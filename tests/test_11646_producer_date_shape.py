@@ -388,6 +388,18 @@ def test_write_door_still_canonicalises_a_date_variant():
     # (cycle 4, finding 3 — on ``origin/main`` they were refused outright)
     assert read_caller_end("2024/03-01") == ("2024-03-01", None)
     assert read_caller_end("2024-03/01") == ("2024-03-01", None)
+    # ⛔ a variant carrying ONLY AN OFFSET (no ``T``/space time part) used to
+    # escape this door entirely: ``rest`` was ``[T ]\S*``, so ``2024/3/1+05:00``
+    # returned None here, took the widened ``_names_an_instant``
+    # "already an instant" path, and was stored VERBATIM — unpadded and
+    # slash-spelled, the exact spelling #9202 review P3 settled against
+    # (measured: ('2024/3/1+05:00', None)). It must re-spell like any variant.
+    assert read_caller_end("2024/3/1+05:00") == ("2024-03-01+05:00", None)
+    assert read_caller_end("2024/03/01+05:00") == ("2024-03-01+05:00", None)
+    assert read_caller_end("2024/3/1-05:00") == ("2024-03-01-05:00", None)
+    # …and an offset that is not a real one is REFUSED, not re-spelled
+    with pytest.raises(ValueError):
+        read_caller_end("2024/3/1+25:00")
     # real instants: accepted, never re-spelled
     assert read_caller_end(PRODUCER_SESSION_DATE) == (PRODUCER_SESSION_DATE, None)
     assert read_caller_end("2024-06-01T12:00:00+02:00") == (
@@ -395,6 +407,32 @@ def test_write_door_still_canonicalises_a_date_variant():
     # a variant whose TIME is unreadable is still refused, never half-shaped
     with pytest.raises(ValueError):
         read_caller_end("2024/3/1Txx")
+
+
+def test_a_stated_offset_that_is_not_real_names_no_instant():
+    """A STATED offset that is not a real one (``+25:00``) leaves the instant
+    UNKNOWABLE — it does not make the value zone-less.
+
+    ``_match_offset`` answers ``None`` for both "no offset stated" and "offset
+    stated and refused", so without an explicit guard a bad offset fell through
+    to the naive reading and ``_names_an_instant`` answered ``True`` — a false
+    PASS that reads ``END_KNOWN`` for a bound whose instant cannot be computed,
+    the reading #9202 exists to deny (measured before the guard:
+    ``_names_an_instant('2023/05/20T02:00:00+25:00') is True``).
+    """
+    for bad in ("2023/05/20T02:00:00+25:00",
+                "2023/05/20T02:00:00-25:00",
+                "2023/05/20T02:00:00+00:99",
+                "2023-05-20+25:00"):
+        assert calendar_datetime(bad) is None, bad
+        assert _names_an_instant(bad) is False, bad
+        assert end_state(bad, None) == END_UNKNOWN, bad
+    # …while a real offset, no offset, and Z keep working (no over-blocking)
+    assert calendar_datetime("2023/05/20T02:00:00+05:00").utcoffset() == \
+        timedelta(hours=5)
+    assert calendar_datetime("2023/05/20T02:00:00Z").utcoffset() == timedelta(0)
+    assert calendar_datetime("2023/05/20").utcoffset() == timedelta(0)
+    assert _names_an_instant("2023/05/20T02:00:00+05:00") is True
 
 
 # ── UNION parity: no value that parsed before may stop parsing ─────────────
@@ -489,6 +527,17 @@ def test_a_pure_number_is_never_truncated_into_a_fabricated_day():
     # and no seam fabricates a day for them either
     assert time_aware._as_date("202305201112") is None
     assert _calendar_date("202305201112") is None
+    # ⛔ THE ASSEMBLY CONSEQUENCE, PINNED AT THE SEAM THAT SUFFERS IT. The
+    # module docstring states the exception; these two lines make it impossible
+    # for the date-reading direction to drift again without a red test. A
+    # 10-digit ``YYYYMMDDHH`` is dated 14 years LATE here, and ``_norm_date`` is
+    # both the as-of boundary and the chronological spine key, so such a row is
+    # EXCLUDED from a historical as-of window — the failure mode #11646 exists
+    # to remove, on another input. Reachability is external only (no in-repo
+    # producer emits the shape), which is why the rule is kept rather than
+    # reopened; it is pinned so the behaviour is visible, never rediscovered.
+    assert _norm_date("2023052011") == date(2034, 2, 8)
+    assert _norm_date("202305201122") is None
 
 
 def test_every_shape_that_used_to_parse_still_parses_at_the_assembly_boundary():

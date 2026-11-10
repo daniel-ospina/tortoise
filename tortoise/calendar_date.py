@@ -155,14 +155,20 @@ UNDATED_SENTINEL_DATE = "1970-01-01"
 #: truncated to two. Moved here from ``coverage_loop`` (#11646) so the shape
 #: set has ONE home instead of one copy per seam.
 #:
-#: Its TWO roles are deliberate: it is a component of ``_INSTANT_RE`` AND the
-#: TOLERANT last-resort reading for a value the whole-value grammar rejects but
-#: whose leading date is unmistakable (``2023-05-20 02:21 PDT``,
+#: Its TWO roles are deliberate: it DUPLICATES the leading calendar-date prefix
+#: of ``_INSTANT_RE`` (below) — a re-spelling, not a reference, so the two
+#: cannot drift by construction only if a test keeps them agreeing — AND it is
+#: the TOLERANT last-resort reading for a value the whole-value grammar rejects
+#: but whose leading date is unmistakable (``2023-05-20 02:21 PDT``,
 #: ``2023/05/20 (Sat) 02:21 (approx)``, ``2023-05-20T+05:00``). Every seam that
 #: read a prefix before #11646 accepted those, so a strictly-anchored grammar
 #: would have made the union claim false in exactly the direction the issue
 #: exists to fix (a real date silently becoming undated) — an unreadable TAIL
 #: means the exact INSTANT is unknown, not that the stated DAY is.
+#:
+#: ⛔ The duplication is the ONLY copy that is not independently re-spelled:
+#: ``tests/test_11646_producer_date_shape.py`` pins both against the same
+#: table, so a change to one that the other does not follow reds a test.
 _CALENDAR_SHAPE_RE = re.compile(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?!\d)")
 
 #: A WHOLE-value instant: the calendar prefix, an optional producer weekday
@@ -347,10 +353,21 @@ def _string_instant(s: str) -> datetime | None:
         naive = _match_naive(match)
         if naive is None:
             return None
+        offset = _match_offset(match)
+        # ⛔ A STATED offset that is not a real one makes the instant
+        # UNKNOWABLE — it does not make the value zone-less. ``_match_offset``
+        # returns ``None`` for both "no offset stated" and "offset stated and
+        # refused" (``+25:00``, ``+00:99``), so without this guard a value that
+        # names a bad offset fell through to the naive reading and
+        # ``validity._names_an_instant`` then reported END_KNOWN for a bound
+        # whose instant cannot be computed — the exact false PASS #9202 exists
+        # to deny. Measured before the guard:
+        # ``_names_an_instant("2023/05/20T02:00:00+25:00") is True``.
+        if match.group("offset") and offset is None:
+            return None
         if match.group("hour") is None:
             # date-only: UTC midnight, a stated offset wins (#3982)
-            return naive.replace(tzinfo=_match_offset(match) or UTC)
-        offset = _match_offset(match)
+            return naive.replace(tzinfo=offset or UTC)
         return naive if offset is None else naive.replace(tzinfo=offset)
     d = _date_only_shape(s)
     if d is not None:
