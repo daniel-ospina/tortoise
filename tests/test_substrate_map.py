@@ -63,13 +63,22 @@ _LABEL_CLAIM = re.compile(
 #: a negative lookahead enumerating the separators a second population could be
 #: joined with (`,`, `and`, `or`, `plus`) left `files under `tortoise/` + `tests/``
 #: green, and a bare `(?=\s*\()` left `files under `tortoise/` (and `tests/`)` green
-#: — a false sentence with every number green both times. Binding the clause that
-#: must follow, by name, is the shape that closes it: any second population, however
-#: it is punctuated, breaks the match.
+#: — a false sentence with every number green both times.
+#:
+#: ⚠️ What this closes is the population named BEFORE the quote. It cannot see one
+#: named AFTER it, inside the same parenthetical, so `_NO_SECOND_POPULATION` (below,
+#: applied to that tail) closes that half; the two are pinned together because either
+#: alone leaves a false sentence green.
 _POPULATION_CLAIM = re.compile(
     r"occurs on \*\*\d+\*\*\s+lines\s+across\s+\*\*\d+\*\*\s+files\s+under\s+"
     r"`([^`]+)`(?=\s*\(`git grep)"
 )
+
+#: A backticked PATH inside the quoted measurement's parenthetical, other than the two
+#: `git grep` commands themselves. A second population named AFTER the quote lives
+#: there: measured GREEN on "… the file count is not the line count, and `tests/` is
+#: counted in both figures)" while `tests/` alone holds several times the claimed lines.
+_NO_SECOND_POPULATION = re.compile(r"`((?!git grep)[^`]*/[^`]*)`")
 
 _COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
 
@@ -1708,6 +1717,43 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
         "§5 no longer states the population its `:Document` figure is measured over — "
         "re-state it as `files under ``tortoise/``` so this pin can read it, rather "
         "than leaving the figure unattributed"
+    )
+    # The population named BEFORE the quote is pinned above; this pins the half the
+    # lookahead cannot read — the tail of the same parenthetical, where a second
+    # population ("…, and `tests/` is counted in both figures)") states a false scope
+    # while every number stays green.
+    population_match = _POPULATION_CLAIM.search(section)
+    rest = section[population_match.end():]
+    assert rest.lstrip().startswith("("), (
+        "§5's population is not followed by the quoted-measurement parenthetical this "
+        "pin reads its tail from — re-state it as `files under ``tortoise/``` "
+        "immediately followed by `(`git grep …``"
+    )
+    open_at = population_match.end() + rest.index("(")
+    depth = 0
+    for close_at in range(open_at, len(section)):
+        if section[close_at] == "(":
+            depth += 1
+        elif section[close_at] == ")":
+            depth -= 1
+            if depth == 0:
+                break
+    else:
+        raise AssertionError(
+            "§5's measurement parenthetical is never closed — the tail of that clause "
+            "is where a second population would be stated, so this pin cannot read it"
+        )
+    tail = section[open_at + 1 : close_at]
+    extra = [
+        token
+        for token in _NO_SECOND_POPULATION.findall(tail)
+        if token != _TRACKED_DIR + "/"
+    ]
+    assert not extra, (
+        f"§5's measurement parenthetical names another path after the quote — "
+        f"{extra!r} — so the figure is stated over a population this pin does not "
+        "measure, while every number stays green. State the figure over one "
+        "population, or measure the one you name"
     )
     assert populations == [_TRACKED_DIR + "/"], (
         f"§5 states its `:Document` figure over {populations!r}, but this pin measures "
