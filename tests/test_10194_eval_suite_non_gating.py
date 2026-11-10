@@ -313,7 +313,26 @@ def _expected_legs(manifest: dict) -> set[str]:
     `split_fast_gate` says as much ("N comes from the manifest's `fast_shards` …
     NOT capped by the file count"), so a lane that unregisters files must not
     drop a label.
+    ⛔ AND THE DERIVATION ALONE IS A TAUTOLOGY ON THE COUNT (`#11681` review P2,
+    main's guard, folded in here by this merge): `push_legs` builds its bins from
+    the SAME `fast_shard_count`, so a code-side collapse — the helper falling back
+    to a pool-size threshold and ignoring `config/ci-surfaces.yml` — moves BOTH
+    sides and the set equality stays green while the selector partitions CI into
+    two shards (measured on `main` with `cs.fast_shard_count` forced to return 2:
+    set equality True, i.e. green). So the counts are ALSO asserted against the
+    manifest's RAW LITERAL, which reds that collapse and still does not red a
+    legitimate re-partition, because a re-partition moves both sides together.
     """
+    for key, got in (
+        ("fast_shards", cs.fast_shard_count(manifest)),
+        ("slow_shards", cs.slow_shard_count(manifest)),
+        ("carve_shards", cs.carve_shard_count(manifest)),
+    ):
+        assert got == manifest[key], (
+            f"`{key}` in config/ci-surfaces.yml is {manifest[key]!r} but the "
+            f"selector's helper reads {got!r} — the shard count must come from "
+            f"that manifest LITERAL and never from a pool-size threshold, or a "
+            f"lane that unregisters files silently re-partitions CI (#11642)")
     return {
         *_LEG_KINDS,
         *(f"test ({c})" for c in cs.shard_labels(cs.fast_shard_count(manifest))),
