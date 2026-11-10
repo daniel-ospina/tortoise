@@ -7096,6 +7096,7 @@ from tortoise.projection.entities import (  # noqa: E402, I001
     _EntityHandlers,
     _is_persistable_prop_value,
     _PERSISTABLE_MAX_DEPTH,
+    _POINT_FLATTEN_LIST_PROPS as _POINT_FLATTEN_LIST_PROPS,  # #11682: the array fixup reads the declaration
     _stated_tags,
     _storable_bound,
     _store_holds_prop_value,
@@ -19526,22 +19527,60 @@ class FalkorProjection(
         # the marker says. The check's cost, and the trade it makes, are
         # documented on this method.
         if (required <= present and fts_required
-                and self._array_valued_search_keys_exist()):
+                and self._array_valued_fts_prop_exists()):
             return False
         return required <= present
 
-    #: Cap-immune fixup precondition. ``typeof`` is a per-row predicate and
-    #: the read takes a single bounded row, so FalkorDB's server-global
-    #: ``RESULTSET_SIZE`` (default 10 000) cannot truncate it into a FALSE
-    #: NEGATIVE. A client-side read of every ``search_keys`` returns only the
-    #: first ``RESULTSET_SIZE`` rows, so on a large graph an array beyond the
-    #: cap was invisible and the fixup was skipped again — the #5444 symptom
-    #: surviving precisely where the data volume is real (measured on docker
-    #: 4.20.4: 10 050 Points with arrays only in rows 10 001-10 050 → a plain
-    #: read returns 10 000 rows and 0 array-typed; this probe finds them).
-    _ARRAY_SEARCH_KEYS_PROBE = (
-        "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
-        "AND typeof(n.search_keys) = 'List' RETURN 1 LIMIT 1"
+    #: Cap-immune fixup PRECONDITION — ONE statement for the WHOLE declared set
+    #: (``entities._POINT_FLATTEN_LIST_PROPS``). One statement rather than one
+    #: per key on purpose: this read runs on the repeat-sweep fast path, whose
+    #: budget is pinned (``tests/test_indexes.py``), and a key that grows the
+    #: fast path's statement count would force that budget open for every
+    #: declared prop from then on.
+    #:
+    #: ``typeof`` is a per-row predicate and the probe takes a single bounded
+    #: row, so FalkorDB's server-global ``RESULTSET_SIZE`` (default 10 000)
+    #: cannot truncate it into a FALSE NEGATIVE. A client-side read of every
+    #: ``search_keys`` returns only the first ``RESULTSET_SIZE`` rows, so on a
+    #: large graph an array beyond the cap was invisible and the fixup was
+    #: skipped again — the #5444 symptom surviving precisely where the data
+    #: volume is real (measured on docker 4.20.4: 10 050 Points with arrays only
+    #: in rows 10 001-10 050 → a plain read returns 10 000 rows and 0
+    #: array-typed; this probe finds them).
+    #:
+    #: ⛔ A key added to ``_POINT_FLATTEN_LIST_PROPS`` MUST appear here (one
+    #: ``typeof(n.<key>) = 'List'`` disjunct) AND as a row of ``_FLATTEN_FIXUPS``
+    #: — the parity pin in ``tests/test_11682_quote_indexed.py`` asserts both, so
+    #: a third key reds a test instead of leaving pre-existing rows silently
+    #: unfixed (the #5444 trap, one widening later — exactly how ``quote`` was
+    #: missed here the first time).
+    _ARRAY_FTS_PROP_PROBE: str = (
+        "MATCH (n:Point) WHERE "
+        "(n.search_keys IS NOT NULL AND typeof(n.search_keys) = 'List') "
+        "OR (n.quote IS NOT NULL AND typeof(n.quote) = 'List') "
+        "RETURN 1 LIMIT 1"
+    )
+
+    #: The REPAIR, one ``(key, rows, set)`` row per declared array-valued FTS
+    #: prop. LITERAL statements rather than one built from the key NAME: a
+    #: property name spliced into a statement is invisible to the writer
+    #: censuses that read this module's SOURCE TEXT, and the ``typeof`` shape
+    #: has to stay literal for them to see it at all. Each row's ``SET`` names
+    #: its OWN key — a shared statement would overwrite one prop with another's
+    #: text, which the parity pin also rejects.
+    _FLATTEN_FIXUPS: tuple[tuple[str, str, str], ...] = (
+        (
+            "search_keys",
+            "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
+            "AND typeof(n.search_keys) = 'List' RETURN n.id, n.search_keys",
+            "MATCH (n:Point {id:$id}) SET n.search_keys = $flat",
+        ),
+        (
+            "quote",
+            "MATCH (n:Point) WHERE n.quote IS NOT NULL "
+            "AND typeof(n.quote) = 'List' RETURN n.id, n.quote",
+            "MATCH (n:Point {id:$id}) SET n.quote = $flat",
+        ),
     )
 
     #: The fields the Point FULLTEXT index is SUPPOSED to carry — the SAME
@@ -19639,13 +19678,17 @@ class FalkorProjection(
         except Exception:
             return False
 
-    def _array_valued_search_keys_exist(self) -> bool:
-        """Does any Point still store ``search_keys`` as an ARRAY?
+    def _array_valued_fts_prop_exists(self) -> bool:
+        """Does any Point still store a DECLARED FTS prop as an ARRAY?
 
         The one-time fixup's real precondition, and the probe's ONLY extra
         read: FalkorDB's fulltext index does not index array-valued properties,
         so such Points are invisible to ``queryNodes`` until ``_ensure_indexes``
-        flattens them.
+        flattens them. Asked over ``_FLATTEN_FIXUPS`` — the SAME declaration the
+        writer flattens with — so a key that joins that set is covered here by
+        construction rather than by a second remembered edit (``quote`` missed
+        that edit once: measured, an array-valued ``quote`` was returned by BOTH
+        in-process mirrors and by NEITHER ``queryNodes``).
 
         Fails CLOSED on any error — including an engine without ``typeof``.
         Both supported engines have it (verified on embedded FalkorDBLite 4.18.3
@@ -19656,35 +19699,34 @@ class FalkorProjection(
         permanent unfindability.
         """
         try:
-            return bool(self.g.query(self._ARRAY_SEARCH_KEYS_PROBE).result_set)
+            return bool(self.g.query(self._ARRAY_FTS_PROP_PROBE).result_set)
         except Exception:
             return True
 
-    def _array_search_keys_rows(self) -> list:
-        """``(id, search_keys)`` for Points whose ``search_keys`` is an array.
+    def _array_fts_prop_rows(self, rows_statement: str) -> list:
+        """``(id, value)`` for Points whose declared FTS prop is an array.
 
         Cap-aware: the ``typeof`` predicate means the ``RESULTSET_SIZE`` cap can
         only truncate the BATCH, never hide arrays behind string rows — so the
-        caller loops until this returns empty. Returns ``[]`` on error (never an
-        untyped scan): the caller re-checks ``_array_valued_search_keys_exist``
-        before minting, and that check fails closed, so an engine which cannot
-        answer never gets a marker minted over an owed fixup.
+        caller loops until this returns empty, once per key. Returns ``[]`` on
+        error (never an untyped scan): the caller re-checks
+        ``_array_valued_fts_prop_exists`` before minting, and that check fails
+        closed, so an engine which cannot answer never gets a marker minted over
+        an owed fixup.
         """
         try:
-            return self.g.query(
-                "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
-                "AND typeof(n.search_keys) = 'List' "
-                "RETURN n.id, n.search_keys"
-            ).result_set
+            return self.g.query(rows_statement).result_set
         except Exception:
             return []
 
-    def _fix_point_search_keys(self) -> None:
+    def _fix_point_array_fts_props(self) -> None:
         """The ONE-TIME Point data fixup, callable from EITHER create branch.
 
-        Flattens array-valued ``search_keys`` to a space-joined string, then
-        drop→recreates the Point FTS index (with its DECLARED field set —
-        ``_POINT_FTS_TARGET_FIELDS``) and mints ``point_fts_v2``.
+        Flattens EVERY declared array-valued FTS prop
+        (``entities._POINT_FLATTEN_LIST_PROPS`` — today ``search_keys`` and
+        ``quote``) to a space-joined string, then drop→recreates the Point FTS
+        index (with its DECLARED field set — ``_POINT_FTS_TARGET_FIELDS``) and
+        mints ``point_fts_v2``.
 
         A shared helper so BOTH branches flatten identically: a RESTORE/DR
         graph — array-valued ``search_keys`` with no index (the dump carries
@@ -19693,36 +19735,39 @@ class FalkorProjection(
         "current" over an owed fixup and makes it undetectable by the probe.
 
         Batched: the read is bounded by ``RESULTSET_SIZE``, so loop until no
-        array rows remain rather than assuming one pass sees them all.
+        array rows remain rather than assuming one pass sees them all. Per KEY,
+        because each key has its own literal statement (see ``_FLATTEN_FIXUPS``).
         """
         created = False
         dropped = False
         try:
-            for _ in range(200):  # bounded; 200 × RESULTSET_SIZE rows
-                rows = self._array_search_keys_rows()
-                if not rows:
-                    break
-                flattened = 0
-                for nid, sk in rows:
-                    if not isinstance(sk, (list, tuple)):
-                        continue
-                    flat = " ".join(
-                        str(k).strip() for k in sk if str(k).strip()
-                    )
-                    self.g.query(
-                        "MATCH (n:Point {id:$id}) SET n.search_keys = $flat",
-                        params={"id": nid, "flat": flat},
-                    )
-                    flattened += 1
-                if flattened == 0:
-                    break  # no progress — never spin
+            for _key, rows_statement, set_statement in self._FLATTEN_FIXUPS:
+                for _ in range(200):  # bounded; 200 × RESULTSET_SIZE rows
+                    rows = self._array_fts_prop_rows(rows_statement)
+                    if not rows:
+                        break
+                    flattened = 0
+                    for nid, value in rows:
+                        if not isinstance(value, (list, tuple)):
+                            continue
+                        flat = " ".join(
+                            str(k).strip() for k in value if str(k).strip()
+                        )
+                        # Literal per key: the property NAME is never spliced
+                        # into a statement (see ``_FLATTEN_FIXUPS``).
+                        self.g.query(
+                            set_statement, params={"id": nid, "flat": flat},
+                        )
+                        flattened += 1
+                    if flattened == 0:
+                        break  # no progress — never spin
 
             # Do NOT mint over an owed fixup. The loop above counts
             # SET ATTEMPTS, not verified writes, and is capped at 200 batches;
             # an unverified SET, the ceiling, or an engine that cannot answer
             # would otherwise leave arrays behind AND cement a marker that makes
             # them permanently invisible. Re-verify first.
-            if self._array_valued_search_keys_exist():
+            if self._array_valued_fts_prop_exists():
                 return
 
             for drop_proc in ("db.idx.fulltext.drop",
@@ -19892,20 +19937,22 @@ class FalkorProjection(
         ⛔ THE LANE CARRIES TWO OBLIGATIONS, AND THE SECOND ONE IS NOT SCHEMA.
         Measured, not assumed: the sweep's body is DDL, the two ``:Meta``
         index-version markers it MERGEs, catalogue reads — **and exactly ONE
-        corpus data write**, the ``SET n.search_keys`` flatten inside
-        ``_fix_point_search_keys``, which two ``except`` branches of the sweep
+        corpus data write**, the ``SET n.<declared FTS prop>`` flatten inside
+        ``_fix_point_array_fts_props`` (``search_keys``, and ``quote`` since
+        ``#11682``), which two ``except`` branches of the sweep
         reach (the fresh-create branch and the legacy ``already indexed``
         branch). It is stated here rather than denied, because a lane documented
         as "schema only" that silently also authorizes a ``:Point`` property
         write is precisely the widening #9124's review caught. It is not hoisted
-        out because ``_fix_point_search_keys`` is ONE unit — the flatten, the
+        out because ``_fix_point_array_fts_props`` is ONE unit — the flatten, the
         drop→recreate and the ``point_fts_v2`` marker — and splitting it is how
         the two create branches stop flattening identically (a RESTORE/DR graph
         reaches the fresh branch with arrays and no index).
 
         The flatten is admitted under THIS lane's own obligations rather than by
-        accident: it rewrites ``search_keys`` from an array into the space-joined
-        string the SDK write path already stores, so it invents nothing, and a
+        accident: it rewrites ``search_keys``/``quote`` from an array into the
+        space-joined string the SDK write path already stores, so it invents
+        nothing, and a
         replay of the owning ``PointAdded`` recreates the flat value — a rebuild
         absorbs its loss (obligation 1) and no comparison reconciles over its
         VALUE (obligation 2). A write the record could describe but a replay
@@ -20221,8 +20268,8 @@ class FalkorProjection(
                         # migration watermark (`docs/durability-posture.md`,
                         # the DR checks), so minting it over owed work is false
                         # bookkeeping regardless of who reads it.
-                        if self._array_valued_search_keys_exist():
-                            self._fix_point_search_keys()
+                        if self._array_valued_fts_prop_exists():
+                            self._fix_point_array_fts_props()
                         else:
                             try:  # noqa: SIM105
                                 self.g.query(
@@ -20264,9 +20311,9 @@ class FalkorProjection(
                                 # already flat still needs the drop→recreate,
                                 # and without it the probe stays not-current and
                                 # every construction re-runs the full sweep.
-                                if (self._array_valued_search_keys_exist()
+                                if (self._array_valued_fts_prop_exists()
                                         or self._point_fts_field_missing()):
-                                    self._fix_point_search_keys()
+                                    self._fix_point_array_fts_props()
                             except Exception:
                                 pass
                         elif label == "Event":

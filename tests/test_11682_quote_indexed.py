@@ -513,3 +513,175 @@ def test_the_fallback_tfidf_join_reads_the_quote() -> None:
         QUOTE_ONLY_TERM, points, limit=1, force_sparse=True)]
     assert hits == ["p1"], (
         f"fallback_tfidf did not read the quote; hits={hits}")
+
+
+# ── the FLATTEN rule (the #5482/#5444 shape, one widening later) ──────────
+
+
+def test_the_flatten_fixup_table_covers_every_declared_array_prop() -> None:
+    """A declared FTS prop that a door can receive as a LIST must be flattened.
+
+    FalkorDB's fulltext index does NOT index array-valued properties, so the
+    flatten set and the one-time array fixup are the only things standing
+    between a list-valued declared field and permanent unfindability by
+    ``queryNodes`` — while BOTH in-process mirrors (BM25 corpus, snapshot lane)
+    join ``point_index_text``, which flattens. Measured at the #11706 review
+    (round 8): adding ``quote`` to the index field set WITHOUT adding it here
+    left a Point written with ``quote=[…]`` stored as ``typeof = 'List'``,
+    ``run_fts_query`` returning ``[]`` and ``run_bm25_query`` returning the
+    point — the two lexical legs disagreeing about the same document, silently.
+
+    So the parity is pinned in BOTH directions, and on the fixup TABLE rather
+    than on a count: every key the writer flattens has exactly one fixup row,
+    each row's ``SET`` names its OWN key (a shared/parameterised statement is
+    the fail-open this checks), and every key is actually part of the declared
+    indexed set — a key flattened but never indexed is dead weight in the
+    writer, and a key indexed but never flattened is the defect above.
+    """
+    from tortoise.projection import FalkorProjection
+    from tortoise.projection.entities import _POINT_FLATTEN_LIST_PROPS
+    from tortoise.sparse import POINT_INDEX_TEXT_FIELDS
+
+    declared = [row[0] for row in FalkorProjection._FLATTEN_FIXUPS]
+    assert sorted(declared) == sorted(_POINT_FLATTEN_LIST_PROPS), (
+        "the array fixup and the flatten declaration have drifted: fixup rows "
+        f"cover {sorted(declared)}, the declaration is "
+        f"{sorted(_POINT_FLATTEN_LIST_PROPS)} — a key added to one and not the "
+        "other leaves pre-existing array rows silently unfixed, or fixes a key "
+        "no writer flattens")
+    assert len(declared) == len(set(declared)), (
+        f"a key carries more than one fixup row: {declared}")
+    assert "quote" in declared, (
+        "the verbatim quote joined the INDEXED set (#11682), so it must be in "
+        "the flatten set too — a list-valued quote is invisible to queryNodes")
+    for key in declared:
+        assert key in POINT_INDEX_TEXT_FIELDS, (
+            f"{key!r} is flattened (a corpus WRITE) but is not an indexed "
+            "field: the writer is paying to rewrite a property no lexical leg "
+            "reads")
+    probe = FalkorProjection._ARRAY_FTS_PROP_PROBE
+    for key, rows, set_statement in FalkorProjection._FLATTEN_FIXUPS:
+        assert f"typeof(n.{key}) = 'List'" in probe, (
+            f"the ONE precondition probe does not ask about {key!r} — the "
+            "fixup reads False for a graph that owes that key and never runs")
+        assert f"RETURN n.id, n.{key}" in rows, (
+            f"the {key!r} rows read does not select its own key")
+        assert f"SET n.{key} = $flat" in set_statement, (
+            f"the {key!r} fixup does not write its own key — a shared "
+            "statement would overwrite one prop with another's text")
+
+
+def test_an_array_valued_quote_is_stored_flat_and_both_legs_find_it(sdk) -> None:
+    """A LIST quote must not be a split verdict between the two lexical legs.
+
+    The write door accepts ``quote`` as a list (the projection's flatten rule
+    is the ONE place that decides the graph form), so this is the state a
+    caller can reach without any raw Cypher. It must be stored as the
+    space-joined STRING — the only form the FULLTEXT index can match — and then
+    BOTH the graph FTS leg and the BM25 mirror must return the point.
+
+    BOTH DIRECTIONS: the array-valued write is flattened AND found (the fix),
+    and a scalar write is left BYTE-IDENTICAL as a string (the flatten rule did
+    not become a rewriter that touches already-canonical values).
+
+    FAIL VALUE: drop ``quote`` from ``_POINT_FLATTEN_LIST_PROPS`` and the node
+    stores ``typeof = 'List'``, the FTS assertion returns [] while the BM25 one
+    still hits — the measured disagreement.
+    """
+    sdk.create_point("statement", DECOY)
+    pid = sdk.create_point(
+        "statement", PARAPHRASE,
+        quote=[VERBATIM, "a second utterance"], source_turn_id=1)["id"]
+    scalar_pid = sdk.create_point(
+        "statement", f"{DECOY} two", quote=VERBATIM, source_turn_id=2)["id"]
+    g = sdk._get_proj().g
+
+    stored = g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.quote, typeof(n.quote)",
+        params={"id": pid}).result_set[0]
+    assert stored[1] == "String", (
+        "a list-valued quote must be stored FLAT — FalkorDB does not index "
+        f"array-valued props, so this node is unfindable by queryNodes; got "
+        f"{stored!r}")
+    assert stored[0] == f"{VERBATIM} a second utterance", (
+        f"the flattened quote lost text; got {stored[0]!r}")
+
+    # … and the SCALAR write is untouched: a str is already canonical.
+    scalar = g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.quote, typeof(n.quote)",
+        params={"id": scalar_pid}).result_set[0]
+    assert scalar == [VERBATIM, "String"], (
+        f"the flatten rule rewrote an already-canonical scalar quote; got {scalar!r}")
+
+    fts_hits = [i for i, _ in run_fts_query(
+        g, QUOTE_ONLY_TERM, entity_type="point")]
+    bm25_hits = [i for i, _ in run_bm25_query(
+        g, QUOTE_ONLY_TERM, entity_type="point")]
+    assert pid in fts_hits, (
+        "the graph FTS leg must find a term that lives in a LIST-valued quote "
+        f"— otherwise the two lexical legs disagree; got fts={fts_hits}")
+    assert pid in bm25_hits, (
+        f"the BM25 mirror must agree with the FTS leg; got bm25={bm25_hits}")
+
+
+def test_a_pre_existing_array_quote_is_flattened_by_the_sweep(sdk) -> None:
+    """The one-time fixup covers the quote too, not just ``search_keys``.
+
+    A graph that already holds an array-valued quote (written before the
+    flatten rule knew about ``quote``, or by a RESTORE) must be REPAIRED by the
+    same sweep that widens the index — otherwise the index widens over data it
+    still cannot match, and ``point_fts_v2`` is minted over an owed fixup.
+
+    FAIL VALUE: revert ``_FLATTEN_FIXUPS`` to a ``search_keys``-only table and
+    ``_array_valued_fts_prop_exists()`` returns False for this graph, the sweep
+    takes the "nothing owed" branch, the node keeps ``typeof = 'List'`` and the
+    FTS query never matches it.
+    """
+    pid = sdk.create_point(
+        "statement", PARAPHRASE, quote=VERBATIM, source_turn_id=1)["id"]
+    proj = sdk._get_proj()
+    g = proj.g
+
+    # The pre-fix state, constructed the way it actually arrives: the node
+    # holds an ARRAY while the index is still the pre-#11682 two-field shape.
+    g.query("MATCH (n:Point {id:$id}) SET n.quote = $vals",
+            params={"id": pid, "vals": [VERBATIM, "second utterance"]})
+    dropped = False
+    for proc in ("db.idx.fulltext.drop", "db.idx.fulltext.dropIndex"):
+        try:
+            g.query(f"CALL {proc}('Point')")
+            dropped = True
+            break
+        except Exception:
+            continue
+    if not dropped:
+        pytest.skip("engine has no Point fulltext drop procedure")
+    proj._create_fulltext_index("Point", ["content", "search_keys"])
+    index_rows_after_settle(
+        proj,
+        until=lambda r: _point_fulltext_fields_from_rows(r)
+        == {"content", "search_keys"})
+
+    assert g.query("MATCH (n:Point {id:$id}) RETURN typeof(n.quote)",
+                   params={"id": pid}).result_set[0][0] == "List", (
+        "fixture not reached: the quote should still be an array")
+    assert proj._array_valued_fts_prop_exists() is True, (
+        "the fixup precondition must SEE an array-valued quote — a "
+        "search_keys-only probe reads False here and the repair never runs")
+    assert proj._schema_is_current() is False
+
+    proj._ensure_indexes()
+
+    rows = index_rows_after_settle(
+        proj,
+        until=lambda r: "quote" in (_point_fulltext_fields_from_rows(r) or set()))
+    assert "quote" in (_point_fulltext_fields_from_rows(rows) or set()), (
+        "the sweep must widen the Point index")
+    fixed = g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.quote, typeof(n.quote)",
+        params={"id": pid}).result_set[0]
+    assert fixed[1] == "String", (
+        f"the pre-existing array quote must be flattened by the sweep; got {fixed!r}")
+    assert pid in [i for i, _ in run_fts_query(
+        g, QUOTE_ONLY_TERM, entity_type="point")], (
+            "the repaired point must now be findable by its verbatim quote")

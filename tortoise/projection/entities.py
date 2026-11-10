@@ -1132,12 +1132,26 @@ def _point_source_transit(p: dict):
 #: ⛔ NOT a substitute for ``_POINT_LIST_PROPS``: these keys are NOT written as
 #: arrays. They are flattened to a string, the only form the fulltext index can
 #: match (#5482/#5444).
-_POINT_FLATTEN_LIST_PROPS: frozenset = frozenset({"search_keys"})
+#: ⛔ AND IT FOLLOWS THE INDEXED SET, not a list of keys someone remembered:
+#: ``quote`` joined it with ``#11682`` — the SAME widening that made it a
+#: FULLTEXT field. Leaving it out was MEASURED as a live disagreement: a Point
+#: written with a LIST quote stored ``typeof = 'List'``, the graph FTS leg
+#: returned NOTHING for a term that is in the quote, and BOTH in-process
+#: mirrors (BM25 corpus, snapshot lane) returned the point, because they join
+#: ``sparse.point_index_text``, which flattens. The predicate for membership is
+#: *a declared FULLTEXT field a write door can receive as a list* — ``content``
+#: is the counter-example (a string by contract, never flattened, so NOT here).
+#: The projection's one-time array fixup reads THIS declaration too
+#: (``_FLATTEN_FIXUPS`` in ``projection/__init__.py``), and the parity pin in
+#: ``tests/test_11682_quote_indexed.py`` makes a key added here WITHOUT a fixup
+#: statement a red instead of pre-existing rows silently skipped.
+_POINT_FLATTEN_LIST_PROPS: frozenset = frozenset({"search_keys", "quote"})
 
 
 def flatten_search_keys_prop(props: dict) -> None:
     """R2 (#1541) D3 — THE ONE HOME of the flatten rule for
-    ``_POINT_FLATTEN_LIST_PROPS`` keys (today: ``search_keys``).
+    ``_POINT_FLATTEN_LIST_PROPS`` keys (today: ``search_keys`` and, since
+    ``#11682``, ``quote``).
 
     Those props must be FLAT space-joined STRINGS in the graph: FalkorDB's
     fulltext index (``db.idx.fulltext.createNodeIndex``, over
@@ -1383,7 +1397,7 @@ def strip_identifier_aliases(view: dict, extra=None) -> bool:
 #: ``CASE`` were verified on the embedded lane (FalkorDBLite 4.18.3) against
 #: array-, empty-array-, string-, absent- and integer-valued nodes, and
 #: ``typeof(n.search_keys) = 'List'`` is already load-bearing here on BOTH
-#: engines (``_array_valued_search_keys_exist``). Idempotence re-checked by
+#: engines (``_array_valued_fts_prop_exists``). Idempotence re-checked by
 #: applying each clause twice (#10203 review round 8, F3).
 _NODE_SEARCH_KEYS_VIEW = (
     "CASE WHEN n.search_keys IS NULL THEN '' "
@@ -1421,7 +1435,7 @@ def identifier_alias_append_clauses(aliases: list[str]) -> tuple[list[str], dict
     or Null but was List``, so a write whose only job was to add one alias
     ABORTED. :func:`flatten_search_keys_prop` flattens the PAYLOAD, never a node
     value that predates the flatten rule, and
-    ``_array_valued_search_keys_exist``/``_array_search_keys_rows`` exist
+    ``_array_valued_fts_prop_exists``/``_array_fts_prop_rows`` exist
     precisely because such rows can be present at any time.
 
     Returns ``(clauses, params)`` for ``_persist_extra_props``.
@@ -1448,7 +1462,7 @@ def _flat_search_keys_value(value) -> str:
 
     A node's value crosses the driver boundary as a ``list`` whenever the array
     shape is present, and that state is reachable at any time —
-    :data:`_NODE_SEARCH_KEYS_VIEW` and ``_array_valued_search_keys_exist`` exist
+    :data:`_NODE_SEARCH_KEYS_VIEW` and ``_array_valued_fts_prop_exists`` exist
     for exactly that reason (a later ``update_entity``'s ``SET n += $props`` has
     no flatten, #5482; a RESTORE/DR graph carries them). ``str(value)`` on a list
     is NOT the value — it is ``"['alpha', 'beta']"`` — so joining it directly
