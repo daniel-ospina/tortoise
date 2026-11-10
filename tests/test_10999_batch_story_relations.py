@@ -2102,3 +2102,81 @@ def test_an_ambiguous_reference_on_the_working_path_reports_the_REWRITE():
     assert "left as written" not in ambiguous[0], ambiguous
     assert "rewrote the key to 'billing'" in ambiguous[0], ambiguous
     assert "NOT disambiguated" in ambiguous[0], ambiguous
+
+
+def test_an_immutable_slot_ref_does_not_break_the_no_op_reconcile():
+    """Finding 1 (P3) of the review at `bd6eba7e`: `copy.deepcopy` is
+    pickle-backed, so an immutable `MappingProxyType` slot ref raised
+    `TypeError` out of `apply_vet` — breaking the totality contract stated in
+    `apply_vet`'s own docstring ("an immutable `Mapping` slot ref: no
+    exception") and, worse, `_run_vet_pass` swallows the raise as
+    `vet failed (TypeError: …) — candidates kept (fail-open)`, so EVERY DISCARD
+    and the operator prune were skipped for that batch too.
+
+    The copy is now just deep enough for the rewriter (`_copy_for_rewrite`):
+    the containers it mutates, nothing else. The immutable ref is passed
+    through untouched — which is the rewriter's documented behaviour (it skips
+    a non-`MutableMapping` ref rather than raising).
+    """
+    from types import MappingProxyType
+
+    emission = {
+        "entities": [{"name": "Retry Storm", "kind": "core:event"}],
+        "events": [], "operators": [], "relations": [],
+        "points": [{"content": "p", "about_entities": ["RETRY STORM"],
+                    "slots": {"subject": [MappingProxyType(
+                        {"name": "RETRY STORM", "kind": "core:event"})]}}],
+    }
+    snapshot = emission["points"][0]["about_entities"][:]
+    out, warns = vg.apply_vet(emission, {})            # must not raise
+    # the mutable reference IS reconciled …
+    assert out["points"][0]["about_entities"] == ["Retry Storm"], warns
+    # … the immutable one is skipped, not raised on (the rewriter's contract)
+    assert out["points"][0]["slots"]["subject"][0]["name"] == "RETRY STORM"
+    # … and the caller's objects are untouched (the copy is doing its job)
+    assert emission["points"][0]["about_entities"] == snapshot
+
+
+def test_the_record_never_claims_a_rewrite_the_rewriter_cannot_perform():
+    """Finding 2 (P3) of the review at `bd6eba7e`: the collector accepted a
+    slot ref on `Mapping` while `_rewrite_entity_references` rewrites only
+    `MutableMapping` — so an immutable ref minted a `canonical` entry, the
+    warning said it was re-spelled, and `commit_schema` rejected the slot
+    exactly as before: a record stating the opposite of what happened,
+    with nothing in the run explaining the rejection.
+
+    The collector now uses the rewriter's own predicate, so a reference that
+    cannot be rewritten is never collected — and never claimed.
+    """
+    from types import MappingProxyType
+
+    emission = {
+        "entities": [{"name": "Retry Storm", "kind": "core:event"},
+                     {"name": "Z", "kind": "core:rule"}],
+        "events": [], "operators": [], "relations": [],
+        "points": [{"content": "p", "slots": {"subject": [MappingProxyType(
+            {"name": "RETRY STORM", "kind": "core:event"})]}}],
+    }
+    out, warns = vg.apply_vet(emission, _discard_entity(emission, 1))
+    assert out["points"][0]["slots"]["subject"][0]["name"] == "RETRY STORM"
+    assert not [w for w in warns if "re-spelled" in w], warns
+
+
+@pytest.mark.parametrize("held,ref", [
+    ("Straße", "STRASSE"),     # `_norm` DIFFERS (`straße` vs `strasse`) — casefold only
+    ("Straße", "STRAßE"),      # `_norm` equal, casefold too — the exact stage
+])
+def test_the_casefold_only_class_is_reconciled_without_a_discard(held, ref):
+    """Finding 3 (P3) of the review at `bd6eba7e`: the casefold-only pair is
+    answered by Rule 4's `held_folded` arm — **when that loop runs**. On the
+    nothing-to-do early return there is no loop, so `STRASSE` vs `Straße`
+    stayed a SILENT 422: whole session rejected, run looked clean. That is
+    #10999's failure mode one fold away from the line written to close it.
+
+    The pass now takes the same casefold probe the working path has, still
+    unique-or-nothing.
+    """
+    emission = _held_and_ref(held, ref)
+    out, warns = vg.apply_vet(emission, {})
+    assert out["points"][0]["about_entities"] == [held], warns
+    assert any("re-spelled" in w and held in w for w in warns), warns

@@ -142,7 +142,6 @@ exactly what produces that 422.
 """
 from __future__ import annotations
 
-import copy
 import math
 import re
 from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
@@ -1109,9 +1108,21 @@ def _layer1_reference_spellings(embed_list: object) -> dict[str, set[str]]:
     → the payload still 422s, the exact failure this pass exists to close.
     The sibling call three lines below already passes ``set()`` for the same
     reason.
+
+    ⛔ **THE COLLECTING PREDICATE IS THE REWRITING PREDICATE.**
+    :func:`_rewrite_entity_references` rewrites a slot ref only when it is a
+    ``MutableMapping`` and skips an immutable one BY CONTRACT (the totality
+    promise this function's caller documents: an immutable slot ref is skipped,
+    never raised on). Collecting an immutable ref here would mint a `canonical`
+    entry for a reference that pass cannot rewrite — the record would say the
+    reference was re-spelled while ``commit_schema`` still rejects it, and
+    nothing in the run would explain the rejection (review at ``bd6eba7e``,
+    finding 2). Same for an item that is not a ``MutableMapping``.
     """
     spellings: dict[str, set[str]] = {}
     for _section, _index, item in _iter_items(embed_list):
+        if not isinstance(item, MutableMapping):
+            continue          # `_rewrite_entity_references` skips it
         refs = item.get("about_entities")
         if isinstance(refs, Sequence) and not isinstance(refs, (str, bytes)):
             for ref in refs:
@@ -1124,12 +1135,65 @@ def _layer1_reference_spellings(embed_list: object) -> dict[str, set[str]]:
                         or isinstance(slot_refs, (str, bytes)):
                     continue
                 for slot_ref in slot_refs:
-                    if isinstance(slot_ref, Mapping) \
+                    if isinstance(slot_ref, MutableMapping) \
                             and isinstance(slot_ref.get("name"), str) \
                             and slot_ref["name"].strip():
                         spellings.setdefault(_norm(slot_ref["name"]),
                                              set()).add(slot_ref["name"])
     return spellings
+
+
+def _copy_for_rewrite(embed_list: Mapping[str, Any]) -> dict[str, Any]:
+    """A copy just deep enough for :func:`_rewrite_entity_references`.
+
+    The nothing-to-do path promises the caller's objects are never mutated, so
+    the reconcile runs on a copy — but ``copy.deepcopy`` is the WRONG
+    instrument: it is pickle-backed, so an immutable ``MappingProxyType`` slot
+    ref raises ``TypeError`` out of ``apply_vet``. That breaks the totality
+    contract stated in ``apply_vet``'s own docstring (an immutable slot ref must
+    be SKIPPED, which is exactly what the rewriter does), and the blast radius
+    is the whole pass: ``_run_vet_pass`` swallows the raise as
+    ``vet failed (TypeError: …) — candidates kept (fail-open)``, so every
+    DISCARD and the operator prune are skipped for that batch as well (review at
+    ``bd6eba7e``, finding 1).
+
+    Only the containers the rewriter mutates are copied — the section list, each
+    candidate ``MutableMapping``, its ``about_entities`` list, its ``slots``
+    mapping and the MUTABLE refs inside each slot list. Everything else is
+    shared with the input, exactly as a no-op return would share it. An
+    immutable item or ref is passed through untouched, because the rewriter
+    skips it.
+    """
+    copied_list: dict[str, Any] = dict(embed_list)
+    for section, _field, _kf, _family in SECTIONS:
+        items = _as_items(embed_list.get(section))
+        if not items:
+            continue
+        kept: list[Any] = []
+        for item in items:
+            if not isinstance(item, MutableMapping):
+                kept.append(item)
+                continue
+            new_item = dict(item)
+            refs = item.get("about_entities")
+            if isinstance(refs, Sequence) and not isinstance(refs,
+                                                            (str, bytes)):
+                new_item["about_entities"] = list(refs)
+            slots = item.get("slots")
+            if isinstance(slots, Mapping):
+                new_slots = dict(slots)
+                for role, slot_refs in slots.items():
+                    if isinstance(slot_refs, Sequence) \
+                            and not isinstance(slot_refs, (str, bytes)):
+                        new_slots[role] = [
+                            dict(slot_ref)
+                            if isinstance(slot_ref, MutableMapping)
+                            else slot_ref
+                            for slot_ref in slot_refs]
+                new_item["slots"] = new_slots
+            kept.append(new_item)
+        copied_list[section] = kept
+    return copied_list
 
 
 def _reconcile_held_layer1_spellings(
@@ -1189,8 +1253,32 @@ def _reconcile_held_layer1_spellings(
     warnings: list[str] = []
     for key, used in sorted(_layer1_reference_spellings(embed_list).items()):
         emitted = held.get(key)
-        if not emitted:
-            continue          # not held — Rule 4's restore leg owns this one
+        folded_match = False
+        if emitted is None:
+            # ── THE CASE FOLD, second stage ────────────────────────────────
+            # `_norm` is `.lower()`, so `"STRASSE"` ("strasse") and `"Straße"`
+            # ("straße") are DIFFERENT keys and the exact stage above cannot see
+            # the pair. Rule 4's loop answers it with `held_folded` — but that
+            # loop does not run on this path (nothing was discarded), so without
+            # this probe the casefold-only class stayed a SILENT 422 here: the
+            # whole session rejected while the run looked clean, which is #10999's
+            # failure mode exactly, one fold away from the line written to close
+            # it. Unique-or-nothing, and never a second copy, mirroring the
+            # loop's arm — the pass repairs a spelling, it never decides identity.
+            folded = sorted(candidate for candidate in held
+                            if candidate.casefold() == key.casefold())
+            if not folded:
+                continue      # not held — Rule 4's restore leg owns this one
+            if len(folded) > 1:
+                warnings.append(
+                    f"vet: reference {sorted(used)[0]!r} matches "
+                    f"{len(folded)} emitted entity names that differ only by "
+                    f"case fold ({', '.join(map(repr, folded))}) — left as "
+                    "written; Layer-1 identity is EXACT, and choosing between "
+                    "them would be a guess")
+                continue
+            emitted = held[folded[0]]
+            folded_match = True
         if len(emitted) > 1:
             unresolved = sorted(used - emitted)
             if unresolved:
@@ -1225,6 +1313,7 @@ def _reconcile_held_layer1_spellings(
         warnings.append(
             f"vet: reference {mismatched[0]!r} re-spelled {winner!r} — the "
             "emission holds that entity and Layer-1 identity is EXACT"
+            + (" (via the case fold)" if folded_match else "")
             + (f" ({len(mismatched)} spellings)" if len(mismatched) > 1
                else ""))
     return canonical, warnings
@@ -1605,7 +1694,7 @@ def apply_vet(embed_list: Mapping[str, Any],
             # Nothing to re-spell — but an AMBIGUOUS reference still owes its
             # warning (refusing to guess is a decision the record must carry).
             return dict(base), warnings + held_warnings
-        reconciled = copy.deepcopy(dict(base))
+        reconciled = _copy_for_rewrite(base)
         _rewrite_entity_references(reconciled, held_canonical)
         return reconciled, warnings + held_warnings
 
