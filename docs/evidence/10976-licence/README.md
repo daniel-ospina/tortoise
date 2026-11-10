@@ -41,8 +41,10 @@ The probe mints its **own** graph (`licence_probe_<rand>`), seeds **25,000** `:P
 nodes of which **500** carry `is_episodic = true` (the `turn` population — the only
 population with a parity instrument), writes a CLEAN report claiming **20,000** turns,
 and runs the real `assess()` over a declared byte ceiling the instance is over. It drops
-the graph and exits 0 when the licence is refused, **4** when one is issued (not 2 —
-argparse uses 2 for a usage error, which must not read as the defect arm).
+the graph and exits on the **licence**, not the verdict: **0** when no licence was issued
+(the bound fired), **4** when one was (the defect is present). Not 2 — argparse uses 2 for
+a usage error, which must not read as either arm — and not keyed on the verdict, because a
+cache under its byte ceiling answers `CLEAN` with an empty licence.
 
 ## The measurement (falkordb 4.20.6, private lane container, `noeviction`)
 
@@ -100,7 +102,7 @@ gated individually by the executor's per-node record probe.
 
 ## Tests
 
-`tests/test_cache_eviction_census.py` (112 tests in the file, 218 across the four
+`tests/test_cache_eviction_census.py` (113 tests in the file, 219 across the four
 eviction suites — the counts are the final run recorded in `WORKTREE-REPORT.md`):
 
 | arm | what it pins |
@@ -113,6 +115,7 @@ eviction suites — the counts are the final run recorded in `WORKTREE-REPORT.md
 | `test_no_two_populations_share_a_resident_count_statement` | a copy-pasted statement would bound a new population by the turn count — fail-open, and invisible to the whole-graph backstop |
 | `test_an_empty_population_count_read_is_a_refusal_not_zero` | an empty count read is a refusal, never `0`: "this graph holds only 0" would be a fact nobody measured |
 | `test_a_population_with_no_count_statement_is_a_refusal_not_a_guess` | an unbounded population is refused, never bounded by a default (`0` demotes it forever; the whole-graph total restores the defect) |
+| `test_a_row_multiplying_count_statement_is_a_documented_residual` | **asserts what the whole-graph backstop does NOT catch** — a claim under the graph total with an inflated ceiling passes both guards, so that class rests on the mirror pin alone |
 
 Measured red-first: with the population bound removed, the stale-report arm fails
 `assert 'PLAN' == 'REFUSED'` while the two positive arms stay green.

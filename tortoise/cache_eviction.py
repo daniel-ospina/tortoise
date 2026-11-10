@@ -62,9 +62,12 @@ WHAT THIS MODULE IS NOT
 It is not the parity instrument. `tools/turn_parity_census.py` (#10029) already owns
 the two store legs, the paging guard, the tenant-scoped record read and the
 field-by-field parity definition for the ONE class that has an instrument (turns).
-This module **consumes** that report; it never re-implements it, and it never
+This module **consumes** that report; it never re-implements the INSTRUMENT, and it never
 invents a verdict for a class no instrument covers. A class with no instrument is
 `cannot-answer`, which is a refusal — never a silent skip and never an assumed pass.
+⚠️ Its ONE mirrored statement is :data:`POPULATION_RESIDENT_COUNT` — a copy of the
+instrument's own count predicate, used only to BOUND the report's licence, and pinned by
+an identity test. That is not a second instrument: it derives no count the licence spends.
 
 READ-ONLY, AND STRUCTURALLY SO. Nothing here writes, deletes or drops anything: the
 only statements it issues are counts, and the only other commands are `INFO memory`,
@@ -176,7 +179,10 @@ DERIVED_LABELS = frozenset({"Subject", "Object", "Point", "Operator"})
 #: licensing the eviction of every `:Point` — or of `:Source`, or of `:GraphEvent`.
 #: That is why eligibility is keyed by population and why the turn population's node
 #: count is taken from the instrument's own report (`measured_nodes`) rather than
-#: re-derived here: this module never re-implements the turn shape.
+#: re-derived here. ⚠️ This module carries exactly ONE copy of the turn PREDICATE —
+#: :data:`POPULATION_RESIDENT_COUNT`, a mirror pinned by
+#: `test_the_population_count_mirrors_the_instrument` — and uses it only to BOUND the
+#: report, never to derive the count the licence spends.
 PARITY_INSTRUMENTS: dict[str, str] = {
     "turn": "tools/turn_parity_census.py",
 }
@@ -1254,25 +1260,30 @@ def assess(
     # per-population statement, and it catches an outright impossible number — a report
     # about ANOTHER graph of this instance trips it even when that graph is larger.
     #
-    # ⛔ WHAT THIS CATCHES, EXACTLY — and it is narrower than it looks. The comparison is
-    # ``entry.nodes`` (the REPORT's claim) against the graph's whole node count, so it
-    # fires only when a claim exceeds EVERY node the graph holds. Two things follow, and
-    # the second is why the sentence that used to be here was wrong:
+    # ⛔ WHAT THIS CATCHES, EXACTLY — the operands are ``entry.nodes`` (the REPORT'S
+    # CLAIM) and the graph's whole node count, so the trigger is:
     #
-    # - A count statement whose PREDICATE is too wide (dropping the `:Point` half) can
-    #   never trip it: a subgraph count cannot exceed `MATCH (n) RETURN count(n)`.
-    # - Nor can a statement whose query SHAPE multiplies rows (a join, a second `MATCH`,
-    #   an `UNWIND`) — unless that inflation is large enough to exceed the whole graph.
-    #   A modest multiplication (population 500 counted as 2,000 on a 25,000-node graph)
-    #   passes BOTH guards: the claim is validated against the inflated ceiling, and the
-    #   claim is under the total. No total-based comparison can separate that from "the
-    #   population grew since the report" — refusing on ``resident_population >
-    #   report.total_nodes`` would block legitimate growth — so it is covered SOLELY by
-    #   `test_the_population_count_mirrors_the_instrument` (identity with the
-    #   instrument's executed constant, plus the `:Point` assertion). Keep that pin; this
-    #   check does not replace it.
+    #     resident_population >= claim > node_total
     #
-    # What this DOES catch is the worst case: a claim above every node the graph holds,
+    # i.e. THE CLAIM ITSELF is above every node the graph holds (which implies the
+    # mirror's count is at least that large — eligibility already required
+    # `claim <= resident_population`). Both halves matter, and neither of the two
+    # sentences that used to sit here was right:
+    #
+    # - A count statement whose PREDICATE is too wide (dropping the `:Point` half) never
+    #   trips it: a subgraph count cannot exceed `MATCH (n) RETURN count(n)`.
+    # - Nor does a statement whose query SHAPE multiplies rows (a join, a second
+    #   `MATCH`, an `UNWIND`) — the comparison never reads the mirror's count, so a
+    #   multiplied count alone cannot trip it. A modest multiplication (population 500
+    #   counted as 2,000 on a 25,000-node graph, claim 1,500) passes BOTH guards: the
+    #   claim is validated against the inflated ceiling and is under the total. No
+    #   total-based comparison can separate that from "the population grew since the
+    #   report" — refusing on ``resident_population > report.total_nodes`` would block
+    #   legitimate growth — so that class is covered SOLELY by
+    #   `test_the_population_count_mirrors_the_instrument`, and by the characterisation
+    #   test that pins this residual. Keep the pin; this check does not replace it.
+    #
+    # What this DOES catch is the worst case — a claim above every node the graph holds,
     # whatever produced it. One integer compare, independent of any predicate, so it
     # stays.
     resident_total = total_nodes

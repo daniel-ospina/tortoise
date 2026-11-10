@@ -28,8 +28,8 @@ carry `is_episodic = true` (the turn population), writes a CLEAN parity report c
     uv run python docs/evidence/10976-licence/repro_licence.py \
         --uri "$TORTOISE_DB_URI" --out /tmp/licence.json
 
-Exit codes: 0 the licence was REFUSED/UNBOUNDED (the bound fired), 4 a licence WAS
-issued (the defect is still present). ⚠️ Not 2 — argparse exits 2 on a usage error, and a
+Exit codes, keyed on the LICENCE: 0 no licence was issued (the bound fired), 4 a
+licence WAS issued (the defect is still present). ⚠️ Not 2 — argparse exits 2 on a usage error, and a
 mistyped command must not read as the defect arm.
 
 Expected WITH the population bound (`POPULATION_RESIDENT_COUNT`, #10976):
@@ -175,9 +175,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"licence / population           {payload['licence_x_population']:.0f}x")
     for problem in payload["problems"]:
         print(f"  · {problem}")
-    # ⛔ 4, not 2: argparse exits 2 on a usage error, so a mistyped command would be
-    # indistinguishable from "a licence was issued and the defect is present".
-    return 0 if payload["verdict"] in {"REFUSED", "UNBOUNDED"} else 4
+    # ⛔ KEYED ON THE LICENCE, NOT THE VERDICT, and not 2. The verdict is the census's
+    # BYTE state, so a cache under its byte ceiling answers `CLEAN` while the licence is
+    # still refused by the population bound — keying on the verdict would report that
+    # healthy refusal as the defect. And argparse exits 2 on a usage error, so a mistyped
+    # command must not be readable as either arm.
+    return 0 if not payload["evictable"] else 4
 
 
 if __name__ == "__main__":
