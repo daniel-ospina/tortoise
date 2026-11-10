@@ -252,8 +252,18 @@ none.
 `aboutDocument` **edge** is retargeted at `:Source` — that asymmetry is the
 whole fold, and it is why L1 and L2 could close. The retirement mechanism is a
 symbol pair this guard does check: the writers' retired-key allowlist
-`_DOC_RETIRED_KEYS` (`projection/entities.py:1974`) and the graph migration
-`relabel_legacy_documents` (`migrate_kinds.py:167`).
+`_DOC_RETIRED_KEYS` (`projection/entities.py:1974`, at this head — `1584` at
+`4f68a2aa7`) and the graph migration `relabel_legacy_documents`
+(`migrate_kinds.py:167`).
+
+**How to read a line pointer in this section:** the interface-map table above is
+frozen at the frontmatter's `measured_at_commit`, so its line numbers are as-of
+that commit and drift at head by design. The pointers in *this* subsection's
+prose are maintained at HEAD — that is what
+`test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names` checks — and
+a pointer that legitimately names a past commit marks it ("at `4f68a2aa7`").
+Without that sentence the two conventions look like one, and a reader who
+re-derives the stale half concludes the live half is stale too.
 
 ⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,
 and the reason is measured: `:Document` occurs on **63** lines across **19**
@@ -266,8 +276,8 @@ census's own note on why node labels do not partition the node set
 count, being a new file), #8447's ingest door (`tortoise/ingest.py`, the
 `REFUSED_NOT_FOUND` enum docstring), and #11729's prose lines in
 `tortoise/hosted_backup.py` — a file the population had not previously reached,
-carrying no `:Document` mention at `4f68a2aa7`, where the hosted backup/restore
-path now owns its label at the seam. All three are the point rather than an
+carrying no `:Document` mention at `4f68a2aa7`, whose served-label bound added
+the pre-D10 dump/restore refusal and repair prose. All three are the point rather than an
 accident: this population grows for good reasons, so the figure tracks the tree
 and not a past commit.
 `tests/test_substrate_map.py` re-derives both numbers over the **same**
