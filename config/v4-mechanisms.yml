@@ -1552,14 +1552,18 @@ mechanisms:
       to walk, which is how a declared-and-absent mechanism kept reading as
       shipped (#5064's root, with one directory of margin).
       ⚠️ WHAT IS BUILT (the PAYLOAD half): `commit_schema.Mention` carries
-      `surface`, `span_start`/`span_end` and `kind_guess` and BOUNDS EACH FIELD
-      (it has no list-level validator, so it neither clamps nor dedupes the
-      list); the clamp and the dedupe live in the PRODUCER —
-      `extractor_v2._clamped_mention` and `extractor_v2._dedupe_mentions`, run
-      from `route_mentions` / `_mentions_for_claim`, and ALSO in `execute_embed`
-      (the `mentions_recorded` accounting the next paragraph is about) and
-      `extract_session_v2` (the evidence block) — and the producer channel
-      publishes the result (`result["embed_list"]["mentions"]` /
+      `surface`, `span_start`/`span_end` and `kind_guess` and bounds the fields it
+      DECLARES a bound on (`surface`, `quote`, `kind_guess`, the span offsets);
+      `claim_ref` and `rule_id` carry NO schema bound — they are cut by the
+      producer (`_mention_ref` / `_mention_rule`). It has no list-level validator,
+      so it neither clamps nor dedupes the list either. The clamp and the dedupe
+      live in the PRODUCER — `extractor_v2._clamped_mention` and
+      `extractor_v2._dedupe_mentions` — reached from `_mentions_for_claim` (both),
+      `execute_embed` (both — the `mentions_recorded` accounting the next
+      paragraph is about) and `extract_session_v2` (both — the evidence block),
+      and from `route_mentions`, which builds through `_mention_record` and then
+      dedupes (`_clamped_mention` does NOT run on that path) — and the producer
+      channel publishes the result (`result["embed_list"]["mentions"]` /
       `result["s2_embed"]["mentions"]`). A future write door that persists the
       payload VERBATIM therefore stores what it was handed; it must not assume
       the commit shape will have cleaned it.

@@ -1828,7 +1828,8 @@ a docs-only diff skips doc-subject guards, which is the opposite of what the sur
 
 **So the DOCUMENT was reworded, not the tripwire** — and the noun took a second pass, because the first replacement
 collided again and the second time with a REGISTRY ROW. *"The carve-out is about CONTENT"* reads as
-`state_value_carve_out` (E2, `#1534`), which is a declared mechanism this same document carries at §4.3 and this
+`state_value_carve_out` (E2, `#1534`), which is a declared mechanism this same document carries at §7 (its marker
+sits on §7's §7.3 passage, `EXTRACTOR-V4-ARCHITECTURE.md:1345`) and this
 same gate scans: nine of the document's ten `carve-out` occurrences name that mechanism, and only §3's sentence
 meant this one. The sentence now says *"**This clause** is about CONTENT"*, a phrase that names no mechanism at all.
 Loosening
