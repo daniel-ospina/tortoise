@@ -50,14 +50,15 @@ _LABEL_CLAIM = re.compile(
     r"occurs on \*\*(\d+)\*\*\s+lines(?:\s+across\s+\*\*(\d+)\*\*\s+files)?"
 )
 
-#: The POPULATION §5 states its figure over, read out of the count sentence itself.
+#: §5's `:Document` claim paragraph, pinned as ONE canonical form: the
+#: `⚠️ **The claim …**` line and the measurement sentence it leads into.
+#:
 #: Without this, §5 could say `files under `tests/`` and stay green — measured: 43 passed
 #: and `substrate_map_check --check` CLEAN while the sentence claimed the `tortoise/`
-#: figure for `tests/`, which is more than twice as large as the one this pin measures. The adjacent
-#: quoted `git grep` still carried `-- tortoise/`, so only the prose population was
-#: free to lie — and §5's own next sentence ("re-derives both numbers over the **same**
-#: population this sentence is stated in") asserts the very thing nothing read.
-#: §5's `:Document` measurement SENTENCE, pinned as ONE canonical form.
+#: figure for `tests/`. The adjacent quoted `git grep` still carried `-- tortoise/`, so only
+#: the prose population was free to lie — and §5's own next sentence ("re-derives both
+#: numbers over the **same** population this sentence is stated in") asserts the very thing
+#: nothing read.
 #:
 #: ⛔ Every earlier version of this pin tried to ENUMERATE the ways a second population
 #: could be smuggled into the sentence — connectors, parens, backtick pairs, path shapes,
@@ -72,19 +73,33 @@ _LABEL_CLAIM = re.compile(
 #: deliberate and fail-closed: a reworded sentence REDS, and the fix is to re-measure and
 #: update this constant together with the sentence, which is exactly the re-measure the
 #: document exists to force.
+#:
+#: ⛔ The span starts at §5's `⚠️ **The claim …**` line, not at `:Document`, and the pin
+#: requires it to BEGIN a paragraph. A span that starts inside the sentence is a SUFFIX:
+#: text in front of it never reaches the match, so a second population could sit there —
+#: measured at the head before this boundary existed, all three GREEN (43 passed) while the
+#: sentence stated the `tortoise/` figure over `tests/`, a population several times larger:
+#:
+#:     and the reason is measured: in `tests/`, `:Document` occurs on …   -> GREEN
+#:     and the reason is measured over `tests/`: `:Document` occurs on …  -> GREEN
+#:     For `tests/`: ⚠️ **The claim "`:Document` is not minted" …             -> GREEN
+#:
+#: The first two are now inside the match (they break the lead-in literal); the third is
+#: caught by the paragraph-boundary assertion, because it no longer ends the line in front
+#: of the span. `search` can always be preceded by text, so the boundary — not the literal
+#: alone — is what makes "the whole sentence" true.
 _MEASUREMENT_TEMPLATE = (
-    "`:Document` occurs on **{lines}** lines across **{files}**\n"
+    '⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,\n'
+    "and the reason is measured: `:Document` occurs on **{lines}** lines across **{files}**\n"
     "files under `{pop}/` (`git grep -n ':Document' -- {pop}/` → {{quoted_lines}} lines,\n"
     "`git grep -l ':Document' -- {pop}/` → {{quoted_files}} files — "
     "the file count is not the line count)."
 )
 
 
-def _measurement_sentence() -> re.Pattern[str]:
-    """§5's measurement sentence as a pattern, with only the four figures free."""
-    literal = _MEASUREMENT_TEMPLATE.format(
-        lines="{lines}", files="{files}", pop=_TRACKED_DIR
-    )
+def _measurement_paragraph() -> re.Pattern[str]:
+    """§5's claim paragraph as a pattern, with only the four figures free."""
+    literal = _MEASUREMENT_TEMPLATE.format(lines="{lines}", files="{files}", pop=_TRACKED_DIR)
     pieces = re.split(r"(\{lines\}|\{files\}|\{quoted_lines\}|\{quoted_files\})", literal)
     pattern = ""
     for piece in pieces:
@@ -1718,21 +1733,36 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
         "— `search` binds the first, so a second statement is drift this pin would "
         "silently read past; keep one statement, or pin each one"
     )
-    # ── The sentence, verbatim ────────────────────────────────────────────────
+    # ── The paragraph, verbatim ───────────────────────────────────────────────
     # Everything about "one population, one reproducible command pair, nothing else" is
     # enforced by ONE anchored match on the sentence's canonical form (see
     # `_MEASUREMENT_TEMPLATE`): only the four figures are free, so no second population,
     # third command, dotted filename, differently-cased word or prose scope phrase can be
     # inserted without the match failing.
-    sentence = _measurement_sentence().search(section)
-    assert sentence, (
-        "§5's `:Document` measurement sentence is gone or was reworded — this pin reads it "
-        "VERBATIM, with only the four figures free. Re-measure the tree, then update §5's "
-        "sentence and `_MEASUREMENT_TEMPLATE` together; do not paraphrase it, because a "
-        "paraphrase is where a second population hides"
+    paragraph = _measurement_paragraph().search(section)
+    assert paragraph, (
+        "§5's `⚠️ **The claim …**` line and the `:Document` measurement sentence it leads "
+        "into are gone or were reworded — this pin reads them VERBATIM, with only the four "
+        "figures free. Re-measure the tree, then update §5's paragraph and "
+        "`_MEASUREMENT_TEMPLATE` together; do not paraphrase it, because a paraphrase is "
+        "where a second population hides"
+    )
+    # The match must BEGIN a paragraph. A `search` can always be preceded by text, so the
+    # literal alone pins the span only where it starts; a prefix on the same line as the
+    # span's first character is outside it and would be unread — measured GREEN at the head
+    # before this guard existed: `For `tests/`: ⚠️ **The claim "`:Document` is not minted" …`
+    # with the figures left correct (43 passed), stating the `tortoise/` figure over a
+    # population several times larger.
+    before = section[: paragraph.start()]
+    assert paragraph.start() == 0 or before.endswith("\n\n"), (
+        "§5's `:Document` claim does not begin a paragraph — this pin matches it from "
+        "`⚠️ **The claim` through the measurement sentence and requires that span to start "
+        "a paragraph, so a second population or a scope phrase placed in front of it REDS "
+        "instead of being skipped by `search`. Put the claim on its own paragraph, or "
+        "extend the template and re-measure"
     )
     claimed_lines, claimed_files, quoted_lines, quoted_files = (
-        int(group) for group in sentence.groups()
+        int(group) for group in paragraph.groups()
     )
     lines, files, narrow = _label_hits()
     assert (claimed_lines, claimed_files) == (lines, files), (
@@ -1822,6 +1852,47 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
         "this pin was cut against — the exclusion argument needs re-measuring (§5), "
         "never the assertion widening"
     )
+
+
+#: The prefixes a second population has been measured in FRONT of the pinned span while the
+#: pin stayed green — two inside the sentence, one on the same line as its first character.
+#: Each keeps the figures correct and adds nothing but a scope phrase, which is exactly what
+#: a suffix match cannot see.
+_MEASURED_PREFIXES = (
+    # inside the sentence, before `:Document`
+    (
+        "and the reason is measured: `:Document` occurs on",
+        "and the reason is measured: in `tests/`, `:Document` occurs on",
+    ),
+    # the same slot, spelled as a scope for the measurement itself
+    (
+        "and the reason is measured: `:Document` occurs on",
+        "and the reason is measured over `tests/`: `:Document` occurs on",
+    ),
+    # in front of the span's first character, on the same line
+    ("⚠️ **The claim", "For `tests/`: ⚠️ **The claim"),
+)
+
+
+@pytest.mark.parametrize("before_span,with_prefix", _MEASURED_PREFIXES)
+def test_a_second_population_in_FRONT_of_the_pinned_span_is_read(
+    monkeypatch, before_span: str, with_prefix: str
+) -> None:
+    """Fails if the pin can be satisfied by a SUFFIX of §5's claim paragraph.
+
+    Reachable — this WAS the shipped state at `4323344f32`: `_MEASUREMENT_TEMPLATE` began at
+    `:Document`, so a population named in front of it (`… measured over `tests/`: `:Document`
+    occurs on the bold figure …`) satisfied the pin and left 43 passed while the sentence stated
+    the `tortoise/` figure over `tests/` — the false PASS the verbatim template was cut to
+    stop, reached from the other side of the span. Each prefix below was measured GREEN there
+    and RED at this head.
+    """
+    doc = _doc()
+    assert doc.count(before_span) == 1, "the shipped paragraph no longer contains this span"
+    mutated = doc.replace(before_span, with_prefix)
+    monkeypatch.setattr(sys.modules[__name__], "_doc", lambda: mutated)
+    with pytest.raises(AssertionError, match=r"does not begin a paragraph|gone or were reworded"):
+        test_the_document_label_prose_count_is_the_LINE_count()
 
 
 #: A `cache_eviction.py:<n>` pointer, and the window after it searched for the commit a
