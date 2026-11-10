@@ -77,7 +77,7 @@ twin **builders** for 9 and 10 are the two gaps.
 |---|---|---|---|
 | `epic-align` | strategy review | ✅ **9 cycles recorded**, 5 of them P-counted → `NO ISSUES FOUND` at cycle 9 | `00-align.md` §6 (7×P1 + 17×P2 fixed across cycles 1/2/5/6/7; cycle 8 cosmetic-only; cycle 3 never run and cycle 4 caught by the decompose gate — both rows record it) |
 | `epic-research` | research brief review | ✅ **GATE B `NO ISSUES FOUND`**, GATE A cosmetic-only → fixed | `01-research-brief.md` |
-| `epic-scope` | scope review | ✅ **3 cycles** → cosmetic-only, all fixed | **not in `02-scope.md`** (that file carries no scope-review section by design — its last line says the two reviews are recorded after confirmation). The record is the `#7949` pipeline comment of **2026-11-08T00:17:36Z** (`epic-scope ×3 … cosmetic-only`) |
+| `epic-scope` | scope review | ✅ **3 cycles** → cosmetic-only, **the findings fixed in later stages** | **not in `02-scope.md`** (that file carries no scope-review section by design — its last line says the two reviews are recorded after confirmation). The record is the `#7949` pipeline comment of **2026-11-08T00:17:36Z**, whose row reads: **`epic-scope ×3 + duplication-architecture` — ✅ cosmetic-only; D&A `ISSUES — DEGRADED` (registry 401), verdicts recorded** — i.e. the comment records **cosmetic-only**, and does not itself say "all fixed" |
 | `epic-scope` | **`duplication-architecture`** | ✅ ran, **`ISSUES — DEGRADED`** (registry 401); verdicts recorded, **not** fix-looped | `02-scope.md` §"verdicts recorded" |
 | Test-Design Gate | issue filed with the full map | ✅ **#11454** | — |
 | UX Design Gate | `UX_RATING` determination | ✅ **low**, no routing (below the ≥ medium threshold) | `02-scope.md` §3 |
@@ -87,7 +87,7 @@ twin **builders** for 9 and 10 are the two gaps.
 | `epic-plan` §8 | coherence + risk gate | ✅ → **5** findings fixed | `04-plan.md` §8 |
 | `epic-plan` §5 | **`duplication-architecture`** | ✅ ran, `ISSUES` — **2×P0**, verdicts folded | `04-plan.md` §8.5 |
 | `epic-plan` §8 | **`duplication-architecture` re-check** | ✅ ran, `ISSUES` — **1×P0 + 3×P1**, folded | `04-plan.md` §5.3a |
-| `epic-decompose` | per-issue gate | ✅ ran — **5 issues failing**, table on `#7949` | `#7949` Stage-5 comment |
+| `epic-decompose` | per-issue gate | ✅ ran — **8 of 10 children fail it, 1 partly, 1 mostly**; every correction is named per issue | `#7949` Stage-5 comment (2026-11-08T00:01:58Z, "Gate A — per-issue verdicts (10 issues)") |
 | `epic-decompose` | MECE gate | ✅ ran — **`ISSUES: 4`** (2 gaps, 1 overlap, 1 cycle) | same comment |
 | Capstone Verification Gate | issue filed | ✅ **#11496** | — |
 
@@ -99,6 +99,7 @@ twin **builders** for 9 and 10 are the two gaps.
 | **D2** | The **human approval gates** at scope were satisfied by this session's presentation + the owner's "proceed"/"ok"/"go", not by a `human_approval` step | enforcement was session-escaped earlier (recorded) and re-requesting approval for each re-entry would have stalled the lane | the approval is in the transcript, **not** in the enforcement audit — an auditor relying on `enforcement.jsonl` will not see it |
 | **D3** | The **research stage's graph write-back** could not land | the hosted graph is at its **25,000-point cap** (`-32006`), and the CLI is out of sync with the tool schema (`#11076`) | the research findings are in the brief and on `#7949`, but **not** in the graph — so the next lane cannot find them by searching memory |
 | **D4** | `00-plan.md` retained, not deleted | it is referenced by comments and by the children | the risk was that a reader took it as current — **mitigated at the document level**, not at its §5: `doc_status: superseded`, a supersession banner under its title, and its A4 passages rewritten as pointers to `02-scope.md` item 5 / `04-plan.md` §8.4 **AM7** |
+| **D5** | **`file:line` citations were keyed to line numbers, and line numbers rot** | every forward merge into this branch moves them, and `tests/test_docs_citation_refs.py` cannot catch it — by its own docstring it checks line **presence**, not semantic correctness, so "a shift onto a DIFFERENT non-blank line stays green, and the pointer then silently names whatever row now sits there" | a citation that names the wrong line reads as verified. **The policy this bundle now follows, stated here so the next merger applies it:** the **symbol is authoritative and the line number is a convenience** (`00-plan.md:27-30`) — cite `quota_refusal_payload`, `retry_failed_capture`, `REGISTERED_NON_BAR_ROWS`, the `on_demand:` register heading — and where a number is given, it is **as of head `a4da62477`**. The numbers that a review found wrong at earlier heads were re-pointed at this one (`hosted_api.py:18205`/`:18216`, `:18131`/`:18159`/`:18717`; `EXTRACTOR-V4-ARCHITECTURE.md:1400` D6 / `:1095` "D6 as ruled" / `:2085` §13.8 Q1; `config/ci-surfaces.yml`'s `# ── THE NON-GATING LANE (`on_demand:`) ──` block); **the same treatment was not completed for every citation in every file**, and that residual is named here rather than left for a reader to discover |
 
 ---
 
