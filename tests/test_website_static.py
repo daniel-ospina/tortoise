@@ -5993,7 +5993,10 @@ class TestSiteIconAndSocialPreviewContract:
         expected_pages = {
             "marketing": 14,
             "app": 5,
-            "app-admin": 1,
+            # 2, not 1: the vite SOURCE and the committed `dist/` shell are both graded —
+            # `dist/index.html` disappearing from this list is exactly the drift #7749
+            # describes, and a minimum of 1 would let it happen in silence.
+            "app-admin": 2,
         }
         for label, (pages, root, origins) in surfaces.items():
             assert pages, f"no {label} pages found — the guard would pass vacuously"
@@ -6019,9 +6022,9 @@ class TestSiteIconAndSocialPreviewContract:
         # ("mentions the file and gives the tab no icon at all" — this file's own words),
         # every `rel="icon"` demoted to `apple-touch-icon`, and the whole tag commented
         # out all passed. Reusing the page predicate closes it with no new code: it
-        # dispatches the rel by NAME, counts the trio, refuses `data:` and the wordmark,
-        # resolves the origin, checks the file exists under the serving root, and compares
-        # the `?v=` to the digest. Each source gets ITS OWN root because a self-rendered
+        # dispatches the rel by NAME, requires each of the trio, refuses `data:` and the
+        # wordmark, resolves the origin, checks the file exists under the serving root, and
+        # compares the `?v=` to the digest. Each source gets ITS OWN root because a self-rendered
         # document is served by a project, and asserting existence against the right one
         # is the point.
         # ⚠️ `website/functions/_middleware.ts`'s refusal page is a deliberate EXCEPTION and
@@ -6039,9 +6042,13 @@ class TestSiteIconAndSocialPreviewContract:
         }
         for source_label, (source, root, origins) in self_rendered.items():
             rendered = source.read_text()
-            assert "<head>" in rendered or "<head " in rendered, (
-                f"{source_label} no longer renders a <head> — if the document moved or was "
-                "removed, update this list rather than letting the guard grade nothing")
+            heads = rendered.count("<head")
+            assert heads == 1, (
+                f"{source_label} renders {heads} <head> element(s), but this guard grades ONE "
+                "document per source (it slices the first `<head>…</head>`). A SECOND "
+                "document added to this file would ship with no icon and no `?v=` while every "
+                "assertion here stayed green — grade each one, or list the new document "
+                "separately, rather than letting the guard quietly cover the first only")
             violations = self._surface_icon_violations(
                 "self-rendered", source_label, rendered, root, expected, origins)
             assert not violations, "\n".join(violations)
@@ -6207,7 +6214,7 @@ class TestSiteIconAndSocialPreviewContract:
         files" — a FALSE RED on a correct page, with a message that misnames the cause
         (the file IS one of the three).
 
-        The same read made `origins` UNOBSERVABLE: all 20 graded pages use root-relative
+        The same read made `origins` UNOBSERVABLE: all 21 graded pages use root-relative
         hrefs, which `_icon_ref` resolves through `SITE_ORIGINS` whether `origins` is
         passed or not, so replacing `ICON_ORIGINS` with `SITE_ORIGINS` — or deleting the
         parameter and its four call sites — left every assertion green. A check whose
