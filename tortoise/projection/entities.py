@@ -2645,7 +2645,7 @@ class _EntityHandlers:
                 or any(isinstance(p.get(k), (list, tuple))
                        for k in _POINT_FLATTEN_LIST_PROPS)):
             p = dict(p)
-            encode_json_record_props(p)
+            pass  # MUTANT: replay-door encode disabled
             flatten_search_keys_prop(p)
             append_identifier_aliases(p, alias_tokens)
         op = p.get("operator")
