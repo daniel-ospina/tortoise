@@ -49,11 +49,11 @@ map explicitly forbids as a layout input.
 | Surface | Type | Data flow | The contract |
 |---|---|---|---|
 | **the pinned registration** (`preregistration.json` + checker) | State / config | Read + Write (amended) | `capstone-preregistration/v1`; `criteria[].id`, `denominator_floors`, `below_floor`, `corpus`, `amendments`; the A-rows enter as a **versioned amendment** quoting superseded text |
-| **the verdict gate enum** (`capstone_verdict_check.py:135`) | State (closed vocabulary) | Read | `capstone-verdict-v1`; a **closed** `CRITERIA` tuple that refuses any id outside it (`:821`) — two schemas move, not one |
+| **the verdict gate enum** (`capstone_verdict_check.py:135`) | State (closed vocabulary) | Read | `capstone-verdict-v1`; a **closed** `CRITERIA` tuple that refuses any id outside it (`:920-922`, testing `RECOGNISED_CRITERIA` — so A1–A5 are accepted) — two schemas move, not one |
 | **the corpus pin** (fixture + A-corpus) | State | Read + Write | **three shapes already exist** (`fixtures_hash` in the record; `corpus.sha256`/`items` demanded by `capstone_run.py:1177`; a derived `e1e2_corpus.json`) — the A-corpus must **unify the contract**, not add a fourth |
 | **the A-corpus capture** (`POST /v1/sessions`) | External service | Out → graph | request = curated payloads; response = receipt; **402 quota** at `hosted_api.py:18205` (`if count + est > max_points`) / `:18216` (`quota_refusal_payload`); harness resolution `#3681` |
 | **the graph the A-rows read** (hosted `live-v4` / per-run graph) | DB | Read | `:Object`/`:Event`/`:Point`/`:Subject` shapes; `hasPart` Object→Object (ONTOLOGY §3.7); `batch_id` on `RelationUpsert.attrs` |
-| **the pack declaration → write path** (`semantics`/`hierarchies`) | State | Read | `relation_write_verdict` returns `writable`; **unread legs**: `semantics` (surfaced at `pack_registry.py:456-459`), `hierarchies` (validated only, `:1824-1838`) |
+| **the pack declaration → write path** (`semantics`/`hierarchies`) | State | Read | `relation_write_verdict` returns `writable`; **unread legs**: `semantics` (surfaced at `pack_registry.py:456-459`), `hierarchies` (validated only, `:2341-2355`) |
 | **the declared-mechanism registry** (`config/v4-mechanisms.yml`) | Config | Read | 13 rows; `state`/`code:`/`tests:`/`symbols:`/`pins:`/`preconditions:`; guard `tests/test_v4_declared_mechanisms.py` |
 | **the sealed gold** (`a-corpus/gold/`, hash-pinned) | State | Read | two label sets (direct, transitive); labeller identity recorded; sealed **before** the rollup exists |
 | **the operator legal ≠** (unpatched `extract_session_v2`) | External (LLM) | Out | 15 planted edges; endpoint refs remapped; the only current test **monkeypatches** the extractor |
