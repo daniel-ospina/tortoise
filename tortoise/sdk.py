@@ -167,6 +167,7 @@ from .projection.entities import (  # #3998: the declared :Source surface
 # was: the SDK doors flattened, the shared projection writer did not, so
 # `EventAPI.add_point` stored NOTHING.
 from .projection.entities import (
+    encode_json_record_props as _encode_json_record_props,
     flatten_search_keys_prop as _flatten_search_keys_prop,
     revise_identifier_aliases as _revise_identifier_aliases,
 )
@@ -13379,6 +13380,16 @@ class TortoiseSDK:
         props = _sanitize_props(props)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
+        # #11239 (DM1's home): `mentions` is a list of RECORD dicts and the
+        # engine cannot hold an array of maps, so the payload form is encoded to
+        # ONE compact JSON scalar here — the SAME helper `_upsert_point_props`
+        # applies on the replay door, called from this one so the live write and
+        # every rebuild derive byte-identical values (#330 parity; the #8006
+        # lesson is that a rule living on only one of the two doors leaves the
+        # other storing NOTHING). Without it the live CREATE would hand the
+        # engine a list of maps and the write would be refused or silently
+        # reshaped — the silent-drop class #11239 exists to end.
+        _encode_json_record_props(props)
         # #10122: a `name` the index does not hold is a stored-but-unfindable
         # identifier — advise here, at the door that accepted it (after the
         # flatten, so the coverage check sees the stored `search_keys` form).
@@ -16896,6 +16907,17 @@ class TortoiseSDK:
                 # writer was forked).
                 props = {k: v for k, v in pt.items()
                          if k in _CAPTURE_PASSTHROUGH_PROPS}
+                # #11239 (DM1's home): the claim's MENTION records are carried
+                # to the node too — and deliberately NOT by widening
+                # `_CAPTURE_PASSTHROUGH_PROPS`, which is the public capture
+                # RESPONSE surface (#2949 response parity, and `validFrom`'s
+                # standing note below: "stored, never advertised"). It rides
+                # the CREATE branch exactly like `validFrom`/`money`, so a
+                # dedup hit still writes nothing (first-writer) and the
+                # response shape is unchanged. Read off the payload point HERE,
+                # beside the other read, so the two halves cannot disagree
+                # about which point they describe.
+                _mention_records = pt.get("mentions")
                 # #2949 (re-review P2): normalize PRESENCE to what the write
                 # will actually store, so the response never advertises a
                 # field the node does not hold. Two cases, both verified:
@@ -16961,8 +16983,15 @@ class TortoiseSDK:
                     # deliberately EXCLUDES `validFrom`, so it can never arrive
                     # here to be clobbered.
                     create_props = props
+                    # #11239: the mention records ride the create only (see the
+                    # read above). Merged BEFORE the `validFrom` fold, and from
+                    # `create_props` rather than `props`, so the two carriers
+                    # compose instead of one clobbering the other.
+                    if _mention_records:
+                        create_props = {
+                            **create_props, "mentions": _mention_records}
                     if props.get("when"):
-                        create_props = {**props, "validFrom": props["when"]}
+                        create_props = {**create_props, "validFrom": props["when"]}
                     # #2817: the value derived at the top of this loop rides
                     # the CREATE only — a dedup hit writes no props at all
                     # (first-writer), and its abstention has already been
@@ -18585,6 +18614,11 @@ class TortoiseSDK:
                                 reject_claim_class=True)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
+        # #11239: same rule at the UPDATE door. Idempotent — a value already in
+        # the canonical scalar form is left untouched, which is what lets
+        # `create_point`'s dedup fold hand these props straight through
+        # (`self.update_point(pid, **props)`) without re-encoding or refusing.
+        _encode_json_record_props(props)
         # E4 (#5007): same rule as `create_point` / the `Point` model — an
         # update may not leave a half span, an inverted pair or an
         # out-of-range offset on the node. The pair is all-or-nothing, so an
@@ -44339,6 +44373,11 @@ class TortoiseSDK:
         # carries the annotator dims, not `search_keys` — so a replay does not
         # restore it. That is pre-existing (#4094) and unchanged here.
         _flatten_search_keys_prop(props)
+        # #11239: and the same list→JSON-scalar encode as the two Point doors,
+        # so a caller-supplied `mentions` cannot reach the engine as an array of
+        # maps (see `projection.entities.encode_json_record_props`). Idempotent
+        # for an already-canonical string.
+        _encode_json_record_props(props)
         # E4 (#5007, re-review P2): the span invariant has to hold HERE too.
         # This is the generic tenant surface (`tortoise_update_entity`) and
         # its Point branch below writes caller props straight through

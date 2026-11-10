@@ -93,17 +93,22 @@ turns ──► S0 READ ──► S1 NARRATE ──► S2.1 EXTRACT ──► S2
 
 **State of DM1's home, stated where the shape is declared:**
 
-<!-- v4-mechanism: mention_record state: not-implemented -->
-⛔ **DM1's home on the `Point` is DECLARED AND UNBUILT** (`#11239`): the record is
-built as a payload (`commit_schema.Mention` bounds the fields it declares a bound
-on — `claim_ref` and `rule_id` are cut by the producer, not the schema — while the
-clamp and the dedupe are the producer's — `extractor_v2._clamped_mention` /
-`_dedupe_mentions`) and **no write door persists it** — the REST `CreatePointRequest`, the SDK capture whitelist
-(`sdk._CAPTURE_PASSTHROUGH_ORDER`) and both `hosted_api`/`selfhost_api` omit
-`mentions` — so a capture counts records the write DISCARDS, and a graph read
-after a capture holds the claim and no mention on it. Read this row as the TARGET
-shape, not as current state, until a door carries it (or an explicit
-evidence-only ruling moves the declaration).
+<!-- v4-mechanism: mention_record state: implemented -->
+✅ **DM1's home on the `Point` is BUILT** (declared-and-absent until `#11239`, which
+persisted it). The record is built as a payload (`commit_schema.Mention` bounds the
+fields it declares a bound on — `claim_ref` and `rule_id` are cut by the producer,
+not the schema — while the clamp and the dedupe are the producer's —
+`extractor_v2._clamped_mention` / `_dedupe_mentions`) **and it now reaches the
+claim Point**: `hosted_api._execute_commit_writes` passes `mentions=` on both its
+create legs, and the SDK capture seam carries it on its create branch exactly as it
+carries `validFrom` — **stored, never advertised** (it is deliberately NOT in
+`sdk._CAPTURE_PASSTHROUGH_ORDER`, `#2949`'s public response surface). On the node the
+value is ONE compact JSON scalar (`projection.entities.encode_json_record_props`,
+declared in `_POINT_JSON_RECORD_PROPS` and `_POINT_DECLARED_PROPS`) because the
+engine refuses an array containing a map; the payload keeps the record shape, and
+`consistency._uncarried` reads that same declaration instead of re-listing it.
+Neither REST `CreatePointRequest` (hosted or self-host) has the field: it is a
+writer-produced record, not a client field.
 
 **Integrity constraints:** no mention row without its claim; no held item silently dropped; every committed node must walk to its `Source` (§2.4.1 — value-bearing today, the widening is `#2684`); the hierarchy edge must replay.
 

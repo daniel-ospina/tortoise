@@ -1239,86 +1239,119 @@ def test_a_mention_only_response_keeps_a_rule_the_cue_AGREES_with():
     assert records[0]["rule_id"] == ref.RULE_PRONOUN
 
 
-# ── the record's boundary: it is payload-only, and the tree says so ───────
+# ── the record's boundary: it reaches the claim Point, and the tree says so ──
 
-def test_the_mention_record_is_payload_only_and_says_so():
-    """⛔ THE DECLARED DEFERRAL, PINNED (review at `591906397`, Issue 1). DM1
-    names the claim Point as the record's home and `Point.mentions` exists, but
-    BOTH declared write doors drop it — `hosted_api.create_point` enumerates its
-    props and the SDK capture whitelist is `#2949`'s response-parity surface. So
-    an armed run's `mentions_recorded` counts records the write discards, and a
-    reader of the graph sees the claim and no mention on it.
+def test_the_mention_record_reaches_the_claim_point_and_says_so():
+    """⛔ DM1's HOME, ASSERTED FROM BOTH SIDES (persisted by `#11239`). DM1
+    names the claim Point as the record's home and `Point.mentions` exists;
+    between `#11211` and `#11239` the record stopped at the payload, so an armed
+    run's `mentions_recorded` counted records the write DISCARDED and a reader of
+    the graph saw the claim and no mention on it.
 
-    Persisting it is `#11239`, deliberately not this slice. This row exists so the
-    boundary cannot become a silent claim: adding `mentions` to the whitelist (or
-    removing the disclosure) REDs here and forces the docstring, the PR body and
-    `#11239` to be updated together."""
+    This row pins the boundary in BOTH directions, because a one-sided pin is how
+    the deferral survived: it REDs if persistence is REMOVED (the doors stop
+    carrying it, the encoder stops running, the declaration disappears) and it
+    REDs if the record is over-advertised (a REST `CreatePointRequest` field, or
+    `mentions` added to `_CAPTURE_PASSTHROUGH_PROPS`, which is `#2949`'s public
+    capture RESPONSE surface — `validFrom`'s standing note).
+    """
     import inspect
 
-    from tortoise import hosted_api
+    from tortoise import hosted_api, selfhost_api
     from tortoise.commit_schema import Mention
-    from tortoise.sdk import _CAPTURE_PASSTHROUGH_PROPS
+    from tortoise.consistency import _POINT_JSON_RECORD_PROPS as _CONSISTENCY_SET
+    from tortoise.projection.entities import (
+        _POINT_JSON_RECORD_PROPS,
+        _EntityHandlers,
+        encode_json_record_props,
+    )
+    from tortoise.sdk import TortoiseSDK, _CAPTURE_PASSTHROUGH_PROPS
 
-    # the record EXISTS at the payload — "payload-only" is not "nothing"
+    # the record EXISTS at the payload — "payload-only" was never "nothing"
     payload, _ = _mint(_embed_list("it"))
     assert [m["surface"] for m in _mentions_of(payload)] == ["it"]
 
-    # …and NEITHER declared write door takes it, which is the whole deferral.
-    # ⛔ BOTH doors, because the docstring names both and the REST door is the one
-    # most likely to grow a field: pinning only the SDK whitelist let
-    # `CreatePointRequest.mentions` be added with all rows green (review at
-    # `11039b1bd8`, P3).
+    # ── the PERSISTENCE half, door by door ────────────────────────────────
+    # 1. the hosted commit door — the one the v2 payload actually rides.
+    _commit_src = inspect.getsource(hosted_api._execute_commit_writes)
+    assert "mentions=_mention_props or None" in _commit_src, (
+        "the commit route no longer writes `mentions`: DM1's home is empty "
+        "again — see #11239 and `Mention`'s docstring")
+    # 2. the SDK capture seam: a create-only carrier, read off the payload point
+    #    beside the other passthrough read (the `validFrom` shape — stored,
+    #    never advertised).
+    _capture_src = inspect.getsource(TortoiseSDK._extract_session_v2)
+    assert '_mention_records = pt.get("mentions")' in _capture_src, (
+        "the SDK capture seam stopped reading the payload point's `mentions`")
+    assert '"mentions": _mention_records' in _capture_src, (
+        "the SDK capture seam reads `mentions` and no longer carries it to the "
+        "create — the record would be dropped at the write boundary")
+    # 3. the ONE encoder, called from every Point door (live AND replay), so
+    #    the engine is never handed an array of maps. `update_entity` delegates
+    #    to `_update_entity`, which is where the Point branch writes caller
+    #    props straight through.
+    for door in ("create_point", "update_point", "_update_entity"):
+        assert "_encode_json_record_props" in inspect.getsource(
+            getattr(TortoiseSDK, door)), (
+            f"{door} no longer encodes `mentions`, so the engine is handed an "
+            "array of maps and the live write diverges from every rebuild")
+    # 4. the declaration the writer reads — and the checker reads FROM it.
+    assert "mentions" in _POINT_JSON_RECORD_PROPS
+    assert "mentions" in _EntityHandlers._POINT_DECLARED_PROPS, (
+        "`mentions` is not declared, so every capture that records a mention "
+        "logs a FALSE \"Point prop 'mentions' is not declared\" drift warning")
+    assert _CONSISTENCY_SET is _POINT_JSON_RECORD_PROPS, (
+        "consistency must READ the writer's declaration rather than re-list it")
+
+    # ── the encode itself: deterministic, lossless, canonical on re-entry ──
+    once = {"mentions": [{"surface": "it", "span_start": 3, "span_end": 5},
+                         {"surface": "the problem"}]}
+    twice = {"mentions": [{"span_end": 5, "surface": "it", "span_start": 3},
+                          {"surface": "the problem"}]}
+    encode_json_record_props(once)
+    encode_json_record_props(twice)
+    assert once["mentions"] == twice["mentions"], (
+        "the encode is not deterministic across field order, so live and "
+        "rebuild would diverge on the same record")
+    assert isinstance(once["mentions"], str), (
+        "the encoded value must be ONE scalar — the engine cannot hold an array "
+        "of maps (`_is_persistable_prop_value`)")
+    assert json.loads(once["mentions"])[0]["surface"] == "it"
+    encode_json_record_props(once)          # idempotent for a canonical string
+    assert isinstance(once["mentions"], str)
+    blank = {"mentions": []}
+    encode_json_record_props(blank)
+    assert "mentions" not in blank, (
+        "an empty list must POP the key, never store `[]` and clear a value")
+    model_form = {"mentions": [Mention(surface="it", span_start=3, span_end=5)]}
+    encode_json_record_props(model_form)
+    assert json.loads(model_form["mentions"])[0]["span_end"] == 5, (
+        "a pydantic Mention must encode through its own model_dump")
+
+    # ── the OTHER direction: nothing over-advertises the record ───────────
     assert "mentions" not in _CAPTURE_PASSTHROUGH_PROPS, (
-        "the capture whitelist now carries mentions: the payload-only deferral "
-        "is over — update Mention's docstring and #11239, and turn this row into "
-        "a persistence assertion")
+        "`mentions` joined the capture RESPONSE surface: that is #2949's "
+        "public create/dedup read-back — a stored-and-not-advertised field "
+        "(the `validFrom` shape) must not become part of the response")
     assert "mentions" not in hosted_api.CreatePointRequest.model_fields, (
-        "CreatePointRequest now accepts `mentions`: the REST write door takes a "
-        "record that has no store-side home yet — update Mention's docstring and "
-        "#11239, and turn this row into a persistence assertion")
-    assert "mentions" not in inspect.getsource(hosted_api.create_point), (
-        "create_point now writes `mentions`, so the payload-only deferral is "
-        "over — see #11239 and turn this row into a persistence assertion")
-    # ⛔ THE DOOR THE v2 PAYLOAD ACTUALLY USES. `extract_session_v2` POSTs its
-    # payload to /v1/sessions/commit, which writes points through
-    # `hosted_api._execute_commit_writes` → `sdk.create_point(...)`, NOT through
-    # the single-point route pinned above. Measured (review at `5da3575b7a`, P3):
-    # adding `mentions=` to that call left every row green, and the docstring
-    # cannot see the boundary move on the payload's own path.
-    assert "mentions" not in inspect.getsource(hosted_api._execute_commit_writes), (
-        "the commit route now writes `mentions`: the payload-only deferral is "
-        "over — see #11239 and turn this row into a persistence assertion")
-    # ⛔ THE SELF-HOST MIRROR IS ITS OWN DOOR. `#4032` frames
-    # `hosted_api.CreatePointRequest`/`create_point` and
-    # `selfhost_api.CreatePointRequest`/`create_point` as parity mirrors, so a
-    # mention field added on the hosted side alone re-opens the divergence — and
-    # pinning only the hosted pair left this door asserting nothing (review at
-    # `40a0a81e6`, P3; the docstring said "three" doors while the tree had four).
-    from tortoise import selfhost_api
-
+        "CreatePointRequest now accepts `mentions`: it is a writer-produced "
+        "record, not a client field")
     assert "mentions" not in selfhost_api.CreatePointRequest.model_fields, (
-        "the self-host REST door now accepts `mentions`: the payload-only "
-        "deferral is over on the mirror too — update Mention's docstring and "
-        "#11239")
-    assert "mentions" not in inspect.getsource(selfhost_api.create_point), (
-        "selfhost_api.create_point now writes `mentions`, so the payload-only "
-        "deferral is over on the self-host mirror — see #11239")
-    # …and the docstring's enumeration NAMES that door, because a count a reader
-    # cannot check is how "three" survived beside four real doors. ⛔ BOTH
-    # docstrings: the reviewer's own file had already been corrected while
-    # `route_mentions`' still said THREE, so one reader got "four" and the next
-    # got "three" in the same round (review at `0c15ad04d`, P3).
-    from tortoise.extractor_v2 import route_mentions
+        "the self-host REST door now accepts `mentions` — #4032's parity "
+        "mirror must move with the hosted pair, and this field is neither's")
 
+    # …and both docstrings NAME the doors, so a reader can check the claim.
     for doc in (Mention.__doc__ or "", route_mentions.__doc__ or ""):
         assert "selfhost_api.CreatePointRequest" in doc, (
-            "a mention docstring does not name the self-host write door, so its "
-            "enumeration of the doors that DROP `mentions` is incomplete (the "
-            "tree has four; `#4032`'s parity mirror is the one most likely to be "
-            f"missed): {doc[:200]!r}")
+            "a mention docstring does not name the self-host REST door, so its "
+            "enumeration of which doors carry `mentions` is incomplete: "
+            f"{doc[:200]!r}")
     assert "11239" in (Mention.__doc__ or ""), (
-        "Mention's docstring no longer names the slice that owns persistence, so "
-        "the model reads as graph state")
+        "Mention's docstring no longer names the slice that persisted it, so a "
+        "reader cannot tell what put the record on the node")
+    assert "PAYLOAD-ONLY" not in (Mention.__doc__ or ""), (
+        "Mention's docstring still says PAYLOAD-ONLY — the record IS on the "
+        "claim Point since #11239, and a stale boundary is worse than none")
 
 
 # ── the channel-only response must reach the LAST BUILDER, not just the door ──

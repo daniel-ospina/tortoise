@@ -12112,29 +12112,31 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     4. it is recorded as a mention on **every** claim that used it —
        ``{surface, claim_ref, quote, span_start, span_end, span_source,
        kind_guess, rule_id}`` — which is where the information a hold would
-       otherwise destroy now lives, **in the payload** (see the boundary below). ⚠️ Every POINT carrier, exactly: an EVENT is
+       otherwise destroy now lives, **in the payload and — since #11239 — on the
+       claim Point itself** (see the boundary below). ⚠️ Every POINT carrier, exactly: an EVENT is
        a carrier too (its ``about_entities`` is stripped like a claim's), but
        ``execute_embed``'s ref set is points-only, so a record written against an
        EVENT can never resolve and would be reported as a fold that never
        happened. An event-only hold therefore writes NO record, and says so: the
        surface is listed in ``mention_unrecorded_surfaces`` and counted in
        ``mention_carrier_is_event``. The surface is still HELD (never minted) —
-       only the DM1 record is missing, and that gap is the persistence slice's.
+       only the DM1 record is missing, and there is no Point for it to live on.
 
-    ⛔ **The record stops at the PAYLOAD, and that is stated, not implied.** All
-    FOUR write doors drop ``mentions`` — the REST ``CreatePointRequest``, the SDK
-    capture whitelist (``sdk._CAPTURE_PASSTHROUGH_ORDER``),
-    ``hosted_api._execute_commit_writes`` (the ``sdk.create_point`` call the v2
-    payload actually rides), and the SELF-HOST mirror
-    ``selfhost_api.CreatePointRequest`` / ``selfhost_api.create_point`` — so an
-    armed run's ``stats["mentions_recorded"]`` counts records the WRITE discards.
-    ⛔ The self-host pair is a SEPARATE model and route, not an alias: ``#4032``
-    frames it as the parity mirror of the hosted pair, so a ``mentions`` field
-    added on one side alone re-opens the divergence (review at `0c15ad04d`, P3 —
-    this line said THREE while the tree had four). That is #11239's slice (DM1's
-    home on the Point is declared and unfulfilled): the count is an extraction
-    measurement, never a claim that the graph holds it. There are also FOUR keys
-    carrying a record, and the two producer lists
+    ⛔ **The record now REACHES the claim Point, and the two REST doors still do
+    not carry it — stated, not implied (#11239).** The REST ``CreatePointRequest``
+    (hosted and SELF-HOST — ``selfhost_api.CreatePointRequest`` is a SEPARATE
+    model and route, not an alias) has no ``mentions`` field; the two POINT write
+    doors
+    DO persist it: ``hosted_api._execute_commit_writes`` passes ``mentions=`` on
+    both its create legs, and the SDK capture seam carries it on its create
+    branch exactly as it carries ``validFrom`` (stored, never advertised — it is
+    deliberately NOT in ``sdk._CAPTURE_PASSTHROUGH_ORDER``, ``#2949``'s public
+    response surface). The node stores ONE compact JSON scalar
+    (``projection.entities.encode_json_record_props``); the payload keeps the
+    record shape. ``stats["mentions_recorded"]`` is still a PRODUCER measurement: a record the
+    write discards (a pre-#11239 door, or an EVENT-only carrier) is counted as
+    lost, never counted as stored. There are also FOUR keys carrying a record,
+    and the two producer lists
     (``result["embed_list"]["mentions"]``, ``result["s2_embed"]["mentions"]``)
     are the model's RAW channel on the fail-open path — see
     ``commit_schema.Mention``'s docstring.

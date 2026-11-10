@@ -21252,6 +21252,21 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     for pr in reconcile.points:
         pid = pr.point.id
         resolved_pid = pid
+        # #11239 (DM1's home): the phrases this claim POINTED with but did not
+        # NAME ride the Point write, so a reader of the GRAPH — not only of the
+        # capture response — can see what the sentence meant without an
+        # `:Object` having been minted for a pronoun. Built ONCE per point and
+        # as PLAIN DICTS: the payload is journalled (`PointAdded`) and a
+        # pydantic model is not JSON-serialisable, so the model boundary is
+        # crossed here rather than in the writer.
+        # ⛔ NOT added to `sdk._CAPTURE_PASSTHROUGH_PROPS`: that set is the
+        # public capture RESPONSE surface (#2949/#3945's stated reason, see
+        # `sdk._CAPTURE_PASSTHROUGH_ORDER`), and this field is stored, never
+        # advertised — the same shape as `validFrom` on the capture seam.
+        _mention_props = [
+            m if isinstance(m, dict) else m.model_dump()
+            for m in (getattr(pr.point, "mentions", None) or [])
+        ]
         # #1370 fail-closed: stays ``None`` unless a create actually ran and
         # returned a usable id, so the map below can never hold a
         # requested-but-unconfirmed id.
@@ -21292,6 +21307,8 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # E4 (#5007): the verbatim span pointer rides to the node
                 span_start=pr.point.span_start,
                 span_end=pr.point.span_end,
+                # #11239: DM1's mention record (see `_mention_props` above).
+                mentions=_mention_props or None,
                 source_ref=pr.point.source_ref,
                 extractedFrom=session_ref_urls.get(
                     pr.point.source_ref, pr.point.source_ref),
@@ -21439,6 +21456,8 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # E4 (#5007): the verbatim span pointer rides to the node
                 span_start=pr.point.span_start,
                 span_end=pr.point.span_end,
+                # #11239: DM1's mention record (see `_mention_props` above).
+                mentions=_mention_props or None,
                 source_ref=pr.point.source_ref,
                 extractedFrom=session_ref_urls.get(
                     pr.point.source_ref, pr.point.source_ref),

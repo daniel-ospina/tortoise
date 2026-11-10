@@ -5686,23 +5686,38 @@ def test_a_declaration_in_the_epic_plan_is_in_the_checked_set() -> None:
     assert {d.document for d in markers["mention_record"]} == {
         "epics/2026-11-05-5087-extractor-v4/05-plan.md"
     }, markers["mention_record"]
-    assert {d.state for d in markers["mention_record"]} == {NOT_IMPLEMENTED}
+    # The STATE is the registry's to own, and it moved to `implemented` when
+    # `#11239` persisted the record — what this row measures is that a marker in
+    # `docs/epics` is in the checked set AT ALL, which is the same claim under
+    # either state (the state disagreement is its own test, above).
+    assert {d.state for d in markers["mention_record"]} == {IMPLEMENTED}
 
 
-def test_the_mention_record_row_records_the_persistence_half_as_unbuilt() -> None:
-    """The row's contract: an absence, its tracker, and the half that IS built."""
+def test_the_mention_record_row_records_the_persistence_half_as_built() -> None:
+    """The row's contract after `#11239`: implemented, with its home named.
+
+    The row was created as a `not-implemented` ABSENCE whose `tracking_issue`
+    named `#11239`. That slice persists the record (`hosted_api`'s commit door +
+    the SDK capture create branch + the shared writer's encode), so the row
+    flips to `implemented` and its tracker is dropped — an `implemented` row that
+    still carries a tracker reads as "there is an absence here" to the next
+    reader, which is the same ambiguity in the other direction.
+    """
     row = next(
         r for r in load_registry()["mechanisms"] if r["id"] == "mention_record"
     )
-    assert row["state"] == NOT_IMPLEMENTED
-    assert row["tracking_issue"] == 11239
-    # The payload half is BUILT — that is why this is not a "nothing exists" row.
-    assert row["code"] == ["tortoise/commit_schema.py"]
-    assert row["symbols"] == ["Mention"]
-    assert row["pins"] == [
-        "tests/test_referentiality_11021.py::"
-        "test_the_mention_record_is_payload_only_and_says_so"
-    ]
+    assert row["state"] == IMPLEMENTED
+    assert row.get("tracking_issue") is None, row.get("tracking_issue")
+    # The payload half AND the persistence half are both named here, so the row
+    # cannot outlive the code it points at.
+    assert "tortoise/commit_schema.py" in row["code"]
+    assert "tortoise/projection/entities.py" in row["code"]
+    assert "tortoise/hosted_api.py" in row["code"]
+    assert set(row["symbols"]) == {"Mention", "encode_json_record_props"}
+    # ⛔ No `pins:` — a pin asserts an ABSENCE and would red when it closes, so an
+    # implemented row may not carry one (the gate refuses that combination).
+    assert not row.get("pins"), row.get("pins")
+    assert "tests/test_referentiality_11021.py" in row["tests"]
 
 
 def test_a_marker_in_the_epic_plan_with_no_row_is_refused(tmp_path) -> None:

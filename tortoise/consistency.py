@@ -103,6 +103,7 @@ from .projection.entities import (
     _usable_instant,
     _writable_journalled_vector,
     append_identifier_aliases,
+    encode_json_record_props,
     flatten_search_keys_prop,
     is_non_operator_payload,
     promote_status_applies,
@@ -139,6 +140,14 @@ _POINT_DENY: frozenset = _EntityHandlers._POINT_DENY
 # call such a value "the projection cannot hold this" when it now carries it,
 # and the canonical view must compare the WRITER'S form, not the payload's.
 _POINT_FLATTEN_LIST_PROPS: frozenset = entities._POINT_FLATTEN_LIST_PROPS
+# #11239: the props the SAME writer encodes from a payload LIST OF RECORDS into
+# one compact JSON SCALAR (`encode_json_record_props`). Read from the writer's
+# own declaration for the same reason as the set above — `_uncarried` must not
+# call `mentions` "the projection cannot hold this" now that it carries it, and
+# the canonical view must compare the WRITER'S bytes rather than the payload's
+# record shape (a list of dicts vs a JSON string would otherwise be a FALSE
+# content divergence on every faithfully replayed claim that made a mention).
+_POINT_JSON_RECORD_PROPS: frozenset = entities._POINT_JSON_RECORD_PROPS
 
 
 # ── #5011: the projection's declared content schema ───────────────────────
@@ -602,6 +611,11 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset(),
     # declared ``search_keys`` uncarried for this point, so the normalisation
     # cannot re-add a key the uncarried classification deliberately excluded.
     flatten_search_keys_prop(out)
+    # #11239: the writer's OTHER payload normalization, applied identically on
+    # both sides — a payload list of mention RECORDS and the node's compact
+    # JSON scalar are the same value in the graph's canonical form. No-op for a
+    # view that already carries the string.
+    encode_json_record_props(out)
     # #8933 Stage 2, #10203 review round 6 (measured P0): the derived IDENTIFIER
     # ALIASES come OUT of the comparison, on BOTH sides. The alias is a pure
     # function of the view's own `content`/`search_keys`, so it is not
@@ -734,6 +748,11 @@ def _uncarried(journal_by_id: dict) -> dict[str, dict[str, str]]:
             elif k in _POINT_FLATTEN_LIST_PROPS:
                 # Carried in canonical form — not uncarried, whatever its
                 # payload type (a list flattens, a str is already canonical).
+                continue
+            elif k in _POINT_JSON_RECORD_PROPS:
+                # #11239: carried in canonical form too — the payload's list of
+                # mention records is encoded to one JSON scalar by the same
+                # writer (`encode_json_record_props`), so this is not a loss.
                 continue
             elif isinstance(v, list) and k not in _POINT_LIST_PROPS:
                 found[k] = _UNCARRIED_CONTENT_PROPS.get(k, _UNCARRIED_LIST)

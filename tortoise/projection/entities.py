@@ -1150,6 +1150,95 @@ def _point_source_transit(p: dict):
 #: a fixup row instead of pre-existing rows being silently skipped.
 _POINT_FLATTEN_LIST_PROPS: frozenset = frozenset({"search_keys", "quote"})
 
+#: #11239 — the Point props whose PAYLOAD form is a list of RECORDS and whose
+#: GRAPH form is ONE compact JSON scalar. A second declaration, not a member of
+#: the frozenset above, because the two rules carry different shapes and only
+#: one of them is a fulltext surface: `_POINT_FLATTEN_LIST_PROPS` keys flatten
+#: to a space-joined STRING and feed the FTS index (`sparse.POINT_INDEX_TEXT_
+#: FIELDS`), while these keys ENCODE to JSON and are read back as records. A
+#: space-join of `{"surface": "it", …}` would store prose no reader can parse,
+#: and adding a key here does NOT widen the search surface.
+#:
+#: Why an encoded SCALAR at all (and not the declared list the payload carries):
+#: `_persist_extra_props` rejects any array containing a dict at ANY depth
+#: (`_is_persistable_prop_value`), and `_POINT_LIST_PROPS` is deliberately
+#: EMPTY, so a list of mention records never reaches the node. The encode runs
+#: on the PAYLOAD inside `_upsert_point_props` — the shared door every write
+#: reaches — so the live write and every rebuild replay derive the same bytes.
+_POINT_JSON_RECORD_PROPS: frozenset = frozenset({"mentions"})
+
+
+def encode_json_record_props(props: dict) -> None:
+    """`_POINT_JSON_RECORD_PROPS` — THE ONE HOME of the list→JSON encode.
+
+    `mentions` is DM1's home for a held phrase (``05-plan.md``; ``#11021``,
+    persisted by ``#11239``): the claim Point carries the surfaces it POINTED
+    with, so a reader can see what the sentence meant without an ``:Object``
+    being minted for a pronoun. The payload form is a list of records; the
+    graph form is one compact JSON string.
+
+    **Determinism is the parity condition** (``#330``): the bytes must be a
+    pure function of the payload, so the value is emitted with sorted keys, no
+    spaces and ``ensure_ascii=False`` — a rebuild replaying the same record
+    re-derives byte-identical output, and a reordering of a record's FIELDS
+    cannot produce a spurious live/replay difference.
+
+    Accepts dicts (the extraction payload), model objects (``Mention``, which a
+    commit-payload validator hands us), or a string already in canonical form
+    (a replay of a graph/record payload). An empty/blank list POPS the key —
+    the same ``or None`` convention `flatten_search_keys_prop` uses, so a blank
+    list never clears an existing value with an empty JSON array.
+
+    This is deliberately NOT a policy that DROPS a record: every field the
+    producer put on a mention survives the encode, and a record the producer
+    could not shape is kept by taking its ``str()`` for the surface rather
+    than dropped (a lost mention is the memory loss the channel exists to
+    prevent — ``value_gate``'s asymmetry, cited at `extractor_v2`).
+    """
+    import json
+
+    for key in _POINT_JSON_RECORD_PROPS:
+        value = props.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            # Already canonical (a rebuild reading a graph/record payload).
+            continue
+        if not isinstance(value, (list, tuple)):
+            props.pop(key, None)
+            continue
+        records: list[dict] = []
+        for item in value:
+            if isinstance(item, dict):
+                rec = dict(item)
+            elif hasattr(item, "model_dump"):
+                rec = item.model_dump()
+            else:
+                rec = {"surface": str(item)}
+            # Fixed field set, no None members and a string surface: the shape
+            # `Mention` declares, so a reader parses one schema rather than a
+            # per-call variant. `kind_guess` is kept only when it carries a
+            # value (DM1 makes it optional, and there is no producer that must
+            # invent one).
+            surface = rec.get("surface")
+            out = {"surface": "" if surface is None else str(surface)}
+            for offset in ("span_start", "span_end"):
+                raw = rec.get(offset)
+                if isinstance(raw, int) and not isinstance(raw, bool):
+                    out[offset] = raw
+                else:
+                    out[offset] = None
+            kind = rec.get("kind_guess")
+            if kind is not None:
+                out["kind_guess"] = str(kind)
+            records.append(out)
+        if not records:
+            props.pop(key, None)
+            continue
+        props[key] = json.dumps(
+            records, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False)
+
 
 def flatten_search_keys_prop(props: dict) -> None:
     """R2 (#1541) D3 — THE ONE HOME of the flatten rule for
@@ -2227,6 +2316,16 @@ class _EntityHandlers:
         # text, declared so the replay open-set passthrough does not log a
         # FALSE undeclared-prop drift warning on every rebuild.
         "span_start", "span_end",
+        # #11239 (DM1's home, #11021): the phrases this claim POINTED with but
+        # did not NAME, as ONE compact JSON scalar (`_POINT_JSON_RECORD_PROPS`,
+        # encoded by `encode_json_record_props` on this shared writer). Declared
+        # for the same reason as the two above — without it every capture that
+        # records a mention logs a FALSE "Point prop 'mentions' is not declared"
+        # drift warning on the live write and again on every rebuild, which is
+        # the noise that hides a GENUINE undeclared prop. Declaration is
+        # warning-suppression only here too: the encode above, not this entry,
+        # is what makes the value persistable.
+        "mentions",
         # #1724: the STABLE external anchor carried by extractor-minted
         # statement Points (``github:issue:*`` from the GitHub indexer's
         # dormant statement path, ``docs:<doc_id>#<claim key>`` from the docs
@@ -2484,6 +2583,14 @@ class _EntityHandlers:
         # copy, because that is also the condition that decides whether a copy
         # is needed at all: a point with no identifier takes the pre-#8933 path
         # and writes byte-identically.
+        # #11239: encode BEFORE the list policy can consult the payload —
+        # `_persist_extra_props` denies an undeclared array of dicts silently,
+        # and a silent drop is the failure mode this prop exists to end. The
+        # copy is unconditional-when-needed so the caller's dict is never
+        # mutated (the same rule `flatten_search_keys_prop` follows).
+        _needs_json_encode = any(
+            isinstance(p.get(k), (list, tuple))
+            for k in _POINT_JSON_RECORD_PROPS)
         alias_tokens = point_identifier_aliases(p)
         # #10203 review round 6 (measured P1): whether the payload OWNS
         # `search_keys` decides REPLACE vs APPEND. It owns it only when it
@@ -2503,9 +2610,11 @@ class _EntityHandlers:
             owns_search_keys = bool(_pk.strip())
         else:
             owns_search_keys = False
-        if alias_tokens or any(isinstance(p.get(k), (list, tuple))
-                               for k in _POINT_FLATTEN_LIST_PROPS):
+        if (_needs_json_encode or alias_tokens
+                or any(isinstance(p.get(k), (list, tuple))
+                       for k in _POINT_FLATTEN_LIST_PROPS)):
             p = dict(p)
+            encode_json_record_props(p)
             flatten_search_keys_prop(p)
             append_identifier_aliases(p, alias_tokens)
         op = p.get("operator")
