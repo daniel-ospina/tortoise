@@ -3031,7 +3031,16 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_cloud_agent_limit
     cursor_lines = [ln for ln in listing.stdout.splitlines()
                     if "tortoise install cursor" in ln]
     assert len(cursor_lines) == 1, listing.stdout
-    assert "AGENT VM gets neither hook" in cursor_lines[0], cursor_lines[0]
+    # ⛔ THE LISTING WAS THE ONE SURFACE LEFT UNSCOPED (r5). It said "A CURSOR
+    # CLOUD AGENT VM gets neither hook" — and then, in the SAME sentence,
+    # "Self-Hosted Machines workers DO fire both". A reader meets the universal
+    # first and the contradiction second, so the universal is what they keep:
+    # exactly the over-assertion this PR removes one surface over. The scope
+    # the message, this PR's own matrix row, and the install surface all use is
+    # HOSTED, so the listing must carry the same qualifier. Claim-shaped, so a
+    # reflow that drops the word REDs instead of passing silently.
+    assert ("A HOSTED CURSOR CLOUD AGENT VM gets neither hook"
+            in cursor_lines[0]), cursor_lines[0]
     assert "Self-Hosted Machines" in cursor_lines[0], cursor_lines[0]
     assert "on Enterprise" in cursor_lines[0], cursor_lines[0]
     assert "hooks are IDE-ONLY" not in listing.stdout, listing.stdout

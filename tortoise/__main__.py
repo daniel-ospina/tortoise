@@ -6263,11 +6263,11 @@ def _install_read_hook_impl(args) -> int:
         print("  tortoise install cursor  → ~/.cursor/hooks.json "
               "(the sessionEnd capture hook + the sessionStart cold-context "
               "injection hook; Cursor has no per-turn shell-hook read seam — "
-              "its beforeSubmitPrompt event cannot inject. A CURSOR CLOUD "
-              "AGENT VM gets neither hook — that file is user-level and the "
-              "VM cannot read it; Self-Hosted Machines workers DO fire both, "
-              "from project hooks (plus team and enterprise-managed hooks on "
-              "Enterprise) this installer does not write)")
+              "its beforeSubmitPrompt event cannot inject. A HOSTED CURSOR "
+              "CLOUD AGENT VM gets neither hook — that file is user-level and "
+              "the VM cannot read it; Self-Hosted Machines workers DO fire "
+              "both, from project hooks (plus team and enterprise-managed "
+              "hooks on Enterprise) this installer does not write)")
         print("  tortoise install hermes  → <dir>/.hermes/plugins/"
               "tortoise-volunteer/ (the pre_llm_call PLUGIN — Hermes' per-turn "
               "injection surface; import with `tortoise sessions import "
