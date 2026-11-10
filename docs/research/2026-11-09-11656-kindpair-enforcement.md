@@ -340,10 +340,10 @@ safe one here. No decision needed unless the owner wants a migration.
 
 | issue says | measured | effect |
 |---|---|---|
-| gate `create_edge` / `create_direct_edge` / `ingest` | ⚠️ **Corrected (revision 2): `create_direct_edge` is IN scope.** It takes a `label` (`sdk.py:29040`), `link_entities` passes one (`:17163-17169`) and `ingest` reaches it too (`:27493`), it validates nothing about declarations, and `_point_mediated_route` keeps Object↔Object on the direct shape — 30 of 32 declarations. See §2.4 | gate **`create_operator`** + **`create_direct_edge`** (both label doors) + `create_edge`/`create_about_edge` (**2/32**, which also bind the operator path) + the replay fold; `ingest` inherits all of them |
+| gate `create_edge` / `create_direct_edge` / `ingest` | ⚠️ **Corrected (revision 2): `create_direct_edge` is IN scope.** It takes a `label` (`sdk.py:29040`), `link_entities` passes one (`sdk.py:18070-18078`) and `ingest` reaches it too (`sdk.py:28497`), it validates nothing about declarations, and `_point_mediated_route` keeps Object↔Object on the direct shape — 32 of 35 declarations. See §2.4 | gate **`create_operator`** + **`create_direct_edge`** (both label doors) + `create_edge`/`create_about_edge` (**2/35**, which also bind the operator path) + the replay fold; `ingest` inherits all of them |
 | "one write gate, not two" | live and replay are **two writers of one shape** | the rule is one *function*; the fold (`_create_edges`) must call it too, or `rebuild_all` diverges |
 | reads `pack_state.graph_installed_namespaces` | that read is **O(nodes)** (8 whole-graph property scans; ~6 ms at 300 nodes, linear) and deliberately uncached | must not run per write. `resolved_pack_set_for_graph` exists for bare-graph seams; a cache must be data-leg-keyed or it reintroduces #5163 |
-| depends on `#11484` (corrected) | ⚠️ **I10 does not carry the pair map.** `docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md:628` defines `allowed_predicates(graph)` as `predicate -> {admitted_by, verb, record_carried}` with `verb ∈ {create_edge, create_about_edge, ingest}` — **no `fromKind`/`toKind` field**, and the verb enum excludes `create_operator`, the door 32/32 ride. I10 supplies the predicate→verb/namespace map **only.** | #11656 derives the pair map itself from `list_relations()` (32 populated pairs). **Not a blocking dependency.** If the owner wants I10 to own the pairs, that is an I10 amendment — do not assume it. |
+| depends on `#11484` (corrected) | ⚠️ **I10 does not carry the pair map.** `docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md:638` defines `allowed_predicates(graph)` as `predicate -> {admitted_by, verb, record_carried}` with `verb ∈ {create_edge, create_about_edge, ingest}` — **no `fromKind`/`toKind` field**, and the verb enum excludes `create_operator`, the door 32/32 ride. I10 supplies the predicate→verb/namespace map **only.** | #11656 derives the pair map itself from `list_relations()` (35 populated pairs). **Not a blocking dependency.** If the owner wants I10 to own the pairs, that is an I10 amendment — do not assume it. |
 | `domain_validators` as a component | it is the **pattern to follow** (call-time read, fail-open-but-named, manifest-pinned test), for a *read-side* grader; a write gate must not fail open to a stale constant | keep both: the validator catches pre-existing damage, the gate prevents new |
 
 **Existing capability to reuse rather than re-implement** (duplication review, file:line evidence in the
@@ -435,7 +435,7 @@ finding that is *the* argument for per-pair scoping:
 
 ⚠️ **It is WIRED — for a narrower job than this issue needs, and the difference is the whole point.** It is
 called twice inside `compile_value_brief` (`value_extractor.py:395`, `:458`), its output rides `pack_refs`
-into the brief, and `extractor_v2._select_pack_kinds` (`:1052`, `:1292`) consumes it to decide **which KINDS
+into the brief, and `extractor_v2._select_pack_kinds` (`extractor_v2.py:999`, called at `:1322`) consumes it to decide **which KINDS
 to offer together** (one side of a declared pair pulls the other). What it does **not** do is constrain
 **which RELATION LABEL** is offered for a given endpoint pair. So the prevention half (D5) is an
 **extension of a wired capability**, not the activation of a dead one — materially cheaper, and the

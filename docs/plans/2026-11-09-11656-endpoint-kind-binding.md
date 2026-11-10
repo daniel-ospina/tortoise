@@ -152,7 +152,7 @@ a superset (measured: `kind_forms_for('dev:issue')` has `issue` but not `pm:issu
 | site | source |
 |---|---|
 | `create_operator` | the existing per-label probe (`sdk.py:23460`) — add the kind property to its `RETURN`, the same zero-extra-round-trip shape `#2351` uses for `claimClass` |
-| `create_direct_edge` | its own existing probe (`sdk.py:28140+`) returns `id, is_operator, status, claimClass` — add the kind property |
+| `create_direct_edge` | its own existing probe (`sdk.py:29142-29146`) returns `id, is_operator, status, claimClass` — add the kind property |
 | `create_edge` / `create_about_edge` | `_resolve_entity` already returns `properties` (consumed for the `aboutDocument` refusal at `edges.py:2933`) |
 | `_create_edges` (fold) | it already resolves the descriptor's endpoints |
 
@@ -194,7 +194,7 @@ alone. `portfolio:marks` is the load-bearing case: `domain_validators._portfolio
 ### 5.3 Layer-valued declarations (dependency on #11000)
 
 `Subject` is a **layer** (`CORE_ENTITY_TYPES`), not a kind; the manifest validator already accepts it as a
-core kind (`pack_registry.py:2041`), and `:2294` already treats entity types as hierarchy parents — so the
+core kind (`pack_registry.py:2041`), and `:2725` (`core_parents = CANONICAL_OBJECT_KINDS | CORE_ENTITY_TYPES`) already treats entity types as hierarchy parents — so the
 reading is *"a Subject or any subtype"* (W3C SHACL UCR, verbatim).
 
 ⚠️ `expand_kind('Subject') == ['Subject']` today because ONTOLOGY §6's core hierarchy is not in the expansion
@@ -215,12 +215,12 @@ Resolve over the **installed** set. **This bug is live today** for the label-leg
 **three** production readers, and one of them is D5's own job:
 
 - `domain_validators.py:396-410` — one pack's portfolio shape.
-- `sdk._resolve_traversal_path` (`:41450`, live at `:37465`) — **kind pair → `{predicate, fromKind, toKind}`**,
+- `sdk._resolve_traversal_path` (`sdk.py:42773`; the live call is `sdk.py:38605`) — **kind pair → `{predicate, fromKind, toKind}`**,
   i.e. exactly `allowed_relations(from_kind, to_kind)`. ⛔ **Not reusable as the gate** (bare-suffix,
   first-match-wins, returns one relation) — but it must be **named**, or a lane will implement D5 twice.
 - `value_extractor._relation_endpoint_refs` (`:44`) — the kind→kind adjacency, called twice inside
   `compile_value_brief` (`:395`, `:458`); its output rides `pack_refs` and is consumed by
-  `extractor_v2._select_pack_kinds` (`:1052`, `:1291`) to choose **which kinds to offer together**. **Wired**,
+  `extractor_v2._select_pack_kinds` (`extractor_v2.py:999`, called at `:1322`) to choose **which kinds to offer together**. **Wired**,
   for a narrower job than this issue needs.
 
 **The delta:** use that same map to choose **which relation labels to offer for a pair**, derived from
