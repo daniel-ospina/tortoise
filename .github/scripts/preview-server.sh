@@ -53,20 +53,23 @@
 #                                             from being graded.
 #   alive --name N                            exit 0 iff OUR recorded process is still
 #                                             RUNNING (not a zombie) AND the port it
-#                                             recorded still answers HTTP — and, when
-#                                             `record` left a start-time witness, iff
-#                                             that witness was RE-READ and still
-#                                             matches. A witness that exists but
-#                                             cannot be re-read is reported as
-#                                             "IDENTITY was NOT checked" (never as a
-#                                             match), and a read that fails because
-#                                             the process exited is GONE. Every other
-#                                             outcome gets its OWN exit code and
-#                                             message — see `cmd_alive`. This is the
-#                                             verb a FAILURE dump calls: it separates
-#                                             "the preview died mid-run" from "the
-#                                             specs were wrong", which a bare
-#                                             `kill -0` cannot do.
+#                                             recorded still answers HTTP. The
+#                                             start-time witness `record` left is
+#                                             RE-READ and reported: a match says the
+#                                             identity was checked; a read that fails
+#                                             (or a name with no witness) says the
+#                                             IDENTITY was NOT checked and the verdict
+#                                             is "alive and serving", never "the
+#                                             process we started survived" — the
+#                                             identity leg degrades, exit 0 does not
+#                                             become a claim it did not earn. A read
+#                                             that fails because the process exited is
+#                                             GONE. Every other outcome gets its OWN
+#                                             exit code and message — see `cmd_alive`.
+#                                             This is the verb a FAILURE dump calls:
+#                                             it separates "the preview died mid-run"
+#                                             from "the specs were wrong", which a
+#                                             bare `kill -0` cannot do.
 #   stop --name N                             signal the recorded tree only
 #   stop-all                                  stop every server this job recorded
 #
@@ -498,10 +501,24 @@ cmd_alive() {
   fi
 
   if serves_now "$port"; then
-    printf '%s\n' "${PROG}: ${name}: pid ${pid} on :${port} is ALIVE (our recorded process: not a zombie, and ${identity}) and :${port} answers HTTP — this preview SURVIVED the run, so the red is the specs' or the content's, not a dead server. This does NOT prove the listener on the port is ours: alloc's pre-boot free-check and wrangler's own exit on EADDRINUSE are what exclude a peer's server, not this probe."
+    if [[ -n "$recorded" && "$ident" -eq 0 ]]; then
+      printf '%s\n' "${PROG}: ${name}: pid ${pid} on :${port} is ALIVE (our recorded process: not a zombie, and ${identity}) and :${port} answers HTTP — this preview SURVIVED the run, so the red is the specs' or the content's, not a dead server. This does NOT prove the listener on the port is ours: alloc's pre-boot free-check and wrangler's own exit on EADDRINUSE are what exclude a peer's server, not this probe."
+      return 0
+    fi
+    # The identity leg was NOT taken (no witness, or a witness that could not be
+    # re-read), so the verdict may not borrow it: it reports what the probe DID
+    # take — the recorded pid runs, the port answers — and says the other leg is
+    # unchecked. Same rule as the sentence above (`#11675` review, finding 3):
+    # returning a non-zero here would mark a live preview dead on a box where
+    # `/proc` is unreadable, a false red; borrowing the identity is a false green.
+    printf '%s\n' "${PROG}: ${name}: pid ${pid} on :${port} is ALIVE (not a zombie, and ${identity}) and :${port} answers HTTP. Read this as ALIVE AND SERVING, not as 'the process we started survived': ${identity}, so that leg is NOT evidence either way. Whether the red is the specs' or a dead server is therefore undecided by this probe."
     return 0
   fi
-  printf '%s\n' "${PROG}: ${name}: pid ${pid} on :${port} is ALIVE (our recorded process: not a zombie, and ${identity}) but :${port} does not answer an HTTP success — nothing is listening there, or the answer is a non-2xx. The PROCESS survived and the SERVER did not serve; the log is where the cause is."
+  if [[ -n "$recorded" && "$ident" -eq 0 ]]; then
+    printf '%s\n' "${PROG}: ${name}: pid ${pid} on :${port} is ALIVE (our recorded process: not a zombie, and ${identity}) but :${port} does not answer an HTTP success — nothing is listening there, or the answer is a non-2xx. The PROCESS survived and the SERVER did not serve; the log is where the cause is."
+    return 7
+  fi
+  printf '%s\n' "${PROG}: ${name}: pid ${pid} on :${port} is ALIVE (not a zombie, and ${identity}) but :${port} does not answer an HTTP success — nothing is listening there, or the answer is a non-2xx. The recorded PID is running and nothing served on its port; ${identity}, so 'it is still OUR process' is NOT established by this probe. The log is where the cause is."
   return 7
 }
 

@@ -960,6 +960,64 @@ def test_alive_does_not_claim_an_identity_it_could_not_READ(tmp_path: Path, stat
         _reap(victim.pid)
 
 
+def test_alive_does_not_borrow_an_unchecked_identity_for_a_serving_verdict(
+    tmp_path: Path, state
+) -> None:
+    """Serving + an UNREADABLE witness: exit 0, but the verdict may not say SURVIVED.
+
+    The header's old `iff` said exit 0 required the start-time witness to be
+    re-read AND to match, while `cmd_alive` fell through to 0 when the re-read
+    FAILED and the port answered — the block a CI author reads first asserted an
+    invariant the code did not have, and the message spent it: *"this preview
+    SURVIVED the run, so the red is the specs' or the content's, not a dead
+    server"* is a CAUSAL verdict, drawn from an identity leg the probe had not
+    taken (`#11675` review, finding 3). The state is designed for, not exotic: the
+    pid + creation-time rule is documented as inherently racy, so a process can
+    exit between the liveness probe and the start-time probe.
+
+    Exit 0 STAYS on this state — a non-zero would mark a live, serving preview
+    dead on a box that cannot read `/proc`, which is a false red — so what this
+    pins is the claim: alive-and-serving, with the identity leg named as
+    unchecked, and no SURVIVED verdict riding on it.
+
+    RED on the pre-fix code (measured): it printed SURVIVED and claimed the red
+    was not a dead server.
+    """
+    blind = tmp_path / "blind-bin"
+    blind.mkdir()
+    (blind / "awk").write_text("#!/bin/sh\nexit 1\n")
+    (blind / "awk").chmod(0o755)
+
+    allocated = _script("alloc", "--name", "app", "--base", "18679", env=state)
+    assert allocated.returncode == 0, allocated.stderr
+    port = int(allocated.stdout.strip())
+
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    server = _spawn_http(port, 200, tmp_path)
+    try:
+        assert _wait_port(port), f"the listener never bound :{port}"
+        assert _script(
+            "record", "--name", "app", "--pid", str(victim.pid), env=state
+        ).returncode == 0
+        result = _script(
+            "alive", "--name", "app",
+            env={**state, "PATH": f"{blind}:{state['PATH']}"},
+        )
+        assert result.returncode == 0, (
+            "an alive, serving preview must stay exit 0 even when the identity leg "
+            f"could not be taken: {result.stdout}{result.stderr}"
+        )
+        assert "IDENTITY was NOT checked" in result.stdout, result.stdout
+        assert "SURVIVED" not in result.stdout, (
+            "`alive` graded the preview SURVIVED from a start-time leg it never "
+            f"took: {result.stdout}"
+        )
+        assert "ALIVE AND SERVING" in result.stdout, result.stdout
+    finally:
+        _reap(victim.pid, server.pid)
+
+
 def test_alive_refuses_to_call_an_unchecked_port_leg_a_serving_verdict(
     tmp_path: Path, state
 ) -> None:

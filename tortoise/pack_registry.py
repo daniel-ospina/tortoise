@@ -3723,10 +3723,11 @@ class PackRegistry:
         # **NOT `sdk.query()`**, which is `MATCH (n:Point)` (`sdk.py`): it can
         # never return an `:Object`, so citing it as evidence that the widening
         # happened is vacuous. ⚠️ It is not inert either — `query(kind=…)` filters
-        # `n.pointKind IN expand_kind(kind)` (`sdk.py`), so once `expand_kind(
-        # "Object")` carries `goal`/`target` a `query(kind="Object")` DOES return
-        # `:Point` rows with those `pointKind`s. It answers a DIFFERENT question
-        # (`:Point` rows), before and after this fix — see DM4.
+        # `n.pointKind IN read_filter_kinds(kind)` (`sdk.py`; the DOWN set since
+        # #11684), and `goal`/`plan`/`strategy`/`target` are DOWN children of
+        # `Object` in `CORE_SUBCLASSES["Object"]`, so a `query(kind="Object")` DOES
+        # return `:Point` rows with those `pointKind`s. It answers a DIFFERENT
+        # question (`:Point` rows), before and after this fix — see DM4.
         #
         # ⛔ The closure must be DIRECTIONAL. A plain "add the members of every
         # member's bucket" fixpoint is WRONG: `WorkItem`'s bucket contains all
