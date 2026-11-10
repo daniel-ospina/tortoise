@@ -102,7 +102,7 @@ note **or a justified skip citing the brief**. Both are **justified skips**, cit
 
 1. **The mechanisms** — implementing A1's edge producer (`#11001`), A2's HOLD gate (`#10997`), A3's S5 jobs
    (`#10998`/`#10999`), or the selection defaults (`#10996`). **Deferred to epic `#5087`'s lane.** *Exception:*
-   A2's attach/resolve half is unowned, so **C4 builds it** (argued in `00-align.md` §4, two-branch rule).
+   A2's attach/resolve half is unowned, so **C4 builds it** (argued in `00-align.md`'s two-branch rule, `:124-129`).
 2. **The MCP-side nudge** — telling agents to *use* the graph so they connect objects. Nothing implements it;
    a different surface from extraction. Deferred to `#5087` / `#10976` / `#5090`.
 3. **Any volume target, recall floor, or node budget.** §16.3 **O2** — E1's `≤ 0.50 ×` is a pre-registered
@@ -137,7 +137,7 @@ citing `00-plan.md`'s *evidence*-seam criterion ("only if the registry's contrac
 
 ### Boundary Rationale
 
-**The cut is *evidence vs mechanism*.** `00-align.md` §Decision established that the sibling epic `#5087`
+**The cut is *evidence vs mechanism*.** `00-align.md`'s evidence-vs-mechanism boundary (`:112-123`) established that the sibling epic `#5087`
 charters the implementations (filed 2026-11-05T00:30–00:31Z) while **the proof of A1–A5 has no other owner**.
 A capstone that implements is a second implementation with its own opinion; a capstone that proves is the only
 thing that can turn a RED row green with evidence.
@@ -353,7 +353,7 @@ falsifiable: a claimed inherited part must be reachable through declared interme
 Adding a `partOf` edge remains **out** of scope — it would duplicate ONTOLOGY §3.7's vocabulary.
 
 **D-S3 · A5 is measured here; a real mechanism gap is filed under `#5087`.** *(Corrected after review: the
-first version reversed `00-align.md` §4's operative sentence — "if C6 finds the binder genuinely broken, the
+first version reversed `00-align.md`'s operative sentence (`:144`) — "if C6 finds the binder genuinely broken, the
 mechanism issue is filed **under `#5087`'s epic** and C6 keeps only the evidence" — while claiming to follow
 the same rule. Reversing a decision in its operative sentence while restating it in a summary is the exact
 failure this lane's align gate spent six cycles on, so the align's sentence stands.)*
