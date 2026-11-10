@@ -370,6 +370,7 @@ def _journal_snapshot_from_create_map(
             out[key] = stored
     return out
 
+
 # baseline_source token family (issue #2199 direction, 2026-09-03):
 #   set-by-author         — belief stated directly by whoever filed the point
 #                           (human OR agent; the species is already tracked in
@@ -14137,6 +14138,77 @@ class TortoiseSDK:
         else:
             pid = ulid()
 
+        # ── #11739: the DETERMINISTIC composed embedding text (gate OFF) ──
+        # DELIVERED HERE: the `quote` VERBATIM — the vector half of #11682 that
+        # #11706's lexical change did not take, and the half a created point
+        # actually has (see the neighbour note below). The names half
+        # (`embed_compose`'s ordering / fan-out ceiling / word budget /
+        # redaction) is built and tested but NOT wired at this door; it attaches
+        # at the recompose seam, once the point's `about*` edges exist.
+        # Composed here because this is the seam the door mints a Point's vector
+        # through (`encode_for_row` below, #5008's gated submission step). ⛔ The boundary is stated in
+        # `embed_compose`'s decision 5 and is not "one seam in the tree":
+        # `update_point` is a second `:Point` mint door that does NOT recompose
+        # (composition is CREATE-only, so a `quote`/`about*` revise leaves the
+        # existing composed text and vector in place — the disclosed
+        # stale-composition residual), and `api.EventAPI.add_point` mints from
+        # raw `content` and is not routed through here at all.
+        #
+        # The composed string is written to `embeddingText` — the schema A′
+        # field (#8932 §1) `stamp_journal_embedding` ALREADY attests — so
+        # #4194's rule ("the vector can never describe different text than the
+        # node holds") stays true as written, with no new attestation path: the
+        # CREATE map carries the text as an ordinary property,
+        # `_journal_snapshot_from_create_map` journals it, and
+        # `_upsert_point_props` restores it on replay (`n.embeddingText=$et`).
+        # `derived = replay(journal)` therefore RESTORES the composed text
+        # rather than recomposing it — nothing is amended.
+        #
+        # ⛔ TWO conditions, both load-bearing, and both were review findings:
+        #  * the composed text must DIFFER from `content` (an unquoted, unbound
+        #    point stays byte-identical to the pre-#11739 write: no
+        #    `embeddingText` property appears on it at all), and
+        #  * `embeddingText` is attached ONLY once a derived vector actually
+        #    exists for it — never when the caller supplied the vector
+        #    (`"embedding" in props`: that vector describes the caller's own
+        #    text) and never when the embedder was unavailable (nothing then
+        #    describes the composed text, and a later `backfill_embeddings`
+        #    re-encode is from `content`). Attaching it anyway is exactly the
+        #    #4194 lie `update_point`'s content arm clears.
+        # ⛔ THE NEIGHBOUR HALF IS DELIBERATELY NOT WIRED HERE, and the reason is
+        # measured rather than assumed (#11739 review round 4): a Point has NO
+        # resolved neighbours at its own creation. `create_point` mints NO
+        # `about*` edge (its only structural writes are `extractedFrom` and
+        # `TAGGED`); its `about*` EDGES are written
+        # by later passes (`backfill_about_entities`, the capture's entity link),
+        # and the `about*` values it does receive are stored as plain string
+        # properties — an asserted relation the graph does not hold. Composing
+        # names from THOSE would put a neighbour name into the attested
+        # `embeddingText` of a point with no such neighbour, which is the
+        # fabrication the whole change must not make. So this door composes the
+        # half a created point actually HAS: its verbatim quote. The names half
+        # (ordering, fan-out ceiling, word budget, redaction — all built and
+        # tested in `embed_compose`) attaches at the recompose seam that runs once
+        # the edges exist, which is #11739's remaining scope.
+        _embedding_text: str | None = None
+        # ⛔ FAIL-SOFT, and the shape is #5148's rule rather than a habit: this
+        # door must survive an embedder/dependency that cannot be imported
+        # (`tests/test_write_path_unreachable_seam_5148.py` replaces the seam
+        # with a raising module, and the `try/except` around `encode_for_row`
+        # below is the same posture). `embed_compose` imports
+        # `tortoise.embeddings` for its word budget, so an UNGUARDED import here
+        # made `create_point` raise with the gate OFF — review round 5 measured
+        # exactly that. A failed import means "no composition", never "no write".
+        try:
+            from . import embed_compose as _embed_compose
+            if _embed_compose.compose_enabled():
+                _composed = _embed_compose.compose_embedding_text(
+                    props.get("quote"), content=content)
+                if _composed != content:
+                    _embedding_text = _composed
+        except Exception:  # noqa: BLE001, RUF100 — composition is optional
+            _embedding_text = None
+
         # Compute embedding (Phase 1A, #7698) — stored as Point property.
         # #4280: the store declares the width it can hold; on the embedded
         # lane that is None (no vector index — brute-force scan), so a
@@ -14145,9 +14217,13 @@ class TortoiseSDK:
         try:
             from .embeddings import encode_for_row
             embedding = encode_for_row(
-                content, self._get_proj().required_embedding_dim)
+                _embedding_text if _embedding_text is not None else content,
+                self._get_proj().required_embedding_dim)
         except Exception:
             pass  # Graceful — embedding is optional
+        if (_embedding_text is not None and embedding is not None
+                and "embedding" not in props):
+            props["embeddingText"] = _embedding_text
 
         # #2199 baseline — resolved BEFORE the CREATE so the ep_* provenance
         # fields land in the node's FIRST write. Embedded (FalkorDB Lite)
@@ -19065,6 +19141,34 @@ class TortoiseSDK:
             # reached through the other write door. `None` REMOVES the property;
             # the replay's `_revise_point` clears it under the same condition.
             props["embeddingText"] = None
+
+        # ── #11739: composition is CREATE-only, and this door says so ──────
+        # `create_point` composes a Point's embedding text from its verbatim
+        # `quote` (the names half is not wired at that door — a created point
+        # has no resolved `about*` neighbours yet; see `embed_compose`'s wiring
+        # note). THIS door is a second `:Point` vector mint, and it does NOT
+        # recompose: recomposition is the seam that will also own neighbour
+        # resolution, and duplicating it here is the "many seams" #11739 rules
+        # out.
+        #
+        # ⛔ A `quote` / `about*` revise therefore leaves the existing composed
+        # text and its vector in place — they still describe the text as it was
+        # COMPOSED, which is a stale-composition window on a text the node no
+        # longer carries. It is a STATED residual, not an oversight: an earlier
+        # revision of this change cleared BOTH here, and review round 2 measured
+        # that the clear diverged live from rebuild (`_revise_point` writes the
+        # vector only under `new_content is not None`, and `emit_props` strips a
+        # derived `embedding`), i.e. it traded a stale vector for
+        # `derived = replay(journal)` being FALSE — a strictly worse defect. The
+        # close for it is the recompose path (delete-time redaction sweep +
+        # recompose on revise), which is #11739's remaining scope and must land
+        # BEFORE the flag is armed.
+        #
+        # ⛔ Deliberately NOT "clear on key presence" either: `create_point`'s
+        # dedup fold forwards the caller's props to this door
+        # (`create_point(..., dedup=True)`), so a presence-triggered clear would
+        # strip the composed text and the dense-leg vector from every UNCHANGED
+        # point on an idempotent re-ingest (review round 2, measured).
 
         # Check if node carries :Object label (entity node with version tracking)
         has_object = proj.g.query(
