@@ -67,6 +67,12 @@ stays over `E1`–`E5`): the two tables below are FROZEN evidence whose bytes §
 revising in place, so requiring a sixth row of them would red this bundle on artifacts nobody may
 edit. The row is demanded at the CLOSE, which is the statement `#7949` makes (`#11673` review P1).
 
+⛔ **And the close cannot pass yet, on purpose:** the scored-log producer
+(`probes/capstone_measure.py`) still emits the five `E1`–`E5` rows, so a re-run's table has no
+`E6` row and `V9` refuses it. Growing the probe is tracked as `#11695` — registering the row
+ahead of its producer is deliberate, because the alternative leaves the epic's acceptance
+criterion with no bar at all.
+
 > **Verdict: 0/5 rows green. THREE rows are RED with measured numbers, TWO are BLOCKED
 > because the frozen metric cannot be scored on the artifact that exists. The epic is NOT
 > closeable, and this bundle says so mechanically — at `9152448d7`, re-measured 2026-11-02:**

@@ -4380,7 +4380,12 @@ def test_the_sixth_capstone_row_is_RECOGNISED_and_GATES_the_close():
         row["verdict"] = "GREEN"
     assert [r["criterion"] for r in five_green["rows"]] == list(cvc.CRITERIA)
     assert "V9" in _codes(five_green, require_green=True), _codes(five_green, require_green=True)
-    # …and once the sixth row is carried and GREEN, the same record closes.
+    # …and once the sixth row is carried and GREEN, `V9` no longer fires. ⛔ NOT
+    # "the same record closes": `_record()`'s rows stay UNPREREGISTERED with no
+    # evidence, so this fixture still reports V5/V10 and exits non-zero — the
+    # claim here is about V9's subject (the row SET), and saying more would be a
+    # comment asserting an outcome the assert below does not measure (#11673
+    # review P2).
     six_green = _record()
     for row in six_green["rows"]:
         row["verdict"] = "GREEN"

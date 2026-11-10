@@ -158,21 +158,19 @@ _TIER2_CHANGES = (
 
 
 def _expected_legs(manifest: dict) -> set[str]:
-    """`_LEG_FAMILIES` + the shard legs, whose letters come from the MANIFEST.
+    """`_LEG_FAMILIES` + the shard legs, whose labels come from the PRODUCER.
 
-    ``string.ascii_lowercase[:n]`` is the same convention `cs.push_legs` names its
-    shards with — verified against the producer, never re-implemented: the
-    assertions below compare this set with the legs `_gating_sets` actually built.
+    `cs.shard_labels` is the selector's own naming helper, so this map cannot
+    drift from the legs it is compared against — the typed letters were exactly
+    that drift (`test (k)`).
     """
-    import string
-
     return {
         *_LEG_FAMILIES,
-        *(f"test ({c})" for c in string.ascii_lowercase[:cs.fast_shard_count(manifest)]),
+        *(f"test ({c})" for c in cs.shard_labels(cs.fast_shard_count(manifest))),
         *(f"test-slow ({c})"
-          for c in string.ascii_lowercase[:cs.slow_shard_count(manifest)]),
+          for c in cs.shard_labels(cs.slow_shard_count(manifest))),
         *(f"test-carve-out ({c})"
-          for c in string.ascii_lowercase[:cs.carve_shard_count(manifest)]),
+          for c in cs.shard_labels(cs.carve_shard_count(manifest))),
         *(f"tier-2 test_files [{c}]" for c in _TIER2_CHANGES),
         *(f"tier-2 slow_selected [{c}]" for c in _TIER2_CHANGES),
     }

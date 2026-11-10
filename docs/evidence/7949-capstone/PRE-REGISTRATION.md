@@ -441,7 +441,7 @@ reporting one is the defect, not the small number.
 eight steps are required and which is conditional on the pipeline having work for it (`#10215`).
 
 ⚠️ **The five `A`-rows were added on 2026-11-06 by `#10982` (§10.11) and are NOT required rows.**
-`pins.required_criteria_rows` stays `[E1, E2, E3, E4, E5, E6]` — the sixth entry is `E6`, added by
+`pins.required_criteria_rows` is now `[E1, E2, E3, E4, E5, E6]` — the sixth entry is `E6`, added by
 `#11673` (§10.21) on the owner's 2026-11-05 ruling, **not** an `A`-row: the `A`-rows name criteria
 whose scoring runs `#10984`–`#10988` own, and a registration may not turn a row into a gate before
 anyone has measured it. A verdict table that omits them is not refused; a table that carries one is
@@ -2097,6 +2097,17 @@ uniformly (E1's object floor and every `A`-row floor, §3.7) rather than fitting
 census, no second record, no new gate. ⚠️ The artifact's `verdicts` aggregate covers `relations[]`
 only; the metric spans the ROWS of both surfaces, which is why §3.1's row names the per-row cells and
 the population rather than that aggregate.
+
+⛔ **What is NOT yet wired, and is named rather than left to be discovered: the verdict ROW
+(`#11695`).** The census emits the metric's CELLS; the scored-log producer does not yet emit its ROW.
+`probes/capstone_measure.py` declares `CRITERIA = ("E1", …, "E5")` and its table builder writes five
+rows, so a full re-run produces a five-row table — and `V9` refuses it: *"6/6 rows are not green
+(E1, E2, E3, E4, E5, E6)"*. That is the gate behaving correctly (an epic must not close while `E6` is
+unscored), but it means **`#7949` cannot close until `#11695` teaches the probe to emit the `E6` row**
+from `pack-relation-census.json` — per-row cells of BOTH surfaces under the `e6_declared_rows` floor,
+with `written` reported beside and never as the bar. Registering the row AHEAD of its producer is
+deliberate: waiting for the producer would leave the epic's own acceptance criterion with no bar at
+all, which is the defect `#11673` exists to fix.
 
 **Why an amendment and not a second registration.** Same ground as §10.11: the record's corpus pin is a
 single `fixtures_hash`, its checker parses one criteria table and one machine record, and

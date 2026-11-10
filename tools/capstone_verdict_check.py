@@ -2,9 +2,11 @@
 """The extractor-v4 capstone's closing gate (#9080 / epic #7949).
 
 The epic states its own closing rule verbatim: *"Close this epic only when
-E1–E5 all have evidence attached to this issue — not when the children close.
+E1–E6 all have evidence attached to this issue — not when the children close.
 A child closing is a claim; this epic is where the claim is checked against the
-pipeline running end to end."* A rule in prose is not a gate: nothing fails
+pipeline running end to end."* `#11673` registered the sixth row on the owner's
+2026-11-05 ruling, and `CLOSING_CRITERIA` below is that rule in code. A rule in
+prose is not a gate: nothing fails
 when a row is marked green on a closed child, on an evidence file that does not
 exist, or on a denominator inherited from a different corpus. This tool is the
 mechanical form of that rule, and it is the second half of the issue's own
@@ -36,7 +38,11 @@ marked green off closed children, with no artifact at all. This closes that.
 ## The rule set (each finding carries a stable code)
 
     V1  root schema is ``capstone-verdict-v1``
-    V2  exactly five rows, ids E1..E5, one each — no missing, no duplicate
+    V2  the five rows every table carries, ids E1..E5, one each — no missing, no
+        duplicate. ⛔ NOT the closing rule: a table that closes must also carry
+        E6, and that is V9's job over ``CLOSING_CRITERIA``, because the tables
+        predating the sixth row are frozen evidence whose bytes may not be
+        revised in place (#11673)
     V3  per-row required fields; verdict/evidence_kind in vocabulary; sha SHAPE
         (always fatal, every row, whatever its verdict). Resolvability is
         REPORTED and fails only under ``--require-resolvable`` — see V11
@@ -1508,11 +1514,9 @@ def main(argv: list[str] | None = None) -> int:
                          "never reaches main, so requiring it would red a "
                          "shipped bundle after merge")
     ap.add_argument("--require-green", action="store_true",
-                    help="the EPIC's closing rule: exit 0 only when E1-E6 "
-                         "rows are all GREEN ("
-                         f"{len(CLOSING_CRITERIA)} rows), "
-                         "are green (without this, an honest all-blocked table "
-                         "is clean)")
+                    help="the EPIC's closing rule: exit 0 only when E1-E6 rows "
+                         f"are all GREEN ({len(CLOSING_CRITERIA)} rows; without "
+                         "this, an honest all-blocked table is clean)")
     ap.add_argument("--blocker-states", default=None, metavar="PATH",
                     help="JSON record of the tracker state of the issues the "
                          f"rows cite (default: {BLOCKER_STATES_DEFAULT}, when "
