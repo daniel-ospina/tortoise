@@ -29797,11 +29797,6 @@ class TortoiseSDK:
     def file_human_approval(self, approver_id: str, artifact_id: str,
                             point_ids: list[str],
                             decision_content: str | None = None) -> dict:
-        # #11702: lazy import (the `_created_sort_key` convention in this file) —
-        # `annotate_ep_batch` is the ONE belief read the rankers use, and importing
-        # it at module scope would pull `search_engine` into every `sdk` import.
-        from .search_engine import annotate_ep_batch
-
         """Record a human approval of a planning artifact (#531).
 
         Canonical approval pattern (research #421): an Event
@@ -29832,8 +29827,16 @@ class TortoiseSDK:
         claim whose belief did not exist on either side of the run (#11702: a
         delta against a fabricated 0.5 baseline reported movement that never
         happened).
-        """
+        """        # #11702: lazy import (the `_created_sort_key` convention in this file) —
+        # `annotate_ep_batch` is the ONE belief read the rankers use, and importing
+        # it at module scope would pull `search_engine` into every `sdk` import.
+        # ⛔ BELOW the docstring on purpose: a statement above it makes the string
+        # an unused expression and `__doc__` becomes None, so the `confidence_delta`
+        # contract documented here would be invisible to `help()` and to the
+        # generated docs.
         from datetime import datetime, timezone
+
+        from .search_engine import annotate_ep_batch
         proj = self._get_proj()
 
         # 1. Validate approver Subject exists (fail loudly, not silently).
@@ -33560,13 +33563,20 @@ class TortoiseSDK:
         written = proj.g.query(
             f"MATCH (n:Point {{id: $id}}) SET {_set_clause} RETURN n.id",
             params={"id": claim_id, "a": alpha, "b": beta, "src": source,
-                    # #11702: guard the degenerate (0,0) pair exactly as every
-                    # other mean on this path does (`_beta_mean`, ep.py's flush):
-                    # a bare `alpha / (alpha + beta)` raises ZeroDivisionError
-                    # BEFORE the write, leaving `self._evidence` holding a prior
-                    # the graph never received. 0.5 is the documented #330 house
-                    # value for a degenerate pair.
-                    "c": round(alpha / (alpha + beta), 4) if (alpha + beta) > 0 else 0.5},
+                    # #11702: a degenerate (0,0) baseline writes NO mirror.
+                    # Writing the #330 house 0.5 here would make the row
+                    # PRESENT by the shared predicate (`n.confidence IS NOT
+                    # NULL` wins over the zero-total pair), so one SDK call
+                    # produced the exact `0.5` + belief state §6.3 forbids —
+                    # and journaled it, so a rebuild reproduced it. `None`
+                    # removes the property (Cypher `SET n.p = null`), leaving
+                    # the row absent, which is what every read surface says.
+                    # (The division guard also keeps a bare `alpha / (alpha +
+                    # beta)` from raising ZeroDivisionError BEFORE the write,
+                    # which used to leave `self._evidence` holding a prior the
+                    # graph never received.)
+                    "c": (round(alpha / (alpha + beta), 4)
+                          if (alpha + beta) > 0 else None)},
         ).result_set
         # #9063: a baseline the statement did NOT write must never be reported
         # as written when the caller's node EXISTS. ``set_point_baseline`` used
@@ -33682,8 +33692,11 @@ class TortoiseSDK:
         # existing-point paths; its docstring records the mechanism, the
         # measured symptom, and why closing it is not a small change.
         if self._event_log_path:
+            # #11702: the SAME value the statement committed — `None` for a
+            # degenerate pair, so replay leaves the row absent exactly as the
+            # live graph does (see the `c` param above).
             _mirror = (round(alpha / (alpha + beta), 4)
-                       if (alpha + beta) > 0 else 0.5)
+                       if (alpha + beta) > 0 else None)
             for row in written:
                 self._emit_event(
                     "ConfidenceChanged", id=row[0], confidence=_mirror,

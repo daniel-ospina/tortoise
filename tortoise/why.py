@@ -69,6 +69,7 @@ from .search_engine import (  # type: ignore[import-not-found]
     EP_STATE_BASELINE,
     EP_STATE_MEASURED,
     _exclude_status_clause,
+    belief_value,  # #11702: the ONE Python belief VALUE reader
     ep_has_belief_cypher,
     ep_measured_cypher,  # #3276: has_ep == EP measured (baseline prior != measured)
     ep_state,
@@ -185,18 +186,23 @@ def _assemble_supports(rows: list, by_id: dict[str, dict], *,
     rank: dict[tuple[str, str], tuple[str, str]] = {}
     for row in rows:
         if operator_leg:
-            (pid, sup_id, content, a, b,
+            (pid, sup_id, content, sup_conf, pa, pb, ea, eb,
              op_id, op_type, op_label, mitigation, mit_id) = row
         else:
-            pid, sup_id, content, a, b = row
+            pid, sup_id, content, sup_conf, pa, pb, ea, eb = row
             op_id = op_type = op_label = mitigation = mit_id = None
         if not pid or not sup_id:
             continue
+        # #11702: `weight` is the supporter's PERSISTED belief, or None when it
+        # has none -- never the 0.5 the `coalesce(…, 1.0)` default produced.
+        weight = belief_value(confidence=sup_conf, posterior_alpha=pa,
+                              posterior_beta=pb, ep_alpha=ea, ep_beta=eb,
+                              round_to=4)
         entry = {
             "point_id": sup_id,
             "content_snippet": _snippet(content),
             "edge": "IMPL",
-            "weight": round(_mean(float(a), float(b)), 4),
+            "weight": weight,
             # #3990 — the WHY layer's operator leg. ``operator_label`` is
             # the Layer-3 predicate (ONTOLOGY §8); ``operator_type`` is the
             # epistemic mechanism. It is ``IMPL`` on every entry today
@@ -239,8 +245,14 @@ def _assemble_supports(rows: list, by_id: dict[str, dict], *,
             pending[pid][sup_id] = entry
             rank[(pid, sup_id)] = key
     for pid, chain_map in pending.items():
+        # #11702: absent-supporter TIER -- `weight` is None for a supporter
+        # with no persisted belief, and it sorts after EVERY weighted one so
+        # the ≤3 cap cannot be filled by fabricated 0.5s (measured: two absent
+        # supporters crowded a real 0.4 reading out of the chain).
         chain = sorted(chain_map.values(),
-                       key=lambda s: (-s["weight"], s["point_id"]))
+                       key=lambda s: (s["weight"] is None,
+                                      -(s["weight"] or 0.0),
+                                      s["point_id"]))
         if merge and by_id[pid].get("support_chain"):
             # Union with the first leg's already-selected candidates, then
             # re-sort + re-cap across BOTH legs (deterministic strongest ≤3).
@@ -251,7 +263,9 @@ def _assemble_supports(rows: list, by_id: dict[str, dict], *,
             for s in chain:
                 by_sup.setdefault(s["point_id"], s)
             chain = sorted(by_sup.values(),
-                           key=lambda s: (-s["weight"], s["point_id"]))
+                           key=lambda s: (s["weight"] is None,
+                                          -(s["weight"] or 0.0),
+                                          s["point_id"]))
         by_id[pid]["support_chain"] = chain[:W4_MAX_SUPPORT]
 
 
@@ -568,8 +582,12 @@ _SUPPORT_OP_CYPHER = (
     "OPTIONAL MATCH (op)-[:mitigated_by]->(mit:Point) "
     f"WHERE {_live_only('mit.status')} "
     "RETURN n.id, sup.id, sup.content, "
-    "  coalesce(sup.posterior_alpha, sup.ep_alpha, 1.0), "
-    "  coalesce(sup.posterior_beta, sup.ep_beta, 1.0), "
+    # #11702: the RAW belief columns, not `coalesce(…, 1.0)` -- the default
+    # supplied a missing operand and made an ABSENT supporter weigh 0.5 (and a
+    # β-only one 0.25), which then ordered the ≤3 cap. `belief_value` is the
+    # ONE Python reader, so this leg cannot re-decide presence.
+    "  sup.confidence, sup.posterior_alpha, sup.posterior_beta, "
+    "  sup.ep_alpha, sup.ep_beta, "
     # mit.id rides the same traversal so an operator mitigated MORE THAN ONCE
     # resolves deterministically (lowest mitigation id) instead of to whichever
     # row the storage layer returned first — the sibling of the operator
@@ -583,8 +601,8 @@ _SUPPORT_DIRECT_CYPHER = (
     f"WHERE sup.id <> n.id "
     f"AND (sup.is_operator = false OR sup.is_operator IS NULL) AND {_exclude_status_clause('sup')} "
     "RETURN n.id, sup.id, sup.content, "
-    "  coalesce(sup.posterior_alpha, sup.ep_alpha, 1.0), "
-    "  coalesce(sup.posterior_beta, sup.ep_beta, 1.0)"
+    "  sup.confidence, sup.posterior_alpha, sup.posterior_beta, "
+    "  sup.ep_alpha, sup.ep_beta"
 )
 # Conflicts (NANDer-only; the target ep read is the dedicated _EP_CYPHER).
 # The NANDer is either a direct statement (operator-less NAND edge) or a NAND

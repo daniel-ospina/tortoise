@@ -185,10 +185,18 @@ TEMPLATES: dict[str, dict] = {
             MATCH (c:Point)
             WHERE c.is_operator = false
               AND {_terminal_excluded('c.status')}
-              // #11702: the population gate is the SHARED presence predicate,
-              // so a stored (0, 0) or HALF pair is not a candidate at all — it
-              // has no variance to rank and no belief to report.
-              AND {ep_has_belief_cypher('c')}
+              // #11702: the population gate is the PAIR, not the presence
+              // predicate. Variance is COMPUTED from α/β, so it needs both
+              // operands: gating on presence alone admitted a MIRROR-ONLY claim
+              // (a real belief with no stored operands), whose `coalesce(…, 1.0)`
+              // defaults then produced the MAXIMUM variance 1/12 and first
+              // place on a "how uncertain are we" answer. A stored (0, 0) or a
+              // HALF pair has no variance either, and `… > 0` excludes the
+              // zero-total one.
+              AND coalesce(c.posterior_alpha, c.ep_alpha) IS NOT NULL
+              AND coalesce(c.posterior_beta, c.ep_beta) IS NOT NULL
+              AND (coalesce(c.posterior_alpha, c.ep_alpha, 0.0)
+                   + coalesce(c.posterior_beta, c.ep_beta, 0.0)) > 0
             WITH c, coalesce(c.posterior_alpha, c.ep_alpha, 1.0) AS a,
                  coalesce(c.posterior_beta, c.ep_beta, 1.0) AS b
             WITH c, a, b, (a * b) / 
@@ -235,7 +243,16 @@ TEMPLATES: dict[str, dict] = {
             MATCH (c:Point)
             WHERE c.content CONTAINS $entity
               AND {_terminal_excluded('c.status')}
-              AND (c.posterior_alpha IS NOT NULL OR c.ep_alpha IS NOT NULL)
+              // #11702: this template PRINTS α/β, so it must print STORED ones:
+              // `coalesce(…, 1.0)` printed `β=1.0` for a half pair that stores no
+              // β at all, and `OR c.ep_alpha IS NOT NULL` admitted rows with no
+              // complete pair. A mirror-only claim (a real belief with no stored
+              // operands) is not a TIMELINE row — there is no α/β history to
+              // show — and it is the only shape the presence predicate would add.
+              AND coalesce(c.posterior_alpha, c.ep_alpha) IS NOT NULL
+              AND coalesce(c.posterior_beta, c.ep_beta) IS NOT NULL
+              AND (coalesce(c.posterior_alpha, c.ep_alpha, 0.0)
+                   + coalesce(c.posterior_beta, c.ep_beta, 0.0)) > 0
             WITH c, coalesce(c.posterior_alpha, c.ep_alpha, 1.0) AS a,
                  coalesce(c.posterior_beta, c.ep_beta, 1.0) AS b
             RETURN c.id, c.content, {_belief('c')} as conf,

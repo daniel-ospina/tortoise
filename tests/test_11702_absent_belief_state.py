@@ -682,3 +682,119 @@ def test_set_point_baseline_journals_the_mirror_it_writes(sdk, tmp_path):
         assert carried[-1] == pytest.approx(0.75, abs=1e-4), carried
     finally:
         j.close()
+
+
+def test_degenerate_baseline_writes_no_mirror(sdk):
+    """`set_point_baseline(0, 0)` must not manufacture a 0.5 belief.
+
+    The new mirror write made the row PRESENT by the shared predicate (the
+    mirror test wins over the zero-total pair), so one SDK call produced the
+    exact `0.5` + belief state §6.3 forbids — and journaled it, so a rebuild
+    reproduced it. The degenerate write now leaves the row ABSENT, which is
+    what every read surface reports.
+    """
+    pid = sdk.create_point("statement", "degenerate baseline claim",
+                           dedup=False, status="live")["id"]
+    sdk.set_point_baseline(pid, 0.0, 0.0)
+    stored = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.confidence", params={"id": pid}
+    ).result_set[0][0]
+    assert stored is None, f"a degenerate baseline wrote a mirror: {stored!r}"
+    eps = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
+    assert eps.ep_state == EP_STATE_ABSENT, eps
+    assert eps.confidence_mean is None, eps
+
+
+def test_why_support_chain_does_not_weigh_an_absent_supporter(sdk):
+    """The support chain is ordered and capped by `weight`.
+
+    `_mean(coalesce(…, 1.0), coalesce(…, 1.0))` weighed an ABSENT supporter
+    0.5 (and a β-only one 0.25), so the ≤3 cap was filled by fabricated numbers
+    and a genuinely measured 0.4 supporter could be crowded out entirely.
+    """
+    from tortoise.why import _assemble_supports
+
+    proj = sdk._get_proj()
+    target = sdk.create_point("statement", "the supported target")["id"]
+    absent = [sdk.create_point("statement", f"absent supporter {i}")["id"]
+              for i in range(3)]
+    measured = sdk.create_point("statement", "measured 0.4 supporter")["id"]
+    proj.g.query(
+        "MATCH (n:Point {id:$id}) SET n.posterior_alpha = 2.0, "
+        "n.posterior_beta = 3.0", params={"id": measured})
+    for sup in (*absent, measured):
+        proj.g.query(
+            "MATCH (s:Point {id:$s}), (t:Point {id:$t}) "
+            "CREATE (s)-[:IMPL {idx:1}]->(t)", params={"s": sup, "t": target})
+
+    blocks = {target: {"support_chain": []}}
+    rows = proj.g.query(
+        "MATCH (n:Point {id:$id}) WITH n "
+        "MATCH (sup:Point)-[r:IMPL]->(n) "
+        "RETURN n.id, sup.id, sup.content, sup.confidence, "
+        "       sup.posterior_alpha, sup.posterior_beta, sup.ep_alpha, sup.ep_beta",
+        params={"id": target}).result_set
+    _assemble_supports(rows, blocks)
+    chain = blocks[target]["support_chain"]
+    assert chain, "no support chain assembled"
+    assert chain[0]["point_id"] == measured, (
+        f"the measured 0.4 supporter must lead the chain, got {chain}")
+    assert chain[0]["weight"] == pytest.approx(0.4, abs=1e-4), chain[0]
+    for entry in chain[1:]:
+        assert entry["weight"] is None, (
+            f"an absent supporter was weighed {entry['weight']!r}: {entry}")
+
+
+def test_most_uncertain_does_not_rank_a_mirror_only_claim_first(sdk):
+    """Variance is computed from α/β, so its population must HAVE α/β.
+
+    Gating that population on the presence predicate admitted a mirror-only
+    claim, whose `coalesce(…, 1.0)` defaults produced the MAXIMUM variance
+    1/12 — first place on a "how uncertain are we" answer, for a claim with no
+    stored operands at all.
+    """
+    from tests._embedded import _wipe_or as wipe
+    from tortoise.analyze import analyze
+
+    proj = sdk._get_proj()
+    wipe(proj)
+    g = proj.g
+    g.query("CREATE (:Point {id:'mirror', content:'ZEBRA mirror-only claim', "
+            "is_operator:false, status:'live', confidence:0.42})")
+    g.query("CREATE (:Point {id:'meas', content:'ZEBRA measured claim', "
+            "is_operator:false, status:'live', posterior_alpha:9.0, "
+            "posterior_beta:1.0})")
+    answer = analyze("what are we most uncertain about?", proj=proj,
+                     use_llm=False)["answer"]
+    assert "ZEBRA measured claim" in answer, answer
+    assert "ZEBRA mirror-only claim" not in answer, (
+        "a mirror-only claim has no stored α/β, so it has no variance to rank "
+        "— and the coalesce(…, 1.0) defaults gave it the maximum: " + answer)
+
+
+def test_trends_prints_only_stored_alpha_beta(sdk):
+    """`trends` prints α/β, so those numbers must be STORED, not defaults.
+
+    `coalesce(…, 1.0)` printed `β=1.0` for a half pair that stores no β at all,
+    and admitted rows with no complete pair.
+    """
+    from tests._embedded import _wipe_or as wipe
+    from tortoise.analyze import analyze
+
+    proj = sdk._get_proj()
+    wipe(proj)
+    g = proj.g
+    # `$entity` is matched with CONTAINS, so both contents carry the exact
+    # phrase `classify` extracts ('zebra strategy over time?').
+    g.query("CREATE (:Point {id:'half', content:'zebra strategy over time? "
+            "alpha-only claim', is_operator:false, status:'live', "
+            "posterior_alpha:3.0})")
+    g.query("CREATE (:Point {id:'meas', content:'zebra strategy over time? "
+            "measured claim', is_operator:false, status:'live', "
+            "posterior_alpha:9.0, posterior_beta:1.0})")
+    answer = analyze("how has the ZEBRA strategy changed over time?",
+                     proj=proj, use_llm=False)["answer"]
+    assert "measured claim" in answer, answer
+    assert "α=3.0" not in answer, (
+        "a half pair was printed with a fabricated β from the coalesce default: "
+        + answer)
