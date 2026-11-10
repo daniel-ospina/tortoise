@@ -668,6 +668,33 @@ def index_text(*parts) -> str:
 #: query phrased the way it was said matched nothing unless the paraphrase
 #: happened to keep the same words — the lossy regime the architecture
 #: (EXTRACTOR-V4 §S1) and #8488's research both name.
+#:
+#: ⚠️ TWO THINGS THIS DECLARATION DOES *NOT* CLAIM (#11706 review):
+#:
+#: 1. **The gain is unquantified.** How often ``quote`` is non-empty on REAL
+#:    captured points is UNMEASURED, and #11682 names that measurement as its
+#:    own first task. What is pinned is that an UNQUOTED point composes to
+#:    byte-identical index text (the pre-#11682 text), so an unpopulated graph
+#:    is inert-but-harmless here — not that a populated one moves a metric.
+#: 2. **There is no runtime switch, deliberately.** #8488's banner asks every
+#:    fix for "its own fail-safe switch"; a switch is the wrong instrument for
+#:    THIS one, and saying so is the answer rather than leaving the clause
+#:    unaddressed: a corpus text that switches off against a still-three-field
+#:    index would recreate exactly the index/mirror drift this constant exists
+#:    to kill. The fail-safe is a CODE REVERT, and it must revert BOTH halves —
+#:    removing ``quote`` from THIS tuple alone leaves the literal
+#:    ``("Point", "quote", "FULLTEXT")`` entry in
+#:    ``FalkorProjection._REQUIRED_FULLTEXT_INDEXES`` (that entry is NOT derived
+#:    from this tuple; only the CREATE target is), which ``_schema_is_current``
+#:    unions — so the requirement becomes unsatisfiable, every construction
+#:    reads NOT current, and the whole DDL sweep re-runs forever (#4465's
+#:    churn). Revert the tuple AND that entry together and the revert is clean:
+#:    no index is dropped either way (``_point_fts_field_missing`` reads the
+#:    DERIVED ``_POINT_FTS_TARGET_FIELDS``, so a three-field index satisfies a
+#:    two-field declaration) and the sweep returns to its fast path.
+#:
+#: The BM25 leg joins this set for the ``Point`` family ONLY — ``quote`` is not
+#: a field any other label's FTS index declares (#11706 review P2-5).
 POINT_INDEX_TEXT_FIELDS: tuple[str, ...] = ("content", "search_keys", "quote")
 
 

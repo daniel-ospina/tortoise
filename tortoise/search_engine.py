@@ -2097,12 +2097,32 @@ def run_bm25_query(
         return []
 
     from .bm25 import bm25_rank
-    from .sparse import point_index_text
+    from .sparse import index_text, point_index_text
 
     # Label via the ONE declaration (#4997) rather than a per-leg derivation
     # (#5407 has not migrated run_fts_query off its own); a document IS a
     # :Source (D10, ONTOLOGY v3.15 §4.4).
     label = entity_label(entity_type)
+
+    # #11682: the corpus join is PER FAMILY. ``quote`` is a POINT field — the
+    # Point FTS index declares it, no other label's does — so a
+    # ``:Source``/``:Document`` row must not contribute one to the BM25 text
+    # (#11706 review P2-5): that would index text no lexical surface on that
+    # label can see, i.e. the exact index/mirror asymmetry this declaration
+    # exists to kill, one field over. The row SHAPE stays one shape (the column
+    # is selected for every family and is NULL where the label has none); only
+    # the JOIN reads ``row[3]`` for Points.
+    if label == "Point":
+        def _corpus_text(row) -> str:
+            return point_index_text({
+                "content": row[1], "search_keys": row[2], "quote": row[3],
+            })
+    else:
+        def _corpus_text(row) -> str:
+            # The family's own text: the coalesced content/_searchText arm ∪
+            # search_keys — unchanged by #11682.
+            return index_text(row[1], row[2])
+
     id_field = "url" if entity_type in ("source", "document") else "id"
 
     where = [f"n.{id_field} IS NOT NULL"]
@@ -2130,11 +2150,10 @@ def run_bm25_query(
         # ``truncated`` below.
         # #11682: ``quote`` rides the corpus read on the Point family — the
         # field the verbatim source text lives in. It is selected for EVERY
-        # entity type the leg serves (one Cypher, one row shape): ``quote`` is
-        # absent on Subject/Object/Event-shaped labels, but those families are
-        # refused above, and on the document/source family the coalesce arm
-        # already supplies the text. Requesting a property a node lacks is a
-        # NULL, not an error.
+        # entity type the leg serves (one Cypher, one row shape): on the
+        # document/source family the column is NULL, which is not an error —
+        # and ``_corpus_text`` above joins it for the Point family ONLY, so the
+        # other families mirror their own FTS field set.
         cypher = (
             f"MATCH (n:{label}) WHERE {' AND '.join(where)} "
             f"RETURN n.{id_field}, coalesce(n.content, n._searchText, ''), "
@@ -2178,11 +2197,7 @@ def run_bm25_query(
             _record(ran=True, degraded=False, reason="empty_results",
                     count=0, declined=True)
             return []
-        docs = [
-            (row[0], point_index_text({
-                "content": row[1], "search_keys": row[2], "quote": row[3],
-            })) for row in rows if row[0]
-        ]
+        docs = [(row[0], _corpus_text(row)) for row in rows if row[0]]
         # #10121: the arm's own tie must follow the SAME recency-then-id rule as
         # every other leg. It sorts its whole corpus itself, so fixing only the
         # corpus-read ORDER BY would leave the newest match truncated at this

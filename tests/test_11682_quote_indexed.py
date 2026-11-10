@@ -30,8 +30,13 @@ WHAT THIS PINS (each revert must red a named test):
         -> ``test_a_pre_11682_two_field_index_is_upgraded_to_carry_the_quote``
            reds (the index stays two-field, the already-written point stays
            un-findable, and the probe stays not-current forever);
-  * revert the BM25 corpus read to content ∪ search_keys
+  * revert the BM25 corpus read for the POINT family to content ∪ search_keys
         -> ``test_the_bm25_mirror_finds_the_quote_too`` reds;
+  * join ``quote`` for EVERY family the BM25 leg serves (the pre-review
+    shape, one join instead of the per-family one)
+        -> ``test_the_bm25_mirror_is_per_family`` reds: a ``:Source`` whose
+           only record of the term is its ``quote`` becomes a BM25 hit while
+           its own FTS index (``_searchText``) cannot see it (#11706 P2-5);
   * drop the ``quote`` from ``_SNAPSHOT_QUERY``
         -> the ``"quote" in _SNAPSHOT_QUERY`` assertion reds, and so does
            ``test_every_declared_field_is_selected_by_the_snapshot_mirror``,
@@ -42,9 +47,17 @@ WHAT THIS PINS (each revert must red a named test):
   * revert the snapshot's JOIN (``texts = [point_index_text(p) …]``) or its
     scorer join to ``index_text(content, search_keys)``
         -> the masked-embedder arm in that test reds (the sparse vocabulary
-           loses ``quokka`` and ``search_snapshot`` misses the point), and
+           loses ``quokka`` and ``search_snapshot`` misses the point), the
+           legacy no-vector arm reds too, and
            `test_the_bm25_corpus_select_and_join_carry_every_declared_field`
            goes on red for the BM25 mirror's own select/join;
+
+⚠️ FIXTURE PROVENANCE: ``VERBATIM`` is CONSTRUCTED prose (authored for this
+module, punctuated the way a real utterance is), NOT a captured transcript —
+the repo ships no real quote corpus and its test extractors are fakes. What is
+*measured* rather than inferred is the recall property itself:
+``REAL_SENTENCE_QUERY`` is a differently-worded question whose only overlap
+with the stored fact lives in the ``quote``, and it must find the point.
 
 BOTH DIRECTIONS are asserted, and the negative controls are explicit: the
 content-only word is still found (the leg was not narrowed), a word in NEITHER
@@ -74,14 +87,21 @@ from tortoise.search_engine import (
 )
 from tortoise.sdk import TortoiseSDK
 
-# The utterance as it was actually said, the lossy paraphrase the fact is
-# stored as, and a decoy so a "returns something" leg cannot pass for a hit.
-VERBATIM = "we adopted the QUOKKA migration plan for the ledger"
+# CONSTRUCTED prose (see the module docstring's provenance note): punctuated
+# and quoted exactly as a transcript records an utterance, the lossy paraphrase
+# the fact is stored as, and a decoy so a "returns something" leg cannot pass
+# for a hit.
+VERBATIM = ('Ana, on the Q3 close: "we adopted the QUOKKA migration plan for '
+            'the ledger — and it\'s already paid off!"')
 PARAPHRASE = "The team chose the ledger migration plan"
 DECOY = "an unrelated note about coffee machines"
-QUOTE_ONLY_TERM = "QUOKKA"     # only in the quote
-CONTENT_TERM = "ledger"        # in the paraphrase
-ABSENT_TERM = "zzquartzitezz"  # in neither field
+QUOTE_ONLY_TERM = "QUOKKA"          # only in the quote
+CONTENT_TERM = "ledger"             # in the paraphrase
+ABSENT_TERM = "zzquartzitezz"       # in neither field
+# A real-shaped question: every token it shares with the stored fact (Ana, Q3,
+# close, adopted) lives in the QUOTE — the paraphrase contributes none — so a
+# hit is attributable to the quote and not to the paraphrase.
+REAL_SENTENCE_QUERY = "what did Ana say we adopted at the Q3 close?"
 
 
 # ── the declaration (hermetic — no DB) ────────────────────────────────────
@@ -218,6 +238,13 @@ def test_a_verbatim_quote_only_phrase_is_findable_by_the_fts_leg(sdk) -> None:
         graph, ABSENT_TERM, entity_type="point")] == [], (
             "a term held by no indexed field must not match")
 
+    # MEASURED recall claim (not inferred from the tokeniser): a user asking in
+    # their OWN words finds the punctuated, quoted utterance.
+    assert pid in [i for i, _ in run_fts_query(
+        graph, REAL_SENTENCE_QUERY, entity_type="point")], (
+            "a real, differently-worded question must find the punctuated "
+            "verbatim quote (#11682's whole point)")
+
 
 def test_the_bm25_mirror_finds_the_quote_too(sdk) -> None:
     """The in-process BM25 leg must not disagree with the graph's index.
@@ -282,6 +309,51 @@ def test_the_bm25_mirror_finds_the_quote_too(sdk) -> None:
     assert row["has_answer"] is False, (
         "the row mapping crossed its columns — `has_answer` reads the quote "
         f"column; row={row}")
+
+    # The NO-VECTOR legacy scorer is the OTHER reader of the same corpus text:
+    # when the cached vectors are missing/failed, ``search_snapshot`` rebuilds
+    # the text per point at serve time. Dropping the vectors must not lose the
+    # quote, or the tier that answers on a graph with no vectorizer at all is
+    # the one mirror nobody pinned (#11706 review P1-2).
+    legacy_only = dict(snap, doc_vecs=None, vectorizer=None, model_id=None)
+    assert pid in [r["id"] for r in fs.search_snapshot(
+        QUOTE_ONLY_TERM, legacy_only, threshold=0.01)], (
+            "the snapshot's legacy in-memory scorer must index the quote too")
+
+
+def test_the_bm25_mirror_is_per_family(sdk) -> None:
+    """``quote`` is a POINT field — the leg must not index it for ``:Source``.
+
+    ``run_bm25_query`` serves the document/source family from the same Cypher,
+    but that family's own FTS index is ``Source._searchText`` alone. Joining a
+    Point-only field into its corpus text would be the very asymmetry this
+    change exists to kill, one field over (#11706 review P2-5): the BM25 leg
+    would match text no other lexical surface on that label can see.
+
+    FAIL VALUE: join ``POINT_INDEX_TEXT_FIELDS`` for every family (the shape
+    this branch had before the review) — a ``:Source`` carrying a ``quote``
+    becomes a BM25 hit with no FTS hit behind it.
+    """
+    g = sdk._get_proj().g
+    g.query(
+        "CREATE (s:Source {url: $url, _searchText: $text, quote: $quote})",
+        params={"url": f"https://example.test/{uuid.uuid4().hex[:8]}",
+                "text": DECOY, "quote": VERBATIM},
+    )
+
+    # The family IS served, and the leg sees its _searchText (the control).
+    assert [i for i, _ in run_bm25_query(
+        g, "coffee", entity_type="source", limit=10, excluded_statuses=())], (
+            "the :Source family must stay served — the coalesce arm supplies "
+            "its _searchText")
+    # …but a term only in the Source's ``quote`` is NOT this family's index
+    # text: the leg mirrors the label's own FTS field set.
+    assert [i for i, _ in run_bm25_query(
+        g, QUOTE_ONLY_TERM, entity_type="source", limit=10,
+        excluded_statuses=())] == [], (
+            "a :Source's ``quote`` is not one of its FTS fields — the BM25 "
+            "corpus text must not index text no lexical surface on that "
+            "label holds (#11706 review P2-5)")
 
 
 def test_the_bm25_corpus_select_and_join_carry_every_declared_field() -> None:
