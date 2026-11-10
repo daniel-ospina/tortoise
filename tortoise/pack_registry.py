@@ -3588,9 +3588,13 @@ class PackRegistry:
         # `subclassOf` parent to `CANONICAL_OBJECT_KINDS | CORE_ENTITY_TYPES`, so
         # a pack kind is never a parent — but all 16 of the
         # `CANONICAL_OBJECT_KINDS` are themselves children of `Object` (the row's
-        # members ARE that canonical set), so every declared pair is the chain
+        # members ARE that canonical set), so a declared pair is the chain
         # `pack kind ⊑ core child ⊑ Object`
-        # (`dev:bug ⊑ Problem ⊑ Object`). Measured at the one-hop head: 16 of the
+        # (`dev:bug ⊑ Problem ⊑ Object`) — but not EVERY pair: `Document` is a
+        # `CORE_ENTITY_TYPES` member and not an `Object` child (it has no
+        # `CORE_SUBCLASSES` row at all, by design), so
+        # `product-strategy:architecture ⊑ Document` has no `Object` in its
+        # chain. Measured at the one-hop head: 16 of the
         # 17 declared pairs had a parent that is an `Object` child, and
         # `expand_kind("Object")` carried NONE of them — half-fixing the very
         # defect #11000 is. ⚠️ The instrument that reads `kind=` for OBJECTS is the
