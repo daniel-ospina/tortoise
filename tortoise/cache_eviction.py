@@ -50,12 +50,20 @@ it … this is gated on #10593 + #7879, and its first deliverable is the census 
 dry-run pass that reports what it WOULD evict and which of those nodes the record
 can serve. **A pass that cannot answer that must refuse, never sweep.**"*
 
-Both gates are OPEN as of this writing (`#10593` — every hosted record write is
-rejected `22P02` — and `#7879`, the record epic), so today the correct answer for
-every class is `cannot-answer` and the verdict is `REFUSED`. The point of writing it
-down as code, rather than as prose, is that the day the gates close the verdict
-flips by itself, and that a future sweeper cannot be written without consuming a
-verdict that says which classes were proven.
+⚠️ **RECORD READINESS IS NOT WHAT WITHHOLDS THE LICENCE, and this docstring said it
+was:** `#10593` (the record's write path) closed **COMPLETED** on 2026-11-06 on a
+non-vacuous measurement, so the `22P02` rejection cited here is gone and the record
+CAN serve a node; `#7879` (the record epic) is still open, but that is a statement
+about the record's role as system of record, not about whether it can serve one
+today. What withholds a licence is the **absence of a CLEAN parity census report for
+the graph being swept** — nothing schedules that instrument, so no graph has one
+until an operator runs it. Nor is the verdict `REFUSED` for every class: the verdict
+is the census's BYTE state, so a production cache under its byte ceiling answers
+`CLEAN` with `plan["evictable"] == []` (see `tortoise/cache_evictor.py`'s header for
+which gate actually refuses). The point of writing the rule down as code, rather than
+as prose, is that the verdict flips by itself once a census is CLEAN, and that a
+future sweeper cannot be written without consuming a verdict that says which classes
+were proven.
 
 WHAT THIS MODULE IS NOT
 -----------------------

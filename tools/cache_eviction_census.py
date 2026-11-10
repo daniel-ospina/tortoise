@@ -3,9 +3,13 @@
 
 **Preview only. There is no `--execute`, and that is the deliverable, not an
 omission.** `#10976` gates eviction on the record being able to serve — *"gated on
-#10593 + #7879 … A pass that cannot answer that must refuse, never sweep"* — and
-both
-gates are OPEN, so a sweep today would delete nodes whose only copy is the graph.
+#10593 + #7879 … A pass that cannot answer that must refuse, never sweep"*. ⚠️ **The
+record CAN serve today, and this docstring said otherwise:** `#10593` (the record's
+write path) closed COMPLETED on 2026-11-06, so the `22P02` rejection cited here is
+gone; only `#7879` (the epic) is open, which is about the record as system of record,
+not its ability to serve a node. What withholds a licence is the absence of a CLEAN
+parity census for the graph being swept — and since nothing here sweeps, an
+`--execute` would delete nodes whose only copy is the graph.
 The `--execute` flag is therefore REFUSED BY NAME rather than absent, so a caller
 that tries it learns why instead of concluding the flag was misspelled.
 
@@ -267,10 +271,12 @@ def main(argv: list[str] | None = None) -> int:
         if any(a == flag or a.startswith(f"{flag}=") for a in argv):
             print(
                 f"REFUSED {flag}: this census does not sweep, and cannot.\n"
-                f"  #10976 gates eviction on the record being able to serve "
-                f"(#10593 hosted record writes are rejected 22P02; #7879 the record "
-                f"epic) — both open. A pass that cannot prove the record serves a "
-                f"class must refuse rather than sweep.\n"
+                f"  #10976 gates eviction on the record being able to serve. #10593 "
+                f"(the record's write path) closed COMPLETED on 2026-11-06, so the "
+                f"record CAN serve; only #7879 (the epic) remains open, which is about "
+                f"the record as system of record, not its ability to serve a node. A "
+                f"pass that cannot prove the record serves a class must refuse rather "
+                f"than sweep.\n"
                 f"  Run without {flag} to get the plan and the refusal reasons.",
                 file=sys.stderr,
             )
