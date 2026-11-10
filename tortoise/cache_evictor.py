@@ -48,8 +48,9 @@ all.
 proven record-served), NOT gate 1. Gate 1 admits ``CLEAN`` on purpose — a production
 cache under its byte ceiling answers ``CLEAN`` — so reading *"production can only ever be
 REFUSED"* would attribute the refusal to the verdict word and make a licence widening
-look harmless. The day the record can serve, the licence populates and this executor
-becomes reachable without a second decision.
+look harmless. The day a CLEAN parity census exists for the graph being swept, the licence
+populates and this executor becomes reachable without a second decision — record readiness
+is not the trigger, and this header said it was until #11709 corrected it.
 
 ⛔ FIVE INDEPENDENT GATES, and each one alone refuses
 -----------------------------------------------------
