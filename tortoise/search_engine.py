@@ -356,10 +356,31 @@ def ep_has_belief_cypher(alias: str) -> str:
     is genuinely stored. It is false only when there is nothing to report,
     which is the one case where a read must return ``null`` rather than a
     value. Textually in step with the Python twin :func:`ep_state`.
+
+    ⛔ **A stored pair with ``α + β <= 0`` is NOT a belief**, and this is the
+    whole reason the predicate is a sum rather than an ``IS NOT NULL``. A
+    Beta(0, 0) is not a distribution — it carries no information — and
+    ``ep.py::_write_node`` writes exactly that pair verbatim (a decayed or
+    never-seeded posterior). Tested as "columns present", it was a belief with
+    NO computable mean, which gave four surfaces four answers for one claim: a
+    fabricated 0.5 in the ``ep`` block, ``None`` in ``recall_ranking``,
+    ``absent`` in ``gaps_ranking``, and **``nan``** in ``graph_ranking`` (the
+    Cypher ``α/(α+β)`` division with no guard, serialised onto the wire as a
+    bare ``NaN`` token). {"Absent" if no columns are set, but a stored zero
+    pair is absent too} — nothing is known either way, and every surface now
+    says so through this ONE predicate.
+
+    **A HALF pair is no belief either**: both coalesced values must be present.
+    A row carrying only `posterior_beta = 3.0` (no α, no prior, no mirror) has
+    no mean; read as present it invented one from the `coalesce(…, 1.0)`
+    default — `1/4 = 0.25`, a number nothing measured. The same rule, stated as:
+    a belief exists when the expression that computes it has both operands.
     """
-    return (f"({alias}.posterior_alpha IS NOT NULL "
-            f"OR {alias}.ep_alpha IS NOT NULL "
-            f"OR {alias}.confidence IS NOT NULL)")
+    return (f"({alias}.confidence IS NOT NULL OR ("
+            f"coalesce({alias}.posterior_alpha, {alias}.ep_alpha) IS NOT NULL "
+            f"AND coalesce({alias}.posterior_beta, {alias}.ep_beta) IS NOT NULL "
+            f"AND (coalesce({alias}.posterior_alpha, {alias}.ep_alpha, 0.0) "
+            f"     + coalesce({alias}.posterior_beta, {alias}.ep_beta, 0.0)) > 0))")
 
 
 def ep_state_cypher(alias: str) -> str:
@@ -386,6 +407,7 @@ def ep_state_cypher(alias: str) -> str:
 
 
 def ep_state(*, posterior_alpha, ep_alpha, confidence=None,
+             posterior_beta=None, ep_beta=None,
              baseline_set: bool = False) -> str:
     """Python twin of :func:`ep_state_cypher` — 'measured' | 'baseline' | 'absent'.
 
@@ -393,8 +415,22 @@ def ep_state(*, posterior_alpha, ep_alpha, confidence=None,
     ``None``, never a fabricated Beta(1,1) mean. ``baseline`` is a persisted
     prior EP has not measured (a #2199 declared baseline, or a legacy
     EP-flush mirror) — still a value, just not a measurement.
+
+    A stored ``α + β <= 0`` pair is ``absent``: Beta(0, 0) is not a
+    distribution, so the pair carries no belief. Same rule as
+    :func:`ep_has_belief_cypher`, which spells it in Cypher — the two must not
+    drift, or a surface reads a state the `ep` block denies for one claim.
+    Pass the β columns too, or a stored zero pair reads as ``present`` here
+    while Cypher calls it absent.
     """
-    if posterior_alpha is None and ep_alpha is None and confidence is None:
+    # α/β are coalesced as a PAIR (posterior first, then the ep_* prior), the
+    # same precedence `ep_has_belief_cypher` spells in Cypher — never α from one
+    # pair with β from the other.
+    alpha = posterior_alpha if posterior_alpha is not None else ep_alpha
+    beta = posterior_beta if posterior_beta is not None else ep_beta
+    present = (alpha is not None and beta is not None
+               and (alpha + beta) > 0)
+    if confidence is None and not present:
         return EP_STATE_ABSENT
     return (EP_STATE_MEASURED
             if ep_measurement_state(posterior_alpha=posterior_alpha,
@@ -4166,7 +4202,13 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             # 1.0 defaults above — `coalesce(n.posterior_alpha, …, 1.0)`
             # answers 0.5 for a claim that has no belief at all, which is
             # precisely the number this issue removes.
-            "  n.posterior_alpha, n.ep_alpha, n.confidence "
+            "  n.posterior_alpha, n.ep_alpha, n.confidence, "
+            # #11702 cycle 3: the β columns ride too, so the Python twin can
+            # apply the SAME α+β <= 0 rule the Cypher predicate applies. Without
+            # them `ep_state()` called a stored (0, 0) pair PRESENT while
+            # `ep_has_belief_cypher` called it absent — the four-surface split
+            # (0.5 / None / absent / nan) this class of bug kept reappearing as.
+            "  n.posterior_beta, n.ep_beta "
         )
         rows = graph.query(cypher, params={"ids": point_ids}).result_set
 
@@ -4188,9 +4230,10 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             # test double that predates them asserts the numeric contract, so
             # its row carries a belief by construction — that fallback keeps
             # the doubles honest instead of silently marking them absent.
-            if len(row) > 12:
+            if len(row) > 14:
                 state = ep_state(posterior_alpha=row[10], ep_alpha=row[11],
-                                 confidence=row[12], baseline_set=baseline_set)
+                                 confidence=row[12], posterior_beta=row[13],
+                                 ep_beta=row[14], baseline_set=baseline_set)
             else:
                 state = (EP_STATE_MEASURED if measured
                          else EP_STATE_BASELINE)

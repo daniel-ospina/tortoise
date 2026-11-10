@@ -2863,8 +2863,18 @@ class TortoiseEP:
                 # Sorted, so the journal order is a property of the id set
                 # rather than of the engine's row order (every record here is
                 # the same posterior clear, so only determinism is at stake).
+                #
+                # ⛔ #11702: `confidence=None` MUST ride too. The fold is
+                # presence-conditional — only the keys a record carries are
+                # written — so a record with just the two posterior keys clears
+                # the posterior and LEAVES the `n.confidence` mirror the
+                # statement above just nulled. Live: the claim reads
+                # `absent`/None. Rebuilt from the journal: `baseline`/0.9 — a
+                # belief the live graph no longer has, resurrected by recovery.
+                # The emit is already filtered to non-baseline claims, which is
+                # exactly the predicate the SET uses for the mirror.
                 for _cid in sorted(seen.values(), key=str):
-                    self._emit("ConfidenceChanged", id=_cid,
+                    self._emit("ConfidenceChanged", id=_cid, confidence=None,
                                posterior_alpha=None, posterior_beta=None)
 
         # #395 (delta C): stash the run set BEFORE the early returns — the

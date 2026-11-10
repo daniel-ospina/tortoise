@@ -29823,7 +29823,10 @@ class TortoiseSDK:
 
         Returns {event_id, decision_point_id, impl_operator_ids,
                  confidence_delta} where confidence_delta maps each approved
-        claim id to its confidence change after the EP run.
+        claim id to its confidence change after the EP run — ``None`` for a
+        claim whose belief did not exist on either side of the run (#11702: a
+        delta against a fabricated 0.5 baseline reported movement that never
+        happened).
         """
         from datetime import datetime, timezone
         proj = self._get_proj()
@@ -29911,7 +29914,11 @@ class TortoiseSDK:
         before = {}
         for pid in point_ids:
             p = self.get_point(pid)
-            before[pid] = p.get("confidence", 0.5) if p else 0.5
+            # #11702: `None` when the claim carries no belief — the 0.5 default
+            # invented a baseline that never existed, so a claim taken from
+            # nothing to 0.9 reported `+0.4`. `get_point` omits the key for a
+            # never-measured claim, which is the honest reading here.
+            before[pid] = (p.get("confidence") if p else None)
         # #344: conscious opt-out from the fail-closed gate. #7739 scoped the
         # no-arg gate to the dirty roots and their closure (it is no longer
         # graph-wide), and this call still passes no anchors/factors — but the
@@ -29925,8 +29932,14 @@ class TortoiseSDK:
         deltas = {}
         for pid in point_ids:
             p = self.get_point(pid)
-            after = p.get("confidence", 0.5) if p else 0.5
-            deltas[pid] = round(after - before[pid], 4)
+            after = (p.get("confidence") if p else None)
+            # #11702: a delta needs TWO numbers. Against a `None` endpoint the
+            # only truthful answer is `None` (the claim went from "no belief"
+            # to a value, which is not a delta on the same axis) — reporting
+            # `0.9 - 0.5` claimed a movement that never happened.
+            deltas[pid] = (round(after - before[pid], 4)
+                           if after is not None and before[pid] is not None
+                           else None)
 
         # 8. Approval seeds the grounding a-vector — re-compute (api.py pattern)
         if hasattr(proj, "compute_grounding"):

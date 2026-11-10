@@ -23,23 +23,44 @@ from .search_engine import (  # #11702: the ONE presence predicate
 
 # #11702: THE belief-value expression for the analyze templates -- the served
 # `n.confidence` mirror first, the persisted alpha/beta mean as the fallback,
-# 0.5 only for the degenerate (alpha+beta <= 0) pair the rest of the repo also
-# answers 0.5 for. Specified ONCE here so the five templates cannot drift from
-# each other or from `annotate_ep_batch` / the rankers (the coalesced 0.5 this
-# replaces was the fabrication #11702 removes).
+# and `null` when neither exists. Specified ONCE here so the templates cannot
+# drift from each other or from `annotate_ep_batch` / the rankers (the
+# coalesced 0.5 this replaces was the fabrication #11702 removes).
+#
+# ⛔ The fallback is **null**, never 0.5 (#11702, §6.3). A `CASE ... ELSE 0.5`
+# arm cannot tell a stored (α, β) = (0, 0) from "no columns at all" — both sum
+# to 0.0 — so it handed a never-measured claim a neutral coin flip and
+# `ORDER BY conf DESC` then ranked it ABOVE a measured 0.10 claim. A template
+# that must exclude an absent belief gates on `ep_has_belief_cypher` (see
+# `disagreement`/`consensus`); one that deliberately admits it reports `null`
+# and orders it LAST (`_order_by_belief`), which is the same refusal the
+# rankers make.
 _BELIEF = (
-    "coalesce({a}.confidence, "
-    "  CASE WHEN (coalesce({a}.posterior_alpha, {a}.ep_alpha, 0.0) "
-    "           + coalesce({a}.posterior_beta, {a}.ep_beta, 0.0)) > 0 "
+    "CASE WHEN {a}.confidence IS NOT NULL THEN {a}.confidence "
+    "  WHEN (coalesce({a}.posterior_alpha, {a}.ep_alpha, 0.0) "
+    "        + coalesce({a}.posterior_beta, {a}.ep_beta, 0.0)) > 0 "
     "       THEN coalesce({a}.posterior_alpha, {a}.ep_alpha, 1.0) "
     "            / (coalesce({a}.posterior_alpha, {a}.ep_alpha, 1.0) "
     "               + coalesce({a}.posterior_beta, {a}.ep_beta, 1.0)) "
-    "       ELSE 0.5 END)")
+    "  ELSE null END"
+)
 
 
 def _belief(alias: str) -> str:
     """The belief expression for one alias (see `_BELIEF`)."""
     return _BELIEF.format(a=alias)
+
+
+def _order_by_belief() -> str:
+    """`ORDER BY` clause: highest belief first, an ABSENT belief (`null`) LAST.
+
+    The explicit `CASE` is required, not decorative: Cypher sorts `null` as the
+    largest value, so a bare `ORDER BY conf DESC` puts a never-measured claim at
+    the TOP — the same inversion the multiplicative identity caused in
+    StateRanker, one layer down. Specified once so the four ranking templates
+    cannot drift apart.
+    """
+    return "ORDER BY CASE WHEN conf IS NULL THEN 1 ELSE 0 END, conf DESC"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -97,7 +118,7 @@ TEMPLATES: dict[str, dict] = {
               // last, instead of being scored as a neutral coin flip — and is
               // still returned, unlike a bare-mirror test would do.
             RETURN supporter.id, supporter.content, {_belief('supporter')} as conf
-            ORDER BY conf DESC LIMIT $limit
+            {_order_by_belief()} LIMIT $limit
         """,
         "format": lambda rows: _format_ranked(rows, "supporting"),
     },
@@ -114,7 +135,7 @@ TEMPLATES: dict[str, dict] = {
               // `opponent.confidence` reports null for a claim whose belief is
               // persisted in its posterior.
             RETURN opponent.id, opponent.content, {_belief('opponent')} as conf
-            ORDER BY conf DESC LIMIT $limit
+            {_order_by_belief()} LIMIT $limit
         """,
         "format": lambda rows: _format_ranked(rows, "counter"),
     },
@@ -132,7 +153,7 @@ TEMPLATES: dict[str, dict] = {
               AND {_belief('c')} > 0.6
               AND NOT (c)<-[:NAND]-(:Point {{op_type:"NAND"}})
             RETURN c.id, c.content, {_belief('c')} as conf
-            ORDER BY conf DESC LIMIT $limit
+            {_order_by_belief()} LIMIT $limit
         """,
         "format": lambda rows: _format_ranked(rows, "consensus"),
     },
@@ -192,7 +213,7 @@ TEMPLATES: dict[str, dict] = {
               // #11702: the belief VALUE by the shared precedence, never a bare
               // mirror (a claim with a persisted posterior would report null).
             RETURN evidence.id, evidence.content, {_belief('evidence')} as conf
-            ORDER BY conf DESC LIMIT $limit
+            {_order_by_belief()} LIMIT $limit
         """,
         "format": lambda rows: _format_chain(rows),
     },

@@ -415,11 +415,13 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
         # surface uses (presence from the raw columns, then the #2490 fold).
         # Index map for `_EP_CYPHER`: 0 id, 1 alpha, 2 beta, 3 measured,
         # 4 status, 5 outdated, 6 baseline_set, 7 has_belief, 8 posterior_alpha,
-        # 9 ep_alpha, 10 confidence. The len guard covers the pre-#11702
-        # 7-col contract doubles, which carry a belief by construction.
-        if len(row) > 10:
+        # 9 ep_alpha, 10 confidence, 11 posterior_beta, 12 ep_beta. The len
+        # guard covers the pre-#11702 7-col contract doubles, which carry a
+        # belief by construction.
+        if len(row) > 12:
             state = ep_state(posterior_alpha=row[8], ep_alpha=row[9],
-                             confidence=row[10], baseline_set=baseline_set)
+                             confidence=row[10], posterior_beta=row[11],
+                             ep_beta=row[12], baseline_set=baseline_set)
         else:
             state = (EP_STATE_MEASURED if measured
                      else EP_STATE_BASELINE)
@@ -633,7 +635,10 @@ _EP_CYPHER = (
     # belief at all — the defect this issue removes, one level above the
     # coalesce that was fixed in `annotate_ep_batch`.
     f"  {ep_has_belief_cypher('n')}, "
-    "  n.posterior_alpha, n.ep_alpha, n.confidence"
+    # #11702 cycle 3: the β columns ride so `ep_state()` can apply the same
+    # α+β <= 0 rule the predicate does — a stored (0, 0) pair is no belief.
+    "  n.posterior_alpha, n.ep_alpha, n.confidence, "
+    "  n.posterior_beta, n.ep_beta"
 )
 # Tradeoffs (decision points): the point is the operator SOURCE (INPUT idx 0)
 # and the alternatives are the operator's IMPL TARGETS at idx > 0 (the

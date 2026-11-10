@@ -116,10 +116,20 @@ def test_ep_state_names_the_three_presence_states():
     the wire state. `unmeasured` ships as `absent` (the word §6.3's rule uses),
     and nothing else is renamed."""
     assert ep_state(posterior_alpha=None, ep_alpha=None) == EP_STATE_ABSENT
-    assert ep_state(posterior_alpha=2.0, ep_alpha=None) == EP_STATE_MEASURED
+    assert ep_state(posterior_alpha=2.0, ep_alpha=None,
+                    posterior_beta=2.0) == EP_STATE_MEASURED
     # A declared #2199 baseline prior: a VALUE, but not a measurement (#3276).
-    assert ep_state(posterior_alpha=None, ep_alpha=3.0,
+    assert ep_state(posterior_alpha=None, ep_alpha=3.0, ep_beta=1.0,
                     baseline_set=True) == EP_STATE_BASELINE
+    # ⛔ HALF a pair is no belief: the mean needs both operands, so a row with
+    # only β (or only α) invents nothing — the `coalesce(…, 1.0)` default used
+    # to supply the missing one and answer 1/4.
+    assert ep_state(posterior_alpha=None, ep_alpha=None,
+                    posterior_beta=3.0) == EP_STATE_ABSENT
+    assert ep_state(posterior_alpha=2.0, ep_alpha=None) == EP_STATE_ABSENT
+    # …and a complete pair that sums to zero is no belief either.
+    assert ep_state(posterior_alpha=0.0, ep_alpha=None,
+                    posterior_beta=0.0) == EP_STATE_ABSENT
     # A legacy EP-flush mirror alone is still a persisted belief.
     assert ep_state(posterior_alpha=None, ep_alpha=None,
                     confidence=0.42) == EP_STATE_BASELINE
@@ -374,22 +384,159 @@ def test_mirror_only_claim_agrees_on_the_value_everywhere(sdk):
     assert why_ep["ep_state"] == EP_STATE_BASELINE, why_ep
 
 
-def test_degenerate_posterior_pair_is_not_reported_as_absent(sdk):
-    """A stored (α, β) = (0, 0) pair is PRESENT with no computable mean.
+def test_degenerate_posterior_pair_is_ABSENT_on_every_surface(sdk):
+    """A stored (α, β) = (0, 0) pair is NO belief — not a 0.5, not a NaN.
 
-    `ep.py::_write_node` writes that pair verbatim. The read answers
-    `confidence: None` beside a NON-absent state, and the ranking must not
-    invert that into `absent` — which pushed the row below every other one and
-    contradicted the `ep` block on the same response.
+    `ep.py::_write_node` writes that pair verbatim (a decayed or never-seeded
+    posterior), and Beta(0, 0) is not a distribution: it carries no
+    information. Read as "columns present" it was a belief with no computable
+    mean, and one claim got FOUR answers — 0.5 in the `ep` block, `None` in
+    `recall_ranking`, `absent` in `gaps_ranking`, and **NaN** from
+    `graph_ranking`'s unguarded α/(α+β) division (serialised as a bare `NaN`
+    token). The presence predicate is therefore a SUM (`α + β > 0`), and this
+    is the regression test that keeps every surface on that one rule.
     """
     pid = sdk.create_point("statement", "a degenerate posterior pair")["id"]
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.posterior_alpha = 0.0, "
         "n.posterior_beta = 0.0", params={"id": pid})
     eps = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
-    rec = StateRanker(projection=sdk._get_proj()).rerank(
+    proj = sdk._get_proj()
+    rec = StateRanker(projection=proj).rerank(
         [{"id": pid, "scores": {"rrf": 1.0}}])[0]["recall_ranking"]
-    assert eps.ep_state != EP_STATE_ABSENT, (
-        "a stored degenerate pair is PRESENT — no belief would mean no columns")
-    assert rec["ep_state"] == eps.ep_state, (
-        "the recall row invented a state the `ep` block denies for the same claim")
+    gap = GapsRanker(projection=proj).rerank(
+        [{"id": pid, "scores": {"rrf": 1.0}}])[0]["gaps_ranking"]
+    graph = GraphRanker(projection=proj).rerank(
+        [{"id": pid, "scores": {"rrf": 1.0}}])[0]["graph_ranking"]
+    sig = GraphRanker(projection=proj)._fetch_signals([pid], "point")[pid]
+
+    assert eps.ep_state == EP_STATE_ABSENT, (
+        "Beta(0, 0) is not a distribution — the pair carries no belief")
+    assert eps.confidence_mean is None, (
+        "a zero-total pair has NO mean; answering 0.5 is the fabrication")
+    for name, value in (("recall_ranking", rec["confidence"]),
+                        ("gaps_ranking", gap["confidence"]),
+                        ("graph_ranking", graph["confidence"]),
+                        ("graph signal", sig["confidence"])):
+        assert value is None, f"{name} reports {value!r} for a zero-total pair"
+        assert not isinstance(value, float) or value == value, (
+            f"{name} answered NaN — an unguarded 0/0 reached the wire")
+    for name, state in (("recall_ranking", rec["ep_state"]),
+                        ("gaps_ranking", gap["ep_state"]),
+                        ("graph_ranking", graph["ep_state"]),
+                        ("graph signal", sig["ep_state"])):
+        assert state == EP_STATE_ABSENT, f"{name} reports {state!r}"
+    assert rec["belief_informed_order"] is False, rec
+
+
+def test_zero_total_pair_does_not_survive_an_equal_relevance_order(sdk):
+    """The absent tier places the zero-total claim after a MEASURED 0.1 claim.
+
+    The value check above is not enough on its own: the failure it guards was
+    an ORDERING one (absent sorted as if it were 0.5, above a measured low).
+    """
+    absent = sdk.create_point("statement", "zero-total claim")["id"]
+    low = sdk.create_point("statement", "measured low claim")["id"]
+    proj = sdk._get_proj()
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 0.0, "
+                 "n.posterior_beta = 0.0", params={"id": absent})
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 1.0, "
+                 "n.posterior_beta = 9.0", params={"id": low})
+    rows = StateRanker(projection=proj).rerank(
+        [{"id": absent, "scores": {"rrf": 1.0}},
+         {"id": low, "scores": {"rrf": 1.0}}])
+    order = [r["id"] for r in rows]
+    assert order == [low, absent], (
+        f"absent must sort after a measured 0.1 claim, got {order}")
+    assert rows[0]["recall_ranking"]["confidence"] == pytest.approx(0.1, abs=1e-4)
+    assert rows[1]["recall_ranking"]["confidence"] is None
+
+
+def test_analyze_evidence_chain_reports_null_and_sorts_an_absent_claim_last(sdk):
+    """`tortoise_analyze` is a read surface too — it must not score an absent claim.
+
+    The `strongest_for` / `counter_arguments` / `evidence_chain` templates
+    deliberately ADMIT a belief-less claim (the IMPL edge is the evidence), so
+    the belief never gates them — but they RANK by it, and the `CASE … ELSE 0.5`
+    arm did not distinguish "no columns" from a stored (0, 0) pair. The absent
+    supporter therefore printed `conf: 0.50` and sorted ABOVE a claim genuinely
+    measured at 0.10, which is the ranker ordering on a fabricated absence.
+    """
+    from tests._embedded import _wipe_or as wipe
+    from tortoise.analyze import analyze
+
+    proj = sdk._get_proj()
+    wipe(proj)
+    g = proj.g
+    g.query("CREATE (:Point {id:'absent-sup', content:'absent evidence claim', "
+            "is_operator:false, status:'live'})")
+    g.query("CREATE (:Point {id:'low-sup', content:'measured low claim', "
+            "is_operator:false, status:'live', posterior_alpha:1.0, "
+            "posterior_beta:9.0})")
+    g.query("CREATE (:Point {id:'tgt', content:'evidence ai strategy is working', "
+            "is_operator:false, status:'live'})")
+    g.query("CREATE (:Point {id:'op', content:'IMPL', op_type:'IMPL', "
+            "is_operator:true, status:'live'})")
+    g.query("MATCH (a:Point {id:'absent-sup'}), (b:Point {id:'low-sup'}), "
+            "(o:Point {id:'op'}), (t:Point {id:'tgt'}) "
+            "CREATE (a)<-[:IMPL {idx:0}]-(o)-[:IMPL {idx:1}]->(t), "
+            "       (b)<-[:IMPL {idx:0}]-(o)-[:IMPL {idx:2}]->(t)")
+
+    out = analyze("show me the evidence chain for the AI strategy",
+                  proj=proj, use_llm=False)
+    answer = out["answer"]
+    assert "measured low claim" in answer and "absent evidence claim" in answer, answer
+    # The measured 0.1 claim must lead; the absent one follows with NO number.
+    first = answer.index("measured low claim")
+    second = answer.index("absent evidence claim")
+    assert first < second, (
+        "an absent belief must sort LAST, not above a measured 0.1 claim: " + answer)
+    assert "0.50" not in answer, (
+        "the absent claim was scored 0.50 — a fabricated neutral belief: " + answer)
+
+
+def test_ep_evidence_prewrite_journals_the_mirror_clear(tmp_path):
+    """The pre-write CLEARS `n.confidence`; the record must clear it too.
+
+    The journal fold is presence-conditional — only the keys a record carries
+    are written — so a `ConfidenceChanged` carrying just the two posterior keys
+    cleared the posterior and LEFT the mirror the statement had just nulled.
+    Live: the claim reads `absent`/None. Rebuilt from the journal:
+    `baseline`/0.9 — a belief the live graph no longer has, resurrected by
+    recovery. This is the recovery-equivalence property a journal exists for.
+    """
+    import json as _json
+
+    from tortoise.sdk import TortoiseSDK
+
+    db = str(tmp_path / "j.db")
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(db, event_log_path=str(events / "events.jsonl"))
+    try:
+        # A claim carrying a posterior AND the flush-mirror beside it.
+        pid = sdk.create_point("statement", "mirrored claim", dedup=False,
+                               status="live")["id"]
+        g = sdk._get_proj().g
+        g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 3.0, "
+                "n.posterior_beta = 1.0, n.confidence = 0.75",
+                params={"id": pid})
+        # An EP run seeded with this claim as evidence takes the pre-write
+        # branch that clears a non-baseline claim's posterior + mirror.
+        sdk.compute_confidence(evidence={pid: (10, 1)},
+                               require_calibration=False)
+
+        recs = [r for r in ( _json.loads(line)
+                             for line in (events / "events.jsonl").read_text().splitlines()
+                             if line.strip())
+                if r.get("type") == "ConfidenceChanged" and r.get("id") == pid]
+        assert recs, "no ConfidenceChanged journaled for the cleared claim"
+        # The record must carry EVERY key the statement cleared.
+        assert any("confidence" in r for r in recs), (
+            "the record omitted `confidence` — a rebuild replays only the keys "
+            "a record carries, so the mirror the SET nulled survives recovery")
+        assert all(r.get("confidence") is None
+                   for r in recs if "confidence" in r), (
+            "the record carries a stale mirror value instead of the clear")
+    finally:
+        sdk.close()

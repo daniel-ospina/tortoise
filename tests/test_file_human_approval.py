@@ -112,12 +112,35 @@ class TestFileHumanApproval:
             p = sdk.get_point(c["id"])
             assert p["confidence"] > 0.5, f"claim {c['id']} not strengthened: {p['confidence']}"
 
-    def test_confidence_delta_reported(self, sdk):
-        """Return value maps each approved claim to its confidence delta."""
+    def test_confidence_delta_is_null_when_the_claim_had_no_belief(self, sdk):
+        """#11702: a delta needs TWO numbers — no prior belief means no delta.
+
+        These claims are created with no persisted belief, so the pre-run value
+        is `None` (it used to be fabricated as 0.5, and a claim taken from
+        "nothing measured" to 0.9 reported `+0.4` — movement on an axis it was
+        never on). The APPROVAL still landed, which is what the second half
+        asserts: `None` here is about the delta's arithmetic, not about the run.
+        """
         subj, doc, c1, c2, result = _setup_approval(sdk)  # noqa: RUF059
         assert set(result["confidence_delta"].keys()) == {c1["id"], c2["id"]}
-        assert result["confidence_delta"][c1["id"]] > 0
-        assert result["confidence_delta"][c2["id"]] > 0
+        for c in (c1, c2):
+            assert result["confidence_delta"][c["id"]] is None, c["id"]
+            assert sdk.get_point(c["id"])["confidence"] > 0.5, (
+                f"the approval did not strengthen {c['id']}")
+
+    def test_confidence_delta_is_numeric_when_a_belief_existed(self, sdk):
+        """The complementary direction: two real measurements still report one."""
+        subj, doc, c1, c2, _ = _setup_approval(sdk)
+        # Give both claims a persisted prior, so the pre-run value is a number.
+        for c in (c1, c2):
+            sdk.set_point_baseline(c["id"], 2.0, 2.0)
+        result = sdk.file_human_approval(
+            approver_id=subj["id"], artifact_id=doc["id"],
+            point_ids=[c1["id"], c2["id"]],
+        )
+        for c in (c1, c2):
+            delta = result["confidence_delta"][c["id"]]
+            assert isinstance(delta, float) and delta > 0, (c["id"], delta)
 
     def test_validates_approver_artifact_and_points(self, sdk):
         """Fail loudly on missing approver / artifact / point ids."""

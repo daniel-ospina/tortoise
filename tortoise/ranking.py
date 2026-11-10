@@ -855,9 +855,20 @@ class GraphRanker:
             # AT THE WRITE — `sdk.set_point_baseline` refreshes it, the EP
             # evidence pre-write clears it alongside the posterior — rather
             # than by demoting the served value here.
+            # #11702 cycle 3: the division carries its OWN zero guard. The
+            # presence predicate now excludes a stored (0, 0) pair, but
+            # `coalesce(…, 1.0)` substitutes NULL only — a persisted 0.0 is
+            # passed through — so without this the value was `0.0/0.0` = NaN,
+            # which json.dumps writes as a bare `NaN` token onto the wire and
+            # which no `sort()` orders consistently. Belt and braces: the two
+            # guards must not be able to drift apart again.
             "    coalesce(n.confidence, "
-            "      coalesce(n.posterior_alpha, n.ep_alpha, 1.0) "
-            "      / (coalesce(n.posterior_alpha, n.ep_alpha, 1.0) + coalesce(n.posterior_beta, n.ep_beta, 1.0))) "
+            "      CASE WHEN (coalesce(n.posterior_alpha, n.ep_alpha, 0.0) "
+            "                 + coalesce(n.posterior_beta, n.ep_beta, 0.0)) > 0 "
+            "           THEN coalesce(n.posterior_alpha, n.ep_alpha, 1.0) "
+            "                / (coalesce(n.posterior_alpha, n.ep_alpha, 1.0) "
+            "                   + coalesce(n.posterior_beta, n.ep_beta, 1.0)) "
+            "           ELSE null END) "
             "  ELSE null END AS conf, degree, n.createdAt AS created, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
             # #2490: aligned with StateRanker/GapsRanker — has_ep rides the
@@ -1427,7 +1438,13 @@ class StateRanker:
                     conf = float(mirror)
                 elif (alpha + beta) > 0:
                     conf = round(alpha / (alpha + beta), 6)
-                else:  # pragma: no cover — coalesce(…, 1.0) cannot reach it
+                else:  # pragma: no cover — unreachable BY the presence rule
+                    # `has_prior` is now `ep_has_belief_cypher`, which requires a
+                    # mirror OR α+β > 0; with no mirror, reaching here would mean
+                    # a zero sum, which cannot be present. (Pre-#11702's
+                    # `IS NOT NULL` predicate DID reach it with a stored 0.0/0.0
+                    # pair, so this arm was live and reported None beside
+                    # `measured`.)
                     conf = None
                 state = (EP_STATE_MEASURED if measured_raw
                          else EP_STATE_BASELINE)
@@ -1720,9 +1737,20 @@ class GapsRanker:
                 "confidence_source": (
                     UNCOMPUTED_CONFIDENCE_SOURCE if uncomputed else conf_source),
                 # #11702: the state NAME (see StateRanker's recall_ranking).
-                "ep_state": (EP_STATE_ABSENT if confidence is None
-                             else EP_STATE_MEASURED if conf_source == "posterior"
-                             else EP_STATE_BASELINE),
+                # Taken from the SIGNAL when the graph was queried — the same
+                # field StateRanker reads — and NOT re-derived from the value:
+                # `confidence is None` is also true of a claim whose state is a
+                # non-absent one (`_confidence_of` answers None for a stored
+                # degenerate pair), so deriving here reported `absent` for a
+                # claim the `ep` block called `measured`. Two rankers inventing
+                # a state the read denies is the defect, not the fix. The value
+                # fallback survives only for the embedded (no-graph) path,
+                # which carries no signal to read.
+                "ep_state": (
+                    sig.get("ep_state")
+                    or (EP_STATE_ABSENT if confidence is None
+                        else EP_STATE_MEASURED if conf_source == "posterior"
+                        else EP_STATE_BASELINE)),
                 "score": round(score, 6),
             }
             if draft:
@@ -1927,7 +1955,13 @@ class GapsRanker:
                     conf = float(mirror)
                 elif (alpha + beta) > 0:
                     conf = round(alpha / (alpha + beta), 6)
-                else:  # pragma: no cover — coalesce(…, 1.0) cannot reach it
+                else:  # pragma: no cover — unreachable BY the presence rule
+                    # `has_prior` is now `ep_has_belief_cypher`, which requires a
+                    # mirror OR α+β > 0; with no mirror, reaching here would mean
+                    # a zero sum, which cannot be present. (Pre-#11702's
+                    # `IS NOT NULL` predicate DID reach it with a stored 0.0/0.0
+                    # pair, so this arm was live and reported None beside
+                    # `measured`.)
                     conf = None
                 state = (EP_STATE_MEASURED if measured_raw
                          else EP_STATE_BASELINE)
@@ -2166,8 +2200,12 @@ class SubgraphExpander:
             "  CASE WHEN labels(n)[0] = 'Point' THEN "
             f"    CASE WHEN {ep_has_belief_cypher('n')} THEN "
             "      coalesce(n.confidence, "
-            "        coalesce(n.posterior_alpha, n.ep_alpha, 1.0) "
-            "        / (coalesce(n.posterior_alpha, n.ep_alpha, 1.0) + coalesce(n.posterior_beta, n.ep_beta, 1.0))) "
+            "        CASE WHEN (coalesce(n.posterior_alpha, n.ep_alpha, 0.0) "
+            "                   + coalesce(n.posterior_beta, n.ep_beta, 0.0)) > 0 "
+            "             THEN coalesce(n.posterior_alpha, n.ep_alpha, 1.0) "
+            "                  / (coalesce(n.posterior_alpha, n.ep_alpha, 1.0) "
+            "                     + coalesce(n.posterior_beta, n.ep_beta, 1.0)) "
+            "             ELSE null END) "
             "    ELSE null END "
             "  ELSE null END AS confidence, "
             f"  CASE WHEN labels(n)[0] = 'Point' THEN {ep_state_cypher('n')} "

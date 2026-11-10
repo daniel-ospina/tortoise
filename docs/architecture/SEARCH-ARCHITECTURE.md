@@ -303,6 +303,16 @@ directions (a *measured* 0.5 keeps its 0.5).
   (`0.6·inst_norm` / `0.5·connectivity`), never the unweighted term — which would let absence (0.75)
   outscore a measured 0.5 (0.65), the same defect pointed the other way.
 * **`min_confidence`**: an absent claim fails any floor above `0.0` and is kept by the `0.0` default.
+  `navigation.py`'s `confidenceMin` and the notification gate (`volunteer._eligible`) follow the same
+  rule — the gate is stricter, requiring a belief at **every** floor: you do not interrupt about a
+  claim you have no belief about.
+* **PRESENCE is a property of the value's operands, not of a column existing.** A belief exists when the
+  mirror (`n.confidence`) is set, **or** both coalesced operands are set and `α + β > 0`. So a stored
+  `(0, 0)` pair (Beta(0, 0) is not a distribution) and a HALF pair (`posterior_beta` with no α, whose
+  mean the `coalesce(…, 1.0)` default used to invent as 1/4) are both **absent**. Without this rule one
+  claim got four answers — `0.5` in the `ep` block, `None` in `recall_ranking`, `absent` in
+  `gaps_ranking`, and **`NaN`** from `graph_ranking`'s unguarded `α/(α+β)` division, serialised onto the
+  wire as a bare `NaN` token.
 * **The one stated exception**, recorded on #11702
   ([decision comment](https://github.com/daniel-ospina/tortoise/issues/11702#issuecomment-6781252637)):
   `sdk.get_confidence` / `TortoiseEP.compute_confidence` still answer the Beta(1,1) prior mean under an
