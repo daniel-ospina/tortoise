@@ -4658,7 +4658,7 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
     # as the per-migration rationale — selection AND the `_selection_relevant()`
     # keep-signal now come from the family rule, so they are fully redundant. The
     # completeness of the family is pinned by
-    # `test_every_record_migration_selects_core_and_both_readers`, whose own
+    # `test_every_record_migration_selects_core_and_its_readers`, whose own
     # mutation checks DO discriminate (disabling the structural rule, narrowing
     # the glob, or narrowing the selector's regex each red it). The doc paths
     # below are unaffected: nothing claims them structurally.
@@ -4784,7 +4784,7 @@ def test_the_semantic_id_key_migration_selects_every_reader_of_the_contract():
     # (`ci_selection.is_record_migration_path()`), so `core` is selected either
     # way. What pins this path is the assertions below, which red if the selector
     # stops claiming it; the family's completeness is pinned by
-    # `test_every_record_migration_selects_core_and_both_readers`.
+    # `test_every_record_migration_selects_core_and_its_readers`.
     changed = "supabase/migrations/20261027000001_record_semantic_id_key.sql"
 
     r = _sel([changed])
@@ -4800,7 +4800,7 @@ def test_the_semantic_id_key_migration_selects_every_reader_of_the_contract():
         assert reader in r["test_files"], (reader, r)
 
 
-def test_every_record_migration_selects_core_and_both_readers():
+def test_every_record_migration_selects_core_and_its_readers():
     # #10080 (category A — a no-op gate): the forward record migrations were
     # claimed by HAND-WRITTEN `CORE_ALSO` coverage (11 per-file entries plus the
     # shared `2026101200000` prefix = 12 entries for 16 members — a DATED ANCHOR,
@@ -4909,10 +4909,31 @@ def test_every_record_migration_selects_core_and_both_readers():
     assert any("test_ci_selection.py" in s for s in rm["slow_selected"]), rm
 
     # The family rule is scoped to the record family ON PURPOSE: a migration
-    # outside it keeps selecting no surface (51 of 81 `supabase/migrations/*.sql`
-    # do), so this fix does not silently widen to the whole migrations directory.
+    # outside it keeps selecting no surface, so this fix does not silently widen
+    # to the whole migrations directory. ⚠️ NOT asserted as a numerator/denominator:
+    # the count moves on ANY new `supabase/migrations/*.sql` — not just a record
+    # one — and nothing reds on the sentence, so a live count here rots into a
+    # false claim in the very file whose subject is claims that rot (measured
+    # 2026-11-10: 51 of 81 empty; re-derive it with a sweep, do not quote it).
     off_family = _sel(["supabase/migrations/20990101000000_unlisted.sql"])
     assert off_family["surfaces"] == [], off_family
+
+    # The scope limit is NOT the same statement as "only `*_record_*.sql` is
+    # claimed": the shared `supabase/migrations/2026101200000` CORE_ALSO PREFIX
+    # also claims `20261012000006_recover_team_key_expiry.sql`, which is OUTSIDE
+    # this family (`is_record_migration_path()` is False for it). That prefix is
+    # that file's ONLY claim, so it is the one entry in the enumeration above that
+    # must never be tidied away as "redundant" (#11728 review P2). Pinned here
+    # rather than left to the comment, because a comment rots and this reds.
+    neighbour = "supabase/migrations/20261012000006_recover_team_key_expiry.sql"
+    assert not cs.is_record_migration_path(neighbour), neighbour
+    rn = _sel([neighbour])
+    assert rn["surfaces"] == ["core"], (
+        f"{neighbour} lost its only claim — it is NOT a record migration, so the "
+        "family rule does not cover it and only the shared `2026101200000` "
+        "CORE_ALSO prefix entry does; removing that entry silently un-claims it",
+        rn,
+    )
 
 
 def test_the_tenancy_migration_selects_the_posture_pins():
