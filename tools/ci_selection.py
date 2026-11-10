@@ -1514,9 +1514,19 @@ SOURCE_PATTERNS = {
 # above): they are kept as the per-migration rationale, which the rule — one
 # regex — has no room to carry.
 RECORD_MIGRATION_DIR = "supabase/migrations/"
-# Deliberately the same family `pyproject.toml` ships as the migrate-apply include
-# (`*_record_*.sql`) — a file outside it is not applied by the shipped tooling
-# either, so claiming it here would be claiming a path the product ignores.
+# Deliberately the family the wheel SHIPS and the record reader PARSES. Three facts,
+# stated exactly because two earlier versions of this comment got them wrong:
+#   * `pyproject.toml`'s `[tool.setuptools.package-data]` carries `*_record_*.sql`
+#     — PACKAGE DATA (it ships the bytes; it is not an apply rule);
+#   * the reader does NOT glob: `record_projection._read_migrations()` iterates
+#     the hardcoded `RECORD_MIGRATIONS` tuple, and
+#     `tests/test_9231_record_migrations_trigger.py::test_every_record_migration_the_wheel_ships_is_named`
+#     is what pins that tuple EQUAL to the shipped family, so a new
+#     `*_record_*.sql` missing from the tuple is red in CI;
+#   * the deploy step runs `supabase db push --linked --include-all --yes`, which
+#     applies EVERY `supabase/migrations/*.sql` — so this rule is NOT a statement
+#     about what gets applied. A non-record migration is out of scope because its
+#     pins are not the ones asleep, not because it is unapplied.
 _RECORD_MIGRATION_RE = re.compile(r"^[^/]+_record_.*\.sql$")
 
 
