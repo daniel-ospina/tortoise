@@ -1183,9 +1183,12 @@ class TestAWaiterRefusalCannotPoisonTheNextCapture:
         i.e. passing over a budget of 120.
 
         The marker is asserted, not assumed: dropping `pytestmark` leaves the
-        ORDERING arm green (300 still exceeds 280) while silently handing this
-        file back to the shard's 300 s default, which is the flake this commit
+        ORDERING green (300 still exceeds 280) while silently handing this file
+        back to the shard's 300 s default, which is the flake this commit
         removes — so this block pins the declared value and the resolved one.
+
+        There is no separate `item_budget > bound` assert: it follows from the
+        resolved-equality and coverage arms, so it could never fail alone.
         """
         tc, _ = hosted
 
@@ -1240,16 +1243,18 @@ class TestAWaiterRefusalCannotPoisonTheNextCapture:
             f"transport bound ({_SUITE_WAIT_BOUND_S} s) PLUS the fixture's drain "
             f"of an abandoned worker ({_DRAIN_TIMEOUT_S} s). This is a LOWER "
             f"bound, not the item's total cost — the cold load and the retry "
-            f"capture are paid on top. A budget below it is the shard's 300 s "
-            f"default under another name, and the marker beside it is decorative")
-        assert item_budget > _SUITE_WAIT_BOUND_S, (
-            f"the suite bound ({_SUITE_WAIT_BOUND_S} s) is not strictly below "
-            f"the per-item budget in force ({item_budget:g} s), so pytest kills "
-            f"the item BEFORE the transport bound can refuse the capture — the "
-            f"legible 504 becomes `Failed: Timeout >{item_budget:g}s`, i.e. the "
-            f"bound was raised away instead of raised. Lower "
-            f"`_SUITE_WAIT_BOUND_S` (or raise this module's "
-            f"`pytest.mark.timeout` above it).")
+            f"capture are paid on top. It is also the arm that catches a "
+            f"transport bound raised to or past the item budget: with the budget "
+            f"pinned to {_ITEM_BUDGET_S} s above, a bound that high leaves nothing "
+            f"for the rest of the item, and pytest would kill it BEFORE the bound "
+            f"could refuse the capture (so the legible 504 becomes "
+            f"`Failed: Timeout`). A budget below it is the shard's 300 s default "
+            f"under another name, and the marker beside it is decorative")
+        # NOTE there is deliberately NO separate `item_budget > _SUITE_WAIT_BOUND_S`
+        # assert here: with `item_budget == _ITEM_BUDGET_S` pinned above and
+        # `_ITEM_BUDGET_S > bound + drain` asserted just here, the ordering follows
+        # from them, so such an assert could never fail on its own — an inert guard
+        # that only looks like coverage (review, round 3).
 
         # ── HALF 2: a held key must not refuse the next capture ────────
         sid = "s-7951-leak"
