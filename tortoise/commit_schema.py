@@ -701,9 +701,9 @@ class Mention(BaseModel):
     verdicts below are the HEAD's code, one per door:
 
     - hosted REST ``CreatePointRequest`` / ``hosted_api.create_point`` — **NOT
-      carried**. No ``mentions`` field on the model, and the route forwards
-      only ``confidence``/``authoredBy``/``credibility`` into
-      ``sdk.create_point``.
+      carried**. The model has no ``mentions`` field, and the route's
+      ``sdk.create_point`` call forwards ``content``/``kind``/``tags``/``dedup``
+      plus ``confidence``/``authoredBy``/``credibility`` — never the record.
     - self-host REST ``selfhost_api.CreatePointRequest`` / its ``create_point``
       route — **NOT carried**. A SEPARATE model and route, not an alias;
       ``#4032`` frames the pair as parity mirrors, so a hosted-only addition
@@ -729,11 +729,14 @@ class Mention(BaseModel):
       its path (measured: neutering it stores nothing, live and replay). Pinned
       by ``tests/test_mention_write_11239.py::test_the_event_api_door_carries_a_mention_to_the_point``.
 
-    Six doors, FOUR of them carried (the two ``_execute_commit_writes`` legs
-    count as one door): ``_execute_commit_writes``, the capture seam,
-    ``update_entity`` and ``EventAPI.add_point``. Every carried leg is
-    **stored, never advertised**, so a
-    graph read after a capture holds the claim AND the mentions it used.
+    ⛔ NO ARITHMETIC HERE ON PURPOSE — three rounds of this paragraph shipped a
+    count that its own bullet list refuted. Read the verdicts above: the doors
+    marked **CARRIED** are the carrier set, and the SDK Point doors
+    (``sdk.create_point`` / ``sdk.update_point``) carry a caller-supplied value
+    too — they are listed under "which call is load-bearing" in
+    ``projection/entities.py`` rather than as payload doors. Every carried leg is
+    **stored, never advertised**, so a graph read after a capture holds the claim
+    AND the mentions it used.
 
     ⛔ Still NOT part of ``sdk._CAPTURE_PASSTHROUGH_PROPS``: that set is the
     public capture **RESPONSE** surface (``#2949`` response parity), and widening
@@ -818,8 +821,10 @@ class Point(BaseModel):
     # (`sdk._CAPTURE_PASSTHROUGH_PROPS`) — it is a writer-produced record, not a
     # client field. It IS persisted on the node since #11239:
     # `projection.entities.encode_json_record_props` stores it as one compact
-    # JSON scalar, and FOUR of the SIX write doors carry it (see `Mention`'s
-    # docstring for the enumeration and one verdict per door).
+    # JSON scalar, and the write doors that carry it are enumerated with one
+    # verdict each in `Mention`'s docstring (the carrier set is the list of
+    # doors marked CARRIED there — deliberately no count, which three rounds
+    # proved cannot be kept true).
     mentions: list[Mention] = Field(default_factory=list)
 
     @model_validator(mode="after")

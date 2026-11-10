@@ -83,8 +83,10 @@ import json
 
 import pytest
 
-pytest.importorskip("tortoise.sdk")
-
+# ⛔ NOT `pytest.importorskip("tortoise.sdk")` (review P3 on PR #11795): that
+# turns an unimportable SDK into FOURTEEN skips, and this file is the only
+# behavioural pin the mention record has. Its declared sibling
+# (`test_3817_tags_rebuild_durability.py`) imports directly and fails loudly.
 from tortoise.api import EventAPI, provenance
 from tortoise.log import EventLog
 from tortoise.sdk import TortoiseSDK
@@ -120,12 +122,27 @@ def _node_prop(sdk, pid: str):
     return rows[0][0] if rows else None
 
 
+#: DM1's declared record shape (`05-plan.md` §4). The encode writes
+#: `surface`/`span_start`/`span_end` always and `kind_guess` only when the model
+#: carries one, so the CLOSED set below is the narrowing the docstring depends on
+#: (`entities.encode_json_record_props` says the docstring is the only guard).
+_DM1_KEYS = {"surface", "span_start", "span_end", "kind_guess"}
+
+
 def _assert_record_is_the_payload_surfaces(prop) -> None:
-    """The stored scalar is DM1's four-field row, parsed — not a blob."""
+    """The stored scalar is DM1's declared row, parsed — not a blob."""
     assert isinstance(prop, str), (
-        "the node must hold ONE compact JSON scalar: the engine refuses an "
-        f"array containing a map (`_is_persistable_prop_value`); got {prop!r}")
+        "the node must hold ONE compact JSON scalar: no path stores an array "
+        f"containing a map; got {prop!r}")
     records = json.loads(prop)
+    for rec in records:
+        assert set(rec) <= _DM1_KEYS, (
+            "the encoder wrote a field DM1 does NOT declare onto the node: "
+            f"{sorted(set(rec) - _DM1_KEYS)} — promoting a payload-only field "
+            "(claim_ref / quote / span_source / rule_id) is a DM1 reopen in "
+            "DM1's own home, not an edit here")
+        assert {"surface", "span_start", "span_end"} <= set(rec), (
+            f"a stored record is missing a DM1 field: {sorted(rec)}")
     assert [r["surface"] for r in records] == ["it", "the problem"], records
     assert records[0]["span_start"] == 0 and records[0]["span_end"] == 2, records
 

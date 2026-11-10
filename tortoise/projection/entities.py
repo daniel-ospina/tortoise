@@ -1333,12 +1333,17 @@ def stated_json_record_prop(payload, key: str) -> tuple[str, object]:
         consulting it would misclassify the primary shape as "skip" (measured,
         review P1 on PR #11795). On a MERGE'd node a "skip" value SURVIVES,
         untouched;
-      * ``"null"`` — the payload states a value the filter ACCEPTS but the
-        store cannot hold EXACTLY (#7369 nulls it before dispatch — a NUL /
-        lone-surrogate string), so the writer dispatches a null and the property
-        is REMOVED. Distinct from ``"skip"`` on purpose: the provenance fold
-        spells the same split, and conflating them is a live/replay divergence
-        in the direction that resurrects state.
+      * ``"null"`` — the payload states a value the store cannot hold EXACTLY
+        (#7369 nulls it before dispatch — measured with an embedded NUL string:
+        the writer dispatches a null and the property is REMOVED). Distinct from
+        ``"skip"`` on purpose: the provenance fold spells the same split, and
+        conflating them is a live/replay divergence in the direction that
+        resurrects state. ⚠️ A LONE-SURROGATE string is a different failure and is
+        NOT this arm on the live path: it fails the journal append (invalid
+        utf-8) and the write raises ``WriteNotLandedError`` instead of dispatching
+        anything (measured) — the disposition still describes what a JOURNAL
+        carrying that value folds to, which is why the rule is stated over the
+        payload and not over one door's outcome.
 
     Written for `_apply_one`'s two arms (`#11239`): the creation arm carries a
     ``"skip"`` value forward (the graph MERGE keeps it) and drops a ``"null"``

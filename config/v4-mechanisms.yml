@@ -1594,6 +1594,7 @@ mechanisms:
       - tortoise/consistency.py
     tests:
       - tests/test_referentiality_11021.py
+      - tests/test_mention_write_11239.py
     symbols:
       - Mention
       - encode_json_record_props

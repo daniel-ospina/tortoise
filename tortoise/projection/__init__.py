@@ -15512,12 +15512,13 @@ class FalkorProjection(
                         # and diverge from the ``apply()`` oracle. The recreate
                         # leg suppresses the REVISION half of a
                         # delete→recreate. It does NOT clear a stale value: the
-                        # pass-1a recreate wipe above covers only
+                        # pass-1a recreate wipe above clears
                         # embedding/content_hash/embedding_verbatim/
-                        # sourceVersionTransit, so an open-set prop the
-                        # re-creation omits survives from the dead incarnation
-                        # (pre-existing, general to every open-set prop — see
-                        # the residual note on the PR; not a #5048 regression).
+                        # sourceVersionTransit/extractedFromAll/tags/mentions/
+                        # eventId/source_session/source_harness/ingested_at, and
+                        # every OTHER open-set prop a re-creation omits still
+                        # survives from the dead incarnation (pre-existing,
+                        # general — not a #5048 regression).
                         skip_mitigation_strength = (
                             last_recreate_seq_by_source.get(key, -1) > seq
                             or last_ms_write_by_source.get(key, -1) > seq)
