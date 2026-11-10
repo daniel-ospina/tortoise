@@ -1284,18 +1284,29 @@ def test_a_raw_custom_session_key_cannot_split_the_seed_from_the_merge_11382():
 
     ``seeded_sessions`` normalises what it emits; before this PR
     ``reinjection_merge_order`` keyed the pool with the raw custom key, so its
-    ``last_rank`` map never matched a normalised seed and the group fell to
-    the defensive TAIL. MEASURED on the pre-fix merge (pool
-    ``['p1','p2','p3']``, sessions ``'  s1  '`` and ``'s2'``, group for
-    ``s1``):
+    ``last_rank`` map never matched a normalised seed. MEASURED, three trees,
+    same fixture (pool ``['p1'('  s1  '), 'p2'('s2'), 'p3'('s2')]``, group for
+    ``s1`` = ``['t1','t2']``, ``seed_order`` from ``seeded_sessions``):
 
-        merged -> ['p1', 'p2', 'p3', 't1', 't2']     (group AFTER s2's hits)
-        wanted -> ['p1', 't1', 't2', 'p2', 'p3']     (after s1's last base rank)
+        origin/main                      -> ['p1','p2','p3']
+                                           (group DROPPED: the raw seed key
+                                           matches neither ``order`` nor
+                                           ``last_rank``, so ``groups`` is
+                                           empty and the merge short-circuits)
+        one-sided (seeds normalised,
+          merge raw)                     -> ['p1','p2','p3','t1','t2']
+                                           (group in the defensive TAIL —
+                                           the shape this test exists for)
+        both-sided (this PR)             -> ['p1','t1','p2','p3','t2']
+                                           (= the assertion below; the guard
+                                           still pushes ``t2`` past its window
+                                           cap, which is the guard working,
+                                           not the seed/merge split)
 
-    That is reader-visible: the reader consumes a PREFIX of the pool, so a
-    tail-appended group is context the reader can lose. No in-repo caller
-    passes ``session_key=`` to this pair today (measured: only ``dedup_pool``
-    takes a custom key), so this pins the GUARANTEE rather than a live lane.
+    The tail is reader-visible: the reader consumes a PREFIX of the pool, so
+    a tail-appended group is context it can lose. No in-repo caller passes
+    ``session_key=`` to this pair today (measured: only ``dedup_pool`` takes a
+    custom key), so this pins the GUARANTEE rather than a live lane.
     """
     def raw_key(hit: dict) -> str:
         return hit.get("session_id") or ""

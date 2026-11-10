@@ -2482,7 +2482,8 @@ def _session_admission_key(
     (``session_id: 5`` used to key the int ``5``, and THREE callers then
     raised ``AttributeError`` on ``.startswith``: ``seeded_sessions``,
     ``coverage_loop.coverage_gap`` (``coverage_loop.py``:488) and
-    ``reader_window_displacement`` (``session_reinjection.py``:843-845); the
+    ``reader_window_displacement`` (``session_reinjection.py``:852 and
+    ``:854``); the
     pool leg now returns ``""`` for a non-``str``, i.e. falls through to its
     index / wire / per-hit leg, so those three callers get a ``str`` — the
     untyped shape stops being an identity and is no longer a raising seam —
