@@ -4267,6 +4267,16 @@ DENIAL_MARKERS: tuple[str, ...] = (
     "is exempt",
     "is exempted",
     "an exemption",
+    # ⚠️ `the exemption` is LIVE as of the `#11665` clause in the extractor's §3
+    # (*"The exemption is about CONTENT, not the declaration site"*): a TOPIC use —
+    # the noun naming the exempt class, not a sentence calling a counted writer an
+    # exemption. ⛔ Its failure direction is OVER-red, never a miss: this tuple is
+    # consulted only for a sentence the enclosing leg has already keyed on a NAMED
+    # census writer, and each occurrence is then judged per-occurrence
+    # (`_denies_the_class`, `#11714`) — so a sentence that names a counted writer AND
+    # carries the phrase in the affirmative DOES red, which is why the topic use is
+    # tolerable only where it is not a claim about a writer. Its absence declaration
+    # was deleted — why is recorded at `MARKERS_ABSENT_BY_DESIGN` below.
     "the exemption",
     "carries nothing",
     "writes nothing",
