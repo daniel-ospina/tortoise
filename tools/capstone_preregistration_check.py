@@ -10,8 +10,11 @@ It verifies six things, and it fails on each of them for a specific reason:
 
 1. **Every criteria row carries a metric, a denominator AND a numeric threshold.** A row with a
    placeholder (*"to be decided"*, *"TBD"*, an em dash) is a row that will be decided later — which is
-   the same failure as no registration at all. E1–E6 must each be present (E2 may be split into
-   sub-rows, e.g. ``E2a``/``E2b``, and every sub-row must itself be complete). Only E2 takes
+   the same failure as no registration at all. The rows THIS bundle's pins require must each be
+   present — the core ``E1``–``E5`` set, plus ``E6`` for the capstone (see
+   ``required_criteria_for``; the set is per-bundle because the tool is shared) — and
+   ``E2`` may be split into
+   sub-rows, e.g. ``E2a``/``E2b``, and every sub-row must itself be complete. Only E2 takes
    sub-rows: ``E1b`` is E1's anti-gaming CONTROL, so a table carrying ``E1b`` without an ``E1`` row
    is the epic's central criterion deleted behind its guard (#9075 review r3 P2). ``E6`` was added to
    this set by ``#11673`` on the owner's 2026-11-05 ruling (``#7949`` comment ``6664402530``); it is
@@ -618,6 +621,21 @@ def _plain(cell: str) -> str:
 
 def is_placeholder(cell: str) -> bool:
     return _plain(cell).casefold() in PLACEHOLDER_CELLS
+
+
+#: A criterion row's FAMILY — the SLOT it names, whatever the row calls itself. `E6`, `e6`, `E6a`
+#: and `E6 (declared)` all name slot `e6`; a sub-row suffix (`E1b`, `E2a`) collapses to its parent
+#: on purpose, because the refusal below is about the slot being DEFINED while the gate never
+#: demands it, not about the row's label. ⛔ #11688 review, issue 1: the exact-membership test this
+#: replaces was defeated by spelling the row `E6a` — one character, and the guard was inert.
+_CRITERION_FAMILY = re.compile(r"^([a-z]\d+)", re.IGNORECASE)
+
+
+def criterion_family(row_id: str) -> str:
+    """The slot a criterion row names: markdown-stripped, casefolded, sub-row suffix removed."""
+    plain = _plain(row_id).casefold()
+    match = _CRITERION_FAMILY.match(plain)
+    return match.group(1) if match else plain
 
 
 def parse_criteria_rows(text: str) -> list[dict[str, str]]:
@@ -4191,9 +4209,17 @@ def check_pins(pins: dict, derived: dict,
         # …and the reverse direction: a bundle that DEFINES a required id and does not require it.
         # This is the capstone's own defect shape — `E6` described in §3.1 while the gate demanded
         # only E1–E5 — so a table carrying `E6` under a core-only declaration is refused.
+        #
+        # ⛔ THE MATCH IS ON THE ROW'S SLOT, NOT ON ITS SPELLING (#11688 review, issue 1). An exact
+        # `r["id"] in {"E6"}` test was reachable around by writing the row `E6a`/`e6`/`E6 (declared)`
+        # — and `E6a` is this record's OWN sub-row convention, not a contrived spelling. Nothing
+        # upstream normalizes an id (`parse_criteria_rows` takes the cell verbatim), so the guard
+        # has to do it here.
+        beyond_core = {
+            criterion_family(c) for c in set(REQUIRED_CRITERIA) - set(CORE_REQUIRED_CRITERIA)
+        }
         defined_beyond_core = sorted(
-            r["id"] for r in rows
-            if r["id"] in set(REQUIRED_CRITERIA) - set(CORE_REQUIRED_CRITERIA)
+            r["id"] for r in rows if criterion_family(r["id"]) in beyond_core
         )
         if defined_beyond_core:
             failures.append(

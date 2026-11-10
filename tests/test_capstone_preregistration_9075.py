@@ -7429,6 +7429,34 @@ def test_a_table_that_DEFINES_the_sixth_row_without_REQUIRING_it_is_refused():
     assert not any("the criteria table carries" in f for f in failures), failures
 
 
+def test_the_define_without_require_refusal_is_NOT_defeated_by_the_row_ID_spelling():
+    """The reverse-shape refusal binds on the SLOT, not on how the row spells itself (#11688 r1).
+
+    The shipped arm compared `r["id"] in {"E6"}` exactly, and nothing upstream normalizes a
+    criterion id — `parse_criteria_rows` takes the cell verbatim and `_plain` strips only markdown
+    emphasis. So a core-declaring bundle that wrote its sixth row as `E6a` (this record's OWN
+    sub-row convention, cf. `E2a`/`E2b`), `e6`, or `E6 (declared)` was DEFINED-without-REQUIRED and
+    passed: the guard was inert for one character of edit. Non-vacuity is the last leg — the same
+    declaration over a table with no sixth row is still not refused, so the arm is not simply
+    always-firing.
+    """
+    pins = check.parse_pins(PREREG.read_text())
+    rows = check.parse_criteria_rows(PREREG.read_text())
+    derived = check.derive_corpus_facts(pins)
+    pins["required_criteria_rows"] = list(check.CORE_REQUIRED_CRITERIA)
+    for spelling in ("E6", "E6a", "e6", "E6 (declared)", "**E6**"):
+        respelled = [dict(r) for r in rows]
+        for row in respelled:
+            if row["id"] == "E6":
+                row["id"] = spelling
+        assert check.criterion_family(spelling) == "e6", spelling
+        failures = check.check_pins(pins, derived, respelled)
+        assert any("the criteria table carries" in f for f in failures), (spelling, failures)
+    # non-vacuity: the refusal is about the ROW, not about the declaration being core
+    failures = check.check_pins(pins, derived, [r for r in rows if r["id"] != "E6"])
+    assert not any("the criteria table carries" in f for f in failures), failures
+
+
 def test_the_capstone_is_refused_when_the_sixth_row_is_absent():
     """The completeness arm, on a synthetic body: the row's absence is a finding, not a skip."""
     body = FULL_ROWS.replace(

@@ -846,8 +846,10 @@ def test_a_green_table_with_no_frozen_prereg_reds_even_when_the_sha_is_absent():
     """
     rec = _record()
     _green(rec)
-    # the sixth row, for the same reason as the #9089 status arm above: V9 is over
-    # E1–E6 (#11673), so a five-row fixture can no longer prove "the rows ARE green".
+    # the sixth row because V5 fires PER ROW: this test asserts one V5 per row on a green table,
+    # and #11673 registered `E6`, so the fixture carries six. (It is NOT here because V9 reads
+    # E1–E6 — V9 runs over the five-row `CRITERIA`; see the sibling arm asserting `"E6" not in
+    # cvc.CRITERIA`, and #7949's own close condition, which is the five-row sentence.)
     rec["rows"].append(dict(rec["rows"][0], criterion="E6"))
     for row in rec["rows"]:
         row.update(verdict="GREEN", evidence_kind="measurement",
