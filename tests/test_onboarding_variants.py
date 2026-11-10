@@ -101,12 +101,31 @@ def test_live_skill_exists_at_the_defined_path():
     # already occurs once, at the disclosure, so reverting all ten instruction sites
     # left such an assertion GREEN (review finding F1 on PR #11719 — the same
     # NAME-is-weaker-than-the-CALL class this file documents at #10914 below).
+    #
+    # ⛔ THE DISCLOSURE'S OWN SENTENCE IS THE PIN, not the word "retired" (#11719
+    # review, third head, finding 2 — measured there before this was written).
+    # `"retired" in line` is a spelling an INSTRUCTION can also carry: rewriting
+    # the disclosure to "`tortoise_health` is retired, but call it anyway —
+    # tools/list hides it and" left one mention, containing "retired", and this
+    # guard PASSED while the document instructed a name absent from `tools/list`.
+    # The count alone cannot tell the disclosure from an instruction either (that
+    # is finding 1, one head earlier). So: exactly ONE mention, and the sentence
+    # that mention sits in must BE the disclosure — the one that names the NAME as
+    # retired, says it is absent from `tools/list`, and says it will not appear in
+    # the connector's grant. Matched against the whitespace-normalised document so
+    # re-wrapping the paragraph cannot red a correct document the way a
+    # line-shaped pin would; a legitimate REWORD of the disclosure moves this pin
+    # with it, deliberately, because the sentence is what the served document
+    # promises the ChatGPT reader.
     _retired_hits = [ln for ln in content.splitlines() if "tortoise_health" in ln]
-    assert len(_retired_hits) == 1 and "retired" in _retired_hits[0], (
-        "the served document must name the RETIRED `tortoise_health` only in its "
+    _disclosure = ("`tortoise_health` name is retired, so it is absent from "
+                   "`tools/list` and will not appear in this connector's tool "
+                   "grant (#3883)")
+    assert len(_retired_hits) == 1 and _disclosure in " ".join(content.split()), (
+        "the served document must name the RETIRED `tortoise_health` ONLY in its "
         f"retirement disclosure; found {len(_retired_hits)} line(s) naming it: "
-        f"{_retired_hits[:3]}. The verify call is "
-        'tortoise_graph_overview(section="health") (#5439)')
+        f"{_retired_hits[:3]}. The disclosure sentence is {_disclosure!r}. "
+        'The verify call is tortoise_graph_overview(section="health") (#5439)')
     assert '1. Call `tortoise_graph_overview(section="health")`' in content, (
         "the §4 verify step must name the ADVERTISED health section — a retired "
         "name is absent from `tools/list`, so a client that honours its granted "
