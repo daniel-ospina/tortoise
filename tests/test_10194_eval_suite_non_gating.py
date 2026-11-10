@@ -104,9 +104,12 @@ _TIER2_CHANGES = ("tests/eval/ask/test_ask_corpus.py",
                   "tortoise/embeddings.py")
 
 
-#: The leg KINDS, which stay LITERAL. A producer added to the selector later is
-#: not walked at all unless it is added to `_gating_sets()` below, and that
-#: silent omission is exactly what `_expected_legs()` must make loud.
+#: The leg KINDS, which stay LITERAL — the DECLARED side of the equality, so a
+#: kind `_gating_sets()` starts producing without a matching entry here reds.
+#: ⚠️ The reverse case has no guard, and this comment used to claim the opposite:
+#: a producer the selector gains that `_gating_sets()` never reads produces no
+#: leg on EITHER side, so nothing here can see it. Editing that map's body is
+#: what a lane adding a producer has to remember.
 _LEG_KINDS = frozenset({"fast_pool", "slow", "env_broken", "carve_out",
                         "push slow_selected"})
 
@@ -134,16 +137,24 @@ def _expected_legs(manifest: dict) -> set[str]:
     equality below still fails, and it now names the declared count rather than a
     stale one. Label SPELLING has its own pin
     (`tests/test_ci_selection.py::test_shard_labels_are_a_superset_when_s_changes`).
-    A producer leg that is added or renamed without landing in `_gating_sets()`
-    reads as a pass over a set nobody walked, which is what this pin refuses; the
-    leg KINDS stay literal (`_LEG_KINDS`) for exactly that reason.
+    What this pin refuses is the DECLARED side, and only that: a leg
+    `_gating_sets()` produces that is not declared here (a gating set added or
+    moved below without `_LEG_KINDS`/this derivation following) reds, and the
+    message names both sides. ⚠️ It cannot refuse the other direction — a
+    producer the selector gains that `_gating_sets()` never reads appears on
+    neither side, so it still reads as a pass over a set nobody walked; an
+    earlier version of this docstring said this pin refused THAT. It does not,
+    and neither does `leg_coverage_issues()` (it checks overlap/cover over the
+    sets the producers DO emit): the guard is a lane editing `_gating_sets()`'s
+    body. The leg KINDS stay literal (`_LEG_KINDS`) so the declared side cannot
+    drift along with the map.
 
-    The count is `main`'s, never this branch's: the two `core` rows #11642 added
-    move no shard count at all (measured over `push_legs` — strip both and the
-    names are still `a`..`k`; only the file count moves, and that number decays
-    with every unrelated registration, so the claim here is the NAMES, never the
-    total). Nor is it a pool-size threshold — `fast_shard_count` reads the
-    manifest's `fast_shards` literal, and `split_fast_gate` says as much ("N comes
+    The count is the manifest's, never a second copy in this file: the two
+    `core` rows #11642 added move no shard count at all (measured over
+    `push_legs` — strip both and the names are still `a`..`k`; only the file
+    count moves, and that number decays with every unrelated registration, so
+    the claim here is the NAMES, never the total). Nor is it a pool-size
+    threshold — `fast_shard_count` reads the manifest's `fast_shards` literal, and `split_fast_gate` says as much ("N comes
     from the manifest's `fast_shards` … NOT capped by the file count"), so a lane
     that unregisters files must not drop a label.
     """
@@ -167,7 +178,9 @@ def _gating_sets(manifest: dict) -> dict[str, list[str]]:
     selection for a change in each relevant surface, and the full selection. A
     set added to the selector later is covered only if it is added here too —
     which is why `_expected_legs()` above asserts this map's leg KIND list, so a
-    silent omission is impossible to mistake for a pass.
+    KIND missing there reds. ⚠️ A set omitted from THIS map is invisible to that
+    assertion (both sides are built from it) and nothing else refuses it — see
+    `_expected_legs()`.
     """
     legs = cs.push_legs(manifest)
     out: dict[str, set[str]] = {
