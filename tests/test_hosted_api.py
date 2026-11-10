@@ -224,9 +224,19 @@ def _patch_tortoise_sdk_init(db_path: str):
 
 
 def _restore_tortoise_sdk_init(original_init):
-    """Restore original TortoiseSDK.__init__."""
+    """Restore original TortoiseSDK.__init__ AND clear the forced-path record."""
+    global _FORCED_DB_PATH
     import tortoise.hosted_api as ha_mod
 
+    # #2273 review finding 1, second half: `_FORCED_DB_PATH` must not outlive
+    # the fixture that wrote it. The pin guard's ``assert forced`` says "the
+    # guard must run with the fixture ACTIVE", and that sentence is only true
+    # if the record is cleared on teardown — otherwise a PREVIOUS test's
+    # (already-deleted) temp DB satisfies the arm and the guard compares the
+    # pin against a dead path instead of rejecting a fixture-less run. Same
+    # class as the tautology this PR replaced: an assertion that cannot fail
+    # for the reason it claims.
+    _FORCED_DB_PATH = None
     ha_mod.TortoiseSDK.__init__ = original_init
     # #1502-class: evict the embedded-fallback anchor created DURING this
     # test (e.g. by the registry-mode rename helper's _make_sdk). Without
@@ -5406,6 +5416,31 @@ def test_client_pins_the_db_path_its_anchor_reads(client):
     missing the pin.
     """
     _assert_fixture_pins_anchor_db_path("client")
+
+
+def test_the_forced_path_record_does_not_outlive_its_fixture():
+    """#2273 review finding 1: `assert forced` must mean "a fixture is ACTIVE".
+
+    ``_FORCED_DB_PATH`` is written by :func:`_patch_tortoise_sdk_init` and read
+    by :func:`_assert_fixture_pins_anchor_db_path`. If teardown does not clear
+    it, the arm is satisfied by a PREVIOUS test's temp DB — which is already
+    deleted — so a guard run with no fixture active compares the pin against a
+    dead path and reports a wrong-pin failure instead of the real one. The
+    record is per-fixture-activation state, so teardown must reset it.
+
+    Ordering-independent by construction: it drives the real patch/restore pair
+    rather than relying on another test having leaked a value.
+    """
+    orig_init = _patch_tortoise_sdk_init("/tmp/tt_not_a_real_db/test.db")
+    assert _FORCED_DB_PATH == "/tmp/tt_not_a_real_db/test.db", (
+        "the patch must record the path it forces — otherwise the pin guard at "
+        "_assert_fixture_pins_anchor_db_path has nothing to compare against")
+    _restore_tortoise_sdk_init(orig_init)
+    assert _FORCED_DB_PATH is None, (
+        f"teardown must clear the recorded forced path (still "
+        f"{_FORCED_DB_PATH!r}): a stale record makes `assert forced` pass for a "
+        "run with NO fixture active, so the guard cannot tell an active "
+        "fixture from a dead one (#2273 review finding 1)")
 
 
 def test_register_journals_minted_team_graph(tmp_path, monkeypatch):
