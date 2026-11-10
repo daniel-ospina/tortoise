@@ -1350,6 +1350,14 @@ def test_the_mention_record_reaches_the_claim_point_and_says_so():
     assert "mentions" not in selfhost_api.CreatePointRequest.model_fields, (
         "the self-host REST door now accepts `mentions` — #4032's parity "
         "mirror must move with the hosted pair, and this field is neither's")
+    # …and pin the ROUTE's own write, not only its request model (review P3 on
+    # PR #11795: the pre-#11239 row asserted exactly this and the rewrite
+    # dropped it, so a `body.mentions` kwarg could be threaded into the route's
+    # `sdk.create_point` call while both model assertions stayed green).
+    assert "mentions" not in inspect.getsource(selfhost_api.create_point), (
+        "the self-host create route now forwards `mentions` into its "
+        "`sdk.create_point` call: the field is writer-produced, and a door that "
+        "reads it off the request body advertises it on the public REST surface")
 
     # …and both docstrings NAME the doors, so a reader can check the claim.
     for doc in (Mention.__doc__ or "", route_mentions.__doc__ or ""):

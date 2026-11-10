@@ -1162,9 +1162,26 @@ _POINT_FLATTEN_LIST_PROPS: frozenset = frozenset({"search_keys", "quote"})
 #: Why an encoded SCALAR at all (and not the declared list the payload carries):
 #: `_persist_extra_props` rejects any array containing a dict at ANY depth
 #: (`_is_persistable_prop_value`), and `_POINT_LIST_PROPS` is deliberately
-#: EMPTY, so a list of mention records never reaches the node. The encode runs
-#: on the PAYLOAD inside `_upsert_point_props` — the shared door every write
-#: reaches — so the live write and every rebuild replay derive the same bytes.
+#: EMPTY, so a list of mention records never reaches the node.
+#:
+#: ⛔ WHICH CALL IS LOAD-BEARING, MEASURED (review P2, PR #11795) — the
+#: placement is deliberately stated here because the prose previously inverted
+#: it. The LIVE doors call `encode_json_record_props` THEMSELVES: `create_point`
+#: (`sdk.py`, before the write and before its dedup fold forwards the props to
+#: `update_point`), `update_point`, and `_update_entity`. Those calls are what
+#: make the record reach the node: commenting `create_point`'s out leaves
+#: `p.mentions` UNSET. `_upsert_point_props` — the replay door — calls it too,
+#: and that call is **DEFENCE-IN-DEPTH, not the load-bearing one**: a journal
+#: written by these doors already carries the canonical STRING (the helper is a
+#: no-op for a `str`, which is also what lets `create_point`'s dedup fold hand
+#: the encoded value straight to `update_point`), so deleting the replay call
+#: changes no test at all. It has work to do only on a NON-canonical record — a
+#: hand-written journal, or an older emitter's snapshot — which it normalises to
+#: the same scalar instead of handing `_persist_extra_props` an undeclared array
+#: of dicts that it DENIES SILENTLY. That arm is pinned behaviourally by
+#: `tests/test_mention_write_11239.py::test_the_replay_door_normalises_a_non_canonical_record`.
+#: The parity claim (#330) therefore rests on the LIVE calls emitting a pure
+#: function of the payload, not on the replay door re-deriving it.
 _POINT_JSON_RECORD_PROPS: frozenset = frozenset({"mentions"})
 
 

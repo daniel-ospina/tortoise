@@ -12133,9 +12133,13 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     deliberately NOT in ``sdk._CAPTURE_PASSTHROUGH_ORDER``, ``#2949``'s public
     response surface). The node stores ONE compact JSON scalar
     (``projection.entities.encode_json_record_props``); the payload keeps the
-    record shape. ``stats["mentions_recorded"]`` is still a PRODUCER measurement: a record the
-    write discards (a pre-#11239 door, or an EVENT-only carrier) is counted as
-    lost, never counted as stored. There are also FOUR keys carrying a record,
+    record shape. ``stats["mentions_recorded"]`` counts the records this
+    producer BUILT — ``len(_records)`` at the return below. It is not a store
+    counter and there is no loss counter beside it: a record a door or an
+    EVENT-only carrier does not carry is INVISIBLE to this number rather than
+    subtracted from it, so the value is "records produced", never "records
+    held" (review P3 on PR #11795 — the earlier text claimed an accounting the
+    code does not make, in both directions). There are also FOUR keys carrying a record,
     and the two producer lists
     (``result["embed_list"]["mentions"]``, ``result["s2_embed"]["mentions"]``)
     are the model's RAW channel on the fail-open path — see

@@ -174,3 +174,54 @@ def test_a_recommit_with_no_mentions_does_not_clear_the_stored_record(env):
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _node_prop(sdk, pid) == stored, (
         "live and replay disagree after a no-mention re-commit")
+
+
+def test_the_replay_door_normalises_a_non_canonical_record(env):
+    """The REPLAY-door encode (`_upsert_point_props`) is pinned HERE, behaviourally.
+
+    Review P2 on PR #11795 measured the placement question the honest way round:
+    deleting the replay-door call changed no test, while deleting
+    `create_point`'s changed the node. That is expected — a journal written by
+    the live doors already carries the canonical STRING and the helper is a
+    no-op for a `str`. So what is the replay call for? It is the only arm that
+    can see a NON-canonical record: a hand-written journal, or an older
+    emitter's snapshot, still in the PAYLOAD spelling (a list of dicts).
+    `_persist_extra_props` DENIES an undeclared array of dicts — silently — so
+    without the replay encode that record vanishes on replay while the live
+    write had stored it: the same live/replay divergence, in the direction that
+    loses memory.
+
+    Rewriting the journal to the list spelling is the only way to exercise that
+    arm through a real `rebuild_all` rather than through source text.
+    """
+    sdk, events = env
+    pid = sdk.create_point("statement", CONTENT, dedup=True,
+                           status="draft", mentions=MENTIONS)["id"]
+    live = _node_prop(sdk, pid)
+    assert live is not None, "the live create did not store the record"
+
+    log = events / "events.jsonl"
+    rows = [json.loads(line) for line in log.read_text().splitlines()
+            if line.strip()]
+    rewritten = 0
+    for row in rows:
+        point = row.get("point") or {}
+        if point.get("id") == pid and isinstance(point.get("mentions"), str):
+            point["mentions"] = json.loads(point["mentions"])
+            rewritten += 1
+    assert rewritten == 1, (
+        "the journaled snapshot did not carry `mentions` as the canonical "
+        "scalar — this row can only prove the normalisation arm if it starts "
+        "from the encoded form")
+    log.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    sdk._get_proj().rebuild_all(str(log.parent), confirm_destructive=True)
+    rebuilt = _node_prop(sdk, pid)
+    assert rebuilt is not None, (
+        "the replay door DROPPED a non-canonical (list-shaped) record instead "
+        "of normalising it: `_persist_extra_props` denies an undeclared array "
+        "of dicts silently, so the record dies on replay while the live write "
+        "stored it")
+    assert rebuilt == live, (
+        "the replay door normalised the record to DIFFERENT bytes than the "
+        "live write stored for the same payload (#330)")

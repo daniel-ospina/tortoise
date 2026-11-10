@@ -13382,13 +13382,16 @@ class TortoiseSDK:
         _flatten_search_keys_prop(props)
         # #11239 (DM1's home): `mentions` is a list of RECORD dicts and the
         # engine cannot hold an array of maps, so the payload form is encoded to
-        # ONE compact JSON scalar here — the SAME helper `_upsert_point_props`
-        # applies on the replay door, called from this one so the live write and
-        # every rebuild derive byte-identical values (#330 parity; the #8006
-        # lesson is that a rule living on only one of the two doors leaves the
-        # other storing NOTHING). Without it the live CREATE would hand the
-        # engine a list of maps and the write would be refused or silently
-        # reshaped — the silent-drop class #11239 exists to end.
+        # ONE compact JSON scalar here. ⛔ THIS call is the LOAD-BEARING one, and
+        # that is measured rather than assumed (review P2, PR #11795):
+        # commenting it out leaves `p.mentions` UNSET, while deleting the replay
+        # door's call (`_upsert_point_props`) changes no test — because a journal
+        # written by this door already carries the canonical STRING and the
+        # helper is a no-op for a `str`. Without it the live CREATE would hand
+        # the engine a list of maps and the write would be refused or silently
+        # reshaped — the silent-drop class #11239 exists to end. Encoding here
+        # ALSO precedes the dedup fold's `self.update_point(pid, **props)`, so
+        # that fold forwards the encoded value rather than a list.
         _encode_json_record_props(props)
         # #10122: a `name` the index does not hold is a stored-but-unfindable
         # identifier — advise here, at the door that accepted it (after the
