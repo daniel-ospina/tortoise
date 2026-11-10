@@ -214,8 +214,12 @@ branch — check before assuming it is still needed.)
 Read `enforcement.relations[predicate]` through the existing seam (§2.1). ⚠️ **Fix in the same change:**
 `resolve_enforcement` (`enforcement.py:56`) iterates `reg.packs.values()` — the **whole catalog** — and takes
 the **max** severity, so one pack's `block` would block another pack's unrelated edge on the same predicate.
-Resolve over the **installed** set. **This bug is live today** for the two `kind=` callers
-(`projection/entities.py:341`, `kind_classifier.py:364`); the label leg never reaches this seam —
+Resolve over the **installed** set. Both arms are affected, differently: the max-severity arm
+(`enforcement.py:92-108`) scans `reg.packs.values()` for a **bare** kind or relation and has **no
+production caller today**; the two live `kind=` callers (`projection/entities.py:341`,
+`kind_classifier.py:364`) pass **namespaced** kinds and so resolve exclusively through
+`reg.get_pack(ns)` (`enforcement.py:83-91`) — still against the **whole catalog**, so a pack this graph
+does not install still decides the level. The label leg never reaches this seam at all:
 `create_operator` does its own inline membership check (`enforcement.py:6`).
 
 ### 5.5 The prevention half (D5) — extend, and do not add a fourth resolver

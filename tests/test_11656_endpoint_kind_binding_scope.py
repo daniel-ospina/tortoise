@@ -24,7 +24,7 @@ have shipped because nothing reads prose:
 
   * neither #11656 doc was registered in `docs/00_index.md` (the repo's ledger — how the next lane finds a
     doc);
-  * a cited `.md` was written bare where the basename is ambiguous (7 files in this repo are named
+  * a cited `.md` was written bare where the basename is ambiguous (8 files under `docs/` are named
     `04-plan.md`), so the reference did not resolve from the citing document.
 """
 from __future__ import annotations

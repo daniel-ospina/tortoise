@@ -481,7 +481,7 @@ mapped logically."* That reframes A1, and the check found a gap that A1 as scope
 |---|---|---|
 | **V1 — the ontology's declared Object↔Object section** | `docs/ONTOLOGY.md` **§3.7**: exactly **two** predicates — `wasDerivedFrom` (provenance) and `hasPart` (composition, inverse traversal covers "part of") | humans; the design |
 | **V2 — the ontology's enforced write vocabulary** | **§3.9** *"Valid Predicate Vocabulary (code)"*: **16 generic** predicates — `performs, produces, uses, authoredBy, ownedBy, managedBy, hasMember, holdsRole, memberOf, reportsTo, participatesIn, hasPart, related, dependsOn, references, wasDerivedFrom` — **plus the `about*` family's 6**, which `create_edge` also accepts (`_VALID_EDGE_PREDICATES`), while `create_about_edge`'s own `_VALID_ABOUT_EDGE_PREDICATES` holds **5** — it adds `aboutPoint` and drops `aboutAction`/`aboutSource` | `create_edge` and `create_about_edge` |
-| **V3 — what the packs declare** | `dev`: `decomposesInto`(→hasPart), `implements`(→addresses), `deploysTo`(→addresses), **`dependsOn`**(→addresses), `causes`(→supports), `fixes`(→addresses), `addresses`(→addresses) · `venture`: **`funds`, `produces`, `managedBy`, `holds`, `related`, `dependsOn`** · `product-strategy`: `addresses`, `opposes`, `supports` · **every one `mechanism: IMPL`** | `list_relations()`, the classifier's kind index, the write-path verdict |
+| **V3 — what the packs declare** | `dev` (9): `decomposesInto`(→hasPart), `hasPart`(→hasPart), `implements`(→addresses), `deploysTo`(→addresses), **`dependsOn`**(→addresses), `causes`(→supports), `fixes`(→addresses), `addresses`×2(→addresses) · `venture` (7): **`funds`**(→funds), `gatedBy`(→dependsOn), `protects`(→related), `producedBy`(→produces), `assignedTo`(→managedBy), `partOf`(→hasPart), `holds`(→holds) · `product-strategy` (8): `contains`(→hasPart), `addresses`×4(→addresses), `targets`(→addresses), `manifests`(→supports), `competesWith`(→opposes) · **every one `mechanism: IMPL` except `competesWith` (`NAND`)** — ⚠️ the `→` is the row's `semantics:`, **not** a declaration: `produces`/`related`/`managedBy` are not predicates any pack declares | `list_relations()`, the classifier's kind index, the write-path verdict |
 
 **The three mismatches, each load-bearing:**
 
@@ -494,7 +494,7 @@ mapped logically."* That reframes A1, and the check found a gap that A1 as scope
    nothing emits it.
 3. ⛔ **Every business predicate in V3 routes to the OPERATOR path, not the structural one** — because each carries
    `mechanism: IMPL`, and `relation_write_paths()` binds the `operator` path on `mechanism ∈ CORE_PREDICATES`. So
-   `funds`, `produces`, `owns`, `dependsOn`, `addresses`, `opposes` are consumed as **epistemic IMPL edges**
+   `funds`, `producedBy`, `holds`, `dependsOn`, `addresses`, `competesWith` are consumed as **epistemic IMPL/NAND edges**
    (belief propagation, EP confidence) with the pack's word as a **label** — not as structural business facts.
 
 **And that third point is a deliberate design decision, not an accident.** §3.9 states it: *"Where relevance is
