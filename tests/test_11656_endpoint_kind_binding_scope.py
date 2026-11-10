@@ -41,9 +41,17 @@ have shipped because nothing reads prose:
     `test_every_cited_yaml_locator_resolves` holds the replacement locator form to a real key. ⛔ Same
     reasoning as above: no count is written into an assertion, but this header says 44 in the scope and 36 in
     the brief at the pre-fix head, because that is the size of the defect the ban covers.
+  * the ban asserted only that a `path.py::symbol`-shaped TOKEN was present, never that the symbol EXISTS —
+    so **three** citation classes shipped green, in **nine** occurrences at `f54f40b0c072` (six in the scope,
+    two in the brief, one in this file): a method cited on the wrong class, a module attribute that is only a
+    function-local import, and a method cited as a module-level name.
+    `test_every_python_symbol_citation_resolves` imports the module and resolves each citation by `getattr`,
+    which is the whole reason the symbol form beats the line number: a name that does not resolve is the same
+    dead end in a new costume.
 """
 from __future__ import annotations
 
+import importlib
 import inspect
 import os
 import re
@@ -425,7 +433,16 @@ class TestTheThirdDoorExists:
         )
 
         ingest = inspect.getsource(TortoiseSDK.ingest)
-        assert '_route == "direct"' in ingest, "the bundle writer's direct route — the second public path"
+        # ⛔ LEADING NEWLINE, not a bare substring. `sdk.py` also carries
+        # `if _request_route == "direct" and _route == "operator":`, whose text ENDS with
+        # `_route == "direct"` — so a bare `in` check stayed green with the real branch deleted, which is
+        # the file's own F3 rule ("a weaker assertion beside a behavioural one, whose message claims
+        # precedence it cannot earn"). The anchor pins the branch at a line start.
+        assert '\n                if _route == "direct":\n' in ingest, (
+            "the bundle writer's direct route — the second public path — no longer branches on "
+            "`_route == \"direct\"` at a statement boundary. A substring test here is satisfied by the "
+            "`_request_route` decoy above it, which is why this anchor is newline-delimited"
+        )
         assert "label=label" in _call_window(ingest, "self.create_direct_edge("), (
             "`ingest`'s direct route no longer passes `label` into `create_direct_edge` — the second public "
             "path to the door is gone and the delta §1.1 counts would have to be re-derived"
@@ -511,7 +528,7 @@ class TestThePairHasProductionReaders:
         inside `sdk.py::TortoiseSDK._extract_session_v2`) → `plan_relation_edges` → `declared_hierarchy` →
         `_resolve` (`pack_hierarchy.py::_resolve`) → `_binding` (`pack_hierarchy.py::_binding`) + `_matching_row`
         (`pack_hierarchy.py::_matching_row`). The **join is in
-        `_resolve`**, not in `plan_hierarchy_edges` (`relation_write.py::plan_hierarchy_edges`), which matches on the
+        `_resolve`**, not in `plan_hierarchy_edges` (`pack_hierarchy.py::plan_hierarchy_edges`), which matches on the
         already-resolved `edge.from_kind`/`edge.to_kind`; and the symbol is **not** `sdk.apply_relation_edges` —
         `TortoiseSDK` has no such method, so a reader following the old sentence found an import.
 
@@ -852,6 +869,72 @@ class TestTheDocsAreDiscoverableAndResolve:
         assert symbols, (
             f"{doc.name} cites no python symbol at all — the doc's mechanism is code citations, so either "
             "the scanner is broken or the citations were deleted rather than re-keyed"
+        )
+
+    def test_every_python_symbol_citation_resolves(self):
+        """`path.py::symbol` beats a line number ONLY if the symbol exists — so resolve it, do not pattern-match it.
+
+        The ban above closes `file:<line>` and names `path.py::symbol` as the replacement, but for three
+        revisions it asserted only that SOME symbol-shaped token was present (`assert symbols`). A wrong or
+        invented symbol therefore shipped GREEN — and did. Measured at `f54f40b0c072`, the head this row was
+        added to: **nine** occurrences across this PR's three artifacts (six in the scope, two in the brief,
+        one in this file), spanning **three** distinct citation classes:
+
+          * `projection/entities.py::_EdgeHandlers._upsert_point_edges` — `_upsert_point_edges` is a method of
+            `_EntityHandlers`; `edges.py`'s `_EdgeHandlers` has no such attribute.
+          * `relation_write.py::plan_hierarchy_edges` — defined in `pack_hierarchy.py` and imported INSIDE
+            `plan_relation_edges`, so `relation_write.plan_hierarchy_edges` does not exist.
+          * `projection/__init__.py::_rebuild_all_replay` — a method of `FalkorProjection`, not a module-level
+            name.
+
+        Every one was found by a reviewer opening the citation, never by this file — which is the asymmetry
+        this row removes. It is the same defect the errata table records for `sdk.apply_relation_edges`: a
+        locator that looks like a citation, reads like a citation, and sends the reader nowhere.
+
+        Scope is `tortoise/` python modules only: a citation to a `tests/…` file names a TEST rather than a
+        production symbol, and resolving it here would import a test module into a test module.
+        """
+
+        def _module_for(rel: str) -> str | None:
+            """The import path for a citation's file, or `None` when it is not a `tortoise/` module."""
+            p = rel[len("tortoise/") :] if rel.startswith("tortoise/") else rel
+            if not (REPO_ROOT / "tortoise" / p).exists():
+                return None
+            if p == "__init__.py":
+                return "tortoise"
+            if p.endswith("/__init__.py"):
+                return "tortoise." + p[: -len("/__init__.py")].replace("/", ".")
+            return "tortoise." + p[: -len(".py")].replace("/", ".")
+
+        unresolved = []
+        for doc in (SCOPE_DOC, BRIEF_DOC):
+            found = sorted(
+                set(
+                    re.findall(
+                        r"`([A-Za-z0-9_./-]+\.py)::([A-Za-z_][A-Za-z0-9_.]*)`", doc.read_text()
+                    )
+                )
+            )
+            for rel, symbol in found:
+                # `path.py::symbol` is the citation FORM, quoted as prose in both docs — not a citation.
+                if (rel, symbol) == ("path.py", "symbol"):
+                    continue
+                module_name = _module_for(rel)
+                if module_name is None:
+                    continue
+                node = importlib.import_module(module_name)
+                try:
+                    for part in symbol.split("."):
+                        node = getattr(node, part)
+                except Exception as exc:  # AttributeError in practice; an import hole surfaces too
+                    unresolved.append(
+                        f"{doc.name}: `{rel}::{symbol}` does not resolve in `{module_name}` "
+                        f"({type(exc).__name__})"
+                    )
+        assert not unresolved, (
+            "these citations name a symbol that does not exist, so a lane implementing the issue opens the "
+            "module and lands nowhere — cite the symbol that actually holds the behaviour (or the class that "
+            "holds the method):\n  " + "\n  ".join(unresolved)
         )
 
     def test_this_pin_carries_no_line_keyed_citation(self):

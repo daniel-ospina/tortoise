@@ -55,7 +55,7 @@ that must be settled before a scope can converge.
   `sdk.apply_relation_edges` — that symbol does not exist. `TortoiseSDK` has no such method; the function is
   `tortoise.relation_write.apply_relation_edges` (`relation_write.py::apply_relation_edges`), imported and called inside
   `sdk.py::TortoiseSDK._extract_session_v2`, which reaches `plan_relation_edges`
-  (`relation_write.py::plan_relation_edges`) and hence `declared_hierarchy`. The **join** is not in `plan_hierarchy_edges` (`relation_write.py::plan_hierarchy_edges`,
+  (`relation_write.py::plan_relation_edges`) and hence `declared_hierarchy`. The **join** is not in `plan_hierarchy_edges` (`pack_hierarchy.py::plan_hierarchy_edges`,
   which matches on the already-resolved `edge.from_kind`/`edge.to_kind`): it is one call deeper, in
   `declared_hierarchy` (`pack_hierarchy.py::declared_hierarchy`) → `_resolve` (`pack_hierarchy.py::_resolve`) → `_binding` (`pack_hierarchy.py::_binding`) +
   `_matching_row` (`pack_hierarchy.py::_matching_row`), which match on the **declared** `(fromKind, toKind)`. **This one already exists —
@@ -191,7 +191,7 @@ body**.
 ### 3.3 A gate at the two live primitives leaves **both** replay folds ungated
 
 `create_operator` (live) and `_EdgeHandlers._create_edges` (`projection/edges.py::_EdgeHandlers._create_edges`, replay/fold,
-reached from `projection/entities.py::_EdgeHandlers._upsert_point_edges`) are the two writers of the *same* operator-edge shape, and
+reached from `projection/entities.py::_EntityHandlers._upsert_point_edges`) are the two writers of the *same* operator-edge shape, and
 the code says so (*"#7902 fold-parity: live create_operator writes the same typed + INPUT edges this
 replay does"*). A live-only gate **diverges on `rebuild_all`** — the documented `derived == replay(journal)`
 failure class.

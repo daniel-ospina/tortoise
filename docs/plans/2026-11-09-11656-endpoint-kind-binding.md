@@ -84,7 +84,7 @@ So a declared IMPL label over a mismatched **direct-shape** pair is writable tod
 3. `projection/edges.py::_EdgeHandlers.create_edge`
 4. `projection/edges.py::_EdgeHandlers.create_about_edge`
 5. `projection/edges.py::_EdgeHandlers._create_edges` (**the operator replay fold**, reached from
-   `projection/entities.py::_EdgeHandlers._upsert_point_edges`) — it MERGEs operator edges directly and never calls `create_edge`. A
+   `projection/entities.py::_EntityHandlers._upsert_point_edges`) — it MERGEs operator edges directly and never calls `create_edge`. A
    live-only gate **diverges on `rebuild_all`**: the `derived == replay(journal)` class. The code says the
    two write one shape (*"#7902 fold-parity"*).
 6. `projection/__init__.py`, the **`DirectEdgeCreated` replay fold** (`rebuild_all` pass-2b, fold starts
@@ -95,11 +95,11 @@ So a declared IMPL label over a mismatched **direct-shape** pair is writable tod
    - **structural-edge lane** (`sdk._record_structural_edge`, `sdk.py::TortoiseSDK._record_structural_edge`) journals `edge_type=rel`
      (the journal call in that same method), so `edge_type` **is** the declared predicate — `ownedBy`/`hasPart`/`dependsOn`, which
      the fold's own code names (*"the structural-edge lane's `ownedBy`/`hasPart`/`dependsOn`/… (#9553
-     class 4)"*, `projection/__init__.py::_rebuild_all_replay`);
+     class 4)"*, `projection/__init__.py::FalkorProjection._rebuild_all_replay`);
    - **`create_direct_edge`** does **not** put its label in the rel type: it writes
      `rel_type = op_type  # IMPL / NAND` (`sdk.py::TortoiseSDK.create_direct_edge`) and carries the declared predicate as an edge
      **property** — `attrs["label"] = label` (`sdk.py::TortoiseSDK.create_direct_edge`), restored by this fold through
-     `DIRECT_EDGE_ATTR_KEYS` (`projection/edges.py::DIRECT_EDGE_ATTR_KEYS`, applied in the fold at `projection/__init__.py::_rebuild_all_replay`).
+     `DIRECT_EDGE_ATTR_KEYS` (`projection/edges.py::DIRECT_EDGE_ATTR_KEYS`, applied in the fold at `projection/__init__.py::FalkorProjection._rebuild_all_replay`).
 
    ⇒ the rule at this fold must read the predicate as **`ev["label"]` when present, else `ev["edge_type"]`**.
    A gate keyed on `edge_type` alone sees `IMPL`/`NAND` — a predicate no pack declares — returns `unbound`, and
@@ -122,6 +122,7 @@ claim holds, on different evidence:
 addresses   declared 6×, 6 DISTINCT pairs   (4 of them inside product-strategy alone)
 contains    2×, 2 pairs                     (marketing, product-strategy)
 targets     2×, 2 pairs
+assignedTo  2×, 2 pairs                     (pm, venture — both Object→Subject)
 hasPart     1×                                   <- NOT a multiplicity case
 ```
 
@@ -221,7 +222,7 @@ a superset (measured: `kind_forms_for('dev:issue')` has `issue` but not `pm:issu
 | `create_direct_edge` | its own existing probe (`sdk.py::TortoiseSDK.create_direct_edge`) returns `id, is_operator, status, claimClass` — add the kind property |
 | `create_edge` / `create_about_edge` | `_resolve_entity` already returns `properties` (consumed for the `aboutDocument` refusal at `projection/edges.py::_EdgeHandlers.create_edge`) |
 | `_create_edges` (operator fold) | it already resolves the descriptor's endpoints |
-| **`DirectEdgeCreated` fold** | its per-label endpoint probe (`projection/__init__.py::_rebuild_all_replay`, the pass-2b `DirectEdgeCreated` fold) returns **only `p.id`** — the label sweep supplies the node LABEL (`Point`/`Object`/`Subject`/`Event`), not the kind property. It must add the kind property to that `RETURN`, the same shape as the two rows above; without it the rule is called with no kind and the fold's gate reports `unknown_kind` for every record |
+| **`DirectEdgeCreated` fold** | its per-label endpoint probe (`projection/__init__.py::FalkorProjection._rebuild_all_replay`, the pass-2b `DirectEdgeCreated` fold) returns **only `p.id`** — the label sweep supplies the node LABEL (`Point`/`Object`/`Subject`/`Event`), not the kind property. It must add the kind property to that `RETURN`, the same shape as the two rows above; without it the rule is called with no kind and the fold's gate reports `unknown_kind` for every record |
 
 **`create_operator`'s synthetic node carries no kind** — the pair is `(source_id, each target_id)` from the
 **arguments**; never read it off the stored typed edges.
@@ -307,7 +308,7 @@ already exists.** `_matching_row` joins a hierarchy entry to its `relations[]` r
   (`relation_write.py::apply_relation_edges`, imported and called inside `sdk.py::TortoiseSDK._extract_session_v2`)
   → `plan_relation_edges` → `declared_hierarchy(registry)` → `_resolve`
   (`pack_hierarchy.py::_resolve`) → `_binding` + `_matching_row` (both in `pack_hierarchy.py`). ⛔ The **join** is in
-  `_resolve`, **not** in `plan_hierarchy_edges` (`relation_write.py::plan_hierarchy_edges`), which matches on the
+  `_resolve`, **not** in `plan_hierarchy_edges` (`pack_hierarchy.py::plan_hierarchy_edges`), which matches on the
   already-resolved `edge.from_kind`/`edge.to_kind`; and the symbol is **not** `sdk.apply_relation_edges`
   — `TortoiseSDK` has no such method. **Reuse its join — this is the "do not add a fourth resolver" rule
   applied to itself, and the pin over this chain lives in `tests/test_11656_endpoint_kind_binding_scope.py`.**
@@ -349,9 +350,9 @@ undeclared.
 | 18 | **writer census** — a mechanical re-derivation of every parameterised-rel-type Cypher write site under `tortoise/` (regex over `MERGE`/`CREATE (…)-[:{rel}]->`, filtered to a non-literal rel type), asserting each routes through `kind_pair_verdict` or is named in a declared exemption list | **a new writer silently bypassing the gate** — the completeness claim that failed four review rounds on #11656 (§1.2). A hand-counted list cannot prevent this; a census can |
 
 ⚠️ **This table is the pin set #11656's GATE lands with — it is not the count of the file that ships in THIS PR.**
-This PR lands `tests/test_11656_endpoint_kind_binding_scope.py`, which holds **26 test functions / 28 collected**
+This PR lands `tests/test_11656_endpoint_kind_binding_scope.py`, which holds **27 test functions / 29 collected**
 (two are parametrised over the two docs — `test_every_cited_markdown_path_resolves` and
-`test_neither_doc_cites_a_line_keyed_reference`, one case per doc; that is the whole 26→28 delta). The two
+`test_neither_doc_cites_a_line_keyed_reference`, one case per doc; that is the whole 27→29 delta). The two
 populations are deliberately different: the file pins the
 **scoping facts this document rests on** — the inventory (§2.1), the three doors (§1.1), the two replay folds
 (§1.2 item 6), the four readers (§5.5), and the two docs' registration/resolution — while the 19 rows above
@@ -420,7 +421,9 @@ the declared kinds; a read-side census reports the pre-existing population.
 | "five call sites" / "four writers" (revision 3) | **six**, and **two** of them are replay folds — the operator fold *and* the `DirectEdgeCreated` fold (`projection/__init__.py` pass-2b), which carries declared predicates from **two** producers: rel type for the structural-edge lane, a `label` property for `create_direct_edge`. Fixed by §1.2 item 6, §4, pins 15/15b | fresh review (P1) — found by opening the second fold's own `#9553 class 4` note |
 | the list of call sites presented as the specification | an **inventory**, not a completeness claim: four review rounds each asserted a writer set and each was wrong. Completeness is now **measured** (pin 18) | the scoping lane's handoff on #11656, confirmed by a fresh review |
 | §2.1's **"Recorded here"** for the `#1934` departure (revision 4) | the marker's **home is the ISSUE**, not this ledger: it is now on `#1934` itself (comment 6759287749 — the `OVERRIDES:` line naming #1934's warn-not-block), relayed with a cross-reference on `#11656` (comment 6759288785); this doc keeps the ledger copy | fresh review (P3-2) — `#1934` was CLOSED and held **0** `OVERRIDES` comments, so the departure read as an accident at the only artifact a lane reads |
-| "reached from `sdk.apply_relation_edges` (`sdk.py::TortoiseSDK._extract_session_v2`)" (revision 3) | **that symbol does not exist** — `TortoiseSDK` has no such method. It is `tortoise.relation_write.apply_relation_edges` (`relation_write.py::apply_relation_edges`), imported and called inside `sdk.py::TortoiseSDK._extract_session_v2`. And the pair→writer **join** is not in `plan_hierarchy_edges` (`relation_write.py::plan_hierarchy_edges`, which matches the already-resolved `edge.from_kind`/`edge.to_kind`): it is in `declared_hierarchy` (`pack_hierarchy.py::declared_hierarchy`) → `_resolve` (`pack_hierarchy.py::_resolve`) → `_binding` (`pack_hierarchy.py::_binding`) + `_matching_row` (`pack_hierarchy.py::_matching_row`). Fixed by §5.5, and pinned by `test_the_fourth_reader_is_the_pair_to_writer_resolver` inside `_resolve`'s own source | fresh review (P2) — found by opening `sdk.py::TortoiseSDK._extract_session_v2`, which is an *import* |
+| "reached from `sdk.apply_relation_edges` (`sdk.py::TortoiseSDK._extract_session_v2`)" (revision 3) | **that symbol does not exist** — `TortoiseSDK` has no such method. It is `tortoise.relation_write.apply_relation_edges` (`relation_write.py::apply_relation_edges`), imported and called inside `sdk.py::TortoiseSDK._extract_session_v2`. And the pair→writer **join** is not in `plan_hierarchy_edges` (`pack_hierarchy.py::plan_hierarchy_edges`, which matches the already-resolved `edge.from_kind`/`edge.to_kind`): it is in `declared_hierarchy` (`pack_hierarchy.py::declared_hierarchy`) → `_resolve` (`pack_hierarchy.py::_resolve`) → `_binding` (`pack_hierarchy.py::_binding`) + `_matching_row` (`pack_hierarchy.py::_matching_row`). Fixed by §5.5, and pinned by `test_the_fourth_reader_is_the_pair_to_writer_resolver` inside `_resolve`'s own source | fresh review (P2) — found by opening `sdk.py::TortoiseSDK._extract_session_v2`, which is an *import* |
+| the `path.py::symbol` locators that replaced the line numbers | **three of them named a symbol that does not exist** — `_upsert_point_edges` is a method of `_EntityHandlers`, not `_EdgeHandlers`; `plan_hierarchy_edges` is defined in `pack_hierarchy.py` and imported *inside* `plan_relation_edges`, so `relation_write.plan_hierarchy_edges` is not a module attribute; and `_rebuild_all_replay` is a method of `FalkorProjection`, not a module-level name. Each now cites the class that holds the method, and `test_every_python_symbol_citation_resolves` imports the module and resolves every citation, so the class cannot return | fresh review (P2) for the first two; the third was found by the new resolution pin itself — the reviewer opened that citation and did not flag it |
+| §1.3's multiplicity table listed `addresses` / `contains` / `targets` / `hasPart` and omitted `assignedTo` ×2 | `assignedTo` is a **fourth** multiplicity case (`pm:assignedTo` and `venture:assignedTo`, both Object→Subject), which the pin already asserted — so the table contradicted a row beside it. The table now lists it | fresh review (non-blocking note), reconciled against the pin |
 
 ## 11. Downward-closure example correction (the brief's §4.3)
 
