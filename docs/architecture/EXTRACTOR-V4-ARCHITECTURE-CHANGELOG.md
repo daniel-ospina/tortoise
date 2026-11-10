@@ -1783,7 +1783,9 @@ return `({}, [])`, i.e. the state half of the gate compared nothing and reported
 `surface is EMPTY` verdict. Both are pinned by tests that fail without the guard.
 
 **Two documentation-truth defects found in review cycle 2, and two factual defects in cycle 3.** Cycle 2: the
-registry header said *"these thirteen are every mechanism either document names"* (there are fourteen, and
+registry header said *"these thirteen are every mechanism either document names"* — inside a sentence whose *"it is
+**not** a claim that …"* negation is the point, so what was stale was the NUMERAL, not a completeness claim (there
+are fourteen, and
 `mechanisms:` starts below it) and `test_ci_selection.py`'s tier-1 failure message still asserted the pre-change
 surface — both corrected. Cycle 3 found
 one **inherited** claim in the text this change adds: the row said `commit_schema` *"clamps and dedupes the list"*,
@@ -1797,7 +1799,7 @@ diff, 155 → **165** for a STORAGE-only diff; an epic-plan-only diff takes the 
 drift inside the comment block this change edits, kept correct rather than carried. Cycle 4 (over the head cycle 3
 produced) found four more: the registry's headline still said *"eight to thirteen"* while the block below it
 narrates the fourteenth; this entry QUOTED text the base blob does not contain (*"the thirteen rows above"* — the
-blob says *"these thirteen are every mechanism either document names"*), which is the unverifiable-citation class;
+blob says *"it is **not** a claim that these thirteen are every mechanism either document names"*), which is the unverifiable-citation class;
 the row named 2 of the 4 call sites that run the clamp/dedupe (missing `execute_embed` — the `mentions_recorded`
 accounting this row is about — and `extract_session_v2`); and a typo (`carriers`). All corrected, and the
 relay this entry claims is now a fact rather than a plan — **the disposition is recorded on `#5064` as comment
@@ -1816,7 +1818,7 @@ were cancelled, and a replacement noun colliding with this document's own `state
 (five more: a docstring still saying `Mention` bounds every field, a count quoted a head late, a `§7.3` that does not
 exist, `(filed separately)` with no issue number, and the `(a) + (b)` disposition wording). Cycle 7 (a `carve-out`
 location claim that §3 itself falsifies, the relay cited to the comment its own text disavows, an inverted phrase
-attribution, a `cycle-5 note` cited to the wrong file, and this Provenance list ending three cycles early).** The mechanism's absence is unchanged and still tracked by
+attribution, a `cycle-5 note` cited to the wrong file, and this Provenance list ending three cycles early). The mechanism's absence is unchanged and still tracked by
 `#11239`; `#5064`'s Target 3 is not moved by this change, because a gate that can SEE an absence is not a mechanism
 that is built.
 
