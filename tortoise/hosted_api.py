@@ -11247,11 +11247,18 @@ def _capture_control_plane_unavailable() -> HTTPException:
     the lookup, and a finished lookup has no side effect, so a retry cannot
     duplicate anything.
 
-    Copy shape: ONE em dash is this house's separator and the dashboard's
-    capture-status line already supplies it (`Last attempt — ${detail}` in
+    Copy shape: the dashboard's capture-status line already supplies the
+    separator (`Last attempt — ${detail}` in
     `website/apps/dashboard/src/*harnesses*`), so this message uses a COLON after
-    its first clause — a second em dash would render as two separators in one
-    sentence.
+    its first clause rather than a second em dash, which would render as two
+    separators in one sentence.
+
+    ⛔ That is a fact about THIS message, not a house rule — do not generalise it.
+    Two existing strings in the same per-harness last-error slot keep an em dash
+    of their own: ``_capture_outcome_last_error``'s "session stored, extraction
+    failed — …" and the unexpected-500 arm's "internal capture error — …". They
+    are deliberate and render as two separators on purpose; do NOT "fix" them to
+    match this one.
     """
     return HTTPException(
         status_code=503,
