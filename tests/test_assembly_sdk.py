@@ -95,14 +95,16 @@ is a strict PERMUTATION of its predecessor (same rows, same multiplicity), so
 the drift is a re-ordering of evidence already present, not added or lost
 rows. ⚠️ THE DIRECTION, stated rather than left as "a permutation" (#11706
 review): on ``GOLD_LEGACY_CANARY`` the out-of-subgraph distractor
-``sess-distract-8`` rises ABOVE "sold the old couch and ordered a new sofa
-instead" (line 10 → 8 while that row goes 8 → 10), and on both
-``_A4_OFF_ORDERED`` entries the "new sofa was delivered" row moves from
-position 3 to 5. That is a measured demotion of a correct row beneath a
-distractor on the fixture R16(b) uses for out-of-subgraph admission; it breaks
-no gate (``"reading lamp" in evidence`` and ``B=0`` are unchanged), and #11682's
-stated first task is to quantify the widening's gain, so the datum belongs in
-the record.
+``sess-distract-8`` now sits ABOVE "sold the old couch and ordered a new sofa
+instead" — at ``183e6888d7`` that row came first and the distractor followed it;
+and in each of the two ``_A4_OFF_ORDERED`` entries the "new sofa was delivered"
+row falls two places (from the third rendered row to the fifth). That is a
+measured demotion of a correct row beneath a distractor on the fixture R16(b)
+uses for out-of-subgraph admission; it breaks no gate (``"reading lamp" in
+evidence`` and ``B=0`` are unchanged), and #11682 names the RANK-DISTRIBUTION
+check among the measurements that decide whether this widening earns its place
+(the count of items displaced from the top-k) — the same family as ``#8486`` —
+so the datum belongs in the record.
 Byte-identical and UNTOUCHED: ``GOLD_LEGACY_CURRENT`` / ``_MISFIRE`` / ``_AGO``
 / ``_COMPARE`` and the other three ``_A4_OFF_ORDERED`` entries; the FIRED/HOSTED
 goldens are unaffected too (their spine is rendered from dated events, not from
