@@ -29,6 +29,7 @@ Three properties are load-bearing and each has its own pin below:
 
 Lane: embedded (`TortoiseSDK(db_path)`, like the sibling `test_connector_sources.py`).
 """
+# #4282: `test_a_current_derivation_reads_current`, `test_the_earlier_derivation_reads_stale_after_a_content_change` were removed WITH `get_provenance_chain`, one of the 26 dead public methods #4282 retired on 2026-10-27 (`tortoise/sdk_retired.py`). Every leg here drove that door, so there is no surviving subject to re-point them at.
 from __future__ import annotations
 
 import os
@@ -243,48 +244,6 @@ def test_a_content_changing_repoll_advances_the_hash_and_the_ordinal():
         assert closed_version == open_version + 1, (
             f"the ordinal must advance with the hash: "
             f"{open_version} -> {closed_version}"
-        )
-
-
-def test_the_earlier_derivation_reads_stale_after_a_content_change():
-    """The point of the anchor, end to end: the `ON CREATE`-only edge keeps the
-    version it was read at, the Source moves on, and the read says `stale` —
-    never `current`.
-
-    FAILS IF the edge advances with the Source (the recorded limitation: that
-    would report a stale derivation as current — the exact false-current the
-    model forbids)."""
-    with fresh_sdk() as sdk:
-        proj = sdk._get_proj()
-        proj.apply(gh_issue_event())
-        anchored = _anchor(proj, GH_URL, "github-issue-test/repo-42-created")[0]
-        proj.apply(gh_issue_event(state="closed",
-                                  closed_at="2026-07-11T00:00:00Z"))
-        _point_extracted_from(sdk, GH_URL)
-        current = _source(proj, GH_URL)[0]
-        assert anchored != current, "the ON CREATE-only anchor must NOT advance"
-        rows = sdk.get_provenance_chain("pt_1")
-        verdicts = {r["linkRecordedVersion"]: r["linkCurrency"] for r in rows}
-        assert verdicts.get(anchored) == "stale", (
-            f"the superseded derivation must read `stale`, got {verdicts!r}"
-        )
-
-
-def test_a_current_derivation_reads_current():
-    """The converse pin: with no content change the verdict is `current`, so
-    the `stale` above is a real signal and not a constant.
-
-    FAILS IF `_connector_content_hash` is unstable across re-materialization
-    (the digest would differ from the anchor's on an unchanged item)."""
-    with fresh_sdk() as sdk:
-        proj = sdk._get_proj()
-        proj.apply(gh_issue_event())
-        anchored = _anchor(proj, GH_URL, "github-issue-test/repo-42-created")[0]
-        _point_extracted_from(sdk, GH_URL)
-        rows = sdk.get_provenance_chain("pt_1")
-        verdicts = {r["linkRecordedVersion"]: r["linkCurrency"] for r in rows}
-        assert verdicts.get(anchored) == "current", (
-            f"an unchanged connector derivation must read `current`, got {verdicts!r}"
         )
 
 

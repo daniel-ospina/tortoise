@@ -975,7 +975,7 @@ def test_run_benchmark_records_the_raw_capture_diagnostic(monkeypatch):
     )
 
     class _FakeCaptureSDK:
-        def capture_session(self, conversation, session_id=None, harness=None):
+        def _capture_session(self, conversation, session_id=None, harness=None):
             return {
                 "ok": False,
                 "errors": [headline],

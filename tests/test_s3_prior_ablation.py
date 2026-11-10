@@ -638,10 +638,15 @@ def _run_one_off_arm(probe, monkeypatch, census, counter: dict | None = None):
         def __init__(self, graph_name=None):
             self.graph_name = graph_name
 
-        def capture_session(self, turns, session_id=None):
+        def _capture_session(self, turns, session_id=None):
             captured["sessions"] += 1
             return {"ok": True, "stats": {"llm": {"calls": 1}},
                     "search": probe.off_arm_stub("real")}
+
+        # The double stands in for a PRE-#4282 SDK at `assert_capture_lane`,
+        # which refuses when the PUBLIC name is absent; the arm body itself
+        # calls the private door the body survives under.
+        capture_session = _capture_session
 
     monkeypatch.setattr(sdk_module, "TortoiseSDK", FakeSDK)
     monkeypatch.setattr(probe, "_turns", lambda sid: [{"role": "user", "content": "hi"}])
@@ -999,24 +1004,6 @@ def test_a_later_head_that_moved_a_config_file_refuses_the_pin(probe, monkeypatc
 # ── the write-back must not leave the doc contradicting its own measurement (r4 P2-1) ──
 
 
-def test_the_architecture_doc_no_longer_calls_the_question_unmeasured(probe):
-    """§10 reported the falsification, but §4.1's note still pointed at §14 as "still unmeasured".
-
-    `#10463`'s contract says a falsified hypothesis is never re-run until it agrees, so the design
-    doc is what has to settle it: :548 routed the next reader to :1758's "UNMEASURED", i.e. to the
-    state that produced this lane. Both must carry the figure now, and §14 must keep the half that
-    really is still open (S3's disambiguation accuracy).
-    """
-    doc = (ROOT / "docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md").read_text()
-    assert "**Still unmeasured (§14):** whether giving extraction the neighbourhood" not in doc, (
-        "§4.1's note still sends the reader to §14 for an open question this PR measured")
-    assert "Whether the neighbourhood lookup changes extraction's output is UNMEASURED" not in doc, (
-        "§14 still declares UNMEASURED what §10 reports as measured")
-    assert "284" in doc and "247" in doc, "the measured figures must live where the claim was"
-    assert "whether S3's disambiguation is accurate" in doc, (
-        "the half that really IS still unmeasured must survive the edit")
-
-
 def test_the_architecture_doc_quotes_the_run_whose_ordering_provenance_is_whole():
     """`#10557`: the doc published run 1 as settled after the ruling withdrew that log.
 
@@ -1073,6 +1060,35 @@ def test_the_architecture_doc_quotes_the_run_whose_ordering_provenance_is_whole(
     assert "10.9" in bundle and "drift" in bundle.lower(), (
         "the README's `0.870` must be qualified by the untreated-arm drift, or it reads as the "
         "settled magnitude the ruling withdrew")
+
+
+# ── the pin must see the WORKING TREE, and the log must name the bytes that ran (r5 P1) ──
+#
+# `assert_source_sha` compares two COMMITS, so an uncommitted edit to production code, to a metric
+# artifact or to the probe itself was admitted silently while the log still asserted that the pinned
+# sha was the tree that ran. The measured run is an instance of that hole: its `head=` line names
+# `a1075dfc2`, while the `S3 WITNESS` line it prints does not exist in the probe at that commit
+# (it was an uncommitted working copy whose content equals `325f2a1a5`). So the tree is now asserted
+# clean over exactly the paths that can move a number, and the log carries the probe's own sha256 —
+# which names the bytes that ran whether or not they were ever committed.
+
+
+def test_the_architecture_doc_no_longer_calls_the_question_unmeasured(probe):
+    """§10 reported the falsification, but §4.1's note still pointed at §14 as "still unmeasured".
+
+    `#10463`'s contract says a falsified hypothesis is never re-run until it agrees, so the design
+    doc is what has to settle it: :548 routed the next reader to :1758's "UNMEASURED", i.e. to the
+    state that produced this lane. Both must carry the figure now, and §14 must keep the half that
+    really is still open (S3's disambiguation accuracy).
+    """
+    doc = (ROOT / "docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md").read_text()
+    assert "**Still unmeasured (§14):** whether giving extraction the neighbourhood" not in doc, (
+        "§4.1's note still sends the reader to §14 for an open question this PR measured")
+    assert "Whether the neighbourhood lookup changes extraction's output is UNMEASURED" not in doc, (
+        "§14 still declares UNMEASURED what §10 reports as measured")
+    assert "284" in doc and "247" in doc, "the measured figures must live where the claim was"
+    assert "whether S3's disambiguation is accurate" in doc, (
+        "the half that really IS still unmeasured must survive the edit")
 
 
 # ── the pin must see the WORKING TREE, and the log must name the bytes that ran (r5 P1) ──
@@ -1575,6 +1591,12 @@ def _stub_below_the_refusals(probe, monkeypatch, bundle: Path, doc: str) -> None
     monkeypatch.setattr(probe, "assert_clean_tree", lambda: "a1075dfc2")
     monkeypatch.setattr(probe, "probe_sha256", lambda: "sha256:" + "0" * 64)
     monkeypatch.setattr(probe, "corpus_state", lambda pins: (["wp01_x"] * 7, "sha256:" + "1" * 64))
+    # ⛔ #4282 DELETED the method this arm drives, so the REAL predicate refuses on every
+    # invocation. The tests that call this helper are about the refusals BELOW it, so it is stubbed
+    # here exactly like the git/corpus helpers above. The real predicate has its own behavioural
+    # test (`test_the_capture_lane_refusal_says_4282_and_leaves_no_log`), which is where the
+    # ordering and the no-file invariant are measured.
+    monkeypatch.setattr(probe, "assert_capture_lane", lambda sdk=None: None)
 
 
 def test_a_refused_run_leaves_no_log_file_behind(probe, monkeypatch, tmp_path, capsys):
@@ -1601,6 +1623,55 @@ def test_a_refused_run_leaves_no_log_file_behind(probe, monkeypatch, tmp_path, c
         probe.main(["--prereg", "a1075dfc2", "--out", str(out)])
     assert refusal.value.code == 3
     assert "TORTOISE_DB_URI" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_the_capture_lane_refusal_says_4282_and_leaves_no_log(
+        probe, monkeypatch, tmp_path, capsys):
+    """#4282 deleted the arm's entry point, so the refusal is TERMINAL and first.
+
+    Three claims, each of which was wrong before the #4282 work touched this tool:
+      · it is the FIRST run-precondition refusal, ahead of the repairable-looking `source_sha` pin
+        and dirty-tree checks — those otherwise send an operator to repair a pin or clean a tree
+        for an instrument that cannot execute at all;
+      · it NAMES the authorised deletion (`#4282`, `capture_session`) rather than dying with an
+        `AttributeError` on session 1 of every arm; and
+      · it leaves NO file (review r6 F3): a header-only log reads as the setup of a run that never
+        started, and the next attempt is refused at exit 2 by the one-log rule while the documented
+        reproduce command passes no `--overwrite`.
+
+    The predicate is deliberately NOT stubbed here — this is the test that measures the real one.
+    """
+    bundle, doc = _copy_bundle(tmp_path)
+    monkeypatch.setattr(probe, "EVIDENCE_DIR", bundle)
+    monkeypatch.setattr(probe, "head_sha", lambda: "0" * 40)
+    monkeypatch.setattr(probe, "assert_prereg_binding", lambda prereg, head: prereg)
+    monkeypatch.setattr(probe, "show", lambda sha, rel: doc)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "present")
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379/tortoise_test_matrix")
+    out = bundle / "s3-ablation-capture-lane.log"
+
+    with pytest.raises(SystemExit) as refusal:
+        probe.main(["--prereg", "a1075dfc2", "--out", str(out)])
+
+    assert refusal.value.code == 3
+    err = capsys.readouterr().err
+    assert "#4282" in err and "capture_session" in err, (
+        f"the refusal must name the authorised deletion, not a repairable pin: {err!r}")
+    assert not out.exists(), (
+        "a terminal refusal must leave no file — see the r6-F3 reason above")
+
+    # …and it fires AHEAD of the repairable-looking refusals. Both are stubbed to record a call, so
+    # a passing run proves neither was reached.
+    reached: list[str] = []
+    monkeypatch.setattr(probe, "assert_source_sha",
+                        lambda source_sha, head: reached.append("source_sha") or [])
+    monkeypatch.setattr(probe, "assert_clean_tree",
+                        lambda: reached.append("clean_tree") or "a1075dfc2")
+    with pytest.raises(SystemExit):
+        probe.main(["--prereg", "a1075dfc2", "--out", str(out)])
+    assert reached == [], (
+        f"the capture-lane refusal must precede the pin/tree checks, reached {reached}")
     assert not out.exists()
 
 

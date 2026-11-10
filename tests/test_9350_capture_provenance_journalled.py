@@ -94,7 +94,7 @@ def un_promoted_capture(tmp_path, monkeypatch):
     log_path = str(tmp_path / "events" / "sdk.jsonl")
     sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
     try:
-        res = sdk.capture_session(CONV)
+        res = sdk._capture_session(CONV)
         assert res["ok"] is True, res
         minted = [p["id"] for p in res["points"]]
         assert minted, "precondition: the capture must mint at least one Point"
@@ -171,7 +171,7 @@ def test_the_record_precedes_the_stamp_statement(tmp_path, monkeypatch):
 
     monkeypatch.setattr(projection._GuardedGraph, "query", _spy)
     try:
-        res = sdk.capture_session(CONV, session_id="sess_9350_ordering")
+        res = sdk._capture_session(CONV, session_id="sess_9350_ordering")
     finally:
         sdk.close()
     assert res["ok"] is True, res
@@ -215,7 +215,7 @@ def test_the_stamp_is_authorized_by_its_own_lane_under_an_armed_handle(
 
         monkeypatch.setattr(projection._GuardedGraph, "query", _spy)
         with _live_write_scope("test-standin: lanes #9349 declares"):
-            res = sdk.capture_session(
+            res = sdk._capture_session(
                 [{"role": "user",
                   "content": "The on-call rota is the decision: we rotate "
                              "weekly and page the secondary first."},
@@ -362,7 +362,7 @@ def test_a_refused_record_skips_the_cache_write(tmp_path, monkeypatch):
             return real_emit(type_, *a, **fields)
 
         monkeypatch.setattr(sdk, "_emit_event", _emit)
-        res = sdk.capture_session(CONV)
+        res = sdk._capture_session(CONV)
         assert res["ok"] is True, res
         minted = [p["id"] for p in res["points"]]
         assert minted, "precondition: the capture minted a Point"

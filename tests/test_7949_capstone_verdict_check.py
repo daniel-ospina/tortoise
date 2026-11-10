@@ -1364,7 +1364,7 @@ def test_the_production_capture_path_puts_the_witness_on_the_receipt(monkeypatch
     graph = f"test_capstone_9116_{_uuid.uuid4().hex[:10]}"
     sdk = TortoiseSDK(graph_name=graph)
     try:
-        receipt = sdk.capture_session(
+        receipt = sdk._capture_session(
             [{"role": "user",
               "content": ("Daniel Ospina at Premise Labs decided on 2026-10-10 "
                           "to adopt the Postgres record as the system of "
@@ -1481,7 +1481,7 @@ def test_a_g5_refusal_blames_the_instrument_not_the_pipeline(tmp_path, monkeypat
     monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
 
     class _FakeSDK:
-        def capture_session(self, _turns, session_id=None):
+        def _capture_session(self, _turns, session_id=None):
             return _receipt()
 
     monkeypatch.setattr(sdk_mod, "TortoiseSDK", _FakeSDK)
@@ -1518,7 +1518,7 @@ def test_a_g5_refusal_on_a_seam_receipt_blames_the_pipeline_not_the_seam(
     monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
 
     class _FakeSDK:
-        def capture_session(self, _turns, session_id=None):
+        def _capture_session(self, _turns, session_id=None):
             # VET gated off: the seam is here and says so
             return _seam_receipt(vet={"enabled": False, "s2": {}, "union": {}})
 
@@ -1562,7 +1562,7 @@ def test_a_g5_refusal_names_an_incomplete_seam_as_the_seam(
     monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
 
     class _IncompleteSeamSDK:
-        def capture_session(self, _turns, session_id=None):
+        def _capture_session(self, _turns, session_id=None):
             receipt = _seam_receipt()
             # the seam IS here — one of its blocks is not
             del receipt["stats"]["step_witness"]["vet"]
@@ -1615,7 +1615,7 @@ def test_a_zero_candidate_g5_refusal_names_the_candidate_count_not_a_marker(
     classify = {"enabled": True, "s2": {}, "union": {}}
 
     class _ZeroCandidateSDK:
-        def capture_session(self, _turns, session_id=None):
+        def _capture_session(self, _turns, session_id=None):
             # flag ON, no activity, no error surface — and NOTHING to classify
             return _seam_receipt(classify_later=classify, embed_list=empty_map)
 
@@ -1652,7 +1652,7 @@ def test_a_degraded_search_refuses_the_completed_table(tmp_path, monkeypatch):
     monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
 
     class _FakeSDK:
-        def capture_session(self, _turns, session_id=None):
+        def _capture_session(self, _turns, session_id=None):
             return _seam_receipt(search={
                 "mode": "docker", "degraded": True,
                 "reason": "S3 degraded: graph search failed (timeout)",
@@ -1688,7 +1688,7 @@ def test_a_completed_run_is_reachable_now_that_the_seam_landed(
     monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
 
     class _FakeSDK:
-        def capture_session(self, _turns, session_id=None):
+        def _capture_session(self, _turns, session_id=None):
             return _seam_receipt()
 
     monkeypatch.setattr(sdk_mod, "TortoiseSDK", _FakeSDK)
@@ -4209,7 +4209,7 @@ def test_a_conditional_step_g5_can_witness_idle_passes_the_gate(tmp_path, monkey
     surfaces = {"classify_later": {"enabled": True, "s2": {}, "union": {}}}
 
     class _FakeSDK:
-        def capture_session(self, _turns, session_id=None):
+        def _capture_session(self, _turns, session_id=None):
             return _seam_receipt(**surfaces)
 
     monkeypatch.setattr(sdk_mod, "TortoiseSDK", _FakeSDK)
@@ -4256,7 +4256,7 @@ def test_g5_refuses_when_the_conditional_pass_FAILED_instead_of_idling(
     monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
 
     class _FakeSDK:
-        def capture_session(self, _turns, session_id=None):
+        def _capture_session(self, _turns, session_id=None):
             receipt = _seam_receipt(
                 classify_later={"enabled": True, "s2": {}, "union": {}})
             receipt["errors"] = ["classify(S2) failed: RuntimeError: boom"]
@@ -4288,7 +4288,7 @@ def test_g5_refuses_a_conditional_step_whose_surface_is_absent(tmp_path, monkeyp
     monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
 
     class _FakeSDK:
-        def capture_session(self, _turns, session_id=None):
+        def _capture_session(self, _turns, session_id=None):
             return _receipt(search={"found": []}, payload={"points": []},
                             vet={"enabled": True, "s2": {"kept": 3}})
 

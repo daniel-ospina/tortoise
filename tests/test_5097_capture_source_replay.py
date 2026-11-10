@@ -11,7 +11,7 @@ computed from the #4911-REDACTED transcript, i.e. this lane's own output.
 Before the fix it had NO journal carrier, so a rebuild silently reverted the
 whole block:
 
-    capture_session(...) -> rebuild()
+    _capture_session(...) -> rebuild()
     summary  "We decided ..."           -> None
     topics   ['decided', 'weekly', ...] -> None
     contentHash <sha of transcript>     -> ''
@@ -127,7 +127,7 @@ def _offline_extractor(monkeypatch):
 def captured(tmp_path):
     log_path = str(tmp_path / "events" / "sdk.jsonl")
     sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
-    res = sdk.capture_session(CONV, session_id=SESSION_ID)
+    res = sdk._capture_session(CONV, session_id=SESSION_ID)
     assert res["ok"] is True and res["turns"] == 3
     yield sdk, log_path
     sdk.close()

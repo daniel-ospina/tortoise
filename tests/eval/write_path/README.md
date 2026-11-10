@@ -1,5 +1,21 @@
 # W2 Write-Path Planted-Gold Corpus (issue #2097, W2-a)
 
+> ⛔ **The benchmark runner's `run` leg was KEPT, not removed (#4282).** It drove
+> each session through the SDK's `capture_session`, which #4282 retired; the body
+> survives as the private `TortoiseSDK._capture_session`, and both `runner.py` and
+> `test_write_path_benchmark.py` now call THAT. The probe file therefore still
+> exists and so does its **#4860 rotating-key failover guard**
+> (`test_write_path_benchmark.py::test_capture_session_fails_over_on_403_key_limit`),
+> and `runner.run_benchmark` is still reached from it. The ONLY change in either
+> file versus `main` is that one call site (`sdk.capture_session(` →
+> `sdk._capture_session(`) — see the module docstring in `runner.py`, which still
+> describes this leg accurately. The corpus, the gold and the schemas below are
+> unchanged and still tested by `test_write_path_corpus.py`, `test_write_path_grading.py`,
+> `test_write_path_semantic_judge.py`, `test_write_path_prescreen.py`,
+> `test_write_path_operator_lane.py`, `test_write_path_operator_receipt.py`,
+> `test_write_path_runner.py` and `test_score_qualifiers.py`; the replay that
+> produces a *run* receipt is one of them, not a removed one.
+
 Frozen planted-gold corpus for the **write-path benchmark** (epic #2080,
 W2): fictional agent sessions whose transcripts are planted with salient
 units carrying verbatim anchors, true-but-routine distractors, and

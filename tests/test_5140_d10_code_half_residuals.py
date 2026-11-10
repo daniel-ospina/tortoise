@@ -18,8 +18,11 @@ over-reach:
 LANDED, and therefore deliberately NOT re-pinned here (the `file:line` evidence
 is on the issue): finding 1 (`search_engine.py`'s `documentKind` discriminator
 on all three legs), finding 2 (the `references` self-loop + the re-pointed
-reader, `tests/test_references_edge.py::test_provenance_chain_returns_document
-_without_source_url`), finding 3's reproduced defect (#9874,
+reader — ⚠️ its pin, `test_references_edge.py::test_provenance_chain_returns_
+document_without_source_url`, was RETIRED with `get_provenance_chain` by #4282;
+the ledger for that removal is in that file's header, and the `references`
+self-loop invariant is pinned by the surviving tests there, not by the retired
+one), finding 3's reproduced defect (#9874,
 `tests/test_5140_pending_extraction.py`), finding 5 (#9396,
 `tests/test_document_source_ingested_at_5140.py`), finding 6 (#5422's `version`
 anchor), finding 9 (#5236), finding 11 (the ruling-B `:Source` guard).

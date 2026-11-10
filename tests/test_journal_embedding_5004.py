@@ -496,7 +496,7 @@ def test_session_turn_producer_journals_the_vector(tmp_path, monkeypatch):
         sdk = TortoiseSDK(str(tmp_path / "c.db"),
                           event_log_path=str(events / "events.jsonl"))
         try:
-            sdk.capture_session(conv)
+            sdk._capture_session(conv)
             turn_events = [
                 e for e in _events(events)
                 if e.get("type") == "PointAdded"
@@ -651,7 +651,7 @@ def test_turn_recapture_with_the_embedder_down_keeps_the_journalled_vector(
         sdk = TortoiseSDK(str(tmp_path / "recap.db"),
                           event_log_path=str(events / "events.jsonl"))
         try:
-            sdk.capture_session(conv, session_id=sid)
+            sdk._capture_session(conv, session_id=sid)
             first = [e["point"] for e in _events(events)
                      if e.get("type") == "PointAdded"
                      and (e.get("point") or {}).get("pointKind") == "event"]
@@ -666,7 +666,7 @@ def test_turn_recapture_with_the_embedder_down_keeps_the_journalled_vector(
             # Capture 2 — identical content, embedder DOWN.
             with mock.patch("tortoise.embeddings.encode_batch_for_store",
                             _embedder_down):
-                sdk.capture_session(conv, session_id=sid)
+                sdk._capture_session(conv, session_id=sid)
 
             # The LIVE write preserved the prior vector (this is the trap).
             assert _vector(sdk, pid) == live_before, (
@@ -888,7 +888,7 @@ def test_a_preserved_turn_vector_is_not_attested_to_the_active_model(
         sdk = TortoiseSDK(str(tmp_path / "attest.db"),
                           event_log_path=str(events / "events.jsonl"))
         try:
-            sdk.capture_session(conv, session_id=sid)
+            sdk._capture_session(conv, session_id=sid)
             pid = f"{sid}_t0"
             first = [e["point"] for e in _events(events)
                      if e.get("type") == "PointAdded"
@@ -898,7 +898,7 @@ def test_a_preserved_turn_vector_is_not_attested_to_the_active_model(
 
             with mock.patch("tortoise.embeddings.encode_batch_for_store",
                             _embedder_down):
-                sdk.capture_session(conv, session_id=sid)
+                sdk._capture_session(conv, session_id=sid)
 
             recs = [e["point"] for e in _events(events)
                     if e.get("type") == "PointAdded"
@@ -1030,7 +1030,7 @@ def test_a_cleared_turn_vector_is_cleared_on_replay_too(tmp_path, monkeypatch):
         sdk = TortoiseSDK(str(tmp_path / "clear.db"),
                           event_log_path=str(events / "events.jsonl"))
         try:
-            sdk.capture_session(
+            sdk._capture_session(
                 [{"role": "user", "content": "ORIGINAL turn text"}],
                 session_id=sid)
             pid = f"{sid}_t0"
@@ -1038,7 +1038,7 @@ def test_a_cleared_turn_vector_is_cleared_on_replay_too(tmp_path, monkeypatch):
 
             # CHANGED content + embedder down => the live write CLEARS.
             with mock.patch(_BATCH_PATCH, _embedder_down):
-                sdk.capture_session(
+                sdk._capture_session(
                     [{"role": "user", "content": "a DIFFERENT replacement"}],
                     session_id=sid)
             assert _vector(sdk, pid) is None, (

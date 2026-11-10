@@ -425,7 +425,7 @@ class TestSessionsQuota:
         try:
             # 40 minimal captures (tiny conversation — no regex extraction)
             for i in range(40):
-                tenant.capture_session(
+                tenant._capture_session(
                     [{"role": "user", "content": "okay"}],
                     session_id=f"s{i:02d}",
                 )
@@ -449,7 +449,7 @@ class TestSessionsQuota:
                 "trap is open")
             enforce_org_limit(limits, "sessions", sdk=tenant)  # no raise
             # 41st session is STORED, not refused (was a 402 before #4010).
-            tenant.capture_session(
+            tenant._capture_session(
                 [{"role": "user", "content": "okay"}], session_id="s40")
             assert count_org_usage(tid, "sessions", sdk=tenant) == 41
         finally:
@@ -463,7 +463,7 @@ class TestSessionsQuota:
         tid = _find_org_id(reg_sdk)
         tenant = TortoiseSDK(db, namespace=tid)
         try:
-            tenant.capture_session(
+            tenant._capture_session(
                 [{"role": "user", "content": "okay"}], session_id="only_s1")
             # ~10 non-Session nodes: turn Point + Event + extracted points
             tenant.create_point("statement", "plain non-episodic point")
@@ -1225,7 +1225,7 @@ class TestObjectSubjectQuota:
         tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
-            tenant.capture_session(
+            tenant._capture_session(
                 [{"role": "user", "content": "okay"}], session_id="cap_s1")
             # 1 value point + 1 minted Object = 2 (the Session/turn Point/
             # Event/Source nodes stay episodic and are excluded)
@@ -1337,7 +1337,7 @@ class TestEventQuota:
         tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
-            tenant.capture_session(
+            tenant._capture_session(
                 [{"role": "user", "content": "okay"}], session_id="ev_s1")
             assert count_org_usage(tid, "points", sdk=tenant) == 2
         finally:
@@ -1428,7 +1428,7 @@ class TestIsEpisodicBackfill:
         tenant = self._make_tenant(reg_sdk, tmp_path)
         try:
             proj = tenant._get_proj()
-            tenant.capture_session(
+            tenant._capture_session(
                 [{"role": "user", "content": "okay"}], session_id="new_s1")
             # Nothing to backfill — new capture nodes already carry the flag
             # (turn Point, Event, and the session-provenance Source all stamp

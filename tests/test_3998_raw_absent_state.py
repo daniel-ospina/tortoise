@@ -1,3 +1,29 @@
+# #4282: four of the seven tests this PR removed were removed with the methods they pin —
+# `test_a_multi_source_point_prefers_the_source_that_has_an_entity`,
+# `test_chain_keeps_a_stable_key_set_when_the_source_has_no_references_edge`,
+# `test_reads_do_not_raise_when_the_raw_is_unreachable` — plus
+# `test_the_read_path_filters_a_pre_existing_payload_bearing_source`, which pinned
+# **TWO** drivers and only ONE of them left (see `tortoise/sdk_retired.py`). Its first
+# half drove `get_provenance_chain` (deleted, so that half goes with the method); its
+# second half drove `get_entity`, which SURVIVES (`sdk.py::TortoiseSDK.get_entity` →
+# `_get_entity`, and its `:Source` payload filter is still live) — so that half is
+# RE-AIMED onto `test_the_root_read_path_filters_a_pre_existing_payload_bearing_source`
+# below, which already builds the legacy payload-bearing node.
+# The surviving capture door is driven by the rest of this file under its private name
+# `_capture_session`.
+#
+# ⛔ The other THREE were RESTORED (#10226 review, 2 × P1 + 1 × P2) because their drivers
+# all SURVIVE and only the removal ledger said otherwise — the same "cut because it
+# FAILED rather than because its SUBJECT died" error this branch already repaired in
+# `ead45ab15` / `e5349a85d`. `test_the_generic_route_cannot_clear_or_forge_the_absent_state`
+# and `test_rebuild_does_not_replay_a_state_change_from_an_entity_mutation` drive
+# `create_source` / `update_entity` / `_journal_entity_mutation` / `rebuild_all`; the
+# tenant CLEAR/FORGE path and the `rawState` half of the `EntityMutated` replay rule were
+# UNPINNED repo-wide at this head without them.
+# `test_the_declaration_covers_every_in_tree_source_writer` lost only its LAST assertion to
+# the deleted `get_provenance_chain`; the producers-drift invariant it exists for is
+# re-aimed at the surviving reader below, and the filtered-read-bag half is recorded as
+# UNPINNED rather than silently dropped.
 """#3998 — the absent-raw state is a FIRST-CLASS VALUE (D30 / #3919).
 
 **Class B — mechanical architecture conformance.** The contract is already
@@ -168,12 +194,21 @@ def _memory(sdk, content: str = "a claim whose raw may be gone"):
 
 
 def _raw(sdk, url: str = RAW_URL) -> dict:
-    """The ``raw`` block as a READER sees it — through ``get_provenance_chain``,
-    never by touching the node, so these assertions cannot pass by reading state
-    the read path would not surface."""
-    chain = sdk.get_provenance_chain(_memory(sdk))
+    """The ``raw`` block as a READER sees it — through ``provenance``, never by
+    touching the node, so these assertions cannot pass by reading state the read
+    path would not surface.
+
+    ⚠️ #4282 deleted `get_provenance_chain` (one row per `(source, reference)`
+    hop); the surviving reader returns ONE chain whose `raw` block is built by the
+    same `_raw_entry_for_point` → `raw_state.raw_entry` builder, so a
+    single-source assertion reads the same keys through `["raw"]`. The hop-shaped
+    assertions that needed more than one row were removed with the reader.
+    """
+    chain = sdk.provenance(_memory(sdk))
     assert chain, "no provenance row — the read went silent"
-    return chain[0]["raw"]
+    raw = chain.get("raw")
+    assert raw, "no raw block on the chain — the read went silent"
+    return raw
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -544,7 +579,7 @@ def test_memory_and_provenance_are_readable_and_labelled(sdk, cause):
     pid = _memory(s)
     if cause == RAW_DELETED:
         s.create_source(RAW_URL, "conversation", raw_state=cause)
-        raw = s.get_provenance_chain(pid)[0]["raw"]
+        raw = s.provenance(pid)["raw"]
     else:
         with pytest.raises(ValueError, match="observed live"):
             s.create_source(RAW_URL, "conversation", raw_state=cause)
@@ -597,87 +632,15 @@ def test_the_three_causes_are_distinguishable_through_the_read_path(sdk):
     plain = _source_props(s)
     seen = {cause: raw_entry(plain, observed=cause) for cause in RAW_OBSERVED_STATES}
     s.create_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
-    seen[RAW_DELETED] = s.get_provenance_chain(pid)[0]["raw"]
+    seen[RAW_DELETED] = s.provenance(pid)["raw"]
     assert len({r["raw_state"] for r in seen.values()}) == 3
     assert len({r["label"] for r in seen.values()}) == 3
     assert len({r["message"] for r in seen.values()}) == 3
     assert len({(r["permanent"], r["retryable"]) for r in seen.values()}) == 3
 
 
-def test_reads_do_not_raise_when_the_raw_is_unreachable(sdk):
-    """Criterion (2) end to end: every read path returns a VALUE.
-
-    The recorded deletion is exercised through the SDK's public reads; the
-    observed conditions are exercised through the live seam, which returns an
-    explicit, labelled, user-facing state — never an empty result standing in
-    for "not there", and never a raise on a hostile observation.
-
-    (1) FAILS if any of these raises for an absent raw, or returns an ``error``
-        payload (or an empty/None entry) instead of the state.
-    (2) REACHABLE: the deletion is recorded and read below; the conditions are
-        observed over the real node; the sourceless point is created by
-        ``create_point`` with no ``extractedFrom`` and no session context.
-    """
-    s, _events = sdk
-    s.create_source(RAW_URL, "conversation", contentHash="h1")
-    pid = _memory(s)
-    # The live observations must be taken over a record with no marker (a
-    # recorded act wins), so capture the plain record before the write.
-    plain = _source_props(s)
-
-    s.create_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
-    chain = s.get_provenance_chain(pid)          # must not raise
-    prov = s.provenance(pid)                     # must not raise
-    assert chain[0]["raw"]["raw_state"] == RAW_DELETED
-    assert prov["raw"]["raw_state"] == RAW_DELETED
-    assert "error" not in prov
-
-    for cause in RAW_OBSERVED_STATES:
-        entry = raw_entry(plain, observed=cause)
-        assert isinstance(entry, dict) and entry, "the live read went silent"
-        assert entry["raw_state"] == cause
-        assert entry["available"] is False and entry["label"] and entry["message"]
-    # A hostile observation is a value too, not an exception.
-    assert raw_entry(plain, observed=object())["raw_state"] == RAW_UNRECOGNISED
-
-    # A point with NO source at all: still no raise, and no raw key invented.
-    orphan = s.create_point("statement", "orphan claim")["id"]
-    assert s.get_provenance_chain(orphan) == []
-    assert "raw" not in s.provenance(orphan)
 
 
-def test_chain_keeps_a_stable_key_set_when_the_source_has_no_references_edge(sdk):
-    """The other half of the silence fix: a source with no ``:references``
-    edge must still report its provenance, with the SAME key set, so a caller
-    that iterates a non-empty chain cannot ``KeyError`` on the shape that used
-    to return ``[]``.
-
-    (1) FAILS if the entity half is OMITTED rather than present — a consumer
-        reading ``item["entity"]`` on a chain it used to receive as ``[]``
-        now raises KeyError.
-    (2) REACHABLE: no ``references`` edge is wired below — the shape of a raw
-        indexed before extraction.
-    """
-    s, _events = sdk
-    s.create_source(RAW_URL, "conversation", contentHash="h1", raw_state=RAW_DELETED)
-    pid = _memory(s)
-    chain = s.get_provenance_chain(pid)
-    assert len(chain) == 1, "a source with no entity must not silence the chain"
-    assert set(chain[0]) >= {"source", "raw", "entity", "labels"}
-    # The entity half keeps MAIN's OPTIONAL + coalesce semantics (D10): with no
-    # ``:references`` edge the coalesce falls back to the source itself, which
-    # IS the terminal provenance, so ``entity`` is the source — filtered to the
-    # declared surface, so the fallback cannot re-hand a raw payload. The STABLE
-    # KEY SET asserted just above is what this test is about; ``entity is None``
-    # was the branch's implementation choice, and pinning it here would
-    # contradict
-    # ``test_references_edge.py::test_provenance_chain_returns_document_without_source_url``.
-    assert chain[0]["entity"]["url"] == RAW_URL
-    assert "Source" in chain[0]["labels"]
-    assert "content" not in chain[0]["entity"], (
-        "the coalesce fallback re-handed the raw payload"
-    )
-    assert chain[0]["raw"]["raw_state"] == RAW_DELETED
 
 
 def test_absence_is_preserved_by_a_later_upsert_that_carries_none(sdk):
@@ -895,42 +858,6 @@ def test_the_generic_entity_route_cannot_reach_a_source_with_a_payload(sdk):
     assert _source_props(s)["format"] == "transcript"
 
 
-def test_the_read_path_filters_a_pre_existing_payload_bearing_source(sdk):
-    """Review round 3, P2: a Source written BEFORE this change still holds its
-    payload, and `get_provenance_chain` edits the `source` bag — so without a
-    filter the read hands back the bytes the write path now refuses, and the
-    "never a copy of the raw" docstring is false for every pre-existing node.
-
-    (1) FAILS if the returned bag is the raw stored property map (`dict(row[0])`)
-        — the payload comes straight back.
-    (2) REACHABLE: the payload is written with raw Cypher, exactly as the
-        pre-fix writer did, so the node genuinely holds it before the read.
-    """
-    s, _events = sdk
-    body = "LEGACY_PAYLOAD " + ("old raw bytes. " * 150)
-    s.create_source(RAW_URL, "conversation", contentHash="h1")
-    pid = _memory(s)
-    # The PRE-GUARD writer's shape: the bytes are on the node already.
-    s._get_proj().g.query(
-        "MATCH (s:Source {url:$u}) SET s.content=$b, s.text=$b",
-        params={"u": RAW_URL, "b": body},
-    )
-    chain = s.get_provenance_chain(pid)
-    assert len(chain) == 1
-    assert "content" not in chain[0]["source"] and "text" not in chain[0]["source"], (
-        sorted(chain[0]["source"])
-    )
-    assert body not in repr(chain), "the read handed the raw payload back"
-    # The PRIMARY entity read leaks the same way and is exposed as the MCP tool
-    # `tortoise_get_entity` (review round 4, P2) — filter both, or the fix is
-    # one function away from being no fix at all.
-    ent = s.get_entity(RAW_URL)
-    assert "content" not in ent and "text" not in ent, sorted(ent)
-    assert body not in repr(ent), "get_entity handed the raw payload back"
-    # Legitimate declared props survive the filter.
-    assert chain[0]["source"]["url"] == RAW_URL
-    assert chain[0]["source"]["contentHash"] == "h1"
-    assert ent["url"] == RAW_URL
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -972,6 +899,20 @@ def test_the_root_read_path_filters_a_pre_existing_payload_bearing_source(sdk):
     troot = trav["entity"]
     assert "content" not in troot and "text" not in troot, sorted(troot)
     assert body not in repr(trav), "tortoise_traverse handed the raw payload back"
+
+    # The THIRD door onto the same node: the PRIMARY entity read (`sdk._get_entity`,
+    # exposed as the MCP tool `tortoise_get_entity`), whose filter is the round-4 fix of
+    # the same #5196 defect. #10226 review, P2: the assertion that pinned it was the
+    # SECOND half of `test_the_read_path_filters_a_pre_existing_payload_bearing_source`,
+    # and that test was removed for its FIRST half's driver (`get_provenance_chain`) —
+    # so the removal took a live pin with it, and a regression that re-served the raw
+    # payload bytes through `get_entity` passed CI green. Re-aimed here, on the node
+    # this test already poisons.
+    ent = s.get_entity(RAW_URL)
+    assert "content" not in ent and "text" not in ent, sorted(ent)
+    assert body not in repr(ent), "get_entity handed the raw payload back"
+    # …and the filter must not eat the declared surface.
+    assert ent.get("url") == RAW_URL and ent.get("contentHash") == "h1", ent
 
 
 def test_an_undeclared_document_prop_is_persisted_but_never_served(sdk):
@@ -1179,25 +1120,65 @@ def test_rebuild_drops_a_payload_carried_by_an_entity_mutated_record(sdk):
     assert props.get("format") == "transcript", sorted(props)
 
 
-def test_the_generic_route_cannot_clear_or_forge_the_absent_state(sdk):
-    """Review round 4, P1: the declaration HAS to admit ``rawState`` (or the
-    state could not be written) — so an allowlist check alone let the tenant MCP
-    route set it freely: ``rawState=None`` CLEARS a recorded absence (``SET n +=
-    {k: null}`` removes the key) and ``rawState='banana'`` persists an
-    unvalidated value. Both silently resurrect a raw the record says is gone —
-    the failure this issue exists to prevent — and the clear is journalled, so
-    it survives a rebuild.
+def test_rebuild_does_not_replay_a_state_change_from_an_entity_mutation(sdk):
+    """Review round 5, P1: the fold's `:Source` arm filtered undeclared keys but still
+    replayed the SERVER-MANAGED ones, so a journal line written by an earlier head — the
+    ``rawState=None`` CLEAR that round 3's open guard journalled — resurrected a
+    permanently deleted raw on every rebuild. A ``SourceCreated`` record owns the state;
+    no legitimate ``EntityMutated`` producer exists for it, so replay must drop it.
 
-    (1) FAILS if the guard consults only ``_SOURCE_NODE_PROPS``: ``rawState`` is
-        a member, so the clear and the forgery both go through.
-    (2) REACHABLE: both spellings are passed through the real tenant surface,
-        and the read is checked after each to prove the state actually moved.
+    (1) FAILS if the fold drops only undeclared keys: the recorded clear is applied and
+        the state reads back as ``present``.
+    (2) REACHABLE: the record is emitted through the real journal producer with the
+        exact shape the unguarded route wrote, and the read is checked.
+
+    ⛔ RESTORED by the #10226 review (P1). The removal ledger said this went "with the
+    methods it pin"; it pins none. ``create_source``, ``_journal_entity_mutation`` and
+    ``rebuild_all`` all survive, and at the previous head NO test anywhere under
+    ``tests/`` emitted ``state={"rawState": None}`` — so the ``rawState`` half of the
+    ``EntityMutated`` replay rule was pinned NOWHERE, while the fold arm that must drop it
+    stayed live (the surviving payload half, which this file keeps, does not cover it).
+    """
+    from tortoise.raw_state import RAW_DELETED
+
+    s, events = sdk
+    s.create_source(RAW_URL, "conversation", contentHash="h1", raw_state=RAW_DELETED)
+    assert _raw(s)["raw_state"] == RAW_DELETED
+    s._journal_entity_mutation("Source", RAW_URL, "revise", state={"rawState": None})
+
+    s._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+    assert _raw(s)["raw_state"] == RAW_DELETED, (
+        "a replayed EntityMutated resurrected the raw the record says is gone"
+    )
+    assert _raw(s)["available"] is False
+
+
+def test_the_generic_route_cannot_clear_or_forge_the_absent_state(sdk):
+    """Review round 4, P1: the declaration HAS to admit ``rawState`` (or the state could
+    not be written) — so an allowlist check alone let the tenant MCP route set it freely:
+    ``rawState=None`` CLEARS a recorded absence (``SET n += {k: null}`` removes the key)
+    and ``rawState='banana'`` persists an unvalidated value. Both silently resurrect a raw
+    the record says is gone — the failure this issue exists to prevent — and the clear is
+    journalled, so it survives a rebuild.
+
+    (1) FAILS if the guard consults only ``_SOURCE_NODE_PROPS``: ``rawState`` is a member,
+        so the clear and the forgery both go through.
+    (2) REACHABLE: both spellings are passed through the real tenant surface, and the read
+        is checked after each to prove the state actually moved.
+
+    ⛔ RESTORED by the #10226 review (P1). Removed in `20e5613e67` on the premise that it
+    went "with the methods it pin" — it pins NONE: every driver below
+    (``create_source``, ``update_entity``) is a surviving approved method and the guard it
+    exercises (``_SOURCE_SERVER_MANAGED_PROPS``) is still in the code. Removing it left
+    the tenant CLEAR/FORGE path pinned nowhere in the tree while the behaviour it guards
+    stayed live — exactly the state in which a regression re-opens the hole green.
     """
     from tortoise.raw_state import RAW_DELETED
 
     s, _events = sdk
     s.create_source(RAW_URL, "conversation", contentHash="h1", raw_state=RAW_DELETED)
-    assert _raw(s) ["raw_state"] == RAW_DELETED
+    assert _raw(s)["raw_state"] == RAW_DELETED
 
     # The CLEAR: without the server-managed guard this reads back as `present`.
     with pytest.raises(ValueError, match="server-managed"):
@@ -1217,18 +1198,27 @@ def test_the_generic_route_cannot_clear_or_forge_the_absent_state(sdk):
 
 
 def test_the_declaration_covers_every_in_tree_source_writer(sdk):
-    """Review round 4, P2: the declaration drifted from the node. It was
-    written from the two writers I happened to be editing, but
-    ``get_source_reliability`` also mints three keys — so the read filter
-    silently DROPPED the reliability cache that the read had just returned to
-    the caller. Naming keys one at a time does not scale; this asserts the
-    invariant instead: every property an in-tree producer writes to a
-    ``:Source`` is DECLARED.
+    """Review round 4, P2: the declaration drifted from the node. It was written from the
+    two writers I happened to be editing, but ``get_source_reliability`` also mints three
+    keys — so the read filter silently DROPPED the reliability cache that the read had
+    just returned to the caller. Naming keys one at a time does not scale; this asserts
+    the invariant instead: every property an in-tree producer writes to a ``:Source`` is
+    DECLARED.
 
-    (1) FAILS the day a producer adds a key the declaration lacks — which is
-        exactly the drift that produced the dropped-cache defect.
-    (2) REACHABLE: each producer below is invoked for real and the node is read
-        back, so the surface measured is the one that exists, not a literal.
+    (1) FAILS the day a producer adds a key the declaration lacks — which is exactly the
+        drift that produced the dropped-cache defect.
+    (2) REACHABLE: each producer below is invoked for real and the node is read back, so
+        the surface measured is the one that exists, not a literal.
+
+    ⛔ RESTORED by the #10226 review (P2). Only the final assertion touched a deleted
+    reader (``get_provenance_chain``); the producers-drift invariant above it drives four
+    SURVIVING producers, and at the previous head two of them
+    (``_materialize_session_source``, ``get_source_reliability``) appeared in this file
+    only inside a comment — so the drift guard this test was written for no longer ran for
+    half its population. The last assertion now reads through the surviving
+    ``get_source_reliability`` (which serves the cached ``reliabilityComponents``); the
+    filtered-read-BAG half is recorded as UNPINNED, because #4282 deleted the only reader
+    that returned a ``:Source`` property bag.
     """
     from tortoise.projection.entities import _SOURCE_NODE_PROP_NAMES
 
@@ -1282,12 +1272,19 @@ def test_the_declaration_covers_every_in_tree_source_writer(sdk):
         f"declare them in entities._SOURCE_NODE_PROPS or stop them at the writer; an "
         f"undeclared key is dropped from every filtered read"
     )
-    # ...and the read keeps them, which is the defect this test was written for.
-    chain = s.get_provenance_chain(_memory(s))
-    assert chain and "reliabilityComponents" in chain[0]["source"], (
-        f"the reliability cache was dropped from the read bag: "
-        f"{sorted(chain[0]['source'] if chain else {})}"
-    )
+    # ...and the reliability cache the read just returned must not have been dropped.
+    # (#4282: the original assertion read it back off `get_provenance_chain(...)[0]`
+    # ["source"], the only reader that returned a `:Source` property bag. That reader is
+    # deleted; this is the surviving half of the same property.)
+    served = s.get_source_reliability(RAW_URL)
+    assert served["cache"] in {"fresh", "recomputed"}, (
+        f"the reliability cache did not round-trip: {served.get('cache')!r}")
+    assert served.get("components"), (
+        f"the reliability cache's components were dropped: {served!r}")
+
+
+
+
 
 
 def test_a_url_only_source_stub_is_guarded_like_any_other_source(sdk):
@@ -1572,32 +1569,6 @@ def test_the_declaration_covers_an_id_less_source_stub(sdk):
     s.update_entity(RAW_URL, format="transcript")
 
 
-def test_rebuild_does_not_replay_a_state_change_from_an_entity_mutation(sdk):
-    """Review round 5, P1: the fold's `:Source` arm filtered undeclared keys but
-    still replayed the SERVER-MANAGED ones, so a journal line written by an
-    earlier head — the ``rawState=None`` CLEAR that round 3's open guard
-    journalled — resurrected a permanently deleted raw on every rebuild. A
-    ``SourceCreated`` record owns the state; no legitimate ``EntityMutated``
-    producer exists for it, so replay must drop it.
-
-    (1) FAILS if the fold drops only undeclared keys: the recorded clear is
-        applied and the state reads back as ``present``.
-    (2) REACHABLE: the record is emitted through the real journal producer with
-        the exact shape the unguarded route wrote, and the read is checked.
-    """
-    from tortoise.raw_state import RAW_DELETED
-
-    s, events = sdk
-    s.create_source(RAW_URL, "conversation", contentHash="h1", raw_state=RAW_DELETED)
-    assert _raw(s)["raw_state"] == RAW_DELETED
-    s._journal_entity_mutation("Source", RAW_URL, "revise", state={"rawState": None})
-
-    s._get_proj().rebuild_all(str(events), confirm_destructive=True)
-
-    assert _raw(s)["raw_state"] == RAW_DELETED, (
-        "a replayed EntityMutated resurrected the raw the record says is gone"
-    )
-    assert _raw(s)["available"] is False
 
 
 # NOTE (#3998): there is deliberately NO test here pinning the identity keys either
@@ -1607,68 +1578,35 @@ def test_rebuild_does_not_replay_a_state_change_from_an_entity_mutation(sdk):
 # `::TestUrlKeyedSourceIsWritable::test_a_rekeying_update_returns_the_node_at_its_new_address`
 # AND `::TestTheStateReadBackIsTheSameStatement::test_a_name_update_that_rekeys_a_url_source_still_journals`
 # (two classes, not one). Restoring the refusal fails exactly those 2 tests —
-# measured; that is 2 of the file's 23 collected tests (an earlier revision of this
-# note said "6", which is the union of the two named CLASSES, not the file). They are the pin; a second copy here could only
+# measured; that is 2 of the file's 30 collected tests at this head (an earlier
+# revision of this note said "6", which is the union of the two named CLASSES, not
+# the file; the count read 23 when this note was written and the file has grown
+# since, so it is stated as a count-at-a-head rather than a standing fact). They are the pin; a second copy here could only
 # disagree with them. An earlier revision of this file asserted the refusal, which
 # is why this PR was red for its whole life.
 #
 # The residual a refusal was aimed at is NOT covered by those tests, so nothing
 # here buys it back: a re-key rewriting the MERGE key, so a rebuild splits the
-# `:Source` (two nodes) and the Point's `get_provenance_chain` returns EMPTY —
-# re-measured live at this head with a 1517-byte `url`. It is PRE-EXISTING to #3998
-# and it is #4649's structural issue (the outer label loop takes the FIRST matching
-# label), recorded on #4649 — which is CLOSED, so it is neither open-tracked nor
-# test-pinned. That is a real gap, stated rather than papered over: the structural
-# fix belongs with #4649's loop, not with a guard on this write.
+# `:Source` (two nodes) and a provenance-chain read over the Point returns EMPTY —
+# measured live on the pre-#4282 head with a 1517-byte `url`. ⚠️ It cannot be
+# re-measured from THIS tree: the chain read that produced that number was
+# `get_provenance_chain`, one of the 26 public methods #4282 retired
+# (`tortoise/sdk_retired.py`), and its Cypher + row shaping were inline in that
+# method — no projection reader replaced it. What survives is the DATA, not the
+# chain: the `:Source` / `extractedFrom` edges are still there, so the residual is
+# still reachable by writing that two-hop query yourself. ⚠️ One CURRENCY-ONLY
+# reader of the `references` hop does survive
+# (`search_engine.read_reference_currency_links`), but it answers `currency`, not
+# the chain — it is not a rebuilt provenance reader and does not make this number
+# reproducible. The number is retained as the record of a measurement, not as a
+# claim reproducible at this head. It is
+# PRE-EXISTING to #3998 and it is #4649's structural issue (the outer label loop
+# takes the FIRST matching label), recorded on #4649 — which is CLOSED, so it is
+# neither open-tracked nor test-pinned. That is a real gap, stated rather than
+# papered over: the structural fix belongs with #4649's loop, not with a guard on
+# this write.
 
 
-def test_a_multi_source_point_prefers_the_source_that_has_an_entity(sdk):
-    """Review round 5, P2 — a REGRESSION introduced by this change's own
-    ``OPTIONAL MATCH``. Making the ``references`` hop survivable is required (a
-    source with no entity must still be sayable), but a bare ``LIMIT 1`` then
-    returned whichever source matched FIRST — so a Point with two sources
-    (#3263 many-to-many) whose first source has no entity reported
-    ``entity=None`` and HID the entity-bearing source the pre-change required-hop
-    query returned.
-
-    (1) FAILS if the entity-bearing source is HIDDEN. Under the branch's
-        pre-#5199 query (`OPTIONAL MATCH` + `LIMIT 1` with no ordering) the
-        entity-less source won and the chain reported it alone. `origin/main`
-        (#5199) now returns ONE ROW PER LINK, so the shape is two rows and the
-        falsifier is that the entity-bearing source's row must be PRESENT and
-        must LEAD (`ref IS NULL` sorts a resolved reference ahead of the
-        self-terminal fallback), and the fallback row's `entity` is the source
-        itself (the `coalesce`), never `None`.
-    (2) REACHABLE: the fixture builds that exact shape — an entity-less source
-        linked first, then an entity-bearing one — so both rows exist to choose
-        between.
-    """
-    s, _events = sdk
-    pid = _memory(s)
-    second = "https://raw.example.com/conv/8"
-    s.create_source(second, "conversation", contentHash="h2")
-    obj = s.create_entity("Object", "an extracted object")["node"]["id"]
-    s.link_source_to_entity(second, obj, "Object")
-    s._get_proj().g.query(
-        "MATCH (p:Point {id:$p}), (s:Source {url:$u}) MERGE (p)-[:extractedFrom]->(s)",
-        params={"p": pid, "u": second},
-    )
-    chain = s.get_provenance_chain(pid)
-    # #5199 (now on main): ONE ROW PER LINK — a Point with two sources yields
-    # two rows, not one. The regression this test pins is unchanged in
-    # substance: the entity-bearing source must not be HIDDEN behind the
-    # entity-less one, so its row must be present AND lead (`ref IS NULL` sorts
-    # a resolved reference ahead of the self-terminal fallback).
-    assert len(chain) == 2, chain
-    assert chain[0]["entity"] is not None, (
-        "the entity-bearing source was hidden behind an entity-less one"
-    )
-    assert chain[0]["labels"], "labels must accompany the entity"
-    assert "Object" in chain[0]["labels"], chain[0]["labels"]
-    assert "Source" in chain[1]["labels"], chain[1]["labels"]
-    assert chain[1]["entity"] is not None, (
-        "the self-terminal fallback row returns the source itself, never None"
-    )
 
 
 def test_index_entry_shape_carries_no_payload_field():
@@ -1810,3 +1748,45 @@ def test_a_url_only_stub_that_collides_with_a_point_id_still_guards_the_write(sd
     # `:Source` above — ruling B applies to every `:Source` the write reaches.
     with pytest.raises(ValueError, match="retired field"):
         s.update_entity(pid, content="edited point A content")
+
+def test_provenance_reads_do_not_raise_and_invent_no_raw_for_a_sourceless_point(sdk):
+    """Criterion (2), on the SURVIVING read door: `provenance()` returns a VALUE.
+
+    ⛔ This is the surviving half of `test_reads_do_not_raise_when_the_raw_is_
+    unreachable`, which #4282 deleted with `get_provenance_chain` — that method is
+    one of the 26 retired doors (`tortoise/sdk_retired.py`), so the two assertions
+    that read through it are gone WITH their driver and are not restored here.
+    What IS restored is the half that reads through a method that SURVIVES, and it
+    is restored because nothing else at this head covers it: no test asserted that
+    a point with NO source at all gets no `raw` block invented for it, and an
+    invented block would fabricate a raw-availability state out of nothing.
+
+    (1) FAILS if `provenance()` raises for an absent raw, returns an `error`
+        payload instead of the state, or hands a sourceless point a `raw` key.
+    (2) REACHABLE: the deletion is recorded and read below; the three observed
+        conditions are read over the real source row; the sourceless point is
+        created by `create_point` with no `extractedFrom` and no session context.
+    """
+    s, _events = sdk
+    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    pid = _memory(s)
+    # Taken over a record with no marker (a recorded act wins), so the live reads
+    # below observe the plain row rather than the deletion just written.
+    plain = _source_props(s)
+
+    s.create_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
+    prov = s.provenance(pid)                     # must not raise
+    assert prov["raw"]["raw_state"] == RAW_DELETED
+    assert "error" not in prov
+
+    for cause in RAW_OBSERVED_STATES:
+        entry = raw_entry(plain, observed=cause)
+        assert isinstance(entry, dict) and entry, "the live read went silent"
+        assert entry["raw_state"] == cause
+        assert entry["available"] is False and entry["label"] and entry["message"]
+    # A hostile observation is a value too, not an exception.
+    assert raw_entry(plain, observed=object())["raw_state"] == RAW_UNRECOGNISED
+
+    # A point with NO source at all: still no raise, and NO raw key invented.
+    orphan = s.create_point("statement", "orphan claim")["id"]
+    assert "raw" not in s.provenance(orphan)

@@ -116,7 +116,7 @@ def test_credential_in_role_is_redacted_in_all_three_sinks(sdk, monkeypatch):
     _keyless(monkeypatch)
     secret = _secret()
     sid = "sess-5445-role"
-    res = sdk.capture_session(
+    res = sdk._capture_session(
         [{"role": secret, "content": "please review the attached patch"},
          {"role": "user", "content": "ordinary follow-up"}],
         session_id=sid)

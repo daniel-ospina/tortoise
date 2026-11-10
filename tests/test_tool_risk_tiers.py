@@ -483,18 +483,16 @@ class TestTheMitigationWriteIsNeverAdvertisedAsRepeatable:
             f"{offenders}"
         )
 
-    def test_the_sdk_door_states_the_same_condition(self):
-        """The same claim served through the SDK docstring — the third channel.
-
-        `TortoiseSDK.operator_action` carried "strength (idempotent)" while its own
-        `mitigate_operator` docstring did not, so a caller reading either surface
-        got a different answer about the same write.
-        """
-        from tortoise.sdk import TortoiseSDK
-
-        doc = TortoiseSDK.operator_action.__doc__ or ""
-        assert "(idempotent)" not in doc
-        assert "withdraw" in doc, doc
+    # `test_the_sdk_door_states_the_same_condition` was deleted WITH its door: #4282
+    # deleted `TortoiseSDK.operator_action`, so the SDK docstring that test read no
+    # longer exists. ⛔ Coverage is NOT equivalent, and saying so is the point —
+    # `test_no_door_to_the_mitigation_write_claims_unqualified_idempotence` above
+    # grades the MCP tool DESCRIPTIONS only (`mitigation_writers()` enumerates registry
+    # entries, never SDK methods). The SDK surface for this same write SURVIVES as
+    # `TortoiseSDK.mitigate_operator`, and NOTHING reads its docstring — so re-adding
+    # "(idempotent)" there would ship with every gate green, which is the exact defect
+    # the deleted test existed to catch, one door over. Re-pin that docstring if the
+    # SDK channel becomes load-bearing.
 
 
 class TestTheReadThroughToolsRegressionPin:

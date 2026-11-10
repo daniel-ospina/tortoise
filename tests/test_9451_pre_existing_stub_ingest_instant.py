@@ -123,7 +123,7 @@ def test_a_capture_over_a_pre_existing_stub_replays_its_ingest_instant(prov):
     session_id = "S1"
     url, stub_ingested_at = _mint_stub_via_create_point(sdk, session_id)
 
-    res = sdk.capture_session(CONV, session_id=session_id)
+    res = sdk._capture_session(CONV, session_id=session_id)
     assert res["ok"] is True, res
 
     live = _bag(sdk, url)
@@ -156,7 +156,7 @@ def test_the_record_states_the_instant_the_write_stored(prov):
     session_id = "S2"
     url, stub_ingested_at = _mint_stub_via_create_point(sdk, session_id)
 
-    res = sdk.capture_session(CONV, session_id=session_id)
+    res = sdk._capture_session(CONV, session_id=session_id)
     assert res["ok"] is True, res
     live = _bag(sdk, url)
 
@@ -199,7 +199,7 @@ def test_a_replay_that_remints_the_stub_first_lands_the_recorded_instant(prov):
     session_id = "S3"
     url, stub_ingested_at = _mint_stub_via_create_point(sdk, session_id)
 
-    res = sdk.capture_session(CONV, session_id=session_id)
+    res = sdk._capture_session(CONV, session_id=session_id)
     assert res["ok"] is True, res
     live = _bag(sdk, url)
 
@@ -229,7 +229,7 @@ def test_two_captures_over_one_stub_replay_in_journal_order(prov):
     session_id = "S4"
     url, stub_ingested_at = _mint_stub_via_create_point(sdk, session_id)
 
-    res = sdk.capture_session(CONV, session_id=session_id)
+    res = sdk._capture_session(CONV, session_id=session_id)
     assert res["ok"] is True, res
     # A SECOND materialization of the same session (the re-materialisation door
     # `tests/test_5097_capture_source_replay.py` drives directly — a second
@@ -273,7 +273,7 @@ def test_a_blank_stored_instant_is_journaled_as_blank_not_as_the_capture_clock(p
     sdk._get_proj().g.query(
         "MATCH (s:Source {url:$u}) SET s.ingestedAt = ''", params={"u": url})
 
-    res = sdk.capture_session(CONV, session_id=session_id)
+    res = sdk._capture_session(CONV, session_id=session_id)
     assert res["ok"] is True, res
     live = _bag(sdk, url)
     assert live["ingestedAt"] == "", (

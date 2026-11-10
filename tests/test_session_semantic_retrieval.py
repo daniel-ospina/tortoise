@@ -156,7 +156,7 @@ def _keyless(monkeypatch) -> None:
 
 
 def _write(sdk: TortoiseSDK, session_id: str, turns: list[str]):
-    res = sdk.capture_session(
+    res = sdk._capture_session(
         [{"role": "user", "content": t} for t in turns], session_id=session_id)
     assert res["turns"] == len(turns), res
     return res

@@ -1034,7 +1034,7 @@ class TestTheCapturePathExecutesTheFusion:
         monkeypatch.setattr(ev2, "extract_session_v2",
                             lambda *a, **k: out)
 
-        receipt = sdk.capture_session(
+        receipt = sdk._capture_session(
             [{"role": "user", "content": "a session whose seam is fixed"},
              {"role": "assistant", "content": "noted"}],
             session_id="s_second_document")
@@ -1107,7 +1107,7 @@ class TestTheCapturePathExecutesTheFusion:
                "error_census": {}}
         monkeypatch.setattr(ev2, "extract_session_v2", lambda *a, **k: out)
 
-        receipt = sdk.capture_session(
+        receipt = sdk._capture_session(
             [{"role": "user", "content": "a session naming a person"},
              {"role": "assistant", "content": "noted"}],
             session_id="s_subject_doc")
@@ -1148,7 +1148,7 @@ class TestTheCapturePathExecutesTheFusion:
         monkeypatch.setattr(ev2, "extract_session_v2",
                             lambda *a, **k: out)
 
-        receipt = sdk.capture_session(
+        receipt = sdk._capture_session(
             [{"role": "user", "content": "a session whose seam is fixed"},
              {"role": "assistant", "content": "noted"}],
             session_id="s_no_merge")

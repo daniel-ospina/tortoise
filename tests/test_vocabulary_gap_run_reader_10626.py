@@ -328,7 +328,7 @@ def test_the_m2_capture_lane_reports_the_gap_on_its_own_receipt(tmp_path, monkey
             {"role": "user", "content": GAP_CLAIM},
         ]
 
-        out = sdk.capture_session(conversation, session_id="gap-m2")
+        out = sdk._capture_session(conversation, session_id="gap-m2")
     finally:
         sdk.close()
 
@@ -361,7 +361,7 @@ def test_a_zero_fold_m2_capture_leaves_stats_untouched(tmp_path, monkeypatch):
 
     sdk = TortoiseSDK(str(tmp_path / "m2-clean.db"))
     try:
-        out = sdk.capture_session(
+        out = sdk._capture_session(
             [{"role": "user", "content": CLEAN_CLAIM},
              {"role": "assistant", "content": "noted"}],
             session_id="gap-m2-clean")

@@ -347,7 +347,7 @@ def test_capture_receipt_carries_the_notice(sdk, monkeypatch):
 
     conv = [{"role": "user", "content": "a session"},
             {"role": "assistant", "content": "noted"}]
-    receipt = sdk.capture_session(conv, session_id="s5516")
+    receipt = sdk._capture_session(conv, session_id="s5516")
 
     assert receipt.get("ok") is True, receipt
     notices = receipt.get(NOTICE_KEY) or []

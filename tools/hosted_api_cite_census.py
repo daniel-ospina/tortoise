@@ -10,7 +10,7 @@ census has one command:
 
     uv run python tools/hosted_api_cite_census.py            # human-readable
     uv run python tools/hosted_api_cite_census.py --json     # for a script
-    uv run python tools/hosted_api_cite_census.py --pivot 23128
+    uv run python tools/hosted_api_cite_census.py --pivot 23131
     uv run python tools/hosted_api_cite_census.py --check    # exit 1 when a note is stale
     uv run python tools/hosted_api_cite_census.py --refresh  # re-state every figure in place
 
@@ -73,8 +73,12 @@ REPO = Path(__file__).resolve().parent.parent
 CITE_RE = r"hosted_api\.py:[0-9]+"
 
 #: The line the two notes are written around: the ONE production execution site of
-#: `LIFETIME_MEMORY_QUERY`.
-DEFAULT_PIVOT = 23128
+#: `LIFETIME_MEMORY_QUERY`. ⚠️ A FALLBACK, not the source: every shipped path
+#: derives the site from the tree (`lifetime_query_sites()[0]`) and the test
+#: passes its own `_PIVOT`, so this constant only ever has to agree with them —
+#: which is exactly why it must be re-derived whenever an edit above the site
+#: moves it (#10226 forward-merge moved it 23128 -> 23131).
+DEFAULT_PIVOT = 23131
 
 _SCORECARD = "tortoise/activation_scorecard.py"
 _HOSTED = "tortoise/hosted_api.py"
@@ -91,7 +95,7 @@ _NOTES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     # ⛔ The pivot is CAPTURED here, not matched as a bare digit run: this sentence
     # is the note's second of three spellings of it, and an uncaptured one is a
     # figure neither verb can see (#11576 review, P2 — `--check` greened a note
-    # that said 23128 and 24500 at once after a pivot move).
+    # that said 23131 and 24500 at once after a pivot move).
     ("scorecard ABOVE range", _SCORECARD,
      r"LARGER than (\d+) \((\d+) … (\d+)\)", ("pivot", "above_min", "max_above")),
     ("scorecard BELOW count", _SCORECARD,

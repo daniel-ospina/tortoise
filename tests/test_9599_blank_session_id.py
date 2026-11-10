@@ -1,3 +1,6 @@
+# #4282: the tests below were removed with the methods they pin — `test_a_consent_declined_commit_still_reports_a_minted_id` — which this
+# PR deletes outright (see `tortoise/sdk_retired.py`). The surviving capture door is
+# driven by the rest of this file under its private name `_capture_session`.
 """#9599 — a BLANK session id is not an identity, and the capture doors refuse it.
 
 The defect this pins (measured, #9599): a *present but blank* ``session_id``
@@ -23,8 +26,9 @@ citing the wrong home is how a later lane "tidies" it into a refusal.)
 What this module pins is the half that IS ours, with TWO homes at two layers:
 
 * the DOOR half — a caller-supplied ``session_id`` — is
-  ``tortoise.ids.session_id_refusal``, applied at all FOUR caller-id doors —
-  the two SDK capture doors (``capture_session`` / ``commit_session``), the
+  ``tortoise.ids.session_id_refusal``, applied at all THREE caller-id doors —
+  the SDK capture door (``_capture_session``, private since #4282 retired the
+  public ``capture_session`` name and deleted ``commit_session``), the
   hosted ``/v1/sessions`` ``SessionRequest`` boundary, and
   ``commit_schema.CommitPayload`` (the ``POST /v1/sessions/commit`` model) —
   (the ``capture_consent`` idiom: one predicate, every door); and
@@ -265,8 +269,8 @@ def test_the_fold_gate_and_the_door_gate_are_one_rule():
 def test_the_remedy_belongs_to_the_door_not_to_the_rule():
     """ONE rule, TWO remedies — pinned in both directions (#11576 review P2).
 
-    All four doors share ``session_id_refusal``, but only three of them MINT for
-    ``None`` (the two SDK doors and the hosted ``SessionRequest`` boundary).
+    The three doors share ``session_id_refusal``, but only two of them MINT for
+    ``None`` (the SDK capture door and the hosted ``SessionRequest`` boundary).
     ``commit_schema.CommitPayload`` does not: its ``session_id`` is a required
     ``str``, so the mint advice is a remedy that door rejects. The shared text
     used to carry the mint clause to every door, and a caller who followed it at
@@ -286,13 +290,16 @@ def test_the_remedy_belongs_to_the_door_not_to_the_rule():
         assert ids_mod.SESSION_ID_MINT_REMEDY in mint, (value, mint)
         assert ids_mod.SESSION_ID_NO_MINT_REMEDY in no_mint, (value, no_mint)
         assert ids_mod.SESSION_ID_MINT_REMEDY not in no_mint, (value, no_mint)
-    # The default is the MINTING door's remedy — three of the four doors take it
-    # by saying nothing, so a flipped default would silently re-break the fourth.
+    # The default is the MINTING door's remedy — two of the three doors take it
+    # by saying nothing, so a flipped default would silently re-break the third.
     assert ids_mod.SESSION_ID_MINT_REMEDY in ids_mod.session_id_refusal("   ")
 
 
 @pytest.mark.parametrize("value", (0, False, 123, b"  "))
-@pytest.mark.parametrize("door", ("capture", "commit"))
+# #4282 deleted the `commit_session` door outright, so the surviving SDK door is
+# the private `_capture_session`; the commit arm is pinned at the hosted
+# `CommitPayload` boundary instead (see test_demo_session_read_exclusion_8290).
+@pytest.mark.parametrize("door", ("capture",))
 def test_both_sdk_doors_refuse_a_present_non_string_id(sdk, door, value):
     """The DOORS, not just the predicate — the predicate alone pins nothing.
 
@@ -302,8 +309,10 @@ def test_both_sdk_doors_refuse_a_present_non_string_id(sdk, door, value):
     boundary. This is the test that reds if that ordering ever comes back.
     """
     client, _ = sdk
-    res = (client.capture_session(CONV, session_id=value) if door == "capture"
-           else client.commit_session(CONV, session_id=value))
+    # one door remains: `commit_session` is deleted by #4282 and the capture
+    # door's public name is retired, so this drives the surviving private body.
+    assert door == "capture"
+    res = client._capture_session(CONV, session_id=value)
 
     assert res["ok"] is False, res
     errors = [str(e) for e in (res.get("errors") or [])]
@@ -389,12 +398,15 @@ def test_the_skip_report_names_a_blank_identity_as_blank():
 
 # ── enforcement point 1: the SDK capture doors ───────────────────────────
 
-@pytest.mark.parametrize("door", ("capture", "commit"))
+# #4282 deleted the `commit_session` door outright, so the surviving SDK door is
+# the private `_capture_session`; the commit arm is pinned at the hosted
+# `CommitPayload` boundary instead (see test_demo_session_read_exclusion_8290).
+@pytest.mark.parametrize("door", ("capture",))
 @pytest.mark.parametrize("blank", ("   ", "\t"))
 def test_the_sdk_doors_refuse_a_blank_session_id(sdk, door, blank):
     client, log_path = sdk
-    res = (client.capture_session(CONV, session_id=blank) if door == "capture"
-           else client.commit_session(CONV, session_id=blank))
+    assert door == "capture"
+    res = client._capture_session(CONV, session_id=blank)
 
     assert res["ok"] is False, res
     errors = [str(e) for e in (res.get("errors") or [])]
@@ -416,7 +428,7 @@ def test_a_blank_session_id_cannot_mint_a_duplicate_session(sdk):
     """The measured #9599 shape: two captures on one blank id, ONE container."""
     client, _ = sdk
     for _ in range(2):
-        res = client.capture_session(CONV, session_id="   ")
+        res = client._capture_session(CONV, session_id="   ")
         assert res["ok"] is False, res
     assert _session_ids(client) == [], _session_ids(client)
 
@@ -451,18 +463,6 @@ def test_the_hosted_boundary_validator_reds_without_the_network():
         SessionRequest(conversation=CONV, session_id=ok_value)
 
 
-def test_a_consent_declined_commit_still_reports_a_minted_id(sdk, monkeypatch):
-    """Receipt parity: the mint stays ABOVE the consent gate (#9599 review P3).
-
-    Moving the mint below the gate turns this field into `None` — a silent
-    change to a public receipt — and nothing else in the suite would notice.
-    """
-    client, _ = sdk
-    monkeypatch.delenv("TORTOISE_CAPTURE", raising=False)
-    res = client.commit_session(CONV)
-    assert res["ok"] is False, res
-    assert str(res.get("session_id", "")).startswith("session_"), res
-    assert "consent" in str(res.get("error", "")).lower(), res
 
 
 # ── the replay half: a journal written before the doors refused ────
