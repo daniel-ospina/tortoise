@@ -177,6 +177,9 @@ export function emailInterstitial(email: string | null, pendingId: string, kind:
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Confirm your sign-in — Tortoise</title>
+<link rel="icon" href="/favicon.ico?v=62885cadb6d1" sizes="32x32 48x48">
+<link rel="icon" type="image/png" href="/favicon.png?v=49f77b817262" sizes="256x256">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png?v=d528e4e4021a">
 <style nonce="${nonce}">
   :root { --bg:#060b14; --surface:#0d1a2d; --text:#cbd5e1; --dim:#94a3b8; --accent:#06b6d4; --red:#ef4444; --border:#1e293b;
           --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace; --serif:Georgia,'Times New Roman',serif; }
