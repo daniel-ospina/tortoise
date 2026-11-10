@@ -7,10 +7,10 @@ give `C3`–`C7` a fixed bar to report against.
 
 Three properties are pinned here, and each names the mutation that makes it FAIL:
 
-1. **the record registers them, and does NOT require them** — `required_criteria_rows` stays
-   `[E1, E2, E3, E4, E5]`, because a required row cannot be inferred from the rest (`V2`) and making
-   them required would red every verdict table that predates their scoring runs, the committed
-   `capstone-measured-9152448d.log` included;
+1. **the record registers them, and does NOT require them** — `required_criteria_rows` gains `E6`
+   (the capstone's sixth row, `#11673`) and still carries no `A`-row, because a required row cannot be
+   inferred from the rest (`V2`) and making an `A`-row required would red every verdict table that
+   predates its scoring run, the committed `capstone-measured-9152448d.log` included;
 2. **the amendment is an amendment** — §10.11 quotes the superseded pins line verbatim, so the change
    is findable rather than a quiet overwrite (`#9736` is the model, not a new registration);
 3. **the census reports, and where it cannot measure it says so** — a population no instrument has

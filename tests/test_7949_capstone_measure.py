@@ -4729,11 +4729,11 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # so the shift cannot be avoided by shortening it — a line count above a
         # cite moves the cite.
         ("E1-E5-PROOFS.md", 'declares `STEPS = ("S0"', (
-            ("185", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+            ("192", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
-        ("E1-E5-PROOFS.md", "_step_accounting` (`:738`) refuses a GREEN row whose", (
-            ("738", "def _step_accounting("),
+        ("E1-E5-PROOFS.md", "_step_accounting` (`:745`) refuses a GREEN row whose", (
+            ("745", "def _step_accounting("),
         ), "capstone_verdict_check"),
         # ⛔ A SECOND DOCUMENT PRINTS THE SAME DECLARATION (#10601 review round 2).
         # `docs/00_index.md`'s capstone row cites this gate too, and it moved
@@ -4743,7 +4743,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # and the rows above covered ONE document. Every doc that prints a
         # `tools/*.py` number needs its own row here, not just the first one.
         ("docs/00_index.md", "declares the eight steps", (
-            ("185", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+            ("192", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
         # ⛔ THE VET BLOCK'S OWN "BEFORE" CLAIM (#10833 review, P2 — the SECOND
@@ -6199,11 +6199,11 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
     is 25 Objects … with no before arm", "E2 … carried by no committed artifact") and
     `E1-E5-PROOFS.md`'s E2a/E2b rows ("the bundle's README marks the row BLOCKED because
     the frozen 14-unit denominator is carried by no committed artifact"), whose
-    `README.md:83` pointer now lands on a row that NAMES the re-run reading
+    `README.md:85` pointer now lands on a row that NAMES the re-run reading
     (`RED 8/14`) while its committed verdict cell still reads
     `⛔ **BLOCKED** (#10360)`. Nothing read that prose, so the suite stayed green while the
     bundle's own entry point told a reader the opposite of the table beside it.
-    (The number moved 69 -> 83 across `#11673`'s two README additions — the closing-rule
+    (The number moved 69 -> 85 across `#11673`'s two README additions — the closing-rule
     paragraph and the E6-producer disclosure
     above the table; it is re-derived against the tree, never carried across a merge.)
     The cite is now held by `test_the_e2_routing_claim_cites_the_row_it_describes`
