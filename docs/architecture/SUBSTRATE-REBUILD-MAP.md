@@ -257,8 +257,8 @@ symbol pair this guard does check: the writers' retired-key allowlist
 
 ⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,
 and the reason is measured: `:Document` occurs on **63** lines across **19**
-files under `tortoise/` (`git grep -n ':Document'` → 63 lines,
-`git grep -l ':Document'` → 19 files — the file count is not the line count).
+files under `tortoise/` (`git grep -n ':Document' -- tortoise/` → 63 lines,
+`git grep -l ':Document' -- tortoise/` → 19 files — the file count is not the line count).
 It was **55** across **17** when this was first measured at `4f68a2aa7`, and
 three moves have since been made, one per workstream: the #10976
 census's own note on why node labels do not partition the node set

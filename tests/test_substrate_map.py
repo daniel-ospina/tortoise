@@ -77,8 +77,16 @@ _NARROW_CLAIM = re.compile(r"still matches \*\*(\w+)\*\*")
 #: and stay green (measured: the quote alone set to 57 / 18 passed). Pinned to the
 #: same `_label_hits()` tuple, exactly once, because §5 stating a number twice is
 #: the drift the document exists to stop.
+#:
+#: ⛔ The pathspec is PART of the pinned text. §5 quotes these commands as the way to
+#: reproduce its figure, and the figure is stated over `tortoise/`; a bare
+#: `git grep -n ':Document'` run from the repo root answers 311 lines / 83 files, not
+#: 63 / 19, so a reader following the quote wrote it off as stale. Requiring
+#: `-- tortoise/` here means the quote cannot drift back onto a population this pin
+#: does not measure.
 _QUOTED_GREP = re.compile(
-    r"`git grep -n ':Document'` → (\d+) lines,\s*\n`git grep -l ':Document'` → (\d+) files"
+    r"`git grep -n ':Document' -- tortoise/` → (\d+) lines,\s*\n"
+    r"`git grep -l ':Document' -- tortoise/` → (\d+) files"
 )
 
 #: The population §5's claim is stated in: every **tracked** file under
@@ -1686,12 +1694,21 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
         "silently read past; keep one statement, or pin each one"
     )
     word = narrow_claim.group(1).lower()
-    assert section.count(f"`{_NARROW_PATTERN}`") == 1, (
-        "§5 no longer quotes the narrow pattern this pin measures as "
-        f"`{_NARROW_PATTERN}` exactly once — the 'six' is the count FOR THAT "
-        "PATTERN, so swapping in a looser one (e.g. `:Document\\b`, which matches "
-        "all 63 lines) states evidence for a measurement nothing takes while every "
-        "number and count word below stays green"
+    # Pin the PATTERN the six is a count OF, and pin it EXCLUSIVELY: `section.count(...)
+    # == 1` passed a document that ADDED a second, looser pattern to the same clause
+    # (measured: `(`\\(\\w*:Document`, or as a bare `:Document`)` left 43 green) while
+    # the sentence then asserted that a pattern matching all 63 lines matches six.
+    clause = re.search(r"one narrow enough(.*?)still matches", section, re.DOTALL)
+    assert clause, (
+        "§5's 'one narrow enough … still matches' clause is gone — re-measure it rather "
+        "than dropping it; the six is the count FOR the pattern named in that clause"
+    )
+    stated_patterns = re.findall(r"`([^`]*)`", clause.group(1))
+    assert stated_patterns == [_NARROW_PATTERN], (
+        "§5's narrow clause must name exactly one pattern, `"
+        f"{_NARROW_PATTERN}`, and it names {stated_patterns!r} — the 'six' below is "
+        "the count FOR THAT PATTERN, so anything else (a looser pattern, or a second "
+        "one alongside it) states evidence for a measurement nothing takes"
     )
     assert word in _COUNT_WORDS, (
         f"§5 states the narrow count as {word!r}, which is not a count word this pin "
