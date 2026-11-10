@@ -382,9 +382,10 @@ def _eligible(block: dict, *, min_confidence: float,
     why-block's dedicated ep read — post-#2206 identical to the search
     path's ep.confidence_mean, which reads the same coalesce of
     posterior_alpha/ep_alpha).
-    UNMEASURED points (no persisted prior at all) sit at the Beta(1,1)
-    neutral 0.5 (``has_ep=False``, ``baseline=False``) — below the 0.7
-    default → below-notability/silent, never fired. #3415 correction: that
+    UNMEASURED points (no persisted belief at all) carry NO mean —
+    ``confidence_mean: None`` with ``ep_state: "absent"`` — so they fail every
+    floor and are never fired (the outcome the old Beta(1,1) 0.5 produced by
+    sitting below the 0.7 default; the reason no longer is). #3415 correction: that
     neutral-0.5 statement is NO LONGER true of every unmeasured point — a
     #2199 DECLARED baseline (``baseline=True``, e.g. the decide-part system
     default Beta(3,1) mean 0.75, or an author ``credibility=`` prior) is
@@ -463,7 +464,18 @@ def _synopsis(content: str) -> str:
     return text[: SNIPPET_MAX - 1].rstrip() + "…"
 
 
-def _band(mean: float) -> str:
+def _band(mean: float | None) -> str:
+    """Coarse support band for the surfaced block.
+
+    #11702: an ABSENT belief has no band — ``None`` renders the fourth label
+    ``unmeasured`` (the same word ``subgraph_render._confidence_text`` uses)
+    instead of falling into the numeric comparisons, which raise on ``None``.
+    This sits inside the pipeline's blanket ``except Exception``, so the old
+    signature would have degraded the WHOLE response — every candidate
+    dropped — the moment an unmeasured candidate reached it.
+    """
+    if mean is None:
+        return "unmeasured"
     if mean >= _BAND_HIGH:
         return "high"
     if mean >= _BAND_MEDIUM:
@@ -486,10 +498,16 @@ def why_entry(block: dict) -> dict:
         "point_id": block["point_id"],
         "support_chain": block.get("support_chain") or [],
         "ep": block.get("ep") or {
-            "confidence_mean": NEUTRAL_CONFIDENCE,
+            # #11702: a missing ep sub-block means NO belief was read for this
+            # point, so the default is the ABSENT state (None + the state
+            # name), not the neutral 0.5 — the same fabrication _eligible now
+            # refuses to admit. The consumer reads `confidence_mean` only, and
+            # `None` is the answer it already handles.
+            "confidence_mean": None,
             "variance": 0.0,
             "contested": False,
             "has_ep": False,
+            "ep_state": "absent",
         },
     }
     conflicts = block.get("conflicts")

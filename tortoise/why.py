@@ -376,10 +376,14 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
     """Fold the dedicated persisted α/β read into the canonical ``ep``
     sub-block (flag-first pairing for agents — variance/contested ride the
     block; same formula as annotate_ep_batch / TortoiseEP). Every row is an
-    EXISTING :Point node (the query is the existence anchor). Unmeasured
-    points coalesce to the Beta(1,1) uniform prior: mean 0.5, variance
-    1/12, has_ep False — absence of measurement is NOT low support (repo
-    neutral-0.5 convention).
+    EXISTING :Point node (the query is the existence anchor). A point with NO
+    persisted belief in any form carries ``confidence_mean: None`` and
+    ``ep_state: "absent"`` (#11702) — never the Beta(1,1) mean 0.5, which
+    admitted a never-measured claim through any floor at or under 0.5 as if it
+    carried neutral evidence. ``variance`` is still the neutral (1,1) width and
+    must not be read as a posterior statistic when the state is ``absent``;
+    ``has_ep``/``measured`` are unchanged by #11702. "Absence of measurement is
+    not low support" still holds — the belief term simply does not participate.
 
     #2490: the gate is a PROJECTION-side has_ep OVERRIDE, NOT a WHERE
     insertion — why() explicitly serves terminal ids in the supersession
@@ -420,6 +424,7 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
             state = (EP_STATE_MEASURED if measured
                      else EP_STATE_BASELINE)
         state = ep_state_resolve(state, measured=measured)
+        mirror = row[10] if len(row) > 10 else None
         by_id[pid]["ep"] = {
             # #11702: `None` when nothing is persisted — never the Beta(1,1)
             # mean. This is the block a caller reads to decide whether to
@@ -427,8 +432,18 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
             # never-measured claim through every `min_confidence <= 0.5`
             # floor (volunteer.py, why_snapshot.py) as if it carried neutral
             # evidence.
-            "confidence_mean": (None if state == EP_STATE_ABSENT
-                                else round(_mean(a, b), 4)),
+            #
+            # The VALUE follows the same precedence every other read uses —
+            # the `n.confidence` mirror first (index 10, the served belief),
+            # the coerced α/β mean as the fallback for a node the flush never
+            # reached. α/β-only here made a mirror-only node (what
+            # `compute_confidence` / `dream` write, and what a pre-#852 node
+            # carries) report 0.5 on this one surface while annotate, all
+            # three rankers and the subgraph read its real 0.95.
+            "confidence_mean": (
+                None if state == EP_STATE_ABSENT
+                else round(float(mirror), 4) if mirror is not None
+                else round(_mean(a, b), 4)),
             "ep_state": state,
             "variance": round(variance, 6),
             "contested": measured and variance > CONTESTED_VARIANCE_THRESHOLD,

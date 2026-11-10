@@ -443,8 +443,9 @@ class EpBreakdown:
     # exception, ``None`` here: those two still answer the Beta(1,1) prior mean
     # (0.5) for a claim with no persisted belief at all, because they are the
     # EP read under an explicit `require_calibration=False`, not a read/rank
-    # surface. That divergence is deliberate and recorded on #11702 (decision
-    # comment) — it is the one place "no belief" still answers 0.5, and it is
+    # surface. That divergence is deliberate and recorded in the #11702 decision
+    # comment (issuecomment-6781252637) — it is the one place "no belief" still
+    # answers 0.5, and it is
     # outside this field's contract rather than a second vocabulary for it.
     # Historically this
     # field was the structural edge-ratio impl/(impl+nand); it is NOT that

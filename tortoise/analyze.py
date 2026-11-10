@@ -16,6 +16,30 @@ from .live import (
     epistemic_labels_of,
     epistemic_sweep,
 )
+from .search_engine import (  # #11702: the ONE presence predicate
+    ep_has_belief_cypher,
+)
+
+
+# #11702: THE belief-value expression for the analyze templates -- the served
+# `n.confidence` mirror first, the persisted alpha/beta mean as the fallback,
+# 0.5 only for the degenerate (alpha+beta <= 0) pair the rest of the repo also
+# answers 0.5 for. Specified ONCE here so the five templates cannot drift from
+# each other or from `annotate_ep_batch` / the rankers (the coalesced 0.5 this
+# replaces was the fabrication #11702 removes).
+_BELIEF = (
+    "coalesce({a}.confidence, "
+    "  CASE WHEN (coalesce({a}.posterior_alpha, {a}.ep_alpha, 0.0) "
+    "           + coalesce({a}.posterior_beta, {a}.ep_beta, 0.0)) > 0 "
+    "       THEN coalesce({a}.posterior_alpha, {a}.ep_alpha, 1.0) "
+    "            / (coalesce({a}.posterior_alpha, {a}.ep_alpha, 1.0) "
+    "               + coalesce({a}.posterior_beta, {a}.ep_beta, 1.0)) "
+    "       ELSE 0.5 END)")
+
+
+def _belief(alias: str) -> str:
+    """The belief expression for one alias (see `_BELIEF`)."""
+    return _BELIEF.format(a=alias)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -27,20 +51,22 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["disagree", "conflict", "oppose", "contradict", "tension", "contested"],
         "description": "Find NAND conflicts between high-confidence claims",
         "subgraph_vars": ["a", "b"],
-        "cypher": """
-            MATCH (a:Point)<-[:NAND]-(op:Point {op_type:\"NAND\"})-[:NAND]->(b:Point)
+        "cypher": f"""
+            MATCH (a:Point)<-[:NAND]-(op:Point {{op_type:"NAND"}})-[:NAND]->(b:Point)
             WHERE a.id <> b.id
               AND a.is_operator = false
               AND b.is_operator = false
-              // #11702: a claim with NO persisted belief is not a "high
-              // confidence claim". `coalesce(a.confidence, 0.5) > 0.45`
-              // ADMITTED it by fabricating the Beta(1,1) mean; a NULL
-              // comparison is NULL in Cypher, so the bare column refuses it
-              // while keeping the 0.45 bar for real beliefs.
-              AND a.confidence > 0.45
-              AND b.confidence > 0.45
-            RETURN a.id, a.content, a.confidence as a_conf,
-                   b.id, b.content, b.confidence as b_conf
+              // #11702: admission is the shared PRESENCE predicate, and the bar
+              // is compared against each claim's OWN belief -- never a
+              // fabricated 0.5, and never a bare-mirror test either (a claim
+              // whose belief lives only in its posterior is exactly the
+              // population `ep_has_belief_cypher` exists to keep).
+              AND {ep_has_belief_cypher('a')}
+              AND {ep_has_belief_cypher('b')}
+              AND {_belief('a')} > 0.45
+              AND {_belief('b')} > 0.45
+            RETURN a.id, a.content, {_belief('a')} as a_conf,
+                   b.id, b.content, {_belief('b')} as b_conf
             ORDER BY a_conf DESC LIMIT $limit
         """,
         "format": lambda rows: _format_pairs(rows, "conflict"),
@@ -57,16 +83,20 @@ TEMPLATES: dict[str, dict] = {
         # own source served as the SUPPORTER of a target: querying the source
         # returned the target as its supporter, and `tortoise_analyze` answered
         # with the claim's own hypothesis as its evidence.
-        "cypher": """
-            MATCH (supporter:Point)<-[r_in:IMPL]-(op:Point {op_type:\"IMPL\"})-[r_out:IMPL]->(target:Point)
+        "cypher": f"""
+            MATCH (supporter:Point)<-[r_in:IMPL]-(op:Point {{op_type:"IMPL"}})-[r_out:IMPL]->(target:Point)
             WHERE coalesce(r_in.idx, 0) = 0
               AND coalesce(r_out.idx, 0) >= 1
               AND target.id <> supporter.id
               AND target.content CONTAINS $entity
-              // #11702: no fabricated 0.5 as the admission ticket (see the
-              // conflict template above).
-              AND supporter.confidence > 0.0
-            RETURN supporter.id, supporter.content, supporter.confidence as conf
+              // #11702: NO belief gate here. A supporter is admitted by the
+              // IMPL edge (that IS the evidence); the old
+              // `coalesce(supporter.confidence, 0.5) > 0.0` admitted everything
+              // anyway, and the fabricated 0.5 only decided its RANK. A claim
+              // with no persisted belief now reports `conf: null` and sorts
+              // last, instead of being scored as a neutral coin flip — and is
+              // still returned, unlike a bare-mirror test would do.
+            RETURN supporter.id, supporter.content, {_belief('supporter')} as conf
             ORDER BY conf DESC LIMIT $limit
         """,
         "format": lambda rows: _format_ranked(rows, "supporting"),
@@ -75,12 +105,15 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["counter", "against", "objection", "contradicts", "opposes", "attack"],
         "description": "Find claims that contradict a target via NAND edges",
         "subgraph_vars": ["opponent"],
-        "cypher": """
-            MATCH (target:Point)<-[:NAND]-(op:Point {op_type:\"NAND\"})-[:NAND]->(opponent:Point)
+        "cypher": f"""
+            MATCH (target:Point)<-[:NAND]-(op:Point {{op_type:"NAND"}})-[:NAND]->(opponent:Point)
             WHERE target.id <> opponent.id
               AND target.content CONTAINS $entity
               AND opponent.is_operator = false
-            RETURN opponent.id, opponent.content, opponent.confidence as conf
+              // #11702: the belief VALUE by the shared precedence -- a bare
+              // `opponent.confidence` reports null for a claim whose belief is
+              // persisted in its posterior.
+            RETURN opponent.id, opponent.content, {_belief('opponent')} as conf
             ORDER BY conf DESC LIMIT $limit
         """,
         "format": lambda rows: _format_ranked(rows, "counter"),
@@ -89,15 +122,16 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["consensus", "agree", "shared", "common ground", "everyone believes"],
         "description": "Find high-confidence claims with no NAND attacks (consensus)",
         "subgraph_vars": ["c"],
-        "cypher": """
+        "cypher": f"""
             MATCH (c:Point)
             WHERE c.is_operator = false
               // #11702: "consensus" is agreement among claims the graph has a
               // BELIEF for; the coalesced 0.5 let a never-measured claim in at
               // the 0.6 bar it was fabricating against.
-              AND c.confidence > 0.6
-              AND NOT (c)<-[:NAND]-(:Point {op_type:\"NAND\"})
-            RETURN c.id, c.content, c.confidence as conf
+              AND {ep_has_belief_cypher('c')}
+              AND {_belief('c')} > 0.6
+              AND NOT (c)<-[:NAND]-(:Point {{op_type:"NAND"}})
+            RETURN c.id, c.content, {_belief('c')} as conf
             ORDER BY conf DESC LIMIT $limit
         """,
         "format": lambda rows: _format_ranked(rows, "consensus"),
@@ -148,14 +182,16 @@ TEMPLATES: dict[str, dict] = {
         # operator's idx=0 endpoint, the chained claim an idx>=1 one. Without
         # it, asking for the evidence chain of the SOURCE returned its own
         # targets as its foundation.
-        "cypher": """
-            MATCH (evidence:Point)<-[r_in:IMPL]-(op:Point {op_type:\"IMPL\"})-[r_out:IMPL]->(target:Point)
+        "cypher": f"""
+            MATCH (evidence:Point)<-[r_in:IMPL]-(op:Point {{op_type:"IMPL"}})-[r_out:IMPL]->(target:Point)
             WHERE coalesce(r_in.idx, 0) = 0
               AND coalesce(r_out.idx, 0) >= 1
               AND target.id <> evidence.id
               AND target.content CONTAINS $entity
               AND evidence.is_operator = false
-            RETURN evidence.id, evidence.content, evidence.confidence as conf
+              // #11702: the belief VALUE by the shared precedence, never a bare
+              // mirror (a claim with a persisted posterior would report null).
+            RETURN evidence.id, evidence.content, {_belief('evidence')} as conf
             ORDER BY conf DESC LIMIT $limit
         """,
         "format": lambda rows: _format_chain(rows),

@@ -33535,7 +33535,13 @@ class TortoiseSDK:
         written = proj.g.query(
             f"MATCH (n:Point {{id: $id}}) SET {_set_clause} RETURN n.id",
             params={"id": claim_id, "a": alpha, "b": beta, "src": source,
-                    "c": alpha / (alpha + beta)},
+                    # #11702: guard the degenerate (0,0) pair exactly as every
+                    # other mean on this path does (`_beta_mean`, ep.py's flush):
+                    # a bare `alpha / (alpha + beta)` raises ZeroDivisionError
+                    # BEFORE the write, leaving `self._evidence` holding a prior
+                    # the graph never received. 0.5 is the documented #330 house
+                    # value for a degenerate pair.
+                    "c": round(alpha / (alpha + beta), 4) if (alpha + beta) > 0 else 0.5},
         ).result_set
         # #9063: a baseline the statement did NOT write must never be reported
         # as written when the caller's node EXISTS. ``set_point_baseline`` used
@@ -37222,8 +37228,7 @@ class TortoiseSDK:
         Point results annotated with EP breakdown. confidence_mean is THE
         point's confidence (issue #2206 contract): the belief mean α/(α+β) of
         the persisted posterior when EP has run, else the persisted prior
-        mean, else the persisted prior mean — and ``null`` + ``ep_state:
-        "absent"`` when NOTHING is persisted (#11702: there is then no belief
+        mean — and ``null`` + ``ep_state: "absent"`` when NOTHING is persisted (#11702: there is then no belief
         to report; the neutral Beta(1,1) 0.5 was indistinguishable from a
         measured symmetric coin flip, so it is no longer substituted anywhere
         on a read/rank surface — ``get_confidence`` remains the EP prior read

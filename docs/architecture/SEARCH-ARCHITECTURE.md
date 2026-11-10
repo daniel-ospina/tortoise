@@ -303,9 +303,12 @@ directions (a *measured* 0.5 keeps its 0.5).
   (`0.6·inst_norm` / `0.5·connectivity`), never the unweighted term — which would let absence (0.75)
   outscore a measured 0.5 (0.65), the same defect pointed the other way.
 * **`min_confidence`**: an absent claim fails any floor above `0.0` and is kept by the `0.0` default.
-* **The one stated exception**, recorded on #11702: `sdk.get_confidence` /
-  `TortoiseEP.compute_confidence` still answer the Beta(1,1) prior mean under an explicit
-  `require_calibration=False` — that is the EP read, not a read/rank surface.
+* **The one stated exception**, recorded on #11702
+  ([decision comment](https://github.com/daniel-ospina/tortoise/issues/11702#issuecomment-6781252637)):
+  `sdk.get_confidence` / `TortoiseEP.compute_confidence` still answer the Beta(1,1) prior mean under an
+  explicit `require_calibration=False` — that is the EP read, not a read/rank surface. Consequence, so
+  nobody "fixes" it later: `get_confidence` and `search` disagree for an ABSENT claim by design, and
+  #2206's agreement indicator holds only for the population that has a belief.
 
 ---
 

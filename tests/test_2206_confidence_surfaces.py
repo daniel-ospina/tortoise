@@ -460,7 +460,7 @@ class TestAnalyzePriorOnlyParity:
             # (measured: 0.9 from the ranking beside 0.75 from the `ep` block).
             # It must agree with the α/β mean, not merely be non-None.
             assert stored[2] is None and stored[3] is not None, stored
-            assert float(stored[3]) == pytest.approx(2 / 3, abs=1e-6), stored
+            assert float(stored[3]) == pytest.approx(2 / 3, abs=1e-4), stored
             # Parity oracle — Python float division, never truncating.
             expected = annotate_ep_batch(proj.g, [pid])[pid].confidence_mean
             assert expected == pytest.approx(2 / 3, abs=1e-4), expected

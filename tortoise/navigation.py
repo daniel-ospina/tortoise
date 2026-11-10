@@ -224,8 +224,17 @@ def entityProfile(
         if pointKind and node.get("pointKind") != pointKind:
             continue
         if confidenceMin is not None:
-            conf = node.get("confidence", 0.5)
-            if conf < confidenceMin:
+            # #11702: `node.get("confidence", 0.5)` fabricated the neutral
+            # Beta(1,1) mean for a claim with NO persisted belief, so a floor at
+            # or below 0.5 admitted it as if it carried neutral evidence — the
+            # same defect `min_confidence` on search/recall had. An absent
+            # belief has no number to clear a floor with: it is kept only by the
+            # no-op default (0.0 / None) and excluded by any real floor.
+            conf = node.get("confidence")
+            if conf is None:
+                if confidenceMin > 0.0:
+                    continue
+            elif conf < confidenceMin:
                 continue
         # Categorize
         if label == "point":

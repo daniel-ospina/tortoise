@@ -741,7 +741,7 @@ class GraphRanker:
         with 3 about-Objects — which reads "nothing measured this" as stronger
         evidence than "measured, symmetric". That is the same defect pointed
         the other way. So the absent arm returns ``0.6·inst_norm`` /
-        ``0.5·connectivity``: absence is neither buried (the #898 concern) nor
+        ``0.5·connectivity``: absence is neither buried nor
         promoted above a real measurement.
 
         Contestation is deliberately NOT used as a blanket ranking penalty:
@@ -975,8 +975,14 @@ class GraphRanker:
 #   n.confidence flush-mirror when present and falls back to the identical
 #   coalesce-column mean otherwise, so StateRanker and GraphRanker can never
 #   disagree on a point's belief).
-#   Uncalibrated points (no persisted α/β → Beta(1,1)) fall back to a
-#   documented neutral 0.5: absence of measurement is NOT evidence against.
+#   A point with NO persisted belief in any form carries `confidence: null`
+#   and `ep_state: "absent"` (#11702): the confidence term does not
+#   participate (`base` uses the multiplicative identity) and the row sorts
+#   after every row that HAS a belief. This replaced the documented neutral
+#   0.5, which made "no evidence" order exactly as a measured symmetric coin
+#   flip. "Absence of measurement is NOT evidence against" still holds — the
+#   belief term does not penalise the row — but it is no longer a NUMBER.
+#   SEARCH-ARCHITECTURE.md §6.3 is the decision.
 #   NOTE: EpBreakdown.confidence_mean is deliberately NOT used — post-#2206
 #   it carries the SAME belief mean (α/(α+β) over the same coalesce read,
 #   rounded 4dp), so reading the coalesced columns directly is a
@@ -1079,8 +1085,17 @@ class StateRanker:
         returned with a ``recall_ranking`` breakdown:
 
         ``{relevance_norm, confidence, confidence_source, centrality_norm,
-          base_score, final_score, degree, variance, contested}`` plus, on a
-        DRAFT row only, ``draft: True`` (see #2598 below).
+          base_score, final_score, degree, variance, contested, ep_state,
+          belief_informed_order}`` plus, on a DRAFT row only, ``draft: True``
+        (see #2598 below).
+
+        #11702 — ABSENT BELIEF. A row with NO persisted belief carries
+        ``confidence: None`` and ``ep_state: "absent"``, and the confidence
+        term does not participate: ``base`` uses the multiplicative identity
+        and the row sorts AFTER every row that has a belief
+        (``belief_informed_order: false``). Its ``base_score``/``final_score``
+        are therefore its NON-belief factors and are not comparable with a
+        belief-informed row's. See `_confidence_of` and the sort in `rerank`.
 
         #2598 — DRAFT HONESTY. A draft is EP-inert (``live._live_only``), so no
         belief is computed for it. Three consequences, all keyed off the row's
@@ -1096,16 +1111,20 @@ class StateRanker:
            stay byte-identical), so a consumer can badge without knowing the
            status vocabulary.
         3. drafts sort AFTER every live row. Ordering is
-           ``(is_draft, -final_score)`` — an EXPLICIT status tiebreaker, not a
-           side effect of the numbers. Today the question is answered by
-           whichever fabricated 0.5 happens to win: a draft's neutral 0.5 and a
-           contested live claim's measured 0.5 are the SAME number, and at equal
-           relevance a draft OUTRANKS a measured live claim at 0.29 (#2598
-           repro). Neither is an acceptable basis for the order.
+           ``(is_draft, belief_informed_order, -final_score)`` — an EXPLICIT
+           status tiebreaker (plus, since #11702, the absent-belief tier;
+           neither is a side effect of the numbers). Pre-#2598 the question
+           was answered by whichever fabricated 0.5 happened to win: a draft's
+           neutral 0.5 and a contested live claim's measured 0.5 are the SAME
+           number, and at equal relevance a draft OUTRANKED a measured live
+           claim at 0.29 (#2598 repro). Neither is an acceptable basis for the
+           order.
 
-        Live rows are unaffected: no ``draft`` key, the same numeric
-        ``confidence``, the same score, and the same relative order (live rows
-        keep their stable relative ordering under the new sort key).
+        Live rows: calibrated rows are unaffected (no ``draft`` key, the same
+        numeric ``confidence``, the same score, the same relative order). A
+        LIVE row with NO persisted belief is the case #11702 changes — it moves
+        to ``confidence: null`` + ``ep_state: "absent"`` and sorts after every
+        belief-carrying row, where it used to carry a fabricated neutral 0.5.
 
         W4-b (issue #2102): ``query`` is OPTIONAL.  When a query is present
         AND the W4 flag is on, contested POINTS whose conflict is
@@ -1185,7 +1204,7 @@ class StateRanker:
             # report, even when the read answered a NUMBER (an EP-inert row's
             # embedded prior is not a measurement).
             # #11702 EXTENDS the null to every row with no PERSISTED belief — a
-            # live uncalibrated claim used to keep the documented #898 neutral
+            # live uncalibrated claim used to keep a documented neutral
             # 0.5 ("absence of measurement is NOT evidence against"), which is
             # precisely the fabricated number this issue removes: it made "we
             # have not computed this" order EXACTLY as "a measured symmetric
@@ -1200,9 +1219,18 @@ class StateRanker:
             # derivation for the embedded path. Re-deriving it from `source`
             # here is how the same claim ended up `measured` in the `ep` block
             # and `baseline` in the ranking.
-            ep_state = sig.get("ep_state") if confidence is not None else EP_STATE_ABSENT
+            #
+            # ⛔ Unconditionally — including when the VALUE is None. A stored
+            # degenerate pair (posterior α = β = 0, which `ep.py::_write_node`
+            # writes verbatim) is PRESENT with no computable mean, so the read
+            # legitimately answers `confidence: None` beside
+            # `ep_state: "measured"`; deriving `absent` from the None value
+            # fabricated a state the signal had just denied, and pushed the row
+            # below every other one on the page.
+            ep_state = sig.get("ep_state")
             if ep_state is None:
-                ep_state = (EP_STATE_MEASURED if source == "posterior"
+                ep_state = (EP_STATE_ABSENT if confidence is None
+                            else EP_STATE_MEASURED if source == "posterior"
                             else EP_STATE_BASELINE)
             # #11702: an absent belief contributes NO factor — never a
             # substituted 0.5. `1.0` is the multiplicative IDENTITY, so this
@@ -1306,7 +1334,7 @@ class StateRanker:
         #11702: ``(None, EP_STATE_ABSENT)`` when NO belief is persisted — the
         ranker refuses to order on a number it does not have, instead of the
         neutral 0.5 (Beta(1,1) prior mean) this used to return. "absence of
-        measurement is NOT low support" (#898) is kept where it belongs: the
+        measurement is NOT low support" is kept where it belongs: the
         absent term does not participate at all (see ``base`` in :meth:`rerank`),
         so an unmeasured claim is neither buried nor given a fabricated
         confidence. Source is ``"posterior"`` when EP actually measured the
@@ -1425,8 +1453,9 @@ class StateRanker:
     def _fetch_object_signals(self, ids: list[str]) -> dict[str, dict]:
         """Batch-fetch state signals for Objects: confidence = MEAN EP
         posterior of the Points about them (via about* edges); degree =
-        incident about* edge count. Objects with no about-Points degrade to
-        neutral 0.5 (no measurement ≠ low support)."""
+        incident about* edge count. An Object with no about-Point carrying a
+        belief reports ``confidence: None`` + ``ep_state: "absent"`` (#11702) —
+        the old neutral 0.5 was the same fabrication one level up."""
         if not ids:
             return {}
         about_types = "|".join(ABOUT_EDGE_TYPES)
@@ -2126,6 +2155,8 @@ class SubgraphExpander:
             # ABSENT/stored distinction (#9974 R1 — `coalesce(n.status, '')`
             # collapses an absent status into a STORED empty one).
             "  n.status AS status, "
+            "  coalesce(n.outdated, false) AS outdated, "
+            f"  {ep_measured_cypher('n')} AS measured, "
             # #11702: this display read coalesced to 0.5 too — the SECOND path
             # §6.3 names. A Point with no persisted belief now renders
             # ``confidence: null`` beside ``ep_state: "absent"``, so a reader
@@ -2143,7 +2174,8 @@ class SubgraphExpander:
             "  ELSE null END AS ep_state",
             params={"ids": list(nodes)},
         ).result_set
-        for nid, label, display, kind, is_op, status, confidence, state in rows:
+        for (nid, label, display, kind, is_op, status, outdated,
+             measured_raw, confidence, state) in rows:
             node = nodes.get(nid)
             if node is None:
                 continue
@@ -2166,8 +2198,18 @@ class SubgraphExpander:
             if state:
                 # #11702: the state NAME travels with the value, so
                 # ``confidence: null`` is self-describing rather than a
-                # missing key a reader has to interpret.
-                node["ep_state"] = state
+                # missing key a reader has to interpret. The #2490 terminal
+                # fold is applied HERE because `ep_state_cypher` cannot see
+                # terminal-ness — without it a superseded claim (whose
+                # posterior is the decayed 0.5/1.0/1.0 that `live.VACUITY_BELIEF`
+                # stamps on every terminalising write) reported `measured` on
+                # this surface while the `ep` block, graph_ranking,
+                # recall_ranking and gaps_ranking all said `baseline` for the
+                # same claim. Same resolver, same answer, everywhere.
+                node["ep_state"] = ep_state_resolve(
+                    state,
+                    measured=bool(measured_raw) and not is_terminal_status(
+                        status or "", bool(outdated)))
                 node["confidence"] = (None if confidence is None
                                       else round(float(confidence), 6))
 

@@ -398,8 +398,9 @@ response_fields:
 - response: tortoise_recall
   field: gaps_ranking.ep_state
   emitted_when: 'mode=gaps ONLY: the same three-token #11702 state as recall_ranking.ep_state, on the gaps ranker''s
-    own rows (it reads its own signal query). An absent gap carries confidence null and sorts after every gap with
-    a belief'
+    own rows (it reads its own signal query). An absent gap carries confidence null + ep_state "absent" and is
+    ordered by STRUCTURE alone — the gaps score is load/(1+support), so a belief never participates in the gaps order and an absent gap is NOT demoted relative to a belief-carrying one (unlike recall_ranking, which has the
+    absent tier). This key is NOT an ordering guarantee on mode=gaps'
   unchanged_when_off: NO — additive key on an existing payload. Not flag-gated
 - response: tortoise_search
   field: graph_ranking.ep_state
@@ -434,7 +435,8 @@ response_fields:
   unchanged_when_off: 'NO for an unmeasured draft, yes for everything else — deliberately not flag-gated. This is
     a value change on an existing key, scoped to rows whose rendered number was never measured. Live rows: identical
     number, identical key set, identical order. ⚠️ #11702 CHANGED THE LIVE-ROW RULE: an uncalibrated LIVE row now carries
-    null + ep_state "absent" instead of the #898 neutral 0.5, and the absent row is placed AFTER every row that has a
+    null + ep_state "absent" instead of the neutral-0.5 convention this supersedes (no recorded decision stood behind it), and the
+    absent row is placed AFTER every row that has a
     belief. `docs/architecture/SEARCH-ARCHITECTURE.md` §6.3 is the recorded decision (PR #11481) that supersedes the
     neutral-0.5 carve-out this row used to state — OVERRIDES: the neutral-0.5 fallback for a claim with no persisted
     belief, because 0.5 is the maximum-entropy value and made "no evidence" order exactly as a measured symmetric coin
@@ -464,7 +466,8 @@ response_fields:
     live gap (an explicit status tiebreaker — its structural score is not an acceptable basis for placing it first)'
   unchanged_when_off: 'NO for an unmeasured draft, yes for everything else — deliberately not flag-gated. Live gaps:
     identical number, identical key set, identical order. ⚠️ #11702 CHANGED THE LIVE-ROW RULE: an uncalibrated LIVE gap
-    now carries null + ep_state "absent" instead of the #898 neutral 0.5 (see recall_ranking.confidence above —
+    now carries null + ep_state "absent" instead of the neutral-0.5 convention this supersedes (see
+    recall_ranking.confidence above —
     SEARCH-ARCHITECTURE.md §6.3 is the superseding decision), and the absent gap is placed after every gap that has a
     belief'
 - response: tortoise_recall

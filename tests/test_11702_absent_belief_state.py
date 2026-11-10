@@ -31,7 +31,8 @@ covering more than it does): the surfaces pinned here are
 `battery/arms/a4_tortoise.py` (an eval arm, not a product surface), and
 `sdk.get_confidence`/`TortoiseEP.compute_confidence`, which remain the EP
 prior read under `require_calibration=False` and still answer 0.5 for an
-absent claim — the one stated exception, recorded on #11702.
+absent claim — the one stated exception, recorded in the #11702 decision
+comment (issuecomment-6781252637).
 """
 from __future__ import annotations
 
@@ -340,3 +341,55 @@ def test_ep_block_and_rankers_agree_on_the_state(sdk):
         if eps[pid].ep_state != EP_STATE_ABSENT:
             assert whys[pid]["ep"]["confidence_mean"] == pytest.approx(
                 eps[pid].confidence_mean, abs=1e-4), pid
+            assert sigs[pid]["confidence"] == pytest.approx(
+                eps[pid].confidence_mean, abs=1e-4), pid
+
+
+def test_mirror_only_claim_agrees_on_the_value_everywhere(sdk):
+    """The THIRD shape: a belief stored ONLY in the `n.confidence` mirror.
+
+    `compute_confidence` / `dream` write the mirror with no α/β, and a
+    pre-#852 node carries nothing else — so this is a live population, not a
+    legacy corner. It must report `baseline` AND the same NUMBER on every
+    surface; the `ep` block used to compute from α/β alone and answer the
+    Beta(1,1) 0.5 for it while the rankers read 0.95.
+    """
+    pid = sdk.create_point("statement", "a mirror-only claim")["id"]
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.confidence = 0.95", params={"id": pid})
+
+    from tortoise.why import assemble_why_blocks
+    eps = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
+    why_ep = assemble_why_blocks(sdk._get_proj(), [pid])[pid]["ep"]
+    sig = GraphRanker(projection=sdk._get_proj())._fetch_signals([pid], "point")[pid]
+    rec = StateRanker(projection=sdk._get_proj()).rerank(
+        [{"id": pid, "scores": {"rrf": 1.0}}])[0]["recall_ranking"]
+
+    assert eps.ep_state == EP_STATE_BASELINE, eps.ep_state
+    for name, value in (("ep block", eps.confidence_mean),
+                        ("why block", why_ep["confidence_mean"]),
+                        ("graph signal", sig["confidence"]),
+                        ("recall_ranking", rec["confidence"])):
+        assert value == pytest.approx(0.95, abs=1e-4), name
+    assert why_ep["ep_state"] == EP_STATE_BASELINE, why_ep
+
+
+def test_degenerate_posterior_pair_is_not_reported_as_absent(sdk):
+    """A stored (α, β) = (0, 0) pair is PRESENT with no computable mean.
+
+    `ep.py::_write_node` writes that pair verbatim. The read answers
+    `confidence: None` beside a NON-absent state, and the ranking must not
+    invert that into `absent` — which pushed the row below every other one and
+    contradicted the `ep` block on the same response.
+    """
+    pid = sdk.create_point("statement", "a degenerate posterior pair")["id"]
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.posterior_alpha = 0.0, "
+        "n.posterior_beta = 0.0", params={"id": pid})
+    eps = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
+    rec = StateRanker(projection=sdk._get_proj()).rerank(
+        [{"id": pid, "scores": {"rrf": 1.0}}])[0]["recall_ranking"]
+    assert eps.ep_state != EP_STATE_ABSENT, (
+        "a stored degenerate pair is PRESENT — no belief would mean no columns")
+    assert rec["ep_state"] == eps.ep_state, (
+        "the recall row invented a state the `ep` block denies for the same claim")

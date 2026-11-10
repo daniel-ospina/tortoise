@@ -352,13 +352,13 @@ def test_event_signal_degrades_without_about_objects(sdk):
     assert sig["about_objects"] == 0
     assert sig["is_event"] is True
     assert sig["confidence"] is None  # #11702: absent, not a 0.5 fallback
-    # Real-path chain: if the producer dropped is_event this would route to the
-    # point branch → 0.5·0.5 + 0 = 0.25, not 0.2. This 0.2 assert is
-    # consumer-key-agnostic by construction (n=0 → inst_norm=0 under any key
-    # name); the renamed-consumer-key guard lives in
-    # test_event_signal_counts_about_objects' 0.45 asserts.
-    # #11702: zero about-objects AND no belief ⇒ 0.0 (this was 0.2 on the
-    # fabricated 0.5; there is no signal left to boost with).
+    # #11702: zero about-objects AND no belief ⇒ 0.0 — the absent belief term
+    # is dropped and the about-count term is zero. ⚠️ 0.0 alone does NOT
+    # discriminate the branches here (a degree-0 Point with no belief also
+    # returns 0.5·connectivity = 0.0); the routing guard is
+    # `sig["is_event"] is True` above (producer side) plus the NON-zero case in
+    # test_event_signal_counts_about_objects, whose 0.45 can only come from the
+    # event branch (the point branch there returns 0.0 at degree 0).
     assert ranker.graph_boost({}, sig) == 0.0
 
 
