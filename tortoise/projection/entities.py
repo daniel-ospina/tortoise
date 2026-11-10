@@ -1325,10 +1325,14 @@ def stated_json_record_prop(payload, key: str) -> tuple[str, object]:
         through `encode_json_record_props` (THE encoder);
       * ``"skip"`` — the payload states nothing the writer puts in its SET: an
         absent key, an explicit ``None`` (`_persist_extra_props` drops those),
-        a value `_is_persistable_prop_value` refuses (a map, bytes, a set, a
-        nested array of maps), an empty list (the encoder POPS it), or any other
-        shape (the encoder pops it). On a MERGE'd node the stored value then
-        SURVIVES, untouched;
+        an empty list (the encoder POPS it), or any shape the encoder POPS (a
+        map, bytes, a set, an int — everything that is neither a ``str`` nor a
+        ``list``/``tuple``). ⛔ NOT "whatever `_is_persistable_prop_value`
+        refuses": that filter refutes the payload's OWN list spelling (any array
+        containing a dict), which the encoder turns into a storable scalar, so
+        consulting it would misclassify the primary shape as "skip" (measured,
+        review P1 on PR #11795). On a MERGE'd node a "skip" value SURVIVES,
+        untouched;
       * ``"null"`` — the payload states a value the filter ACCEPTS but the
         store cannot hold EXACTLY (#7369 nulls it before dispatch — a NUL /
         lone-surrogate string), so the writer dispatches a null and the property
@@ -1344,20 +1348,35 @@ def stated_json_record_prop(payload, key: str) -> tuple[str, object]:
     if not isinstance(payload, dict) or key not in payload:
         return "skip", None
     value = payload.get(key)
-    if value is None or not _is_persistable_prop_value(value):
+    if value is None:
         return "skip", None
     if isinstance(value, str):
         return ("set", value) if _store_holds_prop_value(value) else ("null", None)
-    if not isinstance(value, (list, tuple)):
-        return "skip", None
-    view = {key: value}
-    encode_json_record_props(view)
-    encoded = view.get(key)
-    if encoded is None:
-        return "skip", None
-    if not _store_holds_prop_value(encoded):
-        return "null", None
-    return "set", encoded
+    # ⛔ THE LIST/TUPLE CASE IS DECIDED BY THE ENCODER, NOT BY
+    # `_is_persistable_prop_value` (review P1 on PR #11795, measured). The
+    # payload's OWN spelling — a list of mention dicts — is exactly what that
+    # filter REFUSES (`_is_persistable_prop_value` rejects any array containing
+    # a dict), so consulting it first classified the primary shape as "skip":
+    # the creation fold then carried the PREVIOUS incarnation's record forward
+    # while the live write and `rebuild_all` stored the NEW one, and the
+    # revision fold DROPPED what `_revise_point` SET. Two arms, two opposite
+    # outcomes, one journal record — the #5048/#5256 unclearable-red class this
+    # prop exists to remove, on a faithful graph. The writer never asks that
+    # question for this key: it encodes first, and the encode's OUTPUT is a
+    # JSON string the store holds.
+    if isinstance(value, (list, tuple)):
+        view = {key: value}
+        encode_json_record_props(view)
+        encoded = view.get(key)
+        if encoded is None:
+            return "skip", None
+        if not _store_holds_prop_value(encoded):
+            return "null", None
+        return "set", encoded
+    # Any other shape: `encode_json_record_props` POPS it (`entities.py`, the
+    # non-list arm), so the writer stores nothing and a MERGE keeps what the
+    # node holds.
+    return "skip", None
 
 
 def flatten_search_keys_prop(props: dict) -> None:
@@ -2709,9 +2728,14 @@ class _EntityHandlers:
         # and a silent drop is the failure mode this prop exists to end. The
         # copy is unconditional-when-needed so the caller's dict is never
         # mutated (the same rule `flatten_search_keys_prop` follows).
+        # The gate is `key in payload`, NOT `isinstance(…, list|tuple)`: the
+        # encoder itself is the arbiter (it no-ops on a canonical `str` and POPS
+        # any other shape), and gating on the list type let a non-list value
+        # through unencoded — measured: `EventAPI.add_point(mentions=5)` stored
+        # `mentions: 5` while `sdk.create_point(mentions=5)` stored nothing, and
+        # `stated_json_record_prop` called it a "skip" (review P3 on PR #11795).
         _needs_json_encode = any(
-            isinstance(p.get(k), (list, tuple))
-            for k in _POINT_JSON_RECORD_PROPS)
+            k in p for k in _POINT_JSON_RECORD_PROPS)
         alias_tokens = point_identifier_aliases(p)
         # #10203 review round 6 (measured P1): whether the payload OWNS
         # `search_keys` decides REPLACE vs APPEND. It owns it only when it

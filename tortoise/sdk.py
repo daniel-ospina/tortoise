@@ -13398,12 +13398,16 @@ class TortoiseSDK:
         # encoded to
         # ONE compact JSON scalar here. ⛔ THIS call is the LOAD-BEARING one, and
         # that is measured rather than assumed (review P2, PR #11795):
-        # commenting it out leaves `p.mentions` UNSET, while deleting the replay
-        # door's call (`_upsert_point_props`) changes no test in the DEFAULT
-        # population — a journal written by this door already carries the
-        # canonical STRING and the helper is a no-op for a `str` (the
-        # non-canonical arm IS pinned behaviourally, by
-        # `tests/test_mention_write_11239.py::test_the_replay_door_normalises_a_non_canonical_record`).
+        # commenting it out leaves `p.mentions` UNSET. ⛔ The replay door's call
+        # (`_upsert_point_props`) is NOT free either — do not delete it: for a
+        # journal this door wrote it is a no-op (canonical STRING, and the helper
+        # no-ops for a `str`), but it is LOAD-BEARING for `EventAPI.add_point`,
+        # a live door that journals the payload's LIST spelling and calls no
+        # encoder of its own (neutering it leaves that live write storing
+        # NOTHING), and it is the only arm that normalises a NON-canonical
+        # record. Both are pinned behaviourally, by
+        # `tests/test_mention_write_11239.py::test_the_event_api_door_carries_a_mention_to_the_point`
+        # and `…::test_the_replay_door_normalises_a_non_canonical_record`.
         # Without it the live CREATE would hand
         # the engine a list of maps and the write would be refused or silently
         # reshaped — the silent-drop class #11239 exists to end. Encoding here

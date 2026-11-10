@@ -641,3 +641,100 @@ def test_an_addressed_clear_removes_the_stored_record_and_survives_a_rebuild(env
     assert report["ok"] is True, (
         "live and replay agree, so the checker must not red this graph: "
         + str(report.get("divergent_points")))
+
+
+RESTATED = [{"surface": "the problem", "span_start": 9, "span_end": 20,
+             "kind_guess": "pronoun"}]
+
+
+def test_a_restated_mention_replaces_the_record_in_both_folds(env):
+    """A SECOND statement of the key must SET, not carry the old value forward.
+
+    Review P1 on PR #11795, measured. `stated_json_record_prop` consulted
+    `_is_persistable_prop_value` BEFORE the encoder, and that filter refuses the
+    payload's OWN spelling (any array containing a dict) — so the payload's list
+    of mention dicts was classified `"skip"`. The creation fold then carried the
+    PREVIOUS incarnation's record forward while the live write and `rebuild_all`
+    stored the NEW one, and `check_consistency` redded a FAITHFUL graph with the
+    advice "replay the journal", which reproduces exactly that graph (the
+    #5048/#5256 unclearable-red class). Reachable through a door this PR
+    declares carried: `EventAPI.add_point` journals the list spelling.
+
+    Mutant this reds on: the `_is_persistable_prop_value` pre-check ahead of the
+    encoder (the pre-fix `stated_json_record_prop`) — the checker assertion
+    fails on `fields: ['mentions']` while the node itself already agrees.
+    """
+    sdk, events = env
+    api = EventAPI(EventLog(str(events / "events.jsonl")),
+                   initiated_by="extractor", projection=sdk._get_proj())
+    prov = provenance("session.md", [0, 23], "quote", extracted_by="t@0")
+    pid = api.add_point(CONTENT, prov, mentions=[dict(m) for m in MENTIONS])
+    first = _node_prop(sdk, pid)
+    assert first is not None
+
+    # The SAME point, restating the key with a DIFFERENT record.
+    api.add_point(CONTENT, prov, id=pid, mentions=[dict(m) for m in RESTATED])
+    live = _node_prop(sdk, pid)
+    assert live is not None and live != first, (
+        "the restated record did not reach the node")
+    assert json.loads(live)[0]["surface"] == "the problem", live
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert _node_prop(sdk, pid) == live, (
+        "the creation fold carried the FIRST record forward instead of folding "
+        "the restated one: live and replay disagree on the same journal")
+
+    from tortoise.consistency import check_consistency
+
+    report = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+    assert report["ok"] is True, (
+        "live and replay agree, so the checker must not red this graph: "
+        + str(report.get("divergent_points")))
+
+
+def test_a_revision_stating_the_payload_spelling_folds_to_the_writers_bytes(env):
+    """The REVISION arm, with the journal in the payload's list spelling.
+
+    The sibling half of the same P1: the revision arm treated `"skip"` as the
+    absence the graph fold produces (`p.pop`), so a journal whose `PointRevised`
+    carries the PAYLOAD spelling CLEARED the node on one engine while
+    `_revise_point` SET the encoded value on the other — two engines, opposite
+    outcomes, one record. `stated_json_record_prop` now classifies that spelling
+    as `"set"` for both arms.
+
+    Rewriting the journaled `PointRevised` is the only way to reach it through a
+    real `rebuild_all`.
+    """
+    sdk, events = env
+    pid = sdk.create_point("statement", CONTENT, dedup=True,
+                           status="draft")["id"]
+    sdk.update_point(pid, mentions=MENTIONS)
+    live = _node_prop(sdk, pid)
+    assert live is not None
+
+    log = events / "events.jsonl"
+    rows = [json.loads(line) for line in log.read_text().splitlines()
+            if line.strip()]
+    rewritten = 0
+    for row in rows:
+        if row.get("type") == "PointRevised" and row.get("id") == pid \
+                and isinstance(row.get("mentions"), str):
+            row["mentions"] = json.loads(row["mentions"])
+            rewritten += 1
+    assert rewritten >= 1, (
+        "no journaled `PointRevised` carried `mentions` as the canonical "
+        "scalar — this row can only pin the revision arm if it starts there")
+    log.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    sdk._get_proj().rebuild_all(str(log.parent), confirm_destructive=True)
+    rebuilt = _node_prop(sdk, pid)
+    assert rebuilt == live, (
+        "the revision fold disagreed with `_revise_point` on the same "
+        f"list-shaped record: live {live!r} vs rebuilt {rebuilt!r}")
+
+    from tortoise.consistency import check_consistency
+
+    report = check_consistency(str(log), sdk._get_proj())
+    assert report["ok"] is True, (
+        "the two replay engines now agree, so the checker must not red: "
+        + str(report.get("divergent_points")))

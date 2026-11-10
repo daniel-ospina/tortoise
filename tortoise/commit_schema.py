@@ -729,8 +729,10 @@ class Mention(BaseModel):
       its path (measured: neutering it stores nothing, live and replay). Pinned
       by ``tests/test_mention_write_11239.py::test_the_event_api_door_carries_a_mention_to_the_point``.
 
-    Six doors, three of them carried (the two ``_execute_commit_writes`` legs
-    count as one door). Every carried leg is **stored, never advertised**, so a
+    Six doors, FOUR of them carried (the two ``_execute_commit_writes`` legs
+    count as one door): ``_execute_commit_writes``, the capture seam,
+    ``update_entity`` and ``EventAPI.add_point``. Every carried leg is
+    **stored, never advertised**, so a
     graph read after a capture holds the claim AND the mentions it used.
 
     ⛔ Still NOT part of ``sdk._CAPTURE_PASSTHROUGH_PROPS``: that set is the
@@ -816,7 +818,7 @@ class Point(BaseModel):
     # (`sdk._CAPTURE_PASSTHROUGH_PROPS`) — it is a writer-produced record, not a
     # client field. It IS persisted on the node since #11239:
     # `projection.entities.encode_json_record_props` stores it as one compact
-    # JSON scalar, and THREE of the SIX write doors carry it (see `Mention`'s
+    # JSON scalar, and FOUR of the SIX write doors carry it (see `Mention`'s
     # docstring for the enumeration and one verdict per door).
     mentions: list[Mention] = Field(default_factory=list)
 

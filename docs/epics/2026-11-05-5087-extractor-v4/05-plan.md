@@ -107,7 +107,9 @@ carries `validFrom` — **stored, never advertised** (it is deliberately NOT in
 `sdk._CAPTURE_PASSTHROUGH_ORDER`, `#2949`'s public response surface). On the node the
 value is ONE compact JSON scalar (`projection.entities.encode_json_record_props`,
 declared in `_POINT_JSON_RECORD_PROPS` and `_POINT_DECLARED_PROPS`) because the
-engine refuses an array containing a map; the payload keeps the record shape, and
+engine never stores an array containing a map — the projection denies it and a raw
+`SET` gets it degraded to `null` by the driver, both silent and neither a refusal;
+the payload keeps the record shape, and
 `consistency._uncarried` reads that same declaration instead of re-listing it.
 Neither REST `CreatePointRequest` (hosted or self-host) has the field: it is a
 writer-produced record, not a client field.
