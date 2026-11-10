@@ -57,8 +57,8 @@ tree disagree:
   same number, and the doc's figure is the line one). §5 of the doc carries the
   same measurement against the tree it ships with, re-measured whenever that
   population moves; this paragraph is the argument, not the number. Every one of
-  those lines is prose naming the *retired* label (a docstring, a comment, an RST
-  literal). A pattern loose enough to catch a mint catches those; one narrow
+  those lines is prose naming the *retired* label (a docstring, a comment, a printed
+  message, an RST literal). A pattern loose enough to catch a mint catches those; one narrow
   enough to skip them still matches the RST literals. The honest options were a
   hand-maintained allowlist of docstrings or no regex check at all, so the label
   claim stays evidence in the doc (§5).

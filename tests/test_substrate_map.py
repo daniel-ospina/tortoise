@@ -56,7 +56,7 @@ _COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
 #: measures with this constant and the pin below asserts the document quotes THIS
 #: pattern. It used to be written inline in `_label_hits` and quoted separately in
 #: the doc, so the doc could state a pattern nothing measured (measured: `:Document\\b`
-#: in §5 — matching all 63 lines — left 43 passed and `substrate_map_check` CLEAN)
+#: in §5 — matching every line — left 43 passed and `substrate_map_check` CLEAN)
 #: while the guard kept measuring six with its own copy: the document asserting
 #: evidence for a pattern no guard used, in the sentence the no-regex-check
 #: decision rests on.
@@ -1598,9 +1598,9 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     `cache_eviction.py:956` (the #10976 census's note on why labels do not partition
     the node set), #8447's ingest door (`tortoise/ingest.py`, the
     `REFUSED_NOT_FOUND` enum docstring), and #11729's runtime-label writers
-    (`tortoise/hosted_backup.py` — an EXISTING file that carried no `:Document` mention
-    at `4f68a2aa7`, which is the second file the count gained; its six added mentions
-    are the dump-and-restore prose about pre-D10 artifacts). That move is the mechanism
+    (`tortoise/hosted_backup.py` — a file the population had not previously reached,
+    carrying no `:Document` mention at `4f68a2aa7`; its added mentions are the
+    dump-and-restore prose about pre-D10 artifacts). That move is the mechanism
     working: the census landed, this check reddened, and §5 was re-measured instead
     of the number being quietly widened or the guard loosened.
 
@@ -1671,11 +1671,13 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     )
     quoted = _QUOTED_GREP.findall(section)
     assert quoted, (
-        "§5 no longer quotes its `git grep` output — keep each command on its own "
-        "line so the two results stay readable, and keep `-- tortoise/`: the figure "
-        "is stated over `tortoise/`, and the repo-root population is a different "
-        "measurement. Or re-state the measurement and re-measure it rather than "
-        "dropping it"
+        "§5 no longer quotes its `git grep` output in the pinned shape. The quote "
+        "must read exactly, in §5's body: the line "
+        "`git grep -n ':Document' -- tortoise/` → N lines, then on the next line "
+        "`git grep -l ':Document' -- tortoise/` → N files. The arrow must be `→`, "
+        "both commands must keep the `-- tortoise/` pathspec, and each stays on its "
+        "own line — those are part of the pinned text, not formatting. Re-measure and "
+        "restore it; do not drop the quote"
     )
     assert len(quoted) == 1, (
         f"§5 quotes its `git grep` output {len(quoted)} times inside the anchored "
@@ -1701,7 +1703,7 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     # Pin the PATTERN the six is a count OF, and pin it EXCLUSIVELY: `section.count(...)
     # == 1` passed a document that ADDED a second, looser pattern to the same clause
     # (measured: `(`\\(\\w*:Document`, or as a bare `:Document`)` left 43 green) while
-    # the sentence then asserted that a pattern matching all 63 lines matches six.
+    # the sentence then asserted that a pattern matching every line matches six.
     clause = re.search(r"one narrow enough(.*?)still matches", section, re.DOTALL)
     assert clause, (
         "§5's 'one narrow enough … still matches' clause is gone — re-measure it rather "
@@ -1856,7 +1858,7 @@ def test_every_cited_line_in_this_section_still_carries_the_prose_it_describes()
     the pointer was not. A reader re-examining the no-regex-check decision follows
     that pointer as the evidence — and lands on `)`.
 
-    The count pin above cannot catch this: it pins the NUMBER (63/19), not where the
+    The count pin above cannot catch this: it pins the two counts, not where the
     number came from. This is the same silent-staleness class the PR closed for
     `Pinned by tests/…` citations with
     `test_every_pin_reference_in_ci_selection_names_a_test_that_exists`: a citation
