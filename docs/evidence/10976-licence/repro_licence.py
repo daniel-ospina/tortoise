@@ -5,9 +5,9 @@ THE DEFECT THIS MEASURES
 ------------------------
 `tortoise/cache_eviction.assess()` licenses `plan["evictable"][i]["nodes"]`, and
 `tortoise/cache_evictor.py` spends that number directly as its runaway cap
-(`licence_remaining`). The ONLY staleness guard on that licence was a comparison against
-the graph's **whole** node total (`node_total`, `MATCH (n) RETURN count(n)`) — a report
-claiming more nodes than the graph holds is demoted, and everything under it passes.
+(`licence_remaining`). The staleness guard on that licence used to be ONLY a comparison
+against the graph's **whole** node total (`node_total`, `MATCH (n) RETURN count(n)`) — a
+report claiming more nodes than the graph holds is demoted, and everything under it passes.
 
 That denominator is the wrong population. A `turn` report (the only population with a
 parity instrument) claiming 20,000 nodes passes on a graph holding 25,000 nodes in total
@@ -23,6 +23,12 @@ WHAT THIS PROBE DOES
 Mints its OWN graph (`licence_probe_<rand>`), seeds 25,000 `:Point` nodes of which 500
 carry `is_episodic = true` (the turn population), writes a CLEAN parity report claiming
 20,000 turns, and runs the real `assess()` over a declared byte ceiling it is over.
+
+⛔ The report is stamped FRESH (`measured_at`, now). Staleness has TWO independent bounds
+and this probe measures the SIZE one: an undated report would be demoted by the AGE bound
+(`PARITY_REPORT_MAX_AGE_ENV`, #11720 — the sibling fix that landed first) before the
+population bound was ever consulted, so the run would report a refusal that proves nothing
+about the guard this file is evidence for.
 
     uri="$(uv run python tools/test_lane.py uri)" && eval "$uri"
     uv run python docs/evidence/10976-licence/repro_licence.py \
@@ -45,6 +51,7 @@ import argparse
 import json
 import secrets
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
@@ -118,6 +125,12 @@ def run(uri: str, *, out: Path | None = None) -> dict:
         report_path.write_text(json.dumps({
             "instrument": PARITY_INSTRUMENTS["turn"],
             "graph": name,
+            # ⛔ STAMPED FRESH, so the AGE bound cannot be what refuses this report.
+            # The probe exists to measure the POPULATION bound, and an undated artifact
+            # would be demoted by `assess`'s staleness arm (#11720) before the population
+            # count was read — a refusal that proves nothing about the guard under test.
+            "measured_at": datetime.now(UTC).isoformat().replace(
+                "+00:00", "Z"),
             "population": {"episodic_graph_nodes": CLAIM},
             "dry_run": {"would_delete_turn_nodes": CLAIM},
             "verdict": "CLEAN",

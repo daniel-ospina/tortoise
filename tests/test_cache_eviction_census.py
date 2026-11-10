@@ -1186,7 +1186,8 @@ def test_the_demoted_row_still_names_its_population():
     g = _FakeGraph({"Point": 5}, populations={"turn": 120})
     c = _FakeClient(used=900, maxmemory=1_000)
     stale = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                         measured_nodes=120, total_nodes=120, graph_name="tortoise")
+                         measured_nodes=120, total_nodes=120, graph_name="tortoise",
+                         measured_at=time.time())
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": stale})
@@ -1229,7 +1230,8 @@ def test_a_claim_above_the_graph_total_is_caught_from_an_inflated_count_statemen
     g = _FakeGraph({"Point": 25_000}, populations={"turn": 30_000})
     c = _FakeClient(used=900, maxmemory=1_000)
     inflated = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                            measured_nodes=30_000, total_nodes=30_000, graph_name="tortoise")
+                            measured_nodes=30_000, total_nodes=30_000, graph_name="tortoise",
+                            measured_at=time.time())
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": inflated})
@@ -1267,7 +1269,8 @@ def test_an_inflated_ceiling_does_not_arm_the_backstop_at_the_total():
     g = _FakeGraph({"Point": 25_000}, populations={"turn": 30_000})
     c = _FakeClient(used=900, maxmemory=1_000)
     inflated = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                            measured_nodes=25_000, total_nodes=25_000, graph_name="tortoise")
+                            measured_nodes=25_000, total_nodes=25_000, graph_name="tortoise",
+                            measured_at=time.time())
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": inflated})
@@ -1504,7 +1507,10 @@ def test_a_report_stamped_far_in_the_FUTURE_is_a_clock_disagreement_not_freshnes
 
 def test_a_second_or_two_of_clock_skew_does_not_refuse_a_fresh_report():
     """The other side of the tolerance: a small future stamp is SKEW, not a defect."""
-    g = _FakeGraph({"Point": 25_000})
+    # The `turn` population is declared HONEST here (500 claimed, 500 resident) so this arm
+    # decides on the AGE axis alone — the population bound is a second, independent demotion,
+    # and a fixture that omitted it would red for the wrong reason.
+    g = _FakeGraph({"Point": 25_000}, populations={"turn": 500})
     c = _FakeClient(used=900, maxmemory=1_000)
     skewed = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
                           measured_nodes=500, total_nodes=500, graph_name="tortoise",
@@ -1519,7 +1525,9 @@ def test_a_second_or_two_of_clock_skew_does_not_refuse_a_fresh_report():
 
 def test_the_age_bound_is_read_from_the_environment(monkeypatch):
     """The operator's lever, and it is a BOUND: the aged fixture flips with it."""
-    g = _FakeGraph({"Point": 25_000})
+    # Honest population size (see the skew arm): the age bound is what flips here, and the
+    # population bound must not be what the `PLAN` half trips over.
+    g = _FakeGraph({"Point": 25_000}, populations={"turn": 500})
     c = _FakeClient(used=900, maxmemory=1_000)
     aged = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
                         measured_nodes=500, total_nodes=500, graph_name="tortoise",
@@ -1724,7 +1732,9 @@ def test_an_un_ageable_stamp_is_REFUSED_by_assess_and_does_not_raise():
 def test_the_licence_carries_when_it_was_measured_and_against_which_bound(monkeypatch):
     """`nodes` is a destructive cap: the operator must be able to audit its freshness."""
     monkeypatch.delenv(PARITY_REPORT_MAX_AGE_ENV, raising=False)
-    g = _FakeGraph({"Point": 25_000})
+    # Honest population size: this arm is about the LICENCE's freshness evidence, so the
+    # population bound must be satisfied rather than be the demotion it reports.
+    g = _FakeGraph({"Point": 25_000}, populations={"turn": 500})
     c = _FakeClient(used=900, maxmemory=1_000)
     stamp = time.time() - 30
     report = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
@@ -2524,7 +2534,7 @@ def test_a_stale_report_cannot_size_a_sweep_beyond_its_own_population():
     c = _FakeClient(used=900, maxmemory=1_000)
     stale = ParityReport(instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
                          measured_nodes=_STALE_CLAIM, total_nodes=_STALE_CLAIM,
-                         graph_name="tortoise")
+                         graph_name="tortoise", measured_at=time.time())
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={PARITY_INSTRUMENTS["turn"]: stale})
@@ -2553,7 +2563,7 @@ def test_an_honest_report_of_the_same_population_still_licenses_it():
     honest = ParityReport(instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
                           measured_nodes=_STALE_POPULATION["turn"],
                           total_nodes=_STALE_POPULATION["turn"],
-                          graph_name="tortoise")
+                          graph_name="tortoise", measured_at=time.time())
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={PARITY_INSTRUMENTS["turn"]: honest})
@@ -2575,7 +2585,8 @@ def test_a_report_claiming_fewer_nodes_than_the_population_still_licenses_that_s
     g = _FakeGraph(_STALE_GRAPH, populations=_STALE_POPULATION)
     c = _FakeClient(used=900, maxmemory=1_000)
     smaller = ParityReport(instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
-                           measured_nodes=400, total_nodes=400, graph_name="tortoise")
+                           measured_nodes=400, total_nodes=400, graph_name="tortoise",
+                           measured_at=time.time())
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={PARITY_INSTRUMENTS["turn"]: smaller})
@@ -2800,7 +2811,7 @@ def test_the_graph_total_is_read_AFTER_every_population_count():
     honest = ParityReport(instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
                           measured_nodes=_STALE_POPULATION["turn"],
                           total_nodes=_STALE_POPULATION["turn"],
-                          graph_name="tortoise")
+                          graph_name="tortoise", measured_at=time.time())
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={PARITY_INSTRUMENTS["turn"]: honest})
@@ -2872,7 +2883,7 @@ def test_a_row_multiplying_count_statement_is_a_documented_residual():
     c = _FakeClient(used=900, maxmemory=1_000)
     report = ParityReport(instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
                           measured_nodes=1_500, total_nodes=1_500,
-                          graph_name="tortoise")
+                          graph_name="tortoise", measured_at=time.time())
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={PARITY_INSTRUMENTS["turn"]: report})

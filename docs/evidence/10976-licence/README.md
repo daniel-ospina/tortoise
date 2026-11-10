@@ -106,14 +106,24 @@ gated individually by the executor's per-node record probe.
   a population that grew since the report, so it is covered **solely** by the mirror pin
   above plus the characterisation test that pins it.
 - **A population with no count statement is a REFUSAL**, never a defaulted bound.
+- **That is ONE of the two staleness bounds, and this file is evidence for this one.**
+  The sibling fix that landed first (PR #11720) bounds the SAME licence by WHEN
+  the report was measured — `ParityReport.measured_at` against
+  `$TORTOISE_PARITY_REPORT_MAX_AGE_S` (default 3600 s). The two are independent and
+  neither subsumes the other: a report stamped a minute ago still over-claims if the
+  population shrank since (and eviction IS the shrink path, so the two move separately by
+  design), while a report of exactly the right size still licenses a sweep when it is
+  hours old. ⛔ A fixture that builds a `ParityReport` directly must now satisfy BOTH —
+  declare the population's resident size in `_FakeGraph(populations=…)` and stamp
+  `measured_at` — or it is demoted for a reason the test was not written to assert.
 
 ## Tests
 
-`tests/test_cache_eviction_census.py` (118 tests in the file, 224 across the four
-eviction suites — measured, not asserted: `uv run python tools/test_lane.py run --
+`tests/test_cache_eviction_census.py` (134 tests in the file, 216 passed + 1 skipped across
+the four eviction suites — measured, not asserted: `uv run python tools/test_lane.py run --
 tests/test_cache_eviction_census.py tests/test_cache_eviction_evictor.py
 tests/test_cache_eviction_evictor_pins.py tests/test_cache_evict_cli.py -q` →
-`224 passed`, recorded in `WORKTREE-REPORT.md`):
+`216 passed, 1 skipped`, recorded in `WORKTREE-REPORT.md`):
 
 | arm | what it pins |
 |---|---|
