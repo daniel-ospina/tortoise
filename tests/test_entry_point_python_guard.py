@@ -588,7 +588,7 @@ _SURFACES_OUT_OF_SCOPE: dict[str, str] = {
 #: takes the guarded form, because its purpose is that a reader re-runs it. That
 #: is why `docs/plans/2026-09-26-5042-…:208` and
 #: `docs/ci/merge-throughput-measurements.md:524` stay `uv run python` while the
-#: three entries below do not.
+#: four entries below do not.
 #:
 #: Rewriting a record FALSIFIES evidence provenance, which is strictly worse than
 #: the doc/guard contradiction this test exists to prevent. Keyed by
