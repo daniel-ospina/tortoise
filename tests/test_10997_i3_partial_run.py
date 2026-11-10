@@ -23,10 +23,13 @@ rolls anything back.
 The points loop is **fail-soft**: its `except` counts the failure, appends the
 error and **continues** (`sdk.py:17116-17125`), and nothing between the phases
 gates on that count. So a point-write failure does not end the run — it is
-recorded, and the run **keeps writing**: the events phase and the operators
-phase behind it commit anyway. A "failed" capture is therefore observable,
-partially applied, and in two directions at once (a record from before the
-failure AND records from after it) — exactly what I3 forbids.
+recorded, and the run **keeps writing**: the events phase commits anyway (the
+operators phase sits behind that too, but this fixture's payload carries no
+operators — `_V2SessionMock` returns `"operators": []` — so that leg is
+reasoning about the code path, NOT something this file exercises). A "failed"
+capture is therefore observable, partially applied, and in two directions at
+once (a record from before the failure AND records from after it) — exactly what
+I3 forbids.
 
 WHAT IS MEASURED HERE (both directions, so the pin cannot pass vacuously)
 ------------------------------------------------------------------------
@@ -65,8 +68,18 @@ the same rule `tests/test_5095_s3_identity_policy.py::TestTheRemainingAbsence`
 follows).
 
 LANDING SIGNAL — stated precisely, because a half-fix must not pass it: I3 has
-landed when a failed run's journal delta is **EMPTY**, however the fix
-compensates (staging, buffering, or compensating writes).
+landed when a failed run's journal delta is **EMPTY**. `docs/architecture/
+EXTRACTOR-V4-ARCHITECTURE.md` §4.4's wording is *"leave the journal …
+unchanged"*, so only NOT-WRITING satisfies it — which is what a staging or
+buffering fix does (nothing is journalled before the commit).
+
+⛔ **Compensating writes are NOT a landing**, and must not be listed as one: the
+journal is append-only (§"WHY A PIN", above — `append_event` appends one record
+per call), so a compensation *appends inverse records* and the originals are
+never removed. The delta stays **non-empty**, `replay(journal)` still yields the
+failed run's records, and this file stays GREEN — a genuine compensation-based
+change would read here as "I3 still absent". I3 says the same thing from its own
+side: a journaled compensation *changes* the journal, which I3 forbids outright.
 
 ⛔ Rolling back only the phases that PRECEDED the failure does NOT satisfy it —
 the events phase commits AFTER the point failure, so that fix leaves
@@ -76,10 +89,13 @@ the other way (`got ['ObjectRegistered']`). Both are PARTIAL fixes; neither is a
 landing — so a red here means *"read which record survived"*, not *"the entity
 write broke"*.
 
-⚠️ The one half-fix this file **cannot** see is a compensation that rolls the
-GRAPH back while leaving both journal records in place (unrecorded deletes — the
-`#4716` class). That is why the landing signal is the journal **delta** and not
-the graph, and why a graph-level compensation still owes its own record.
+⚠️ The one shape this file **cannot** see is a compensation that rolls the GRAPH
+back while recording nothing (unrecorded deletes — the `#4716` class): the
+journal is left intact and the delta stays non-empty, so arm 1 is green — and
+that is correct for this pin, because the violation survives: `replay(journal)`
+re-creates what the delete removed. It is also why the landing signal is the
+journal **delta** and not the graph, and why a graph-level compensation is not a
+landing either.
 
 On a real landing `assert failed["journal"]` reds (an empty delta is falsy),
 which is the signal that `config/v4-mechanisms.yml` (the `failure_policy` note's
@@ -219,10 +235,12 @@ def test_a_failed_capture_still_commits_before_and_after_the_failure(tmp_path):
     failure leaves `EventRecorded` behind, and this file must not read that
     half-fix as a landing.
 
-    MUTATION: make the run atomic so its journal delta is EMPTY, however it
-    compensates (staging, buffering, or compensating writes) → the assertion
-    below reds, signalling that a `commit_transaction` row may be added and
-    this absence pin replaced by its positive counterpart.
+    MUTATION: make the run atomic so its journal delta is EMPTY — a staging or
+    buffering fix that journals nothing before the commit (NOT a compensating
+    write, which appends inverse records and leaves the delta non-empty; see the
+    module docstring's LANDING SIGNAL) → the journal assertion below reds,
+    signalling that a `commit_transaction` row may be added and this absence pin
+    replaced by its positive counterpart.
     """
     failed = _run_capture(tmp_path, fail_phase="point", tag="pin")
 
@@ -238,8 +256,9 @@ def test_a_failed_capture_still_commits_before_and_after_the_failure(tmp_path):
 
     assert failed["journal"], (
         "the failed run left NO journal record — its journal delta is EMPTY. "
-        "If a failed capture now commits nothing at all, I3 HAS LANDED "
-        "(whatever the mechanism: staging, buffering or compensating writes): "
+        "If a failed capture now journals nothing at all, I3 HAS LANDED "
+        "(a staging/buffering fix; NOT compensating writes — those append "
+        "inverse records, so they would leave this delta non-empty): "
         "replace this absence pin with its positive counterpart and update "
         "`config/v4-mechanisms.yml` (the `failure_policy` note's I3 clause, and "
         "the `commit_transaction` row #10998's scoping plans) — do not simply "
@@ -290,6 +309,13 @@ def test_the_control__an_unfailed_capture_journals_more(
     assert "PointAdded" in ok["journal"], (
         f"the control capture journals no PointAdded ({ok['journal']}) — the "
         f"pin's `extracted == []` then proves nothing about the points phase")
+    # `EntityLinked` is claimed in this arm's docstring, so it is GUARDED here
+    # rather than left as prose: without this line nothing reds if the edge
+    # record stops being emitted, and the claim above silently stops being true.
+    assert "EntityLinked" in ok["journal"], (
+        f"the control capture journals no EntityLinked ({ok['journal']}) — the "
+        f"docstring above claims it does, so either the claim or the emitter "
+        f"moved")
     # The ORDER, not just membership: the events phase is behind the points
     # loop, so its record must come after PointAdded in a clean run. This is
     # the fact the pin's post-failure `EventRecorded` rests on.
