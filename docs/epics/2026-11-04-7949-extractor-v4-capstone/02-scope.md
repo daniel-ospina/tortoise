@@ -114,7 +114,7 @@ note **or a justified skip citing the brief**. Both are **justified skips**, cit
 6. **The v3 fidelity programme** beyond the E2 guard arm (`#2453`/`#1534`/`#10360` own it).
 7. **`#2817`** numeric/locale canonicalisation (CLOSED) — `value_normalizer`'s own rulings.
 8. **Deciding `§13.8 Q1`** (cross-batch connection by model or mechanically) — **deferred to the owner**, routed
-   by a comment on `#7949` naming the decision home (`EXTRACTOR-V4-ARCHITECTURE.md:1842`). This epic produces
+   by a comment on `#7949` naming the decision home (`EXTRACTOR-V4-ARCHITECTURE.md:2085`). This epic produces
    the **tier-provenance evidence** that makes the answer decidable (item 3); it does not decide it, and it
    does **not** adopt the mechanical standard over **D6**.
 9. **The 25,000-point quota / cache eviction** — `#10976`'s root (the graph is at its ceiling; measured).
