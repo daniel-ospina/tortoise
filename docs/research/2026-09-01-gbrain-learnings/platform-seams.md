@@ -284,7 +284,7 @@ holds, one is new and was undisclosed:
    still correct. The watch item stays open upstream; #8109 remains the only adjacent
    injection seam (`postToolUse` / `postToolUseFailure` → `additional_context` — post-tool
    result, not the pre-prompt reflex).
-2. **Cloud agents get NEITHER hook — NEW, and it was previously undisclosed.** Cursor's
+2. **Hosted cloud agents get NEITHER hook — NEW, and it was previously undisclosed.** Cursor's
    reference lists `sessionStart` under *"Hooks not available in cloud agents"* — *"Deferred
    while cloud agents can still start in a read-only environment. Hooks don't load there, so a
    cloud `sessionStart` would fire too late (after the first write) rather than at true session
@@ -297,7 +297,7 @@ holds, one is new and was undisclosed:
    "injection still works in the cloud". Per the **#3819 owner ruling** (the IDE-only limit is
    disclosed *where the user chooses Cursor — the install surface, not buried*), that
    disclosure now covers both hooks and names the MCP pull surface as the cloud-agent route.
-   Cloud-agent users' volunteering memory is therefore **pull only** — the same shape this row
+   Hosted-cloud-agent users' volunteering memory is therefore **pull only** — the same shape this row
    already claims for the platform, since MCP pull is the universal seam.
 
 3. **"IDE-only" is NOT the right absolute — a THIRD surface fires both events (added
@@ -320,7 +320,9 @@ holds, one is new and was undisclosed:
    that this installer does not write — and a repo-committed `hooks.json` cannot simply
    point at this install's scripts, which register by **absolute** path under `~/.cursor/hooks/`
    (`hook_install.py` `absolute_command=True`) and read their state from `$HOME`
-   (`session-start.sh` `~/.tortoise/…`), so another machine's copy would not resolve. #8109's
+   (`session-start.sh` `~/.tortoise/…`), so it would not resolve on a worker that never ran the
+   install — and on one that did, the registration is THAT machine's own copy of the same
+   installer, not this repository's. #8109's
    `postToolUse` seam is the adjacent route; it is not a pre-prompt reflex.
 
 ### #2121 Hermes — corrected contract (2026-10-11, primary source)

@@ -6023,7 +6023,7 @@ def _install_capture_seam(args, install_capture) -> int:
         # hooks (~/.cursor/hooks.json) are not available in cloud agents" —
         # and `tortoise install cursor` registers at the USER level only
         # (~/.cursor is Cursor's one writable root; there is no project-level
-        # default). A cloud agent therefore gets NEITHER hook, and disclosing
+        # default). A HOSTED cloud agent therefore gets NEITHER hook, and disclosing
         # only `sessionEnd` would leave the user believing the cold-context
         # digest still reaches a cloud session — the unshipped-seam claim this
         # issue's indicator 3 forbids, applied to the sibling hook.
@@ -6061,18 +6061,19 @@ def _install_capture_seam(args, install_capture) -> int:
         print(
             f"Both Cursor hooks are registered in "
             f"{cursor_root / 'hooks.json'}, the USER-level file, which a "
-            "Cursor cloud agent VM cannot read. So a session running in a "
-            "cloud agent VM is NOT captured and is NOT injected: Cursor's "
-            "docs say 'Cloud agents have no editor-lifetime session boundary. "
-            "sessionEnd is tied to the IDE session, not a cloud agent chat', "
-            "that 'sessionStart' is not available in cloud agents, and that "
-            "'User-level hooks (~/.cursor/hooks.json) are not available in "
-            "cloud agents'. LOCAL desktop-editor sessions are the surface "
-            "this install serves; for cloud-agent sessions use the MCP pull "
-            "surface (`tortoise_search` / `tortoise_recall`). Cursor also "
-            "fires `sessionStart`/`sessionEnd` on Self-Hosted Machines "
-            "workers — project hooks, plus team and enterprise-managed hooks "
-            "on Enterprise — none of which this installer writes.")
+            "hosted Cursor cloud agent VM cannot read. So a session running "
+            "in a hosted cloud agent VM is NOT captured and is NOT injected: "
+            "Cursor's docs say 'Cloud agents have no editor-lifetime session "
+            "boundary. sessionEnd is tied to the IDE session, not a cloud "
+            "agent chat', that 'sessionStart' is not available in cloud "
+            "agents', and that 'User-level hooks (~/.cursor/hooks.json) are "
+            "not available in cloud agents'. LOCAL desktop-editor sessions "
+            "are the surface this install serves; for cloud-agent sessions "
+            "use the MCP pull surface (`tortoise_search` / "
+            "`tortoise_recall`). Cursor also fires "
+            "`sessionStart`/`sessionEnd` on Self-Hosted Machines workers — "
+            "project hooks, plus team and enterprise-managed hooks on "
+            "Enterprise — none of which this installer writes.")
     if args.harness == "openclaw" and not getattr(args, "dry_run", False):
         # #2120: the plugin is discovered under the HOME-scoped
         # ~/.openclaw/extensions and hooks only bind at Gateway startup, so a

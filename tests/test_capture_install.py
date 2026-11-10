@@ -3013,10 +3013,17 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_cloud_agent_limit
     # measured it: re-appending "neither … reaches a cloud agent" left the whole
     # suite GREEN, because every other assert is a presence pin on prose that
     # coexists with the absolute. Pin the scoping on THIS surface, not only on
-    # the `install --list` line.
-    assert "cloud agent VM is NOT captured" in r.stdout, r.stdout
-    assert "reaches a cloud agent" not in r.stdout, r.stdout
+    # the `install --list` line. The guards are CLAIM-SHAPED — "<X> reaches a
+    # cloud agent" / "gets a Tortoise hook" — not verb+object, because the
+    # message's own recommendation ("use the MCP pull surface") is a thing that
+    # DOES reach a cloud agent, so banning the bare phrase would red correct
+    # prose (measured, review round 4 note 1).
+    assert "hosted cloud agent VM is NOT captured" in r.stdout, r.stdout
     assert "neither the capture seam" not in r.stdout, r.stdout
+    assert "hook reaches a cloud agent" not in r.stdout, r.stdout
+    assert "seam reaches a cloud agent" not in r.stdout, r.stdout
+    assert "gets a Tortoise hook" not in r.stdout, r.stdout
+    assert "no cloud agent session" not in r.stdout, r.stdout
     # …and the SECOND surface that states this claim -- `install --list` -- was
     # pinned by nothing at all, so a revert there was silent.
     listing = _run(("install", "--list"), env, root)
