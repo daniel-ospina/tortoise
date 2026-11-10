@@ -42782,10 +42782,15 @@ class TortoiseSDK:
         """Expand kind to the values a READ FILTER may match — never an ancestor.
 
         Uses PackRegistry.read_filter_kinds(): [kind] + descendants +
-        equivalents + stored spellings. Every Cypher ``n.<kind_field> IN [...]``
-        filter in this module uses this one, so a narrow-kind read cannot return
-        a broader-kinded row (#11679). Membership tests use
+        equivalents + stored spellings. Every read filter in this module that is
+        built from a kind EXPANSION uses this one, so a narrow-kind read cannot
+        return a broader-kinded row (#11679). Membership tests use
         :meth:`_expand_kind`.
+
+        The quantifier is scoped on purpose: ``backfill_sources`` also runs an
+        ``e.eventKind IN $kinds`` filter, but its vocabulary is a CLOSED,
+        caller-supplied literal (``event_kinds``) that expands nothing, so it
+        cannot match a broader kind and needs no expansion either way.
         """
         return _get_kind_expander().read_filter_kinds(kind)
 

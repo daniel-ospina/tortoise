@@ -3372,6 +3372,16 @@ class PackRegistry:
         must match — the kind, its declared DESCENDANTS, its equivalents, and
         every stored spelling of those. **Never an ancestor.**
 
+        ⚠️ One pre-existing asymmetry survives and is pinned, so the sentence
+        above is not a guarantee it makes: a BARE parent kind reaches its
+        namespaced children (``"dev:issue" in read_filter_kinds("issue")``), but
+        a namespaced kind does not pick up the bare spelling
+        (``"issue" not in read_filter_kinds("dev:issue")``). That direction
+        predates #11679 — it is #6146-adjacent, is unchanged by this split, and
+        is out of this PR's scope — but a reader auditing a wrong-empty should
+        know it is still there
+        (``test_a_bare_kind_filter_keeps_its_namespaced_rows``).
+
         Why this is a second surface and not a parameter on ``expand_kind``:
         the two callers of the kind hierarchy need opposite directions, and one
         list cannot be correct for both (#11679).
