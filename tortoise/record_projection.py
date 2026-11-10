@@ -274,6 +274,14 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # `*_record_*.sql` glob ships it, so an unlisted file is invisible to
     # `tests/test_9231_record_migrations_trigger.py`'s reverse direction.
     "20261102000002_record_point_search_keys_text.sql",
+    # #11642 / #4051 V1 — the vector move: `CREATE EXTENSION vector`, the
+    # `record_embedding_vector(jsonb)` converter, three GENERATED
+    # `embedding_vec public.vector(384)` columns and their HNSW indexes. It
+    # contributes three COLUMN NAMES (which is why the type vocabulary was
+    # widened for `vector`) but NO bindable column — every one is GENERATED
+    # ALWAYS — and no refusal. It is listed for the registry reason above:
+    # `tests/test_9231_record_migrations_trigger.py` reds on an unlisted file.
+    "20261109000001_record_embedding_vector.sql",
 )
 
 #: The tenancy GUC every record RLS policy reads (`*_read_org`, `*_app_tenant`).
@@ -1742,6 +1750,17 @@ _DECLARED_TYPE_ALTERNATION = (
     r"|bigserial|smallserial|serial|bigint|smallint|integer"
     r"|numeric|decimal|real"
     r"|boolean|jsonb|json|text|varchar|uuid|bytea|date"
+    # #11642 — the vector payload's INDEXED projection (`pgvector`). Widened here
+    # rather than at a call site, per the rule above, because
+    # `20261109000001_record_embedding_vector.sql` declares three columns of this
+    # type and `tests/test_11075_record_declared_type_contract.py`'s migration-
+    # text closure reds on any column the vocabulary cannot capture. ⛔ Being in
+    # this list does NOT make these columns bindable: they are GENERATED ALWAYS,
+    # so Postgres refuses an `INSERT`/`UPDATE` that names one, and
+    # :data:`GENERATED_COLUMNS` is what keeps the projection from ever trying
+    # (see the `embedding_vec` entry there — a bound `vector` parameter would be
+    # adapted by the driver as an ARRAY and fail on the column type).
+    r"|vector"
 )
 
 #: One column definition of a `CREATE TABLE`, with its TYPE. The name-only
@@ -2544,6 +2563,32 @@ _BOOKKEEPING_COLUMNS: frozenset[str] = frozenset({
     "rel_type", "src_label", "src_key", "tgt_label", "tgt_key", "idx",
 })
 
+#: Columns POSTGRES computes, so a payload naming one contributes NOTHING.
+#:
+#: `#11642` added the first ones: `embedding_vec` on `point`/`source`/`event` is
+#: `GENERATED ALWAYS AS (record_embedding_vector(embedding)) STORED` — the
+#: ANN-indexed projection of the payload's `embedding`. Three separate reasons
+#: it must never be bound, and only the FIRST is enforced by the database:
+#:
+#:   1. Postgres refuses it outright (`column "embedding_vec" can only be
+#:      updated to DEFAULT` — measured), so binding it turns a record write into
+#:      a raise;
+#:   2. binding it would also make it possible for the column to disagree with
+#:      `embedding`, which is the whole reason it is generated rather than a
+#:      trigger-maintained second writer;
+#:   3. the value the projection holds is a JSON list, and the driver adapts a
+#:      Python list to a Postgres ARRAY — so even a hypothetical non-generated
+#:      `vector` column would fail the bind with a type error rather than
+#:      storing a vector.
+#:
+#: A payload naming one is DROPPED (like the DERIVED carve-out), not pushed into
+#: the `props` tail: the tail is the graph's open property set, and a generated
+#: column is not a node property — nothing produces one, and a copy in the tail
+#: would be a value the graph does not carry.
+GENERATED_COLUMNS: frozenset[str] = frozenset({
+    "embedding_vec",
+})
+
 
 def _split_properties(
     table: str,
@@ -2586,6 +2631,10 @@ def _split_properties(
         if prop in drop:
             continue
         column = snake(prop)
+        if column in GENERATED_COLUMNS:
+            # Postgres computes it; binding it RAISES (#11642). See
+            # `GENERATED_COLUMNS` for why it is dropped rather than tailed.
+            continue
         if column in _BOOKKEEPING_COLUMNS:
             # A payload may never write the record's own coordinates. The
             # property is preserved as DATA in the tail instead — dropping it

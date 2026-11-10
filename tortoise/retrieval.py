@@ -58,6 +58,7 @@ from tortoise.coverage_loop import (
     session_diverse_order,
 )
 
+from .calendar_date import calendar_date as _calendar_resolver_day  # #11646
 from .env_truthy import env_flag  # #4097: the declared truthy contract
 from .validity import (  # #2350: the 3-state end
     _EPOCH_SECONDS_SANE_MAX,
@@ -1124,6 +1125,24 @@ def _epoch_utc_day(value: float) -> str | None:
 _DASHED_DAY_PREFIX = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
+def _resolver_day(text: str) -> str | None:
+    """The day a non-ISO spelling STATES, via the ONE shared grammar (#11646).
+
+    The fallback behind :func:`_stated_iso_day`, never ahead of it: that helper
+    owns the ISO family and its explicit UTC-truncation rule, while this one
+    covers the shapes the ingest producer writes (``2023/05/20 (Sat) 02:21``)
+    and the compact / ISO-week spellings. Same truncation rule — an
+    offset-bearing value truncates in UTC — so one stored instant cannot state
+    two days because of how it was written (#9741 review P2). Never raises;
+    ``None`` means the text names no day and the caller keeps it whole.
+    """
+    try:
+        day = _calendar_resolver_day(text, utc_truncate=True)
+    except (TypeError, ValueError, OverflowError, OSError):  # never a read-path fault
+        return None
+    return None if day is None else day.isoformat()
+
+
 def _stated_iso_day(text: str) -> str | None:
     """The calendar day an ISO text STATES, or ``None`` when it names none.
 
@@ -1238,10 +1257,18 @@ def _display_bound(value: object, field: str, hit: dict) -> str:
             # review P2). ``2024-06-01T12:00:00Z`` is unchanged by this.
             day = _stated_iso_day(text)
             return day if day is not None else text[:10]
-        # Any other spelling of a day (ISO basic) is read, not cut (#9741
-        # review P3-1); text that names no day survives whole rather than as
-        # a fragment.
-        day = _stated_iso_day(text)
+        # Any other spelling of a day (ISO basic, or the ingest producer's
+        # ``2023/05/20 (Sat) 02:21``) is read, not cut (#9741 review P3-1);
+        # text that names no day survives whole rather than as a fragment.
+        # ⛔ The producer's shape is READER TEXT, not a timestamp: ``validFrom``
+        # is written in it by ``tools/longmem_eval/ingest_v2.py``, and once
+        # #11646 made such a bound ORDERABLE the whole string began rendering as
+        # ``[valid since 2023/05/20 (Sat) 02:21]`` beside ``precision='day'`` —
+        # this module's contract is that no full timestamp reaches the reader
+        # context (cycle 5, finding 2). So the day comes from the shared
+        # resolver, with ``_stated_iso_day``'s UTC-truncation rule, which owns
+        # the offset case and stays first.
+        day = _stated_iso_day(text) or _resolver_day(text)
         return day if day is not None else text
     if isinstance(value, (int, float)):
         day = _epoch_utc_day(value)
