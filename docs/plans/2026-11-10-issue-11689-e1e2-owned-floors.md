@@ -307,7 +307,7 @@ a grandfathered log after the thresholds were written and the add-commit cannot 
 Measured, not argued — the re-take made the required check fail:
 
 ```text
-$ uv run python tools/capstone_preregistration_check.py --dir docs/evidence/7949-capstone \
+$ python3 tools/capstone_preregistration_check.py --dir docs/evidence/7949-capstone \
       --no-corpus --base-ref origin/main
 FAIL — 1 problem(s):
   - e1-e2.log: exempted, but it was MODIFIED at 1794290611, which is not strictly before the
