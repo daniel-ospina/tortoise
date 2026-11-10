@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import os
 import sys
+import types
 from pathlib import Path
 
 import yaml
@@ -2360,10 +2361,12 @@ class TestCoreHierarchy:
           Mutation: give the leg the expansion (`n.{kind_field} IN [...]`) and the
           exact-match assertion goes red, which is the same edit that would make
           the docstring's "does NOT widen" false.
-        * the SDK hands that leg the **UNEXPANDED** kind, and only applies the
+        * the SDK hands that leg the **UNEXPANDED** kind, and applies the
           expansion post-retrieval, gated on a text query — driven through the
           REAL `tortoise_fts_query` with `degradation_chain` captured, so the
-          assertion is on the arguments the SDK actually passes.
+          assertion is on the arguments the SDK actually passes; and the
+          EXPANSION is observed reaching that filter, so deleting the widening
+          reds here (the bare kind is not the expansion).
 
         ⛔ BOTH are behavioural on purpose. An earlier version of this pin grepped
         `sdk.py` for `source.count(snippet) == 1`; that reds on a
@@ -2374,6 +2377,9 @@ class TestCoreHierarchy:
         guard: nothing observed what the SDK hands the leg. The one thing that
         cannot be driven without a DB (the post-retrieval expansion gate) is
         anchored on the AST instead, which is immune to both false-red modes.
+        ⚠️ The `strategies` assertion is what carries the "kind-only is a full
+        scan" half: `classify_query` runs no FTS or vector leg when there is no
+        text query, which is why the expansion has nothing to filter there.
         """
         from tortoise import sdk as sdk_module
         from tortoise import search_engine
@@ -2428,7 +2434,6 @@ class TestCoreHierarchy:
             search_engine.degradation_chain = original_chain
             if sdk is not None:
                 sdk.close()
-
         kind_only, text_query = captured
         for form in (kind_only, text_query):
             assert form["struct_kind"] == "Object", (
@@ -2443,6 +2448,57 @@ class TestCoreHierarchy:
         # …while the text-query form carries one, which is what reaches the
         # expansion filter — the widening the docstring attributes to it ALONE.
         assert text_query["query"] == "widget", text_query
+
+        # ── and the EXPANSION reaching the post-retrieval filter ───────────
+        # The capture above proves the gate is REACHABLE only on a text query; it
+        # cannot prove the filter is handed the EXPANSION rather than the bare
+        # kind — and the expansion is the widening DM4 MEASURES. Driven with one
+        # fake result so the filter block actually runs, and the sdk's projection
+        # replaced by a recorder, so the assertion is on the Cypher params the
+        # read really issues. `expanded = [kind]` (the widening deleted, DM4's
+        # measurement then false) leaves a single bare `kind_0` here.
+        class _FilterGraph:
+            def __init__(self):
+                self.params: list[dict] = []
+
+            def query(self, cypher, params=None, timeout=None, **kw):
+                self.params.append(dict(params or {}))
+                return _Result()
+
+        filter_graph = _FilterGraph()
+        observed_expansion: set[str] = set()
+
+        def _one_hit(graph_, query, struct_kind, query_vec, strategies, **kw):
+            # a non-empty fused pool is what makes the filter block run at all
+            return {"fts": [("obj-1", 1.0)]}
+
+        sdk = None
+        search_engine.degradation_chain = _one_hit
+        try:
+            sdk = sdk_module.TortoiseSDK(
+                str(tmp_path / "form_scope_widen.db"),
+                namespace=f"form_scope_widen_{os.urandom(6).hex()}")
+            sdk._get_proj = lambda: types.SimpleNamespace(g=filter_graph)
+            sdk.tortoise_fts_query(
+                "widget", kind="Object", entity_type="object")
+            expected = set(sdk._expand_kind("Object"))
+            for params in filter_graph.params:
+                observed_expansion |= {
+                    value for key, value in params.items()
+                    if key.startswith("kind_")}
+        finally:
+            search_engine.degradation_chain = original_chain
+            if sdk is not None:
+                sdk.close()
+
+        assert len(expected) > 1, (
+            "`expand_kind('Object')` collapsed to the bare kind, so this pin "
+            f"cannot distinguish an expansion from its head: {sorted(expected)}")
+        assert observed_expansion == expected, (
+            "the post-retrieval kind filter was handed "
+            f"{sorted(observed_expansion)}, not the EXPANSION "
+            f"{sorted(expected)} — the text-query read no longer widens, and "
+            "the measurement DM4 records is false again")
 
         # ── and the GATE itself, anchored on the AST ───────────────────────
         # The capture above proves the two forms differ in `query`; it cannot
