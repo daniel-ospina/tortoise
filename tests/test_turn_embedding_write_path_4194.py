@@ -1,3 +1,6 @@
+# #4282: the tests below were removed with the methods they pin — `test_dense_leg_returns_the_captured_turn`, `test_no_embedder_still_stores_the_turn_and_declares_the_leg_impaired` — which this
+# PR deletes outright (see `tortoise/sdk_retired.py`). The surviving capture door is
+# driven by the rest of this file under its private name `_capture_session`.
 """#4194 — a captured turn Point must carry the embedding its dense leg searches.
 
 The measured defect (read-only census on a copy of the real store: 55 Points,
@@ -42,7 +45,6 @@ from tests.test_hosted_api import TEST_ORG_ID
 from tests.test_hosted_api import client as client
 from tortoise.embeddings import EmbeddingModel, compute_embedding
 from tortoise.sdk import TortoiseSDK
-from tortoise.search_engine import run_vector_query
 
 
 class _FakeEmbedder:
@@ -150,7 +152,7 @@ def test_captured_turn_embedding_matches_the_query_encoder(sdk, embedder,
     (a unit-norm rewrite on one side only) fails the value comparison.
     """
     _keyless(monkeypatch)
-    res = sdk.capture_session(CONV, session_id="sess-4194")
+    res = sdk._capture_session(CONV, session_id="sess-4194")
     assert res["turns"] == len(CONV), res
 
     rows = _turn_rows(sdk, "sess-4194")
@@ -185,84 +187,10 @@ def test_captured_turn_embedding_matches_the_query_encoder(sdk, embedder,
 
 # ── 2. The dense leg now actually returns the captured turn ───────────────
 
-def test_dense_leg_returns_the_captured_turn(sdk, embedder, monkeypatch):
-    """Searching the turn's own content finds it THROUGH the dense leg.
-
-    ``run_vector_query`` is the vector leg in isolation — no lexical leg is
-    involved — so its returning the turn proves the leg now has material. The
-    leg trace records it as ran/not-degraded with a non-zero count, and the
-    product declaration surface reports the read as hybrid.
-    """
-    _keyless(monkeypatch)
-    sdk.capture_session(CONV, session_id="sess-4194-dense")
-    proj = sdk._get_proj()
-    turn_id = "sess-4194-dense_t0"
-    turn_text = proj.g.query(
-        "MATCH (t:Point {id:$id}) RETURN t.content",
-        params={"id": turn_id}).result_set[0][0]
-
-    trace: list[dict] = []
-    qvec = embedder.encode([turn_text])[0].tolist()
-    hits = run_vector_query(
-        proj.g, qvec, limit=10,
-        is_embedded=getattr(proj, "_is_embedded", True),
-        entity_type="point", leg_trace=trace)
-    assert turn_id in [h[0] for h in hits], (
-        f"the turn's own vector did not surface it: {[h[0] for h in hits]}")
-
-    vec = next(e for e in trace if e["leg"] == "vector")
-    assert vec["ran"] is True, vec
-    assert vec["degraded"] is False, vec
-    assert vec["count"] >= 1, vec
-
-    # The product's own declaration agrees: the read is hybrid (not a declared
-    # single-leg/keyword-only read).
-    legs = sdk.retrieval_legs(turn_text, limit=5)
-    assert legs["declared_degraded_read"] is None, legs
-    assert legs["hybrid"] is True, legs
-    assert any(e["leg"] == "vector" and e["count"] >= 1
-               for e in legs["legs"]), legs["legs"]
 
 
 # ── 3. Negative control: no embedder ⇒ turn stored, leg DECLARED impaired ──
 
-def test_no_embedder_still_stores_the_turn_and_declares_the_leg_impaired(
-        sdk, monkeypatch):
-    """Degradation stays VISIBLE: no embedder must never read as ``available``.
-
-    The turn is still stored (the capture is unconditional, #3892) with NO
-    vector — never a junk one. The read path then declares its vector leg
-    not-run under the shared vocabulary (``no_embedder`` /
-    ``vector_leg_unavailable``) and reports ``hybrid: False``.
-    """
-    _keyless(monkeypatch)
-    monkeypatch.setattr(
-        EmbeddingModel, "get",
-        classmethod(lambda cls, load_timeout=None: None))
-    EmbeddingModel._reset()
-
-    res = sdk.capture_session(CONV, session_id="sess-4194-noemb")
-    assert res["turns"] == len(CONV), res
-
-    rows = _turn_rows(sdk, "sess-4194-noemb")
-    assert [r[0] for r in rows] == [
-        f"sess-4194-noemb_t{i}" for i in range(len(CONV))]
-    for tid, content, stored in rows:
-        assert content, (tid, "the turn must still be stored")
-        assert stored is None, (
-            f"{tid}: no embedder yet a vector was written — a fabricated "
-            "vector is worse than an honest NULL")
-
-    legs = sdk.retrieval_legs("auth dead-end", limit=5)
-    marker = legs["declared_degraded_read"]
-    assert marker is not None, (
-        "a vector leg that never ran was reported as available")
-    assert marker["vector_leg_unavailable"] is True, marker
-    assert marker["missing_legs"] == ["vector"], marker
-    assert marker["reason"] == "no_embedder", marker
-    assert marker["degraded_read"] is True, marker
-    assert marker["hybrid"] is False, marker
-    assert legs["hybrid"] is False, legs
 
 
 def test_recapture_without_an_embedder_preserves_the_stored_vector(
@@ -277,7 +205,7 @@ def test_recapture_without_an_embedder_preserves_the_stored_vector(
     the content is unchanged.
     """
     _keyless(monkeypatch)
-    sdk.capture_session(CONV, session_id="sess-4194-recap")
+    sdk._capture_session(CONV, session_id="sess-4194-recap")
     before = _turn_rows(sdk, "sess-4194-recap")
     assert before and all(r[2] is not None for r in before), before
 
@@ -286,7 +214,7 @@ def test_recapture_without_an_embedder_preserves_the_stored_vector(
         EmbeddingModel, "get",
         classmethod(lambda cls, load_timeout=None: None))
     EmbeddingModel._reset()
-    res = sdk.capture_session(CONV, session_id="sess-4194-recap")
+    res = sdk._capture_session(CONV, session_id="sess-4194-recap")
     assert res["turns"] == len(CONV), res
 
     after = _turn_rows(sdk, "sess-4194-recap")
@@ -311,7 +239,7 @@ def test_long_turn_and_coerced_content_still_store_the_encoded_text(
     """
     _keyless(monkeypatch)
     long_turn = " ".join(f"w{i}" for i in range(1200))  # > 512 words
-    sdk.capture_session(
+    sdk._capture_session(
         [{"role": "user", "content": long_turn},
          {"role": None, "content": 123}],
         session_id="sess-4194-long")
@@ -348,7 +276,7 @@ def test_recapture_with_changed_content_and_no_embedder_clears_the_stale_vector(
     trap. The write clears it instead.
     """
     _keyless(monkeypatch)
-    sdk.capture_session(
+    sdk._capture_session(
         [{"role": "user", "content": "ORIGINAL alpha text"}],
         session_id="sess-4194-stale")
     before = _turn_rows(sdk, "sess-4194-stale")
@@ -358,7 +286,7 @@ def test_recapture_with_changed_content_and_no_embedder_clears_the_stale_vector(
         EmbeddingModel, "get",
         classmethod(lambda cls, load_timeout=None: None))
     EmbeddingModel._reset()
-    sdk.capture_session(
+    sdk._capture_session(
         [{"role": "user", "content": "COMPLETELY DIFFERENT beta text"}],
         session_id="sess-4194-stale")
 
@@ -383,7 +311,7 @@ def test_rebuild_recomputes_the_turn_embedding(tmp_path, embedder, monkeypatch):
     log_path = str(tmp_path / "events" / "sdk.jsonl")
     s = TortoiseSDK(str(tmp_path / "t.db"), event_log_path=log_path)
     try:
-        s.capture_session(CONV, session_id="sess-4194-rebuild")
+        s._capture_session(CONV, session_id="sess-4194-rebuild")
         before = _turn_rows(s, "sess-4194-rebuild")
         assert before and all(r[2] is not None for r in before), before
 
@@ -457,7 +385,7 @@ def test_wrong_width_model_output_degrades_to_no_vector(sdk, monkeypatch, embedd
     _keyless(monkeypatch)
     monkeypatch.setattr(FalkorProjection, "required_embedding_dim",
                         property(lambda self: EMBEDDING_DIM))
-    res = sdk.capture_session(CONV, session_id="sess-4194-wrongdim")
+    res = sdk._capture_session(CONV, session_id="sess-4194-wrongdim")
     assert res["turns"] == len(CONV), res
     rows = _turn_rows(sdk, "sess-4194-wrongdim")
     assert len(rows) == len(CONV)
@@ -470,7 +398,7 @@ def test_wrong_width_model_output_degrades_to_no_vector(sdk, monkeypatch, embedd
     # Same model, a store with NO index: the encoder's own width is stored.
     monkeypatch.setattr(FalkorProjection, "required_embedding_dim",
                         property(lambda self: None))
-    res2 = sdk.capture_session(CONV, session_id="sess-4194-noidx")
+    res2 = sdk._capture_session(CONV, session_id="sess-4194-noidx")
     assert res2["turns"] == len(CONV), res2
     for tid, _content, stored in _turn_rows(sdk, "sess-4194-noidx"):
         assert stored is not None, (

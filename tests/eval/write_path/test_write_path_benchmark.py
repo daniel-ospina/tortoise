@@ -424,7 +424,7 @@ def test_capture_session_fails_over_on_403_key_limit(monkeypatch, tmp_path):
     db = tmp_path / "keylimit_capture.db"
     sdk = TortoiseSDK(db_path=str(db), namespace=f"test_403kl_{uuid.uuid4().hex[:8]}")
     try:
-        capture = sdk.capture_session(
+        capture = sdk._capture_session(
             [{"role": "user", "content": "we decided X"},
              {"role": "assistant", "content": "the plan is durable"}],
             session_id="wp_kl_403", harness="pi",

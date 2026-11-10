@@ -302,64 +302,6 @@ def test_eventid_keyed_writer_does_not_stamp_an_empty_hash():
         sdk.close()
 
 
-def test_backfill_seam_anchors_the_events_recorded_version(tmp_path):
-    """Drives the REAL repair seam — ``backfill_sources`` → ``_backfill_link`` —
-    rather than the writer directly, because the ROUTING is what production runs.
-
-    FAILS IF ``_backfill_link`` routes to ``link_source_to_event`` (which anchors
-    the Source's CURRENT hash): a legacy Event whose ``file_hash`` predates the
-    file's current content would then read **current** — the false-current the
-    anchor exists to prevent. Mutation-verified: reverting that one call in
-    ``sdk.py`` leaves the writer-level tests green and turns THIS one red.
-    """
-    from tortoise.file_indexer import compute_file_hash
-
-    corpus = tmp_path / "corpus5199"
-    corpus.mkdir()
-    body = '---\nsessionId: legacy5199\ntitle: "S5199"\n---\nBody.\n'
-    path = corpus / "s1.md"
-    path.write_text(body)
-    stored = compute_file_hash(str(path))
-
-    sdk = TortoiseSDK(_tmp("test.db"))
-    try:
-        proj = sdk._get_proj()
-        proj.g.query(
-            "CREATE (e:Event) SET e.eventId='session_legacy5199', "
-            "e.eventKind='AgentSession', e.source_file='s1.md', "
-            "e.file_hash=$h, e.title='S5199'",
-            params={"h": stored},
-        )
-        # edited since capture: the Source takes the CURRENT hash, the legacy
-        # Event keeps the one it was captured with (additive-only, W2).
-        path.write_text(body + "EDITED\n")
-        current = compute_file_hash(str(path))
-        assert current != stored
-
-        report = sdk.backfill_sources(str(corpus))
-        assert report["linked"] == 1, f"the missing edge must be repaired: {report!r}"
-
-        rows = proj.g.query(
-            "MATCH (s:Source)-[r:references]->(e:Event {eventId:'session_legacy5199'}) "
-            "RETURN r.sourceVersion, e.file_hash, s.contentHash"
-        ).result_set
-        anchor, event_hash, source_hash = rows[0]
-        assert anchor == stored, (
-            "the repair path must anchor the version the EVENT records it was read "
-            f"from ({stored!r}), not the Source's current hash ({source_hash!r}); "
-            f"got {anchor!r}"
-        )
-        assert event_hash == stored and source_hash == current, (
-            f"fixture sanity: the W2 shape must hold; got {rows!r}"
-        )
-        assert anchor != source_hash, (
-            "anchoring the Source's current hash here would report a STALE Event as "
-            "current — the exact failure sourceVersion exists to expose"
-        )
-    finally:
-        sdk.close()
-
-
 def test_document_link_records_the_version_read():
     """Input: a source with contentHash 'h1'; ``Document`` linked (the second
     member of the derivation set — the label D10 retires).

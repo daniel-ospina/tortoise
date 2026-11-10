@@ -250,7 +250,7 @@ def test_the_write_site_does_not_claim_a_re_capture_heals_a_pre_fix_node():
 
 
 def _capture(sdk, session_id: str) -> dict:
-    return sdk.capture_session(
+    return sdk._capture_session(
         conversation=[
             {"role": "user",
              "content": f"{MARKER} the raw transcript text must not live on a "
@@ -895,7 +895,7 @@ def test_a_non_latin_transcript_still_derives_and_is_findable(sdk):
          "content": "пользователь: перенеси релиз на пятницу"},
         {"role": "assistant", "content": "договорились, пятницу"},
     ]
-    sdk.capture_session(conversation=cyrillic_turns,
+    sdk._capture_session(conversation=cyrillic_turns,
                         session_id="sess-cyrillic-10000")
     row = _source_rows(sdk)["session:sess-cyrillic-10000"]
     assert row[1], (
@@ -974,7 +974,7 @@ def test_a_digit_only_transcript_still_derives_and_is_findable(sdk):
         f"a digit ranked against the session's words: {mixed!r}")
 
     # ── the live leg: the derived pair reaches the node AND the index
-    sdk.capture_session(
+    sdk._capture_session(
         conversation=[{"role": "user", "content": "42"},
                       {"role": "assistant", "content": "100 200"}],
         session_id="sess-digits-10000")

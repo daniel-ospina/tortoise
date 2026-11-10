@@ -16,7 +16,7 @@ the corrected reading:
 1. **A single entry point DOES exist.** The body says *"whether any single
    entry point … can drive all eight in one pass"* is an open question. It can:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
-   (``sdk.py:16420``, called at ``:15448``) →
+   (``sdk.py:16313``, called at ``:15339``) →
    ``extractor_v2.extract_session_v2`` (``extractor_v2.py:13192``) calls
    ``_edus_from_conversation`` (S0, ``:13310``) and then ``_arm_extract`` — the
    S1→S2→S2.2 prefix, which it calls twice since `#11002`: the first arm and the
@@ -1244,7 +1244,7 @@ def main(argv: list[str] | None = None) -> int:
     sdk = TortoiseSDK()
     session_id = f"capstone_{uuid.uuid4().hex[:12]}"
     try:
-        captured = sdk.capture_session(turns, session_id=session_id)
+        captured = sdk._capture_session(turns, session_id=session_id)
         # The receipt IS the only surface. ``capture_session`` never returns an
         # ``extraction`` key (sdk.py assembles ``resp`` from ``extracted`` +
         # ``meta``), so the old ``captured.get("extraction") or captured`` was a

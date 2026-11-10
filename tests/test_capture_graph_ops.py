@@ -273,9 +273,9 @@ def test_capture_reports_nonzero_phase_attributed_ops(tmp_path, monkeypatch, *, 
         assert own["scope"] is not None, "could not resolve the capture's store"
         # warm-up: index creation etc. is NOT a captured session and must not
         # leak into any capture's count.
-        sdk.capture_session(CONV, session_id="warmup_000")
+        sdk._capture_session(CONV, session_id="warmup_000")
         issued.update(n=0, unmetered=0, foreign=0)  # measure ONLY the capture
-        res = sdk.capture_session(CONV, session_id="gops_000")
+        res = sdk._capture_session(CONV, session_id="gops_000")
         # Snapshot HERE, before ``close()`` — the close is teardown, not
         # capture, so it must not enter the oracle's denominator.
         #

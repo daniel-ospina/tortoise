@@ -33,7 +33,6 @@ from tortoise.search_engine import (
     subject_binding_available,
 )
 from tortoise.sdk import (
-    HOLDS_ROLE_UNAVAILABLE,
     TortoiseSDK,
     _holds_role_available,
 )
@@ -257,76 +256,6 @@ class TestSearchPathFailsLoud:
 
 
 # ── get_org_structure: roles marked, members NOT marked ──────────────────
-
-class TestGetOrgStructure:
-    def test_roles_marked_unavailable_on_a_producerless_graph(self, sdk):
-        sdk.create_subject("root-org", "organization")
-        org = sdk.get_org_structure("root-org")
-        assert org["members"] == []
-        assert org["roles"] == []
-        assert org["unavailable"] == {"roles": HOLDS_ROLE_UNAVAILABLE}
-
-    def test_members_are_not_marked_because_memberOf_has_a_producer(self, sdk):
-        """memberOf has a real producer — an empty list is a finding."""
-        sdk.create_subject("root-org", "organization")
-        sdk.create_subject("member-1", "role")
-        proj = sdk._get_proj()
-        root = proj.g.query(
-            "MATCH (s:Subject {name:'root-org'}) RETURN s.id"
-        ).result_set[0][0]
-        m1 = proj.g.query(
-            "MATCH (s:Subject {name:'member-1'}) RETURN s.id"
-        ).result_set[0][0]
-        proj.g.query(
-            "MATCH (p:Subject {id:$m}), (s:Subject {id:$r}) "
-            "MERGE (p)-[:memberOf]->(s)",
-            params={"m": m1, "r": root})
-        org = sdk.get_org_structure(root)
-        assert any(m["id"] == m1 for m in org["members"])
-        # roles stays marked; members is never in the map.
-        assert "members" not in org["unavailable"]
-
-    def test_non_subject_holdsRole_edge_does_not_suppress_the_marker(self, sdk):
-        """The read traverses Subject→Subject only; an Object→Subject
-        ``holdsRole`` edge (reachable via ``create_edge``) cannot populate
-        ``roles``, so it must not silence the marker."""
-        sdk.create_subject("root-org", "organization")
-        sdk.create_object("a stray object", "repository")
-        proj = sdk._get_proj()
-        root = proj.g.query(
-            "MATCH (s:Subject {name:'root-org'}) RETURN s.id"
-        ).result_set[0][0]
-        oid = proj.g.query(
-            "MATCH (o:Object {name:'a stray object'}) RETURN o.id"
-        ).result_set[0][0]
-        proj.g.query(
-            "MATCH (o:Object {id:$o}), (s:Subject {id:$s}) "
-            "MERGE (o)-[:holdsRole]->(s)",
-            params={"o": oid, "s": root})
-        org = sdk.get_org_structure("root-org")
-        assert org["roles"] == []
-        assert org["unavailable"] == {"roles": HOLDS_ROLE_UNAVAILABLE}, (
-            "a non-Subject holdsRole edge cannot populate `roles`, so the "
-            "marker must stay")
-
-    def test_roles_marker_self_clears_on_a_holdsRole_edge(self, sdk):
-        sdk.create_subject("root-org", "organization")
-        sdk.create_subject("boss", "role")
-        proj = sdk._get_proj()
-        root = proj.g.query(
-            "MATCH (s:Subject {name:'root-org'}) RETURN s.id"
-        ).result_set[0][0]
-        boss = proj.g.query(
-            "MATCH (s:Subject {name:'boss'}) RETURN s.id"
-        ).result_set[0][0]
-        proj.g.query(
-            "MATCH (p:Subject {id:$p}), (r:Subject {id:$r}) "
-            "MERGE (p)-[:holdsRole]->(r)",
-            params={"p": root, "r": boss})
-        org = sdk.get_org_structure(root)
-        assert "unavailable" not in org, (
-            "the marker must self-clear the moment a holdsRole edge exists")
-        assert any(r["id"] == boss for r in org["roles"])
 
 
 class TestHoldsRoleProbe:

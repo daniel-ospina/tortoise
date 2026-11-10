@@ -290,7 +290,7 @@ def test_rekeyed_recapture_does_not_duplicate_operator(tmp_path, monkeypatch):
     proj = sdk._get_proj()
     counts = []
     for sid in ("s1", "s2", "s3"):
-        r = sdk.capture_session(CONV, session_id=sid)
+        r = sdk._capture_session(CONV, session_id=sid)
         assert r.get("ok") is True, r
         counts.append(_impl_operator_count(proj))
     assert counts == [1, 1, 1], (

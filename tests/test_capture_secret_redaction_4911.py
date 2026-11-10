@@ -266,7 +266,7 @@ def test_every_credential_shape_is_redacted_end_to_end(sdk, monkeypatch):
     conv = [{"role": "user", "content": f"leaked value: {value} (please rotate)"}
             for _case, _kind, value in CASES]
     sid = "sess-4911-shapes"
-    res = sdk.capture_session(conv, session_id=sid)
+    res = sdk._capture_session(conv, session_id=sid)
 
     stored = _stored(sdk, sid)
     assert len(stored) == len(CASES)
@@ -302,7 +302,7 @@ def test_a_multipart_credential_is_not_left_in_the_source_as_fragments(
     segments = value.split(".")
     assert all(len(s) >= 10 for s in segments)
     sid = "sess-4911-source-fragments"
-    sdk.capture_session(
+    sdk._capture_session(
         [{"role": "user", "content": f"my token is {value} rotate it"}],
         session_id=sid)
 
@@ -329,7 +329,7 @@ def test_redaction_is_visible_not_a_silent_truncation(sdk, monkeypatch):
     secret = "sk_live_" + _fill(24)
     prefix, suffix = "preceding context ", " trailing context"
     sid = "sess-4911-visible"
-    sdk.capture_session([{"role": "user", "content": prefix + secret + suffix}],
+    sdk._capture_session([{"role": "user", "content": prefix + secret + suffix}],
                         session_id=sid)
 
     content, text_hash = _stored(sdk, sid)[f"{sid}_t0"]
@@ -360,7 +360,7 @@ def test_the_extraction_leg_writes_the_marker_not_the_credential(
     try:
         secret = "sk-proj-" + _fill(64)
         sid = "sess-4911-extract"
-        res = sdk.capture_session(
+        res = sdk._capture_session(
             [{"role": "user",
               "content": f"My OpenAI API key is {secret} — keep it safe."}],
             session_id=sid)
@@ -402,7 +402,7 @@ def test_an_over_long_turn_matches_between_client_and_server(sdk, monkeypatch):
     long_turn = "x" * 4989 + " " + secret + " tail"
     assert len(long_turn) > 5000
     sid = "sess-4911-cut"
-    sdk.capture_session([{"role": "user", "content": long_turn}], session_id=sid)
+    sdk._capture_session([{"role": "user", "content": long_turn}], session_id=sid)
 
     stored, _hash = _stored(sdk, sid)[f"{sid}_t0"]
     client = expected_turns(sid, [{"role": "user", "content": long_turn}])
@@ -449,7 +449,7 @@ def test_a_credential_in_a_truncated_turn_is_redacted_and_the_cut_is_marked(
     content = f"My key is {secret} and here is why. " + "context " * 800
     assert len(content) > _CAPTURE_TURN_CAP
     sid = f"sess-4897-4911-compose-{direction}"
-    res = sdk.capture_session([{"role": "user", "content": content}],
+    res = sdk._capture_session([{"role": "user", "content": content}],
                               session_id=sid)
     stored, _hash = _stored(sdk, sid)[f"{sid}_t0"]
     assert secret not in stored, "the credential survived the combined cut+scrub"
@@ -481,7 +481,7 @@ def test_a_dangling_pem_header_past_the_cut_still_carries_the_marker(
                + _pem_end("RSA PRIVATE KEY"))
     assert len(content) > _CAPTURE_TURN_CAP
     sid = "sess-4897-pem-marker"
-    sdk.capture_session([{"role": "user", "content": content}], session_id=sid)
+    sdk._capture_session([{"role": "user", "content": content}], session_id=sid)
     stored, _hash = _stored(sdk, sid)[f"{sid}_t0"]
     assert "[REDACTED:private_key]" in stored, (
         "the dangling key header must still be redacted")
@@ -859,7 +859,7 @@ def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     # The size is bound to a NAME so the prose and the failure message below can
     # reference it instead of a hand-copied number that drifts (round 6).
     raw = "pad " * 200_000 + beyond
-    sdk.capture_session(
+    sdk._capture_session(
         [{"role": "user", "content": {"note": f"my key is {secret}"}},
          {"role": "user", "content": raw}],
         session_id=sid)
@@ -916,14 +916,14 @@ def test_redaction_count_is_recorded_per_session_and_surfaced(sdk, monkeypatch):
          + " and whsec_" + _fill(24)},
         {"role": "assistant", "content": "nothing sensitive in this one"},
     ]
-    res = sdk.capture_session(conv, session_id=sid)
+    res = sdk._capture_session(conv, session_id=sid)
 
     assert res["capture_redactions"] == 2
     assert any("redacted" in w for w in res["warnings"]), res["warnings"]
     assert _session_redactions(sdk, sid) == 2
 
     clean_sid = "sess-4911-clean"
-    clean = sdk.capture_session(
+    clean = sdk._capture_session(
         [{"role": "user", "content": "a session with no credentials in it"}],
         session_id=clean_sid)
     assert clean["capture_redactions"] == 0
@@ -947,7 +947,7 @@ def test_capture_redactions_survives_a_journal_only_replay(tmp_path, monkeypatch
                       event_log_path=str(events / "events.jsonl"))
     try:
         sid = "sess-4911-journal"
-        sdk.capture_session(
+        sdk._capture_session(
             [{"role": "user", "content": "key sk_live_" + _fill(24)}],
             session_id=sid)
         proj = sdk._get_proj()

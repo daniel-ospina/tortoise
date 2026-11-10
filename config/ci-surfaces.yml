@@ -3773,7 +3773,6 @@ surfaces:
   - test_analytics.py
   - test_analyze.py
   - test_analyze_scoped.py
-  - test_backfill_sources.py
   - test_backup.py
   - test_backup_config.py
   - test_backup_e2e.py
@@ -7902,10 +7901,6 @@ surfaces:
   # supersession and the gate goes RED.
   - test_ask_spotcheck_distilled_corpus.py
   - test_client_surface.py
-  # #6869: `commit_session(base_url=..., api_key=...)` configures the Tortoise
-  # API POST only — this pins that it does NOT select the extraction provider
-  # (warning matrix + docstring contract); sdk surface owns tortoise/sdk.py.
-  - test_commit_session_extraction_provider_6869.py
   - test_config.py
   - test_cross_lens.py
   - test_crypto.py
@@ -8971,7 +8966,6 @@ slow_files:
 # their classification, and the next eval run would have no committed cost.
 - test_3311_multilabel_status_vocab.py
 - test_about_edges.py
-- test_backfill_sources.py
 - test_billing.py
 - test_cli_context.py
 - test_control_plane.py
@@ -11130,7 +11124,7 @@ durations:
   test_projection_maxmemory_message.py: 0.2  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 0.1 — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.1s) is a LOWER bound; kept 0.2
   test_provenance_extractedfrom_3263.py: 14.4  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 4.2; The prohibition applies here too, not only one row up: this row is the one most likely to tempt a re-write with a measured number, and the RULE outranks the number. The local whole-file reading is stated precisely because it must NOT be substituted, which is the `test_9836_id_addressed_repoint.py` pattern: 54 top-level `def test_` (`grep -c '^def test_'` -> 54; 25 at the 2026-11-02 sample, 48 until #11038's #10063 read-side pins landed — `test_query_answers_for_a_folded_ref_from_another_source`, `test_query_answers_for_every_ref_of_a_sequence_born_point`, `test_a_prop_only_ref_still_answers_by_equality`, `test_scalar_property_filters_keep_EXACT_equality` — and 53 once the `extractedFromAll` ref-family pin did, `test_the_accumulated_refs_filter_answers_for_every_carried_ref`, which the review recorded as the family's one UNPINNED key) and 54 once the 11038 review's UNVERIFIED probe landed as `test_a_LIST_filter_value_answers_or_is_empty_but_never_raises` (a LIST ref filter must answer or return `[]`, never raise — measured: the edge arm degrades to false); several of them driving `rebuild_all(..., confirm_destructive=True)` + `check_consistency`, measured at the #10010 head on an isolated docker lane (`tools/test_lane.py uri`, falkordb-server v4.20.6, private container) -> **48 passed in 138.44s**, on a box under fleet load, so it is an UPPER bound and 138.4 is the direction that OVER-packs. Consequence, stated rather than hidden: 2.4 was measured against the 25-case file and is known to under-declare this file ~57x (138.4 / 2.4) until a push-to-main sweep includes it and `--refresh-durations` re-bases the row — the sweep is the fix, a hand edit is not. The count stays cited in the instrument's own spelling on purpose: `tests/test_ci_selection.py::test_no_durations_row_states_a_stale_case_count` reads exactly that spelling, so this row's one re-derivable claim reds instead of drifting — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.4
   test_rebuild_turn_points_3947.py: 6.3  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 6.8
-  test_source_version_extractedfrom_5038.py: 6.4  # #5256: 35 tests; docker lane (#1647 default) — not carve_out-registered. The count is re-derived from the file (`grep -c '^def test_'` -> 35; it read 33 until #10010's `test_consistency_gate_compares_the_folded_set` landed, then 34 until the review-P2 `test_a_capture_style_re_emit_keeps_the_folded_set_green` did). Cited in the instrument's own spelling so `tests/test_ci_selection.py::test_no_durations_row_states_a_stale_case_count` guards it: the row stated a bare count, which that pin cannot read, so nothing redded while it was a head behind — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 4.4
+  test_source_version_extractedfrom_5038.py: 6.4  # #5256: 35 tests; docker lane (#1647 default) — not carve_out-registered. The count is re-derived from the file (`grep -c '^def test_'` -> 34; it read 33 until #10010's `test_consistency_gate_compares_the_folded_set` landed, then 34 until the review-P2 `test_a_capture_style_re_emit_keeps_the_folded_set_green` did, then 35 — and it is 34 again because #4282 deleted `test_dedup_recommit_does_not_raise_or_diverge`, whose subject was the deleted `commit_session`). Cited in the instrument's own spelling so `tests/test_ci_selection.py::test_no_durations_row_states_a_stale_case_count` guards it: the row stated a bare count, which that pin cannot read, so nothing redded while it was a head behind — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 4.4
   test_source_change_notice_5516.py: 2.3  # #5516: 12 tests; docker lane (#1647 default) — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.8
   test_source_currency_5581.py: 1.5  # #5581: 12 tests; the project-search case dominates (embedder/engine warmup + a full scan per assertion) — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 1.3
   test_source_rematerialisation_5024.py: 1.4  # #5024: 30 tests (21 + 9 review-round-6 pins), docker FalkorDB — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 1.3
@@ -11252,7 +11246,6 @@ durations:
   test_consumed_sdk_binding_3904.py: 2.0  # carried forward (not a full-file CI measurement) — new in #3904. Without a row this file packs at the flat 2.0s default anyway, but it would count as UNCOVERED, dropping the repo-wide coverage floor (#3400) to 89.9% and redding the manifest-integrity gate. The 2.0 value is the default it would have received; it is a weight, not a measurement. — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.4s) is a LOWER bound; kept 2.0
   bench/test_smoke_embedded.py: 46.7  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 38.6
   test_about_edges.py: 6.1  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 6.6
-  test_backfill_sources.py: 1.8  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 1.0
   test_billing.py: 38.0  # #9017 CI-junit 2026-10-18 (run 39165691659); was 27.8. #8946 added TEN tests (152 -> 162 at home) whose CI cost is ~0.4s, so this CI-measured weight is kept rather than replaced: the only readings available here were 137.02s and 167.49s on a loaded host, a 4x distortion of the same suite the CI run timed at 35.3s — which is exactly why this row prefers a CI junit measurement. — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 35.3
   test_cli_context.py: 6.6  # #9017 CI-junit 2026-10-18 (run 39165691659) — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (6.5s) is a LOWER bound; kept 6.6
   test_config.py: 4.0  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 4.1
@@ -11808,7 +11801,6 @@ durations:
   test_ci_queue_health.py: 0.3  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 0.2
   test_ci_runner_x64_install.py: 4.9  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 1.2 — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (4.4s) is a LOWER bound; kept 4.9
   test_cli_extraction.py: 5.2  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.8
-  test_commit_session_extraction_provider_6869.py: 0.7  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.3 — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.5s) is a LOWER bound; kept 0.7
   test_decide_direction_7813.py: 1.7  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (1.0s) is a LOWER bound; kept 1.7
   test_docs_miner.py: 0.7  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 0.5
   test_document_source_ingested_at_5140.py: 3.3  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.9

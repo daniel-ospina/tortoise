@@ -456,14 +456,17 @@ def test_a_real_capture_cannot_be_filed_under_the_reserved_namespace(tmp_path):
     client = TortoiseSDK(str(tmp_path / "tortoise.db"),
                          event_log_path=str(tmp_path / "events" / "sdk.jsonl"))
     try:
-        for door, res in (
-            ("capture", client.capture_session(turns, session_id=reserved)),
-            ("commit", client.commit_session(turns, session_id=reserved)),
-        ):
-            assert res["ok"] is False, (door, res)
-            errors = [str(e) for e in (res.get("errors") or [])]
-            assert any("RESERVED demo/sample namespace" in e for e in errors), (
-                door, errors)
+        # ⛔ ONE arm, not two: the SDK's `commit_session` door is DELETED by
+        # #4282 (its `_commit_session_v1`/`_v2` bodies still exist but run the
+        # extractor, so they cannot be driven as a refusal), and the surviving
+        # commit boundary is `POST /v1/sessions/commit`'s Layer-1 model, pinned
+        # by `test_the_commit_door_refuses_a_reserved_id_too` and
+        # `test_the_commit_door_rule_is_BOUND_to_the_session_id_field` below.
+        # The capture door survives privately, which is what is driven here.
+        res = client._capture_session(turns, session_id=reserved)
+        assert res["ok"] is False, res
+        errors = [str(e) for e in (res.get("errors") or [])]
+        assert any("RESERVED demo/sample namespace" in e for e in errors), errors
         # ⛔ LABEL SCAN, not an equality seek (#9599's lesson): what matters is
         # that NO :Session was written under the reserved id.
         written = client._get_proj().g.query(
@@ -811,10 +814,10 @@ def test_the_census_check_verb_reds_on_a_stale_figure(tmp_path, monkeypatch):
     # arm 2: degrade ONE figure by hand — the verb must now report stale (1), not 0.
     scorecard = repo / census_mod._SCORECARD
     text = scorecard.read_text(encoding="utf-8")
-    assert "**434**" in text, (
+    assert "**436**" in text, (
         "the BELOW count this arm degrades must still be the figure the note "
         "states; re-point the degradation at the new one")
-    scorecard.write_text(text.replace("**434**", "**999**", 1), encoding="utf-8")
+    scorecard.write_text(text.replace("**436**", "**999**", 1), encoding="utf-8")
     assert census_mod._sweep(measured, refresh=False) == 1, (
         "`--check` green-lit a note whose stated figure is not the measured one — "
         "that is the false green the nightly census-drift job exists to prevent")

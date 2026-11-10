@@ -1,5 +1,15 @@
 # W2 Write-Path Planted-Gold Corpus (issue #2097, W2-a)
 
+> ⛔ **The benchmark runner's `run` leg was REMOVED by #4282** (it drove each
+> session through the SDK's `capture_session`, which #4282 deleted), and so was the
+> probe file that drove it — `test_write_path_benchmark.py`, including its #4860
+> rotating-key failover guard. What survives below is the corpus, the gold and the
+> schemas, still tested by `test_write_path_corpus.py`, `test_write_path_grading.py`,
+> `test_write_path_semantic_judge.py`, `test_write_path_prescreen.py`,
+> `test_write_path_operator_lane.py`, `test_write_path_operator_receipt.py`,
+> `test_write_path_runner.py` and `test_score_qualifiers.py`; what is gone is the
+> replay that produced a *run* receipt. See the module docstring in `runner.py`.
+
 Frozen planted-gold corpus for the **write-path benchmark** (epic #2080,
 W2): fictional agent sessions whose transcripts are planted with salient
 units carrying verbatim anchors, true-but-routine distractors, and

@@ -388,7 +388,7 @@ def test_flag_off_writes_no_embedding_text_and_embeds_the_raw_content(
     """OFF: no ``embeddingText`` node prop, vector == the raw stored text's."""
     monkeypatch.delenv(ENRICH_ENV, raising=False)
     _keyless(monkeypatch)
-    sdk.capture_session(CONV, session_id="sess-off")
+    sdk._capture_session(CONV, session_id="sess-off")
     rows = _turn_rows(sdk, "sess-off")
     assert len(rows) == len(CONV)
     for tid, content, enriched, stored in rows:
@@ -401,7 +401,7 @@ def test_flag_off_writes_no_embedding_text_and_embeds_the_raw_content(
 
 def test_flag_on_stores_and_embeds_the_enriched_text(sdk, embedder, enrichment_on):
     """ON: ``embeddingText`` is stored and the ONE vector is computed from it."""
-    sdk.capture_session(CONV, session_id="sess-on")
+    sdk._capture_session(CONV, session_id="sess-on")
     rows = _turn_rows(sdk, "sess-on")
     assert len(rows) == len(CONV)
     t0, t1 = rows
@@ -424,7 +424,7 @@ def test_journal_attests_the_enriched_text(sdk, embedder, enrichment_on, tmp_pat
     log_path = str(tmp_path / "events" / "sdk.jsonl")
     s = TortoiseSDK(str(tmp_path / "t.db"), event_log_path=log_path)
     try:
-        s.capture_session(CONV, session_id="sess-attest")
+        s._capture_session(CONV, session_id="sess-attest")
     finally:
         s.close()
     events = EventLog(log_path).read_all()
@@ -449,13 +449,13 @@ def test_dense_leg_returns_the_enriched_turn_only_when_on(
     """
     _keyless(monkeypatch)
     monkeypatch.delenv(ENRICH_ENV, raising=False)
-    sdk.capture_session(CONV, session_id="sess-rank-off")
+    sdk._capture_session(CONV, session_id="sess-rank-off")
 
     from tortoise import model_adapters
     monkeypatch.setenv(ENRICH_ENV, "1")
     monkeypatch.setattr(model_adapters, "build_extractor_model",
                         lambda *a, **kw: _Rewriter())
-    sdk.capture_session(CONV, session_id="sess-rank-on")
+    sdk._capture_session(CONV, session_id="sess-rank-on")
 
     proj = sdk._get_proj()
     qvec = _query_vec(embedder, "auth")
@@ -483,7 +483,7 @@ def test_recapture_off_after_on_clears_the_stale_enriched_text(
     """A stale ``embeddingText`` must not survive a re-capture with the flag
     off — the node reverts to the raw-only shape, so no enriched text outlives
     the vector that described it."""
-    sdk.capture_session(CONV, session_id="sess-recap")
+    sdk._capture_session(CONV, session_id="sess-recap")
     on_rows = _turn_rows(sdk, "sess-recap")
     assert all(r[2] is not None for r in on_rows), on_rows
 
@@ -491,7 +491,7 @@ def test_recapture_off_after_on_clears_the_stale_enriched_text(
     # `_capture_enriched_texts` now returns None (the env is unset), so the
     # writer must REMOVE the stale enriched text, not preserve it.
     monkeypatch.delenv(ENRICH_ENV, raising=False)
-    sdk.capture_session(CONV, session_id="sess-recap")
+    sdk._capture_session(CONV, session_id="sess-recap")
     off_rows = _turn_rows(sdk, "sess-recap")
     for tid, content, enriched, stored in off_rows:
         assert enriched is None, (tid, "a stale enriched text survived the OFF re-capture")
@@ -505,7 +505,7 @@ def test_content_stays_keyword_searchable_when_enriched(sdk, embedder, enrichmen
     """``content`` stays in the fulltext field set: a query that matched the
     raw text before still matches with enrichment on (the enriched text is a
     NEW field, never a replacement for ``content``)."""
-    sdk.capture_session(CONV, session_id="sess-raw")
+    sdk._capture_session(CONV, session_id="sess-raw")
     hits = sdk.tortoise_fts_query("release", limit=5)
     assert any(h["id"].startswith("sess-raw_t") for h in hits), (
         f"raw retrieval lost the keyword the enriched text replaced: "
@@ -520,7 +520,7 @@ def test_rebuild_preserves_the_enriched_text(sdk, embedder, enrichment_on, tmp_p
     log_path = str(tmp_path / "events" / "sdk.jsonl")
     s = TortoiseSDK(str(tmp_path / "t.db"), event_log_path=log_path)
     try:
-        s.capture_session(CONV, session_id="sess-rebuild")
+        s._capture_session(CONV, session_id="sess-rebuild")
         before = _turn_rows(s, "sess-rebuild")
         assert before and all(r[2] is not None for r in before), before
 
@@ -731,7 +731,7 @@ def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
     log_path = str(tmp_path / "events" / "sdk.jsonl")
     s = TortoiseSDK(str(tmp_path / "m.db"), event_log_path=log_path)
     try:
-        s.capture_session(CONV, session_id="sess-mismatch")
+        s._capture_session(CONV, session_id="sess-mismatch")
     finally:
         s.close()
 
@@ -978,7 +978,7 @@ def test_recapture_on_with_a_different_rewrite_clears_the_stale_vector(
     """#4194 on the preserve arm: with no new vector, the stored one may be kept
     ONLY while the text it describes is unchanged. The first test in this file
     that would red if the `prior_et` half of that guard were removed."""
-    sdk.capture_session(CONV, session_id="sess-on2")
+    sdk._capture_session(CONV, session_id="sess-on2")
     on_rows = _turn_rows(sdk, "sess-on2")
     assert all(r[2] is not None for r in on_rows), on_rows
     assert all(r[3] is not None for r in on_rows), on_rows
@@ -996,7 +996,7 @@ def test_recapture_on_with_a_different_rewrite_clears_the_stale_vector(
     _no_embedder(monkeypatch)
     monkeypatch.setattr(model_adapters, "build_extractor_model",
                         lambda *a, **kw: _BillingRewriter())
-    sdk.capture_session(CONV, session_id="sess-on2")
+    sdk._capture_session(CONV, session_id="sess-on2")
 
     rows = _turn_rows(sdk, "sess-on2")
     t0 = rows[0]
@@ -1010,7 +1010,7 @@ def test_content_edit_clears_the_enriched_text(sdk, embedder, enrichment_on):
     """`update_point(content=…)` re-derives the vector from `content`, so the
     node must not keep an `embeddingText` no vector was computed from
     (review round 2, P1 — the other write door into the same #4194 rule)."""
-    sdk.capture_session(CONV, session_id="sess-edit")
+    sdk._capture_session(CONV, session_id="sess-edit")
     t0 = _turn_rows(sdk, "sess-edit")[0]
     assert t0[2] == "[user] the auth flow is blocked", t0
 
@@ -1035,7 +1035,7 @@ def test_a_caller_supplied_vector_clears_the_enriched_text(
     identity hash cannot catch it (payload-only, and withheld when the vector is
     preserved), so this leg is the only thing that does.
     """
-    sdk.capture_session(CONV, session_id="sess-vec")
+    sdk._capture_session(CONV, session_id="sess-vec")
     t0 = _turn_rows(sdk, "sess-vec")[0]
     assert t0[2] == "[user] the auth flow is blocked", t0
     assert t0[3] is not None, t0
@@ -1050,7 +1050,7 @@ def test_a_caller_supplied_vector_clears_the_enriched_text(
 
     # …and an unrelated update must NOT disturb a writer-minted value (the gate
     # is the KEY, so this cannot be satisfied by clearing unconditionally).
-    sdk.capture_session(CONV, session_id="sess-vec2")
+    sdk._capture_session(CONV, session_id="sess-vec2")
     t0b = _turn_rows(sdk, "sess-vec2")[0]
     assert t0b[2] == "[user] the auth flow is blocked", t0b
     sdk.update_point(t0b[0], status="live")
@@ -1074,7 +1074,7 @@ def test_a_caller_supplied_vector_through_update_entity_clears_the_enriched_text
     afterwards (the identity hash is payload-only; `_record_embedding_identity`
     returns early when the journal carries none).
     """
-    sdk.capture_session(CONV, session_id="sess-ue")
+    sdk._capture_session(CONV, session_id="sess-ue")
     t0 = _turn_rows(sdk, "sess-ue")[0]
     assert t0[2] == "[user] the auth flow is blocked", t0
     assert t0[3] is not None, t0
@@ -1090,7 +1090,7 @@ def test_a_caller_supplied_vector_through_update_entity_clears_the_enriched_text
 
     # …and an unrelated `update_entity` must NOT disturb a writer-minted value:
     # the gate is the KEY, so this cannot be satisfied by clearing always.
-    sdk.capture_session(CONV, session_id="sess-ue2")
+    sdk._capture_session(CONV, session_id="sess-ue2")
     t0b = _turn_rows(sdk, "sess-ue2")[0]
     assert t0b[2] == "[user] the auth flow is blocked", t0b
     sdk.update_entity(t0b[0], status="live")
@@ -1130,7 +1130,7 @@ def test_a_caller_vector_does_not_resurrect_the_enriched_text_on_rebuild(
     log_path = str(tmp_path / "events" / "sdk.jsonl")
     s = TortoiseSDK(str(tmp_path / "t.db"), event_log_path=log_path)
     try:
-        s.capture_session(CONV, session_id="sess-vec-rebuild")
+        s._capture_session(CONV, session_id="sess-vec-rebuild")
         before = _turn_rows(s, "sess-vec-rebuild")
         assert before[0][2] == "[user] the auth flow is blocked", before
 
@@ -1192,7 +1192,7 @@ def test_check_consistency_does_not_red_a_faithful_enriched_graph(
     s = TortoiseSDK(str(tmp_path / "t.db"), event_log_path=log_path)
     try:
         # ── the CONTENT-EDIT door: the graph fold clears ABSOLUTELY ────────
-        s.capture_session(CONV, session_id="sess-cc-edit")
+        s._capture_session(CONV, session_id="sess-cc-edit")
         t0 = _turn_rows(s, "sess-cc-edit")[0]
         assert t0[2] is not None, t0
         s.update_point(t0[0], content="the billing migration is blocked")
@@ -1205,7 +1205,7 @@ def test_check_consistency_does_not_red_a_faithful_enriched_graph(
             f"{result.get('divergent_points')}")
 
         # ── the CALLER-VECTOR door: live clears PRESENCE-conditionally ─────
-        s.capture_session(CONV, session_id="sess-cc-vec")
+        s._capture_session(CONV, session_id="sess-cc-vec")
         t1 = _turn_rows(s, "sess-cc-vec")[0]
         assert t1[2] is not None, t1
         s.update_point(t1[0], embedding=[1.0, 0.0, 0.0, 0.0])
@@ -1223,7 +1223,7 @@ def test_check_consistency_does_not_red_a_faithful_enriched_graph(
             f"residual it leans on is gone: {result.get('divergent_points')}")
 
         # ── an unrelated revision must NOT clear it (presence-conditional) ──
-        s.capture_session(CONV, session_id="sess-cc-ok")
+        s._capture_session(CONV, session_id="sess-cc-ok")
         t2 = _turn_rows(s, "sess-cc-ok")[0]
         s.update_point(t2[0], status="live")
         assert _turn_rows(s, "sess-cc-ok")[0][2] == t2[2], (
@@ -1272,7 +1272,7 @@ def test_an_unwritable_content_edit_keeps_the_text_in_BOTH_folds(
     log_path = str(tmp_path / "events" / "sdk.jsonl")
     s = TortoiseSDK(str(tmp_path / "t.db"), event_log_path=log_path)
     try:
-        s.capture_session(CONV, session_id="sess-unwritable")
+        s._capture_session(CONV, session_id="sess-unwritable")
         rows = _turn_rows(s, "sess-unwritable")
         pid = rows[0][0]
         enriched = rows[0][2]

@@ -264,7 +264,7 @@ def test_two_session_contradiction_supersedes_object(sdk):
     against the faked S3) — Object approach-A must land
     status='superseded' supersededBy='approach-B', approach-B stays live,
     and the s2 statement point is aboutObject-linked to approach-B."""
-    res1 = sdk.capture_session(CONV_S1, session_id="s1")
+    res1 = sdk._capture_session(CONV_S1, session_id="s1")
     assert res1["ok"] is True, res1
     assert res1["errors"] == [], res1
 
@@ -276,7 +276,7 @@ def test_two_session_contradiction_supersedes_object(sdk):
     # reinstated fabricated `'live'` as well as the correct absence.
     assert a1 is not None and a1[1] is None, a1
 
-    res2 = sdk.capture_session(CONV_S2, session_id="s2")
+    res2 = sdk._capture_session(CONV_S2, session_id="s2")
     assert res2["ok"] is True, res2
     assert res2["errors"] == [], res2
 
@@ -317,9 +317,9 @@ def test_chain_pin_and_no_double_fold(sdk):
     capture (fresh session, same conversation) forms no new record (the
     supersede ref no longer resolves — S3 returns live items only) and the
     object state is byte-unchanged: no double-fold, no successor clobber."""
-    assert sdk.capture_session(CONV_S1, session_id="c1")["ok"] is True
-    assert sdk.capture_session(CONV_S2, session_id="c2")["ok"] is True
-    assert sdk.capture_session(CONV_S3, session_id="c3")["ok"] is True
+    assert sdk._capture_session(CONV_S1, session_id="c1")["ok"] is True
+    assert sdk._capture_session(CONV_S2, session_id="c2")["ok"] is True
+    assert sdk._capture_session(CONV_S3, session_id="c3")["ok"] is True
 
     proj = sdk._get_proj()
 
@@ -345,7 +345,7 @@ def test_chain_pin_and_no_double_fold(sdk):
     assert rows and rows[0][0] == 1, "surviving replacement claim must stay linked to approach-B"
 
     # ── no double-fold: re-run the s2-style capture on a fresh session ──
-    res = sdk.capture_session(CONV_S2, session_id="c2-rerun")
+    res = sdk._capture_session(CONV_S2, session_id="c2-rerun")
     assert res["ok"] is True, res
 
     a_after = _object(proj, "approach-A")

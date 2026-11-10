@@ -30,10 +30,12 @@ def mint_session_id() -> str:
     """Mint a session id — the ONE spelling every capture door uses.
 
     ``session_<12 hex>`` was hand-copied at FOUR create sites — the two SDK
-    doors (``commit_session``, ``capture_session``), ``extractor_v2.
-    extract_session_v2`` and the hosted ``/v1/sessions`` handler. Four
-    spellings of one value is the #5416 class: a caller reading one of them
-    cannot tell whether the others agree. All four now call this (#9599).
+    doors (``commit_session``, deleted by #4282, and ``capture_session``, its public
+    name retired — the body survives as ``_capture_session``),
+    ``extractor_v2.extract_session_v2`` and the hosted ``/v1/sessions`` handler.
+    Four spellings of one value is the #5416 class: a caller reading one of them
+    cannot tell whether the others agree. All four call this (#9599); the two
+    SDK doors are gone, the remaining two still do.
     """
     return f"session_{uuid.uuid4().hex[:12]}"
 
@@ -141,12 +143,14 @@ def session_id_refusal(session_id: object, *,
     a duplicate of the other (#9599 review P2):
 
     * THIS function is the **DOOR half** — a caller-supplied ``session_id`` at
-      ``capture_session``, ``commit_session``, the hosted ``SessionRequest``
+      ``capture_session`` (its public name retired by #4282; the body survives
+      as the private ``_capture_session``) and ``commit_session`` (deleted by
+      #4282), the hosted ``SessionRequest``
       boundary and ``commit_schema.CommitPayload`` (``#8290`` review P1 — the
       Layer-1 model of the public ``POST /v1/sessions/commit``, whose
       ``session_id`` is written verbatim as a ``:Session`` and as an
       ``AgentSession`` ``:Event``) — where the answer has to name a reason.
-      The four doors share it, so they cannot drift apart.
+      The doors that remain share it, so they cannot drift apart.
     * ``projection._writable_container_id`` is the **REPLAY half** —
       ``_writable_id`` PLUS this same blank clause — and it gates every fold
       that merges a session key (``_link_session``'s ``contains_session``,
