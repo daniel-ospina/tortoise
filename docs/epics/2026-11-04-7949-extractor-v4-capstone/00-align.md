@@ -220,7 +220,7 @@ shipped table says RED.
 Two recorded decisions and one closed-but-unsettled metric sit under the owner's assertions. This epic
 **routes** them; it does not decide them.
 
-1. **REOPEN — D3 `statement`-only** (`docs/ONTOLOGY.md:975`, option B 2026-08-12, `#1022` MERGED) vs A4
+1. **REOPEN — D3 `statement`-only** (`docs/ONTOLOGY.md:969-978`, option B 2026-08-12, `#1022` MERGED) vs A4
    ("0.6 % typed is the ceiling the capstone must beat"). Fork: (a) A4 overrides D3 → `OVERRIDES:` on
    `#1022` + `ONTOLOGY.md` §5 and C7 gains a target; (b) A4 was aimed at `#4432`'s docs-vs-code drift → C7
    attributes the 109 and follows whichever of `#4432`'s options the owner picks.
@@ -233,7 +233,7 @@ Two recorded decisions and one closed-but-unsettled metric sit under the owner's
    > written — a later stage resolving a fork this stage opened is the pipeline working, not a contradiction;
    > read the ruling, not the fork.
 2. **ASK — §13.8 Q1**, to-graph connection by model or mechanically: recorded **OPEN**
-   (`EXTRACTOR-V4-ARCHITECTURE.md:2085` — under §13.8's heading at `:2057` — and `:1818`) while **D6 stands** (`:1400`, `:1095`). **C5 measures conformance to D6** — the two connection sets are `#10999` (Job 1) and `#10998` (Job 2); C5 builds neither.
+   (`EXTRACTOR-V4-ARCHITECTURE.md:2085` — under §13.8's heading at `:2057` — and `:2061`) while **D6 stands** (`:1400`, `:1095`). **C5 measures conformance to D6** — the two connection sets are `#10999` (Job 1) and `#10998` (Job 2); C5 builds neither.
 3. **`#9736`** — E3's denominator. **CLOSED 2026-11-04T15:37Z** *before* this head; its amendment landed
    (`8c1151426`) and E3 is still RED at 157/397 because 193 of 354 Points cannot carry an anchor. Its
    closure leaves two owner-gated lines owed. `blocker-states.json` still says OPEN — a stale pointer of

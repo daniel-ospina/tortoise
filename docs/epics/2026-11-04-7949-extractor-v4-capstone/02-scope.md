@@ -55,7 +55,7 @@ note **or a justified skip citing the brief**. Both are **justified skips**, cit
    (within-batch vs to-graph). That last clause is not decoration: it is the evidence the owner's `§13.8 Q1`
    answer is waiting on (`01-research-brief.md` Rec. 3). ⚠️ **The set is DERIVED, not persisted** (F4): the
    write path already carries `batch_id` in `RelationUpsert.attrs` (`tortoise/record_projection.py`: the dataclass at
-   `:945`, its `attrs` tuple at `:951-952` — keyed by symbol, since this row moved twice), and
+   `:953`, its `attrs` tuple at `:959-960` — keyed by symbol, since this row moved twice), and
    "this batch" vs "a previous batch" is exactly that distinction — so the tier is **reported from `batch_id`**
    and no new edge property is added. A persisted marker would have to update the five MAP-form writers and
    `sdk.py:18029`'s per-door `_honours` set in the same change, and a free-form `props` key is the branch this
@@ -119,7 +119,7 @@ note **or a justified skip citing the brief**. Both are **justified skips**, cit
    does **not** adopt the mechanical standard over **D6**.
 9. **The 25,000-point quota / cache eviction** — `#10976`'s root (the graph is at its ceiling; measured).
    ⛔ **But it is a BLOCKING PRECONDITION for every A-row, not merely a neighbour.** The capture door refuses
-   with **HTTP 402** when `count + est > max_points` (`hosted_api.py:18205` — that exact expression — and the 402 at `:18216` via `quota_refusal_payload`; **the symbol is authoritative and the line is a convenience**, per `00-plan.md:27-30`), counting non-episodic Points +
+   with **HTTP 402** when `count + est > max_points` (`hosted_api.py:18205` — that exact expression — and the 402 at `:18216` via `quota_refusal_payload`; **the symbol is authoritative and the line is a convenience**, per `00-plan.md:30-31`), counting non-episodic Points +
    Object + Subject — and the team was **measured at that cap** (`-32006 … limit reached (25000)`). So while the
    cap holds, **the acceptance capture is refused before it writes anything** and every A-row is unrunnable.
    The A-runs therefore name: **the org/graph they write to**, its **headroom**, the **point budget the A-corpus

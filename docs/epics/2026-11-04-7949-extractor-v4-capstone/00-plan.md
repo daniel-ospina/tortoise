@@ -151,9 +151,9 @@ vocabulary are comments). A1 cannot be satisfied by "enabling something"; someth
 above (they declare `mechanism: IMPL`, so the `operator` path binds; the predicate is in the structural
 set). The **`mechanism`** leg *is* read at the write door by `declared_mechanisms`
 (`pack_registry.py:598-820`, matching at `:804`), consumed by `create_operator`. Unread: (i) the
-**`semantics`** leg — surfaced at `:2965`, and nothing derives an op_type or direction from it; and (ii)
+**`semantics`** leg — surfaced at `:3736`, and nothing derives an op_type or direction from it; and (ii)
 **`hierarchies`** — validated only (`pack_registry.py:2341-2355`). ⚠️ The operator writers (`commit_ops.py:426-429`,
-`mcp_server.py:4322`) are the **Point-layer** mechanism; they are not evidence about Object→Object.
+`sdk.create_operator`) are the **Point-layer** mechanism; they are not evidence about Object→Object.
 
 **R5 · The declared-mechanism registry is a contract, not a list.** `config/v4-mechanisms.yml` — 13 rows,
 guarded by `tests/test_v4_declared_mechanisms.py`. `implemented` requires non-empty `code:` + `tests:` +
@@ -184,10 +184,10 @@ value (`tortoise/projection/edges.py`), and no extraction path sets one
 (`edges.py:1213`). Recorded with that annotation, never as a target.
 
 **R8 · Two owner assertions sit on a recorded decision or an open question — ROUTED, not decided
-(§6).** A4 vs **D3** (`docs/ONTOLOGY.md:975` *"extraction emits `statement` only"*, option B
+(§6).** A4 vs **D3** (`docs/ONTOLOGY.md:969-978` *"extraction emits `statement` only"*, option B
 2026-08-12, `#1022` MERGED). A3 vs **D6** — *"Two distinct connection sets — within-batch and to-graph,
 both **proposed by the model**"* (`EXTRACTOR-V4-ARCHITECTURE.md:1400` — the **D6** row; `:1095` — "D6 as ruled"),
-with §13.8 (`:2085`, under the heading at `:2057`) recording the to-graph LLM-vs-mechanical question as **OPEN** and `:2024` recording
+with §13.8 (`:2085`, under the heading at `:2057`) recording the to-graph LLM-vs-mechanical question as **OPEN** and `:2061` recording
 the mechanical alternative as *"a direct challenge to D6 — D6 is the decision that stands; the challenge
 is evidence for the owner, **not** a change we may make."*
 
@@ -417,7 +417,7 @@ fan-out respected; C8 holds.
 **The contradiction to adjudicate:** `#4889` ("the Subject layer is unpopulated in production") is
 **CLOSED**, and the owner measured **26 Subjects against 19,300 points**. One of those is false.
 **Produces:** the binder's attach rate (`bind_point_subjects`, `tortoise/subject_binding.py:341`, called
-from `sdk.py`'s point-creation path at `:16848` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
+from `sdk.py`'s point-creation path at `:16892` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
 the four subject-edge family counts, and the **customer-visible** consequence
 (search `subject`, `get_org_structure`). The three candidate explanations — the binder never runs (note
 `subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:4782` and
@@ -510,7 +510,7 @@ behaviour.
 > `04-plan.md` §8.4 **AM7**, `05-verify.md` item 3. The fork below is kept verbatim as the history of the
 > question — **do not read it as open**, and do not set the percentage target fork (a) proposed.
 
-**REOPEN — D3 `statement`-only (`docs/ONTOLOGY.md:975`, option B 2026-08-12, `#1022` MERGED).**
+**REOPEN — D3 `statement`-only (`docs/ONTOLOGY.md:969-978`, option B 2026-08-12, `#1022` MERGED).**
 A4 ("0.6 % typed is the ceiling the capstone must beat") points **opposite** to D3. A later owner ruling
 may reverse an earlier one (§16.3/O4) — but the reversal must be recorded where the next lane reads it.
 **The fork:**
@@ -526,7 +526,7 @@ may reverse an earlier one (§16.3/O4) — but the reversal must be recorded whe
 `statement` and does not"* — the baseline refutes it (80 % already are).
 
 **ASK — §13.8 Q1, the to-graph connection mechanism.** Recorded **OPEN**
-(`EXTRACTOR-V4-ARCHITECTURE.md:2085`, `:2024`) while **D6 stands** (`:1400`, `:977`). **C5 measures conformance to D6** — the two connection sets are `#10999`/`#10998`; C5 builds neither
+(`EXTRACTOR-V4-ARCHITECTURE.md:2085`, `:2061`) while **D6 stands** (`:1400`, `:977`). **C5 measures conformance to D6** — the two connection sets are `#10999`/`#10998`; C5 builds neither
 and reports both jobs; the answer is routed as evidence, never adopted quietly. (Distinct from `#7948`,
 which answered Q2 — `aboutObject` is a **STORED** edge — and is CLOSED.)
 

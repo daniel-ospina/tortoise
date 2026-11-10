@@ -218,7 +218,7 @@ fixture arm is the regression harness; the fleet capture is the claim. Scope mus
 whichever it picks and C2 proves the door.
 
 **2 · D3 / A4 — the contradiction the epic's own GREEN bar creates.** (`00-align` §4 records the REOPEN.) D3
-(`docs/ONTOLOGY.md:975`, *"extraction emits `statement` only"*, option B 2026-08-12, `#1022` MERGED) versus
+(`docs/ONTOLOGY.md:969-978`, *"extraction emits `statement` only"*, option B 2026-08-12, `#1022` MERGED) versus
 A4 (*"0.6 % typed claims is the ceiling the capstone must beat"*). What the research says that bears on it:
 
 **[⚠️ single-source]** The category's shape is *declared **classes** + properties, then hierarchy, then query* [4],
@@ -231,7 +231,7 @@ not closed by anything found here.** A4's target remains unset.
 > ⚠️ **SUPERSEDED ON THE LAST CLAUSE ONLY.** "A4's target remains unset" was true at the research stage and is
 > no longer: the owner ruling of 2026-11-09 set it — per-layer label coverage, bar = appears + labelled, the
 > percentage reported and not chased. **Everything else above stands**, including that this brief neither
-> confirmed nor refuted D3: the ruling moved A4 *off* D3 rather than settling D3. See `02-scope.md:75-81` and
+> confirmed nor refuted D3: the ruling moved A4 *off* D3 rather than settling D3. See `02-scope.md:76-81` and
 > `04-plan.md` §4.1/§4.4.
 
 ---

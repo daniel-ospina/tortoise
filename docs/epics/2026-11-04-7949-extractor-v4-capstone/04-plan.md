@@ -513,8 +513,8 @@ The architecture above declares Tier E the home of all measurement. **No existin
 
 ⚠️ **And the new job must join the register, or it is a fourth unrecorded runner.** The repo's non-gating-runner
 contract is a **lane membership** statement plus a **runner register** whose own words are *"this comment is the
-record"* (`config/ci-surfaces.yml`, the `# ── THE NON-GATING LANE (`on_demand:`) ──` block at `:11868-11900`, key
-`on_demand:` at `:11887` — cite the block by that heading, not by a line range: at the bundle's authoring head
+record"* (`config/ci-surfaces.yml`, the `# ── THE NON-GATING LANE (`on_demand:`) ──` block and its
+`on_demand:` key — cite the block by that heading, not by a line range: at the bundle's authoring head
 `641e5f1b37` the block sat at `:10339` and a forward merge moved it. The lane→runner table is
 `docs/ci/affected-test-selection.md:134-138`). The A-lane runs a **script** (`capstone_run.py`), not a test file, so
 it **cannot be an `on_demand:` member** and `leg_coverage_issues()` **cannot see it**.
