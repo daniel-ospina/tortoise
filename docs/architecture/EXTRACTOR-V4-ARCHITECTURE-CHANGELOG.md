@@ -1766,7 +1766,10 @@ declared instead of inferring presence from an adopted shape.
 
 **Disposition taken, and it is the one #5064 reserved.** The issue recorded three options and left the choice to
 whoever owned closure: (a) a row + a marker in a `docs/architecture/` doc, (b) widen the scan to the plan that
-declares it, (c) record DM1 as an explicit exclusion. This is **(a) + (b)**: the row exists AND the scanned surface
+declares it, (c) record DM1 as an explicit exclusion. This is **(b) plus the registry row, with the marker at the
+DECLARATION SITE** — not (a) as the issue worded it: the marker sits in the plan that declares DM1, not in a
+`docs/architecture/` doc, which would have been a marker with no declaration behind it (the detached-marker limit
+this gate already states). So the row exists AND the scanned surface
 includes the plan, so the same class of declaration cannot hide in `docs/epics/` again — rather than (c), which
 would have documented the blindness instead of closing it. The alternatives were not "adopt with a caveat": (c)
 leaves the mechanism invisible, and an architecture-doc marker with no declaration behind it is the detached-marker
@@ -1829,9 +1832,11 @@ a docs-only diff skips doc-subject guards, which is the opposite of what the sur
 **So the DOCUMENT was reworded, not the tripwire** — and the noun took a second pass, because the first replacement
 collided again and the second time with a REGISTRY ROW. *"The carve-out is about CONTENT"* reads as
 `state_value_carve_out` (E2, `#1534`), which is a declared mechanism this same document carries at §7 (its marker
-sits on §7's §7.3 passage, `EXTRACTOR-V4-ARCHITECTURE.md:1345`) and this
-same gate scans: nine of the document's ten `carve-out` occurrences name that mechanism, and only §3's sentence
-meant this one. The sentence now says *"**This clause** is about CONTENT"*, a phrase that names no mechanism at all.
+sits on §7's second subsection, *"State values and numeric facts — the carve-out is NARROWER than it looks"*,
+`EXTRACTOR-V4-ARCHITECTURE.md:1345`) and this
+same gate scans: at the FIRST-replacement head that sentence read `The carve-out is about CONTENT`, which made ten
+`carve-out` occurrences with nine naming that mechanism; this head has nine, none of them §3's. The sentence now says
+*"**This clause** is about CONTENT"*, a phrase that names no mechanism at all.
 Loosening
 `MARKERS_ABSENT_BY_DESIGN` to a frame-aware
 read would have narrowed a deliberately COARSE instrument, which is the shape this file's cycle-5 note refuses
@@ -1840,7 +1845,7 @@ read would have narrowed a deliberately COARSE instrument, which is the shape th
 the denial vocabulary: a document that wants a synonym for an exemption must not borrow the denial's own noun.
 Nothing about the design changed — the sentence states the same rule with a different noun.
 
-**⚠️ A fail-open this lane measured and did NOT fix here (filed separately):** `#11665`'s head merged with Python CI
+**⚠️ A fail-open this lane measured and did NOT fix here (filed as `#11737`):** `#11665`'s head merged with Python CI
 showing seven of ten fast shards `cancelled` and only `test (a)`/`(b)`/`(c)` executed. A merge rail that reads a
 cancelled shard as "nothing to see" is a false PASS on the merge path, and it is how a red `main` is created — the
 red this PR inherits is that mechanism's product.
