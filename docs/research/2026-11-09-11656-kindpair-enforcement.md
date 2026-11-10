@@ -467,7 +467,7 @@ at write time.
 | the case | is the intent legible? | is the third part writable, **by this caller, about this write**? | outcome the AX ruling requires |
 |---|---|---|---|
 | **kinds known, declared pair matched** | yes | — nothing failed | write |
-| **kinds known, declared pair mismatched** | **yes** — we know exactly what it meant and why it is wrong | **yes**: *"`funds` is declared `investor → investment`; you wrote from `core:tool` to `core:person`; use one of the predicates allowed for that pair, or the node of the declared kind"* | **refuse, three parts** — rule 2 |
+| **kinds known, declared pair mismatched** | **yes** — we know exactly what it meant and why it is wrong | **yes**: *"`funds` is declared `venture:fundingAgreement → venture:program`; you wrote from `core:tool` to `core:person`; use one of the predicates allowed for that pair, or the node of the declared kind"* | **refuse, three parts** — rule 2 |
 | **endpoint kind `unclassified`** (designed state, §8.2) | **no — we cannot establish what the node IS** | **no**: the repair is *"go classify a node you did not create, in a different step"* — not performable here. This is the #10158 shape verbatim (*"the prescribed repair is not performable for this record"*) | **must not refuse** — accept, record, report as a distinct state |
 | **endpoint kind missing (legacy)** | no | no | as above, and the census names it |
 
