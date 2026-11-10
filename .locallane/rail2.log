@@ -1,0 +1,7 @@
+admin-merge: repo daniel-ospina/tortoise (resolved from checkout origin (/home/cmux/tortoise/.worktrees/prd-11722)) — checkout daniel-ospina/tortoise
+admin-merge: PR #11722 head c19a261bba3a8a470664f9f8eeb19ef361eeb781
+admin-merge: · the head's unfinished set is NOT only the rail's own body-edit run generation — 1 run(s) belong to the lane's own CI; §1b's lane-terminal precondition decides (unchanged).
+admin-merge: … FIRST-CHECKS wait: 1 run(s) still queued/in progress, no change observed yet (1s of the 18064s ceiling; stall bound 8760s) — waiting. first observation: run 42778585815: 4 job(s): 2 completed, 2 not — changes queued step 0/0; surface-guard queued step 0/0
+admin-merge: … FIRST-CHECKS wait: 1 run(s) still queued/in progress, no change observed yet (63s of the 18064s ceiling; stall bound 8760s) — waiting. first observation: run 42778585815: 4 job(s): 2 completed, 2 not — changes queued step 0/0; surface-guard queued step 0/0
+admin-merge: … FIRST-CHECKS wait: 1 run(s) still queued/in progress, no change observed yet (185s of the 18064s ceiling; stall bound 8760s) — waiting. first observation: run 42778585815: 4 job(s): 2 completed, 2 not — changes queued step 0/0; surface-guard queued step 0/0
+admin-merge: … FIRST-CHECKS wait: 1 run(s) still queued/in progress, no change observed yet (427s of the 18064s ceiling; stall bound 8760s) — waiting. first observation: run 42778585815: 4 job(s): 2 completed, 2 not — changes queued step 0/0; surface-guard queued step 0/0
