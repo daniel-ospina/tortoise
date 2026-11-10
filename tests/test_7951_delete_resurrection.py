@@ -39,6 +39,7 @@ import contextlib
 import json
 import os
 import threading
+import time
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("TORTOISE_ENCRYPTION_KEY",
@@ -49,6 +50,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tortoise import hosted_api as _ha
+from tortoise import mcp_auth as _mcp_auth
 from tortoise.hosted_api import (
     app,
     get_current_org_gated,
@@ -176,9 +178,149 @@ def _reset_replay_anchors():
     _clear()
 
 
+#: This file's per-item pytest budget, named once so the marker and the pin cannot
+#: disagree. This file cold-loads the embedder on its first capture (measured
+#: 124.53 s; up to 204.64 s observed under CI load), so the shard's default
+#: `--timeout=300` is not a safe per-item budget here — the same reason
+#: `test_embedder_probe.py` and friends carry this marker (#1349). It ALSO keeps
+#: `_SUITE_WAIT_BOUND_S` unambiguously below the item budget it must beat, which
+#: the `BOUNDS` block of `TestAWaiterRefusalCannotPoisonTheNextCapture` asserts.
+_ITEM_BUDGET_S = 600
+pytestmark = pytest.mark.timeout(_ITEM_BUDGET_S)
+
+
+#: The transport wait bound (#3834) is a USER-PATIENCE promise about the real
+#: service. This suite drives the REAL endpoint to assert JOURNAL semantics
+#: (delete → replay must not resurrect), so it must not be graded by that
+#: bound — the bound has its own suite (`tests/test_transport_wait_bound.py`),
+#: which pins the shipped 10.0 s value.
+#:
+#: MEASURED, not assumed. A cold process pays a one-time cost that the bound
+#: charges to whichever request arrives first (#11060):
+#:   * first capture of a fresh process, under pytest: **124.53 s** — 12x the
+#:     shipped 10.0 s bound. The bulk is the one-time embedder load, which this
+#:     box's hermetic egress guard amplifies: `#11060` measured 125.70 s for the
+#:     same load on `test_onboarding_seed_endpoint`.
+#:   * every later capture in the same process: **0.62 s**.
+#: So the margin is not thin, it is negative by an order of magnitude, and the
+#: CI shard's load only widens it: on `test (f)` (run 42763774765) three of this
+#: file's captures were refused with 504 (`_TRANSPORT_WAIT_BOUND_MESSAGE`) on a
+#: head whose diff touches none of this.
+#:
+#: 280 s is sized off that 124.53 s measurement AND off the two clocks around it.
+#: There are three budgets in play, and the correct value sits BETWEEN the other
+#: two — each read from its owner, never re-typed (see the pin in
+#: `TestAWaiterRefusalCannotPoisonTheNextCapture`, its `BOUNDS` block):
+#:
+#:   `conftest.py` embedder load budget   270 s  (`EmbeddingModel._LOAD_TIMEOUT_S`)
+#:   this file's transport bound          280 s  <- must sit in here
+#:   the per-item pytest budget           600 s (this module's `pytest.timeout`)
+#:
+#: ⛔ ABOVE THE LOAD BUDGET, because the point of `conftest.py`'s 270 s is that a
+#: cold load is reported AS A LOAD rather than abandoned by the harness; a capture
+#: bound below it would turn a slow load into a 504, the exact misattribution that
+#: derivation exists to prevent. (This is also why 240 s, the first candidate, was
+#: wrong.)
+#:
+#: ⛔ BELOW THE PER-ITEM BUDGET, so a genuinely hung capture still fails with the
+#: legible `_TRANSPORT_WAIT_BOUND_MESSAGE` 504 instead of `Failed: Timeout`. The
+#: budget is `_ITEM_BUDGET_S` (600 s) because this module carries a
+#: `pytest.mark.timeout` — the marker the repo's other real-embedder suites use
+#: (#1349) — and this file cold-loads the embedder. NOTE the 300 s the first
+#: iteration of this fix used was unreachable *at `b1b5db6903`, which carried no
+#: marker*: the item budget there WAS the repo-wide `--timeout=300`, and pytest's
+#: clock starts at the ITEM — before the capture this bound covers — so a bound AT
+#: that budget could never fire first and was in practice identical to removing
+#: it.
+#:
+#: WHY 280 AND NOT 300, stated without over-claiming: once the marker is in place
+#: a 300 s bound WOULD satisfy the ordering too (270 < 300 < 600) — the ordering
+#: alone does not select 280. 280 is chosen because it is the tightest round value
+#: above the 270 s load budget, and it is ALSO under the shard's 300 s default, so
+#: the bound is the first clock that can fire at BOTH rungs this file is actually
+#: graded at — with the marker, and with the marker dropped back to the shard
+#: default (at which rung a 300 s bound would tie the item clock exactly, and the
+#: item clock wins ties). The marker's job is headroom for the rest of the item
+#: (see the coverage assert in the `BOUNDS` block), not this ordering.
+_SUITE_WAIT_BOUND_S = 280.0
+
+#: How long `_drain_in_flight_captures` waits for an abandoned capture's worker
+#: before clearing the key. The worker finishes on its own (a breach ABANDONS the
+#: request, it never cancels it), so the wait is the normal path; the clear is
+#: the hung-worker guard and must never be reached on a healthy suite.
+_DRAIN_TIMEOUT_S = 120.0
+
+
+def _item_budget_s(item) -> float:
+    """The pytest-timeout budget that will actually bound ONE item.
+
+    Read from the plugin's own resolver (`_get_item_settings`) rather than
+    re-implemented, so the marker -> `--timeout` -> `PYTEST_TIMEOUT` -> ini
+    precedence cannot drift from pytest-timeout's. A non-positive or absent
+    budget is `inf`, because pytest-timeout arms NOTHING there (`timeout <= 0`
+    never starts the alarm), so "no bound" is the true reading — the same
+    polarity `tests/test_migrate_db.py::_positive_or_unbounded` uses for the
+    global case. That arm is not reachable while this module's marker is in
+    place: dropping `pytestmark` reds the marker assertion beside this call.
+
+    A hand-rolled CLI-then-ini resolver is NOT good enough and was caught in
+    review: for an item with no marker, `PYTEST_TIMEOUT=120` under an ini of 300
+    made it answer 300 — it never consulted the env rung at all — so the pin
+    passed over a budget of 120, a false green at exactly the condition it exists
+    to catch (`tests/test_migrate_db.py::_effective_item_budget_s` carries the
+    same lesson for the global case).
+    """
+    import pytest_timeout
+
+    timeout = pytest_timeout._get_item_settings(item).timeout
+    value = float(timeout) if timeout is not None else 0.0
+    return value if value > 0 else float("inf")
+
+
+def _drain_in_flight_captures(timeout_s: float = _DRAIN_TIMEOUT_S) -> None:
+    """Wait for any previously ABANDONED capture to release its session key.
+
+    #3129's admission gate refuses a second capture for a session that is still
+    "in flight" (409 `_CAPTURE_SESSION_IN_FLIGHT_DETAIL`), and a slot keeps that
+    key until BOTH the worker reports and the request tears down. A request
+    abandoned at the wait bound never tears down on its own schedule, so the key
+    outlives the test that caused it — measured: after a forced 504 the registry
+    still held `{'team-7951:org_team-7951:s-cascade': 1}`, and the next capture
+    for that session id answered **409**.
+
+    That is correct product behaviour, and it is fatal to THIS suite because
+    every test in the file uses the same constant `SID` and the same org, so the
+    key is literally the same string: one slow capture poisons every later test.
+    That cascade is what turned ONE 504 into the five failures CI recorded (3x
+    504, then 2x 409).
+
+    The registry is ephemeral and process-local (`hosted_api`'s own words on
+    `_capture_session_key`), so clearing a key that no live request can answer
+    for is safe: the slot's own release is `.pop(key, None)`, idempotent by
+    design, so a later stale pop cannot raise on an already-cleared key.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        with _ha._CAPTURE_IN_FLIGHT_LOCK:
+            if not _ha._CAPTURE_SESSIONS:
+                return
+        time.sleep(0.05)
+    with _ha._CAPTURE_IN_FLIGHT_LOCK:
+        _ha._CAPTURE_SESSIONS.clear()
+
+
 @pytest.fixture
 def hosted(tmp_path, monkeypatch):
     """(TestClient, journaled SDK) on a temp embedded DB + temp journal."""
+    # Before anything else: a capture abandoned by a PREVIOUS test is still
+    # holding its session key (#3129), and this file's constant `SID` makes that
+    # the key this test is about to ask for. Drain it, or the 409 that follows
+    # reads as a #7951 defect it has nothing to do with.
+    _drain_in_flight_captures()
+    # The suite tests journal semantics, not the #3834 transport bound — see
+    # `_SUITE_WAIT_BOUND_S` for the measurement that makes this load-bearing.
+    monkeypatch.setattr(_mcp_auth, "_TRANSPORT_WAIT_BOUND_S",
+                        _SUITE_WAIT_BOUND_S)
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "hosted.db"))
     events = tmp_path / "events"
@@ -983,3 +1125,177 @@ class TestOrphanedWriteSweepIsJournaled:
             "was a NO-OP (the same-id re-capture won the race) — a replay "
             "would delete the live re-capture (#7951 P2-d)")
 
+
+# ═══════════════════════════════════════════════════════════════════════
+# The harness contract this file depends on: one refused capture must not
+# poison the next one — `test (f)`, run 42763774765 (3x 504, then 2x 409).
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestAWaiterRefusalCannotPoisonTheNextCapture:
+    def test_a_refused_capture_cannot_cascade_into_the_next_one(
+            self, hosted, request):
+        """Both halves of the CI flake, in one fixture (each `hosted` setup is a
+        cold embedded DB — keeping it to one keeps this affordable).
+
+        HALF 1 — the suite is no longer graded by the #3834 user-patience
+        bound. MEASURED on a quiet box: the first capture of a fresh process
+        costs 124.53 s (the #11060 one-time embedder load) against the shipped
+        10.0 s bound; every later capture costs 0.62 s. These tests assert
+        JOURNAL semantics, so a slow box must not turn them into 504s. The
+        shipped value stays pinned by its own suite
+        (`tests/test_transport_wait_bound.py`); this pins only that THIS file
+        stopped being graded by it.
+
+        HALF 2 — a held session key must not refuse the NEXT capture. The key
+        is injected rather than produced by a real abandoned request: a forced
+        breach leaves the handler to cold-start its way to admission (measured
+        >30 s under pytest), so driving it live would make this test a race
+        against the embedded DB. What must be pinned is the DRAIN, and the
+        injected key IS the state an abandonment leaves behind — observed
+        directly: after a forced 504 the registry still held
+        `{'team-7951:org_team-7951:s-cascade': 1}`, and the next capture for
+        that session answered 409.
+
+        Discrimination (both MEASURED at this head, each mutant restored):
+        `_SUITE_WAIT_BOUND_S` -> 10.0 reds half 1 with `assert 10.0 > 10.0`.
+        `_drain_in_flight_captures` -> an immediate `return` reds with the
+        drain still holding this session's key, one assertion before the
+        retry that CI answered 409.
+
+        BOUNDS (checked FIRST, before any stateful capture — the order in this
+        body is 1, BOUNDS, 2) — the raised bound must be the FIRST clock that
+        can fail, and it must not pre-empt the one that is supposed to report a
+        cold load. Three budgets are in play and the bound has to sit strictly between the outer
+        two, each READ from its owner rather than re-typed:
+
+          conftest.py embedder load budget  270 s  `EmbeddingModel._LOAD_TIMEOUT_S`
+          this file's transport bound       280 s
+          the per-item pytest budget        600 s  `_ITEM_BUDGET_S` (module marker)
+
+        A bound AT the per-item budget is unreachable (the item's clock starts
+        before the capture does), so it would hide the 504 message without
+        bounding anything; a bound UNDER the load budget would charge a slow
+        cold load to the transport (the misattribution `conftest.py`'s 270 s
+        exists to prevent). The budget is resolved through pytest-timeout's own
+        `_get_item_settings`, so a marker, `--timeout`, `PYTEST_TIMEOUT` or the
+        ini value are all honoured — a two-rung hand-rolled resolver was caught
+        in review answering 300 for an unmarked item under `PYTEST_TIMEOUT=120`,
+        i.e. passing over a budget of 120.
+
+        The marker is asserted, not assumed: dropping `pytestmark` leaves a
+        bare `budget > bound` comparison green (the shard's 300 s still exceeds
+        280) while silently handing this file back to the shard's 300 s default,
+        which is the flake this commit removes — so this block pins the declared
+        value AND the resolved one, because the comparison cannot see the drop.
+
+        There is no separate `item_budget > bound` assert: it follows from the
+        resolved-equality and coverage arms, so it could never fail alone (and
+        this docstring no longer points at one — it used to say "the ORDERING
+        below stays green", naming an arm review round 3 had removed).
+        """
+        tc, _ = hosted
+
+        # ── HALF 1: the fixture raised the bound ───────────────────────
+        assert _mcp_auth._TRANSPORT_WAIT_BOUND_S == _SUITE_WAIT_BOUND_S, (
+            "the `hosted` fixture stopped raising the transport wait bound — "
+            "every test in this file is graded by the #3834 user-patience "
+            "bound again, which is the flake `test (f)` recorded on a head "
+            "whose diff touches none of this")
+        assert _SUITE_WAIT_BOUND_S > 10.0, (
+            "the suite bound must be strictly above the shipped 10.0 s value, "
+            "or it reproduces the race instead of removing it")
+
+        # ── BOUNDS: … and it must still be the clock that fires first ─────
+        from tortoise.embeddings import EmbeddingModel
+
+        load_budget = float(EmbeddingModel._LOAD_TIMEOUT_S)
+        assert load_budget < _SUITE_WAIT_BOUND_S, (
+            f"the suite bound ({_SUITE_WAIT_BOUND_S} s) is not above the "
+            f"embedder's cold-load budget ({load_budget} s): a slow load would "
+            f"now be refused as a transport 504 instead of being reported as a "
+            f"LOAD, which is the attribution `conftest.py`'s 270 s exists to "
+            f"preserve")
+        item_budget = _item_budget_s(request.node)
+        mark = request.node.get_closest_marker("timeout")
+        assert mark is not None and tuple(mark.args) == (_ITEM_BUDGET_S,), (
+            f"this module must ask for its {_ITEM_BUDGET_S} s per-item budget "
+            f"explicitly (pytestmark); found "
+            f"{'no timeout marker' if mark is None else mark.args}. Dropping it "
+            f"leaves a bare budget>bound comparison green (the shard's 300 s "
+            f"still exceeds the transport bound) while handing this file back "
+            f"to a budget it cold-loads past — 124.53 s measured, 204.64 s "
+            f"observed under CI load — i.e. the `Failed: Timeout` flake this "
+            f"suite bound exists to remove")
+        assert item_budget == float(_ITEM_BUDGET_S), (
+            f"the RESOLVED per-item budget is {item_budget:g} s, not "
+            f"{_ITEM_BUDGET_S} s: a marker override, `PYTEST_TIMEOUT`, "
+            f"`--timeout` or the ini is grading this file with a budget the "
+            f"transport bound was not reasoned against")
+        # …and the declared value must clear the MINIMUM a real budget has to
+        # afford — one bound-hitting capture PLUS the fixture's drain — without
+        # being the shard's default under another name. It is a LOWER BOUND, not
+        # this item's total cost (the cold load and the retry capture are paid on
+        # top of it); it is the term that kills the decorative-300 case. Both
+        # terms are read from their owners, so lowering `_ITEM_BUDGET_S` cannot
+        # move both sides together: at 300 s (the shard's `--timeout=300`) a
+        # bound-hitting capture leaves 20 s — a sixth of the fixture's 120 s
+        # drain — where that minimum needs 400 s, so it is 100 s short.
+        assert _ITEM_BUDGET_S > _SUITE_WAIT_BOUND_S + _DRAIN_TIMEOUT_S, (
+            f"the declared per-item budget ({_ITEM_BUDGET_S} s) does not clear "
+            f"the minimum a real budget must afford: a capture that runs to the "
+            f"transport bound ({_SUITE_WAIT_BOUND_S} s) PLUS the fixture's drain "
+            f"of an abandoned worker ({_DRAIN_TIMEOUT_S} s). This is a LOWER "
+            f"bound, not the item's total cost — the cold load and the retry "
+            f"capture are paid on top. It is also the arm that catches a "
+            f"transport bound raised to or past the item budget: with the budget "
+            f"pinned to {_ITEM_BUDGET_S} s above, a bound that high leaves nothing "
+            f"for the rest of the item, and pytest would kill it BEFORE the bound "
+            f"could refuse the capture (so the legible 504 becomes "
+            f"`Failed: Timeout`). A budget below it is the shard's 300 s default "
+            f"under another name, and the marker beside it is decorative")
+        # NOTE there is deliberately NO separate `item_budget > _SUITE_WAIT_BOUND_S`
+        # assert here: with `item_budget == _ITEM_BUDGET_S` pinned above and
+        # `_ITEM_BUDGET_S > bound + drain` asserted just here, the ordering follows
+        # from them, so such an assert could never fail on its own — an inert guard
+        # that only looks like coverage (review, round 3).
+
+        # ── HALF 2: a held key must not refuse the next capture ────────
+        sid = "s-7951-leak"
+        key = _ha._capture_session_key(dict(TEAM), sid)
+        assert key is not None
+
+        # (a) The premise, measured: a held key refuses the next capture. This
+        #     is #3129's admission guard working exactly as designed.
+        with _ha._CAPTURE_IN_FLIGHT_LOCK:
+            _ha._CAPTURE_SESSIONS[key] = 1
+        refused = tc.post("/v1/sessions",
+                          json={"conversation": CONV, "session_id": sid})
+        assert refused.status_code == 409, (
+            f"a held session key did not refuse the next capture (got "
+            f"{refused.status_code}) — the #3129 admission guard changed and "
+            f"this test no longer describes the failure it pins: {refused.text}")
+        assert _ha._CAPTURE_SESSION_IN_FLIGHT_DETAIL in refused.text
+
+        # (b) The worker that held it finishes while the drain waits, so the
+        #     WAIT arm (not the hung-worker clear) is what releases it.
+        threading.Timer(
+            0.3, _ha._capture_session_release, args=(key,)).start()
+        started = time.monotonic()
+        _drain_in_flight_captures(timeout_s=30.0)
+        waited = time.monotonic() - started
+        with _ha._CAPTURE_IN_FLIGHT_LOCK:
+            assert not _ha._CAPTURE_SESSIONS, (
+                f"the drain returned while keys were still held: "
+                f"{dict(_ha._CAPTURE_SESSIONS)}")
+        assert waited < 10.0, (
+            f"the drain took {waited:.1f}s — it hit the hung-worker clear "
+            f"instead of draining the released key, so the timing above is not "
+            f"the path this test claims to exercise")
+
+        # (c) And the same session is capturable again — no cascade.
+        retry = tc.post("/v1/sessions",
+                        json={"conversation": CONV, "session_id": sid})
+        assert retry.status_code == 200, (
+            f"a held session key poisoned the NEXT capture for {sid!r} with "
+            f"{retry.status_code} — the 504→409 cascade that turned ONE slow "
+            f"request into the five failures `test (f)` recorded: {retry.text}")
