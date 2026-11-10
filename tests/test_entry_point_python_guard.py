@@ -1314,6 +1314,13 @@ def test_the_residual_scan_guard_names_an_invocation_that_actually_resolves(
 
     Pinned by PROVING the claim rather than by reading the string alone: the form
     the refusal names must resolve, and the bare path must NOT.
+
+    ⚠️ `rc == 2` alone does not measure "a USAGE error" here: `2` is also this
+    tool's documented NO-VERDICT (`tortoise/embedding_residual_scan.py:78`
+    `EXIT_UNAVAILABLE = 2`, returned when `--graph-uri` is absent), so making
+    `--org` optional would leave the bare form parsing, refusing the graph half,
+    and still exiting 2 — green on the code while the property the message
+    states is false. The CAUSE is pinned too (`#11744` review, round 4).
     """
     path = (Path(__file__).resolve().parents[1]
             / "tools" / "embedding_residual_scan.py")
@@ -1345,3 +1352,10 @@ def test_the_residual_scan_guard_names_an_invocation_that_actually_resolves(
         "the bare path must stay a USAGE error (argparse, `--org` is "
         f"required) — if it stops being one, this guard's advice is no longer the "
         f"only form that resolves: rc={bare.returncode}, {bare.stderr[-300:]!r}")
+    # `2` is not unique to argparse on this tool (it is also `EXIT_UNAVAILABLE`),
+    # so the CODE above cannot distinguish "usage error" from "a store could not
+    # be read". Pin argparse's own text, which only the missing-token path emits.
+    assert "the following arguments are required" in bare.stderr, (
+        "the bare path exited 2, but not on argparse's missing-token error — `2` "
+        "is also this tool's NO-VERDICT exit, so the code alone does not prove "
+        f"the bare path is unusable: {bare.stderr[-300:]!r}")
