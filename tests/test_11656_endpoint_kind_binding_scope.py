@@ -178,7 +178,9 @@ def _unittest_case_classes(module_body: list[ast.stmt]) -> set[str]:
     def _is_case(node: ast.ClassDef, seen: frozenset[str]) -> bool:
         for base in node.bases:
             leaf = ast.unparse(base).split(".")[-1]
-            if leaf == "TestCase":
+            # ⛔ `leaf not in by_name` first: a module that defines its OWN class called `TestCase` must not
+            # turn every subclass of it into a `unittest` case — pytest would collect none of them by name.
+            if leaf == "TestCase" and leaf not in by_name:
                 return True
             parent = by_name.get(leaf)
             if parent is not None and leaf not in seen and _is_case(parent, seen | {leaf}):
@@ -399,8 +401,9 @@ def _derive_population(source: str) -> tuple[int, int]:
             extra += len(cases.elts) - 1
     for cls_name in inheriting:
         unreadable.append(
-            f"class `{cls_name}`: it inherits another `Test*` class in this module, so pytest re-collects the "
-            "parent's methods and this derivation cannot see them"
+            f"class `{cls_name}`: it inherits a class defined in this module, so pytest may re-collect the "
+            "parent's methods — and a `unittest.TestCase` parent is collected regardless of the child's name — "
+            "which this derivation cannot see"
         )
     for cls_name in sorted(parametrised_classes):
         unreadable.append(
