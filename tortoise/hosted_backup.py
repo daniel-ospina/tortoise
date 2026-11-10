@@ -82,6 +82,7 @@ from tortoise.index_catalogue import (  # #3154/#3441: the ONE presence check
 )
 from tortoise.vector_write import (  # #4520: the ONE clear-then-set vector seam
     clear_then_set_prefix,
+    require_served_store_labels,  # #11641: the ONE bound on WHERE a vector may be stored
     set_embedding_clause,
 )
 
@@ -99,6 +100,42 @@ _AES_KEY_SIZE = 32  # AES-256
 _LABEL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DUMP_ID_PROP = "__dump_id"  # temp internal-id bridge during restore; removed after edges link
 _EMBED_BATCH = 400  # rows per UNWIND vecf32 re-encode query (falkordb inlines params)
+
+#: The labels a RESTORED vector may land on — and therefore the label set
+#: `tortoise.embed_writer_register` declares for `restore_graph` (#11641).
+#:
+#: The dump carries its own labels (`CREATE (n:{safe_labels})`), so before `#11641` the restore's
+#: stored label was "whatever the file says" and the register had to declare `LABELS_AT_RUNTIME`,
+#: holding `#5090` DoD row 2 at PARTIAL. The label is now BOUNDED: a node carrying an ``embedding``
+#: whose labels include none of these is refused in the pre-mutation validation pass, so the vector
+#: restore can only ever run label-scoped against a label `run_vector_query` serves.
+#:
+#: ⛔ Refusing is the fail-closed direction, not a new restriction on legitimate dumps: a vector on
+#: a label no query path reaches is paid for and unreadable (`#5090` row 2's whole subject), so
+#: restoring one silently preserves a defect that a backup is the last chance to notice. The check
+#: runs in the SAME pre-mutation pass as `#3895`'s dangling-edge validation, so a refusal leaves the
+#: target graph untouched and the import endpoint maps it to a 422 + quarantine — never a partial
+#: restore.
+#:
+#: ⛔ This tuple is a MIRROR of the query path's vocabulary, and it is pinned as one in BOTH
+#: directions (`tests/test_11641_runtime_vector_label.py`): a label added to
+#: `tortoise.security.VALID_ENTITY_TYPES` reds here instead of silently widening what the restore
+#: writes, and a label dropped from it reds instead of leaving a declaration over a dead label.
+#: `(label, id-prop)` shaped so the register's constant pin can read it
+#: (`tests/test_embed_writer_register.py::test_every_declared_label_re_derives_at_this_head`) —
+#: ⚠️ only the LABEL element is re-derived there; the id-prop is the label's PRIMARY identity key
+#: (`projection._CANONICAL_ENTITY_ID_PROPS`), carried so the shape is the register's, and it is NOT
+#: what this restore matches on (the restore matches `__dump_id`, above).
+_VECTOR_RESTORE_LABELS: tuple[tuple[str, str], ...] = (
+    ("Point", "id"),
+    ("Subject", "id"),
+    ("Object", "id"),
+    ("Source", "id"),
+    ("Event", "eventId"),
+)
+
+#: The label set the vector restore is bound to, derived once from the declaration above.
+_VECTOR_RESTORE_LABEL_SET = frozenset(label for label, _prop in _VECTOR_RESTORE_LABELS)
 
 
 class RestoreVerificationError(RuntimeError):
@@ -879,6 +916,41 @@ def _first_live_node_id(g, ids: set[int]) -> int | None:
     return None
 
 
+def _require_served_restore_labels(node_rows) -> None:
+    """``#11641`` — a restored vector may only land on a label the read path serves.
+
+    Runs in `restore_graph`'s PRE-MUTATION validation pass, beside ``#3895``'s dangling-edge check
+    and for the same reason: a dump is caller-supplied, so a defect in it must be a ``ValueError``
+    before the target graph is touched (the import endpoint maps that to a 422 + quarantine), never
+    a partial restore.
+
+    A node carrying an ``embedding`` whose labels include NONE of :data:`_VECTOR_RESTORE_LABELS`
+    would be written somewhere ``run_vector_query`` cannot reach — a vector paid for and unreadable,
+    which is exactly what ``#5090`` DoD row 2 is scored on. Restoring it silently would preserve
+    that defect through the one operation that could notice it.
+
+    A node with SEVERAL labels is fine as long as one of them is served: Cypher's ``MATCH (n:Point)``
+    matches a node that also carries ``:Foo``, so such a vector IS reachable, and the restore binds
+    the write to the served label (see the vector pass below).
+    """
+    # The declaration must still name labels the query path serves. Fail closed at the seam, not
+    # only in a test: a vocabulary that shrank under this constant would otherwise turn every
+    # restore into a write against a label nothing can read.
+    require_served_store_labels(
+        _VECTOR_RESTORE_LABEL_SET, writer="tortoise.hosted_backup::restore_graph")
+    for dump_id, labels, props in node_rows:
+        if not isinstance(props.get("embedding"), list):
+            continue
+        if not _VECTOR_RESTORE_LABEL_SET.intersection(labels):
+            raise ValueError(
+                f"Malformed dump node {dump_id!r}: it carries a vector on label(s) "
+                f"{list(labels)!r}, none of which `run_vector_query` serves "
+                f"({sorted(_VECTOR_RESTORE_LABEL_SET)}). Restoring it would store a vector no "
+                "read path can reach, so the artifact is refused before the target graph is "
+                "touched (#11641)."
+            )
+
+
 def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False) -> dict:
     """Rebuild the graph from a logical dump into graph handle ``g``.
 
@@ -964,6 +1036,12 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False) -> dict:
         node_rows.append((
             _coerce_dump_id(n["dump_id"], "node dump_id"), safe_labels, props))
 
+    # #11641: the VECTOR half of the same pre-mutation validation (#3895's discipline). A node that
+    # carries a vector is about to be written label-scoped below, so the label it will be written
+    # against must be one `run_vector_query` serves. Checked HERE, before any node is created, so a
+    # refusal leaves the target untouched and the import endpoint quarantines the artifact.
+    _require_served_restore_labels(node_rows)
+
     edge_rows: list[tuple[int, int, str, dict]] = []
     for e in edges:
         if not isinstance(e, dict) or not all(
@@ -1013,19 +1091,34 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False) -> dict:
     # large embedding-heavy graph would exceed socket_timeout/redis bulk
     # limits; a plain-list embedding would poison vector search — search_engine
     # documents this).
-    embed_rows = [
-        {"id": dump_id, "v": props["embedding"]}
-        for dump_id, _labels, props in node_rows
-        if isinstance(props.get("embedding"), list)
-    ]
-    for i in range(0, len(embed_rows), _EMBED_BATCH):
-        chunk = embed_rows[i:i + _EMBED_BATCH]
-        g.query(
-            f"UNWIND $rows AS r MATCH (n {{{_DUMP_ID_PROP}:r.id}}) "
-            + clear_then_set_prefix("n", "r.v")
-            + "SET " + set_embedding_clause("n", "r.v"),
-            params={"rows": chunk},
+    #
+    # #11641: the write NAMES the label it stores on, taken from the declaration above, instead of
+    # matching a bare `(n {__dump_id:r.id})` and letting the node's own label decide where the
+    # vector landed. `_require_served_restore_labels` has already refused any vector-bearing node
+    # with no served label, so every row here has one; a multi-label node is grouped under its
+    # served label, which is the label a read queries it by. One statement per label (≤5) rather
+    # than one per node.
+    embed_rows_by_label: dict[str, list[dict]] = {}
+    for dump_id, labels, props in node_rows:
+        vector = props.get("embedding")
+        if not isinstance(vector, list):
+            continue
+        label = next(
+            (l for l in labels if l in _VECTOR_RESTORE_LABEL_SET),  # noqa: E741
+            None,
         )
+        embed_rows_by_label.setdefault(label, []).append(
+            {"id": dump_id, "v": vector})
+    for label in sorted(embed_rows_by_label):
+        embed_rows = embed_rows_by_label[label]
+        for i in range(0, len(embed_rows), _EMBED_BATCH):
+            chunk = embed_rows[i:i + _EMBED_BATCH]
+            g.query(
+                f"UNWIND $rows AS r MATCH (n:{label} {{{_DUMP_ID_PROP}:r.id}}) "
+                + clear_then_set_prefix("n", "r.v")
+                + "SET " + set_embedding_clause("n", "r.v"),
+                params={"rows": chunk},
+            )
 
     # Which dump endpoints actually materialized? Computed structurally (one
     # query) instead of one probe-MATCH per edge — a 10k-edge dump would

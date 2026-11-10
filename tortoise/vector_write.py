@@ -135,11 +135,16 @@ from regrowing while the vector leg is retired.
 """
 from __future__ import annotations
 
+import re
+
 __all__ = [
     "EMBEDDING_PROPERTY",
     "clear_embedding",
     "clear_then_set_prefix",
+    "require_served_store_labels",
+    "served_store_labels",
     "set_embedding_clause",
+    "statement_node_labels",
     "stored_embedding_vector_expr",
 ]
 
@@ -148,6 +153,81 @@ EMBEDDING_PROPERTY = "embedding"
 
 #: The default Cypher expression holding the incoming vector.
 DEFAULT_VECTOR_EXPR = "$embedding"
+
+
+#: ── WHERE a vector may be stored, at the SAME seam (#11641) ──────────────────────────────────
+#: A Cypher label is not a bindable parameter — it is part of the statement text — so every writer
+#: that stores a vector has TWO facts to get right, not one: the clause (above) and the LABEL the
+#: clause's alias is bound to. This section is the one home of the second half, for the same reason
+#: the section above is the one home of the first: a writer that spells its own label locally can
+#: put a vector somewhere no read reaches, and `#5090` DoD row 2 exists to catch exactly that.
+#: ⛔ Nothing here creates an index, and nothing here reads or writes a store — it is a bound, not
+#: a migration. `STORAGE-ARCHITECTURE.md` §14.3 V1 (the vector INDEX lives in Postgres) is
+#: untouched by it.
+
+def served_store_labels() -> frozenset[str]:
+    """The labels a stored vector can be READ BACK from: the query path's own vocabulary.
+
+    ⛔ ONE owner, never a second copy. This reads `tortoise.security`'s vocabulary — the same one
+    `run_vector_query` validates its ``entity_type`` against and derives its query label from — so
+    the served set here cannot drift from the served set there. A literal list of the five labels
+    in this module would be a second declaration of where a vector can be found, and the two could
+    disagree with nothing going red: the failure mode row 2 is scored on.
+
+    ``operator`` and ``document`` collapse onto ``Point`` and ``Source`` by ``entity_label``, which
+    is why seven entity types are five labels.
+    """
+    from tortoise.security import VALID_ENTITY_TYPES, entity_label
+    return frozenset(entity_label(t) for t in VALID_ENTITY_TYPES)
+
+
+#: A node label as a Cypher PATTERN binds it — `(n:Point`, `MATCH (e:Event`, `, (b:Batch`. ⛔ Not
+#: anchored to `MATCH|MERGE|CREATE`: a single statement binds SEVERAL patterns and only the first
+#: follows the keyword (`MATCH (e:Event {…}), (b:Batch {…})` — measured, the keyword-anchored form
+#: missed `Batch` entirely and let a stray label through the door's bound). ``\w+`` deliberately does
+#: NOT match an INTERPOLATED label (`(n:{safe_labels})`), because the point of this pattern is to let
+#: a writer prove the labels its statement NAMES; an interpolation is the shape that fact cannot be
+#: read off, and a writer using one must declare a bound instead (see
+#: `require_served_store_labels`).
+_STATEMENT_LABEL_RE = re.compile(r"\(\s*(?:[A-Za-z_]\w*\s*)?:\s*([A-Za-z_]\w*)")
+
+
+def statement_node_labels(statement: str) -> frozenset[str]:
+    """Every node label a Cypher statement binds in a node PATTERN (``(x:Label``).
+
+    The reader a *door* uses: a writer that executes a caller-supplied statement cannot name its
+    own label in its own body, so it names the labels the STATEMENT declares and refuses anything
+    outside them (``tortoise.sdk::_event_raw_write_door``, #11641).
+
+    ⚠️ It matches the pattern SHAPE, not the clause that introduces it, so it sees every comma- or
+    ``WHERE``-separated pattern in one statement — not only the first one after ``MATCH``/``MERGE``/
+    ``CREATE``. That breadth is deliberate (a keyword-anchored form missed a stray second pattern,
+    measured) and it errs in the REFUSING direction: a false positive costs a writer a clear error,
+    where a false negative stores a vector somewhere no read path reaches.
+    """
+    return frozenset(_STATEMENT_LABEL_RE.findall(statement))
+
+
+def require_served_store_labels(labels, *, writer: str) -> None:
+    """Refuse a vector store onto a label ``run_vector_query`` cannot serve.
+
+    ``labels`` is every label the write targets (the writer's declared set, or the labels a
+    caller's statement names). Raises ``ValueError`` naming the writer, the offending labels and
+    the served vocabulary — fail CLOSED, before the write, because the alternative is a vector that
+    is paid for and unreachable: the defect `#5090` DoD row 2 is scored on.
+
+    ⛔ This is the bound, not the read path's own validation. `run_vector_query` already refuses an
+    unknown ``entity_type``; this refuses a WRITE that would land somewhere no ``entity_type``
+    reaches, which is the half nothing checked before `#11641`.
+    """
+    served = served_store_labels()
+    stray = sorted(set(labels) - served)
+    if stray:
+        raise ValueError(
+            f"{writer} would store a vector on label(s) {stray}, which no read path serves — "
+            f"`run_vector_query` can only reach {sorted(served)}. A vector stored on any other "
+            "label is paid for and unreachable, so the write is refused (#11641)."
+        )
 
 
 def clear_then_set_prefix(alias: str,

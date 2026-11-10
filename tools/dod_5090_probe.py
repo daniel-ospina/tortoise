@@ -1810,8 +1810,12 @@ def score_rule_bullet() -> Row:
 #: `::test_a_no_live_vector_declaration_executes_no_store_clause` for every `NO_LIVE_VECTOR` entry.
 #: ⛔ State the residual at its true size (round-1 review): the `NO_LIVE_VECTOR` scan proves the
 #: writer's own body executes no store clause, which is NOT the same as proving it stores nothing —
-#: a door that EXECUTES A CALLER-SUPPLIED statement (`sdk::_event_raw_write_door`) carries no
-#: marker and is caught only by review. The pin narrows that half; it does not close it.
+#: a door that EXECUTES A CALLER-SUPPLIED statement (`sdk::_event_raw_write_door`) cannot be pinned
+#: from its own body at all. `#11641` gave that door a BOUND instead of a body-shaped pin — it owns
+#: `sdk::_RAW_WRITE_DOOR_LABELS` and REFUSES a statement naming any other label — and
+#: `tests/test_embed_writer_register.py::LABEL_EVIDENCE` now carries a needle for it. ⚠️ The bound
+#: narrows that half; it does not close it: review still catches WHICH label the door's own
+#: declaration names, and the bound only catches a label OUTSIDE it.
 ROW2_REGISTER_MODULE = REGISTER_MODULE
 
 

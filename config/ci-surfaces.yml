@@ -6399,6 +6399,17 @@ surfaces:
   # the gate) has to point at. NOT carve_out-registered: it writes no graph, opens no connection
   # and needs no lane.
   - test_embed_writer_register.py
+  # #11641: the SEAM the register declares — that each of the two former `labels-at-runtime`
+  # writers really BOUNDS its label (`restore_graph`'s `_VECTOR_RESTORE_LABELS` pre-mutation
+  # refusal, `_event_raw_write_door`'s `_RAW_WRITE_DOOR_LABELS` refusal), asserted in both
+  # directions, plus row 2 reading `MET`. `core` for the same reason its sibling above is: the
+  # modules under test (`tortoise/vector_write.py`, `tortoise/hosted_backup.py`,
+  # `tortoise/embed_writer_register.py`) all reach `core`, and a diff confined to
+  # `tortoise/embed_writer_register.py` — the file whose declarations this pin exists to make true
+  # — matches no named SOURCE_PATTERNS entry and therefore selects `core` alone. Placed HERE, beside
+  # `test_embed_writer_register.py`, because the two guard one seam from its two sides: the
+  # declaration, and the refusal that makes the declaration a fact.
+  - test_11641_runtime_vector_label.py
   # #5049: the verdict contract (`tests/_verdict.py`) — condition-vs-deadline
   # waits, INCONCLUSIVE-on-expiry, the measured `Deadline`, the host-capability
   # gate, and the per-test process-global reset. Registered here (core) AND its
