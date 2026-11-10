@@ -319,6 +319,15 @@ FAIL — 1 problem(s):
 (`1794290611` = this branch's `daab38f`; the registration's add-commit is `a6085af84` at
 `1792619351`.) `main` passes the same command; only the re-take reds it.
 
+**This transcript is a RECORD, so it keeps the form that ran.** `python3` was ≥ 3.12 on the box the
+run happened on, and the block's purpose is to show what that run printed — the census flags the
+FORM (a reader on a pre-3.12 ambient gets the tool's refusal instead), so the line is exempted in
+`tests/test_entry_point_python_guard.py`'s `_DELIBERATE_BARE_FORM` rather than rewritten. Rewriting it
+would state a command the machine never executed. The exemption on this line landed with `#11755`
+(`217d46bac5`); `#11756` (`7c45d5af1f`) then rewrote the record to `uv run python` without touching
+`test_entry_point_python_guard.py`, which left that exemption matching no live line — a dead
+exemption, reddening `test_the_record_exemptions_all_still_match_a_live_line` on `main`.
+
 **The root cause was the pin, not the gate.** A pin whose only remedy is forbidden is unsatisfiable:
 any future change to what the probe prints would re-demand an in-place edit of a frozen evidence
 artefact. So:
