@@ -5499,6 +5499,17 @@ surfaces:
   - test_pack_hierarchy_11001.py
   - test_pack_kinds.py
   - test_pack_registry_gaps.py
+  # #11679: the kind hierarchy's TWO surfaces (`expand_kind` = membership/UP,
+  # `read_filter_kinds` = read filter/DOWN). Registered here beside the pack
+  # suites because its subject modules (`tortoise/pack_registry.py` and
+  # `tortoise/domain_validators.py`) match no `SOURCE_PATTERNS` row and fall
+  # through to the `core` fallback. Measured:
+  # `select(['tortoise/pack_registry.py']) -> ['core']`,
+  # `select(['tortoise/domain_validators.py']) -> ['core']`; the third subject,
+  # `tortoise/sdk.py`, resolves `full=True`, so it reaches this file from every
+  # surface and needs no second row. Hermetic except the one graph-backed
+  # discriminator, which `_skip_unless_live_uri()` gates.
+  - test_kind_read_filter_direction.py
   # #11083: the per-pack relation census — HERMETIC half. Holds the committed
   # artifact to a live re-derivation (declared / writable / effective_direction /
   # written_label / declaration_only_reason / dangling), the derived denominator,
