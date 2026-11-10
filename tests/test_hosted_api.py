@@ -177,8 +177,29 @@ def _listed_key(client, kid, timeout: float = 3.0) -> dict:
         time.sleep(0.15)
 
 
+#: The DB path the ACTIVE fixture's patched ``__init__`` forces (#2273 review
+#: finding 1). Written by :func:`_patch_tortoise_sdk_init`, read by
+#: :func:`_assert_fixture_pins_anchor_db_path`.
+#:
+#: WHY THIS EXISTS: the pin guard's ``pin == _resolve_embedded_db_path()``
+#: comparison is NOT discriminating on its own. `_resolve_embedded_db_path()`
+#: returns ``TORTOISE_DB_PATH`` VERBATIM whenever its dirname exists or can be
+#: created (hosted_api.py ``_resolve_embedded_db_path``), so once the pin is
+#: asserted non-empty that comparison reduces to ``pin == pin`` — a pin at a
+#: directory that exists passes even when it is not the fixture's DB at all,
+#: which is exactly the #2273 divergence (pin set, anchor bound elsewhere).
+#: Comparing against the path the patch REALLY forces is what can reject it.
+_FORCED_DB_PATH: str | None = None
+
+
 def _patch_tortoise_sdk_init(db_path: str):
-    """Make TortoiseSDK use a temp db_path when constructed without one."""
+    """Make TortoiseSDK use a temp db_path when constructed without one.
+
+    Records ``db_path`` in :data:`_FORCED_DB_PATH` so the #2273 pin guard can
+    compare ``TORTOISE_DB_PATH`` against the DB this fixture ACTUALLY opened —
+    the only value that tells a right pin from a wrong one.
+    """
+    global _FORCED_DB_PATH
     import tortoise.hosted_api as ha_mod
 
     _orig_init = ha_mod.TortoiseSDK.__init__
@@ -198,6 +219,7 @@ def _patch_tortoise_sdk_init(db_path: str):
     # previous graph's rows appear in the "fresh" temp DB). Clear it so
     # _make_sdk re-binds to THIS test's temp DB.
     ha_mod._FALLBACK_KEEPALIVE.clear()
+    _FORCED_DB_PATH = db_path
     return _orig_init
 
 
@@ -296,25 +318,34 @@ def client():
         # eviction shut the redislite daemon down mid-test, losing the consent
         # seed between this fixture's write and the gate read → 403).
         _prev_db_path = _pin_db_path(db_path)
-        import tortoise.hosted_api as ha_mod
-        # #1927: provision the Team node first (the state writer is
-        # MATCH...SET — a silent no-op without it), then seed the flag so the
-        # session-capture tests run deterministically.
-        ha_mod._make_sdk(namespace="registry")._get_registry().query(
-            "CREATE (t:Team {id:$id, onboarding_state:$st})",
-            params={"id": TEST_ORG_ID, "st": "{}"},
-        )
-        state = ha_mod._update_onboarding_state(
-            TEST_ORG_ID, session_recording=True)
-        # #1950: self-verify the consent seed — if the write silently no-ops,
-        # every session-capture test 403s downstream; fail loud HERE with the
-        # actual persisted state instead.
-        assert state.get("session_recording") is True, state
-        assert ha_mod._get_onboarding_state(TEST_ORG_ID).get(
-            "session_recording") is True, \
-            "consent seed not visible to the gate read"
 
         try:
+            # #2273 review (note 2): the seed and its two self-checks live
+            # INSIDE the `try`, like `internal_client`'s. Outside it a seed
+            # failure left both the pin AND the patched `__init__` unrestored:
+            # `TORTOISE_*` is repaired by conftest's `_isolate_process_env`,
+            # `TortoiseSDK.__init__` is not — so one failed seed leaked a temp
+            # DB path and a patched SDK constructor into every later test in
+            # the process. That is the drift this PR's own rationale argues
+            # against; the restore is unconditional now.
+            import tortoise.hosted_api as ha_mod
+            # #1927: provision the Team node first (the state writer is
+            # MATCH...SET — a silent no-op without it), then seed the flag so
+            # the session-capture tests run deterministically.
+            ha_mod._make_sdk(namespace="registry")._get_registry().query(
+                "CREATE (t:Team {id:$id, onboarding_state:$st})",
+                params={"id": TEST_ORG_ID, "st": "{}"},
+            )
+            state = ha_mod._update_onboarding_state(
+                TEST_ORG_ID, session_recording=True)
+            # #1950: self-verify the consent seed — if the write silently
+            # no-ops, every session-capture test 403s downstream; fail loud
+            # HERE with the actual persisted state instead.
+            assert state.get("session_recording") is True, state
+            assert ha_mod._get_onboarding_state(TEST_ORG_ID).get(
+                "session_recording") is True, \
+                "consent seed not visible to the gate read"
+
             with _verdict_client(app) as tc:
                 yield tc
         finally:
@@ -5302,6 +5333,22 @@ def _assert_fixture_pins_anchor_db_path(fixture_name: str) -> None:
         "forces the fixture's SDKs onto its temp DB while the anchor policy "
         "resolves the ambient (here: unset) env, so the two databases "
         "diverge and the seed is not the DB the anchor serves")
+    # ⛔ THIS IS THE DISCRIMINATING ASSERTION (#2273 review finding 1). A wrong
+    # pin — set, but to a DIFFERENT DB than the fixture patches its SDKs onto —
+    # is the #2273 divergence, and only this comparison can see it:
+    # `_resolve_embedded_db_path()` echoes the pin back verbatim whenever its
+    # dirname is creatable, so the policy comparison below passes for any pin at
+    # an existing directory. Measured: pinning `internal_client` to
+    # `/tmp/not-the-fixture-db.db` leaves the policy assertion GREEN.
+    forced = _FORCED_DB_PATH
+    assert forced, (
+        f"{fixture_name} guard must run with the fixture ACTIVE: no patched "
+        "TortoiseSDK.__init__ recorded the DB path it forces (#2273)")
+    assert pin == forced, (
+        f"{fixture_name}'s TORTOISE_DB_PATH pin ({pin!r}) must be the DB its "
+        f"patched TortoiseSDK.__init__ forces ({forced!r}) — the seed would "
+        "otherwise land in a different database than the registry anchor "
+        "reads (#2273/#1950)")
     assert pin == ha._resolve_embedded_db_path(), (
         f"{fixture_name}'s TORTOISE_DB_PATH pin ({pin!r}) must be the path "
         "_resolve_embedded_db_path() returns "
@@ -5311,9 +5358,9 @@ def _assert_fixture_pins_anchor_db_path(fixture_name: str) -> None:
     if os.environ.get("TORTOISE_DB_URI"):
         # URI mode: `_registry_anchor()` is the #4661 probe cache, not a
         # `_FALLBACK_KEEPALIVE` anchor, so there is no embedded DB for the
-        # anchor to hold. The pin assertion above IS this lane's whole
-        # contract — and it is the leg that reds here without the fix (the
-        # ambient pin is unset on every CI shard, which all export a URI).
+        # anchor to hold. (The pin is still load-bearing here: it is half of
+        # `_registry_probe_identity()`, so it reaches the probe's derived graph
+        # name.) The pin assertions above are this lane's whole contract.
         return
 
     anchor = ha._registry_anchor()
@@ -5327,14 +5374,38 @@ def _assert_fixture_pins_anchor_db_path(fixture_name: str) -> None:
         "rebuilt anchor means the previous one was evicted and closed")
 
 
+# ⛔ `embedded_only` IS LOAD-BEARING, NOT DECORATION (#2273 review finding 1).
+# Without the mark these guards ran in NO CI job: `test_hosted_api.py` is in
+# `config/ci-surfaces.yml` `slow_files` (not `carve_out`), so the only job that
+# runs it in full is the docker slow leg, which exports TORTOISE_DB_URI — the
+# URI-unset branch above is dead there. `test-d14-hosted-api` selects by
+# `-m embedded_only` precisely because that file's URI-less anchor guards had no
+# lane; an unmarked test is DESELECTED, so the mark is the whole reason the
+# anchor/identity legs execute on every PR. (D14's checked-in manifest accepts
+# supersets, so new marks need no manifest edit.)
+
+
+@pytest.mark.embedded_only  # #2273 pins-anchor guard: URI-less anchor/identity legs (D14)
 def test_internal_client_pins_the_db_path_its_anchor_reads(internal_client):
     """#2273: `internal_client` must not seed one DB and read another."""
     _assert_fixture_pins_anchor_db_path("internal_client")
 
 
+@pytest.mark.embedded_only  # #2273 pins-anchor guard: URI-less anchor/identity legs (D14)
 def test_unauth_client_pins_the_db_path_its_anchor_reads(unauth_client):
     """#2273: same omission, same failure — pinned for `unauth_client`."""
     _assert_fixture_pins_anchor_db_path("unauth_client")
+
+
+@pytest.mark.embedded_only  # #1950/#2273 pins-anchor guard: URI-less anchor/identity legs (D14)
+def test_client_pins_the_db_path_its_anchor_reads(client):
+    """#1950/#2273: the sibling `client` pin is guarded by the same check.
+
+    The fix was extracted so the three fixtures `cannot drift again` — that
+    claim is only true if all three are asserted, not just the two that were
+    missing the pin.
+    """
+    _assert_fixture_pins_anchor_db_path("client")
 
 
 def test_register_journals_minted_team_graph(tmp_path, monkeypatch):
