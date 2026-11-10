@@ -2293,8 +2293,10 @@ class TestCoreHierarchy:
         The failure this prevents: the §6 Object↔Point overlap is a CROSS-LAYER
         read change — `expand_kind("Object")` now carries point kinds, so an
         object read for `kind="Object"` also returns `:Point` rows stored with
-        `pointKind='goal'`/`'target'`. Measured as `[]` before this PR
-        (`expand_kind("Object") == ["Object"]`).
+        `pointKind='goal'`/`'target'`. Measured as `[]` before **#11667**
+        (`expand_kind("Object") == ["Object"]`); the widening cited here is
+        already in `main` via #11667, so this PR's own before-state is the
+        closure, not `[]` — the `[]` is #11667's measurement.
 
         ⚠ It is a consequence of the mandated contract, not an implementation
         error — #7813's ruling is that confidence propagates across
