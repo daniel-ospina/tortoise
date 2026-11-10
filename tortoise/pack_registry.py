@@ -3664,8 +3664,7 @@ class PackRegistry:
         # the four `CORE_SUBCLASSES` rows (`Object`/`Subject`/`Point`/`Event` — §6
         # declares only `Object`/`Document`/`Subject`, so `Point` AND `Event` are
         # this module's extension) while the other three already behave this way.
-        # Applied
-        # for UNIFORMITY, with the widening named rather than denied.
+        # Applied for UNIFORMITY, with the widening named rather than denied.
         for endpoint in (list(direct_parents) + list(direct_children)
                          + list(equivalences) + list(bare_inherits)):
             expansions.setdefault(endpoint, [endpoint])
