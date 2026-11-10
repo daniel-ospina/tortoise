@@ -2564,6 +2564,24 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # reason to place them anywhere else. Pinned by
              # tests/test_ci_selection.py::test_the_census_tool_change_selects_core.
              "tools/hosted_api_cite_census.py",
+             # #11642 / #11086 — the SAME hole, owned by their own files. Both tools
+             # are `tools/**` entry points, so `tests/test_entry_point_python_guard.py`
+             # (`core`, the #5128 census) is the pin that holds them — and neither
+             # path matches a SOURCE_PATTERNS row while `tools/` is a flat
+             # NON_PYTHON_PREFIXES entry, so a tool-only diff returned `changed == []`,
+             # took the docs-only early return and selected NO surface. Measured at
+             # PR #11733: `--changed-files tools/embedding_residual_scan.py` ->
+             # surfaces=[], guard file absent — which is how both merged to main with
+             # no guard at all and redded the `test` job (4 failed: the two pytest
+             # cases × the two files), naming `tools/embedding_residual_scan.py` and
+             # `tools/measure_11086_gate_rate.py` in the corpus assert. The
+             # per-file remedy the census entry above states — "the file that must
+             # carry it is now the file that selects its guard" — applied to both. ⚠️ This is per-file, NOT the corpus-wide reach gap the
+             # guard's own docstring declares (still filed separately): the next tool
+             # added lands unguarded again until that is closed. Pinned by
+             # tests/test_ci_selection.py::test_the_11086_and_11642_tools_select_core.
+             "tools/embedding_residual_scan.py",
+             "tools/measure_11086_gate_rate.py",
              # #5612: the journal-growth measurement (`tools/journal_growth.py`)
              # and its probe
              # (`docs/evidence/5612-journal-growth/probes/corpus_growth_probe.py`)
