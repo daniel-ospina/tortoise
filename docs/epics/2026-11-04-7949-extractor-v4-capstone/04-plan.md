@@ -295,8 +295,12 @@ nothing measures any more, which is the exact class of stale flag D-S4 exists to
 ⛔ **P1 from the substep-8 gate: the new floor keys must land in BOTH homes or C1's first commit is a hard red.** The
 checker fails closed on any record `denominator_floors` key with **no** counterpart in
 `PRE-REGISTRATION.md`'s fenced `preregistration-pins` block — *"the record may not invent a REFUSED boundary the
-document does not state"*. **That fence does not hold five keys; it holds fourteen** (`PRE-REGISTRATION.md:679`: **five**
-E-keys at §3.6 plus **nine** A-row floors at §3.7) — an earlier revision of this paragraph said "exactly the five
+document does not state"*. **That fence does not hold five keys; it holds fifteen** — **six** E-keys at §3.6
+(`e6_declared_rows: 30` arrived with `#11673`) plus **nine** A-row floors at §3.7. ⚠️
+`PRE-REGISTRATION.md:679` still says *fourteen*, and *five* E-keys: that was true when the document
+was frozen, and it stays that way because `preregistration.json` pins its `document_sha256` — a
+correction here would re-cut the digest of the registration this bundle reports against. So the
+count is re-derived from the record, not copied from the frozen prose. — an earlier revision of this paragraph said "exactly the five
 E-keys" and was simply wrong about the file. So the A-floors go into **the record's `denominator_floors` AND the
 document's `denominator_floors:` block, with `document_sha256` re-cut, in the same commit**. Without that clause,
 D-S4's purpose silently inverts: the A-floors are dropped to make the gate green and *"an A-row with no floor can
@@ -322,8 +326,9 @@ I1/I2, and the plan states explicitly that the A-row fields are **not** required
 versioning answer: "only a breaking change bumps it" must first ask **who else reads the schema** — and a live second
 bundle is the answer.
 
-**`corpus_id` on the E-rows too.** I1/I2 make it the per-row key, so all **twelve** rows carry it
-(`fixture` for the seven E-rows, as the D-S1 matrix says) — otherwise the frozen contract would fail the seven rows
+**`corpus_id` on the E-rows too.** I1/I2 make it the per-row key, so all **thirteen** rows carry it
+(`fixture` for the seven E-rows, as the D-S1 matrix says; the thirteenth is `E6`, which `#11673`
+added — its corpus is named by that amendment, not assumed here) — otherwise the frozen contract would fail the seven rows
 it was written to protect.
 
 ### 4.2 Two corpus pins in ONE record
