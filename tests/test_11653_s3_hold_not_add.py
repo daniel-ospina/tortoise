@@ -42,10 +42,20 @@ WHAT THIS PINS
    Points (an entity record there would be re-minted as a claim).
 5. **Non-vacuity** (the mutation arm): the SAME fixture with a resolver that
    answers `new` mints again, so the assertions read the gate and not the fixture.
+6. **One node, never the session** (#11693 review, P1). A held entity is
+   stripped from every reference set Layer-1 resolves — the points' and events'
+   `about_entities`, their typed `subject`/`object` slots — and operators naming
+   it are dropped, so the payload the hold produces still PASSES `commit_schema`.
+   ⛔ Without that strip the payload is a 422: the entity is absent from
+   `entities[]` while the claims still name it, so `commit_session` returns
+   `ok=False` without POSTing and the duplicate is traded for memory loss — the
+   one trade I2 forbids, and the hazard `route_mentions` (the pre-existing hold)
+   was built to avoid.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import sys
 from pathlib import Path
@@ -54,6 +64,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tortoise import commit_schema  # noqa: E402, RUF100
 from tortoise import extractor_v2 as v2  # noqa: E402, RUF100
 
 _CANDIDATE = {"id": "obj_acme", "name": "Acme Corporation",
@@ -305,6 +316,212 @@ class TestTheOtherArms:
         assert set(res["new"]) | set(_held_names(res)) == unmatched
 
 
+class TestTheHoldRemovesOneNodeNotTheSession:
+    """⛔ The held entity's name must not be left dangling in the payload.
+
+    Review finding 1 (#11693), the blocking one: `execute_embed` withheld the
+    entity from `payload["entities"]` — which IS the commit's create list — but
+    nothing removed it from the claims and events that NAME it. Layer-1 resolves
+    both of those sets against the emitted entities, so the pre-fix payload was
+    refused as a whole: `tortoise/commit_schema.py` reports
+    `about_entities reference unknown entities: ['Acme']`,
+    `tortoise/sdk.py::commit_session` folds `not l1.ok` into `errors` and returns
+    `ok=False` WITHOUT POSTing, and the hosted door answers 422 before the first
+    write. "One duplicate node" was traded for "no memory at all".
+
+    The remedy is the RECORDED one — the same move `route_mentions` already makes
+    for its own hold (`extractor_v2.py::_strip_reference_sets`, whose docstring
+    says *"a hold that 422s the whole session … is worse than the phantom node it
+    removed"*): strip the held name from every claim's/event's `about_entities`
+    and from the typed `subject`/`object` slots, and DROP operators naming it
+    (the mint-before-wire pass would otherwise re-materialise it as a fabricated
+    statement Point, #2552).
+
+    ⛔ These assertions run the PRODUCED payload through the real Layer-1 gate.
+    Asserting the payload's shape without asking the gate is how the invalid
+    shape shipped: the previous arm asserted `points` non-empty while
+    `entities == []` and never looked at the referential rule that reads BOTH.
+    """
+
+    def _search_body(self) -> dict:
+        return {
+            "mode": "real", "degraded": False, "reason": None,
+            "entities": [dict(_CANDIDATE)], "points": [], "events": [],
+            "queries_run": 4,
+            "query_coverage": {"derived": {"object": 1, "event": 1, "point": 2},
+                               "ran": {"object": 1, "event": 1, "point": 2},
+                               "failed": {"object": 0, "event": 0, "point": 0}},
+        }
+
+    def _embed(self) -> dict:
+        """One claim and one event that NAME the held entity, plus an operator
+        whose endpoint is it — every reference set Layer-1 resolves."""
+        return {
+            "entities": [{"name": "Acme", "kind": "core:organisation"}],
+            "events": [{
+                "content": "Acme shipped the release",
+                "eventKind": "core:occurrence",
+                "about_entities": ["Acme"],
+                "startedAt": None,
+                "slots": {"subject": [{"name": "Acme",
+                                        "kind": "core:organisation"}],
+                          "object": [], "event": []},
+            }],
+            "points": [{
+                "content": "Acme signed the deal",
+                "pointKind": "statement",
+                "about_entities": ["Acme"],
+                "slots": {"subject": [{"name": "Acme",
+                                        "kind": "core:organisation",
+                                        "confidence": 0.9}],
+                          "object": [], "event": []},
+            }],
+            "operators": [{"src": "Acme",
+                           "dst": "Acme shipped the release",
+                           "op_type": "IMPL"}],
+            "chain_notes": [], "link_before_create": [],
+        }
+
+    def test_the_payload_the_hold_produces_passes_layer1(self):
+        """The assertion that would have caught finding 1."""
+        out = v2.execute_embed(self._embed(), self._search_body(), session_id="s1",
+                               held_entities={"Acme": v2.HOLD_DISAMBIGUATION_FAILED})
+        payload = out["payload"]
+        assert payload is not None, "capture must never be blocked"
+        # The hold itself still holds: no create, one node fewer.
+        assert payload["entities"] == []
+        assert [p["content"] for p in payload["points"]] == ["Acme signed the deal"]
+        # …and every reference that named it is gone, in the payload the door reads.
+        assert payload["points"][0]["about_entities"] == [], (
+            f"the claim still names the held entity: "
+            f"{payload['points'][0]['about_entities']!r} — Layer-1 refuses the "
+            "whole session on it")
+        assert "slots" not in payload["points"][0], (
+            "the typed slot still resolves to a held entity — Layer-1 accepts "
+            "`about_entities` and refuses the SLOT, so both halves must go")
+        assert payload["events"][0]["about_entities"] == [], payload["events"][0]
+        assert "slots" not in payload["events"][0], payload["events"][0]
+        # Dropped, not minted: an endpoint naming the held entity would be
+        # fabricated into a statement Point by the mint-before-wire pass (#2552).
+        assert payload["operators"] == [], payload["operators"]
+        assert [p["content"] for p in payload["points"]] == ["Acme signed the deal"]
+        # Measured, not inferred: 1 claim + 1 event carrier changed, 1 operator
+        # dropped, and the run says so in words.
+        assert out["stats"]["held_entity_refs_stripped"] == 2, out["stats"]
+        assert out["stats"]["held_entity_operators_dropped"] == 1, out["stats"]
+        assert any("the hold removes ONE node, never the session" in w
+                   for w in out["warnings"]), out["warnings"]
+        # ⛔ THE GATE ITSELF, over the payload this run produced.
+        l1, _ = commit_schema.validate_payload_dict(payload)
+        assert l1.ok, (
+            "the payload the S3 hold produces is REFUSED by Layer-1, so the "
+            f"session is never committed (the 422 the fix must not create): "
+            f"{l1.errors}")
+
+    def test_the_unstripped_shape_is_the_rejection_this_fix_removes(self):
+        """NON-VACUITY: put the references back and the SAME gate refuses it.
+
+        Without this arm the test above could pass on a gate that never read the
+        referential rule at all — the shape the pre-fix code produced is exactly
+        this payload with the names left in, so the pair pins the differential
+        and not the fixture.
+        """
+        out = v2.execute_embed(self._embed(), self._search_body(), session_id="s1",
+                               held_entities={"Acme": v2.HOLD_DISAMBIGUATION_FAILED})
+        prefix = copy.deepcopy(out["payload"])
+        assert commit_schema.validate_payload_dict(prefix)[0].ok is True
+        prefix["points"][0]["about_entities"] = ["Acme"]
+        prefix["events"][0]["about_entities"] = ["Acme"]
+        # Recompute the canonical id over the mutated body, so the ONLY thing
+        # this arm measures is the referential rule (not the commit-id check).
+        prefix["client_commit_id"] = commit_schema.compute_client_commit_id(
+            prefix["session_id"], prefix["points"], prefix["entities"],
+            prefix["operators"], prefix["summary"], prefix["story_arc"],
+            prefix.get("events", []), prefix.get("supersessions", []))
+        l1, _ = commit_schema.validate_payload_dict(prefix)
+        assert l1.ok is False, (
+            "Layer-1 ACCEPTED a claim naming an entity the session does not "
+            "emit — then the strip this fix adds is unnecessary, and finding 1 "
+            "was wrong")
+        reasons = " ".join("".join(v) for v in l1.errors.values())
+        assert "about_entities reference unknown entities" in reasons, l1.errors
+
+    def test_a_hold_with_nothing_to_strip_still_creates_nothing(self):
+        """The strip must not become a second gate: an entity held on its own,
+        named by no claim, is still simply absent from the create list."""
+        embed = {"entities": [{"name": "Acme", "kind": "core:organisation"}],
+                 "events": [], "points": [], "operators": [],
+                 "chain_notes": [], "link_before_create": []}
+        out = v2.execute_embed(embed, self._search_body(), session_id="s1",
+                               held_entities={"Acme": v2.HOLD_DISAMBIGUATION_FAILED})
+        assert out["payload"]["entities"] == []
+        assert out["stats"]["held_entity_refs_stripped"] == 0
+        assert out["stats"]["held_entity_operators_dropped"] == 0
+        assert commit_schema.validate_payload_dict(out["payload"])[0].ok is True
+
+
+class TestTheVocabularyIsEnforced:
+    """`HOLD_REASONS` is a DECLARED set, so a reason arriving through the
+    `held_entities` PARAMETER must not widen it silently (#11693 review, P3).
+
+    The reason is not chosen inside `execute_embed` — `extract_session_v2`
+    forwards whatever `resolve_entities` produced, and a future caller can pass
+    its own `{name: reason}`. An unknown spelling would reach
+    `stats["held_reasons"]` and `result["resolution_held"]`, the census an
+    operator reads, naming a state the design never decided.
+    """
+
+    def test_an_unknown_reason_is_normalised_not_published(self):
+        out = v2.execute_embed(_EMBED, _search(_CANDIDATE), session_id="s1",
+                               held_entities={"Acme": "some_future_reason"})
+        # Still HELD — the fail-closed direction is unchanged…
+        assert out["payload"]["entities"] == []
+        assert out["stats"]["held_entities"] == 1
+        # …and the census carries a class the design declares, with the arrival
+        # disclosed rather than absorbed.
+        assert out["stats"]["held_reasons"] == {
+            v2.HOLD_DISAMBIGUATION_UNDECIDED: 1}, out["stats"]["held_reasons"]
+        assert out["held"][0]["reason"] == v2.HOLD_DISAMBIGUATION_UNDECIDED
+        assert any("some_future_reason" in w and "HOLD_REASONS" in w
+                   for w in out["warnings"]), out["warnings"]
+
+    def test_a_declared_reason_passes_through_untouched(self):
+        """Non-vacuity: the three declared reasons are NOT rewritten."""
+        for reason in v2.HOLD_REASONS:
+            out = v2.execute_embed(
+                _EMBED, _search(_CANDIDATE), session_id="s1",
+                held_entities={"Acme": reason})
+            assert out["stats"]["held_reasons"] == {reason: 1}, reason
+            assert not any("HOLD_REASONS" in w for w in out["warnings"]), reason
+
+
+class TestAMalformedAnswerIsNamed:
+    def test_a_string_new_verdict_is_ignored_as_a_whole_not_by_character(self):
+        """`"new": "Acme"` is iterable, so the old loop walked it character by
+        character: every character was dropped as "not among the unmatched
+        names" and the candidate was held (fail-closed, correct) while one
+        bogus warning per character reported it (#11693 review, P3)."""
+        res = v2.resolve_entities(
+            _ref(), _search(_CANDIDATE),
+            model=_Says({"resolutions": [], "new": "Acme"}))
+        assert res["new"] == [], (
+            "a string was read as a list of names — it must license nothing")
+        assert _held_names(res) == {"Acme": v2.HOLD_DISAMBIGUATION_UNDECIDED}
+        dropped = [w for w in res["warnings"] if "not among the unmatched" in w]
+        assert dropped == [], (
+            f"one malformed answer produced {len(dropped)} per-character "
+            "warnings instead of one sentence saying what arrived")
+        assert any("'new' verdict is a str" in w for w in res["warnings"]), (
+            res["warnings"])
+
+    def test_a_list_new_verdict_still_licenses_the_add(self):
+        """Non-vacuity: the guard does not freeze the ADD path."""
+        res = v2.resolve_entities(
+            _ref(), _search(_CANDIDATE),
+            model=_Says({"resolutions": [], "new": ["Acme"]}))
+        assert res["new"] == ["Acme"] and res["held"] == []
+
+
 class TestTheRunReports:
     """The orchestrator arm — `extract_session_v2`, the real caller."""
 
@@ -361,6 +578,18 @@ class TestTheRunReports:
         assert out["error_census"].get("entity_identity_held") == 1, (
             "I2: the hold is reported on the CENSUS, not only in warnings")
         assert any("HELD, not created" in w for w in out["warnings"])
+        # ⛔ The orchestrator's payload is the one the commit door reads, so the
+        # assertion this test was missing is the GATE's verdict on it (#11693
+        # review, finding 1): the claim names the held entity, and a payload that
+        # leaves that name in is refused as a whole — `commit_session` returns
+        # `ok=False` without POSTing, the hosted door answers 422.
+        assert out["payload"]["points"][0]["about_entities"] == [], (
+            f"the claim still names the held entity: "
+            f"{out['payload']['points'][0]['about_entities']!r}")
+        l1, _ = commit_schema.validate_payload_dict(out["payload"])
+        assert l1.ok, (
+            "the run's own payload is refused by Layer-1, so this capture "
+            f"commits NOTHING (the duplicate traded for memory loss): {l1.errors}")
 
     def test_an_entity_hold_is_never_written_to_the_hold_store(self, tmp_path):
         """The trap this fix must not walk into: the hold store's DRAIN mints

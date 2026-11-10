@@ -5789,6 +5789,10 @@ HOLD_DISAMBIGUATION_FAILED = "disambiguation_failed"
 HOLD_DISAMBIGUATION_UNDECIDED = "disambiguation_undecided"
 HOLD_REASONS: tuple[str, ...] = (HOLD_AMBIGUOUS, HOLD_DISAMBIGUATION_FAILED,
                                  HOLD_DISAMBIGUATION_UNDECIDED)
+#: …and the declared set is ENFORCED, not merely documented: `execute_embed`
+#: normalises an unknown reason arriving through its `held_entities` parameter to
+#: the undecided class with a warning, so the vocabulary cannot widen silently at
+#: a call site (see the comment at that seam).
 
 #: The ``held`` record kind of an ENTITY candidate S3 could not identify (#11653).
 #: A DISTINCT kind from `identity_hold.HOLD_ENDPOINT` on purpose: the hold store's
@@ -5925,7 +5929,20 @@ def resolve_entities(entity_refs: list[dict], search: dict,
                              max_tokens=500, stats=stats)
             parsed = _parse_json(resp)
             unmatched_names = {u["name"] for u in unmatched}
-            for item in (parsed.get("new") or []):
+            # ⛔ A `new` answer that is a STRING is iterable, so the old loop
+            # walked it CHARACTER BY CHARACTER: every character was dropped as
+            # "not among the unmatched names" and the candidate was held. That is
+            # the fail-closed direction (the candidate must not be created), but
+            # it emitted one bogus warning per character for a single malformed
+            # answer — say what arrived instead (#11693 review, P3).
+            _declared = parsed.get("new")
+            if _declared is not None and not isinstance(_declared, list):
+                warnings.append(
+                    f"'new' verdict is a {type(_declared).__name__}, not a list "
+                    "— ignored, so every candidate it did not name stays "
+                    "UNRESOLVED (held, never created)")
+                _declared = []
+            for item in (_declared or []):
                 cand = str(item or "").strip()
                 if not cand:
                     continue
@@ -9875,6 +9892,27 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     else:
         _entity_holds = {str(_k).strip(): "" for _k in (held_entities or ())
                          if str(_k).strip()}
+    # ⛔ `HOLD_REASONS` IS THIS SEAM'S VOCABULARY, and this is the only place it
+    # can be enforced: `held_entities` is a PARAMETER, so a reason arrives from a
+    # CALLER (`extract_session_v2` forwards S3's own verdicts), not from this
+    # module's constants. An invented spelling would otherwise reach
+    # `stats["held_reasons"]` and `result["resolution_held"]` — the census an
+    # operator reads — while naming a state the design never decided. Fail CLOSED
+    # in both directions rather than silently widening the vocabulary: the item is
+    # still HELD, and its reason is recorded as the undecided class with a
+    # warning naming what arrived (#11693 review, P3).
+    _unknown_reasons = sorted({r for r in _entity_holds.values()
+                               if r and r not in HOLD_REASONS})
+    if _unknown_reasons:
+        warnings.append(
+            "held_entities carried "
+            + ", ".join(repr(r) for r in _unknown_reasons)
+            + f" outside HOLD_REASONS {list(HOLD_REASONS)} — recorded as "
+            f"{HOLD_DISAMBIGUATION_UNDECIDED!r} (still HELD, never created)")
+        _entity_holds = {
+            n: (r if not r or r in HOLD_REASONS
+                else HOLD_DISAMBIGUATION_UNDECIDED)
+            for n, r in _entity_holds.items()}
     # #10997: the run-level identity state the mint gate reads, and the two
     # populations it reports. `held` is what this run did NOT mint and did NOT
     # drop (I2). `held_drained` is this run's DRAIN of what a previous run held —
@@ -10045,6 +10083,47 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # scope (see the issue's "the candidate set cannot carry correctness").
     graph_entity_names = {k for e in idx["entities"] if e.get("name")
                           for k in _endpoint_keys(e.get("name"))}
+
+    # ── #11653 P1: a HELD entity is stripped from every reference set ────────
+    # ⛔ Withholding the entity from `payload["entities"]` while every claim that
+    # NAMES it keeps the name is not a hold — it is a Layer-1 rejection of the
+    # WHOLE session. `commit_schema` resolves `points[i].about_entities`,
+    # `events[i].about_entities` and the typed `subject`/`object` slots against
+    # the emitted entities; `sdk.commit_session` folds a `not l1.ok` into
+    # `errors` and returns `ok=False` WITHOUT POSTing, and the hosted door answers
+    # 422 before the first write. So the pre-fix trade — one duplicate node — would
+    # become "no memory at all", which is precisely the hazard `route_mentions`
+    # was built to avoid and the strip it implements is the recorded remedy:
+    # *"a hold that 422s the whole session … is worse than the phantom node it
+    # removed"*. An S3-held ENTITY is by definition a name the claims talk about,
+    # so this is the NORMAL case, not an edge.
+    #
+    # The operators half is the same hazard one step sideways: the
+    # mint-before-wire pass (#2552) materialises an unresolvable operator
+    # endpoint as a fabricated statement Point, so an operator naming the held
+    # entity must be DROPPED, not left to be minted.
+    #
+    # ⛔ Non-mutating: carriers this pass does not touch stay byte-identical and
+    # `embed_list` itself is never rewritten in place (the caller still owns it).
+    held_refs_stripped = 0
+    held_operators_dropped = 0
+    if _entity_holds:
+        _held_names: set[str] = set(_entity_holds)
+        _kept_events, _ev_stripped = _strip_carriers(
+            embed_list.get("events"), _held_names)
+        _kept_points, _pt_stripped = _strip_carriers(
+            embed_list.get("points"), _held_names)
+        _kept_operators, held_operators_dropped = _prune_held_operators(
+            embed_list.get("operators"), _held_names)
+        held_refs_stripped = _ev_stripped + _pt_stripped
+        embed_list = {**embed_list, "events": _kept_events,
+                      "points": _kept_points, "operators": _kept_operators}
+        if held_refs_stripped or held_operators_dropped:
+            warnings.append(
+                f"S3 HOLD (#11653): {held_refs_stripped} claim/event carrier(s) "
+                "had a held entity removed from about_entities/slots and "
+                f"{held_operators_dropped} operator(s) naming one were dropped "
+                "— the hold removes ONE node, never the session")
 
     # ── events (dependency order 2) ───────────────────────────────────────
     payload_events: list[dict] = []
@@ -11552,6 +11631,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             # a reader has to infer from the absence of nodes.
             "held_entities": sum(1 for r in held
                                  if r.get("kind") == _HELD_ENTITY_KIND),
+            # #11653 review P1: what the hold had to REMOVE to stay a hold rather
+            # than a rejected session — the carriers whose reference sets named a
+            # held entity, and the operators dropped instead of being minted.
+            # Additive and always present (0/0 on a run with no entity hold), so a
+            # reader can tell "nothing was stripped" from "nothing was
+            # attempted" without inferring either.
+            "held_entity_refs_stripped": held_refs_stripped,
+            "held_entity_operators_dropped": held_operators_dropped,
             "held_reasons": {
                 _why: sum(1 for r in held
                           if str(r.get("reason") or _lookup) == _why)
@@ -12208,39 +12295,20 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
             held_surfaces.add(surface)
             hold.setdefault(surface, verdict)
 
-    def _strip_reference_sets(carrier: dict) -> dict:
-        """Remove every held surface from BOTH reference sets Layer-1 resolves.
-
-        Returns ``carrier`` ITSELF when nothing changed (an untouched carrier
-        stays byte-identical and the caller's dicts are never mutated), else a
-        NEW dict. ⛔ `about_entities` alone leaves the slot dangling, and a
-        dangling slot is what Layer-1 reports as an extraction error.
-        """
-        out: dict = carrier
-        names = carrier.get("about_entities")
-        if isinstance(names, list):
-            pruned = [a for a in names
-                      if str(a).strip() not in held_surfaces]
-            if len(pruned) != len(names):
-                out = {**out, "about_entities": pruned}
-        slots = carrier.get("slots")
-        if isinstance(slots, dict):
-            stripped = _strip_held_slot_refs(slots, held_surfaces)
-            if stripped is not slots:
-                out = {k: v for k, v in out.items() if k != "slots"}
-                if stripped:
-                    out["slots"] = stripped
-        return out
-
+    # ⛔ ONE definition of the strip, shared with `execute_embed`'s #11653 hold:
+    # `_strip_reference_sets` is module-level precisely because a hold that lands
+    # AFTER this pass (S3's disambiguation, discovered inside `execute_embed`)
+    # owes the SAME two reference sets the SAME strip, and a second implementation
+    # is how the two would drift apart.
     for point in (embed_list.get("points") or []):
-        kept_points.append(_strip_reference_sets(point)
+        kept_points.append(_strip_reference_sets(point, held_surfaces)
                            if isinstance(point, dict) else point)
 
     for event in (embed_list.get("events") or []):
         if not isinstance(event, dict):
             kept_events.append(event)
             continue
-        stripped = _strip_reference_sets(event)
+        stripped = _strip_reference_sets(event, held_surfaces)
         if stripped is not event:
             stats["events_stripped"] += 1
         kept_events.append(stripped)
@@ -12533,6 +12601,66 @@ def _strip_held_slot_refs(slots: dict, held_surfaces: set[str]) -> dict:
             continue
         out[role] = refs
     return out if changed else slots
+
+
+def _strip_reference_sets(carrier: dict, held_surfaces: set[str]) -> dict:
+    """Remove every held surface from BOTH reference sets Layer-1 resolves.
+
+    Returns ``carrier`` ITSELF when nothing changed (an untouched carrier
+    stays byte-identical and the caller's dicts are never mutated), else a
+    NEW dict. ⛔ `about_entities` alone leaves the slot dangling, and a
+    dangling slot is what Layer-1 reports as an extraction error.
+
+    ⛔ WHY THIS IS THE ONLY IMPLEMENTATION. Layer-1 resolves a point's and an
+    event's ``about_entities`` AND their typed ``subject``/``object`` slots
+    against the emitted ``entities[]`` (``commit_schema``), so ANY hold that
+    withholds an entity from the payload owes both halves — a hold that strips
+    neither does not remove one node, it removes the session: the SDK drops the
+    payload without POSTing it and the hosted door answers 422. Two callers need
+    exactly that shape, at two different stages: ``route_mentions`` (#11021,
+    the referentiality hold, which runs BEFORE S3) and ``execute_embed``
+    (#11653, S3's disambiguation hold, which is discovered DURING the entity
+    loop). The parameter is the held set, not a closure, so there is one rule.
+    """
+    out: dict = carrier
+    names = carrier.get("about_entities")
+    if isinstance(names, list):
+        pruned = [a for a in names
+                  if str(a).strip() not in held_surfaces]
+        if len(pruned) != len(names):
+            out = {**out, "about_entities": pruned}
+    slots = carrier.get("slots")
+    if isinstance(slots, dict):
+        stripped = _strip_held_slot_refs(slots, held_surfaces)
+        if stripped is not slots:
+            out = {k: v for k, v in out.items() if k != "slots"}
+            if stripped:
+                out["slots"] = stripped
+    return out
+
+
+def _strip_carriers(carriers: object,
+                    held_surfaces: set[str]) -> tuple[list, int]:
+    """Strip held surfaces from every point/event carrier, with a strip count.
+
+    The count is of CARRIERS CHANGED, not of references removed: it is the
+    number a warning reports so "the hold touched N claims" is a measurement
+    rather than an inference, and a carrier that named nothing held is not
+    counted (``_strip_reference_sets`` returns it unchanged).
+    """
+    if not isinstance(carriers, list):
+        return [], 0
+    kept: list = []
+    stripped = 0
+    for carrier in carriers:
+        if not isinstance(carrier, dict):
+            kept.append(carrier)
+            continue
+        out = _strip_reference_sets(carrier, held_surfaces)
+        if out is not carrier:
+            stripped += 1
+        kept.append(out)
+    return kept, stripped
 
 
 def _operator_endpoint_surfaces(operators: object) -> set[str]:
