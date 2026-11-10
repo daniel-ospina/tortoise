@@ -854,9 +854,12 @@ class TestRelationWriteVerdict:
         relations = reg.list_relations()
         # Every verdict is one the schema declares — the vocabulary is closed.
         assert {r["write_verdict"] for r in relations} <= set(RELATION_WRITE_VERDICTS)
-        assert len(relations) == 36, (
+        assert len(relations) == 39, (
             "the declared relation population must not be reduced by deleting "
-            f"a declaration to make the verdict counts green, got {len(relations)}"
+            "a declaration to make the verdict counts green, got "
+            f"{len(relations)} — 36 before #11001's KIN-2 three goal "
+            "connections and 39 after, so a value BELOW 36 is a deletion and "
+            "a value above 39 is a new declaration that must be named here"
         )
         reported = {
             (r["pack"], r["predicate"])

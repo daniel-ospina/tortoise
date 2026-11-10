@@ -165,10 +165,14 @@ def test_h2_population_is_derived_not_remembered(artifact):
     assert pop["hierarchies"] == hier
     assert pop["declared"] == rel + hier, (
         "the declared population must be Σ relations + Σ hierarchies, derived")
-    assert pop["declared"] == 42, (
+    assert pop["declared"] == 45, (
         "the declared population MOVED — update every downstream reference "
         "(the issue body, the capstone row) rather than this assertion alone, "
-        "and check the move was a declaration change and not a deletion")
+        "and check the move was a declaration change and not a deletion. "
+        "42 → 45 is #11001's KIN-2: the three goal connections "
+        "(`goal --ownedBy--> Subject`, `epic --addresses--> goal`, "
+        "`indicator --addresses--> goal`) were APPROVED on 2026-11-05 and "
+        "declared by nobody until now — a declaration change, not a deletion)")
     for ns, section in sections.items():
         assert "relations" in section and "hierarchies" in section, (
             f"{ns} is missing a surface key — a zero must be an explicit 0, not "
@@ -718,7 +722,7 @@ def test_h11_the_distinct_denominator_is_measured_not_subtracted_in_prose(artifa
     assert restated == 4, (
         f"{restated} hierarchy row(s) restate a `relations[]` row — if this moved, "
         "the distinct denominator moved with it and the README/body must too")
-    assert pop["distinct_connections"] == 38
+    assert pop["distinct_connections"] == 41
 
     # The per-row flag is the JOIN's answer, not an inference of the census's: it
     # must agree with `declared_hierarchy()` entry for entry (H7's rule, one
