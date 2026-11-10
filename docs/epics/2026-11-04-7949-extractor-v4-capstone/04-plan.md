@@ -480,7 +480,7 @@ mapped logically."* That reframes A1, and the check found a gap that A1 as scope
 | vocabulary | what it holds | who reads it |
 |---|---|---|
 | **V1 — the ontology's declared Object↔Object section** | `docs/ONTOLOGY.md` **§3.7**: exactly **two** predicates — `wasDerivedFrom` (provenance) and `hasPart` (composition, inverse traversal covers "part of") | humans; the design |
-| **V2 — the ontology's enforced write vocabulary** | **§3.9** *"Valid Predicate Vocabulary (code)"*: **16 generic** predicates — `performs, produces, uses, authoredBy, ownedBy, managedBy, hasMember, holdsRole, memberOf, reportsTo, participatesIn, hasPart, related, dependsOn, references, wasDerivedFrom` — **plus the `about*` family's 6**, which live in `_VALID_ABOUT_EDGE_PREDICATES` and are written by a **different verb** | `create_edge` and `create_about_edge` |
+| **V2 — the ontology's enforced write vocabulary** | **§3.9** *"Valid Predicate Vocabulary (code)"*: **16 generic** predicates — `performs, produces, uses, authoredBy, ownedBy, managedBy, hasMember, holdsRole, memberOf, reportsTo, participatesIn, hasPart, related, dependsOn, references, wasDerivedFrom` — **plus the `about*` family's 6**, which `create_edge` also accepts (`_VALID_EDGE_PREDICATES`), while `create_about_edge`'s own `_VALID_ABOUT_EDGE_PREDICATES` holds **5** — it adds `aboutPoint` and drops `aboutAction`/`aboutSource` | `create_edge` and `create_about_edge` |
 | **V3 — what the packs declare** | `dev`: `decomposesInto`(→hasPart), `implements`(→addresses), `deploysTo`(→addresses), **`dependsOn`**(→addresses), `causes`(→supports), `fixes`(→addresses), `addresses`(→addresses) · `venture`: **`funds`, `produces`, `managedBy`, `holds`, `related`, `dependsOn`** · `product-strategy`: `addresses`, `opposes`, `supports` · **every one `mechanism: IMPL`** | `list_relations()`, the classifier's kind index, the write-path verdict |
 
 **The three mismatches, each load-bearing:**
@@ -524,8 +524,8 @@ core**. So:
 
 | path | derivation | where |
 |---|---|---|
-| **operator / label path** | ✅ **already derived** from the packs: `declared \|= {r.get("predicate") for r in reg.list_relations()}` | `tortoise/sdk.py:22253` |
-| **structural path** | ⛔ **a static literal** — and it is **1 of FIVE declarations in one file**, and **not the one the verdict reads**: `relation_write_paths` reads **`STRUCTURAL_WRITE_PREDICATES`** (the union), while `create_edge` gates on `_VALID_EDGE_PREDICATES` | `projection/edges.py:621` (`_VALID_EDGE_PREDICATES`) · `:639` (`_VALID_ABOUT_EDGE_PREDICATES`) · `:655` (`STRUCTURAL_WRITE_PREDICATES`) · `:54` (`DERIVABLE_STRUCTURAL_RELS`) · `:1129` (`structural_edge_carrier`) · the reader at `pack_registry.py:534` |
+| **operator / label path** | ✅ **already derived** from the packs: `declared \|= {r.get("predicate") for r in reg.list_relations()}` | `tortoise/pack_registry.py:549`, in `declared_relation_predicates()`, which `create_operator` calls at `tortoise/sdk.py:23188` |
+| **structural path** | ⛔ **a static literal** — and it is **1 of FIVE declarations in one file**, and **not the one the verdict reads**: `relation_write_paths` reads **`STRUCTURAL_WRITE_PREDICATES`** (the union), while `create_edge` gates on `_VALID_EDGE_PREDICATES` | `projection/edges.py:621` (`_VALID_EDGE_PREDICATES`) · `:639` (`_VALID_ABOUT_EDGE_PREDICATES`) · `:655` (`STRUCTURAL_WRITE_PREDICATES`) · `:54` (`DERIVABLE_STRUCTURAL_RELS`) · `:1129` (`structural_edge_carrier`) · the reader, `relation_write_paths`, at `pack_registry.py:615` |
 | **per-graph gating** | ✅ **the resolver exists and is THREE-VALUED** — `pack_state.graph_installed_namespaces(sdk, *, graph_name=None)`: `None` ⇒ no `:PackInstall` records ⇒ **catalog union**; a `frozenset` ⇒ recorded ∪ already-in-data; an **empty** frozenset ⇒ a configured graph whose set is deliberately empty (`#2728`), where the union fallback **must not** apply. The SDK v2 master's write gate stays ungated (`#5202`) | `tortoise/pack_state.py:1170`; caveat in `docs/EXPANSION_PACKS.md` (`#2714`/`#2728`) |
 
 ⛔⛔ **P0 from the substep-8 `duplication-architecture` pass: a derivation on `_VALID_EDGE_PREDICATES` alone would be
@@ -534,7 +534,7 @@ wrong three ways.**
 1. **It is not the set the verdict reads.** `relation_write_paths` reads **`STRUCTURAL_WRITE_PREDICATES`** — the
    union — and its own comment says a predicate added or removed *"THERE moves this verdict with it"*. Deriving
    the literal instead leaves **writer accepts / verdict refuses**, silently (the verdict never raises).
-   ⚠️ This exact defect was already fixed once at another layer: `pack_registry.py:500-509` records that reading
+   ⚠️ This exact defect was already fixed once at another layer: `pack_registry.py:633-636` records that reading
    *"only `_VALID_EDGE_PREDICATES`"* under-reported `aboutPoint`/`extractedFrom` as unwritable — **#8285 review P1**.
 2. **A derived predicate must carry THREE facts, not one name**: (i) is it admitted by `core ∪ installed_packs`;
    (ii) **which verb** accepts it (`create_edge` / `create_about_edge` / `ingest`'s `extractedFrom` exemption);

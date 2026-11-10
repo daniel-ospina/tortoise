@@ -15,8 +15,8 @@ produced the same way: asserted from a partial reading instead of re-measured.
   * "a `create_edge`-only pin leaves 31 untested" — 2 declarations also bind the structural path, so 33
     (the corpus is 35 kind-bearing at this head; this line read "31 → 30" before `main` added three).
 
-Each number below is re-measured from `packs/*/manifest.yaml` (offline: no graph, no registry boot, no
-network), so a manifest edit that makes a scope claim false reds here instead of rotting in prose. This is
+Each number below is re-measured from `packs/*/manifest.yaml` (offline: no graph, no SDK construction, no
+network; the pack registry is loaded from `packs/`), so a manifest edit that makes a scope claim false reds here instead of rotting in prose. This is
 the "dogfood the repo's own declared relations" pin the brief's CI shape asks for.
 
 It also pins the two DEFECTS the review found in the docs themselves — both are cheap, mechanical, and would
@@ -279,7 +279,7 @@ class TestTheDocsAreDiscoverableAndResolve:
     def test_every_cited_markdown_path_resolves(self, doc):
         """A cited `.md` must resolve from the citing doc, or be an UNAMBIGUOUS repo-wide basename.
 
-        7 files in this repo are named `04-plan.md`, so citing it bare from `docs/research/` is a reference
+        8 files under `docs/` are named `04-plan.md`, so citing it bare from `docs/research/` is a reference
         that does not resolve — the exact defect the review found.
         """
         basenames = Counter(p.name for p in (REPO_ROOT / "docs").rglob("*.md"))

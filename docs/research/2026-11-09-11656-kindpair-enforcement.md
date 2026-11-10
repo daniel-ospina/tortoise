@@ -46,8 +46,9 @@ that must be settled before a scope can converge.
 ### 2.1 The declared relations do not ride `create_edge`
 
 Measured over all 7 shipped packs (`packs/*/manifest.yaml`), **re-measured at `3d63339d` after `main`
-was merged into the branch** (the merge added three kind-bearing declarations — `pm:card→pm:card`,
-`pm:sprint→pm:card`, `pm:card→Subject`, all `IMPL` — plus `pm:assignedTo`): **36 declared relations, 35
+was merged into the branch** (the merge added three kind-bearing declarations — `pm:blocks` → `pm:card→pm:card`,
+`pm:partOfSprint` → `pm:sprint→pm:card`, `pm:assignedTo` → `pm:card→Subject`, all `IMPL` — plus `pm:onBoard`,
+which declares no kinds): **36 declared relations, 35
 carrying `fromKind`+`toKind`.** ⚠️ **All 35 carry a CORE mechanism** — 34 `IMPL` plus 1 `NAND`
 (`product-strategy:competesWith`) — and `relation_write_paths()` (`pack_registry.py:615`) binds the
 **operator** path on `mechanism ∈ CORE_PREDICATES`. That includes `hasPart` and `dependsOn`, which also
@@ -632,7 +633,9 @@ distinction is recorded where the next lane reads it, with a line naming the def
 folded, `equivalentTo` included). The graph already holds the confirming constraint: *"the closure must be
 over kinds, iterated to a fixpoint"* (`pt_727969bd…`).
 
-**D3 — binding scope: unchanged from §5** (the declaring pack's vocabulary), now with a second,
+**D3 — binding scope: unchanged from §5 option B** (the vocabulary the declaration **names** — the
+declaring pack ∪ any it names explicitly; ⚠️ **not** the narrower "the declaring pack's vocabulary"
+reading, which leaves 8 of the 35 declarations permanently `unbound` — see the scope's §5.2), now with a second,
 independent confirmation: `_relation_endpoint_refs` is already **per-pair**, and its docstring records
 that namespace-granular scoping was *measured* to make the metric worse.
 

@@ -29,8 +29,8 @@ A pack declares `relations[]: {predicate, mechanism, fromKind, toKind}`. **Nothi
 edge's endpoints have those kinds.** 36 declared relations across 7 packs; 35 carry `fromKind`+`toKind`.
 
 > ⚠️ **Re-measured at `3d63339d` after `main` was merged into this branch.** The merge brought three new
-> kind-bearing declarations (`pm:card→pm:card`, `pm:sprint→pm:card`, `pm:card→Subject`, all `IMPL`) plus
-> `pm:assignedTo`. The figures below were first measured at `e809803e` (32 kind-bearing, 31 `IMPL` + 1 `NAND`,
+> kind-bearing declarations (`pm:blocks` → `pm:card→pm:card`, `pm:partOfSprint` → `pm:sprint→pm:card`,
+> `pm:assignedTo` → `pm:card→Subject`, all `IMPL`) plus `pm:onBoard`, which declares one `from`/`to` and no kinds. The figures below were first measured at `e809803e` (32 kind-bearing, 31 `IMPL` + 1 `NAND`,
 > 30 Object→Object, 7 disabled by §5.2) and are restated here at **this** head: **35 kind-bearing,
 > 34 `IMPL` + 1 `NAND`, 32 Object→Object, 8 disabled by §5.2**. The argument does not move — every
 > kind-bearing declaration still rides the operator path, and `create_edge` is still the wrong seam — but the
@@ -207,7 +207,9 @@ branch — check before assuming it is still needed.)
 Read `enforcement.relations[predicate]` through the existing seam (§2.1). ⚠️ **Fix in the same change:**
 `resolve_enforcement` (`enforcement.py:56`) iterates `reg.packs.values()` — the **whole catalog** — and takes
 the **max** severity, so one pack's `block` would block another pack's unrelated edge on the same predicate.
-Resolve over the **installed** set. **This bug is live today** for the label-leg check.
+Resolve over the **installed** set. **This bug is live today** for the two `kind=` callers
+(`projection/entities.py:341`, `kind_classifier.py:364`); the label leg never reaches this seam —
+`create_operator` does its own inline membership check (`enforcement.py:6`).
 
 ### 5.5 The prevention half (D5) — extend, and do not add a fourth resolver
 
