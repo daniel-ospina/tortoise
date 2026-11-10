@@ -5985,8 +5985,23 @@ class TestSiteIconAndSocialPreviewContract:
                            self.WEB / "apps" / "blog-admin" / "dist" / "index.html"],
                           self.DASHBOARD_ROOT, self.ICON_ORIGINS),
         }
+        # ⛔ `assert pages` ALONE IS NEARLY VACUOUS HERE: two of the three surfaces build
+        # their list from LITERALS, so truthiness could only ever fail for `marketing`, and
+        # the app surface's `glob("*.html")` half could shrink to nothing without a word.
+        # Names are asserted instead — a page that stops being found is the failure this
+        # guard exists to notice, and it must not be quieter than a page that breaks.
+        expected_pages = {
+            "marketing": 14,
+            "app": 5,
+            "app-admin": 1,
+        }
         for label, (pages, root, origins) in surfaces.items():
             assert pages, f"no {label} pages found — the guard would pass vacuously"
+            assert len(pages) >= expected_pages[label], (
+                f"the {label} surface found only {len(pages)} page(s), not the "
+                f"{expected_pages[label]} it declares: "
+                f"{sorted(p.name for p in pages)} — a page that stopped being discovered "
+                "passes every assertion below by not being graded")
             violations = []
             for page in pages:
                 violations += self._surface_icon_violations(
@@ -6060,12 +6075,13 @@ class TestSiteIconAndSocialPreviewContract:
         violations = self._icon_trio_violations(
             page_name, head, png, ico_sizes, apple, origins=origins)
 
+        # ⛔ NO `len(hrefs) != 3` HERE. It refused an HONEST page that adds a fourth icon
+        # link (an SVG variant, a second `sizes=192x192` slot) with a message claiming the
+        # trio was missing, which is the opposite of what happened — and it added no
+        # detection power over `_icon_trio_violations`, which already reds a page that omits
+        # any one of the three. A guard that reds honest artwork is the guard the next person
+        # weakens instead of fixes (review round 2, measured on a `/tmp` copy of signup.html).
         hrefs = self._icon_hrefs(head)
-        if len(hrefs) != 3:
-            violations.append(
-                f"{page_name} declares {len(hrefs)} icon link(s) — every surface must "
-                "declare the ICO, the PNG and the apple-touch icon, or the tab falls back "
-                "to whatever the platform guesses")
         for href in hrefs:
             if href.startswith("data:"):
                 violations.append(
