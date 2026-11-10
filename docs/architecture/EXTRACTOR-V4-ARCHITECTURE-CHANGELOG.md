@@ -1793,7 +1793,7 @@ unnamable declared document is its own fail-closed verdict. (2) An empty surface
 return `({}, [])`, i.e. the state half of the gate compared nothing and reported agreement — now a first-class
 `surface is EMPTY` verdict. Both are pinned by tests that fail without the guard.
 
-**Three more fail-opens found in cycles 4 and 5, all fixed before landing.** (3) An unreadable surface returned an
+**Three more fail-opens found in cycles 4 and 5, all fixed before landing, and a fourth in cycle 7.** (3) An unreadable surface returned an
 empty marker set with NO error: `is_dir()` answers about the inode and `Path.rglob` swallows the `PermissionError`
 that `os.scandir` raises, so a surface at mode `0o000` read exactly like a declaration-free one — the gate's primary
 direction (a marker with no registry row) silently empty for every document behind it. (4) The first fix probed only
@@ -1805,6 +1805,17 @@ separates `architecture/x.md` from `epics/x.md` — but nothing asserted the bas
 the second, which is precisely the cross-surface alias the prefix exists to prevent. All three are pinned by tests
 that fail without the guard (mutation-checked). The `0o000` shapes need local filesystem state — git cannot store
 such a directory — so those two tests `chmod` to build the shape and skip on a box that can read it anyway.
+
+**(6) A fourth fail-open, found in cycle 7, was a STATED ASSUMPTION that stated the wrong failure mode.**
+`_scanned_targets` computed `surface_root = surface.parent.parent` — "every surface sits exactly two levels below
+the root" — so a surface at any other depth resolved its entries against the wrong root and dropped every one of
+them from `targets`. The comment there called that "a FALSE RED … never a silent pass"; measured, it is the
+fail-open. With a correctly-rooted surface also in `targets`, `scanned_targets` stays non-empty, so the
+per-document branch still runs for the OTHER surface and a declared-but-UNMARKED document in the deeper surface is
+reported NOWHERE (`membership_errors -> []` on a tree where the deeper document carries no marker at all). Both
+real surfaces sit at depth 2, which is why it was latent. The root is now DERIVED from the surface — its trailing
+components are matched against the entry's leading ones, so the document is `surface / <the rest>` and no root is
+ever counted — and the pin builds the depth itself.
 
 **Two documentation-truth defects found in review cycle 2, and two factual defects in cycle 3.** Cycle 2: the
 registry header said *"these thirteen are every mechanism either document names"* — inside a sentence whose *"it is
