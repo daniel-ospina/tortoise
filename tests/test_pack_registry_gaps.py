@@ -2522,14 +2522,21 @@ class TestReadFilterKinds:
         members (#11677, `test_a_pack_kind_registered_under_a_core_name_round_
         trips_both_spellings`). That pin covers the MEMBERSHIP table.
 
-        This one covers the READ-FILTER table, and it is the reason the
-        round-trip lives in `_closure` rather than at either builder's loop: the
-        two tables share ONE source expression, so a round-trip applied to the
-        membership walk only would leave `read_filter_kinds("core:team")`
-        unable to reach a row stored as `synth:team` — a wrong-empty for a
-        spelling the registry says is the same kind (#6146), while every
-        ancestor/descendant assertion still passed. It reds if the round-trip
-        is hoisted back out of `_closure`.
+        This one covers the READ-FILTER table. Both tables share ONE source
+        expression, which is why the round-trip lives in `_closure` rather than
+        at either builder's loop: a round-trip applied to the membership walk
+        only would leave `read_filter_kinds("core:team")` unable to reach a row
+        stored as `synth:team` — a wrong-empty for a spelling the registry says
+        is the same kind (#6146), while every ancestor/descendant assertion
+        still passed. Measured: it reds when the round-trip is hoisted to the
+        MEMBERSHIP builder's loop, and on that mutant #11677's pin stays green —
+        that pin sees `expand_kind` alone, so this test is the only catch.
+
+        ⚠️ One hoist it does NOT catch, stated so the pair is not mistaken for a
+        redundant one: hoisting the round-trip into the read-filter loop only
+        leaves this assertion green (both spellings gain `synth:team` after the
+        fact) and is caught instead by #11677's membership pin. Together the two
+        pins hold the round-trip inside `_closure`; neither does alone.
         """
         (tmp_path / "synth").mkdir()
         (tmp_path / "synth" / "manifest.yaml").write_text(
