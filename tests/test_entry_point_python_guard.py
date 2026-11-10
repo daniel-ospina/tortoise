@@ -959,7 +959,7 @@ def test_the_record_exemption_prose_counts_the_set_it_describes():
 
 
 def test_the_prose_pin_reads_through_formatting_but_not_wording():
-    """Non-vacuity of the tolerance, both directions, through the seam AND the pin.
+    """Non-vacuity of the tolerance, both directions, through the seam AND the pin's body.
 
     The pin reds through `_cardinality_claims_in`, and the reason the tolerance matters
     is that the pin's failure message prescribes the one remedy that disables it —
@@ -970,11 +970,15 @@ def test_the_prose_pin_reads_through_formatting_but_not_wording():
 
     Two levels, on purpose. The first half drives `_cardinality_claims_in` — the seam — and
     labels each arm with the mechanism it measures. The second half drives
-    `_assert_the_prose_names_the_set_size`, the PIN's own body, with synthetic sources: that
-    is how the pin's CALL SITE is measured. With the pin inlined and this seam intact the
-    whole file used to stay green (measured, #11777 review round 1), so the tolerance was
-    dead code that read as coverage; an inlined pin now reds in the second half on the first
-    `**four**` variant, because an inline copy cannot read emphasis.
+    `_assert_the_prose_names_the_set_size` — the pin's BODY, not its call site — with synthetic
+    sources: an inline extraction in THAT body reds here on the first `**four**` variant,
+    because an inline copy cannot read emphasis (measured: replacing the body's seam call with
+    a non-tolerant `_stated_cardinalities` walk leaves `2 failed` in the targeted selection).
+    The pin TEST's body is a DIFFERENT surface that this half cannot see — with the extraction
+    inlined there and this seam intact the whole file stayed GREEN at `354ef36c0a` (measured,
+    #11777 review round 7, finding 1), which is why
+    `test_the_prose_pin_is_the_code_path_the_artifact_runs` holds that surface separately, by
+    execution.
 
     The opposite direction matters just as much — a REWORDED sentence must still read as
     absent, or the pin becomes a fuzzy match that passes on prose it never read.
