@@ -5807,16 +5807,33 @@ _RESOLUTION_NARRATIVE_MAX_CHARS = 4000
 #: exists to carry: a narrative introduces who someone is early and re-uses the
 #: short form later, so "Michael … our contact at Kaironis" (head) and "Mike
 #: said" (tail) can sit on opposite sides of a long session.
+#:
+#: The marker lives INSIDE the untrusted body, so a session's own text can carry
+#: it verbatim and appear to claim an elision that never happened. That claim is
+#: therefore made by the TRUSTED turn instead (`_resolution_prompt` says the
+#: middle was omitted only when ``_bounded_narrative`` reports it really was),
+#: and the marker is a separator, never the evidence that truncation occurred.
 _RESOLUTION_NARRATIVE_ELISION = "\n[… story truncated …]\n"
 
 
-def _bounded_narrative(story: str) -> str:
-    """``story`` trimmed to the constant, keeping both ends."""
+def _bounded_narrative(story: str) -> tuple[str, bool]:
+    """``story`` trimmed to the constant, keeping both ends.
+
+    Returns ``(body, truncated)``. The body — elision marker included — is at
+    most ``_RESOLUTION_NARRATIVE_MAX_CHARS``: the marker is 23 characters of
+    the budget rather than 23 characters on top of it, so the constant states
+    what the prompt actually carries (a guard or budget computed from it must
+    not under-count the region).
+
+    ``truncated`` is returned rather than re-derived at the call site: two
+    places deciding *"was this elided?"* is how the prompt and its own
+    description drift apart, the same class of defect #11654's first cut had.
+    """
     cap = _RESOLUTION_NARRATIVE_MAX_CHARS
     if len(story) <= cap:
-        return story
-    half = cap // 2
-    return f"{story[:half]}{_RESOLUTION_NARRATIVE_ELISION}{story[-half:]}"
+        return story, False
+    half = (cap - len(_RESOLUTION_NARRATIVE_ELISION)) // 2
+    return f"{story[:half]}{_RESOLUTION_NARRATIVE_ELISION}{story[-half:]}", True
 
 
 def _resolution_prompt(existing: list[dict], new_names: list[str],
@@ -5851,13 +5868,23 @@ def _resolution_prompt(existing: list[dict], new_names: list[str],
     # this fix exists to prevent, delivered through its own evidence channel.
     # The helper returns "" for an empty body, which is what keeps the
     # narrative-absent render byte-identical to the pre-#11654 prompt.
-    block = _render_untrusted_block(
-        "S1 STORY", _bounded_narrative(story))
+    body, elided = _bounded_narrative(story)
+    block = _render_untrusted_block("S1 STORY", body)
     if block:
         context = ("NARRATIVE (the S1 story of the conversation these names "
                    "come from — the evidence that answers whether a new "
                    "name and an existing entity are the SAME real "
                    f"entity):\n{block}\n\n")
+        if elided:
+            # The elision marker sits INSIDE the untrusted body above, so the
+            # session could carry that text verbatim. The claim that evidence
+            # is missing is therefore made HERE, in the trusted turn, and only
+            # when the pipeline really dropped something — and it also warns
+            # against reading across the cut, since the head and the tail are
+            # not adjacent in the original.
+            context += ("The story was longer than the space allowed: its "
+                        "MIDDLE is omitted above, so the head and the tail "
+                        "are NOT adjacent in the original.\n\n")
         rule = ("The NARRATIVE is ADDITIONAL evidence for identity: when it "
                 "establishes that a new name and an existing entity are the "
                 "same referent (an alias, a short form, a surname, a "
