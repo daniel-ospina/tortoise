@@ -597,7 +597,7 @@ _SURFACES_OUT_OF_SCOPE: dict[str, str] = {
 #: takes the guarded form, because its purpose is that a reader re-runs it. That
 #: is why `docs/plans/2026-09-26-5042-…:208` and
 #: `docs/ci/merge-throughput-measurements.md:524` stay `uv run python` while the
-#: three entries below do not.
+#: four entries below do not.
 #:
 #: #11744 (main red at `3173971283f9`): the `11689` plan doc's entry is the
 #: `$`-prompted transcript WITH its captured `FAIL — 1 problem(s): …` output, under
@@ -628,19 +628,35 @@ _DELIBERATE_BARE_FORM: frozenset[tuple[str, str]] = frozenset(
             "$ python3 tools/edge_census.py census --uri "
             "'docker://:falkordb@localhost:6379' \\",
         ),
-        # RETIRED — do NOT re-add this key (#11757). It exempted the plan doc's
-        # `$ python3 tools/capstone_preregistration_check.py …` transcript. #11756
-        # then rewrote that line to `uv run python` (measured: the new form
-        # reproduces the block's recorded FAIL output verbatim, so the record still
-        # describes a command that runs), which left this key matching NO live line —
-        # `test_the_record_exemptions_all_still_match_a_live_line` reddened main.
-        # The exemption is dead weight now, not protection: the doc no longer
-        # carries the bare form, so the doc-scan test does not need it either.
-        # ⛔ Re-adding THIS key reddens the dead-key test again, because its text
-        # (`$ python3 …`) no longer appears in the doc. Membership is the exact
-        # stripped line, so an exemption can only be revived by restoring the line
-        # it names — never by re-declaring the key. If that record is ever put back
-        # in the bare form, re-derive the key from the live line and say why there.
+        # ⛔ REVIVED, by #11757's own rule. That PR removed this key as dead and said
+        # how it comes back: "an exemption can only be revived by restoring the line
+        # it names — never by re-declaring the key." The line IS back: `#11759`
+        # (`6ba6fac9844a`) restored the record to the form that ran and stated, in the
+        # plan doc itself, that "the line is exempted in
+        # `tests/test_entry_point_python_guard.py`'s `_DELIBERATE_BARE_FORM`" — a
+        # sentence that was FALSE on `main` until this key returned.
+        #
+        # Both PRs were correct at their own head and red together, which is why the
+        # key is neither a mistake nor a re-declaration:
+        #   · `#11756` (`7c45d5af1f`) rewrote the record to `uv run python`, leaving
+        #     this key matching no live line;
+        #   · `#11757` deleted the then-dead key — correctly, at a head that predated
+        #     `#11759` and merged ~3 min after it;
+        #   · `#11759` restored the `python3` record relying on a key `#11757` had
+        #     already removed.
+        # The merged tree therefore advertised the refused form with nothing exempting
+        # it: `test_no_doc_or_usage_advertises_the_form_the_guard_refuses` red on
+        # `origin/main` at `900d4aafc61a`, with no branch content involved.
+        #
+        # Keeping the record verbatim is `#11759`'s recorded decision (THE BOUNDARY
+        # above: rewriting a RECORD falsifies evidence provenance), so the key returns
+        # rather than the line being rewritten — the resolution that satisfies both
+        # PRs' stated rules instead of reversing either.
+        (
+            "docs/plans/2026-11-10-issue-11689-e1e2-owned-floors.md",
+            "$ python3 tools/capstone_preregistration_check.py --dir "
+            "docs/evidence/7949-capstone \\",
+        ),
     }
 )
 
