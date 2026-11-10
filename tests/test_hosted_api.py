@@ -14175,6 +14175,17 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         # Registered the same way the previous arm was (#10142, f8970b536): a new
         # fail-closed arm gets a category entry, not a rewritten message.
         "quota count sdk unavailable",
+        # #10967: the CAPTURE door's own 503 when the allowance carry misses its
+        # control-plane bound (`hosted_api._capture_control_plane_unavailable`).
+        # Same category as "the team allowances could not be resolved for" a few
+        # lines above, and for the same reason: the customer hit no ceiling — WE
+        # failed to READ their allowance, and the message says exactly that
+        # ("this team's plan limits could not be read"). No plan a customer could
+        # buy lifts a control-plane stall, so the retry it advertises is the only
+        # true remedy and the contact path would promise an upgrade that cannot
+        # exist. Registered as a category entry, not a rewritten message, which is
+        # this list's own rule (#10142, f8970b536).
+        "this team's plan limits could not be read",
         "resolve_org_limits requires a org_id", "cohort is larger than the",
         "cannot bound anything", "cannot be evaluated",
         "an unscoped cap would apply", "Import artifact exceeds the size cap",

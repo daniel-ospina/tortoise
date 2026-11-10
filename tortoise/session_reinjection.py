@@ -180,6 +180,7 @@ from tortoise.retrieval import (
     DEFAULT_POOL_SESSION_CAP,
     TURN_POINT_KIND,
     guard_and_recap_pool,
+    normalize_session_key,
     session_key_of,
 )
 
@@ -353,6 +354,23 @@ def seeded_sessions(pool: list[dict], *,
     seeded hit to resolve its Session (``Session-[:CONTAINS]->hit``), so a
     seed without one would spend the budget on a session the query cannot
     name. Pool hits always carry their id.
+
+    ⛔ The emitted ``session_id`` is :func:`retrieval.normalize_session_key`'d
+    (#11382), whichever ``session_key`` produced it — including a
+    caller-supplied one. This value is not cosmetic: it is the ``seed_order``
+    anchor :func:`reinjection_merge_order` splices a fetched group against,
+    and the group key comes from the GRAPH (``coalesce(p.session_id, s.id)``)
+    while this one comes from the POOL HIT — two separately-produced strings.
+    Normalising both sides is the fix; normalising one side is the bug. It is
+    also why a custom key cannot reintroduce the mismatch by being raw: this
+    function normalises what it EMITS, and
+    :func:`reinjection_merge_order` normalises what it KEYS on (both the
+    splice anchor and the ``guard_and_recap_pool`` re-cap it hands the key
+    to), so a raw custom key is normalised on both halves of the pair rather
+    than on one. ⚠️ A caller that reaches a THIRD grain with the same raw key
+    (e.g. ``dedup_pool`` directly) makes its own decision — the default
+    ``session_key_of`` is normalised, and that is the only combination this
+    arm ships.
     """
     if not pool or window < 1 or limit < 1:
         return []
@@ -366,7 +384,7 @@ def seeded_sessions(pool: list[dict], *,
         if admitted is not None and not admitted(hit):
             continue
         admitted_seen += 1
-        sid = key(hit)
+        sid = normalize_session_key(key(hit))
         pid = str(hit.get("id") or "")
         if not pid or not _is_real_session_id(sid) or sid in seen:
             continue
@@ -375,6 +393,78 @@ def seeded_sessions(pool: list[dict], *,
         if len(out) >= limit:
             break
     return out
+
+
+def _merge_key(value: object) -> str:
+    """The COMPARISON form of a key in :func:`reinjection_merge_order`'s
+    namespace (#11382), leaving the ``idx:`` PHANTOM namespace byte-identical.
+
+    Two different normalisations are wanted in one namespace, and conflating
+    them is a bug in either direction:
+
+    * a SESSION IDENTITY is compared after :func:`retrieval.normalize_session_key`
+      (``strip``) — the seed key, the graph group key and the splice anchor
+      must agree on ``"  s1  "`` vs ``"s1"``;
+    * a PHANTOM bucket (``idx:{index}``, ``idx:point:{id}``) is passed through
+      UNTOUCHED, because its payload is an identity, not a session id: a
+      Point id carrying boundary whitespace is a DIFFERENT Point, so
+      stripping it would fuse two distinct hits into one bucket and let the
+      C5 cap drop a base hit (measured: ``dedup_pool`` keeps ``['p1','p1 ']``
+      while a stripped key keeps ``['p1']``). It would also make this key
+      disagree with :func:`retrieval.session_key_of` — the pool authority
+      whose ``idx:`` legs interpolate the raw payload on purpose.
+
+    With that split, applying this to ``session_key_of``'s output is a true
+    no-op (its identity legs already return the normalised form), which is
+    what keeps the DEFAULT path of the merge byte-identical.
+
+    ⚠️ The exemption is on the WHOLE key, so the two sides must agree on
+    spelling INSIDE the ``idx:`` namespace too. A bespoke caller that builds
+    its own raw ``seed_order`` carrying a padded ``idx:``-prefixed id
+    (``"idx:3 "``) while its fetch returns ``"idx:3"`` loses that group:
+    it never enters ``order``, so it is not spliced AND not tailed (measured;
+    ⚠️ the reason is the ``order`` membership, not an empty ``groups`` — with
+    a second valid group present that group still splices and the padded one
+    is simply never looked up). Nothing in the shipped paths can do that —
+    ``seeded_sessions`` rejects every ``idx:`` key (``_is_real_session_id``)
+    and the fetch builds both sides from the same stored string.
+
+    ⚠️ A non-``str`` key maps to ``""``, i.e. it is not a session. MEASURED,
+    for a bespoke caller whose ``session_key`` returns an ``int`` (e.g. the raw
+    ``lme_session_index``): ``seeded_sessions`` drops every seed BEFORE any
+    fetch (``[]`` — there is nothing left to collapse into a bucket), and
+    ``reinjection_merge_order`` drops the groups too, returning the base pool's
+    own order. Pre-#11382 the two halves differed: ``seeded_sessions`` RAISED
+    ``AttributeError`` on such a key (it reaches ``.startswith`` through
+    ``_is_real_session_id``) while ``reinjection_merge_order`` matched and
+    spliced it, so the pair never "worked" together — the direction of this
+    change on that path is a DROP, not a fusion — and
+    ``test_a_non_str_custom_key_is_dropped_not_stringified_11382`` pins it,
+    because the stringifying alternative (``str(5)`` → a session literally
+    named ``"5"``, which CAN fuse with a real one) passes every other test.
+    No SHIPPED caller supplies a
+    custom ``session_key=`` to this pair: the only shipped sites that pass one
+    to ``dedup_pool`` are ``tortoise/ask_lane.py``:607,
+    ``tools/ask_recall_bench.py``:276 and ``tools/gen_ask_transcripts.py``:215
+    (``guard_and_recap_pool`` forwards its own ``None``-default parameter, and
+    the three ``tools/longmem_eval/retrieve.py`` calls all take the default).
+    The TESTS do supply one — ``session_key=raw_key`` in
+    ``tests/test_session_reinjection_rules.py`` is what pins the merge
+    contract — and ``dedup_pool``'s custom-key path is covered in
+    ``tests/test_ask_sdk.py`` / ``tests/test_ask_retrieval_levers.py``. So this
+    is a bespoke-path change, and it is the same fail-closed direction
+    :func:`retrieval.normalize_session_key` takes everywhere else. ⚠️ Where the
+    collapse IS observable is ``dedup_pool``'s per-session cap: every
+    non-``str`` key becomes the ONE ``""`` bucket, so a bespoke caller that
+    keyed by an ``int`` now shares one cap window across sessions it used to
+    keep apart (no shipped caller is in that shape).
+    """
+    text = value if isinstance(value, str) else ""
+    if not text:
+        return ""
+    if text.startswith("idx:"):
+        return text
+    return normalize_session_key(text)
 
 
 def source_session_chunk_pass(
@@ -434,7 +524,11 @@ def source_session_chunk_pass(
       ``ok``            — the query ran (False on any failure).
       ``by_session``    — {session key: [{id, session_id,
                           lme_chunk_index}]} post-budget, deterministic
-                          order, DISTINCT ids.
+                          order, DISTINCT ids. The key AND each row's
+                          ``session_id`` are
+                          :func:`retrieval.normalize_session_key`'d
+                          (#11382) — see the loop's own note for why the
+                          graph side and the seed side must agree.
       ``total``         — the injected DISTINCT-item count (== sum of the
                           groups).
       ``dropped_by_cap``— rows the per-session/total budgets dropped.
@@ -496,7 +590,25 @@ def source_session_chunk_pass(
     total_cap_hit = False
     seen_pids: set[str] = set()
     for pid, sid, idx in rows or []:
-        sid = str(sid or "")
+        # #11382: the group key and the seed key are two INDEPENDENTLY
+        # produced strings (this one from the graph, the seed one from the
+        # pool hit), so both run through the same normalisation. Without
+        # this the seed is CHARGED (it spent a graph pass, and the total
+        # budget below) and then DROPPED, because ``reinjection_merge_order``
+        # builds its groups by iterating ``seed_order``: a padded stored id
+        # never matched the stripped seed, surfacing as ``sessions=0,
+        # injected=0`` with a non-zero ``total`` and nothing naming why.
+        # Collapsing two raw spellings of one session (``s1`` / ``  s1  ``)
+        # into one group is the intended reading — they ARE one identity —
+        # and the per-session cap then counts them jointly.
+        # ⚠️ The ``str(...)`` here is a THIRD rule for a non-``str`` stored id
+        # (it coerces it to a name, where :func:`retrieval.session_key_of`
+        # discards it and :func:`_merge_key` maps it to ``""``). It is
+        # pre-existing and unreachable through the shipped write door
+        # (``ids.session_id_refusal`` refuses a non-``str``), so the "one
+        # helper on every side" invariant above holds for ``str`` identities
+        # only — stated rather than left to be inferred.
+        sid = normalize_session_key(str(sid or ""))
         pid = str(pid or "")
         if not sid or not pid or pid in seen_pids:
             continue
@@ -579,8 +691,36 @@ def reinjection_merge_order(
     """
     if not pool:
         return list(pool)
-    key = session_key if session_key is not None else session_key_of
-    order = list(seed_order) if seed_order is not None else list(added_by_session)
+    # #11382: the merge is the SECOND half of the same comparison the seed
+    # makes, so BOTH SIDES of it run through :func:`_merge_key` — the pool
+    # key, the ``seed_order`` / ``added_by_session`` side, and the key handed
+    # on to ``guard_and_recap_pool``. Normalising only the pool side is a
+    # REGRESSION, not a partial fix: a caller passing a self-consistent RAW
+    # trio (raw ``session_key``, raw ``seed_order``, raw group keys) matched
+    # before and would stop matching, sending BOTH groups to the defensive
+    # TAIL (measured: ``['p1','p2','p3','t1','t9']`` instead of
+    # ``['p1','t1','p2','p3','t9']``) — reader-visible, because the reader
+    # consumes a PREFIX of the pool. See :func:`_merge_key` for why the
+    # phantom ``idx:`` namespace is passed through instead of stripped.
+    raw_key = session_key if session_key is not None else session_key_of
+
+    def key(hit: dict) -> str:
+        return _merge_key(raw_key(hit))
+
+    raw_order = (list(seed_order) if seed_order is not None
+                 else list(added_by_session))
+    order: list[str] = []
+    for raw_sid in raw_order:
+        sid = _merge_key(raw_sid)
+        if sid and sid not in order:
+            order.append(sid)
+    # Every group arrives under its RAW key; index them by the merged form so
+    # a raw group key still meets its normalised seed.
+    groups_in: dict[str, list[dict]] = {}
+    for raw_sid, rows in added_by_session.items():
+        sid = _merge_key(raw_sid)
+        if sid:
+            groups_in.setdefault(sid, []).extend(rows or [])
     last_rank: dict[str, int] = {}
     for i, hit in enumerate(pool):
         last_rank[key(hit)] = i
@@ -588,7 +728,7 @@ def reinjection_merge_order(
     groups: dict[str, list[dict]] = {}
     for sid in order:
         keep: list[dict] = []
-        for hit in (added_by_session.get(sid) or []):
+        for hit in (groups_in.get(sid) or []):
             hid = hit.get("id")
             if not hid or hid in seen:
                 continue

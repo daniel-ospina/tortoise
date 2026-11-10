@@ -507,6 +507,93 @@ def validate_validity_window(valid_from: object, valid_to: object) -> None:
     change outside this issue. Equality is well-formed: a zero-length
     ``[t, t]`` window is legal.
 
+    ⚠ HOST-DEPENDENT FOR A ZONE-LESS DATE-TIME (#11646, recorded not endorsed).
+    A producer-shaped bound (``2023/05/20 (Sat) 02:21``) is a zone-less
+    date-TIME, and #3982 recorded that such a value stays NAIVE, so its epoch is
+    read in the READER's zone. #11646 made that shape ORDERABLE here for the
+    first time — before it, the value bucketed as unparseable and this guard
+    skipped the pair on every host. What it decides now depends on which bound
+    is the naive one, so state it exactly rather than as one predicate:
+
+    * producer as the START, other bound a stated instant (the pinned pair):
+      refusal is ``reader_offset < separation``, where ``separation`` is the
+      NAIVE bound's WALL CLOCK minus the other bound's instant (here 02:21 over
+      an anchored UTC midnight = 2h21 = 8460 s). ⚠ It is the SEPARATION, not the
+      difference of the two sort keys: the key of the naive bound has already
+      absorbed the reader's offset (measured at ``Africa/Johannesburg``, where
+      the key difference is 1260 s while the true threshold is 8460 s, so a
+      formula written in keys predicts the wrong verdict for both orientations);
+    * producer as the END: the same separation, and the comparison INVERTS —
+      ``reader_offset > separation``;
+    * BOTH bounds producer-shaped: ONE host reads both, so the reader's offset
+      CANCELS — EXCEPT where the pair straddles an OFFSET TRANSITION on that
+      host (a DST change OR a permanent standard-offset change) that leaves one
+      of the two local times in a NONEXISTENT HOUR AND the OTHER bound is read at
+      the POST-transition offset — which happens only for a WALL-INVERTED pair
+      whose END is in the gap, or a non-inverted pair whose START is in the gap
+      and whose END is after it. A bound in the gap is read at the PRE-transition
+      offset, so a non-inverted END pair and a WALL-INVERTED START pair read BOTH
+      bounds at that same offset and cannot move (``02:50`` and ``01:50`` on
+      2023-03-12 are both -08:00). Given different offsets, WHEN the verdict
+      moves follows the orientation, because only the NONEXISTENT bound is
+      shifted:
+        - non-existent bound is the END: a WALL-INVERTED pair flips when
+          ``separation <= shift`` — the shift un-inverts it into a well-formed
+          window of length ``shift - separation``, zero-length exactly at
+          equality (measured at a 60 min shift: 20, 30 and 60 min separations
+          flip, 61 min does not). A NON-inverted END pair never
+          flips: the gap host reads the same separation-long window as a
+          transition-free host, because BOTH bounds land on the SAME
+          pre-transition offset;
+        - non-existent bound is the START, the other bound AFTER the
+          transition: the flip needs ``separation < shift``. At EXACTLY the shift
+          the GAP host reads a zero-length window while a transition-free host
+          reads a shift-long one, and BOTH accept, so the hosts agree (measured:
+          20 and 59 min flip, 60 min agrees);
+        - a WALL-INVERTED START pair never flips: both bounds land on the SAME
+          pre-transition offset, so the gap host reads the same inverted window
+          as any other host (measured: ``("… 02:50", "… 01:50")`` on 2023-03-12
+          is refused everywhere).
+      Measured instances: the US spring-forward pair is REFUSED at ``UTC`` and
+      ``Asia/Kolkata`` and ACCEPTED at ``America/Los_Angeles`` — the pair being
+      ``("2023/03/12 (Sun) 03:10", "2023/03/12 (Sun) 02:50")``; and
+      ``Asia/Pyongyang``'s PERMANENT +08:30 → +09:00 change (2018-05-05, no DST
+      either side) does the same to a 20 min pair under its 30 min shift — so
+      the class is NOT DST-specific.
+
+    For a MIXED pair (one bound zone-less, one stated), two hosts therefore
+    disagree only when the separation falls between their offsets, and WHICH end
+    is closed follows from the orientation — it is closed at the offset of the
+    host that ACCEPTS: ``O_low < separation <= O_high``
+    when the producer's shape is the START (the lower-offset host refuses), and
+    ``O_low <= separation < O_high`` when it is the END (the higher-offset host
+    refuses). Measured: for the END pair ``("2023-05-20", "2023/05/20 (Sat)
+    02:00")`` (separation 7200 s) ``Africa/Johannesburg`` (+02:00) ACCEPTS and
+    ``Asia/Kolkata`` (+05:30) REFUSES — the LOWER of those two offsets EQUALS
+    the separation, so a direction-blind "the higher offset inclusive" rule
+    would mispredict it. The OFFSETS decide it, and the distance alone decides
+    nothing (measured: the pair ``("2023/05/20 (Sat) 02:21", "2023-05-20")`` is
+    refused at ``UTC`` and ``America/Los_Angeles`` and accepted at
+    ``Asia/Kolkata``, while ``…, "2023-05-19"`` and ``…, "2023-05-21"`` agree on
+    all three; two hosts 1h apart disagree about a pair 13h30 apart, and a pair
+    20h apart answers the same on every host). That is the recorded #3982
+    reading meeting a newly-orderable shape, not a new rule.
+    Changing that reading is a REOPEN of #3982; giving the producer's shape its
+    own deterministic anchor instead is the SEPARATE decision recorded on
+    #11646 (it would make this guard deterministic without touching #3982's
+    dashed date-TIME reading, at the cost of a slash-vs-dashed asymmetry), and
+    is not a reopen. Either way it is escalated as a decision rather than fixed
+    here. The divergence is PINNED for BOTH orientations —
+    ``tests/test_11646_producer_date_shape.py::test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded``
+    asserts, at FOUR zones, the producer-as-START verdict (UTC refused,
+    ``Asia/Kolkata`` accepted, ``America/Los_Angeles`` refused,
+    ``Africa/Johannesburg`` refused) AND the producer-as-END verdict (accepted /
+    refused / accepted / accepted, in that order), so a change that moves either
+    reds before it can move silently. The both-naive case, the 7200 s END pair
+    and ALL FOUR offset-transition arms (wall-inverted END, non-inverted END,
+    START in the gap with its END after it, wall-inverted START) are recorded
+    here and asserted in the same test.
+
     #6140 — an unorderable START is not refused here, and this function does
     not warn about it either. Its caller
     ``sdk._refuse_inverted_point_window`` is what MERGES a caller's bound with
