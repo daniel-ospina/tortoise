@@ -95,14 +95,14 @@ __all__ = [
 #:    :data:`DEMO_SESSION_ID_PREFIX`.
 #: 2. **Caller-supplied ids cannot enter it either** — and this half was
 #:    MISSING until the #8290 review: the doors are not mint-only
-#:    (``SessionRequest.session_id`` / the two SDK doors accept a caller's id of
-#:    any shape), so a genuine capture filed as ``session_demo_…`` used to be
+#:    (``SessionRequest.session_id`` / the SDK capture door accept a caller's id
+#:    of any shape), so a genuine capture filed as ``session_demo_…`` used to be
 #:    written and then invisible on all three surfaces. The namespace is now
-#:    RESERVED at ALL FOUR caller-id doors by ``ids.session_id_refusal`` (the
+#:    RESERVED at ALL THREE caller-id doors by ``ids.session_id_refusal`` (the
 #:    ONE predicate every door shares), so such a capture is refused loudly
 #:    instead of disappearing quietly.
 #:
-#:    ⚠️ ALL FOUR, or not at all. The second review pass found the first
+#:    ⚠️ ALL OF THEM, or not at all. The second review pass found the first
 #:    reservation gated three of them: ``commit_schema.CommitPayload`` — the
 #:    Layer-1 model of the PUBLIC ``POST /v1/sessions/commit`` — still carried
 #:    its own ad-hoc blank test, so ``{"session_id": "session_demo_…"}`` was
@@ -114,8 +114,8 @@ __all__ = [
 #:
 #: ``tests/test_demo_session_read_exclusion_8290.py`` pins both halves — a
 #: 1000-mint population for (1), the door/exclusion agreement for (2), and one
-#: reserved-id refusal per real door — all FOUR of them: the two SDK doors, the
-#: hosted ``SessionRequest`` boundary, and ``commit_schema.CommitPayload`` —
+#: reserved-id refusal per real door — the SDK capture door, the hosted
+#: ``SessionRequest`` boundary, and ``commit_schema.CommitPayload`` —
 #: because a vacuous prefix test would hide every leak instead of one.
 #:
 #: ⚠️ RESIDUAL, stated and not claimed closed: the reservation is NOT
@@ -136,7 +136,7 @@ __all__ = [
 #:
 #: The commit lane can no longer MINT one — the door that carried
 #: ``payload.session_id`` now refuses the prefix — but the reservation is on
-#: SESSION ids at the four session doors, NOT on every ``sessionId`` a caller
+#: SESSION ids at the caller-id session doors, NOT on every ``sessionId`` a caller
 #: can set through the other doors that accept one (``create_event(...,
 #: sessionId=…)`` persists it as-is), and an Event left by an older tree stays
 #: indexed either way.
@@ -222,7 +222,8 @@ class SessionClient:
 
 
 #: The ONE capture-path writer. Both capture lanes funnel through it: hosted
-#: ``_capture_session_impl`` and ``TortoiseSDK.capture_session`` called it and
+#: ``_capture_session_impl`` and ``TortoiseSDK._capture_session`` (the private
+#: body the public ``capture_session`` name retired to, #4282) called it and
 #: hold no copy of the MERGE text (#3551).
 CAPTURE_PRIMITIVE = "tortoise/sdk.py::_write_session_and_turns"
 

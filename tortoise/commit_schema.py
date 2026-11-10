@@ -974,9 +974,10 @@ class CommitPayload(BaseModel):
         # session read surface — written, durable (the replay fold is
         # BLANK-ONLY by #9594/#9553, so it survives), and invisible to its
         # owner. Delegating to ``ids.session_id_refusal`` keeps ONE predicate
-        # across all four doors — and, since #11576's review, one REASON plus THIS
-        # door's own REMEDY (``may_mint=False``): its ``session_id`` is required, so
-        # the mint advice the other three doors give is a remedy this one rejects.
+        # across all three caller-id doors — and, since #11576's review, one REASON
+        # plus THIS door's own REMEDY (``may_mint=False``): its ``session_id`` is
+        # required, so the mint advice the other TWO doors give is a remedy this
+        # one rejects.
         #
         # ⛔ Deliberately NOT widened: ``projection._writable_container_id`` (the
         # REPLAY half) stays BLANK-ONLY — #9594/#9553 govern it, and a replay that

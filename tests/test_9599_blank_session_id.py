@@ -26,9 +26,9 @@ citing the wrong home is how a later lane "tidies" it into a refusal.)
 What this module pins is the half that IS ours, with TWO homes at two layers:
 
 * the DOOR half — a caller-supplied ``session_id`` — is
-  ``tortoise.ids.session_id_refusal``, applied at all FOUR caller-id doors —
-  the SDK capture door (``capture_session``, private since #4282 deleted
-  ``commit_session``), the
+  ``tortoise.ids.session_id_refusal``, applied at all THREE caller-id doors —
+  the SDK capture door (``_capture_session``, private since #4282 retired the
+  public ``capture_session`` name and deleted ``commit_session``), the
   hosted ``/v1/sessions`` ``SessionRequest`` boundary, and
   ``commit_schema.CommitPayload`` (the ``POST /v1/sessions/commit`` model) —
   (the ``capture_consent`` idiom: one predicate, every door); and
@@ -269,8 +269,8 @@ def test_the_fold_gate_and_the_door_gate_are_one_rule():
 def test_the_remedy_belongs_to_the_door_not_to_the_rule():
     """ONE rule, TWO remedies — pinned in both directions (#11576 review P2).
 
-    All four doors share ``session_id_refusal``, but only three of them MINT for
-    ``None`` (the two SDK doors and the hosted ``SessionRequest`` boundary).
+    The three doors share ``session_id_refusal``, but only two of them MINT for
+    ``None`` (the SDK capture door and the hosted ``SessionRequest`` boundary).
     ``commit_schema.CommitPayload`` does not: its ``session_id`` is a required
     ``str``, so the mint advice is a remedy that door rejects. The shared text
     used to carry the mint clause to every door, and a caller who followed it at
@@ -290,8 +290,8 @@ def test_the_remedy_belongs_to_the_door_not_to_the_rule():
         assert ids_mod.SESSION_ID_MINT_REMEDY in mint, (value, mint)
         assert ids_mod.SESSION_ID_NO_MINT_REMEDY in no_mint, (value, no_mint)
         assert ids_mod.SESSION_ID_MINT_REMEDY not in no_mint, (value, no_mint)
-    # The default is the MINTING door's remedy — three of the four doors take it
-    # by saying nothing, so a flipped default would silently re-break the fourth.
+    # The default is the MINTING door's remedy — two of the three doors take it
+    # by saying nothing, so a flipped default would silently re-break the third.
     assert ids_mod.SESSION_ID_MINT_REMEDY in ids_mod.session_id_refusal("   ")
 
 

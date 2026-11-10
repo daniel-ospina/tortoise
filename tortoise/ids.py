@@ -34,15 +34,19 @@ def mint_session_id() -> str:
     name retired — the body survives as ``_capture_session``),
     ``extractor_v2.extract_session_v2`` and the hosted ``/v1/sessions`` handler.
     Four spellings of one value is the #5416 class: a caller reading one of them
-    cannot tell whether the others agree. All four call this (#9599); the two
-    SDK doors are gone, the remaining two still do.
+    cannot tell whether the others agree. All four used to call this (#9599);
+    after #4282 THREE create sites remain — the private ``_capture_session`` body,
+    ``extract_session_v2`` and the hosted handler — because the SDK
+    ``commit_session`` door is gone and ``capture_session`` survives only as that
+    private body.
     """
     return f"session_{uuid.uuid4().hex[:12]}"
 
 
 #: ⛔ A refusal is REASON + REMEDY, and the REMEDY belongs to the DOOR, not to
-#: the rule (#11576 review P2). All four doors share :func:`session_id_refusal`,
-#: but only three of them MINT: the two SDK doors and the hosted
+#: the rule (#11576 review P2). The three caller-id doors share
+#: :func:`session_id_refusal`, but only two of them MINT: the SDK capture door
+#: (``_capture_session``; its public name was retired by #4282) and the hosted
 #: ``/v1/sessions`` ``SessionRequest`` boundary. ``commit_schema.CommitPayload``
 #: — the ``POST /v1/sessions/commit`` model — does not: its ``session_id`` is a
 #: required ``str`` (``Field(min_length=1)``) written VERBATIM by the handler, so
@@ -60,8 +64,9 @@ def mint_session_id() -> str:
 SESSION_ID_BLANK_REASON = (
     "session_id is blank — a session id must name something (be non-blank)")
 
-#: The remedy for a door whose ``session_id`` is OPTIONAL — the two SDK doors
-#: and the hosted ``SessionRequest`` boundary, which mint for ``None``.
+#: The remedy for a door whose ``session_id`` is OPTIONAL — the SDK capture
+#: door (``_capture_session``) and the hosted ``SessionRequest`` boundary,
+#: which mint for ``None``.
 SESSION_ID_MINT_REMEDY = "pass None to let Tortoise mint one"
 
 #: The remedy for a door whose ``session_id`` is REQUIRED and never minted —
@@ -94,7 +99,7 @@ SESSION_ID_NOT_STR_REASON = "session_id must be a string — got %s"
 #: DEMO_SESSION_ID_PREFIX`, and a prefix test is only safe if no real capture can
 #: occupy that namespace. ``mint_session_id()`` cannot (``demo_`` is neither hex
 #: nor 12 chars), but the doors are NOT mint-only: ``SessionRequest.session_id``
-#: and the two SDK doors accept a CALLER-SUPPLIED id of any shape. Without this
+#: and the SDK capture door accept a CALLER-SUPPLIED id of any shape. Without this
 #: refusal a genuine capture filed as ``session_demo_…`` would be written, paid
 #: for, and then invisible on ALL THREE read surfaces — the list, the detail
 #: door (404) and the SDK mirror (``None``). A silent disappearance is the exact
@@ -102,13 +107,15 @@ SESSION_ID_NOT_STR_REASON = "session_id must be a string — got %s"
 #: rather than merely unused.
 #:
 #: The reasoning is shared with the other refusal classes: ONE predicate for
-#: every door (``capture_session``, ``commit_session``, the hosted
+#: every door (the SDK capture door ``_capture_session``, the hosted
 #: ``SessionRequest`` boundary, and ``commit_schema.CommitPayload`` — the
 #: Layer-1 model of the public ``POST /v1/sessions/commit``, whose
-#: ``session_id`` is written verbatim as a ``:Session``), so the four cannot
-#: disagree about which ids may name a session. ⚠️ Three-of-four is NOT
-#: reserved (#8290 review P1): the commit payload boundary was the door that
-#: used to admit the namespace and file a session every read surface hides.
+#: ``session_id`` is written verbatim as a ``:Session``), so the three cannot
+#: disagree about which ids may name a session. ⚠️ Three-of-four was NOT enough
+#: before #4282 (#8290 review P1): the commit payload boundary was the door that
+#: used to admit the namespace and file a session every read surface hides — and
+#: the count is three now because #4282 retired the SDK ``commit_session`` door,
+#: not because a door stopped being gated.
 SESSION_ID_RESERVED_REASON = (
     "session_id is inside the RESERVED demo/sample namespace (%s) — every "
     "session read surface excludes that namespace, so a capture filed under it "
@@ -130,9 +137,10 @@ def session_id_refusal(session_id: object, *,
     may be used.
 
     ``may_mint`` is the one thing the doors do not share (#11576 review P2): the
-    two SDK doors and the hosted ``SessionRequest`` boundary MINT for ``None``,
-    so they take the default and their refusal ends with "pass None to let
-    Tortoise mint one". ``commit_schema.CommitPayload`` passes
+    SDK capture door (``_capture_session``) and the hosted ``SessionRequest``
+    boundary MINT for ``None``, so they take the default and their refusal ends
+    with "pass None to let Tortoise mint one". ``commit_schema.CommitPayload``
+    passes
     ``may_mint=False``, because its ``session_id`` is a REQUIRED ``str`` that the
     handler writes verbatim — there, that advice is a remedy the door rejects
     (a 400 ``missing_required_fields``), so it gets
@@ -143,14 +151,15 @@ def session_id_refusal(session_id: object, *,
     a duplicate of the other (#9599 review P2):
 
     * THIS function is the **DOOR half** — a caller-supplied ``session_id`` at
-      ``capture_session`` (its public name retired by #4282; the body survives
-      as the private ``_capture_session``) and ``commit_session`` (deleted by
-      #4282), the hosted ``SessionRequest``
+      ``_capture_session`` (the private SDK door; its public name
+      ``capture_session`` was retired by #4282), the hosted ``SessionRequest``
       boundary and ``commit_schema.CommitPayload`` (``#8290`` review P1 — the
       Layer-1 model of the public ``POST /v1/sessions/commit``, whose
       ``session_id`` is written verbatim as a ``:Session`` and as an
       ``AgentSession`` ``:Event``) — where the answer has to name a reason.
-      The doors that remain share it, so they cannot drift apart.
+      ⛔ The SDK ``commit_session`` door is GONE (#4282): the hosted
+      ``/v1/sessions`` boundary is the surviving door for that path, so the
+      three remaining doors share it and cannot drift apart.
     * ``projection._writable_container_id`` is the **REPLAY half** —
       ``_writable_id`` PLUS this same blank clause — and it gates every fold
       that merges a session key (``_link_session``'s ``contains_session``,
@@ -187,7 +196,7 @@ def session_id_refusal(session_id: object, *,
     decision, and each reds in the cited test if either half is widened.
 
     ABSENT (``None`` or ``""``) is not a refusal at this PREDICATE — the host
-    named no session, and the three mint-capable doors mint one
+    named no session, and the two mint-capable doors mint one
     (``mint_session_id``); ``commit_schema.CommitPayload`` never mints and
     rejects an absent id one layer up (400 ``missing_required_fields``). That is
     today's contract and it is preserved exactly. The test is PRESENCE, not truthiness
