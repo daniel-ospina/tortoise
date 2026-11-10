@@ -44,7 +44,7 @@ committed points?"*. The structural reason is that the measuring harness
 persists the S2 *model* output (``tests/eval/write_path/raw_vs_narrative.py`` →
 ``ev2.run_s2(...)``), which is pre-``pt_entry``; the span is stamped later, when
 ``pt_entry`` is built (``extractor_v2.py:10694-10701``, stamped at
-``:10718``). It is NOT a question of
+``:10718-10721``). It is NOT a question of
 dates — the receipts (committed 2026-10-19, ``ecc7bc8ca8``) postdate #8659
 (``2312845b6``, 2026-10-14) — so no re-ingest through that harness can ever put
 a span key in a receipt.
@@ -1187,6 +1187,8 @@ _RUNBOOK_CITES = {
            "the committed quote inside `pt_entry`"),
     10700: ('"source_turn_id": turn_idx,',
            "the resolved turn the point COMMITS"),
+    10721: ('pt_entry["span_start"], pt_entry["span_end"] = _span',
+           "the span assignment"),
 }
 
 _RUNBOOK = "docs/runbook/2684-slice-b-t-gate.md"
@@ -1209,19 +1211,14 @@ _REPO = WRITE_PATH.resolve().parents[2]
 #: Both ENDS of a range must be mapped: a range's end is a cite too, and it is
 #: the end that silently points at unrelated code when the file grows.
 _CROSS_FILE_CITES: dict[tuple[str, int], tuple[str, str]] = {
-    ("tortoise/commit_schema.py", 445):
-        ("def validate_span(span_start: object, span_end: object) -> None:",
+    ("tortoise/commit_schema.py", 445): ("def validate_span(span_start: object, span_end: object) -> None:",
          "`validate_span`'s definition"),
-    ("tortoise/commit_schema.py", 765):
-        ("span_start: int | None = Field(default=None, ge=0, le=SPAN_OFFSET_MAX)",
+    ("tortoise/commit_schema.py", 765): ("span_start: int | None = Field(default=None, ge=0, le=SPAN_OFFSET_MAX)",
          "the `span_start` field"),
-    ("tortoise/commit_schema.py", 792):
-        ("return self", "the end of `_span_is_an_address`"),
-    ("tools/longmem_eval/retrieve.py", 1005):
-        ('if p.get("span_start") is not None and p.get("span_end") is not None:',
+    ("tortoise/commit_schema.py", 792): ("return self", "the end of `_span_is_an_address`"),
+    ("tools/longmem_eval/retrieve.py", 1005): ('if p.get("span_start") is not None and p.get("span_end") is not None:',
          "the eval lane's offset annotation"),
-    ("tools/longmem_eval/retrieve.py", 1007):
-        ('entry["span_end"] = p["span_end"]',
+    ("tools/longmem_eval/retrieve.py", 1007): ('entry["span_end"] = p["span_end"]',
          "the annotated end offset"),
     ("tortoise/sdk.py", 38935):
         ("rows = graph.query(", "the provenance query's opener"),
