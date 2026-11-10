@@ -324,6 +324,40 @@ def _end_refusal(value: object, fault: str) -> ValueError:
     return ValueError(message)
 
 
+def _canonical_variant_spelling(value: object) -> str | None:
+    """The canonical dashed/padded spelling of a date-field VARIANT, else None.
+
+    ``2024/03/01`` and ``2024-3-1`` name the same instant as ``2024-03-01``;
+    this door stores the canonical form, and answers ``None`` when the value is
+    not a variant OR is already canonical — so a byte-identical value still
+    takes the "accepted, never re-spelled" path.
+
+    #11646 is why this is its own step: widening the READ measure to order the
+    slash spelling (the ingest producer's shape) made such a variant reach
+    ``read_caller_end`` as *already an instant*, so the canonicalisation
+    downstream of that check stopped running. A time part is kept verbatim and
+    validated by the same read measure, so ``2024/3/1Txx`` still falls through
+    to the refusal arms and is reported rather than silently half-shaped.
+    """
+    if not isinstance(value, str):
+        return None
+    token = value.strip()
+    match = _DATE_VARIANT_RE.match(token)
+    if match is None:
+        return None
+    try:
+        canonical = date(int(match["year"]), int(match["month"]),
+                         int(match["day"])).isoformat()
+    except ValueError:
+        return None                # the refusal arms below name the component
+    if token[:10] == canonical:
+        return None                # already canonical — never re-spell
+    rest = match["rest"] or ""
+    if rest and not _names_an_instant(canonical + rest):
+        return None                # the refusal arms below name the fault
+    return canonical + rest
+
+
 def read_caller_end(value: object, declared_precision: object = None,
                     ) -> tuple[object, str | None]:
     """#9202: read a caller's ``validTo`` for INTENT on the way in.
@@ -374,6 +408,17 @@ def read_caller_end(value: object, declared_precision: object = None,
     """
     if value is None:
         return None, None          # absent = OPEN end, not an un-datable one
+    # #11646: a date-field VARIANT is canonicalised BEFORE the instant check.
+    # Widening the read measure to order ``2024/03/01`` (and the ingest
+    # producer's slash shape) means such a variant is now "already an instant"
+    # — without this arm the door would store whatever spelling the caller
+    # sent, which is exactly the padding/separator tolerance #9202 review P3
+    # settled (a padded date was finished silently while the padded date-TIME
+    # beside it was refused). A canonical value returns ``None`` from the
+    # helper and is then stored byte-identical by the arm below.
+    canonical_variant = _canonical_variant_spelling(value)
+    if canonical_variant is not None:
+        return canonical_variant, None
     if _names_an_instant(value):
         return value, None         # a real instant: accepted, never re-spelled
     if isinstance(value, str):
