@@ -93,7 +93,7 @@ So a declared IMPL label over a mismatched **direct-shape** pair is writable tod
    - **`create_direct_edge`** does **not** put its label in the rel type: it writes
      `rel_type = op_type  # IMPL / NAND` (`sdk.py:29214`) and carries the declared predicate as an edge
      **property** — `attrs["label"] = label` (`sdk.py:29238`), restored by this fold through
-     `DIRECT_EDGE_ATTR_KEYS` (`edges.py:90-91`, applied at `__init__.py:17126`).
+     `DIRECT_EDGE_ATTR_KEYS` (`edges.py:90-91`, applied at `__init__.py:17127`).
 
    ⇒ the rule at this fold must read the predicate as **`ev["label"]` when present, else `ev["edge_type"]`**.
    A gate keyed on `edge_type` alone sees `IMPL`/`NAND` — a predicate no pack declares — returns `unbound`, and
@@ -212,7 +212,7 @@ a superset (measured: `kind_forms_for('dev:issue')` has `issue` but not `pm:issu
 | `create_direct_edge` | its own existing probe (`sdk.py:29142-29146`) returns `id, is_operator, status, claimClass` — add the kind property |
 | `create_edge` / `create_about_edge` | `_resolve_entity` already returns `properties` (consumed for the `aboutDocument` refusal at `edges.py:2933`) |
 | `_create_edges` (operator fold) | it already resolves the descriptor's endpoints |
-| **`DirectEdgeCreated` fold** | its per-label endpoint probe (`projection/__init__.py:17090-17093`) returns **only `p.id`** — the label sweep supplies the node LABEL (`Point`/`Object`/`Subject`/`Event`), not the kind property. It must add the kind property to that `RETURN`, the same shape as the two rows above; without it the rule is called with no kind and the fold's gate reports `unknown_kind` for every record |
+| **`DirectEdgeCreated` fold** | its per-label endpoint probe (`projection/__init__.py:17091-17094`) returns **only `p.id`** — the label sweep supplies the node LABEL (`Point`/`Object`/`Subject`/`Event`), not the kind property. It must add the kind property to that `RETURN`, the same shape as the two rows above; without it the rule is called with no kind and the fold's gate reports `unknown_kind` for every record |
 
 **`create_operator`'s synthetic node carries no kind** — the pair is `(source_id, each target_id)` from the
 **arguments**; never read it off the stored typed edges.
@@ -249,16 +249,20 @@ names** — the declaring pack ∪ any namespace it names explicitly (`core:` co
 alone. `portfolio:marks` is the load-bearing case: `domain_validators._portfolio_mark_contract`
 (`:396-410`) reads it.
 
-### 5.3 Layer-valued declarations (dependency on #11000)
+### 5.3 Layer-valued declarations (the `#11000` dependency has LANDED)
 
 `Subject` is a **layer** (`CORE_ENTITY_TYPES`), not a kind; the manifest validator already accepts it as a
-core kind (`pack_registry.py:2041`), and `:2725` (`core_parents = CANONICAL_OBJECT_KINDS | CORE_ENTITY_TYPES`) already treats entity types as hierarchy parents — so the
+core kind (`pack_registry.py:2127`), and `:2814` (`core_parents = CANONICAL_OBJECT_KINDS | CORE_ENTITY_TYPES`) already treats entity types as hierarchy parents — so the
 reading is *"a Subject or any subtype"* (W3C SHACL UCR, verbatim).
 
-⚠️ `expand_kind('Subject') == ['Subject']` today because ONTOLOGY §6's core hierarchy is not in the expansion
-table. Until **#11000's §6 leg** lands, a declaration whose endpoint is a `CORE_ENTITY_TYPES` member is
-**`unbound`**, pinned by a test naming the dependency. (#11000's lane has already landed that leg on its
-branch — check before assuming it is still needed.)
+✅ **`#11000`'s §6 leg has landed** (`main` `a7da06cc`, *"`subclassOf` widens to its parent, and the CORE
+hierarchy (§6) reaches the expansion table"*): `expand_kind('Subject')` now returns **12** kinds — the six
+bare (`Subject`, `legalPerson`, `naturalPerson`, `organization`, `role`, `team`) plus their six `core:`
+spellings. A layer-valued declaration therefore **binds**: `toKind: Subject` admits any `Subject` subtype,
+so the three such rows (§5.2: `assignedTo` twice, `holds`) resolve on the kind axis instead of being held
+`unbound`. The `unbound` verdict for the layer case, and the false-refusal risk that hung off it (R5), are
+gone; **pin 12 now asserts the landed behaviour**, so a regression of the §6 leg reds instead of silently
+turning every layer-valued declaration `unbound` again.
 
 ### 5.4 Severity — reuse, and fix the seam's scope
 
@@ -314,7 +318,7 @@ undeclared.
 | 9 | an explicit `{predicate: warn}` → warns and writes; `{predicate: block}` → refuses | the override being unreachable |
 | 10 | **each of the 8 cross-universe declarations binds** — `portfolio:marks`, `dev:implements`, … (§5.2) | 22 % of declarations silently disabled |
 | 11 | `addresses` between two non-declared kind pairs → `unbound`, **not** `mismatch` | the predicate-name-global error (six pairs) |
-| 12 | a layer-valued declaration (`toKind: Subject`) is `unbound` **and** the pin names #11000 | false refusals, and a silent un-pin when §6 lands |
+| 12 | a layer-valued declaration (`toKind: Subject`) **binds** — `expand_kind('Subject')` carries the §6 subtypes (§5.3) | a regression of the §6 leg silently turning every layer-valued declaration `unbound` again |
 | 13 | **mutation**: deleting the binding test reds ≥1 pin | the guard asserted by prose |
 | 14 | **`create_direct_edge`** refuses a declared mismatched label — **both** the `link_entities` arm (including a **Point-bearing** pair: that route has no Point gate, §1.1) and the `ingest` arm | the P0 — an ungated third door |
 | 15 | the **operator** replay fold (`_create_edges`) produces the same verdict as live **and still writes the committed edge** (verdict equality alone is satisfied by a fold that classifies then `continue`s before its `MERGE`) | `rebuild_all` divergence |
@@ -345,7 +349,7 @@ the declared kinds; a read-side census reports the pre-existing population.
 | `extractor_v2.build_master_list` / `value_extractor._relation_endpoint_refs` | prompt guidance | §5.5 |
 | `docs/EXPANSION_PACKS.md` §"Declaring a relation" | docs | state that a declaration now **binds**, and what `unbound`/`unknown_kind` mean |
 | `docs/00_index.md` §5 | docs ledger | add this scope + the research brief |
-| **#11000 §6 core hierarchy** | dependency | blocks only the layer case (§5.3) |
+| **#11000 §6 core hierarchy** | dependency | **LANDED** (`main` `a7da06cc`) — the layer case (§5.3) binds; pin 12 guards the leg |
 
 ## 8. Risks
 
@@ -355,7 +359,7 @@ the declared kinds; a read-side census reports the pre-existing population.
 | R2 | the O(nodes) installed-pack read per write | §7 — never per write |
 | R3 | live/replay divergence | pins 15 **and 15b** — one per replay fold |
 | R4 | the gate reads "done" while nothing emits business relations | pin 17 is a unit/contract test |
-| R5 | a false refusal from the layer case before #11000 lands | §5.3 — `unbound` + pin 12 |
+| R5 | a regression of the landed `#11000` §6 leg re-`unbound`ing every layer-valued declaration | §5.3 — pin 12 asserts the layer case **binds** |
 | R6 | blocking by default surprises an existing caller | it is the ruling; `enforcement.relations[predicate] = warn` is the declared escape, and pin 9 proves it |
 
 ## 9. Out of scope

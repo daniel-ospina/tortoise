@@ -53,7 +53,7 @@ was merged into the branch** (the merge added three kind-bearing declarations �
 `pm:partOfSprint` → `pm:sprint→pm:card`, `pm:assignedTo` → `pm:card→Subject`, all `IMPL` — plus `pm:onBoard`,
 which declares no kinds): **36 declared relations, 35
 carrying `fromKind`+`toKind`.** ⚠️ **All 35 carry a CORE mechanism** — 34 `IMPL` plus 1 `NAND`
-(`product-strategy:competesWith`) — and `relation_write_paths()` (`pack_registry.py:615`) binds the
+(`product-strategy:competesWith`) — and `relation_write_paths()` (`pack_registry.py:701`) binds the
 **operator** path on `mechanism ∈ CORE_PREDICATES`. That includes `hasPart` and `dependsOn`, which also
 declare `mechanism: IMPL`; they are the only two that **additionally** bind the structural path.
 
@@ -233,26 +233,32 @@ are: target untyped nodes and flag them; don't target them and enforce nothing t
 (OWL), which **masks** the gap — *"a pipeline that runs entailment before validation will happily report
 clean data that is missing information."*
 
-### 4.3 Subclass closure is part of the constraint's definition, and Tortoise's is one-directional
+### 4.3 Subclass closure is part of the constraint's definition, and Tortoise's now runs in both directions
 
 SHACL requires the validator to compute the `rdfs:subClassOf` **transitive closure itself**, no reasoner
 required — `sh:class` *"reads `rdfs:subClassOf` straight from the data graph, so a constraint demanding
 `ex:Person` accepts an `ex:Employee`"*.
 
-Tortoise's `expand_kind` **only widens parent → children**, one level, and **not transitively**. Measured:
+⚠️ **Re-measured after `#11000` landed** (`main` `a7da06cc`, *"`subclassOf` widens to its parent, and the
+CORE hierarchy (§6) reaches the expansion table"*). At the head this section was first written at, the
+expansion was **one-directional and non-transitive**: the parent was absent (`dev:issue` did **not** carry
+`WorkItem`), `dev:epic` did not carry `Project`, and `expand_kind('Subject')` returned `['Subject']`. All
+three are fixed, and the fix says so where the code is: `expand_kind` (`pack_registry.py:3331`) now
+documents **four ADDITIVE directions** — superclass (a child carries its declared `subclassOf` parent,
+*"#11000 Leg A"*), subclass (a parent carries its children, CORE `ONTOLOGY §6` then pack, *"#11000 Leg B"*),
+`equivalentTo`, and the bare/`core:` spelling of one kind. Measured at this head:
 
 ```text
-dev:issue   -> ['dev:issue', 'pm:issue']         ← parent 'WorkItem' ABSENT (#11000)
-WorkItem    -> ['WorkItem','dev:issue','dev:pullRequest','marketing:content',
-                'product-strategy:feature','product-strategy:requirement',
-                'pm:issue','pm:card','venture:actionItem']
-dev:epic    -> ['dev:epic']                      ← 'Project' ABSENT
+dev:issue -> ['dev:issue','pm:issue','Object','WorkItem','core:Object','core:WorkItem']
+dev:epic  -> ['dev:epic','Object','Project','core:Object','core:Project']
+Subject   -> 12 kinds: 'Subject','legalPerson','naturalPerson','organization','role','team'
+             plus their six `core:` spellings
 ```
 
-The bug is visible in the code — `pack_registry.py:3278` binds `parent` and never reads it (`# noqa: B007`)
-— under a comment that claims the opposite. **Good news for this issue:** the check needs
-`actual ∈ expand_kind(declared_parent)`, which works today. `#11000` is therefore **not** a blocker, provided
-the direction is pinned.
+Upward closure is **transitive** (`dev:issue` reaches `Object` *through* `WorkItem`), and downward closure
+reaches grandchildren (`WorkItem` carries `dev:requirement`). **Good news for this issue:** the check needs
+`actual ∈ expand_kind(declared_parent)`, which works; and because `declared_parent ∈ expand_kind(actual)`
+now works too, the direction has to be **pinned** rather than assumed in either reading.
 
 ### 4.4 A shared predicate carrying multiple declarations is a modelling defect, not a feature
 
@@ -327,11 +333,12 @@ on the table unless the owner wants the graph to reject 77 % of writes.
 
 ### D2 — Does a declared parent kind accept a declared subclass?
 
-ONTOLOGY §6 + `#11000`. The direction matters and only one works today:
+ONTOLOGY §6 + `#11000` (**landed** `a7da06cc`). Both directions work at this head, so the direction is a
+decision to **pin**, not a capability to inherit:
 
 - `actual ∈ expand_kind(declared_parent)` → **works** (`WorkItem` finds `dev:issue`).
-- `declared_parent ∈ expand_kind(actual)` → **does not work** (`dev:issue` does not find `WorkItem`,
-  `#11000`), and is not transitive.
+- `declared_parent ∈ expand_kind(actual)` → **also works now** (`dev:issue` carries `WorkItem` and `Object` —
+  before `#11000` Leg A it carried neither), and the closure is transitive upward.
 
 **Recommendation: yes — a declared parent kind accepts a declared subclass, computed as
 `expand_kind(declared)` expanded transitively (closure), per §4.3.** Two riders that must be decided with

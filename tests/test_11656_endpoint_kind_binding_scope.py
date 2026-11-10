@@ -209,6 +209,37 @@ class TestTheInventoryTheScopeCites:
         assert sorted(layer) == ["assignedTo", "assignedTo", "holds"], layer
         assert len(cross) + len(layer) == 8
 
+    def test_a_layer_valued_declaration_binds_after_11000s_six_leg(self):
+        """Pin 12 (§5.3): `toKind: Subject` must **bind**, not sit `unbound` forever.
+
+        `Subject` is a layer (`pack_registry.CORE_ENTITY_TYPES`), not a kind, so a declaration naming it is
+        only enforceable if the expansion table carries ONTOLOGY §6's core hierarchy. Before `#11000`'s §6
+        leg landed this measured `['Subject']` — a single element — and every layer-valued declaration
+        (§5.2: `assignedTo` twice, `holds`) was permanently `unbound`: never enforced, never warned about.
+
+        This pin is deliberately **behavioural, not textual**: it asserts the expansion, so a regression of
+        the §6 leg reds here instead of silently re-`unbound`ing the layer case while the prose still says
+        it binds. Measured at this head: 12 kinds — six bare plus their six `core:` spellings.
+        """
+        registry = PackRegistry(PACKS_DIR)
+        registry.load_all()
+
+        expanded = registry.expand_kind("Subject")
+        # The §6 subtypes a layer-valued declaration has to admit, spelled both ways.
+        for kind in ("organization", "team", "role", "naturalPerson"):
+            assert kind in expanded, (
+                f"`{kind}` missing from expand_kind('Subject') — #11000's §6 leg regressed and every "
+                f"`toKind: Subject` declaration (assignedTo ×2, holds) is `unbound` again"
+            )
+            assert f"core:{kind}" in expanded, f"`core:{kind}` spelling missing from expand_kind('Subject')"
+        assert "Subject" in expanded, "INVARIANT (#6146): the argument is always in its own expansion"
+        assert len(expanded) == 12, expanded
+
+        # The direction D2 leans on, which #11000 Leg A added: a child carries its parent, transitively.
+        issue = registry.expand_kind("dev:issue")
+        assert "WorkItem" in issue, "#11000 Leg A regressed: `dev:issue` no longer carries its `subclassOf` parent"
+        assert "Object" in issue, "upward closure is no longer transitive: `dev:issue` should reach `Object`"
+
 
 class TestTheSeveritySeamThePrecedenceMustAnswerFor:
     """§2.1 of the scope: the enforcement map cannot carry D1's refuse half on the shipped tree."""
