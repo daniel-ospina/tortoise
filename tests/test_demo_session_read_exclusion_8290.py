@@ -808,7 +808,7 @@ def test_the_census_check_verb_reds_on_a_stale_figure(tmp_path, monkeypatch):
     `tortoise/activation_scorecard.py`, and `.github/workflows/main-health-nightly.yml`
     (`census-drift` — nightly, report-only, "deliberately NOT as a per-PR check").
     The arm below was added back in that same commit and re-created the block: it
-    redded #11685, a docs PR whose eight markdown artifacts legitimately cite seven
+    redded #11685, a docs PR whose nine markdown artifacts legitimately cite seven
     more `hosted_api.py` lines (population 449 → 456). Arm 1 therefore proves the
     ROUND TRIP on the throwaway copies — a degraded figure must be restated to the
     MEASURED one, and `--check` must then call the result green — which is all this
