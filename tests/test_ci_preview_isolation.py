@@ -933,9 +933,17 @@ def test_a_preflight_red_dumps_the_preview_servers_own_logs(
     # mid-run death as 11 app-origin spec failures. `kill -0` on the pid the BOOT
     # recorded — the same per-job pid file `preview-server.sh` writes — is what
     # separates them, and the two verdicts must be distinguishable in the log.
-    assert "kill -0" in run, (
+    # ⛔ A `#` COMMENT MUST NOT SATISFY A GATE (#11675). `run` is the whole
+    # shell blob, prose included, so a plain `in run` is satisfied by a comment
+    # that merely NAMES the call — the regression this assertion exists for
+    # (deleting the probe, leaving `# was: bash "$PREVIEW" ready …` behind) has
+    # been measured green. `_cut_comment` is this file's own answer to that, and
+    # the POSITIVE `elif …; then` form is required so an inverted gate
+    # (`elif ! bash "$PREVIEW" ready …`) cannot pass either.
+    code = "\n".join(_cut_comment(line) for line in run.splitlines())
+    assert "kill -0" in code, (
         "the dump does not check whether the recorded pid is still ALIVE, so it "
-        f"cannot say a preview DIED mid-run: {run}"
+        f"cannot say a preview DIED mid-run: {code}"
     )
     # ⛔ A LIVE PID IS NOT A SURVIVING PREVIEW. `kill -0` proves the process
     # exists and nothing else — `preview-server.sh`'s `ready` states the three
@@ -948,9 +956,12 @@ def test_a_preflight_red_dumps_the_preview_servers_own_logs(
     # liveness, on a free port AND on any non-200 (its last leg is `curl -f`, so
     # a 500 — this step's own #10305 shape — lands here with the port very much
     # bound), so the branch may only report that the probe failed.
-    assert 'ready --name "$name"' in run, (
-        "the SURVIVED verdict is deduced from `kill -0` alone: a live pid whose "
-        f"port answers nothing would be reported as a surviving preview: {run}"
+    gate = 'elif bash "$PREVIEW" ready --name "$name"; then'
+    assert gate in code, (
+        "the SURVIVED verdict is deduced from `kill -0` alone (or the probe is "
+        "present only in a comment, or negated): a live pid whose port answers "
+        f"nothing would be reported as a surviving preview. Expected {gate!r} in "
+        f"the step's CODE: {code}"
     )
     for verdict in ("ALIVE", "DIED MID-RUN"):
         assert verdict in run, (
