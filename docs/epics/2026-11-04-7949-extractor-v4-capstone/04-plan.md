@@ -889,7 +889,7 @@ defines **E6** and asks `#7949` to carry it:
 > *for each installed pack, every declared relation whose endpoints both occur in the corpus is materialised, and the
 > census reports declared vs written, with the delta named.* **Before-arm: 0 written on the Object→Object class.**
 
-**Why it matters here:** E6 is the row that measures the very gap this plan found independently in §5.3a — the
+**Why it matters here:** E6 is the row that measures the very gap this plan found independently at the decompose gate — the
 **wiring residual** (`pack_hierarchy.py` ships the applier; `extractor_v2.py` calls it **zero** times) and the
 **static allowlist** (`_VALID_EDGE_PREDICATES` is not derived from core ∪ packs, so a pack predicate outside the
 core's two is rejected by `create_edge`). Two lanes reached the same conclusion from different directions, which is
@@ -906,7 +906,7 @@ the strongest evidence either is right.
 | the row's verdict state | **`#10984`** (C3) and **`#11496`** (the closing walk) must report E6 alongside A1 |
 
 ⚠️ **E6's registered bar is `unbound_and_unexplained = 0`, and the row is GREEN on both halves at registration**
-(`24e53f2b2256`) — the census's `written` column is **reported beside** the row and is **never its bar**, because a bar on it would duplicate `A1` and let one defect red two rows (`PRE-REGISTRATION.md` §3.8). The `written` residual (0 on the Object→Object class) is the **separate wiring blocker** §5.3a found — *not* E6's verdict, and not pack content.
+(`24e53f2b2256`) — the census's `written` column is **reported beside** the row and is **never its bar**, because a bar on it would duplicate `A1` and let one defect red two rows (`PRE-REGISTRATION.md` §3.8). The `written` residual (0 **pipeline**-written on the Object→Object class; the census records 8 direct / 33 mediated / 1 none, so those rows are caller-writable and the gap is an **INVOCATION**) is the **separate wiring blocker** the decompose gate found — *not* E6's verdict, and not pack content.
 
 ---
 

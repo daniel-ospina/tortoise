@@ -95,8 +95,8 @@ note **or a justified skip citing the brief**. Both are **justified skips**, cit
    **each installed pack**, every declared relation whose endpoints both occur in the corpus is **materialised**, and
    a census reports **declared → writable → written** with the delta named. ⚠️ It was **missing from this pipeline's
    own artifacts** until 2026-11-07 (they were built on E1–E5 + A1–A5). Its *writable* column is `#11484`'s, its
-   *written* column is the **wiring residual** (`extractor_v2` → `pack_hierarchy`), and it is **RED by construction**
-   — before-arm **0 written on Object→Object** — for a wiring reason, **not** a pack-content one.
+   *written* column is the **wiring residual** (`extractor_v2` → `pack_hierarchy`) and is **never its bar** — the bar is
+   `unbound_and_unexplained = 0`, GREEN on both halves at registration, and the census's `written` column reads **8 direct / 33 mediated / 1 none**, i.e. those rows are CALLER-writable and the gap is an **INVOCATION** — a wiring reason, **not** a pack-content one.
 
 ### Out of Scope
 
