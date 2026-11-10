@@ -9890,8 +9890,27 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             _norm(_k): str(_v or HOLD_DISAMBIGUATION_UNDECIDED)
             for _k, _v in held_entities.items() if _norm(_k)}
     else:
-        _entity_holds = {_norm(_k): HOLD_DISAMBIGUATION_UNDECIDED
-                         for _k in (held_entities or ()) if _norm(_k)}
+        # ⛔ THE ITERABLE FORM CARRIES RECORDS. `resolve_entities` returns its
+        # held population as `[{"name", "kind", "reason"}, …]`, so handing that
+        # list straight back (`held_entities=res["held"]`) is the NATURAL call
+        # shape — and coercing an element with `str()` keyed every hold to a
+        # DICT REPR that matched no emitted entity: the hold was silently
+        # DISABLED (the entity was minted, `stats["held_entities"] == 0`, and
+        # nothing said the hold had been ignored) — the fail-open class this
+        # issue exists to remove (review cycle 8, P2). A record's own `name` is
+        # its identity and its own `reason` is the vocabulary item, i.e. exactly
+        # what the Mapping form keys. An element carrying no `name` keeps its
+        # repr as the key so the unmatched-hold warning below NAMES it instead
+        # of dropping it silently.
+        _entity_holds = {}
+        for _item in (held_entities or ()):
+            if isinstance(_item, Mapping):
+                _k = _norm(_item.get("name") or "") or str(_item)
+                _v = str(_item.get("reason") or HOLD_DISAMBIGUATION_UNDECIDED)
+            else:
+                _k, _v = _norm(_item), HOLD_DISAMBIGUATION_UNDECIDED
+            if _k:
+                _entity_holds[_k] = _v
     # ⛔ `HOLD_REASONS` IS THIS SEAM'S VOCABULARY, and this is the only place it
     # can be enforced: `held_entities` is a PARAMETER, so a reason arrives from a
     # CALLER (`extract_session_v2` forwards S3's own verdicts), not from this
@@ -9927,6 +9946,11 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     _lookup = _failure_policy.lookup_state(search)
     held: list[dict] = []
     held_drained: list[dict] = []
+    # #11693 (review cycle 8, P2): which `held_entities` keys actually hit an
+    # emitted entity. A held name ALWAYS originates in `embed_list["entities"]`,
+    # so a key that matches none is anomalous — a wrong call shape, a spelling
+    # the extractor never emitted — and an unapplied hold must never be silent.
+    _holds_matched: set[str] = set()
 
     # ── entities (dependency order 1) ─────────────────────────────────────
     payload_entities: list[dict] = []
@@ -9965,6 +9989,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if key in seen_entities:
             continue
         seen_entities.add(key)
+        _holds_matched.add(_norm(name))
         if _norm(name) in _entity_holds:  # F3: identity is `_norm`
             # ⛔ #11653 — S3 could not identify this entity, so nothing here may
             # assert it is `new` (§4.4 I1). It is held (reported, with the
@@ -10043,6 +10068,22 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         payload_entities.append({
             "name": name, "kind": kind, "passes_frequency_gate": True})
 
+    # ⛔ #11693 (review cycle 8, P2): a hold that matched NOTHING was never
+    # applied, so the entity it was meant to withhold was CREATED. Nothing else
+    # in the run can see that — the hold count is 0 and the entity is ordinary —
+    # so this is the one place that can name it. Fail CLOSED by saying it out
+    # loud, in the same warning list the other hold facts use.
+    _unmatched_holds = sorted(set(_entity_holds) - _holds_matched)
+    if _unmatched_holds:
+        warnings.append(
+            "held_entities named "
+            + ", ".join(repr(n[:60]) for n in _unmatched_holds[:8])
+            + (f" (+{len(_unmatched_holds) - 8} more)"
+               if len(_unmatched_holds) > 8 else "")
+            + " but no emitted entity matches — the HOLD WAS NOT APPLIED "
+            "(nothing withheld). Pass `{name: reason}` or the records "
+            "`resolve_entities` returns, not rendered text")
+
     # conversation-driven supersession: deterministic recording (the shared
     # resolver validates against S3 by id/kind-filtered name — never guesses)
     supersessions = _supersession_records(entity_supersede_refs, search,
@@ -10109,6 +10150,26 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     held_operators_dropped = 0
     if _entity_holds:
         _held_names: set[str] = set(_entity_holds)
+        # ⛔ A NON-LIST SECTION CANNOT BE STRIPPED, and the helpers below coerce it
+        # to `[]` rather than echoing the wrong type back (review cycle 2, P3).
+        # The coercion is right; SILENT it turns the hold path into a partial
+        # commit that drops every claim in that section with nothing naming the
+        # loss — "one node, never the session" traded for "all of that section".
+        # WITHOUT a hold the same malformed section fails loudly (it reaches
+        # `validate_chains`), so the hold must not be the quieter of the two
+        # (review cycle 8, P3): name the section and the type that ARRIVED, which
+        # is what an operator needs to fix the emitter. ⛔ Not routed around by
+        # passing the malformed value through instead: on the no-hold path that
+        # is a raw TypeError out of `execute_embed`, and a hold that kills the
+        # session is the exact trade I2 forbids.
+        for _section in ("events", "points", "operators"):
+            _val = embed_list.get(_section)
+            if _val is not None and not isinstance(_val, list):
+                warnings.append(
+                    f"S3 HOLD (#11653): embed_list[{_section!r}] is "
+                    f"{type(_val).__name__}, not a list — held entities cannot "
+                    "be stripped from it, so that whole section is DROPPED and "
+                    "its claims are lost")
         _kept_events, _ev_stripped = _strip_carriers(
             embed_list.get("events"), _held_names)
         _kept_points, _pt_stripped = _strip_carriers(
@@ -11578,6 +11639,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         _persisted = sum(1 for r in _endpoint_holds if r.get("persisted"))
         if hold_store is None:
             _carried = "; NOT carried forward — no hold store was supplied"
+        elif not _endpoint_holds:
+            # ⛔ `_persisted == len(_endpoint_holds)` is VACUOUSLY TRUE at 0 == 0,
+            # so a run whose only hold is an ENTITY hold said "carried in the hold
+            # store for the next run" about a store this very record asserts was
+            # never written — and then contradicted itself in the next clause
+            # (#11693 review cycle 7, non-blocking). Nothing this store could
+            # carry: the entity clause below states the fact.
+            _carried = ""
         elif _persisted == len(_endpoint_holds):
             _carried = ("; carried in the hold store for the next run against "
                         "this graph")

@@ -734,6 +734,14 @@ class TestTheRunReports:
         assert store.pending() == [], (
             "an ENTITY was written to a store whose drain mints Points — a later "
             "run would mint the entity's name as a claim Point")
+        # ⛔ The aggregate clause must not claim the store carried it. With no
+        # ENDPOINT hold in the run, `_persisted == len(_endpoint_holds)` was
+        # 0 == 0 — vacuously true — so the same warning said "carried in the hold
+        # store for the next run against this graph" AND "1 ENTITY hold(s) are
+        # NOT carried forward" (#11693 review cycle 7). Both facts are read off
+        # that one sentence, so the false half is a fail-open in the record.
+        assert not any("carried in the hold store" in w
+                       for w in out["warnings"]), out["warnings"]
 
 
 class TestTheHoldIsNormalisedBothSides:
@@ -793,6 +801,76 @@ class TestTheHoldIsNormalisedBothSides:
         assert out["mention_held"] == [
             {"surface": "The Problem", "rule_id": "referentiality.generic_head"}], (
             f"the hold must publish the model's own spelling: {out['mention_held']!r}")
+
+
+class TestTheHoldCannotBeSilentlyDisabled:
+    """Review cycle 8 (P2): the seam enforced the REASON vocabulary but not the
+    KEY SHAPE, so the natural call shape minted silently.
+
+    `resolve_entities` returns its held population as
+    `[{"name": …, "kind": …, "reason": …}]`, so `held_entities=res["held"]` is
+    the first thing a caller reaches for. The iterable branch coerced each
+    element with `str()`, keying every hold to a DICT REPR that matched no
+    emitted entity: the held entity was CREATED, `stats["held_entities"] == 0`,
+    and the only warning was the unrelated kind repair. Fail-open, silent, and
+    one call-shape change away from undoing this whole issue — so the shape is
+    now understood AND an unapplied hold is named.
+    """
+
+    def test_the_records_resolve_entities_returns_hold_when_passed_back(self):
+        res = v2.resolve_entities(_ref(), _search(_CANDIDATE), model=_Says({}))
+        assert [h["name"] for h in res["held"]] == ["Acme"], res["held"]
+        out = v2.execute_embed(_EMBED, _search(_CANDIDATE), session_id="s1",
+                               held_entities=res["held"])
+        assert out["payload"]["entities"] == [], (
+            "the held entity was MINTED: `held_entities=res['held']` keyed on "
+            "dict reprs, so no emitted name matched the hold")
+        assert out["stats"]["held_entities"] == 1, out["stats"]
+        # The RECORD's own reason rides through, not the undecided default —
+        # a record shape that held for the wrong reason would be just as wrong.
+        assert out["held"][0]["reason"] == v2.HOLD_DISAMBIGUATION_UNDECIDED
+        assert out["stats"]["held_reasons"] == {
+            v2.HOLD_DISAMBIGUATION_UNDECIDED: 1}, out["stats"]["held_reasons"]
+        assert not any("HOLD WAS NOT APPLIED" in w for w in out["warnings"])
+
+    def test_a_records_own_reason_is_what_the_hold_carries(self):
+        """A record's `reason` is authoritative — the iterable form's bare names
+        carry none, but a record that states one must not be defaulted."""
+        out = v2.execute_embed(
+            _EMBED, _search(_CANDIDATE), session_id="s1",
+            held_entities=[{"name": "Acme", "kind": "core:organisation",
+                            "reason": v2.HOLD_DISAMBIGUATION_FAILED}])
+        assert out["stats"]["held_reasons"] == {
+            v2.HOLD_DISAMBIGUATION_FAILED: 1}, out["stats"]["held_reasons"]
+        assert out["held"][0]["reason"] == v2.HOLD_DISAMBIGUATION_FAILED
+
+    def test_held_key_that_matches_no_emitted_entity_is_named(self):
+        """An unapplied hold must never be silent: a held name always originates
+        in `embed_list["entities"]`, so a key that matches none is anomalous."""
+        out = v2.execute_embed(
+            _EMBED, _search(_CANDIDATE), session_id="s1",
+            held_entities={"Nobody": v2.HOLD_DISAMBIGUATION_FAILED})
+        assert any("HOLD WAS NOT APPLIED" in w and "nobody" in w
+                   for w in out["warnings"]), out["warnings"]
+
+    def test_a_malformed_section_is_named_not_silently_dropped(self):
+        """Review cycle 8 (P3): the strip coerces a non-list section to `[]`
+        (correct — echoing the wrong type back is worse), but SILENTLY it turns
+        the hold path into a partial commit that drops every claim in that
+        section, while the SAME malformed section without a hold fails loudly.
+        Name the section and the type that arrived."""
+        malformed = {"entities": [{"name": "Acme",
+                                    "kind": "core:organisation"}],
+                     "events": [],
+                     "points": {"content": "Acme signed the deal"},
+                     "operators": []}
+        out = v2.execute_embed(malformed, _search(_CANDIDATE), session_id="s1",
+                               held_entities={
+                                   "Acme": v2.HOLD_DISAMBIGUATION_FAILED})
+        assert out["payload"]["points"] == []
+        assert any("'points'" in w and "dict" in w for w in out["warnings"]), (
+            "the section was dropped with nothing naming the loss: "
+            f"{out['warnings']}")
 
 
 if __name__ == "__main__":  # pragma: no cover

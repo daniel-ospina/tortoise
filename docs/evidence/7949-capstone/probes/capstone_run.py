@@ -17,15 +17,15 @@ the corrected reading:
    entry point … can drive all eight in one pass"* is an open question. It can:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
    (``sdk.py:16420``, called at ``:15448``) →
-   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:13526``) calls
-   ``_edus_from_conversation`` (S0, ``:13644``) and then ``_arm_extract`` — the
+   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:13595``) calls
+   ``_edus_from_conversation`` (S0, ``:13713``) and then ``_arm_extract`` — the
    S1→S2→S2.2 prefix, which it calls twice since `#11002`: the first arm and the
-   retry — and that one function drives ``run_s1`` (S1, ``:16565``), ``run_s2``
-   (S2.1, ``:16597``) and ``_run_vet_pass`` (S2.2, ``:16651``).
+   retry — and that one function drives ``run_s1`` (S1, ``:16634``), ``run_s2``
+   (S2.1, ``:16666``) and ``_run_vet_pass`` (S2.2, ``:16720``).
    ``extract_session_v2`` itself calls ``kind_classifier.classify_items`` (S2.3,
-   ``:14098``), ``_apply_classify_kinds`` (S2.3, ``:14099``), ``search_graph``
-   (S3, ``:14115``), ``run_s4`` (the gap filler, ``:14136``), and
-   ``execute_embed`` (S5+S6, ``:14371``). ONE cite per symbol, on the line that symbol is on:
+   ``:14167``), ``_apply_classify_kinds`` (S2.3, ``:14168``), ``search_graph``
+   (S3, ``:14184``), ``run_s4`` (the gap filler, ``:14205``), and
+   ``execute_embed`` (S5+S6, ``:14440``). ONE cite per symbol, on the line that symbol is on:
    S2.3 makes TWO calls two lines apart, and the single ``:NNNN`` a
    ``a``/``b`` pair cite could carry is only ever checkable for one of them —
    that pair form is how ``_apply_classify_kinds`` sat on ``:9210`` (naming
