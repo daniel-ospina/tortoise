@@ -91,11 +91,24 @@ def test_live_skill_exists_at_the_defined_path():
         assert step in content, f"SKILL.md must reference the canonical step {step}"
     for fork in ("'self'", "'build'"):
         assert fork in content, f"SKILL.md must reference fork {fork}"
-    assert "tortoise_graph_overview(section=\"health\")" in content, (
-        "SKILL.md must verify via the ADVERTISED health section — the legacy "
-        "`tortoise_health` name is retired and absent from `tools/list`, so a "
-        "client that honours its granted tool list has no function to call "
-        "(#5439)")
+    # #5439: the served document must not INSTRUCT a retired tool. The COUNT is the
+    # assertion, not a presence check — and that distinction is the whole point:
+    # the document legitimately keeps exactly ONE mention, the ChatGPT carve-out's
+    # retirement disclosure ("the legacy `tortoise_health` name is retired, so it is
+    # absent from `tools/list`"). A presence check for the advertised call is
+    # satisfied BY that disclosure, which says the opposite of what it appears to
+    # pin: measured on the pre-fix blob, `tortoise_graph_overview(section="health")`
+    # already occurs once, at the disclosure, so reverting all ten instruction sites
+    # left such an assertion GREEN (review finding F1 on PR #11719 — the same
+    # NAME-is-weaker-than-the-CALL class this file documents at #10914 below).
+    assert content.count("tortoise_health") == 1, (
+        "the served document must name the RETIRED `tortoise_health` only in its "
+        f"retirement disclosure; found {content.count('tortoise_health')} mention(s). "
+        'The verify call is tortoise_graph_overview(section="health") (#5439)')
+    assert '1. Call `tortoise_graph_overview(section="health")`' in content, (
+        "the §4 verify step must name the ADVERTISED health section — a retired "
+        "name is absent from `tools/list`, so a client that honours its granted "
+        "tool list has no function to call (#5439)")
     assert "checkpoint" in content, "SKILL.md must write the harness-connected checkpoint"
 
 
@@ -1353,15 +1366,14 @@ def test_skill_decide_protocol_tools_are_registered_mcp_tools():
     # section="health" verification sentence, so nothing failed if the protocol stopped
     # performing the structure check at all. The SECTION is what performs it, so pin the
     # section: `section="structure_check"` is the call the protocol actually makes.
-    # #5439: the decide protocol's own verify step named `tortoise_health`, which is
-    # RETIRED — absent from `tools/list`, so a client that honours its granted tool
-    # list has no function to call, while the failure rule "never decide against a
-    # dead connection" has no working success path. #9664's step 9 sits inside this
-    # section and no ChatGPT carve-out reached it. The container's `health` section is
-    # the advertised name for the same call (RETIRED_USE_INSTEAD), so the protocol now
-    # names it — the requirement moves with the copy rather than being dropped.
-    for required in ("tortoise_compute_confidence", "tortoise_create_operator",
-                     "tortoise_graph_overview"):
+    # The loop names only tokens whose presence can VARY. `tortoise_graph_overview`
+    # is deliberately NOT a member: the decide section already carries it via the
+    # `section="structure_check"` line below, so a membership assertion on the
+    # container name is a no-op that no revert can redden (PR #11719 review F1).
+    # The health verify is guarded by the explicit SECTION assertion below, which
+    # DOES redden — measured: the pre-fix decide section contains 0 occurrences of
+    # `tortoise_graph_overview(section="health")`.
+    for required in ("tortoise_compute_confidence", "tortoise_create_operator"):
         assert required in tokens, f"decide protocol must use {required}"
     assert 'tortoise_graph_overview(section="health")' in decide_section, (
         "the decide protocol must verify the live connection through the "
