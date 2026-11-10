@@ -32,7 +32,8 @@ from urllib.parse import urlsplit
 
 # Reserved parameter names that sdk.query/paginated_query generate internally.
 # ``kind`` (single-kind branch), ``kind_0..kind_{n-1}`` (expanded-kind branch
-# placeholders from _expand_kind), and ``skip``/``limit`` (paginated_query).
+# placeholders from _read_filter_kinds, #11679), and ``skip``/``limit``
+# (paginated_query).
 # A filter key colliding with any of these would silently override the
 # auto-generated parameter and corrupt the WHERE clause — reject by design.
 _RESERVED_FILTER_KEYS = frozenset({"kind", "skip", "limit"})

@@ -4259,14 +4259,16 @@ surfaces:
   # #5064: the declared-mechanism gate. `core` is its classification home and
   # the lane for a code diff; `tier1` is REQUIRED because half the gate's subject
   # is now DOCUMENT — `membership_errors()` reads the
-  # `<!-- v4-mechanism: <id> state: <state> -->` markers in `docs/architecture/**/*.md` — and this
+  # `<!-- v4-mechanism: <id> state: <state> -->` markers in the two declaration
+  # surfaces (`docs/architecture/**/*.md` and `docs/epics/**/*.md`) — and this
   # file is in NEITHER named surface a docs-only diff can select. `docs/` is in
   # NON_PYTHON_PREFIXES, so the mechanism differs by document: an
   # EXTRACTOR-V4-ARCHITECTURE.md-only diff takes `select()`'s early return
-  # (`surfaces=[]`, 78 files — re-measured at `#11064`, which is itself a `tier1`
-  # addition) while a STORAGE-ARCHITECTURE.md-only diff is
+  # (`surfaces=[]`, 84 files — re-measured 2026-11-10 against this manifest; an
+  # epic-plan-only diff takes the same arm at the same 84) while a
+  # STORAGE-ARCHITECTURE.md-only diff is
   # claimed by the `onboarding` SOURCE_PATTERNS entry (`surfaces=['onboarding']`,
-  # 155 files) — neither selects `core`. Measured for both: the gate is selected
+  # 165 files) — neither selects `core`. Measured for both: the gate is selected
   # only once this `tier1` row exists, which is the same placement every sibling
   # v4 doc-subject guard uses (#5092).
   - test_v4_declared_mechanisms.py
@@ -5166,11 +5168,13 @@ surfaces:
   # `docs/architecture/STORAGE-ARCHITECTURE.md`-only diff does NOT take
   # `select()`'s early return — that path is claimed by the `onboarding`
   # `SOURCE_PATTERNS` entry, so `select()` returns `surfaces=['onboarding'],
-  # full=False, 155 files` (re-derived at `#11064`). The `131` this comment
-  # carried is 24 files short, and its history is NOT all `tier1`: 60 -> 78
-  # `tier1` rows account for **18** of the 24, and six more came from the
-  # `onboarding` surface itself growing (91 -> 97 members; measured through
-  # `select()` on both manifest blobs, so "19 `tier1` rows" is wrong).
+  # full=False, 165 files` (re-derived 2026-11-10; the `155` this comment
+  # carried at `#11064` went stale as `tier1` and the surface both grew). The
+  # `131` this comment carried is 34 files short, and its history is NOT all
+  # `tier1`: 60 -> 84 `tier1` rows account for **24** of the 34, and ten more
+  # came from the `onboarding` surface itself growing (91 -> 101 members;
+  # measured through `select()` on both manifest blobs, so "19 `tier1` rows" is
+  # wrong).
   # ⚠️ Re-derive that figure after any `tier1` addition,
   # and do not attribute its whole history to one row: #5064's row accounts for
   # exactly ONE of those files (measured: 130 at the commit before it, 131
@@ -8754,14 +8758,16 @@ tier1:
 # falsify a claim it pins (or tidy the marker away).
 - test_extractor_v4_s4_stage_claims.py
 # #5064: the declared-mechanism gate (`core` above) — its membership half scans
-# `docs/architecture/**/*.md` for the `v4-mechanism:` markers, so a docs-only PR is
+# the two declaration surfaces (`docs/architecture/**/*.md`, `docs/epics/**/*.md`)
+# for the `v4-mechanism:` markers, so a docs-only PR is
 # exactly the change that can delete, rename or forge one with the gate absent
 # from the tier-1 arm. Same no-DB, doc/`ast` shape as the guards above.
 # ⚠️ #9778 review (P1): the docs-only diff really does reach this entry, and the
 # mechanism differs by DOCUMENT — measured with `tools/ci_selection.py`:
 # EXTRACTOR-V4-ARCHITECTURE.md takes `select()`'s early return (`surfaces=[]`,
-# 78 files) while STORAGE-ARCHITECTURE.md matches the `onboarding` entry
-# (`surfaces=['onboarding']`, 155 files), and `core` is added only when NOTHING
+# 84 files; an epic-plan-only diff takes the same arm) while
+# STORAGE-ARCHITECTURE.md matches the `onboarding` entry
+# (`surfaces=['onboarding']`, 165 files), and `core` is added only when NOTHING
 # matched. Registered in `core` alone the gate was asleep on the exact diff class
 # that can red it (#1349/#3332/#3616 silent-drop class); pinned by
 # `tests/test_ci_selection.py::test_docs_scanning_gates_stay_in_tier1`.
