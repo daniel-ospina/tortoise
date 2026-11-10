@@ -488,11 +488,13 @@ mapped logically."* That reframes A1, and the check found a gap that A1 as scope
 1. **V2 is a superset of V1 with no declared Object-level semantics.** `dependsOn`, `related`, `produces`,
    `managedBy`, `memberOf`, `reportsTo` are all **writable** between Objects, and **§3.7 declares none of them** as
    Object→Object. So the writer can express relations the ontology does not say are valid at that layer.
-2. **§3.9 itself records two of them as having ZERO producers**: *"Vocabulary-only edges (valid predicates with zero
+2. **§3.9 itself records three of them as having ZERO producers**: *"Vocabulary-only edges (valid predicates with zero
    producers): `reportsTo` …, `dependsOn` (pack-declared — dev:api dependsOn dev:database; used by
    `list_relations()` for kind expansion), and `related`"*. **The gap is self-documented** — the vocabulary exists,
    nothing emits it.
-3. ⛔ **Every business predicate in V3 routes to the OPERATOR path, not the structural one** — because each carries
+3. ⛔ **Every business predicate in V3 routes to the OPERATOR path** — and, except for the two core structural words the
+   packs re-declare (`hasPart`, `dependsOn`, whose `relation_write_paths()` is `('operator','structural')`), not to the
+   structural one — because each carries
    `mechanism: IMPL`, and `relation_write_paths()` binds the `operator` path on `mechanism ∈ CORE_PREDICATES`. So
    `funds`, `producedBy`, `holds`, `dependsOn`, `addresses`, `competesWith` are consumed as **epistemic IMPL/NAND edges**
    (belief propagation, EP confidence) with the pack's word as a **label** — not as structural business facts.
@@ -585,7 +587,7 @@ hierarchy (which both routes need), and routes the choice to the owner — becau
 
 Corrected after review: "retry once on 5xx" would have manufactured the silent zero this epic exists to
 prevent. A re-POST of an **existing** `session_id` takes the **replay path** - it skips extraction and returns a
-200 *success-shaped* receipt (`hosted_api.py:17212-17217`; the abandoned-marker code says "same-session retry would
+200 *success-shaped* receipt (`hosted_api.py:18629-18635`, receipt fields at `:18697`; the abandoned-marker code says "same-session retry would
 legacy-replay (#3129)"). So a "retry" after a 5xx is not a retry of the measurement. **The contract is on the
 receipt, not on the status code:**
 
