@@ -375,8 +375,10 @@ class Declaration:
     SURFACE (`sub/x.md`), prefixed with the surface's directory name when more
     than one surface is in play (`architecture/x.md` vs `epics/x.md`, so the two
     can never be mistaken for each other — see :func:`_document_name`). It is
-    related to the row's repo-relative `declared_in:` entry by RESOLUTION against
-    the surface root, never by string equality. A basename is not an identity.
+    related to the row's repo-relative `declared_in:` entry by RESOLUTION — the
+    entry names the document by its path, and the surface supplies the document's
+    identity relative to itself — and never by basename equality. A basename is
+    not an identity.
     ``state`` is the state the DECLARATION SITE
     asserts, or ``None`` when the marker states none — which
     :func:`declaration_state_errors` refuses and :func:`membership_errors` does
@@ -633,7 +635,9 @@ def declaration_markers(
     surface is scanned (`epics/2026-…/05-plan.md`), so two surfaces' same-named
     documents stay distinct — see :func:`_document_name`, and note that
     attribution relates that identity to a row's repo-relative `declared_in:` by
-    RESOLUTION, never by string equality. Every verdict below names the document
+    RESOLUTION through the surface (the entry names the document, the surface
+    supplies the identity relative to itself), never by basename equality. Every
+    verdict below names the document
     that way too, because a basename is not a document identity (`a.md` can exist
     at two depths).
 
@@ -880,13 +884,20 @@ def _scanned_targets(entries: list[str], docs_dir) -> set[Path]:
     admitted here (`declaration_markers`: a linked directory is not descended and
     a linked file's target is outside the name it is walked under).
 
-    Resolved against the surface's own root (`<root>/docs/architecture` ->
-    `<root>`), not string-compared: a declaration written as
-    `./docs/architecture/X.md` or with a doubled separator names the same
-    document, and a string comparison would silently attribute it to nothing (a
-    false red on a legitimate registry). Containment — not mere
-    existence — is the test, so `packs/dev/manifest.yaml` is NOT a scanned
-    declaring document: the markdown marker convention does not reach it. A
+    Resolved the SAME WAY :func:`gate_errors` validates `declared_in` — an entry
+    is repo-relative, so a surface inside :data:`ROOT` accepts it only when the
+    entry's leading components are that surface's own `ROOT`-relative path
+    (`docs/epics/…` belongs to `docs/epics`, and `architecture/a.md` belongs to
+    neither surface). The two halves therefore read one entry as one path; the
+    earlier form matched the surface's trailing components alone and could pull
+    an entry that names no surface INTO one (review cycle 8, P1). A surface
+    outside :data:`ROOT` — every fixture tree — has no repo-relative path to
+    compare, so it falls back to matching its trailing components against the
+    entry's leading ones, longest first: the document is then
+    `surface / <the rest of the entry>` and no root is counted. Containment —
+    not mere existence — is the test, so `packs/dev/manifest.yaml` is NOT a
+    scanned declaring document: the markdown marker convention does not reach
+    it. A
     `.yaml`/`.yml` INSIDE a surface is not one either, for the same reason:
     `gate_errors` accepts such a source, it can carry no markdown comment, and
     demanding a marker there emits a remedy no edit can satisfy.
@@ -919,14 +930,34 @@ def _scanned_targets(entries: list[str], docs_dir) -> set[Path]:
             # NOWHERE (`membership_errors -> []` on a tree where the deeper
             # document carries no marker at all).
             #
-            # Matching the surface's trailing components against the entry's
-            # LEADING ones (longest match first) makes the document simply
-            # `surface / <the rest of the entry>`, so the root never has to be
-            # guessed and a third surface at any depth is attributable. A
-            # surface whose own trailing components do not prefix the entry owns
-            # no part of it, which is what keeps `docs/architecture/a.md` out of
-            # the `docs/epics` surface.
-            for depth in range(min(len(surface.parts), len(rel.parts) - 1), 0, -1):
+            # ⛔ AND THE ATTRIBUTION MUST RESOLVE THE SAME PATH `gate_errors`
+            # VALIDATED (review cycle 8, P1). That half reads an entry as
+            # repo-relative — `<ROOT> / entry`, `is_file()` — so THIS half agrees
+            # with it whenever it can: a surface inside `ROOT` accepts an entry
+            # only when the entry's LEADING components are the surface's own
+            # `ROOT`-relative path. The earlier form matched the surface's
+            # trailing components alone, which let an entry that names NO surface
+            # (`architecture/a.md`) be pulled INTO `docs/architecture/` — the row's
+            # real declaration site then went marker-unchecked while the row read
+            # clean, which is the declared-and-absent shape this gate exists to
+            # refuse. A surface OUTSIDE `ROOT` (every fixture tree, and the
+            # depth the pin below builds) has no `ROOT`-relative path to compare,
+            # so it keeps the trailing-component match — the document is then
+            # `surface / <the rest of the entry>`, no root counted.
+            try:
+                surface_rel = surface.resolve().relative_to(ROOT.resolve())
+            except (OSError, RuntimeError, ValueError):
+                surface_rel = None  # a fixture surface: no repo-relative path
+            if surface_rel is not None:
+                depth = len(surface_rel.parts)
+                depths: tuple[int, ...] = (
+                    (depth,) if rel.parts[:depth] == surface_rel.parts else ()
+                )
+            else:
+                depths = tuple(
+                    range(min(len(surface.parts), len(rel.parts) - 1), 0, -1)
+                )
+            for depth in depths:
                 if surface.parts[-depth:] != rel.parts[:depth]:
                     continue
                 try:
@@ -7872,6 +7903,42 @@ def test_a_surface_at_another_DEPTH_is_still_attributable(tmp_path) -> None:
     # louder: the same tree with the deep document marked is clean.
     (deep / "d.md").write_text("<!-- v4-mechanism: x -->\n", encoding="utf-8")
     assert membership_errors([row], surfaces) == []
+
+
+def test_an_entry_that_names_NO_surface_is_not_attributed_to_one() -> None:
+    """A repo-relative entry outside every surface stays outside it.
+
+    The two halves of the gate must resolve `declared_in` to the SAME path.
+    `gate_errors` reads an entry as `<ROOT> / entry` and demands `is_file()`
+    there; the attribution half therefore accepts an entry for a surface inside
+    `ROOT` only when the entry's leading components ARE that surface's own
+    `ROOT`-relative path (review cycle 8, P1).
+
+    Measured against the earlier trailing-component match: `architecture/a.md`
+    (no `docs/` prefix) was pulled INTO `docs/architecture/`, because the
+    surface's trailing components `('docs', 'architecture')` never get compared
+    against the entry's leading ones — only the last components of the ENTRY
+    were. The row's real declaration site, `<ROOT>/architecture/a.md`, then went
+    marker-unchecked while the row read clean: the declared-and-absent shape this
+    gate exists to refuse, reached without an unmarked document anywhere.
+
+    The real surfaces, not a fixture: this is the `ROOT`-anchored arm, and a
+    `tmp_path` surface takes the fixture fallback instead.
+    """
+    assert _scanned_targets(["architecture/a.md"], DECLARATION_SURFACES) == set()
+    assert _scanned_targets(["epics/2026-01-01-x/05-plan.md"], DECLARATION_SURFACES) == set()
+    # …and the same documents named by their repo-relative paths DO attribute,
+    # each to its own surface, so the rule did not merely stop working.
+    assert _scanned_targets(["docs/architecture/a.md"], DECLARATION_SURFACES) == {
+        ARCH_DOCS / "a.md"
+    }
+    assert _scanned_targets(
+        ["docs/epics/2026-01-01-x/05-plan.md"], DECLARATION_SURFACES
+    ) == {EPIC_DOCS / "2026-01-01-x" / "05-plan.md"}
+    # …and one entry names ONE surface: the cross-surface alias stays refused.
+    assert ARCH_DOCS / "a.md" not in _scanned_targets(
+        ["docs/epics/a.md"], DECLARATION_SURFACES
+    )
 
 
 def test_a_malformed_marker_breaks_the_state_verdict_too(tmp_path) -> None:

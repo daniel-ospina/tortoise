@@ -1926,9 +1926,14 @@ them from `targets`. The comment there called that "a FALSE RED … never a sile
 fail-open. With a correctly-rooted surface also in `targets`, `scanned_targets` stays non-empty, so the
 per-document branch still runs for the OTHER surface and a declared-but-UNMARKED document in the deeper surface is
 reported NOWHERE (`membership_errors -> []` on a tree where the deeper document carries no marker at all). Both
-real surfaces sit at depth 2, which is why it was latent. The root is now DERIVED from the surface — its trailing
-components are matched against the entry's leading ones, so the document is `surface / <the rest>` and no root is
-ever counted — and the pin builds the depth itself.
+real surfaces sit at depth 2, which is why it was latent. The root is now DERIVED from the surface rather than
+counted off it — and, because the attribution half must resolve the same path `gate_errors` validated, an entry is
+accepted for a surface inside the repo root only when its leading components ARE that surface's repo-relative path,
+so an entry naming no surface (`architecture/a.md`) is no longer pulled into `docs/architecture/` and its real
+declaration site can no longer go marker-unchecked while the row reads clean (review cycle 8, P1). A surface outside
+the root — every fixture tree — falls back to matching its trailing components against the entry's leading ones, so
+the document is `surface / <the rest>` and no root is counted. The pins build both arms: the deep surface's depth,
+and a repo-relative entry that names no surface at all.
 
 **Two documentation-truth defects found in review cycle 2, and two factual defects in cycle 3.** Cycle 2: the
 registry header said *"these thirteen are every mechanism either document names"* — inside a sentence whose *"it is
