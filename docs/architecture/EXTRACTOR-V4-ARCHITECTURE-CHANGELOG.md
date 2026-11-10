@@ -1743,3 +1743,105 @@ row vector; and re-runs the rate measurement against its committed record.
 **The departure is now marked, and the reopen is reachable from the page.** Two things a lane needs to see without leaving the document: an `OVERRIDES:` line naming what this ruling overrides — Onyx's federated per-source prompts, the measured comparable that does key a prompt on the source brand, and the shipped `extraction.promptFragments` slot, which exists to carry pack-authored instruction into the prompt — and a pointer under the table saying the two contested cells state the decision's wording, with the reopen filed at `#11081` `6754938117`. Without the first the ruling reads as an accident of history to a lane holding a vendor page; without the second a lane reads the mem0 and Hindsight cells as settled measurement and either re-derives the contradiction or re-files it. The marker's home is the decision issue (`6755286041`), per the rule that the issue is what a lane actually reads.
 
 **Provenance.** Owner decision 2026-11-10 on `#11081` (`6752174448`, corrected by `6752335134`), recorded on `#2696` (`6752567775`) and now in the body of that epic. The open prerequisite it names — we cannot yet say which already-ingested meetings need re-extraction after a profile change — is `#11661`, and it is deliberately **not** a private-beta item.
+
+## 2026-11-10 — the declared step list names the two S2.2 sub-steps the pipeline runs, and the stage-order row is pinned to the code (`#11002`)
+
+**What changed.** §4.1's canonical list and §4.2's ordering table gained two of the `S2.2`
+sub-steps the shipped pipeline executes — `S2.2b-RE-NARRATE` (`_renarrate_trigger` → the second
+`_arm_extract`, the arms `merge_embed_lists`-unioned, `_renarrate_pick` binding the winner) and
+`S2.2b-ADD` (`run_partial_gap_fill`, the ADD-capable partial-gap fill, armed OFF by default). The eight TOP-LEVEL count is unchanged: §4.1's own note already says a
+sub-step does not make a ninth step, and this is a sub-step pair. The drift marker's `stage order` row
+was published from the pre-`#11517` pipeline (`run_s1 → run_s2 → S2.2 VET → S3 → run_s4 → S5`) and now
+states the order the code runs: `_arm_extract` (S1→S2→S2.2 VET) → `S2.2b-RE-NARRATE` → `S2.2b-ADD` →
+`S2.3 CLASSIFY` → `S3 search_graph` → `run_s4` → `S5 execute_embed`. A THIRD hunk is in the same
+drift marker's F3 paragraph, and it is a MEASUREMENT rather than an ordering claim: the ADD stage's
+coverage-triggered reach on the F3 population is stated with its denominators and artifact — 8 of the
+12 `points` and 1 of the 9 `operators` in the 21 S4 additions this record totals (the pinned totals
+are in `docs/evidence/11534-partial-gap/README.md` §3), i.e. 8 of the 9 operator additions GENERALISE
+rather than leave a span uncovered —
+recorded there because it is what keeps the removal (`#8500`) gated on the half a coverage detector
+cannot reach.
+
+**Why it was wrong, and why nothing caught it.** `tests/test_extractor_v4_step_list_consistency.py`
+parses the two fenced blocks with
+`_STEP_ID = ^(S\d+(?:\.\d+)?[a-z]?(?:-[αβ])?)\s`. The two stages' ids are
+`S2.2b-RE-NARRATE` and `S2.2b-ADD`, and the grammar accepted only the `-α`/`-β` suffix — so a row
+labelled with either id did not match AT ALL. `_fenced_rows` silently skipped it, and every presence
+and order assertion in that file read the blocks as if the stages did not exist. Two stages shipped by
+the PRs `#11517`/`#11554` (the issues are `#11002`/`#11534`) were therefore absent from both declared
+lists while the code ran them, and the
+guard reported the lists consistent. **Measured before the change:** both labels parse `False`; the
+§4.1 and §4.2 id sets each lack both.
+
+**The direction chosen, and why not the other one.** The alternative is deleting `run_s4` so the code
+matches the eight-step declaration. It is contradicted by three recorded decisions, not by preference:
+§4.3 G5's ordering obligation (removal is a migration deliverable and must not leave the list before
+its successor lands); `#1536` E4 ("S4 merges, not replaces") plus the requirement recorded on
+`#11002` on 2026-11-08 that the retry union both attempts — derived there from those two records, not
+a new ruling (that comment withdraws the owner question); and F3, a MEASUREMENT on `#11002`
+(2026-11-08) — `added_by_s4 > 0` while `coverage_suspect` is False in 4 of the 7 `legacy`-arm sessions
+in the primary run, 3 of 7 on the re-run, **5 of 7 across their union** (the arm is named because the
+count is arm-specific — §4.3), so the retry cannot reach those items and deleting S4 removes
+gap-filling rather than relocating it. The
+declaration was therefore brought to the code, and `run_s4` keeps its own marker row as the LIVE
+stage — a statement about the shipped code, never a step restored to the design.
+
+**The guard that closes this omission.** The same test file now derives the declared sequence from
+§4.1/§4.2, reads `extract_session_v2`'s own body with `ast`, and asserts (V1) EVERY stage the guard can
+locate is declared in both blocks — not just the two new ids, because `_order_problems` compares the
+ids that survive in the document, so a stage deleted from both blocks passed on both sides (measured:
+deleting both `S3  RESOLVE` rows left the file green) — (V2) the declared order equals the source order
+of the pipeline's call sites, (V3) the gap fill precedes `run_s4`, (V4) `run_s4` sits between
+`S3 search_graph` and `S5 execute_embed`, (V5) the gap fill follows `_renarrate_pick` — the PICK, not
+the trigger, because a fill placed between the trigger and the pick addresses the FIRST arm's
+narrative, which the run may discard — and (V6) the drift marker's `stage order` row names those stages
+in the same order, places `S2.2 VET` before the retry, and keeps `run_s4` between S3 and S5 (a row
+nothing read could revert to its pre-`#11517` wording green — measured: it did), (V7) `run_s4` has
+exactly ONE call site and each declared stage the expected number (`S1` and `S2.3` two, the rest one),
+because `.index` reads the FIRST occurrence and an ADDED second gap fill behind `run_s4` was measured
+green, (V8) a declared row may not retire the stage it declares — read on the row's JOINED text
+(the document wraps nearly every row, and both rows this change adds are two-line rows, so a
+retirement written on a CONTINUATION line was measured green; a line in the block that is neither a
+row nor an indented continuation is now SURFACED as an `<unparsed …>` row and reds rather than being
+dropped — the column-0 spelling of the same hole) for every declared SHIPPED row, including ids
+the order guard does not map (`S2.2b`, `S2.1`, `S6`, `S6a` run) and with NO exemption — `S0a`/`S0b`
+are annotated `← NEW (proposal, §4.2)` in §4.1 while `config/v4-mechanisms.yml` carries `source_dedup`
+as `state: implemented`, and `S2.2a-α`/`-β` carry the same annotation over mechanisms the registry
+also calls implemented, so a carve-out on that annotation left a retirement claim about a SHIPPED
+stage green — over a BOUNDED word list
+(`retired`/`removed`/`gone`/`no longer`/`not run`), so an ordinary synonym outside it is a named
+residual, not a claim of closure — and (V9) the document carries EXACTLY ONE `stage order` row
+(whitespace-, case- and emphasis-tolerant: `>  | Stage order |`, `>|stage order|` and
+`> | **stage order** |` are the same claim to a reader), so a second, stale one cannot hide behind
+the first (measured green before this). EVERY branch that can be
+a SOLE discriminator has a mutation that reds it
+(`test_every_order_branch_has_a_mutation`, whose base row is synthetic so a document reword cannot
+break it) — including an adjacent duplicate `run_s4(` call, which leaves the ORDER untouched and is
+caught only by the site count; the one branch that cannot — the "gap fill after `run_s4`" message,
+subsumed by the order comparison — is marked as such in the code rather than claimed covered. Measured against the
+pre-change document at this head: **`3 failed, 17 passed`** on
+`tests/test_extractor_v4_step_list_consistency.py` (the presence/omission test, the gate-placement
+test and the stage-order-row test red), and clean after — the guard file (20) +
+`tests/test_extractor_v4_s4_stage_claims.py` (29) + `tests/test_selection_step.py` (42) +
+`tests/test_extractor_v4_citation_rot.py` (15) = 106 passed.
+
+**Named limits.** (1) Stage ids with no distinguishable call site in `extract_session_v2` are not
+order-pinned: `S0a`/`S0b` (no distinct call site in the pipeline body — the mechanism is
+`tortoise/source_identity.py`, reached through `projection/entities.py`), `S2`/`S2.1`/`S2.2` (inside
+`_arm_extract`), and
+`S6`/`S6a` (inside `execute_embed` and the write path). `S0` IS pinned
+(`_edus_from_conversation(conversation)` is the body's own segmentation call). (2) The two sub-step
+rows are not an exhaustive account of S2.2: the referentiality pass (`route_mentions`, `#11021`) has
+no row either, and this change adds none. (3) The id grammar remains a regex over free prose, so a
+row spelled with a lowercase or digit suffix after the hyphen still would not parse; what closes that
+residual is that such a row now REDS (`test_every_step_shaped_row_parses`) instead of being silently
+dropped — for a row at COLUMN 0, which is the blocks' own row convention. An INDENTED row is still
+invisible to both halves (the blocks' continuation lines are indented, so a whitespace-tolerant
+matcher would red on legitimate prose), and that residual is named here rather than claimed closed.
+(4) The call-site checks count TEXT occurrences rather than `ast.Call` nodes, so a call that is
+COMMENTED OUT (`# added = run_partial_gap_fill(…)`) keeps its count and leaves the order pins reading
+the old position — a false pass inherited from the pre-existing marker approach, sharpened (not
+created) by the count check, and left open because the text mutations all the guards are proved with
+are string edits. (5) The retirement scan is a bounded word list, and it now READS each row's
+continuation lines, so a claim wrapped onto a second line is caught; a synonym outside the list
+(`DELETED`, `SUPERSEDED`, `DEPRECATED`) is not.
