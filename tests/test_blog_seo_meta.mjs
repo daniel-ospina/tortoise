@@ -1938,7 +1938,7 @@ console.log("the blog's link preview and icon");
       && hrefPath(t) === href);
     assert(
       /\?v=[0-9a-f]{12}$/.test(linkAttr(tag, "href") ?? ""),
-      `the blog shell links ${href} WITHOUT a ?v=<sha256[:12]> cache-buster — a re-exported mark keeps drawing the old artwork (#11407)`,
+      `the blog shell links ${href} with a ?v=<sha256[:12]> cache-buster that moves when the bytes do (#11407) — got ${linkAttr(tag, "href")}`,
     );
   }
 

@@ -5929,7 +5929,7 @@ class TestSiteIconAndSocialPreviewContract:
 
     @staticmethod
     def _head_element_count(rendered: str) -> int:
-        """How many `<head>` ELEMENTS a source renders — `<header>` is not one.
+        r"""How many `<head>` ELEMENTS a source renders — `<header>` is not one.
 
         ⛔ SPLIT OUT SO THE COUNT IS DRIVEN BY AN ASSERTION, not only by the surface test.
         The first cut was `rendered.count("<head")`, which counts a `<header>` element as a
@@ -5937,11 +5937,20 @@ class TestSiteIconAndSocialPreviewContract:
         three self-rendered sources could legitimately gain one. It refused an honest page
         with a diagnosis ("a SECOND document … grade each one") describing a document that
         does not exist — a false red, and the class this file's `_icon_trio_violations`
-        docstring says must not ship. `\\b` is the discipline the tag scanners already use
-        (`:582-583`, `:761`, `HEADING_TAG_RE`): it ends the match at a word boundary, so
-        `<head>`, `<head `, `<head\n` and `<head/>` count and `<header>`/`<heading>` do not.
+        docstring says must not ship.
+
+        ⛔ A WORD BOUNDARY ALONE IS NOT ENOUGH, IN EITHER DIRECTION (review rounds 7-8).
+        `<head\b` is CASE-SENSITIVE and HTML tag names are not: `<HEAD>` counted 0, so a
+        genuine second document spelled in uppercase passed `heads == 1` and the guard
+        sliced the first while reporting green for both — the fail-open this count exists to
+        prevent. And the boundary still matched `<head` inside a JS STRING: these sources
+        build HTML with `.replace()` / concatenation, so `html.replace("<head", "<head>")`
+        counted 2 and refused an honest edit. `(?=[\s/>])` requires the tag name to END there
+        (so `<header>`, `<heading>`, `<head-x>` and `"<head"` are not matches) and `re.I`
+        makes the name case-insensitive — the same flag `HEADING_TAG_RE` (`:2577`) carries.
+        `<head>`, `<head >`, `<head\t>`, `<head\n>` and `<head/>` each count one, in any case.
         """
-        return len(re.findall(r"<head\b", rendered))
+        return len(re.findall(r"<head(?=[\s/>])", rendered, re.I))
 
     def test_every_surface_declares_the_same_versioned_icon_set(self):
         """ONE mark on every origin — and a URL that changes when the bytes do.
@@ -6056,24 +6065,30 @@ class TestSiteIconAndSocialPreviewContract:
         # ⚠️ `website/functions/_middleware.ts`'s refusal page is a deliberate EXCEPTION and
         # stays unlinked: its own contract forbids an outbound request while a credential is
         # in the URL — so it is excluded by DECISION, not by oversight.
+        # ⛔ EACH SOURCE CARRIES THE URL IT IS SERVED AT (review round 8 — the same defect the
+        # round-3 `base` fix closed for disk pages): `_icon_ref` resolves a href the way a
+        # BROWSER does, against the page that carries it, so grading these three against
+        # `SITE_ROOT` alone read a document-relative `favicon.ico?v=…` in `confirm.ts` as
+        # GREEN while the browser requests `/auth/favicon.ico` and 404s. All three sources use
+        # root-relative hrefs today (verified), so this changes no current answer.
         self_rendered = {
             "website/functions/blog/_lib.ts": (
-                self.WEB / "functions" / "blog" / "_lib.ts", self.WEB, self.SITE_ORIGINS),
+                self.WEB / "functions" / "blog" / "_lib.ts", self.WEB, self.SITE_ORIGINS,
+                self.SITE_ROOT + "blog/"),
             "website/apps/dashboard/functions/auth/confirm.ts": (
                 self.WEB / "apps" / "dashboard" / "functions" / "auth" / "confirm.ts",
-                self.DASHBOARD_ROOT, self.ICON_ORIGINS),
+                self.DASHBOARD_ROOT, self.ICON_ORIGINS, self.SITE_ROOT + "auth/"),
             "website/apps/dashboard/functions/admin/[[path]].ts": (
                 self.WEB / "apps" / "dashboard" / "functions" / "admin" / "[[path]].ts",
-                self.DASHBOARD_ROOT, self.ICON_ORIGINS),
+                self.DASHBOARD_ROOT, self.ICON_ORIGINS, self.SITE_ROOT + "admin/"),
         }
-        for source_label, (source, root, origins) in self_rendered.items():
+        for source_label, (source, root, origins, page_url) in self_rendered.items():
             rendered = source.read_text()
-            # `re.findall(r"<head\b")`, not `count("<head")`: a `<header>` element would
+            # `self._head_element_count`, not `count("<head")`: a `<header>` element would
             # have counted as a second `<head>` and refused an honest page with a diagnosis
             # ("grade each one, or list the new document") that describes a document that
-            # does not exist. `\b` is the discipline the tag scanners already use
-            # (see `_head_element_count`, which is what `test_a_header_element_is_not_a_
-            # second_head_document` drives in both directions).
+            # does not exist. The helper's docstring carries the two failure directions it
+            # closes; what DRIVES it is `test_a_header_element_is_not_a_second_head_document`.
             heads = self._head_element_count(rendered)
             assert heads == 1, (
                 f"{source_label} renders {heads} <head> element(s), but this guard grades ONE "
@@ -6082,7 +6097,8 @@ class TestSiteIconAndSocialPreviewContract:
                 "assertion here stayed green — grade each one, or list the new document "
                 "separately, rather than letting the guard quietly cover the first only")
             violations = self._surface_icon_violations(
-                "self-rendered", source_label, rendered, root, expected, origins)
+                "self-rendered", source_label, rendered, root, expected, origins,
+                page_url=page_url)
             assert not violations, "\n".join(violations)
 
     def _page_url(self, page: Path, root: Path) -> str:
@@ -6485,8 +6501,12 @@ class TestSiteIconAndSocialPreviewContract:
                 self.DASHBOARD_ROOT.parent / "functions" / "admin" / "[[path]].ts",
         }
         for label, source in sources.items():
-            text = source.read_text()
+            # ⛔ `is_file()` BEFORE `read_text()`: read-first raised `FileNotFoundError` on a
+            # renamed fixture, so the drift diagnosis below was unreachable in every case it
+            # named — "a check whose failure path never runs cannot be told apart from a
+            # no-op", which is this file's own rule (review round 8, F3).
             assert source.is_file(), f"fixture drift: {label} is gone"
+            text = source.read_text()
             assert self._head_element_count(text) == 1, (
                 f"{label} renders {self._head_element_count(text)} <head> element(s); this "
                 "test assumes exactly one, or the directions below grade nothing")
@@ -6509,8 +6529,23 @@ class TestSiteIconAndSocialPreviewContract:
                 f"{label} plus a real second <head> must count 2 — otherwise the guard "
                 "covers the first document and reports green for both")
 
-            # Direction 3 — every opening spelling of the ONE element still counts exactly
-            # one: `<head>`, `<head `, `<head\n`, `<head/>` are the same element.
-            for spelling in ("<head>", "<head >", "<head\n>", "<head/>"):
+            # Direction 3 — EVERY opening spelling of the ONE element still counts exactly
+            # one, in any case: `<head>`, `<head `, `<head\t>`, `<head\n`, `<head/>` are the
+            # same element, and an UPPERCASE name is not a different one (HTML lowercases
+            # tag names; the case-sensitive boundary counted `<HEAD>` as 0 and so let a real
+            # second document through).
+            for spelling in ("<head>", "<head >", "<head\t>", "<head\n>", "<head/>",
+                             "<HEAD>", "<Head>"):
                 assert self._head_element_count(spelling) == 1, (
                     f"{spelling!r} must count as one <head> element")
+
+            # Direction 4 — a `<head` inside a STRING BUILDER is not an element either.
+            # These three sources assemble HTML with `.replace()`/concatenation, so an honest
+            # edit like the one below counted 2 and refused the page with "a SECOND
+            # document" that nobody wrote.
+            builder = 'x = html.replace("<head", "<head>")'
+            assert self._head_element_count(builder) == 1, (
+                f"a `\"<head\"` inside a string builder is not an element: {builder!r} "
+                f"counted {self._head_element_count(builder)}")
+            assert self._head_element_count("<head-x>") == 0, (
+                "a tag name that merely STARTS with `head` is not <head> ")
