@@ -13392,8 +13392,10 @@ class TortoiseSDK:
         props = _sanitize_props(props)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
-        # #11239 (DM1's home): `mentions` is a list of RECORD dicts and the
-        # engine cannot hold an array of maps, so the payload form is encoded to
+        # #11239 (DM1's home): `mentions` is a list of RECORD dicts and no path
+        # stores an array of maps (the projection denies it; a raw `SET n += $p`
+        # gets it degraded to `null` by the driver, #7369), so the payload form is
+        # encoded to
         # ONE compact JSON scalar here. ⛔ THIS call is the LOAD-BEARING one, and
         # that is measured rather than assumed (review P2, PR #11795):
         # commenting it out leaves `p.mentions` UNSET, while deleting the replay
@@ -43828,8 +43830,14 @@ class TortoiseSDK:
         # R1, PR #11795). The #4094 exemption is declared for props that
         # ALREADY reached the node live without a record; #11239 is what made
         # ``mentions`` persistable on this surface AT ALL, and before the encode
-        # below the same call was a hard refusal (the engine rejects an array of
-        # maps), not a silent live-only write. Both replay folds carry the key
+        # below the same call was a SILENT no-store rather than a write — `SET n
+        # += $p` with an array of maps succeeds and the driver degrades the value
+        # to ``null`` before dispatch (measured on this head; the same degrade the
+        # tree already documents for ``tags``, #7369), so the property simply
+        # never landed. (On the PROJECTION path the sibling denial is explicit:
+        # ``_persist_extra_props`` refuses an array containing a dict by
+        # ``_is_persistable_prop_value``.) Neither path was a refusal, and neither
+        # journalled a store. Both replay folds carry the key
         # already (``_revise_point`` / ``_apply_one``), so leaving it
         # unjournalled here would ship a NEW divergence: a stored-live,
         # unreplayable record, which ``check_consistency`` then reds on a

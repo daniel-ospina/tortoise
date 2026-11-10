@@ -49,6 +49,17 @@ every assertion passed. So each of those doors now has a NODE READ-BACK here
     also review R1's fix: that door used to store the record LIVE with no
     journal record, so a rebuild dropped it and `check_consistency` redded a
     faithful graph with the one piece of advice that deletes it.
+
+TWO MORE ROWS, ADDED AFTER THE `e63a78de` REVIEW (findings 2 and 8):
+
+  * `EventAPI.add_point` — the door that makes the PROJECTION's encode
+    load-bearing rather than defensive. It journals `PointAdded(point=p)` with
+    the payload's LIST spelling and calls no encoder of its own, so
+    `_upsert_point_props`'s call is the only one on its path; neutering it was
+    measured to store NOTHING, live and replay (#finding 2).
+  * the ADDRESSED clear (`update_point(mentions=None)`) — three comments rest
+    the create-door `None`-drop on this verb being the documented way to delete
+    a record, and nothing pinned it (finding 8).
 """
 
 from __future__ import annotations
@@ -59,6 +70,8 @@ import pytest
 
 pytest.importorskip("tortoise.sdk")
 
+from tortoise.api import EventAPI, provenance
+from tortoise.log import EventLog
 from tortoise.sdk import TortoiseSDK
 
 MENTIONS = [
@@ -253,7 +266,8 @@ def test_a_mention_written_by_update_entity_survives_a_rebuild(env):
     `_update_entity`'s `:Point` branch writes caller props with a live
     `SET n += $p`, and before this row it journalled only the annotator dims.
     #11239 is what made `mentions` persistable through that surface at all (a
-    list of maps used to be a hard engine refusal, not a silent store), so an
+    list of maps used to be a silent no-store — the driver degrades the value to
+    `null` before dispatch, #7369's `tags` mechanism — never a refusal), so an
     unjournalled write here would be a NEW live-only door — and the worst kind:
     `check_consistency` reds a faithful graph with "reconcile by replaying the
     journal", and replaying it deletes the record. The fix journals the key on
@@ -401,3 +415,79 @@ def test_the_capture_seam_carries_the_payload_mentions_to_the_node(env,
     assert _node_prop(sdk, pid) == live, (
         "the capture seam's record did not survive the rebuild — live and "
         "replay must be a pure function of the payload (#330)")
+
+
+def test_the_event_api_door_carries_a_mention_to_the_point(env):
+    """`EventAPI.add_point` — the door that makes the PROJECTION encode load-bearing.
+
+    Review finding 2 on the `e63a78de` head. `add_point` updates the point dict
+    and journals `PointAdded(point=p)` with the payload's LIST spelling, and it
+    calls no encoder of its own — so `_upsert_point_props`'s call is the ONLY
+    one on its path, live as well as replayed. The docstring that called that
+    call "DEFENCE-IN-DEPTH, not the load-bearing one" was therefore false, and
+    would have invited a deletion that silently stops this door storing the
+    record at all.
+
+    Mutant this reds on: neutering `entities.encode_json_record_props` — the
+    live write then stores NOTHING, so `live` is None here.
+    """
+    sdk, events = env
+    api = EventAPI(EventLog(str(events / "events.jsonl")),
+                   initiated_by="extractor", projection=sdk._get_proj())
+    prov = provenance("session.md", [0, 23], "quote", extracted_by="t@0")
+    pid = api.add_point(CONTENT, prov, mentions=[dict(m) for m in MENTIONS])
+
+    live = _node_prop(sdk, pid)
+    assert live is not None, (
+        "`EventAPI.add_point` was handed a mention record and the claim Point "
+        "holds none: this door journals the payload's LIST spelling and relies "
+        "on the projection's encode, which is the only encoder on its path")
+    _assert_record_is_the_payload_surfaces(live)
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    rebuilt = _node_prop(sdk, pid)
+    assert rebuilt is not None, (
+        "the EventAPI door's record is LIVE-ONLY: the replay dropped it")
+    assert rebuilt == live, (
+        "the rebuild re-derived DIFFERENT bytes for the same record (#330)")
+
+
+def test_an_addressed_clear_removes_the_stored_record_and_survives_a_rebuild(env):
+    """`update_point(mentions=None)` — the ADDRESSED clear (review finding 8).
+
+    Three comments rest the create door's `None`-drop on this verb being *the*
+    documented way to delete a record (`sdk.py`'s `create_point` note,
+    `projection.__init__`'s revision fold note, `_update_entity`'s journal
+    note), and nothing pinned it — so if the clear ever regressed, the
+    justification for dropping `None` at CREATE would be void and every row
+    would stay green.
+
+    This also keeps the two directions honest side by side: an addressed edit
+    clears, an unaddressed re-commit (`test_a_recommit_with_no_mentions_...`,
+    and the hosted-door row) does not.
+    """
+    sdk, events = env
+    pid = sdk.create_point("statement", CONTENT, dedup=True,
+                           status="draft", mentions=MENTIONS)["id"]
+    stored = _node_prop(sdk, pid)
+    assert stored is not None, "the create did not store the record"
+
+    sdk.update_point(pid, mentions=None)
+    cleared = _node_prop(sdk, pid)
+    assert cleared is None, (
+        "`update_point(mentions=None)` did not clear the stored record: this is "
+        "the ADDRESSED clear, the one verb allowed to delete a mention — "
+        f"without it the create door's None-drop has no sanctioned counterpart "
+        f"(node still holds {cleared!r})")
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert _node_prop(sdk, pid) is None, (
+        "the clear is LIVE-ONLY: the rebuild restored the deleted record, so "
+        "live and replay disagree on a journal that says `mentions: None`")
+
+    from tortoise.consistency import check_consistency
+
+    report = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+    assert report["ok"] is True, (
+        "live and replay agree, so the checker must not red this graph: "
+        + str(report.get("divergent_points")))

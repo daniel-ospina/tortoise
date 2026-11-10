@@ -1635,15 +1635,19 @@ mechanisms:
       field.
       On the node the value is ONE compact JSON scalar
       (`projection.entities.encode_json_record_props`, declared in
-      `_POINT_JSON_RECORD_PROPS` and `_POINT_DECLARED_PROPS`), because the engine
-      refuses an array containing a map and `_POINT_LIST_PROPS` is deliberately
-      empty. The LIVE doors call that helper themselves (`create_point`,
-      `update_point`, `_update_entity`) and emit a pure function of the payload,
-      which is what makes the live write and every rebuild byte-identical
-      (#330); the projection's replay writer (`_upsert_point_props`) calls it too,
-      but that call is DEFENCE-IN-DEPTH — a journal from these doors already
-      carries the canonical string, so it only normalises a NON-canonical record,
-      pinned behaviourally by
+      `_POINT_JSON_RECORD_PROPS` and `_POINT_DECLARED_PROPS`), because an array
+      containing a map never reaches the node: the projection denies it
+      (`_is_persistable_prop_value`) and a raw `SET n += $p` gets it degraded to
+      `null` by the driver before dispatch (#7369's `tags` mechanism), and
+      `_POINT_LIST_PROPS` is deliberately empty. The SDK doors call that helper
+      themselves (`create_point`, `update_point`, `_update_entity`) and emit a
+      pure function of the payload, which is what makes the live write and every
+      rebuild byte-identical (#330); the projection's replay writer
+      (`_upsert_point_props`) calls it too, and that call is LOAD-BEARING for
+      `EventAPI.add_point` — a live door that journals the payload's LIST
+      spelling and calls no encoder of its own (neutering it stores nothing) —
+      as well as the only arm that normalises a NON-canonical record, pinned
+      behaviourally by
       `test_the_replay_door_normalises_a_non_canonical_record`.
       `consistency._uncarried` READS that declaration instead of
       re-listing it, so an armed capture no longer reports a `_UNCARRIED_LIST` it

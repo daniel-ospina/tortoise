@@ -753,6 +753,14 @@ def _uncarried(journal_by_id: dict) -> dict[str, dict[str, str]]:
                 # #11239: carried in canonical form too — the payload's list of
                 # mention records is encoded to one JSON scalar by the same
                 # writer (`encode_json_record_props`), so this is not a loss.
+                # ⚠️ Only for the shapes that writer ACCEPTS: it pops a value
+                # that is neither a `str` nor a `list`/`tuple` (the `pop` arm in
+                # `entities.py`), so a journal carrying `mentions: 5` is a real
+                # drop and must be NAMED — exactly the value-dependent carriage
+                # the `tags` branch above exists for (review P3 on PR #11795).
+                if isinstance(v, (str, list, tuple)):
+                    continue
+                found[k] = _UNCARRIED_NON_PERSISTABLE
                 continue
             elif isinstance(v, list) and k not in _POINT_LIST_PROPS:
                 found[k] = _UNCARRIED_CONTENT_PROPS.get(k, _UNCARRIED_LIST)

@@ -721,16 +721,26 @@ class Mention(BaseModel):
       branch) — **CARRIED**, and journalled as ``PointRevised(mentions=…)`` so
       a rebuild reproduces it (review R1 on PR #11795: journaled here rather
       than left as a live-only third door).
+    - ``EventAPI.add_point`` (``tortoise/api.py``) — **CARRIED**, and it is the
+      door that makes the PROJECTION's encode load-bearing rather than
+      defensive: `add_point` updates the point dict and journals
+      ``PointAdded(point=p)`` with the payload's LIST spelling and calls no
+      encoder of its own, so ``_upsert_point_props``'s call is the only one on
+      its path (measured: neutering it stores nothing, live and replay). Pinned
+      by ``tests/test_mention_write_11239.py::test_the_event_api_door_carries_a_mention_to_the_point``.
 
-    Every carried leg is **stored, never advertised**, so a graph read after a
-    capture holds the claim AND the mentions it used.
+    Six doors, three of them carried (the two ``_execute_commit_writes`` legs
+    count as one door). Every carried leg is **stored, never advertised**, so a
+    graph read after a capture holds the claim AND the mentions it used.
 
     ⛔ Still NOT part of ``sdk._CAPTURE_PASSTHROUGH_PROPS``: that set is the
     public capture **RESPONSE** surface (``#2949`` response parity), and widening
     it would advertise a field no client model declares. The value is stored on
     the node only. On the node it is ONE compact JSON scalar —
-    ``projection.entities.encode_json_record_props`` — because the engine cannot
-    hold an array of maps; the payload keeps the record shape, and
+    ``projection.entities.encode_json_record_props`` — because no path stores an
+    array of maps (the projection denies it; a raw ``SET n += $p`` gets it
+    degraded to ``null`` by the driver, ``#7369``); the payload keeps the record
+    shape, and
     ``consistency._uncarried`` reads the same declaration so an armed capture no
     longer reports a ``_UNCARRIED_LIST`` it will never persist.
 
@@ -804,10 +814,10 @@ class Point(BaseModel):
     # never promotes a member to an :Object — a mention is a record, not a node.
     # ⛔ NOT a declared REST field, and NOT part of the capture RESPONSE surface
     # (`sdk._CAPTURE_PASSTHROUGH_PROPS`) — it is a writer-produced record, not a
-    # client field. It IS persisted on the node since #11239: both Point write
-    # doors carry it and `projection.entities.encode_json_record_props` stores it
-    # as one compact JSON scalar (see `Mention`'s docstring for the four doors
-    # and which two carry it).
+    # client field. It IS persisted on the node since #11239:
+    # `projection.entities.encode_json_record_props` stores it as one compact
+    # JSON scalar, and THREE of the SIX write doors carry it (see `Mention`'s
+    # docstring for the enumeration and one verdict per door).
     mentions: list[Mention] = Field(default_factory=list)
 
     @model_validator(mode="after")

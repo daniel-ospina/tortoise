@@ -5597,3 +5597,59 @@ def test_a_recommit_whose_payload_has_no_mentions_keeps_the_stored_record(client
         "record — the door folded `mentions=None` onto the claim and a `None` "
         "in a generic prop removes the property (DM1: no held item silently "
         "dropped)")
+
+
+def test_the_supersede_leg_carries_its_mentions_to_the_superseding_point(client):
+    """The OTHER create leg of `_execute_commit_writes` (review finding 1).
+
+    The plain-create leg has two node read-backs above. The supersede leg —
+    the one that mints the successor of a REVISED claim — was covered only by
+    an `inspect.getsource` assertion in `tests/test_referentiality_11021.py`
+    that counts the assignment TEXT twice. Evaluated against the mutant
+    `if False and _mention_props:`, that assertion still passes (`_mention_props
+    = [` present, `point_props["mentions"] = _mention_props` counted 2, no
+    `mentions=_mention_props` kwarg), while the supersede leg carries nothing —
+    so a supersede commit dropped the record with every row green. This row
+    executes the leg.
+
+    Mutant this reds on: `if _mention_props:` → `if False and _mention_props:`
+    on the SUPERSEDE leg only (the plain-create rows stay green).
+    """
+    sdk = _team_sdk()
+    proj = sdk._get_proj()
+    # Seed the predecessor so the commit REVISES it (same shape as
+    # `test_supersede_branch_carries_e3_point_props`).
+    # SAME id as the payload point, DIFFERENT content: that pair is what makes
+    # `reconcile_payload` choose the supersede leg (the E3 row's shape).
+    pid = "pt_11239_supersede"
+    proj.g.query(
+        "MERGE (p:Point {id:$id}) SET p.pointKind='statement', "
+        "    p.content='the old 5K claim', p.is_operator=false, "
+        "    p.status='live', p.content_hash='seed' ",
+        params={"id": pid})
+    new_content = "my 5K best is 26:58"
+    raw = _raw_payload(0, session_id="s11239-supersede", points=[_point(
+        0, id=pid, content=new_content,
+        mentions=[dict(_MENTION_RECORD)])])
+    r = _commit(client, raw)
+    assert r.status_code == 200, r.text[:400]
+
+    # The leg RAN: the predecessor was superseded by this commit.
+    old = proj.g.query(
+        "MATCH (p:Point {id:$id}) RETURN p.status",
+        params={"id": pid}).result_set
+    assert old and old[0][0] == "superseded", (
+        "the supersede leg did not run, so this row would prove nothing "
+        f"(predecessor status {old[0][0] if old else 'missing'})")
+
+    rows = proj.g.query(
+        "MATCH (p:Point) WHERE p.content = $c AND p.mentions IS NOT NULL "
+        "RETURN p.id, p.mentions LIMIT 1",
+        params={"c": new_content}).result_set
+    assert rows, (
+        "the supersede commit accepted a `mentions` payload and the "
+        "SUPERSEDING Point holds none: the second create leg reads the record "
+        "and drops it (#11239)")
+    records = json.loads(rows[0][1])
+    assert records[0]["surface"] == "it", records
+    assert records[0]["kind_guess"] == "pronoun", records

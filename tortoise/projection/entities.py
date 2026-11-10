@@ -1160,29 +1160,41 @@ _POINT_FLATTEN_LIST_PROPS: frozenset = frozenset({"search_keys", "quote"})
 #: and adding a key here does NOT widen the search surface.
 #:
 #: Why an encoded SCALAR at all (and not the declared list the payload carries):
-#: `_persist_extra_props` rejects any array containing a dict at ANY depth
-#: (`_is_persistable_prop_value`), and `_POINT_LIST_PROPS` is deliberately
-#: EMPTY, so a list of mention records never reaches the node.
+#: on the PROJECTION path `_persist_extra_props` rejects any array containing a
+#: dict at ANY depth (`_is_persistable_prop_value`), and `_POINT_LIST_PROPS` is
+#: deliberately EMPTY; on a raw `SET n += $p` (the generic entity door, the graph
+#: fold) the driver instead degrades a value it cannot send to `null` BEFORE
+#: dispatch — the same degrade the tree documents for `tags` (#7369). Both are
+#: silent: a list of mention records never reaches the node either way.
 #:
-#: ⛔ WHICH CALL IS LOAD-BEARING, MEASURED (review P2, PR #11795) — the
-#: placement is deliberately stated here because the prose previously inverted
-#: it. The LIVE doors call `encode_json_record_props` THEMSELVES: `create_point`
-#: (`sdk.py`, before the write and before its dedup fold forwards the props to
-#: `update_point`), `update_point`, and `_update_entity`. Those calls are what
-#: make the record reach the node: commenting `create_point`'s out leaves
-#: `p.mentions` UNSET. `_upsert_point_props` — the replay door — calls it too,
-#: and that call is **DEFENCE-IN-DEPTH, not the load-bearing one**: a journal
-#: written by these doors already carries the canonical STRING (the helper is a
-#: no-op for a `str`, which is also what lets `create_point`'s dedup fold hand
-#: the encoded value straight to `update_point`), so deleting the replay call
-#: changes no test in the DEFAULT population. It has work to do only on a
-#: NON-canonical record — a
-#: hand-written journal, or an older emitter's snapshot — which it normalises to
-#: the same scalar instead of handing `_persist_extra_props` an undeclared array
-#: of dicts that it DENIES SILENTLY. That arm IS pinned behaviourally, by
-#: `tests/test_mention_write_11239.py::test_the_replay_door_normalises_a_non_canonical_record`.
-#: The parity claim (#330) therefore rests on the LIVE calls emitting a pure
-#: function of the payload, not on the replay door re-deriving it.
+#: ⛔ WHICH CALL IS LOAD-BEARING, MEASURED (review P2 on PR #11795, twice) — the
+#: placement is stated here because the prose inverted it once and then
+#: under-stated it once.
+#:
+#: * The SDK doors call `encode_json_record_props` THEMSELVES: `create_point`
+#:   (`sdk.py`, before the write and before its dedup fold forwards the props to
+#:   `update_point`), `update_point`, and `_update_entity`. Commenting
+#:   `create_point`'s out leaves `p.mentions` UNSET.
+#: * `_upsert_point_props` — the REPLAY door — is **load-bearing for a LIVE door
+#:   too, and that is not a corner case**: `EventAPI.add_point` (`tortoise/api.py`)
+#:   updates the point dict and journals `PointAdded(point=p)` with the
+#:   payload's LIST spelling, and it calls no encoder of its own — this call is
+#:   the only one on its path. Neutering it was measured to make that same live
+#:   call store `None` (the record silently denied), live AND replay. So
+#:   "deleting the replay call changes no test" is true only of the SDK doors
+#:   below and false of `add_point`: do not delete it.
+#: * For a journal a live SDK door wrote, the call is a no-op (the helper is a
+#:   no-op for a `str`, which is also what lets `create_point`'s dedup fold hand
+#:   the encoded value straight to `update_point`). It has real work on a
+#:   NON-canonical record — a hand-written journal, an older emitter's snapshot,
+#:   or `add_point`'s — which it normalises to the same scalar instead of handing
+#:   `_persist_extra_props` an undeclared array of dicts that it DENIES SILENTLY.
+#:   That arm is pinned behaviourally by
+#:   `tests/test_mention_write_11239.py::test_the_replay_door_normalises_a_non_canonical_record`;
+#:   `add_point`'s own arm by
+#:   `tests/test_mention_write_11239.py::test_the_event_api_door_carries_a_mention_to_the_point`.
+#: The parity claim (#330) rests on every door emitting a pure function of the
+#: payload — which is why the encode lives in ONE helper and not per door.
 _POINT_JSON_RECORD_PROPS: frozenset = frozenset({"mentions"})
 
 
@@ -1268,8 +1280,11 @@ def encode_json_record_props(props: dict) -> None:
             # offsets are `None` when the producer supplied no usable int, so
             # `{"surface": "the thing"}` encodes to
             # `[{"span_end":null,"span_start":null,"surface":"the thing"}]`
-            # — and `kind_guess` only when it carries a value (DM1 makes it
-            # optional, and there is no producer that must invent one). A
+            # — and `kind_guess` only when it carries a value. The MODEL makes it
+            # optional (`commit_schema.Mention.kind_guess: str | None = None`);
+            # DM1 itself declares a four-field row with no optionality, so what
+            # permits the drop is the model, not the declaration. There is no
+            # producer that must invent one. A
             # reader parses one schema rather than a per-call variant. The
             # fields DM1 excludes are listed in the docstring above.
             surface = rec.get("surface")
