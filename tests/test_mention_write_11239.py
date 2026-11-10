@@ -49,6 +49,21 @@ every assertion passed. So each of those doors now has a NODE READ-BACK here
     also review R1's fix: that door used to store the record LIVE with no
     journal record, so a rebuild dropped it and `check_consistency` redded a
     faithful graph with the one piece of advice that deletes it.
+
+WHY THE RE-CREATE ROWS EXIST (review P1 on the `19575dd5922b` head). The wipe
+that makes a re-created Point FRESH (`projection._rebuild_all_replay`'s pass-1a
+`is_recreate` arm — the list that already clears `embedding_verbatim`,
+`sourceVersionTransit`, `extractedFromAll` and `tags`) did not name `mentions`.
+Pass 1a never folds the delete, so the re-create MERGEs onto the still-present
+dead node and the open-set passthrough writes only the keys the payload states:
+the DELETED incarnation's record survived on the new node, `check_consistency`
+redded a faithful rebuild on `fields: ['mentions']`, and its advice ("replay the
+journal") reproduced that graph (#5048/#5256). The mirror of DM1's "no held
+item silently dropped" is that a dropped item must not silently RETURN. The
+other half of the same arm is the omitted-key carry-forward in `_apply_one`'s
+creation arm: a non-re-create second `PointAdded` that says nothing about
+mentions leaves the stored value on the node, so the pure fold must keep it too
+or the two replay engines disagree on the same journal.
 """
 
 from __future__ import annotations
@@ -326,6 +341,105 @@ def test_a_recommit_passing_mentions_none_does_not_clear_the_record(env):
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     assert _node_prop(sdk, pid) == stored, (
         "live and replay disagree after a `mentions=None` re-commit")
+
+
+def test_a_recreate_without_mentions_does_not_inherit_the_deleted_record(env):
+    """The RE-CREATE wipe (review P1 on the `19575dd5922b` head).
+
+    Pass 1a never folds the delete, so a same-id re-creation MERGEs onto the
+    still-present dead node and `_persist_extra_props` writes only the keys the
+    payload states. The wipe list that makes a re-created Point FRESH already
+    named `embedding_verbatim` (#5004 r4), `sourceVersionTransit` (#5256),
+    `extractedFromAll` (#7704) and `tags` (#2897); it did not name `mentions`,
+    which this change is what puts in that class. Both consequences were
+    measured on the pre-fix tree: the rebuilt node held the DELETED
+    incarnation's record, and `check_consistency` redded the FAITHFUL rebuild on
+    `fields: ['mentions']` with the advice "replay the journal" — which
+    reproduces exactly that graph.
+
+    Mutant it reds on: dropping `n.mentions = NULL` from the pass-1a wipe.
+    """
+    sdk, events = env
+    pid = sdk.create_point("statement", CONTENT, dedup=True,
+                           status="draft", mentions=MENTIONS)["id"]
+    assert _node_prop(sdk, pid) is not None, "the fixture never stored a record"
+    # A JOURNALED hard delete (`EntityMutated op=delete`) is what makes the next
+    # same-id creation a RE-creation to pass 1a; a raw DETACH DELETE journals
+    # nothing, the wipe would never fire, and this row would pass for the wrong
+    # reason (the #5256 row's warning).
+    assert sdk.delete_point(pid) is True
+
+    sdk.create_point("statement", "second life", id=pid)
+    assert _node_prop(sdk, pid) is None, (
+        "guard: the LIVE re-creation must carry no record — otherwise this row "
+        "is comparing the wrong thing")
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert _node_prop(sdk, pid) is None, (
+        "the DEAD incarnation's mention record survived the re-create wipe: "
+        "pass 1a MERGEs onto the still-present node, so a re-creation that "
+        "states no mentions inherits a record the journal never authored for "
+        "that incarnation (live has none — the #330 parity break)")
+
+    from tortoise.consistency import check_consistency
+
+    report = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+    assert report["ok"] is True, (
+        "a faithfully rebuilt graph must not be reported as diverged — the "
+        "checker's own advice (replay the journal) reproduces this graph: "
+        + str(report.get("divergent_points")))
+
+
+def test_a_second_creation_saying_nothing_keeps_the_record_in_both_folds(env):
+    """The pure fold's omitted-key carry-forward (same review P1, other half).
+
+    The graph fold MERGEs and the passthrough writes only stated keys, so a
+    second `PointAdded` for an id that already holds a record — with no
+    `mentions` on it — leaves the node's value untouched. `_apply_one`'s
+    creation arm REPLACES the folded entry, so without the carry-forward it
+    drops the key from the journal view only, and `check_consistency` then
+    reports a `mentions` divergence on a graph that is right.
+
+    The second record is written straight into the journal because no in-tree
+    producer emits a non-dedup second `PointAdded` for a claim id today (review
+    noted the arm as reachable-but-unproven); a hand-written journal line is
+    exactly the input a replay must survive.
+
+    Mutant it reds on: the `_POINT_JSON_RECORD_PROPS` carry-forward in
+    `_apply_one`'s creation arm.
+    """
+    sdk, events = env
+    pid = sdk.create_point("statement", CONTENT, dedup=True,
+                           status="draft", mentions=MENTIONS)["id"]
+    stored = _node_prop(sdk, pid)
+    assert stored is not None
+
+    log = events / "events.jsonl"
+    rows = [json.loads(line) for line in log.read_text().splitlines()
+            if line.strip()]
+    source = next(r for r in rows
+                  if r.get("type") == "PointAdded"
+                  and (r.get("point") or {}).get("id") == pid)
+    dup = json.loads(json.dumps(source))
+    dup.pop("seq", None)  # the replay's seq space is the enumerate index
+    assert dup["point"].pop("mentions", None) is not None, (
+        "this row can only prove the carry-forward if the second snapshot "
+        "starts WITHOUT the key")
+    rows.append(dup)
+    log.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert _node_prop(sdk, pid) == stored, (
+        "a second creation that says nothing about mentions DELETED the "
+        "stored record on replay: the MERGE keeps it, so the fold must too")
+
+    from tortoise.consistency import check_consistency
+
+    report = check_consistency(str(log), sdk._get_proj())
+    assert report["ok"] is True, (
+        "the pure fold dropped a record the node holds, so the checker reds a "
+        "faithful graph with advice that reproduces it: "
+        + str(report.get("divergent_points")))
 
 
 #: Any non-empty conversation — the extractor is replaced by a payload below.

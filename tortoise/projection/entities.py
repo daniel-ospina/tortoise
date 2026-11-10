@@ -1292,6 +1292,57 @@ def encode_json_record_props(props: dict) -> None:
             ensure_ascii=False)
 
 
+def stated_json_record_prop(payload, key: str) -> tuple[bool, object]:
+    """``(writes_property, value)`` for one `_POINT_JSON_RECORD_PROPS` key.
+
+    The ONE rule for *"does this payload state a record this writer must apply,
+    and as what bytes"* — the pass-1a/1b create writer (`_upsert_point_props`,
+    which encodes before `_persist_extra_props` can consult the list policy) and
+    the pure replay fold (`_apply_one`'s creation arm, whose carry-forward must
+    mirror the writer's OUTCOME on a MERGE'd node) — never re-spelled at either
+    site (#5048).
+
+    The answer IS the writer's outcome, spelled against every gate that sits
+    between the payload and the property:
+
+      * absent / ``None`` — `_persist_extra_props` skips a ``None`` value, so a
+        MERGE keeps whatever the node already holds: NO property written;
+      * a value ``_is_persistable_prop_value`` refuses (a map, bytes, a set, a
+        nested array of maps) — filtered before the SET, same outcome;
+      * a ``str`` — already canonical, passed through untouched, so only the
+        store-EXACTNESS gate is left (#7369 nulls a value `_value_ok` refuses,
+        e.g. a NUL/lone-surrogate string);
+      * a non-empty ``list``/``tuple`` — normalised through
+        `encode_json_record_props` (THE encoder), which POPS an empty list, so
+        an empty record list writes no property either — and the encoded
+        scalar is re-tested against the store gate for the same #7369 reason;
+      * any other shape — the encoder pops it, so nothing is written.
+
+    Written for `_apply_one`'s omitted-key carry-forward (`#11239`), which needs
+    exactly this: the graph MERGE keeps the stored record whenever the payload
+    states none the writer can persist, and a fold that replaced the entry
+    outright would disagree with the graph on the same journal — a divergence
+    `check_consistency` then reports with the advice ("replay the journal") that
+    reproduces the graph.
+    """
+    if not isinstance(payload, dict) or key not in payload:
+        return False, None
+    value = payload.get(key)
+    if value is None or not _is_persistable_prop_value(value):
+        return False, None
+    if isinstance(value, str):
+        holds = _store_holds_prop_value(value)
+        return (True, value) if holds else (False, None)
+    if not isinstance(value, (list, tuple)):
+        return False, None
+    view = {key: value}
+    encode_json_record_props(view)
+    encoded = view.get(key)
+    if encoded is None or not _store_holds_prop_value(encoded):
+        return False, None
+    return True, encoded
+
+
 def flatten_search_keys_prop(props: dict) -> None:
     """R2 (#1541) D3 — THE ONE HOME of the flatten rule for
     ``_POINT_FLATTEN_LIST_PROPS`` keys (today: ``search_keys`` and, since

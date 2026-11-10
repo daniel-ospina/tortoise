@@ -7096,11 +7096,13 @@ from tortoise.projection.entities import (  # noqa: E402, I001
     _EntityHandlers,
     _is_persistable_prop_value,
     _PERSISTABLE_MAX_DEPTH,
+    _POINT_JSON_RECORD_PROPS,
     _stated_tags,
     _storable_bound,
     _store_holds_prop_value,
     _usable_instant,
     encode_json_record_props,
+    stated_json_record_prop,
     gated_promote_payload,
     identifier_tokens_enabled,
     promote_status_applies,
@@ -9707,6 +9709,28 @@ def _apply_one(points: dict[str, dict], ev: dict,
                 if (not (isinstance(_ef_all, (list, tuple)) and _ef_all)
                         and "extractedFromAll" in _prev):
                     _carried["extractedFromAll"] = _prev["extractedFromAll"]
+                # #11239: the SAME omitted-key carry-forward for DM1's mention
+                # record — the one `_POINT_JSON_RECORD_PROPS` key, whose writer
+                # is the open-set passthrough AFTER `encode_json_record_props`.
+                # The graph MERGE therefore keeps the stored record whenever the
+                # payload states none the writer can persist (absent, `None`,
+                # an empty list the encoder POPS, or a value neither the payload
+                # filter nor the store accepts), and replacing the entry outright
+                # below would drop it from the journal view ONLY — the exact
+                # asymmetry `check_consistency` reports as a `mentions`
+                # divergence whose own action reproduces the graph. When the
+                # payload DOES state one, the fold stores the WRITER's bytes
+                # (the encoded scalar), so a list-shaped journal record folds to
+                # the same value the node holds. Gated on the same
+                # `journal_recreate` boundary so a re-created node does not
+                # inherit a dead incarnation's record (the wipe mirrors this).
+                for _jk in _POINT_JSON_RECORD_PROPS:
+                    _jwrote, _jvalue = stated_json_record_prop(p, _jk)
+                    if not _jwrote:
+                        if _jk in _prev:
+                            _carried[_jk] = _prev[_jk]
+                    elif _jvalue != p.get(_jk):
+                        p = {**p, _jk: _jvalue}
                 if _carried or _dropped:
                     p = {**{_k: _v for _k, _v in p.items() if _k not in _dropped},
                          **_carried}
@@ -14853,6 +14877,22 @@ class FalkorProjection(
                     # `tests/test_source_version_extractedfrom_5038.py::
                     # test_consistency_gate_compares_the_folded_set` pins it on
                     # both halves.
+                    # #11239: DM1's mention record is the same class again, and
+                    # it is THIS change that puts it in it. `mentions` reaches
+                    # the node ONLY through the open-set passthrough
+                    # (`_POINT_DECLARED_PROPS`, deliberately in neither
+                    # `_POINT_HANDLED` nor `_POINT_DENY`), so
+                    # `_persist_extra_props` writes it only when the payload
+                    # states one — and the pass-1a MERGE would otherwise keep a
+                    # DELETED incarnation's encoded record on the re-created
+                    # node. Both consequences are the ones the list above exists
+                    # for: the rebuilt node holds a property live does not (the
+                    # #330 parity break), and `check_consistency` reds a
+                    # FAITHFUL rebuild on `fields: ['mentions']` with the advice
+                    # "replay the journal", which reproduces exactly that graph
+                    # — the #5048/#5256 unclearable-red class. The mirror of
+                    # DM1's integrity constraint ("no held item silently
+                    # dropped") is that a dropped item must not silently RETURN.
                     self.g.query(
                         "MATCH (n:Point {id:$id}) "
                         "SET n.embedding = NULL, n.content_hash = NULL, "
@@ -14860,6 +14900,7 @@ class FalkorProjection(
                         "    n.sourceVersionTransit = NULL, "
                         "    n.extractedFromAll = NULL, "
                         "    n.tags = NULL, "
+                        "    n.mentions = NULL, "
                         "    n.eventId = NULL, n.source_session = NULL, "
                         "    n.source_harness = NULL, n.ingested_at = NULL",
                         params={"id": p["id"]})
