@@ -48,6 +48,12 @@
         "canary-streak"
       ]
     ],
+    "census-drift": [
+      [
+        "main-health-nightly.yml",
+        "census-drift"
+      ]
+    ],
     "changes": [
       [
         "ci.yml",
@@ -529,7 +535,7 @@
       ]
     ]
   },
-  "gate_digest": "158a77885e887af95841e9d8d1dbdf2b42cc612bf6a1f9c199aa4272b280d20e",
+  "gate_digest": "76f73d93539710fba70830a8c63fc855b11b5e4d28aad77caaf7381e64b32513",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -553,5 +559,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-11-04T11:57:29Z"
+  "verified_at": "2026-11-09T22:03:30Z"
 }

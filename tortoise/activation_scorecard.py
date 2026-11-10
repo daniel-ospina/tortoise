@@ -132,6 +132,16 @@ from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+# The ONE owner of the reserved sample-session prefix (`session_demo_…`, derived
+# from the mint shape, never a re-spelled literal). Imported at MODULE level —
+# the module's ONLY non-stdlib module-level import — because the module-level
+# QUERY constants (`_SESSION_NOT_DEMO`, `LIFETIME_MEMORY_QUERY`) interpolate it at
+# import time. `stage_counts` imports the PREDICATE (`is_demo_session_id`)
+# function-locally instead: nothing at module level evaluates that row filter, so
+# there is nothing to hoist, and every other non-stdlib import in this module is
+# function-local too (see `analytics_write_path_configured`).
+from tortoise.session_schema import DEMO_SESSION_ID_PREFIX
+
 _logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 2
@@ -324,9 +334,66 @@ FUNNEL_QUERY = (
 # deliberate: a ``WHERE`` after a required ``MATCH`` IS a filter (the
 # absorption hazard in (1) applies only to a predicate on an ``OPTIONAL
 # MATCH``). Because this query spans all time it is intentionally unwindowed.
+#
+# ⛔ AND IT EXCLUDES THE SAMPLE SESSION AT THE QUERY, not one surface over
+# (review of #8290, P2). This is the SIBLING of the funnel: ``stage_counts``
+# filters the funnel's rows through the shared predicate, but ``first_memory_at``
+# and ``sessions_with_memory`` come from HERE and are load-bearing — a non-NULL
+# ``first_memory_at`` is what moves stage 4 off ``no_memory_produced_in_lifetime``
+# onto a measured recall count, so a demo Session carrying a non-``event`` point
+# would move the baseline back to the sample's creation date.
+#
+# REACHABILITY, STATED HONESTLY: no seeded graph builds that shape. The demo
+# seeder wires NO ``CONTAINS`` edge to the sample Session at all, and the turn
+# nodes an earlier seeder did wire carried ``pointKind='event'``, which
+# ``STAGE3_PREDICATE`` already excludes. So the hazard is reachable only from a
+# writer that wires a NON-``event`` claim point to a demo-id Session — the
+# extraction lane's ``CONTAINS`` wiring is such a writer (`sdk._capture_turn_ids`
+# says so) — which is exactly why the exclusion belongs at the query rather
+# than in a reader's assumption about what today's seeder does.
+#
+# The prefix is INTERPOLATED from its one owner (``session_schema``), not bound
+# as a ``$`` parameter, and what that buys is LINE COST, stated at its real size:
+# the one PRODUCTION execution is ``hosted_api.py:23128`` (the two TEST sites are
+# ``tests/test_activation_scorecard.py`` — a stubbed ``_G``, through the hosted
+# route — and ``tests/test_demo_session_read_exclusion_8290.py``, which queries it
+# directly on a real embedded engine), and a ``params=…`` argument there does not
+# fit in 100 columns, so it wraps and pushes later lines down. Measured over every
+# ``hosted_api.py:<line>`` cite in the tracked tree: **14** distinct cite
+# targets have a line number LARGER than 23128 (23284 … 99999) and those are the
+# ones that shift; **434** have a number smaller than it (22 … 22292) and cannot
+# move. (449 distinct targets in all — the remainder is 23128 itself, which this
+# very comment names. NEVER re-take these by hand — that is how they went wrong
+# twice. `uv run python tools/hosted_api_cite_census.py --refresh` re-states every
+# figure in this note AND the list-helper's in one command whenever
+# ``hosted_api.py`` gains or loses a line above the pivot, and ``--check`` (run
+# nightly on main by `.github/workflows/main-health-nightly.yml`) reds when one is
+# stale. ⛔ These figures are NOT pinned by a tree-wide
+# test: that population belongs to every citing file (measured: ~1 commit in 30
+# adds a cite), so asserting it would red PRs that touch neither this note nor
+# ``hosted_api.py``. What the fast suite pins is what this change OWNS — the two
+# notes state one number, the three figures are arithmetic, and the pivot cite is
+# the query's production execution site. A "re-measurement" round flipped these to
+# 450/435 by counting with a `*` regex, so the census is a command, not a hand
+# count — and the command, not a per-PR assertion, is what carries the figures: a
+# per-PR `--check` would red PRs whose only remedy is prose in a module they never
+# opened, which is the false block this note's neighbour paragraph removed.)
+# ``STAGE3_PREDICATE`` is interpolated for the same reason, but as a predicate
+# EXPRESSION (``WHERE ({STAGE3_PREDICATE}) AND …``), never inside a quoted
+# literal — so escaping is not what it needs. The one value interpolated INSIDE a
+# single-quoted Cypher literal is the PREFIX, and it is a module constant with no
+# quote, backslash, ``$`` or backtick in it, so it cannot break out of that
+# literal. ``toString`` is what keeps a legacy non-string id from ABORTING the
+# query (``STARTS WITH`` raises ``Type mismatch`` on an integer id), and the
+# explicit NULL arm keeps a NULL-id Session counted: the demo set is exactly the
+# prefixed ids.
+_SESSION_NOT_DEMO = (
+    "(s.id IS NULL OR NOT toString(s.id) STARTS WITH "
+    f"'{DEMO_SESSION_ID_PREFIX}')"
+)
 LIFETIME_MEMORY_QUERY = (
     "MATCH (s:Session)-[:CONTAINS]->(p:Point) "
-    f"WHERE {STAGE3_PREDICATE} "
+    f"WHERE ({STAGE3_PREDICATE}) AND {_SESSION_NOT_DEMO} "
     "RETURN min(s.created_at) AS first_memory_at, "
     "count(DISTINCT s) AS sessions_with_memory"
 )
@@ -514,8 +581,23 @@ def stage_counts(rows: Sequence[Sequence[Any]], since: str,
     """
     integrity: list[str] = []
     kept: list[tuple[int, int]] = []
+    # #8290: the demo/sample Session is NOT one of the org's captures, and the
+    # session read surfaces (GET /v1/sessions, the detail door, TortoiseSDK
+    # .get_session) already exclude it. Counting it here would publish
+    # `captured_sessions: 1` for a demo-seeded org whose session LIST is empty —
+    # two org-facing surfaces disagreeing about whether the sample content is the
+    # user's own, which is the exact defect #8290 exists to remove, one surface
+    # over. Excluded HERE (in the row loop, on the shared predicate) rather than in
+    # `FUNNEL_QUERY`: the query is also the evidence for the stage-2/3 arithmetic,
+    # and a Python filter keeps the exclusion identical to the one every other
+    # surface applies (`session_schema.is_demo_session_id`) instead of a second
+    # Cypher spelling of the prefix.
+    from tortoise.session_schema import is_demo_session_id
+
     for row in rows:
         sid, created_at = row[0], row[1]
+        if is_demo_session_id(sid if isinstance(sid, str) else None):
+            continue
         if len(row) >= 5:
             # the live shape: (sid, created_at, turn_nodes, turn_count, extracted)
             turn_points = max(int(row[2] or 0), int(row[3] or 0))
@@ -599,8 +681,17 @@ def analytics_write_path_configured() -> bool:
     """
     import os
 
-    # Function-local import keeps this module import-pure (stdlib only at
-    # module level). The key is resolved through the SAME seam the analytics
+    # Function-local import, like every other non-stdlib import in this module
+    # EXCEPT one: the module-level ``from tortoise.session_schema import
+    # DEMO_SESSION_ID_PREFIX`` at the top, which the module-level QUERY constants
+    # (``_SESSION_NOT_DEMO``, ``LIFETIME_MEMORY_QUERY``) interpolate at import time
+    # and so cannot defer. That exception is stated rather than hidden — this
+    # comment used to claim "stdlib only at module level", which stopped being
+    # true when #8290 added the import (#11576 review: the two claims disagreed)
+    # — because the property is one a later lane would otherwise rely on. There is
+    # no cycle to fear either way: ``session_schema`` is stdlib-only.
+    #
+    # The key is resolved through the SAME seam the analytics
     # WRITER uses (``supabase_control._service_key()``) — re-deriving the
     # resolution here is how the write path ended up reading a name the hosted
     # deployment never sets (#3677). A second resolver could report "unset"

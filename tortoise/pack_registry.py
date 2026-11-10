@@ -3503,7 +3503,27 @@ class PackRegistry:
                 direct_parents.setdefault(full_child, set()).add(parent)
                 direct_children.setdefault(parent, set()).add(full_child)
 
-        # The `core:`-prefixed spelling is the fourth kind of equivalence.
+        # The `core:`-prefixed spelling is the fourth kind of equivalence, and a
+        # first-class one: a core kind is spelled BARE (`WorkItem`) by pack
+        # declarations and `core:`-prefixed (`core:WorkItem`) by the classifier's
+        # candidate index (`extractor_v2.CORE_OBJECT_KEYS` / `SUBJECTS` /
+        # `EVENTS`), by the open write doors
+        # (`create_object(objectKind="core:organization")`), and
+        # `subject_binding._normalize_kind` folds the prefix back for comparison.
+        # Rows are STORED in either spelling, so a bucket carrying only the bare
+        # form returns nothing for a `core:`-kinded row — without this seed the
+        # widening is inert on the `search`/object path, where `core:WorkItem` is
+        # the spelling the classifier actually emits.
+        #
+        # It is declared HERE, as an equivalence, rather than copied into each
+        # `core:` bucket afterwards, and that is what makes it transitive: the
+        # closure seeds every endpoint named in `equivalences`, then re-adds
+        # `_equivalence_class(member)` for everything a bucket gains, so a bucket
+        # reaches the other spelling AND every stored legacy spelling of it
+        # (`expand_kind("core:deployment")` carries `dev:deployment`) whatever
+        # order the constants are folded in. A post-closure copy pass used to sit
+        # below the closure claiming to be load-bearing; it appended nothing to
+        # any of the 311 buckets and was deleted (post-merge review of #11667).
         for kind in CORE_ALIASED_KINDS:
             _equivalent(kind, f"core:{kind}")
 
@@ -3653,8 +3673,14 @@ class PackRegistry:
         # skipped in the UP direction. Measured before this seed:
         # `expand_kind("team") == ["team", "core:team"]` — no `Subject`, although
         # `CORE_SUBCLASSES["Subject"]` declares it — because §5's five Subject
-        # kinds sit in no canonical set, so their bucket was created by the
-        # `core:` spelling pass at the very END.
+        # kinds sit in no canonical set, so nothing before the walk created their
+        # bucket. This seed is now the only thing that creates it: the post-walk
+        # `core:`-alias copy loop that also used to do so was measured inert and
+        # deleted (see the `_equivalent` seed above), so this seed is the last
+        # thing that creates a MEMBERSHIP bucket any more. The #11679 read-filter
+        # build at the end of this builder runs after this point but creates no
+        # key either: it grows from `down_base`, the bucket snapshot taken before
+        # the closure below.
         for endpoint in (list(direct_parents) + list(direct_children)
                          + list(equivalences) + list(bare_inherits)):
             expansions.setdefault(endpoint, [endpoint])
@@ -3673,36 +3699,6 @@ class PackRegistry:
             bucket = expansions[kind]
             for member in sorted(gained.difference(bucket)):
                 bucket.append(member)
-
-        # ── #11000: ONE kind, TWO live spellings ──────────────────────────
-        # A core kind is spelled BARE (`WorkItem`) by pack declarations and
-        # `core:`-prefixed (`core:WorkItem`) by the classifier's candidate index
-        # (`extractor_v2.CORE_OBJECT_KEYS` / `SUBJECTS` / `EVENTS`) and by the
-        # open write doors (`create_object(objectKind="core:organization")`, and
-        # `subject_binding._normalize_kind` folds the prefix back for comparison).
-        # Rows are STORED in either spelling, so a bucket carrying only the bare
-        # form still returns nothing for a `core:`-kinded row. Without this pass
-        # the widening above was inert on the `search`/object path, where
-        # `core:WorkItem` is the spelling the classifier actually emits — the
-        # parent would be present in the table and match nothing.
-        #
-        # It runs AFTER `LEGACY_KIND_ALIASES` so the source bucket it copies
-        # already carries stored legacy spellings (`core:deployment` reaching
-        # `dev:deployment`). ⚠️ That is a one-hop convenience, NOT the only
-        # recovery path: the closure above is equivalence-aware, so moving this
-        # block earlier still leaves `core:deployment` carrying `dev:deployment`
-        # (measured). Reordering is therefore safe; what is NOT safe is dropping
-        # the block — without it a kind that exists only `core:`-prefixed keeps
-        # an unwidened bucket.
-        for kind in CORE_ALIASED_KINDS:
-            core = f"core:{kind}"
-            base = expansions.setdefault(kind, [kind])
-            bucket = expansions.setdefault(core, [core])
-            for member in base:
-                if member not in bucket:
-                    bucket.append(member)
-            if core not in base:
-                base.append(core)
 
         # ── #11679: the READ-FILTER table, the other direction ─────────────
         # `expand_kind` is a MEMBERSHIP set (it carries a child's ANCESTORS, so
@@ -3725,7 +3721,13 @@ class PackRegistry:
         # and `bare_inherits`, then `_descendants` of each source, then the
         # equivalence class of everything gained (an ancestor's stored legacy
         # spelling rides the equivalence class, and so does a descendant's).
-        read_filters: dict[str, list[str]] = dict(down_base)
+        # A COPY of the snapshot, not `dict(down_base)`: that is shallow, so the
+        # growth loop below would append into `down_base`'s own lists and the
+        # snapshot would no longer be the DOWN-clean one this comment promises.
+        # Nothing reads `down_base` afterwards today, so this is not a live bug —
+        # it keeps the structural guarantee true for the next reader.
+        read_filters: dict[str, list[str]] = {
+            kind: list(bucket) for kind, bucket in down_base.items()}
         for kind in list(read_filters):
             gained = _closure(kind, down_only=True)
             bucket = read_filters[kind]

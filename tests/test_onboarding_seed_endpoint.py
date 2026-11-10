@@ -640,23 +640,80 @@ class TestDigestExcludesDemo:
             assert r.status_code == 200, r.text
             assert r.json()["status"] == "demo_created"
             assert _point_count(org_id) == 10  # 9 + _demo_sentinel (graph)
-            # ── #10000: the READ DOOR on the demo Session ──────────────────
-            # The counter is a COMPLETENESS CLAIM `record_read.served_turn_count`
-            # acts on for BOTH session doors, so a seeder that declared the
-            # sample transcript's length while storing no turn made this read
-            # either refuse (`record_unavailable`) or publish `turns: 3` beside
-            # `turn_points: []`. Asserted HERE, through the real door on a real
-            # graph, because that is the shape the seeder-side pins cannot see.
+            # ── #10000 + #8290: the demo Session is NOT a read surface ──────
+            # #10000's property: the demo seeder declares `turn_count=0`
+            # because it stores no turn, so the read door can never publish
+            # `turns: N` beside `turn_points: []`. #8290 then closed the door
+            # entirely: the demo Session is excluded from every session read
+            # surface, so the DETAIL door answers the not-found shape and the
+            # turn-count claim is asserted at the NODE the seeder wrote (the
+            # read door can no longer observe it). The seeder-side pin is
+            # `tests/test_write_session_and_turns_3551.py`, which asserts the
+            # written `turn_count=0` and the empty capture turn-id space; the
+            # door's own completeness guard for REAL sessions lives in
+            # `tests/test_10000_turns_record_only.py`.
             from tortoise.session_schema import demo_session_id
-            detail = tc.get(f"/v1/sessions/{demo_session_id(org_id)}")
-            assert detail.status_code == 200, detail.text
-            body = detail.json()
-            assert body["turns"] == 0, body
-            assert body["turn_points"] == [], body
+            demo_sid = demo_session_id(org_id)
+            detail = tc.get(f"/v1/sessions/{demo_sid}")
+            assert detail.status_code == 404, (
+                "#8290: the demo Session must not be readable through the "
+                f"detail door — got {detail.status_code}: {detail.text}")
+            _demo_turn_count = _proj(org_id).query(
+                "MATCH (s:Session {id:$sid}) RETURN s.turn_count",
+                sid=demo_sid).result_set
+            assert _demo_turn_count == [[0]], (
+                "#10000: the demo seeder must still declare turn_count=0 — "
+                f"got {_demo_turn_count!r}")
+            # ── #8290: the LIST door agrees with the detail door AND with the
+            # digest. The demo Session is absent while a REAL session in the
+            # same tenant is present — the second half is the NON-VACUITY leg:
+            # an exclusion that simply emptied the list (or a list route that
+            # 500'd into its #1591 fail-soft `[]`) would pass the first half
+            # alone and hide every real capture.
+            _real_sid = f"session_{uuid.uuid4().hex[:12]}"
+            _proj(org_id).query(
+                "CREATE (s:Session {id:$sid, created_at:'2026-01-01T00:00:00Z', "
+                "turn_count:0})", sid=_real_sid)
+            listed = tc.get("/v1/sessions")
+            assert listed.status_code == 200, listed.text
+            _ids = [row["id"] for row in listed.json()["sessions"]]
+            assert _real_sid in _ids, (
+                "#8290 non-vacuity: a REAL captured session must still be "
+                f"listed — got {_ids!r}")
+            assert demo_sid not in _ids, (
+                "#8290: the demo Session must not appear in the captured-"
+                f"sessions list — got {_ids!r}")
+            # ...and the SDK read (the third door) agrees
+            assert _make_sdk(namespace=org_id).get_session(demo_sid) is None, (
+                "#8290: TortoiseSDK.get_session must not serve the demo Session")
+            assert _make_sdk(namespace=org_id).get_session(_real_sid) is not None, (
+                "#8290 non-vacuity: the SDK read must still serve a REAL session")
+            # ── #8290 review: the SDK read has TWO lanes, and the FIRST one
+            # serves a raw `AgentSession` Event by session_id/sessionId. The
+            # guard therefore has to sit on `get_session`'s ENTRY; a guard in the
+            # captured arm alone answers `None` for a captured demo Session while
+            # still serving an INDEXED one — the surfaces-disagree defect this
+            # issue exists to close, one arm over. Both halves are asserted: the
+            # demo id stays unreadable even with an Event carrying it, and a REAL
+            # id is still served through that same arm (non-vacuity).
+            _proj(org_id).query(
+                "CREATE (e:Event {eventId:$eid, eventKind:'AgentSession', "
+                "session_id:$sid, sessionId:$sid, name:'indexed'})",
+                eid=f"ev_{uuid.uuid4().hex[:12]}", sid=demo_sid)
+            _real_event_sid = f"session_{uuid.uuid4().hex[:12]}"
+            _proj(org_id).query(
+                "CREATE (e:Event {eventId:$eid, eventKind:'AgentSession', "
+                "session_id:$sid, sessionId:$sid, name:'indexed'})",
+                eid=f"ev_{uuid.uuid4().hex[:12]}", sid=_real_event_sid)
+            assert _make_sdk(namespace=org_id).get_session(demo_sid) is None, (
+                "#8290: an AgentSession Event must not re-open the demo id — "
+                "the guard belongs on get_session's entry, before that arm")
+            assert _make_sdk(namespace=org_id).get_session(_real_event_sid) is not None, (
+                "#8290 non-vacuity: the AgentSession Event arm must still "
+                "serve a REAL indexed session")
             # ...but the digest count EXCLUDES them — still 0
             assert tc.get("/v1/team").json()["point_count"] == 0
             # a real user filing counts normally
-            import uuid
             _proj(org_id).query(
                 "CREATE (p:Point {id: $pid, content: 'real filing', "
                 "pointKind: 'statement', is_operator: false, "
