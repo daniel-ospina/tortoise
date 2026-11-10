@@ -82,11 +82,16 @@ _LOG = _REPO_ROOT / "docs" / "evidence" / "7949-capstone" / "e1-e2.log"
 #: `e1-e2.log`'s bytes, pinned as a CONSTANT (#11746 review P2). The *reproduction* pin is
 #: gone — it demanded a re-take the pre-registration forbids — but a *content* pin is a
 #: different thing and stays satisfiable forever: this log may never change again, so its
-#: digest is a constant rather than a re-take target. Without it, an edit the census checker
-#: CANNOT see still changes the evidence: the checker reconciles the log with ITSELF, so it
-#: only sees an edit that makes two of the log's own lines disagree. Editing one of the log's
-#: free-text/`note=` spans (`split-implemented=no note=…`, MEASURED: the checker still reports
-#: "structurally sound") leaves every remaining gate green.
+#: digest is a constant rather than a re-take target.
+#:
+#: What it adds, precisely — because two gates already guard this file and neither is this
+#: one. The CENSUS CHECKER reconciles the log with ITSELF, so it only sees an edit that makes
+#: two of the log's own lines disagree: editing a free-text/`note=` span
+#: (`split-implemented=no note=…`) leaves it reporting "structurally sound" (MEASURED). The
+#: ORDERING gate is content-blind and reds ANY commit that touches the log, so it covers the
+#: committed case — but it reads COMMITS only, and answers `unprovable` in a shallow checkout.
+#: The digest is therefore what catches the edit that is not yet a commit, and the one seen
+#: from a checkout with no history to read.
 _FROZEN_LOG_SHA256 = "9e44d4f13d716e063bb50bc4305ba14e5e8b81709275e914a44eac1e61de5f37"
 
 sys.path.insert(0, str(_REPO_ROOT))
