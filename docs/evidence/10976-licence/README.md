@@ -88,9 +88,10 @@ gated individually by the executor's per-node record probe.
   `tests/test_cache_eviction_census.py::test_the_population_count_mirrors_the_instrument`
   compares the two EXECUTED constants (not source text), so a rename, a removal or a
   changed predicate reds.
-- **Mirror it exactly.** `is_episodic` is stamped on `:Source`/`:Object` nodes too
-  (`graph-scripts/backfill_is_episodic.py`), so dropping the `:Point` half would *inflate*
-  the ceiling and re-open this hole from the other side.
+- **Mirror it exactly.** `is_episodic` rides non-`:Point` labels too —
+  `:Session`/`:Event`/`:Source` (`graph-scripts/backfill_is_episodic.py`) and `:Object`
+  (`TortoiseSDK.create_entity(is_episodic=…)`) — so dropping the `:Point` half would
+  *inflate* the ceiling and re-open this hole from the other side.
 - **The whole-graph check stays**, with its reach stated as the mechanical trigger it is,
   in `cache_eviction.py`'s own comment: it compares the REPORT's claim against every node
   the graph holds, so it fires when `resident_population >= claim > node_total` — reachable
