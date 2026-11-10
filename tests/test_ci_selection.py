@@ -4855,9 +4855,17 @@ def test_every_record_migration_selects_core_and_its_readers():
     # `slow` from both tiers (`files -= slow`, #1371), so a slow reader could never
     # appear in `test_files` and the assertions below would red on every arm.
     # `test_record_schema_placement.py` stood here until the #11728 P3 and cannot
-    # fail: it is tier1 (config/ci-surfaces.yml), and tier1 ⊆ `test_files` on every
-    # return path (measured: the `off_family` selection below — `surfaces: []`,
-    # n=84 — still carries it). A vacuous assertion is worse than none: it reads as
+    # fail: it is tier1 (config/ci-surfaces.yml), and on THE RETURN PATH THIS ARM
+    # PRODUCES — `surfaces: []` — `test_files` is `tier1` minus `uri_requiring` minus
+    # `on_demand`, so every tier-1 member is present (measured: the `off_family`
+    # selection below carries it). ⚠️ The invariant is NOT `tier1 ⊆ test_files` on
+    # every return path, which an earlier version of this comment claimed: the
+    # tier-2 path ALSO subtracts `slow` and `carve_out` (`tools/ci_selection.py`),
+    # and three tier-1 members are `carve_out`
+    # (`test_config.py`, `test_guard.py`, `test_reaper_orphan.py`), so they are
+    # absent from `test_files` on e.g. the `api` selection. Scoped to the path
+    # measured, because the over-broad form is exactly the vacuity this block
+    # exists to prevent. A vacuous assertion is worse than none: it reads as
     # coverage.
     #
     # #11728 review P2: that axis is PINNED below, not merely described — a reader
@@ -4873,12 +4881,16 @@ def test_every_record_migration_selects_core_and_its_readers():
     for reader in readers:
         assert reader not in tier1, (
             f"{reader} is in tier1, so its `in test_files` arm below can no longer "
-            "discriminate (tier1 ⊆ test_files on every return path) — pick a "
-            "`core`-registered reader that is not in tier1, or drop the arm"
+            "discriminate (on the `surfaces: []` return, `test_files` is `tier1` "
+            "minus `uri_requiring` minus `on_demand`, so a tier-1 member is always "
+            "present there) — pick a `core`-registered reader that is not in "
+            "tier1, or drop the arm"
         )
     # Non-vacuity, measured on the PRE-FIX state and stated exactly: with the
     # structural rule disabled AND this member's `CORE_ALSO` entry removed,
-    # `select()` returns `surfaces: []`, n=84, and every reader assertion reds.
+    # `select()` returns `surfaces: []`, n=84 (2026-11-10; re-derive with one
+    # `select()` call — the tier-1 file count moves), and every reader assertion
+    # reds.
     # ⚠️ Disabling the rule ALONE changes nothing for a member that still has its
     # entry — measured on the embedding migration: `surfaces: ['core']`, every
     # reader present — which is the same measurement that makes those entries
@@ -4924,7 +4936,8 @@ def test_every_record_migration_selects_core_and_its_readers():
     # exactly that case). ⚠️ Deliberately no live count here: it moves on ANY new
     # `supabase/migrations/*.sql` — not just a record one — and nothing reds on the
     # sentence, so a count written here rots into a false claim in the very file
-    # whose subject is claims that rot.
+    # whose subject is claims that rot. Sweep the directory through `select()`
+    # instead — one call answers it for whatever is there today.
     off_family = _sel(["supabase/migrations/20990101000000_unlisted.sql"])
     assert off_family["surfaces"] == [], off_family
 
