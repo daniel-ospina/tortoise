@@ -39,6 +39,7 @@ import contextlib
 import json
 import os
 import threading
+import time
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("TORTOISE_ENCRYPTION_KEY",
@@ -49,6 +50,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tortoise import hosted_api as _ha
+from tortoise import mcp_auth as _mcp_auth
 from tortoise.hosted_api import (
     app,
     get_current_org_gated,
@@ -176,9 +178,81 @@ def _reset_replay_anchors():
     _clear()
 
 
+#: The transport wait bound (#3834) is a USER-PATIENCE promise about the real
+#: service. This suite drives the REAL endpoint to assert JOURNAL semantics
+#: (delete → replay must not resurrect), so it must not be graded by that
+#: bound — the bound has its own suite (`tests/test_transport_wait_bound.py`),
+#: which pins the shipped 10.0 s value.
+#:
+#: MEASURED, not assumed. A cold process pays a one-time cost that the bound
+#: charges to whichever request arrives first (#11060):
+#:   * first capture of a fresh process, under pytest: **124.53 s** — 12x the
+#:     shipped 10.0 s bound. The bulk is the one-time embedder load, which this
+#:     box's hermetic egress guard amplifies: `#11060` measured 125.70 s for the
+#:     same load on `test_onboarding_seed_endpoint`.
+#:   * every later capture in the same process: **0.62 s**.
+#: So the margin is not thin, it is negative by an order of magnitude, and the
+#: CI shard's load only widens it: on `test (f)` (run 42763774765) three of this
+#: file's captures were refused with 504 (`_TRANSPORT_WAIT_BOUND_MESSAGE`) on a
+#: head whose diff touches none of this.
+#:
+#: 300 s is sized off that 124.53 s measurement: ~2.4x headroom over the worst
+#: COLD capture, while a genuinely hung capture still fails this test legibly
+#: and well inside the shard's watchdog — which is why this is RAISED to a
+#: larger FINITE value rather than removed.
+_SUITE_WAIT_BOUND_S = 300.0
+
+#: How long `_drain_in_flight_captures` waits for an abandoned capture's worker
+#: before clearing the key. The worker finishes on its own (a breach ABANDONS the
+#: request, it never cancels it), so the wait is the normal path; the clear is
+#: the hung-worker guard and must never be reached on a healthy suite.
+_DRAIN_TIMEOUT_S = 120.0
+
+
+def _drain_in_flight_captures(timeout_s: float = _DRAIN_TIMEOUT_S) -> None:
+    """Wait for any previously ABANDONED capture to release its session key.
+
+    #3129's admission gate refuses a second capture for a session that is still
+    "in flight" (409 `_CAPTURE_SESSION_IN_FLIGHT_DETAIL`), and a slot keeps that
+    key until BOTH the worker reports and the request tears down. A request
+    abandoned at the wait bound never tears down on its own schedule, so the key
+    outlives the test that caused it — measured: after a forced 504 the registry
+    still held `{'team-7951:org_team-7951:s-cascade': 1}`, and the next capture
+    for that session id answered **409**.
+
+    That is correct product behaviour, and it is fatal to THIS suite because
+    every test in the file uses the same constant `SID` and the same org, so the
+    key is literally the same string: one slow capture poisons every later test.
+    That cascade is what turned ONE 504 into the five failures CI recorded (3x
+    504, then 2x 409).
+
+    The registry is ephemeral and process-local (`hosted_api`'s own words on
+    `_capture_session_key`), so clearing a key that no live request can answer
+    for is safe: the slot's own release is `.pop(key, None)`, idempotent by
+    design, so a later stale pop cannot raise on an already-cleared key.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        with _ha._CAPTURE_IN_FLIGHT_LOCK:
+            if not _ha._CAPTURE_SESSIONS:
+                return
+        time.sleep(0.05)
+    with _ha._CAPTURE_IN_FLIGHT_LOCK:
+        _ha._CAPTURE_SESSIONS.clear()
+
+
 @pytest.fixture
 def hosted(tmp_path, monkeypatch):
     """(TestClient, journaled SDK) on a temp embedded DB + temp journal."""
+    # Before anything else: a capture abandoned by a PREVIOUS test is still
+    # holding its session key (#3129), and this file's constant `SID` makes that
+    # the key this test is about to ask for. Drain it, or the 409 that follows
+    # reads as a #7951 defect it has nothing to do with.
+    _drain_in_flight_captures()
+    # The suite tests journal semantics, not the #3834 transport bound — see
+    # `_SUITE_WAIT_BOUND_S` for the measurement that makes this load-bearing.
+    monkeypatch.setattr(_mcp_auth, "_TRANSPORT_WAIT_BOUND_S",
+                        _SUITE_WAIT_BOUND_S)
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "hosted.db"))
     events = tmp_path / "events"
@@ -983,3 +1057,91 @@ class TestOrphanedWriteSweepIsJournaled:
             "was a NO-OP (the same-id re-capture won the race) — a replay "
             "would delete the live re-capture (#7951 P2-d)")
 
+
+# ═══════════════════════════════════════════════════════════════════════
+# The harness contract this file depends on: one refused capture must not
+# poison the next one — `test (f)`, run 42763774765 (3x 504, then 2x 409).
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestAWaiterRefusalCannotPoisonTheNextCapture:
+    def test_a_refused_capture_cannot_cascade_into_the_next_one(self, hosted):
+        """Both halves of the CI flake, in one fixture (each `hosted` setup is a
+        cold embedded DB — keeping it to one keeps this affordable).
+
+        HALF 1 — the suite is no longer graded by the #3834 user-patience
+        bound. MEASURED on a quiet box: the first capture of a fresh process
+        costs 124.53 s (the #11060 one-time embedder load) against the shipped
+        10.0 s bound; every later capture costs 0.62 s. These tests assert
+        JOURNAL semantics, so a slow box must not turn them into 504s. The
+        shipped value stays pinned by its own suite
+        (`tests/test_transport_wait_bound.py`); this pins only that THIS file
+        stopped being graded by it.
+
+        HALF 2 — a held session key must not refuse the NEXT capture. The key
+        is injected rather than produced by a real abandoned request: a forced
+        breach leaves the handler to cold-start its way to admission (measured
+        >30 s under pytest), so driving it live would make this test a race
+        against the embedded DB. What must be pinned is the DRAIN, and the
+        injected key IS the state an abandonment leaves behind — observed
+        directly: after a forced 504 the registry still held
+        `{'team-7951:org_team-7951:s-cascade': 1}`, and the next capture for
+        that session answered 409.
+
+        Discrimination (both MEASURED at this head, each mutant restored):
+        `_SUITE_WAIT_BOUND_S` -> 10.0 reds half 1 with `assert 10.0 > 10.0`.
+        `_drain_in_flight_captures` -> an immediate `return` reds with the
+        drain still holding this session's key, one assertion before the
+        retry that CI answered 409.
+        """
+        tc, _ = hosted
+
+        # ── HALF 1: the fixture raised the bound ───────────────────────
+        assert _mcp_auth._TRANSPORT_WAIT_BOUND_S == _SUITE_WAIT_BOUND_S, (
+            "the `hosted` fixture stopped raising the transport wait bound — "
+            "every test in this file is graded by the #3834 user-patience "
+            "bound again, which is the flake `test (f)` recorded on a head "
+            "whose diff touches none of this")
+        assert _SUITE_WAIT_BOUND_S > 10.0, (
+            "the suite bound must be strictly above the shipped 10.0 s value, "
+            "or it reproduces the race instead of removing it")
+
+        # ── HALF 2: a held key must not refuse the next capture ────────
+        sid = "s-7951-leak"
+        key = _ha._capture_session_key(dict(TEAM), sid)
+        assert key is not None
+
+        # (a) The premise, measured: a held key refuses the next capture. This
+        #     is #3129's admission guard working exactly as designed.
+        with _ha._CAPTURE_IN_FLIGHT_LOCK:
+            _ha._CAPTURE_SESSIONS[key] = 1
+        refused = tc.post("/v1/sessions",
+                          json={"conversation": CONV, "session_id": sid})
+        assert refused.status_code == 409, (
+            f"a held session key did not refuse the next capture (got "
+            f"{refused.status_code}) — the #3129 admission guard changed and "
+            f"this test no longer describes the failure it pins: {refused.text}")
+        assert _ha._CAPTURE_SESSION_IN_FLIGHT_DETAIL in refused.text
+
+        # (b) The worker that held it finishes while the drain waits, so the
+        #     WAIT arm (not the hung-worker clear) is what releases it.
+        threading.Timer(
+            0.3, _ha._capture_session_release, args=(key,)).start()
+        started = time.monotonic()
+        _drain_in_flight_captures(timeout_s=30.0)
+        waited = time.monotonic() - started
+        with _ha._CAPTURE_IN_FLIGHT_LOCK:
+            assert not _ha._CAPTURE_SESSIONS, (
+                f"the drain returned while keys were still held: "
+                f"{dict(_ha._CAPTURE_SESSIONS)}")
+        assert waited < 10.0, (
+            f"the drain took {waited:.1f}s — it hit the hung-worker clear "
+            f"instead of draining the released key, so the timing above is not "
+            f"the path this test claims to exercise")
+
+        # (c) And the same session is capturable again — no cascade.
+        retry = tc.post("/v1/sessions",
+                        json={"conversation": CONV, "session_id": sid})
+        assert retry.status_code == 200, (
+            f"a held session key poisoned the NEXT capture for {sid!r} with "
+            f"{retry.status_code} — the 504→409 cascade that turned ONE slow "
+            f"request into the five failures `test (f)` recorded: {retry.text}")
