@@ -95,8 +95,8 @@ _LOG = _REPO_ROOT / "docs" / "evidence" / "7949-capstone" / "e1-e2.log"
 _FROZEN_LOG_SHA256 = "9e44d4f13d716e063bb50bc4305ba14e5e8b81709275e914a44eac1e61de5f37"
 
 sys.path.insert(0, str(_REPO_ROOT))
-from tools import e1_e2_census_check as check  # noqa: E402
 from tools import capstone_preregistration_check as prereg_check  # noqa: E402
+from tools import e1_e2_census_check as check  # noqa: E402
 
 
 def _load(path: Path, name: str):
