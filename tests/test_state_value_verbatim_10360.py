@@ -6267,14 +6267,33 @@ def test_the_registry_rows_measured_disclosures_are_pinned():
 _CLOCK_FORM = re.compile(r"\b\d{1,2}:\d{2}\s*(?:am|pm)?\b|\b\d{1,2}\s*(?:am|pm)\b",
                          re.IGNORECASE)
 _ISO_DATE_FORM = re.compile(r"\b(?:19|20)\d{2}-\d{2}-\d{2}\b")
-#: A separator-bearing numeral (`1,234`, `1.234`) is the THIRD form the
-#: engine puts outside the judged set (`_separator_reads_ambiguously`, the
-#: recorded #2817 decision: no separator rule at all). Without it a row whose
-#: only value is separator-spelled fell into `CONTENT_NO_VALUE`, whose quote
-#: slot then counted as a DROPPED value — a positive claim about text the
-#: projection never read (#11730 review, cycle 12). Census-inert: no row on
-#: this corpus carries the form, so the split is unchanged.
-_SEPARATOR_FORM = re.compile(r"\d[,.\u00a0 ]\d{3}(?!\d)")
+
+
+def _carries_excluded_separator(text: str) -> bool:
+    """Does the text carry a numeral the engine refuses to READ?
+
+    A separator-bearing numeral (`1,234`, `1.234`, `4,2`) is the THIRD form the
+    engine puts outside the judged set (`_separator_reads_ambiguously`, the
+    recorded #2817 decision: no separator rule at all). Without this arm a row
+    whose only value is separator-spelled fell into `CONTENT_NO_VALUE`, whose
+    quote slot then counted as a DROPPED value — a positive claim about text the
+    projection never read (#11730 review, cycle 12). Census-inert: no row on
+    this corpus carries the form, so the split is unchanged.
+
+    ⛔ THE PROBE IS THE ENGINE'S OWN PREDICATE OVER THE ENGINE'S OWN TOKENS, not
+    a local copy of it (#11730 review, cycle 16). The copy that stood here
+    matched a separator followed by exactly three digits — the 3-digit GROUP
+    shape only — so the comma-DECIMAL one (`4,2`, the shape #2817's own ruling names)
+    still landed in `CONTENT_NO_VALUE` and its quote slot was counted as a
+    DROPPED value; it also matched `1 234`, which the engine does NOT exclude.
+    `_value_bindings` is the tokeniser `_value_slots_scaled` reads, so these are
+    the exact tokens the engine asked `_separator_reads_ambiguously` about and
+    the copy cannot drift from it again — the rule the paren arm beside it
+    already follows.
+    """
+    return any(v2._separator_reads_ambiguously(value)
+               for _anchor, value in v2._value_bindings(text))
+
 
 #: The spelled month names the corpus's quotes use, for the one agreement check
 #: the excluded-form class CAN carry: an ISO date in the content against the
@@ -6430,41 +6449,55 @@ def _magnitude_in_play(missing: list[tuple], content_slots: list[tuple]) -> bool
     is not a counterpart whatever its anchor, and an unscaled quote value
     against a scaled content value is not one either (`3 batches` against
     `3 million events` is a DROP, not a magnitude).
+
+    The per-slot question is `_magnitude_explains_slot`, because the row-level
+    verdict is not the only consumer: `_lost_rows` publishes the DROPPED set and
+    must ask the SAME per-slot predicate, or a row that is LOST for one value
+    publishes its EXPLAINED value as dropped too (#11730 review, cycle 16).
     """
-    for _anchor, quote_core, quote_scale in missing:
-        explained = False
-        for _ca, content_core, content_scale in content_slots:
-            if quote_scale and content_scale:
-                # ⛔ TWO DIFFERENT SCALE WORDS ARE A MAGNITUDE QUESTION — but only
-                # for the SAME value (#11730 review, cycles 12 and 14). `2000
-                # thousand` against `2 million` is one value, and requiring equal
-                # digits filed it as a positive claim (a value ABSENT) that this
-                # projection cannot support. ⛔ THE MANTISSAS MUST RELATE, though:
-                # accepting ANY differently-scaled leftover let an unrelated
-                # `7 billion` at another anchor explain a dropped `3 million`,
-                # which is the launder the docstring says is closed. Equal digits
-                # or a zero-extended form are the two relations that make the pair
-                # one value at two magnitudes. The SAME scale word is never a
-                # magnitude question: the scale cancels, the mantissa is what
-                # differs, and the shipped rule JUDGES it (`1.2 million` against
-                # `12 million`).
-                if (quote_scale != content_scale
-                        and (str(content_core[1]) == str(quote_core[1])
-                             or _same_magnitude_number(content_core, quote_core))):
-                    explained = True
-                    break
-            elif ((quote_scale or content_scale)
-                  and _same_magnitude_number(content_core, quote_core)):
-                # ⛔ A SCALE WORD MUST BE ON ONE OF THE TWO SIDES (#11730 review,
-                # cycle 11): `2000 batches` against `2 batches` is a 1000x
-                # DIFFERENT number with no scale word anywhere, and the shipped
-                # rule JUDGES that pair — the zero-extension relation only
-                # bridges a numeric form and a scaled one.
-                explained = True
-                break
-        if not explained:
-            return False
-    return True
+    return all(_magnitude_explains_slot(quote_core, quote_scale, content_slots)
+               for _anchor, quote_core, quote_scale in missing)
+
+
+def _magnitude_explains_slot(quote_core: tuple, quote_scale: str | None,
+                             content_slots: list[tuple] | tuple) -> bool:
+    """Is THIS one missing quote slot a magnitude the projection cannot compare?
+
+    The counterpart search `_magnitude_in_play` applies per slot, extracted so
+    `_lost_rows` can ask it about the single slot it is about to publish as
+    DROPPED. A row can be `LAYOUT_LOST` — not EVERY missing slot is explained —
+    while THIS slot is, and publishing it as a dropped value is a false claim of
+    absence that the classifier itself has already decided against (#11730
+    review, cycle 16: `12000000`/`12 million` was published as a DROP).
+    """
+    for _ca, content_core, content_scale in content_slots:
+        if quote_scale and content_scale:
+            # ⛔ TWO DIFFERENT SCALE WORDS ARE A MAGNITUDE QUESTION — but only
+            # for the SAME value (#11730 review, cycles 12 and 14). `2000
+            # thousand` against `2 million` is one value, and requiring equal
+            # digits filed it as a positive claim (a value ABSENT) that this
+            # projection cannot support. ⛔ THE MANTISSAS MUST RELATE, though:
+            # accepting ANY differently-scaled leftover let an unrelated
+            # `7 billion` at another anchor explain a dropped `3 million`,
+            # which is the launder the docstring says is closed. Equal digits
+            # or a zero-extended form are the two relations that make the pair
+            # one value at two magnitudes. The SAME scale word is never a
+            # magnitude question: the scale cancels, the mantissa is what
+            # differs, and the shipped rule JUDGES it (`1.2 million` against
+            # `12 million`).
+            if (quote_scale != content_scale
+                    and (str(content_core[1]) == str(quote_core[1])
+                         or _same_magnitude_number(content_core, quote_core))):
+                return True
+        elif ((quote_scale or content_scale)
+              and _same_magnitude_number(content_core, quote_core)):
+            # ⛔ A SCALE WORD MUST BE ON ONE OF THE TWO SIDES (#11730 review,
+            # cycle 11): `2000 batches` against `2 batches` is a 1000x
+            # DIFFERENT number with no scale word anywhere, and the shipped
+            # rule JUDGES that pair — the zero-extension relation only
+            # bridges a numeric form and a scaled one.
+            return True
+    return False
 
 
 def _unstated_quote_slots(content_slots: tuple, quote_slots: tuple
@@ -6521,7 +6554,8 @@ def _retention_class(content: str, quote: str) -> str | None:
                             lost: unjudged.
     CONTENT_EXCLUDED_FORM — the content binds no slot, but states the value in
                             a form the row excludes by design ((c)): a CLOCK, an
-                            ISO date, a SEPARATOR-BEARING numeral (`1,234`), or
+                            ISO date, a SEPARATOR-BEARING numeral (`1,234`,
+                            `4,2` — the engine's own exclusion, not a copy), or
                             an ACCOUNTING PARENTHETICAL (`($4)`) — the three
                             token forms `_value_form_outside_judged` puts outside
                             the judged set, plus the text-level exclusion
@@ -6563,7 +6597,7 @@ def _retention_class(content: str, quote: str) -> str | None:
         # slot on that row as a DROPPED value. Census-inert (no row on this
         # corpus carries the form), pinned synthetically in §24 item 3a2.
         if (_CLOCK_FORM.search(content) or _ISO_DATE_FORM.search(content)
-                or _SEPARATOR_FORM.search(content)
+                or _carries_excluded_separator(content)
                 or v2._PAREN_NUMERAL_RE.search(content)):
             return "CONTENT_EXCLUDED_FORM"
         return "CONTENT_NO_VALUE"
@@ -6630,14 +6664,27 @@ def _lost_rows(rows: list[tuple]) -> set[tuple]:
     a dropped value, over a pair the shipped rule passes — a false accusation,
     in the one direction this census exists to prevent, with a fix message that
     invites the next lane to enshrine it in `LAYOUT_LOST_ROWS`.
+
+    ⛔ AND A MAGNITUDE-EXPLAINED SLOT IS NOT DROPPED EITHER (#11730 review, cycle
+    16). The row-level class is `LAYOUT_LOST` when not EVERY missing slot is
+    explainable as a magnitude, so a row can be LOST for one value while ANOTHER
+    of its missing slots is exactly the `12000000`/`12 million` pair the
+    classifier has already decided is one value at two magnitudes — and this
+    function published that explained slot as a DROPPED value. The red message
+    then tells the next lane a state value was dropped and invites it into
+    `LAYOUT_LOST_ROWS`, so the trap is the same one the paragraph above closes,
+    one level up. Each slot is asked through `_magnitude_explains_slot` — the
+    SAME per-slot predicate `_retention_class` decides the row with.
     """
     lost = set()
     for session, arm, klass, content, quote in rows:
         if klass != "LAYOUT_LOST":
             continue
-        missing, _leftovers = _unstated_quote_slots(
+        missing, leftovers = _unstated_quote_slots(
             v2._value_slots_scaled(content), v2._value_slots_scaled(quote))
-        for anchor, core, _scale in missing:
+        for anchor, core, scale in missing:
+            if _magnitude_explains_slot(core, scale, leftovers):
+                continue
             lost.add((session, arm, (anchor, str(core))))
     return lost
 
@@ -6745,6 +6792,22 @@ def test_the_fail_open_half_is_MEASURED_so_a_gap_is_not_read_as_a_LOSS():
     assert _retention_class("we cut 20 percent of the fleet",
                             "we cut 20% of the fleet and dropped 300 nodes") == (
         "LAYOUT_LOST")
+    # ⛔ AND AN EXPLAINED MAGNITUDE SLOT IS NOT A DROP EITHER, on a row that IS
+    # LOST for another value (#11730 review, cycle 16). The (a2) row above — the
+    # ONLY shape that distinguishes the every-slot rule from first-wins — is
+    # `LAYOUT_LOST` because `9 nodes` is dropped, while its `12000000` against
+    # `12 million` is the one-value/two-magnitudes pair the classifier itself
+    # files as UNJUDGED. Publishing BOTH made the red message say a state value
+    # was dropped and invited the next lane to enshrine the explained pair in
+    # `LAYOUT_LOST_ROWS` — the same false-DROP trap as the cycle-15 finding, one
+    # level up. MEASURED pre-fix: both slots were reported, so this assert reds
+    # on it; the `12` is the slot that must vanish, the `9` is the real drop.
+    assert _lost_rows([
+        ("synthetic", "raw", "LAYOUT_LOST",
+         "we shipped 12000000 events and 5 nodes",
+         "we shipped 12 million events and 9 nodes"),
+    ]) == {("synthetic", "raw", ("events", "('', '9', None)"))}, (
+        "a magnitude-explained slot must not be published as a DROPPED value")
 
     # ⛔ AND THE RETAINED HALF IS CHECKED AGAINST THE OTHER ARTEFACT, not
     # re-derived from the classifier: the shipped rule fails open on EVERY row
@@ -6998,6 +7061,25 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
                             "we have 1234 events") == "CONTENT_EXCLUDED_FORM"
     assert _retention_class("we have 1.234 events",
                             "we have 1234 events") == "CONTENT_EXCLUDED_FORM"
+    #     ⛔ AND THE COMMA-DECIMAL SHAPE, which is #2817's own worked example and
+    #     the one the local copy of the probe could not see (#11730 review, cycle
+    #     16): `4,2` and `4.2` are ONE character sequence with two readings (the
+    #     ES/PT/de decimal), so the engine excludes it — while the copy that
+    #     stood here only knew the 3-digit GROUP form, so the row fell into
+    #     `CONTENT_NO_VALUE` and its quote slot was counted as a DROPPED value.
+    #     MEASURED pre-fix: both rows below came back `CONTENT_NO_VALUE`.
+    assert _retention_class("we have 4,2 events",
+                            "we have 4.2 events") == "CONTENT_EXCLUDED_FORM"
+    assert _retention_class("we have 1,2345 events",
+                            "we have 1234.5 events") == "CONTENT_EXCLUDED_FORM"
+    #     … and the probe is the ENGINE's, in BOTH directions: `1 234` is excluded
+    #     by the old copy and NOT by the engine, so a re-localised pattern reds on
+    #     the assertion that follows (the class arm alone cannot see it — `1 234`
+    #     binds two slots, so the row is judged either way).
+    assert v2._separator_reads_ambiguously("4,2")
+    assert _carries_excluded_separator("we have 4,2 events")
+    assert not _carries_excluded_separator("we have 1 234 events"), (
+        "the probe must be the engine's exclusion set, not a wider local copy")
     #     … and it is still a FORM class, not a value class: a plain numeral that
     #     the projection CAN bind stays in the judged set.
     assert _retention_class("we have 1234 events",
