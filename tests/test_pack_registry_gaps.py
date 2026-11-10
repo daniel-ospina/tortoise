@@ -2512,6 +2512,50 @@ class TestReadFilterKinds:
         assert "dev:issue" in shipped.read_filter_kinds("issue")
         assert "issue" not in shipped.read_filter_kinds("dev:issue")
 
+    def test_the_filter_table_inherits_the_bare_round_trip_from_the_one_home(
+            self, tmp_path):
+        """The peer round-trip must live in `_closure`, not at a call site.
+
+        `bare_inherits` is keyed by the BARE name, so a pack that registers
+        `objectKinds: [team]` puts `synth:team` in `team`'s buckets but not in
+        `core:team`'s unless the closure round-trips a peer's bare-inherited
+        members (#11677, `test_a_pack_kind_registered_under_a_core_name_round_
+        trips_both_spellings`). That pin covers the MEMBERSHIP table.
+
+        This one covers the READ-FILTER table, and it is the reason the
+        round-trip lives in `_closure` rather than at either builder's loop: the
+        two tables share ONE source expression, so a round-trip applied to the
+        membership walk only would leave `read_filter_kinds("core:team")`
+        unable to reach a row stored as `synth:team` — a wrong-empty for a
+        spelling the registry says is the same kind (#6146), while every
+        ancestor/descendant assertion still passed. It reds if the round-trip
+        is hoisted back out of `_closure`.
+        """
+        (tmp_path / "synth").mkdir()
+        (tmp_path / "synth" / "manifest.yaml").write_text(
+            "name: Synthetic\n"
+            "namespace: synth\n"
+            "version: 1.0.0\n"
+            "tier: free\n"
+            "ontology:\n"
+            "  extends: core\n"
+            "  objectKinds: [team]\n"
+        )
+        registry = PackRegistry(str(tmp_path))
+        assert registry.load_all() == 1, registry.errors
+
+        bare = set(registry.read_filter_kinds("team"))
+        core = set(registry.read_filter_kinds("core:team"))
+        assert "synth:team" in bare, sorted(bare)
+        assert bare == core, (
+            "the two spellings of one kind read differently: the closure's "
+            f"bare round-trip did not reach the filter table — {sorted(bare - core)} / "
+            f"{sorted(core - bare)}")
+        # …and the split still holds: no ancestor entered through the round-trip.
+        for bucket in (bare, core):
+            assert "Subject" not in bucket, sorted(bucket)
+            assert "core:Subject" not in bucket, sorted(bucket)
+
     def test_the_cross_axis_pair_is_down_only(self, shipped):
         """The one declared cross-axis pair, on the filter surface.
 
