@@ -640,8 +640,10 @@ _DELIBERATE_BARE_FORM: frozenset[tuple[str, str]] = frozenset(
         # key is neither a mistake nor a re-declaration:
         #   · `#11756` (`7c45d5af1f`) rewrote the record to `uv run python`, leaving
         #     this key matching no live line;
-        #   · `#11757` deleted the then-dead key — correctly, at a head that predated
-        #     `#11759` and merged ~3 min after it;
+        #   · `#11757` deleted a key that was LIVE at its own head — its merge parent
+        #     `215e7d9d8b` already contained `#11759` (restored ~3 min earlier) and
+        #     the file was GREEN there, so the removal CREATED the doc-scan red
+        #     rather than clearing a dead key. It is not the model to copy (#11774);
         #   · `#11759` restored the `python3` record relying on a key `#11757` had
         #     already removed.
         # The merged tree therefore advertised the refused form with nothing exempting
@@ -754,8 +756,8 @@ def _comment_region_above(prefix: str) -> list[str]:
     Reading the REGION rather than the last contiguous run of `#:` lines is the
     round-2 correction (#11754 review). A blank line, or a bare `#` separator,
     anywhere in the block is a re-wrap of the paragraph — not a deletion of the
-    sentence — but scoping to a contiguous `#:` run made every break INSIDE the ~28
-    lines below the sentence read as *"the comment block no longer carries the
+    sentence — but scoping to a contiguous `#:` run made every break INSIDE the
+    region below the sentence read as *"the comment block no longer carries the
     sentence"*, across a sentence that was present and correct. That message invites
     the author to reword the pattern, i.e. to weaken the pin, so a false red here is
     the failure mode this guard exists to avoid.
@@ -768,15 +770,45 @@ def _comment_region_above(prefix: str) -> list[str]:
     return list(reversed(region))
 
 
+def _normalise_prose(prose: str) -> str:
+    """`prose` with the emphasis and whitespace a re-wrap adds, removed.
+
+    Emphasis, backticks and line breaks are formatting, not wording: *"while the
+    four entries below do not"* states the same set size as *"while the `four` entries
+    below do not"* or *"while the **four** entries below do not"*. Capitalisation is the
+    same case and is folded downstream, by `_cardinality_of`, so the claim is read
+    rather than dropped. This matters more
+    than it looks: a false red here reports *"the sentence is gone"* and hands the
+    author the one remedy that disables the property — *"update the pattern in this
+    test"* — so reddening on formatting costs the pin itself (#11775). Emphasis is
+    already idiomatic a few lines above that sentence, so the case is live, not
+    contrived.
+    """
+    return re.sub(r"\s+", " ", re.sub(r"[*`]", "", prose)).strip()
+
+
+def _stated_cardinalities(prose: str) -> list[str]:
+    """Every `<N>` in a `while the <N> entries below do not` claim in `prose`.
+
+    Matching is deliberately narrow — the sentence, not a fuzzy "a number near the
+    word *entries*" — because the pin's value is that a REWORDED sentence reads as
+    absent rather than as an approximate hit. `[A-Za-z]+` (rather than `[a-z]+`) is
+    what lets `_normalise_prose` leave capitalisation to `_cardinality_of`'s
+    lower-casing instead of silently dropping the claim (#11775).
+    """
+    return re.findall(r"while the ([A-Za-z]+|\d+) entries below do not", prose)
+
+
 def _cardinality_of(token: str) -> int | None:
     """A cardinality token as `int` — a word from `_CARDINALITY_WORDS`, or digits.
 
     Digits are accepted so that a set which outgrows the word table is not reported
     as *"the sentence is gone"* when the sentence is present and correct (#11754
     review, finding 4: an 11-member set with prose `eleven` reddened with a message
-    telling the author to restore a sentence they had written).
+    telling the author to restore a sentence they had written). Case is folded for
+    the same reason — a sentence-initial *Four* is the same claim (#11775).
     """
-    return int(token) if token.isdigit() else _CARDINALITY_WORDS.get(token)
+    return int(token) if token.isdigit() else _CARDINALITY_WORDS.get(token.lower())
 
 
 def test_the_record_exemption_prose_counts_the_set_it_describes():
@@ -800,12 +832,14 @@ def test_the_record_exemption_prose_counts_the_set_it_describes():
     # sentence satisfied this pin while the block that actually describes the set
     # drifted (measured, #11754 review: decoy sentence above + prose `three` over a
     # four-member set PASSED).
-    prose = " ".join(
-        re.sub(r"\s+", " ", line[2:]).strip()
-        for line in _comment_region_above(before)
-        if line.startswith("#:") and line[2:].strip()
+    prose = _normalise_prose(
+        " ".join(
+            line[2:].strip()
+            for line in _comment_region_above(before)
+            if line.startswith("#:") and line[2:].strip()
+        )
     )
-    matches = re.findall(r"while the ([a-z]+|\d+) entries below do not", prose)
+    matches = _stated_cardinalities(prose)
     assert matches, (
         "the `_DELIBERATE_BARE_FORM` comment block no longer carries the sentence "
         "'while the <N> entries below do not'. This pin must NOT rot into passing "
@@ -836,6 +870,42 @@ def test_the_record_exemption_prose_counts_the_set_it_describes():
         "describes a set that no longer exists. Update the word when you add or "
         "remove an entry."
     )
+
+
+def test_the_prose_pin_reads_through_formatting_but_not_wording():
+    """Non-vacuity of the tolerance, both directions (#11775).
+
+    The pin above reds through `_normalise_prose` / `_stated_cardinalities`, and the
+    reason it must is that its failure message prescribes the one remedy that
+    disables it — *"update the pattern in this test"*. So the tolerance is
+    load-bearing and cannot be left untested: without it, `**four**`, `` `four` `` and
+    a sentence-initial `Four` all reddened as *"the sentence is gone"* while the
+    sentence was present and correct (measured, #11754 review F5).
+
+    The opposite direction matters just as much — a REWORDED sentence must still read
+    as absent, or the pin becomes a fuzzy match that passes on prose it never read.
+    """
+    for variant in (
+        "while the four entries below do not.",
+        "while the **four** entries below do not.",
+        "while the `four` entries below do not.",
+        "while the Four entries below do not.",
+        "while the FOUR entries below do not.",
+        "while the   four\n entries below do not.",
+    ):
+        stated = _stated_cardinalities(_normalise_prose(variant))
+        assert stated, f"{variant!r}: a formatting difference must not read as absence"
+        assert _cardinality_of(stated[0]) == 4, f"{variant!r} -> {stated}"
+
+    assert _stated_cardinalities(
+        _normalise_prose("while the entries below are exempt")
+    ) == [], "a reworded sentence must read as ABSENT, not as an approximate hit"
+    # A word outside the table is still a CLAIM: the sentence is found and the number
+    # is unreadable — reported that way, never silently treated as absent.
+    unknown = _stated_cardinalities(_normalise_prose("while the **some** entries below do not"))
+    assert unknown == ["some"], unknown
+    assert _cardinality_of(unknown[0]) is None
+    assert _cardinality_of("fourteen") is None
 
 
 def test_no_doc_or_usage_advertises_the_form_the_guard_refuses():
