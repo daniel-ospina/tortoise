@@ -3652,8 +3652,18 @@ class PackRegistry:
         # `create_subject(subjectKind="Subject")` and
         # `create_subject(subjectKind="core:Subject")` are both accepted and STORED
         # as written, so `subjectKind IN expand_kind("team")` now also returns a
-        # root-kinded Subject row — the read genuinely widens by a join on the
-        # layer root.
+        # root-kinded Subject row — the read widens by a join on the layer root
+        # whenever that `IN` clause is the filter that runs.
+        # ⚠️ FORM-SCOPED, exactly like the `Object` read below — measured, not
+        # generalised: the `IN` clause is the POST-retrieval filter, so a
+        # text-query read widens while a kind-only read (`query=None`, i.e.
+        # `is_full_scan`) runs only the structural leg (`n.subjectKind = $kind`)
+        # and does NOT. One `:Subject` with `subjectKind='team'` and one with
+        # `subjectKind='Subject'`: `tortoise_fts_query(kind="team",
+        # entity_type="subject")` returned the `team` row only;
+        # `tortoise_fts_query("widget", kind="team", entity_type="subject")`
+        # returned both. Widening the full scan is a BEHAVIOUR change owed by
+        # #11690, not a doc fix.
         #
         # …and that is CORRECT, because the `Object` row has had exactly this
         # property since the §6 table was first read: `create_object(objectKind=

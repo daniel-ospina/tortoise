@@ -2373,8 +2373,12 @@ class TestCoreHierarchy:
         semantics-preserving reflow (the statement wrapped over two lines) and on
         a comment that merely QUOTES the statement — the habit this very docstring
         uses — and its message then sends the next lane hunting a behaviour change
-        that does not exist. It also would not have caught the edit it claimed to
-        guard: nothing observed what the SDK hands the leg. The one thing that
+        that does not exist. What it did NOT cover is the CALL SITE: the plain
+        hand-off edit (`struct_kind = … else expanded_kinds`) removed one of its
+        literal snippets and did red, but forwarding the expansion at the call
+        (`degradation_chain(graph, query, sorted(expanded_kinds) if expanded_kinds
+        else struct_kind, …)`) left it green — and that is the edit the behavioural
+        capture below catches. The one thing that
         cannot be driven without a DB (the post-retrieval expansion gate) is
         anchored on the AST instead, which is immune to both false-red modes.
         ⚠️ The `strategies` assertion is what carries the "kind-only is a full
@@ -2527,14 +2531,33 @@ class TestCoreHierarchy:
         # asserted as a statement SHAPE. An AST dump, not a text anchor: it is
         # immune to a reflow and to a comment quoting the line, and it names the
         # mutation it catches.
+        #
+        # ⚠️ The conjuncts are compared as a SET, not as a whole `BoolOp` dump.
+        # Reordering `kind and query is not None and result_ids` is
+        # semantics-preserving (three truthiness loads, no side effects), so an
+        # ordered comparison would be a FALSE RED whose message claims
+        # `query is not None` was dropped — a behaviour change that did not
+        # occur, which is the same false-diagnosis class the text tripwire above
+        # was removed for. A dropped or duplicated conjunct still changes the
+        # set, so the mutation this pin exists to catch is unaffected.
         gate = ast.parse(
             "kind and query is not None and result_ids", mode="eval").body
+
+        def _conjuncts(expr: ast.expr) -> set[str]:
+            """The `and` conjuncts of a test, order-insensitively."""
+            if isinstance(expr, ast.BoolOp) and isinstance(expr.op, ast.And):
+                out: set[str] = set()
+                for value in expr.values:
+                    out |= _conjuncts(value)
+                return out
+            return {ast.dump(expr)}
+
+        wanted = _conjuncts(gate)
         tree = ast.parse(
             Path(sdk_module.__file__).read_text(encoding="utf-8"))
         hits = [
             node for node in ast.walk(tree)
-            if isinstance(node, ast.If)
-            and ast.dump(node.test) == ast.dump(gate)
+            if isinstance(node, ast.If) and _conjuncts(node.test) == wanted
         ]
         assert len(hits) == 1, (
             "the post-retrieval expansion gate `kind and query is not None and "
