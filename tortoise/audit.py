@@ -928,25 +928,36 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     # producer-as-END — see ``commit_schema.validate_validity_window``). When
     # BOTH bounds are naive ONE host reads both, so the reader's offset CANCELS
     # — except where the pair straddles an OFFSET TRANSITION on that host (a DST
-    # change OR a permanent standard-offset change) that leaves a local time in a
-    # nonexistent hour: the two values then carry different offsets, and when
-    # the verdict moves follows the orientation, because only the NONEXISTENT
-    # bound is shifted — as the END, ``separation <= shift`` flips (measured at a
-    # 60 min shift: 20/30/60 min flip, 61 min does not); as the START the flip
-    # needs ``separation < shift``, because at exactly the shift the shifted
-    # start lands ON the end bound and both hosts accept that zero-length
-    # window (measured: 20 and 59 min flip, 60 min agrees). Measured: the US
+    # change OR a permanent standard-offset change) that leaves ONE bound in a
+    # nonexistent hour AND reads the OTHER at the POST-transition offset — which
+    # is a WALL-INVERTED pair whose END is in the gap, or a non-inverted pair
+    # whose START is in it and whose END is after it. A gap bound is read at the
+    # PRE-transition offset, so a non-inverted END pair and a WALL-INVERTED START
+    # pair read BOTH bounds at that same offset and cannot move. Given different
+    # offsets the verdict moves per orientation, because only the NONEXISTENT
+    # bound is shifted — as the END, a WALL-INVERTED pair flips at
+    # ``separation <= shift`` (the shift un-inverts it into a well-formed window
+    # of length ``shift - separation``, zero-length exactly at equality; measured
+    # at a 60 min shift: 20/30/60 min flip, 61 does not), while a NON-inverted END
+    # pair never flips: BOTH bounds land on the SAME pre-transition offset, so
+    # the gap host reads the same separation-long window as any other host. As
+    # the START, with the other bound AFTER the transition, the flip needs
+    # ``separation < shift``, because at exactly the shift the GAP host reads a
+    # zero-length window while a transition-free host reads a shift-long one, and
+    # both accept (measured: 20 and 59 min flip, 60 min agrees); a WALL-INVERTED
+    # START pair never flips, for the same offset reason. Measured: the US
     # spring-forward pair flips between UTC and America/Los_Angeles, and
-    # Asia/Pyongyang's PERMANENT +08:30 → +09:00 change
-    # in 2018 does the same with no DST at all. This check reports rather than
-    # refuses, but the verdict it reports is that measure under a host-dependent
-    # key: not a new asymmetry, but a newly reachable one (the shape used to
-    # bucket as unparseable, so the pair was skipped everywhere).
+    # Asia/Pyongyang's PERMANENT +08:30 → +09:00 change in 2018 does the same with
+    # no DST at all. This check reports rather
+    # than refuses, but the verdict it reports is that measure under a
+    # host-dependent key: not a new asymmetry, but a newly reachable one (the
+    # shape used to bucket as unparseable, so the pair was skipped everywhere).
     # It is RECORDED and PINNED rather than changed: flipping the reading is a
     # reopen of #3982, and anchoring the producer's shape on its own is the
     # SEPARATE decision recorded on #11646 — either way a decision, not a
     # cleanup here. The pin is
-    # ``tests/test_11646_producer_date_shape.py::test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded``,
+    # ``tests/test_11646_producer_date_shape.py``::
+    # test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded,
     # which asserts ``validate_validity_window``'s verdict at FOUR zones (UTC,
     # Asia/Kolkata, America/Los_Angeles, Africa/Johannesburg) plus a fifth child
     # at Asia/Pyongyang for the permanent-shift case.

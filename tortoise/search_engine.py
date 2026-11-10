@@ -3663,18 +3663,31 @@ _DECORATION_TIMEOUT_MS = 200
 #: which makes consumers of this key answer DIFFERENTLY per host. The key
 #: itself is host-dependent for the value above, and the guards order with it,
 #: so which hosts disagree is decided by where the pair's separation falls
-#: against their two OFFSETS — the distance alone decides nothing: refusal is
-#: ``reader_offset < (naive - other)`` when the naive value is the START (the
-#: sign INVERTS for an END). When BOTH bounds are naive ONE host reads both, so
-#: the reader's offset CANCELS and every host agrees — except where the pair
-#: straddles an OFFSET TRANSITION on that host (a DST change OR a permanent
-#: standard-offset change) that leaves a local time in a nonexistent hour: the two
-#: values then carry different offsets, and when the verdict moves follows the
-#: ORIENTATION, because only the non-existent bound is shifted: as the END,
-#: ``separation <= shift`` flips (at a 60 min shift, 20/30/60 min flip, 61 does
-#: not); as the START the flip needs ``separation < shift``, since at exactly the
-#: shift the shifted start lands ON the end bound and both hosts accept that
-#: zero-length window (measured: 20 and 59 min flip, 60 min agrees).
+#: against their two OFFSETS — for a MIXED pair (one bound zone-less, one
+#: stated) the end closed is the ACCEPTING host's offset (``O_low < S <= O_high``
+#: for a producer-as-START, ``O_low <= S < O_high`` for a producer-as-END; the
+#: full rule is ``commit_schema.validate_validity_window``'s). The distance alone
+#: decides nothing: refusal is ``reader_offset < (naive - other)`` when the naive
+#: value is the START (the sign INVERTS for an END). When BOTH bounds are naive
+#: ONE host reads both, so the reader's offset CANCELS and every host agrees —
+#: except where the pair straddles an OFFSET TRANSITION on that host (a DST
+#: change OR a permanent standard-offset change) that leaves ONE bound in a
+#: nonexistent hour AND reads the OTHER at the POST-transition offset (a
+#: WALL-INVERTED pair whose END is in the gap, or a non-inverted pair whose START
+#: is in it and whose END is after it). A gap bound is read at the PRE-transition
+#: offset, so a non-inverted END pair and a WALL-INVERTED START pair read BOTH at
+#: that same offset and cannot move. Given different offsets the verdict moves per
+#: ORIENTATION, because only the non-existent bound is shifted: as the END, a
+#: WALL-INVERTED pair flips at ``separation <= shift`` (the shift un-inverts it
+#: into a well-formed window of length ``shift - separation``, zero-length exactly
+#: at equality; at 60 min, 20/30/60 min flip, 61 does not), while a NON-inverted END
+#: pair never flips — BOTH bounds land on the SAME pre-transition offset, so the
+#: gap host reads the same separation-long window as any other host. As the START
+#: with the other bound AFTER the transition the flip needs ``separation <
+#: shift``, since at exactly the shift the GAP host reads a zero-length window
+#: while a transition-free host reads a shift-long one and both accept (measured:
+#: 20 and 59 min flip, 60 min agrees); a WALL-INVERTED START pair never flips,
+#: for the same offset reason.
 #: The US spring-forward pair is REFUSED at UTC and ACCEPTED at
 #: ``America/Los_Angeles``, and ``Asia/Pyongyang``'s PERMANENT +08:30 → +09:00
 #: change does the same with no DST at all. Separately, two hosts 1h apart
@@ -3685,9 +3698,9 @@ _DECORATION_TIMEOUT_MS = 200
 #: write door reached by ``create_point`` / ``update_point`` /
 #: ``invalidate_point`` / ``retract_point`` / ``mining._temporal_wire``) and
 #: audit check 8 (``inverted_validity_window``), which order with this same
-#: measure. Before #11646 those values bucketed ``(1, text)``, so the guards
-#: were skipped — i.e. this exposure is NEW, and it is the #3982 divergence
-#: reaching WRITE and AUDIT paths.
+#: measure. Before #11646 those values bucketed ``(1, text)``, so the guards were
+#: skipped — i.e. this exposure is NEW, and it is the #3982 divergence reaching
+#: WRITE and AUDIT paths.
 #: Reversing #3982 is a recorded decision and is NOT the fix; giving the
 #: producer's shape its own deterministic anchor instead is the SEPARATE
 #: decision recorded on #11646 (deterministic without touching #3982's dashed

@@ -674,20 +674,21 @@ def test_the_instant_view_takes_whole_value_date_times_and_refuses_unreadable_ta
     rows this module says are dated.
 
     Scoped to the DATE+TIME families on purpose: the whole-value shapes the day
-    view dates but this view deliberately refuses are an EPOCH spelled as a
-    STRING (the #9202 owner ruling, the asymmetry stated in ``calendar_date``'s
-    module docstring), a COMPACT / ISO-WEEK DATE + OFFSET (or ``Z``) carrying NO
+    view dates but this view refuses are an EPOCH spelled as a STRING (the #9202
+    owner ruling, the asymmetry stated in ``calendar_date``'s module docstring),
+    a COMPACT / ISO-WEEK DATE + OFFSET (or ``Z``) carrying NO
     TIME — ``20230520+05:00``, ``20230520-05:00``, ``20230520Z``,
     ``2026W243+05:00`` and ``2023-W43-2+05:00`` are all day-dated and all
-    refused here (the gap named on #11708; ⚠ the axis is the FORM, not the
+    refused here (a GAP, not a ruling — #11708; ⚠ the axis is the FORM, not the
     separators: the CALENDAR form ``2023-05-20+05:00`` IS accepted, by
     ``_INSTANT_RE``'s date-only branch, as that offset's midnight, while the
     DASHED ISO-week ``2023-W43-2+05:00`` is refused like the rest of its
-    family), an HOUR-24 spelling
-    (``2023-05-20T24:00:00``, which the day view dates by the whole-value
-    grammar and the instant view refuses at ``_match_naive``), and a
-    STATED-BUT-IMPOSSIBLE OFFSET (``2023/05/20T02:00:00+25:00``, refused by the
-    deliberate guard in ``_string_instant``).
+    family), an OUT-OF-RANGE CLOCK spelling (`2023-05-20T24:00:00`, which the day
+    view dates by the whole-value grammar and the instant view refuses at
+    ``_match_naive`` — the same refusal covers `T25:00:00` and a 61st minute or
+    second), and a STATED-BUT-IMPOSSIBLE OFFSET
+    (``2023/05/20T02:00:00+25:00``, refused by the deliberate guard in
+    ``_string_instant``).
 
     ORDERABILITY is a separate gate (``_created_sort_key``'s
     ``s[0].isdigit() and len(s) >= 10 and ("-" in s or "T" in s or "/" in s)``):
@@ -698,9 +699,11 @@ def test_the_instant_view_takes_whole_value_date_times_and_refuses_unreadable_ta
 
     ⛔ The last block is the FALSIFIER for the distinction cycle 7 restored: the
     day view dates a value whose TAIL is unreadable, and the instant view must
-    refuse it. A narrow "just add the prefix fallback for these shapes" change
-    left every other test green, so these assertions are what make that
-    fabrication impossible to land quietly (review of PR 11705).
+    refuse it. A narrow "just add the prefix fallback for these shapes" widening
+    ALSO reds the pre-existing ``test_write_door_still_canonicalises_a_date_variant``
+    (its ``read_caller_end('2024/3/1Txx')`` must raise — measured), but that test
+    asserts the DOOR on ONE tail shape; these assertions falsify the resolver
+    directly and cover all four. (Review of PR 11705.)
     """
     assert calendar_date("20230520T02:21:00Z") == date(2023, 5, 20)
     assert calendar_datetime("20230520T02:21:00Z") is not None
@@ -741,30 +744,42 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
     verdict is depends on the orientation: producer as the START refuses when
     ``reader_offset < separation`` (the naive bound's WALL CLOCK minus the other
     bound's instant — 2h21 = 8460 s here, NOT the 1260 s difference of the two
-    sort keys: the naive key has already absorbed the reader's offset), producer
+    sort keys measured at ``Africa/Johannesburg`` (+02:00); at ``UTC`` the key
+    difference IS the 8460 s separation, because the naive key has already
+    absorbed the reader's offset), producer
     as the END uses the same separation with the comparison INVERTED. With BOTH
     bounds producer-shaped ONE host reads both, so the reader's offset CANCELS
     — except across an OFFSET TRANSITION on that host (a DST change OR a
-    permanent standard-offset change) that leaves a local time in a nonexistent
-    hour. The two values then carry different offsets, and WHEN the verdict moves
+    permanent standard-offset change) that leaves ONE bound in a nonexistent hour
+    AND reads the OTHER at the post-transition offset — a WALL-INVERTED pair whose
+    END is in the gap, or a non-inverted pair whose START is in it and whose END
+    is after it. A gap bound is read at the PRE-transition offset, so a
+    non-inverted END pair and a WALL-INVERTED START pair read BOTH at that same
+    offset and cannot move. Given different offsets, WHEN the verdict moves
     follows the ORIENTATION, because only the non-existent bound is shifted — as
-    the END, ``separation <= shift`` flips (at a 60 min shift: 20, 30 and 60 min
-    separations flip, 61 min does not), while as the START the flip needs
-    ``separation < shift``, because at exactly the shift the shifted start lands
-    ON the end bound and BOTH hosts accept that zero-length window (measured: 20
-    and 59 min flip, 60 min agrees). Measured instances: the US spring-forward
-    pair is REFUSED at ``UTC``/``Asia/Kolkata`` and ACCEPTED at
+    the END, a WALL-INVERTED pair flips at
+    ``separation <= shift`` (the shift un-inverts it into a well-formed window of
+    length ``shift - separation``, zero-length exactly at equality; at 60 min: 20,
+    30 and 60 min separations flip, 61 min does not), while a NON-inverted END
+    pair never flips because both bounds land on the SAME pre-transition offset,
+    so the gap host reads the same separation-long window as any other host. As
+    the START, with the other bound AFTER the transition, the flip needs
+    ``separation < shift``, since at exactly the shift the GAP host reads a
+    zero-length window while a transition-free host reads a shift-long one and
+    BOTH accept (measured: 20 and 59 min flip, 60 min agrees); a WALL-INVERTED
+    START pair never flips, for the same offset reason. Measured
+    instances: the US spring-forward pair is REFUSED at ``UTC``/``Asia/Kolkata``
+    and ACCEPTED at
     ``America/Los_Angeles``, and ``Asia/Pyongyang``'s PERMANENT +08:30 → +09:00
     change does the same under its 30 min shift with no DST at all (the class is
     NOT DST-specific — review cycle 10). For a MIXED pair, two hosts therefore
     disagree only when the separation falls between their offsets, the closed end
     being the ACCEPTING host's offset — higher for a producer-as-START, lower for
     a producer-as-END — so the two orientations close at opposite ends (measured:
-    the END pair with a 7200 s
-    separation is ACCEPTED at ``Africa/Johannesburg`` +02:00 and REFUSED at
-    ``Asia/Kolkata`` +05:30). The distance alone decides nothing: two hosts 1h apart can disagree
-    about a pair 13h30 apart, and a pair 20h apart answers the same on every
-    host.
+    the END pair with a 7200 s separation is ACCEPTED at ``Africa/Johannesburg``
+    +02:00 and REFUSED at ``Asia/Kolkata`` +05:30). The distance alone decides
+    nothing: two hosts 1h apart can disagree about a pair 13h30 apart, and a pair
+    20h apart answers the same on every host.
 
     Recorded, not endorsed: fixing it means either revisiting the ``#3982``
     ruling or giving the producer's shape its own deterministic anchor — the
@@ -772,11 +787,14 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
     instead of changed here. What this pin buys is a red test the day the
     divergence MOVES, and an explicit statement of every zone the record names
     (the four zones above, each asserted, plus ``Asia/Pyongyang`` for the
-    permanent-shift case).
+    permanent-shift case), of all FOUR offset-transition arms, of both arms'
+    INCLUSIVE / STRICTLY-BELOW boundaries at equality, of BOTH orientations'
+    closed ends and of the window lengths the record quotes.
 
-    Subprocesses are used because ``TZ`` must be set before the first
-    ``import time`` for ``datetime.timestamp()``/``astimezone`` to see it; each
-    child re-derives both the sort key and the write door's verdict.
+    Subprocesses are used so each zone is read by its OWN interpreter and this
+    pin cannot leak a ``TZ`` change into the rest of the suite (an in-process
+    ``os.environ["TZ"] = …; time.tzset()`` would work too); each child
+    re-derives both the sort key and the write door's verdict.
     """
     import subprocess
     import sys
@@ -798,6 +816,16 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
         "print(verdict('2023/03/12 (Sun) 03:10', '2023/03/12 (Sun) 02:50'))\n"
         "print(verdict('2018/05/05 (Sat) 00:10', '2018/05/04 (Fri) 23:50'))\n"
         "print(verdict('2023-05-20', '2023/05/20 (Sat) 02:00'))\n"
+        "print(verdict('2023/03/12 (Sun) 02:50', '2023/03/12 (Sun) 03:50'))\n"
+        "print(verdict('2023/03/12 (Sun) 01:59', '2023/03/12 (Sun) 02:59'))\n"
+        "print(verdict('2023/03/12 (Sun) 02:50', '2023/03/12 (Sun) 01:50'))\n"
+        "print(verdict('2023/03/12 (Sun) 03:10', '2023/03/12 (Sun) 02:10'))\n"
+        "print(verdict('2023/03/12 (Sun) 03:10', '2023/03/12 (Sun) 02:09'))\n"
+        "print(verdict('2023/03/12 (Sun) 02:50', '2023/03/12 (Sun) 03:49'))\n"
+        "print(verdict('2023/05/20 (Sat) 05:30', '2023-05-20'))\n"
+        "print(verdict('2023/05/20 (Sat) 05:30:01', '2023-05-20'))\n"
+        "print((k('2023/03/12 (Sun) 02:50')[1] - k('2023/03/12 (Sun) 03:10')[1],\n"
+        "       k('2023/03/12 (Sun) 03:50')[1] - k('2023/03/12 (Sun) 02:50')[1]))\n"
     )
     env_base = {"PATH": str(Path(sys.executable).parent), "PYTHONPATH": str(
         Path(__file__).resolve().parent.parent)}
@@ -808,10 +836,16 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
                              text=True, timeout=120,
                              env={**env_base, "TZ": zone}, check=True).stdout
         lines = out.strip().splitlines()
-        (key, forward, reverse, both_naive, dst_straddle, perm_shift,
-         end_7200) = lines[-7:]
+        (key, forward, reverse, both_naive, dst_straddle, perm_shift, end_7200,
+         start_in_gap, end_not_inverted, start_wall_inverted,
+         end_flip_at_shift, end_flip_past, start_flip_at_59,
+         start_close_at_shift, start_close_past,
+         windows) = lines[-16:]
         observed[zone] = (key, forward, reverse, both_naive, dst_straddle,
-                          perm_shift, end_7200)
+                          perm_shift, end_7200, start_in_gap, end_not_inverted,
+                          start_wall_inverted, end_flip_at_shift, end_flip_past,
+                          start_flip_at_59, start_close_at_shift,
+                          start_close_past, windows)
     # all four order the value now (before #11646 every one of them bucketed)
     assert all("(0," in k for k, *_ in observed.values()), observed
     # the epoch — and therefore the window verdict — is decided by the HOST
@@ -854,6 +888,23 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
     for zone in ("UTC", "Asia/Kolkata", "America/Los_Angeles",
                  "Africa/Johannesburg"):
         assert observed[zone][5] == "refused", (zone, observed[zone])
+    # the START-in-gap sub-case: at separation == shift (3600 s) the gap host
+    # reads a ZERO-LENGTH window while a transition-free host reads a shift-long
+    # one, and BOTH accept — so the hosts AGREE and this never moves
+    for zone in ("UTC", "Asia/Kolkata", "America/Los_Angeles",
+                 "Africa/Johannesburg"):
+        assert observed[zone][7] == "accepted", (zone, observed[zone])
+    # the NON-inverted END sub-case (START valid, END inside the gap): both
+    # bounds read at the SAME pre-transition offset, so both hosts accept and it
+    # never moves either
+    for zone in ("UTC", "Asia/Kolkata", "America/Los_Angeles",
+                 "Africa/Johannesburg"):
+        assert observed[zone][8] == "accepted", (zone, observed[zone])
+    # the FOURTH arm: a WALL-INVERTED START pair — both readings land on the SAME
+    # pre-transition offset, so nothing moves and every host refuses it
+    for zone in ("UTC", "Asia/Kolkata", "America/Los_Angeles",
+                 "Africa/Johannesburg"):
+        assert observed[zone][9] == "refused", (zone, observed[zone])
     # the END pair with a 7200 s separation — the instance the prose names for
     # the closed-end rule — asserted in the same zones, so no zone named in the
     # record is unmeasured (review cycle 12 of PR 11705)
@@ -863,12 +914,45 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
         assert observed[zone][6] == expected, (zone, observed[zone])
     # …and the class is NOT DST-specific: Asia/Pyongyang's offset changed
     # PERMANENTLY (+08:30 -> +09:00 on 2018-05-05, no DST on either side), which
-    # leaves 2018-05-04 23:30-24:00 nonexistent all the same, so the same
-    # wall-inverted pair
-    # un-inverts there. Pinned, because "it is only DST" is the wrong rule.
+    # leaves 2018-05-04 23:30-24:00 nonexistent (00:00 onward on the 5th is
+    # +09:00), so the pair's END bound is the one in the gap and the same
+    # wall-inverted pair un-inverts there. Pinned, because "it is only DST" is
+    # the wrong rule.
     pyongyang = subprocess.run(
         [sys.executable, "-c", script], capture_output=True, text=True,
         timeout=120, env={**env_base, "TZ": "Asia/Pyongyang"}, check=True,
-    ).stdout.strip().splitlines()[-2]  # the PERMANENT-shift line, not the END pair
+    ).stdout.strip().splitlines()[5]  # the PERMANENT-shift line, by INDEX: a
+    # positional [-n] here silently re-binds when a print is added (it did —
+    # [−2] became the START-in-gap line and this assertion went dead)
     assert pyongyang == "accepted", pyongyang
     assert {o[3] for o in observed.values()} == {"accepted"}, observed
+    # ⛔ THE BOUNDARIES, not just the arms: the record states INCLUSIVE for an
+    # END-in-gap pair (``separation <= shift``) and STRICTLY BELOW for a
+    # START-in-gap pair (``separation < shift``). Asserting only an interior
+    # point leaves the pin green if either comparison is quietly moved, so both
+    # boundaries are measured at the 60 min shift (review cycle 32 of PR 11705).
+    assert observed["America/Los_Angeles"][10] == "accepted", observed
+    for zone in ("UTC", "Asia/Kolkata", "Africa/Johannesburg"):
+        assert observed[zone][10] == "refused", (zone, observed[zone])
+    for zone in ("UTC", "Asia/Kolkata", "America/Los_Angeles",
+                 "Africa/Johannesburg"):
+        assert observed[zone][11] == "refused", (zone, observed[zone])
+    # …and the START side at 59 min (< shift): it moves on the gap host only
+    assert observed["America/Los_Angeles"][12] == "refused", observed
+    for zone in ("UTC", "Asia/Kolkata", "Africa/Johannesburg"):
+        assert observed[zone][12] == "accepted", (zone, observed[zone])
+    # the START orientation's CLOSED END, at equality (19800 s = Asia/Kolkata's
+    # +05:30): the accepting host is the one whose offset EQUALS the separation,
+    # so a pin on the END orientation alone would leave the mirror rule unpinned
+    assert observed["Asia/Kolkata"][13] == "accepted", observed
+    for zone in ("UTC", "America/Los_Angeles", "Africa/Johannesburg"):
+        assert observed[zone][13] == "refused", (zone, observed[zone])
+    for zone in ("UTC", "Asia/Kolkata", "America/Los_Angeles",
+                 "Africa/Johannesburg"):
+        assert observed[zone][14] == "refused", (zone, observed[zone])
+    # …and the WINDOW LENGTHS the record names: ``shift - separation`` for the
+    # WALL-INVERTED END pair (3600 - 1200 = 2400 s) and zero at equality for the
+    # START pair. Host-scoped, because the gap host is the one that shifts.
+    assert observed["America/Los_Angeles"][15] == "(2400.0, 0.0)", observed
+    for zone in ("UTC", "Asia/Kolkata", "Africa/Johannesburg"):
+        assert observed[zone][15] == "(-1200.0, 3600.0)", (zone, observed[zone])
