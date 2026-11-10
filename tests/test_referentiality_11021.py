@@ -1353,7 +1353,15 @@ def test_the_mention_record_reaches_the_claim_point_and_says_so():
     # …and pin the ROUTE's own write, not only its request model (review P3 on
     # PR #11795: the pre-#11239 row asserted exactly this and the rewrite
     # dropped it, so a `body.mentions` kwarg could be threaded into the route's
-    # `sdk.create_point` call while both model assertions stayed green).
+    # `sdk.create_point` call while both model assertions stayed green). BOTH
+    # mirrors: the self-host route below, and the hosted one whose
+    # `_author_props` splat is one kwarg away from carrying the field (review
+    # R3 on this head: the hosted half was deleted, not replaced, so the two
+    # assertions are deliberately symmetric).
+    assert "mentions" not in inspect.getsource(hosted_api.create_point), (
+        "the hosted create route now forwards `mentions` into its "
+        "`sdk.create_point` call: the field is writer-produced, and a door that "
+        "reads it off the request body advertises it on the public REST surface")
     assert "mentions" not in inspect.getsource(selfhost_api.create_point), (
         "the self-host create route now forwards `mentions` into its "
         "`sdk.create_point` call: the field is writer-produced, and a door that "

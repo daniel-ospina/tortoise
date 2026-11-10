@@ -12122,24 +12122,31 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
        ``mention_carrier_is_event``. The surface is still HELD (never minted) —
        only the DM1 record is missing, and there is no Point for it to live on.
 
-    ⛔ **The record now REACHES the claim Point, and the two REST doors still do
-    not carry it — stated, not implied (#11239).** The REST ``CreatePointRequest``
-    (hosted and SELF-HOST — ``selfhost_api.CreatePointRequest`` is a SEPARATE
-    model and route, not an alias) has no ``mentions`` field; the two POINT write
-    doors
-    DO persist it: ``hosted_api._execute_commit_writes`` passes ``mentions=`` on
-    both its create legs, and the SDK capture seam carries it on its create
-    branch exactly as it carries ``validFrom`` (stored, never advertised — it is
-    deliberately NOT in ``sdk._CAPTURE_PASSTHROUGH_ORDER``, ``#2949``'s public
-    response surface). The node stores ONE compact JSON scalar
-    (``projection.entities.encode_json_record_props``); the payload keeps the
-    record shape. ``stats["mentions_recorded"]`` counts the records this
+    ⛔ **The record now REACHES the claim Point, and the REST point doors still
+    do not carry it — stated, not implied (#11239).** The REST
+    ``CreatePointRequest`` (hosted and SELF-HOST — ``selfhost_api.CreatePointRequest``
+    is a SEPARATE model and route, not an alias) has no ``mentions`` field and
+    neither route forwards one; the write doors that DO persist it are
+    ``hosted_api._execute_commit_writes`` (both its create legs, by setting
+    ``point_props["mentions"]`` — not a ``mentions=`` kwarg), the SDK capture
+    seam's create branch (carried exactly as it carries ``validFrom``), and the
+    generic ``update_entity`` ``:Point`` branch (journalled as
+    ``PointRevised(mentions=…)``). ⛔ The full per-door list lives in
+    ``commit_schema.Mention``'s docstring — one list with a verdict each, so
+    the two enumerations cannot drift. Every carrier is **stored, never
+    advertised**: it is deliberately NOT in ``sdk._CAPTURE_PASSTHROUGH_ORDER``
+    (``#2949``'s public response surface). The node stores ONE compact JSON
+    scalar (``projection.entities.encode_json_record_props``); the payload keeps
+    the record shape. ``stats["mentions_recorded"]`` counts the records this
     producer BUILT — ``len(_records)`` at the return below. It is not a store
-    counter and there is no loss counter beside it: a record a door or an
-    EVENT-only carrier does not carry is INVISIBLE to this number rather than
-    subtracted from it, so the value is "records produced", never "records
-    held" (review P3 on PR #11795 — the earlier text claimed an accounting the
-    code does not make, in both directions). There are also FOUR keys carrying a record,
+    counter, and there is no counter of DOOR-side loss beside it: the keys that
+    DO sit beside it measure the producer (``mentions_attached`` /
+    ``mentions_unresolved``), and a record a door or an EVENT-only carrier does
+    not carry is INVISIBLE to this number rather than subtracted from it, so the
+    value is "records produced", never "records held" (review P3 on PR #11795 —
+    the earlier text claimed an accounting the code does not make, in both
+    directions, and a later wording overcorrected to "no loss counter" while
+    those keys sat in the same dict). There are also FOUR keys carrying a record,
     and the two producer lists
     (``result["embed_list"]["mentions"]``, ``result["s2_embed"]["mentions"]``)
     are the model's RAW channel on the fail-open path — see

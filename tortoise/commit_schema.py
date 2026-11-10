@@ -692,19 +692,38 @@ class Mention(BaseModel):
     a verification: it is the honest label for "the model asserted these bytes"
     (an unverified offset pair survives under it — it is demoted, never dropped).
 
-    No REST write door carries it, and there are **four** of them: the REST
-    ``CreatePointRequest`` (no ``mentions`` field at all, hosted and self-host —
-    the self-host ``selfhost_api.CreatePointRequest`` is a SEPARATE model and
-    route, and ``#4032`` frames the pair as parity mirrors, so a hosted-only
-    addition would re-open the divergence), ``hosted_api._execute_commit_writes``
-    — the door the v2 payload actually uses, which enumerates its
-    ``sdk.create_point`` kwargs — and the self-host ``selfhost_api.create_point``.
-    **The two POINT doors DO
-    carry it** (persisted by ``#11239``):
-    ``hosted_api._execute_commit_writes`` passes ``mentions=`` on both its create
-    legs, and the SDK capture seam carries it on its create branch exactly as it
-    carries ``validFrom`` — **stored, never advertised** — so a graph read after
-    a capture holds the claim AND the mentions it used.
+    ⛔ **WHICH WRITE DOORS CARRY IT — ONE list, ONE verdict each (#11239,
+    review R5 on PR #11795).** An earlier version of this paragraph enumerated
+    the doors and then contradicted itself: it listed
+    ``hosted_api._execute_commit_writes`` among the doors that do NOT carry the
+    field, then said in the next sentence that it does, and it described the
+    carrier as a ``mentions=`` kwarg when the code sets ``point_props``. The
+    verdicts below are the HEAD's code, one per door:
+
+    - hosted REST ``CreatePointRequest`` / ``hosted_api.create_point`` — **NOT
+      carried**. No ``mentions`` field on the model, and the route forwards
+      only ``confidence``/``authoredBy``/``credibility`` into
+      ``sdk.create_point``.
+    - self-host REST ``selfhost_api.CreatePointRequest`` / its ``create_point``
+      route — **NOT carried**. A SEPARATE model and route, not an alias;
+      ``#4032`` frames the pair as parity mirrors, so a hosted-only addition
+      would re-open the divergence. Its route forwards no ``mentions`` either.
+    - ``hosted_api._execute_commit_writes`` — **CARRIED**, on BOTH its create
+      legs (the supersede leg and the plain-create leg), by setting
+      ``point_props["mentions"]`` and only when the payload carries a
+      non-empty record list. ⛔ Never ``mentions=_mention_props or None`` on the
+      call: on a dedup hit a ``None`` in a generic prop REMOVES the property.
+    - the SDK capture seam (``_extract_session_v2``'s create branch) —
+      **CARRIED**, into ``create_point``'s ``props`` exactly as it carries
+      ``validFrom``. Create branch only, so a dedup hit writes nothing
+      (first-writer).
+    - the generic ``update_entity`` surface (``_update_entity``'s ``:Point``
+      branch) — **CARRIED**, and journalled as ``PointRevised(mentions=…)`` so
+      a rebuild reproduces it (review R1 on PR #11795: journaled here rather
+      than left as a live-only third door).
+
+    Every carried leg is **stored, never advertised**, so a graph read after a
+    capture holds the claim AND the mentions it used.
 
     ⛔ Still NOT part of ``sdk._CAPTURE_PASSTHROUGH_PROPS``: that set is the
     public capture **RESPONSE** surface (``#2949`` response parity), and widening

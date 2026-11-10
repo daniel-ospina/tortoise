@@ -5485,3 +5485,92 @@ class Test4051ChargeCoversTheLoopShape:
             "the points count moved for a `points: []` commit — if this is a "
             "real widening of the counted category, §4 of #4051 has been "
             "decided (candidate 2) and this leg must be replaced, not relaxed")
+
+
+# ── #11239 (DM1's home): the commit PAYLOAD's mentions reach the claim Point ──
+#
+# Review R2 on PR #11795. `_execute_commit_writes` is the door a v2 payload
+# actually rides, and before these rows its mention handling was guarded ONLY
+# by `inspect.getsource` substrings in `tests/test_referentiality_11021.py`.
+# Measured on the reviewed head: `if _mention_props:` → `if False and
+# _mention_props:` neutered the write completely (no record ever reached the
+# node) and every assertion stayed green, and `point_props["mentions"] =
+# _mention_props or None` — the shipped clearing bug — stayed green too
+# because `_mention_props or None` CONTAINS the asserted substring.
+#
+# So these are node read-backs through the real route: commit, then
+# `MATCH (n:Point {id}) RETURN n.mentions`.
+
+_MENTION_RECORD = {"surface": "it", "span_start": 0, "span_end": 2,
+                   "kind_guess": "pronoun"}
+
+
+def _point_mentions(pid: str):
+    """The claim Point's stored mention scalar, read straight off the node."""
+    rows = _team_sdk()._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.mentions",
+        params={"id": pid}).result_set
+    return rows[0][0] if rows else None
+
+
+def test_the_commit_payload_carries_its_mentions_to_the_claim_point(client):
+    """A `points[].mentions` payload reaches the node — not only the payload.
+
+    Mutant this reds on: `if _mention_props:` → `if False and _mention_props:`
+    (the record is built, dropped at the write, and the pre-#11239 behaviour
+    returns silently).
+    """
+    pid = "pt_11239_commit_door"
+    raw = _raw_payload(0, session_id="s11239-mentions",
+                       points=[_point(0, id=pid, content="the claim holds a pronominal mention",
+                                      mentions=[dict(_MENTION_RECORD)])])
+    r = _commit(client, raw)
+    assert r.status_code == 200, r.text[:400]
+
+    stored = _point_mentions(pid)
+    assert stored is not None, (
+        "the commit payload carried `mentions` and the claim Point holds none: "
+        "the hosted door read the payload and dropped the record (#11239)")
+    records = json.loads(stored)
+    assert records[0]["surface"] == "it" and records[0]["span_start"] == 0, records
+    assert records[0]["kind_guess"] == "pronoun", records
+
+
+def test_a_recommit_whose_payload_has_no_mentions_keeps_the_stored_record(client):
+    """The shipped clearing bug, measured through the door that had it.
+
+    `_mention_props or None` on a create leg folds `mentions=None` onto the
+    dedup target, and a `None` in a generic prop REMOVES the property — so the
+    ordinary re-commit of a claim whose payload says nothing about mentions
+    DELETED the stored record. The fix adds the key only when the payload
+    carries a record (first-writer).
+
+    Mutant this reds on: `point_props["mentions"] = _mention_props or None`, or
+    any `mentions=_mention_props or None` kwarg on the create legs.
+    """
+    pid = "pt_11239_recommit_door"
+    content = "the claim keeps its mention across a re-commit"
+    first = _raw_payload(
+        0, session_id="s11239-recommit-1",
+        points=[_point(0, id=pid, content=content,
+                       mentions=[dict(_MENTION_RECORD)])])
+    assert _commit(client, first).status_code == 200
+
+    stored = _point_mentions(pid)
+    assert stored is not None, "the first commit did not store the record"
+
+    # The re-commit: same claim, and the payload says NOTHING about mentions
+    # (the cue-off capture — `[]`, which `_mention_props` turns into the empty
+    # list the old `or None` made destructive). A new session so it is a real
+    # commit rather than an L1 duplicate replay.
+    second = _raw_payload(
+        0, session_id="s11239-recommit-2",
+        points=[_point(0, id=pid, content=content, mentions=[])])
+    assert _commit(client, second).status_code == 200
+
+    after = _point_mentions(pid)
+    assert after == stored, (
+        "a re-commit whose payload carries no mentions CLEARED the stored "
+        "record — the door folded `mentions=None` onto the claim and a `None` "
+        "in a generic prop removes the property (DM1: no held item silently "
+        "dropped)")

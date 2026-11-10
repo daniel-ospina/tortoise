@@ -13397,14 +13397,32 @@ class TortoiseSDK:
         # ONE compact JSON scalar here. ⛔ THIS call is the LOAD-BEARING one, and
         # that is measured rather than assumed (review P2, PR #11795):
         # commenting it out leaves `p.mentions` UNSET, while deleting the replay
-        # door's call (`_upsert_point_props`) changes no test — because a journal
-        # written by this door already carries the canonical STRING and the
-        # helper is a no-op for a `str`. Without it the live CREATE would hand
+        # door's call (`_upsert_point_props`) changes no test in the DEFAULT
+        # population — a journal written by this door already carries the
+        # canonical STRING and the helper is a no-op for a `str` (the
+        # non-canonical arm IS pinned behaviourally, by
+        # `tests/test_mention_write_11239.py::test_the_replay_door_normalises_a_non_canonical_record`).
+        # Without it the live CREATE would hand
         # the engine a list of maps and the write would be refused or silently
         # reshaped — the silent-drop class #11239 exists to end. Encoding here
         # ALSO precedes the dedup fold's `self.update_point(pid, **props)`, so
         # that fold forwards the encoded value rather than a list.
         _encode_json_record_props(props)
+        # #11239 (review R2 on PR #11795): a CREATE that did not restate the
+        # record must not DELETE one. `update_point(mentions=None)` is the
+        # documented clear — an addressed edit of an existing claim — but THIS
+        # verb is "create": an explicit `mentions=None` reaches the dedup
+        # fold's `self.update_point(pid, **props)` below, where a `None` in a
+        # generic prop REMOVES the property. That is a silent deletion
+        # triggered by a call that only asked to create, and it was measured:
+        # `create → create_point(dedup=True, mentions=None)` left
+        # `p.mentions` UNSET (the DM1 constraint "no held item silently
+        # dropped", breached by the ordinary re-commit path). First-writer is
+        # the rule every other prop here follows and the encoder already POPs
+        # an empty list for exactly this reason, so a `None` is dropped rather
+        # than forwarded.
+        if props.get("mentions") is None:
+            props.pop("mentions", None)
         # #10122: a `name` the index does not hold is a stored-but-unfindable
         # identifier — advise here, at the door that accepted it (after the
         # flatten, so the coverage check sees the stored `search_keys` form).
@@ -43799,14 +43817,30 @@ class TortoiseSDK:
         # ``_revise_point``/``_apply_one`` fold, so presence-conditional replay
         # restores exactly what the live write set.
         #
-        # SCOPE: only the annotator dims. Every other prop this generic surface
-        # writes live is still unfolded on replay — the pre-existing
-        # PointRevised-extras class tracked by #2946/#2795/#4094, deliberately
-        # NOT widened here: folding ``content`` would need the live
+        # SCOPE: the annotator dims and (#11239) ``mentions``. Every other prop
+        # this generic surface writes live is still unfolded on replay — the
+        # pre-existing PointRevised-extras class tracked by #2946/#2795/#4094,
+        # deliberately NOT widened here: folding ``content`` would need the live
         # content_hash/embedding recompute (#1904) or it would introduce a NEW
         # live/replay divergence in the same breath.
+        #
+        # ⛔ ``mentions`` is NOT an instance of that pre-existing class (review
+        # R1, PR #11795). The #4094 exemption is declared for props that
+        # ALREADY reached the node live without a record; #11239 is what made
+        # ``mentions`` persistable on this surface AT ALL, and before the encode
+        # below the same call was a hard refusal (the engine rejects an array of
+        # maps), not a silent live-only write. Both replay folds carry the key
+        # already (``_revise_point`` / ``_apply_one``), so leaving it
+        # unjournalled here would ship a NEW divergence: a stored-live,
+        # unreplayable record, which ``check_consistency`` then reds on a
+        # faithful graph with the one piece of advice that DELETES it. Journalled
+        # on the same record as the dims, presence-conditional like the live
+        # ``SET n += $p`` (a ``None`` is the documented clear and folds as one).
         annotator_updates = {
             k: v for k, v in props.items() if k in _ANNOTATOR_PROP_NAMES}
+        journaled_updates = dict(annotator_updates)
+        if "mentions" in props:
+            journaled_updates["mentions"] = props["mentions"]
         # #3860 one-table rule: consume the SAME label→id-property table the
         # replay fold and `_delete_entity` use, so the MUTATION/DELETE producer
         # and the fold cannot drift. (Byte-equivalent to the tuple this
@@ -44117,10 +44151,10 @@ class TortoiseSDK:
                     # Post-apply, per matched label — the `_delete_entity`
                     # emitter's ordering contract (a failed/no-op write never
                     # leaves a phantom record).
-                    if (annotator_updates and res.result_set
+                    if (journaled_updates and res.result_set
                             and res.result_set[0][0]):
                         self._emit_event("PointRevised", id=id_val,
-                                         **annotator_updates)
+                                         **journaled_updates)
                 else:
                     # C1 (#3312 statuses, #3377 rename): this branch used to apply
                     # caller props with a live `SET n += $p` and emit NOTHING — so

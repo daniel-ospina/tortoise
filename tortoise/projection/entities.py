@@ -1175,10 +1175,11 @@ _POINT_FLATTEN_LIST_PROPS: frozenset = frozenset({"search_keys", "quote"})
 #: written by these doors already carries the canonical STRING (the helper is a
 #: no-op for a `str`, which is also what lets `create_point`'s dedup fold hand
 #: the encoded value straight to `update_point`), so deleting the replay call
-#: changes no test at all. It has work to do only on a NON-canonical record — a
+#: changes no test in the DEFAULT population. It has work to do only on a
+#: NON-canonical record — a
 #: hand-written journal, or an older emitter's snapshot — which it normalises to
 #: the same scalar instead of handing `_persist_extra_props` an undeclared array
-#: of dicts that it DENIES SILENTLY. That arm is pinned behaviourally by
+#: of dicts that it DENIES SILENTLY. That arm IS pinned behaviourally, by
 #: `tests/test_mention_write_11239.py::test_the_replay_door_normalises_a_non_canonical_record`.
 #: The parity claim (#330) therefore rests on the LIVE calls emitting a pure
 #: function of the payload, not on the replay door re-deriving it.
@@ -1212,19 +1213,35 @@ def encode_json_record_props(props: dict) -> None:
     prevent — ``value_gate``'s asymmetry, cited at `extractor_v2`).
 
     ⛔ **It is NOT field-preserving, and the narrowing is DM1's, not this
-    helper's.** The encode writes exactly FOUR keys — ``surface``,
-    ``span_start``, ``span_end``, ``kind_guess`` — because that is DM1's declared
-    shape (`05-plan.md` §4: *"a property on the claim Point that carried it"*,
-    with no ``claim_id`` because the owning point IS the claim). The payload's
-    `Mention` model carries four MORE that this encode deliberately does not
-    write to the node: ``claim_ref`` (the claim's own content — the node's
-    identity already is that claim), ``quote`` and ``span_source`` (the address
-    and the name of the haystack it indexes into; the POINT's own span fields
-    carry the same pair) and ``rule_id`` (which rule held it — that is S2.1's
-    audit channel on the PAYLOAD/evidence block, `result["mentions"]`).
+    helper's.** DM1 (`05-plan.md` §4: *"a property on the claim Point that
+    carried it"*, with no ``claim_id`` because the owning point IS the claim)
+    declares the node's record shape as ``surface``, ``span_start``,
+    ``span_end``, ``kind_guess`` — that decision is why the node does not
+    carry the model's other four fields, and it is the ONLY reason. The
+    payload's ``Mention`` model carries four MORE that this encode deliberately
+    does not write to the node:
+
+    - ``claim_ref`` — the claim's own content; the node's identity already IS
+      that claim;
+    - ``quote`` and ``span_source`` — the mention's own quoted text and **the
+      name of the haystack its offsets index into**. ⛔ They are NOT
+      interchangeable with the Point's own ``quote``/``span_start``/
+      ``span_end``, which are the CLAIM's span in a different space, and
+      ``Point`` has no ``span_source`` field at all. So the node's
+      ``span_start``/``span_end`` are a BARE OFFSET PAIR with no haystack
+      label (``Mention.span_source``'s own docstring: *"A bare offset that
+      does not say which space it is in is not an address"*) — a consumer that
+      needs that label must read ``span_source`` from the PAYLOAD/evidence
+      block, ``result["mentions"]``;
+    - ``rule_id`` — which rule held it. That is the audit channel on the
+      PAYLOAD/evidence block (``result["mentions"]``, S2.1), not on the node.
+
     A reader must not conclude those four reached the node: **promoting any of
     them onto the Point is a reopen of DM1 in DM1's own home, not an edit
-    here.**
+    here.** ⚠️ Because ``consistency._canonical_point_fields`` applies this
+    SAME encode to BOTH sides, the field loss is invisible to the drift
+    detector by construction — this docstring is the only guard, so it has to
+    be true.
     """
     import json
 
@@ -1246,11 +1263,15 @@ def encode_json_record_props(props: dict) -> None:
                 rec = item.model_dump()
             else:
                 rec = {"surface": str(item)}
-            # Fixed field set, no None members and a string surface: DM1's
-            # FOUR-field row (not the model's eight — see the docstring), so a
-            # reader parses one schema rather than a per-call variant.
-            # `kind_guess` is kept only when it carries a value (DM1 makes it
-            # optional, and there is no producer that must invent one).
+            # DM1's declared field row (not the model's eight): a record
+            # always carries `surface`, `span_start` and `span_end` — the
+            # offsets are `None` when the producer supplied no usable int, so
+            # `{"surface": "the thing"}` encodes to
+            # `[{"span_end":null,"span_start":null,"surface":"the thing"}]`
+            # — and `kind_guess` only when it carries a value (DM1 makes it
+            # optional, and there is no producer that must invent one). A
+            # reader parses one schema rather than a per-call variant. The
+            # fields DM1 excludes are listed in the docstring above.
             surface = rec.get("surface")
             out = {"surface": "" if surface is None else str(surface)}
             for offset in ("span_start", "span_end"):

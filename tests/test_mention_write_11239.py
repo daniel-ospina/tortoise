@@ -29,6 +29,26 @@ directions followed:
 
 Both are pinned below, and the second is pinned at the SDK door that the hosted
 commit path funnels through.
+
+WHY THE DOOR ROWS EXIST (review R1/R2 on the `eb7071ae` head). The rows above
+drove `sdk.create_point` / `sdk.update_point` directly, so THREE doors the fix
+is about — `hosted_api._execute_commit_writes`, the `_extract_session_v2`
+capture seam, and `update_entity` — stayed guarded only by `inspect.getsource`
+substrings in `test_referentiality_11021.py`, which a `if False:` or an
+`or None` keeps green. Measured on that head: `if False and _mention_props:`
+and `if False and _mention_records:` each neared the write completely while
+every assertion passed. So each of those doors now has a NODE READ-BACK here
+(or, for the HTTP door, in `tests/test_commit_endpoint.py`, which owns the
+`TestClient` fixture):
+
+  * the hosted commit door — both node read-back rows in
+    `test_commit_endpoint.py` (`..._the_commit_payload...`), including the
+    re-commit whose payload says nothing about mentions;
+  * the capture seam — `..._the_capture_seam...` below;
+  * `update_entity` — `..._update_entity_survives_a_rebuild` below, which is
+    also review R1's fix: that door used to store the record LIVE with no
+    journal record, so a rebuild dropped it and `check_consistency` redded a
+    faithful graph with the one piece of advice that deletes it.
 """
 
 from __future__ import annotations
@@ -225,3 +245,159 @@ def test_the_replay_door_normalises_a_non_canonical_record(env):
     assert rebuilt == live, (
         "the replay door normalised the record to DIFFERENT bytes than the "
         "live write stored for the same payload (#330)")
+
+
+def test_a_mention_written_by_update_entity_survives_a_rebuild(env):
+    """The GENERIC tenant surface — review R1 on the `eb7071ae` head.
+
+    `_update_entity`'s `:Point` branch writes caller props with a live
+    `SET n += $p`, and before this row it journalled only the annotator dims.
+    #11239 is what made `mentions` persistable through that surface at all (a
+    list of maps used to be a hard engine refusal, not a silent store), so an
+    unjournalled write here would be a NEW live-only door — and the worst kind:
+    `check_consistency` reds a faithful graph with "reconcile by replaying the
+    journal", and replaying it deletes the record. The fix journals the key on
+    the same `PointRevised` record as the dims, which both replay folds already
+    carry.
+
+    Mutant it reds on: `journaled_updates` built WITHOUT the `mentions` key
+    (i.e. reverting to `annotator_updates`) — the node keeps the record live
+    and the rebuild loses it.
+    """
+    sdk, events = env
+    pid = sdk.create_point("statement", CONTENT, dedup=True,
+                           status="draft")["id"]
+    assert _node_prop(sdk, pid) is None
+
+    sdk.update_entity(pid, mentions=MENTIONS)
+    live = _node_prop(sdk, pid)
+    assert live is not None, (
+        "the generic `update_entity` surface did not store the record live")
+    _assert_record_is_the_payload_surfaces(live)
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    rebuilt = _node_prop(sdk, pid)
+    assert rebuilt is not None, (
+        "`update_entity` stored the mention LIVE and journalled nothing for "
+        "it, so the rebuild dropped it — the live-only third door review R1 "
+        "filed (the #5048 class, in the direction that loses memory)")
+    assert rebuilt == live, (
+        "the rebuild re-derived different bytes for the same record (#330)")
+
+    from tortoise.consistency import check_consistency
+
+    report = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+    assert report["ok"] is True, (
+        "a faithful graph must not be reported as diverged: the checker's "
+        "advice (\"replay the journal\") is the repair that DELETES a "
+        "graph-only record: " + str(report.get("divergent_points")))
+
+
+def test_a_recommit_passing_mentions_none_does_not_clear_the_record(env):
+    """The measured hazard review R2 names, at the door it happens on.
+
+    `create_point` takes `**props`, so an ABSENT key and an explicit
+    `mentions=None` are different inputs — and only the second clears: a `None`
+    in `SET n += $props` REMOVES the property, and on a dedup hit those props
+    are folded onto the existing claim by `self.update_point(pid, **props)`.
+    The previous row re-committed with the key ABSENT, so it could never red
+    for this mutant.
+
+    Mutant it reds on: `create_point` forwarding a `None` mention to the dedup
+    fold (the shape the hosted door produced with
+    `point_props["mentions"] = _mention_props or None`).
+    """
+    sdk, events = env
+    pid = sdk.create_point("statement", CONTENT, dedup=True,
+                           status="draft", mentions=MENTIONS)["id"]
+    stored = _node_prop(sdk, pid)
+    assert stored is not None
+
+    again = sdk.create_point("statement", CONTENT, dedup=True, status="draft",
+                             mentions=None)
+    assert again["id"] == pid, "the re-commit must dedup onto the same claim"
+    after = _node_prop(sdk, pid)
+    assert after == stored, (
+        "a CREATE that passed `mentions=None` DELETED the stored record: the "
+        "dedup fold forwarded the None to `update_point`, where it removes the "
+        "property. A create must never destroy a record it did not restate "
+        "(first-writer; DM1's 'no held item silently dropped')")
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert _node_prop(sdk, pid) == stored, (
+        "live and replay disagree after a `mentions=None` re-commit")
+
+
+#: Any non-empty conversation — the extractor is replaced by a payload below.
+_CAPTURE_CONV = [
+    {"role": "user", "content": "the timeout command fails because it exceeds"},
+    {"role": "assistant", "content": "ack"},
+]
+
+
+def test_the_capture_seam_carries_the_payload_mentions_to_the_node(env,
+                                                                  monkeypatch):
+    """The SDK capture seam's create branch — review R2(c) on PR #11795.
+
+    `_extract_session_v2` reads the payload point's `mentions` beside its other
+    passthrough reads and merges it into the CREATE props. Before this row the
+    only guard on that block was three `inspect.getsource` substrings, which
+    survive `if False and _mention_records:` — measured on the reviewed head:
+    the write is neutered completely and every assertion stays green.
+
+    Driven hermetically: the offline `TORTOISE_SESSION_LLM_MOCK=1` provider
+    seam plus a payload-injecting fake extractor (the
+    `tests/test_capture_validfrom_3945.py` pattern), so no network and no model
+    call is spent.
+    """
+    import tortoise.extractor_v2 as ev2
+
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+
+    pid = "pt_11239_capture_seam"
+    payload = {
+        "entities": [], "events": [], "operators": [],
+        "points": [{
+            "id": pid,
+            "content": CONTENT,
+            "pointKind": "statement",
+            "reason": "NEW",
+            "confidence": 0.5,
+            "c_cal": 0.5,
+            "about_entities": [],
+            "source_ref": "session.md",
+            "status": "draft",
+            # the record rides the PAYLOAD point, exactly as `route_mentions`
+            # leaves it — the seam is the only thing between here and the node
+            "mentions": [{"surface": "it", "span_start": 0, "span_end": 2,
+                          "kind_guess": "pronoun"}],
+        }],
+    }
+
+    def _fake_extract(model, conversation, **kw):
+        return {"payload": payload, "minted_kinds": [], "supersessions": [],
+                "chain_notes": [], "link_before_create": [],
+                "warnings": [], "story_arc": "", "search": {},
+                "stats": {}, "errors": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+
+    sdk, events = env
+    receipt = sdk._capture_session(_CAPTURE_CONV, session_id="11239-capture")
+    assert receipt["ok"] is True, receipt
+    assert receipt["errors"] == [], receipt
+
+    live = _node_prop(sdk, pid)
+    # PRESENCE FIRST — an absent-on-both-sides equality is the silent-drop
+    # signature this whole issue is about.
+    assert live is not None, (
+        "the capture seam read the payload's mentions and never carried them "
+        "to the create: the record a customer's capture held is not on the "
+        "claim Point (#11239)")
+    assert json.loads(live)[0]["surface"] == "it", live
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert _node_prop(sdk, pid) == live, (
+        "the capture seam's record did not survive the rebuild — live and "
+        "replay must be a pure function of the payload (#330)")
