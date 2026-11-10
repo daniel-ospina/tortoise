@@ -144,11 +144,13 @@ __all__ = [
     "require_served_store_labels",
     "served_store_labels",
     "set_embedding_clause",
+    "statement_conflicting_bindings",
     "statement_interpolates_label",
     "statement_label_mutations",
     "statement_node_labels",
     "statement_pattern_labels",
     "statement_rebound_aliases",
+    "statement_stores_embedding_in_a_map",
     "statement_unattributed_set_items",
     "statement_uses_unmodelled_scope",
     "statement_write_aliases",
@@ -217,8 +219,12 @@ _STATEMENT_LABEL_RE = re.compile(
 #: `{meta: {a: 1}}` cannot trip it), but a `{` where a label identifier would be. Kept beside that
 #: pattern because the two together say the whole truth about what a statement names — the reader
 #: sees the LITERAL labels, this sees the ones no reader can read off.
+#: ⛔ BOTH renderings, ``:{expr}`` AND ``:$(expr)`` / ``:$param`` — the `$` spelling is live in this
+#: tree (`tortoise/cache_projection.py` builds `MATCH (n:$label …)` statements), and a reader that
+#: matched only `{` answered False for it, so the door refused such a statement only through the
+#: UNLABELLED-binding leg while this reader claimed to catch it "on its own" (#11641 review 4).
 _INTERPOLATED_LABEL_RE = re.compile(
-    rf"\(\s*(?:{_IDENT_FRAGMENT}\s*)?:\s*\{{")
+    rf"\(\s*(?:{_IDENT_FRAGMENT}\s*)?:\s*[{{$(]")
 
 
 def _blank_string_literals(statement: str) -> str:
@@ -628,9 +634,9 @@ def _scan_node_patterns(statement: str, depths: list[int],
 def _read_labels(statement: str, cursor: int, close: int) -> set[str]:
     """Read ``Label`` / ``Label:Other`` starting at ``cursor``, stopping at anything else.
 
-    A rendered label (``:{expr}`` or ``:$(expr)``) yields NO label here and leaves the alias
-    UNLABELLED — the fail-closed reading, since an unlabelled binding is refused by the door. The
-    interpolation shapes are also refused on their own by :func:`statement_interpolates_label`.
+    A rendered label (``:{expr}``, ``:$(expr)`` or ``:$param``) yields NO label here and leaves the
+    alias UNLABELLED — the fail-closed reading, since an unlabelled binding is refused by the door.
+    Both renderings are ALSO refused on their own by :func:`statement_interpolates_label`.
     """
     labels: set[str] = set()
     while cursor < close:
@@ -788,6 +794,15 @@ def statement_rebound_aliases(statement: str) -> frozenset[str]:
     only an ``AS`` whose TARGET is an alias the patterns also bind is a rebind — see
     :func:`statement_write_target_problem`, which joins the two.
 
+    ⛔ A ``RETURN`` item is NOT read: a ``RETURN`` ends its query part, so nothing after it can
+    write, and a statement that sets a property then projects an alias of the same name under
+    ``RETURN`` is VALID — the engine accepts it. The first version of this reader had no notion of
+    clause position and refused exactly that shape with a message claiming a rebind that had not
+    happened (#11641 review 4): a false diagnosis of a legitimate statement, which is the one error
+    class this file's docstrings promise it does not produce. Every OTHER clause (``WITH``,
+    ``UNWIND``, ``CALL``/``YIELD``, ``MATCH``) is still read, because a re-point there precedes
+    whatever writes follow it.
+
     ⚠️ DEFENCE IN DEPTH, and after :func:`statement_uses_unmodelled_scope` it is mostly
     UNREACHABLE: a `WITH` is refused at the door before this reader runs, so the shape this reader
     was built for is already gone. It is kept because it is still CORRECT over what remains (an
@@ -797,8 +812,76 @@ def statement_rebound_aliases(statement: str) -> frozenset[str]:
     """
     text = _blank_comments(statement)
     text = _blank_string_literals(text)
-    return frozenset(alias.strip("`")
-                     for alias in _REBIND_RE.findall(text))
+    depths = _depths(text)
+    aliases: set[str] = set()
+    for keyword, start, end in _clause_bodies(text, depths):
+        if keyword.upper() == "RETURN":
+            continue
+        for match in _REBIND_RE.finditer(text, start, end):
+            aliases.add(match.group(1).strip("`"))
+    return frozenset(aliases)
+
+
+#: A pattern that binds the SAME alias more than once — the label sets one alias is bound to.
+#: `statement_pattern_labels` UNIONS them, which is right for a repeated alias inside one MATCH and
+#: WRONG across `UNION` arms: an arm that binds the alias with no label contributes nothing to the
+#: union, so the union still reads `{Event}` while that arm stores on a label-less node (#11641
+#: review round 3, measured through the door on a seeded graph).
+def statement_conflicting_bindings(
+        statement: str) -> dict[str, list[frozenset[str]]]:
+    """Aliases bound by several patterns with DIFFERING label sets, and the sets.
+
+    A repeated alias inside ONE ``MATCH`` denotes one node, so its labels union harmlessly. Across
+    ``UNION`` arms it does not: the engine accepts updating clauses in each arm, and the arms bind
+    the same NAME to different nodes — so a reader that unions per name proves a label for one arm
+    and lets the other store wherever it likes. Reported here rather than unioned away.
+
+    Only aliases whose sets actually DIFFER are returned; a statement binding ``(e:Event …)`` twice
+    is not a conflict.
+    """
+    text = _blank_comments(statement)
+    text = _blank_string_literals(text)
+    depths = _depths(text)
+    seen: dict[str, list[frozenset[str]]] = {}
+    for alias, labels, _start in _scan_node_patterns(text, depths):
+        if alias is None:
+            continue
+        seen.setdefault(alias, []).append(frozenset(labels))
+    return {alias: sets for alias, sets in seen.items()
+            if len({frozenset(labels) for labels in sets}) > 1}
+
+
+#: The embedding property as a map KEY — `{embedding: …}`. A property MAP is a third way to place a
+#: vector (beside a `SET` clause and a rendered clause builder), and it is the one no alias-based
+#: reader can follow: `CREATE ({…})` binds no alias at all, and `CREATE (e)-[r:R {…}]->()` writes to a
+#: RELATIONSHIP, which no `entity_type` reaches (#11641 review round 3 — both ACCEPTED and both
+#: landed a `Vectorf32` where no read path can reach it).
+_EMBEDDING_MAP_KEY_RE = re.compile(
+    rf"[{{,]\s*`?{re.escape(EMBEDDING_PROPERTY)}`?\s*:")
+
+
+def statement_stores_embedding_in_a_map(statement: str) -> bool:
+    """True when a property MAP in ``statement`` carries an ``embedding`` key.
+
+    The third store shape, and the one the alias readers cannot follow. Refused rather than
+    reasoned about: a map on an anonymous pattern (``CREATE ({embedding: …})``) lands on a node with
+    NO label at all, while a map on a relationship (``[r:R {embedding: …}]``) lands where
+    ``run_vector_query`` never looks — and neither exposes an ALIAS, so no binding-based reader can
+    prove anything about it.
+
+    ⚠️ Why refusing it costs nothing: every vector store in this product is a ``SET <alias>…``
+    clause — SOME built by :func:`set_embedding_clause`, some spelled inline by their own writer
+    (``projection.entities::_upsert_point_props``, ``sdk::_TURN_WRITE_CYPHER``,
+    ``projection::_rebuild_all_replay``). None places one in a map literal. ⛔ Nothing here licenses
+    re-routing those inline writes through the helper: `tortoise.embed_writer_register` carries the
+    ``#5004`` / PR #3018 decision that one of them stays spelled out, and re-routing it is a REOPEN
+    of that decision, never a tidy-up.
+
+    Strings and comments are blanked first, so ``SET e.note = '{embedding: 1}'`` is text, not a map.
+    """
+    text = _blank_comments(statement)
+    text = _blank_string_literals(text)
+    return bool(_EMBEDDING_MAP_KEY_RE.search(text))
 
 
 #: The constructs that MOVE Cypher's variable scope, or replace the scope a statement starts in.
@@ -911,8 +994,12 @@ def statement_write_target_problem(statement: str, allowed) -> str | None:
     clause hidden in a comment cannot shift the depth out from under the scan; and an alias
     RE-BOUND by ``AS`` (:func:`statement_rebound_aliases`) is refused, because this reader unions
     bindings per alias NAME, so ``WITH b AS e`` would leave a proved label describing a different
-    node. Each of those three was a live fail-open on this guard before #11641's review rounds, and
-    every one was reached WITHOUT leaving the grammar.
+    node; an alias bound to DIFFERING label sets (:func:`statement_conflicting_bindings`) is refused
+    for the same reason across ``UNION`` arms; and a vector placed in a property MAP
+    (:func:`statement_stores_embedding_in_a_map`) is refused because a map on an anonymous pattern
+    or on a relationship is a store no alias-based reader can follow. Each of those was a live
+    fail-open on this guard before #11641's review rounds, and every one was reached WITHOUT leaving
+    the grammar.
 
     ⛔ WHAT IT IS NOT COMPLETE OVER, and why a DOOR must pair it with
     :func:`statement_uses_unmodelled_scope`: this reader keys bindings by NAME across the whole
@@ -945,8 +1032,25 @@ def statement_write_target_problem(statement: str, allowed) -> str | None:
     mutations = statement_label_mutations(statement)
     unattributed = statement_unattributed_set_items(statement)
     rebound = statement_rebound_aliases(statement)
+    conflicting = statement_conflicting_bindings(statement)
+    map_store = statement_stores_embedding_in_a_map(statement)
 
     problems: list[str] = []
+    if map_store:
+        problems.append(
+            "it stores the vector inside a property MAP (`{embedding: …}`) — a map on an "
+            "ANONYMOUS pattern lands on a node with no label at all, and a map on a relationship "
+            "lands where `run_vector_query` never looks, so no alias-based reader can prove where "
+            "it goes; write the vector through a `SET` clause on a labelled alias instead")
+    diverged = sorted(alias for alias in targets if alias in conflicting)
+    if diverged:
+        rendered = ", ".join(f"{alias} bound to {[sorted(s) for s in conflicting[alias]]}"
+                             for alias in diverged)
+        problems.append(
+            f"it binds the same alias to DIFFERING label sets ({rendered}), which in one MATCH "
+            "denotes one node but ACROSS `UNION` arms denotes different ones — and this reader "
+            "unions per alias name, so an arm that binds the alias with no label contributes "
+            "nothing to the union and stores on a label-less node")
     shadowed = sorted(alias for alias in targets
                       if alias in rebound and alias in bindings)
     if shadowed:

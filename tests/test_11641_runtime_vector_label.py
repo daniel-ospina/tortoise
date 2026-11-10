@@ -63,10 +63,12 @@ from tortoise.vector_write import (
     clear_then_set_prefix,
     served_store_labels,
     set_embedding_clause,
+    statement_conflicting_bindings,
     statement_interpolates_label,
     statement_label_mutations,
     statement_node_labels,
     statement_pattern_labels,
+    statement_rebound_aliases,
     statement_unattributed_set_items,
     statement_uses_unmodelled_scope,
     statement_write_aliases,
@@ -224,6 +226,37 @@ def test_the_naming_readers_know_what_text_is(statement: str, expected: set) -> 
         )
 
 
+@pytest.mark.parametrize("statement", [
+    # BOTH spellings of a rendered label. The `$` form is live in this tree
+    # (`tortoise/cache_projection.py` builds `MATCH (n:$label …)`), and a reader that matched only
+    # `{` answered False for it while its docstring claimed to catch it "on its own".
+    "MATCH (e:Event {eventId:$eid}), (n:{kind}) SET n += $props",
+    "MATCH (e:Event {eventId:$eid}), (n:$label {id:$rid}) SET n += $props",
+    "MATCH (e:Event {eventId:$eid}), (n:$(label)) SET n += $props",
+])
+def test_every_rendered_label_spelling_is_refused(statement: str) -> None:
+    assert statement_interpolates_label(statement) is True, statement_interpolates_label(statement)
+    with pytest.raises(ValueError, match="INTERPOLATION"):
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={}, embedding=VEC, lane="test")
+
+
+def test_a_terminal_RETURN_alias_is_not_a_rebind() -> None:
+    """A `RETURN` ends its query part, so nothing after it can write — it cannot re-point a store.
+
+    The first `statement_rebound_aliases` read every `AS` regardless of clause, so it refused
+    `… SET e.embedding = … RETURN e.eventId AS e` — a statement the engine ACCEPTS — with a message
+    asserting a rebind that had not happened. A false diagnosis of a legitimate statement is the one
+    error class this seam's docstrings promise it does not produce.
+    """
+    valid = "MATCH (e:Event {eventId:'v'}) SET e.note = 'x' RETURN e.eventId AS e"
+    assert statement_rebound_aliases(valid) == frozenset(), statement_rebound_aliases(valid)
+    assert statement_write_target_problem(valid, {"Event"}) is None
+    with pytest.raises(AssertionError, match="journal was reached"):   # accepted → reaches the journal
+        DOOR(_NoJournal(), None, valid, event_id="e1", props={}, embedding=VEC, lane="test")
+    # …but a re-point BEFORE the store is still refused.
+    assert statement_rebound_aliases("MATCH (e:Event {id:$eid}) WITH 1 AS e SET e += $props") == {"e"}
+
+
 def test_a_rebound_alias_is_refused_because_the_reader_unions_by_name() -> None:
     """A fail-OPEN that lived INSIDE the grammar, found at `66da0c05` — now DEFENCE IN DEPTH.
 
@@ -289,6 +322,66 @@ def test_a_NON_rebinding_projection_is_now_REFUSED_by_the_declared_grammar(state
     message = str(refused.value)
     assert "WITH" in message and "DECLARED grammar" in message, message
     assert message.rstrip().endswith("(#11641)."), message
+
+
+def test_a_store_inside_a_property_map_is_refused() -> None:
+    """The THIRD store shape, and the one no alias-based reader can follow (#11641 review 3).
+
+    Both of these were ACCEPTED by all three legs and both landed a `Vectorf32` where no read path
+    reaches: a map on an anonymous pattern writes to a node with NO label at all, and a map on a
+    relationship writes a property `run_vector_query` never looks at.
+    """
+    for statement in (
+        # anonymous node, vector in the map
+        "MATCH (e:Event {eventId:$eid}) CREATE ({embedding: vecf32($embedding)}) SET e += $props",
+        # relationship property
+        "MATCH (e:Event {eventId:$eid}) "
+        "CREATE (e)-[r:R {embedding: vecf32($embedding)}]->() SET e += $props",
+        # named but LABEL-LESS node, vector in the map
+        "MATCH (e:Event {eventId:$eid}) CREATE (q {embedding: vecf32($embedding)}) SET e += $props",
+    ):
+        problem = statement_write_target_problem(statement, {"Event"})
+        assert problem is not None and "property MAP" in problem, problem
+        with pytest.raises(ValueError, match="property MAP"):
+            DOOR(_NoJournal(), None, statement, event_id="e1", props={},
+                 embedding=VEC, lane="test")
+    # …and the accept direction: an ordinary property map without the vector is fine (every one of
+    # the six real doors carries `{eventId:$eid}`).
+    ok = ("CREATE (e:Event {eventId: $eid}) SET e += $props, "
+          + set_embedding_clause("e", preserve_on_null=False))
+    assert statement_write_target_problem(ok, {"Event"}) is None
+    # …and a map inside a STRING is text, not a store.
+    assert statement_write_target_problem(
+        "MATCH (e:Event {eventId:$eid}) SET e.note = '{embedding: 1}'", {"Event"}) is None
+
+
+def test_one_alias_bound_to_differing_label_sets_is_refused() -> None:
+    """`UNION` arms bind the same NAME to DIFFERENT nodes, so the union of labels is a lie.
+
+    `statement_pattern_labels` unions per alias NAME — correct for a repeated alias inside one
+    `MATCH`, wrong across arms: the arm that binds `e` with no label contributes nothing to the
+    union, so the reader still proves `{Event}` while that arm stores on a label-less node. Measured
+    through the door on a seeded graph at `556284de`, where a `:Batch` and a `:Session` both came
+    out holding a `Vectorf32`.
+    """
+    union = ("MATCH (e:Event {eventId:$eid}) SET e.embedding = vecf32($embedding) RETURN 1 "
+             "UNION MATCH (e) SET e.embedding = vecf32($embedding) RETURN 1")
+    problem = statement_write_target_problem(union, {"Event"})
+    assert problem is not None and "DIFFERING label sets" in problem, problem
+    # The DOOR refuses it too — with the GRAMMAR guard's message, which is the earlier of the two
+    # refusals (`UNION` is a scope construct). Both are correct; the door's own ordering decides
+    # which one a caller sees, so only "it is refused, and for a named reason" is pinned here.
+    with pytest.raises(ValueError) as refused:
+        DOOR(_NoJournal(), None, union, event_id="e1", props={}, embedding=VEC, lane="test")
+    assert ("DIFFERING label sets" in str(refused.value)
+            or "UNION" in str(refused.value)), str(refused.value)
+    # Accept: the same alias bound twice with the SAME labels is one node, not a divergence.
+    assert statement_write_target_problem(
+        "MATCH (e:Event {eventId:$eid}) MATCH (e:Event) "
+        + "SET e += $props, " + set_embedding_clause("e"), {"Event"}) is None
+    # …and an alias bound once is not reported at all.
+    assert statement_conflicting_bindings(
+        "MATCH (e:Event {eventId:$eid}) SET e += $props") == {}
 
 
 # ── the door: refused shapes, and the real shape that must keep working ────────────────────────
@@ -617,12 +710,16 @@ def test_the_scope_blind_spot_is_exactly_what_the_name_keyed_readers_miss() -> N
     assert statement_write_aliases(statement) == {"p"}, statement_write_aliases(statement)
     assert statement_label_mutations(statement) == frozenset()
     assert statement_interpolates_label(statement) is False
-    assert statement_write_target_problem(statement, {"Event"}) is None, (
-        "the write-target reader now refuses this shape on its own — if that is deliberate, the "
-        "grammar guard's non-vacuity argument has to be re-derived rather than silently kept"
-    )
-    # …and the ONE reader that refuses it is the grammar guard.
+    # ⚠️ RE-DERIVED (#11641, after the conflicting-bindings reader landed): these two assert the
+    # reader's own verdict rather than "the target reader is blind". It is no longer blind — an
+    # alias bound to DIFFERING label sets is refused by the target reader too, so the grammar guard
+    # is now DEFENCE IN DEPTH rather than the sole defence. What stays true, and is what the guard
+    # is for, is that it refuses the shape WITHOUT modelling scope at all: every name-keyed reader
+    # above still reports a served, labelled binding, so the guard's protection does not depend on
+    # any of them being right about scopes.
     assert statement_uses_unmodelled_scope(statement) == "WITH"
+    problem = statement_write_target_problem(statement, {"Event"})
+    assert problem is not None and "DIFFERING label sets" in problem, problem
 
 
 @pytest.mark.parametrize("statement", [

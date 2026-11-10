@@ -3338,6 +3338,18 @@ def restore_backup(
     False: a dangling edge not explained by the export-skip class still fails
     closed.
 
+    ``allow_unserved_vectors`` (#11641): the SAME repair-on-read shape for the
+    VECTOR half. An artifact may carry a vector on a label no read path serves —
+    every graph written before D10 still holds ``(:Document {id, …})`` with an
+    ``embedding`` — and the strict path refuses the whole artifact. With this flag
+    every other node and edge is restored, the unserved vectors are DROPPED, the
+    nodes are KEPT so ``migrate_kinds.relabel_legacy_documents(sdk)`` can repair
+    the label on the restored graph, and the count + the dropped labels are
+    returned in ``dropped_vectors`` / ``dropped_vector_labels`` (logged as well as
+    returned). Default False, and deliberately NOT exposed on the customer import
+    route, for the same reason ``allow_dangling_edges`` is not: it is a repair an
+    operator runs after seeing the drop.
+
     ``db``: falkordb Connection handle (e.g. ``sdk._get_proj().db``) — temp graph and
     the live graph live on the same server.
 
