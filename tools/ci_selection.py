@@ -1500,6 +1500,36 @@ SOURCE_PATTERNS = {
 # matrix, and never drops to tier-1 smoke (the #1349/#3332/#3910
 # silent-drop class). No TOOL_CARVEOUTS entry is needed: that
 # tuple is redundant for any path already listed here.
+# #10080: the FORWARD RECORD MIGRATION family, claimed STRUCTURALLY rather than by
+# enumeration. `CORE_ALSO` below carries one hand-written entry per member, and
+# nothing pinned the completeness of that list — so a member nobody registered
+# selected NO surface at all (measured on #11703's head: 1 of the 16
+# `supabase/migrations/*_record_*.sql` files). The rule keyed on
+# `is_record_migration_path()` closes the whole family at once, including the
+# member nobody has written yet, and it is what makes the completeness pin in
+# `tests/test_ci_selection.py` RUN on a migration-only diff: `core` is a surface,
+# so it arms the slow legs, whereas the tier-1 smoke set does not carry that test.
+# The per-migration `CORE_ALSO` entries stay — they are now redundant for
+# SELECTION and are kept for their rationale comments and their
+# `_selection_relevant()` keep-signal.
+RECORD_MIGRATION_DIR = "supabase/migrations/"
+# Deliberately the same family `pyproject.toml` ships as the migrate-apply include
+# (`*_record_*.sql`) — a file outside it is not applied by the shipped tooling
+# either, so claiming it here would be claiming a path the product ignores.
+_RECORD_MIGRATION_RE = re.compile(r"^[^/]+_record_.*\.sql$")
+
+
+def is_record_migration_path(path: str) -> bool:
+    """True for the `supabase/migrations/*_record_*.sql` forward-migration family.
+
+    The glob needs BOTH underscores: `0014_metering_records.sql` has `record`
+    followed by `s`, not `_`, so it is correctly not a member.
+    """
+    if not path.startswith(RECORD_MIGRATION_DIR):
+        return False
+    return bool(_RECORD_MIGRATION_RE.match(path[len(RECORD_MIGRATION_DIR):]))
+
+
 CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py",
              "tortoise/projection/edges.py",
              # #9607: `tortoise/quadrature.py` is registered in `onboarding` (its
@@ -2188,7 +2218,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `jsonb` and would drop rows again), `RECORD_MIGRATIONS`'
              # registry-completeness pin (`test_9231`), and
              # `test_record_schema_placement.py`. The #1349/#3332/#3616
-             # silent-drop class, and nine sibling entries exist for exactly it.
+             # silent-drop class, and ten sibling entries exist for exactly it.
              # Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "supabase/migrations/20261102000002_record_point_search_keys_text.sql",
@@ -2202,7 +2232,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # pre-fix head: `select([<this path>])` -> `surfaces: []`,
              # `full: False`). What then ran nothing on a migration-only edit:
              # `test_11642_vector_move.py` (the DB-free pin that PARSES this
-             # file's `vector(384)` / `jsonb_array_length(doc) = 384` literals —
+             # file's `vector(384)` and `jsonb_array_length(doc) <> 384` literals —
              # on a width rotation they would go on answering for the old width
              # while every record dense read degrades to the brute-force graph
              # leg), `test_9231_record_migrations_trigger.py` (the
@@ -2211,12 +2241,15 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # migration are NOT a reason for this entry: `test_record_schema_
              # placement.py` is tier1 (the early return carries it) and
              # `test_9078_record_written_by_production_path.py` runs on an
-             # UNGATED job (`test-record-postgres`, no diff gate). The
-             # completeness of this enumeration is now DERIVED rather than
-             # remembered — pinned generically by
-             # tests/test_ci_selection.py::test_every_record_migration_selects_core_and_both_readers
-             # (#10080), so the NEXT `*_record_*.sql` reds instead of going
-             # silently unguarded.
+             # UNGATED job (`test-record-postgres`, no diff gate).
+             # ⚠️ This entry is now REDUNDANT for selection: the whole family is
+             # claimed structurally by `is_record_migration_path()` above, so a
+             # record migration selects `core` even with no entry here. It is kept
+             # for this rationale and as the `_selection_relevant()` keep-signal its
+             # siblings rely on — the completeness pin is
+             # tests/test_ci_selection.py::test_every_record_migration_selects_core_and_both_readers,
+             # which also asserts the structural claim (so the NEXT `*_record_*.sql`
+             # selects `core` AND runs the pin) rather than trusting this list.
              "supabase/migrations/20261109000001_record_embedding_vector.sql",
              # Re-stated at the migration pair, NOT replaced by it (#9638 review
              # P1): the DOC side is an independent member of this set. The
@@ -4203,6 +4236,14 @@ def select(changed_files: list[str], event: str, manifest: dict,
     # written for that exact file never runs. SOURCE_PATTERNS is the single
     # source of truth; test_every_source_pattern_is_selectable is the ratchet.
     def _selection_relevant(path: str) -> bool:
+        # #10080: the record-migration family is a CLAIM of its own. `supabase/` is
+        # a NON_PYTHON_PREFIX, so without this the family rule in the match loop
+        # below never sees the path — it is dropped here first (measured: with
+        # only the match-loop rule, a synthetic
+        # `supabase/migrations/20990101000000_record_future_thing.sql` still
+        # selected `surfaces: []`).
+        if is_record_migration_path(path):
+            return True
         return any(
             path.startswith(p)
             for surface, pats in SOURCE_PATTERNS.items()
@@ -4281,6 +4322,15 @@ def select(changed_files: list[str], event: str, manifest: dict,
         # matched above (see CORE_ALSO) — otherwise its core-registered
         # pinners silently drop out of the selection.
         if any(c.startswith(p) for p in CORE_ALSO):
+            matched.add("core")
+            found = True
+        # #10080: the STRUCTURAL claim for the record-migration family. Without
+        # it, a `*_record_*.sql` absent from both `CORE_ALSO` and the
+        # `2026101200000` prefix selected NOTHING — not a surface, not a slow leg
+        # — so every schema pin that reads it stayed asleep while `--integrity`
+        # still reported "all test files classified". Claiming the family here
+        # means the enumeration above cannot fall behind a new migration.
+        if is_record_migration_path(c):
             matched.add("core")
             found = True
         if not found:  # noqa: SIM102
