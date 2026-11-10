@@ -1301,7 +1301,9 @@ render the carve-out; the two master renders additionally carry the vocabulary i
 template never points at it). Two consequences were measured rather than inferred: the carve-out's
 own retention bar sits short of baseline (49.4% strict verbatim survival on the flags-on arm against
 a 49/90 = 54.4% committed baseline), and on the capstone corpus the whole value class scored 1 of 14
-against a bar of 13 with the loss upstream of the selection path. The prompt-side consequence was
+against a bar of 13 with the loss upstream of the selection path ⛔ **SUPERSEDED by `#10360` — the
+record now scores 8 of 14 surviving (`docs/evidence/9889/e2a-value-units.json`), so the loss is 6 of 14;
+this entry keeps the number as the reading it was taken on.** The prompt-side consequence was
 visible in the text itself: S2's Tier-A rule instructs the mapper to see *"the USER-PERSONAL-STATE
 VOCABULARY in the master list"*, and the compact prompt did not carry that section at all.
 

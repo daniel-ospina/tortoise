@@ -36,7 +36,6 @@ import pathlib
 import re
 import sys
 import traceback
-from collections import Counter
 
 import pytest
 
@@ -6354,6 +6353,29 @@ def _same_magnitude_number(one: tuple, other: tuple) -> bool:
     return longer.startswith(shorter) and set(longer[len(shorter):]) <= {"0"}
 
 
+def _identity_agrees(content_core: tuple, content_scale: str | None,
+                    quote_core: tuple, quote_scale: str | None) -> bool:
+    """Does the engine's own tolerance accept these two spellings as one value?
+
+    `20 percent` against `20%` is one value: the shipped
+    `_value_identity_matches` allows one side to omit a UNIT, and the census
+    must not accuse a pair the rule would pass (#11730 review, cycle 11 — exact
+    core equality filed that truthful restatement as a LOSS once the anchor
+    moved).
+
+    ⛔ A SCALE WORD IS NOT A UNIT, so the tolerance is not applied where either
+    side carries one: `3 million` and `3` are not "the same number with the unit
+    omitted", and letting the identity predicate see them made the magnitude
+    class unreachable — `12 thousand` against `12 million` came back RETAINED
+    because both scales are unknown units to that table. Scale words are
+    outside the judged set upstream (`_SCALE_WORDS`), and this decider keeps
+    them outside too.
+    """
+    if content_scale or quote_scale:
+        return False
+    return v2._value_identity_matches(content_core, quote_core)
+
+
 def _magnitude_in_play(missing: list[tuple], content_slots: list[tuple]) -> bool:
     """Is EVERY missing value a magnitude this projection cannot compare?
 
@@ -6390,7 +6412,13 @@ def _magnitude_in_play(missing: list[tuple], content_slots: list[tuple]) -> bool
                         and _digits(quote_core) == _digits(content_core)):
                     explained = True
                     break
-            elif _same_magnitude_number(content_core, quote_core):
+            elif ((quote_scale or content_scale)
+                  and _same_magnitude_number(content_core, quote_core)):
+                # ⛔ A SCALE WORD MUST BE ON ONE OF THE TWO SIDES (#11730 review,
+                # cycle 11): `2000 batches` against `2 batches` is a 1000x
+                # DIFFERENT number with no scale word anywhere, and the shipped
+                # rule JUDGES that pair — the zero-extension relation only
+                # bridges a numeric form and a scaled one.
                 explained = True
                 break
         if not explained:
@@ -6432,21 +6460,29 @@ def _retention_class(content: str, quote: str) -> str | None:
     if (tuple((a, s) for a, _, s in content_slots)
             == tuple((a, s) for a, _, s in quote_slots)):
         return "ALIGNED"
-    stated = Counter((str(core), scale) for _a, core, scale in content_slots)
     missing = []
     leftovers = list(content_slots)
     for anchor, core, scale in quote_slots:
-        key = (str(core), scale)
-        if stated[key]:
-            stated[key] -= 1
+        # ⛔ THE MATCH USES THE ENGINE'S OWN TOLERANCE, not string equality
+        # (#11730 review, cycle 11): `20 percent` and `20%` are one value the
+        # shipped rule tolerates, so exact-core matching called a truthful
+        # restatement a LOSS as soon as the anchor moved. `_value_identity_matches`
+        # is the same predicate `_value_slot_divergence` applies, so the census
+        # cannot accuse a pair the rule would pass.
+        found = None
+        for index, (_ca, content_core, content_scale) in enumerate(leftovers):
+            if (str(content_core), content_scale) == (str(core), scale):
+                found = index
+                break
+            if _identity_agrees(content_core, content_scale, core, scale):
+                found = index
+                break
+        if found is None:
+            missing.append((anchor, core, scale))
+        else:
             # consume ONE content slot per quote slot, so a duplicate value in
             # the quote cannot be satisfied twice by one content value
-            for index, (_ca, content_core, content_scale) in enumerate(leftovers):
-                if (str(content_core), content_scale) == key:
-                    leftovers.pop(index)
-                    break
-        else:
-            missing.append((anchor, core, scale))
+            leftovers.pop(found)
     if missing:
         # ⛔ A MAGNITUDE is not comparable here: `12 million` against
         # `12 billion` binds the same core (residual (m)), and `12000000`
@@ -6742,6 +6778,33 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
                             "we have 1200000 events") == "LAYOUT_UNJUDGED"
     assert _retention_class("we have 0.5 million events",
                             "we have 500000 events") == "LAYOUT_UNJUDGED"
+    # 2e. ⛔ EVERY CLAUSE ABOVE IS PINNED BY BEHAVIOUR, not by the comment that
+    #     describes it (#11730 review, cycle 11: reverting the every-slot rule
+    #     kept all 122 tests green, because the repros appeared only in the
+    #     commit message). Each row below moved when its clause was reverted:
+    #     (a) ONE explained slot does not excuse a row whose OTHER missing value
+    #         has no counterpart at all;
+    for content, quote in (("we shipped 3000 events",
+                            "we shipped 30 batches and 12 events"),
+                           ("we shipped 12000 events",
+                            "we shipped 3 batches and 12 events"),
+                           ("we shipped 100 events",
+                            "we shipped 4 batches and 1000 events"),
+                           ("the fleet holds 700 nodes",
+                            "the fleet holds 7 regions and 40 nodes")):
+        assert _retention_class(content, quote) == "LAYOUT_LOST", (content, quote)
+    #     (b) a zero extension with NO scale word on either side is a different
+    #         number the shipped rule JUDGES, not a magnitude question;
+    assert _retention_class("we ordered 2000 batches",
+                            "we shipped 2 batches") == "LAYOUT_LOST"
+    #     (c) the SAME scale word with a different mantissa is that pair too;
+    assert _retention_class("we shipped 3 million events",
+                            "we shipped 3 batches") == "LAYOUT_LOST"
+    #     (d) a unit form the engine tolerates is a RESTATEMENT, not a loss —
+    #         the direction that accuses a truthful point (`20 percent` against
+    #         `20%`, the same tolerance the file's battery at the top pins).
+    assert _retention_class("we ordered 20 percent",
+                            "we shipped 20%") == "LAYOUT_RETAINED"
     # 3. An excluded FORM is its own class — residual (c) is not a loss.
     assert _retention_class("we cut over at 2am",
                             "we cut over at 2am") == "CONTENT_EXCLUDED_FORM"
@@ -6781,6 +6844,10 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
         assert _stated_month_day(quote) is not None, quote[:80]
         assert _stated_month_day(content) == _stated_month_day(quote), (
             _stated_month_day(content), _stated_month_day(quote), content[:80])
+    # ⛔ AND THE LOOP IS NOT VACUOUS: emptying its iterable left all of §24 green
+    #     (cycle 11), so the count and the agreement are asserted together.
+    assert len(iso_bound) == 2 and all(
+        _stated_month_day(c) == _stated_month_day(q) for c, q in iso_bound)
     # 3d. ⛔ AND THE HELPER ITSELF IS DISCRIMINATED, because both census rows
     #     AGREE: an equality over two agreeing rows cannot tell "compares
     #     month-and-day" from "compares presence", which is the cycle-9 P1 one
@@ -6790,6 +6857,11 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
         "land by November 2")
     assert _stated_month_day("due 2026-12-25") != _stated_month_day(
         "land by November 2"), "the checker must compare month-and-day, not presence"
+    # ⛔ THE DAY TOO, not just the month (cycle 11): both census ISO rows are
+    # NOVEMBER, so a helper reduced to `(month, 0)` stayed green while a content
+    # rewritten `2026-11-19` against a quote `November 2` compared EQUAL.
+    assert _stated_month_day("due 2026-11-19") != _stated_month_day(
+        "land by November 2"), "the checker must compare the DAY too"
     assert _stated_month_day("nothing here") is None
     # 4. A value-free point is not a row at all.
     assert _retention_class("the team prefers intervals",
