@@ -5597,7 +5597,8 @@ surfaces:
   # would disable) — plus the three door/reader facts the reviews established (three doors, TWO replay
   # folds, FOUR pair readers, each CALLED rather than `callable()`-checked), and the three DOC defects: an
   # unregistered doc, a bare citation of an ambiguous basename, and line-keyed citations (banned for
-  # `.py`/`.yaml`/`.yml`/`.md`/`.json`: 44 in the scope + 36 in the brief went stale on one `main` merge;
+  # `.py`/`.yaml`/`.yml`/`.md`/`.json`: 40 in the scope + 33 in the brief at `12040d1554c1` — the maximum
+  # across every commit touching either doc — went stale on one `main` merge;
   # cited by SYMBOL now, and every `packs/*/manifest.yaml::key.path` citation is resolved to a real key).
   # 27 test functions / 29 collected.
   # Offline, no graph, ~5s. ⚠️ DUAL-REGISTERED with `tier1` (below): `core` is the not-found FALLBACK, so

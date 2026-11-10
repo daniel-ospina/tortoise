@@ -39,8 +39,9 @@ have shipped because nothing reads prose:
     green over two `packs/*/manifest.yaml:<line>` citations the brief still carried while its header said
     none was carried (review F2 at `09f20512`); it now covers `.py`, `.yaml`/`.yml`, `.md` and `.json`, and
     `test_every_cited_yaml_locator_resolves` holds the replacement locator form to a real key. ⛔ Same
-    reasoning as above: no count is written into an assertion, but this header says 44 in the scope and 36 in
-    the brief at the pre-fix head, because that is the size of the defect the ban covers.
+    reasoning as above: no count is written into an assertion, but this header says 40 in the scope and 33 in
+    the brief at `12040d1554c1` (re-derive with the ban's own pattern; that is the maximum across every commit
+    that touches either doc), because that is the size of the defect the ban covers.
   * the ban asserted only that a `path.py::symbol`-shaped TOKEN was present, never that the symbol EXISTS —
     so **three** citation classes shipped green, in **nine** occurrences at `f54f40b0c072` (six in the scope,
     two in the brief, one in this file): a method cited on the wrong class, a module attribute that is only a
@@ -51,6 +52,7 @@ have shipped because nothing reads prose:
 """
 from __future__ import annotations
 
+import ast
 import importlib
 import inspect
 import os
@@ -76,6 +78,11 @@ PACKS_DIR = REPO_ROOT / "packs"
 SCOPE_DOC = REPO_ROOT / "docs" / "plans" / "2026-11-09-11656-endpoint-kind-binding.md"
 BRIEF_DOC = REPO_ROOT / "docs" / "research" / "2026-11-09-11656-kindpair-enforcement.md"
 INDEX_DOC = REPO_ROOT / "docs" / "00_index.md"
+
+#: Roots whose `.py` files are cited but must NOT be imported here — importing a test module into a test
+#: module (or a tool into the suite) is a side effect this pin does not need. A citation into one of these is
+#: checked by NAME against the file's own AST instead, so an invented symbol still reds.
+_NON_IMPORTABLE_ROOTS = ("tests", "tools")
 
 
 def _call_window(source: str, marker: str) -> str:
@@ -434,8 +441,9 @@ class TestTheThirdDoorExists:
 
         ingest = inspect.getsource(TortoiseSDK.ingest)
         # ⛔ LEADING NEWLINE, not a bare substring. `sdk.py` also carries
-        # `if _request_route == "direct" and _route == "operator":`, whose text ENDS with
-        # `_route == "direct"` — so a bare `in` check stayed green with the real branch deleted, which is
+        # `if _request_route == "direct" and _route == "operator":` — `_request_route` ENDS IN `_route`,
+        # so the needle matches INSIDE it (not at the end of the line) — so a bare `in` check stayed green
+        # with the real branch deleted, which is
         # the file's own F3 rule ("a weaker assertion beside a behavioural one, whose message claims
         # precedence it cannot earn"). The anchor pins the branch at a line start.
         assert '\n                if _route == "direct":\n' in ingest, (
@@ -887,24 +895,57 @@ class TestTheDocsAreDiscoverableAndResolve:
           * `projection/__init__.py::_rebuild_all_replay` — a method of `FalkorProjection`, not a module-level
             name.
 
-        Every one was found by a reviewer opening the citation, never by this file — which is the asymmetry
-        this row removes. It is the same defect the errata table records for `sdk.apply_relation_edges`: a
+        Two were found by a reviewer opening the citation; the third was found by the first run of this row —
+        which is the asymmetry this row removes. It is the same defect the errata table records for `sdk.apply_relation_edges`: a
         locator that looks like a citation, reads like a citation, and sends the reader nowhere.
 
-        Scope is `tortoise/` python modules only: a citation to a `tests/…` file names a TEST rather than a
-        production symbol, and resolving it here would import a test module into a test module.
+        ⛔ A file that does not exist is a FAILURE, not a skip. An earlier revision folded "not a `tortoise/`
+        module" and "no such file" into one `None`, so an invented module (`sdkk.py::…`) passed GREEN — the
+        dead end this row exists to close, one level up. A `tests/` or `tools/` citation is checked by NAME
+        against that file's own AST instead of being imported (importing a test module into a test module is a
+        side effect this pin does not need), so an invented test symbol reds too.
         """
 
-        def _module_for(rel: str) -> str | None:
-            """The import path for a citation's file, or `None` when it is not a `tortoise/` module."""
-            p = rel[len("tortoise/") :] if rel.startswith("tortoise/") else rel
-            if not (REPO_ROOT / "tortoise" / p).exists():
+        def _citation_path(rel: str) -> Path:
+            """The file a `path.py::symbol` citation names.
+
+            A bare `sdk.py` is relative to `tortoise/` (that is how both docs write a `tortoise/` module); an
+            explicit `tortoise/…` or a non-production root (`tests/`, `tools/`) is repo-relative.
+            """
+            if rel.startswith("tortoise/") or rel.split("/", 1)[0] in _NON_IMPORTABLE_ROOTS:
+                return REPO_ROOT / rel
+            return REPO_ROOT / "tortoise" / rel
+
+        def _module_for(path: Path) -> str | None:
+            """The import path for a citation's file, or `None` when the file is not importable as `tortoise.*`."""
+            rel = path.relative_to(REPO_ROOT).as_posix()
+            if not rel.startswith("tortoise/"):
                 return None
+            p = rel[len("tortoise/") :]
             if p == "__init__.py":
                 return "tortoise"
             if p.endswith("/__init__.py"):
                 return "tortoise." + p[: -len("/__init__.py")].replace("/", ".")
             return "tortoise." + p[: -len(".py")].replace("/", ".")
+
+        def _ast_declares(path: Path, symbol: str) -> bool:
+            """True when every dotted part of `symbol` is declared somewhere in `path`.
+
+            For a non-importable file (`tests/`, `tools/`) the symbol is checked by NAME from the AST rather
+            than by importing it — importing a test module into a test module is what this avoids, but a
+            name that the file never defines is still the dead end this row exists to catch.
+            """
+            tree = ast.parse(path.read_text())
+            declared: set[str] = set()
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    declared.add(node.name)
+                elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    for target in targets:
+                        if isinstance(target, ast.Name):
+                            declared.add(target.id)
+            return all(part in declared for part in symbol.split("."))
 
         unresolved = []
         for doc in (SCOPE_DOC, BRIEF_DOC):
@@ -919,8 +960,20 @@ class TestTheDocsAreDiscoverableAndResolve:
                 # `path.py::symbol` is the citation FORM, quoted as prose in both docs — not a citation.
                 if (rel, symbol) == ("path.py", "symbol"):
                     continue
-                module_name = _module_for(rel)
+                # ⛔ The FILE is resolved FIRST, and a file that does not exist is a failure.
+                # An earlier revision folded "not a `tortoise/` module" and "no such file" into one
+                # `None` and skipped both, so an invented module (`sdkk.py::…`) passed green — the very
+                # dead end this row exists to close, one level up. A missing file is not a scope decision.
+                path = _citation_path(rel)
+                if not path.exists():
+                    unresolved.append(f"{doc.name}: `{rel}::{symbol}` — no such file `{rel}`")
+                    continue
+                module_name = _module_for(path)
                 if module_name is None:
+                    if not _ast_declares(path, symbol):
+                        unresolved.append(
+                            f"{doc.name}: `{rel}::{symbol}` — `{path.name}` declares no `{symbol}`"
+                        )
                     continue
                 node = importlib.import_module(module_name)
                 try:
@@ -938,19 +991,36 @@ class TestTheDocsAreDiscoverableAndResolve:
         )
 
     def test_this_pin_carries_no_line_keyed_citation(self):
-        """The file that SHIPS the ban must obey it — the ban above scans the two docs only.
+        """The file that SHIPS the ban must obey the SAME ban the docs do — not a weaker one.
 
         Round-17 P2-2, measured: this file explained its own window bound with a bare line number that was
         **127 lines stale on the commit that introduced it**, and wrong in the most misleading direction
         available — it named a location *inside* the window the bound claims to exclude, so a reader trying
         to verify the bound landed on unrelated operator-cleanup code. The class is exactly the one the ban
-        above closes for the two docs; it shipped here because nothing scanned this file, and the parse it
-        would need is narrow (a backticked bare line reference), not the free-text one the docs need.
+        above closes for the two docs; it shipped here because nothing scanned this file.
+
+        ⛔ Round-18 P3: the first revision of THIS row matched only a backticked bare `` `:NNN` ``, while the
+        docs' ban matches `path.ext:NNN` — so this file was held to a strictly weaker ban and carried two
+        `packs/*/manifest.yaml:<line>` citations (quoted below as the defect record) that its own row could
+        not see. Both patterns are now scanned, and the two live historical citations are listed explicitly
+        rather than hiding in a blind spot: this is a DECLARED allowlist, so a NEW one reds.
         """
+        #: Citations quoted as the RECORD of a defect already fixed, not live locators. A count here is a
+        #: claim about prose, so it is named rather than pattern-excluded.
+        historical = {
+            "packs/dev/manifest.yaml:33-35",
+            "packs/product-strategy/manifest.yaml:21",
+        }
         source = Path(__file__).read_text()
         offenders = re.findall(r"`:\d{3,5}`", source)
+        offenders += [
+            c for c in re.findall(r"[A-Za-z0-9_./-]+\.(?:py|ya?ml|md|json):[0-9]+(?:-[0-9]+)?", source)
+            if c not in historical
+        ]
         assert not offenders, (
             f"this pin carries {len(offenders)} line-keyed citation(s) {sorted(set(offenders))}. Cite the "
             "SYMBOL, or the literal string an assertion already reads (`for ev in direct_repoint_events`): "
-            "a line number rots on the next `main` merge and lands the reader in unrelated code."
+            "a line number rots on the next `main` merge and lands the reader in unrelated code. If it is the "
+            "record of a defect already fixed, add it to the `historical` allowlist above so the exception is "
+            "declared rather than invisible."
         )
