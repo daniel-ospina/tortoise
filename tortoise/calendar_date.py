@@ -18,15 +18,25 @@ numeric epoch into a window. All of them are accepted here, and the result is
 always validated through ``date``, so ``2026-13-45`` is undated rather than a
 fabricated date.
 
-⛔ THE RULE IS A UNION, and it is a union over the SECOND axis too: no value
-that any of the replaced parsers read may stop parsing. Three of them read a
-calendar-date PREFIX and one was as tolerant as ``datetime.fromisoformat``, so
-this resolver deliberately keeps BOTH tolerances as documented fallbacks: the
-whole-value grammar first (it knows about offsets, which is what the UTC
-truncation needs), then a prefix reading for a value whose TAIL is unreadable
-(``2023-05-20 02:21 PDT``, ``2023/05/20 (Sat) 02:21 (approx)``,
-``2023-05-20T+05:00``) — an unparseable tail means the exact INSTANT is
-unknown, not that the stated DAY is.
+⛔ THE RULE IS A UNION — over the values whose leading calendar date is
+UNAMBIGUOUS. Three of the replaced parsers read a calendar-date PREFIX and one
+was as tolerant as ``datetime.fromisoformat``, so this resolver deliberately
+keeps BOTH tolerances as documented fallbacks: the whole-value grammar first (it
+knows about offsets, which is what the UTC truncation needs), then a prefix
+reading for a value whose TAIL is unreadable (``2023-05-20 02:21 PDT``,
+``2023/05/20 (Sat) 02:21 (approx)``, ``2023-05-20T+05:00``) — an unparseable tail
+means the exact INSTANT is unknown, not that the stated DAY is.
+
+⚠ TWO DELIBERATE EXCLUSIONS from that union, both of them the fabricated-day
+class this module exists to end, stated so a later reader does not "restore the
+union" by re-adding them:
+
+* a THREE-DIGIT day (``2023/04/105``, ``2023-05-072``) — the old ``s[:10]`` +
+  ``fromisoformat`` path truncated it to a real date; that is a day nobody
+  wrote;
+* a pure 9+-digit number read as a date (``20230520.3``, ``202305201112``) —
+  the same truncation artifact seen from the other side; see the epoch rule
+  below for what those ARE read as.
 
 ⛔ MONTH GRANULARITY IS NOT COERCED. A value naming only ``YYYY/MM`` (or
 ``2026-09``) has NO day, and this resolver returns ``None`` rather than
@@ -161,6 +171,20 @@ _COMPACT_OR_WEEK_RE = re.compile(r"^(?:\d{8}|\d{4}-?W\d{2}(?:-?\d)?)\Z")
 _COMPACT_DATETIME_RE = re.compile(
     r"^(?:(?:\d{8})|(?:\d{4}-?W\d{2}(?:-?\d)?))[T\s]+")
 
+#: A COMPACT / ISO-week DATE carrying an OFFSET and no time (``20260610-05:00``,
+#: ``2026W243-05:00``, ``20230520-0500``, ``2023-W43-2+05:00``). This family is
+#: DECLARED REAL by ``tests/test_3982_date_only_utc.py`` (its compact-with-offset
+#: assertion exists to fail if the alternatives are dropped), and the old
+#: assembly parser dated them through ``date.fromisoformat``'s tolerance. The
+#: OFFSET must be an offset, never trailing digits — that gate is what keeps
+#: cycle 1's fabricated-day class (`\d{8}` truncating an epoch spelling) shut.
+#: The day returned is the WRITTEN one, which is what the dashed date-only +
+#: offset path returns too (``utc_truncate`` applies only to a TIME-bearing
+#: instant) and what ``origin/main`` returned.
+_COMPACT_DATE_OFFSET_RE = re.compile(
+    r"^(?P<date>\d{8}|\d{4}-?W\d{2}(?:-?\d)?)"
+    r"(?P<offset>[Zz]|[+-]\d{2}(?::?\d{2}(?::?\d{2})?)?)$")
+
 _OFFSET_RE = re.compile(
     r"^(?P<sign>[+-])(?P<hours>\d{2})"
     r"(?::?(?P<minutes>\d{2})(?::?(?P<seconds>\d{2}))?)?$")
@@ -186,7 +210,7 @@ def calendar_date(value: object, *, utc_truncate: bool = False) -> date | None:
         return None
     if isinstance(value, datetime):  # before date — datetime IS a date
         if utc_truncate and value.tzinfo is not None:
-            return value.astimezone(UTC).date()
+            return _utc_day(value, value.date())
         return value.date()
     if isinstance(value, date):
         return value
@@ -244,9 +268,12 @@ def _string_date(s: str, *, utc_truncate: bool) -> date | None:
             naive = _match_naive(match)
             offset = _match_offset(match)
             if naive is not None and offset is not None:
-                return naive.replace(tzinfo=offset).astimezone(UTC).date()
+                return _utc_day(naive.replace(tzinfo=offset), d)
         return d
     d = _date_only_shape(s)
+    if d is not None:
+        return d
+    d = _compact_date_offset(s)
     if d is not None:
         return d
     d = _compact_datetime_date(s, utc_truncate=utc_truncate)
@@ -289,6 +316,32 @@ def _date_only_shape(s: str) -> date | None:
         return None
 
 
+def _utc_day(stamp: datetime, fallback: date) -> date:
+    """``stamp``'s UTC day, or ``fallback`` when the conversion overflows.
+
+    ``date.max``/``date.min`` sit at the boundary where a stated offset can push
+    the instant out of the representable range. ``_norm_date`` promises never to
+    raise (assembly calls it UNGUARDED inside a per-row loop, and ten call sites
+    pass a question date through it), so an unrepresentable instant answers with
+    the day the value STATES — never an exception out of a read path.
+    """
+    try:
+        return stamp.astimezone(UTC).date()
+    except (OverflowError, ValueError, OSError):
+        return fallback
+
+
+def _compact_date_offset(s: str) -> date | None:
+    """The day of a compact / ISO-week date that carries an OFFSET, no time."""
+    match = _COMPACT_DATE_OFFSET_RE.match(s)
+    if match is None:
+        return None
+    try:
+        return date.fromisoformat(match.group("date"))
+    except ValueError:
+        return None
+
+
 def _compact_datetime_date(s: str, *, utc_truncate: bool) -> date | None:
     """The day of a COMPACT / ISO-week date that carries a time.
 
@@ -304,7 +357,7 @@ def _compact_datetime_date(s: str, *, utc_truncate: bool) -> date | None:
     except ValueError:
         return None
     if utc_truncate and stamp.tzinfo is not None:
-        return stamp.astimezone(UTC).date()
+        return _utc_day(stamp, stamp.date())
     return stamp.date()
 
 

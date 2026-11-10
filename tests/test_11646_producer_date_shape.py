@@ -370,12 +370,25 @@ def test_write_door_still_canonicalises_a_date_variant():
     ("2023-05-20T02:21:00+05", "2023-05-20", "2023-05-19"),
     ("20230520T02:21:00Z", "2023-05-20", "2023-05-20"),     # compact + time
     ("2023-W43-2T11:00:00", "2023-10-24", "2023-10-24"),    # ISO week + time
+    # compact / ISO-week date with an OFFSET and no time — a family
+    # `tests/test_3982_date_only_utc.py` pins as REAL stored data
+    ("20260610-05:00", "2026-06-10", "2026-06-10"),
+    ("2026W243-05:00", "2026-06-10", "2026-06-10"),
+    ("20230520-0500", "2023-05-20", "2023-05-20"),
+    ("2023-W43-2+05:00", "2023-10-24", "2023-10-24"),
 ])
 def test_a_value_that_parsed_before_still_names_its_day(value, written, utc_day):
     """Every one of these read a calendar-date PREFIX (or was as tolerant as
     ``datetime.fromisoformat``) before #11646, so a strictly anchored
     whole-value grammar made a REAL date silently undated — the defect the issue
-    exists to remove, on another input (review cycles 1 and 2)."""
+    exists to remove, on another input (review cycles 1, 2 and 3).
+
+    NOT included, deliberately: values whose leading calendar date is ambiguous
+    because the old ``s[:10]`` + ``fromisoformat`` path FABRICATED a day from a
+    three-digit day or a trailing number (``2023-05-072``, ``20230520.3``).
+    Those stay undated — that is finding 2's class, and "restoring the union"
+    for them would re-add the fabrication.
+    """
     for name, seam in (("calendar_date", calendar_date),
                        ("_as_date", time_aware._as_date),
                        ("_calendar_date", _calendar_date),
@@ -426,3 +439,23 @@ def test_every_shape_that_used_to_parse_still_parses_at_the_assembly_boundary():
     assert _norm_date("20230520T02:21:00Z") == date(2023, 5, 20)
     assert _norm_date("2023-W43-2T11:00:00") == date(2023, 10, 24)
     assert time_aware._as_date("2023-W43-2T11:00:00") == "2023-10-24"
+
+
+def test_an_unrepresentable_instant_does_not_raise_out_of_a_read_path():
+    """Assembly calls ``_norm_date`` UNGUARDED inside its per-row loop and at
+    ten question-date sites, and both it and this resolver promise never to
+    raise — review cycle 3, finding 2. A stated offset at ``date.max``/``min``
+    can push the UTC conversion out of range; the day the value STATES is the
+    honest answer (and the pre-#11646 parser returned ``None`` for these, never
+    an exception)."""
+    for value in ("9999-12-31 (Sat) 23:30-05:00",     # producer shape, max date
+                  "9999-12-31T23:30:00-05:00",        # ISO form
+                  "0001-01-01 (Sat) 02:21+05:00"):    # min date
+        for seam in (calendar_date, _norm_date, time_aware._as_date,
+                     _calendar_date):
+            seam(value)  # must not raise
+    # and the assembly ladder falls through / floors rather than aborting
+    assert _norm_date("9999-12-31 (Sat) 23:30-05:00") == date(9999, 12, 31)
+    assert _norm_date("0001-01-01 (Sat) 02:21+05:00") is None   # pre-1970 floor
+    assert _tier_and_date({"when": "9999-12-31 (Sat) 23:30-05:00"}) == (
+        "when", date(9999, 12, 31))
