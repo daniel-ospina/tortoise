@@ -826,9 +826,12 @@ def _cardinality_claims_in(source: str) -> list[str]:
     tests actually MEASURE is stated per arm below, rather than claimed for all four at
     once (#11777 review round 2, findings 1 and 2):
 
-      * region scoping — measured by the decoy-outside-the-region arm;
-      * `#:` filtering — measured by the same arm (the decoy is a `#:` line past the code
-        that ends the region, so reading the whole file head would satisfy the pin);
+      * region scoping — measured by the decoy arm: a `#:` copy of the sentence ABOVE the
+        non-comment line that ends the block, which the whole-file head would satisfy;
+      * `#:` filtering — measured by the BARE `#` line INSIDE the region carrying its own
+        claim (`seven`), which only the filter excludes. Region scoping does NOT cover
+        this one: the bare line is inside the region either way, so dropping the filter
+        alone leaves `['seven', 'four']` and reds the arm (measured, #11777 round 3);
       * normalisation and the claim match — measured by the formatting and reword rows.
 
     What no behavioural test can measure is the pin's CALL SITE; that is
@@ -992,23 +995,31 @@ def test_the_pin_reads_through_the_seam_rather_than_its_own_copy():
     Its limit, stated rather than hidden: this is a SHAPE pin (it reads this file's
     source), so an edit that rewrites the pin *and* this assertion defeats it. That is
     an adversarial edit, and it lands in a visible diff; the class being prevented here
-    is the accidental revert, which it does catch. `AGENTS.md`'s `[pin-defensive-claim]`
-    row is the reason the limit is written down instead of implied.
+    is the accidental revert, which it does catch. The `[pin-defensive-claim]` row in this
+    repo's `MEMORY.md` is the reason the limit is written down instead of implied.
 
-    One non-adversarial edit can also trip it: RENAMING the pin. The partition below
-    then finds no marker, and a bare `[""]` slice would report "it has its own copy of
-    the extraction again" about a body that calls the seam fine (#11777 review round 2,
-    finding 3). So the missing-marker case is its own failure with its own remedy.
+    One non-adversarial edit can also trip it: RENAMING the pin. The lookup below then
+    finds no `def` line, and deriving the body by text search instead would be worse than
+    useless — an earlier draft of this test searched for the marker STRING, which occurs
+    twice (the `def`, and the literal in this assertion), so a rename made it derive its
+    own tail and report "it has its own copy of the extraction again" about a pin that was
+    fine (#11777 review round 3, finding 1). So the lookup is anchored on a `def` at the
+    start of a line, and the missing case is its own failure with its own remedy.
     """
     source = Path(__file__).read_text(encoding="utf-8")
-    marker = "def test_the_record_exemption_prose_counts_the_set_it_describes("
-    assert marker in source, (
-        "this test's own marker for the cardinality pin is gone — if you RENAMED the pin, "
-        f"update the literal {marker!r} here; do not delete this test, which is the only "
-        "thing that observes the pin still calling `_cardinality_claims_in`."
+    name = "test_the_record_exemption_prose_counts_the_set_it_describes"
+    lines = source.splitlines(keepends=True)
+    start = next((i for i, line in enumerate(lines) if line.startswith(f"def {name}(")), None)
+    assert start is not None, (
+        f"no `def {name}(` line in this file — if you RENAMED the cardinality pin, update "
+        f"`name` here; do not delete this test, which is the only thing that observes the "
+        "pin still calling `_cardinality_claims_in`."
     )
-    pin = source.partition(marker)[2]
-    body = pin.partition("\ndef ")[0]
+    body = ""
+    for line in lines[start:]:
+        if body and line.startswith("def "):
+            break
+        body += line
     assert "_cardinality_claims_in(" in body, (
         "the cardinality pin no longer reads through `_cardinality_claims_in` — it has "
         "its own copy of the extraction again, so the formatting tolerance is dead code "
