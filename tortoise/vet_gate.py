@@ -1106,8 +1106,12 @@ def _layer1_reference_spellings(embed_list: object) -> dict[str, set[str]]:
     skipped. Measured (review at ``2b843a0e``): points ``[A, B, B]`` with the
     first twin DISCARDed left the surviving twin's ``RETRY STORM`` unreconciled
     → the payload still 422s, the exact failure this pass exists to close.
-    The sibling call three lines below already passes ``set()`` for the same
-    reason.
+    ``apply_vet``'s Rule-4 block already sets that precedent for the same
+    reason, at ``_referenced_entity_names(out, set())`` — name the CALL SITE if
+    you extend this note, never a relative offset: the sentence once said "three
+    lines below", which is true of that block and false inside this docstring,
+    so a maintainer checking the precedent found the body of this very function
+    (review at ``bd6eba7e77``, P3).
 
     ⛔ **THE COLLECTING PREDICATE IS THE REWRITING PREDICATE.**
     :func:`_rewrite_entity_references` rewrites a slot ref only when it is a
