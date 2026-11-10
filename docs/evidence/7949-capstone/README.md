@@ -221,15 +221,15 @@ them.** That log renders, for the capture path's `proj.link_source_to_event` cal
 not be read as such. At the base it ships from (`9152448d7`) those lines are exactly those symbols;
 at THIS head neither number resolves: measured, `15506` is the closing `)` of an unrelated
 `_logger.warning(...)` call and `2408` is a `#:` comment line (the one that records *"Do NOT
-reintroduce a literal tuple at this site"*). `sdk.py` has moved many times since: six commits
-touching it merged to `main` before this PR's base (`a33af140f`, `c833c41cd`, `62e3f2f61`,
-`5028881f8`, `63981d152`, `2180f0054`), and `#11682` then adds its own `sdk.py` insertions.
-`git log 9152448d7..HEAD -- tortoise/sdk.py` lists the full set at this head — do not read the six
-as the total. The symbols, and this head's numbers for them, are cited ABOVE in this document —
-this paragraph exists only to say which numbers in the LOG belong to the log. ⛔ **Not
-`#10215`:** its `8bc2fbed1` touches no `tortoise/` file at all, which is why the movers are
-`main`'s plus this PR's. Neither number is a defect and the log is not edited for it — a log is the
-record of what the run rendered — but do NOT follow them as pointers at this head.
+reintroduce a literal tuple at this site"*). `sdk.py` has moved many times since — `git log
+9152448d7..HEAD -- tortoise/sdk.py` lists every mover at this head, `main`'s and this PR's alike, and
+this paragraph deliberately quotes NO count of them: a number here is one more thing that goes stale
+— so the symbols no longer sit at the numbers the log renders. **§E3 — the census** below is where
+this head's numbers for both of them live; this paragraph exists only to say which numbers in the
+LOG belong to the log. ⛔ **Not `#10215`:** its `8bc2fbed1` touches no `tortoise/` file at all,
+which is why the movers are `main`'s plus this PR's. Neither number is a defect and the log is not
+edited for it — a log is the record of what the run rendered — but do NOT follow them as pointers
+at this head.
 
 The **SUPERSEDED** `capstone-measured-e0fc940b.log` carried the cites **as-of its own
 stamp**, and those are the numbers listed here — the ones that log rendered, exactly as it
