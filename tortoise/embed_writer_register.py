@@ -848,7 +848,9 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "#10541",
             # `#11641`: a LABEL SET, because the door no longer INHERITS its label. It owns one —
             # `tortoise.sdk::_RAW_WRITE_DOOR_LABELS` — and refuses, before the journal append and
-            # before the write, any caller statement naming a label outside it. So this is no
+            # before the write, any caller statement naming a label outside it, and any statement
+            # that renders a label by INTERPOLATION (`(n:{…})`, which no bound can read off the
+            # text). So this is no
             # longer a claim about CALLERS that nothing re-derives: the door's own body enforces
             # the set, and the register's constant pin re-derives it in both directions.
             # ⛔ `no-live-vector` would still be false (that is the exact mistake `#11492`'s review

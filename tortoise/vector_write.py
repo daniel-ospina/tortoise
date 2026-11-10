@@ -144,6 +144,7 @@ __all__ = [
     "require_served_store_labels",
     "served_store_labels",
     "set_embedding_clause",
+    "statement_interpolates_label",
     "statement_node_labels",
     "stored_embedding_vector_expr",
 ]
@@ -191,6 +192,13 @@ def served_store_labels() -> frozenset[str]:
 #: `require_served_store_labels`).
 _STATEMENT_LABEL_RE = re.compile(r"\(\s*(?:[A-Za-z_]\w*\s*)?:\s*([A-Za-z_]\w*)")
 
+#: A node label rendered by INTERPOLATION inside a node pattern — `(n:{safe_labels})`. It is the
+#: EXACT complement of :data:`_STATEMENT_LABEL_RE`: same prefix (so a nested map literal
+#: `{meta: {a: 1}}` cannot trip it), but a `{` where a label identifier would be. Kept beside that
+#: pattern because the two together say the whole truth about what a statement names — the reader
+#: sees the LITERAL labels, this sees the ones no reader can read off.
+_INTERPOLATED_LABEL_RE = re.compile(r"\(\s*(?:[A-Za-z_]\w*\s*)?:\s*\{")
+
 
 def statement_node_labels(statement: str) -> frozenset[str]:
     """Every node label a Cypher statement binds in a node PATTERN (``(x:Label``).
@@ -206,6 +214,22 @@ def statement_node_labels(statement: str) -> frozenset[str]:
     where a false negative stores a vector somewhere no read path reaches.
     """
     return frozenset(_STATEMENT_LABEL_RE.findall(statement))
+
+
+def statement_interpolates_label(statement: str) -> bool:
+    """True when ``statement`` renders a node label by INTERPOLATION — ``(n:{safe_labels})``.
+
+    The companion of :func:`statement_node_labels`, and the reason a *door* needs one: a reader
+    that returns only the labels a statement NAMES cannot see a pattern whose label is rendered at
+    runtime, so a caller could satisfy the bound with one literal ``(e:Event …)`` pattern and store
+    the vector on a SECOND, interpolated one — the label inherited from the caller again, which is
+    exactly what a bound is supposed to end.
+
+    So the two answer different questions, and a writer that cannot name its own label must ask
+    both: *which labels does the statement name* (:func:`statement_node_labels`) and *does it name
+    one by interpolation* (this). Nothing here inspects a graph — it is a text-level bound.
+    """
+    return bool(_INTERPOLATED_LABEL_RE.search(statement))
 
 
 def require_served_store_labels(labels, *, writer: str) -> None:

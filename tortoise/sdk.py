@@ -73,6 +73,7 @@ from .vector_write import (  # #4520: the ONE clear-then-set vector seam
     clear_then_set_prefix,
     require_served_store_labels,  # #11641: the ONE bound on WHERE a vector may be stored
     set_embedding_clause,
+    statement_interpolates_label,
     statement_node_labels,
 )
 # #4282 phase 2: retired public names fail with their replacement named (#3836 (c)).
@@ -12963,6 +12964,14 @@ class TortoiseSDK:
         """
         _declared_labels = {label for label, _id_prop in _RAW_WRITE_DOOR_LABELS}
         _named_labels = statement_node_labels(statement)
+        if statement_interpolates_label(statement):
+            raise ValueError(
+                "_event_raw_write_door: the statement renders a node label by INTERPOLATION "
+                "(`(n:{…})`), so the label(s) it stores on cannot be read off the statement and "
+                "this door's bound cannot prove them — a literal `(e:Event …)` pattern beside it "
+                "would pass the bound while the vector landed wherever the interpolation points. "
+                "Name the label literally (`MATCH (e:Event {…})`) (#11641)."
+            )
         if not _named_labels:
             raise ValueError(
                 "_event_raw_write_door: the statement names NO node label, so the label this "

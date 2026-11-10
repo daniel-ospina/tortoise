@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
 from uuid import uuid4
 
 import pytest
@@ -40,9 +39,9 @@ from tortoise.embed_writer_register import (
     LABELS_AT_RUNTIME,
 )
 from tortoise.hosted_backup import (
-    DUMP_FORMAT,
-    _VECTOR_RESTORE_LABELS,
     _VECTOR_RESTORE_LABEL_SET,
+    _VECTOR_RESTORE_LABELS,
+    DUMP_FORMAT,
     restore_graph,
 )
 from tortoise.projection import FalkorProjection
@@ -51,6 +50,7 @@ from tortoise.vector_write import (
     clear_then_set_prefix,
     served_store_labels,
     set_embedding_clause,
+    statement_interpolates_label,
     statement_node_labels,
 )
 
@@ -188,6 +188,54 @@ def test_every_real_door_shape_is_inside_the_bound(statement: str) -> None:
     with pytest.raises(AssertionError, match="journal was reached"):
         DOOR(_NoJournal(), None, statement, event_id="e1", props={},
              embedding=VEC, lane="test")
+
+
+def test_the_door_refuses_a_statement_that_INTERPOLATES_a_label() -> None:
+    """The refused shape a reader of LITERAL labels cannot see (#11641).
+
+    `statement_node_labels` returns only the labels a statement NAMES, so a caller can satisfy the
+    bound with one literal `(e:Event …)` pattern and store the vector on a SECOND pattern whose
+    label it renders at runtime: `MATCH (e:Event {eventId:$eid}), (n:{kind}) SET n.embedding = …`.
+    The bound would read `{'Event'}`, pass, and the vector would land wherever `kind` points — the
+    label inherited from the caller again, which is the whole defect `#11641` closes.
+
+    ⛔ NON-VACUITY: the STATEMENT is the proof of this assertion's reach — the reader below really
+    does see nothing wrong with it (`{'Event'}`, no stray label), so on a bound that only reads
+    named labels the door reaches the JOURNAL (the fake raises), which is exactly what the pre-fix
+    tree does for every statement.
+    """
+    statement = (
+        "MATCH (e:Event {eventId:$eid}), (n:{kind}) "
+        + clear_then_set_prefix("n") + "SET n += $props, " + set_embedding_clause("n")
+    )
+    # The reader's blind spot, asserted rather than assumed: the literal label is all it sees.
+    assert statement_node_labels(statement) == {"Event"}, statement_node_labels(statement)
+    assert statement_interpolates_label(statement) is True
+    with pytest.raises(ValueError) as refused:
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={},
+             embedding=VEC, lane="test")
+    assert "INTERPOLATION" in str(refused.value), str(refused.value)
+    assert "_event_raw_write_door" in str(refused.value), (
+        "the refusal must name the writer a reader can go look at"
+    )
+
+
+def test_no_real_door_shape_is_mistaken_for_an_interpolation() -> None:
+    """The other direction: the product's own statements must not trip the new refusal.
+
+    A guard that refused a real shape would break ingestion, and a nested map literal
+    (`{meta: {a: 1}}`) is the ONE text shape a loose `:{` pattern would misread — so both sides of
+    the boundary are pinned here rather than reasoned about.
+    """
+    for statement in (
+        "MATCH (e:Event {eventId:$eid}) SET e += $props",
+        "MERGE (e:Event {eventId:$eid}) " + clear_then_set_prefix("e")
+        + "SET e += $props, " + set_embedding_clause("e"),
+        # A nested map literal is NOT a label interpolation — the pattern is anchored to the node
+        # pattern's `(alias:` prefix for exactly this reason.
+        "MATCH (e:Event {eventId:$eid}) SET e.meta = {a: {b: 1}}",
+    ):
+        assert statement_interpolates_label(statement) is False, statement
 
 
 def test_a_real_event_write_still_lands_on_event(tmp_path) -> None:
