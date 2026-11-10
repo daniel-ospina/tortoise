@@ -102,9 +102,13 @@ gated individually by the executor's per-node record probe.
   nor a claim at or below the total — whatever the multiplier
   (`test_an_inflated_ceiling_does_not_arm_the_backstop_at_the_total`). That last band is
   the residual, and it is bounded by the CLAIM, not by how badly a statement multiplies:
-  `true_population < claim <= node_total`. No total-based comparison can tell it apart from
-  a population that grew since the report, so it is covered **solely** by the mirror pin
-  above plus the characterisation test that pins it.
+  `true_population < claim <= node_total`. A mirror-vs-total check
+  (`resident_population > node_total`) **would** fire on a sub-band of it — an inflated
+  mirror above the total with the claim under it — but it is **unsound in the other
+  direction**: for an honest mirror it fires on removal skew alone, since the total is read
+  AFTER every population count (a gain cannot trip it, a removal can), so it would
+  false-block a legitimate report. The band is therefore covered by the mirror pin above
+  plus the characterisation test that pins it.
 - **A population with no count statement is a REFUSAL**, never a defaulted bound.
 - **That is ONE of the two staleness bounds, and this file is evidence for this one.**
   The sibling fix that landed first (PR #11720) bounds the SAME licence by WHEN
@@ -119,11 +123,11 @@ gated individually by the executor's per-node record probe.
 
 ## Tests
 
-`tests/test_cache_eviction_census.py` (134 tests in the file, 216 passed + 1 skipped across
-the four eviction suites — measured, not asserted: `uv run python tools/test_lane.py run --
-tests/test_cache_eviction_census.py tests/test_cache_eviction_evictor.py
+`tests/test_cache_eviction_census.py` (134 tests in the file, 240 passed across the four
+eviction suites, 0 skipped — measured, not asserted: `uv run python tools/test_lane.py run
+-- tests/test_cache_eviction_census.py tests/test_cache_eviction_evictor.py
 tests/test_cache_eviction_evictor_pins.py tests/test_cache_evict_cli.py -q` →
-`216 passed, 1 skipped`, recorded in `WORKTREE-REPORT.md`):
+`240 passed in 6.30s`; the census file alone → `134 passed`):
 
 | arm | what it pins |
 |---|---|

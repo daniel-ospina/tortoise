@@ -1290,17 +1290,28 @@ def assess(
     #   lands here is a claim the multiplication pushed above the total; a claim that stays
     #   at or below it passes BOTH guards, whatever the multiplier — the measured example
     #   is population 500 counted as 2,000 on a 25,000-node graph with a 1,500 claim, and
-    #   the same graph with a 30,000 ceiling and a 25,000 claim is equally untouched. No
-    #   total-based comparison can separate that from "the population grew since the
-    #   report" — refusing on ``resident_population > report.total_nodes`` would block
-    #   legitimate growth — so that class is covered SOLELY by
-    #   `test_the_population_count_mirrors_the_instrument`, and by the characterisation
-    #   test that pins this residual. Keep the pin; this check does not replace it.
+    #   the same graph with a 30,000 ceiling and a 25,000 claim is equally untouched.
+    #
+    # ⛔ A MIRROR-VS-TOTAL CHECK IS NOT "NO DETECTION" — it is UNSOUND, which is a
+    # different fact and the one this paragraph asserts. Refusing on
+    # ``resident_population > node_total`` WOULD fire on a sub-band of this residual: an
+    # inflated mirror above the total with the CLAIM under it (measured — a `turn`
+    # statement answering 30,000 on a 25,000-node graph licenses a 25,000 claim today, and
+    # such a guard would refuse exactly that licence). It is not used because it is
+    # unsound in the OTHER direction: for an HONEST mirror it fires on removal skew alone
+    # — a gain cannot trip it now that the total is read AFTER every population count, but
+    # a removal between the two reads can — so it would false-block a legitimate report.
+    # The band is therefore covered by `test_the_population_count_mirrors_the_instrument`
+    # (the identity pin, which binds the mirror to the instrument's own EXECUTED statement)
+    # plus `test_a_row_multiplying_count_statement_is_a_documented_residual`, which pins
+    # the band this check cannot reach. Keep the pin; this check does not replace it.
     #
     # What this DOES catch is a claim above every node the graph holds. ⛔ Read that
     # NARROWLY in BOTH directions, because earlier versions of this paragraph were wrong
-    # about the reach in OPPOSITE directions — first as unreachable on a quiescent graph,
-    # then as triggered by a large multiplication:
+    # about the reach in OPPOSITE directions — first as catching a claim "whatever
+    # produced it" (an overstatement), then as unreachable on a quiescent graph (the
+    # understatement), then as triggered by a large multiplication (an overstatement
+    # again):
     #
     # - It is NOT a detector for a misplaced PREDICATE: a widened predicate yields a
     #   subgraph count, which cannot exceed `MATCH (n) RETURN count(n)`, so the claim
