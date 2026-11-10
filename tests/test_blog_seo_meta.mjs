@@ -1934,8 +1934,11 @@ console.log("the blog's link preview and icon");
     ["icon", "/favicon.png"],
     ["apple-touch-icon", "/apple-touch-icon.png"],
   ]) {
-    const tag = links.find((t) => (linkAttr(t, "rel") ?? "").split(/\s+/).includes(rel)
-      && hrefPath(t) === href);
+    // ⛔ THE SAME PREDICATE AS THE PRESENCE ASSERTIONS ABOVE — `linkWith` (not a second,
+    // inlined copy of it). Two spellings of "is this link here" drift: a later edit to one
+    // (e.g. also matching `sizes`) would silently not apply to the other, so the version
+    // check would grade a tag the presence check never looked at (review round 10).
+    const tag = linkWith(rel, href);
     // ⛔ A MISSING LINK IS ALREADY A REPORTED FAILURE ABOVE, AND `assert` DOES NOT THROW IN
     // THIS FILE (`fail` only increments a counter). Dereferencing `undefined` here threw an
     // uncaught `TypeError`, which aborts the MODULE — so the card assertions below never ran
