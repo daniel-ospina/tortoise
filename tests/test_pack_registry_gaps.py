@@ -1853,6 +1853,98 @@ class TestCoreHierarchy:
         # deleted pass appended 0 members to 0 of 311 buckets.
         assert "dev:deployment" in shipped.expand_kind("core:deployment")
 
+    def test_a_pack_kind_registered_under_a_core_name_round_trips_both_spellings(
+            self, tmp_path):
+        """A pack may declare a kind whose BARE name is a core alias (`team`).
+
+        The failure this prevents: the two spellings diverging for a shape the
+        SHIPPED packs do not have, so the equality above passed vacuously for it.
+        A manifest with `ontology.objectKinds: [team]` is ACCEPTED
+        (`canonical_kind_axes("team")` is empty, so the #2786 collision guard does
+        not fire), and it puts `synth:team` in `expand_kind("team")`. With the
+        bare-inherited members not round-tripping into the `core:` bucket,
+        `expand_kind("core:team")` missed them — the same one-kind-two-answers
+        asymmetry this PR exists to remove.
+
+        Reachability is narrow: of the 73 `CORE_ALIASED_KINDS` members only five
+        are registrable this way (`team`, `role`, `organization`, `legalPerson`,
+        `naturalPerson` — the children of §5's `Subject` row). The other 68 are
+        either owned by a canonical axis (the #2786 guard refuses
+        `objectKinds: [plan]`) or PascalCase (`Subject`, `Object`, …) and refused
+        by the camelCase shape check.
+        """
+        (tmp_path / "synth").mkdir()
+        (tmp_path / "synth" / "manifest.yaml").write_text(
+            "name: Synthetic\n"
+            "namespace: synth\n"
+            "version: 1.0.0\n"
+            "tier: free\n"
+            "ontology:\n"
+            "  extends: core\n"
+            "  objectKinds: [team]\n"
+        )
+        registry = PackRegistry(str(tmp_path))
+        assert registry.load_all() == 1, registry.errors
+        assert not registry.errors, registry.errors
+
+        bare = set(registry.expand_kind("team"))
+        core = set(registry.expand_kind("core:team"))
+        assert "synth:team" in bare, bare
+        assert bare <= core, (
+            "the two spellings of one kind answer differently for a pack kind "
+            f"registered under an aliased core name: {sorted(bare - core)}")
+        assert core <= bare, sorted(core - bare)
+
+    def test_a_multi_segment_equivalent_to_target_does_not_chain_into_a_bucket(
+            self, tmp_path):
+        """A colon-bearing `equivalentTo` target must not reach a bucket's closure.
+
+        The failure this prevents is a silent WRONG-WIDE read. `bare_inherits` is
+        keyed by the tail of a single-segment `ns:kind` name, and the closure
+        closes in one hop because a value is never itself a key. A multi-segment
+        target breaks that: `x:synth:team` has tail `synth:team`, which IS a key
+        (for the real `synth:team` kind), so the closure chained `synth:widget` —
+        a kind in no relation to `team` — into `expand_kind("team")`, i.e. into
+        the read path's `IN` clause.
+
+        `expand_kind("core:team")` is spared at this head, but NOT by the guard:
+        the closure takes one round, so it reaches `core:team → team →
+        synth:team` and never `synth:team → x:synth:team`. Both spellings are
+        asserted below anyway — a future fixpoint that ALSO dropped the guard
+        would widen `core:team` too, and that leg is what would catch it. (A
+        fixpoint alone changes nothing: with the guard in place this loop is
+        already at its fixpoint after one round — measured.)
+
+        `equivalentTo` only has to CONTAIN ':' (an unresolved target is a warning
+        and the pack stays loaded), so this shape is accepted by the registry.
+        `bare_to_full` therefore admits single-segment names only; the rest stay
+        in `expansions` and are still chained to their declared `equivalentTo`
+        peer, which is correct — they simply never seed a `bare_inherits` chain.
+        """
+        (tmp_path / "synth").mkdir()
+        (tmp_path / "synth" / "manifest.yaml").write_text(
+            "name: Synthetic\n"
+            "namespace: synth\n"
+            "version: 1.0.0\n"
+            "tier: free\n"
+            "ontology:\n"
+            "  extends: core\n"
+            "  objectKinds: [team, widget]\n"
+            "  equivalentTo:\n"
+            "    widget: [x:synth:team]\n"
+        )
+        registry = PackRegistry(str(tmp_path))
+        assert registry.load_all() == 1, registry.errors
+
+        for kind in ("team", "core:team"):
+            bucket = set(registry.expand_kind(kind))
+            assert "synth:widget" not in bucket, (
+                f"an unrelated kind chained into the `{kind}` bucket through a "
+                f"multi-segment equivalentTo target: {sorted(bucket)}")
+            assert "x:synth:team" not in bucket, sorted(bucket)
+            # …and the round-trip this whole class exists for still holds.
+            assert "synth:team" in bucket, sorted(bucket)
+
     def test_get_subclasses_folds_the_core_prefix_like_expand_kind(self, shipped):
         """`get_subclasses` answers the `core:` spelling too, not a wrong-empty.
 
