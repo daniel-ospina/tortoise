@@ -238,6 +238,8 @@ failure, not a skip — so the A-rows carry them too, and §6 I1 freezes the *co
 | `corpus_id` | `a-corpus` | `a-corpus` | `a-corpus` | `fleet-graph` | `a-corpus` |
 | floor number (read from `denominator_floors`) | `a1_labelled_pairs: 30` | `a2_candidates: 30` | `a3_statements: 30` | `a4_labelled_nodes: 1` | **`a5_actors: 30`** (registered) |
 | `threshold_basis` | the ~10 pp resolution argument (`EXTRACTOR-V4-ARCHITECTURE.md:1397`, restated `:1533`) | same | the owner's own 9,910/15,534 baseline | "0 of 0 labelled is not coverage; a declared kind that is absent, or a node left unlabelled, is a failing run" | presence question, not a statistic |
+| `max_realizations` | 2 | 2 | 2 | 1 (read-only) | 2 |
+| `measurement_visible_to_author` | **`false`** — no prior A-row measurement exists (the honest answer) + the basis that says so | `false` + basis | `false` + basis | `false` + basis | `false` + basis |
 
 ⛔ **P1 — A5's floor is the REGISTERED one, and `a5_slots` is not a floor key this plan may invent.** An earlier
 revision of this table gave A5 `a5_slots: 5` and called it a *new key* (§4.4 below), which collides with the record
@@ -254,8 +256,6 @@ the `metric` cell, and `02-scope.md:235` already states the honest outcome — a
 ("the binder did not run / the corpus has no bindable slots") instead of reading as a zero. A5 is therefore **not** a
 second re-authored row: §4.4's *"it re-authors A4's row, so the set stays 12"* stays true, and no registered A5
 text moves.
-| `max_realizations` | 2 | 2 | 2 | 1 (read-only) | 2 |
-| `measurement_visible_to_author` | **`false`** — no prior A-row measurement exists (the honest answer) + the basis that says so | `false` + basis | `false` + basis | `false` + basis | `false` + basis |
 
 ⛔ **P1 from the substep 6–7 gate: `pinned_by` was about to recreate the P0 it just fixed.** The **retained**
 `corpus` block carries `pinned_by` as **free prose** (*"fixture revision (fixtures_hash), not a graph dump"*), while
@@ -689,7 +689,6 @@ receipt, not on the status code:**
 | retryable | `502` `503` `504`, **and `409`/`429` after the door's own `Retry-After`** - retried **once**, by re-POSTing the **SAME `session_id`** |
 | terminal | `402` (quota - a refusal, not a failure), `422` (malformed payload). **`409` is NOT terminal** - the door publishes `Retry-After: 30` on it |
 | replay guard | read the receipt: `meta.mode == "replayed"` **and** a `capture_ok` that is **not** false => `REFUSED(replayed, no extraction)`, **no row scored**. A re-POST is a **TRUE retry** exactly when the stored `capture_ok` is `false` - which is what `#3129`'s abandoned marker exists to write |
-
 | breaker | **two consecutive refusals at one head stop dispatching that run** |
 | census | **not** retried (a partial census is a refused run, not a best-effort one); W2c's read-only census inherits this and needs no breaker |
 | model-proposed arms | re-run **once** for the repeat policy. "A third run is a policy violation" was narration - nothing counts runs. It is frozen as a **record field** (`max_realizations`) with a **CI pin over the committed run artefacts**; absent that, it is a reporting convention and the plan says so instead of calling it a violation |
