@@ -110,7 +110,7 @@ The bundle's headline lists **7 files** under `docs/epics/2026-11-04-7949-extrac
 | file | what changes | effect |
 |---|---|---|
 | `docs/00_index.md` | one row registering the new bundle directory | index only |
-| `docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md` | one clause added to the `#10149` round-4 correction already in that changelog, and its `#11714` parenthetical rewritten, reconciling `the exemption`'s declaration with `#11704` and `#11688` | prose; this is one of the two documents the 9397 census flattens, so it is inside that census's own subject |
+| `docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md` | one clause added to the `#10149` round-4 correction already in that changelog, and its `#11714` parenthetical rewritten, reconciling `the exemption`'s declaration with `#11704` and `#11688` | prose; the 9397 census **pins this ledger** (one ledger pin flattens it, and three further legs read it un-flattened), so the edit is inside that census's own subject — ⚠️ but it is **not** one of the two documents the census's marker legs flatten, which are `STORAGE-ARCHITECTURE.md` and `EXTRACTOR-V4-ARCHITECTURE.md` (`tests/test_9397_about_edge_properties.py:7311-7314`) |
 | `tortoise/activation_scorecard.py` | two figures in a comment, **re-taken** by `tools/hosted_api_cite_census.py --refresh` (434→441 below the pivot, 449→456 distinct targets) | none — no code line changes |
 | `tortoise/hosted_api.py` | the same census's `179 tracked files`/`449 distinct targets` figures, re-taken to `185`/`456` | none — comment text |
 | `.github/workflows/main-health-nightly.yml` | the `census-drift` job's **comment block**, removing the restated figures the `--refresh` verb cannot verify | none — no job, trigger, permission or step changes |
