@@ -12,28 +12,28 @@
   },
   "population": {
     "packs": 7,
-    "relations": 36,
+    "relations": 39,
     "hierarchies": 6,
-    "declared": 42,
+    "declared": 45,
     "restated_hierarchy_rows": 4,
-    "distinct_connections": 38,
+    "distinct_connections": 41,
     "note": "the join is ORDERED (pack_hierarchy._matching_row: the same (fromKind, toKind) in that order, plus the same predicate or the same semantics). An inverse-spelling row \u2014 the same pair declared the other way round \u2014 is NOT counted by that join; counting it would need a predicate-inversion table, a second parser this artifact deliberately does not have"
   },
   "probe": {
     "store": "a throwaway embedded store (`TORTOISE_DB_URI` is deliberately NOT read)",
     "endpoints": "one node per declared KIND, cached and reused; a row whose from_kind and to_kind are the same kind mints its destination its own node",
-    "minted": 72,
-    "deleted": 72,
+    "minted": 76,
+    "deleted": 76,
     "leftovers": []
   },
   "verdicts": {
-    "writable": 35,
+    "writable": 38,
     "declaration-only": 1,
     "predicate-not-in-allowlist": 0
   },
   "written_counts": {
-    "mediated": 33,
-    "direct": 8,
+    "mediated": 35,
+    "direct": 9,
     "none": 1
   },
   "load_errors": {},
@@ -298,6 +298,82 @@
           "path_disagreement": false,
           "written": "mediated",
           "written_direction": "->"
+        },
+        {
+          "surface": "relations",
+          "pack": "dev",
+          "predicate": "ownedBy",
+          "from_kind": "core:goal",
+          "to_kind": "Subject",
+          "cardinality": "many_to_one",
+          "mechanism": "IMPL",
+          "semantics": "ownedBy",
+          "verdict": "writable",
+          "write_paths": [
+            "operator",
+            "structural"
+          ],
+          "write_path": "structural",
+          "declared_direction": null,
+          "effective_direction": "->",
+          "declaration_only": false,
+          "declaration_only_reason": null,
+          "written_label": "ownedBy",
+          "written_edge_type": "ownedBy",
+          "structural_writer_accepts": true,
+          "path_disagreement": false,
+          "written": "direct",
+          "written_direction": "n/a: direct edge (the predicate carries the sense)"
+        },
+        {
+          "surface": "relations",
+          "pack": "dev",
+          "predicate": "addresses",
+          "from_kind": "dev:epic",
+          "to_kind": "core:goal",
+          "cardinality": "many_to_many",
+          "mechanism": "IMPL",
+          "semantics": "addresses",
+          "verdict": "writable",
+          "write_paths": [
+            "operator"
+          ],
+          "write_path": "operator",
+          "declared_direction": null,
+          "effective_direction": "->",
+          "declaration_only": false,
+          "declaration_only_reason": null,
+          "written_label": "addresses",
+          "written_edge_type": "IMPL",
+          "structural_writer_accepts": null,
+          "path_disagreement": false,
+          "written": "mediated",
+          "written_direction": "->"
+        },
+        {
+          "surface": "relations",
+          "pack": "dev",
+          "predicate": "addresses",
+          "from_kind": "dev:indicator",
+          "to_kind": "core:goal",
+          "cardinality": "many_to_one",
+          "mechanism": "IMPL",
+          "semantics": "addresses",
+          "verdict": "writable",
+          "write_paths": [
+            "operator"
+          ],
+          "write_path": "operator",
+          "declared_direction": null,
+          "effective_direction": "->",
+          "declaration_only": false,
+          "declaration_only_reason": null,
+          "written_label": "addresses",
+          "written_edge_type": "IMPL",
+          "structural_writer_accepts": null,
+          "path_disagreement": false,
+          "written": "mediated",
+          "written_direction": "->"
         }
       ],
       "hierarchies": [
@@ -354,7 +430,7 @@
           "written_direction": "n/a: direct edge (the predicate carries the sense)"
         }
       ],
-      "declared": 11
+      "declared": 14
     },
     "marketing": {
       "relations": [
@@ -1144,12 +1220,6 @@
   },
   "dangling": [
     {
-      "kind": "goal",
-      "namespace": "core",
-      "owner": null,
-      "note": "is a core Object kind (ONTOLOGY \u00a75's commitment-state family) and NO declared relation or hierarchy names it as an endpoint, in any pack \u2014 the graph can hold one but cannot connect it to the work that serves it or the person who owns it"
-    },
-    {
       "kind": "plan",
       "namespace": "core",
       "owner": null,
@@ -1176,12 +1246,6 @@
     {
       "kind": "customer",
       "namespace": "product-strategy",
-      "owner": null,
-      "note": "is declared by its pack and no declared relation or hierarchy names it as an endpoint"
-    },
-    {
-      "kind": "indicator",
-      "namespace": "dev",
       "owner": null,
       "note": "is declared by its pack and no declared relation or hierarchy names it as an endpoint"
     },
@@ -1227,7 +1291,7 @@
     "relations_channel": {
       "status": "UNMEASURED",
       "owner": "#11237",
-      "why": "`result[\"relations\"]` (#10999's channel) has no consumer in tortoise/: the code says so itself in `extractor_v2.py`'s S5 Job 1 block \u2014 \"nothing in this tree consumes `result[\"relations\"]`\" \u2014 and that block is the ONLY support for this UNMEASURED cell, so it is cited by its SENTENCE. \u26d4 Not by a line number: this string carried `:10815`, which is inside the MITIGATES-strength warning block, not the S5 Job 1 block \u2014 a line cite re-stales on every edit above it and `--write-probe` would reproduce the stale pointer forever. An unmeasured column reads UNMEASURED, never 0 (#10995)."
+      "why": "`result[\"relations\"]` (#10999's channel) IS consumed: the capture commit path calls `relation_write.apply_relation_edges` on that same dict (`sdk.py::TortoiseSDK._extract_session_v2` \u2014 `out = extract_session_v2(...)`, then `if out.get(\"relations\")`). What stays UNMEASURED is the EMISSION leg (whether a capture actually populates the channel, and how many edges it yields) and the declared-PAIR gate, which is `#11656`'s scope. Cited by SYMBOL, never by a line number: this string carried `:10815`, which was inside the MITIGATES-strength warning block, and a line cite re-stales on every edit above it. An unmeasured column reads UNMEASURED, never 0 (#10995)."
     },
     "hierarchy_invocation": {
       "status": "UNMEASURED",

@@ -189,6 +189,53 @@ ontology:
     semantics: addresses
     fromKind: dev:pullRequest
     toKind: dev:issue
+  # ── the commitment spine (KIN-2, approved 2026-11-05) ────────────────────
+  # `06-pack-logic-decisions.md` §KIN-2 declared three connections that no
+  # child owned, using ONLY words the canonical document already rules — no
+  # new kinds, no new vocabulary. They are declared here because `dev` is the
+  # pack that owns the delivery vocabulary (`epic`, `indicator`, `theme`) and
+  # already points relations at core kinds (`deploysTo` → `core:deployment`).
+  #
+  # Measured before they existed (`docs/evidence/11083/pack-relation-census.json`,
+  # `dangling`): `goal` is a core Object kind (§5's commitment-state family)
+  # and 0 of the 42 declared connections named it as an endpoint, so the graph
+  # could hold a goal and could not connect it to the work that serves it or
+  # the person who owns it. `dev:indicator` was dangling for the same reason.
+  #
+  # ⚠️ `goal --ownedBy--> Subject` carries `mechanism: IMPL` only because a
+  # new-format relation must declare one (pack_registry._validate). ONTOLOGY §8
+  # gives `ownedBy` NO mechanism (`—`: structural/neutral), so neither spelling
+  # contradicts it. `relation_write_verdict` answers the SET of bound paths —
+  # `("operator", "structural")` for this row, operator FIRST — not a choice:
+  # the PICK is `pack_hierarchy._binding`'s (`_VALID_EDGE_PREDICATES` ⇒ structural)
+  # and `tools/pack_relation_census.py::_relation_row`'s (`"structural" in paths`),
+  # and both resolve this row to the STRUCTURAL path, where the writer stamps
+  # `:ownedBy` as a bare `(:Object)-[:ownedBy]->(:Subject)` edge.
+  # §3.6 makes the target an Entity (Subject | Object); this row names the
+  # Subject half — the accountable owner — and its `->` reads "the subject owns
+  # the goal", which is RACI Accountable, not a stake.
+  - predicate: ownedBy
+    mechanism: IMPL
+    semantics: ownedBy
+    fromKind: core:goal
+    toKind: Subject
+    cardinality: many_to_one
+  # A goal is served by the epics that pursue it and measured by the
+  # indicators that track it. §8 gives `addresses` IMPL and `->`, so an epic
+  # existing is weak evidence the goal is real — the same reading
+  # `dev:fixes` (a PR addresses a bug) already carries.
+  - predicate: addresses
+    mechanism: IMPL
+    semantics: addresses
+    fromKind: dev:epic
+    toKind: core:goal
+    cardinality: many_to_many
+  - predicate: addresses
+    mechanism: IMPL
+    semantics: addresses
+    fromKind: dev:indicator
+    toKind: core:goal
+    cardinality: many_to_one
   hierarchies:
   - path: Theme → Epic
     type: hasPart

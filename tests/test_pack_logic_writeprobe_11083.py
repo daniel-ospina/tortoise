@@ -182,15 +182,16 @@ def test_g1c_the_written_column_distinguishes_a_bridge_from_an_edge():
     """The whole reason the column is three-valued.
 
     `create_operator` writes `(o1)-[:INPUT]->(op)-[:IMPL]->(o2)`, never
-    `(o1)-[:p]->(o2)`. A census asking only "written?" reports 41/42 and hides
-    that the direct Object→Object class is 8 of 42 — 2 relations and 6
-    hierarchies (the `pm` rows that keep their Domain words ride the operator
-    path, so they read `mediated`, not `direct`).
+    `(o1)-[:p]->(o2)`. A census asking only "written?" reports 44/45 and hides
+    that the direct Object→Object class is 9 of 45 — 3 relations (`dev:hasPart`,
+    `dev:dependsOn`, `dev:ownedBy` — the last one this lane added, Object→Subject)
+    and 6 hierarchies (the `pm` rows that keep their Domain words ride the
+    operator path, so they read `mediated`, not `direct`).
     """
     committed = json.loads(ARTIFACT.read_text())
     counts = committed["written_counts"]
-    assert counts["direct"] == 8, counts
-    assert counts["mediated"] == 33, counts
+    assert counts["direct"] == 9, counts
+    assert counts["mediated"] == 35, counts
     assert counts["none"] == 1, counts
     assert sum(v for k, v in counts.items() if not k.startswith("UNMEASURED")) == \
         committed["population"]["declared"], (

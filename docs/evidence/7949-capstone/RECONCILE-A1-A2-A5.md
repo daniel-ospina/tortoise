@@ -193,7 +193,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    produced by `_EdgeHandlers.link_source_to_event` — `probes/capstone_measure.py:275-283`, reached from
    the capture path at `tortoise/sdk.py:17749`). (The probe's own docstring cites it too and was
    re-derived with it — `#11212` had already corrected a stale `:17465` there, and `#11459`'s +102
-   insertion then moved both; both now read `17852`.) What is missing is the *declared part-whole* edge, not every structural
+   insertion then moved both; both now read `17749`.)  <!-- #10226 removed 26 SDK methods above this writer: the prose cite and the `sed` were re-derived with it, this bare parenthetical was not — re-derived here off `grep -n '^ *proj\.link_source_to_event' tortoise/sdk.py`. --> What is missing is the *declared part-whole* edge, not every structural
    edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second
    producer" the epic forbids).
 3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2747-2749`
@@ -715,13 +715,19 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
                                                           # sdk.create_operator) and 0 at this base — a
                                                           # count is only as good as the base it was taken at
 # ⛔ THREE hits in this record's merged tree since #11548 landed the consumer (#11237):
-# extractor_v2.py:11470 (the stale comment), relation_write.py:7, sdk.py:17296.
+# extractor_v2.py:11470 (the comment that WAS stale, corrected in place by #11001's lane),
+# relation_write.py:7, sdk.py:17296.
 # ⛔ AND THE CONCLUSION THIS ROW WAS WRITTEN WITH IS NOW FALSE — `relation_write.py` IS that
 # consumer. Its own docstring says so ("#10999 built the `relations` channel as transport only …
 # and nothing consumed it. … This module is that consumer"), and `_extract_session_v2` calls it at
-# `sdk.py:17309` (`_capture_session` reaches it at `sdk.py:15510`). Of the three hits only ONE is still prose-about-absence (the stale comment at
+# `sdk.py:17309` (`_capture_session` reaches it at `sdk.py:15510`). Of the three hits only ONE was still prose-about-absence (the stale comment at
 # `extractor_v2.py:11470`); the other two are the consumer announcing itself. Read §0's amendment
 # above, never "nothing consumes it".
+# ⛔ AND AS OF `#11001`'s LANE NONE OF THE THREE IS: the comment at `extractor_v2.py:11470` was
+# corrected IN PLACE — same line, and its block's line count was held at 13 so every cite in this
+# record keeps its number — to state the consumer (`apply_relation_edges`, called from
+# `_extract_session_v2`) and to leave only the EMISSION leg unmeasured. So the A1 paragraph's quote
+# is now history only, and the ONE prose-about-absence hit this row counted is gone.
 # ⛔ Both sides of the #11534 × #8290 forward-merge printed a different number, and neither matched
 # the other: the branch printed 10906 / :7 / 17181 at its own tip, main printed 11119 / :7 / 17188
 # at its own. The MERGED tree's three are exactly main's three — which is precisely why this was
@@ -730,8 +736,10 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
 # this record's base: ONE hit" was itself stale — that base predates #11205, whose comment is the
 # hit.) Re-measured at the merge.
 git grep -n 'result\["relations"\]' -- tortoise/        # at this record's merged tree: THREE hits —
-                                                          # :11470 (the stale "nothing consumes it"
-                                                          # comment), relation_write.py:7 (the
+                                                          # :11470 (was the stale "nothing
+                                                          # consumes it" comment; CORRECTED in
+                                                          # place — see the note above),
+                                                          # relation_write.py:7 (the
                                                           # CONSUMER's docstring) and sdk.py:17296 (the
                                                           # #10999 transport-only note). ⛔ NOT "no
                                                           # consumer": the second hit IS the consumer

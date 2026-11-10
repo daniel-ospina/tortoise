@@ -26,13 +26,17 @@ named in §10 so the correction is auditable.
 ## 1. Confirmed problem
 
 A pack declares `relations[]: {predicate, mechanism, fromKind, toKind}`. **Nothing checks that a written
-edge's endpoints have those kinds.** 36 declared relations across 7 packs; 35 carry `fromKind`+`toKind`.
+edge's endpoints have those kinds.** 39 declared relations across 7 packs; 38 carry `fromKind`+`toKind`.
 
-> ⚠️ **Re-measured at `3d63339d` after `main` was merged into this branch.** The merge brought three new
+> ⚠️ **Re-measured at `3d63339d` after `main` was merged into this branch, and again at `4584d090` after
+> `#11001` declared KIN-2's three.** The `main` merge brought three new
 > kind-bearing declarations (`pm:blocks` → `pm:card→pm:card`, `pm:partOfSprint` → `pm:sprint→pm:card`,
-> `pm:assignedTo` → `pm:card→Subject`, all `IMPL`) plus `pm:onBoard`, which declares one `from`/`to` and no kinds. The figures below were first measured at `e809803e` (32 kind-bearing, 31 `IMPL` + 1 `NAND`,
-> 30 direct-shape (26 Object→Object), 7 disabled by §5.2) and are restated here at **this** head: **35 kind-bearing,
-> 34 `IMPL` + 1 `NAND`, 28 Object→Object (33 direct-shape), 8 disabled by §5.2**. The argument does not move — every
+> `pm:assignedTo` → `pm:card→Subject`, all `IMPL`) plus `pm:onBoard`, which declares one `from`/`to` and no kinds.
+> `#11001` then declared the three goal connections KIN-2 approved on 2026-11-05 and no child had written
+> (`core:goal --ownedBy--> Subject`, `dev:epic --addresses--> core:goal`, `dev:indicator --addresses--> core:goal`).
+> The figures below were first measured at `e809803e` (32 kind-bearing, 31 `IMPL` + 1 `NAND`,
+> 30 direct-shape (26 Object→Object), 7 disabled by §5.2) and are restated here at **this** head: **38 kind-bearing,
+> 37 `IMPL` + 1 `NAND`, 30 Object↔Object (36 direct-shape), 11 disabled by §5.2**. The argument does not move — every
 > kind-bearing declaration still rides the operator path, and `create_edge` is still the wrong seam — but the
 > counts are what a lane implements against and what pins 1, 8 and 16 assert, so they are stated at the head
 > they were measured on. Every figure is re-derived on every run by
@@ -64,10 +68,10 @@ not-terminal, and the claim-class override. `undeclared_relation` fires only in 
 **And the direct door is the *dominant* shape, not a corner.** `_point_mediated_route` (`sdk.py::TortoiseSDK._point_mediated_route`)
 reifies only when a `:Point` is involved — *"`Object↔Object` keeps the direct shape … `Point↔Object` is
 operator-mediated … `Subject`/`Event` endpoints are not Point-bearing and take the Object path"*
-(`sdk.py::TortoiseSDK._point_mediated_route`, its docstring) — and the 35 kind-bearing declarations partition as **28 Object↔Object**, **5 more
-direct-shape but not Object↔Object** (3 `Object→Subject`, 1 `Object→Event`, 1 `Event→Object`), and **2
+(`sdk.py::TortoiseSDK._point_mediated_route`, its docstring) — and the 38 kind-bearing declarations partition as **30 Object↔Object**, **6 more
+direct-shape but not Object↔Object** (4 `Object→Subject`, 1 `Object→Event`, 1 `Event→Object`), and **2
 Point-involved** (`agent-ops:groundedIn` via `pointKinds: rationale`, `product-strategy:addresses`
-`useCase→feature` via `pointKinds: useCase`) — so **33 of the 35** take the direct shape through
+`useCase→feature` via `pointKinds: useCase`) — so **36 of the 38** take the direct shape through
 `link_entities` and through `ingest` alike, and **the other 2 are reified by `ingest` only**. ⛔ The Point gate
 is `ingest`'s, not `create_direct_edge`'s: `_effective_route` is called only inside `ingest`/its helpers
 (`sdk.py::TortoiseSDK.ingest` and its `_check_endpoints` / `_check_endpoint_race` helpers), and `create_direct_edge`'s own docstring says so — *"`ingest()` adds the
@@ -120,7 +124,7 @@ implements pins 1–18; it does **not** treat this list as the specification.
 claim holds, on different evidence:
 
 ```text
-addresses   declared 6×, 6 DISTINCT pairs   (4 of them inside product-strategy alone)
+addresses   declared 8×, 8 DISTINCT pairs   (4 of them inside product-strategy alone)
 contains    2×, 2 pairs                     (marketing, product-strategy)
 targets     2×, 2 pairs
 assignedTo  2×, 2 pairs                     (pm, venture — both Object→Subject)
@@ -142,7 +146,7 @@ the declared relation.
 |---|---|
 | **D1** | **Refuse** where the pair is declared **and both endpoint kinds are known**. **Never refuse** on an unknown / `unclassified` kind. **Severity declared by the pack; the policy applied by the graph.** |
 | **D2** | A declared parent kind **accepts its declared subclasses** — closure over the declared kind, both spelling forms admitted, `equivalentTo` included. |
-| **D3** | A declaration's binding scope is **the vocabulary it names**, not the predicate name. ⛔ **This DEPARTS from the ruling as recorded on the issue** ("the declaring pack's vocabulary") and is **reopened there, pending one line from the owner**: [#11656 comment 6754927533](https://github.com/daniel-ospina/tortoise/issues/11656#issuecomment-6754927533). Read it before implementing — the two readings differ in outcome (§5.2: the pack-scoped reading leaves **8 of the 35** declarations permanently `unbound`). |
+| **D3** | A declaration's binding scope is **the vocabulary it names**, not the predicate name. ⛔ **This DEPARTS from the ruling as recorded on the issue** ("the declaring pack's vocabulary") and is **reopened there, pending one line from the owner**: [#11656 comment 6754927533](https://github.com/daniel-ospina/tortoise/issues/11656#issuecomment-6754927533). Read it before implementing — the two readings differ in outcome (§5.2: the pack-scoped reading leaves **11 of the 38** declarations permanently `unbound`). |
 | **D5** | The **prevention half lives in this issue**. |
 
 ### 2.1 D1's precedence, stated — the contradiction in revision 1
@@ -175,9 +179,9 @@ with a different answer, so it gets its own default. Both are pinned (§6 pins 8
 
 | alternative | why rejected |
 |---|---|
-| Gate `create_edge` only (the issue's own prescription) | covers 2 of 35 — 6 %. |
-| Exclude `create_direct_edge` (revision 1) | **false**: it takes a `label`, and it is the dominant shape — 33 of the 35 declarations are direct-shape (§1.1). |
-| Predicate-name-global constraint | refuses most of `addresses`' six pairs (and the 17/47 live edges). The modelling error RDFS names. |
+| Gate `create_edge` only (the issue's own prescription) | covers 3 of 38 — 8 %. |
+| Exclude `create_direct_edge` (revision 1) | **false**: it takes a `label`, and it is the dominant shape — 36 of the 38 declarations are direct-shape (§1.1). |
+| Predicate-name-global constraint | refuses most of `addresses`' eight pairs (and the 17/47 live edges). The modelling error RDFS names. |
 | Refuse on unknown kind too | contradicts `EXTRACTOR-V4-ARCHITECTURE.md` §4.4 S2.3 (*"FAIL-OPEN, never raises … `unclassified` is honest"*) and the AX admission test. |
 | Warn-only everywhere | the permanently-degraded signal (brief §9.2); graph holds `pt_656aa190…` *"partial enforcement reads as fixed"*. |
 | New manifest key + new per-graph policy record | unnecessary — `extraction.enforcement.relations` + `resolve_enforcement` exist; only the kind-pair **default** is new (§2.1). |
@@ -239,10 +243,10 @@ so the rows are free; the missing piece is `relations_for_namespaces(names) -> r
 `ResolvedPackSet`'s **tri-state** (`None` ⇒ catalog union; `frozenset()` ⇒ deliberately empty; a set ⇒
 recorded ∪ data). Reuse `pack_state.resolved_pack_set_for_graph` — it exists for bare-graph seams.
 
-### 5.2 The binding test (D3) — 8 of 35 span universes, not 2
+### 5.2 The binding test (D3) — 11 of 38 span universes, not 2
 
 ⚠️ **Revision 1's rule ("both kinds resolve into the *declaring pack's* universe") would have silently
-disabled 8 of the 35 declarations** — never enforced, never warned about. They are:
+disabled 11 of the 38 declarations** — never enforced, never warned about. They are:
 
 ```text
 dev:implements               dev:issue              -> product-strategy:feature
@@ -250,9 +254,12 @@ dev:deploysTo                dev:code               -> core:deployment
 portfolio:constrainedBy      venture:investment     -> portfolio:mandate
 portfolio:marks              portfolio:valuationMark-> venture:investment
 product-strategy:manifests   dev:incident           -> product-strategy:customerProblem
+dev:epic                     dev:epic               -> core:goal          (a FOREIGN namespace, `#11001`)
+dev:indicator                dev:indicator          -> core:goal          (a FOREIGN namespace, `#11001`)
 pm:assignedTo                pm:card                -> Subject          (a LAYER, §5.3)
 venture:assignedTo           venture:actionItem     -> Subject          (a LAYER, §5.3)
 venture:holds                venture:investment     -> Subject          (a LAYER, §5.3)
+core:goal                    core:goal              -> Subject          (a LAYER, §5.3)  # `ownedBy`, `#11001`
 ```
 
 **Rule:** a declaration binds when each endpoint kind resolves into **the namespaces the declaration itself
@@ -315,8 +322,8 @@ already exists.** `_matching_row` joins a hierarchy entry to its `relations[]` r
   applied to itself, and the pin over this chain lives in `tests/test_11656_endpoint_kind_binding_scope.py`.**
 
 **The delta:** use that same map to choose **which relation labels to offer for a pair**, derived from
-`ontology.relations[]` (36 declared relations, **35 of them kind-bearing** — `pm:onBoard` is `declarationOnly`
-and carries no kinds, so it maps no pair — which collapse to **34** distinct `(fromKind, toKind)` pairs:
+`ontology.relations[]` (39 declared relations, **38 of them kind-bearing** — `pm:onBoard` is `declarationOnly`
+and carries no kinds, so it maps no pair — which collapse to **37** distinct `(fromKind, toKind)` pairs:
 `venture:asset→venture:program` is declared twice, by `protects` and `producedBy`) — **not** `extraction.relationTemplates[]` (declared but
 unshipped; only `packs/_template` has it, commented out). Reuse `extractor_v2.build_master_list`, which
 already carries the per-graph tenant-narrowed kind vocabulary.
@@ -413,15 +420,16 @@ the declared kinds; a read-side census reports the pre-existing population.
 | earlier claim | the truth | how it was found |
 |---|---|---|
 | "two writers: `create_operator` + `create_edge`" | **three** — `create_direct_edge` takes a `label` and validates nothing | fresh review (P0) |
-| "`hasPart` declared by 4 packs with 4 different pairs" | `hasPart` as a predicate is declared **once**; the **five** rows that produced the miscount carried `semantics: hasPart` over **four** different predicates (`decomposesInto`, `contains` ×2, `partOf`, `partOfSprint`). Real evidence: `addresses` ×6, `contains` ×2, `targets` ×2 | fresh review (P1), confirmed by recount |
+| "`hasPart` declared by 4 packs with 4 different pairs" | `hasPart` as a predicate is declared **once**; the **five** rows that produced the miscount carried `semantics: hasPart` over **four** different predicates (`decomposesInto`, `contains` ×2, `partOf`, `partOfSprint`). Real evidence at that head: `addresses` ×6, `contains` ×2, `targets` ×2 (now ×8) | fresh review (P1), confirmed by recount |
+| **the DECLARED POPULATION moved under this scope's figures** (36 → 39 relations, 35 → 38 kind-bearing, 34 → 37 `IMPL`, 28 → 30 Object↔Object, 3 → 4 `Object→Subject`, 33 → 36 direct-shape, 8 → 11 naive-D3 casualties, `addresses` 6× → 8×) | `#11001` declared KIN-2's three approved goal connections and left EVERY figure in this doc and in `docs/00_index.md` stale; nothing re-measured them | `TestTheInventoryTheScopeCites` caught it (8 reds plus the ledger row), which is the pin doing what its own docstring promises: *"a manifest edit that makes a scope claim false reds here instead of rotting in prose"* |
 | "`fromKind`/`toKind` acted on in exactly one place" | **four** readers, incl. `_resolve_traversal_path` which is D5's own job, and **`pack_hierarchy._matching_row`/`_binding` — a pair→writer resolver that already exists and must be reused, not rebuilt** | fresh review (P1) |
 | "`_relation_endpoint_refs` has no production consumer" | it is **wired**, for kind co-selection | `[VGATE]` round 1 |
-| "30 of 32 declare a mechanism" | **35 of 35** (34 IMPL + 1 NAND), incl. `hasPart`/`dependsOn` | `[VGATE]` round 1 |
+| "30 of 32 declare a mechanism" | **35 of 35** (34 IMPL + 1 NAND), incl. `hasPart`/`dependsOn` — figures at that head; **38 of 38** (37 IMPL + 1 NAND) after `#11001` | `[VGATE]` round 1 |
 | "`mismatch` → refuse, unconditionally" beside "read the level through `resolve_enforcement`" | contradictory — the map's default is `warn` and no pack declares a level. Fixed by §2.1 | fresh review (P1) |
 | "both kinds in the declaring pack's vocabulary" | disables **8** of 35 cross-universe declarations. Fixed by §5.2 | fresh review (P1) |
 | "leaves 31 untested" | `create_edge` covers 2 ⇒ leaves **33** | fresh review (P2) |
 | "five call sites" / "four writers" (revision 3) | **six**, and **two** of them are replay folds — the operator fold *and* the `DirectEdgeCreated` fold (`projection/__init__.py` pass-2b), which carries declared predicates from **two** producers: rel type for the structural-edge lane, a `label` property for `create_direct_edge`. Fixed by §1.2 item 6, §4, pins 15/15b | fresh review (P1) — found by opening the second fold's own `#9553 class 4` note |
-| **earlier defect:** "32 of the 35 are Object→Object" (§1.1) | it was the **non-`Subject`** count relabelled (35 − 3 `Subject`), which absorbed the four non-`Subject` non-Object rows — two of them Point-involved. The true figures are **28 Object↔Object** and **33 direct-shape** (not Point-involved), and they are pinned against the registry by `test_the_direct_shape_partition_28_object_and_33_non_point` | fresh review, and a lane building pin 14's fixture from `addresses` would have watched the `useCase→feature` row reify and concluded the direct door is not the dominant shape |
+| **earlier defect:** "32 of the 35 are Object→Object" (§1.1) | it was the **non-`Subject`** count relabelled (35 − 3 `Subject`), which absorbed the four non-`Subject` non-Object rows — two of them Point-involved. The corrected figures (since moved again by `#11001` — see the re-measurement note in §1) are pinned against the registry by `test_the_direct_shape_partition_30_object_and_36_non_point` | fresh review, and a lane building pin 14's fixture from `addresses` would have watched the `useCase→feature` row reify and concluded the direct door is not the dominant shape |
 | **earlier defect:** the list of call sites presented as the specification | an **inventory**, not a completeness claim: four review rounds each asserted a writer set and each was wrong. Completeness is now **measured** (pin 18) | the scoping lane's handoff on #11656, confirmed by a fresh review |
 | §2.1's **"Recorded here"** for the `#1934` departure (revision 4) | the marker's **home is the ISSUE**, not this ledger: it is now on `#1934` itself (comment 6759287749 — the `OVERRIDES:` line naming #1934's warn-not-block), relayed with a cross-reference on `#11656` (comment 6759288785); this doc keeps the ledger copy | fresh review (P3-2) — `#1934` was CLOSED and held **0** `OVERRIDES` comments, so the departure read as an accident at the only artifact a lane reads |
 | "reached from `sdk.apply_relation_edges` (`sdk.py::TortoiseSDK._extract_session_v2`)" (revision 3) | **that symbol does not exist** — `TortoiseSDK` has no such method. It is `tortoise.relation_write.apply_relation_edges` (`relation_write.py::apply_relation_edges`), imported and called inside `sdk.py::TortoiseSDK._extract_session_v2`. And the pair→writer **join** is not in `plan_hierarchy_edges` (`pack_hierarchy.py::plan_hierarchy_edges`, which matches the already-resolved `edge.from_kind`/`edge.to_kind`): it is in `declared_hierarchy` (`pack_hierarchy.py::declared_hierarchy`) → `_resolve` (`pack_hierarchy.py::_resolve`) → `_binding` (`pack_hierarchy.py::_binding`) + `_matching_row` (`pack_hierarchy.py::_matching_row`). Fixed by §5.5, and pinned by `test_the_fourth_reader_is_the_pair_to_writer_resolver` inside `_resolve`'s own source | fresh review (P2) — found by opening `sdk.py::TortoiseSDK._extract_session_v2`, which is an *import* |
