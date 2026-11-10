@@ -57,9 +57,16 @@ _LABEL_CLAIM = re.compile(
 #: quoted `git grep` still carried `-- tortoise/`, so only the prose population was
 #: free to lie — and §5's own next sentence ("re-derives both numbers over the **same**
 #: population this sentence is stated in") asserts the very thing nothing read.
+#: ⛔ The lookahead requires the QUOTED-COMMAND clause ("… files under `tortoise/`
+#: (`git grep …") to follow the population IMMEDIATELY. An earlier version enumerated
+#: the separators a second population could be joined with (`,`, `and`, `or`, `plus`)
+#: — a closed list, measured GREEN on `files under `tortoise/` + `tests/``,
+#: `` `tortoise/` & `tests/` `` and `` `tortoise/` as well as `tests/` ``, i.e. green on
+#: exactly the drift it exists to stop. Binding what MUST follow instead of what must
+#: not is the shape that closes it: every added population breaks the lookahead.
 _POPULATION_CLAIM = re.compile(
     r"occurs on \*\*\d+\*\*\s+lines\s+across\s+\*\*\d+\*\*\s+files\s+under\s+"
-    r"`([^`]+)`(?!\s*(?:,|and|or|plus)\s*`)"
+    r"`([^`]+)`(?=\s*\()"
 )
 
 _COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
@@ -1703,11 +1710,11 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     assert populations == [_TRACKED_DIR + "/"], (
         f"§5 states its `:Document` figure over {populations!r}, but this pin measures "
         f"`{_TRACKED_DIR}/` — the count and the file count are only true for the "
-        f"population they were measured over, so naming a different one (e.g. "
-        "`tests/`, a population more than twice as large as the one this pin measures) "
-        "makes the sentence false "
+        f"population they were measured over, so naming a different one (or a second "
+        "one alongside it) makes the sentence false "
         "while every number here stays green. State `files under "
-        f"`{_TRACKED_DIR}/``, or measure the population you name"
+        f"`{_TRACKED_DIR}/`` followed by the quoted measurement, or measure the "
+        "population you name"
     )
     assert (claimed_lines, claimed_files) == (lines, files), (
         f"§5 claims {claimed_lines} lines across {claimed_files} files; the tree has "
