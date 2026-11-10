@@ -4265,6 +4265,17 @@ DENIAL_MARKERS: tuple[str, ...] = (
     "is exempt",
     "is exempted",
     "an exemption",
+    # ⚠️ `the exemption` is LIVE as of the `#11665` clause in the extractor's §3
+    # (*"The exemption is about CONTENT, not the declaration site"*), and it is
+    # deliberately NOT listed in `MARKERS_ABSENT_BY_DESIGN` any more: that
+    # declaration claimed the corpus would not write the spelling, and the corpus
+    # now does. It is a TOPIC use — the noun naming the exempt class, not a
+    # sentence calling a counted writer an exemption — and it cannot false-red,
+    # because this tuple is only consulted against a sentence that NAMES a census
+    # writer (`_denies_the_class`), and that sentence names none (`#11714`).
+    # Removing the declaration is the stale-declaration remedy leg 36 prescribes;
+    # rewording the document instead would be clearing a red by weakening TRUE
+    # prose, which is the failure mode these legs exist to prevent.
     "the exemption",
     "carries nothing",
     "writes nothing",
@@ -7089,11 +7100,6 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
         "contradiction vocabulary — the indefinite-articled form the owner's "
         "decision quotes verbatim ('called an exemption'). Absent from both "
         "documents until someone writes it"
-    ),
-    "the exemption": (
-        "contradiction vocabulary — the definite-articled form. Absent from both "
-        "documents until someone writes it; the documents write `both exemptions` "
-        "and `merely exempting` instead, neither of which is a denial"
     ),
     "counts as a writer": (
         "contradiction vocabulary — the VERB form of 'called counted', absent from "

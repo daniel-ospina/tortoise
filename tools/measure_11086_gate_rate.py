@@ -49,13 +49,23 @@ previous run's.
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/measure_11086_gate_rate.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/measure_11086_gate_rate.py`"
+    )
+
 import argparse
 import hashlib
 import json
 import os
 import re
 import subprocess
-import sys
 import time
 from pathlib import Path
 
