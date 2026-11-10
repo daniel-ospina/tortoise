@@ -297,10 +297,18 @@ def main(argv: list[str] | None = None) -> int:
                               "cannot be re-badged by repeating --graph here. "
                               "⚠️ The check is NAME-ONLY: a graph of the same name "
                               "on a different INSTANCE, or measured EARLIER, is "
-                              "NOT detected here. An earlier census IS bounded "
-                              "downstream: a report claiming more nodes than its "
-                              "population now holds is REFUSED, as is a claim above "
-                              "the graph's whole node count."))
+                              "NOT detected here. An earlier or oversized census "
+                              "IS bounded downstream: a report claiming more "
+                              "nodes than its OWN population now holds is "
+                              "demoted to cannot-answer, so that population is "
+                              "absent from `plan['evictable']` (no licence), and "
+                              "a claim above the graph's whole node count is also "
+                              "refused. Note the VERDICT that demotion produces: "
+                              "`REFUSED` only when the cache is also over its "
+                              "byte ceiling — a byte-clean cache still answers "
+                              "`CLEAN`, carrying an empty licence. Read "
+                              "`plan['evictable']`, not the verdict, to learn "
+                              "what may be swept."))
     parser.add_argument("--ceiling-bytes", type=int, default=None,
                         metavar="N",
                         help=("a declared ceiling; defaults to "
