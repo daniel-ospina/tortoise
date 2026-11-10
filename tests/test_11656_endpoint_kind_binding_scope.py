@@ -277,6 +277,15 @@ def _collected_test_nodes(source: str) -> list[ast.AST]:
                 # nested `class TestInner` with one method) was taken by the name branch first, which walked
                 # the body as a container and reported **(2, 2)** where `--collect-only` collects **1** —
                 # the over-count direction, and one of the three shapes this passed off as impossible.
+                # ⛔ The `__test__` arm applies HERE TOO (round-28 P3, measured): pytest's unittest path
+                # refuses a class on a FALSY `__test__` (`_pytest/unittest.py`: `if not getattr(cls,
+                # "__test__", True): return`), and this branch bypassed the predicate entirely — so
+                # `class DisabledCase(unittest.TestCase): __test__ = False` was collected by nobody while the
+                # derivation counted it. ⛔ NOT the `__init__` arm: measured, a `unittest.TestCase` with a
+                # class-level `__init__` IS collected (`1 test`), because pytest's `hasinit` refusal exists
+                # only on the name-based path — applying it here would flip the defect to an UNDERCOUNT.
+                if _class_refuses_collection(node):
+                    continue
                 nodes.extend(
                     member
                     for member in node.body
@@ -299,34 +308,72 @@ def _collected_test_nodes(source: str) -> list[ast.AST]:
     return nodes
 
 
+#: Sentinel: a `__test__` bound to something that is not a literal, so its truthiness is a RUNTIME fact.
+_NOT_CONSTANT = object()
+#: Sentinel: no `__test__` binding at all. ⛔ DISTINCT from `None`, and that is not pedantry — `__test__ =
+#: None` is a real falsy binding pytest refuses, so folding "unbound" onto `None` made it read as "no
+#: binding" and still counted the class (measured round-28: derived `(1, 1)` where pytest collects `0`).
+_UNBOUND = object()
+
+
+def _test_dunder(body: list[ast.stmt]) -> object:
+    """The `__test__` a body binds: its CONSTANT value, `_NOT_CONSTANT`, or `_UNBOUND` if it binds none.
+
+    ⛔ pytest tests `__test__` for TRUTHINESS, never for identity with `False` (`_pytest/python.py`:
+    `if not safe_getattr(self.obj, "__test__", True): return []`; `_pytest/unittest.py`: `if not
+    getattr(cls, "__test__", True): return`). The first revision of this helper tested `is False`, so
+    `__test__ = 0` / `None` / `""` all read as "collectable" — measured round-28 P3: pytest collected
+    **0** for each while `_derive_population` reported **(1, 1)**, a silent over-count in the exact
+    direction the helper exists to close. A non-literal binding is not answerable from the AST at all, so
+    it is returned as `_NOT_CONSTANT` and `_derive_population` fails closed on it rather than guessing.
+    """
+    for stmt in body:
+        if isinstance(stmt, ast.Assign):
+            if any(isinstance(t, ast.Name) and t.id == "__test__" for t in stmt.targets):
+                return stmt.value.value if isinstance(stmt.value, ast.Constant) else _NOT_CONSTANT
+        elif (
+            isinstance(stmt, ast.AnnAssign)
+            and isinstance(stmt.target, ast.Name)
+            and stmt.target.id == "__test__"
+        ):
+            value = stmt.value
+            return value.value if isinstance(value, ast.Constant) else _NOT_CONSTANT
+    return _UNBOUND
+
+
+def _declares_falsy_test_dunder(body: list[ast.stmt]) -> bool:
+    """True iff this class/module body binds `__test__` to a FALSY literal — pytest then collects nothing."""
+    value = _test_dunder(body)
+    return value is not _UNBOUND and value is not _NOT_CONSTANT and not value
+
+
+def _class_refuses_collection(node: ast.ClassDef) -> bool:
+    """The refusals that apply to a class on EITHER pytest collection path — i.e. `__test__` alone."""
+    return _declares_falsy_test_dunder(node.body)
+
+
 def _pytest_collects_class(node: ast.ClassDef) -> bool:
-    """False for the two `Test*` shapes pytest's collector REFUSES — both measured with `--collect-only`.
+    """False for the shapes pytest's NAME-BASED collector REFUSES — both measured with `--collect-only`.
 
     A bare `node.name.startswith("Test")` walk counts both of them, i.e. in the OVERCOUNT direction, and
     round-27 P3 measured exactly that against the helper's own fail-closed promise:
 
-      * `__test__ = False` on the class — pytest reports `no tests collected` for it;
+      * a FALSY `__test__` on the class — pytest reports `no tests collected` for it;
       * a class-level `__init__` — pytest will not instantiate the class (`no tests collected`, plus a
         `PytestCollectionWarning`), so none of its methods is a case.
 
-    Neither is modelled by counting; both are modelled exactly by returning False here, which is why this
-    is a predicate and not a raise (unlike the arms in `_derive_population`, these two ARE answerable).
+    Neither is modelled by counting; both are modelled exactly here, which is why this is a predicate and
+    not a raise (unlike the arms in `_derive_population`, these two ARE answerable).
+
+    ⛔ The `__init__` arm is NAME-PATH ONLY — measured: `class Case(unittest.TestCase)` with a class-level
+    `__init__` IS collected (`1 test`), so it must not be applied to the TestCase branch above.
     """
-    for stmt in node.body:
-        if isinstance(stmt, ast.Assign):
-            targets = [t for t in stmt.targets if isinstance(t, ast.Name)]
-            if any(t.id == "__test__" for t in targets) and (
-                isinstance(stmt.value, ast.Constant) and stmt.value.value is False
-            ):
-                return False
-        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
-            if stmt.target.id == "__test__" and (
-                isinstance(stmt.value, ast.Constant) and stmt.value.value is False
-            ):
-                return False
-        elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name == "__init__":
-            return False
-    return True
+    if _class_refuses_collection(node):
+        return False
+    return not any(
+        isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name == "__init__"
+        for stmt in node.body
+    )
 
 
 def _derive_population(source: str) -> tuple[int, int]:
@@ -355,6 +402,15 @@ def _derive_population(source: str) -> tuple[int, int]:
         so whether it multiplies cases cannot be answered without modelling per-module/class marks
     """
     tree = ast.parse(source)
+
+    # ⛔ MODULE-LEVEL `__test__` disables collection for the WHOLE module on both paths — measured: a module
+    # carrying `__test__ = False` reports `no tests collected` even for a `unittest.TestCase` subclass in it.
+    # A falsy literal is therefore answerable exactly (0); a non-literal is a runtime fact this derivation
+    # cannot read, so it falls into the `unreadable` arms below with every other unmodellable shape.
+    module_dunder = _test_dunder(tree.body)
+    if module_dunder is not _UNBOUND and module_dunder is not _NOT_CONSTANT and not module_dunder:
+        return 0, 0
+
     nodes = _collected_test_nodes(source)
 
     # A module-level name bound to something `parametrize`-shaped (`pt = pytest.mark.parametrize`) then used
@@ -423,6 +479,20 @@ def _derive_population(source: str) -> tuple[int, int]:
 
     extra = 0
     unreadable: list[str] = []
+    # A `__test__` bound to a non-literal is a RUNTIME truthiness fact: whether the class (or module) is
+    # collected cannot be answered from the AST, so it is an ERROR rather than a silent number — the same
+    # contract every other arm here holds. A literal is modelled exactly by `_test_dunder` above.
+    if module_dunder is _NOT_CONSTANT:
+        unreadable.append(
+            "module-level `__test__` is bound to a non-literal, so whether ANY test in this module is "
+            "collected is a runtime fact this derivation cannot read"
+        )
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and _test_dunder(node.body) is _NOT_CONSTANT:
+            unreadable.append(
+                f"class `{node.name}`: `__test__` is bound to a non-literal, so whether pytest collects "
+                "this class is a runtime fact this derivation cannot read"
+            )
     for rendered in pytestmark_bindings:
         unreadable.append(
             f"a `pytestmark` binding (`{rendered}`) applies a mark to EVERY test in its scope, so whether "
@@ -1649,6 +1719,71 @@ class TestTheDocsAreDiscoverableAndResolve:
             f"population that does not exist: {_derive_population(refused.read_text())}"
         )
 
+        # --- Round-28 P3: pytest tests `__test__` for TRUTHINESS, never for identity with `False`
+        # (`_pytest/python.py` `if not safe_getattr(self.obj, "__test__", True)`, `_pytest/unittest.py`
+        # `if not getattr(cls, "__test__", True)`), on BOTH collection paths — and the `unittest.TestCase`
+        # branch bypassed the predicate entirely. The first fix tested `is False`, so `0`/`None`/`""` and a
+        # DISABLED TestCase all read as collectable: measured `--collect-only` collects 0 for each while the
+        # derivation reported (1, 1) — a silent OVER-count, the direction whose tempting remedy is to write
+        # the derived figure into the document. The last two classes are the counterweight: they MUST still
+        # count, so the fix cannot be "refuse anything mentioning `__test__`". ---
+        falsy = tmp_path / "synthetic_falsy.py"
+        falsy.write_text(
+            "import unittest\n"
+            "\n"
+            "class TestZero:\n"
+            "    __test__ = 0\n"
+            "    def test_never(self):\n        pass\n"
+            "\n"
+            "class TestNone:\n"
+            "    __test__ = None\n"
+            "    def test_never(self):\n        pass\n"
+            "\n"
+            "class TestEmptyString:\n"
+            "    __test__ = ''\n"
+            "    def test_never(self):\n        pass\n"
+            "\n"
+            "class DisabledCase(unittest.TestCase):\n"
+            "    __test__ = False\n"
+            "    def test_never(self):\n        pass\n"
+            "\n"
+            "class CaseWithInit(unittest.TestCase):\n"
+            "    def __init__(self, *args, **kwargs):\n"
+            "        super().__init__(*args, **kwargs)\n"
+            "    def test_collected(self):\n        pass\n"
+            "\n"
+            "class TestTruthy:\n"
+            "    __test__ = True\n"
+            "    def test_collected(self):\n        pass\n"
+        )
+        assert _derive_population(falsy.read_text()) == (2, 2), (
+            "pytest collects exactly TWO cases here (`CaseWithInit::test_collected` and "
+            "`TestTruthy::test_collected`) and NONE from the four falsy-`__test__` classes. ⛔ "
+            "`CaseWithInit` matters in the other direction: a `unittest.TestCase` with a class-level "
+            "`__init__` IS collected (measured: `1 test`), because pytest's `hasinit` refusal exists only "
+            "on the name-based path — so applying the whole predicate to the TestCase branch would flip "
+            f"this to an UNDERCOUNT: {_derive_population(falsy.read_text())}"
+        )
+
+        # --- A MODULE-level falsy `__test__` disables collection for the whole module on both paths
+        # (measured: `no tests collected` even for a `unittest.TestCase` subclass in it). ---
+        module_off = tmp_path / "synthetic_module_off.py"
+        module_off.write_text(
+            "__test__ = False\n"
+            "\n"
+            "def test_never():\n"
+            "    pass\n"
+            "\n"
+            "import unittest\n"
+            "\n"
+            "class CaseAnyway(unittest.TestCase):\n"
+            "    def test_never_either(self):\n        pass\n"
+        )
+        assert _derive_population(module_off.read_text()) == (0, 0), (
+            "a module-level falsy `__test__` stops pytest collecting ANYTHING in the module, including a "
+            f"`unittest.TestCase` subclass — got {_derive_population(module_off.read_text())}"
+        )
+
         # --- ISSUE 2: the AST symbol check keeps class qualification. ---
         assert _ast_declares(module, "test_module_level") is True
         assert _ast_declares(module, "TestOuter.test_a_method") is True
@@ -1727,6 +1862,15 @@ class TestTheDocsAreDiscoverableAndResolve:
                 "class TestMarked:\n"
                 "    pytestmark = pytest.mark.parametrize('x', [1, 2])\n"
                 "    def test_a(self, x):\n        pass\n"
+            ),
+            # Round-28 P3 — a `__test__` bound to a NON-LITERAL is a runtime truthiness fact: whether the
+            # class (or the whole module) is collected cannot be answered from the AST, so it is an ERROR
+            # rather than a number, exactly like every other arm above.
+            "class-level `__test__` bound to a non-literal": (
+                "FLAG = True\nclass TestDynamic:\n    __test__ = FLAG\n    def test_a(self):\n        pass\n"
+            ),
+            "module-level `__test__` bound to a non-literal": (
+                "FLAG = True\n__test__ = FLAG\ndef test_a():\n    pass\n"
             ),
         }
         for label, source in unmodellable.items():
