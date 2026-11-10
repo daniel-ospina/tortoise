@@ -50,32 +50,21 @@ it … this is gated on #10593 + #7879, and its first deliverable is the census 
 dry-run pass that reports what it WOULD evict and which of those nodes the record
 can serve. **A pass that cannot answer that must refuse, never sweep.**"*
 
-⚠️ **RECORD READINESS IS NOT WHAT WITHHOLDS THE LICENCE, and this docstring said it
-was:** `#10593` (the record's write path) closed **COMPLETED** on 2026-11-06 on a
-non-vacuous measurement, so the `22P02` rejection cited here is gone and the record
-CAN serve a node; `#7879` (the record epic) is still open, but that is a statement
-about the record's role as system of record, not about whether it can serve one
-today. What withholds a licence is the **absence of a CLEAN parity census report for
-the graph being swept** — nothing schedules that instrument, so no graph has one
-until an operator runs it. Nor is the verdict `REFUSED` for every class: the verdict's
-`CLEAN`/over-ceiling half is its BYTE state, so a production cache under its byte ceiling
-answers `CLEAN` with `plan["evictable"] == []` (see `tortoise/cache_evictor.py`'s header
-for which gate actually refuses). The point of writing the rule down as code, rather than
-as prose, is that the verdict flips by itself once a census is CLEAN, and that a
-future sweeper cannot be written without consuming a verdict that says which classes
-were proven.
+Both gates are OPEN as of this writing (`#10593` — every hosted record write is
+rejected `22P02` — and `#7879`, the record epic), so today the correct answer for
+every class is `cannot-answer` and the verdict is `REFUSED`. The point of writing it
+down as code, rather than as prose, is that the day the gates close the verdict
+flips by itself, and that a future sweeper cannot be written without consuming a
+verdict that says which classes were proven.
 
 WHAT THIS MODULE IS NOT
 -----------------------
 It is not the parity instrument. `tools/turn_parity_census.py` (#10029) already owns
 the two store legs, the paging guard, the tenant-scoped record read and the
 field-by-field parity definition for the ONE class that has an instrument (turns).
-This module **consumes** that report; it never re-implements the INSTRUMENT, and it never
+This module **consumes** that report; it never re-implements it, and it never
 invents a verdict for a class no instrument covers. A class with no instrument is
 `cannot-answer`, which is a refusal — never a silent skip and never an assumed pass.
-⚠️ Its ONE mirrored statement is :data:`POPULATION_RESIDENT_COUNT` — a copy of the
-instrument's own count predicate, used only to BOUND the report's licence, and pinned by
-an identity test. That is not a second instrument: it derives no count the licence spends.
 
 READ-ONLY, AND STRUCTURALLY SO. Nothing here writes, deletes or drops anything: the
 only statements it issues are counts, and the only other commands are `INFO memory`,
@@ -119,7 +108,6 @@ __all__ = [
     "PARITY_INSTRUMENTS",
     "PARITY_REPORT_FUTURE_SKEW_S",
     "PARITY_REPORT_MAX_AGE_ENV",
-    "POPULATION_RESIDENT_COUNT",
     "TRUTH_LABELS",
     "Assessment",
     "CacheReadError",
@@ -133,7 +121,6 @@ __all__ = [
     "measure_state",
     "node_total",
     "parse_measured_at",
-    "population_resident_count",
     "resident_counts",
     "resolve_max_report_age",
 ]
@@ -187,46 +174,9 @@ DERIVED_LABELS = frozenset({"Subject", "Object", "Point", "Operator"})
 #: licensing the eviction of every `:Point` — or of `:Source`, or of `:GraphEvent`.
 #: That is why eligibility is keyed by population and why the turn population's node
 #: count is taken from the instrument's own report (`measured_nodes`) rather than
-#: re-derived here. ⚠️ This module carries exactly ONE copy of the turn PREDICATE —
-#: :data:`POPULATION_RESIDENT_COUNT`, a mirror pinned by
-#: `test_the_population_count_mirrors_the_instrument` — and uses it only to BOUND the
-#: report, never to derive the count the licence spends.
+#: re-derived here: this module never re-implements the turn shape.
 PARITY_INSTRUMENTS: dict[str, str] = {
     "turn": "tools/turn_parity_census.py",
-}
-
-#: How to count each population's OWN resident nodes in the graph being censused.
-#:
-#: ⛔ WHY THIS EXISTS — the licence's only staleness guard used to be the WHOLE graph's
-#: node total (:func:`node_total`, `MATCH (n) RETURN count(n)`), which is the wrong
-#: denominator: a stale `turn` report claiming 20,000 nodes passed on a graph holding
-#: 25,000 nodes in total but only **500** in the turn population (500 < 20,000 <
-#: 25,000), so ``plan["evictable"][i]["nodes"]`` — the cap
-#: ``cache_evictor``/``licence_remaining`` spends — became **40x** the population it
-#: bounds. Nothing unserved could be deleted (gate 3 asks the record per node), but the
-#: property the cap exists for — *"evicting more nodes than the instrument measured is
-#: evicting nodes nothing proved"* — was weakened by **40x** on a small population (the
-#: multiple is the report's claim over the real population; nothing here is a square, so
-#: do not restate it as an order of magnitude). Measured on a lane container:
-#: `docs/evidence/10976-licence/`.
-#:
-#: ⚠️ THE PREDICATE IS THE INSTRUMENT'S, NOT THIS MODULE'S. `tools/turn_parity_census.py`
-#: owns the turn population's shape (#3551) — ``_GRAPH_EPISODIC_COUNT_CYPHER`` — and this
-#: statement is a MIRROR of it, kept literally identical (same label, same property, same
-#: `RETURN count(...)`) and pinned by
-#: ``tests/test_cache_eviction_census.py::test_the_population_count_mirrors_the_instrument``:
-#: a consumer may not import a script, so the only way to keep ONE definition in practice
-#: is a test that reds when the two drift. Mirror it exactly — ``is_episodic`` also rides
-#: NON-``:Point`` labels, so dropping the ``:Point`` half would INFLATE the ceiling and
-#: re-open exactly the hole this closes: ``graph-scripts/backfill_is_episodic.py`` stamps
-#: ``:Session``/``:Event``/``:Source``, and the entity door writes it on ``:Object`` too
-#: (``TortoiseSDK.create_entity(is_episodic=…)`` → ``_create_entity`` — the backfill does
-#: NOT stamp ``:Object``, so cite the two sources and not one).
-#:
-#: A population registered in :data:`PARITY_INSTRUMENTS` with no entry here is a REFUSAL
-#: (:func:`population_resident_count`), never a defaulted bound.
-POPULATION_RESIDENT_COUNT: dict[str, str] = {
-    "turn": "MATCH (t:Point) WHERE t.is_episodic = true RETURN count(t)",
 }
 
 #: The verdict a parity instrument must reach for its class to be provable. These
@@ -234,16 +184,9 @@ POPULATION_RESIDENT_COUNT: dict[str, str] = {
 #: report in any other verdict did NOT prove the record serves the class.
 PARITY_PROVEN_VERDICTS = frozenset({"CLEAN"})
 
-#: ⛔ HOW OLD A PARITY REPORT MAY BE AND STILL LICENSE A SWEEP. This is the AGE axis
-#: of staleness, and it is an EVIDENCE-AGE bound — the same class, and named the same
-#: way, as `allowance_gate.STALE_AFTER_SECONDS` (#5331).
-#:
-#: ⛔ IT IS NOT THE ONLY STALENESS BOUND ON THIS PATH, and reading it as though it were
-#: is how the SIZE axis gets deleted as "redundant": :data:`POPULATION_RESIDENT_COUNT`
-#: bounds the SAME licence by the population's own resident count, and neither subsumes
-#: the other. A report stamped a minute ago still over-claims if the population shrank
-#: since (eviction IS the shrink path, so the two move independently by design), while a
-#: report of exactly the right size still licenses a sweep when it is hours old.
+#: ⛔ HOW OLD A PARITY REPORT MAY BE AND STILL LICENSE A SWEEP. The one staleness
+#: bound on this path, and it is an EVIDENCE-AGE bound — the same class, and named
+#: the same way, as `allowance_gate.STALE_AFTER_SECONDS` (#5331).
 #:
 #: WHY IT IS NEEDED AT ALL (measured, #10976): the population `nodes` count a report
 #: carries IS the executor's runaway cap (`cache_evictor` gate 2,
@@ -472,17 +415,12 @@ class ParityReport:
     (``tools/turn_parity_census.py::census`` emits it), :func:`load_parity_report`
     refuses a report that carries none, and a name that disagrees with the graph being
     measured is refused too. ⚠️ What that buys is a real comparison, not a proof: the
-    reader still trusts the instrument to name the graph it actually opened, the reader
-    cannot correlate a name with an INSTANCE (two hosts can both call a graph
-    ``tortoise``), and a census of the SAME graph measured EARLIER passes this check
-    untouched — time is not part of the identity. That is why the size claim is bounded
-    on TWO further axes, and neither is the graph NAME: WHEN the report was measured
-    (``measured_at``, below) and the size of the POPULATION the report claims to
-    describe (:data:`POPULATION_RESIDENT_COUNT`, against the whole graph's node total
-    only as a coarse impossibility check). Stated here rather than overclaimed: an
-    earlier version of this docstring called the field "an OPERATOR ASSERTION" and the
-    loader filled in a missing name with the caller's own — which made the check unable
-    to fail at all (review P1 on #11004).
+    reader still trusts the instrument to name the graph it actually opened, and the
+    reader cannot correlate a name with an INSTANCE (two hosts can both call a graph
+    ``tortoise``). Stated here rather than overclaimed: an earlier version of this
+    docstring called the field "an OPERATOR ASSERTION" and the loader filled in a
+    missing name with the caller's own — which made the check unable to fail at all
+    (review P1 on #11004).
 
     ``measured_at`` is the SECOND identity axis, and it is the one that bounds
     staleness: a census of the SAME graph measured EARLIER satisfies every name check
@@ -987,48 +925,6 @@ def node_total(graph: Any) -> int:
     return int(rows[0][0])
 
 
-def population_resident_count(graph: Any, population: str) -> int:
-    """The *population*'s OWN resident node count in THIS graph.
-
-    This is the ceiling a licence may not exceed (see
-    :data:`POPULATION_RESIDENT_COUNT`), read through the same read-only verb as every
-    other census statement (:func:`_read_statement`) — a census cannot create the graph
-    it is measuring, even while proving a bound.
-
-    ⛔ A POPULATION WITH NO COUNT STATEMENT IS A REFUSAL. Defaulting to ``0`` would
-    demote every report for that population (a silent, permanent shutdown of a gate
-    nobody would notice was shut — REFUSED looks like the record not being ready), and
-    defaulting to the whole-graph total would silently restore the defect this exists
-    to close. Neither is a bound, so the caller is told instead.
-
-    ⛔ A FAILING READ PROPAGATES, never softening to a number. ``0`` and "could not
-    read" are opposite findings — the same rule :func:`node_total` and
-    :func:`measure_state` follow — and only one of them is safe to threshold against.
-    That includes an EMPTY result: ``RETURN count(...)`` always yields one row, so no
-    rows means the reading did not happen. Defaulting to ``0`` would demote every report
-    for the population with the message *"this graph holds only 0 …"* — a fact about the
-    graph that nobody measured, and a REFUSAL indistinguishable from the record being
-    unready (the silent shutdown the missing-statement branch above also refuses).
-    """
-    statement = POPULATION_RESIDENT_COUNT.get(population)
-    if statement is None:
-        raise CacheReadError(
-            f"population {population!r} is registered in PARITY_INSTRUMENTS but has no "
-            f"resident-count statement in POPULATION_RESIDENT_COUNT — a licence for it "
-            f"cannot be bounded, so it is refused rather than bounded by a guess"
-        )
-    rows = _read_statement(
-        graph, statement, f"the resident {population} population count"
-    )
-    if not rows:
-        raise CacheReadError(
-            f"the resident {population} population count returned NO row — the "
-            f"population size is UNMEASURED, and an unmeasured size cannot bound a "
-            f"licence"
-        )
-    return int(rows[0][0])
-
-
 def classify(label: str, *, config: Iterable[str]) -> str:
     """§3's authority for *label*, never a guess.
 
@@ -1088,6 +984,7 @@ def assess(
     """
     state = measure_state(client, graph_name, ceiling_bytes=ceiling_bytes)
     counts = resident_counts(graph)
+    total_nodes = node_total(graph)
     config = config_labels()
     reports = dict(parity_reports or {})
     #: The instant THIS pass ages the reports against, and it is taken AFTER the state and
@@ -1221,35 +1118,6 @@ def assess(
                       f"ago, older than this pass's {max_report_age:.0f}s bound — a "
                       f"stale report licenses evicting a population that no longer "
                       f"has the size it measured")
-        elif proven:
-            # ⛔ THE LICENCE MAY NOT EXCEED THE POPULATION IT BOUNDS. `proves()` says
-            # the report was CLEAN over its OWN measured population — it says nothing
-            # about that population's size in THIS graph NOW. A report measured before a
-            # purge (or on a graph that held more turns) therefore licensed a cap far
-            # above the population, and gate 2 spends that cap directly
-            # (`cache_evictor.licence_remaining`). Measured before this check: a graph
-            # with 500 turn nodes and a report claiming 20,000 licensed **20,000** — 40x
-            # the population — because 20,000 was still under the 25,000-node whole-graph
-            # total. The comparison is against the population's own count, and it is an
-            # upper bound (`>`), not equality: turns that ARRIVED since the report are
-            # growth, and every one of them still has to pass gate 3 individually.
-            #
-            # ⚠️ The `measured_at` arms above bound the report's AGE; this arm bounds its
-            # SIZE, and neither subsumes the other: a report stamped a minute ago still
-            # over-claims if the population shrank since (eviction IS the shrink path,
-            # so the two move independently by design), and a report of exactly the right
-            # size still licenses a sweep when it is hours old. This arm is also why the
-            # demotion chain costs a graph read only for reports that are otherwise
-            # fresh AND correctly proof-shaped.
-            resident_population = population_resident_count(graph, population)
-            if measured > resident_population:
-                proven = False
-                reason = (
-                    f"cannot-answer: {instrument} claims {measured} {population} "
-                    f"node(s) but this graph holds only {resident_population} — the "
-                    f"report is stale, or it measured a different population, so it "
-                    f"cannot size a sweep here"
-                )
         entry = ClassReading(
             label=f"{population} (population)",
             nodes=int(measured or 0),
@@ -1269,81 +1137,14 @@ def assess(
     # otherwise license evicting N nodes that this graph does not contain — the
     # plan's own node count is the only number a sweeper would size itself from.
     #
-    # ⚠️ THIS IS THE COARSE THIRD CHECK, NOT A STALENESS GUARD. Staleness is bounded
-    # above on two axes — the report's own `measured_at` (age) and the POPULATION's own
-    # resident count (`population_resident_count`) — and BOTH of those can demote a report
-    # this one passes. This check compares against the WHOLE graph (`node_total`, every
-    # label): it is the bound that existed BEFORE the per-population one, and as a
-    # denominator it let a report claim 40x its own population (measured, #10976 comment
-    # 6689914601 / `docs/evidence/10976-licence/`). What it catches, and what it cannot,
-    # is set out exactly below — it needs no clock and no per-population statement, which
-    # is the whole of its residual job.
-    #
-    # ⛔ WHAT THIS CATCHES, EXACTLY — the operands are ``entry.nodes`` (the REPORT'S
-    # CLAIM) and the graph's whole node count, so the trigger is:
-    #
-    #     resident_population >= claim > node_total
-    #
-    # i.e. THE CLAIM ITSELF is above every node the graph holds (which implies the
-    # mirror's count is at least that large — eligibility already required
-    # `claim <= resident_population`). Every sentence that has sat in this block has been
-    # wrong about the reach in one direction or the other; the criterion above is the
-    # whole of it, and the two arms that pin it are named below. The measured example: a
-    # population 500 counted as 2,000 on a 25,000-node graph with a 1,500 claim passes
-    # BOTH guards — the 30,000/25,000 pair below is the same reach, from the other side.
-    #
-    # ⛔ A MIRROR-VS-TOTAL CHECK IS NOT "NO DETECTION" — it is UNSOUND, which is a
-    # different fact and the one this paragraph asserts. Refusing on
-    # ``resident_population > node_total`` WOULD fire on a sub-band of this residual: an
-    # inflated mirror above the total with the CLAIM under it (measured — a `turn`
-    # statement answering 30,000 on a 25,000-node graph licenses a 25,000 claim today, and
-    # such a guard would refuse exactly that licence). It is not used because it is
-    # unsound in the OTHER direction: for an HONEST mirror it fires on removal skew alone
-    # — a gain cannot trip it now that the total is read AFTER every population count, but
-    # a removal between the two reads can — so it would false-block a legitimate report.
-    # The band is therefore covered by `test_the_population_count_mirrors_the_instrument`
-    # (the identity pin, which binds the mirror to the instrument's own EXECUTED statement)
-    # plus `test_a_row_multiplying_count_statement_is_a_documented_residual`, which pins
-    # the band this check cannot reach. Keep the pin; this check does not replace it.
-    #
-    # What this DOES catch is a claim above every node the graph holds. ⛔ Read that
-    # NARROWLY in BOTH directions, because earlier versions of this paragraph were wrong
-    # about the reach in OPPOSITE directions — first as catching a claim "whatever
-    # produced it" (an overstatement), then as unreachable on a quiescent graph (the
-    # understatement), then as triggered by a large multiplication (an overstatement
-    # again):
-    #
-    # - It is NOT a detector for a misplaced PREDICATE: a widened predicate yields a
-    #   subgraph count, which cannot exceed `MATCH (n) RETURN count(n)`, so the claim
-    #   capped by it cannot either.
-    # - It IS reachable on a QUIESCENT graph, but the reach is set by the CLAIM, not by
-    #   how badly a count statement multiplies: the trigger is
-    #   ``resident_population >= claim > node_total``, so an inflated count statement lands
-    #   here only when the CLAIM it licenses ALSO sits above the total. "A population is a
-    #   subgraph" (``resident_population <= node_total``) holds for an HONEST statement
-    #   and not for an inflated one, so the population bound's premise does not carry —
-    #   measured in this worktree on a 25,000-node graph with `turn` answering 30,000 (a
-    #   60x multiplication on 500 turns):
-    #       claim 30,000 -> REFUSED here ("holds only 25000"), population bound SILENT
-    #       claim 25,000 -> PLAN, licence 25,000 — NEITHER guard fires
-    #   i.e. the size of the multiplication is IRRELEVANT; only ``claim <= node_total``
-    #   bounds the hole. ⛔ So "a LARGE multiplication is caught here" would be false, and
-    #   the residual band is NOT "the modest one": it is
-    #   ``true_population < claim <= node_total``, independent of the multiplier.
-    # - The residual band is what
-    #   `test_a_row_multiplying_count_statement_is_a_documented_residual` pins, and the
-    #   boundary of the band is pinned executably by
-    #   `test_an_inflated_ceiling_does_not_arm_the_backstop_at_the_total`.
-    #
-    # ⚠️ ITS OTHER REACHABLE TRIGGER IS READ SKEW, and the read order below is what keeps
-    # that honest. The total is read HERE — AFTER every per-population count — rather than
-    # beside them: a graph that GAINS nodes between the two reads then satisfies
-    # ``resident_population <= total`` by construction for an honest mirror, so an honest
-    # report cannot be demoted by this check. (Read before the counts, it could: a
-    # legitimate 500/500 report measured REFUSED when the total read answered 5, which is
-    # the false block #11726 records.) What remains reachable on the honest path is the
-    # opposite skew — nodes REMOVED between a population count and this read.
-    resident_total = node_total(graph)
+    # ⚠️ THIS IS THE COARSE SECOND CHECK, NOT THE STALENESS GUARD. It compares against
+    # the WHOLE graph (`node_total`, every label), so it only fires on a report claiming
+    # more nodes than exist AT ALL — a stale report claiming fewer passes it. The real
+    # bound is the report's own `measured_at` above; this stays because it is the one
+    # check that needs no clock and catches an outright impossible number (it is the
+    # guard that a report about ANOTHER graph of this instance trips even when that
+    # graph happens to be larger).
+    resident_total = total_nodes
     checked: list[ClassReading] = []
     for entry in classes:
         if entry.eligible and entry.nodes > resident_total:
@@ -1450,13 +1251,8 @@ def assess(
         }
     elif not eligible:
         # ⛔ THE REFUSAL. Over the bound and NOTHING is proven — so nothing may go.
-        # This is the correct answer whenever NOTHING is proven: an unserved node has the
-        # graph as its only copy, so a sweep would destroy it (gate 3 asks per node).
-        # ⚠️ RECORD READINESS IS NOT THE REASON, and this comment said it was: `#10593`
-        # closed COMPLETED on 2026-11-06 (write-healthy, measured non-vacuously), so the
-        # record CAN serve; what is missing is a CLEAN parity census for the graph being
-        # swept. `#7879` (the epic) remains open, which is a statement about the record's
-        # role as system of record, not about whether it can serve a node today.
+        # This is the correct answer today: #10593 + #7879 are open, so the record
+        # cannot serve, and a sweep would destroy the only copy of a node.
         verdict = "REFUSED"
         plan = {
             "evictable": [],
@@ -1585,9 +1381,8 @@ def load_parity_report(path: str, *, graph_name: str) -> ParityReport:
     # gate (verdict PLAN, exit 2, `plan["evictable"]` naming N nodes) that a real report
     # with an unrecognised name could not — the exact inversion this check's own comment
     # names. `tools/turn_parity_census.py` now emits `instrument`, so the honest path
-    # reopens by itself; while no CLEAN census report exists for the graph being swept
-    # this direction costs nothing, because the licence is empty either way (gate 2 —
-    # and note the verdict may still be `CLEAN`, which is its BYTE state, not a licence).
+    # reopens by itself; while #10593/#7879 are open this direction costs nothing,
+    # because every verdict today is a refusal.
     instrument = payload.get("instrument")
     if instrument is None:
         raise CacheReadError(
@@ -1610,13 +1405,6 @@ def load_parity_report(path: str, *, graph_name: str) -> ParityReport:
 
     measured = dry_run.get("would_delete_turn_nodes")
     total = population.get("episodic_graph_nodes")
-    # ⚠️ STALENESS ON THIS PATH IS STILL NOT CLOSED BY THE LOADER, and saying otherwise
-    # was how the residual survived a review: a census of the SAME graph measured EARLIER
-    # carries the same name and loads clean. What refuses it is downstream —
-    # :func:`assess` compares the report's count against the POPULATION's own resident
-    # count (:data:`POPULATION_RESIDENT_COUNT`), so a report claiming MORE turns than the
-    # graph now holds is demoted. A report claiming FEWER is still accepted (that is a
-    # cap smaller than the population, the safe direction).
 
     # ⛔ THE FIELD IS `graph` AND ONLY `graph`. There is no `graph_name` fallback: the
     # alias was a pre-fix shim nothing emits (`tools/turn_parity_census.py::census`
@@ -1639,13 +1427,10 @@ def load_parity_report(path: str, *, graph_name: str) -> ParityReport:
     # `measured_at` is read here and why it is REQUIRED evidence downstream —
     # :func:`assess` refuses a report with no measurement time, or one older than the
     # pass's bound (:data:`PARITY_REPORT_MAX_AGE_ENV`), because the population count a
-    # report carries is the executor's runaway cap — and why that cap is bounded a
-    # SECOND, clock-free way on the same path: `assess()` compares the claim against the
-    # POPULATION's own resident count (:data:`POPULATION_RESIDENT_COUNT`) rather than the
-    # whole-graph total, which let a 20,000-node claim through on a 500-node population
-    # (#10976, measured). The over-count check (`entry.nodes > resident_total`) remains
-    # as the coarse third guard: it fires on a report claiming more nodes than the graph
-    # holds AT ALL.
+    # report carries is the executor's runaway cap. The over-count check
+    # (`entry.nodes > resident_total`) remains as the coarse, clock-free second guard:
+    # it fires on a report claiming more nodes than the graph holds AT ALL, and a stale
+    # report claiming FEWER is the shape only the timestamp can catch.
     if reported_graph is None or not str(reported_graph).strip():
         raise CacheReadError(
             f"parity report {path} names no graph — the field is REQUIRED "

@@ -91,12 +91,12 @@ note **or a justified skip citing the brief**. Both are **justified skips**, cit
    acceptance run through a **named transport** (see §Scope Decisions).
 9. **Reporting** — every number lands on `#7949` as evidence, with its corpus, command and head sha.
 
-10. **E6 evidence** — the **sixth** acceptance criterion, **built by `#11083`** (2026-11-07) and **registered on this epic by `#11673`** (`24e53f2b2256`, merged as `#11688`; `#11083` closed **without** registering the row): for
+10. **E6 evidence** — the **sixth** acceptance criterion, registered on this epic by **`#11083`** (2026-11-07): for
    **each installed pack**, every declared relation whose endpoints both occur in the corpus is **materialised**, and
    a census reports **declared → writable → written** with the delta named. ⚠️ It was **missing from this pipeline's
    own artifacts** until 2026-11-07 (they were built on E1–E5 + A1–A5). Its *writable* column is `#11484`'s, its
-   *written* column is the **wiring residual** (`extractor_v2` → `pack_hierarchy`) and is **never its bar** — the bar is
-   `unbound_and_unexplained = 0`, GREEN on both halves at registration, and the census's `written` column reads **8 direct / 33 mediated / 1 none**, i.e. 41 of 42 are CALLER-writable (`pm:onBoard` is deliberately declaration-only) and the gap is an **INVOCATION** — a wiring reason, **not** a pack-content one.
+   *written* column is the **wiring residual** (`extractor_v2` → `pack_hierarchy`), and it is **RED by construction**
+   — before-arm **0 written on Object→Object** — for a wiring reason, **not** a pack-content one.
 
 ### Out of Scope
 
@@ -173,7 +173,7 @@ only value is "easier for us" is marked as such and earns no place.
 | **Instrument + door** | **Internal — no user-visible value.** Recorded as such: it exists so the other seven rows' numbers are reproducible. It is in scope because *without* it every other row is an unverifiable claim, not because it helps a user. |
 
 **Rule applied:** eight rows for ten in-scope items; item 9 (*Reporting*) is the delivery mechanism of the
-first eight and is not given a value line of its own, and item 10 (*E6 evidence*) was added after
+first eight and is not given a value line of its own, and item 10 (*E6 evidence*) was added by `#11083` after
 this map was drawn — it is a per-pack `declared → writable → written` census whose user-visible value is that
 A1's declared-but-not-written gap becomes a number instead of a claim. Neither has a value line of its own.
 

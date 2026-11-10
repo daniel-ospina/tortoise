@@ -1110,22 +1110,6 @@ def test_the_replay_cli_exposes_the_switch_and_normalises_it():
 
     from tools.longmem_eval import temporal_leg_replay as rep
 
-    # ⛔ SNAPSHOT, never an unconditional pop (#11412). `multiprocessing`'s spawn
-    # start method reads `sys.modules["__main__"]` in
-    # `spawn.get_preparation_data`, so REMOVING it breaks every later spawn in the
-    # same pytest process with `KeyError: '__main__'`. That is not hypothetical:
-    # `fast_shards` rose 10 → 11 (`efc472108f`) and moved
-    # `tests/test_worker_topology.py` into THIS file's shard, where
-    # `test_a_spawned_child_has_a_supervisor_parent` and
-    # `test_a_spawned_worker_child_sees_the_parents_command_line` then died in
-    # `spawn.get_preparation_data` on the pop this `finally` used to do. A test
-    # that mutates a process-global owes "put back what was here", which is a
-    # restore — deleting the runner's own module is not cleanup, it is damage.
-    # The body below no longer pops it (nothing here writes `sys.modules`), so the
-    # snapshot now backs a DEFENSIVE restore rather than a live obligation — see the
-    # `finally`, and #11681 review P2.
-    _main_before = sys.modules.get("__main__")
-
     seen: dict = {}
     real_replay, real_subset = rep.replay, rep._subset_questions
 
@@ -1153,15 +1137,7 @@ def test_the_replay_cli_exposes_the_switch_and_normalises_it():
     finally:
         rep.replay = real_replay
         rep._subset_questions = real_subset
-        # ⛔ DEFENSIVE ONLY, and it repairs the DAMAGE CLASS without ever reverting a
-        # legitimate replacement (#11681 review, P2). The body above no longer touches
-        # `sys.modules` at all, so this `finally` is insurance against a FUTURE
-        # re-introduction of the pop #11412 removed — not an obligation this test
-        # still creates. It therefore acts ONLY when `__main__` is MISSING (the
-        # destructive case that reds every later spawn), and leaves alone a value
-        # some later import legitimately put there instead of silently reverting it.
-        if _main_before is not None and "__main__" not in sys.modules:
-            sys.modules["__main__"] = _main_before
+        sys.modules.pop("__main__", None)
 
 
 # ── 12. the inert targeting value has a producer ───────────────────────────

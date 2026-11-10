@@ -249,7 +249,7 @@ failure, not a skip — so the A-rows carry them too, and §6 I1 freezes the *co
 ⛔ **P1 — A5's floor is the REGISTERED one, and `a5_slots` is not a floor key this plan may invent.** An earlier
 revision of this table gave A5 `a5_slots: 5` and called it a *new key* (§4.4 below), which collides with the record
 `A5` already carries: `preregistration.json` registers `"floor": "a5_actors"` with `"a5_actors": 30`, and its
-`denominator` cell is the *distinct actors the A-corpus names* (`PRE-REGISTRATION.md:672` states the same 30-actor
+`denominator` cell is the *distinct actors the A-corpus names* (`PRE-REGISTRATION.md:669` states the same 30-actor
 floor). `a5_slots` exists **nowhere else in the tree** — `git grep -n a5_slots` returns documentary hits in this
 file only, no `.py`, `.json` or `.yml` reader — so writing it here would either leave `a5_actors: 30` as the enforced
 floor while `a5_slots: 5` promises a REFUSED boundary nothing enforces, or silently move a hash-pinned registered
@@ -295,12 +295,8 @@ nothing measures any more, which is the exact class of stale flag D-S4 exists to
 ⛔ **P1 from the substep-8 gate: the new floor keys must land in BOTH homes or C1's first commit is a hard red.** The
 checker fails closed on any record `denominator_floors` key with **no** counterpart in
 `PRE-REGISTRATION.md`'s fenced `preregistration-pins` block — *"the record may not invent a REFUSED boundary the
-document does not state"*. **That fence does not hold five keys; it holds fifteen** — **six** E-keys at §3.6
-(`e6_declared_rows: 30` arrived with `#11673`) plus **nine** A-row floors at §3.7. ⚠️
-`PRE-REGISTRATION.md:682` (it read `:679` before `#11688`'s base shift — the number rots, the quoted words do not) still says *fourteen*, and *five* E-keys: that was true when the document
-was frozen, and it stays that way because `preregistration.json` pins its `document_sha256` — a
-correction here would re-cut the digest of the registration this bundle reports against. So the
-count is re-derived from the record, not copied from the frozen prose. — an earlier revision of this paragraph said "exactly the five
+document does not state"*. **That fence does not hold five keys; it holds fourteen** (`PRE-REGISTRATION.md:679`: **five**
+E-keys at §3.6 plus **nine** A-row floors at §3.7) — an earlier revision of this paragraph said "exactly the five
 E-keys" and was simply wrong about the file. So the A-floors go into **the record's `denominator_floors` AND the
 document's `denominator_floors:` block, with `document_sha256` re-cut, in the same commit**. Without that clause,
 D-S4's purpose silently inverts: the A-floors are dropped to make the gate green and *"an A-row with no floor can
@@ -309,7 +305,7 @@ pass on three objects"* returns.
 ⚠️ **Two of the five proposed keys are NEW, two already exist and one is the registered A5 floor — the amendment
 edits the set, it does not append five.** At
 this head the record holds `a1_objects`, `a2_candidates`, `a3_statements`, `a4_typed_statements`, `a5_points`,
-`a5_actors`, plus the **six** E-keys and `a1_rollup_queries` / `a2_decided_candidates` / `a3_event_root_coverage` (6 + 9 = 15). So:
+`a5_actors`, plus the **five** E-keys and `a1_rollup_queries` / `a2_decided_candidates` / `a3_event_root_coverage` (5 + 9 = 14). So:
 `a2_candidates` and `a3_statements` are **already there** (reuse, do not duplicate); `a1_labelled_pairs` and
 `a4_labelled_nodes` are the **two** genuinely new keys; **A5's floor is the already-registered `a5_actors: 30`** (the
 collision above — `a5_slots` is dropped, not registered); and `a4_typed_statements` must be **removed**, not left
@@ -326,9 +322,8 @@ I1/I2, and the plan states explicitly that the A-row fields are **not** required
 versioning answer: "only a breaking change bumps it" must first ask **who else reads the schema** — and a live second
 bundle is the answer.
 
-**`corpus_id` on the E-rows too.** I1/I2 make it the per-row key, so all **thirteen** rows carry it
-(`fixture` for the seven E-rows, as the D-S1 matrix says; the thirteenth is `E6`, which `#11673`
-added — its corpus is named by that amendment, not assumed here) — otherwise the frozen contract would fail the seven rows
+**`corpus_id` on the E-rows too.** I1/I2 make it the per-row key, so all **twelve** rows carry it
+(`fixture` for the seven E-rows, as the D-S1 matrix says) — otherwise the frozen contract would fail the seven rows
 it was written to protect.
 
 ### 4.2 Two corpus pins in ONE record
@@ -412,7 +407,7 @@ amendment adds **no** ids; it re-authors A4's row, so the set stays 13. The corr
 (record ids − NON_VERDICT_ROWS) ∪ SUB_ROW_PARENT.values() == enum ids
 ```
 
-⛔ **And three hardcoded copies silently DROP the A-rows**: `docs/evidence/7949-capstone/probes/capstone_run.py:695` (`refused_rows`) and `:758`
+⛔ **And three hardcoded copies silently DROP the A-rows**: `docs/evidence/7949-capstone/probes/capstone_run.py:687` (`refused_rows`) and `:750`
 (`completed_rows`) both iterate `("E1","E2","E3","E4","E5")`, and
 `docs/evidence/7949-capstone/probes/capstone_measure.py:244` (`CRITERIA = (…)`) carries the same — **once, not twice**
 literal — so an A-row is **never emitted**, while V2's "the table is 5 rows" still passes. **All three are in scope
@@ -636,7 +631,7 @@ core**. So:
 
 | path | derivation | where |
 |---|---|---|
-| **operator / label path** | ✅ **already derived** from the packs: `declared \|= {r.get("predicate") for r in reg.list_relations()}` | `tortoise/sdk.py:23397` → `pack_registry.py:609` (`declared_relation_predicates()`) |
+| **operator / label path** | ✅ **already derived** from the packs: `declared \|= {r.get("predicate") for r in reg.list_relations()}` | `tortoise/sdk.py:23232` → `pack_registry.py:609` (`declared_relation_predicates()`) |
 | **structural path** | ⛔ **a static literal** — and it is **1 of FIVE declarations in one file**, and **not the one the verdict reads**: `relation_write_paths` reads **`STRUCTURAL_WRITE_PREDICATES`** (the union), while `create_edge` gates on `_VALID_EDGE_PREDICATES` | `projection/edges.py:621` (`_VALID_EDGE_PREDICATES`) · `:639` (`_VALID_ABOUT_EDGE_PREDICATES`) · `:655` (`STRUCTURAL_WRITE_PREDICATES`) · `:54` (`DERIVABLE_STRUCTURAL_RELS`) · `:1129` (`structural_edge_carrier`) · the reader `from .projection.edges import STRUCTURAL_WRITE_PREDICATES` at `pack_registry.py:723` (used `:729`) |
 | **per-graph gating** | ✅ **the resolver exists and is THREE-VALUED** — `pack_state.graph_installed_namespaces(sdk, *, graph_name=None)`: `None` ⇒ no `:PackInstall` records ⇒ **catalog union**; a `frozenset` ⇒ recorded ∪ already-in-data; an **empty** frozenset ⇒ a configured graph whose set is deliberately empty (`#2728`), where the union fallback **must not** apply. The SDK v2 master's write gate stays ungated (`#5202`) | `tortoise/pack_state.py:1170`; caveat in `docs/EXPANSION_PACKS.md` (`#2714`/`#2728`) |
 
@@ -739,7 +734,7 @@ in order and complete; the **table's** last row is I6, kept at the end rather th
 | **I4a** | **row verdict vocabulary - the gate's OWN, verbatim** | `GREEN · RED · BLOCKED · UNPREREGISTERED` (exactly `capstone_verdict_check.VERDICTS`, enforced by V3: "unknown is not a verdict"). `BLOCKED`'s reason is carried by the existing **`blocked_by`** field, **never inside the verdict string** | `capstone_verdict_check.py` (V3) | adding a fifth word (`REFUSED`, `UNMEASURED`) to this set - V3 refuses it |
 | **I4b** | **display vocabulary for the `#7949` table + README - a MAPPING onto I4a** | `GREEN`->GREEN - `RED`->RED - `BLOCKED(<reason>)`->`BLOCKED` + `blocked_by` - `REFUSED(below floor: n of N)`-> a **run status on the artifact** (the record's own `below_floor`: "REFUSED, which is neither a pass nor a fail"), displayed as `REFUSED`, with the row it belongs to `BLOCKED` - `UNMEASURED(<what>)`->`BLOCKED` + `blocked_by` naming what would measure it | the README, the `#7949` table | displaying a state that maps onto no I4a verdict - i.e. a fifth *verdict* |
 | **I5** | **test-tier declaration — it must UNIFY onto the two declarations that already exist, not add a third** | ⛔ **file-level ⇒ `config/ci-surfaces.yml`'s `on_demand:`** (read by `tools/ci_selection.py::leg_coverage_issues`, and the runner-register comment stays the one record of what runs where); **per-test, for a mixed file ⇒ a REGISTERED pytest marker** (`tier_e`, added to `pyproject.toml`'s `markers` and to each leg's `-m` filter — the mechanism `slow`/`live`/`integration` already use at five legs). The `Tier:` docstring survives as **human annotation only** | the **existing** enforcement: `on_demand:` + the `-m` filters. The one NEW pin is the **consistency assertion** — every `Tier: E` file is an `on_demand:` member (or carries `tier_e` on every live test), and every `on_demand:` member is `Tier: E`-annotated | ⚠️ **corrected: "none exists today" was false** — two declarations are live and enforced. A third, readerless marker would add a population no check can see (the F5 gap again) |
-| **I7** | **point budget - a POINTER, not a snapshot** | the door already enforces `count + est > max_points` and already publishes the readers: `org_info` -> `nodes_used` / `max_nodes` (`hosted_api.py:13512-13589`, from `quota.count_org_usage`), limits from `quota.resolve_org_limits`, and the 402 carries `used`/`limit`/`estimate` (`quota_refusal_payload`). C2's field is **`graph_headroom_at`** (when it was read) plus the A-corpus's own consumption, **doubled** for the control | C2 declares; W2a refuses when the estimated budget exceeds the read headroom | declaring a *snapshot* that drifts from the door's live readers |
+| **I7** | **point budget - a POINTER, not a snapshot** | the door already enforces `count + est > max_points` and already publishes the readers: `org_info` -> `nodes_used` / `max_nodes` (`hosted_api.py:10300`, from `quota.count_org_usage`), limits from `quota.resolve_org_limits`, and the 402 carries `used`/`limit`/`estimate` (`quota_refusal_payload`). C2's field is **`graph_headroom_at`** (when it was read) plus the A-corpus's own consumption, **doubled** for the control | C2 declares; W2a refuses when the estimated budget exceeds the read headroom | declaring a *snapshot* that drifts from the door's live readers |
 | **I8** | **declared-mechanism row** | `config/v4-mechanisms.yml`: **`id`**, **`name`**, **`declared_in`**, `state`, `code:`, `tests:`, `symbols:`, `pins:`, `preconditions:`, `tracking_issue:` **plus the marker-agreement rule** — every `declared_in:` document must carry `<!-- v4-mechanism: <id> state: <state> -->` and agree with the row - guarded by `tests/test_v4_declared_mechanisms.py` | C4 (the one component that builds a write-path mechanism) | a mechanism shipped with no row (**the `#5064` defect inverted**); a row missing `id`/`name`/`declared_in`; a doc marker disagreeing with its row |
 | **I9** | **rollup answer** (C3's deliverable — frozen by no other contract) | `{rows[], reading: "direct"\|"transitive", intermediates[], evidence[]}` — `rows[]` are the objects the query returns, `reading` names which walk produced them, `intermediates[]` proves each inherited row is reachable through **declared** edges | C3 (author), the scorer, the census/verdict tooling, **J2's reader** | an answer whose shape two lanes can disagree on while E2E-1/E2E-3 still "pass" |
 | **I10** | **`allowed_predicates(graph)` — the derived vocabulary's shape** | an ordered mapping `predicate -> {admitted_by, verb, record_carried}`: `admitted_by ∈ {core, <pack namespace>}`, `verb ∈ {create_edge, create_about_edge, ingest}`, `record_carried: bool` (durable across `rebuild_all`) | **all three writers** (`create_edge`, `create_about_edge`, `ingest`), `relation_write_paths`/`relation_write_verdict`, `list_relations`, and **C10's acceptance** | adding a predicate with no `verb` or no `record_carried` answer — a live-only edge dropped by a rebuild, silently |
@@ -885,16 +880,16 @@ share), **E2E-9→the retry/replay contract pin** and
 
 ---
 
-## 7a · E6 — the sixth criterion, BUILT by `#11083` and REGISTERED by `#11673` (added 2026-11-07)
+## 7a · E6 — the sixth criterion, registered by `#11083` (added 2026-11-07)
 
-⚠️ **This plan was built on E1–E5 + A1–A5 and MISSED a sixth acceptance row the epic carries — registered later, by `#11673`.**
+⚠️ **This plan was built on E1–E5 + A1–A5 and MISSED a sixth acceptance row that another lane registered on the epic.**
 `#11083` (*"the declared connection logic is the ontology we construct — per-pack census + the sixth acceptance row"*)
 defines **E6** and asks `#7949` to carry it:
 
 > *for each installed pack, every declared relation whose endpoints both occur in the corpus is materialised, and the
 > census reports declared vs written, with the delta named.* **Before-arm: 0 written on the Object→Object class.**
 
-**Why it matters here:** E6 is the row that measures the very gap this plan found independently at the decompose gate — the
+**Why it matters here:** E6 is the row that measures the very gap this plan found independently in §5.3a — the
 **wiring residual** (`pack_hierarchy.py` ships the applier; `extractor_v2.py` calls it **zero** times) and the
 **static allowlist** (`_VALID_EDGE_PREDICATES` is not derived from core ∪ packs, so a pack predicate outside the
 core's two is rejected by `create_edge`). Two lanes reached the same conclusion from different directions, which is
@@ -904,14 +899,14 @@ the strongest evidence either is right.
 
 | aspect | home |
 |---|---|
-| the criterion + its bar | registered on `#7949` by **`#11673`** (`24e53f2b2256`, merged as `#11688`) — `#11083` built the census and **closed without registering the row**, which is the defect `#11673` fixes (re-registration amendment, per the `#9736` model) |
+| the criterion + its before-arm | registered on `#7949` by **`#11083`** (re-registration amendment, per the `#9736` model) |
 | the census that reports `declared → writable → written` | **`#11083`** (`docs/evidence/<issue>/pack-relation-census.json`) |
 | **`writable`** — the middle column | **`#11484`** (C10): the derivation is what makes a pack predicate writable at all |
 | **`written`** — the right column | the **wiring residual**: `extractor_v2` → the applier (nearest owner **`#11237`**) |
 | the row's verdict state | **`#10984`** (C3) and **`#11496`** (the closing walk) must report E6 alongside A1 |
 
-⚠️ **E6's registered bar is `unbound_and_unexplained = 0`, and the row is GREEN on both halves at registration**
-(`24e53f2b2256`) — the census's `written` column is **reported beside** the row and is **never its bar**, because a bar on it would duplicate `A1` and let one defect red two rows (`PRE-REGISTRATION.md` §3.8). The `written` residual (0 **pipeline**-written on the Object→Object class; the census records 8 direct / 33 mediated / 1 none, so 41 of 42 are caller-writable (`pm:onBoard` is deliberately declaration-only) and the gap is an **INVOCATION**) is the **separate wiring blocker** the decompose gate found — *not* E6's verdict, and not pack content.
+⛔ **E6 is `RED` by construction today** (0 written), and it will stay red until the wiring lands — *not* because of
+pack content. `#11083` says so explicitly and this plan adopts that reading.
 
 ---
 
@@ -926,7 +921,7 @@ the strongest evidence either is right.
 | §4.4 ↔ §6 I1 | the enum is derived, but I1 freezes the row shape | both: derive from `criteria[].id`, freeze the field set |
 | §3 ↔ #11454 | the prototype draws three tiers; the map lists 18 surfaces | the diagram is the *tier* view; the map is the *surface* view — one cross-reference, no second list |
 | §7 ↔ 02-scope | ⛔ **the claim "1:1, no new case invented" is FALSE** — §7 has **ten** cases, the scope **eight**; §7 added **E2E-9** (F3's retry/replay contract, a money-spending one) and **E2E-10** (the 402 state) with **no scope parent** | **02-scope gains E2E-9/E2E-10**, or §7 marks them derived additions that **C2's child must carry** — either way they get an owner, or decomposition drops them |
-| **§6 I1 ↔ the seven E-rows** | I1 freezes `floor_kind`, `max_realizations`, `corpus_id`; the seven E-rows carry **none of the three** today | state that `floor_kind`/`max_realizations` are **A-row-only** (or add them to all thirteen) — §4.1 resolves only `corpus_id` |
+| **§6 I1 ↔ the seven E-rows** | I1 freezes `floor_kind`, `max_realizations`, `corpus_id`; the seven E-rows carry **none of the three** today | state that `floor_kind`/`max_realizations` are **A-row-only** (or add them to all twelve) — §4.1 resolves only `corpus_id` |
 | **§6 I9 ↔ §5.3 / J2** | I9 names "J2's reader" and "the census/verdict tooling" as consumers, while §5.3 says C3's rollup is **EVIDENCE-ONLY** and J2 says **no new service is built** | narrow I9's consumers to **C3 + the scorer** (the reader is the existing graph path, not a new one) |
 | **§4.1 floors ↔ the checker's pin↔record contract** | the A-floors in the record alone are a **hard red** (no doc counterpart) | both homes + `document_sha256`, same commit (§4.1) |
 | §2 W4 ↔ 02-scope D3 | W4 is a workflow, not a decision | W4 routes; it does not adopt |
@@ -944,7 +939,7 @@ the strongest evidence either is right.
 | R5 | **CI bloat** — ten children each adding a merge-gating test | medium | the suite the owner already called expensive | #11454's tier rule; **Tier-E marker required**; ~20 s recovered |
 | R6 | **stale copies** — a claim fixed in a summary, stale in its copies | **high** (hit 3× in this lane alone) | a green claim beside a refuted copy | one vocabulary (`I4`); the repo's existing double-copy pins |
 | R7 | **mechanism dependency** — `#11001`/`#10997`/`#10998`/`#10999` slip | medium | A1/A2/A3 unmeasurable | `blocked-by` by id, stated per child; the epic never builds them (except C4's argued half) |
-| **R8** | ⛔ **A-rows registered but NEVER EMITTED** — the silent P0 this plan's own §4.4/§8.5-F2 found, and which R4 (loud enum refusal) does not cover: `probes/capstone_run.py:695`/`:758` and `probes/capstone_measure.py:244` iterate a literal `("E1"…"E5")`, so an A-row is never emitted **while V2's "table is 5 rows" still passes** | **high** | **the epic closes 5/5 having measured no A-row** — the exact failure class it exists to prevent | derive all three row lists from `criteria[].id` **plus a sub-second source pin: "no literal E-row tuple under `docs/evidence/7949-capstone/probes/`"** — the three CI pins C1 was granted do **not** assert this |
+| **R8** | ⛔ **A-rows registered but NEVER EMITTED** — the silent P0 this plan's own §4.4/§8.5-F2 found, and which R4 (loud enum refusal) does not cover: `probes/capstone_run.py:687`/`:750` and `probes/capstone_measure.py:244` iterate a literal `("E1"…"E5")`, so an A-row is never emitted **while V2's "table is 5 rows" still passes** | **high** | **the epic closes 5/5 having measured no A-row** — the exact failure class it exists to prevent | derive all three row lists from `criteria[].id` **plus a sub-second source pin: "no literal E-row tuple under `docs/evidence/7949-capstone/probes/`"** — the three CI pins C1 was granted do **not** assert this |
 | **R9** | the fixture lane's **G1 refuses the committed record** (F1) | high | six E-rows unproducible | §4.2's token dispatch + the `CROSS_CHECKED_CORPUS_KEYS` companion (C1/C2) |
 | **R10** | the new Tier-E job **joins no runner register** (F5) | medium | a non-gating runner nothing can see; "Tier E" names three populations | C2 owns the register entry. ⚠️ **Not yet mitigated in the tree**: §5.2a asks `03-test-design.md` to name the three Tier-E *populations*, and that file's §5 still names only the three *tiers* — so this is an owed amendment, not a landed one |
 | **R11** | ⛔ **the structural allowlist is a static literal** (`_VALID_EDGE_PREDICATES`), so a pack-declared object relation is rejected by `create_edge` and can only ride as an IMPL label — the object layer therefore cannot be expanded by a pack, which is the "map of the business" gap | **certain** (measured) | the epic goes green on hierarchy and the map claim stays unproven | **owner ruling recorded (§5.3a): the write vocabulary is DERIVED per graph from `core ∪ installed packs`** — **C10** owns the derivation, on the existing `list_relations()` + `:PackInstall` machinery, not a new one |
@@ -968,7 +963,7 @@ expansion the scope gate recorded; repo search carried every finding). Recorded 
 | # | finding | verdict | disposition — folded into |
 |---|---|---|---|
 | **F1** | ⛔ **P0 — the fixture lane's G1 REFUSES the committed record today** (`capstone_run.py`'s fail-closed `if not frozen.get("sha256")`, `:1186`, needs `corpus.sha256`; the record has none), so **all six fixture rows cannot be produced**; and the plan added two more pin kinds beside the one key the probe reads | `unify-contract-keep-drivers` | **§4.2**: G1 dispatches on `pinned_by`; the A-corpus key renamed **`posted_payload_sha256`** (the old spelling collides with `tortoise/export.py`'s envelope digest); owners C1 (record) / C2 (probe) |
-| **F2** | ⛔ **P0 — the enum invariant was arithmetically FALSE** (record ids − sub-rows = 4, not 5: there is **no plain `E2` row**); and **three hardcoded literals silently drop the A-rows** (`probes/capstone_run.py:695`, `:758`, `probes/capstone_measure.py:244`) while V2's "5 rows" still passes | `unify-contract-keep-drivers` | **§4.4**: the invariant gains `SUB_ROW_PARENT`; the three literals are in C1's scope; **and `PRE-REGISTRATION.md`'s table + `document_sha256` are re-cut in the same commit** |
+| **F2** | ⛔ **P0 — the enum invariant was arithmetically FALSE** (record ids − sub-rows = 4, not 5: there is **no plain `E2` row**); and **three hardcoded literals silently drop the A-rows** (`probes/capstone_run.py:687`, `:750`, `probes/capstone_measure.py:244`) while V2's "5 rows" still passes | `unify-contract-keep-drivers` | **§4.4**: the invariant gains `SUB_ROW_PARENT`; the three literals are in C1's scope; **and `PRE-REGISTRATION.md`'s table + `document_sha256` are re-cut in the same commit** |
 | **F3** | ⛔ **P1 — §5.4 INVERTED the door's retry contract**: "fresh `session_id`" double-mints, while the door's TRUE retry is a **same-session** re-POST with `capture_ok=false`, and `409` carries `Retry-After: 30` (not terminal); the citation `:17212-17217` claimed the 422 branch | `unify-contract-keep-drivers` | **§5.4**: the contract is the door's (`meta.mode`, `capture_ok`, `Retry-After`), cited at `hosted_api.py:1245-1254` (the `429` capacity refusal and the `409` in-flight refusal, both carrying `Retry-After: 30`), `retry_failed_capture` at `:18131`, its gate at `:18159`, and `"mode": "replayed"` at `:18717` |
 | **F4** | **P1 — a new `s3_attach` row would split a mechanism `failure_policy` already declares**, whose absence pin reds the day C4's create gate lands; `preconditions:` is ordering, not composition | `unify` | **§5.3 / I8**: **one row — `failure_policy`**; record the shipped half in `code:`/`tests:`/`symbols:`; name the reddening pin + the flip condition |
 | **F5** | **P2 — §5.2a's new job is a fourth non-gating runner joining no register**, and "Tier E" then names three unreconciled populations (`on_demand:` test files · script-driven runs · the new job) that `leg_coverage_issues()` cannot all see | `unify-contract-keep-drivers` | **§5.2a**: C2 owns the **register entry** (`config/ci-surfaces.yml` `on_demand:` + `docs/ci/affected-test-selection.md`); **`03-test-design.md` §5 must name all three populations** |

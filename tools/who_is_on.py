@@ -841,68 +841,6 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
         for surface in advisory_partial:
             lines.append(f"  [{_clean(surface.name)}] "
                          f"{_clean(surface.truncation_note or surface.note)}")
-    # ⛔ WHAT THE HOLDER READ RESTED ON, EVEN WHEN IT ATTRIBUTED NOBODY (#11678).
-    # The gate prints this inside its `issue assignee/holder` row's own note; this
-    # verb renders only surfaces that produced a HIT, so on a CLEAN the ONE arm
-    # whose answer is a PROXY on a cell (lane roster + board attribution + process
-    # table — never the holder-authored `refs/claims/…` registry) said "nobody"
-    # with no word about the store it rested on. That is #11202's property one verb
-    # over: the gate could say which store answered and which did not, and the
-    # sibling verb, which AGENTS.md points agents at for exactly this question,
-    # could not. The string is the GATE's own (`_holder_gate_note`, carried on the
-    # surface's `note` by `scan_issue_surface`) — never a second composition — so
-    # the two verbs cannot describe the same read differently.
-    # ⛔ THE GUARD READS THE SAME PREDICATE THE PRINTER DOES (#11681 review, P2).
-    # It used to re-test `status != STATUS_INCOMPLETE` alone, while the section that
-    # already prints this note is `incomplete` above — `status == INCOMPLETE OR
-    # truncated`. Two descriptions of one state in one file is the exact defect this
-    # PR is about, and `incomplete` is already computed a few lines up (the same
-    # predicate `ANSWER:`'s `n_queried` uses), so it is read, never re-derived.
-    # ⛔ WHAT `incomplete` SKIPPING THIS BLOCK ACTUALLY COSTS, arm by arm — the two
-    # arms are NOT the same kind of omission and the first is the only one reachable
-    # today. On the `status == STATUS_INCOMPLETE` arm the section above renders this
-    # SAME note, so skipping here is pure de-duplication. On the TRUNCATED arm that
-    # section renders `surface.truncation_note` instead, so the gate's holder note
-    # would be dropped rather than de-duplicated. That arm is unreachable for
-    # `SURFACE_ISSUE` — `scan_issue_surface` never calls `mark_truncated`; all three
-    # call sites (`collision_preflight.py:8529/8656/8670`) are PR surfaces — so it is
-    # latent by construction, not by luck. If `SURFACE_ISSUE` ever becomes
-    # truncatable the repair is to render THIS note in that section, not to widen
-    # this guard back into a second description of the printed state.
-    holder_surface = next((s for s in surfaces if s.name == cp.SURFACE_ISSUE), None)
-    if (holder_surface is not None
-            and holder_surface not in incomplete
-            and (holder_surface.note or "").strip()):
-        lines.append("")
-        # ⛔ THE HEADING NAMES THE ROW AND CLAIMS NOTHING ELSE (#11681 review, P2).
-        # TWO separate over-reaches were measured here, and both are about claiming
-        # more than this block carries:
-        #   • "the note for the holder read behind this answer" claimed holders THE
-        #     ANSWER has. They can come from OTHER surfaces — on #11678
-        #     `ANSWER: 1 holder(s)` where the holder was an OPEN PR while this
-        #     note read `NO lane is mechanically attributed` — so a reader taking
-        #     the tail lines saw "nobody" under a holder count, the tail-line
-        #     misread #11202 is about.
-        #   • "the BOARD's holder read" claimed the note's CONTENTS. The rendered
-        #     string is the whole `surface.note`, and `scan_issue_surface` appends
-        #     an `issue state=…` sentence to it, so on a LANDED answer the heading
-        #     sat over a clause that is not part of that read.
-        #   • the parenthetical promised the store disclosure UNCONDITIONALLY ("a
-        #     CLEAN that rested on ONE liveness store says so here"), but on a
-        #     pre-#11202 board the note carries only `board source: …` — so the
-        #     promise sat over a note naming NO store, which is the same "a CLEAN
-        #     that read them all" misread one level down, asserted by this block's
-        #     own heading (`#11681` review, round 2). It is now scoped to a board
-        #     that RECORDED the provenance.
-        # Re-composing a filtered string is not an option (the note must stay the
-        # GATE's own string), so the heading is narrowed to the row it belongs to.
-        lines.append("CLAIM GATE [" + cp.SURFACE_ISSUE + "] — the gate's own note "
-                     "for the `" + cp.SURFACE_ISSUE + "` row")
-        lines.append("             (separate from any surface hit listed above; where "
-                     "the board recorded")
-        lines.append("             its liveness provenance, a CLEAN that rested on ONE "
-                     "store says so here):")
-        lines.append("  " + _clean(holder_surface.note.strip()))
     if unknown_detail:
         lines.append("")
         lines.append("UNREADABLE LOCAL STATE — could not check uncommitted work:")

@@ -2784,27 +2784,6 @@ def test_the_cloud_cli_answers_liveness_from_the_process_store_and_SAYS_SO(
     that is measured and legitimate (#8999). What must ALSO be true is that the
     read says WHICH store answered and WHICH could not be read, because a CLEAN
     resting on one store must not read as a CLEAN that read them all.
-
-    ⛔ AND `live.measured is True` HERE IS A DECISION, NOT AN OVERSIGHT (#11678).
-    The #11669 review raised this assertion as a P1 the merge left open: it reads
-    like a pinned fail-open unless the ruling beside it is visible, and the review
-    named the cost of leaving it unexplained — *"the next lane will read the red as
-    a regression and revert the fix"*. The ruling is on #11202 (decision comment
-    `6754475756`, recorded before the merge): the process table is TOTAL coverage
-    for the population this gate protects, so an absent cmux session store costs no
-    coverage, and a CLEAN resting on the process table is a MEASUREMENT — not an
-    abstention — and stays exit 0.
-
-    OVERRIDES: the blanket "any store that did not answer must make the gate
-    non-clean" rule — the process table sees every live lane this user runs, so
-    refusing on the cmux group's absence would restore the permanent INCOMPLETE
-    (every dispatch blocked, forever) that #11202 was filed to remove.
-
-    ⛔ So if you arrived here to make this `measured is False`: that is arm (a) of
-    the #11669 review, and it was REFUSED. Read the decision comment above before
-    changing this test — and see the sibling pin in `tests/test_collision_preflight.py`
-    (`test_the_unreadable_cmux_store_never_makes_a_measured_board_unanswerable`),
-    which is where that refusal is enforced on the GATE's own read.
     """
     class _Refusal:
         returncode = 2

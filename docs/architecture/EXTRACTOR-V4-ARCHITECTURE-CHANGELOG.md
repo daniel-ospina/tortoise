@@ -1906,7 +1906,7 @@ unnamable declared document is its own fail-closed verdict. (2) An empty surface
 return `({}, [])`, i.e. the state half of the gate compared nothing and reported agreement — now a first-class
 `surface is EMPTY` verdict. Both are pinned by tests that fail without the guard.
 
-**Three more fail-opens found in cycles 4 and 5, all fixed before landing, and a fourth in cycle 7.** (3) An unreadable surface returned an
+**Three more fail-opens found in cycles 4 and 5, all fixed before landing.** (3) An unreadable surface returned an
 empty marker set with NO error: `is_dir()` answers about the inode and `Path.rglob` swallows the `PermissionError`
 that `os.scandir` raises, so a surface at mode `0o000` read exactly like a declaration-free one — the gate's primary
 direction (a marker with no registry row) silently empty for every document behind it. (4) The first fix probed only
@@ -1918,31 +1918,6 @@ separates `architecture/x.md` from `epics/x.md` — but nothing asserted the bas
 the second, which is precisely the cross-surface alias the prefix exists to prevent. All three are pinned by tests
 that fail without the guard (mutation-checked). The `0o000` shapes need local filesystem state — git cannot store
 such a directory — so those two tests `chmod` to build the shape and skip on a box that can read it anyway.
-
-**(6) A fourth fail-open, found in cycle 7, was a STATED ASSUMPTION that stated the wrong failure mode.**
-`_scanned_targets` computed `surface_root = surface.parent.parent` — "every surface sits exactly two levels below
-the root" — so a surface at any other depth resolved its entries against the wrong root and dropped every one of
-them from `targets`. The comment there called that "a FALSE RED … never a silent pass"; measured, it is the
-fail-open. With a correctly-rooted surface also in `targets`, `scanned_targets` stays non-empty, so the
-per-document branch still runs for the OTHER surface and a declared-but-UNMARKED document in the deeper surface is
-reported NOWHERE (`membership_errors -> []` on a tree where the deeper document carries no marker at all). Both
-real surfaces sit at depth 2, which is why it was latent. The root is now DERIVED from the surface rather than
-counted off it — and, because the attribution half must resolve the same path `gate_errors` validated, a surface
-inside the repo root attributes `<ROOT> / entry` and **containment is the only test**: no path COMPONENT is compared
-anywhere. That distinction took two review cycles to get right and is worth stating, because every component form of
-the rule is the same lexical-vs-resolved trap. Matching only the surface's TRAILING components against the entry
-(cycle 7's form) pulled an entry naming no surface (`architecture/a.md`) INTO `docs/architecture/`, leaving its real
-declaration site marker-unchecked while the row read clean (cycle 8, P1). The leading-components repair for that
-then dropped every entry for a surface that IS the root (`parts[-0:]` is the whole path) or is spelled through a
-link (cycle 9, P3), and still dropped every entry for a surface spelled `docs/architecture` while resolving to
-`docs/archreal` — legitimate, since a linked walk root is not the symlink the scan refuses — so the gate read GREEN
-over an unmarked document in a linked surface while the other surface kept `scanned_targets` non-empty (cycle 10,
-P1; the base attributed it, so that one was a regression). Containment compares resolution to resolution and has
-none of these. A surface outside the root — every fixture tree — has no repo-relative path, so it falls back to
-matching its trailing components against the entry's leading ones: the document is then `surface / <the rest>` and
-no root is counted, and such a surface cannot read clean anyway because `gate_errors` reds every entry of it. The
-pins build each arm: the deep surface's depth, a repo-relative entry that names no surface, a surface that IS the
-root, and a LINKED surface whose document carries no marker.
 
 **Two documentation-truth defects found in review cycle 2, and two factual defects in cycle 3.** Cycle 2: the
 registry header said *"these thirteen are every mechanism either document names"* — inside a sentence whose *"it is

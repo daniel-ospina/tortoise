@@ -196,8 +196,8 @@ def _plan_assessment(client, graph, graph_name: str):
 
     The report claims the whole turn population was measured and CLEAN — that is what
     a closed record gate would produce, and it is the only thing that arms the
-    executor. When no CLEAN census report exists for the graph being swept (#10976), the
-    same call returns REFUSED and `evict` deletes nothing; that is asserted separately.
+    executor. When the record genuinely cannot serve (#10593/#7879 open), the same
+    call returns REFUSED and `evict` deletes nothing; that is asserted separately.
     """
     total = node_total(graph)
     report = ParityReport(
@@ -433,8 +433,7 @@ def test_a_refused_census_issues_no_mutating_statement(lane):
     seed_keys = _seed(graph, 10)
     before = _ids(graph)
     # No parity report ⇒ nothing is proven ⇒ REFUSED, which is production's real state
-    # while no CLEAN parity census exists for the graph being swept (#10593 closed; #7879
-    # is about the record as system of record, not about its ability to serve a node).
+    # while #10593 and #7879 are open.
     assessment = assess(client, graph, graph_name, ceiling_bytes=1)
     assert assessment.verdict == "REFUSED"
 

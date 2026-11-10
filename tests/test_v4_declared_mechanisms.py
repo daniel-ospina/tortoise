@@ -375,10 +375,8 @@ class Declaration:
     SURFACE (`sub/x.md`), prefixed with the surface's directory name when more
     than one surface is in play (`architecture/x.md` vs `epics/x.md`, so the two
     can never be mistaken for each other — see :func:`_document_name`). It is
-    related to the row's repo-relative `declared_in:` entry by RESOLUTION — the
-    entry names the document by its path, and the surface supplies the document's
-    identity relative to itself — and never by basename equality. A basename is
-    not an identity.
+    related to the row's repo-relative `declared_in:` entry by RESOLUTION against
+    the surface root, never by string equality. A basename is not an identity.
     ``state`` is the state the DECLARATION SITE
     asserts, or ``None`` when the marker states none — which
     :func:`declaration_state_errors` refuses and :func:`membership_errors` does
@@ -635,9 +633,7 @@ def declaration_markers(
     surface is scanned (`epics/2026-…/05-plan.md`), so two surfaces' same-named
     documents stay distinct — see :func:`_document_name`, and note that
     attribution relates that identity to a row's repo-relative `declared_in:` by
-    RESOLUTION through the surface (the entry names the document, the surface
-    supplies the identity relative to itself), never by basename equality. Every
-    verdict below names the document
+    RESOLUTION, never by string equality. Every verdict below names the document
     that way too, because a basename is not a document identity (`a.md` can exist
     at two depths).
 
@@ -884,20 +880,13 @@ def _scanned_targets(entries: list[str], docs_dir) -> set[Path]:
     admitted here (`declaration_markers`: a linked directory is not descended and
     a linked file's target is outside the name it is walked under).
 
-    Resolved the SAME WAY :func:`gate_errors` validates `declared_in`: an entry
-    is repo-relative, so for a surface inside :data:`ROOT` the candidate is
-    `<ROOT> / entry` and CONTAINMENT in the surface is the only test. Nothing is
-    compared on path COMPONENTS — such a comparison is a lexical-vs-resolved trap
-    (a surface that IS the root, or one spelled through a symlink, then drops
-    every entry: the fail-open this rule exists to refuse), and it also pulled an
-    entry naming no surface INTO one (review cycles 8–10). A surface outside
-    :data:`ROOT` — every fixture tree — has no repo-relative path, so it falls
-    back to matching its trailing components against the entry's leading ones,
-    longest first: the document is then `surface / <the rest of the entry>` and
-    no root is counted. Containment —
-    not mere existence — is the test, so `packs/dev/manifest.yaml` is NOT a
-    scanned declaring document: the markdown marker convention does not reach
-    it. A
+    Resolved against the surface's own root (`<root>/docs/architecture` ->
+    `<root>`), not string-compared: a declaration written as
+    `./docs/architecture/X.md` or with a doubled separator names the same
+    document, and a string comparison would silently attribute it to nothing (a
+    false red on a legitimate registry). Containment — not mere
+    existence — is the test, so `packs/dev/manifest.yaml` is NOT a scanned
+    declaring document: the markdown marker convention does not reach it. A
     `.yaml`/`.yml` INSIDE a surface is not one either, for the same reason:
     `gate_errors` accepts such a source, it can carry no markdown comment, and
     demanding a marker there emits a remedy no edit can satisfy.
@@ -916,74 +905,27 @@ def _scanned_targets(entries: list[str], docs_dir) -> set[Path]:
         if rel.name.endswith(CHANGELOG_SUFFIX):
             continue  # the same exclusion the marker scan makes
         for surface in _surfaces(docs_dir):
-            # ⛔ THE ENTRY'S ROOT IS DERIVED FROM THE SURFACE, not counted off it
-            # (review cycle 7, P2). The previous form hard-coded
-            # `surface.parent.parent` — "every surface sits exactly two levels
-            # below the root" — so a surface at ANY other depth resolved its
-            # entries against the wrong root, every one of them landed outside
-            # the surface, and they were dropped from `targets`. The comment
-            # there called that "a FALSE RED …, never a silent pass"; MEASURED it
-            # is the fail-open instead: with a correctly-rooted surface also in
-            # `targets`, `scanned_targets` stays non-empty, so the per-document
-            # "carries no marker" branch still runs — for the OTHER surface — and
-            # a declared-but-UNMARKED document in the deeper surface is reported
-            # NOWHERE (`membership_errors -> []` on a tree where the deeper
-            # document carries no marker at all).
-            #
-            # ⛔ AND THE ATTRIBUTION MUST RESOLVE THE SAME PATH `gate_errors`
-            # VALIDATED (review cycles 8 and 10). That half reads an entry as
-            # repo-relative — `<ROOT> / entry`, `is_file()` — so a surface inside
-            # `ROOT` attributes exactly that resolved path, and CONTAINMENT is the
-            # whole test. Nothing is matched on components: an entry naming
-            # `architecture/a.md` resolves to `<ROOT>/architecture/a.md`, which is
-            # inside no surface, so it is not pulled into `docs/architecture/` —
-            # the cycle-8 defect, where the row's real declaration site went
-            # marker-unchecked while the row read clean.
-            #
-            # ⛔ A COMPONENT GATE HERE IS THE LEXICAL/RESOLVED TRAP, and it cost
-            # two review cycles to stop re-entering (cycles 9 and 10). Every form
-            # of it — `parts[-depth:]` against the entry, the surface's
-            # `ROOT`-relative parts against the entry — compares how a path is
-            # SPELLED against how it RESOLVES. A surface that IS `ROOT` has
-            # `depth == 0` and `parts[-0:]` is the whole path; a surface spelled
-            # `docs/architecture` may resolve to `docs/archreal`. Both spellings
-            # are legitimate, and under a component gate either drops EVERY entry
-            # — which is the cycle-7 fail-open again, because a surface
-            # contributing nothing is invisible whenever another surface keeps
-            # `scanned_targets` non-empty. Resolving `<ROOT> / entry` and testing
-            # containment has neither trap, and it is the same expression the
-            # other half already validates.
-            #
-            # A surface OUTSIDE `ROOT` (every fixture tree, and the depth the pin
-            # below builds) has no `ROOT`-relative path at all, so `relative_to`
-            # raises and it keeps the trailing-component match — the document is
-            # then `surface / <the rest of the entry>`, no root counted. That arm
-            # is fixture-only: a real surface resolving outside the repo makes
-            # `gate_errors` red every entry of it, so it cannot read clean.
+            # Resolved against the surface's OWN root (`<root>/docs/epics`
+            # -> `<root>`): an entry is repo-relative, so the root its surface
+            # belongs to is the base every `declared_in:` path is written from.
+            # ⚠️ STATED ASSUMPTION: every surface sits exactly TWO levels below
+            # the root, so `parent.parent` IS that root. True for both surfaces
+            # today (`docs/architecture`, `docs/epics`), and a third surface at
+            # a different depth would resolve entries against the wrong root and
+            # report the row's declaring document as UNNAMED — a FALSE RED, whose
+            # remedy names a document that is in fact on disk and marked, never a
+            # silent pass. So: add a surface here only at this depth, or derive
+            # the root from the surface instead of counting its parents.
+            surface_root = surface.parent.parent
             try:
-                surface.resolve().relative_to(ROOT.resolve())
+                resolved = (surface_root / rel).resolve()
             except (OSError, RuntimeError, ValueError):
-                fixture_surface = True  # outside ROOT: no repo-relative path
-            else:
-                fixture_surface = False
-            if not fixture_surface:
-                try:
-                    resolved = (ROOT / rel).resolve()
-                    if resolved.is_relative_to(surface.resolve()):
-                        targets.add(resolved)
-                except (OSError, RuntimeError, ValueError):
-                    pass  # unresolvable: not attributable
+                continue  # unresolvable: not attributable
+            try:
+                if resolved.is_relative_to(surface.resolve()):
+                    targets.add(resolved)
+            except (OSError, RuntimeError, ValueError):
                 continue
-            for depth in range(min(len(surface.parts), len(rel.parts) - 1), 0, -1):
-                if surface.parts[-depth:] != rel.parts[:depth]:
-                    continue
-                try:
-                    resolved = (surface / Path(*rel.parts[depth:])).resolve()
-                    if resolved.is_relative_to(surface.resolve()):
-                        targets.add(resolved)
-                except (OSError, RuntimeError, ValueError):
-                    pass  # unresolvable: not attributable
-                break
     return targets
 
 
@@ -7883,130 +7825,6 @@ def test_two_surfaces_sharing_a_DIRECTORY_NAME_are_a_verdict(tmp_path) -> None:
     row = _row("x", declared_in=[str(one / "x.md")])
     assert membership_errors([row], surfaces), "an aliased pair must not pass membership"
     assert any("share the directory name" in e for e in membership_errors([row], surfaces))
-
-
-
-def test_a_surface_at_another_DEPTH_is_still_attributable(tmp_path) -> None:
-    """The entry's root is DERIVED from the surface, never counted off it.
-
-    Measured before the fix (review cycle 7, P2): `_scanned_targets` computed
-    `surface_root = surface.parent.parent`, so a surface sitting at any other
-    depth resolved its entries against the WRONG root, every one of them landed
-    outside the surface, and they were dropped from `targets`. The comment there
-    called that consequence "a FALSE RED … never a silent pass" — measured, it is
-    the fail-open: with a correctly-rooted surface also in `targets`,
-    `scanned_targets` stays non-empty, so the per-document branch still runs for
-    the OTHER surface and a declared-but-UNMARKED document in the deeper surface
-    is reported NOWHERE.
-
-    Both real surfaces sit at depth 2, which is exactly why this was latent, so
-    the pin has to build the depth itself.
-    """
-    arch = tmp_path / "docs" / "architecture"
-    deep = tmp_path / "x" / "y" / "z" / "deepdocs"
-    arch.mkdir(parents=True)
-    deep.mkdir(parents=True)
-    (arch / "a.md").write_text("<!-- v4-mechanism: x -->\n", encoding="utf-8")
-    (deep / "d.md").write_text("NO MARKER\n", encoding="utf-8")
-    surfaces = (arch, deep)
-    row = _row("x", declared_in=["docs/architecture/a.md", "x/y/z/deepdocs/d.md"])
-    # the precondition: before the fix the deeper entry never reached `targets`.
-    targets = _scanned_targets(row["declared_in"], surfaces)
-    assert (deep / "d.md").resolve() in targets, sorted(str(t) for t in targets)
-    assert targets == {(arch / "a.md").resolve(), (deep / "d.md").resolve()}
-    errors = membership_errors([row], surfaces)
-    assert any("rotted away" in e and "d.md" in e for e in errors), errors
-    # …and the marker being present clears it, so the rule did not merely get
-    # louder: the same tree with the deep document marked is clean.
-    (deep / "d.md").write_text("<!-- v4-mechanism: x -->\n", encoding="utf-8")
-    assert membership_errors([row], surfaces) == []
-
-
-def test_an_entry_that_names_NO_surface_is_not_attributed_to_one() -> None:
-    """A repo-relative entry outside every surface stays outside it.
-
-    The two halves of the gate must resolve `declared_in` to the SAME path.
-    `gate_errors` reads an entry as `<ROOT> / entry` and demands `is_file()`
-    there; the attribution half therefore resolves that same path for a surface
-    inside `ROOT` and keeps it only if CONTAINMENT holds — no path COMPONENT is
-    compared (review cycles 8–10).
-
-    Measured against the earlier trailing-component match — the arm that caused
-    this: `architecture/a.md` (no `docs/` prefix) was pulled INTO
-    `docs/architecture/`, because that arm compared the SURFACE's last components
-    (`architecture`) against the entry's FIRST ones, so a one-component entry
-    matched the surface's trailing `architecture` and was attributed to it. The
-    row's real declaration site, `<ROOT>/architecture/a.md`,
-    then went marker-unchecked while the row read clean: the declared-and-absent
-    shape this gate exists to refuse, reached without an unmarked document
-    anywhere.
-
-    The real surfaces, not a fixture: this is the `ROOT`-anchored arm, and a
-    `tmp_path` surface takes the fixture fallback instead.
-    """
-    assert _scanned_targets(["architecture/a.md"], DECLARATION_SURFACES) == set()
-    assert _scanned_targets(["epics/2026-01-01-x/05-plan.md"], DECLARATION_SURFACES) == set()
-    # …and the same documents named by their repo-relative paths DO attribute,
-    # each to its own surface, so the rule did not merely stop working.
-    assert _scanned_targets(["docs/architecture/a.md"], DECLARATION_SURFACES) == {
-        ARCH_DOCS / "a.md"
-    }
-    assert _scanned_targets(
-        ["docs/epics/2026-01-01-x/05-plan.md"], DECLARATION_SURFACES
-    ) == {EPIC_DOCS / "2026-01-01-x" / "05-plan.md"}
-    # …and one entry names ONE surface: the cross-surface alias stays refused.
-    assert ARCH_DOCS / "a.md" not in _scanned_targets(
-        ["docs/epics/a.md"], DECLARATION_SURFACES
-    )
-    # …and the arm resolves `<ROOT> / entry` ITSELF, so a surface that IS the
-    # root (`depth == 0`) attributes rather than silently dropping everything:
-    # re-deriving the path from the surface's lexical `parts` made `parts[-0:]`
-    # the WHOLE path, which never equals `()`, and every entry vanished
-    # (review cycle 9, P3 — the cycle-7 fail-open, by a different route).
-    assert _scanned_targets(["docs/architecture/a.md"], ROOT) == {ARCH_DOCS / "a.md"}
-
-
-def test_a_LINKED_surface_still_attributes_its_documents(tmp_path, monkeypatch) -> None:
-    """A surface spelled at one path and resolving to another is still scanned.
-
-    `docs/architecture` may be a LINK (`scripts/`, `skills/` already are). The
-    scan does not refuse a linked WALK ROOT — its symlink refusal covers entries
-    found beneath the root — so attribution must cope with a surface whose
-    spelling and resolution differ. A component gate cannot: it compares
-    `docs/architecture` (how the entry is written) against `docs/archreal` (where
-    the surface resolves), never matches, and drops every entry.
-
-    Measured before this fix, on a tree where the linked surface's `d.md` carries
-    NO marker and the other surface's `p.md` does: `targets` held only `p.md` and
-    `membership_errors` returned `[]` — the gate green over an unmarked declared
-    document, which is the fail-open `membership_errors`' own docstring says the
-    rule exists to refuse. `origin/main` attributed both, so this was a
-    regression against the base, not a pre-existing limit.
-
-    `ROOT` is monkeypatched because the linked surface has to be INSIDE the repo
-    root to take the `ROOT`-anchored arm at all — a `tmp_path` surface alone
-    takes the fixture arm and cannot see this.
-    """
-    docs = tmp_path / "docs"
-    (docs / "archreal").mkdir(parents=True)
-    (docs / "archreal" / "d.md").write_text("NO MARKER\n", encoding="utf-8")
-    (docs / "epics" / "e1").mkdir(parents=True)
-    (docs / "epics" / "e1" / "p.md").write_text(
-        "<!-- v4-mechanism: x -->\n", encoding="utf-8"
-    )
-    (docs / "architecture").symlink_to(docs / "archreal")
-
-    linked = docs / "architecture"
-    epics = docs / "epics"
-    assert linked.resolve() == (docs / "archreal").resolve(), "the fixture is not a link"
-
-    monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
-    row = _row("x", declared_in=["docs/architecture/d.md", "docs/epics/e1/p.md"])
-
-    targets = _scanned_targets(row["declared_in"], (linked, epics))
-    assert (docs / "archreal" / "d.md").resolve() in targets, sorted(map(str, targets))
-    errors = membership_errors([row], (linked, epics))
-    assert any("d.md" in e for e in errors), errors
 
 
 def test_a_malformed_marker_breaks_the_state_verdict_too(tmp_path) -> None:
