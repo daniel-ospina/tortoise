@@ -6945,7 +6945,8 @@ def _warn_point_name_not_lexically_indexed(
     gap) — and never mutates ``props``, because the node still stores it.
 
     THE DEFECT. The Point FULLTEXT index holds ``content`` + ``search_keys``
-    only, while the write doors ACCEPT ``name`` on a Point and the node stores
+    (and, since #11682, the verbatim ``quote``) — never ``name`` — while the
+    write doors ACCEPT ``name`` on a Point and the node stores
     it. The stored name is therefore invisible to the lexical leg: a query for
     the point's OWN exact name returns nothing — MEASURED on the embedded and
     the docker lane (#10122: the name-only point is absent from
@@ -6969,8 +6970,8 @@ def _warn_point_name_not_lexically_indexed(
     there is nothing to advise. WHICH text that is depends on the door:
     ``create_point`` compares against the payload it is about to write (the
     whole write), while ``update_point`` compares against the STORED
-    ``content``/``search_keys`` it reads in its own probe, because a name-only
-    update carries no indexed text of its own. ``update_entity``'s Point branch
+    ``content``/``search_keys``/``quote`` it reads in its own probe, because a
+    name-only update carries no indexed text of its own. ``update_entity``'s Point branch
     still compares payload-only — an asymmetry that is deliberate for now
     (threading the same read there is its own change) and named in
     ``test_10122_point_name_not_indexed.py``.
@@ -7094,9 +7095,14 @@ def _warn_point_name_not_lexically_indexed(
         "%s: this Point stores name=%r, but %s appears in %s (%s) — so a "
         "lexical query for the name can only reach this point through other "
         "evidence, and will not rank on the name itself (#10122). Put the "
-        "identifier in `content` or in `search_keys`: `name` is not lexically "
-        "indexed on a Point (%s). The write is accepted as-is — "
-        "warn-not-block, #1934.",
+        "identifier in `content` or in `search_keys` — the two alias-bearing "
+        "fields; `name` is not lexically indexed on a Point (%s). The "
+        "verbatim `quote` is indexed too, but it is PROSE — a provenance "
+        "anchor, never an alias source (#11682) — so an identifier written "
+        "there matches only on its own SEGMENTS (`build_or_query` expands "
+        "`capstone-9664` to capstone|capstone9664), never as the composite "
+        "alias the extractor mints into `search_keys`. The write is accepted "
+        "as-is — warn-not-block, #1934.",
         door, name, basis, where, "/".join(fields), label_clause,
     )
 
@@ -18732,14 +18738,21 @@ class TortoiseSDK:
                 "OPTIONAL MATCH (n:Point {id:$id}) "
                 "RETURN count(n), "
                 "coalesce(head(collect(n.content)), ''), "
-                "coalesce(head(collect(n.search_keys)), '')",
+                "coalesce(head(collect(n.search_keys)), ''), "
+                "coalesce(head(collect(n.quote)), '')",
                 params={"id": id},
             ).result_set[0]
             if _name_row[0]:
                 _warn_point_name_not_lexically_indexed(
                     props, door="update_point",
                     stored={"content": _name_row[1],
-                            "search_keys": _name_row[2]})
+                            "search_keys": _name_row[2],
+                            # #11682: quote is an INDEXED field now, so the
+                            # stored half of the verdict must read it —
+                            # otherwise a name whose tokens appear only in the
+                            # point's verbatim quote would be called
+                            # unfindable while the index can answer it.
+                            "quote": _name_row[3]})
 
         # #1088: with LIVE as the create default, an ordinary flow reaches
         # here with status='live' on a point that is ALREADY live. That is an
@@ -38916,6 +38929,14 @@ class TortoiseSDK:
                 # ``search_provenance_enabled`` already declares for
                 # provenance — a declared boundary, not an oversight of #3804
                 # or of #8658.
+                # ⚠️ #11682 widened it by ONE key: ``quote`` is now in
+                # ``_SNAPSHOT_QUERY`` as INDEX TEXT for the lexical mirror
+                # (parity with the real FTS index). That does NOT surface
+                # anything — ``search_snapshot`` never sets ``quote`` on its
+                # results — so a degraded hit still carries none of the four
+                # columns and the boundary above is unchanged on the SURFACE.
+                # The corpus-side retention is bounded by the existing caps
+                # (``MAX_CORPUS_POINTS`` × ``MAX_SNAPSHOT_ENTRIES``).
                 #
                 # R17 (``tests/test_assembly_sdk.py``): naming these rows is a
                 # DELIBERATE content change, so the assembly goldens were
@@ -39728,8 +39749,8 @@ class TortoiseSDK:
         original query tokens keep their OR slots and the harvested aliases fill
         the bounded expansion tail (``build_or_query``'s A4 cap — never
         displacing an original token). Points in OTHER sessions that carry the
-        subject's keys in their index text (content \u222a search_keys) now match
-        and join the fts leg.
+        subject's keys in their index text (content ∪ search_keys ∪ quote —
+        the Point lexical field set, #11682) now match and join the fts leg.
 
         Fail-open contract (mirrors A4 #2070): any fetch/query failure or an
         empty expansion returns ``None`` and the caller keeps the ORIGINAL fts

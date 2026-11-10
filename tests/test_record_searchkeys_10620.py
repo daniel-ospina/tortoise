@@ -870,9 +870,26 @@ def test_the_record_flattener_agrees_with_the_graph_flattener():
     `projection/entities.py` because it deliberately loads with no imports beyond
     the standard library (it must be importable without the graph stack). That
     duplication is only safe while the two agree, so this pins them together over
-    the shapes a journal snapshot can carry.
+    the shapes a journal snapshot can carry — and it iterates the GRAPH
+    declaration rather than a hardcoded key list, so the next property that joins
+    `_POINT_FLATTEN_LIST_PROPS` reds HERE instead of silently leaving the record
+    holding a second representation (`#11682`: `quote` was widened graph-side only,
+    and a hardcoded `search_keys` case list stayed green while the record column
+    received `["a b", "c"]` for a graph value of `a b c`).
     """
-    from tortoise.projection.entities import flatten_search_keys_prop
+    from tortoise.projection.entities import (
+        _POINT_FLATTEN_LIST_PROPS,
+        flatten_search_keys_prop,
+    )
+
+    # The two declarations must name the SAME set: a key flattened on one side
+    # and not the other is the #10620 drift in whichever direction it points.
+    assert set(record_projection._POINT_FLATTEN_COLUMNS) == set(
+        _POINT_FLATTEN_LIST_PROPS), (
+        "the record and graph flatten declarations disagree: record="
+        f"{sorted(record_projection._POINT_FLATTEN_COLUMNS)} graph="
+        f"{sorted(_POINT_FLATTEN_LIST_PROPS)}"
+    )
 
     cases = [
         ["err4032", "release"],
@@ -881,20 +898,25 @@ def test_the_record_flattener_agrees_with_the_graph_flattener():
         ["only"],
         ("tuple", "form"),
     ]
-    for case in cases:
-        props = {"search_keys": list(case)}
-        flatten_search_keys_prop(props)
-        graph_kept = "search_keys" in props
-        actual = record_projection._record_column_value("point", "search_keys", case)
-        record_kept = actual is not record_projection._OMIT
-        assert record_kept == graph_kept, (
-            f"{case!r}: the graph {'keeps' if graph_kept else 'POPS'} the key but "
-            f"the record {'writes' if record_kept else 'omits'} the column — a "
-            "blank list must never clear a value the graph preserves"
-        )
-        if graph_kept:
-            assert actual == props["search_keys"], (
-                f"{case!r}: record={actual!r} graph={props['search_keys']!r}")
+    for key in sorted(_POINT_FLATTEN_LIST_PROPS):
+        for case in cases:
+            props = {key: list(case)}
+            flatten_search_keys_prop(props)
+            graph_kept = key in props
+            actual = record_projection._record_column_value("point", key, case)
+            record_kept = actual is not record_projection._OMIT
+            assert record_kept == graph_kept, (
+                f"{key} {case!r}: the graph "
+                f"{'keeps' if graph_kept else 'POPS'} the key but the record "
+                f"{'writes' if record_kept else 'omits'} the column — a blank "
+                "list must never clear a value the graph preserves"
+            )
+            if graph_kept:
+                assert actual == props[key], (
+                    f"{key} {case!r}: record={actual!r} graph={props[key]!r} — "
+                    "the record column must carry the GRAPH's flat string, not "
+                    "the list the fulltext index cannot match"
+                )
 
 
 def test_content_columns_are_named_but_never_quoted():

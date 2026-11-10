@@ -588,7 +588,8 @@ class TestR2OrUnionAndSearchKeys:
                 "MATCH (n:Point {id:'legacy-pb'}) RETURN n.search_keys"
             ).result_set
             assert rows and rows[0][0] == "fastest 5k running pb", rows
-            # the two-field index answers a search_keys-only query
+            # the DECLARED-field index (content, search_keys — plus `quote`
+            # since #11682) answers a search_keys-only query
             hits = run_fts_query(proj.g, "fastest 5k", limit=10)
             assert "legacy-pb" in {h[0] for h in hits}, \
                 f"search_keys-only query failed post-migration: {hits}"

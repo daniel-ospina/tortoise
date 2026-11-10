@@ -610,11 +610,18 @@ def build_or_query(
 
 
 def index_text(*parts) -> str:
-    """Dual-stack index-text builder: ' '.join of non-empty parts.
+    """Generic index-text builder: ' '.join of non-empty parts.
 
-    The indexed text is content ∪ search_keys — the TF-IDF fallback stacks
+    The PARTS are the caller's choice — this function knows no field set. A
+    Point's index text is :func:`point_index_text` (which joins
+    :data:`POINT_INDEX_TEXT_FIELDS`); the callers that pass a deliberate
+    SUBSET are equally real and must stay that way — ``projection/entities.py``
+    feeds ``point_identifier_aliases`` ``content`` ∪ ``search_keys`` only,
+    because ``quote`` is prose and must never mint an identifier alias
+    (``space_separated=False``). The TF-IDF fallback stacks
     (``fallback_snapshot`` and ``fallback_tfidf``) mirror the real backend's
-    multi-field Point FTS index with it. Accepts ``str``, ``None``, and
+    multi-field Point FTS index through ``point_index_text``. Accepts ``str``,
+    ``None``, and
     list/tuple parts: E3's pre-flatten graph values are arrays (and the
     eval ingest passes lists), so each element joins as its own chunk —
     ``index_text("a b", ["c d", "e"]) == "a b c d e"``.
@@ -633,3 +640,72 @@ def index_text(*parts) -> str:
         if s:
             chunks.append(s)
     return " ".join(chunks)
+
+
+#: #11682 — the ``Point`` label's LEXICAL field set: exactly the properties the
+#: Point FULLTEXT index is declared over, and exactly the parts every
+#: index-text mirror joins.
+#:
+#: ONE declaration of the FIELD SET, read by the index DDL
+#: (``projection/__init__.py::_FULLTEXT_INDEX_LABEL_FIELDS``, whose Point entry
+#: IS this tuple), by the in-process BM25 leg's corpus read
+#: (``search_engine.run_bm25_query``) and by the degraded snapshot lane
+#: (``fallback_snapshot``). What that buys, stated exactly: every JOIN goes
+#: through :func:`point_index_text`, so the readers cannot disagree about the
+#: order or the shape of the text. It does NOT automatically widen a mirror's
+#: SQL/Cypher COLUMN LIST — the BM25 corpus read and ``_SNAPSHOT_QUERY`` select
+#: their columns explicitly, so a field added here still has to be added there
+#: (the snapshot's gap is what #11682's own review caught: the constant said
+#: "reaches all of them" while ``_SNAPSHOT_QUERY`` had to be edited by hand).
+#: ``tests/test_11682_quote_indexed.py`` now walks THIS tuple against both
+#: selects, so a fourth field reds instead of drifting silently.
+#:
+#: ``quote`` is the point's VERBATIM source text (persisted by the projection,
+#: read back by the SDK). It is its own indexed field rather than text appended
+#: to ``search_keys``: ``search_keys`` is E3's paraphrase/synonym vocabulary (the
+#: A4 PRF expansion leg harvests its tokens), while ``quote`` is the wording the
+#: speaker actually used. Before #11682 no retrieval surface searched it, so a
+#: query phrased the way it was said matched nothing unless the paraphrase
+#: happened to keep the same words — the lossy regime the architecture
+#: (EXTRACTOR-V4 §S1) and #8488's research both name.
+#:
+#: ⚠️ TWO THINGS THIS DECLARATION DOES *NOT* CLAIM (#11706 review):
+#:
+#: 1. **The gain is unquantified.** How often ``quote`` is non-empty on REAL
+#:    captured points is UNMEASURED, and #11682 names that measurement as its
+#:    own first task. What is pinned is that an UNQUOTED point composes to
+#:    byte-identical index text (the pre-#11682 text), so an unpopulated graph
+#:    is inert-but-harmless here — not that a populated one moves a metric.
+#: 2. **There is no runtime switch, deliberately.** #8488's banner asks every
+#:    fix for "its own fail-safe switch"; a switch is the wrong instrument for
+#:    THIS one, and saying so is the answer rather than leaving the clause
+#:    unaddressed: a corpus text that switches off against a still-three-field
+#:    index would recreate exactly the index/mirror drift this constant exists
+#:    to kill. The fail-safe is a CODE REVERT, and it must revert BOTH halves —
+#:    removing ``quote`` from THIS tuple alone leaves the literal
+#:    ``("Point", "quote", "FULLTEXT")`` entry in
+#:    ``FalkorProjection._REQUIRED_FULLTEXT_INDEXES`` (that entry is NOT derived
+#:    from this tuple; only the CREATE target is), which ``_schema_is_current``
+#:    unions — so the requirement becomes unsatisfiable, every construction
+#:    reads NOT current, and the whole DDL sweep re-runs forever (#4465's
+#:    churn). Revert the tuple AND that entry together and the revert is clean:
+#:    no index is dropped either way (``_point_fts_field_missing`` reads the
+#:    DERIVED ``_POINT_FTS_TARGET_FIELDS``, so a three-field index satisfies a
+#:    two-field declaration) and the sweep returns to its fast path.
+#:
+#: The BM25 leg joins this set for the ``Point`` family ONLY — ``quote`` is not
+#: a field any other label's FTS index declares (#11706 review P2-5).
+POINT_INDEX_TEXT_FIELDS: tuple[str, ...] = ("content", "search_keys", "quote")
+
+
+def point_index_text(point: dict) -> str:
+    """The index text for ONE Point dict, joined in
+    :data:`POINT_INDEX_TEXT_FIELDS` order.
+
+    The one join every mirror calls, so the field list lives in exactly one
+    place: whatever ``point.get(field)`` returns joins (a list-valued legacy
+    ``search_keys`` still flattens through :func:`index_text`; an absent
+    ``quote`` contributes nothing, so an UNQUOTED point's index text is
+    byte-identical to the pre-#11682 text).
+    """
+    return index_text(*(point.get(field) for field in POINT_INDEX_TEXT_FIELDS))

@@ -79,6 +79,38 @@ from the fused pool). No ``_FROZEN_CHUNKS`` / ``_A4_OFF_ROWS`` /
 ``_PRE_3804_CHUNKS`` edit accompanied this re-capture: those are the
 independent CONTENT record, and a re-capture must not touch them.
 
+#11682 RE-CAPTURE (R17, ORDER only — no content change). #11682 adds a Point's
+verbatim ``quote`` to the Point FULLTEXT index's declared field set
+(``sparse.POINT_INDEX_TEXT_FIELDS``), which is a RANKING change: the engine
+scores over the wider field set, so hits that already matched can re-order on a
+corpus whose text did not change. Measured here, not predicted — the affected
+goldens failed the ORDER layer while the two CONTENT layers passed, i.e. the
+row SET was intact and only the sequence moved. Re-captured from the docker
+lane on ``tests/_assembly_graph.build_base_graph`` /
+``build_out_of_subgraph_gold`` with ``question_date="2026-09-10"`` and a
+FakeReader, per the policy above. THREE golden records moved: the byte-golden
+``GOLD_LEGACY_CANARY``, and two of the five ``_A4_OFF_ORDERED`` entries --
+``CANARY_QUESTION`` and ``"which came first - the couch or the dog bed?"``. Each
+is a strict PERMUTATION of its predecessor (same rows, same multiplicity), so
+the drift is a re-ordering of evidence already present, not added or lost
+rows. ⚠️ THE DIRECTION, stated rather than left as "a permutation" (#11706
+review): on ``GOLD_LEGACY_CANARY`` the out-of-subgraph distractor
+``sess-distract-8`` now sits ABOVE "sold the old couch and ordered a new sofa
+instead" — at ``183e6888d7`` that row came first and the distractor followed it;
+and in each of the two ``_A4_OFF_ORDERED`` entries the "new sofa was delivered"
+row falls two places (from the third rendered row to the fifth). That is a
+measured demotion of a correct row beneath a distractor on the fixture R16(b)
+uses for out-of-subgraph admission; it breaks no gate (``"reading lamp" in
+evidence`` and ``B=0`` are unchanged), and #11682 names the RANK-DISTRIBUTION
+check among the measurements that decide whether this widening earns its place
+(the count of items displaced from the top-k) — the same family as ``#8486`` —
+so the datum belongs in the record.
+Byte-identical and UNTOUCHED: ``GOLD_LEGACY_CURRENT`` / ``_MISFIRE`` / ``_AGO``
+/ ``_COMPARE`` and the other three ``_A4_OFF_ORDERED`` entries; the FIRED/HOSTED
+goldens are unaffected too (their spine is rendered from dated events, not from
+the fused pool). NO ``_FROZEN_CHUNKS`` / ``_PRE_3804_CHUNKS`` / ``_A4_OFF_ROWS``
+edit accompanied this: those are the independent CONTENT record.
+
 Docker lane only (live FalkorDB — dedicated per-test graph with fulltext,
 deleted at teardown)."""
 import contextlib
@@ -268,13 +300,13 @@ GOLD_LEGACY_CANARY = """Current Date: 2026-09-10
 
 [session sess-2026-08-10] the dog chewed the corner of the dog bed cushion
 
-[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
-
 [session sess-2026-09-01] the new sofa was delivered on the first of september
 
-[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
+[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
 
 [session sess-distract-8] talked about phone battery replacement shop with a friend
+
+[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
 
 [session sess-2026-08-10] took the dog to the vet for the chewed cushion
 
@@ -435,17 +467,17 @@ _A4_OFF_ORDERED = {
     "which came first - the couch or the dog bed?": (
         _HEADER_CHUNK,
         "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
-        "[session sess-2026-09-01] the new sofa was delivered on the first of september",
         "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
         "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-09-01] the new sofa was delivered on the first of september",
         "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
     ),
     CANARY_QUESTION: (
         _HEADER_CHUNK,
         "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
-        "[session sess-2026-09-01] the new sofa was delivered on the first of september",
         "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
         "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-09-01] the new sofa was delivered on the first of september",
         "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
         "[session sess-bookshelf] [valid since 2026-09-05] on the fifth of september we moved the bookshelf into the study and bought a reading lamp - the same week the old couch was discussed and the dog bed got chewed, but the bookshelf was the newest thing we bought that month",
     ),
