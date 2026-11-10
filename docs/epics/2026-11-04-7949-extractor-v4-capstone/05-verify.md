@@ -144,8 +144,8 @@ gated; the epic's ten rows are unproven, which is the whole point of a capstone.
    census) and **REGISTERED by `#11673`** (`24e53f2b2256`, merged as `#11688`; `#11083` closed **without**
    registering the row). It was **missing from this pipeline's artifacts** (built on E1–E5 + A1–A5) and is now
    recorded in `04-plan.md` §7a and as `02-scope.md` **in-scope item 10**. ⚠️ It is an in-scope item **and a
-   required criteria row** (`REQUIRED_CRITERIA = (*CORE_REQUIRED_CRITERIA, "E6")`; the registration carries 13
-   ids incl. `E6`); it has no row in D-S1's corpus matrix yet — as `E3` also has none, so it is **not** the only
+   required criteria row** (`REQUIRED_CRITERIA = (*CORE_REQUIRED_CRITERIA, "E6")`; the registration carries 13 ids
+   incl. `E6`) — **required of the RECORD, not of the close**: `CRITERIA` stays `E1`–`E5` and promoting `E6` is a re-registration, the owner's call (`tools/capstone_verdict_check.py:173`); it has no row in D-S1's corpus matrix yet — as `E3` also has none, so it is **not** the only
    E-row without one. ⚠️ **`written` is not E6's bar** (`unbound_and_unexplained = 0` is, and the row is GREEN on
    both halves at registration); the `written` residual is the separate wiring blocker in item 1 below.
 

@@ -99,8 +99,8 @@ wrong tier is how CI becomes unusable.
 (c) under ~1 s of measured weight each.* Anything needing a graph, a model call, a quota, or a non-deterministic
 composer goes to **Tier E** (the dispatch-only eval lane).
 
-**18 rows below — numbered `1…17` plus `10a`.** `10a` is **E6**, added by **`#11083`** after the table was
-numbered, and it keeps its own label so the children that already cite `10a` do not have to be renumbered — **not**
+**18 rows below — numbered `1…17` plus `10a`.** `10a` is **E6**, added after the table was
+numbered (when `#11673` registered the row), and it keeps its own label so the children that already cite `10a` do not have to be renumbered — **not**
 because the tracker carries it: `#11454`'s body still reads *"17 surfaces mapped; 8 CI-eligible, 9 Tier E"* and
 names neither `10a` nor E6 (correction relayed to that issue, DECISION RELAY; the stale `17 / 8 / 9` is the issue's,
 not this artifact's). So the map is **18 surfaces — 7 CI, 10 Tier E, 1 split** — not 17, the figure the earlier

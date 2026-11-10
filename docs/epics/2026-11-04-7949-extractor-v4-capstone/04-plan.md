@@ -887,7 +887,7 @@ share), **E2E-9→the retry/replay contract pin** and
 
 ## 7a · E6 — the sixth criterion, BUILT by `#11083` and REGISTERED by `#11673` (added 2026-11-07)
 
-⚠️ **This plan was built on E1–E5 + A1–A5 and MISSED a sixth acceptance row that another lane registered on the epic.**
+⚠️ **This plan was built on E1–E5 + A1–A5 and MISSED a sixth acceptance row the epic carries — registered later, by `#11673`.**
 `#11083` (*"the declared connection logic is the ontology we construct — per-pack census + the sixth acceptance row"*)
 defines **E6** and asks `#7949` to carry it:
 
@@ -911,7 +911,7 @@ the strongest evidence either is right.
 | the row's verdict state | **`#10984`** (C3) and **`#11496`** (the closing walk) must report E6 alongside A1 |
 
 ⚠️ **E6's registered bar is `unbound_and_unexplained = 0`, and the row is GREEN on both halves at registration**
-(`24e53f2b2256`) — the census's `written` column is **reported beside** the row and is **never its bar**, because a bar on it would duplicate `A1` and let one defect red two rows (`PRE-REGISTRATION.md` §3.8). The `written` residual (0 **pipeline**-written on the Object→Object class; the census records 8 direct / 33 mediated / 1 none, so those rows are caller-writable and the gap is an **INVOCATION**) is the **separate wiring blocker** the decompose gate found — *not* E6's verdict, and not pack content.
+(`24e53f2b2256`) — the census's `written` column is **reported beside** the row and is **never its bar**, because a bar on it would duplicate `A1` and let one defect red two rows (`PRE-REGISTRATION.md` §3.8). The `written` residual (0 **pipeline**-written on the Object→Object class; the census records 8 direct / 33 mediated / 1 none, so 41 of 42 are caller-writable (`pm:onBoard` is deliberately declaration-only) and the gap is an **INVOCATION**) is the **separate wiring blocker** the decompose gate found — *not* E6's verdict, and not pack content.
 
 ---
 

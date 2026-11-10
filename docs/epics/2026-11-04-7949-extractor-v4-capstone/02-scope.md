@@ -96,7 +96,7 @@ note **or a justified skip citing the brief**. Both are **justified skips**, cit
    a census reports **declared → writable → written** with the delta named. ⚠️ It was **missing from this pipeline's
    own artifacts** until 2026-11-07 (they were built on E1–E5 + A1–A5). Its *writable* column is `#11484`'s, its
    *written* column is the **wiring residual** (`extractor_v2` → `pack_hierarchy`) and is **never its bar** — the bar is
-   `unbound_and_unexplained = 0`, GREEN on both halves at registration, and the census's `written` column reads **8 direct / 33 mediated / 1 none**, i.e. those rows are CALLER-writable and the gap is an **INVOCATION** — a wiring reason, **not** a pack-content one.
+   `unbound_and_unexplained = 0`, GREEN on both halves at registration, and the census's `written` column reads **8 direct / 33 mediated / 1 none**, i.e. 41 of 42 are CALLER-writable (`pm:onBoard` is deliberately declaration-only) and the gap is an **INVOCATION** — a wiring reason, **not** a pack-content one.
 
 ### Out of Scope
 
@@ -173,7 +173,7 @@ only value is "easier for us" is marked as such and earns no place.
 | **Instrument + door** | **Internal — no user-visible value.** Recorded as such: it exists so the other seven rows' numbers are reproducible. It is in scope because *without* it every other row is an unverifiable claim, not because it helps a user. |
 
 **Rule applied:** eight rows for ten in-scope items; item 9 (*Reporting*) is the delivery mechanism of the
-first eight and is not given a value line of its own, and item 10 (*E6 evidence*) was added by `#11083` after
+first eight and is not given a value line of its own, and item 10 (*E6 evidence*) was added after
 this map was drawn — it is a per-pack `declared → writable → written` census whose user-visible value is that
 A1's declared-but-not-written gap becomes a number instead of a claim. Neither has a value line of its own.
 
