@@ -7090,11 +7090,24 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
         "decision quotes verbatim ('called an exemption'). Absent from both "
         "documents until someone writes it"
     ),
-    "the exemption": (
-        "contradiction vocabulary — the definite-articled form. Absent from both "
-        "documents until someone writes it; the documents write `both exemptions` "
-        "and `merely exempting` instead, neither of which is a denial"
-    ),
+    # ⛔ `the exemption` IS NOT HERE ANY MORE, and the MARKER stays live: it is a
+    # real denial phrase (the owner's decision — *"a counted writer may not be
+    # called **an exemption**"* — and a DEFINITE-articled counted writer is the same
+    # claim), so it remains in `DENIAL_MARKERS` above and the DENIAL frame still
+    # catches it. What was removed is the DECLARATION, because the one reason that
+    # justified it — "absent from both documents until someone writes it" — became
+    # false: `#11665` added EXTRACTOR §3's clause *"The exemption is about CONTENT,
+    # not the declaration site"*, and a marker declared absent-by-design that DOES
+    # appear is exactly the stale declaration the liveness half below reds on.
+    # ⚠️ That occurrence is the word in a DIFFERENT sense — a carve-out from the
+    # no-prompt-text rule, not a census row excused — which is why it also stays
+    # out of the census: `_denies_the_class_by_pattern` still requires the writer's
+    # own name, so `test_no_corrected_passage_denies_a_verdict_the_census_counts`
+    # reads it as one more true sentence. This is the SAME resolution the `exempt`
+    # stem got ("the entries were deleted rather than left as dead coverage"): the
+    # vocabulary follows the documents, never the reverse. Removing the entry does
+    # not weaken the liveness tripwire — it strengthens it, since `unpinned` below
+    # now demands this marker appear, and will red the day a reword drops it.
     "counts as a writer": (
         "contradiction vocabulary — the VERB form of 'called counted', absent from "
         "both documents until someone writes it (`#10200` review, cycle 6)"
