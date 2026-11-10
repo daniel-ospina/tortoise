@@ -80,9 +80,10 @@ TWO DAY SEMANTICS, both required, so the caller states which it wants:
 
 :func:`calendar_datetime` is the instant view, for a consumer that ORDERS
 rather than buckets (``search_engine._created_sort_key``). It mirrors the
-#3982 anchoring rule: a date-only value is UTC midnight (a stated offset
-wins), while a zone-less date-TIME keeps the LOCAL reading that rule
-deliberately left alone.
+#3982 anchoring rule: a date-only value is UTC midnight, and a stated offset
+wins where this view accepts the form (it refuses a COMPACT or ISO-week date
+carrying an offset — see the note on ``_string_instant``), while a zone-less
+date-TIME keeps the LOCAL reading that rule deliberately left alone.
 
 ⛔ THE EPOCH ASYMMETRY IS A RECORDED RULING, not an oversight. A NUMERIC epoch
 is a date to both functions. An epoch spelled as a STRING (``"1900000000"``)
@@ -502,9 +503,12 @@ def _string_instant(s: str) -> datetime | None:
     #    ``20230520Z`` and ``2026W243+05:00`` never reach it, while the extended
     #    ISO-week ``2023-W43-2+05:00`` does (its DATE carries ``-``) despite its
     #    positive offset, and ``2026W243-05:00`` does because its negative
-    #    offset supplies the ``-``. A SEPARATOR asymmetry, not a sign one. Both
-    #    predate #11646, are untouched here, and are named rather than left to
-    #    be rediscovered as violations of this comment.
+    #    offset supplies the ``-``. So the gate is a CHARACTER-PRESENCE test, not
+    #    a sign one: what counts is whether the value CONTAINS ``-``/``T``/``/``
+    #    anywhere, which a negative offset supplies and a positive one does not —
+    #    except where the DATE itself carries a separator, as the dashed forms
+    #    above do. Both predate #11646, are untouched here, and are named rather
+    #    than left to be rediscovered as violations of this comment.
     if _COMPACT_DATETIME_RE.match(s) is not None:
         try:
             return datetime.fromisoformat(s.replace("Z", "+00:00"))

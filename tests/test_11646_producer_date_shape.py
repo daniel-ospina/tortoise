@@ -780,7 +780,7 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
         "print(k('" + PRODUCER_SESSION_DATE + "'))\n"
         "print(verdict('" + PRODUCER_SESSION_DATE + "', '2023-05-20'))\n"
         "print(verdict('2023-05-20', '" + PRODUCER_SESSION_DATE + "'))\n"
-        "print(verdict('" + PRODUCER_SESSION_DATE + "', '2023/05/21 (Sun) 03:00'))\n"
+        "print(verdict('" + PRODUCER_SESSION_DATE + "', '2023/05/20 (Sat) 02:30'))\n"
     )
     env_base = {"PATH": str(Path(sys.executable).parent), "PYTHONPATH": str(
         Path(__file__).resolve().parent.parent)}
@@ -813,5 +813,8 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
     assert observed["UTC"][2] == "accepted"
     assert observed["Asia/Kolkata"][2] == "refused"
     assert observed["America/Los_Angeles"][2] == "accepted"
-    # BOTH bounds zone-less: the reader's offset cancels, so every host agrees
+    # BOTH bounds zone-less: the reader's offset cancels, so every host agrees.
+    # The pair is 9 MINUTES apart on purpose — with a day-sized gap the
+    # assertion survives an asymmetric reading (one bound local, the other in
+    # UTC), which is the break a cancellation pin exists to catch.
     assert {v for *_, v in observed.values()} == {"accepted"}, observed
