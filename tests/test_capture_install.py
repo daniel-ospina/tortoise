@@ -4704,9 +4704,10 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: Generation 19 (#11662): #11636 changed this file's BYTES without moving the
 #: generation, so every install made from generation 18's bytes read
 #: `modified-artifact` — the verdict whose message is "you hand-edited this
-#: file" — on the next `hooks status` / `doctor`. No byte EXCEPT the header line
-#: changes in this commit: the marker moves onto the bytes #11636 already landed,
-#: which is what turns that accusation into the honest `stale-artifact`
+#: file" — on the next `hooks status` / `doctor`. Only the header line and a
+#: ledger paragraph change in this commit: the marker moves onto the bytes #11636
+#: already landed, and nothing behaves differently — which is what turns that
+#: accusation into the honest `stale-artifact`
 #: ("reinstall"). Both halves of the Pi seam move together, because
 #: `contract_version_for('pi')` grades them as ONE contract.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
@@ -4818,9 +4819,10 @@ _GENERATION_DIGESTS = {
     17: "f6aa65ab47fd4779fd9b11a055c86be1ad790a88c8bd7cd6c5456c185c809560",
     # Generation 18: the admission guard answers without re-parsing every meta.
     18: "981a7ce6b153e313197c7e276e7b0f50f2996007ac7b0f809a8788fc1b0c0648",
-    # Generation 19 (#11662): the marker moves onto the bytes #11636 landed.
-    # THIS commit changes no byte of the artifact, so the 18 entry above stays
-    # exactly as it shipped — a shipped digest is never rewritten.
+    # Generation 19 (#11662): the marker moves onto the bytes #11636 landed, plus
+    # a ledger paragraph (a comment-only edit STILL changes the sha256 — derive
+    # it, never assume it). The 18 entry above stays exactly as it shipped: a
+    # shipped digest is never rewritten.
     19: "59da9e75b24e801974edaf4f99d036cb48ccdd662f2cb4713b3db62fe6aaa312",
 }
 
