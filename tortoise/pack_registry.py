@@ -2780,8 +2780,8 @@ class PackRegistry:
                     )
                 # Parent shape: PascalCase core entity types / named object
                 # kinds (Subject…Source, Project, WorkItem, Problem) OR a
-                # canonical lowercase object kind from ONTOLOGY §5 (document,
-                # tag, strategy, plan, goal, target — #2727). The PascalCase
+                # canonical lowercase object kind from ONTOLOGY §5 (tag,
+                # strategy, plan, goal, target — #2727). The PascalCase
                 # heuristic predates the commitment-state family and would
                 # reject those valid parents; it is therefore scoped to refs
                 # that are NOT canonical object kinds, so camelCase typos like
