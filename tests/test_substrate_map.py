@@ -73,6 +73,8 @@ _LABEL_CLAIM = re.compile(
 #: update this constant together with the sentence, which is exactly the re-measure the
 #: document exists to force.
 _MEASUREMENT_TEMPLATE = (
+    '⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,\n'
+    "and the reason is measured: "
     "`:Document` occurs on **{lines}** lines across **{files}**\n"
     "files under `{pop}/` (`git grep -n ':Document' -- {pop}/` → {{quoted_lines}} lines,\n"
     "`git grep -l ':Document' -- {pop}/` → {{quoted_files}} files — "
@@ -92,7 +94,10 @@ def _measurement_sentence() -> re.Pattern[str]:
             pattern += r"(\d+)"
         else:
             pattern += re.escape(piece)
-    return re.compile(pattern)
+    # Anchored at a LINE START on purpose: the template begins at the sentence's own
+    # lead-in, so text inserted between that lead-in and the figure — "measured: as in
+    # `tests/`, `:Document` occurs …" — breaks the match instead of sliding in before it.
+    return re.compile("^" + pattern, re.MULTILINE)
 
 _COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
 
