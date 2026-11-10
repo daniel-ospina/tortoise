@@ -20414,6 +20414,17 @@ class FalkorProjection(
         # the write path keeps its width blessing (`required_embedding_dim` is
         # answered from the handle this branch resolves), and the #4997 gap
         # report keeps its WARNING only where a label really has no index.
+        #
+        # ⚠️ And so does `main`'s PROBE COST: this branch issues the index-create
+        # attempt that resolves the handle, which on a store that already has the
+        # index answers "already" and writes nothing. That is one budgeted
+        # round trip per setup (#4465/#5444 — `tests/test_indexes.py`:
+        # "the vector-API handle probe below legitimately issues index-creation
+        # statements, budgeted separately"), and it is NOT removable here: the
+        # catalogue says an index EXISTS, never WHICH API created it, and the
+        # handle also picks `run_vector_query`'s `queryNodes` signature — so
+        # skipping the probe to save the round trip would silently degrade every
+        # dense read to the brute-force fallback it cannot distinguish.
         if not vector_index_retired():
             return self._create_vector_index_api(catalogue_rows)
         self._vector_index_api = None
