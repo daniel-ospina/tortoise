@@ -4842,16 +4842,40 @@ def test_every_record_migration_selects_core_and_both_readers():
     assert migrations, "record-migration family is empty — the pin would cover nothing"
     # The readers asserted in the loop are the two this record names as having run
     # NOTHING before the fix (the width pin and the registry pin) plus the
-    # projection pin — and they are the three that CAN discriminate: each is a
-    # slow file, so it rides the `core` surface and is ABSENT on a selection with
-    # `surfaces: []`. `test_record_schema_placement.py` stood here until the #11728
-    # P3 and cannot fail: it is tier1, and tier1 ⊆ `test_files` on every return
-    # path (measured: the `off_family` selection below — `surfaces: []`, n=84 —
-    # still carries it). A vacuous assertion is worse than none: it reads as
+    # projection pin — and they are the three that CAN discriminate, for ONE
+    # reason: each is registered on `core` and is NOT in `tier1`, so it is ABSENT
+    # from the tier-1-only return that a `surfaces: []` selection produces
+    # (`select()`'s `"surfaces": [], "full": False` return emits `tier1` minus
+    # `uri_requiring` minus `on_demand`; none of the three is in `_tier1()`).
+    # ⚠️ NOT because they are slow files — an earlier version of
+    # this comment said that and the mechanism is INVERTED: `select()` SUBTRACTS
+    # `slow` from both tiers (`files -= slow`, #1371), so a slow reader could never
+    # appear in `test_files` and the assertions below would red on every arm.
+    # `test_record_schema_placement.py` stood here until the #11728 P3 and cannot
+    # fail: it is tier1 (config/ci-surfaces.yml), and tier1 ⊆ `test_files` on every
+    # return path (measured: the `off_family` selection below — `surfaces: []`,
+    # n=84 — still carries it). A vacuous assertion is worse than none: it reads as
     # coverage.
+    #
+    # #11728 review P2: that axis is PINNED below, not merely described — a reader
+    # promoted into `tier1` (an ordinary edit for a fast DB-free pin) would make its
+    # `in test_files` arm above vacuous silently, so the promotion must red here
+    # instead.
+    readers = (
+        "test_11642_vector_move.py",  # the width pin (`vector(384)` literals)
+        "test_9231_record_migrations_trigger.py",  # the RECORD_MIGRATIONS registry
+        "test_record_projection.py",  # the `ALTER … ADD COLUMN` shape
+    )
+    tier1 = _tier1()
+    for reader in readers:
+        assert reader not in tier1, (
+            f"{reader} is in tier1, so its `in test_files` arm below can no longer "
+            "discriminate (tier1 ⊆ test_files on every return path) — pick a "
+            "`core`-registered reader that is not in tier1, or drop the arm"
+        )
     # Non-vacuity, measured on the PRE-FIX state and stated exactly: with the
     # structural rule disabled AND this member's `CORE_ALSO` entry removed,
-    # `select()` returns `surfaces: []`, n=84, and both reader assertions red.
+    # `select()` returns `surfaces: []`, n=84, and every reader assertion reds.
     # ⚠️ Disabling the rule ALONE changes nothing for a member that still has its
     # entry — measured on the embedding migration: `surfaces: ['core']`, n=801,
     # both readers present — which is the same measurement that makes those entries
@@ -4861,9 +4885,8 @@ def test_every_record_migration_selects_core_and_both_readers():
         r = _sel([f"supabase/migrations/{name}"])
         assert r["full"] is False, (name, r)
         assert r["surfaces"] == ["core"], (name, r)
-        assert "test_11642_vector_move.py" in r["test_files"], (name, r)
-        assert "test_9231_record_migrations_trigger.py" in r["test_files"], (name, r)
-        assert "test_record_projection.py" in r["test_files"], (name, r)
+        for reader in readers:
+            assert reader in r["test_files"], (name, reader, r)
 
     # The case the enumeration used to miss entirely: a record migration NOBODY
     # has registered. It must select `core`, and — the #11728 P2 regression guard —
