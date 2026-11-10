@@ -154,15 +154,19 @@ def _expected_legs(manifest: dict) -> set[str]:
     of a change that did not happen, and a false red of this shape is repaired by
     editing the literal — which is how the drift is absorbed instead of reported.
 
-    What the derivation does NOT give up: if the selector produces fewer (or
-    differently named) shards than the manifest declares — a real defect — the
-    equality below still fails, and it now names the declared count rather than a
-    stale one. Label SPELLING is pinned by the seams that would actually refuse a
-    merge — `tests/test_ci_selection.py::test_shard_labels_are_a_superset_when_s
-    _changes` for the `test (a)`/`test (b)` names the rail subtracts, and
-    `::test_shard_count_is_stable_regardless_of_the_selection_size` for the full
-    `a`..`i` positional sequence. (The former alone does NOT catch a rename past
-    the first two labels — measured: renaming label index 2 leaves it green.)
+    What the derivation does NOT give up: if the selector produces a shard set
+    that differs from this derivation's — a real defect — the equality below
+    still fails, and it now names the declared count rather than a stale one.
+    What it does NOT catch is a rename that flows through `shard_labels()` itself:
+    both sides read that accessor, so a renamed label arrives on both sides
+    unchanged (measured: renaming label index 2, i.e. a shard named differently
+    from the manifest's `a`..`k` sequence, leaves this file 8 passed). Label
+    spelling is therefore pinned by the seams that would refuse a merge:
+    `test_ci_selection.py::test_shard_labels_are_a_superset_when_s_changes` for
+    the `test (a)`/`test (b)` names the rail subtracts (and NOT a rename past the
+    first two labels — measured green), and
+    `test_ci_selection.py::test_shard_count_is_stable_regardless_of_the_selection_size`
+    for the full positional sequence.
     What this pin refuses is the DECLARED side: a leg `_gating_sets()` produces
     that is not declared here (a gating set added or moved below without
     `_LEG_KINDS`/this derivation following) reds, and the message names both
@@ -220,9 +224,10 @@ def _expected_legs(manifest: dict) -> set[str]:
     `push_legs` — strip both and the names are still `a`..`k`; only the file
     count moves, and that number decays with every unrelated registration, so
     the claim here is the NAMES, never the total). Nor is it a pool-size
-    threshold — `fast_shard_count` reads the manifest's `fast_shards` literal, and `split_fast_gate` says as much ("N comes
-    from the manifest's `fast_shards` … NOT capped by the file count"), so a lane
-    that unregisters files must not drop a label.
+    threshold — `fast_shard_count` reads the manifest's `fast_shards` literal, and
+    `split_fast_gate` says as much ("N comes from the manifest's `fast_shards` …
+    NOT capped by the file count"), so a lane that unregisters files must not
+    drop a label.
     """
     return {
         *_LEG_KINDS,
