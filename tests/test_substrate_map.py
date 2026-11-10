@@ -52,6 +52,16 @@ _LABEL_CLAIM = re.compile(
 
 _COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
 
+#: The narrow pattern §5 quotes as its evidence, as ONE owner: `_label_hits()`
+#: measures with this constant and the pin below asserts the document quotes THIS
+#: pattern. It used to be written inline in `_label_hits` and quoted separately in
+#: the doc, so the doc could state a pattern nothing measured (measured: `:Document\\b`
+#: in §5 — matching all 63 lines — left 43 passed and `substrate_map_check` CLEAN)
+#: while the guard kept measuring six with its own copy: the document asserting
+#: evidence for a pattern no guard used, in the sentence the no-regex-check
+#: decision rests on.
+_NARROW_PATTERN = r"\(\w*:Document"
+
 #: The narrow-pattern half of §5's measurement, as the document states it — a
 #: WORD, not a digit (`still matches **six** lines`). Parsed rather than left to
 #: the literal pin in the test below, because that literal is a number hard-coded
@@ -74,7 +84,7 @@ _QUOTED_GREP = re.compile(
 #: The population §5's claim is stated in: every **tracked** file under
 #: `tortoise/`, any suffix. Derived from the index rather than from an extension
 #: filter so the check measures the same set the sentence's `git grep` does —
-#: `rglob("*.py")` omitted the 28 tracked non-`.py` files under `tortoise/`
+#: `rglob("*.py")` omitted the tracked non-`.py` files under `tortoise/`
 #: (`SKILL.md`, `config/*.json|*.yaml`, `pi-hooks/*.ts`, …), so a `:Document`
 #: added to one of them raised the true figure while the check still saw 55 and
 #: passed: a latent false CLEAN on the number the no-regex-check decision rests
@@ -151,7 +161,7 @@ def _label_hits() -> tuple[int, int, int]:
             continue
         files += 1
         lines += len(hits)
-        narrow += sum(1 for line in hits if re.search(r"\(\w*:Document", line))
+        narrow += sum(1 for line in hits if re.search(_NARROW_PATTERN, line))
     return lines, files, narrow
 
 
@@ -1671,6 +1681,13 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
         "silently read past; keep one statement, or pin each one"
     )
     word = narrow_claim.group(1).lower()
+    assert section.count(f"`{_NARROW_PATTERN}`") == 1, (
+        "§5 no longer quotes the narrow pattern this pin measures as "
+        f"`{_NARROW_PATTERN}` exactly once — the 'six' is the count FOR THAT "
+        "PATTERN, so swapping in a looser one (e.g. `:Document\\b`, which matches "
+        "all 63 lines) states evidence for a measurement nothing takes while every "
+        "number and count word below stays green"
+    )
     assert word in _COUNT_WORDS, (
         f"§5 states the narrow count as {word!r}, which is not a count word this pin "
         f"can decode ({', '.join(_COUNT_WORDS)}); the tree measures {narrow} — state "
