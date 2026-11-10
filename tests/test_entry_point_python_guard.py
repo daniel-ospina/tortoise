@@ -950,6 +950,15 @@ def test_the_record_exemption_prose_counts_the_set_it_describes():
     hypothetical — it is what this test was written for, and it is also why the
     prose said "four" over a set whose fourth member had gone dead (#11756 rewrote
     the doc line at source rather than keep the exemption).
+    ⛔ Measured at source, because two rounds have now proposed "corrections" to that sentence
+    and BOTH invert it: `#11756` (`7c45d5af1f`) rewrote
+    `docs/plans/2026-11-10-issue-11689-e1e2-owned-floors.md:310` from `$ python3 …` to
+    `$ uv run python …` and KEPT the exemption entry, which then matched no live line (the
+    key IS present at that head); `#11757` (`900d4aafc6`) deleted the entry and moved the
+    prose `four` -> `three`. Claims that `#11756` "removed the member" or that
+    `900d4aafc6` "rewrote the doc line" are false — do not re-apply them (#11777: round 5's
+    note made that inversion and is falsified at the named commits; this lane's round-9 edit
+    made it again and was reverted).
 
     The set's own description is the only cardinality a reader has, so it must
     describe THIS set — the same non-rot rule
@@ -1065,8 +1074,18 @@ def test_the_prose_pin_reads_through_formatting_but_not_wording():
     #
     # Every arm below runs `_assert_the_prose_names_the_set_size` — the body the real pin
     # executes — so what is measured is the code path the artifact goes through, not a
-    # helper beside it. Sizes are derived from the live set, so these arms do not need
-    # editing when the set gains or loses an entry; only the prose does.
+    # helper beside it. Sizes are derived from the live set, so the arms above and the
+    # digits ones below do not need editing when the set gains or loses an entry; only the
+    # prose does.
+    #
+    # One conditional limit, stated because a silent coverage loss is the failure this whole
+    # change is about (#11777 review round 9, finding 1): `word` is a WORD only while the set
+    # fits `_CARDINALITY_WORDS` (twelve). Past that it is `str(size)`, and the two case arms
+    # (`Four`/`FOUR`) then degenerate into copies of the plain digits arm, because digits have
+    # no case — so case-folding at the CALL SITE stops being measured. The seam-level arms
+    # above still measure it, with hard-coded `Four`/`FOUR` and no dependency on the set size
+    # (verified RED at size 13, where the call-site arms are the ones that go quiet), so the
+    # fold itself is never unpinned; only the duplicate-copy detection loses that one signal.
     # ------------------------------------------------------------------
     size = len(_DELIBERATE_BARE_FORM)
     # `str(size)` when the set outgrows the word table: the digits arms below then carry the
