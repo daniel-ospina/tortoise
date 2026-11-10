@@ -8,6 +8,8 @@ from __future__ import annotations  # noqa: I001
 import re
 from typing import Any
 
+from .search_engine import EP_STATE_ABSENT, ep_state
+
 
 #: Root-lookup branches for _resolve_root (issue #327). Every branch is a
 #: labeled lookup so the planner uses Node By Index Scan instead of All Node
@@ -230,7 +232,19 @@ def entityProfile(
             # same defect `min_confidence` on search/recall had. An absent
             # belief has no number to clear a floor with: it is kept only by the
             # no-op default (0.0 / None) and excluded by any real floor.
-            conf = node.get("confidence")
+            #
+            # ⚠️ But the mirror is not the only place a belief is PERSISTED: a
+            # claim written by any path other than the EP flush carries
+            # posterior/prior α/β and NO `n.confidence` mirror (that is the
+            # population `_fetch_point_signals`' "a node the flush never
+            # reached" fallback exists for). Reading the mirror alone made a
+            # claim MEASURED at 0.9 read `conf is None` and drop out of every
+            # floor — a recall regression that contradicts the §6.3 rule that a
+            # new read surface uses the shared presence predicate instead of
+            # re-deriving absence. `_persisted_belief` applies the repo-wide
+            # precedence: mirror first, then the stored α/β mean, with
+            # `ep_state` deciding absence.
+            conf = _persisted_belief(node)
             if conf is None:
                 if confidenceMin > 0.0:
                     continue
@@ -323,6 +337,46 @@ def tortoise_traverse(
 
 
 # ── Shared helper ──────────────────────────────────────
+
+def _persisted_belief(node: dict) -> float | None:
+    """The claim's PERSISTED belief mean, or ``None`` when it has none (#11702).
+
+    The repo-wide precedence, so this surface cannot disagree with the rankers
+    and the `ep` block about one claim:
+
+    * the served ``n.confidence`` MIRROR first (the EP flush writes it, and the
+      staleness is fixed at the write paths);
+    * then the stored posterior mean, then the stored prior mean — with α and β
+      taken from the SAME pair (posterior first, else the ``ep_*`` prior),
+      exactly the precedence ``ep_state`` applies; never α from one pair with β
+      from the other;
+    * **absence is decided by the shared presence predicate**, never by the
+      value: no mirror and no complete α/β pair means there is nothing to
+      report, and a read must answer ``None`` rather than the Beta(1,1) ``0.5``
+      this used to fabricate.
+
+    A pair that is complete but sums to zero is ``absent`` — Beta(0, 0) is not a
+    distribution — so it answers ``None`` too, which is the same rule
+    ``ep_has_belief_cypher`` spells in Cypher.
+    """
+    mirror = node.get("confidence")
+    if ep_state(posterior_alpha=node.get("posterior_alpha"),
+                ep_alpha=node.get("ep_alpha"),
+                confidence=mirror,
+                posterior_beta=node.get("posterior_beta"),
+                ep_beta=node.get("ep_beta")) == EP_STATE_ABSENT:
+        return None
+    if isinstance(mirror, (int, float)):
+        return float(mirror)
+    alpha, beta = node.get("posterior_alpha"), node.get("posterior_beta")
+    if alpha is None:
+        alpha, beta = node.get("ep_alpha"), node.get("ep_beta")
+    if alpha is not None and beta is not None:
+        total = float(alpha) + float(beta)
+        if total > 0:
+            return float(alpha) / total
+    return None
+
 
 def _parse_node_with_identity(node: Any) -> tuple[dict, Any, str]:
     """Parse FalkorDB Node → ``(flat dict, identity value, identity key)``.

@@ -540,3 +540,45 @@ def test_ep_evidence_prewrite_journals_the_mirror_clear(tmp_path):
             "the record carries a stale mirror value instead of the clear")
     finally:
         sdk.close()
+
+
+# ── entityProfile's floor may not read absence off the mirror alone ────────
+
+def test_entity_profile_floor_reads_a_posterior_only_belief(sdk):
+    """`navigation.entityProfile(confidenceMin=…)` read only the
+    `n.confidence` MIRROR, so a claim whose belief is persisted in its
+    posterior — the population the EP flush never reached, and the reason
+    `_fetch_point_signals` carries its "a node the flush never reached"
+    fallback — read `conf is None` and dropped out of EVERY floor. Before
+    #11702 the fabricated 0.5 admitted it at any floor ≤ 0.5, so this is a
+    recall regression, and it contradicts the §6.3 rule that a read surface
+    uses the shared presence predicate instead of re-deriving absence.
+
+    An ABSENT claim must still be excluded by a real floor, and kept by the
+    no-op `0.0` default.
+    """
+    from tortoise.navigation import entityProfile
+
+    proj = sdk._get_proj()
+    root = sdk.create_point("statement", "the profiled root entity")["id"]
+    measured_kid = sdk.create_point("statement", "a posterior-only kid")["id"]
+    absent_kid = sdk.create_point("statement", "a kid with no belief")["id"]
+    for kid in (measured_kid, absent_kid):
+        proj.g.query(
+            "MATCH (a:Point {id:$a}), (b:Point {id:$b}) "
+            "CREATE (a)-[:IMPL {idx:1}]->(b)", params={"a": root, "b": kid})
+    proj.g.query(
+        "MATCH (n:Point {id:$id}) SET n.posterior_alpha = 9.0, "
+        "n.posterior_beta = 1.0", params={"id": measured_kid})
+
+    def ids(floor):
+        out = entityProfile(proj.db, proj.graph_name, root, hops=1,
+                            confidenceMin=floor)
+        return {p["id"] for p in out["connected"]["points"]}
+
+    assert measured_kid in ids(0.3), (
+        "a claim MEASURED at 0.9 was dropped by a 0.3 floor — the filter read "
+        "the absent mirror instead of the persisted belief")
+    assert absent_kid not in ids(0.3), "an absent belief cleared a real floor"
+    assert {measured_kid, absent_kid} <= ids(0.0), (
+        "the no-op floor must keep an absent claim (0.0 is the #11702 default)")
