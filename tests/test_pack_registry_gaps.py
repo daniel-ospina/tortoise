@@ -1904,13 +1904,20 @@ class TestCoreHierarchy:
         closes in one hop because a value is never itself a key. A multi-segment
         target breaks that: `x:synth:team` has tail `synth:team`, which IS a key
         (for the real `synth:team` kind), so the closure chained `synth:widget` —
-        a kind in no relation to `team` — into `expand_kind("team")` and
-        `expand_kind("core:team")`, i.e. into the read path's `IN` clause.
+        a kind in no relation to `team` — into `expand_kind("team")`, i.e. into
+        the read path's `IN` clause.
+
+        `expand_kind("core:team")` is spared at this head, but NOT by the guard:
+        the closure takes one round, so it reaches `core:team → team →
+        synth:team` and never `synth:team → x:synth:team`. Both spellings are
+        asserted below anyway — a future fixpoint would widen `core:team` too,
+        and that leg is what would catch it.
 
         `equivalentTo` only has to CONTAIN ':' (an unresolved target is a warning
         and the pack stays loaded), so this shape is accepted by the registry.
         `bare_to_full` therefore admits single-segment names only; the rest stay
-        in `expansions` unchained.
+        in `expansions` and are still chained to their declared `equivalentTo`
+        peer, which is correct — they simply never seed a `bare_inherits` chain.
         """
         (tmp_path / "synth").mkdir()
         (tmp_path / "synth" / "manifest.yaml").write_text(

@@ -3540,7 +3540,9 @@ class PackRegistry:
         # IS a key, for the real `synth:team` kind — and the closure would chain
         # an unrelated kind into the bucket — measured on a head WITHOUT this
         # guard, `expand_kind("team")` gained `synth:widget`. Those names stay in
-        # `expansions`, unchained.
+        # `expansions` and remain reachable through `equivalences` — an
+        # `equivalentTo` peer is still chained to its declaration, which is
+        # correct — they simply never seed a `bare_inherits` chain.
         bare_to_full: dict[str, list[str]] = {}
         for full in expansions:
             if full.count(":") == 1:
