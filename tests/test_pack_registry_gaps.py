@@ -1853,6 +1853,42 @@ class TestCoreHierarchy:
         # deleted pass appended 0 members to 0 of 311 buckets.
         assert "dev:deployment" in shipped.expand_kind("core:deployment")
 
+    def test_a_pack_kind_registered_under_a_core_name_round_trips_both_spellings(
+            self, tmp_path):
+        """A pack may declare a kind whose BARE name is a core alias (`team`).
+
+        The failure this prevents: the two spellings diverging for a shape the
+        SHIPPED packs do not have, so the equality above passed vacuously for it.
+        A manifest with `ontology.objectKinds: [team]` is ACCEPTED
+        (`canonical_kind_axes("team")` is empty, so the #2786 collision guard does
+        not fire), and it puts `synth:team` in `expand_kind("team")`. With the
+        bare-inherited members not round-tripping into the `core:` bucket,
+        `expand_kind("core:team")` missed them — the same one-kind-two-answers
+        asymmetry this PR exists to remove, reachable by any pack that registers a
+        kind under an aliased core name.
+        """
+        (tmp_path / "synth").mkdir()
+        (tmp_path / "synth" / "manifest.yaml").write_text(
+            "name: Synthetic\n"
+            "namespace: synth\n"
+            "version: 1.0.0\n"
+            "tier: free\n"
+            "ontology:\n"
+            "  extends: core\n"
+            "  objectKinds: [team]\n"
+        )
+        registry = PackRegistry(str(tmp_path))
+        assert registry.load_all() == 1, registry.errors
+        assert not registry.errors, registry.errors
+
+        bare = set(registry.expand_kind("team"))
+        core = set(registry.expand_kind("core:team"))
+        assert "synth:team" in bare, bare
+        assert bare <= core, (
+            "the two spellings of one kind answer differently for a pack kind "
+            f"registered under an aliased core name: {sorted(bare - core)}")
+        assert core <= bare, sorted(core - bare)
+
     def test_get_subclasses_folds_the_core_prefix_like_expand_kind(self, shipped):
         """`get_subclasses` answers the `core:` spelling too, not a wrong-empty.
 

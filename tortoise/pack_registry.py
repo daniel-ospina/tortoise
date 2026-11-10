@@ -3618,6 +3618,24 @@ class PackRegistry:
         for kind in list(expansions):
             gained: set[str] = set()
             sources = _equivalence_class(kind) | bare_inherits.get(kind, set())
+            # A peer's bare-inherited members round-trip too, or one spelling of
+            # one kind answers narrower than the other: `bare_inherits` is keyed
+            # by the BARE name, so a pack that registers `objectKinds: [team]`
+            # puts `synth:team` in `expand_kind("team")` and, without this, NOT
+            # in `expand_kind("core:team")` — while `test_core_prefixed_and_
+            # bare_spellings_are_one_kind` states they are one kind.
+            #
+            # ONE round is the whole closure, and the reason is an invariant of
+            # `bare_inherits`' CONSTRUCTION, not of this loop: it is filled from
+            # `bare_to_full`, whose keys are the part of a `ns:kind` name after
+            # the `:` and whose values are the full `ns:kind` names themselves.
+            # A kind name may not contain `:` (`_validate` refuses it), so a
+            # value is never itself a key and no chain can exceed one hop. The
+            # `list(...)` snapshot below is deliberate for that reason — but a
+            # change that let `bare_inherits` carry key-shaped values must turn
+            # this into a worklist, or it will silently under-expand.
+            for peer in list(sources):
+                sources |= bare_inherits.get(peer, set())
             for peer in sources:
                 gained.add(peer)
                 gained |= _ancestors(peer) | _descendants(peer)
