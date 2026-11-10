@@ -4556,7 +4556,7 @@ def test_every_capture_artifact_ships_in_the_wheel():
 # either side alone would pin `pi` to a generation main has already passed and
 # leave the shell seams accepting an interpreter they cannot run.
 _EXPECTED_INSTALL_CONTRACT = {"claude": 12, "codex": 4, "cursor": 5,
-                             "pi": 18}
+                             "pi": 19}
 
 
 @pytest.mark.parametrize("harness", sorted(_EXPECTED_INSTALL_CONTRACT))
@@ -4659,12 +4659,12 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     siblings, so a stale installed copy is comparable rather than
     unmeasurable (#4680).
 
-    Mutation: delete ``// tortoise-hook-version: 18`` from
+    Mutation: delete ``// tortoise-hook-version: 19`` from
     ``tortoise/pi-hooks/tortoise-capture.ts`` — ``read_hook_version`` returns
     ``None``, ``contract_version_for('pi')`` returns ``None``, and both this
     test and the generation pin RED.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 18
+    assert hook_install.read_hook_version(_PI_SRC) == 19
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")
@@ -4701,8 +4701,17 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: one directory listing — measured 1.4 s per refused turn at 20 000 entries, the
 #: ceiling this PR raises 20x. Behaviour moved (the guard's cost, and the two
 #: fast paths' precondition checks), so the generation moved with it.
+#: Generation 19 (#11662): #11636 changed this file's BYTES without moving the
+#: generation, so every install made from generation 18's bytes read
+#: `modified-artifact` — the verdict whose message is "you hand-edited this
+#: file" — on the next `hooks status` / `doctor`. Only the header line and a
+#: ledger paragraph change in this commit: the marker moves onto the bytes #11636
+#: already landed, and nothing behaves differently — which is what turns that
+#: accusation into the honest `stale-artifact`
+#: ("reinstall"). Both halves of the Pi seam move together, because
+#: `contract_version_for('pi')` grades them as ONE contract.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    18, "981a7ce6b153e313197c7e276e7b0f50f2996007ac7b0f809a8788fc1b0c0648")
+    19, "59da9e75b24e801974edaf4f99d036cb48ccdd662f2cb4713b3db62fe6aaa312")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -4810,6 +4819,11 @@ _GENERATION_DIGESTS = {
     17: "f6aa65ab47fd4779fd9b11a055c86be1ad790a88c8bd7cd6c5456c185c809560",
     # Generation 18: the admission guard answers without re-parsing every meta.
     18: "981a7ce6b153e313197c7e276e7b0f50f2996007ac7b0f809a8788fc1b0c0648",
+    # Generation 19 (#11662): the marker moves onto the bytes #11636 landed, plus
+    # a ledger paragraph (a comment-only edit STILL changes the sha256 — derive
+    # it, never assume it). The 18 entry above stays exactly as it shipped: a
+    # shipped digest is never rewritten.
+    19: "59da9e75b24e801974edaf4f99d036cb48ccdd662f2cb4713b3db62fe6aaa312",
 }
 
 #: The READ half of the same Pi seam (#2119) — a SECOND shipped artifact of the
@@ -4845,13 +4859,18 @@ _READ_SEAM_GENERATION_DIGESTS = {
     # and the paired pin below moved with it) — a SHIPPED generation's digest
     # must never be rewritten.
     18: "4b78646fbf63a30ce7d4b27107f86a51413273d8548dfb92e56d33aa7a60a2a0",
+    # Generation 19 (#11662): the read half's marker moves with the capture
+    # half's, because `contract_version_for('pi')` grades the pair as ONE
+    # contract (and answers None when the two disagree). Nothing but its header
+    # line changes here, so the 18 entry stays exactly as it shipped.
+    19: "ce5145601142555e3d63bb8c94d9749b2600244e6b257f2b9639e7cc1fddc26e",
 }
 
 #: The paired pin for the read half, mirroring
 #: ``_PINNED_PI_SEAM_INSTALL_CONTRACT`` above (and pinned to the SAME number,
 #: asserted by the test below: one seam, one contract).
 _PINNED_PI_READ_SEAM_INSTALL_CONTRACT = (
-    18, "4b78646fbf63a30ce7d4b27107f86a51413273d8548dfb92e56d33aa7a60a2a0")
+    19, "ce5145601142555e3d63bb8c94d9749b2600244e6b257f2b9639e7cc1fddc26e")
 
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():
