@@ -237,7 +237,7 @@ failure, not a skip — so the A-rows carry them too, and §6 I1 freezes the *co
 | `threshold` | precision ≥ 0.80 **and** direct-set reachability | attach > mint, 100 % classified | share lower **and** component arm positive | **appears + labelled** — the percentage is **reported, not chased**, and there is no `≥ X %` bar. ⛔ **Its registered cell therefore stays `UNMEASURED(<the rule>)`, not a comparator**: A4 is a *registered non-bar* (`REGISTERED_NON_BAR_ROWS`), and the checker refuses a numeric threshold on it (`capstone_preregistration_check.py:4011-4020`). The *rule* is what the verdict reads; the cell records that the bar is a rule | families non-zero **and** readers non-empty |
 | `corpus_id` | `a-corpus` | `a-corpus` | `a-corpus` | `fleet-graph` | `a-corpus` |
 | floor number (read from `denominator_floors`) | `a1_labelled_pairs: 30` | `a2_candidates: 30` | `a3_statements: 30` | `a4_labelled_nodes: 1` | `a5_slots: 5` |
-| `threshold_basis` | the ~10 pp resolution argument (`EXTRACTOR-V4-ARCHITECTURE.md:1197`) | same | the owner's own 9,910/15,534 baseline | "0 of 0 labelled is not coverage; a declared kind that is absent, or a node left unlabelled, is a failing run" | presence question, not a statistic |
+| `threshold_basis` | the ~10 pp resolution argument (`EXTRACTOR-V4-ARCHITECTURE.md:1397`, restated `:1533`) | same | the owner's own 9,910/15,534 baseline | "0 of 0 labelled is not coverage; a declared kind that is absent, or a node left unlabelled, is a failing run" | presence question, not a statistic |
 | `max_realizations` | 2 | 2 | 2 | 1 (read-only) | 2 |
 | `measurement_visible_to_author` | **`false`** — no prior A-row measurement exists (the honest answer) + the basis that says so | `false` + basis | `false` + basis | `false` + basis | `false` + basis |
 
@@ -271,13 +271,22 @@ carrying a label the ontology declares for it** — the *non-vacuity* floor unde
 not carried over from the old framing: a retired metric key would let C1 register a REFUSED boundary for a number
 nothing measures any more, which is the exact class of stale flag D-S4 exists to keep out of the record.
 
-⛔ **P1 from the substep-8 gate: the five keys must land in BOTH homes or C1's first commit is a hard red.** The
+⛔ **P1 from the substep-8 gate: the new floor keys must land in BOTH homes or C1's first commit is a hard red.** The
 checker fails closed on any record `denominator_floors` key with **no** counterpart in
 `PRE-REGISTRATION.md`'s fenced `preregistration-pins` block — *"the record may not invent a REFUSED boundary the
-document does not state"* — and that fence holds exactly the five E-keys today. So the A-floors go into **the
-record's `denominator_floors` AND the document's `denominator_floors:` block, with `document_sha256` re-cut, in the
-same commit**. Without that clause, D-S4's purpose silently inverts: the A-floors are dropped to make the gate green
-and *"an A-row with no floor can pass on three objects"* returns.
+document does not state"*. **That fence does not hold five keys; it holds fourteen** (`PRE-REGISTRATION.md:679`: four
+E-keys at §3.6 plus **nine** A-row floors at §3.7) — an earlier revision of this paragraph said "exactly the five
+E-keys" and was simply wrong about the file. So the A-floors go into **the record's `denominator_floors` AND the
+document's `denominator_floors:` block, with `document_sha256` re-cut, in the same commit**. Without that clause,
+D-S4's purpose silently inverts: the A-floors are dropped to make the gate green and *"an A-row with no floor can
+pass on three objects"* returns.
+
+⚠️ **Three of the five proposed keys are NEW and two already exist — the amendment is a rename, not an append.** At
+this head the record holds `a1_objects`, `a2_candidates`, `a3_statements`, `a4_typed_statements`, `a5_points`,
+`a5_actors`, plus the four E-keys and `a1_rollup_queries` / `a2_decided_candidates` / `a3_event_root_coverage`. So:
+`a2_candidates` and `a3_statements` are **already there** (reuse, do not duplicate); `a1_labelled_pairs`,
+`a4_labelled_nodes` and `a5_slots` are **new keys**; and `a4_typed_statements` must be **removed**, not left beside
+its replacement.
 
 ⛔ **P1 from the substep 6–7 gate: a SECOND bundle shares `capstone-preregistration/v1`, and the checker runs on
 both in ONE CI step.** `python-ci.yml:512` invokes the checker with `--dir docs/evidence/7949-capstone … --dir
@@ -325,7 +334,7 @@ E5) **cannot be produced at this record** — W2b was built on a pin that is alr
 for the fixture kind, `posted_payload_sha256` for the A-corpus, `graph_head` for the fleet graph — rather than
 adding a `sha256`/`items` pair that duplicates `fixtures_hash`. One pin contract, one derivation per kind, and the
 probe stops hardcoding one key. ⚠️ The A-corpus key is renamed **`posted_payload_sha256`** because `payload_sha256`
-already means something else in this repo (`tortoise/export.py:132`, the encrypted export envelope's digest) —
+already means something else in this repo (`tortoise/export.py:178-182`, the encrypted export envelope's digest) —
 a name collision in a pin is how the wrong digest gets compared.
 
 ⛔ **The first version also RETYPED `corpus` into `corpora`, which would have failed the
@@ -375,8 +384,9 @@ and after the amendment 12 − 3 = **9**, not 10. The correct invariant adds the
 (record ids − NON_VERDICT_ROWS) ∪ SUB_ROW_PARENT.values() == enum ids
 ```
 
-⛔ **And three hardcoded copies silently DROP the A-rows**: `capstone_run.py:681` (`refused_rows`) and `:748`
-(`completed_rows`) both iterate `("E1","E2","E3","E4","E5")`, and `capstone_measure.py:242`/`:455` carries the same
+⛔ **And three hardcoded copies silently DROP the A-rows**: `docs/evidence/7949-capstone/probes/capstone_run.py:687` (`refused_rows`) and `:750`
+(`completed_rows`) both iterate `("E1","E2","E3","E4","E5")`, and
+`docs/evidence/7949-capstone/probes/capstone_measure.py:244` (`CRITERIA = (…)`) carries the same — **once, not twice**
 literal — so an A-row is **never emitted**, while V2's "the table is 5 rows" still passes. **All three are in scope
 for C1's change**, or the A-rows are registered and never scored.
 ⛔ **And the A-rows must be authored in `PRE-REGISTRATION.md` too**: the checker compares the record's criteria
@@ -386,10 +396,17 @@ commit**. §4.1 did not say that.
 
 **Cardinality is a decision, and it moves five hardcoded numbers.** If the A-rows become verdict rows (and §1 J1's
 "ten rows" says they do), then the table is **10**, and these move **in the same change**: the "table is 5 rows"
-assertion (`:803`), `{len(red)}/5` (`:1350`), the `5/5` strings (`:1369`, `:1536`), and
-`pins.required_criteria_rows` / `REQUIRED_CRITERIA` (the prereg gate asserts it is exactly `[E1..E5]`). **And
+assertion (`capstone_verdict_check.py:895`), `{len(red)}/5` (`:1450`), the `5/5` strings (`:903`, `:912`, `:1053`, `:1068`, `:1636`). **And
 `blocker-states.json` must move too** — a non-green A-row reds V12 unless every blocker it cites is covered there,
 which the first version of this section omitted.
+
+⛔ **`pins.required_criteria_rows` / `REQUIRED_CRITERIA` do NOT move, and the first version of this paragraph said
+they did.** That question was already decided and landed: `preregistration.json`'s `issue: 10982` amendment states
+*"required_criteria_rows stays `[E1..E5]`, so the new rows are registered and reported, never demanded by the gate (a
+required row would red every existing verdict table for rows nobody has run)"*, and `PRE-REGISTRATION.md` mirrors it.
+`:4123-4126` asserts `pins.required_criteria_rows == list(REQUIRED_CRITERIA)`, so moving one drags the other — into
+the outcome #10982 (CLOSED 2026-11-08) argued against. **The A-rows are verdict rows in the verdict TABLE without
+being REQUIRED rows in the prereg GATE**; the ten rows are a cardinality claim about the table, not about the gate.
 
 ⛔ **A sixth artifact moves, and this list omitted it: `REGISTERED_NON_BAR_ROWS`.**
 `capstone_preregistration_check.py:375` pins `REGISTERED_NON_BAR_ROWS = frozenset({"A4"})`, and two arms make it
@@ -403,15 +420,38 @@ load-bearing rather than decorative:
   that imports it — not reporting a finding.
 
 **A4's registration is therefore decided once, here, and it is (b): A4 stays a non-bar.** The owner ruling of
-2026-11-09 sets A4's bar as *"appears + labelled, percentage reported not chased"* — a **rule**, not a
-threshold — so giving it a comparator would reverse that ruling, which is a reopen, not a plan edit. Concretely,
-C1's amendment must: keep `"A4"` in `REGISTERED_NON_BAR_ROWS`; keep the record's A4 cell as
-`UNMEASURED(<the rule + the owner ruling as its basis>)`, which `:3940-3960` accepts for a pinned non-bar row;
-spend `a4_labelled_nodes: 1` as the *non-vacuity floor* only, never re-scoped as a rate (`:3983-4008` refuses
-that); and leave A4 out of `REQUIRED_CRITERIA`. A4 is still a **verdict row** — it can fail (a declared kind
-absent; a thing or event left unlabelled) — but its verdict comes from the rule, not from a numeric bar. A lane
-that wants A4 to carry a comparator must **reopen the owner ruling first**, and the same commit must then drop
-`"A4"` from the pin.
+2026-11-09 — relayed into §2 of this plan and `02-scope.md:5`/`:79-81`, and recorded on this PR — sets A4's bar as
+*"appears + labelled, percentage reported not chased"*: a **rule**, not a threshold. Giving it a comparator would
+reverse that ruling, which is a reopen, not a plan edit.
+
+⛔ **And the cell must name who decides it.** `capstone_preregistration_check.py:3963-3968` refuses a registered
+non-bar whose `UNMEASURED(...)` names no `#NNNN` — `OWNER_DECISION = re.compile(r"#\d+")` at `:563`) — *"a registered
+non-bar must state who decides it"*. So the cell is
+`UNMEASURED(<the rule> — decided by #<the issue that carries the ruling>)`, with a real number in it. A cell holding
+only prose reds the gate.
+
+⛔ **C1's amendment is a whole-row rewrite of A4, not a cell edit, and the retired field set is what must go.** The
+record today (`docs/evidence/7949-capstone/preregistration.json`, mirrored character-for-character in
+`PRE-REGISTRATION.md`'s A4 row, which the checker cross-checks) still carries the **retired** criterion:
+
+| field | registered today (retired) | must become |
+|---|---|---|
+| `metric` | "typed claims — **claim** Points … not `statement`" | per-layer label coverage (D-S4) |
+| `denominator` | "all **claim** `Point` nodes … floor of at least 30 typed statements" | the things-and-events population, per layer |
+| `floor` | `a4_typed_statements` (30) | the non-vacuity floor, under a key named for the new metric |
+| `blocked_by` | `#10988` — **still OPEN** | cleared: the owner ruling answered the D3 question it was blocked on |
+
+⛔ §4.1's field table carries **no `blocked_by` column** — a gap in this plan, not a licence to leave the field
+standing: a row still carrying `blocked_by: #10988` reads `BLOCKED`, which is the difference between R4's "A4 can
+fail" and a row nobody can score. **`a4_typed_statements` must not survive** the amendment, for the reason §4.2
+already gives about retired keys.
+
+The rest of the instruction stands: keep `"A4"` in `REGISTERED_NON_BAR_ROWS`; keep the threshold cell
+`UNMEASURED(…)` with its `#NNNN`; spend the floor as the *non-vacuity* floor only, never re-scoped as a rate
+(`:3983-4008` refuses that); and leave A4 **out of `REQUIRED_CRITERIA`** (see §4.4's cardinality note below —
+`required_criteria_rows` does **not** move). A4 is still a **verdict row** — it can fail (a declared kind absent; a
+thing or event left unlabelled) — but its verdict comes from the rule, not from a numeric bar. A lane that wants A4
+to carry a comparator must **reopen the owner ruling first**, and the same commit must then drop `"A4"` from the pin.
 
 ### 4.5 What does NOT change
 
@@ -618,7 +658,7 @@ hierarchy (which both routes need), and routes the choice to the owner — becau
 
 Corrected after review: "retry once on 5xx" would have manufactured the silent zero this epic exists to
 prevent. A re-POST of an **existing** `session_id` takes the **replay path** - it skips extraction and returns a
-200 *success-shaped* receipt (`hosted_api.py:17212-17217`; the abandoned-marker code says "same-session retry would
+200 *success-shaped* receipt (`hosted_api.py:18717`; the abandoned-marker code says "same-session retry would
 legacy-replay (#3129)"). So a "retry" after a 5xx is not a retry of the measurement. **The contract is on the
 receipt, not on the status code:**
 
@@ -628,34 +668,28 @@ receipt, not on the status code:**
 | terminal | `402` (quota - a refusal, not a failure), `422` (malformed payload). **`409` is NOT terminal** - the door publishes `Retry-After: 30` on it |
 | replay guard | read the receipt: `meta.mode == "replayed"` **and** a `capture_ok` that is **not** false => `REFUSED(replayed, no extraction)`, **no row scored**. A re-POST is a **TRUE retry** exactly when the stored `capture_ok` is `false` - which is what `#3129`'s abandoned marker exists to write |
 
-⛔⛔ **P1 from the `duplication-architecture` review: the first version INVERTED this contract.** It said "retry with
-a **fresh** `session_id`" - which **discards the door's own convergence machinery and mints a second session's
-points**, double-minting silently. The door already owns the retry semantics: a same-session re-POST on a convergent
-lane is the TRUE retry (`hosted_api.py:17288-17297`, `retry_failed_capture`, blocked for `m2`); a **replay** fires
-only when `capture_ok` is `True`/legacy-`None` and returns `mode: "replayed"` (`:17761`); and `#3129`'s abandoned
-marker writes `capture_ok=false` **precisely so that** a same-session retry is a true retry. §5.4's citation
-(`:17212-17217`) was also wrong - that is the **422 empty-conversation** branch, not the replay path. **The retry
-contract is the door's; the plan declares it, it does not restate a different one.**
 | breaker | **two consecutive refusals at one head stop dispatching that run** |
 | census | **not** retried (a partial census is a refused run, not a best-effort one); W2c's read-only census inherits this and needs no breaker |
+| model-proposed arms | re-run **once** for the repeat policy. "A third run is a policy violation" was narration - nothing counts runs. It is frozen as a **record field** (`max_realizations`) with a **CI pin over the committed run artefacts**; absent that, it is a reporting convention and the plan says so instead of calling it a violation |
+
 ⛔⛔ **P1 from the `duplication-architecture` review: the first version INVERTED this contract.** It said "retry with
 a **fresh** `session_id`" — which **discards the door's own convergence machinery and mints a second session's
 points**, double-minting silently. The door already owns the retry semantics: a same-session re-POST on a convergent
-lane is the TRUE retry (`hosted_api.py:17288-17297`, `retry_failed_capture`, blocked for `m2`); a **replay** fires
-only when `capture_ok` is `True`/legacy-`None` and returns `mode: "replayed"` (`:17761`); and `#3129`'s abandoned
-marker writes `capture_ok=false` **precisely so that** a same-session retry is a true retry. §5.4's citation
-(`:17212-17217`) was also wrong — that is the **422 empty-conversation** branch, not the replay path. **The retry
-contract is the door's; the plan declares it, it does not restate a different one.**
-
-| model-proposed arms | re-run **once** for the repeat policy. "A third run is a policy violation" was narration - nothing counts runs. It is frozen as a **record field** (`max_realizations`) with a **CI pin over the committed run artefacts**; absent that, it is a reporting convention and the plan says so instead of calling it a violation |
+lane is the TRUE retry (`hosted_api.py:18131` assigns `retry_failed_capture`, `:18159` consumes it; blocked for `m2`);
+a **replay** fires only when `capture_ok` is `True`/legacy-`None` and returns `mode: "replayed"`
+(`hosted_api.py:18717`); and `#3129`'s abandoned marker writes `capture_ok=false` **precisely so that** a same-session
+retry is a true retry. ⚠️ §5.4's citation (`:17212-17217`) was wrong, **and so was the first correction to it**: at
+this head `:17212-17217` is `_SESSION_CAPTURED_AT_SOURCE_VALUES` and `class SessionRequest` — neither the 422 branch
+nor the replay path. **The retry contract is the door's; the plan declares it, it does not restate a different one.**
 
 ---
 
 ## 6 · Interfaces (contract-first)
 
-**Nine contracts** to freeze before implementation (I1, I2, I3, I4a, I4b, I5, I6, I7, I8 — **I9** below is the
-tenth and closes the rollup's answer shape). Each names its consumers, so a change is visibly breaking. ⚠️
-*Corrected: the first version said "six" over a nine-row table and left I6 after I8.*
+**Ten contracts** to freeze before implementation (I1, I2, I3, I4a, I4b, I5, I6, I7, I8 and **I9** — and **I10**,
+the derived-vocabulary shape §5.3's C10 needs). Each names its consumers, so a change is visibly breaking. ⚠️
+*Corrected twice: the first version said "six" over a nine-row table and left I6 after I8; the second said "nine"
+over the eleven-row table below and counted I9 as the tenth while omitting I10 altogether.*
 
 | # | contract | shape | consumers | breaking change |
 |---|---|---|---|---|
@@ -665,7 +699,7 @@ tenth and closes the rollup's answer shape). Each names its consumers, so a chan
 | **I4a** | **row verdict vocabulary - the gate's OWN, verbatim** | `GREEN · RED · BLOCKED · UNPREREGISTERED` (exactly `capstone_verdict_check.VERDICTS`, enforced by V3: "unknown is not a verdict"). `BLOCKED`'s reason is carried by the existing **`blocked_by`** field, **never inside the verdict string** | `capstone_verdict_check.py` (V3) | adding a fifth word (`REFUSED`, `UNMEASURED`) to this set - V3 refuses it |
 | **I4b** | **display vocabulary for the `#7949` table + README - a MAPPING onto I4a** | `GREEN`->GREEN - `RED`->RED - `BLOCKED(<reason>)`->`BLOCKED` + `blocked_by` - `REFUSED(below floor: n of N)`-> a **run status on the artifact** (the record's own `below_floor`: "REFUSED, which is neither a pass nor a fail"), displayed as `REFUSED`, with the row it belongs to `BLOCKED` - `UNMEASURED(<what>)`->`BLOCKED` + `blocked_by` naming what would measure it | the README, the `#7949` table | displaying a state that maps onto no I4a verdict - i.e. a fifth *verdict* |
 | **I5** | **test-tier declaration — it must UNIFY onto the two declarations that already exist, not add a third** | ⛔ **file-level ⇒ `config/ci-surfaces.yml`'s `on_demand:`** (read by `tools/ci_selection.py::leg_coverage_issues`, and the runner-register comment stays the one record of what runs where); **per-test, for a mixed file ⇒ a REGISTERED pytest marker** (`tier_e`, added to `pyproject.toml`'s `markers` and to each leg's `-m` filter — the mechanism `slow`/`live`/`integration` already use at five legs). The `Tier:` docstring survives as **human annotation only** | the **existing** enforcement: `on_demand:` + the `-m` filters. The one NEW pin is the **consistency assertion** — every `Tier: E` file is an `on_demand:` member (or carries `tier_e` on every live test), and every `on_demand:` member is `Tier: E`-annotated | ⚠️ **corrected: "none exists today" was false** — two declarations are live and enforced. A third, readerless marker would add a population no check can see (the F5 gap again) |
-| **I7** | **point budget - a POINTER, not a snapshot** | the door already enforces `count + est > max_points` and already publishes the readers: `org_info` -> `nodes_used` / `max_nodes` (`hosted_api.py:12837-12850`, from `quota.count_org_usage`), limits from `quota.resolve_org_limits`, and the 402 carries `used`/`limit`/`estimate` (`quota_refusal_payload`). C2's field is **`graph_headroom_at`** (when it was read) plus the A-corpus's own consumption, **doubled** for the control | C2 declares; W2a refuses when the estimated budget exceeds the read headroom | declaring a *snapshot* that drifts from the door's live readers |
+| **I7** | **point budget - a POINTER, not a snapshot** | the door already enforces `count + est > max_points` and already publishes the readers: `org_info` -> `nodes_used` / `max_nodes` (`hosted_api.py:10300`, from `quota.count_org_usage`), limits from `quota.resolve_org_limits`, and the 402 carries `used`/`limit`/`estimate` (`quota_refusal_payload`). C2's field is **`graph_headroom_at`** (when it was read) plus the A-corpus's own consumption, **doubled** for the control | C2 declares; W2a refuses when the estimated budget exceeds the read headroom | declaring a *snapshot* that drifts from the door's live readers |
 | **I8** | **declared-mechanism row** | `config/v4-mechanisms.yml`: **`id`**, **`name`**, **`declared_in`**, `state`, `code:`, `tests:`, `symbols:`, `pins:`, `preconditions:`, `tracking_issue:` **plus the marker-agreement rule** — every `declared_in:` document must carry `<!-- v4-mechanism: <id> state: … -->` and agree with the row - guarded by `tests/test_v4_declared_mechanisms.py` | C4 (the one component that builds a write-path mechanism) | a mechanism shipped with no row (**the `#5064` defect inverted**); a row missing `id`/`name`/`declared_in`; a doc marker disagreeing with its row |
 | **I9** | **rollup answer** (C3's deliverable — frozen by no other contract) | `{rows[], reading: "direct"\|"transitive", intermediates[], evidence[]}` — `rows[]` are the objects the query returns, `reading` names which walk produced them, `intermediates[]` proves each inherited row is reachable through **declared** edges | C3 (author), the scorer, the census/verdict tooling, **J2's reader** | an answer whose shape two lanes can disagree on while E2E-1/E2E-3 still "pass" |
 | **I10** | **`allowed_predicates(graph)` — the derived vocabulary's shape** | an ordered mapping `predicate -> {admitted_by, verb, record_carried}`: `admitted_by ∈ {core, <pack namespace>}`, `verb ∈ {create_edge, create_about_edge, ingest}`, `record_carried: bool` (durable across `rebuild_all`) | **all three writers** (`create_edge`, `create_about_edge`, `ingest`), `relation_write_paths`/`relation_write_verdict`, `list_relations`, and **C10's acceptance** | adding a predicate with no `verb` or no `record_carried` answer — a live-only edge dropped by a rebuild, silently |
@@ -903,7 +937,7 @@ expansion the scope gate recorded; repo search carried every finding). Recorded 
 
 **The reviewer's own line, worth carrying:** *"every P0 above lives on the boundary between the plan and the live
 tree, not inside the plan … Coherence Review cannot find these because it never reads `hosted_api.py`,
-`capstone_run.py:748`, or the `on_demand:` register. The incoherence is concentrated in **what the plan assumes
+`probes/capstone_run.py:750`, or the `on_demand:` register. The incoherence is concentrated in **what the plan assumes
 already works**."*
 
 ---

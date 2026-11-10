@@ -186,8 +186,8 @@ value (`tortoise/projection/edges.py`), and no extraction path sets one
 **R8 · Two owner assertions sit on a recorded decision or an open question — ROUTED, not decided
 (§6).** A4 vs **D3** (`docs/ONTOLOGY.md:975` *"extraction emits `statement` only"*, option B
 2026-08-12, `#1022` MERGED). A3 vs **D6** — *"Two distinct connection sets — within-batch and to-graph,
-both **proposed by the model**"* (`EXTRACTOR-V4-ARCHITECTURE.md:1200`, `:977`),
-with §15 (`:1842`, under the heading at `:1840`) recording the to-graph LLM-vs-mechanical question as **OPEN** and `:1818` recording
+both **proposed by the model**"* (`EXTRACTOR-V4-ARCHITECTURE.md:1400` — the **D6** row; `:1095` — "D6 as ruled"),
+with §13.8 (`:2085`, under the heading at `:2057`) recording the to-graph LLM-vs-mechanical question as **OPEN** and `:2024` recording
 the mechanical alternative as *"a direct challenge to D6 — D6 is the decision that stands; the challenge
 is evidence for the owner, **not** a change we may make."*
 
@@ -523,7 +523,7 @@ may reverse an earlier one (§16.3/O4) — but the reversal must be recorded whe
 `statement` and does not"* — the baseline refutes it (80 % already are).
 
 **ASK — §13.8 Q1, the to-graph connection mechanism.** Recorded **OPEN**
-(`EXTRACTOR-V4-ARCHITECTURE.md:1842`, `:1818`) while **D6 stands** (`:1200`, `:977`). **C5 measures conformance to D6** — the two connection sets are `#10999`/`#10998`; C5 builds neither
+(`EXTRACTOR-V4-ARCHITECTURE.md:2085`, `:2024`) while **D6 stands** (`:1400`, `:977`). **C5 measures conformance to D6** — the two connection sets are `#10999`/`#10998`; C5 builds neither
 and reports both jobs; the answer is routed as evidence, never adopted quietly. (Distinct from `#7948`,
 which answered Q2 — `aboutObject` is a **STORED** edge — and is CLOSED.)
 

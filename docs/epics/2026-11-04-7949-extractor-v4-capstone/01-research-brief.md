@@ -228,12 +228,18 @@ layer) — **so the research neither confirms nor refutes D3**; it only says the
 point layer to be typed. ⇒ **D3 stays exactly where `00-align` put it: routed as a REOPEN, not decided, and
 not closed by anything found here.** A4's target remains unset.
 
+> ⚠️ **SUPERSEDED ON THE LAST CLAUSE ONLY.** "A4's target remains unset" was true at the research stage and is
+> no longer: the owner ruling of 2026-11-09 set it — per-layer label coverage, bar = appears + labelled, the
+> percentage reported and not chased. **Everything else above stands**, including that this brief neither
+> confirmed nor refuted D3: the ruling moved A4 *off* D3 rather than settling D3. See `02-scope.md:75-81` and
+> `04-plan.md` §4.1/§4.4.
+
 ---
 
 ## Cross-Phase Contradictions (research vs recorded decisions)
 
 **⚠️ The tiered-linking finding contradicts D6 unless it is routed — and it is routed.**
-`EXTRACTOR-V4-ARCHITECTURE.md:1200` records D6: *"Two distinct connection sets — within-batch and to-graph,
+`EXTRACTOR-V4-ARCHITECTURE.md:1400` records D6: *"Two distinct connection sets — within-batch and to-graph,
 both **proposed by the model**"*, and `:977` says *"D6 as ruled"*. The field's convergent answer (tiered:
 mechanical candidates + LLM only for borderline) is **not** D6. Per the **contradiction test** and the
 Adoption Gate, a convergent standard that contradicts a recorded decision is **not adoptable at all** — the

@@ -57,7 +57,7 @@ note **or a justified skip citing the brief**. Both are **justified skips**, cit
    write path already carries `batch_id` in `RelationUpsert.attrs` (`tortoise/record_projection.py:829-836`), and
    "this batch" vs "a previous batch" is exactly that distinction — so the tier is **reported from `batch_id`**
    and no new edge property is added. A persisted marker would have to update the five MAP-form writers and
-   `sdk.py:17079`'s per-door `_honours` set in the same change, and a free-form `props` key is the branch this
+   `sdk.py:17985`'s per-door `_honours` set in the same change, and a free-form `props` key is the branch this
    scope refuses (`STORAGE-ARCHITECTURE.md` §11.4/§13: an OPEN set no guard bounds).
 4. **A5 evidence** — the `Subject` layer either populated (count + the four subject-edge families + the
    customer-visible readers) **or** the honest finding that it is not, with the reason — *"which of
@@ -461,7 +461,7 @@ and it is cheap to close."*
 the `duplication-architecture` reviewer, and record both verdicts here.
 
 **Recorded:** the `duplication-architecture` verdicts **are** in this file (§"`duplication-architecture` review —
-verdicts recorded", `:400`). The scope reviewer's **3 cycles** (cosmetic-only, all fixed) do **not** live here —
+verdicts recorded", `:400`). The scope reviewer's **3 cycles** (cosmetic-only) do **not** live here —
 they are recorded on the `#7949` pipeline comment of **2026-11-08T00:17:36Z** (`epic-scope ×3 … cosmetic-only`),
 which is the artifact `05-verify.md`'s row cites. Nothing further is owed by this file; the earlier wording
 promised a record this artifact does not carry.

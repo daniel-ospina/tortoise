@@ -224,8 +224,16 @@ Two recorded decisions and one closed-but-unsettled metric sit under the owner's
    ("0.6 % typed is the ceiling the capstone must beat"). Fork: (a) A4 overrides D3 → `OVERRIDES:` on
    `#1022` + `ONTOLOGY.md` §5 and C7 gains a target; (b) A4 was aimed at `#4432`'s docs-vs-code drift → C7
    attributes the 109 and follows whichever of `#4432`'s options the owner picks.
+
+   > ⚠️ **RESOLVED AFTER THIS STAGE — do not act on the fork above.** The owner ruling of 2026-11-09 replaced A4
+   > with *"things and events carry the labels the ontology declares for them, reported per layer"*, bar =
+   > appears + labelled, percentage **reported, not chased**. Both arms (a) and (b) are therefore closed:
+   > **C7 does not gain a comparator, and does not follow `#4432`.** See `02-scope.md:75-81` (which says so in
+   > those words) and `04-plan.md` §4.1/§4.4. This file is the **record of the align stage** and is left as
+   > written — a later stage resolving a fork this stage opened is the pipeline working, not a contradiction;
+   > read the ruling, not the fork.
 2. **ASK — §13.8 Q1**, to-graph connection by model or mechanically: recorded **OPEN**
-   (`EXTRACTOR-V4-ARCHITECTURE.md:1842` — under §15's heading at `:1840` — and `:1818`) while **D6 stands** (`:1200`, `:977`). **C5 measures conformance to D6** — the two connection sets are `#10999` (Job 1) and `#10998` (Job 2); C5 builds neither.
+   (`EXTRACTOR-V4-ARCHITECTURE.md:2085` — under §13.8's heading at `:2057` — and `:1818`) while **D6 stands** (`:1200`, `:977`). **C5 measures conformance to D6** — the two connection sets are `#10999` (Job 1) and `#10998` (Job 2); C5 builds neither.
 3. **`#9736`** — E3's denominator. **CLOSED 2026-11-04T15:37Z** *before* this head; its amendment landed
    (`8c1151426`) and E3 is still RED at 157/397 because 193 of 354 Points cannot carry an anchor. Its
    closure leaves two owner-gated lines owed. `blocker-states.json` still says OPEN — a stale pointer of
