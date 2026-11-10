@@ -51,7 +51,13 @@ DOC = ROOT / "docs" / "product" / "sdk-surface-declaration.md"
 # because `main` retired two public names (#10012: `graph_count` → `_graph_count`, `org_list`
 # deleted) while this branch was open; the same rationale `config/surface-manifest.yml`
 # records beside the pin.
-DECLARED_COUNT = 150
+#
+# 150 → 124 (#4282, 2026-10-27). The owner ruled the surplus public methods that nothing
+# calls may be DELETED (`docs/product/canonical-mcp-tools.md`, "Amended 2026-10-27", PR
+# #10187); the 26 with no caller under `tortoise/**` went, code archived at tag
+# `archive/4282-surplus-sdk-methods`. The approved 40 is untouched — this pin tracks what
+# EXISTS, and it moved only because 26 surplus methods stopped existing.
+DECLARED_COUNT = 124
 
 
 def _declaration() -> dict:

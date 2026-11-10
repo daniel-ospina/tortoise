@@ -625,7 +625,7 @@ _HELD_CAP_SUPERSEDED = (
     # copy" — contains the substring and would red on right text, which is the
     # false alarm this file's doctrine says gets a guard deleted.
     "is the only copy",
-    "sole writer",  # false: `sdk.org_update` accepts the field
+    "sole writer",  # false: the org update door accepted the field (#4282 retired it)
     "never on an operator override",  # false, and the opposite of the ruling
     "deletes the measurement",  # the predicate the withdrawn sentence acted on
 )
@@ -831,7 +831,7 @@ def test_the_held_cap_clause_does_not_restate_a_superseded_claim():
         "output, not the only copy (an export is verified by count and the "
         "removal is journalled, #10175 amendment 2026-11-02); and an operator "
         "override is reachable — a stored `max_points` column is honoured with "
-        "precedence over `graph_size_cap` and `sdk.org_update` accepts the "
-        "field — which is why the ruling forbids it rather than claiming it "
-        "cannot be done."
+        "precedence over `graph_size_cap`, and the org update door accepted the "
+        "field (#4282 retired that door) — which is why the ruling forbids it "
+        "rather than claiming it cannot be done."
     )

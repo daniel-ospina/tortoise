@@ -463,7 +463,7 @@ def _capture_with_abort(sdk, needle: str, *, session_id: str, present=True):
     proxy = _AbortOnceGraph(proj.g, needle, present=present)
     proj.g = proxy
     try:
-        result = sdk.capture_session(_CONV, session_id=session_id)
+        result = sdk._capture_session(_CONV, session_id=session_id)
     finally:
         proj.g = proxy._real
     return proxy, result
@@ -511,7 +511,7 @@ def test_a_rebuild_abort_on_the_operator_label_provenance_stamp_is_retried(
         # SAME stamp state as a no-abort control run.
         control = _sdk(tmp_path, "labelstamp-control")
         try:
-            control_result = control.capture_session(
+            control_result = control._capture_session(
                 _CONV, session_id="7405-label-ctl")
             assert control_result.get("ok") is True, control_result
             aborted_state = _label_stamp_state(sdk, "7405-label")

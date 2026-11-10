@@ -233,7 +233,7 @@ def armed(tmp_path_factory):
         lost_before = dict(monitoring.record_write_failure_counts())
         try:
             with use_record_tenant(*tenant):
-                receipt = sdk.capture_session(_TURNS, session_id=session_id)
+                receipt = sdk._capture_session(_TURNS, session_id=session_id)
         finally:
             after = _counts(conn, tenant)
             lost = monitoring.record_write_failure_counts().get(
@@ -667,7 +667,7 @@ def traced(armed, tmp_path_factory):
         _instrument(mp, entries)
         session_id = f"capstone-order-{tag}"
         with use_record_tenant(*tenant):
-            receipt = sdk.capture_session(list(_TURNS), session_id=session_id)
+            receipt = sdk._capture_session(list(_TURNS), session_id=session_id)
         # The measured census, for the run's artifact. A COUNT of what this run
         # observed is the evidence (DoD rule 1); it is printed, never asserted
         # against a constant (DoD rule 4 — a number in a test rots).

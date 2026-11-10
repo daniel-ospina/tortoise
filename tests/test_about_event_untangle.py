@@ -82,7 +82,7 @@ def _scan(sdk, limit=100):
 def test_capture_session_no_about_event_provenance(sdk):
     """The capture path mints NO aboutEvent edge to the sessionCaptured Event
     and stamps the Event's eventId onto every extracted Point instead."""
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     proj = sdk._get_proj()
     eid = _session_event(sdk)
 
@@ -105,7 +105,7 @@ def test_capture_session_subject_resolves_via_eventid_fallback(sdk):
     """D10 fallback without the edge: a freshly captured Point has no
     aboutEvent edge, yet its promoted ``subject`` resolves via the Event's
     aboutSubject — the eventId-property hop (the provenance surface)."""
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     proj = sdk._get_proj()
     eid = _session_event(sdk)
     pid = res["points"][0]["id"]

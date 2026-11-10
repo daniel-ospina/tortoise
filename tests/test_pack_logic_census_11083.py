@@ -165,10 +165,14 @@ def test_h2_population_is_derived_not_remembered(artifact):
     assert pop["hierarchies"] == hier
     assert pop["declared"] == rel + hier, (
         "the declared population must be Σ relations + Σ hierarchies, derived")
-    assert pop["declared"] == 42, (
+    assert pop["declared"] == 45, (
         "the declared population MOVED — update every downstream reference "
         "(the issue body, the capstone row) rather than this assertion alone, "
-        "and check the move was a declaration change and not a deletion")
+        "and check the move was a declaration change and not a deletion. "
+        "42 → 45 is #11001's KIN-2: the three goal connections "
+        "(`goal --ownedBy--> Subject`, `epic --addresses--> goal`, "
+        "`indicator --addresses--> goal`) were APPROVED on 2026-11-05 and "
+        "declared by nobody until now — a declaration change, not a deletion)")
     for ns, section in sections.items():
         assert "relations" in section and "hierarchies" in section, (
             f"{ns} is missing a surface key — a zero must be an explicit 0, not "
@@ -718,7 +722,7 @@ def test_h11_the_distinct_denominator_is_measured_not_subtracted_in_prose(artifa
     assert restated == 4, (
         f"{restated} hierarchy row(s) restate a `relations[]` row — if this moved, "
         "the distinct denominator moved with it and the README/body must too")
-    assert pop["distinct_connections"] == 38
+    assert pop["distinct_connections"] == 41
 
     # The per-row flag is the JOIN's answer, not an inference of the census's: it
     # must agree with `declared_hierarchy()` entry for entry (H7's rule, one
@@ -859,12 +863,22 @@ def test_h14_the_pipeline_unmeasured_cell_cites_the_SENTENCE_not_a_line(artifact
     assert not _LINE_CITE.search(artifact["pipeline"]["relations_channel"]["why"]), (
         "the pipeline cell cites a LINE (`file.py:NNNN`), which re-stales on every "
         "edit above it and which `--write-probe` reproduces into the artifact")
+    # ⛔ DIRECTION FLIPPED: the sentence this cell used to cite ("nothing in this tree consumes
+    # `result[\"relations\"]`") was RETRACTED — `#11548` landed the consumer and `sdk.py`'s capture
+    # commit path calls `relation_write.apply_relation_edges` on exactly this dict, so the citation
+    # was supporting `UNMEASURED` with a falsehood. What is unmeasured is the EMISSION leg, not the
+    # consumer. Both halves are asserted in the corrected direction: the artifact must now cite the
+    # consumer, and must NOT carry the retracted sentence (which `--write-probe` would reproduce).
     why = artifact["pipeline"]["relations_channel"]["why"]
-    assert "nothing in this tree consumes" in why
+    assert "IS consumed" in why and "apply_relation_edges" in why, (
+        "the cell's only support must be the corrected reading — the channel HAS a consumer")
+    assert "nothing in this tree consumes" not in why, (
+        "the artifact still carries the retracted sentence; `--write-probe` reproduces whatever "
+        "the generator says, so a stale sentence in the artifact is a stale sentence forever")
     src = (REPO_ROOT / "tortoise" / "extractor_v2.py").read_text()
-    assert "nothing in this tree consumes `result[\"relations\"]`" in src, (
-        "the cited SENTENCE is not in the file it points at — an unfollowable "
-        "citation is the same defect as a stale line number")
+    assert "nothing in this tree consumes `result[\"relations\"]`" not in src, (
+        "the retracted sentence is back in the file this cell cites — the S5 Job 1 block must "
+        "state the consumer that exists")
 
 
 def test_h2c_the_dangling_kinds_are_spelled_as_the_packs_DECLARE_them(artifact):

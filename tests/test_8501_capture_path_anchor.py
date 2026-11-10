@@ -10,7 +10,8 @@ unanchored, and a revised transcript could never mark them stale. Measured on
 the pre-fix tree: ``references`` 1/1 anchored, ``extractedFrom`` 0/1.
 
 The fix moves the MINT + MATERIALIZE half of the capture above extraction (both
-lanes: ``sdk.capture_session`` and ``hosted_api._capture_session_impl``), so the
+lanes: ``sdk.capture_session`` (now private as ``TortoiseSDK._capture_session``,
+#4282 retired only the public name) and ``hosted_api._capture_session_impl``), so the
 ordinary link-time read returns the version and the anchor lands in the Point's
 own journaled ``sourceVersionTransit`` snapshot — which is what makes it survive
 a rebuild.
@@ -110,7 +111,7 @@ def test_capture_anchors_every_extractedfrom_link(prov):
     no ``$v``), or if the link-time read stops happening at all.
     """
     sdk, _events = prov
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True and res["extracted"] >= 1
 
     links = _capture_links(sdk)
@@ -140,7 +141,7 @@ def test_the_anchor_survives_a_full_rebuild(prov):
     would produce exactly that: an unjournalled second write whose value the
     Point's snapshot never saw, so ``rebuild_all`` drops it)."""
     sdk, events = prov
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True
 
     live = sorted((pid, recorded) for pid, _u, recorded, _c, _t in
@@ -162,7 +163,7 @@ def test_capture_path_source_shape_is_unchanged_by_the_early_materialization(pro
     stub mint (title=url, canonicalUrl, urlAliases, is_episodic for session
     refs), and materializing FIRST must not change one property of it."""
     sdk, _events = prov
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True
 
     rows = sdk._get_proj().g.query(
@@ -184,12 +185,12 @@ def test_a_recapture_neither_advances_nor_drops_the_anchor(prov):
     FAILS IF a re-link (or a second materialization) overwrites the recorded
     version, or if the replay path drops the link."""
     sdk, _events = prov
-    first = sdk.capture_session(CONV)
+    first = sdk._capture_session(CONV)
     before = sorted((pid, recorded) for pid, _u, recorded, _c, _t in
                     _capture_links(sdk))
     assert before and all(recorded for _pid, recorded in before)
 
-    second = sdk.capture_session(CONV, session_id=first["session_id"])
+    second = sdk._capture_session(CONV, session_id=first["session_id"])
     assert second["session_id"] == first["session_id"]
 
     after = sorted((pid, recorded) for pid, _u, recorded, _c, _t in
@@ -207,7 +208,7 @@ def test_the_m2_lane_anchors_too(prov, monkeypatch):
     before the extraction dispatch (the m2 lane would then stay unanchored)."""
     monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
     sdk, _events = prov
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True and res["extracted"] >= 1
 
     links = _capture_links(sdk)
@@ -224,7 +225,7 @@ def test_the_point_added_record_carries_the_anchor(prov):
     FAILS IF the anchor is stamped onto the edge outside ``create_point``'s
     create map — i.e. if a fix "repairs" the edge after the write."""
     sdk, events = prov
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True
     ref = f"session:{res['session_id']}"
 
@@ -261,7 +262,7 @@ def test_a_failed_mint_reports_one_warning_not_two(prov, monkeypatch):
         raise RuntimeError("mint down")
 
     monkeypatch.setattr(sdk, "create_event", _boom)
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True, "a mint failure must never fail the capture"
 
     mint_warnings = [w for w in res["warnings"]
@@ -282,7 +283,7 @@ def test_the_stub_the_early_materialization_mints_survives_a_rebuild(prov):
     FAILS IF the stub mint's create-time fields (`title=url`, `canonicalUrl`,
     `urlAliases`, `is_episodic`, `ingestedAt`) are live-only."""
     sdk, events = prov
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True
     url = f"session:{res['session_id']}"
 
@@ -316,7 +317,7 @@ def test_a_keyless_capture_stamps_its_stub_with_the_capture_instant(prov, monkey
     _keyless(monkeypatch)
     sdk, _events = prov
 
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     assert res["extraction_mode"] == "no-provider", res["extraction_mode"]
     url = f"session:{res['session_id']}"
@@ -348,7 +349,7 @@ def test_the_extracting_lane_stamps_its_stub_with_the_capture_instant(prov):
     FAILS IF the early mint stops carrying ``now=`` (a fresh ``_now_iso()``
     stamp again) or if the materialization moves back below extraction."""
     sdk, _events = prov
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     # PRE-CONDITION: this is the lane that extracts, i.e. the one where the
     # stub used to be minted by `_link_source` after the capture began.
@@ -387,7 +388,7 @@ def test_a_keyless_capture_lands_the_full_stub_shape(prov, monkeypatch):
     _keyless(monkeypatch)
     sdk, _events = prov
 
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     assert res["extraction_mode"] == "no-provider", res["extraction_mode"]
     url = f"session:{res['session_id']}"

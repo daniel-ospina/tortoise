@@ -33,7 +33,7 @@ is a GRAPH fact, so it is compared by `tests/test_pack_logic_writeprobe_11083.py
 instead — a check that needs a database is run rarely, and that is how an
 artifact rots.
 
-## Baseline at this stamp — 7 packs, 42 declared (36 relations + 6 hierarchies), 38 distinct connections, 0 load errors
+## Baseline at this stamp — 7 packs, 45 declared (39 relations + 6 hierarchies), 41 distinct connections, 0 load errors
 
 ⚠️ **Rows ≠ connections.** `pack_hierarchy` calls a `hierarchies[]` entry and a
 `relations[]` row over the same pack + pair + meaning *"one declaration spelled
@@ -42,7 +42,7 @@ twice"*, and **4 of the 6 hierarchy rows are exactly that** (`dev` theme→epic,
 product→feature). The artifact derives both numbers from each hierarchy row's own
 `restates_relation` (`population.declared` / `population.restated_hierarchy_rows`
 / `population.distinct_connections`) rather than leaving the subtraction to a
-paragraph: 42 rows are 38 distinct connections, and the 2 that no `relations[]`
+paragraph: 45 rows are 41 distinct connections, and the 2 that no `relations[]`
 row declares **in the same direction** are venture's.
 
 ⚠️ **The join is ORDERED** — `pack_hierarchy._matching_row` matches the same
@@ -58,10 +58,10 @@ RULE only, because only a computed cell may carry a count.
 
 | | before #11083 | after #11083 |
 |---|---|---|
-| `writable` | 32 | **35** |
+| `writable` | 32 | **38** (`#11001` added `dev:ownedBy`, `dev.addresses` ×2) |
 | `declaration-only` | 0 | **1** (`pm:onBoard`) |
 | `predicate-not-in-allowlist` | 4 (all `pm`) | **0** |
-| declared population | 42 | 42 — **nothing was deleted to make a count green** |
+| declared population | 42 | 45 — **nothing was deleted to make a count green** |
 
 `written`, measured by the write probe (one node per declared KIND, cached and
 reused; a row whose `from_kind` and `to_kind` are the same kind mints its
@@ -70,18 +70,19 @@ the row's own write path invoked, the graph read back):
 
 | shape | rows | what it means |
 |---|---|---|
-| `direct` | 8 | a real `(:Object)-[:p]->(:Object)` edge — 2 relations (`dev:hasPart`, `dev:dependsOn`) + 6 declared hierarchies |
-| `mediated` | 33 | the relation IS persisted and the two Objects ARE connected — **through an operator Point**: `(:Object)-[:INPUT]->(:Point {label:p})-[:IMPL]->(:Object)`. A different graph from a direct edge, which is why this column exists |
+| `direct` | 9 | a real `(:Object)-[:p]->(:Object)` (or `->(:Subject)`) edge — 3 relations (`dev:hasPart`, `dev:dependsOn`, `dev:ownedBy`) + 6 declared hierarchies |
+| `mediated` | 35 | the relation IS persisted and the two Objects ARE connected — **through an operator Point**: `(:Object)-[:INPUT]->(:Point {label:p})-[:IMPL]->(:Object)`. A different graph from a direct edge, which is why this column exists |
 | `none` | 1 | `pm:onBoard` — `declaration-only`, reason printed in the row |
 
-⚠️ **A census that asked only "written?" would report 41/42 and hide that the
-direct Object→Object class is 8/42 and that 33 rows are operator bridges.**
+⚠️ **A census that asked only "written?" would report 44/45 and hide that the
+direct Object→Object class is 9/45 and that 35 rows are operator bridges.**
 That is the whole argument for the three-way column.
 
-**Why `direct` is 8 and not 10.** A Layer-3 domain word can only be written
+**Why `direct` is 9 and not 11.** A Layer-3 domain word can only be written
 through the operator path: `create_edge` is STRICT and keyed on the edge's own
 predicate, so `blocks`/`partOfSprint` are not structural edge types (only
-`dependsOn`/`hasPart` are). Keeping the words — which the ruling requires —
+`dependsOn`/`hasPart`/`ownedBy` are — `ownedBy` is the direct row this pack
+declares). Keeping the words — which the ruling requires —
 therefore moves those two `pm` rows from `direct` to `mediated`. That is the
 measurement being honest, not a regression: the same two declarations, written
 through the writer their own vocabulary selects.
@@ -140,9 +141,9 @@ prints it. A marker without a reason is a silencer, not a disposition.
 
 | gap | status here | owner |
 |---|---|---|
-| the pipeline never emits declared relations (`result["relations"]` has no consumer) | `UNMEASURED` | **#11237** |
-| `apply_hierarchy_edges` has **zero production callers** | `UNMEASURED` | ⛔ **no owner** — #11001 closed read-only, #11237 disclaims the hierarchy writer in its own body |
-| the commitment spine: `core:goal` (and `plan`, `strategy`, `target`) is named as an endpoint by **0 of 42** declared connections | `dangling`, printed | ⛔ **no owner** — the three goal connections were attributed to #11001, which closed without declaring them |
+| the pipeline's EMISSION of declared relations is unmeasured — the CONSUMER now exists (`apply_relation_edges`, called from `sdk.py` on `extract_session_v2`'s `relations`), so what is unmeasured is whether that channel emits | `UNMEASURED` | **#11237** |
+| `apply_hierarchy_edges` has **zero production callers** | the CAPABILITY is wired; the symbol is still test-only | **#11237 delivered the wiring, not this symbol** — `tortoise/relation_write.py:631` calls `pack_hierarchy.plan_hierarchy_edges`, and the production leg writes through the structural/operator writers itself. `apply_hierarchy_edges` remains called only by `tests/test_pack_hierarchy_11001.py` and named by the capstone pin. That is now a **shape** question (two seams for one job: a plan the pipeline consumes and an applier only tests use), not a `written` gap |
+| the commitment spine: `core:goal` (and `plan`, `strategy`, `target`) is named as an endpoint by **0 of 42** declared connections | ⛔ was `dangling`; `goal` and `dev:indicator` are **out of the list at this stamp** | **delivered by #11001** — KIN-2's three connections are declared in `packs/dev/manifest.yaml` and measured `written` above (`goal --ownedBy--> Subject` = `direct`, the two `addresses` rows = `mediated`). `plan`/`strategy`/`target` remain dangling and are NOT KIN-2's |
 | `dev:initiative` as a real kind | out of scope | **#11000** |
 | `funds` as a Layer-2 meaning | ⛔ **withdrawn** | #7848's correction of 2026-11-08 |
 

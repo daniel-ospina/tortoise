@@ -107,7 +107,7 @@ def test_reflex_replays_kta_corpus_with_honest_numbers(monkeypatch):
         # exact cell shape — m2 echo lane via the mock seam).
         parsed = wp.parse_roundtrip(
             session_id, fx["turns"], "pi", workdir=workdir, log=log)
-        capture = sdk.capture_session(
+        capture = sdk._capture_session(
             parsed, session_id=session_id, harness="pi")
         assert capture.get("ok") is True, capture.get("errors")
         # 1. COLD: the untouched cell — the honest under-fire class.

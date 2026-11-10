@@ -56,6 +56,45 @@ _TARGET_ROW = re.compile(r"^\| (\d{1,2}) \| `([A-Za-z_][A-Za-z0-9_]*)")
 _ROW_RANGE = re.compile(r"rows? (\d{1,2})(?:\s*[–-]\s*(\d{1,2}))?")
 
 
+def _mentions(quote: str, name: str) -> bool:
+    """Does `quote` name `name` as a WHOLE identifier (not as a substring of another)?"""
+    return bool(
+        re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", quote)
+    )
+
+
+#: `Recorded destination `x`` / `Recorded destinations `x`, `y`` — the ONE claim shape a
+#: surplus removal's prose may use to state where a caller should go instead.
+_DESTINATION_CLAIM = re.compile(
+    r"Recorded destinations? ((?:`[A-Za-z_][A-Za-z0-9_]*`(?:, )?)+)"
+)
+
+
+def _inventory_destinations() -> dict[str, tuple[str, ...]]:
+    """The destination the NON-OWNER inventory records, per name it lists.
+
+    Its third column is the recorded disposition (`tools/sdk_rename_table.py` cites it and
+    the owner ledger agrees name-for-name), so it is READ here, never re-typed: a cell of
+    `—` means no destination was recorded, and each backticked identifier in it is one.
+    """
+    out: dict[str, tuple[str, ...]] = {}
+    for line in INVENTORY_DOC.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("| `"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) != 3:
+            continue
+        m = re.fullmatch(r"`([A-Za-z_][A-Za-z0-9_]*)`", cells[0])
+        if not m:
+            continue
+        cell = cells[2]
+        out[m.group(1)] = (
+            () if cell.startswith("—")
+            else tuple(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", cell))
+        )
+    return out
+
+
 def _target_rows() -> dict[int, str]:
     """The numbered owner-approved target rows of `beta-sdk-surface.md`."""
     out: dict[int, str] = {}
@@ -105,10 +144,19 @@ def _approved_replacements(name: str) -> set[str]:
         f"{name}: the recorded approval does not name the retired name. Recorded: {quote!r}"
     )
     m = _ROW_RANGE.search(quote)
-    assert m, (
-        f"{name}: the recorded approval points at no target row, so it authorises no "
-        f"replacement. Recorded: {quote!r}"
-    )
+    if not m:
+        # A region that names a destination WITHOUT numbering it — the owner ledger's
+        # "Removed" table does exactly this for a group at a time (`narrow readers (…) →
+        # `get_entity``). There is no ordinal in the text, so the approved set is the
+        # targets the region NAMES — and only when it names exactly ONE, because two or
+        # more is a CHOICE, and a choice belongs to the author, not to a parser.
+        named = sorted({t for t in _target_rows().values() if _mentions(quote, t)})
+        assert len(named) == 1, (
+            f"{name}: the recorded approval points at no target row and names "
+            f"{len(named)} approved targets ({named}), so it authorises no single "
+            f"replacement. Recorded: {quote!r}"
+        )
+        return set(named)
     lo = int(m.group(1))
     hi = int(m.group(2) or lo)
     rows = _target_rows()
@@ -330,4 +378,127 @@ def test_a_name_that_was_never_public_gets_no_retirement_claim() -> None:
         _ = sdk.definitely_not_a_real_method
     assert "retired" not in str(exc.value).lower(), (
         f"a name that was never public claimed to be a retirement: {exc.value}"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# #4282 surplus block (#10226 review, P2) — the RECORDED DESTINATION is a claim
+# ══════════════════════════════════════════════════════════════════════════
+#
+# The 26-name surplus block used to carry each departure's destination in free prose
+# only, and it drifted off the record it claimed to quote: measured 2026-11-10, five
+# entries named a target the record never recorded (or named one where it records
+# NONE) and three claimed "no destination" for names the record does give one, while
+# both counters above the block were wrong. `tortoise/sdk_retired.py` now holds the
+# destinations in ONE machine-readable cell; these tests hold that cell, and every
+# reason written from it, to the inventory — in both directions.
+
+def test_every_surplus_destination_is_the_one_the_record_records() -> None:
+    """The cell IS the inventory's column — re-typed values red here, not in production.
+
+    Non-vacuity: on the pre-fix tree this fails on eight names — `batch_create_points`
+    (`create_entity` vs `write_knowledge_batch`), `get_provenance_chain`
+    (`check_confidence` vs `get_entity`), `list_drafts` (`update_knowledge` vs
+    `list_knowledge`), `backfill_about_entities`/`backfill_sources`/`complete_source`
+    (a target where the record has `—`), and `apikey_list`/`membership_list`/
+    `membership_delete` (`—` where the record has a target).
+    """
+    from tortoise.sdk_retired import SURPLUS_DELETION_DESTINATIONS
+
+    inventory = _inventory_destinations()
+    missing = sorted(n for n in SURPLUS_DELETION_DESTINATIONS if n not in inventory)
+    assert not missing, (
+        f"declared in the surplus destination cell but absent from "
+        f"{INVENTORY_DOC.name}: {missing}. The inventory is the record this cell "
+        "transcribes; a name it does not list has no recorded disposition."
+    )
+    wrong = {
+        n: (dests, inventory[n])
+        for n, dests in SURPLUS_DELETION_DESTINATIONS.items()
+        if dests != inventory[n]
+    }
+    assert not wrong, (
+        "a surplus name's recorded destination is not the one "
+        f"{INVENTORY_DOC.name} records (cell, inventory): {wrong}"
+    )
+
+
+def test_a_surplus_reason_states_only_the_recorded_destination() -> None:
+    """The prose may neither miss the recorded destination nor invent a different one.
+
+    The claim sentence is the only shape allowed to state a destination
+    (`Recorded destination[s] `x``), so it is parsed and compared as a SET: a reason
+    that names `create_entity` while the record says `write_knowledge_batch` reds even
+    though it also mentions the right one somewhere else.
+    """
+    from tortoise.sdk_retired import REMOVED_SDK_METHODS, SURPLUS_DELETION_DESTINATIONS
+
+    wrong: dict[str, tuple] = {}
+    for name, dests in SURPLUS_DELETION_DESTINATIONS.items():
+        if name not in REMOVED_SDK_METHODS:
+            continue  # a RETIREMENT: pinned by test_every_retired_name_is_an_approved_rename
+        reason = REMOVED_SDK_METHODS[name]
+        claim = _DESTINATION_CLAIM.search(reason)
+        claimed = (
+            tuple(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", claim.group(1)))
+            if claim else ()
+        )
+        if claimed != dests:
+            wrong[name] = (claimed, dests, reason)
+    assert not wrong, (
+        "a surplus removal's stated destination is not its recorded one "
+        "(claimed, recorded, reason): "
+        f"{ {k: v[:2] for k, v in wrong.items()} }"
+    )
+
+
+def test_a_live_recorded_destination_is_hinted_or_declared() -> None:
+    """A destination a caller can actually call must be NAMED on failure (#3836 (c)).
+
+    Measured at this head two surplus names have a LIVE recorded destination. The hint is
+    free for `get_provenance_chain` (`get_entity` has a `def`), and it carries one;
+    `create_or_update_point` cannot, because two records disagree about its destination —
+    so that divergence is DECLARED in `UNHINTED_LIVE_DESTINATIONS` with its reason rather
+    than silently skipped. Both directions are pinned: an undeclared live miss reds, and
+    so does a declaration that has stopped being live (a stale excuse).
+    """
+    from tortoise.sdk_retired import (
+        RETIRED_SDK_METHODS,
+        SURPLUS_DELETION_DESTINATIONS,
+        UNHINTED_LIVE_DESTINATIONS,
+    )
+
+    public = _public_methods()
+    live_unhinted = {
+        name: dest
+        for name, dests in SURPLUS_DELETION_DESTINATIONS.items()
+        for dest in dests
+        if dest in public and RETIRED_SDK_METHODS.get(name) != dest
+    }
+    assert set(live_unhinted) == set(UNHINTED_LIVE_DESTINATIONS), (
+        "a surplus name whose recorded destination is LIVE on `TortoiseSDK` today is "
+        "neither hinted (RETIRED_SDK_METHODS -> that destination) nor declared as a "
+        f"recorded divergence (live-and-unhinted, declared): {sorted(live_unhinted)}, "
+        f"{sorted(UNHINTED_LIVE_DESTINATIONS)}"
+    )
+    silent = sorted(n for n, why in UNHINTED_LIVE_DESTINATIONS.items() if not why.strip())
+    assert not silent, f"a declared divergence carries no reason: {silent}"
+    unstated = sorted(
+        n for n, dest in live_unhinted.items() if f"`{dest}`" not in UNHINTED_LIVE_DESTINATIONS[n]
+    )
+    assert not unstated, (
+        "a declared divergence does not NAME the live destination it excuses, so the "
+        f"reader cannot tell which record wins: {unstated}"
+    )
+
+
+def test_the_surplus_counters_state_the_cell() -> None:
+    """The block's own header counts the cell — and both of its numbers were once wrong."""
+    from tortoise.sdk_retired import SURPLUS_DELETION_DESTINATIONS
+
+    with_dest = sum(1 for d in SURPLUS_DELETION_DESTINATIONS.values() if d)
+    assert (len(SURPLUS_DELETION_DESTINATIONS), with_dest) == (26, 14), (
+        "the #4282 surplus block header states 26 names: 14 with a recorded destination "
+        f"and 12 without. The cell now holds {len(SURPLUS_DELETION_DESTINATIONS)} names, "
+        f"{with_dest} with one — restate the header (and this pin) with the record."
     )

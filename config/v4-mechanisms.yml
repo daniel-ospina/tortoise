@@ -225,7 +225,7 @@ version: 1
 # added then were declared by a canonical ENUMERATION in
 # `EXTRACTOR-V4-ARCHITECTURE.md` and had no row. THE FOURTEENTH CAME FROM A
 # SURFACE NONE OF THEM WERE READ FROM (see below), so the current set is
-# fourteen — read the count off `mechanisms:`, never off this paragraph:
+# fifteen — read the count off `mechanisms:`, never off this paragraph:
 #
 #   - §4.1's step list / §4.2's "resulting order" block declare `S2.2a-α EXACT
 #     DEDUP` and `S2.2a-β NEAR-DUP DETECT` as steps with a named rule; the
@@ -245,7 +245,7 @@ version: 1
 #     status (*"a SPEC, not a description of what runs"*): `failure_policy`,
 #     `not-implemented`, pointing at the epic the design itself names.
 #
-# ⚠️ WHAT THIS ENUMERATION IS NOT: it is not a claim that the fourteen rows below
+# ⚠️ WHAT THIS ENUMERATION IS NOT: it is not a claim that the fifteen rows below
 # are every mechanism the SCANNED DOCUMENTS name. It is the set that carries a MARKER (see
 # the limits above) plus the one structure this file can compare mechanically
 # (§4.2's table). A mechanism declared only in unmarked prose is still invisible;
@@ -261,6 +261,15 @@ version: 1
 # root, one directory outside the scan. `docs/epics/**/*.md` is a declaration
 # surface now, for the same reason the architecture docs are: it is where this
 # substrate's design is written down.
+#
+# ⭐ THE FIFTEENTH ARRIVED FROM A BOUNDARY, NOT A DISCOVERY — `declared_pack_relations`
+# (DM5, §6 of the same epic plan). `#11001` shipped the producer and CLOSED,
+# leaving a comment saying the `implemented` row "belongs to THIS issue", and
+# `#10984` inherited only the evidence half (`tracking_issue:` + `pins:`). So the
+# seam that turns a pack's declared kind pair into a replayable edge was shipped
+# and invisible here — #5064's root with the omission on the REGISTRY side instead
+# of the code side. It is the case this paragraph's own rule anticipates: adding a
+# row is how a lane that FINDS a declared mechanism makes it visible from then on.
 mechanisms:
   - id: vet
     name: "S2.2 VET — adversarial candidate review (validity + coverage)"
@@ -1623,3 +1632,61 @@ mechanisms:
       `test_the_mention_record_is_payload_only_and_says_so`, which asserts the
       payload-only shape and says so — the day a write door persists the record
       it reds and this row must flip.
+
+  - id: declared_pack_relations
+    name: "DM5 — the pack's DECLARED relations/hierarchies become replayable Object→Object edges"
+    declared_in:
+      - docs/epics/2026-11-05-5087-extractor-v4/05-plan.md  # §6 DM5 + §7 T7/T8
+    state: implemented
+    code:
+      - tortoise/pack_hierarchy.py
+      - tortoise/relation_write.py
+    tests:
+      - tests/test_pack_hierarchy_11001.py
+      - tests/test_relation_write_11237.py
+    symbols:
+      - declared_hierarchy
+      - plan_hierarchy_edges
+      - plan_relation_edges
+      - apply_relation_edges
+    note: >-
+      The mechanism is the ORACLE for the pairs a pack declares in
+      `ontology.hierarchies[]`: nothing may emit a HIERARCHY pair the packs do
+      not declare — so the graph can tell an asserted structure from an invented
+      one. `ontology.relations[]` rows are the other half of the declaration: they
+      contribute the declared `(from_kind, predicate, to_kind)` the census counts
+      and the mechanism/write path `relation_write_paths()` resolves, but their
+      pairs are NOT yet GATED at write time — that gate is `#11656`'s scope, not
+      this row's. `declared_hierarchy`
+      resolves each declaration to a namespaced `(from_kind, predicate, to_kind)`
+      and binds it to a write path from `relation_write_paths()` (consumed, never
+      re-derived); `plan_hierarchy_edges`/`plan_relation_edges` render the plan
+      and drop every undeclared pair; `apply_relation_edges` is the PRODUCTION
+      consumer, called from `sdk.py`'s capture commit path on
+      `out["relations"]` (the S5 Job 1 remainder, #11237/#11548).
+      ⚠️ This row exists because #11001 CLOSED without it, on a boundary comment
+      that said the `implemented` row "belongs to THIS issue, because the
+      registry contract requires `code:` + `symbols:` that only the producer can
+      declare" (2026-11-05) — and #10984, which inherits the seam's evidence,
+      ships at most `tracking_issue:` + `pins:`. A mechanism shipped and invisible
+      to this registry is #5064's root in the exact direction the gate exists to
+      catch.
+      WHAT `written` MEANS HERE, and where it is measured: per ROW, by
+      `tools/pack_relation_census.py --write-probe`
+      (`docs/evidence/11083/pack-relation-census.json` — `direct` /
+      `mediated` / `none`), because "declared and writable" is not "written".
+      The REPLAY route is named per class rather than assumed: a structural row
+      lands a bare `(:Object)-[:predicate]->(:Object|:Subject)` carried by
+      `RECORD_CARRIED_STRUCTURAL_RELS` (every predicate the lane can write is
+      asserted equal to it) and addressable through
+      `RECORD_ADDRESSABLE_EDGE_LABELS`; an operator row lands the
+      `[:INPUT]`/`[:IMPL]` bridge and replays through `OperatorAdded`. Pinned
+      executably by
+      `tests/test_pack_hierarchy_11001.py::TestTheShippedPacks::test_the_kin2_ownedBy_row_names_its_replay_path`,
+      which reads those two constants so a predicate or label dropped from them
+      reds rather than quietly making the edge live-only.
+      ⛔ NOT a write-side cap: `PER_ENTITY_FANOUT_CAP` (200) is a QUERY-side
+      working-set bound by owner ruling (`STORAGE-ARCHITECTURE.md` §11.5), so
+      clamping the plan would drop stored connections — the planner
+      deliberately does not, and `TestNoWriteSideCap` pins that a 205-edge hub
+      keeps all 205.

@@ -877,14 +877,12 @@ def test_the_three_side_effect_bypass_paths_exist():
     #8601 review swapped the two callees and every test stayed green while
     bypass paths (i)/(ii) went false.
     """
-    routing = _v1_dispatch_routing_violations(SDK.read_text(encoding="utf-8"))
-    assert not routing, (
-        "the `v1` / `summary=` dispatch (the record's bypass paths (i) and (ii)) "
-        "is gone, was rewritten, or no longer BYPASSES S4 — the predicate alone "
-        "is not the bypass, the routing must reach the S4-less path. "
-        + "; ".join(routing)
-    )
-
+    # #4282 (owner ruling 2026-10-27) DELETED `TortoiseSDK.commit_session`, and
+    # paths (i) and (ii) of the record's bypass list WERE that door's `v1` /
+    # `summary=` routing — so the two guards that pinned its predicate and its
+    # routing go with it. A synthetic fixture asserting a dispatch that no
+    # longer exists anywhere pins nothing. Path (iii) below is the one that
+    # survived, and it lives in `extractor_v2.extract_session_v2`, untouched.
     scan = _scan()
     assert scan.s4_call is not None
     fn = _function(

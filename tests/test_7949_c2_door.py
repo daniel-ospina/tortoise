@@ -79,7 +79,7 @@ SEAM = REPO / "tortoise/s2_decision_seam.py"
 REFERENTIALITY = REPO / "tortoise/referentiality.py"
 #: Round 7 of the #10983 review: the closure was still short of the DOOR. Both of
 #: these are consulted on the capture path and were in no ledger, no pin and no
-#: closure — `context_enrich` via `sdk.capture_session(enrich_fn=_capture_enriched_
+#: closure — `context_enrich` via `sdk._capture_session(enrich_fn=_capture_enriched_
 #: texts)` (it REWRITES the text each turn embeds) and `model_adapters` via
 #: `sdk._extract_session_v2` -> `_model_adapter` (it decides the request's
 #: `response_format`). A new read inserted in `context_enrich.enrich_enabled()`
@@ -328,7 +328,7 @@ def _sdk_lane_branch() -> ast.If | None:
         return (isinstance(node, ast.Call)
                 and ast.unparse(node.func).endswith("_extract_session_llm"))
 
-    for node in ast.walk(_funcs(SDK)["capture_session"]):
+    for node in ast.walk(_funcs(SDK)["_capture_session"]):
         if not isinstance(node, ast.If):
             continue
         if any(_calls_llm(c) for stmt in node.body for c in ast.walk(stmt)):
@@ -603,7 +603,7 @@ def test_the_sdk_lane_dispatch_and_the_hosted_mirror_agree():
     # behaviourally-identical variant rerouted every capture by ambient env while
     # both door tests stayed green. The door is the CHAIN, so require that
     # exactly one branch in capture_session dispatches an SDK extractor at all.
-    capture_func = _funcs(SDK)["capture_session"]
+    capture_func = _funcs(SDK)["_capture_session"]
     capture_ifs = _lane_dispatch_ifs(capture_func)
     assert len(capture_ifs) == 1, (
         "sdk.capture_session dispatches an SDK extractor from "
@@ -1841,7 +1841,7 @@ def test_the_negative_control_is_measured_and_the_two_lanes_DISAGREE(monkeypatch
             monkeypatch.setenv(probe.DOOR_LANE_ENV, "m2")
         sdk = TortoiseSDK(os.path.join(tempfile.mkdtemp(), "door.db"))
         try:
-            receipt = sdk.capture_session(conversation, session_id=sid)
+            receipt = sdk._capture_session(conversation, session_id=sid)
             assert receipt.get("ok") is True, receipt.get("errors")
             measured[lane] = _census(sdk)
         finally:

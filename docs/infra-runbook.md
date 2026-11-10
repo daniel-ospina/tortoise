@@ -1265,7 +1265,9 @@ provider/model and fails in hosted mode when the key is missing.
 
 ### Cost bounds per capture
 
-Bounds enforced by `capture_session` (tortoise/hosted_api.py). **A missing
+Bounds enforced by `capture_session` (tortoise/hosted_api.py — the **hosted** lane's
+handler; the same-named `TortoiseSDK.capture_session` method lost its public name to #4282 and
+survives as the private `_capture_session`, so both lanes still enforce these bounds). **A missing
 provider key is not a gate** (#3892): a keyless capture is STORED (turns only)
 with extraction skipped, so it never refuses and never reaches the 402
 estimate below (the keyless path mints zero non-episodic points). The
@@ -4223,7 +4225,10 @@ select count(*) from journal_event;  -- >0 after a capture THAT JOURNALED one
 select count(*) from point;          -- >0 when the capture added points
 ```
 
-⚠️ A pure **`capture_session` capture can legitimately add NO row**: its extracted
+⚠️ A pure **`capture_session` capture can legitimately add NO row** (the hosted lane's
+handler; the same-named SDK method lost its public name to #4282 (the body survives as
+`_capture_session`) — the M2 lane it drove is
+still reached from the hosted path): its extracted
 records go through the M2 lane, whose log is `_InMemoryEventLog` — *not* a journal
 by design — so the seam DECLINES the write (`durable=False`,
 `record_writer.write_live_record`) and counts it on
@@ -4271,7 +4276,8 @@ So the bar has **two parts, and BOTH are required**:
    on the record project. ⚠️ **The capture that proves presence must be a
    JOURNALING one** (a per-graph SDK write whose journal lives under
    `TORTOISE_EVENT_LOG_BASE_DIR=/data/events`). A `capture_session` capture cannot
-   prove it: its records take the M2 lane, where `write_live_record` returns at
+   prove it (the hosted handler; the same-named SDK method was deleted by #4282): its
+   records take the M2 lane, where `write_live_record` returns at
    its `if not durable` branch — **before any tenant resolution, before the
    breaker, before a socket is opened** — so it grows
    `record_non_journal_skips{no_durable_journal}` even when the DSN is armed

@@ -300,7 +300,7 @@ def test_capture_aboutobject_edges_survive_rebuild_all(hosted_lane):
     try:
         proj = sdk._get_proj()
         sdk.create_object("test/repo#42", objectKind="pm:issue")
-        r = sdk.capture_session(CONV, session_id="s-4240-capture")
+        r = sdk._capture_session(CONV, session_id="s-4240-capture")
         assert r.get("ok") is True, r
 
         live = _about_edges(proj)
@@ -349,7 +349,7 @@ def test_relink_aboutobject_edge_survives_rebuild_all(hosted_lane):
         # Capture first — no Object yet, so the conversation-reference pass is
         # an honest no-match (the extractor's own claim edges are a different
         # source and do not count).
-        r = sdk.capture_session(CONV, session_id="s-4240-relink")
+        r = sdk._capture_session(CONV, session_id="s-4240-relink")
         assert r.get("ok") is True, r
         assert not any(src == ("Session",)
                        for src, _, _ in _about_edges(proj)), \
@@ -409,7 +409,7 @@ def test_live_only_capture_loses_aboutobject_edges_without_the_journal(
     try:
         proj = sdk._get_proj()
         sdk.create_object("test/repo#42", objectKind="pm:issue")
-        r = sdk.capture_session(CONV, session_id="s-4240-liveonly")
+        r = sdk._capture_session(CONV, session_id="s-4240-liveonly")
         assert r.get("ok") is True, r
 
         live = _about_edges(proj)
@@ -461,7 +461,7 @@ def test_unwritable_journal_is_disclosed_and_counted(tmp_path, monkeypatch):
     sdk = ha._make_sdk(namespace=org)
     try:
         sdk.create_object("test/repo#42", objectKind="pm:issue")
-        r = sdk.capture_session(CONV, session_id="s-4240-unwritable")
+        r = sdk._capture_session(CONV, session_id="s-4240-unwritable")
         assert r.get("status") == "partial", r
         assert r.get("points") == [], (
             "no record could be committed, so §17.1 forbids the cache write — "
@@ -572,7 +572,7 @@ def test_capture_after_a_failed_non_capture_write_reports_no_journal_warning(
         assert before > 0, (
             "fixture precondition: the non-capture write's append must have "
             "failed and incremented the LIFETIME counter")
-        r = sdk.capture_session(CONV, session_id="s-5632-delta-sdk")
+        r = sdk._capture_session(CONV, session_id="s-5632-delta-sdk")
         assert r.get("ok") is True, r
         assert sdk._journal_write_failures == before, (
             "the capture's own appends must have SUCCEEDED — otherwise this "

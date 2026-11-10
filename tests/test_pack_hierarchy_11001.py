@@ -329,6 +329,88 @@ class TestTheShippedPacks:
         assert ("dev:issue", "dev:code") not in {
             (e.from_kind, e.to_kind) for e in declared_hierarchy(reg)}
 
+    # ── KIN-2: the commitment spine (sixth capstone row E6) ────────────────
+    # `docs/epics/2026-11-05-5087-extractor-v4/06-pack-logic-decisions.md`
+    # §KIN-2 approved three connections on 2026-11-05 and NO child declared
+    # them, so the census reported `goal` as a kind the graph can hold and
+    # cannot connect (`docs/evidence/11083/pack-relation-census.json`: 0 of 42
+    # declared connections named it as an endpoint, `owner: None`).
+    #
+    # `goal` is a CORE kind and there is no `packs/core/manifest.yaml`, so the
+    # declarations live in `dev` — the pack that owns `epic`/`indicator`/`theme`
+    # and already points relations at core kinds (`deploysTo` →
+    # `core:deployment`).
+    _KIN2_PAIRS = (
+        ("core:goal", "ownedBy", "Subject"),
+        ("dev:epic", "addresses", "core:goal"),
+        ("dev:indicator", "addresses", "core:goal"),
+    )
+
+    def test_the_kin2_goal_connections_are_declared_and_writable(self):
+        """Declared, and bound to a write path — a declaration nobody can
+        write is the `predicate-not-in-allowlist` shape #2766 exists to kill.
+
+        The census is what MEASURES the write (`direct` for the `ownedBy` row,
+        `mediated` for the two `addresses` rows); this pin is the hermetic half
+        that reds the moment a declaration is dropped, without a database.
+        """
+        from tortoise.pack_registry import relation_write_verdict
+
+        reg = PackRegistry(PACKS_DIR)
+        reg.load_all()
+        rows = {(r.get("fromKind"), r.get("predicate"), r.get("toKind"))
+                for r in reg.list_relations()}
+        for pair in self._KIN2_PAIRS:
+            assert pair in rows, (
+                f"KIN-2's {pair[0]} --{pair[1]}--> {pair[2]} is approved "
+                f"(06-pack-logic-decisions.md §KIN-2) and not declared — the "
+                f"commitment spine is dangling again")
+        for rel in reg.list_relations():
+            if (rel.get("fromKind"), rel.get("predicate"),
+                    rel.get("toKind")) in self._KIN2_PAIRS:
+                verdict, paths = relation_write_verdict(rel)
+                assert verdict == "writable", (rel, verdict)
+                assert paths, rel
+
+    def test_the_kin2_ownedBy_row_names_its_replay_path(self):
+        """`core:goal --ownedBy--> Subject` is the first declaration in the
+        shipped catalog whose TARGET is a Subject, so it takes the STRUCTURAL
+        path (`relation_write_verdict` resolves structural over operator when
+        both bind) and lands a bare `(:Object)-[:ownedBy]->(:Subject)`.
+
+        A bare structural edge is only durable if the projection CARRIES it and
+        can ADDRESS its endpoints on replay. Both are asserted here against the
+        two constants the replay actually reads, so a predicate dropped from the
+        carrier set — or a label dropped from the addressable set — reds THIS
+        test instead of quietly making the edge live-only. The measured
+        `live == rebuild` for this predicate's structural lane is
+        `tests/test_9553_class4_structural_edge_records.py`.
+        """
+        from tortoise.pack_registry import relation_write_verdict
+        from tortoise.projection.edges import (
+            RECORD_ADDRESSABLE_EDGE_LABELS,
+            RECORD_CARRIED_STRUCTURAL_RELS,
+        )
+
+        reg = PackRegistry(PACKS_DIR)
+        reg.load_all()
+        row = next(
+            r for r in reg.list_relations()
+            if (r.get("fromKind"), r.get("predicate")) == ("core:goal", "ownedBy"))
+        verdict, paths = relation_write_verdict(row)
+        assert verdict == "writable"
+        assert "structural" in paths, paths
+        # the two conditions replay needs, read from the replay's own constants
+        assert "ownedBy" in RECORD_CARRIED_STRUCTURAL_RELS, (
+            "`ownedBy` left the record-carried set — a rebuild would drop the "
+            "goal→owner edge while it survives live")
+        assert "Subject" in RECORD_ADDRESSABLE_EDGE_LABELS, (
+            "`Subject` left the addressable set — the fold could not re-create "
+            "the edge's target on replay")
+        # …and the row really did resolve to the Subject half of $3.6's
+        # Entity -> (Subject | Object) target, not to an Object
+        assert row.get("toKind") == "Subject", row
+
 
 # ── 8. the writer: the existing verb, and the MERGE it lands ───────────────
 

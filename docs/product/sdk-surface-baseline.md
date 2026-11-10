@@ -14,10 +14,10 @@
 | measured | count |
 |---|---|
 | approved methods (the target) | 40 |
-| live public methods on `TortoiseSDK` | 150 |
+| live public methods on `TortoiseSDK` | 124 |
 | approved and implemented (row 1 `Tortoise(...)` resolves to the `TortoiseSDK` class) | 13 |
 | approved but not implemented yet | 27 |
-| live and NOT approved (migration backlog) | 138 |
+| live and NOT approved (migration backlog) | 112 |
 
 Row 1 of the owner's table is `Tortoise(...)` — the class a caller constructs. It resolves
 to `TortoiseSDK` (the only constructible entry point); it is not a method on it.
@@ -68,24 +68,16 @@ the count above is the honest measure of the gap.
 - `annotate_ask_hits`
 - `annotate_operator`
 - `apikey_create`
-- `apikey_list`
 - `apikey_revoke`
 - `apikey_verify`
 - `assess_source`
 - `audit`
-- `backfill_about_entities`
-- `backfill_sources`
 - `backfill_v25`
-- `batch_create_points`
 - `belief_timeline`
 - `calibrate_summary`
 - `calibration_passed`
-- `capture_session`
 - `check_structure`
 - `checkpoint`
-- `cleanup_expired_invitations`
-- `commit_session`
-- `complete_source`
 - `compute_confidence`
 - `compute_reputation`
 - `create_derivation`
@@ -95,7 +87,6 @@ the count above is the honest measure of the gap.
 - `create_event`
 - `create_object`
 - `create_operator`
-- `create_or_update_point`
 - `create_point`
 - `create_source`
 - `create_subject`
@@ -114,25 +105,19 @@ the count above is the honest measure of the gap.
 - `get_confidence`
 - `get_cross_lens_candidates`
 - `get_events`
-- `get_org_structure`
 - `get_owned_entities`
 - `get_point`
-- `get_provenance_chain`
 - `get_session`
 - `get_source_reliability`
 - `graph_active_key_count`
 - `graph_delete`
 - `graph_key_ids`
 - `index_directory`
-- `index_file`
 - `index_sessions`
 - `ingest`
 - `ingest_corpus`
 - `invalidate_point`
-- `invitation_accept`
-- `invitation_create`
 - `invitation_get_by_id`
-- `invitation_get_by_token`
 - `invitation_list`
 - `invitation_revoke`
 - `issue_insight`
@@ -140,7 +125,6 @@ the count above is the honest measure of the gap.
 - `list_batch`
 - `list_batches`
 - `list_dedup_candidates`
-- `list_drafts`
 - `list_graphs`
 - `list_namespaces`
 - `list_pointkinds`
@@ -149,18 +133,11 @@ the count above is the honest measure of the gap.
 - `list_tags`
 - `list_topics`
 - `membership_create`
-- `membership_delete`
 - `membership_get`
-- `membership_list`
-- `membership_update_role`
-- `migrate_orgs_to_registry`
 - `mine_corpus`
 - `mitigate_operator`
-- `operator_action`
 - `org_create`
-- `org_delete`
 - `org_get`
-- `org_update`
 - `paginated_query`
 - `promote_point`
 - `provenance`
@@ -171,10 +148,8 @@ the count above is the honest measure of the gap.
 - `recall_state`
 - `recall_subgraph`
 - `reconcile_sessions`
-- `record_calibration`
 - `resolve_id`
 - `retract_point`
-- `retrieval_legs`
 - `review_connections`
 - `search_sessions`
 - `session_context`
@@ -196,7 +171,6 @@ the count above is the honest measure of the gap.
 - `topic_summarize`
 - `tortoise_fts_query`
 - `trash_graphs`
-- `traverse`
 - `ulid`
 - `update`
 - `update_entity`

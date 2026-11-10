@@ -2,8 +2,25 @@
 calibration milestone marker.
 
 Covers the DE2E-4 grounding snapshot contract (mean over ``confidence`` of
-live non-operator Points, #780 live-only semantics) and the DE2E-7 local
-``calibration_passed()`` marker contract.
+live non-operator Points, #780 live-only semantics).
+
+#4282 retired five tests that stood under the DE2E-7 calibration marker section,
+and they split in two — which is why the ledger records three and REBUILDS two:
+
+- **Rebuilt (2)** — `test_calibration_passed_false_then_true` and
+  `test_calibration_marker_persists_across_restart` were tests OF the
+  ``calibration_passed()`` accessor, which SURVIVES (`tortoise/sdk.py`, pinned as
+  surface row `sdk:calibration_passed`). They drove ``record_calibration`` only
+  as ARRANGEMENT, so they are restored below with the arrangement written as the
+  marker node the record writer itself creates (the raw-Cypher form already used
+  by `tests/test_rebuild_config_preservation.py`), with the marker KEY's value
+  pinned by literal — deriving it from the class attribute the accessor also
+  reads would make a rename invisible.
+- **Recorded as removed (3)** — `test_record_calibration_validation`,
+  `test_record_calibration_enforces_gate_targets` and
+  `test_record_calibration_is_idempotent` assert behaviour OF
+  ``record_calibration``, one of the 26 dead public methods #4282 deleted (see
+  `tortoise/sdk_retired.py`), so no subject survives to re-point them at.
 """
 from __future__ import annotations  # noqa: I001
 
@@ -215,27 +232,75 @@ def test_grounding_drift_ceiling_constants_pinned(sdk):
 
 # ── Calibration milestone marker: DE2E-7 local contract ───────────
 
+def _store_calibration_marker(sdk, **props) -> None:
+    """Write the marker node the RETIRED record writer used to create.
+
+    The writer (`record_calibration`) is gone with #4282, so the tests below
+    arrange its RESULT directly — the same `MERGE (m:Meta {key:$key}) SET m += $props`
+    form `tests/test_rebuild_config_preservation.py` already uses, and the same
+    `recordedAt` stamp the writer applied.
+
+    ⛔ The key is derived from the class attribute here, which on its own would
+    be VACUOUS as a pin (the accessor reads that same attribute, so a rename
+    moves both sides together and both stay green). The key's VALUE is therefore
+    pinned separately, by literal, in
+    `test_calibration_marker_key_is_the_persisted_literal` below — a literal on
+    the TEST side is what makes a rename visible.
+    """
+    props.setdefault("recordedAt", "2026-01-01T00:00:00Z")
+    sdk._get_proj().g.query(
+        "MERGE (m:Meta {key:$key}) SET m += $props",
+        params={"key": TortoiseSDK._CALIBRATION_MARKER_KEY, "props": props})
+
+
+def test_calibration_marker_key_is_the_persisted_literal():
+    """The marker key is DATA already written into shipped graphs — pin its value.
+
+    `_CALIBRATION_MARKER_KEY` is read by ``calibration_passed()`` and was written
+    by the retired ``record_calibration``. Pinning it only against itself is
+    vacuous: a rename moves writer and reader together, every test stays green,
+    and every EXISTING graph — whose marker sits under the literal
+    ``calibration_milestone``, the key `tortoise/hosted_backup.py` and
+    `tortoise/record_restore.py` classify as DATA — silently reads False. So the
+    LITERAL is asserted here.
+
+    FAILS IF the constant's VALUE is re-spelled — that is the case where the
+    graphs already in the field would stop answering. An attribute RENAME also
+    reds it (harmlessly): the reader and any writer move with the attribute, so
+    the stored key is untouched and no field graph is affected — do not read
+    that red as evidence of data breakage.
+    """
+    assert TortoiseSDK._CALIBRATION_MARKER_KEY == "calibration_milestone"
+
+
 def test_calibration_passed_false_then_true(sdk):
+    """The accessor reads the marker: absent ⇒ False, present ⇒ True.
+
+    #4282: rebuilt on ``calibration_passed()`` (which survives) after its
+    arrangement, ``record_calibration``, was retired. FAILS IF the accessor
+    stops reading the marker key, or reports True before anything recorded it.
+    """
     assert sdk.calibration_passed() is False
-    result = sdk.record_calibration(precision=0.73, sample_size=50,
-                                    mean_grounding_delta=0.012,
-                                    notes="50-session human review, 3 reviewers")
-    assert result["key"] == "calibration_milestone"
-    assert result["precision"] == 0.73
-    assert result["sample_size"] == 50
-    assert "recordedAt" in result
+    _store_calibration_marker(
+        sdk, precision=0.73, sample_size=50, mean_grounding_delta=0.012,
+        notes="50-session human review, 3 reviewers")
     assert sdk.calibration_passed() is True
 
 
 def test_calibration_marker_persists_across_restart(tmp_path):
     """Marker is stored in the graph DB (:Meta node), not process memory —
-    a fresh SDK on the same DB still reads it (survives restarts)."""
+    a fresh SDK on the same DB still reads it (survives restarts).
+
+    #4282: rebuilt on ``calibration_passed()``; the arrangement is the marker
+    node itself. FAILS IF the reader ever answers from process state instead of
+    the graph.
+    """
     db_path = str(tmp_path / "persist.db")
     sdk1 = TortoiseSDK(db_path=db_path)
     try:
         assert sdk1.calibration_passed() is False
-        sdk1.record_calibration(precision=0.70, sample_size=50,
-                                mean_grounding_delta=0.02)
+        _store_calibration_marker(
+            sdk1, precision=0.70, sample_size=50, mean_grounding_delta=0.02)
     finally:
         sdk1.close()
     sdk2 = TortoiseSDK(db_path=db_path)  # fresh instance, same DB file
@@ -245,57 +310,3 @@ def test_calibration_marker_persists_across_restart(tmp_path):
         sdk2.close()
 
 
-def test_record_calibration_validation(sdk):
-    # Metrics are required (review round 2) — provide them so these cases
-    # still exercise the range / sample-size checks, not the missing-metrics
-    # refusal.
-    with pytest.raises(ValueError, match="precision must be in"):
-        sdk.record_calibration(precision=1.5, mean_grounding_delta=0.01)
-    with pytest.raises(ValueError, match="precision must be in"):
-        sdk.record_calibration(precision=-0.1, mean_grounding_delta=0.01)
-    with pytest.raises(ValueError, match="sample_size must be positive"):
-        sdk.record_calibration(precision=0.8, sample_size=0,
-                               mean_grounding_delta=0.01)
-    assert sdk.calibration_passed() is False  # failed writes leave no marker
-
-
-def test_record_calibration_enforces_gate_targets(sdk):
-    """Gate B criteria are enforced at write time (review round 1): a
-    0.50-precision marker or an over-ceiling drift must not open Gate B —
-    validation happens BEFORE the MERGE, so a refused write leaves no
-    marker. Measured metrics are REQUIRED (review round 2): a call with no
-    precision/mean_grounding_delta (e.g. notes only) is refused too.
-    Boundary values (0.70 / 0.02) still pass."""
-    with pytest.raises(ValueError, match="0.70"):  # noqa: RUF043
-        sdk.record_calibration(precision=0.50, sample_size=50,
-                               mean_grounding_delta=0.01)
-    with pytest.raises(ValueError, match="0.02"):  # noqa: RUF043
-        sdk.record_calibration(precision=0.73, sample_size=50,
-                               mean_grounding_delta=0.05)
-    assert sdk.calibration_passed() is False  # refused writes leave no marker
-    # No measured metrics → bypass attempt refused, still no marker.
-    with pytest.raises(ValueError, match="requires measured metrics"):
-        sdk.record_calibration(notes="run done")
-    with pytest.raises(ValueError, match="requires measured metrics"):
-        sdk.record_calibration(precision=0.73, sample_size=50)  # no drift
-    with pytest.raises(ValueError, match="requires measured metrics"):
-        sdk.record_calibration(sample_size=50,
-                               mean_grounding_delta=0.01)  # no precision
-    assert sdk.calibration_passed() is False
-    # Boundary values exactly at target still record.
-    ok = sdk.record_calibration(precision=0.70, sample_size=50,
-                                mean_grounding_delta=0.02)
-    assert ok["precision"] == 0.70
-    assert ok["mean_grounding_delta"] == 0.02
-    assert sdk.calibration_passed() is True
-
-
-def test_record_calibration_is_idempotent(sdk):
-    sdk.record_calibration(precision=0.71, sample_size=50,
-                           mean_grounding_delta=0.01)
-    second = sdk.record_calibration(precision=0.74, sample_size=50,
-                                    mean_grounding_delta=0.01,
-                                    notes="re-measured")
-    assert sdk.calibration_passed() is True
-    # MERGE semantics: one marker node, latest write wins.
-    assert second["precision"] == 0.74
