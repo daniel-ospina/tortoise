@@ -629,3 +629,52 @@ class TestKindExpansionAllCategories:
         pm_task = registry.expand_kind("pm:issue")
         assert "pm:issue" in dev_issue
         assert "dev:issue" in pm_task
+
+
+# ── #11679: the read paths match on the DOWN set, measured on a real graph ──
+
+@pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
+class TestKindReadFilterReadPaths:
+    """`query`/`paginated_query(kind=child)` must not match a parent's rows.
+
+    Points stored with `pointKind='WorkItem'` (the broader kind) and
+    `pointKind='dev:issue'` (its declared child) — the exact stored shape the
+    #11667 review measured at `d26f3c6d`. The child filter returns only the
+    child; the parent filter still returns both (#6146 DOWN reach).
+    """
+
+    def test_a_narrow_kind_query_does_not_return_a_broader_kinded_row(self):
+        import contextlib
+
+        sdk = TortoiseSDK()
+        created: list[str] = []
+        try:
+            broad = sdk.create_point("WorkItem", "a work item, not an issue")
+            narrow = sdk.create_point("dev:issue", "an issue")
+            created = [broad["id"], narrow["id"]]
+
+            narrow_ids = {row["id"] for row in sdk.query(kind="dev:issue")}
+            assert narrow["id"] in narrow_ids, (
+                "query(kind='dev:issue') lost its OWN row — wrong-empty")
+            assert broad["id"] not in narrow_ids, (
+                "query(kind='dev:issue') returned a WorkItem row: the read "
+                "filter carries the ancestor (#11679)")
+
+            broad_ids = {row["id"] for row in sdk.query(kind="WorkItem")}
+            assert {broad["id"], narrow["id"]} <= broad_ids, (
+                "query(kind='WorkItem') lost a narrower kind's row — the DOWN "
+                f"direction was over-narrowed (#6146): {broad_ids}")
+
+            page = sdk.paginated_query(kind="dev:issue", limit=50)
+            page_ids = {row["id"] for row in page["results"]}
+            assert narrow["id"] in page_ids
+            assert broad["id"] not in page_ids, (
+                "paginated_query(kind='dev:issue') returned a WorkItem row")
+
+            assert "WorkItem" not in sdk._read_filter_kinds("dev:issue")
+            assert "WorkItem" in sdk._expand_kind("dev:issue")
+        finally:
+            for pid in created:
+                with contextlib.suppress(Exception):
+                    sdk.delete_point(pid)
+            sdk.close()

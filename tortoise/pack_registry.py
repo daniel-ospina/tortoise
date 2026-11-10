@@ -3347,12 +3347,12 @@ class PackRegistry:
             `core:`-prefixed and rows are stored either way.
 
         INVARIANT (#6146): the argument is ALWAYS in its own expansion —
-        ``kind in expand_kind(kind)``. Expansion is additive: it widens a kind to
+        ``kind in expand_kind(kind)``, and the same holds for
+        :meth:`read_filter_kinds`. Expansion is additive: it widens a kind to
         its subclasses and equivalents, it never replaces the caller's kind with
-        namespace forms. Read paths (``query``/``paginated_query`` build
-        ``n.pointKind IN [...]`` from this list) must not turn a valid kind into
-        an empty result set, because a wrong-empty is indistinguishable from a
-        true-empty to the caller.
+        namespace forms. Whichever set a caller filters with must not turn a
+        valid kind into an empty result set, because a wrong-empty is
+        indistinguishable from a true-empty to the caller.
 
         ⛔ This is the **MEMBERSHIP** set, not the read-filter set. It answers
         "is this kind a `<parent>`?" and therefore carries a child's ANCESTORS.
@@ -3634,6 +3634,15 @@ class PackRegistry:
                          + list(equivalences) + list(bare_inherits)):
             expansions.setdefault(endpoint, [endpoint])
 
+        # The buckets are DOWN-clean at this point: `self` + a canonical root's
+        # declared children (`get_subclasses`), equivalences, and the bare/legacy
+        # spellings — the UP direction is added only by the closure below. Snapshot
+        # them: the read-filter table is grown from THIS snapshot (see the end of
+        # the builder), which is what makes it structurally incapable of carrying
+        # an ancestor, rather than correct-by-subtraction.
+        down_base: dict[str, list[str]] = {
+            kind: list(bucket) for kind, bucket in expansions.items()}
+
         for kind in list(expansions):
             gained: set[str] = set()
             sources = _equivalence_class(kind) | bare_inherits.get(kind, set())
@@ -3683,28 +3692,35 @@ class PackRegistry:
         # `expand_kind` is a MEMBERSHIP set (it carries a child's ANCESTORS, so
         # `"operator" in expand_kind(kind)` answers "is this kind a parent?").
         # A read filter asks the opposite question — "rows stored as this kind
-        # or NARROWER" — and `n.pointKind IN [...]` fed the ancestor names, so a
-        # narrow filter matched broader-kinded rows. Derived here by
-        # SUBTRACTION from the membership bucket, which is what makes it safe:
-        # every member that is NOT an ancestor (the kind itself, its declared
-        # descendants, its equivalents, its bare/`core:`/legacy spellings)
-        # survives in its original order, so this is exactly the pre-#11667
-        # read behaviour for a pack child and a no-op for a root.
+        # or NARROWER" — so feeding ancestor names to `n.pointKind IN [...]`
+        # made a narrow filter match broader-kinded rows.
         #
-        # The ancestors are collected over the same relations the closure walks
-        # (`_parents_of` is equivalence-aware; `bare_inherits` makes a bare kind
-        # a name for its namespaced forms), and each ancestor brings its
-        # equivalence class — the membership closure adds an ancestor TOGETHER
-        # with its `core:`/legacy spelling, so subtracting only the bare name
-        # would leave `core:WorkItem` matching in a `dev:issue` filter.
-        read_filters: dict[str, list[str]] = {}
-        for kind, bucket in expansions.items():
-            ancestors: set[str] = set()
-            for peer in _equivalence_class(kind) | bare_inherits.get(kind, set()):
-                for ancestor in _ancestors(peer):
-                    ancestors.add(ancestor)
-                    ancestors |= _equivalence_class(ancestor)
-            read_filters[kind] = [m for m in bucket if m not in ancestors]
+        # ⛔ Grown from `down_base` with the DOWN walk only — never by
+        # subtracting the ancestors from the membership bucket. Subtraction
+        # reads correct today but couples this table to the closure's `sources`
+        # expression: a third inheritance relation would put an ancestor in a
+        # bucket this table never walks up to notice, and `filter ⊆ membership`
+        # plus `kind ∈ filter` both stay true while it happens. A positive walk
+        # cannot produce an ancestor at all, whatever relation is added later.
+        #
+        # Same three ingredients as the UP walk, so the two tables agree on
+        # everything that is not a direction: the equivalence class (§7
+        # `equivalentTo`, bare↔namespaced, `core:` spellings, LEGACY_KIND_ALIASES)
+        # and `bare_inherits`, then `_descendants` of each source, then the
+        # equivalence class of everything gained (an ancestor's stored legacy
+        # spelling rides the equivalence class, and so does a descendant's).
+        read_filters: dict[str, list[str]] = dict(down_base)
+        for kind in list(read_filters):
+            gained: set[str] = set()
+            sources = _equivalence_class(kind) | bare_inherits.get(kind, set())
+            for peer in sources:
+                gained.add(peer)
+                gained |= _descendants(peer)
+            for member in list(gained):
+                gained |= _equivalence_class(member)
+            bucket = read_filters[kind]
+            for member in sorted(gained.difference(bucket)):
+                bucket.append(member)
         self._kind_read_filters = read_filters
 
         self._kind_expansions = expansions
