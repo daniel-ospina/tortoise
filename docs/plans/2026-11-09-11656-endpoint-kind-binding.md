@@ -224,7 +224,7 @@ Resolve over the **installed** set. **This bug is live today** for the label-leg
   for a narrower job than this issue needs.
 
 **The delta:** use that same map to choose **which relation labels to offer for a pair**, derived from
-`ontology.relations[]` (35 populated pairs) — **not** `extraction.relationTemplates[]` (declared but
+`ontology.relations[]` (35 populated declarations, which collapse to **34** distinct `(fromKind, toKind)` pairs — `venture:asset→venture:program` is declared twice, by `protects` and `producedBy`) — **not** `extraction.relationTemplates[]` (declared but
 unshipped; only `packs/_template` has it, commented out). Reuse `extractor_v2.build_master_list`, which
 already carries the per-graph tenant-narrowed kind vocabulary.
 

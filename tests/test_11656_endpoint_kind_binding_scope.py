@@ -12,7 +12,8 @@ produced the same way: asserted from a partial reading instead of re-measured.
     counted `semantics: hasPart`, which rides four *different predicates*. A `semantics:` value is not a
     declaration.
   * "`fromKind`/`toKind` are acted on in exactly one place" — there are **three** production readers.
-  * "a `create_edge`-only pin leaves 31 untested" — 2 declarations also bind the structural path, so 30.
+  * "a `create_edge`-only pin leaves 31 untested" — 2 declarations also bind the structural path, so 33
+    (the corpus is 35 kind-bearing at this head; this line read "31 → 30" before `main` added three).
 
 Each number below is re-measured from `packs/*/manifest.yaml` (offline: no graph, no registry boot, no
 network), so a manifest edit that makes a scope claim false reds here instead of rotting in prose. This is
@@ -225,7 +226,7 @@ class TestTheThirdDoorExists:
         assert "self.create_direct_edge(" in ingest and "label=label" in ingest
 
     def test_point_mediated_route_only_reifies_a_point_pair(self):
-        """Object↔Object keeps the direct shape — 30 of the 32 declarations."""
+        """Object↔Object keeps the direct shape — 32 of the 35 declarations."""
         from tortoise.sdk import TortoiseSDK
 
         doc = inspect.getdoc(TortoiseSDK._point_mediated_route) or ""
