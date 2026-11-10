@@ -2289,8 +2289,9 @@ class TestCoreHierarchy:
 
         `portfolio:allocationTarget` (an `objectKind`) subclasses `target`, and
         `target` is a canonical POINT kind as well (§5; the overlap is the #7813
-        owner ruling — confidence propagates across `:Point`/`:Object`/`:Event`,
-        so the duplication is the model, not residue).
+        owner ruling — confidence propagates across
+        `:Point`/`:Subject`/`:Object`/`:Event` (`docs/ONTOLOGY.md`), so the
+        duplication is the model, not residue).
 
         Consequence, recorded rather than discovered: `sdk.query(kind=
         "portfolio:allocationTarget")` builds `n.pointKind IN [...]`, so after
@@ -2355,7 +2356,7 @@ class TestCoreHierarchy:
 
         ⚠ It is a consequence of the mandated contract, not an implementation
         error — #7813's ruling is that confidence propagates across
-        `:Point`/`:Object`/`:Event`, so the duplication IS the model (the same
+        `:Point`/`:Subject`/`:Object`/`:Event`, so the duplication IS the model (the same
         reasoning `test_a_cross_axis_parent_is_a_recorded_decision` records for
         the far milder `portfolio:allocationTarget`). But the milder case was
         pinned as a decision while this one was unnamed, which is backwards. The
