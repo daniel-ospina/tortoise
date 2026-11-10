@@ -347,18 +347,22 @@ def main(argv: list[str] | None = None) -> int:
         # other — `load_parity_report` refuses a report that names no graph, so a
         # FOREIGN census cannot be re-badged by repeating `--graph` here
         # (review P1 on #11004; the `--parity-graph` help carries the same rule).
-        # ⚠️ What is NOT closed here: a census of the SAME graph measured EARLIER.
-        # Its `graph` matches by construction, so the name comparison passes it — which
-        # is why STALENESS is closed one layer down, on the report's own `measured_at`:
-        # `assess()` demotes an undated report, and one older than the pass's bound
-        # (`TORTOISE_PARITY_REPORT_MAX_AGE_S`, default 3600 s), to `cannot-answer`. The
-        # over-count check (`entry.nodes > resident_total`) stays as the coarse,
-        # clock-free second guard; it only fires when a report claims MORE nodes than
-        # the whole graph holds, so it could not catch a stale claim that was smaller
-        # than the graph but far larger than the population (measured: 20,000 claimed
-        # against 500 real turns on a 25,000-node graph — `cache_evictor` gate 2 would
-        # have capped the sweep at 20,000). Stated in `--parity-graph`'s help as well,
-        # where the operator reads it at the moment of choosing the flag.
+        # ⚠️ What is NOT closed HERE: a census of the SAME graph measured EARLIER. Its
+        # `graph` matches by construction, so the name comparison passes it — which is
+        # why STALENESS is bounded one layer down, on two independent axes. First the
+        # report's own `measured_at`: `assess()` demotes an undated report, and one older
+        # than the pass's bound (`TORTOISE_PARITY_REPORT_MAX_AGE_S`, default 3600 s), to
+        # `cannot-answer`. Second the POPULATION's own resident count: the report's count
+        # is compared against `POPULATION_RESIDENT_COUNT` for its population, so a stale
+        # report claiming more nodes than that population now holds is demoted even
+        # within the age bound (eviction shrinks a population between two fresh-looking
+        # reads). The whole-graph over-count check (`entry.nodes > resident_total`) stays
+        # as the coarse, clock-free backstop that only fires on an outright impossible
+        # number — it could never catch the measured shape here: 20,000 claimed against
+        # 500 real turns on a 25,000-node graph, where `cache_evictor` gate 2 would have
+        # capped the sweep at 20,000 (review P2 on #11097; #10976 residual comment
+        # 6689906625). Stated in `--parity-graph`'s help as well, where the operator
+        # reads it at the moment of choosing the flag.
         return _usage_error(
             parser,
             f"--parity-graph {args.parity_graph!r} must be the graph being measured "
