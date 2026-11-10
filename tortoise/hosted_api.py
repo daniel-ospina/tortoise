@@ -11236,12 +11236,15 @@ def _capture_control_plane_unavailable() -> HTTPException:
     lane-shaped, and only this door's.
 
     The wording claims only what is provable here. This refusal is raised ABOVE
-    every write on the capture path — the gate sits after the probe, the points
-    count and the cohort-cost cap, and BEFORE the first write (the ``:Session``
-    MERGE / ``_write_session_and_turns``) — so "nothing was stored" is a fact
-    about this request, not a guess. It is NOT the first read of the gate stack
-    (the probe, the points count and the cohort cap all read before it), which
-    is why the sentence is about writing, never about reading. The retry it
+    every write on the capture path — the gate sits after the probe and BEFORE
+    the first write (the ``:Session`` MERGE / ``_write_session_and_turns``) — so
+    "nothing was stored" is a fact about this request, not a guess. The sentence
+    is about WRITING, never about READING, and that distinction is deliberate:
+    the probe always reads first, but the points count and the cohort-cost cap
+    are gated on ``(not session_existed or retry_failed_capture) and not
+    store_only``, so on a replay and on the store-only lanes those two are
+    skipped and this gate is the ONLY org-limit read — a message about reading
+    would be false on exactly those paths. The retry it
     advertises is safe because the off-loaded unit is a READ
     (``quota.resolve_org_limits``): a bound miss can still let the worker finish
     the lookup, and a finished lookup has no side effect, so a retry cannot
