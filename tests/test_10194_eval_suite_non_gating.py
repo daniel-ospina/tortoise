@@ -293,6 +293,17 @@ def _expected_legs(manifest: dict) -> set[str]:
            iterates only the keys this map built. The absence of such a key today
            is not a guard: a key that does not exist yet cannot be caught.
 
+    ⚠️ One class this docstring used to leave unstated, now guarded rather than
+    claimed away (`#11675` round-13 review): the tier-2 PROBE LIST. `_TIER2_CHANGES`
+    was a second copy on `main` — `_gating_sets()` spelled the four paths inline
+    while this derivation read the constant, so editing one side red the equality.
+    Both sides (and the per-family read-back) now read the ONE constant, which means
+    a shrunken probe list moves all three together and reads as a pass over a
+    surface nobody selected for (measured: `_TIER2_CHANGES` cut to one entry left
+    the equality 26 == 26 green). The list is therefore pinned against a literal in
+    `test_no_subtree_file_is_in_any_gating_leg`, so dropping a probe is a second,
+    deliberate edit with a reviewer-visible message.
+
     The count is the manifest's, never a second copy in this file: the two
     `core` rows #11642 added move no shard count at all (measured over
     `push_legs` — strip both and the names are still `a`..`k`; only the file
@@ -506,6 +517,23 @@ def test_no_subtree_file_is_in_any_gating_leg():
             f"{sorted(set(got) - set(want))[:8]}\nshards-only-in-producer: "
             f"{sorted(set(want) - set(got))[:8]}\ncontent-differs: "
             f"{sorted(k for k in set(got) & set(want) if got[k] != want[k])[:8]}")
+    assert set(_TIER2_CHANGES) == {
+            "tests/eval/ask/test_ask_corpus.py",
+            "tests/longmem_eval/test_vector_arm.py",
+            "tools/longmem_eval/run.py",
+            "tortoise/embeddings.py",
+    }, (
+        "`_TIER2_CHANGES` changed. It is the probe list the tier-2 family is driven "
+        "with — one surface-owner of each eval subtree plus a direct eval-test edit "
+        "— and it is pinned here against a literal for the same reason "
+        "`_LEG_KINDS` is: this file's map, its declared side AND its per-family "
+        "read-back all read the one constant, so a shrunken list moves all three "
+        "together and the equality stays green over surfaces nobody selected for "
+        "(measured before this pin: cut to one entry, still 26 == 26). Dropping or "
+        "replacing a probe is legitimate, but it must be a SECOND, deliberate "
+        "edit here, with a reviewer reading the message — not a quiet narrowing "
+        "of what the tier-2 legs cover."
+    )
     for changed in _TIER2_CHANGES:
         sel = cs.select([changed], "pull_request", manifest)
         for key, field, drop_all in (
