@@ -405,6 +405,30 @@ def test_clean_requires_BOTH_stores_to_have_been_read():
     assert both.exit_code == EXIT_CLEAN
 
 
+def test_the_none_arm_decides_on_its_own_with_no_refusal_present():
+    """`None` is not zero **even when no refusal accompanies it** (#11660 R7 P3-4).
+
+    The two pins above cannot see the `None` arm: both carry a non-empty
+    `refusals`, so `if self.refusals` answers for them and DELETING the
+    `record_vectors is None or graph_vectors is None` guard leaves them green.
+    `scan()` always appends a refusal for an unread store, so the guard is only
+    reachable by a DIRECT caller — which is exactly why the code comment claims
+    the algebra is safe for one. This is that caller, and it is the pin that reds
+    when the guard goes: without it the verdict falls through to CLEAN for a
+    store nobody read.
+    """
+    unread_graph = ResidualScan(org_id="o", graph_id="g", record_vectors=0,
+                                graph_vectors=None)
+    assert unread_graph.verdict == UNAVAILABLE, (
+        "a store that was never read must not be folded into a CLEAN — this is "
+        "the `or 0` bug the guard exists to stop")
+    assert unread_graph.exit_code == EXIT_UNAVAILABLE
+
+    unread_record = ResidualScan(org_id="o", graph_id="g",
+                                 record_vectors=None, graph_vectors=0)
+    assert unread_record.verdict == UNAVAILABLE
+
+
 @pytest.mark.parametrize("record,graph", [(3, 0), (0, 3), (2, 2)])
 def test_residue_in_EITHER_store_is_a_finding(record, graph):
     """Erased means erased in both. A leftover in one store is not "mostly fine".
@@ -539,14 +563,31 @@ def test_the_record_half_counts_both_the_payload_and_the_indexed_projection():
 # ── the CLI must not read a graph the engine does not hold ─────────────────
 
 def _fake_falkordb(monkeypatch, names, *, listing_raises=False):
-    """Install a stand-in `FalkorDB` and return the names `select_graph` was asked for."""
+    """Stand-in `FalkorDB`; returns (names asked for, how the client was BUILT).
+
+    ⛔ THE CONSTRUCTOR KWARGS ARE THE EVIDENCE (#11660 review round 7, P1-1).
+    The pre-fix handle was `FalkorDB.from_url(uri)`, which hands the raw URI to
+    redis-py and lets ITS defaults pick the port — the divergence from the
+    product's `resolve_db_endpoint` (#2974) these pins exist to keep closed. A
+    fake that only recorded `select_graph` could not tell the two derivations
+    apart, so `from_url` records itself as `{"from_url": uri}` while the resolver
+    path records the endpoint kwargs: a revert to the old derivation reds on the
+    kwargs assertion instead of passing.
+    """
     import falkordb
 
     selected: list[str] = []
+    constructed: list[dict] = []
 
     class _DB:
+        def __init__(self, **kwargs):
+            constructed.append(kwargs)
+            if listing_raises:
+                raise RuntimeError("the listing is down")
+
         @classmethod
         def from_url(cls, uri):
+            constructed.append({"from_url": uri})
             if listing_raises:
                 raise RuntimeError("the listing is down")
             return cls()
@@ -559,7 +600,78 @@ def _fake_falkordb(monkeypatch, names, *, listing_raises=False):
             return ("handle", name)
 
     monkeypatch.setattr(falkordb, "FalkorDB", _DB)
-    return selected
+    return selected, constructed
+
+
+#: A URI the PRODUCT accepts — `.env.example`'s canonical value, and the one
+#: `tools/test_lane.py` prints for a private lane.
+_DOCKER_URI = "docker://:falkordb@localhost:6379/org_acme"
+
+
+def test_the_graph_uri_goes_through_the_repos_ONE_endpoint_derivation(monkeypatch):
+    """`docker://` must dial the documented deployment (#11660 review round 7, P1-1).
+
+    Before the fix the handle was `FalkorDB.from_url(uri)`, and that client
+    rewrites only `falkor(s)://` before deferring to `redis.from_url`, which does
+    not understand `docker://` at all — so the tool's OWN usage block (which
+    passes `$TORTOISE_DB_URI`) could never attest on this repo's default local
+    URI: the graph half was refused and the verdict was always UNAVAILABLE.
+    `resolve_db_endpoint` accepts it (`config.SUPPORTED_URI_SCHEMES`), so the
+    documented command works and dials the PRODUCT's endpoint.
+    """
+    import tools.embedding_residual_scan as cli
+
+    selected, constructed = _fake_falkordb(monkeypatch, names=["org_acme"])
+    assert cli._graph_handle(_DOCKER_URI, "org_acme") == ("handle", "org_acme")
+    assert selected == ["org_acme"]
+    assert len(constructed) == 1 and "from_url" not in constructed[0], (
+        "the client must be built from resolved fields, not handed the raw URI: "
+        f"{constructed!r}")
+    endpoint = constructed[0]
+    assert (endpoint["host"], endpoint["port"], endpoint["password"],
+            endpoint["ssl"]) == ("localhost", 6379, "falkordb", False), (
+        "the handle must carry the endpoint `resolve_db_endpoint` resolved: "
+        f"{endpoint!r}")
+    assert "socket_timeout" in endpoint and "socket_connect_timeout" in endpoint, (
+        "the client must carry the product's BOUNDED socket policy (#8118): "
+        "`falkordb.FalkorDB` defaults `socket_timeout=None`, so an unbounded "
+        f"client parks an attestation in recv() forever: {endpoint!r}")
+
+
+def test_a_PORTLESS_uri_gets_the_products_default_port_not_redis_pys(monkeypatch):
+    """`redis://localhost/tortoise` is 16379 to the product and 6379 to redis-py.
+
+    That gap is the fail-OPEN half of P1-1: dial a different FalkorDB that
+    happens to hold a graph of the same name and every label counts 0, the record
+    half answers in scope, and the tool prints **CLEAN, exit 0** about an
+    instance nobody asked about (the `GRAPH.LIST` check does not cover it — the
+    wrong instance really does hold that name).
+    """
+    import tools.embedding_residual_scan as cli
+
+    _selected, constructed = _fake_falkordb(monkeypatch, names=["org_acme"])
+    assert cli._graph_handle("redis://localhost/org_acme", "org_acme") == (
+        "handle", "org_acme")
+    assert constructed and constructed[0].get("port") == 16379, (
+        "a port-less URI must resolve to the PRODUCT's default port (16379); "
+        "dialing redis-py's 6379 reads a different server and can attest "
+        f"CLEAN about it: {constructed!r}")
+
+
+def test_a_scheme_the_PRODUCT_refuses_is_a_REFUSAL_not_a_handle(monkeypatch):
+    """`falkor://` is refused by the product, so it must be refused here.
+
+    `from_url` ACCEPTED it (it is the scheme that client rewrites), so the tool
+    could measure an instance the product can never connect to. Refused means no
+    handle, the graph half is unmeasured, and the verdict is not CLEAN.
+    """
+    import tools.embedding_residual_scan as cli
+
+    selected, constructed = _fake_falkordb(monkeypatch, names=["org_acme"])
+    assert cli._graph_handle("falkor://localhost:6379/org_acme",
+                             "org_acme") is None
+    assert selected == [] and constructed == [], (
+        "a refused URI must not build a client at all")
 
 
 def test_a_graph_name_the_engine_does_not_hold_is_REFUSED_not_read(monkeypatch):
@@ -576,8 +688,8 @@ def test_a_graph_name_the_engine_does_not_hold_is_REFUSED_not_read(monkeypatch):
     """
     import tools.embedding_residual_scan as cli
 
-    selected = _fake_falkordb(monkeypatch, names=["org_acme"])
-    assert cli._graph_handle("bolt://localhost:6379", "org_typo") is None, (
+    selected, _construct = _fake_falkordb(monkeypatch, names=["org_acme"])
+    assert cli._graph_handle("redis://localhost:6379", "org_typo") is None, (
         "a name the engine does not hold must not produce a handle — a scan "
         "over it would answer 0 and report CLEAN")
     assert selected == [], (
@@ -589,8 +701,9 @@ def test_a_graph_name_the_engine_holds_is_still_read(monkeypatch):
     """The refusal is not an over-block: a real name produces its handle."""
     import tools.embedding_residual_scan as cli
 
-    selected = _fake_falkordb(monkeypatch, names=["org_acme", "org_other"])
-    assert cli._graph_handle("bolt://localhost:6379", "org_acme") == (
+    selected, _construct = _fake_falkordb(monkeypatch, names=["org_acme",
+                                                              "org_other"])
+    assert cli._graph_handle("redis://localhost:6379", "org_acme") == (
         "handle", "org_acme")
     assert selected == ["org_acme"]
 
@@ -600,4 +713,4 @@ def test_an_unreadable_graph_listing_is_a_refusal_not_a_CLEAN(monkeypatch):
     import tools.embedding_residual_scan as cli
 
     _fake_falkordb(monkeypatch, names=[], listing_raises=True)
-    assert cli._graph_handle("bolt://localhost:6379", "org_acme") is None
+    assert cli._graph_handle("redis://localhost:6379", "org_acme") is None

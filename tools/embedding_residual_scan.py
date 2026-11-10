@@ -77,13 +77,66 @@ def _graph_handle(graph_uri: str | None, graph_name: str):
     A listing that cannot be read is treated the same way as an absent name —
     refused, never assumed present. Fail-closed is the only safe direction for an
     attestation.
+
+    ⛔ THE URI GOES THROUGH THE REPO'S ONE URI → ENDPOINT DERIVATION, NEVER A
+    RE-PARSE (#2974; #11660 review round 7, P1-1). This handle used to be
+    ``FalkorDB.from_url(graph_uri)``, which is a DIFFERENT derivation from the
+    product's ``tortoise.projection.resolve_db_endpoint`` on three axes at once,
+    and one of them fails OPEN — the one outcome this module says is impossible:
+
+    * ``docker://`` — the scheme in ``.env.example`` and the one
+      ``tools/test_lane.py`` prints for a private lane — is not understood by the
+      client at all (``FalkorDB.from_url`` rewrites only ``falkor(s)://`` and
+      then defers to ``redis.from_url``, which accepts ``redis``/``rediss``/
+      ``unix``). So the documented command could not attest in the documented
+      deployment: the graph half was refused and the verdict was ALWAYS
+      ``UNAVAILABLE`` on this repo's own default local URI.
+    * ``falkor(s)://`` — a scheme the product REFUSES
+      (``tests/test_engine_probe.py`` pins that refusal) — was ACCEPTED here.
+    * a URI stating **no port** meant ``6379`` (redis-py's default) here and
+      **``16379``** in the product. Dial a different FalkorDB that happens to
+      hold a graph of the same name and the count is ``0`` for every label —
+      ``MATCH … RETURN count(n)`` always answers one row, so the ``if not rows``
+      refusal below does not fire — while the record half (another server
+      entirely) also answers in scope: **CLEAN, exit 0, about an instance nobody
+      asked about.** The ``GRAPH.LIST`` check does not cover it, because the
+      wrong instance really does hold that name.
+
+    So the endpoint is resolved, a ``ValueError`` from the resolver is a REFUSAL
+    that carries the resolver's own message (which names the expected schemes
+    and never echoes the URI — it carries a credential), and the client is built
+    from the resolved fields with the product's bounded socket policy (#8118:
+    ``falkordb.FalkorDB`` defaults ``socket_timeout=None``, so an unbounded
+    client parks this scan in ``recv()`` forever against a stalled engine —
+    #2969's defrag loop, #2838's MERGE lock — alive, 0% CPU, no error). The
+    name-verification and the ``--graph-id``/``--graph-name`` split are
+    untouched: they are about WHICH graph, this is about WHICH SERVER.
     """
     if not graph_uri:
+        return None
+    from tortoise.projection import (
+        _bounded_server_socket_kwargs,
+        resolve_db_endpoint,
+    )
+
+    try:
+        endpoint = resolve_db_endpoint(graph_uri)
+    except ValueError as exc:
+        print(f"Warning: the graph URI was REFUSED ({exc}). The graph half of "
+              "the scan is NOT measured; the verdict cannot be CLEAN.",
+              file=sys.stderr)
         return None
     try:
         from falkordb import FalkorDB
 
-        db = FalkorDB.from_url(graph_uri)
+        db = FalkorDB(
+            host=endpoint.host,
+            port=endpoint.port,
+            username=endpoint.username,
+            password=endpoint.password,
+            ssl=endpoint.ssl,
+            **_bounded_server_socket_kwargs(),
+        )
         names = {str(n) for n in (db.list_graphs() or [])}
     except Exception as e:  # noqa: BLE001, RUF100
         print(f"Warning: no graph handle ({type(e).__name__}: {e}). The graph "
