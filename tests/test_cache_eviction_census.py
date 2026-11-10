@@ -15,6 +15,7 @@ DELETE`/`DROP` anywhere on the path fails the run rather than being argued about
 """
 from __future__ import annotations
 
+import ast
 import math
 import re
 import sys
@@ -2910,6 +2911,36 @@ def _evidence_log(name: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _licence_keys_the_code_emits() -> set[str]:
+    """The key set of the entry `assess()` builds, read out of the SOURCE.
+
+    ⛔ Read from the AST, not hard-coded, because a hard-coded list is the weaker form of
+    exactly this pin: it stays green when the code grows a field the committed artifact
+    does not carry. The dict literal is the one passed to `licence.append(...)` in
+    `assess()`; every key is a string constant, so a rename, an addition or a removal
+    moves this set and reds the artifact comparison below.
+    """
+    source = (ROOT / "tortoise" / "cache_eviction.py").read_text(encoding="utf-8")
+    found: list[set[str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "append"
+                and node.args and isinstance(node.args[0], ast.Dict)):
+            continue
+        keys = {k.value for k in node.args[0].keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+        # The licence entry is the only `append({...})` whose dict carries `population`.
+        if "population" in keys:
+            found.append(keys)
+    assert len(found) == 1, (
+        "expected exactly one `licence.append({...})` carrying a 'population' key in "
+        f"`assess()`; found {len(found)} — the pin cannot locate the entry it compares "
+        "against, so re-derive it rather than widening this assertion"
+    )
+    return found[0]
+
+
 def test_the_two_evidence_arms_come_from_ONE_probe_and_differ_only_in_the_bound():
     """Fails if `before.log` drifts back to being a run of DIFFERENT code.
 
@@ -2948,17 +2979,25 @@ def test_the_two_evidence_arms_come_from_ONE_probe_and_differ_only_in_the_bound(
     )
     assert "licence / population           40x" in before, before
 
-    # ⛔ THE DEFECT ITSELF: the `before` licence must carry the keys the code emits,
-    # including #11720's freshness fields. A four-key licence here means the log was
-    # produced by a tree that predates the sibling bound, so the two logs are not a
-    # controlled comparison of ONE thing.
-    for key in ("measured_at", "age_seconds", "max_age_seconds"):
-        assert key in before, (
-            f"before.log's licence omits '{key}' — it was not produced by the committed "
-            f"probe (whose `assess()` emits every licence key unconditionally), so the two "
-            f"logs do not come from one head and the README's 'differ only in the "
-            f"population bound' claim is false again:\n{before}"
-        )
+    # ⛔ THE DEFECT ITSELF: the `before` licence's key SET must equal the one `assess()`
+    # emits. A four-key licence here means the log was produced by a tree that predates
+    # the sibling bound's freshness fields, so the two logs are not a controlled comparison
+    # of ONE thing. Bound to the SOURCE's set rather than to three key names — the weaker
+    # form stays green when the code grows a field the artifact does not carry, which is
+    # the same drift one step later.
+    licence_line = re.search(r"^licence +(.+)$", before, re.MULTILINE)
+    assert licence_line, f"before.log carries no `licence` line:\n{before}"
+    entry = ast.literal_eval(licence_line.group(1).strip())
+    assert isinstance(entry, list) and entry and isinstance(entry[0], dict), (
+        f"before.log's licence is not a list with one entry dict: {entry!r}"
+    )
+    emitted = _licence_keys_the_code_emits()
+    assert set(entry[0]) == emitted, (
+        "before.log's licence entry does not carry the keys `assess()` emits — it was not "
+        "produced by the committed probe, so the two logs do not come from one head and "
+        "the README's 'differ only in the population bound' claim is false again. "
+        f"log={sorted(entry[0])} code={sorted(emitted)}"
+    )
 
     # And the graph shape is identical on both sides, so neither arm measured a
     # different population — the comparison isolates the BOUND.

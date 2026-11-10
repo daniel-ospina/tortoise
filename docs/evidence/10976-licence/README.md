@@ -49,8 +49,9 @@ cache under its byte ceiling answers `CLEAN` with an empty licence.
 ## The measurement (falkordb 4.20.6, private lane container, `noeviction`)
 
 `before.log` / `after.log` in this directory are the captured runs, **both produced by the
-committed probe at ONE head** (`b58c26e3495c`), differing only in whether `assess()` applies
-the population bound:
+committed probe at ONE head** — the commit that adds `--without-population-bound`
+(`6080da8a24df`, the earliest head whose probe can produce both arms; the two commands below
+are the reproduction) — differing only in whether `assess()` applies the population bound:
 
 ```bash
 export TORTOISE_DB_URI=<a throwaway lane container>
@@ -86,7 +87,7 @@ issue rather than assumed.
 | graph nodes (`MATCH (n) RETURN count(n)`) | 25,000 | 25,000 |
 | `turn` population (`is_episodic = true`) | **500** | **500** |
 | report claims (CLEAN, `proves=True`) | 20,000 | 20,000 |
-| report `age_seconds` at assess time | **0.12** | 0.12 |
+| report `age_seconds` at assess time | **0.12** | not in the licence (none issued) |
 | **verdict** | **`PLAN`** | **`REFUSED`** |
 | **`plan["evictable"]`** | `[{population: turn, nodes: 20000}]` | `[]` |
 | licence ÷ population | **40x** | — |
@@ -158,7 +159,7 @@ gated individually by the executor's per-node record probe.
 eviction suites, 0 skipped — measured, not asserted: `uv run python tools/test_lane.py run
 -- tests/test_cache_eviction_census.py tests/test_cache_eviction_evictor.py
 tests/test_cache_eviction_evictor_pins.py tests/test_cache_evict_cli.py -q` →
-`240 passed in 6.30s`; the census file alone → `134 passed`):
+`241 passed`; the census file alone → `135 passed`):
 
 | arm | what it pins |
 |---|---|
@@ -172,6 +173,7 @@ tests/test_cache_eviction_evictor_pins.py tests/test_cache_evict_cli.py -q` →
 | `test_an_empty_population_count_read_is_a_refusal_not_zero` | an empty count read is a refusal, never `0`: "this graph holds only 0" would be a fact nobody measured |
 | `test_a_population_with_no_count_statement_is_a_refusal_not_a_guess` | an unbounded population is refused, never bounded by a default (`0` demotes it forever; the whole-graph total restores the defect) |
 | `test_a_row_multiplying_count_statement_is_a_documented_residual` | **asserts what the whole-graph backstop does NOT catch** — a 500-node population counted as 2,000 with a 1,500 claim passes both guards; the band is `true_population < claim <= node_total`, bounded by the CLAIM and not by the multiplier, which is why the mirror pin is the only guard there |
+| `test_the_two_evidence_arms_come_from_ONE_probe_and_differ_only_in_the_bound` | the two committed logs declare their own arm, differ only in verdict and licence, state the same graph shape, and the `before` licence's **key set equals the one `assess()` emits** (read out of the AST, not hard-coded) — the defect that made this section's claim false was a four-key licence from a tree predating the freshness fields, so the pin binds the SET and not three key names |
 | `test_a_claim_above_the_graph_total_is_caught_from_an_inflated_count_statement` | `turn` answering 30,000 on a 25,000-node graph with a 30,000 claim is refused by the **graph-total** check, population bound silent. ⛔ Proves the backstop is reachable on a QUIESCENT graph — a comment claiming it was unreachable there was wrong — and that the refusal comes from the right guard |
 | `test_an_inflated_ceiling_does_not_arm_the_backstop_at_the_total` | the **boundary of the residual band**: the SAME 30,000 ceiling on the same 25,000-node graph with a 25,000 claim licenses 25,000, neither guard firing. ⛔ Pins the correction in the direction the previous comment got wrong — the multiplier is irrelevant, only the claim's position against the total matters |
 | `test_the_demoted_row_still_names_its_population` | a demotion must not NULL the name the row demonstrably has — dropping the `population_name` carry through the whole-graph demotion makes the exported artefact report `population: null` beside a label that names one. The comment recorded that measured defect but nothing pinned it (deleting the carry left the suite green), so the regression it describes could return silently |
