@@ -1060,6 +1060,47 @@ def test_alive_refuses_to_call_an_unchecked_port_leg_a_serving_verdict(
         _reap(victim.pid)
 
 
+def test_both_exit_code_lists_name_every_no_port_cause_the_sentence_produces():
+    """The two exit-code lists are PROSE, and nothing pinned them, so they drifted
+    from the code twice in one review (`#11675` rounds 13 and 15).
+
+    `cmd_alive` returns `9` for three different on-disk facts — no port file, a port
+    file that carries no port value (zero bytes, or only whitespace, which the read
+    strips), and a port file whose content could not be read — and its sentence names
+    all three. The header table and the `cmd_alive` list each enumerate the causes
+    independently; both said "is empty, or could not be read" while the third existed,
+    so a reader auditing the exit code from the list alone was told about two of the
+    three. The in-code list even says it "must not drift from" the header table, which
+    is exactly what happened.
+
+    RED on the pre-fix text: neither block mentions `whitespace`.
+    """
+    blocks = []
+    current: list[str] = []
+    for line in SCRIPT.read_text().splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            current.append(stripped)
+            continue
+        if current:
+            blocks.append(" ".join(current).lower())
+            current = []
+    if current:
+        blocks.append(" ".join(current).lower())
+    port_lists = [b for b in blocks if "no port is known" in b]
+    assert len(port_lists) == 2, (
+        "expected exactly two exit-code lists naming the no-port state (the header "
+        f"table and `cmd_alive`'s), found {len(port_lists)} — a list that moved, "
+        "merged or vanished makes this pin vacuous instead of red")
+    for block in port_lists:
+        for cause in ("whitespace", "could not be read"):
+            assert cause in block, (
+                f"an exit-code list enumerates the no-port causes without naming "
+                f"{cause!r}, which `cmd_alive` does produce — a reader auditing the "
+                "code from the list alone is told about fewer causes than exist: "
+                + block[:400])
+
+
 def test_a_later_refusal_outranks_an_earlier_boot(tmp_path: Path, state) -> None:
     """The retry loop can SUCCEED, be STOPPED, and then be REFUSED.
 
