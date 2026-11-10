@@ -6015,14 +6015,30 @@ def _install_capture_seam(args, install_capture) -> int:
                 "`additional_context` (sessionStart is Cursor's only context-"
                 "injection seam — its per-turn beforeSubmitPrompt event can "
                 "observe/block a prompt but cannot inject).")
+        # #2122: BOTH hooks are IDE-only — not just capture. Cursor's hook
+        # reference (re-fetched 2026-11-10) lists `sessionStart` under "Hooks
+        # not available in cloud agents" ("Deferred while cloud agents can
+        # still start in a read-only environment. Hooks don't load there, so a
+        # cloud sessionStart would fire too late") AND states "User-level
+        # hooks (~/.cursor/hooks.json) are not available in cloud agents" —
+        # and `tortoise install cursor` registers at the USER level only
+        # (~/.cursor is Cursor's one writable root; there is no project-level
+        # default). A cloud agent therefore gets NEITHER hook, and disclosing
+        # only `sessionEnd` would leave the user believing the cold-context
+        # digest still reaches a cloud session — the unshipped-seam claim this
+        # issue's indicator 3 forbids, applied to the sibling hook.
         print(
-            f"Cursor's sessionEnd hook is IDE-ONLY. The capture hook "
-            f"registered in {cursor_root / 'hooks.json'} fires for LOCAL "
-            "desktop-editor sessions (the expected surface). CURSOR CLOUD "
-            "AGENT sessions are NOT captured — Cursor's docs: 'Cloud agents "
-            "have no editor-lifetime session boundary. sessionEnd is tied to "
-            "the IDE session, not a cloud agent chat.' If you use cloud "
-            "agents, their sessions are not filed by this seam.")
+            f"Both Cursor hooks are IDE-ONLY (registered in "
+            f"{cursor_root / 'hooks.json'}, the USER-level file). LOCAL "
+            "desktop-editor sessions are the expected surface — CURSOR CLOUD "
+            "AGENT sessions are NOT captured and are NOT injected: Cursor's "
+            "docs say 'Cloud agents have no editor-lifetime session boundary. "
+            "sessionEnd is tied to the IDE session, not a cloud agent chat', "
+            "that 'sessionStart' is not available in cloud agents, and that "
+            "'User-level hooks (~/.cursor/hooks.json) are not available in "
+            "cloud agents'. So neither the capture seam nor the cold-context "
+            "injection seam reaches a cloud agent — for those, use the MCP "
+            "pull surface (`tortoise_search` / `tortoise_recall`).")
     if args.harness == "openclaw" and not getattr(args, "dry_run", False):
         # #2120: the plugin is discovered under the HOME-scoped
         # ~/.openclaw/extensions and hooks only bind at Gateway startup, so a
@@ -6212,8 +6228,9 @@ def _install_read_hook_impl(args) -> int:
         print("  tortoise install cursor  → ~/.cursor/hooks.json "
               "(the sessionEnd capture hook + the sessionStart cold-context "
               "injection hook; Cursor has no per-turn shell-hook read seam — "
-              "its beforeSubmitPrompt event cannot inject. IDE-ONLY: Cursor "
-              "cloud agent sessions are not captured)")
+              "its beforeSubmitPrompt event cannot inject. IDE-ONLY: neither "
+              "hook reaches a Cursor cloud agent — that file is user-level "
+              "and cloud agents run no Tortoise hook)")
         print("  tortoise install hermes  → <dir>/.hermes/plugins/"
               "tortoise-volunteer/ (the pre_llm_call PLUGIN — Hermes' per-turn "
               "injection surface; import with `tortoise sessions import "

@@ -2974,6 +2974,15 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_ide_only_limit(
     assert "IDE-ONLY" in r.stdout, r.stdout
     assert "CLOUD" in r.stdout.upper(), r.stdout
     assert "no editor-lifetime session boundary" in r.stdout, r.stdout
+    # #2122: the disclosure must cover the INJECTION hook too, not only
+    # capture. Cursor's docs exclude `sessionStart` from cloud agents and say a
+    # user-level `~/.cursor/hooks.json` is not loaded there at all, so a message
+    # naming only `sessionEnd` leaves the user believing the cold-context digest
+    # still reaches a cloud session.
+    assert "Both Cursor hooks are IDE-ONLY" in r.stdout, r.stdout
+    assert "NOT injected" in r.stdout, r.stdout
+    assert "sessionStart" in r.stdout and "not available in cloud agents" in r.stdout, r.stdout
+    assert "User-level hooks" in r.stdout, r.stdout
 
 
 def test_cli_install_cursor_uninstall_says_the_seam_remains(tmp_path):
