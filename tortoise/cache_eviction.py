@@ -1288,16 +1288,10 @@ def assess(
     # mirror's count is at least that large — eligibility already required
     # `claim <= resident_population`). Every sentence that has sat in this block has been
     # wrong about the reach in one direction or the other; the criterion above is the
-    # whole of it, and the two arms that pin it are named below.
-    #
-    # - A count statement whose PREDICATE is too wide (dropping the `:Point` half) never
-    #   trips it: a subgraph count cannot exceed `MATCH (n) RETURN count(n)`.
-    # - Nor does a multiplied count ALONE trip it (a join, a second `MATCH`, an
-    #   `UNWIND`): the comparison never reads the mirror's count, only the claim. What
-    #   lands here is a claim the multiplication pushed above the total; a claim that stays
-    #   at or below it passes BOTH guards, whatever the multiplier — the measured example
-    #   is population 500 counted as 2,000 on a 25,000-node graph with a 1,500 claim, and
-    #   the same graph with a 30,000 ceiling and a 25,000 claim is equally untouched.
+    # whole of it, and the two arms that pin it are named below. The measured example: a
+    # population 500 counted as 2,000 on a 25,000-node graph with a 1,500 claim passes
+    # BOTH guards, and the same graph with a 30,000 ceiling and a 25,000 claim is equally
+    # untouched — the multiplier is irrelevant, only `claim <= node_total` bounds the hole.
     #
     # ⛔ A MIRROR-VS-TOTAL CHECK IS NOT "NO DETECTION" — it is UNSOUND, which is a
     # different fact and the one this paragraph asserts. Refusing on

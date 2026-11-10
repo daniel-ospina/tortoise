@@ -262,8 +262,8 @@ files under `tortoise/` (`git grep -n ':Document'` → 63 lines,
 It was **55** across **17** when this was first measured at `4f68a2aa7`, and
 three moves have since been made, one per workstream: the #10976
 census's own note on why node labels do not partition the node set
-(`cache_eviction.py:956`, which is also the one that lifted the file count,
-being a new file), #8447's ingest door (`tortoise/ingest.py`, the
+(`cache_eviction.py:956`, which is also one of the two that lifted the file
+count, being a new file), #8447's ingest door (`tortoise/ingest.py`, the
 `REFUSED_NOT_FOUND` enum docstring), and #9601's record backup
 (`tortoise/hosted_backup.py`, likewise a new file, whose six mentions are the
 dump-and-restore prose about pre-D10 artifacts). All three are the point rather
