@@ -1198,9 +1198,11 @@ def test_the_no_port_verdict_does_not_borrow_an_untaken_identity_leg(
         assert "port file EXISTS" in verified.stdout, (
             "a readable-but-empty port file was reported as one that was never "
             "recorded, in the MATCHED-witness sentence: " + verified.stdout)
-        assert "(unreadable, or empty)" in verified.stdout, (
-            "the empty case is not named among the causes the read could not "
-            "tell apart: " + verified.stdout)
+        assert "and is EMPTY" in verified.stdout, (
+            "the empty case must be NAMED as empty, not merged into 'could not be "
+            "read' — the other cause, with a different remedy (a permissions or "
+            "torn-state hunt), so one sentence for both sends the reader to the "
+            "wrong one: " + verified.stdout)
         (state_dir / "app.port").unlink()
 
         # No witness at all: the verdict may say the leg was not taken…
@@ -1221,22 +1223,34 @@ def test_the_no_port_verdict_does_not_borrow_an_untaken_identity_leg(
         assert "no start-time witness was recorded" not in empty.stdout, empty.stdout
         assert "our recorded process" not in empty.stdout, empty.stdout
 
-        # Same rule for the port file in the UNTAKEN-identity sentence.
+        # Same rule for the port file, and it is THREE states: absent, EXISTS and
+        # EMPTY (`-f && ! -s` — the read succeeded and returned nothing), and
+        # EXISTS with content that could not be read (`-s` needs no read
+        # permission). Collapsing the last two is the same conflation in the other
+        # direction, and the RECYCLED branch (exit 8) computes its port clause from
+        # the same value, so it used to name an absence it never observed.
         (state_dir / "app.port").write_text("")
-        port_gone = _script("alive", "--name", "app", env=state)
-        assert port_gone.returncode == 9, port_gone.stdout + port_gone.stderr
-        assert "port file EXISTS" in port_gone.stdout, (
-            "an empty port file was reported as one that was never recorded: "
-            + port_gone.stdout)
+        port_empty = _script("alive", "--name", "app", env=state)
+        assert port_empty.returncode == 9, port_empty.stdout + port_empty.stderr
+        assert "port file EXISTS" in port_empty.stdout and "EMPTY" in port_empty.stdout, (
+            "an empty port file was reported as one that was never recorded, or as "
+            "one that could not be read: "
+            + port_empty.stdout)
+        assert "no port was recorded" not in port_empty.stdout, port_empty.stdout
 
-        # …and in the RECYCLED sentence, which reads the same port state.
+        # …and the RECYCLED (exit 8) sentence derives its port clause from the
+        # SAME value, so it may not say "no port was recorded" over a port file
+        # that EXISTS. Forced by stamping a witness that no longer matches the live
+        # start time — the same technique `test_the_recycled_verdict_...` uses.
         (state_dir / "app.start").write_text("1\n")
-        (state_dir / "app.port").write_text("")
         recycled = _script("alive", "--name", "app", env=state)
         assert recycled.returncode == 8, recycled.stdout + recycled.stderr
-        assert "port file EXISTS" in recycled.stdout, (
-            "the RECYCLED sentence asserted that no port was recorded although "
-            "the file exists: " + recycled.stdout)
+        assert "no port was recorded for this name" not in recycled.stdout, (
+            "the RECYCLED verdict named a port absence it did not observe: "
+            + recycled.stdout)
+        assert "EMPTY" in recycled.stdout, (
+            "the RECYCLED verdict did not carry the three-way port clause: "
+            + recycled.stdout)
     finally:
         _reap(victim.pid)
 

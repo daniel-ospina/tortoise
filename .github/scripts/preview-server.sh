@@ -78,7 +78,8 @@
 #   stopped · 6 never recorded · 10 record was ATTEMPTED and REFUSED (the process
 #   was already gone when the boot step tried to register it — `ci.yml`'s own
 #   "wrangler already died") · 1 gone (died mid-run, or it exited between the two
-#   probes) · 9 alive, but NO port was recorded, so SERVING was not checked ·
+#   probes) · 9 alive, but NO port is KNOWN (none was recorded — or a port file
+#   exists and is empty, or could not be read), so SERVING was not checked ·
 #   12 the pid FILE itself could not be read, so the dump took NO verdict at all
 #   (never reported as GONE — it measured nothing). 0 is
 #   therefore never returned when the SERVING leg was not taken; the IDENTITY leg
@@ -419,7 +420,8 @@ cmd_ready() {
 # Exit codes (see the header table, which this list must not drift from):
 # 0 alive and serving · 7 alive but not serving · 8 pid recycled · 5 recorded
 # then stopped · 6 never recorded · 10 record attempted and REFUSED · 1 gone ·
-# 9 alive but no port recorded, so SERVING was not checked · 12 the pid FILE
+# 9 alive but no port is KNOWN (none recorded, or the port file was empty or
+#   unreadable), so SERVING was not checked · 12 the pid FILE
 # itself could not be read, so NO verdict was taken (never reported as gone).
 cmd_alive() {
   local name
@@ -431,14 +433,23 @@ cmd_alive() {
   # ⛔ The SAME absent-vs-unreadable rule as the pid file and the start-time
   # witness below: `cat … || true` collapses them, and a port that EXISTS but
   # cannot be read is a permissions/torn-state fault, not "alloc never ran". The
-  # sentence may not name an absence the probe did not observe.
+  # sentence may not name an absence the probe did not observe — and it is THREE
+  # states, not two: ABSENT (`! -f`), EXISTS and EMPTY (`-f && ! -s` — the read
+  # succeeded and returned nothing), and EXISTS with content that could not be read
+  # (`-s` needs no read permission, so that is the fault case). Reporting a
+  # successful empty read as an unreadable file is the same conflation in the other
+  # direction (#11675 review, findings 4/5), and it must not send the reader to a
+  # permissions hunt: `record` never writes the file empty, so an empty one is a
+  # torn write or a truncating tool.
+  local no_port_clause="no port was recorded for this name"
   local port_unreadable=""
-  # …and a readable-but-EMPTY port file is a third cause, not a permission fault:
-  # the read succeeded and returned nothing (`record` never writes it empty, a
-  # torn write or a truncating tool does), so the sentence must not send the reader
-  # to a permissions hunt. Both variants share the branch below.
   if [[ -z "$port" && -f "$dir/${name}.port" ]]; then
     port_unreadable="${name}.port"
+    if [[ -s "$dir/${name}.port" ]]; then
+      no_port_clause="a port file EXISTS (${port_unreadable}) with content but could not be read"
+    else
+      no_port_clause="a port file EXISTS (${port_unreadable}) and is EMPTY"
+    fi
   fi
   local at_port="" stranger=""
   [[ -n "$port" ]] && at_port=" on :${port}"
@@ -448,12 +459,8 @@ cmd_alive() {
   # (#11675 review, finding 2).
   if [[ -n "$port" ]]; then
     stranger="anything answering on :${port} is a stranger's answer, never this preview's"
-  elif [[ -n "$port_unreadable" ]]; then
-    # Same rule as the branch below: a port file that EXISTS is not one that was
-    # never written, and saying it was sends the reader to the boot step.
-    stranger="anything answering at all is a stranger's answer, never this preview's, and a port file EXISTS (${port_unreadable}) but could not be read (unreadable, or empty), so WHERE it would answer was NOT checked"
   else
-    stranger="anything answering at all is a stranger's answer, never this preview's, and no port was recorded for this name so WHERE it would answer was NOT checked"
+    stranger="anything answering at all is a stranger's answer, never this preview's, and ${no_port_clause}, so WHERE it would answer was NOT checked"
   fi
 
   # NAMES are for humans; the exit code is what the step branches on, and every
@@ -559,11 +566,10 @@ cmd_alive() {
     # was not taken, and this branch may not say "our recorded process" in the same
     # clause that says the identity was never checked (measured: both variants of
     # `identity` printed the claim side by side with its own denial). And a port
-    # file that EXISTS but could not be read is not "no port was recorded".
-    local no_port_why="no port was recorded for this name"
-    if [[ -n "$port_unreadable" ]]; then
-      no_port_why="a port file EXISTS (${port_unreadable}) but could not be read (unreadable, or empty), so no port is known"
-    fi
+    # file that EXISTS is not "no port was recorded": the clause is computed ONCE
+    # above, so the empty and unreadable states read differently and the RECYCLED
+    # branch above cannot disagree with this one.
+    local no_port_why="${no_port_clause}"
     if [[ -n "$recorded" && "$ident" -eq 0 ]]; then
       printf '%s\n' "${PROG}: ${name}: pid ${pid} is ALIVE — our recorded process: not a zombie, and ${identity} — but ${no_port_why}, so whether it was still SERVING was NOT checked. This is NOT an alive-and-serving verdict; the log is the next read."
       return 9
