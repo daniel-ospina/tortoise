@@ -251,10 +251,11 @@ SEED_TURNS_EMBEDDED_BY_DEFAULT = True
 #: its seeding mode is not evidence).
 #:
 #: **``False`` is the faithful CAPTURE shape** (the default): ``search_keys``
-#: is an indexed Point FTS field (``tortoise/projection/__init__.py`` —
-#: ``("Point", ["content", "search_keys"])``) and capture's TURN write stores
-#: none (E3 writes it on extracted claim Points), so a capture-exact turn
-#: store has none — exactly why the SHARED primitive
+#: is an indexed Point FTS field (one of ``sparse.POINT_INDEX_TEXT_FIELDS`` —
+#: ``content``/``search_keys``/``quote``, #11682; the CREATE list is
+#: ``projection/__init__.py::_FULLTEXT_INDEX_LABEL_FIELDS``) and capture's TURN
+#: write stores none (E3 writes it on extracted claim Points), so a
+#: capture-exact turn store has none — exactly why the SHARED primitive
 #: ``seed_capture_turn_store`` defaults OFF. Flipping this default ON would
 #: silently change the store of EVERY non-A4 caller that passes nothing
 #: (``tools/profile_read_path.py``, ``tools/ask_pool_admission_probe.py``,

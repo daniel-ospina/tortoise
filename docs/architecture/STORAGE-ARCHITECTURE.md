@@ -1075,6 +1075,21 @@ d = 384, M = 16 → 1,830 B ≈ 1.79 KB/vector
 | `Document` | ⛔ **NONE** | `_searchText` |
 | `Session` / `GraphEvent` | ⛔ **NONE** | — |
 
+**Update (#11682, code-side — NOT a re-measurement of the table above):** the
+`Point` FULLTEXT index is now created over `content`, `search_keys` **and
+`quote`** — one declaration, `tortoise.sparse.POINT_INDEX_TEXT_FIELDS`, read by
+the index DDL and by both lexical mirrors (the BM25 leg and the snapshot lane).
+The table's 2026-09-24 numbers stay as measured; the field set is what a graph
+re-indexed by this code carries.
+
+⚠️ **The GAIN of that widening is unquantified.** How often `quote` is
+non-empty on real captured points is **unmeasured**, and #11682 names that
+measurement as its own *first* task; the only pinned property is that an
+unquoted point composes to byte-identical index text, so an unpopulated graph
+is inert rather than degraded. Do not read this row as a measured recall win.
+The BM25 leg joins `quote` for the **Point** family only — a `:Source` carries
+no Point FTS field (#11706 review P2-5).
+
 **⇒ 12,657 embeddings — `:Object` 7,859 and `:Event` 4,798, i.e. 38% of every vector we store — are stored and paid for with no index behind them.** ≈**19 MB, 13.5% of the graph.** `Object`'s node attributes are **13 MB, of which ~11.8 MB is embeddings — the label is mostly vectors.**
 
 **⭐ And they are still queryable — by full scan, silently.** Measured through the app's own path (`run_vector_query(..., entity_type=…)`, 14 runs, 4 discarded as warmup):

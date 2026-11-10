@@ -2073,7 +2073,7 @@ def test_the_real_machine_record_agrees_with_the_pins():
     `tests/`, `tools/` or `docs/` re-checked - is pinned here beside the probe cites for
     the same reason; that gap was recorded as a residual by a fresh-context review at
     `33109a66184a` and is closed by the arm below rather than left to the next merge. The
-    other three (`sparse.py:226`, `projection/entities.py:1208`,
+    other three (`sparse.py:226`, `projection/entities.py:1239`,
     `subject_binding.py:189`) are named in the arm's comment and are STILL unpinned: this
     pins one of four, not four of four, and an earlier cut of this docstring said "ONE" as
     if the `extractor_v2.py` cite were the field's only other-file cite - caught by a
@@ -2110,19 +2110,20 @@ def test_the_real_machine_record_agrees_with_the_pins():
 
     # ⛔ THE FIELD'S CITES TO FILES OTHER THAN THE PROBE ARE FOUR, AND THIS ARM PINS ONE OF
     # THEM. The arms above pin every `capstone_measure.py` cite in this field; the field also
-    # says the switch is "read PER EMITTED POINT at `extractor_v2.py:9944`", and until this
-    # arm nothing bound that number to anything — `grep 9944` over `tests/ tools/ docs/`
-    # returned the field itself and no pin (measured). That is the exact asymmetry #10274
+    # says the switch is "read PER EMITTED POINT at `extractor_v2.py:10508`", and until this
+    # arm nothing bound that number to anything — `grep 9944` over `tests/ tools/ docs/` at
+    # the head it was measured at (`8212c41eff`, where the field still carried `9944`)
+    # returned the field itself and no pin. That is the exact asymmetry #10274
     # exists to remove, and it was recorded as a residual by a fresh-context review at
     # `33109a66184a`: the number was right at that head, and the next merge could rot it
     # silently. `tortoise/extractor_v2.py` is the most-edited file any row here cites, so it
     # is the likeliest of all these numbers to move.
     # ⛔ ONE OF FOUR, STATED AS ONE OF FOUR. Enumerating `([A-Za-z0-9_./]+\.py):(\d+)` over
-    # this field gives `sparse.py:226`, `projection/entities.py:1208`,
-    # `subject_binding.py:189`, `extractor_v2.py:9944` and the probe cite
+    # this field gives `sparse.py:226`, `projection/entities.py:1239`,
+    # `subject_binding.py:189`, `extractor_v2.py:10508` and the probe cite
     # `probes/capstone_measure.py:527` — so three other-file cites remain UNPINNED by this
     # arm. Measured, scoped so the query cannot match its own prose —
-    # `grep -rnE 'sparse\.py:226|entities\.py:1208|subject_binding\.py:189' tests/ --include='*.py'`
+    # `grep -rnE 'sparse\.py:226|entities\.py:1239|subject_binding\.py:189' tests/ --include='*.py'`
     # returns exactly six hits: four are the sentences around this one, and the other two
     # are PROSE COMMENTS in `tests/test_7949_c2_door.py:96-97` — no `assert`, so no pin.
     # (An earlier cut of this comment said a bare `grep -rn '226\|1208\|189'` over this file

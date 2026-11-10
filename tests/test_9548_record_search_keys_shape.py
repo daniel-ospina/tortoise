@@ -283,7 +283,7 @@ def test_the_read_side_yields_the_graph_s_string_not_an_array():
     is the reader: `cache_projection.node_from_row` projects the column straight
     onto the rebuilt node, and a JSON array becomes a Python `list` — the
     array-valued `search_keys` FalkorDB's Point FULLTEXT index cannot match
-    (#5482), reachable only through `_fix_point_search_keys`'s repair pass.
+    (#5482), reachable only through `_fix_point_array_fts_props`'s repair pass.
 
     WHAT THIS PROVES, NARROWLY: that the RECORD'S OWN READER hands the two
     encodings to the rebuilt node as different Python values (`node_from_row` →

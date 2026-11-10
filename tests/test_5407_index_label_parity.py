@@ -213,6 +213,36 @@ def test_the_required_index_sets_also_cover_every_served_label() -> None:
         _assert_covered(SERVED_LABELS, _required_labels(indexes), kind)
 
 
+def test_every_declared_point_fulltext_field_is_also_REQUIRED() -> None:
+    """PROPERTY-level parity for the Point lexical set (#11682 review, round 4).
+
+    ``_point_fts_field_missing`` asks about the DERIVED target, so a widening
+    is covered *inside* a sweep. The sweep itself is gated on
+    ``_schema_is_current()``, which derives `required` from the LITERAL
+    ``_REQUIRED_FULLTEXT_INDEXES`` — so a field added to the declared Point set
+    without a matching literal entry reads CURRENT on an existing graph, the
+    sweep is skipped, and the field is created on fresh databases only. That is
+    the #4465/#8400 trap one level up: the declaration says the index carries a
+    field an existing graph will never index.
+
+    FAIL VALUE: add a fourth field to ``POINT_INDEX_TEXT_FIELDS`` (and to the DDL
+    mapping) without adding ``("Point", <field>, "FULLTEXT")`` here.
+    """
+    from tortoise.projection import _FULLTEXT_INDEX_LABEL_FIELDS
+    from tortoise.sparse import POINT_INDEX_TEXT_FIELDS
+
+    declared = set(POINT_INDEX_TEXT_FIELDS)
+    required = {prop for label, prop, kind
+                in FalkorProjection._REQUIRED_FULLTEXT_INDEXES
+                if label == "Point" and kind == "FULLTEXT"}
+    missing = declared - required
+    assert not missing, (
+        f"declared for the Point FULLTEXT index but NOT required, so an "
+        f"EXISTING graph never migrates them: {sorted(missing)}")
+    assert declared == set(dict(_FULLTEXT_INDEX_LABEL_FIELDS)["Point"]), (
+        "the DDL field list and the declared lexical set drifted")
+
+
 def test_every_declared_range_index_is_also_REQUIRED() -> None:
     """PROPERTY-level coverage of the required set — the (label, prop) pairs.
 

@@ -2685,27 +2685,52 @@ class _Omit:
 _OMIT = _Omit()
 
 
+#: The Point properties the RECORD boundary flattens, mirroring
+#: ``projection.entities._POINT_FLATTEN_LIST_PROPS`` — the graph's ONE home of the
+#: rule. The two cannot be imported into each other (this module deliberately
+#: loads with no imports beyond the standard library, and
+#: ``projection/__init__.py`` imports THIS one), so the rule is restated here and
+#: the pair is pinned by
+#: ``tests/test_record_searchkeys_10620.py::test_the_record_flattener_agrees_with_the_graph_flattener``,
+#: which now iterates the GRAPH declaration — so a key added there without being
+#: added here reds instead of silently storing a second representation.
+#: ⛔ `quote` joined both declarations with `#11682`: it is a declared FULLTEXT
+#: field a write door can receive as a list, and flattening it on the graph side
+#: ONLY re-created the #10620 drift in the other direction (graph `a b c`, record
+#: `["a b", "c"]`, and a record-sourced rebuild re-materialised the array the
+#: index cannot match). `content` is NOT here (a string by contract).
+_POINT_FLATTEN_COLUMNS: frozenset = frozenset({"search_keys", "quote"})
+
+
 def _record_column_value(table: str, column: str, value: Any) -> Any:
-    """The value the RECORD's column takes, for the one property that has a rule."""
-    if table == "point" and column == "search_keys" and isinstance(value, Mapping):
+    """The value the RECORD's column takes, for the properties that have a rule.
+
+    Two rules, both about ONE datum having ONE representation: a list form of any
+    ``_POINT_FLATTEN_COLUMNS`` key is space-joined exactly as the graph's
+    ``flatten_search_keys_prop`` joins it, and a MAPPING form of the same key is
+    refused rather than serialized into a text column.
+    """
+    if table == "point" and column in _POINT_FLATTEN_COLUMNS and isinstance(
+            value, Mapping):
         # ⚠️ A DELIBERATE DIVERGENCE from the graph, and it is stated rather than
         # hidden: `flatten_search_keys_prop` has no Mapping arm (it flattens only
-        # list/tuple), so the fold stores a dict-valued `search_keys` AS-IS while
+        # list/tuple), so the fold stores a dict-valued flattened key AS-IS while
         # this boundary REFUSES the record. The reasons are asymmetric on purpose
         # — `_jsonb_or_scalar` would `json.dumps` the dict into the now-`text`
         # column, which is the SECOND representation #10620 exists to remove, and
         # this module's standing rule is that a disagreement stays visible rather
-        # than being coerced. A dict-valued `search_keys` is unreachable from
-        # every producer today (the extractor emits a list, the fold a string);
-        # the refusal is the guard for the day that stops being true.
+        # than being coerced. A dict-valued `search_keys`/`quote` is unreachable
+        # from every producer today (the extractor emits a list, the fold a
+        # string); the refusal is the guard for the day that stops being true.
         raise RecordProjectionError(
-            "point.search_keys arrived as a MAPPING — the graph's form is the flat "
+            f"point.{column} arrived as a MAPPING — the graph's form is the flat "
             "space-joined string (projection/entities.py::"
             "flatten_search_keys_prop flattens list/tuple only and leaves a dict "
             "as-is, which this boundary will not copy into a text column as JSON). "
             "Refusing rather than serializing a second representation."
         )
-    if table == "point" and column == "search_keys" and isinstance(value, (list, tuple)):
+    if table == "point" and column in _POINT_FLATTEN_COLUMNS and isinstance(
+            value, (list, tuple)):
         flat = " ".join(str(item).strip() for item in value if str(item).strip())
         # The graph POPS a blank list (`flatten_search_keys_prop`: "an empty/blank
         # list pops the key … so a blank list never clears an existing value"),

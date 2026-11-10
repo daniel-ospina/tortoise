@@ -1,7 +1,8 @@
 """#10122 — a Point's ``name`` is STORED but not lexically indexed (advisory pin).
 
 THE DEFECT, measured on both lanes. The Point FULLTEXT index is created over
-``content`` + ``search_keys`` only (``tortoise/projection/__init__.py``::
+``content`` + ``search_keys`` (+ the verbatim ``quote``, #11682) only
+(``tortoise/projection/__init__.py``::
 ``_FULLTEXT_INDEX_LABEL_FIELDS``), yet the write path ACCEPTS and STORES
 ``name`` on a Point: ``create_point("statement", "body", name="…")`` and
 ``update_point(pid, name="…")`` both succeed and the node holds ``n.name``.
@@ -32,9 +33,20 @@ So this file pins four things, and the reasons differ:
   #8486-gated index change lands, this test reds on purpose and must be
   flipped DELIBERATELY — that is the point of keeping it.
 
-Zero ranking effect is part of the contract: the advisory writes nothing and
-moves no score, so the index's fields and collection statistics are unchanged.
-The helper does no graph read of its own — the one non-payload input is the
+Zero ranking effect is part of the ADVISORY's contract: it writes nothing and
+moves no score, so an advisory firing (or not firing) changes neither the
+index's fields nor its collection statistics.
+
+⚠️ That is a statement about the advisory, NOT a promise that the index set is
+frozen. **#11682 later widened it deliberately** — the Point FULLTEXT index now
+carries the verbatim `quote`, which IS a ranking change: it moves collection
+statistics (the field length and the corpus average), so a point whose own text
+did not change can score differently once a peer gains a quote. The ranking
+effect is NOT measured here; #8486 is where this family of changes is measured,
+and the owner's ordering on this issue is what governs it — fixes first, that
+batch afterwards. The widening is recorded in
+`docs/architecture/STORAGE-ARCHITECTURE.md §12.1b`. The helper does no graph
+read of its own — the one non-payload input is the
 stored text the `update_point` door reads and hands over.
 
 LANE NOTE. Module-level ``pytestmark = pytest.mark.embedded_only`` — the lane
@@ -324,13 +336,23 @@ def test_the_point_index_field_set_is_pinned():
     Without this, adding any other field (a `title`) would red nothing, and
     adding `name` would only red the behavioural pin — this states the set the
     ruling depends on, so a future change has to face it explicitly.
+
+    #11682 faced it and added `quote` DELIBERATELY — the point's verbatim
+    source text, the field the issue makes part of the lexical surface. The
+    ruling above is about `name` (an identifier the write path accepts but the
+    index does not hold) and is untouched: `name` is still absent here, and the
+    advisory is what keeps it honest. `quote` is not `name` — it is the
+    original wording a query is phrased in, so indexing it is the correctness
+    fix #11682 lands, and `sparse.POINT_INDEX_TEXT_FIELDS` keeps the BM25 and
+    snapshot mirrors on the same set.
     """
     from tortoise.projection import _FULLTEXT_INDEX_LABEL_FIELDS
 
-    assert dict(_FULLTEXT_INDEX_LABEL_FIELDS)["Point"] == ["content", "search_keys"], (
+    assert dict(_FULLTEXT_INDEX_LABEL_FIELDS)["Point"] == [
+        "content", "search_keys", "quote"], (
         "the Point fulltext field set changed — the #10122 ruling (option A: "
         "warn, do NOT index `name`) and the #8486 measurement gate both rest "
-        "on this exact set")
+        "on this exact set; #11682 added `quote` on purpose")
 
 
 def test_a_name_only_update_silenced_by_stored_content(sdk, caplog):
@@ -341,7 +363,9 @@ def test_a_name_only_update_silenced_by_stored_content(sdk, caplog):
     update — while the sentence claimed something about the index it had not
     looked at (measured: stored content "the body mentions capstone heavily",
     `update_point(pid, name="capstone-9664")` warned, and the sentence was
-    false). The door now reads the stored content + search_keys.
+    false). The door now reads the stored content + search_keys (+ the
+    verbatim `quote`, an indexed field since #11682) — the text the index will
+    hold after the write.
 
     FAIL VALUE: drop `stored_text=` from the update door and this reds.
     """
@@ -354,6 +378,31 @@ def test_a_name_only_update_silenced_by_stored_content(sdk, caplog):
         "the STORED content already carries the name's tokens, so the record is "
         f"reachable by its name — no advisory belongs here: "
         f"{[r.message for r in caplog.records]}")
+
+
+def test_a_name_only_update_silenced_by_the_stored_QUOTE(sdk, caplog):
+    """The update door must read the stored ``quote`` too — the #11682 arm.
+
+    ``quote`` joined the Point lexical field set in #11682, so the update door's
+    verdict reads it alongside content/search_keys (``stored={"quote":
+    _name_row[3]}``). Without that arm a name whose tokens live ONLY in the
+    point's verbatim quote is called unfindable — a false advisory on a record
+    the index can answer — and nothing reds, because the stored quote is not in
+    the payload and the content arm sees nothing (#11706 review, round 3).
+
+    FAIL VALUE: delete the ``"quote": _name_row[3]`` arm from the update door
+    and this reds while the content-only test above stays green.
+    """
+    created = sdk.create_point(
+        "statement", "an unrelated body about curtains",
+        quote="capstone-9664 shipped on Tuesday")
+    pid = created["id"]
+    with caplog.at_level(logging.WARNING):
+        sdk.update_point(pid, name="capstone-9664")
+    assert not _advisories(caplog), (
+        "the stored QUOTE carries the name's tokens and quote is indexed since "
+        "#11682, so the record IS reachable by its name — no advisory belongs "
+        f"here: {[r.message for r in caplog.records]}")
 
 
 def test_a_name_only_update_on_a_point_without_its_tokens_still_warns(sdk, caplog):
