@@ -3390,7 +3390,7 @@ class PackRegistry:
           (``sdk._operator_scope_clauses``), i.e. "is this kind a `parent`?".
           Needs UP: the child's bucket must carry its ancestors.
         * ``read_filter_kinds`` — **read filter**: ``n.pointKind IN [...]``
-          (``query``/``paginated_query``/``hybrid_search``,
+          (``query``/``paginated_query``/``tortoise_fts_query``,
           ``domain_validators._expand``), i.e. "which rows are this kind or
           narrower?". Needs DOWN only.
 

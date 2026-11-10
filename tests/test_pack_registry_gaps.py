@@ -2352,10 +2352,19 @@ class TestReadFilterKinds:
         filter set must be the pre-#11667 set again.
 
         The exact-list form below is a snapshot, NOT an order contract: it
-        passes because the builder appends `sorted(gained.difference(bucket))`
-        and `"pm:issue"` happens to sort after `"dev:issue"`. The method's real
-        contract is over SET membership (see its docstring); use `set(...)`
-        when adding an assertion that should not depend on that accident.
+        passes because `pm:issue` reaches the bucket from the `equivalentTo`
+        append block, which writes `[self] + peers` in MANIFEST order. That is an
+        artefact too. The method's real contract is over SET membership (see its
+        docstring); use `set(...)` when adding an assertion that should not
+        depend on that accident.
+
+        ⚠️ Not the closure's `sorted(...)`: measured, `_closure("dev:issue",
+        down_only=True)` is already `{dev:issue, pm:issue}` and the snapshot
+        already holds both, so `gained.difference(bucket)` is EMPTY for this
+        bucket and the read-filter builder appends nothing to it. `sorted()`
+        could not have produced this order anyway — it only orders the members
+        being APPENDED among themselves, so they always land after whatever was
+        already in the bucket.
         """
         assert shipped.read_filter_kinds("dev:issue") == ["dev:issue", "pm:issue"]
         assert shipped.expand_kind("dev:issue") != shipped.read_filter_kinds("dev:issue")
@@ -2442,10 +2451,10 @@ class TestReadFilterKinds:
 
         `Registry.expand_kind` is the MEMBERSHIP surface and `sdk._expand_kind`
         is its one wrapper; only `_operator_scope_clauses` (`"operator" in …`)
-        may use them. The `hybrid_search` kind filter (`n.{kind_field} IN [...]`)
-        cannot be pinned behaviourally without a query vector and an embedder,
-        so its wiring is pinned as a rule instead — over EVERY module under
-        `tortoise/`, not just `sdk.py`, because a read-filter site can land
+        may use them. The `tortoise_fts_query` kind filter (`n.{kind_field} IN
+        [...]`) cannot be pinned behaviourally without a query vector and an
+        embedder, so its wiring is pinned as a rule instead — over EVERY module
+        under `tortoise/`, not just `sdk.py`, because a read-filter site can land
         anywhere (the validator's already does). A deliberate membership caller
         has to say so by updating these allow-lists.
 
