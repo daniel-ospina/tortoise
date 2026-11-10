@@ -529,7 +529,7 @@ may reverse an earlier one (§16.3/O4) — but the reversal must be recorded whe
 `statement` and does not"* — the baseline refutes it (80 % already are).
 
 **ASK — §13.8 Q1, the to-graph connection mechanism.** Recorded **OPEN**
-(`EXTRACTOR-V4-ARCHITECTURE.md:2085`, `:2061`) while **D6 stands** (`:1400`, `:977`). **C5 measures conformance to D6** — the two connection sets are `#10999`/`#10998`; C5 builds neither
+(`EXTRACTOR-V4-ARCHITECTURE.md:2085`, `:2061`) while **D6 stands** (`:1400`, `:1095` — *"D6 as ruled"*). **C5 measures conformance to D6** — the two connection sets are `#10999`/`#10998`; C5 builds neither
 and reports both jobs; the answer is routed as evidence, never adopted quietly. (Distinct from `#7948`,
 which answered Q2 — `aboutObject` is a **STORED** edge — and is CLOSED.)
 
