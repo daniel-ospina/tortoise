@@ -256,10 +256,13 @@ symbol pair this guard does check: the writers' retired-key allowlist
 `4f68a2aa7`) and the graph migration `relabel_legacy_documents`
 (`migrate_kinds.py:167`).
 
-**How to read a line pointer in this section:** everything from §5's heading down
-to `### The one interface that must not be broken` — the interface-map table AND
-the prose under it — is as-of the frontmatter's `measured_at_commit`, so those
-line numbers drift at head by design. The prose BELOW that heading (this
+**How to read a line pointer in this section:** the LINE NUMBERS from §5's
+heading down to `### The one interface that must not be broken` — the
+interface-map table AND the prose under it — are as-of the frontmatter's
+`measured_at_commit`, so they drift at head by design. That is a statement about
+the NUMBERS only: the table's `*leaf*` cells and its interface symbols are still
+re-measured at HEAD by `tools/substrate_map_check.py --check`, so a maintainer
+must not read "as-of" as "leave this alone". The prose BELOW that heading (this
 subsection) is maintained at HEAD, and two pins hold it there:
 `test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names` for
 `` `SYMBOL` (`file:line`) `` pointers, and

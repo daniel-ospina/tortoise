@@ -1694,6 +1694,11 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
         "defect this pins"
     )
     populations = _POPULATION_CLAIM.findall(section)
+    assert populations, (
+        "§5 no longer states the population its `:Document` figure is measured over — "
+        "re-state it as `files under ``tortoise/``` so this pin can read it, rather "
+        "than leaving the figure unattributed"
+    )
     assert populations == [_TRACKED_DIR + "/"], (
         f"§5 states its `:Document` figure over {populations!r}, but this pin measures "
         f"`{_TRACKED_DIR}/` — the count and the file count are only true for the "
