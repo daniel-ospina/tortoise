@@ -12555,7 +12555,22 @@ class HolderGateTests(unittest.TestCase):
             liveness_source=self.cp.fleet_state.LIVE_STORE_PROCESS,
             liveness_unreadable=[self.cp.fleet_state.LIVE_STORE_CMUX_GROUP],
         ))
-        state = self.cp._read_board(SLUG, str(self.tmp))[0]
+        # ⛔ NO LIVE REBUILD IN THIS TEST (#11681 review, P1). `_read_board` does
+        # not merely return a refused board — it REBUILDS, and the contrast arm
+        # below used to fall through to a real `fleet_state.build_state`: a live
+        # `gh` GraphQL query against a nonexistent repo plus the operator's own
+        # registry/cmux/`ps` reads, in a file whose contract is "Hermetic tests …
+        # No network" (measured: 4.2 s for this one test against 0.005 s on the
+        # served path, and every sibling refusal test in this class patches this
+        # seam). Patching `build_state` to RAISE means a rebuild attempt is a LOUD
+        # failure rather than a silent live read.
+        def _no_rebuild(**kwargs):
+            raise AssertionError(
+                "this test must never rebuild the board — a rebuild is a live "
+                "gh/cmux/ps read (see the review P1 in the docstring)")
+
+        with mock.patch.object(self.cp.fleet_state, "build_state", _no_rebuild):
+            state = self.cp._read_board(SLUG, str(self.tmp))[0]
         # ⛔ THIS ASSERTION FIRES FIRST UNDER ARM (a), so IT carries the decision:
         # a reverter sees the ruling at the exact line that refused them, not four
         # assertions later.
@@ -12593,12 +12608,30 @@ class HolderGateTests(unittest.TestCase):
         # 4. THE CONTRAST THAT KEEPS THIS FROM BEING A LICENCE: a store whose
         #    failure means the read is UNMEASURED still refuses. The decision is
         #    about an ABSENT store, never about an unreadable board.
-        _write_board(self.board, _fleet_board_state(
+        #    ⛔ TWO ARMS ON PURPOSE (#11681 review, P2). `assertIsNone` alone does
+        #    not distinguish "the gate REFUSED this board" from "the rebuild
+        #    failed for an unrelated reason" — it passed for months-worth of the
+        #    wrong mechanism, and any change that made a rebuild answer would have
+        #    turned it into a RED naming the wrong cause. So the CAUSE is pinned
+        #    deterministically on the board itself, and THEN the rebuild is stubbed
+        #    to hand back that same board (the class's own convention, see
+        #    `test_a_rebuild_that_still_cannot_answer_is_unmeasured`): no network,
+        #    and the refusal asserted is the gate's.
+        unmeasured = _fleet_board_state(
             liveness_unmeasured=True,
             liveness_source=self.cp.fleet_state.LIVE_STORE_CMUX_GROUP,
-        ))
-        refused = self.cp._read_board(SLUG, str(self.tmp))[0]
-        self.assertIsNone(refused, "an unmeasured live read must still refuse")
+        )
+        self.assertIn("live-session store", self.cp._board_can_answer(unmeasured),
+                      "an unmeasured live read must still refuse, by its own cause")
+        _write_board(self.board, unmeasured)
+        with mock.patch.object(self.cp.fleet_state, "build_state",
+                               return_value=unmeasured):
+            refused_state, _source, refused_why = self.cp._read_board(
+                SLUG, str(self.tmp))
+        self.assertIsNone(refused_state, "an unmeasured live read must still refuse")
+        self.assertIn("live-session store", str(refused_why), (
+            "the refusal must be about the unmeasurable live read, not about some "
+            "other failed read: " + str(refused_why)))
 
     def test_an_unmeasured_workspace_read_never_prints_a_live_count(self):
         """⛔ EVERY failure path of `cmux_workspaces` returns an EMPTY map, so the

@@ -738,9 +738,33 @@ exec {real} "$@"
         rc, out = self.run_tool(9999)
         self.assertEqual(rc, 0, out)
         self.assertIn("ANSWER: nobody", out)
-        self.assertIn("CLAIM GATE — the gate's own note", out)
+        self.assertIn("CLAIM GATE [issue assignee/holder]", out)
         self.assertIn("liveness: process-table", out)
         self.assertIn("unreadable store(s): cmux-session-store", out)
+
+    def test_the_holder_read_note_does_not_claim_the_whole_answer(self):
+        """⛔ THE NOTE IS THE BOARD'S HOLDER ARM, NOT "this answer" (#11681 review, P2).
+
+        Measured on #11678: a pushed branch made the answer `1 holder(s) across 1
+        surface(s)` — the holder being a REMOTE BRANCH — while the claim gate's own
+        note read `NO lane is mechanically attributed`. With the heading worded "the
+        note for the holder read behind this answer", a reader taking the tail lines
+        saw "nobody" three lines under a holder count: the tail-line misread #11202
+        is about, reintroduced by the disclosure that exists to prevent it. The
+        heading names the surface and says the hits above are separate.
+        """
+        self._write_fleet_board(liveness_source="process-table",
+                                liveness_unreadable=["cmux-session-store"])
+        self.remote_branch(f"fix/{ISSUE}-pushed")
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ANSWER: 2 holder(s)", out)
+        self.assertNotIn("ANSWER: nobody", out, (
+            "this fixture answers WITH holders, which is the case the heading "
+            "used to misdescribe"))
+        self.assertIn("CLAIM GATE [issue assignee/holder]", out)
+        self.assertIn("separate from any surface hit", out)
+        self.assertNotIn("behind this answer", out)
 
     def test_a_board_with_no_liveness_keys_prints_no_store_claim(self):
         """ABSENT IS NOT EMPTY, on this verb too (#11678).

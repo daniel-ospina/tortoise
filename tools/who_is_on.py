@@ -852,6 +852,13 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
     # could not. The string is the GATE's own (`_holder_gate_note`, carried on the
     # surface's `note` by `scan_issue_surface`) — never a second composition — so
     # the two verbs cannot describe the same read differently.
+    # ⛔ THE HEADING NAMES THE SURFACE AND DOES NOT CLAIM THE ANSWER (#11681
+    # review, P2). "the note for the holder read behind this answer" over-reached:
+    # the answer's holders can come from OTHER surfaces (measured on #11678 —
+    # `ANSWER: 1 holder(s)`, the holder being an open PR, with this block's note
+    # reading `NO lane is mechanically attributed`), and a reader taking the tail
+    # lines then sees "nobody" under a holder count — the exact tail-line misread
+    # #11202 is about. The note is the BOARD's holder arm; the heading says so.
     # An INCOMPLETE holder read is NOT repeated here: it already prints, with this
     # same note, under INCOMPLETE SURFACES above.
     holder_surface = next((s for s in surfaces if s.name == cp.SURFACE_ISSUE), None)
@@ -859,10 +866,11 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
             and holder_surface.status != cp.STATUS_INCOMPLETE
             and (holder_surface.note or "").strip()):
         lines.append("")
-        lines.append("CLAIM GATE — the gate's own note for the holder read behind "
-                     "this answer")
-        lines.append("             (a CLEAN that rested on ONE liveness store says "
-                     "so here):")
+        lines.append("CLAIM GATE [" + cp.SURFACE_ISSUE + "] — the gate's own note "
+                     "for the BOARD's holder read")
+        lines.append("             (separate from any surface hit listed above; a "
+                     "CLEAN that rested on ONE")
+        lines.append("             liveness store says so here):")
         lines.append("  " + _clean(holder_surface.note.strip()))
     if unknown_detail:
         lines.append("")
