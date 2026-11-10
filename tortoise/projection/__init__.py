@@ -9725,12 +9725,17 @@ def _apply_one(points: dict[str, dict], ev: dict,
                 # `journal_recreate` boundary so a re-created node does not
                 # inherit a dead incarnation's record (the wipe mirrors this).
                 for _jk in _POINT_JSON_RECORD_PROPS:
-                    _jwrote, _jvalue = stated_json_record_prop(p, _jk)
-                    if not _jwrote:
-                        if _jk in _prev:
-                            _carried[_jk] = _prev[_jk]
-                    elif _jvalue != p.get(_jk):
-                        p = {**p, _jk: _jvalue}
+                    _jstate, _jvalue = stated_json_record_prop(p, _jk)
+                    if _jstate == "set":
+                        if _jvalue != p.get(_jk):
+                            p = {**p, _jk: _jvalue}
+                    elif _jstate == "null":
+                        # The writer dispatches a null (#7369), which REMOVES the
+                        # property — folding the raw value instead would keep a
+                        # value the node does not hold.
+                        _dropped.add(_jk)
+                    elif _jk in _prev:
+                        _carried[_jk] = _prev[_jk]
                 if _carried or _dropped:
                     p = {**{_k: _v for _k, _v in p.items() if _k not in _dropped},
                          **_carried}
@@ -9802,13 +9807,22 @@ def _apply_one(points: dict[str, dict], ev: dict,
             # fold, which is `check_consistency`'s reference view — drops a
             # record the live write stored, the #5048/#2897 class the clauses
             # above exist for. The value is normalised through the SAME encoder
-            # the writer used, so a list-shaped record and the writer's compact
-            # scalar reach this fold as one value (and an empty list pops the
-            # key, exactly as the live writer does).
+            # the writer used (`stated_json_record_prop`), so a list-shaped
+            # record and the writer's compact scalar reach this fold as one
+            # value, and a record the writer cannot store EXACTLY (a value the
+            # #7369 transport gate nulls — a NUL/lone-surrogate string, which
+            # `_revise_point` clears via `n.mentions = NULL`) folds as ABSENT,
+            # never as the raw value the node does not hold. Measured before this
+            # gate: `update_point(mentions="a\x00b")` left the node with no
+            # property and `check_consistency` redded a FAITHFUL graph on
+            # `fields: ['mentions']` with the unclearable "replay the journal"
+            # advice.
             if "mentions" in ev:
-                _mention_view = {"mentions": ev["mentions"]}
-                encode_json_record_props(_mention_view)
-                p.update(_mention_view)
+                _mstate, _mvalue = stated_json_record_prop(ev, "mentions")
+                if _mstate == "set":
+                    p["mentions"] = _mvalue
+                else:
+                    p.pop("mentions", None)
             # #2350 (E-prec): fold the per-end validity-precision EDIT — the
             # same class as `tags` above, and it must ride the SAME pure-fold
             # arm the graph fold uses, or the two replay engines disagree.

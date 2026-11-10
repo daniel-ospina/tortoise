@@ -442,6 +442,42 @@ def test_a_second_creation_saying_nothing_keeps_the_record_in_both_folds(env):
         + str(report.get("divergent_points")))
 
 
+def test_an_unwritable_record_folds_as_absent_not_as_stored(env):
+    """The store-exactness gate on the REVISION fold (same review P1 arm).
+
+    `update_point(mentions="a\\x00b")` stores NO property live: the raw string
+    passes the payload shape filter, reaches `SET n += $props`, and the #7369
+    transport gate nulls it at dispatch — which REMOVES the property, the same
+    clear `_revise_point` spells as `n.mentions = NULL`. A pure fold that kept
+    the raw string instead redded a FAITHFUL graph on `fields: ['mentions']`
+    (measured at the pre-fix head) with the advice "replay the journal" that
+    reproduces that graph.
+
+    Mutant it reds on: folding `ev["mentions"]` without the store-exactness
+    gate.
+    """
+    sdk, events = env
+    pid = sdk.create_point("statement", CONTENT, dedup=True,
+                           status="draft", mentions=MENTIONS)["id"]
+    assert _node_prop(sdk, pid) is not None
+
+    sdk.update_point(pid, mentions="a\x00b")
+    assert _node_prop(sdk, pid) is None, (
+        "guard: the store must have REFUSED the unusable string — otherwise "
+        "this row measures nothing")
+
+    from tortoise.consistency import check_consistency
+
+    report = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+    assert report["ok"] is True, (
+        "the fold kept a value the store refused, so the checker reds a "
+        "faithful graph: " + str(report.get("divergent_points")))
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert _node_prop(sdk, pid) is None, (
+        "the rebuild resurrected a record the live write could not store")
+
+
 #: Any non-empty conversation — the extractor is replaced by a payload below.
 _CAPTURE_CONV = [
     {"role": "user", "content": "the timeout command fails because it exceeds"},
