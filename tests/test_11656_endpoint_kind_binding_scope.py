@@ -125,15 +125,45 @@ def _kind_bearing(rows: list[dict]) -> list[dict]:
     return [r for r in rows if r.get("fromKind") and r.get("toKind")]
 
 
-def _axis_partition() -> Counter:
-    """The declared relations bucketed by `(fromKind axis, toKind axis)`, derived from the packs + registry.
+#: The bare LAYER spelling → the axis §1.1's partition buckets it on.
+#:
+#: ⛔ This is an explicit table, NOT `CORE_ENTITY_TYPES`. That constant is the *declaration* vocabulary
+#: (`VALID_ENTITY_TYPES`: the 7 entity types a pack may name in `from`/`to`), not a set of axes, and mapping
+#: every one of its names to `subject` bucketed `Object`, `Point`, `Event`, `Document`, `Action` and `Source`
+#: on the WRONG axis — which also made the `assert a and b` guard in `_partition` unreachable for exactly
+#: those six (round-26 P3: an assertion whose value cannot vary under any mutation is dead weight that
+#: misleads the next reader, the same F3 class this file removes elsewhere). Measured at `ea3fd5c996da`:
+#: no shipped pack spells any of the six bare, so the asserted partition was right while the map was wrong.
+#: `documentKinds` fold to `object` — the same axis the pack leg of `_kind_axis_map` gives them.
+#:
+#: ⛔ `Action` and `Source` are deliberately ABSENT: §1.1 partitions Object/Event/Point/Subject only, so a
+#: declaration naming one has no axis. Leaving them out keeps the guard REACHABLE (fail closed with the
+#: "re-derive §1.1's partition" message) instead of silently bucketing them as `subject`.
+_LAYER_AXES: dict[str, str] = {
+    "Subject": "subject",
+    "Object": "object",
+    "Document": "object",
+    "Event": "event",
+    "Point": "point",
+}
 
-    Extracted from `test_the_direct_shape_partition_…` so BOTH that row and the ledger row derive the same
-    numbers. Round-22 P2: the ledger row used to phrase-match `1 Object→Event` / `1 Event→Object` that nothing
-    asserted, so reversing `dev:deploysTo` left every row green while both documents still published 1/1.
+
+def _kind_axis_map(registry: PackRegistry) -> dict[str, str]:
+    """Every kind spelling the packs or the core registry can name → the axis §1.1 partitions it on.
+
+    Split out of `_axis_partition` so the map itself is testable on a synthetic registry: the pre-fix
+    version's six wrong entries were unreachable from the shipped packs (none spells a bare core layer),
+    so no assertion over the real partition could red on them — the wrongness was only observable here.
+
+    ⚠️ `axis.setdefault` below resolves a `core:`-prefixed name that two canonical sets share by ITERATION
+    ORDER, not by a declared rule. Measured overlaps: `decision` is in both `CANONICAL_EVENT_KINDS` and
+    `CANONICAL_POINT_KINDS` (event wins), and `goal`/`plan`/`strategy`/`target` are in both
+    `CANONICAL_OBJECT_KINDS` and `CANONICAL_POINT_KINDS` (object wins). No shipped declaration names any of
+    them, so the partition is unaffected today — but a pack that starts writing `core:decision` would be
+    bucketed `event` silently. Recorded rather than fixed (the round-26 P3 finding scoped it as a note); a
+    future round that needs a verdict should make an overlapping name an ERROR here, never pick a winner.
     """
-    registry = PackRegistry(PACKS_DIR)
-    registry.load_all()
+    from tortoise import pack_registry as pr
 
     axis: dict[str, str] = {}
     for pack in registry.packs.values():
@@ -141,18 +171,28 @@ def _axis_partition() -> Counter:
                            ("event_kinds", "event"), ("point_kinds", "point")):
             for k in getattr(pack, attr, None) or []:
                 axis[f"{pack.namespace}:{k}"] = name
-    from tortoise import pack_registry as pr
 
-    for kind in pr.CORE_ENTITY_TYPES:
+    axis.update(_LAYER_AXES)
+    # §6's Subject SUBKINDS are `subject` too, so a pack spelling one bare (`organization`, not
+    # `core:organization`) resolves instead of tripping the guard. ONE source: `CORE_SUBCLASSES`.
+    for kind in pr.CORE_SUBCLASSES["Subject"]:
         axis[kind] = "subject"
     for const, name in ((pr.CANONICAL_OBJECT_KINDS, "object"),
                         (pr.CANONICAL_EVENT_KINDS, "event"),
                         (pr.CANONICAL_POINT_KINDS, "point")):
         for k in const:
             axis.setdefault(k if ":" in k else f"core:{k}", name)
+    return axis
 
+
+def _partition(declarations: list[dict], axis: dict[str, str]) -> Counter:
+    """Bucket `declarations` by `(fromKind axis, toKind axis)`, FAILING CLOSED on an unmapped kind.
+
+    Split out of `_axis_partition` so the guard is testable: its reachability is the property the round-26
+    P3 finding is about, and a declaration naming a bare core layer is the input that proves it.
+    """
     partition: Counter = Counter()
-    for rel in _kind_bearing(_declared_relations()):
+    for rel in _kind_bearing(declarations):
         a, b = axis.get(rel["fromKind"]), axis.get(rel["toKind"])
         assert a and b, (
             f"{rel['_ns']}:{rel['predicate']} names a kind whose axis is unknown "
@@ -160,6 +200,21 @@ def _axis_partition() -> Counter:
         )
         partition[(a, b)] += 1
     return partition
+
+
+def _axis_partition() -> Counter:
+    """The declared relations bucketed by `(fromKind axis, toKind axis)`, derived from the packs + registry.
+
+    Extracted from `test_the_direct_shape_partition_…` so BOTH that row and the ledger row derive the same
+    numbers. Round-22 P2: the ledger row used to phrase-match `1 Object→Event` / `1 Event→Object` that nothing
+    asserted, so reversing `dev:deploysTo` left every row green while both documents still published 1/1.
+
+    Core LAYER spellings are resolved by the explicit `_LAYER_AXES` table; see `_kind_axis_map` for why that
+    is a table and not `CORE_ENTITY_TYPES` (round-26 P3).
+    """
+    registry = PackRegistry(PACKS_DIR)
+    registry.load_all()
+    return _partition(_declared_relations(), _kind_axis_map(registry))
 
 
 def _unittest_case_classes(module_body: list[ast.stmt]) -> set[str]:
@@ -621,6 +676,67 @@ class TestTheInventoryTheScopeCites:
         }, f"the direct-shape partition moved: {dict(partition)}"
         direct_shape = sum(n for (a, b), n in partition.items() if "point" not in (a, b))
         assert direct_shape == 33, partition
+
+    def test_the_layer_axis_table_buckets_each_layer_and_leaves_the_guard_reachable(self):
+        """Round-26 P3: six of `CORE_ENTITY_TYPES`' seven layers were mapped to `subject`.
+
+        `_axis_partition` used to do `for kind in pr.CORE_ENTITY_TYPES: axis[kind] = "subject"`. That
+        constant is `VALID_ENTITY_TYPES` — the *declaration* vocabulary — so the loop did not say "a layer
+        is a Subject", it said **every** core layer is one, and `Object`, `Point`, `Event`, `Document`,
+        `Action` and `Source` all landed on the wrong axis. Two consequences, both attributable to the pin:
+
+          1. a pack spelling a layer bare (`fromKind: Object` is a documented manifest convention — `Subject`
+             is already spelled bare) is bucketed `subject`, so `test_the_direct_shape_partition_…` reds
+             with "the partition moved" and points the next lane at the docs or the figures instead of at
+             the one line that needs changing — the same misleading-repair shape §1.1's errata records;
+          2. the `assert a and b, "… names a kind whose axis is unknown"` guard is UNREACHABLE for those six
+             names, because the map always answers for them, wrongly. That is the F3 class this file
+             removes elsewhere: an assertion whose value cannot vary under any mutation.
+
+        ⛔ Neither was reachable from the shipped packs (measured: the only bare core layer any manifest
+        names is `Subject`, 3 rows), so no assertion over the real partition could ever red on them. This
+        row is therefore the only place the wrongness is observable, which is why it drives the map
+        directly with a synthetic registry. Non-vacuity: reverting `_LAYER_AXES` to `CORE_ENTITY_TYPES`
+        reds the axis dict, the absent-pair leg and the guard-reachability leg at once.
+        """
+
+        class _NoPacks:
+            def __init__(self) -> None:
+                self.packs: dict = {}  # no pack-declared kinds — the core table is the whole subject
+
+        axis = _kind_axis_map(_NoPacks())  # type: ignore[arg-type]
+
+        # 1. Every layer with an axis on §1.1's partition resolves to THAT axis. `Document` folds to
+        #    `object` for the same reason the pack leg maps `document_kinds` there.
+        assert {k: axis.get(k) for k in ("Subject", "Object", "Document", "Event", "Point")} == {
+            "Subject": "subject",
+            "Object": "object",
+            "Document": "object",
+            "Event": "event",
+            "Point": "point",
+        }, "a core LAYER resolved to an axis other than its own — check `_LAYER_AXES`"
+
+        # 2. The two layers with NO axis on this partition stay UNMAPPED, so the guard can fire for them.
+        #    ⛔ `assert ... not in axis`, not `axis.get(k) is None`: the wrong direction is an entry, and
+        #    the pre-fix code wrote one for every member of `CORE_ENTITY_TYPES`.
+        for kind in ("Action", "Source"):
+            assert kind not in axis, (
+                f"`{kind}` has no axis on §1.1's partition, so mapping it buckets a declaration silently "
+                f"and disables the unknown-axis guard — it must stay absent (got {axis[kind]!r})"
+            )
+
+        # 3. §6's Subject SUBKINDS resolve bare, from the SAME authority `expand_kind` reads.
+        for kind in CORE_SUBCLASSES["Subject"]:
+            assert axis.get(kind) == "subject", f"the §6 Subject subkind `{kind}` must be `subject`"
+
+        # 4. The guard is REACHABLE end-to-end: a declaration naming one of the absent layers fails closed
+        #    with the message that sends the reader to §1.1. Before the fix this input bucketed cleanly as
+        #    `("subject", "object")` — a silent wrong answer, which is the defect.
+        with pytest.raises(AssertionError, match="axis is unknown"):
+            _partition(
+                [{"fromKind": "Action", "toKind": "Object", "predicate": "probe", "_ns": "probe"}],
+                axis,
+            )
 
     def test_the_repeated_predicates_are_addresses_contains_targets(self):
         """D3's evidence, on the correct rows (the corrected §1.3 / brief §4.4)."""

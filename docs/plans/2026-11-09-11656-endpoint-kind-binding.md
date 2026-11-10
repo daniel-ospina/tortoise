@@ -351,9 +351,9 @@ undeclared.
 | 18 | **writer census** — a mechanical re-derivation of every parameterised-rel-type Cypher write site under `tortoise/` (regex over `MERGE`/`CREATE (…)-[:{rel}]->`, filtered to a non-literal rel type), asserting each routes through `kind_pair_verdict` or is named in a declared exemption list | **a new writer silently bypassing the gate** — the completeness claim that failed four review rounds on #11656 (§1.2). A hand-counted list cannot prevent this; a census can |
 
 ⚠️ **This table is the pin set #11656's GATE lands with — it is not the count of the file that ships in THIS PR.**
-This PR lands `tests/test_11656_endpoint_kind_binding_scope.py`, which holds **30 test functions / 32 collected**
+This PR lands `tests/test_11656_endpoint_kind_binding_scope.py`, which holds **31 test functions / 33 collected**
 (two are parametrised over the two docs — `test_every_cited_markdown_path_resolves` and
-`test_neither_doc_cites_a_line_keyed_reference`, one case per doc; that is the whole 30→32 delta). The two
+`test_neither_doc_cites_a_line_keyed_reference`, one case per doc; that is the whole 31→33 delta). The two
 populations are deliberately different: the file pins the
 **scoping facts this document rests on** — the inventory (§1), the three doors (§1.1), the two replay folds
 (§1.2 item 6), the four readers (§5.5), and the two docs' registration/resolution — while the 19 rows above
