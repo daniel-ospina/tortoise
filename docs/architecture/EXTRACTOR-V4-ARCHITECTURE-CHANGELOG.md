@@ -1927,16 +1927,22 @@ fail-open. With a correctly-rooted surface also in `targets`, `scanned_targets` 
 per-document branch still runs for the OTHER surface and a declared-but-UNMARKED document in the deeper surface is
 reported NOWHERE (`membership_errors -> []` on a tree where the deeper document carries no marker at all). Both
 real surfaces sit at depth 2, which is why it was latent. The root is now DERIVED from the surface rather than
-counted off it — and, because the attribution half must resolve the same path `gate_errors` validated, an entry is
-accepted for a surface inside the repo root only when its leading components ARE that surface's repo-relative path,
-so an entry naming no surface (`architecture/a.md`) is no longer pulled into `docs/architecture/` and its real
-declaration site can no longer go marker-unchecked while the row reads clean (review cycle 8, P1). That arm resolves
-`<ROOT> / entry` itself rather than re-deriving it from the surface's lexical parts, so a surface that IS the root is
-attributed too, instead of dropping every entry through a `parts[-0:]` comparison that can only disagree with the
-resolved relationship the match came from (review cycle 9, P3). A surface outside the root — every fixture tree —
-falls back to matching its trailing components against the entry's leading ones, so the document is
-`surface / <the rest>` and no root is counted. The pins build both arms: the deep surface's depth, and a
-repo-relative entry that names no surface at all.
+counted off it — and, because the attribution half must resolve the same path `gate_errors` validated, a surface
+inside the repo root attributes `<ROOT> / entry` and **containment is the only test**: no path COMPONENT is compared
+anywhere. That distinction took two review cycles to get right and is worth stating, because every component form of
+the rule is the same lexical-vs-resolved trap. Matching only the surface's TRAILING components against the entry
+(cycle 7's form) pulled an entry naming no surface (`architecture/a.md`) INTO `docs/architecture/`, leaving its real
+declaration site marker-unchecked while the row read clean (cycle 8, P1). The leading-components repair for that
+then dropped every entry for a surface that IS the root (`parts[-0:]` is the whole path) or is spelled through a
+link (cycle 9, P3), and still dropped every entry for a surface spelled `docs/architecture` while resolving to
+`docs/archreal` — legitimate, since a linked walk root is not the symlink the scan refuses — so the gate read GREEN
+over an unmarked document in a linked surface while the other surface kept `scanned_targets` non-empty (cycle 10,
+P1; the base attributed it, so that one was a regression). Containment compares resolution to resolution and has
+none of these. A surface outside the root — every fixture tree — has no repo-relative path, so it falls back to
+matching its trailing components against the entry's leading ones: the document is then `surface / <the rest>` and
+no root is counted, and such a surface cannot read clean anyway because `gate_errors` reds every entry of it. The
+pins build each arm: the deep surface's depth, a repo-relative entry that names no surface, a surface that IS the
+root, and a LINKED surface whose document carries no marker.
 
 **Two documentation-truth defects found in review cycle 2, and two factual defects in cycle 3.** Cycle 2: the
 registry header said *"these thirteen are every mechanism either document names"* — inside a sentence whose *"it is
