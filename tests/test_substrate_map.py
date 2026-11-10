@@ -711,7 +711,7 @@ def test_the_d10_retirement_mechanism_is_checked(monkeypatch) -> None:
     Reachable: `migrate_kinds.py` does not declare `build_master_list`, so
     retargeting the pair is a real file that genuinely lacks the symbol — exactly
     what deleting the migration would leave behind. The `:Document` label itself
-    is deliberately NOT regex-checked (55 prose lines across 17 files at this
+    is deliberately NOT regex-checked (63 prose lines across 19 files at this
     head — pinned by `test_the_document_label_prose_count_is_the_LINE_count`), so
     the retirement is guarded through these two symbols instead.
     """
@@ -1166,16 +1166,18 @@ def test_the_label_population_is_every_tracked_file_not_just_py(monkeypatch) -> 
     differ by **28** tracked non-`.py` files (`tortoise/onboarding/SKILL.md`,
     `tortoise/config/*.json|*.yaml`, `tortoise/pi-hooks/*.ts`, …), so a
     `:Document` occurrence added to one of them raises the true figure while a
-    `.py`-only walk still returns 55 — the assertion then compares 55 against a
-    document that says 55 and PASSES, leaving the stale number in place. That is
-    the false-CLEAN class this file exists to close.
+    `.py`-only walk keeps reporting the OLD one — the assertion then compares that
+    against a document stating the same figure and PASSES, leaving the stale
+    number in place. That is the false-CLEAN class this file exists to close. (No
+    numerals in this paragraph on purpose: the figure moves, and a numeral here is
+    a statement of it that nothing reads — the failure mode §5's new pins close.)
 
     The control asserts on the POPULATION `_label_hits` ITSELF reads — recorded
     by spying on `Path.read_text` — not on the helper it happens to call. That
     distinction is load-bearing: the first cut of this fix asserted only that
     `_tracked_files_under()` returns a non-`.py` file, which stayed green with
     `_label_hits`'s own loop reverted to `rglob("*.py")` — the two populations
-    are numerically identical today (all 55 hits are in `.py` files), so the
+    are numerically identical today (all 63 hits are in `.py` files), so the
     count matches either way and the latent false CLEAN survives behind a green
     suite. A control on the helper is not a control on the count (#5086 review
     P2, cycle 5).
