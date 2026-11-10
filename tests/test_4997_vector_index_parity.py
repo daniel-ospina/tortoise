@@ -1469,21 +1469,33 @@ def _vector_catalog(proj) -> dict:
 
 
 @live
-def test_live_store_reports_point_indexed_and_the_rest_not():
+def test_live_store_reports_point_indexed_and_the_rest_not(monkeypatch):
     from tortoise.embeddings import EMBEDDING_DIM
 
+    # ⛔ ARMED, explicitly (#11660 review round 7, P2-2). The retirement is gated on
+    # `projection.vector_index_retired()`: an UNARMED store is `main`'s posture in
+    # full — it keeps an index it has and gains one it lacks — so a lane with no
+    # record DSN is NOT a retirement lane, and this live test was asserting the
+    # armed posture out of the ambient environment (it redded the moment the gate
+    # became symmetric). Arming it here is the file's own idiom for these pins
+    # (`_arm_the_record_leg`), not a bypass: the resolver still answers, and it
+    # answers from the two conditions it documents. The UNARMED live posture is
+    # pinned DB-free by
+    # `test_the_retirement_is_NOT_authorised_while_the_record_leg_is_off` and
+    # `test_a_FRESH_store_with_no_replacement_still_GETS_its_ANN_index`.
+    _arm_the_record_leg(monkeypatch)
     proj = _live_projection(_fresh_graph_name())
     try:
         assert proj._is_embedded is False, "the docker lane must be non-embedded"
-        # ⛔ #11642 INVERTED THIS EXPECTATION. `_ensure_indexes` no longer creates
-        # the in-graph Point HNSW index; it RETIRES it, so the handle is None by
-        # design and the measured indexed set is empty. What must still hold is
-        # the invariant this test is named for: the REPORT agrees with the
-        # ENGINE. That is asserted against the engine's own catalogue rather
+        # ⛔ #11642 INVERTED THIS EXPECTATION *for an armed store*: `_ensure_indexes`
+        # no longer creates the in-graph Point HNSW index; it RETIRES it, so the
+        # handle is None by design and the measured indexed set is empty. What must
+        # still hold is the invariant this test is named for: the REPORT agrees with
+        # the ENGINE. That is asserted against the engine's own catalogue rather
         # than against a constant, so the pin survives a future change of mind.
         assert proj._vector_index_api is None, (
             "an in-graph vector-index API was resolved — #11642 retired that "
-            "index, so a store must not report one"
+            "index on an ARMED store, so a store must not report one"
         )
         indexed = proj._vector_indexed_labels
         assert indexed is not None, "the catalog must be readable on a live store"
@@ -1522,7 +1534,7 @@ def test_live_inventory_read_is_read_only():
 
 
 @live
-def test_live_setup_twice_is_harmless_and_the_index_still_serves():
+def test_live_setup_twice_is_harmless_and_the_index_still_serves(monkeypatch):
     """The lane brief's schema-idempotency requirement, PINNED — and now the
     RETIREMENT's idempotency with it (#11642).
 
@@ -1532,10 +1544,16 @@ def test_live_setup_twice_is_harmless_and_the_index_still_serves():
     half — the engine really has no vector index to serve from — and the
     brute-force scan is then asserted to answer, which is what proves the
     retirement removed an INDEX and not a capability.
+
+    ⛔ ARMED, explicitly (#11660 review round 7, P2-2): the retirement is gated on
+    `vector_index_retired()`, so an unarmed lane keeps its index and this pin's
+    first assertion would be false by design rather than by regression. Same
+    arming idiom as its sibling above.
     """
     from tortoise.embeddings import EMBEDDING_DIM
     from tortoise.search_engine import run_vector_query
 
+    _arm_the_record_leg(monkeypatch)
     graph_name = _fresh_graph_name()
     proj = _live_projection(graph_name)
     try:
