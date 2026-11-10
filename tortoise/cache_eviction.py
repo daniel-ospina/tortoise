@@ -951,9 +951,14 @@ def assess(
     #   `test_the_population_count_mirrors_the_instrument`, and by the characterisation
     #   test that pins this residual. Keep the pin; this check does not replace it.
     #
-    # What this DOES catch is the worst case — a claim above every node the graph holds,
-    # whatever produced it. One integer compare, independent of any predicate, so it
-    # stays.
+    # What this DOES catch is a claim above every node the graph holds. ⛔ Read that
+    # NARROWLY, because "whatever produced it" would be FALSE: the population bound
+    # above already required ``claim <= resident_population``, and a population is a
+    # subgraph of the graph (``resident_population <= node_total``), so on a QUIESCENT
+    # graph the two conditions cannot both hold — this check is UNREACHABLE there, and
+    # it is NOT a second detector for a misplaced predicate. It stays as a one-integer
+    # backstop whose only reachable trigger is the read skew named below (#11726 item 3
+    # asked for exactly this honesty after the reorder removed the addition-skew half).
     #
     # ⚠️ ITS REACH IS READ SKEW, and the read order below is what keeps that honest. The
     # total is read HERE — AFTER every per-population count — rather than beside them:

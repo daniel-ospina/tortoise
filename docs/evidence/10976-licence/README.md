@@ -102,8 +102,11 @@ gated individually by the executor's per-node record probe.
 
 ## Tests
 
-`tests/test_cache_eviction_census.py` (113 tests in the file, 219 across the four
-eviction suites — the counts are the final run recorded in `WORKTREE-REPORT.md`):
+`tests/test_cache_eviction_census.py` (115 tests in the file, 221 across the four
+eviction suites — measured, not asserted: `uv run python tools/test_lane.py run --
+tests/test_cache_eviction_census.py tests/test_cache_eviction_evictor.py
+tests/test_cache_eviction_evictor_pins.py tests/test_cache_evict_cli.py -q` →
+`221 passed`, recorded in `WORKTREE-REPORT.md`):
 
 | arm | what it pins |
 |---|---|
@@ -113,6 +116,7 @@ eviction suites — the counts are the final run recorded in `WORKTREE-REPORT.md
 | `test_the_population_count_mirrors_the_instrument` | the mirror reds when the instrument's predicate drifts |
 | `test_every_registered_population_has_a_resident_count_statement` | no population can be licensed without a bound, and no bound outlives its population |
 | `test_no_two_populations_share_a_resident_count_statement` | a copy-pasted statement would bound a new population by the turn count — fail-open, and invisible to the whole-graph backstop |
+| `test_the_shared_statement_check_can_actually_fire` | **proves the pin above is not vacuous** — the live assertion runs over ONE population and can never fail, so this drives the same helper with a REFLOWED copy (must report the collision) and a genuinely distinct predicate (must not), which is the only demonstration the guard would fire the day a second population is registered |
 | `test_an_empty_population_count_read_is_a_refusal_not_zero` | an empty count read is a refusal, never `0`: "this graph holds only 0" would be a fact nobody measured |
 | `test_a_population_with_no_count_statement_is_a_refusal_not_a_guess` | an unbounded population is refused, never bounded by a default (`0` demotes it forever; the whole-graph total restores the defect) |
 | `test_a_row_multiplying_count_statement_is_a_documented_residual` | **asserts what the whole-graph backstop does NOT catch** — a 500-node population counted as 2,000 with a 1,500 claim passes both guards; the band is irreducible (a mirror-vs-total check cannot tell inflation from a live cache gaining nodes, and a report-total check would refuse legitimate growth), so that class rests on the mirror pin alone |
