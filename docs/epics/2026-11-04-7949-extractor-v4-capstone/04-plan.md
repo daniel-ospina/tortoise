@@ -239,7 +239,7 @@ failure, not a skip — so the A-rows carry them too, and §6 I1 freezes the *co
 | `metric` | edges of declared types + rollup precision | attach/mint/held distribution | unlinked share + both S5 jobs | per-layer label coverage: the declared kinds present, and things/events carrying the label the ontology declares for them (the per-writer split and the typed/`statement`/`NULL` shares are reported **diagnostics**) | the `:Subject` count over the corpus's **bindable subject slots**, + 4 families + 2 readers |
 | `denominator` | transitive label set | definite-description candidates | statements written by the run | the things-and-events population of the named graph, counted per layer | **the distinct actors the A-corpus names** — the registered `a5_actors` (see the floor; *bindable subject slots* is this row's METRIC, not its denominator) |
 | `floor` (+ `kind`) | ≥30 pairs · *sample sufficiency* | ≥30 candidates · *sample sufficiency* | ≥30 statements · *sample sufficiency* | ≥1 labelled node · *non-vacuity* | **≥30 named actors** · *sample sufficiency* — A5's REGISTERED floor, unchanged |
-| `threshold` | precision ≥ 0.80 **and** direct-set reachability | attach > mint, 100 % classified | share lower **and** component arm positive | **appears + labelled** — the percentage is **reported, not chased**, and there is no `≥ X %` bar. ⛔ **Its registered cell therefore stays `UNMEASURED(<the rule> — decided by #<NNNN>)`, not a comparator**: A4 is a *registered non-bar* (`REGISTERED_NON_BAR_ROWS`), and `capstone_preregistration_check.py:3963-3968` refuses the cell I first wrote here because it names no `#NNNN` (*"a registered non-bar must state who decides it"*; `OWNER_DECISION` at `:563`). The separate reverse arm (`:4011-4020`) refuses a comparator on a pinned non-bar. The *rule* is what the verdict reads; the cell records that the bar is a rule **and who decided it** | families non-zero **and** readers non-empty |
+| `threshold` | precision ≥ 0.80 **and** direct-set reachability | attach > mint, 100 % classified | share lower **and** component arm positive | **appears + labelled** — the percentage is **reported, not chased**, and there is no `≥ X %` bar. ⛔ **Its registered cell therefore stays `UNMEASURED(<the rule> — decided by #<NNNN>)`, not a comparator**: A4 is a *registered non-bar* (`REGISTERED_NON_BAR_ROWS`), and `capstone_preregistration_check.py:4035-4040` refuses the cell I first wrote here because it names no `#NNNN` (*"a registered non-bar must state who decides it"*; `OWNER_DECISION` at `:592`). The separate reverse arm (`:4083-4090`) refuses a comparator on a pinned non-bar. The *rule* is what the verdict reads; the cell records that the bar is a rule **and who decided it** | families non-zero **and** readers non-empty |
 | `corpus_id` | `a-corpus` | `a-corpus` | `a-corpus` | `fleet-graph` | `a-corpus` |
 | floor number (read from `denominator_floors`) | `a1_labelled_pairs: 30` | `a2_candidates: 30` | `a3_statements: 30` | `a4_labelled_nodes: 1` | **`a5_actors: 30`** (registered) |
 | `threshold_basis` | the ~10 pp resolution argument (`EXTRACTOR-V4-ARCHITECTURE.md:1397`, restated `:1533`) | same | the owner's own 9,910/15,534 baseline | "0 of 0 labelled is not coverage; a declared kind that is absent, or a node left unlabelled, is a failing run" | presence question, not a statistic |
@@ -390,7 +390,7 @@ pin proves *who*. And `sealed_before_any_scored_run` carries its own `_basis`, m
 `capstone_verdict_check.py`'s `CRITERIA` is a **closed** tuple that refuses unknown ids.
 
 ⛔ **Corrected after review — "record ids == enum minus declared sub-rows" is FALSE today.** The record's ids are
-`E1, E1b, E2a, E2b, E3, E4, E5` (7 E-rows) **plus `A1…A5`, which the record already registers** — 12 total while the enum was `E1…E5` (5) when this section was first written and is now `CRITERIA + A_CRITERIA` (`capstone_verdict_check.py:144-145`, tested at `:920-922`), and the check's own `SUB_ROW_CRITERIA` is
+`E1, E1b, E2a, E2b, E3, E4, E5` (7 E-rows) **plus `A1…A5`, which the record already registers** — 12 total while the enum was `E1…E5` (5) when this section was first written and is now `(*CRITERIA, *E6_CRITERIA, *A_CRITERIA)` (`capstone_verdict_check.py:191`, tested at `:964-970`), and the check's own `SUB_ROW_CRITERIA` is
 `("E2",)` — which answers a **different** question ("may stand in for E2"), not "is not a verdict row". So the
 subtraction set is declared **literally, in one place**:
 
@@ -417,9 +417,10 @@ against the document's table character-for-character and refuses a record criter
 document is hash-pinned by the record's `document_sha256`, so **the A-row table and the re-cut hash land in the same
 commit**. §4.1 did not say that.
 
-**Cardinality is a decision, and it moves five hardcoded numbers.** If the A-rows become verdict rows (and §1 J1's
-"ten rows" says they do), then the table is **10**, and these move **in the same change**: the "table is 5 rows"
-assertion (`capstone_verdict_check.py:895`), `{len(red)}/5` (`:1450`), the `5/5` strings (`:903`, `:912`, `:1053`, `:1068`, `:1636`). **And
+**Cardinality is a decision, and it moves the verdict tool's hardcoded five.** If the A-rows become verdict rows (and §1 J1's
+"ten rows" says they do), then the table is **10**, and these move **in the same change**: the `V2` "the table is 5 rows"
+refusal (`capstone_verdict_check.py:941`), the `--require-green: {len(red)}/5` message (`:1506`), and the `5/5`
+prose and strings at `:160`, `:178`, `:624`, `:1103`, `:1118`, `:1500`, `:1694`. **And
 `blocker-states.json` must move too** — a non-green A-row reds V12 unless every blocker it cites is covered there,
 which the first version of this section omitted.
 
@@ -427,18 +428,24 @@ which the first version of this section omitted.
 they did.** That question was already decided and landed: `preregistration.json`'s `issue: 10982` amendment states
 *"required_criteria_rows stays `[E1..E5]`, so the new rows are registered and reported, never demanded by the gate (a
 required row would red every existing verdict table for rows nobody has run)"*, and `PRE-REGISTRATION.md` mirrors it.
-`capstone_preregistration_check.py:4123-4126` asserts `pins.required_criteria_rows == list(REQUIRED_CRITERIA)`, so moving one drags the other — into
-the outcome #10982 (CLOSED 2026-11-08) argued against. **The A-rows are verdict rows in the verdict TABLE without
+`capstone_preregistration_check.py` bounds the declaration to **two sanctioned sets** rather than asserting equality
+with one tuple: `CORE_REQUIRED_CRITERIA` (`[E1..E5]`, `:384`) or `REQUIRED_CRITERIA`
+(`= (*CORE_REQUIRED_CRITERIA, "E6")`, `:399`), refused at `:4201-4208`, with the reverse arm at `:4209-4230`
+refusing a table that DEFINES `E6` under a core-only declaration — so an A-row still cannot be folded into
+`required_criteria_rows` without inventing a third set the gate rejects, which is
+the outcome #10982 (CLOSED 2026-11-08) argued against. ⚠️ The equality assertion this paragraph used to cite
+(`:4123-4126`) no longer exists at this base: `#11673` re-shaped the binding into the two-set form above, so the
+conclusion is unchanged and the mechanism is a refusal rather than a drag. **The A-rows are verdict rows in the verdict TABLE without
 being REQUIRED rows in the prereg GATE**; the ten rows are a cardinality claim about the table, not about the gate.
 
 ⛔ **A sixth artifact moves, and this list omitted it: `REGISTERED_NON_BAR_ROWS`.**
-`capstone_preregistration_check.py:375` pins `REGISTERED_NON_BAR_ROWS = frozenset({"A4"})`, and two arms make it
+`capstone_preregistration_check.py:404` pins `REGISTERED_NON_BAR_ROWS = frozenset({"A4"})`, and two arms make it
 load-bearing rather than decorative:
 
-- `:4011-4020` — the **reverse direction**: a row that is in the pin but whose threshold does **not** say
+- `:4083-4090` — the **reverse direction**: a row that is in the pin but whose threshold does **not** say
   `UNMEASURED(...)` is **refused** (*"drop it from `REGISTERED_NON_BAR_ROWS` or restore `UNMEASURED(...)`"*). So
   writing A4's §4.1 threshold cell as a comparator does not register a bar; it reds the gate.
-- `:376` — a module-level `assert not (REGISTERED_NON_BAR_ROWS & set(REQUIRED_CRITERIA))`. Adding A4 to
+- `:405` — a module-level `assert not (REGISTERED_NON_BAR_ROWS & set(REQUIRED_CRITERIA))`. Adding A4 to
   `REQUIRED_CRITERIA` (which the note below says does **not** move) fires **at import**, erroring the module and every test
   that imports it — not reporting a finding.
 
@@ -447,8 +454,8 @@ load-bearing rather than decorative:
 *"appears + labelled, percentage reported not chased"*: a **rule**, not a threshold. Giving it a comparator would
 reverse that ruling, which is a reopen, not a plan edit.
 
-⛔ **And the cell must name who decides it.** `capstone_preregistration_check.py:3963-3968` refuses a registered
-non-bar whose `UNMEASURED(...)` names no `#NNNN` — `OWNER_DECISION = re.compile(r"#\d+")` at `:563`) — *"a registered
+⛔ **And the cell must name who decides it.** `capstone_preregistration_check.py:4035-4040` refuses a registered
+non-bar whose `UNMEASURED(...)` names no `#NNNN` — `OWNER_DECISION = re.compile(r"#\d+")` at `:592`) — *"a registered
 non-bar must state who decides it"*. So the cell is
 `UNMEASURED(<the rule> — decided by #<the issue that carries the ruling>)`, with a real number in it. A cell holding
 only prose reds the gate.
@@ -471,7 +478,7 @@ already gives about retired keys.
 
 The rest of the instruction stands: keep `"A4"` in `REGISTERED_NON_BAR_ROWS`; keep the threshold cell
 `UNMEASURED(…)` with its `#NNNN`; spend the floor as the *non-vacuity* floor only, never re-scoped as a rate
-(`capstone_preregistration_check.py:3983-4008` refuses that); and leave A4 **out of `REQUIRED_CRITERIA`** (see §4.4's cardinality note below —
+(`capstone_preregistration_check.py:4028-4090` refuses that); and leave A4 **out of `REQUIRED_CRITERIA`** (see §4.4's cardinality note below —
 `required_criteria_rows` does **not** move). A4 is still a **verdict row** — it can fail (a declared kind absent; a
 thing or event left unlabelled) — but its verdict comes from the rule, not from a numeric bar. A lane that wants A4
 to carry a comparator must **reopen the owner ruling first**, and the same commit must then drop `"A4"` from the pin.
@@ -928,7 +935,7 @@ pack content. `#11083` says so explicitly and this plan adopts that reading.
 | R1 | **quota** (`#10976`) blocks every A-row | **high** (already at cap) | epic cannot close | `BLOCKED(402)` state; blocking precondition named; the epic reports rather than fakes |
 | R2 | **gold fitted to the query** by the same lane | medium | A1's headline claim is void | sealed + hash-pinned + **labeller ≠ rollup author**, checked (I3) |
 | R3 | **non-determinism** (D6) makes "green" unreproducible | high | a green run that cannot be re-derived | repeat policy + disagreement-vs-policy = failing run |
-| R4 | **enum drift** — an A-row the verdict gate refuses (`:920-922` tests `RECOGNISED_CRITERIA`) *(the LOUD half; the silent half is R8)* — ⚠️ **and a SECOND bundle, `5087-hypothesis`, shares `capstone-preregistration/v1` and is invoked in the same CI step**, so a schema rule written unbundled reds six sibling criteria | medium | the row cannot land at all | derive the enum (4.4) + CI pin; **I1's field set is bundle-scoped and `5087-hypothesis` is named as a consumer** |
+| R4 | **enum drift** — an A-row the verdict gate refuses (`:964-970` tests `RECOGNISED_CRITERIA`) *(the LOUD half; the silent half is R8)* — ⚠️ **and a SECOND bundle, `5087-hypothesis`, shares `capstone-preregistration/v1` and is invoked in the same CI step**, so a schema rule written unbundled reds six sibling criteria | medium | the row cannot land at all | derive the enum (4.4) + CI pin; **I1's field set is bundle-scoped and `5087-hypothesis` is named as a consumer** |
 | R5 | **CI bloat** — ten children each adding a merge-gating test | medium | the suite the owner already called expensive | #11454's tier rule; **Tier-E marker required**; ~20 s recovered |
 | R6 | **stale copies** — a claim fixed in a summary, stale in its copies | **high** (hit 3× in this lane alone) | a green claim beside a refuted copy | one vocabulary (`I4`); the repo's existing double-copy pins |
 | R7 | **mechanism dependency** — `#11001`/`#10997`/`#10998`/`#10999` slip | medium | A1/A2/A3 unmeasurable | `blocked-by` by id, stated per child; the epic never builds them (except C4's argued half) |
