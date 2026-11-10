@@ -1521,7 +1521,8 @@ SOURCE_PATTERNS = {
 # one regex — has no room to carry.
 # ⛔ THE SHARED `supabase/migrations/2026101200000` PREFIX ENTRY IS **NOT** REDUNDANT,
 # and it sits inside that enumeration, so the paragraph above must not be read as
-# covering it (#11728 review P2). The prefix is a DIRECTORY PREFIX, so it also
+# covering it (#11728 review P2). The entry is a PREFIX, not a filename —
+# `CORE_ALSO` is matched with plain `path.startswith()`, so it also
 # claims `20261012000006_recover_team_key_expiry.sql` — which is NOT a member of
 # this family (`is_record_migration_path()` is False for it, and it is not in
 # `RECORD_MIGRATIONS`). That entry is that file's ONLY claim: with it removed,

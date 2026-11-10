@@ -4880,10 +4880,13 @@ def test_every_record_migration_selects_core_and_its_readers():
     # structural rule disabled AND this member's `CORE_ALSO` entry removed,
     # `select()` returns `surfaces: []`, n=84, and every reader assertion reds.
     # ⚠️ Disabling the rule ALONE changes nothing for a member that still has its
-    # entry — measured on the embedding migration: `surfaces: ['core']`, n=801,
-    # both readers present — which is the same measurement that makes those entries
+    # entry — measured on the embedding migration: `surfaces: ['core']`, every
+    # reader present — which is the same measurement that makes those entries
     # redundant rather than load-bearing, and why the synthetic arm below is the
-    # one the rule alone carries.
+    # one the rule alone carries. No `n=` here on purpose, for the same reason as
+    # the block above: both values move (the file count with any new test, the
+    # reader count with any arm added), and nothing reds on the sentence.
+    # Re-derive in one `select()` call.
     for name in migrations:
         r = _sel([f"supabase/migrations/{name}"])
         assert r["full"] is False, (name, r)
