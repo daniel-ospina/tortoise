@@ -2384,7 +2384,7 @@ class TestCoreHierarchy:
         `test_the_object_and_point_rows_overlap_exactly` can only read the TABLE;
         the read-path consequence it describes has no assertion in it, so the
         sentence could go stale in exactly the way this PR exists to remove. This
-        pin holds the two mechanisms the sentence names:
+        pin holds all THREE mechanisms the sentence names:
 
         * the structural leg matches the kind **exactly** — driven with a
           recording graph, so the assertion is on the Cypher it really issues.
@@ -2408,9 +2408,11 @@ class TestCoreHierarchy:
         literal snippets and did red, but forwarding the expansion at the call
         (`degradation_chain(graph, query, sorted(expanded_kinds) if expanded_kinds
         else struct_kind, …)`) left it green — and that is the edit the behavioural
-        capture below catches. The one thing that
-        cannot be driven without a DB (the post-retrieval expansion gate) is
-        anchored on the AST instead, which is immune to both false-red modes.
+        capture below catches. No text or AST anchor is used: every mechanism
+        including the post-retrieval expansion gate is DRIVEN (the gate by giving
+        the kind-only read a non-empty pool and asserting no call carries an
+        expansion member), so a reflow, a comment quoting a statement, a hoisted
+        condition and a renamed local are all green.
         ⚠️ The `strategies` assertion is what carries the "kind-only is a full
         scan" half: `classify_query` runs no FTS or vector leg when there is no
         text query, which is why the expansion has nothing to filter there.
@@ -2522,9 +2524,10 @@ class TestCoreHierarchy:
             rename of the pool) a FALSE RED whose message claims the widening was
             deleted — the exact false-diagnosis path this pin was rewritten to
             avoid (see the docstring above). Intersecting with `expected` is what
-            drops the pool ids and any other incidental string without weakening
-            the deletion check: a deleted widening yields no intersection, and a
-            collapsed one yields the bare kind only.
+            drops the pool ids and any other incidental string. The equality below
+            is then what catches a deletion — `expected` CONTAINS the bare kind, so
+            a deleted expansion yields `{kind}`, not the empty set — while
+            `len(carriers)` catches a filter that disappeared altogether.
             """
             out: set[str] = set()
             for value in params.values():
