@@ -380,6 +380,14 @@ def test_the_unclassified_column_set_is_exactly_the_declared_four():
     the two Subject lifecycle fields. They are declared in
     `cache_projection.ADDITIONAL_PRIMARY_COLUMNS`. Anything else is a column
     nobody classified, which is a LOUD failure — never a silent drop.
+
+    ⛔ #11642 ADDS A THIRD DECLARED CLASS, SUBTRACTED HERE RATHER THAN COUNTED:
+    `record_projection.GENERATED_COLUMNS` (`embedding_vec` on `point`/`source`/
+    `event`) — columns POSTGRES computes, which the projection must never bind
+    and the cache must never hold. It is the SAME declaration `_props_from_row`
+    skips them by (imported, not re-listed), so the reader that drops them and
+    the pin that accounts for them cannot disagree. The property this test owns
+    is unchanged: a column in NONE of the declared classes still reds it.
     """
     declared = {
         (table, column)
@@ -393,7 +401,8 @@ def test_the_unclassified_column_set_is_exactly_the_declared_four():
         mapped = set(cp.placement_columns()[table])
         refused = set(REFUSED.get(table, ()))
         rest = (set(columns) - mapped - refused
-                - cp.bookkeeping_columns(table) - declared)
+                - cp.bookkeeping_columns(table) - declared
+                - set(cp.GENERATED_COLUMNS))
         unclassified |= {(table, c) for c in rest}
     assert unclassified == set(), (
         "the record gained a column the cache projection has not classified — "

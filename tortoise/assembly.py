@@ -146,6 +146,7 @@ from enum import StrEnum
 
 from tortoise.calendar_anchors import (  # #2655 calendar-anchor resolution
     CalendarAnchorKind, find_anchor_spans, resolve_calendar_anchor)
+from tortoise.calendar_date import calendar_date as _calendar_day  # #11646
 from tortoise.entity_identity import (  # #3633 route-then-refuse
     display_holder_ids, record_non_folded)
 from tortoise.env_truthy import env_flag  # #8775 off-switch resolution
@@ -1625,7 +1626,7 @@ def extract_subject_terms(question: str,
 # ══════════════════════════════════════════════════════════════════════════
 
 from dataclasses import dataclass, field  # noqa: E402
-from datetime import UTC as _UTC, date as _date, datetime as _datetime  # noqa: E402
+from datetime import date as _date  # noqa: E402
 from typing import NamedTuple, Protocol  # noqa: E402
 # #3302: the canonical OBJECT terminal vocabulary. Safe as a module-level
 # import: commit_ops' import closure does not reach assembly (verified), so
@@ -2215,27 +2216,22 @@ class WalkerPort(Protocol):
 def _norm_date(value) -> _date | None:
     """Shared date normalization — the SINGLE source for the as-of equality
     boundary AND the Task-5 ordering/diff arithmetic: parse (ISO datetime
-    with Z, or YYYY-MM-DD) → sentinel-strip → UTC DATE truncation
-    (date-only semantics: 2026-06-10T23:30:00Z → 2026-06-10). Returns None
-    for absent/garbage/sentinel values — never raises."""
-    if not value:
-        return None
-    s = str(value).strip()
-    if not s:
-        return None
-    try:
-        if "T" in s or " " in s:
-            dt = s.replace("Z", "+00:00").replace(" ", "T")
-            dt = _datetime.fromisoformat(dt)
-            if dt.tzinfo is not None:
-                # aware instants truncate in UTC — NEVER the machine-local
-                # zone (a host-dependent day-boundary would scramble the
-                # as-of equality boundary and Task-5 byte-goldens)
-                dt = dt.astimezone(_UTC)
-            d = dt.date()
-        else:
-            d = _date.fromisoformat(s[:10])
-    except (ValueError, TypeError):
+    with Z, a bare date, the compact/ISO-week spellings, a numeric epoch, and
+    the ingest producer's ``2023/05/20 (Sat) 02:21``) → sentinel-strip → UTC
+    DATE truncation (date-only semantics: 2026-06-10T23:30:00Z → 2026-06-10).
+    Returns None for absent/garbage/sentinel values — never raises.
+
+    #11646: the SHAPE SET lives in ``tortoise.calendar_date`` — ONE resolver,
+    never a fourth local copy — and it is a UNION, so no value that parsed
+    before stops parsing. ``utc_truncate=True`` is this caller's requirement:
+    an aware instant truncates in UTC, NEVER the machine-local zone, because a
+    host-dependent day-boundary would scramble the as-of equality boundary and
+    the Task-5 byte-goldens. Before #11646 this parser assumed ISO, which
+    silently made every eval-ingested row (the producer writes
+    ``YYYY/MM/DD (Day) HH:MM``) UNDATED.
+    """
+    d = _calendar_day(value, utc_truncate=True)
+    if d is None:
         return None
     # sentinel-strip: the v2-lane undated marker (and any pre-1970 epoch
     # artifact) is NOT a usable date
@@ -2337,12 +2333,19 @@ def _window_bounds(lo: _date | None, hi: _date | None, *,
        this timestamp half cannot be removed by a string bound).
     3. FALSE NEGATIVE (pre-existing) — ``_norm_date``'s date-only branch also
        accepts the COMPACT (``20261020``) and ISO-WEEK (``2026-W43-2``)
-       spellings and LEADING-space values, none of which is lexicographically
-       inside a dashed range, so such a row is fetched by neither bound. (A
-       TRAILING-space value happens to sort INSIDE the range and is fetched —
-       the spelling class is not uniform.) No in-repo writer emits any of them
-       (the projection writes dashed ISO, the v2 lane writes ``YYYY-MM-DD``),
-       and the predicate cannot normalize a free-text value inside Cypher.
+       spellings, the SLASH spelling and LEADING-space values, none of which is
+       lexicographically inside a dashed range, so such a row is fetched by
+       neither bound. (A TRAILING-space value happens to sort INSIDE the range
+       and is fetched — the spelling class is not uniform.) Two of those classes
+       DO have in-repo writers: the ingest lane writes ``createdAt`` /
+       ``startedAt`` / ``endedAt`` / ``when`` / ``validFrom`` in the producer's
+       ``YYYY/MM/DD (Day) HH:MM`` shape (``tools/longmem_eval/ingest.py``,
+       ``ingest_v2.py``), and ``'2023/05/20 (Sat) 02:21' <= '2023-05-22'`` is
+       False (a slash sorts after a dash), so the window walk still fetches none
+       of those rows even though ``_norm_date`` now DATES them — the ladder
+       benefits, the fetch bound does not (#11646; residue, not a regression:
+       those rows were dropped before too). No version of this predicate can
+       normalize a free-text value inside Cypher.
     """
     lo_s = (lo - _timedelta(days=1)).isoformat() if lo else None
     if not hi:

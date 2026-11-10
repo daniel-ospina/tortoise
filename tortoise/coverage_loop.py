@@ -57,6 +57,11 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
 
+# #11646: ONE calendar-date resolver for every stored date shape — this module
+# used to hold its own copy of the grammar, which is how the copies drifted.
+from tortoise.calendar_date import UNDATED_SENTINEL_DATE as _UNDATED_SENTINEL_DATE
+from tortoise.calendar_date import calendar_date as _shared_calendar_date
+
 logger = logging.getLogger(__name__)
 
 # ── loop budget + merge-discipline constants (the hard, documented bounds) ──
@@ -89,28 +94,14 @@ _DATE_RECENCY_RE = re.compile(
     r"|\blast\s+(\d+)\s+(days?|weeks?|months?)\b)")
 _UNIT_DAYS = {"day": 1, "week": 7, "month": 30}
 
-#: Calendar-date PREFIX carrier — the shapes both date sources actually arrive
-#: in: ISO (``2026-09-01`` / ``2026-09-01T00:00:00Z``) and — measured on the
-#: frozen LongMemEval dataset, 23,867/23,867 values, #3011 — the ingest
-#: producer's ``haystack_dates``/``createdAt`` shape ``2023/05/20 (Sat) 03:29``.
-#: Month/day are ``\d{1,2}``: an UNPADDED ``2023/4/9`` is the same calendar
-#: date, and reading it as undated would drop that session from a bounded span
-#: (the session-level version of the #8710 defect). The trailing ``(?!\d)``
-#: keeps a 3-digit day from being truncated to two.
-#: The PREFIX shape is the one ``tortoise/subgraph_render.py`` and
-#: ``TortoiseSDK._iso_date10`` parse as well; those two stay padded-only, so
-#: they have not been widened here — duplicated rather than imported because
-#: subgraph_render pulls the eval harness in and this one is a stdlib-only leaf
-#: at import time (see ``_session_of``).
-_CALENDAR_DATE_RE = re.compile(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?!\d)")
-
-#: The ingest lane's "no date" marker (``tools/longmem_eval/ingest.UNDATED_SENTINEL``)
-#: — a POSITIVE date value that means UNDATED, in every ISO spelling of its
-#: calendar date. Mirrors ``tortoise/subgraph_render.py`` and
-#: ``TortoiseSDK._iso_date10``, which both special-case it for the same reason:
-#: a fabricated 1970 date is worse than no date, and as a BOUND it turns an
-#: unresolvable input into a window that matches (or excludes) everything.
-_UNDATED_SENTINEL_DATE = "1970-01-01"
+#: Calendar-date shapes live in ``tortoise/calendar_date.py`` (#11646) — ONE
+#: resolver, imported above, so this module carries no grammar of its own. What
+#: this seam needs from it is the measured fact that the ingest producer's
+#: ``2023/05/20 (Sat) 03:29`` (23,867/23,867 values on the frozen LongMemEval
+#: dataset, #3011) and ISO both parse, unpadded month/day included, validated
+#: through ``date``. That is a UNION over what this seam read before, and the
+#: written-day semantics it always had (a timestamp offset never moves the day)
+#: are the resolver's default, so every value reads the same day it did.
 
 
 @dataclass(frozen=True)
@@ -156,27 +147,27 @@ def facet_date_constraint(text: str) -> tuple[str | None, str | None, str | None
 def _calendar_date(value: object) -> str | None:
     """Normalize a session/question date to ``YYYY-MM-DD``, or ``None``.
 
-    Accepts every shape the two date sources actually carry — ISO
-    (``2026-09-01``, ``2026-09-01T00:00:00Z``) and the ingest producer's real
-    ``2023/05/20 (Sat) 03:29`` (#3011) — and VALIDATES the result through
-    ``date.fromisoformat`` so an out-of-range ``2026-13-45`` is undated too.
+    Delegates to ``tortoise.calendar_date`` (#11646) — the ONE resolver for
+    every stored date shape in the read path — instead of holding its own
+    copy of the grammar. It accepts what the two date sources actually carry
+    (ISO dates and timestamps, and the ingest producer's real
+    ``2023/05/20 (Sat) 03:29``, #3011) and validates through ``date``, so an
+    out-of-range ``2026-13-45`` is undated too.
+
+    The WRITTEN-DAY semantics are this seam's (and ``sdk._iso_date10``'s): an
+    offset-bearing timestamp keeps the day the dataset states. The resolver's
+    other reading — UTC truncation — belongs to the assembly as-of boundary
+    and is opt-in there.
 
     ``None`` means UNDATED (missing, empty, the undated sentinel, free text):
     no date is ever fabricated, and the caller decides what undated means
     for its bound (the span qualification drops it — it cannot be proven
     in-window; the window resolution ignores it).
     """
-    if not value:
+    d = _shared_calendar_date(value)
+    if d is None:
         return None
-    match = _CALENDAR_DATE_RE.match(str(value).strip())
-    if match is None:
-        return None
-    year, month, day = match.groups()
-    try:
-        iso = date.fromisoformat(
-            f"{int(year):04d}-{int(month):02d}-{int(day):02d}").isoformat()
-    except ValueError:
-        return None
+    iso = d.isoformat()
     # The sentinel's date itself (any offset spelling) is "no date" — the rule
     # ``TortoiseSDK._iso_date10`` and ``subgraph_render`` already apply.
     return None if iso == _UNDATED_SENTINEL_DATE else iso

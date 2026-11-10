@@ -274,6 +274,31 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
     # function is created and dropped inside the file.
     (REPO_ROOT / "supabase" / "migrations"
      / "20261102000002_record_point_search_keys_text.sql", None),
+    # #11642 — the vector move. RE-APPLY SAFE and re-applied here because the
+    # readers PARSE THE FILES: `record_projection.column_types()` now reports
+    # `embedding_vec` on `point`/`source`/`event`, so a container that predates
+    # the file would be told it has three columns it does not have. Every
+    # statement is idempotent by construction — `CREATE EXTENSION IF NOT EXISTS`,
+    # `CREATE OR REPLACE FUNCTION`, `ADD COLUMN IF NOT EXISTS` (a generated
+    # column is NOT rewritten when it already exists: measured, `NOTICE: column
+    # "embedding_vec" of relation "point" already exists, skipping`) and
+    # `CREATE INDEX IF NOT EXISTS`. The index creation is the one statement a
+    # re-apply does not skip for free, so it is a no-op only because the index
+    # already exists — which is exactly the case on an already-migrated
+    # container.
+    # ⛔ The other half of the failure, and the reason this is a re-apply rather
+    # than an exclusion: the READER the whole dense leg depends on
+    # (`tortoise/record_vector.py`) issues `WHERE t.embedding_vec IS NOT NULL`,
+    # so on a container without the column every read is `42703
+    # UndefinedColumn` -> `RecordVectorError` -> the named graph fallback. That
+    # revert is SAFE — which is exactly why nothing would notice it: the store
+    # would serve a graph-owned dense leg forever, with the move's cost already
+    # paid.
+    # ⚠️ What re-apply does NOT do: change a GENERATED expression that already
+    # exists (`ADD COLUMN IF NOT EXISTS` keeps the old one). That is the
+    # documented drop-and-recreate operation, never a silent rewrite.
+    (REPO_ROOT / "supabase" / "migrations"
+     / "20261109000001_record_embedding_vector.sql", None),
 ]
 
 #: Record migrations that ship AFTER the base shape yet are deliberately NOT in
@@ -3910,6 +3935,43 @@ def test_ci_arms_the_record_against_a_real_postgres():
         f"the drill's scratch env is {RECORD_DB_ENV}, the record's own name: the "
         "second provision would overwrite the first and D8 would refuse its own "
         "target as `refuse_same_database` (#9567 D8)")
+
+    # ⛔ EVERY PROVISIONER THAT IS MIGRATED NEEDS AN IMAGE THAT CAN APPLY THE
+    # REGISTRY (#11660 review round 4, P1 — MEASURED). The first provisioner pins
+    # `pgvector/pgvector:pg16` and says why; the DRILL's second one passed no
+    # `image` and took the action's default, `postgres:16`. But BOTH containers
+    # are migrated by `tests/test_9567_record_capstone.py::drilled` →
+    # `_ensure_record_schema`, which applies the WHOLE
+    # `record_projection.RECORD_MIGRATIONS` registry (a fresh database is absent,
+    # so `public.journal_event` is not there and every file runs) — the vector
+    # migration included. Its first statement is
+    # `CREATE EXTENSION IF NOT EXISTS vector SCHEMA public`, and `IF NOT EXISTS`
+    # skips an INSTALLED extension; it cannot make an UNAVAILABLE one appear. On
+    # `postgres:16` that is `extension "vector" is not available`, the fixture
+    # errors before it seeds anything, `test_D8_…` fails, and the required
+    # `test-record-postgres` leg reds on a migration the PR cannot merge without.
+    #
+    # The rule is stated on the RESOLVED image so a dropped input reds here
+    # instead of on a CI leg: the action's own default is the failure mode, which
+    # is exactly why comparing explicit inputs only would stay green.
+    # Mutation: delete `image: pgvector/pgvector:pg16` from the drill's provision
+    # → it resolves to `postgres:16` → this test reds.
+    import yaml
+
+    provision_action = yaml.safe_load(
+        (POSTGRES_PROVISION.parent / "action.yml").read_text())
+    default_image = provision_action["inputs"]["image"]["default"]
+    provision_images = _resolved(provisions, "image", default_image)
+    for position, image in enumerate(provision_images, start=1):
+        assert "pgvector" in str(image), (
+            f"{name}'s Postgres instance #{position} resolves to image "
+            f"{image!r}, which does not carry the `vector` extension. Every "
+            "container in this job is migrated by `_ensure_record_schema` "
+            "against the full `RECORD_MIGRATIONS` registry, which now includes "
+            "`20261109000001_record_embedding_vector.sql` — on a plain "
+            "`postgres:16` that aborts with `extension \"vector\" is not "
+            "available` and the required `test-record-postgres` leg reds "
+            "(#11660 review round 4, P1)")
 
 
 def test_the_provision_action_refuses_a_name_bash_cannot_indirect(tmp_path):

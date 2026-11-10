@@ -323,6 +323,99 @@ def _bare(index_rows=None, raise_on_indexes=False, *, ver=(4, 18, 3),
     return proj
 
 
+
+def _arm_the_record_leg(monkeypatch):
+    """Arm the Postgres dense leg so the RETIREMENT is authorised (#11660 R4).
+
+    The drop is gated on `projection.vector_index_retired()`, which asks whether
+    the replacement is armed — dropping the in-graph index while the record leg
+    is OFF would leave the store with neither, turning every dense read into a
+    brute-force scan. These pins exercise the ARMED posture, so they arm it; the
+    unarmed posture has its own pin below.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    monkeypatch.setenv("TORTOISE_RECORD_VECTOR_LEG", "1")
+
+
+def test_the_retirement_is_NOT_authorised_while_the_record_leg_is_off(monkeypatch):
+    """Unarmed: the index STAYS, and no DROP is issued (#11660 review round 4).
+
+    This is the P1's pin. The index and its replacement are one decision: retire
+    the index while `TORTOISE_RECORD_VECTOR_LEG` is unset and every dense read
+    becomes a brute-force `:Point` scan recording `scan_fallback`.
+
+    ⛔ ROUND 7 (P2-2) — the gate is SYMMETRIC, so `main`'s CREATE attempt is still
+    issued here. An unarmed store is `main`'s posture in full: it keeps an index
+    it has (this pin) and gains one it lacks (the sibling pin below). The create
+    attempt on a store that already has the index answers "already" and writes
+    nothing — that is what `main` did on every setup, and `_create_vector_index_api`
+    treats it as success rather than as a second creation. What must NEVER happen
+    here is the DROP.
+    """
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    monkeypatch.delenv("TORTOISE_RECORD_VECTOR_LEG", raising=False)
+    graph = _bare([_vector_row("Point")])
+    graph._ensure_indexes()
+
+    assert not any(_is_vector_drop(c) for c in graph.g.calls), (
+        "the in-graph index was retired while nothing replaced it — every dense "
+        "read would be a full scan")
+    assert graph._vector_index_api in {"procedure", "cypher"}, (
+        "an unarmed store must keep `main`'s posture: the ANN index still exists "
+        "and the handle that blesses a write width must still resolve")
+
+
+def test_a_FRESH_store_with_no_replacement_still_GETS_its_ANN_index(monkeypatch):
+    """The gate is symmetric, or the invariant it states is false (#11660 R7 P2-2).
+
+    The gate's own reason — *a store never ends up with neither an in-graph ANN
+    index nor a record leg* — is as true of NOT CREATING as it is of DROPPING,
+    and round 4 only gated the drop. So on the documented default posture (no
+    `TORTOISE_RECORD_VECTOR_LEG`, no DSN) a FRESH store got no index at all,
+    where `main` created one right here: every dense read a full scan, with no
+    arming condition anywhere on the path.
+
+    Both arms are pinned because either one alone can be satisfied by the wrong
+    code: unarmed must CREATE (falsifier: the pre-fix branch, which returned
+    before ever reaching the catalogue), armed must not (falsifier: making the
+    gate unconditional-create).
+    """
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    monkeypatch.delenv("TORTOISE_RECORD_VECTOR_LEG", raising=False)
+    unarmed = _bare([])
+    unarmed._ensure_indexes()
+    assert any(
+        ("createnodeindex" in c.lower()) or ("create vector index" in c.lower())
+        for c in unarmed.g.calls
+    ), (
+        "an UNARMED store with no index must create one, exactly as `main` did — "
+        "otherwise the retirement lands on a store that has nothing to replace "
+        "it and every dense read becomes a full scan")
+    assert unarmed._vector_index_api in {"procedure", "cypher"}, (
+        "the created index must resolve the handle, or `required_embedding_dim` "
+        "silently loses the write-width guard on every unarmed deployment")
+
+    _arm_the_record_leg(monkeypatch)
+    armed = _bare([])
+    armed._ensure_indexes()
+    assert not any(
+        ("createnodeindex" in c.lower()) or ("create vector index" in c.lower())
+        for c in armed.g.calls
+    ), "an ARMED store must never create an in-graph index — the move took it"
+    assert armed._vector_index_api is None
+
+
+def _is_vector_drop(statement: str) -> bool:
+    """Is this the #11642 retirement DROP, and not the fulltext drop→recreate?
+
+    `_fix_point_search_keys` also drops an index on `Point` (the fulltext one),
+    so a bare `"DROP INDEX" in statement` would pass on a store that holds no
+    VECTOR index at all — the exact vacuous assertion this pin exists to avoid.
+    """
+    low = statement.lower()
+    return "drop index" in low and "embedding" in low
+
+
 @pytest.fixture(autouse=True)
 def _reset_vector_gap_warnings_fixture():
     _reset_vector_gap_warnings()
@@ -396,7 +489,11 @@ def test_raising_inventory_read_is_fail_open(caplog):
     assert proj._vector_indexed_labels is None
     # #11087: the served half is None too, so the pair stays coherent.
     assert proj._vector_index_served_labels is None
-    assert "inventory read failed" in caplog.text
+    # #11642: the retirement gate reads the catalogue before the inventory does,
+    # so the failing read may be reported there instead. Either line proves the
+    # same thing — the read was ATTEMPTED, failed, and setup survived.
+    assert ("inventory read failed" in caplog.text
+            or "vector-index catalogue read failed" in caplog.text)
 
 
 # (e) the gate — the predicate is `_ver is None or _ver[0] >= 4`, so None PASSES
@@ -431,38 +528,88 @@ def test_bare_projection_without_db_does_not_raise():
     assert proj._vector_indexed_labels == set()
 
 
-# (f) one WARNING per (endpoint, graph), and the attribute is ALWAYS re-measured
+# (f) one GAP REPORT per (endpoint, graph), and the attribute is ALWAYS re-measured
+#
+# ⛔ #11642 / PR #11660 review F1: the gap report is now an INFO naming the
+# retirement, not a WARNING — the in-graph vector index is retired by design, so
+# a permanent WARNING would describe a correct store as broken. The MARKER is
+# deliberately unchanged (`#4997/#11642`), so every pin below still keys on the
+# same token and none of them went green-by-absence when the level moved; what
+# changed is the level they assert and the capture level the test sets.
+#
+# `_gap_level()` reads the posture rather than restating it: these pins must hold
+# under BOTH postures (`VECTOR_INDEX_RETIRED` True and False), because the flag is
+# the documented rollback switch (#11660 review F9) and a pin hard-coding INFO
+# would fail on a rolled-back store it is supposed to protect.
+def _gap_level() -> int:
+    """The level the gap report is emitted at, read from the posture itself.
+
+    ⛔ It asks `vector_index_retired()`, NOT the constant: the constant says the
+    retirement EXISTS, the function asks whether this deployment armed the thing
+    that replaced it. An unarmed box has no record to serve the dense leg, so
+    its gap is #4997's defect unchanged and it keeps the WARNING — the split
+    `vector_index_retired()` exists for.
+    """
+    from tortoise.projection import vector_index_retired
+    return logging.INFO if vector_index_retired() else logging.WARNING
+
+
+def _gap_records(caplog, *, at_least_warning=False):
+    return [r for r in caplog.records
+            if "#4997" in r.getMessage()
+            and (not at_least_warning or r.levelno >= logging.WARNING)]
+
+
 def test_warning_is_latched_but_the_measurement_is_not(caplog):
     proj = _bare([_vector_row("Point")])
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         proj._ensure_indexes()
-        first = [r for r in caplog.records if "#4997" in r.getMessage()]
+        first = _gap_records(caplog)
         assert len(first) == 1
+        assert first[0].levelno == _gap_level()
 
         # Second setup, same (endpoint, graph), DIFFERENT inventory. The
         # attribute must follow the new measurement; only the warning latches.
         proj.g = _RecordingGraph(index_rows=_rows(_vector_row("Event")))
         proj._ensure_indexes()
-        second = [r for r in caplog.records if "#4997" in r.getMessage()]
-        assert len(second) == 1, "the WARNING must latch on (endpoint, graph)"
+        second = _gap_records(caplog)
+        assert len(second) == 1, "the GAP REPORT must latch on (endpoint, graph)"
 
     # M4 falsifiability: with the same rows a cached and a re-measured
     # attribute are indistinguishable — this assertion is what separates them.
     assert proj._vector_indexed_labels == {"Event"}
 
 
-def test_warning_names_the_gap_and_the_open_question(caplog):
+def test_warning_names_the_gap_and_the_open_question(caplog, monkeypatch):
+    """The UNARMED store's warning names the labels AND the open question.
+
+    ⛔ This is the default lane for a box with no record DSN: `vector_index_retired()`
+    is False because nothing replaced the index, so the gap is #4997's defect
+    unchanged and it keeps its WARNING — and the WARNING's job is still to
+    pressure §14.3 V3 (whether the other served labels should carry an index at
+    all). The retirement INFO's own wording is pinned in
+    `test_the_armed_store_gets_the_retirement_info` below; the two lanes say
+    different things because they are different facts.
+
+    ⛔ BOTH ARMING CONDITIONS ARE CLEARED EXPLICITLY (#11660 review round 6,
+    P1-3). `vector_index_retired()` now asks for a record DSN **and** the armed
+    cutover (`record_vector.ARMING_ENV`), so asserting the lane from the ambient
+    environment would let either one move it — the same class of accidental
+    posture shift this guard's message already warned about, one condition short.
+    """
+    from tortoise.projection import vector_index_retired
+    from tortoise.record_vector import ARMING_ENV
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    monkeypatch.delenv(ARMING_ENV, raising=False)
+    assert not vector_index_retired(), (
+        "this lane is the UNARMED one — a stray record DSN or an armed cutover "
+        "in the environment would silently move the assertion below to a "
+        "different posture")
     proj = _bare([_vector_row("Point")])
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         proj._ensure_indexes()
-    msgs = [r.getMessage() for r in caplog.records if "#4997" in r.getMessage()]
+    msgs = [r.getMessage() for r in _gap_records(caplog)]
     assert len(msgs) == 1
-    # The warning must name the question that is STILL OPEN. Until V1 was
-    # decided (2026-11-07) that question was V1 (where the index lives); it is
-    # now §14.3 V3 (whether the other served labels carry one), and V1 appears
-    # only as SETTLED. Pinning the bare token `V1` passed on that incidental
-    # mention, so the guard no longer asserted anything about the open
-    # question it is named for — retargeted at the V3 attribution itself.
     assert "§14.3 V3" in msgs[0], (
         "the warning must name the OPEN question (§14.3 V3); V1 is settled and "
         "must not be presented as governing it"
@@ -471,11 +618,58 @@ def test_warning_names_the_gap_and_the_open_question(caplog):
         assert missing in msgs[0]
 
 
+def test_the_armed_store_gets_the_retirement_info_naming_the_replacement(
+        caplog, monkeypatch):
+    """The gap on an ARMED store is the DESIGN, and the line has to say so.
+
+    `vector_index_retired()` is what decides this lane (the record answers the
+    dense leg), so it is patched rather than resolved: what is under test is the
+    WORDING and LEVEL of the report, not the arming resolution, which
+    `record_writer`'s own pins own. Before #11660 review F1 this lane's pins
+    captured at WARNING and asserted on the `#4997` WARNING — the level moved, so
+    they failed for a reason none of them stated, and the fix is to pin what the
+    line must now do: name the retirement, name what serves the read, name the
+    way back.
+    """
+    import tortoise.projection as projection_mod
+
+    monkeypatch.setattr(projection_mod, "vector_index_retired", lambda: True)
+    proj = _bare([_vector_row("Point")])
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+    records = _gap_records(caplog)
+    assert len(records) == 1
+    assert records[0].levelno == logging.INFO, (
+        "an armed store's gap is the design — a WARNING here trains every "
+        "reader to ignore the one line that still means something")
+    msg = records[0].getMessage()
+    # The marker is deliberately kept: it is what a log reader, an alert and
+    # every pin in this file key on. A renamed token would make each of them
+    # green-by-absence.
+    assert "#4997" in msg and "#11642" in msg
+    assert "RETIRED, not missing" in msg, (
+        "the retirement INFO must say the gap is the design, not a regression"
+    )
+    # What replaced it, named concretely — the whole point of not leaving it at
+    # "no index": the reader must be able to find the leg that answers.
+    assert "pgvector" in msg or "Postgres record" in msg
+    assert msg.rstrip().endswith(
+        "restore the #4997 warning and the in-graph index."), (
+        "the report must name the way back (the rollback switch) — an operator "
+        "who reads a gap and no remedy is where F9 came from"
+    )
+    for missing in ("Event", "Object", "Source", "Subject"):
+        assert missing in msg
+
+
 def test_a_store_with_no_gap_does_not_warn(caplog):
     proj = _bare([_vector_row(label) for label in SERVED])
-    with caplog.at_level(logging.WARNING):
+    # Capture at INFO, not WARNING: an INFO-level gap report would be invisible
+    # to a WARNING capture, and "no gap" would then hold by ABSENCE rather than
+    # by measurement (the failure #11660 review F1 found in eleven siblings).
+    with caplog.at_level(logging.INFO):
         proj._ensure_indexes()
-    assert not [r for r in caplog.records if "#4997" in r.getMessage()]
+    assert not _gap_records(caplog)
     assert proj._vector_indexed_labels == set(SERVED)
 
 
@@ -521,7 +715,7 @@ def test_a_store_with_no_gap_reports_the_serves_indexes_pair(caplog):
     assert proj._vector_indexed_labels == set(SERVED)
 
 
-def test_a_gap_reports_the_pair_and_still_warns(caplog):
+def test_a_gap_reports_the_pair_and_still_reports_the_gap(caplog):
     """Plan §7 D6 — the pair is TWO halves: serves is every declared label,
     indexes is the measured subset. A store with a gap gets both records."""
     proj = _bare([_vector_row("Point")])
@@ -540,9 +734,9 @@ def test_a_gap_reports_the_pair_and_still_warns(caplog):
     assert serves_seen == SERVED, serves_seen  # every declared label
     assert indexes_seen == ["Point"], indexes_seen  # the measured subset
     assert proj._vector_indexed_labels == {"Point"}
-    warnings = [r for r in caplog.records
-                if "#4997" in r.getMessage() and r.levelno >= logging.WARNING]
-    assert len(warnings) == 1, "the gap must still WARN — #11087 adds a report only"
+    gaps = _gap_records(caplog)
+    assert len(gaps) == 1, "the gap must still be REPORTED — #11087 adds a pair only"
+    assert gaps[0].levelno == _gap_level()
 
 
 def test_the_reported_served_set_is_the_one_declaration(monkeypatch, caplog):
@@ -741,9 +935,8 @@ def test_a_wholly_unparseable_catalogue_is_reported_as_measured_and_empty(caplog
     assert proj._vector_indexed_labels == set(), (
         "documented consequence: unparseable rows read as 'nothing indexed'"
     )
-    assert [r for r in caplog.records
-            if "#4997" in r.getMessage() and r.levelno >= logging.WARNING], (
-        "the gap warning must still fire on this lane"
+    assert _gap_records(caplog), (
+        "the gap report must still fire on this lane"
     )
 
 
@@ -784,12 +977,12 @@ def test_a_changed_pair_is_reported_and_a_repaired_store_announces_it(caplog):
     assert proj._vector_indexed_labels == set(SERVED), (
         "the second report must describe the REPAIRED pair, not the old gap"
     )
-    warnings = [r for r in caplog.records
-                if "#4997" in r.getMessage() and r.levelno >= logging.WARNING]
-    assert len(warnings) == 1, (
-        "the WARNING stays latched on the key — #11087 dedups the REPORT on the "
-        "pair VALUE instead"
+    gaps = _gap_records(caplog)
+    assert len(gaps) == 1, (
+        "the GAP REPORT stays latched on the key — #11087 dedups the pair "
+        "REPORT on the pair VALUE instead"
     )
+    assert gaps[0].levelno == _gap_level()
 
 
 def test_an_unchanged_pair_is_not_reported_twice(caplog):
@@ -927,7 +1120,7 @@ def test_two_ports_on_one_host_are_two_stores(caplog):
     WARNING is latched away, so a full-scan gap on a genuinely different store
     goes unreported: 1 record and 1 warning instead of 2 and 2.
     """
-    rows = [_vector_row("Point")]            # a GAPPED store, so both must warn
+    rows = [_vector_row("Point")]     # a GAPPED store, so both must report
     first = _bare(rows, graph="tortoise", port=6379)
     second = _bare(rows, graph="tortoise", port=16379)
     assert first._stable_endpoint() != second._stable_endpoint(), (
@@ -942,12 +1135,12 @@ def test_two_ports_on_one_host_are_two_stores(caplog):
         "each store reports its own contract; a host-only key collapses them "
         f"(got {len(pairs)} record(s))"
     )
-    warnings = [r for r in caplog.records
-                if "#4997" in r.getMessage() and r.levelno >= logging.WARNING]
-    assert len(warnings) == 2, (
+    gaps = _gap_records(caplog)
+    assert len(gaps) == 2, (
         "a full-scan gap on a DIFFERENT store must not be latched away "
-        f"(got {len(warnings)} warning(s))"
+        f"(got {len(gaps)} gap record(s))"
     )
+    assert {g.levelno for g in gaps} == {_gap_level()}
 
 
 def test_the_reused_catalogue_fast_path_still_reports_the_pair(caplog):
@@ -1009,10 +1202,10 @@ def test_an_unorderable_served_set_fails_open_instead_of_raising(caplog):
 
 
 def test_distinct_graphs_each_report_once(caplog):
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         _bare([_vector_row("Point")], graph="test_4997_g1")._ensure_indexes()
         _bare([_vector_row("Point")], graph="test_4997_g2")._ensure_indexes()
-    msgs = [r for r in caplog.records if "#4997" in r.getMessage()]
+    msgs = _gap_records(caplog)
     assert len(msgs) == 2, "a different graph is a different bucket"
 
 
@@ -1023,11 +1216,42 @@ def test_distinct_graphs_each_report_once(caplog):
 # so a raw call count is now 2. Disable that probe — monkeypatching the fast
 # path to False — rather than loosening the count, so this still pins the
 # property it owns: the #4997 inventory read adds exactly ONE round trip.
+def _indexes_reads(proj) -> int:
+    return sum("db.indexes()" in c for c in proj.g.calls)
+
+
 def test_exactly_one_inventory_read_per_setup(monkeypatch):
-    proj = _bare([_vector_row("Point")])
+    _arm_the_record_leg(monkeypatch)
+    """The steady state costs ONE catalogue round trip — and the sweep that
+    RETIRES an in-graph vector index costs exactly one more (#11642).
+
+    The retirement gate (`_ensure_vector_index_api`) has to read the catalogue
+    to decide whether there is anything to drop, so it hands its rows to the
+    inventory instead of letting it probe again. After a DROP those rows
+    describe a catalogue that no longer exists, so that ONE sweep re-reads — an
+    extra round trip the DROP itself invalidated, not a second opinion.
+
+    ⛔ Both halves are pinned because the choice IS the pin: reuse where nothing
+    wrote, re-read where something did. An assertion that only counted "1" would
+    be satisfied by reusing stale rows after a write (the #5434 false gap), and
+    one that only counted "2" by probing twice on every steady-state setup —
+    which the hosted PER-REQUEST path pays per request (#11660 review F1).
+    """
+    proj = _bare([_fulltext_row("Point")])   # measured: no VECTOR index at all
     monkeypatch.setattr(proj, "_schema_is_current", lambda: False)
     proj._ensure_indexes()
-    assert sum("db.indexes()" in c for c in proj.g.calls) == 1
+    assert _indexes_reads(proj) == 1, (
+        f"the steady state must read the catalogue once (got {proj.g.calls})"
+    )
+
+    retiring = _bare([_vector_row("Point")])
+    monkeypatch.setattr(retiring, "_schema_is_current", lambda: False)
+    retiring._ensure_indexes()
+    assert sum("db.indexes()" in c for c in retiring.g.calls) == 2, (
+        "the sweep that drops the retired index must re-read the catalogue it "
+        "just invalidated — and only that sweep")
+    assert any(_is_vector_drop(c) for c in retiring.g.calls), (
+        "the store held a vector index and it was not dropped")
 
 
 # (h2) the #4465 fast path must ALSO measure — the steady-state path
@@ -1041,24 +1265,109 @@ def test_exactly_one_inventory_read_per_setup(monkeypatch):
 def test_fast_path_still_measures_the_catalog(caplog):
     proj = _bare([_vector_row("Point")])
     proj._schema_is_current = lambda: True  # the steady state
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         proj._ensure_indexes()
     assert proj._vector_indexed_labels == {"Point"}, (
         "#4465's fast path returned before the inventory was measured"
     )
-    assert [r for r in caplog.records if "#4997" in r.getMessage()], (
+    assert _gap_records(caplog), (
         "the gap must still be reported on the fast path"
     )
 
 
-# (j) write-path non-interference — falsifiable
-def test_report_never_gates_index_creation():
+# (j) write-path non-interference — falsifiable, and INVERTED by #11642
+def test_report_never_gates_index_RETIREMENT(monkeypatch):
+    _arm_the_record_leg(monkeypatch)
+    """`_record_vector_index_inventory` must not gate the retirement either.
+
+    ⛔ THIS PIN IS THE OPPOSITE CLAIM TO WHAT IT MADE BEFORE #11642, on purpose.
+    It used to require that a hostile inventory could not suppress CREATION of
+    the in-graph index. The owner's 2026-11-07 decision retires that index, so
+    the write form is now a DROP — and the property worth pinning is that the
+    inventory's verdict cannot make a store KEEP an index it should have
+    retired, nor drop one on a store that has none.
+
+    Falsifiable both ways: a hostile inventory must still drop (present case),
+    and an empty catalogue must never emit a DROP (absent case, which is the
+    steady state and the reason the gate exists).
+    """
+    # (1) an index IS there and the catalogue is readable -> it is dropped, and
+    #     no write form creates a new one.
+    proj = _bare([_vector_row("Point")])
+    proj._ensure_indexes()
+    assert any(_is_vector_drop(c) for c in proj.g.calls), (
+        "the retirement was gated out by the inventory")
+    assert not any(
+        ("createnodeindex" in c.lower()) or ("create vector index" in c.lower())
+        for c in proj.g.calls
+    ), "an in-graph vector index was CREATED after #11642 retired it"
+
+    # (2) the catalogue is UNREADABLE -> NO drop. Dropping blind is the failure
+    #     mode this gate exists to prevent (it would be a failing DDL round trip
+    #     on every setup, and on an engine whose catalogue cannot be read at all
+    #     it could target an index the store never had).
+    # ⛔ `raise_on_indexes=True`, NOT `None` (#11642 review round 2, P3).
+    # `_RecordingGraph(index_rows=None)` is the CLEAN store (it substitutes
+    # `[]`), so the earlier spelling re-asserted case 3 and left the fail-SAFE
+    # arm unpinned — an `except: _has_vector_index = True` would have kept it
+    # green while dropping blind on every store whose catalogue cannot be read.
+    blind = _bare(raise_on_indexes=True)
+    blind._ensure_indexes()  # must not raise
+    assert not any(_is_vector_drop(c) for c in blind.g.calls), (
+        "an unreadable catalogue must not authorise a DROP")
+
+    clean = _bare([_fulltext_row("Point")])
+    clean._ensure_indexes()
+    assert not any(_is_vector_drop(c) for c in clean.g.calls), (
+        "a store holding no vector index must emit no DROP — an unconditional "
+        "drop is a failing DDL round trip on every setup")
+
+
+def test_the_inventory_read_sits_AFTER_the_retirement_write(monkeypatch):
+    _arm_the_record_leg(monkeypatch)
+    """The measurement is not in front of the write (#11660 review F1).
+
+    The sibling pin above proves the drop happens; this one proves WHERE the
+    measurement sits relative to it, which the read COUNT cannot: a probe placed
+    before the drop and another after it also totals two. The hazard is concrete
+    — an inventory whose read can return early, placed first, would leave a
+    deployed store's retired index in place forever, and the one-time migration
+    would never run.
+
+    Falsifiable both ways: a read placed before the drop makes `min(reads)` equal
+    the drop's own position, and a missing re-read after the write makes
+    `max(reads) < drop_at` (the #5434 stale-rows lane).
+    """
+    proj = _bare([_vector_row("Point")])     # the retired index is still there
+    proj._ensure_indexes()
+    calls = proj.g.calls
+    drop_at = next(i for i, c in enumerate(calls) if _is_vector_drop(c))
+    reads = [i for i, c in enumerate(calls) if "db.indexes()" in c]
+    assert reads, "the setup must measure the catalogue at all"
+    assert min(reads) < drop_at, (
+        "the drop is gated on a catalogue READ (never blind) — it must come first"
+    )
+    assert max(reads) > drop_at, (
+        "the inventory must re-read AFTER the write (#5434): pre-drop rows no "
+        "longer describe this store, and reusing them reports a false gap"
+    )
+
+
+def test_report_never_gates_index_creation(monkeypatch):
     """The CREATE VECTOR INDEX fallback (the only way a Point HNSW index is
     built on this engine) must still be attempted when the inventory is hostile.
 
     Falsifiable: if `_record_vector_index_inventory` were placed BEFORE the
     creation block and returned early, no write form would appear.
+
+    ⛔ Driven with `VECTOR_INDEX_RETIRED = False` because that is the only
+    posture where creation happens at all (`#11660` review F9/F1): the creation
+    block is the ROLLBACK path now, and a pin that ran it implicitly would be
+    asserting code no production lane reaches.
     """
+    import tortoise.projection as projection_mod
+
+    monkeypatch.setattr(projection_mod, "VECTOR_INDEX_RETIRED", False)
     for hostile in ([], None):
         proj = _bare(hostile)
         proj._ensure_indexes()
@@ -1076,13 +1385,25 @@ def test_concurrent_setups_do_not_raise_and_latch():
     lock = threading.Lock()
 
     class _Counting(logging.Handler):
+        # The gap report's level is the posture's business (§`_gap_level()`);
+        # the LATCH is this handler's. Keying the counter on the marker alone
+        # keeps the concurrency property (one report per store) pinned under
+        # both postures, instead of silently counting nothing at INFO.
         def emit(self, record):
             if "#4997" in record.getMessage():
                 with lock:
                     warned.append(1)
 
     handler = _Counting()
-    logging.getLogger("tortoise.projection").addHandler(handler)
+    logger = logging.getLogger("tortoise.projection")
+    # The latch is pinned through a HANDLER-level count, so the LOGGER's level
+    # has to admit the record: the retirement reports at INFO, and the root
+    # default (WARNING) would drop it before any handler saw it — the counter
+    # would then read 0 and the pin would fail for a reason that has nothing to
+    # do with latching (#11660 review F1).
+    _prior_level = logger.level
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
     try:
         proj = _bare([_vector_row("Point")], graph="test_4997_thread")
 
@@ -1098,10 +1419,11 @@ def test_concurrent_setups_do_not_raise_and_latch():
         for t in threads:
             t.join()
     finally:
-        logging.getLogger("tortoise.projection").removeHandler(handler)
+        logger.removeHandler(handler)
+        logger.setLevel(_prior_level)
 
     assert not errors, errors
-    assert len(warned) == 1, f"expected exactly one warning, got {len(warned)}"
+    assert len(warned) == 1, f"expected exactly one gap report, got {len(warned)}"
 
 
 # ── Task 4: live integration against a real engine ─────────────────────────
@@ -1153,9 +1475,15 @@ def test_live_store_reports_point_indexed_and_the_rest_not():
     proj = _live_projection(_fresh_graph_name())
     try:
         assert proj._is_embedded is False, "the docker lane must be non-embedded"
-        assert proj._vector_index_api is not None, (
-            "index creation must have succeeded — otherwise this test is "
-            "measuring the wrong thing"
+        # ⛔ #11642 INVERTED THIS EXPECTATION. `_ensure_indexes` no longer creates
+        # the in-graph Point HNSW index; it RETIRES it, so the handle is None by
+        # design and the measured indexed set is empty. What must still hold is
+        # the invariant this test is named for: the REPORT agrees with the
+        # ENGINE. That is asserted against the engine's own catalogue rather
+        # than against a constant, so the pin survives a future change of mind.
+        assert proj._vector_index_api is None, (
+            "an in-graph vector-index API was resolved — #11642 retired that "
+            "index, so a store must not report one"
         )
         indexed = proj._vector_indexed_labels
         assert indexed is not None, "the catalog must be readable on a live store"
@@ -1167,13 +1495,13 @@ def test_live_store_reports_point_indexed_and_the_rest_not():
             f"{sorted(engine_vector_labels)}"
         )
 
-        assert "Point" in indexed, "the Point HNSW index is created by _ensure_indexes"
-        for missing in ("Event", "Object", "Source", "Subject"):
-            assert missing not in indexed, (
-                f"{missing} must NOT be indexed — #4997 records the gap, and "
-                "this issue creates no index"
-            )
-        assert EMBEDDING_DIM > 0  # the dimension the Point index was created at
+        assert "Point" not in indexed, (
+            "the in-graph Point HNSW index was RETIRED by #11642 and must not "
+            "survive a setup — its `vectorset` index is not carried in a graph "
+            "dump, so every cold restore rebuilt it (#7846: 436.5 s at 20k "
+            "nodes, 191.8 s tuned, and it deadlocked the instance)"
+        )
+        assert EMBEDDING_DIM > 0
     finally:
         proj.close()
 
@@ -1195,13 +1523,18 @@ def test_live_inventory_read_is_read_only():
 
 @live
 def test_live_setup_twice_is_harmless_and_the_index_still_serves():
-    """The lane brief's schema-idempotency requirement, PINNED.
+    """The lane brief's schema-idempotency requirement, PINNED — and now the
+    RETIREMENT's idempotency with it (#11642).
 
-    A second `_ensure_indexes()` must not raise, must not drop the Point index,
-    and the index must still serve a vector query afterwards. Asserting only
-    "no exception" would miss a silently dropped index.
+    A second `_ensure_indexes()` must not raise and must not issue a second
+    DROP: the retirement is gated on the catalogue, so the steady state costs
+    zero DDL. The `CALL db.idx.vector.queryNodes` probe asserts the POSITIVE
+    half — the engine really has no vector index to serve from — and the
+    brute-force scan is then asserted to answer, which is what proves the
+    retirement removed an INDEX and not a capability.
     """
     from tortoise.embeddings import EMBEDDING_DIM
+    from tortoise.search_engine import run_vector_query
 
     graph_name = _fresh_graph_name()
     proj = _live_projection(graph_name)
@@ -1217,7 +1550,8 @@ def test_live_setup_twice_is_harmless_and_the_index_still_serves():
         )
         try:
             before = _vector_catalog(proj)
-            assert "Point" in before
+            assert "Point" not in before, (
+                "the first setup must already have retired the Point index")
 
             proj._ensure_indexes()  # the second setup
 
@@ -1226,19 +1560,27 @@ def test_live_setup_twice_is_harmless_and_the_index_still_serves():
                 f"a second setup changed the index catalog: {before} -> {after}"
             )
 
-            # Ask the INDEX directly, not the query layer: run_vector_query
-            # additionally applies the terminal-status/excluded-status WHERE
-            # filters, so a [] there would not distinguish "the index stopped
-            # serving" from "the seed row was filtered out". This assertion
-            # isolates the property under test — the HNSW index still serves.
-            hits = proj.g.query(
-                "CALL db.idx.vector.queryNodes('Point', 'embedding', 5, "
-                "vecf32($vec)) YIELD node, score RETURN node.id",
-                params={"vec": vec},
-            ).result_set
-            assert hits, "the Point vector index must still serve after a re-setup"
-            assert any(row[0] == "test-4997-seed" for row in hits), hits
-            assert proj._vector_indexed_labels is not None
+            # ⛔ ASK THE ENGINE, not the query layer: the index is GONE, so the
+            # procedure has nothing to serve from. This is the retirement made
+            # falsifiable — a store that quietly kept its index fails here.
+            try:
+                proj.g.query(
+                    "CALL db.idx.vector.queryNodes('Point', 'embedding', 5, "
+                    "vecf32($vec)) YIELD node, score RETURN node.id",
+                    params={"vec": vec},
+                )
+            except Exception:
+                pass  # the expected outcome: no index to query
+            else:
+                raise AssertionError(
+                    "CALL db.idx.vector.queryNodes still answered — the "
+                    "in-graph vector index was not retired")
+
+            # …AND THE CAPABILITY IS INTACT: the brute-force scan still finds
+            # the row, so retiring the index cost a mechanism, not an answer.
+            hits = run_vector_query(
+                proj.g, vec, limit=5, is_embedded=False, entity_type="point")
+            assert [pid for pid, _ in hits] == ["test-4997-seed"], hits
         finally:
             proj.g.query("MATCH (p:Point {id: $id}) DELETE p",
                          params={"id": "test-4997-seed"})

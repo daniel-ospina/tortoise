@@ -459,8 +459,22 @@ _MIGRATIONS_DIR = REPO_ROOT / "supabase" / "migrations"
 #: §A1/R7's "at this head, N migrations" and the index row's "`pgvector` = 0
 #: occurrences in N migrations" — the SAME denominator (`supabase/migrations`).
 _PREREQ_MIGRATION_COUNT_RE = re.compile(r"at this head, (?P<count>\d+) migrations")
+# ⛔ #11642 — THE OCCURRENCE HALF IS NOW DERIVED, not assumed to be 0. Before
+# the vector move the whole point of this row was that `pgvector` appeared in NO
+# migration, so `= 0 occurrences` could be a literal. `#11642` puts it in ONE
+# (`20261109000001_record_embedding_vector.sql`), and a pattern that continues to
+# demand the literal `0` would either fail forever or — worse — be "fixed" by
+# editing the number, which is a hand-copied figure that goes stale the moment a
+# second migration mentions the extension. The count is captured and checked
+# against the tree below.
+#: §A5's census line: "`grep -riE 'pgvector|vector\('` over all 81
+#: migrations returns **28**" — the FILE-with-a-count claim is the index row's;
+#: this one is the LINE count of the same grep, and the two are separate facts.
+_PREREQ_A5_LINES_RE = re.compile(
+    r"over all \d+\s+migrations returns \*\*(?P<occurrences>\d+)\*\*")
+
 _INDEX_MIGRATION_COUNT_RE = re.compile(
-    r"`pgvector` = 0 occurrences in (?P<count>\d+) migrations"
+    r"`pgvector` = (?P<occurrences>\d+) of (?P<count>\d+) migrations"
 )
 #: The SAME row states *which* migration is the newest — the half no pattern
 #: above read, so the count could be right while the attribution was false
@@ -487,7 +501,11 @@ _PREREQ_PGVECTOR_TOTAL_RE = re.compile(r"over all (?P<count>\d+)\s+migrations")
 #: are anchored to §R7/§A5 of the prerequisites doc and to the #7879 index row,
 #: so `-#4051`'s copy had no reader at all and went stale in the identical
 #: direction. A count is only pinned where a pattern reaches it.
-_MIGRATION_COUNT_OF_RE = re.compile(r"0 of (?P<count>\d+)\s+migrations")
+#: Same derivation for the two documents that use the `<occurrences> of <N>
+#: migrations` form (see `_INDEX_MIGRATION_COUNT_RE` for why it is no longer a
+#: literal `0`).
+_MIGRATION_COUNT_OF_RE = re.compile(
+    r"(?P<occurrences>\d+) of (?P<count>\d+)\s+migrations")
 #: The two documents carrying the `0 of N migrations` form — scanned WHOLE,
 #: because the phrase is not confined to one row.
 _COUNT_OF_DOCS = (
@@ -1545,6 +1563,53 @@ def test_the_migration_and_grep_census_reproduces_at_this_head():
             f"({migrations[-1].name} is the newest). Update the stated number "
             "— a stale denominator is what makes the census unreproducible"
         )
+
+    # ⛔ #11642: the OCCURRENCE half, derived. Every `pgvector` census sentence
+    # states how many migrations mention the extension; that number is measured
+    # here with the same grep the prose names, so it cannot drift into a
+    # hand-copied figure the way the denominator once did.
+    on_disk_pgvector = sum(
+        1 for path in _MIGRATIONS_DIR.glob("*.sql")
+        if re.search(r"pgvector|vector\(", path.read_text(encoding="utf-8"),
+                     re.I))
+    # ⛔ §A5 STATES A LINE COUNT, NOT A FILE COUNT, and it is DERIVED here rather
+    # than skipped (#11642 review round 2, P3). The earlier draft `continue`d on
+    # it, which made the arm dead code — and that dead arm is exactly why a
+    # stale `26` shipped in both §A5 and the index row when the file actually
+    # matched 28 lines. The two units are different questions about the same
+    # grep, so each is measured against its own command.
+    # ⛔ LINES, not matches: the command §A5 names is `grep -riE … | wc -l`, which
+    # counts LINES carrying at least one match. A `findall` count is a different
+    # number (measured: 31 matches on 28 lines), and taking it would have made
+    # this pin demand a figure the stated command cannot produce.
+    on_disk_pgvector_lines = sum(
+        sum(1 for line in path.read_text(encoding="utf-8").splitlines()
+            if re.search(r"pgvector|vector\(", line, re.I))
+        for path in _MIGRATIONS_DIR.glob("*.sql"))
+    stated = [int(m.group("occurrences"))
+              for m in _INDEX_MIGRATION_COUNT_RE.finditer(index_row)]
+    assert stated, ("docs/00_index.md's #7879 row no longer states its pgvector "
+                    "occurrence count")
+    assert set(stated) == {on_disk_pgvector}, (
+        f"docs/00_index.md says pgvector appears in {sorted(set(stated))} "
+        f"migration(s); the tree has {on_disk_pgvector} — re-state it at this head")
+    # §A5's figure is the LINE count of `grep -riE 'pgvector|vector\('`; the
+    # pattern it states is `over all N migrations returns **M**`.
+    a5 = _PREREQ_A5_LINES_RE.search(prerequisites)
+    assert a5, ("08-hosted-prerequisites.md §A5 no longer states the grep's LINE "
+                "count — restate it rather than deleting the phrase")
+    assert int(a5.group("occurrences")) == on_disk_pgvector_lines, (
+        f"§A5 says the pgvector grep returns {a5.group('occurrences')} lines; the "
+        f"tree has {on_disk_pgvector_lines} — re-state it at this head")
+    for path in _COUNT_OF_DOCS:
+        stated = [int(m.group("occurrences"))
+                  for m in _MIGRATION_COUNT_OF_RE.finditer(
+                      path.read_text(encoding="utf-8"))]
+        if stated:
+            assert set(stated) == {on_disk_pgvector}, (
+                f"{path.relative_to(REPO_ROOT)} says pgvector appears in "
+                f"{sorted(set(stated))} migration(s); the tree has "
+                f"{on_disk_pgvector} — restate it rather than deleting the phrase")
 
     # The same denominator in its OTHER two homes (#1981 review, P2). These are
     # scanned as whole documents rather than rows: the phrase is not confined to
