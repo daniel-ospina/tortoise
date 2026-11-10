@@ -68,6 +68,7 @@ from tortoise.vector_write import (
     statement_node_labels,
     statement_pattern_labels,
     statement_unattributed_set_items,
+    statement_uses_unmodelled_scope,
     statement_write_aliases,
     statement_write_target_problem,
 )
@@ -224,30 +225,70 @@ def test_the_naming_readers_know_what_text_is(statement: str, expected: set) -> 
 
 
 def test_a_rebound_alias_is_refused_because_the_reader_unions_by_name() -> None:
-    """A fail-OPEN that lived INSIDE the grammar, found at `66da0c05`.
+    """A fail-OPEN that lived INSIDE the grammar, found at `66da0c05` — now DEFENCE IN DEPTH.
 
     `WITH b AS e` re-points `e` at a different node, so the label a pattern proved for `e` no longer
     describes what the store touches — and because the readers union bindings per alias NAME, all
     three legs passed while the vector landed on the LABEL-LESS node. Refused rather than reasoned
     about: proving which binding is live at the store needs real scope analysis.
+
+    ⛔ WHAT CHANGED, and why this test asserts TWO different refusals rather than one. The reader
+    below still answers `REBINDS` (kept — it is correct over what it still sees), but the DOOR no
+    longer reaches it for this statement: `WITH` is outside the door's DECLARED GRAMMAR, so the
+    grammar guard refuses the statement FIRST, before the target reader runs. That ordering is
+    asserted rather than assumed — the door's message is the SCOPE one, and asking for `REBINDS`
+    there would pin an ordering that no longer exists.
     """
     rebound = ("MATCH (e:Event {eventId:$eid}) WITH e AS f MATCH (b) WHERE b.id = $eid "
                "WITH b AS e SET e.embedding = vecf32($embedding)")
     problem = statement_write_target_problem(rebound, {"Event"})
     assert problem is not None and "REBINDS" in problem, problem
-    # …and the door refuses it, before the journal (the fake proves the ordering).
-    with pytest.raises(ValueError, match="REBINDS"):
+    # …and the door refuses it BEFORE the journal (the fake proves the ordering) — as a `WITH`,
+    # because the grammar leg runs first and the rebind reader is behind it.
+    with pytest.raises(ValueError) as refused:
         DOOR(_NoJournal(), None, rebound, event_id="e1", props={}, embedding=VEC, lane="test")
-    # The accept direction: projecting an alias WITHOUT re-pointing it is not a rebind.
-    for ok in (
-        "MATCH (e:Event {eventId:$eid}) WITH e, e.eventId AS eid2 "
-        + "SET e += $props, " + set_embedding_clause("e"),
-        "MATCH (e:Event {eventId:$eid}) WITH e WHERE e.eventId = $eid "
-        + "SET e += $props, " + set_embedding_clause("e"),
-    ):
-        assert statement_write_target_problem(ok, {"Event"}) is None, (
-            f"a non-rebinding projection was refused: {ok}"
-        )
+    assert "WITH" in str(refused.value) and "scope" in str(refused.value), str(refused.value)
+
+
+# ⛔ INVERTED, DELIBERATELY, AND HERE IS WHY (#11641 r5's accepted decision).
+#
+# At `556284de` these two statements were pinned as ACCEPTED — a projection that does not RE-POINT
+# the alias is not a rebind, so the reader passed them and the door let them through. That pin is
+# now WRONG, and it is not deleted quietly: under the declared grammar a `WITH` is REFUSED, so both
+# statements are rejected by the door. The reason is the one the whole refusal exists for — a
+# name-keyed reader cannot prove what a name means across a scope boundary, and the round-5
+# reproduction (`WITH 1 AS x` then `MATCH (p)`) is exactly this shape with the alias dropped instead
+# of carried. Pricing that soundness at these two statements is the trade the decision accepted: a
+# grammar that cannot be defeated by the next parse shape, instead of a scope model that can.
+#
+# The reader's own answer is pinned BESIDE the door's, because the two now disagree ON PURPOSE —
+# `statement_write_target_problem` still returns `None` for both (it is scope-blind by design and
+# reachable for non-`WITH` shapes), while the door refuses them. A future edit that removes the
+# grammar leg should red this test, not silently restore the old acceptance.
+@pytest.mark.parametrize("statement", [
+    "MATCH (e:Event {eventId:$eid}) WITH e, e.eventId AS eid2 "
+    + "SET e += $props, " + set_embedding_clause("e"),
+    "MATCH (e:Event {eventId:$eid}) WITH e WHERE e.eventId = $eid "
+    + "SET e += $props, " + set_embedding_clause("e"),
+])
+def test_a_NON_rebinding_projection_is_now_REFUSED_by_the_declared_grammar(statement: str) -> None:
+    """WAS `statement_write_target_problem(…) is None` AS ACCEPTANCE at `556284de` — INVERTED.
+
+    See the comment block above: the reader still passes these (scope-blind), and that is pinned so
+    the two answers cannot drift apart silently; the DOOR refuses them, and that is the behaviour
+    this product now has.
+    """
+    assert statement_write_target_problem(statement, {"Event"}) is None, (
+        "the write-target reader now refuses a non-rebinding projection on its own — if that is "
+        f"deliberate, this inversion's premise needs re-deriving: {statement}"
+    )
+    assert statement_uses_unmodelled_scope(statement) == "WITH", (
+        statement_uses_unmodelled_scope(statement))
+    with pytest.raises(ValueError) as refused:
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={}, embedding=VEC, lane="test")
+    message = str(refused.value)
+    assert "WITH" in message and "DECLARED grammar" in message, message
+    assert message.rstrip().endswith("(#11641)."), message
 
 
 # ── the door: refused shapes, and the real shape that must keep working ────────────────────────
@@ -474,6 +515,287 @@ def test_the_door_refuses_a_statement_that_WRITES_TO_an_unproved_target(
         "the refusal must name the writer a reader can go look at"
     )
     assert door_fragment in str(refused.value), str(refused.value)
+
+
+# ── the door: the GRAMMAR it accepts, and every scope construct it refuses (#11641, r5) ────────
+#
+# The readers above key an alias's labels BY NAME, over the whole statement, with no scope boundary.
+# Cypher's `WITH` ends exactly that: a variable the clause does not carry "is dropped from the scope
+# of the query and cannot be referenced by subsequent clauses" (Neo4j Cypher Manual, `WITH` →
+# *Control variables in scope*), so a later `MATCH (p)` binds a NEW, unlabelled `p` while a
+# name-keyed map still reports the served label the FIRST pattern gave it. Modelling scopes is a
+# parser, and an under-modelled parser fails OPEN — so the door DECLARES the grammar it accepts
+# (`MATCH` / `MERGE` / `CREATE` / `SET` / `REMOVE` / `FOREACH`) and refuses everything outside it.
+# These rows are that declaration's teeth.
+
+#: ``(id, statement, construct)`` — one row per construct the door must refuse. The construct string
+#: is asserted against BOTH the reader and the door's message, so a row cannot pass by refusing for
+#: an unrelated reason.
+SCOPE_REFUSE_ROWS: list[tuple[str, str, str]] = [
+    (
+        # ⛔ THE FIFTH ROUND'S REPRODUCTION, VERBATIM. A served alias bound BEFORE a `WITH` that does
+        # not carry it, then re-bound by NAME in the fresh scope: `WITH 1 AS x` drops `p`, so the
+        # second `MATCH (p)` matches EVERY node and the vector lands on all of them. Measured at
+        # `1f82113d`: ACCEPTED, `VectorF32` on `:Meta` — a label no `entity_type` reaches.
+        "WITH re-binding the same alias",
+        "MATCH (p:Event {eventId:'seed'}) WITH 1 AS x MATCH (p) SET "
+        + set_embedding_clause("p"),
+        "WITH",
+    ),
+    (
+        "UNION",
+        "MATCH (p:Event {eventId:'seed'}) SET " + set_embedding_clause("p")
+        + " RETURN p UNION MATCH (p) SET " + set_embedding_clause("p"),
+        "UNION",
+    ),
+    (
+        "CALL { … } subquery",
+        "CALL { MATCH (p) SET " + set_embedding_clause("p") + " } RETURN 1",
+        "CALL {",
+    ),
+    (
+        "OPTIONAL MATCH",
+        "MATCH (p:Event {eventId:'seed'}) SET " + set_embedding_clause("p")
+        + " OPTIONAL MATCH (q) SET " + set_embedding_clause("q"),
+        "OPTIONAL MATCH",
+    ),
+]
+
+
+@pytest.mark.parametrize("label, statement, construct", SCOPE_REFUSE_ROWS,
+                         ids=[row[0] for row in SCOPE_REFUSE_ROWS])
+def test_the_door_refuses_a_scope_construct_it_cannot_prove(
+        label: str, statement: str, construct: str) -> None:
+    """Every declared scope construct: the READER fires, the DOOR raises, the JOURNAL is untouched.
+
+    ⛔ The three assertions answer three different questions and none is decoration. The reader
+    firing proves the grammar guard is not vacuous. The door raising proves the guard is WIRED IN
+    (a reader nothing calls is documentation, not a bound). `_NoJournal` proves the refusal runs
+    BEFORE the append — a door that journals first and refuses after leaves a record for a node it
+    never wrote, which is the live/replay divergence its own contract forbids.
+    """
+    fired = statement_uses_unmodelled_scope(statement)
+    assert fired is not None, (
+        f"the grammar reader did NOT fire on a `{construct}` statement: {statement}"
+    )
+    assert construct in fired, (fired, construct, statement)
+    with pytest.raises(ValueError) as refused:
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={},
+             embedding=VEC, lane="test")
+    message = str(refused.value)
+    assert "_event_raw_write_door" in message, (
+        f"the refusal must name the writer a reader can go look at: {message}"
+    )
+    assert construct in message, (
+        f"the refusal must name the construct it refused ({construct}): {message}"
+    )
+    assert "scope" in message, (
+        "the refusal must say WHY — that an alias's binding cannot be proved ACROSS A SCOPE "
+        f"BOUNDARY, so a served label bound before the boundary does not prove where the vector "
+        f"lands: {message}"
+    )
+    assert message.rstrip().endswith("(#11641)."), (
+        f"the refusal must end with its issue reference so a reader can trace it: {message}"
+    )
+
+
+def test_the_scope_blind_spot_is_exactly_what_the_name_keyed_readers_miss() -> None:
+    """NON-VACUITY for the row above: the name-keyed readers are BLIND to the reproduction.
+
+    ⛔ This is the whole reason the grammar guard exists rather than a stricter target reader. On
+    `MATCH (p:Event {eventId:'seed'}) WITH 1 AS x MATCH (p) SET <embedding>` every reader this seam
+    has reports a SERVED, LABELLED binding — measured at `1f82113d`, where the door accepted it and
+    the vector landed on `:Meta`. So no amount of tightening the label/target/interpolation/~
+    mutation readers closes this: only refusing the construct does. Asserted first, because a guard
+    whose stated blind spot does not reproduce is a guard guarding nothing.
+    """
+    statement = ("MATCH (p:Event {eventId:'seed'}) WITH 1 AS x MATCH (p) SET "
+                 + set_embedding_clause("p"))
+    assert statement_pattern_labels(statement) == {"p": frozenset({"Event"})}, (
+        statement_pattern_labels(statement))
+    assert statement_node_labels(statement) == {"Event"}, statement_node_labels(statement)
+    assert statement_write_aliases(statement) == {"p"}, statement_write_aliases(statement)
+    assert statement_label_mutations(statement) == frozenset()
+    assert statement_interpolates_label(statement) is False
+    assert statement_write_target_problem(statement, {"Event"}) is None, (
+        "the write-target reader now refuses this shape on its own — if that is deliberate, the "
+        "grammar guard's non-vacuity argument has to be re-derived rather than silently kept"
+    )
+    # …and the ONE reader that refuses it is the grammar guard.
+    assert statement_uses_unmodelled_scope(statement) == "WITH"
+
+
+@pytest.mark.parametrize("statement", [
+    # The product's six door statements, built with the real helpers — the ACCEPT direction. A
+    # grammar guard that refused one of these would break ingestion, so this is the anti-vacuity
+    # half of every refuse row: the guard must be narrow enough to leave the product alone.
+    "MATCH (e:Event {eventId:$eid}) " + clear_then_set_prefix("e")
+    + "SET e += $props, " + set_embedding_clause("e"),
+    "MERGE (e:Event {eventId:$eid}) " + clear_then_set_prefix("e")
+    + "SET e += $props, " + set_embedding_clause("e"),
+    "CREATE (e:Event {eventId:$eid}) SET e += $props",
+    "MATCH (e:Event {eventId:$eid}) SET e += $props",
+    "MATCH (e:Event {eventId: $eid}) " + clear_then_set_prefix("e")
+    + "SET e += $props, " + set_embedding_clause("e"),
+    "CREATE (e:Event {eventId: $eid}) SET e += $props, "
+    + set_embedding_clause("e", preserve_on_null=False),
+])
+def test_the_grammar_guard_accepts_every_product_door_statement(statement: str) -> None:
+    """The declared grammar is the product's OWN grammar — all six statements are inside it."""
+    assert statement_uses_unmodelled_scope(statement) is None, (
+        f"the grammar guard refuses a statement the product itself executes: "
+        f"{statement_uses_unmodelled_scope(statement)} in {statement}"
+    )
+    # …and the door gets PAST the guard onto the journal refusal, which is what proves it let them
+    # through (the fake raises only if the append is reached).
+    with pytest.raises(AssertionError, match="journal was reached"):
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={},
+             embedding=VEC, lane="test")
+
+
+@pytest.mark.parametrize("statement", [
+    # ⛔ ANTI-VACUITY IN THE OTHER DIRECTION, and the reason the guard reuses `_blank_comments` +
+    # `_depths` instead of testing `"WITH" in statement`: a construct inside a STRING LITERAL is
+    # text, not syntax. A substring guard would refuse every one of these while proving nothing.
+    "MATCH (e:Event {eventId:$eid}) SET e += $props, e.note = 'WITH 1 AS x MATCH (p)'",
+    "MATCH (e:Event {eventId:$eid}) SET e += $props, e.note = 'CALL { UNION }'",
+    # …inside a LINE comment.
+    "MATCH (e:Event {eventId:$eid}) SET e += $props // WITH 1 AS x",
+    # …inside a BLOCK comment.
+    "MATCH (e:Event {eventId:$eid}) /* WITH 1 AS x UNION CALL { } */ SET e += $props",
+    # …and inside a BACKTICK-QUOTED identifier, which the engine lexes as an identifier, not a
+    # string — see `_identifier_at`.
+    "MATCH (`with`:Event {eventId:$eid}) SET `with` += $props",
+])
+def test_a_WITH_in_a_string_or_a_comment_is_NOT_a_scope_construct(statement: str) -> None:
+    """A construct the ENGINE does not see as syntax must not be refused.
+
+    The guard is a bound, not a search: refusing a `WITH` inside a string or a comment would block
+    statements the engine accepts (the product writes user text into `e.note`) while proving
+    nothing about scope.
+    """
+    assert statement_uses_unmodelled_scope(statement) is None, (
+        f"a construct inside a string / comment / quoted identifier was read as SYNTAX: "
+        f"{statement_uses_unmodelled_scope(statement)} in {statement}"
+    )
+    with pytest.raises(AssertionError, match="journal was reached"):
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={},
+             embedding=VEC, lane="test")
+
+
+@pytest.mark.parametrize("statement", [
+    # A scope KEYWORD used as a plain VARIABLE: `MATCH (with)` binds an alias named `with`.
+    "MATCH (with) SET with.embedding = $embedding",
+    # A property named after one: `.call` is a property access, not a `CALL` clause.
+    "MATCH (e:Event) SET e.call = 1",
+    # `SET e.with = 1` — same, the keyword is a property NAME.
+    "MATCH (e:Event) SET e.with = 1, e.embedding = $embedding",
+])
+def test_a_scope_KEYWORD_used_as_an_identifier_is_not_refused(statement: str) -> None:
+    """Precision, in the false-BLOCK direction: the token match must not fire on a variable.
+
+    `MATCH (with)` and `SET e.call = …` are statements the engine accepts. They are refused by the
+    LABEL rules where appropriate (`(with)` binds no label), but they must not be refused as SCOPE
+    constructs — a guard that fires on the substring would report the wrong reason and teach a
+    caller to re-spell something that was never the problem.
+    """
+    assert statement_uses_unmodelled_scope(statement) is None, (
+        f"the grammar guard read an IDENTIFIER as a scope construct: "
+        f"{statement_uses_unmodelled_scope(statement)} in {statement}"
+    )
+
+
+@pytest.mark.parametrize("statement", [
+    # A new binding introduced by a NON-scope clause, storing on the alias the pattern proved: the
+    # grammar guard must read `None` and the door must let it through, because `UNWIND … AS x`
+    # cannot RE-BIND a name that is already bound — it only introduces a new one, which cannot
+    # defeat a name-keyed map.
+    "MATCH (e:Event {eventId:$eid}) UNWIND [1] AS x SET e += $props, "
+    + set_embedding_clause("e"),
+    # A read-only clause after the store.
+    "MATCH (e:Event {eventId:$eid}) SET e += $props, " + set_embedding_clause("e")
+    + " RETURN e.eventId AS eid",
+    # A read-only FILTER between the pattern and the store.
+    "MATCH (e:Event {eventId:$eid}) WHERE e.eventId = $eid SET e += $props, "
+    + set_embedding_clause("e"),
+])
+def test_a_NON_scope_clause_is_not_refused_by_the_grammar_guard(statement: str) -> None:
+    """`None` means "no construct in the refusal LIST", not "every clause is allow-listed".
+
+    ⛔ Pinned because the reader's docstring now says so, and an unpinned docstring claim is the
+    drift this PR's own review rounds keep finding. The guard is a REFUSAL list, not an allow-list:
+    `UNWIND`, `WHERE` and `RETURN` are accepted, and leaving them is safe for the two reasons the
+    docstring names — either harmless (these three rows) or caught by the write-target leg (the row
+    below).
+    """
+    assert statement_uses_unmodelled_scope(statement) is None, (
+        f"a NON-scope clause was refused as a scope construct: "
+        f"{statement_uses_unmodelled_scope(statement)} in {statement}"
+    )
+
+
+def test_a_store_on_an_UNWIND_binding_is_refused_by_the_WRITE_TARGET_leg() -> None:
+    """The companion row: a NON-scope clause that introduces the STORE TARGET is still refused.
+
+    `UNWIND $rows AS p` never binds `p` in a node PATTERN, so the write-target leg reads it as
+    ABSENT — which is why leaving `UNWIND` out of the refusal list cannot be a hole. ⚠️ A served
+    label is MATCHed beside it on purpose: with no label anywhere the statement is refused by the
+    EARLIER `names NO node label` leg (`#11641`), and this row would then be pinning the wrong leg
+    while reading as if it pinned the target one (measured — that is exactly what the first draft of
+    this test did). A guard that grew `UNWIND` would refuse this for the wrong reason and teach a
+    caller to re-spell a statement whose real problem is the target.
+    """
+    statement = ("MATCH (e:Event {eventId:$eid}) UNWIND $rows AS p SET "
+                 + set_embedding_clause("p"))
+    assert statement_uses_unmodelled_scope(statement) is None, (
+        statement_uses_unmodelled_scope(statement))
+    assert statement_node_labels(statement) == {"Event"}, statement_node_labels(statement)
+    problem = statement_write_target_problem(statement, {"Event"})
+    assert problem is not None and "NO node pattern" in problem, problem
+    with pytest.raises(ValueError, match="WRITE TARGET"):
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={}, embedding=VEC, lane="test")
+
+
+def test_the_remaining_scope_constructs_are_declared_and_refused() -> None:
+    """The two constructs with no parametrized row: `LOAD CSV` and `IN TRANSACTIONS`.
+
+    Both are in the declared list for the same reason as the four above, and both are pinned here
+    because they need a shape the parameter rows do not carry. ⚠️ HONESTY ABOUT ORDER: a real
+    `IN TRANSACTIONS` clause always follows a closed `CALL { … }`, and `CALL` comes FIRST in
+    statement order — so on the realistic statement the door refuses it as a subquery. The list
+    entry is therefore pinned on its own, on the smallest text that carries the token in clause
+    position, so it cannot be dropped as "shadowed anyway" by a later edit.
+    """
+    load_csv = "LOAD CSV FROM 'file:///x.csv' AS row CREATE (e:Event {eventId:row.id})"
+    assert statement_uses_unmodelled_scope(load_csv) == "LOAD CSV", (
+        statement_uses_unmodelled_scope(load_csv))
+    # A PROCEDURE call is the shape the residual used to hand to review: `CALL apoc.*` can mutate
+    # the node the vector lands on, and it is refused as a construct now, not left to a reviewer.
+    procedure = "MATCH (e:Event {eventId:$eid}) CALL apoc.mutate(e) RETURN 1"
+    assert statement_uses_unmodelled_scope(procedure) == "CALL", (
+        statement_uses_unmodelled_scope(procedure))
+    for statement in (
+        load_csv,
+        procedure,
+        # The realistic shape — refused, by its `CALL { … }` (first in statement order).
+        "CALL { MATCH (e:Event) SET e.embedding = $embedding }"
+        " IN TRANSACTIONS OF 100 ROWS",
+    ):
+        with pytest.raises(ValueError, match="scope"):
+            DOOR(_NoJournal(), None, statement, event_id="e1", props={},
+                 embedding=VEC, lane="test")
+    # The `IN TRANSACTIONS` ENTRY on its own, with no `CALL` before it to shadow it. ⚠️ The
+    # preceding `}` must be BALANCED: `_depths` goes negative on a stray closer — the same
+    # mechanism that made a `)` inside a comment hide a whole clause — so an unbalanced text would
+    # prove nothing about the reader. Valid Cypher cannot spell this at all (the token needs a
+    # `CALL` subquery), so this is deliberately a TEXT-level pin of the list entry.
+    assert statement_uses_unmodelled_scope(
+        "MATCH (e:Event) SET e.probe = {} IN TRANSACTIONS OF 100 ROWS"
+    ) == "IN TRANSACTIONS"
+    # ⛔ …and the word `transactions` as a VARIABLE after `IN` is not the clause: no closing
+    # subquery brace precedes it, so precision is kept where the token alone would misfire.
+    assert statement_uses_unmodelled_scope(
+        "MATCH (e:Event) WHERE e.id IN transactions RETURN e") is None
 
 
 def test_a_property_removal_is_not_read_as_a_label_mutation() -> None:

@@ -1359,18 +1359,76 @@ def test_the_two_former_runtime_label_writers_now_own_their_label() -> None:
     # that genuinely has no bound, so forbidding it outright would contradict that prose — and the
     # failure message would tell a future author to "say why it has none", which the assertion then
     # refused. What is pinned is that reaching for it is ACCOUNTED FOR: the reason carries the
-    # `no-bound:` marker the register's own note requires. `scored_labels()` independently folds any
-    # at-runtime writer into row 2's HOLD set, so the disposition can never be reached silently.
+    # `no-bound:` token the register's own note requires. ⛔ That token is a DECLARATION an author
+    # types, not evidence — this pin tests only that it is PRESENT, so a reason reading
+    # `no-bound: this is a LIE` passes it (`#11641` r5). What catches that is row 2:
+    # `scored_labels()` folds any at-runtime writer into its HOLD set, so the disposition can never
+    # be reached silently. Both halves are pinned by
+    # `test_the_no_bound_marker_pin_still_bites_and_the_LIE_it_cannot_catch_is_row_2s`.
     for key, entry in sorted(EMBED_WRITER_CLASSES.items()):
         if entry.stores != LABELS_AT_RUNTIME:
             continue
         assert "no-bound:" in entry.reason, (
             f"{key} is declared labels-at-runtime with no `no-bound:` marker in its reason — the "
-            "disposition is for a writer that genuinely has no bound, and the marker is how a "
-            "reader tells that apart from a writer whose bound nobody wrote. Prefer a bound at the "
+            "disposition is for a writer that genuinely has no bound. ⛔ The token is a DECLARATION "
+            "an author types — this pin cannot tell it from a lie; row 2 is what holds the row. "
+            "Prefer a bound at the "
             "writer's own seam (`_VECTOR_RESTORE_LABELS`, `_RAW_WRITE_DOOR_LABELS`); if there "
             "genuinely is none, name it with `no-bound:` in the reason and say why."
         )
+
+
+def test_the_no_bound_marker_pin_still_bites_and_the_LIE_it_cannot_catch_is_row_2s(
+        monkeypatch) -> None:
+    """`#11641` r5 — what the `no-bound:` token IS, pinned so the prose cannot re-inflate.
+
+    The register's note used to say the marker is *"how a reader tells a writer that genuinely has
+    no bound from one whose bound nobody wrote"*. **It is not that**, and the note now says so: the
+    pin below tests only that the token is PRESENT in `reason`, so a reason reading
+    `no-bound: this is a LIE, the writer has a bound` passes it. What the token is, is a declaration
+    an AUTHOR must type — a claim they checked, never evidence that they did. The gate that bites is
+    `#5090` DoD row 2, which folds every `LABELS_AT_RUNTIME` writer into the row's HOLD set.
+
+    Both halves are asserted here, because a prose claim with no pin drifts:
+
+    * a marker-LESS at-runtime entry REDS the pin (so the pin cannot be quietly deleted either);
+    * a MARKED LIE passes the pin — the limit, asserted rather than left implied;
+    * …and `scored_labels()` HOLDS the row on that same lie, which is the real gate.
+
+    ⛔ Nothing here weakens row 2: the second half is exactly why the disposition can never be
+    reached SILENTLY, and it is the assertion a future author should extend, not relax.
+    """
+    this_module = sys.modules[__name__]
+    register_module = sys.modules[WriterClass.__module__]
+
+    def _patched(reason: str) -> dict[str, WriterClass]:
+        return {**EMBED_WRITER_CLASSES,
+                "tortoise.z::_no_bound_probe": WriterClass(
+                    EXEMPT, reason, "#11641", stores=LABELS_AT_RUNTIME)}
+
+    # (1) NO marker → the pin bites, naming the writer it wants a reason from.
+    monkeypatch.setattr(this_module, "EMBED_WRITER_CLASSES", _patched("a writer with no bound"))
+    with pytest.raises(AssertionError, match="no `no-bound:` marker"):
+        test_the_two_former_runtime_label_writers_now_own_their_label()
+
+    # (2) A MARKED LIE → the pin passes. The limit, pinned: this is why the register's note no
+    # longer claims the marker discriminates.
+    lying = _patched("no-bound: this is a LIE, the writer has a bound")
+    monkeypatch.setattr(this_module, "EMBED_WRITER_CLASSES", lying)
+    test_the_two_former_runtime_label_writers_now_own_their_label()
+
+    # (3) …and ROW 2 catches what the pin cannot: the writer is HELD as at-runtime, not resolved.
+    # Injected through the probe's own combinator, so a future refactor of the fold reds here too.
+    from tools.dod_5090_probe import scored_labels
+
+    monkeypatch.setattr(register_module, "EMBED_WRITER_CLASSES", lying)
+    synthetic = {"tortoise.z::_no_bound_probe": {"kind": "unresolved_write", "at": "probe"}}
+    scored = scored_labels(writers=synthetic)
+    assert "tortoise.z::_no_bound_probe" in scored["unresolved"], (
+        "row 2 no longer HOLDS an at-runtime declaration — the disposition became reachable "
+        f"silently: {scored['unresolved']}"
+    )
+    assert "tortoise.z::_no_bound_probe" not in scored["labels"]
 
 
 def test_a_writer_that_EXECUTES_a_store_is_never_declared_no_live_vector() -> None:

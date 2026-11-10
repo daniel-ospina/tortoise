@@ -97,9 +97,11 @@ fifteen because its own Cypher names two labels), and a label interpolated at ru
 own seam and then declare the set (`restore_graph` refuses a dump whose vector-bearing node carries
 no served label — the ONE explicit exception is its `allow_unserved_vectors` repair-on-read path,
 which drops the vector, keeps the node and REPORTS it, for artifacts a pre-D10 writer already
-produced; `_event_raw_write_door` refuses a caller statement that names no label, names one outside
-its set, renders one by interpolation, or stores through an alias it never binds to a declared
-label). The disposition remains a legal SHAPE for a writer that has no bound — it is now unused
+produced; `_event_raw_write_door` refuses a caller statement outside its DECLARED grammar
+(`MATCH`/`MERGE`/`CREATE`/`SET`/`REMOVE`/`FOREACH` — every scope construct is refused), one that
+names no label, names one outside its set, renders one by interpolation, or stores through an alias
+it never binds to a declared label). The disposition remains a legal SHAPE for a writer that has no
+bound — it is now unused
 by any live entry, which is the state `#5090` row 2 wants. Note the two-label pair is NOT in this list:
 `_event_plain_merge` and `_rebuild_all_replay` keep their `MERGE`s in their own bodies, which is
 why their own Cypher NAMES two labels instead of none. A second derivation in the grader would be a
@@ -147,15 +149,22 @@ symbol's own body (plus one hop of module constants) executes no store clause, w
 same as proving the writer stores nothing — a door that EXECUTES A CALLER-SUPPLIED statement
 (`sdk::_event_raw_write_door`) carries no marker and is caught only by review. ⚠️ `#11641` gave
 that door a BOUND (`sdk::_RAW_WRITE_DOOR_LABELS`, refused at the seam) rather than a marker, and it
-is a THREE-leg bound: the labels the statement NAMES
-(`tortoise.vector_write::statement_node_labels`), the labels it renders by INTERPOLATION
+is a FOUR-leg bound: the GRAMMAR the door accepts
+(`tortoise.vector_write::statement_uses_unmodelled_scope` — `MATCH` / `MERGE` / `CREATE` / `SET` /
+`REMOVE` / `FOREACH`, with every scope construct — `WITH`, `UNION`, `CALL`, `CALL { … }`,
+`OPTIONAL MATCH`, `LOAD CSV`, `IN TRANSACTIONS` — REFUSED, because all three legs below key an
+alias's labels BY NAME and a `WITH` drops that name from the scope, so a later `MATCH (p)` binds a
+new unlabelled `p` that a name-keyed map still reads as the label the first pattern bound); the
+labels the statement NAMES (`::statement_node_labels`); the labels it renders by INTERPOLATION
 (`::statement_interpolates_label` — a caller could otherwise satisfy the first leg with one literal
-served pattern and store through a second, interpolated one), and the alias it WRITES TO
+served pattern and store through a second, interpolated one); and the alias it WRITES TO
 (`::statement_write_target_problem`). So a store on an unbound, unlabelled or label-mutated target
 is refused too, and a caller can no longer pass by naming a served label it does not store on.
-Review still catches the label the DECLARATION names. ⚠️ That reader sees statement TEXT: a store
-rendered by a mutating procedure, or by clause text a helper builds, stays outside it — the door's
-own docstring names that residual instead of claiming totality.
+Review still catches the label the DECLARATION names. ⚠️ That bound sees statement TEXT, and its
+accepted grammar is a DECLARATION rather than a proof of exhaustiveness: a scope construct the
+declared list does not name is not refused (widening the list is a review duty), and clause text a
+helper builds is read as text like any other, so a scope construct inside it is refused too — the
+door's own docstring names those residuals instead of claiming totality.
 
 **Discovery, and the edge of the guard.** The guard's population comes from
 `tools/dod_5090_probe.py::embedding_writers()`, so the guard is exactly as wide as that discovery —
@@ -404,11 +413,19 @@ NO_LIVE_VECTOR = "no-live-vector"
 #: set that bound makes true (see `restore_graph`'s `_VECTOR_RESTORE_LABELS` and
 #: `_event_raw_write_door`'s `_RAW_WRITE_DOOR_LABELS`, which both REFUSE a store outside the set).
 #: Reach for this only when a writer genuinely has no bound, and say in its reason why it has none.
-#: That sentence is not a wish: the reason must carry the marker `no-bound:`
+#: That sentence is not a wish: the reason must carry the token `no-bound:`
 #: (`test_the_two_former_runtime_label_writers_now_own_their_label` reads it), because an assertion
 #: that simply forbade this disposition would contradict the paragraph above — and its failure
-#: message would tell a future author to do the one thing it refuses (#11641 review). The marker is
-#: how a reader tells a writer that genuinely has no bound from one whose bound nobody wrote.
+#: message would tell a future author to do the one thing it refuses (#11641 review).
+#: ⛔ WHAT THE TOKEN IS, EXACTLY — do not overstate it, as the earlier revision of this note did by
+#: calling it "how a reader tells a writer that genuinely has no bound from one whose bound nobody
+#: wrote". It is not that: the pin tests only that the token is PRESENT in the reason, so a reason
+#: reading `no-bound: this is a lie, the writer has a bound` passes it. It is a token an AUTHOR must
+#: type, i.e. a declaration that the author says they checked — never evidence that they did. The
+#: gate that actually bites is `#5090` DoD row 2: `scored_labels()` folds every `LABELS_AT_RUNTIME`
+#: writer into the row's HOLD set, so reaching for this disposition can never be SILENT, and
+#: `tests/test_11641_runtime_vector_label.py::test_row_2_reads_met_with_no_runtime_label_left` reds
+#: while any entry sits here.
 LABELS_AT_RUNTIME = "labels-at-runtime"
 
 #: The two non-label dispositions :attr:`WriterClass.stores` admits.
@@ -868,22 +885,32 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "#10541",
             # `#11641`: a LABEL SET, because the door no longer INHERITS its label. It owns one —
             # `tortoise.sdk::_RAW_WRITE_DOOR_LABELS` — and refuses, before the journal append and
-            # before the write, any caller statement naming a label outside it, any statement
-            # that renders a label by INTERPOLATION (`(n:{…})`, which no bound can read off the
-            # text), and any statement whose WRITE TARGET alias is unbound, unlabelled, outside
+            # before the write, any caller statement outside its DECLARED GRAMMAR (`MATCH` / `MERGE`
+            # / `CREATE` / `SET` / `REMOVE` / `FOREACH`: `tortoise.vector_write::
+            # statement_uses_unmodelled_scope` refuses `WITH`, `UNION`, `CALL`, `OPTIONAL MATCH`,
+            # `LOAD CSV`, `IN TRANSACTIONS`), any statement naming a label outside the set, any
+            # statement that renders a label by INTERPOLATION (`(n:{…})`, which no bound can read off
+            # the text), and any statement whose WRITE TARGET alias is unbound, unlabelled, outside
             # the set, or whose labels it mutates (`tortoise.vector_write::
-            # statement_write_target_problem`). That third reading is the one the register's own
-            # sentence needs: the first two are about what the statement NAMES, and naming a served
-            # label does not prove where the vector lands. So this is no
+            # statement_write_target_problem`). The last two readings are the ones the register's own
+            # sentence needs: the label checks are about what the statement NAMES, and naming a served
+            # label does not prove where the vector lands. The GRAMMAR leg is what makes all of them
+            # sound: every one keys an alias's labels BY NAME, and a `WITH` drops that name from the
+            # scope (Cypher Manual), so `MATCH (p:Event …) WITH 1 AS x MATCH (p) SET p += $props,
+            # …embedding` would otherwise be accepted while storing on every node the second
+            # `MATCH` reaches
+            # (#11641, measured: the vector landed on `:Meta`). So this is no
             # longer a claim about CALLERS that nothing re-derives: the door's own body enforces
             # the set, and the register's constant pin re-derives it in both directions.
             # ⛔ `no-live-vector` would still be false (that is the exact mistake `#11492`'s review
             # caught in this entry) — the store is real; only its LABEL is now the door's to name,
             # because the record it journals replays through `_upsert_event`, which MERGEs `:Event`
             # and nothing else. A caller writing elsewhere would have its vector come back on a
-            # different label after a rebuild. ⚠️ The residual is a TEXT reader's: a store rendered
-            # by a mutating procedure or by clause text a helper builds is outside it, and that is
-            # named in the door's own docstring rather than claimed away. Cited by SYMBOL, never by
+            # different label after a rebuild. ⚠️ The residual is the DECLARED grammar's: the door
+            # refuses every scope construct in its list and accepts only `MATCH` / `MERGE` / `CREATE`
+            # / `SET` / `REMOVE` / `FOREACH`, so a construct the list does not name is not refused,
+            # and clause text a helper builds is read as text under the same grammar. That is named
+            # in the door's own docstring rather than claimed away. Cited by SYMBOL, never by
             # line — this file's own rule, for the reason the census learned.
             stores=("Event",),
         ),

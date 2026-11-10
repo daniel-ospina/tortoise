@@ -150,6 +150,7 @@ __all__ = [
     "statement_pattern_labels",
     "statement_rebound_aliases",
     "statement_unattributed_set_items",
+    "statement_uses_unmodelled_scope",
     "statement_write_aliases",
     "statement_write_target_problem",
     "stored_embedding_vector_expr",
@@ -786,11 +787,108 @@ def statement_rebound_aliases(statement: str) -> frozenset[str]:
     A plain ``WITH e, e.eventId AS note`` is NOT a rebind of ``e`` (the ``AS`` names ``note``), so
     only an ``AS`` whose TARGET is an alias the patterns also bind is a rebind — see
     :func:`statement_write_target_problem`, which joins the two.
+
+    ⚠️ DEFENCE IN DEPTH, and after :func:`statement_uses_unmodelled_scope` it is mostly
+    UNREACHABLE: a `WITH` is refused at the door before this reader runs, so the shape this reader
+    was built for is already gone. It is kept because it is still CORRECT over what remains (an
+    `AS` in a clause the grammar does not refuse, e.g. `RETURN x AS e`), and because deleting a
+    proven-closed fail-open class so that a future widening of the accepted grammar re-opens it
+    silently is the wrong direction to tidy.
     """
     text = _blank_comments(statement)
     text = _blank_string_literals(text)
     return frozenset(alias.strip("`")
                      for alias in _REBIND_RE.findall(text))
+
+
+#: The constructs that MOVE Cypher's variable scope, or replace the scope a statement starts in.
+#: A scope-respecting reader would have to be a PARSER, so these are refused instead of guessed —
+#: see :func:`statement_uses_unmodelled_scope` for why the name-keyed binding map cannot survive them.
+#:
+#: ⛔ `OPTIONAL MATCH` is here for the SAME reason even though it opens no new scope: it makes a
+#: binding OPTIONAL, so the alias may be NULL at the `SET` while the pattern still reads as labelled —
+#: the same "the pattern is not the node" gap, reached without a `WITH`.
+_SCOPE_CONSTRUCT_RE = re.compile(
+    r"(?<![\w$.:])(OPTIONAL\s+MATCH|LOAD\s+CSV|IN\s+TRANSACTIONS|WITH|UNION|CALL)(?![\w$:])",
+    re.IGNORECASE,
+)
+
+#: What may follow a scope keyword for it to still be a VARIABLE rather than a clause. `MATCH (with)`,
+#: `SET with.x = 1` and `MATCH (with), (x)` are patterns and property writes, not clauses — a token
+#: matcher that refused those would block a statement the engine accepts for no gain.
+_SCOPE_TOKEN_TERMINATORS = ")]},;.:"
+
+
+def statement_uses_unmodelled_scope(statement: str) -> str | None:
+    """The scope construct ``statement`` uses that this module cannot read, or ``None``.
+
+    ⛔ WHY A REFUSAL AND NOT A SCOPE MODEL. :func:`statement_pattern_labels` maps an ALIAS to the
+    labels the statement binds — keyed by NAME, over the whole statement, with no scope boundary.
+    Cypher's ``WITH`` ends exactly that: a variable the clause does not carry *"is dropped from the
+    scope of the query and cannot be referenced by subsequent clauses"* (Neo4j Cypher Manual,
+    ``WITH`` → *Control variables in scope*), so a later ``MATCH (p)`` binds a **NEW, unlabelled**
+    ``p`` while the name-keyed map still reads it as the served label the FIRST pattern gave it.
+    Measured on this PR (#11641):
+
+        MATCH (p:Event {eventId:'seed'}) WITH 1 AS x MATCH (p) SET p += $props, …embedding
+
+    reads ``{p: {'Event'}}``, is ACCEPTED, and stores the vector on **every node the second
+    ``MATCH`` reaches** — ``:Meta`` in the measurement, a label no ``entity_type`` reaches. (The
+    control ``WITH p AS z MATCH (z)`` is refused only because the alias CHANGES; the hole needs
+    the same NAME re-bound across the boundary.)
+
+    Modelling that correctly means modelling scope — pattern expressions, subqueries, ``CALL``
+    imports, ``UNION`` branches — which is a parser, and an under-modelled parser fails OPEN. So the
+    bound is a DECLARED GRAMMAR instead: ``MATCH`` / ``MERGE`` / ``CREATE`` / ``SET`` / ``REMOVE`` /
+    ``FOREACH``, which is every clause the product's own door statements use. A statement outside it
+    is refused, loudly, rather than trusted by a reader that cannot prove it.
+
+    Returns the offending construct (``"WITH"``, ``"UNION"``, ``"CALL"``, ``"CALL { … }``,
+    ``"OPTIONAL MATCH"``, ``"LOAD CSV"``, ``"IN TRANSACTIONS"``) — the FIRST in statement order —
+    or ``None``.
+
+    ⛔ WHAT ``None`` MEANS, EXACTLY — this is the list of constructs REFUSED, not an allow-list of
+    clauses, and the difference is deliberate rather than sloppy. A clause that binds only NEW names
+    (``UNWIND … AS x``) or only READS (``WHERE`` / ``RETURN`` / ``ORDER BY`` / ``SKIP`` /
+    ``LIMIT``) is not refused, because it cannot re-bind a name that is already bound — and a
+    same-name re-binding across a boundary is the ONE shape that defeats a name-keyed map. Leaving
+    them is safe: what they introduce is either harmless (measured — ``MATCH (e:Event {…}) UNWIND
+    [1] AS x SET e += $props, …`` reads ``None`` and stores on ``e``) or caught by the write-target
+    leg (measured — ``UNWIND $rows AS p SET …embedding`` writes to an alias NO node pattern binds,
+    so :func:`statement_write_target_problem` refuses it). The list itself stays a DECLARATION
+    rather than a proof of exhaustiveness; that residual is stated in
+    :func:`statement_write_target_problem`.
+
+    ⛔ ANTI-VACUITY, and it is the reason this reuses :func:`_blank_comments` + :func:`_depths`
+    rather than a bare ``"WITH" in statement``: a construct inside a STRING LITERAL
+    (``SET e.note = 'WITH 1 AS x'``), inside a backticked identifier, or inside a comment
+    (``/* WITH */``) is not syntax, and a guard that refused it would block statements the engine
+    accepts while proving nothing.
+    """
+    text = _blank_comments(statement)
+    depths = _depths(text)
+    for match in _SCOPE_CONSTRUCT_RE.finditer(text):
+        start = match.start()
+        if depths[start] < 0:      # inside a string literal or a backticked identifier — TEXT
+            continue
+        construct = " ".join(match.group(1).upper().split())
+        previous = start - 1
+        while previous >= 0 and text[previous].isspace():
+            previous -= 1
+        # `IN TRANSACTIONS` is only a clause after a subquery closes (`CALL { … } IN TRANSACTIONS`);
+        # without the brace it is a variable named `transactions` after `IN`.
+        if construct == "IN TRANSACTIONS" and not (
+                previous >= 0 and text[previous] == "}"):
+            continue
+        following = match.end()
+        while following < len(text) and text[following].isspace():
+            following += 1
+        if following < len(text) and text[following] in _SCOPE_TOKEN_TERMINATORS:
+            continue               # a VARIABLE in a pattern / property write, not a clause
+        if construct == "CALL" and following < len(text) and text[following] == "{":
+            return "CALL { … } (a CALL subquery)"
+        return construct
+    return None
 
 
 def statement_write_target_problem(statement: str, allowed) -> str | None:
@@ -816,15 +914,30 @@ def statement_write_target_problem(statement: str, allowed) -> str | None:
     node. Each of those three was a live fail-open on this guard before #11641's review rounds, and
     every one was reached WITHOUT leaving the grammar.
 
-    ⛔ ACCEPTED RESIDUAL — what a text reader cannot see, named here rather than left implied:
-    a store rendered by a shape the clause grammar does not phrase as ``SET``/``REMOVE``/``CREATE``/
-    ``MERGE`` — a stored procedure that mutates the node (``CALL apoc.*``), or clause text a helper
-    builds. Inside the grammar this reader refuses what it cannot attribute (an unlabelled target, a
-    label mutation, a ``SET`` item with a non-alias head). That is the same class of limit
-    :func:`statement_node_labels` states for labels it cannot read off, and it is why the door's
-    own docstring says the bound is on the statement TEXT: a caller that renders its store through
-    a procedure defeats it, and that case stays a matter for review rather than a claim of
-    totality.
+    ⛔ WHAT IT IS NOT COMPLETE OVER, and why a DOOR must pair it with
+    :func:`statement_uses_unmodelled_scope`: this reader keys bindings by NAME across the whole
+    statement, so a `WITH` that drops an alias and re-binds the same name makes the map describe a
+    node the statement never touches. That is refused at the door (a DECLARED GRAMMAR — `MATCH` /
+    `MERGE` / `CREATE` / `SET` / `REMOVE` / `FOREACH`), not modelled here: a scope model without a
+    parser fails open, which is the direction a bound must never fail in.
+
+    ⛔ ACCEPTED RESIDUAL — what a text reader cannot see, named here rather than left implied. Two
+    shapes, at their true size after the scope refusal (the earlier revision named a mutating
+    procedure here, which is now INSIDE the bound — every procedure is a `CALL`, and `CALL` is
+    refused):
+
+    * **the declared list is a declaration, not a proof of exhaustiveness.** Every construct in
+      :data:`_SCOPE_CONSTRUCT_RE` is refused, and a test pins one refusal per entry; a scope
+      construct the list does not name is NOT refused. Widening the list is a review duty, so treat
+      it as one — the same limit :func:`statement_node_labels` states for a label it cannot read.
+    * **clause text a helper builds** is read as text like any other, so a scope construct inside it
+      IS refused; what the reader still cannot see is a store the grammar does not phrase as
+      `SET`/`REMOVE`/`CREATE`/`MERGE` at all. Inside the grammar it refuses what it cannot attribute
+      (an unlabelled target, a label mutation, a `SET` item with a non-alias head).
+
+    It is also why the door's own docstring says the bound is on the statement TEXT: a caller that
+    never reaches this door writes outside every reader here, and that is the chokepoint's question
+    (#9079), not this one.
     """
     allowed_labels = {str(label) for label in allowed}
     bindings = statement_pattern_labels(statement)
