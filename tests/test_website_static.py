@@ -6042,7 +6042,11 @@ class TestSiteIconAndSocialPreviewContract:
         }
         for source_label, (source, root, origins) in self_rendered.items():
             rendered = source.read_text()
-            heads = rendered.count("<head")
+            # `re.findall(r"<head\b")`, not `count("<head")`: a `<header>` element would
+            # have counted as a second `<head>` and refused an honest page with a diagnosis
+            # ("grade each one, or list the new document") that describes a document that
+            # does not exist. `\b` is the same discipline the icon matchers already use.
+            heads = len(re.findall(r"<head\b", rendered))
             assert heads == 1, (
                 f"{source_label} renders {heads} <head> element(s), but this guard grades ONE "
                 "document per source (it slices the first `<head>…</head>`). A SECOND "
@@ -6125,27 +6129,40 @@ class TestSiteIconAndSocialPreviewContract:
                     f"{page_name} uses the wordmark as a tab icon ({href!r}) — 400x244 "
                     "squashed into a square slot (#11407)")
                 continue
-            if resolved not in expected:
-                violations.append(
-                    f"{page_name} links {href!r}, which is not one of the three icon "
-                    f"files {sorted(expected)}")
-                continue
-            if not (root / resolved.lstrip("/")).is_file():
+            # ⛔ A FOURTH icon link is ALLOWED. An honest page may add an SVG variant or a
+            # second `sizes=` slot, and refusing it — with a message claiming the trio was
+            # MISSING, which is the opposite of what happened — was the false red the
+            # count's removal was meant to end. Dropping the count alone did not end it:
+            # the membership rejection below the wordmark check still refused every extra,
+            # which is why the comment said "a fourth is GREEN" and the code disagreed.
+            # `_icon_trio_violations` above already reds a page that OMITS any one of the
+            # three, and that is the property the contract needs; an extra adds a mark, it
+            # does not remove one. What an extra IS still held to is the two rules that keep
+            # a tab correct: the file must EXIST under this surface's own root (or the tab
+            # request 404s), and it must be versioned with ITS OWN digest (or a re-export
+            # keeps the old artwork drawing — the staleness bug this file exists for).
+            local = root / resolved.lstrip("/")
+            if not local.is_file():
                 violations.append(
                     f"{page_name} links {href!r}, which does not exist under "
                     f"{root.name}/ — the tab request 404s")
                 continue
             version = self._href_version(href)
+            want = expected.get(resolved)
+            if want is None:
+                # A non-trio icon: its digest comes from its OWN bytes, so the same
+                # self-invalidating rule applies to artwork the contract did not name.
+                want = hashlib.sha256(local.read_bytes()).hexdigest()[:12]
             if version is None:
                 violations.append(
                     f"{page_name} links {href!r} with NO `?v=` — declare "
-                    f"`?v={expected[resolved]}` (this file's sha256 prefix). Without it a "
+                    f"`?v={want}` (this file's sha256 prefix). Without it a "
                     "browser or edge holding the old icon keeps drawing it after a "
                     "re-export, which is the stale-icon bug this contract exists for")
-            elif version != expected[resolved]:
+            elif version != want:
                 violations.append(
                     f"{page_name} links {href!r} but the file's sha256 starts "
-                    f"{expected[resolved]!r} — bump the `?v=` with the bytes, or a browser "
+                    f"{want!r} — bump the `?v=` with the bytes, or a browser "
                     "holding the old icon keeps drawing it (that is the stale-icon bug)")
         return [f"{label}: {v}" for v in violations]
 
