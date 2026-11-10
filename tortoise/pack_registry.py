@@ -3592,13 +3592,17 @@ class PackRegistry:
         #
         # Equivalence (`equivalentTo`, `LEGACY_KIND_ALIASES`, and the `core:`
         # alias seed above) is symmetric and is traversed inside BOTH, because
-        # equivalent kinds have the same extension. The bare↔namespaced pair is
-        # NOT one of these — it is the ONE-DIRECTIONAL `bare_inherits` relation
-        # seeded above (a bare bucket gains its namespaced forms; a namespaced
-        # bucket does not gain the bare name), and it enters the walk through
-        # `sources` rather than through `equivalences`. That is why
-        # `expand_kind("issue")` carries `dev:issue` while
-        # `expand_kind("dev:issue")` carries no bare `issue`.
+        # equivalent kinds have the same extension.
+        #
+        # ⚠ Two DIFFERENT bare↔namespaced relations live here, and conflating
+        # them is what made an earlier version of this comment false:
+        #   * bare ↔ `core:` IS an equivalence — it is the alias seed above — so
+        #     `expand_kind("core:team")` DOES carry the bare `team`.
+        #   * bare ↔ PACK-namespaced is NOT. It is the ONE-DIRECTIONAL
+        #     `bare_inherits` relation seeded above: a bare bucket gains its
+        #     pack-namespaced forms (`ns:kind`), an `ns:` bucket does not gain the
+        #     bare name. That is why `expand_kind("issue")` carries `dev:issue`
+        #     while `expand_kind("dev:issue")` carries no bare `issue`.
         #
         # Termination is structural, not bounded by a counter: `direct_parents`
         # is acyclic (a pack kind is never a parent, and `CORE_SUBCLASSES` rows
@@ -3627,15 +3631,18 @@ class PackRegistry:
             # one kind answers narrower than the other: `bare_inherits` is keyed
             # by the BARE name, so a pack that registers `objectKinds: [team]`
             # puts `synth:team` in `expand_kind("team")` and, without this, NOT
-            # in `expand_kind("core:team")` — while `test_core_prefixed_and_
-            # bare_spellings_are_one_kind` states they are one kind.
+            # in `expand_kind("core:team")` — while
+            # `test_core_prefixed_and_bare_spellings_are_one_kind` states they
+            # are one kind.
             #
             # ONE round is the whole closure, and the reason is an invariant of
             # `bare_inherits`' CONSTRUCTION, not of this loop: it is filled from
             # `bare_to_full`, whose keys are the part of a `ns:kind` name after
             # the `:` and whose values are the full `ns:kind` names themselves.
-            # A kind name may not contain `:` (`_validate` refuses it), so a
-            # value is never itself a key and no chain can exceed one hop. The
+            # Neither a kind name nor a NAMESPACE may contain `:` (`_validate`
+            # refuses both, at `:1994` and `:2035`), so a full name carries exactly
+            # one colon, every key is colon-free and every value keeps its colon:
+            # a value is never itself a key, and no chain can exceed one hop. The
             # `list(...)` snapshot below is deliberate for that reason — but a
             # change that let `bare_inherits` carry key-shaped values must turn
             # this into a worklist, or it will silently under-expand.
