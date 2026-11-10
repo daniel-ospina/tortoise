@@ -5608,6 +5608,19 @@ surfaces:
   - test_pack_hierarchy_11001.py
   - test_pack_kinds.py
   - test_pack_registry_gaps.py
+  # #11656: the declared-relation INVENTORY the endpoint-kind-binding scope cites, re-derived from
+  # `packs/*/manifest.yaml` on every run (36 declared / 35 kind-bearing / 34 IMPL + 1 NAND, `hasPart`
+  # declared once, `addresses` 6x over 6 distinct pairs, the 8 declarations a naive D3 binding test
+  # would disable) — plus the three door/reader facts the reviews established (three doors, TWO replay
+  # folds, FOUR pair readers, each CALLED rather than `callable()`-checked), and the three DOC defects: an
+  # unregistered doc, a bare citation of an ambiguous basename, and line-keyed citations (banned for
+  # `.py`/`.yaml`/`.yml`/`.md`/`.json`: 40 in the scope + 33 in the brief at `12040d1554c1` — the maximum
+  # across every commit touching either doc — went stale on one `main` merge;
+  # cited by SYMBOL now, and every `packs/*/manifest.yaml::key.path` citation is resolved to a real key).
+  # 31 test functions / 33 collected.
+  # Offline, no graph, ~5s. ⚠️ DUAL-REGISTERED with `tier1` (below): `core` is the not-found FALLBACK, so
+  # this row alone leaves a docs-only diff running the pin zero times (#11656 review F1).
+  - test_11656_endpoint_kind_binding_scope.py
   # #11083: the per-pack relation census — HERMETIC half. Holds the committed
   # artifact to a live re-derivation (declared / writable / effective_direction /
   # written_label / declaration_only_reason / dangling), the derived denominator,
@@ -8504,6 +8517,7 @@ surfaces:
   # (#2938).
   - test_session_schema_3554.py
 tier1:
+- test_11656_endpoint_kind_binding_scope.py  # #11656 review F1: this pin's own docstring says it exists so "a manifest edit that makes a scope claim false reds here instead of rotting in prose", and it also pins the two DOC defects (the `docs/00_index.md` row, the ambiguous bare citation). Before this row it was registered in `core` ONLY, and `core` is the not-found FALLBACK — so a docs-only diff took the tier1 early return and ran it ZERO times (measured: `--changed-files docs/plans/2026-11-09-11656-endpoint-kind-binding.md` → `surfaces: []`, 84 files, pin absent; `docs/research/…` likewise) while the `docs/00_index.md` edit DID select `core` and reach it. That is the silent-drop class this manifest documents at `test_10156_alert_registers.py` above, and the exact change class that re-stales the figures a lane implements against. Same shape and reasoning as `test_8093_registry_namespace_doc.py`, `test_extractor_v4_doc_citations.py`, `test_7949_capstone_measure.py`, `test_capstone_*` — every sibling doc/citation pin is dual-registered. Import weight is not a reason to withhold tier1 (`test_config.py`/`test_ids.py`/`test_taxonomy.py` already import `tortoise.*`); hermetic, ~5s, no DB, no graph. — dual-registered with `core`
 - test_8093_registry_namespace_doc.py  # #8093: `docs/registry-graph-schema.md` §Graph namespace cell vs the derived namespace (hermetic doc↔code pin; a docs-only diff runs tier1 only) — dual-registered with `core`
 - test_cli_serve.py
 - test_config.py
