@@ -431,11 +431,22 @@ def _merge_key(value: object) -> str:
     caller whose ``session_key`` returns an ``int`` (e.g. the raw
     ``lme_session_index``) therefore has those seeds dropped from ``order``
     and all such hits collapsed into one empty bucket. Pre-#11382 they were
-    dict-keyed as-is (the ``int`` itself). No in-repo caller passes
-    ``session_key=`` to this pair (measured: only ``dedup_pool`` takes a
-    custom key, in ``tortoise/ask_lane.py`` and ``tools/ask_recall_bench.py``),
-    so this is a bespoke-path change, and it is the same fail-closed direction
-    :func:`retrieval.normalize_session_key` takes everywhere else.
+    dict-keyed as-is (the ``int`` itself). No SHIPPED caller supplies a
+    custom ``session_key=`` to this pair: the only shipped sites that pass one
+    to ``dedup_pool`` are ``tortoise/ask_lane.py``:607,
+    ``tools/ask_recall_bench.py``:276 and ``tools/gen_ask_transcripts.py``:215
+    (``guard_and_recap_pool`` forwards its own ``None``-default parameter, and
+    ``tools/longmem_eval/retrieve.py`` takes the default on both its calls).
+    The TESTS do supply one — ``session_key=raw_key`` in
+    ``tests/test_session_reinjection_rules.py`` is what pins the merge
+    contract — and ``dedup_pool``'s custom-key path is covered in
+    ``tests/test_ask_sdk.py`` / ``tests/test_ask_retrieval_levers.py``. So this
+    is a bespoke-path change, and it is the same fail-closed direction
+    :func:`retrieval.normalize_session_key` takes everywhere else. ⚠️ The
+    collapse reaches the per-session cap too: every non-``str`` key becomes the
+    ONE ``""`` bucket, so a bespoke caller that keyed by an ``int`` now shares
+    one cap window across sessions it used to keep apart (no shipped caller is
+    in that shape).
     """
     text = value if isinstance(value, str) else ""
     if not text:

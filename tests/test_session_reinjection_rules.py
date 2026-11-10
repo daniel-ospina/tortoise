@@ -1306,9 +1306,11 @@ def test_a_raw_custom_session_key_cannot_split_the_seed_from_the_merge_11382():
                                            not the seed/merge split)
 
     The tail is reader-visible: the reader consumes a PREFIX of the pool, so
-    a tail-appended group is context it can lose. No in-repo caller passes
-    ``session_key=`` to this pair today (measured: only ``dedup_pool`` takes a
-    custom key), so this pins the GUARANTEE rather than a live lane.
+    a tail-appended group is context it can lose. No shipped caller supplies
+    ``session_key=`` here (this file's ``raw_key`` tests are what pin the
+    contract; ``dedup_pool``'s own custom-key path is shipped in
+    ``tortoise/ask_lane.py`` etc.), so this pins the GUARANTEE rather than a
+    live lane.
     """
     def raw_key(hit: dict) -> str:
         return hit.get("session_id") or ""

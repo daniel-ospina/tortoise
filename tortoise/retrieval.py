@@ -850,8 +850,9 @@ def session_key_of(hit: dict) -> str:
     ``session_id='  s1  '`` ⇒ ``'  s1  '`` → ``'s1'`` (a padded-but-real id
     — #9599's shape — whose key moves because it is the defect: it could only
     ever half-match the graph's raw group key); ``session_id=5`` ⇒ ``5`` →
-    the index / wire / per-hit bucket; ``session_id='   '`` ⇒ ``'   '`` →
-    the per-hit bucket. The last two are the fail-closed direction
+    the index / wire leg (then the per-hit leg: ``idx:point:p`` with an id,
+    ``idx:-1`` without); ``session_id='   '`` ⇒ ``'   '`` → the same per-hit
+    leg. The last two are the fail-closed direction
     :func:`_session_admission_key`'s divergence list records, and no in-repo
     pool carries either. Everything else — every #8713 census key included
     (snake + index, unpadded; product turns, whose identity is camel-only) —
@@ -2484,8 +2485,9 @@ def _session_admission_key(
     (``session_id: 5`` used to key the int ``5``, and THREE callers then
     raised ``AttributeError`` on ``.startswith``: ``seeded_sessions``,
     ``coverage_loop.coverage_gap`` (``coverage_loop.py``:488) and
-    ``reader_window_displacement`` (``session_reinjection.py``:852 and
-    ``:854``); the
+    ``reader_window_displacement`` (its two ``.startswith("idx:")`` set
+    comprehensions — cite them by symbol, not by line: an earlier revision of
+    this docstring named line numbers that a later docstring edit moved); the
     pool leg now returns ``""`` for a non-``str``, i.e. falls through to its
     index / wire / per-hit leg, so those three callers get a ``str`` — the
     untyped shape stops being an identity and is no longer a raising seam —
