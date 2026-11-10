@@ -829,11 +829,19 @@ def test_the_census_check_verb_reds_on_a_stale_figure(tmp_path, monkeypatch):
     # arm while the note it wrote was never read).
     text = scorecard.read_text(encoding="utf-8")
     stated = _stated(below_sentence, text)  # whatever THIS tree ships
-    degraded = text.replace(f"**{stated}**", "**999**", 1)
-    assert degraded != text, (
-        f"the BELOW count sentence does not spell its figure as `**{stated}**` — "
-        "the degradation would be a no-op")
+    # ⛔ `assert degraded != text` would be DEAD here — `_stated` just matched
+    # `**<stated>** have a number smaller`, so the token is provably present — and
+    # it would FIRE only if the count ever reached 999, i.e. as a false positive.
+    # The reachable form reads the degradation back THROUGH the same sentence: it
+    # reds the day the first `**<stated>**` in the file is not the BELOW sentence
+    # (an ABOVE/BELOW count collision), which is the arm's real targeting risk.
+    bogus = 999 if stated != 999 else 998
+    degraded = text.replace(f"**{stated}**", f"**{bogus}**", 1)
     scorecard.write_text(degraded, encoding="utf-8")
+    assert _stated(below_sentence, degraded) == bogus, (
+        f"the degradation did not land in the BELOW sentence: the first "
+        f"`**{stated}**` in the file belongs to a different figure, so this arm "
+        "would be degrading one number and reading back another")
     assert census_mod._sweep(measured, refresh=True) == 1, (
         "a deliberately degraded figure is stale work: the restatement pass must "
         "report it (1), not 0")
@@ -852,11 +860,13 @@ def test_the_census_check_verb_reds_on_a_stale_figure(tmp_path, monkeypatch):
     # anywhere in the tree can silently turn this arm into a no-op — the previous
     # `**434**` literal had to be re-pointed by hand on every restatement.
     below = measured["below_pivot"]
-    degraded = text.replace(f"**{below}**", "**999**", 1)
-    assert degraded != text, (
-        f"the BELOW count sentence does not spell its figure as `**{below}**` — "
-        "the degradation would be a no-op")
+    bogus = 999 if below != 999 else 998
+    degraded = text.replace(f"**{below}**", f"**{bogus}**", 1)
     scorecard.write_text(degraded, encoding="utf-8")
+    # same reachable targeting check as arm 1 (see the note there)
+    assert _stated(below_sentence, degraded) == bogus, (
+        f"the degradation did not land in the BELOW sentence: the first "
+        f"`**{below}**` in the file belongs to a different figure")
     assert census_mod._sweep(measured, refresh=False) == 1, (
         "`--check` green-lit a note whose stated figure is not the measured one — "
         "that is the false green the nightly census-drift job exists to prevent")
