@@ -355,10 +355,12 @@ def test_the_capture_door_hands_the_carry_its_own_503_factory(client,
 
     The seam half lives in ``tests/test_allowance_gate.py``
     (``test_the_capture_door_gets_a_capture_shaped_503_not_the_sign_in_copy``):
-    that the carry HONOURS a factory it is handed. This is the other half, and
-    it is the one that actually regressed — the seam accepted a factory while
-    the door passed nothing, so every seam-level test stayed green while the
-    route kept rendering a quota stall as a sign-in failure.
+    that the carry HONOURS a factory it is handed. This is the other half.
+    Neither half existed before this change: ``_carry_allowances_off_loop`` had
+    no ``unavailable`` parameter at all (so no seam-level test COULD have pinned
+    the capture copy) and the door therefore had nothing to pass. ``_cp_offload``
+    is what already accepted a factory; the carry never handed it one, which is
+    why this route kept rendering a quota stall as a sign-in failure.
 
     Why a spy rather than the response body: this suite runs
     registry/self-host mode, where the carry legitimately rides the GRAPH pool
