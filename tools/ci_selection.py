@@ -2192,6 +2192,32 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "supabase/migrations/20261102000002_record_point_search_keys_text.sql",
+             # #10080 / #11703 review P2: the migration that MOVES the dense
+             # vector from the in-graph `Point.embedding` index to a
+             # `vector(384) GENERATED ALWAYS … STORED` column plus three HNSW
+             # indexes (#11642/#11660). Same silent-drop class as its
+             # neighbours — it sorts outside the `2026101200000` prefix while
+             # `supabase/` is a NON_PYTHON_PREFIX, so without this entry a
+             # change to this file ALONE selected NO surface (measured on the
+             # pre-fix head: `select([<this path>])` -> `surfaces: []`,
+             # `full: False`). What then ran nothing on a migration-only edit:
+             # `test_11642_vector_move.py` (the DB-free pin that PARSES this
+             # file's `vector(384)` / `jsonb_array_length(doc) = 384` literals —
+             # on a width rotation they would go on answering for the old width
+             # while every record dense read degrades to the brute-force graph
+             # leg), `test_9231_record_migrations_trigger.py` (the
+             # `RECORD_MIGRATIONS` registry pin) and `test_record_projection.py`
+             # (its `ALTER … ADD COLUMN` shape). ⚠️ Two files that name this
+             # migration are NOT a reason for this entry: `test_record_schema_
+             # placement.py` is tier1 (the early return carries it) and
+             # `test_9078_record_written_by_production_path.py` runs on an
+             # UNGATED job (`test-record-postgres`, no diff gate). The
+             # completeness of this enumeration is now DERIVED rather than
+             # remembered — pinned generically by
+             # tests/test_ci_selection.py::test_every_record_migration_selects_core_and_both_readers
+             # (#10080), so the NEXT `*_record_*.sql` reds instead of going
+             # silently unguarded.
+             "supabase/migrations/20261109000001_record_embedding_vector.sql",
              # Re-stated at the migration pair, NOT replaced by it (#9638 review
              # P1): the DOC side is an independent member of this set. The
              # #9555/R7 entry above was inserted over this path, so a

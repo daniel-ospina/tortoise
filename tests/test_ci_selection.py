@@ -4784,6 +4784,43 @@ def test_the_semantic_id_key_migration_selects_every_reader_of_the_contract():
         assert reader in r["test_files"], (reader, r)
 
 
+def test_every_record_migration_selects_core_and_both_readers():
+    # #10080 (category A — a no-op gate): `CORE_ALSO` carries one HAND-WRITTEN
+    # entry per forward record migration, and nothing pinned the COMPLETENESS of
+    # that enumeration — the tuple arm above pins only the paths someone
+    # remembered to add. Measured on #11703's head: of the 16
+    # `supabase/migrations/*_record_*.sql` files,
+    # `20261109000001_record_embedding_vector.sql` (the #11642 vector move) was
+    # the ONE that selected no surface at all, so a migration-only edit to it
+    # ran neither the width pin (`test_11642_vector_move.py`, which parses its
+    # `vector(384)` literals) nor the registry pin (`test_9231`) nor
+    # `test_record_projection.py`.
+    #
+    # Derive the set instead of enumerating it: the assertion is over what the
+    # SELECTOR actually does, so it needs no prefix knowledge and cannot go
+    # stale as migrations are added. Non-vacuity: delete any one of these record
+    # migrations' `CORE_ALSO` entries and this reds naming that file (measured
+    # both ways on the entry this test was written with; all 11 record-migration
+    # entries were then removed one at a time and each reds naming itself).
+    # Entries for migrations OUTSIDE this glob are not covered here by design —
+    # the property this issue is about is the `*_record_*.sql` family.
+    migrations = sorted(
+        p.name for p in (REPO / "supabase" / "migrations").glob("*_record_*.sql")
+    )
+    # Guard the DERIVATION itself, without a count that decays: a renamed or
+    # emptied glob would make the loop below vacuous and report PASS over
+    # nothing. The glob shape carries no underscore after `record`, so a file
+    # merely containing "record" (e.g. `0014_metering_records.sql`) is
+    # correctly not a member — this asserts the membership the rest relies on.
+    assert "20261109000001_record_embedding_vector.sql" in migrations, migrations
+    for name in migrations:
+        r = _sel([f"supabase/migrations/{name}"])
+        assert r["full"] is False, (name, r)
+        assert r["surfaces"] == ["core"], (name, r)
+        assert "test_record_schema_placement.py" in r["test_files"], (name, r)
+        assert "test_record_projection.py" in r["test_files"], (name, r)
+
+
 def test_the_tenancy_migration_selects_the_posture_pins():
     # #9554, PR #9600 review cycle 1 (P2): the TENANCY POSTURE migration defines
     # the record's entire boundary — the role, its grants (including the
