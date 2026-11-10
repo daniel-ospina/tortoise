@@ -2937,11 +2937,16 @@ def test_cli_install_codex_installs_capture_into_the_codex_home(tmp_path):
     assert "TRUST" in r.stdout, r.stdout
 
 
-def test_cli_install_cursor_installs_capture_and_discloses_the_ide_only_limit(
+def test_cli_install_cursor_installs_capture_and_discloses_the_cloud_agent_limit(
         tmp_path):
     """`tortoise install cursor` installs the HOME-scoped capture seam and
-    DISCLOSES the IDE-only limitation on the install surface (owner ruling,
+    DISCLOSES the cloud-agent limitation on the install surface (owner ruling,
     #3819) — never a buried footnote.
+
+    #2122 / #11807: the limitation is disclosed as the LOAD PATH this install
+    writes (user-level, unreadable from a cloud agent VM), NOT as the blanket
+    "IDE-ONLY" absolute — Cursor fires both events on Self-Hosted Machines
+    workers, so the absolute over-asserts its own source.
 
     Mutation: drop cursor from the capture dispatch in `_cmd_install_hooks` —
     no `sessionEnd` registration lands and this REDs."""
@@ -2970,8 +2975,12 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_ide_only_limit(
     # (both the live `.clinerules/hooks` seam and the pre-#2124 `.cline/hooks`)
     assert not (root / ".clinerules").exists(), r.stdout
     assert not (root / ".cline").exists(), r.stdout
-    # the IDE-only disclosure is on the install surface
-    assert "IDE-ONLY" in r.stdout, r.stdout
+    # the platform-limit disclosure is on the install surface — stated as the
+    # LOAD PATH (this install is user-level, and a cloud agent VM cannot read
+    # it), never as a blanket "IDE-ONLY" absolute: Cursor's own page fires BOTH
+    # events on Self-Hosted Machines workers, so the absolute is unsupported
+    # (#11806 review P1, tracked as #11807).
+    assert "USER-level file" in r.stdout, r.stdout
     assert "CLOUD" in r.stdout.upper(), r.stdout
     assert "no editor-lifetime session boundary" in r.stdout, r.stdout
     # #2122: the disclosure must cover the INJECTION hook too, not only
@@ -2979,10 +2988,16 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_ide_only_limit(
     # user-level `~/.cursor/hooks.json` is not loaded there at all, so a message
     # naming only `sessionEnd` leaves the user believing the cold-context digest
     # still reaches a cloud session.
-    assert "Both Cursor hooks are IDE-ONLY" in r.stdout, r.stdout
+    assert "Both Cursor hooks are registered in" in r.stdout, r.stdout
     assert "NOT injected" in r.stdout, r.stdout
-    assert "sessionStart" in r.stdout and "not available in cloud agents" in r.stdout, r.stdout
+    # the SENTENCE, not two words from elsewhere in the output: the old
+    # conjunct-only assert stayed green with this clause deleted (review P2).
+    assert "that 'sessionStart' is not available in cloud agents" in r.stdout, r.stdout
     assert "User-level hooks" in r.stdout, r.stdout
+    # …and the qualification that keeps the claim true: the third surface where
+    # both events DO fire, which this installer does not write (#11807).
+    assert "Self-Hosted Machines" in r.stdout, r.stdout
+    assert "does not write" in r.stdout, r.stdout
 
 
 def test_cli_install_cursor_uninstall_says_the_seam_remains(tmp_path):
