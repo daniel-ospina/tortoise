@@ -1554,23 +1554,26 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     The figure is pinned to the TREE, not to `4f68a2aa7`, because that is what §5
     claims it is: population = every tracked file under `tortoise/`. It has since
     moved to **63** lines across **19** files, in three moves, one per workstream:
-    `cache_eviction.py:894` (the #10976 census's note on why labels do not partition
-    the node set) and #8447's ingest door (`tortoise/ingest.py`, the
-    `REFUSED_NOT_FOUND` enum docstring) took it 55/17 → 57/18, and #11729's #11641
-    vector work added six lines in `tortoise/hosted_backup.py` (a dump or a restore
-    that spans the D10 relabel has to say which `:Document` shape it carries),
-    carrying it to 63/19. Each move is the mechanism working: the census landed,
-    this check reddened, and §5 was re-measured instead of the number being quietly
-    widened or the guard loosened.
+    `cache_eviction.py:956` (the #10976 census's note on why labels do not partition
+    the node set), #8447's ingest door (`tortoise/ingest.py`, the
+    `REFUSED_NOT_FOUND` enum docstring), and #11729's runtime-label writers
+    (`tortoise/hosted_backup.py` — an EXISTING file that carried no `:Document` mention
+    at `4f68a2aa7`, which is the second file the count gained; its six added mentions
+    are the dump-and-restore prose about pre-D10 artifacts). That move is the mechanism
+    working: the census landed, this check reddened, and §5 was re-measured instead
+    of the number being quietly widened or the guard loosened.
 
     §5's second number is pinned with it: the narrow `\\(\\w*:Document` pattern
-    matching **three** lines now — the two RST literals in `migrate_kinds.py:63,170`
-    plus that same `cache_eviction.py:894` comment — is what makes *"a guard would
-    have needed a hand-maintained allowlist"* a measurement rather than an assertion,
-    and it moved 2 → 3 with the line count. The pin is exact for the same reason the
+    matching **six** lines now — the two RST literals in `migrate_kinds.py:63,170`,
+    that same `cache_eviction.py:956` comment, and three of `hosted_backup.py`'s
+    (`:116`, `:948`, `:3429`) that name the pre-D10 node shape in double-backtick
+    literals — is what makes *"a guard would have needed a hand-maintained
+    allowlist"* a measurement rather than an assertion, and it moved 2 → 3 → 6 with
+    the line count. The pin is exact for the same reason the
     first one is: a narrow pattern that starts matching most of the prose is the day
     §5's exclusion argument stops being true, and the honest response is to re-measure
-    it, never to widen the assertion.
+    it, never to widen the assertion. Six of sixty-three is still the exception, so
+    the argument stands at this head.
     """
     doc = _doc()
     match = _LABEL_CLAIM.search(doc)
@@ -1593,8 +1596,8 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     assert narrow == 6, (
         f"the narrow `\\(\\w*:Document` pattern now matches {narrow} lines, not the 6 "
         "§5 records (2 RST literals in `migrate_kinds.py`, the `cache_eviction.py` "
-        "comment, and `hosted_backup.py`'s 3 `(:Document {id, …})` spellers) — the "
-        "exclusion argument needs re-measuring"
+        "comment, and 3 pre-D10 shape literals in `hosted_backup.py`) — the exclusion "
+        "argument needs re-measuring"
     )
 
 
@@ -1754,10 +1757,10 @@ def test_every_cited_line_in_this_section_still_carries_the_prose_it_describes()
 
 
 #: §5 introduces some of its evidence with the SYMBOL the line declares:
-#: `` `_DOC_RETIRED_KEYS` (`projection/entities.py:1975`) ``. Those pointers rot the
+#: `` `_DOC_RETIRED_KEYS` (`projection/entities.py:1974`) ``. Those pointers rot the
 #: same way the `:Document` ones did — and one already had: §5 cited
 #: `projection/entities.py:1584` for `_DOC_RETIRED_KEYS`, which was right when the
-#: map was cut at `438a8924d1` and is at **1975** at this head, so the citation
+#: map was cut at `438a8924d1` and is at **1974** at this head, so the citation
 #: pointed at an unrelated comment about `_ingestedAtStored`. No pin noticed, because
 #: the guard above reads only `cache_eviction.py` citations.
 _SYMBOL_POINTER = re.compile(r"`([A-Za-z_][\w.]*)`\s*\(\s*`([\w./-]+\.py):(\d+(?:,\d+)*)`")
@@ -1768,7 +1771,7 @@ def test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names() -> Non
 
     Reachable — and it WAS the shipped state: §5's D10 evidence cited
     `projection/entities.py:1584` as `_DOC_RETIRED_KEYS`, whose declaration is at
-    1975 (it was 1584 when the map was cut; that module has grown since). The
+    1974 (it was 1584 when the map was cut; that module has grown since). The
     citation therefore sent a reader re-examining the retirement mechanism to a
     comment about `_ingestedAtStored` — the exact class of stale evidence pointer
     the `:Document` pin next door closes for one file, still open for the rest.
