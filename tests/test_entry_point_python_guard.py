@@ -1028,7 +1028,10 @@ def test_the_pin_reads_through_the_seam_rather_than_its_own_copy():
     named in the failure, because a remedy that does not exist for the case in hand is how
     the round-3 version sent a deletion to "update `name` here". A third, partial one is
     named too: renaming the SEAM at its definition and real call sites while leaving this
-    test's reference stale reds the assertion below, and its message says so.
+    test's reference stale reds the assertion below, and its message says so. This list was
+    TWO until round 6 measured that a renamed local, an annotated assignment and a wrapped
+    call each red it as well, with a false diagnosis; the predicate now accepts every binding
+    this file already uses, so the list is the trip set again rather than a guess.
     """
     source = Path(__file__).read_text(encoding="utf-8")
     name = "test_the_record_exemption_prose_counts_the_set_it_describes"
@@ -1055,21 +1058,31 @@ def test_the_pin_reads_through_the_seam_rather_than_its_own_copy():
     }
     # ASSIGNMENT, not mere presence: a name-only check is satisfied by a dead
     # `assert _cardinality_claims_in(src)` beside an inline re-derivation, which leaves the
-    # tolerance dead and the pin green (#11777 review round 5, finding 2 — measured).
-    reads_the_seam = any(
-        isinstance(node, ast.Assign)
-        and any(isinstance(target, ast.Name) and target.id == "matches" for target in node.targets)
-        and isinstance(node.value, ast.Call)
-        and isinstance(node.value.func, ast.Name)
-        and node.value.func.id == "_cardinality_claims_in"
-        for node in ast.walk(pin)
-    )
+    # tolerance dead and the pin green (#11777 review round 5, finding 2 — measured). The
+    # check is on the assigned VALUE and accepts the bindings this file already uses — plain
+    # `=`, annotated `: list[str] =`, any local name, and a value that WRAPS the call —
+    # because an earlier version required `matches = <bare call>` exactly and false-red a pin
+    # renamed, annotated or wrapped, with the diagnosis below (#11777 review round 6).
+    reads_the_seam = False
+    for node in ast.walk(pin):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        value = node.value
+        if value is not None and any(
+            isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Name)
+            and sub.func.id == "_cardinality_claims_in"
+            for sub in ast.walk(value)
+        ):
+            reads_the_seam = True
+            break
     assert reads_the_seam, (
-        "the cardinality pin does not assign `matches` FROM `_cardinality_claims_in` — it "
-        "has its own copy of the extraction again (or keeps a dead call to the seam beside "
-        "one), so the formatting tolerance is dead code and the next `**four**` reds with "
-        "'the sentence is gone' (that is #11775). Read through the seam. If you RENAMED "
-        "`_cardinality_claims_in`, update this assertion's name as well."
+        "the cardinality pin never assigns a value that comes FROM `_cardinality_claims_in` "
+        "— it has its own copy of the extraction again (or keeps a dead call to the seam "
+        "beside one), so the formatting tolerance is dead code and the next `**four**` reds "
+        "with 'the sentence is gone' (that is #11775). Read through the seam. (A local "
+        "binding, its name, its annotation and any wrapper around the call are all fine.) "
+        "If you RENAMED `_cardinality_claims_in`, update this assertion's name as well."
     )
     rederived = called & {"_normalise_prose", "_stated_cardinalities", "_comment_region_above"}
     assert not rederived, (
