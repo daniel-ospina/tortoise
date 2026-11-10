@@ -1904,6 +1904,19 @@ unnamable declared document is its own fail-closed verdict. (2) An empty surface
 return `({}, [])`, i.e. the state half of the gate compared nothing and reported agreement — now a first-class
 `surface is EMPTY` verdict. Both are pinned by tests that fail without the guard.
 
+**Three more fail-opens found in cycles 4 and 5, all fixed before landing.** (3) An unreadable surface returned an
+empty marker set with NO error: `is_dir()` answers about the inode and `Path.rglob` swallows the `PermissionError`
+that `os.scandir` raises, so a surface at mode `0o000` read exactly like a declaration-free one — the gate's primary
+direction (a marker with no registry row) silently empty for every document behind it. (4) The first fix probed only
+the surface ROOT, so an unreadable SUBDIRECTORY still returned `markers: {}` with no verdict; the walk now collects
+its own errors (`os.walk(onerror=…)`) instead of using `rglob`, which is the one shape that reports a read it was
+refused, at any depth. (5) `_document_name` qualifies a document with its surface's BASENAME, which is what
+separates `architecture/x.md` from `epics/x.md` — but nothing asserted the basenames differ, so two surfaces named
+`plans` published ONE identity per document and a marker in the first satisfied a row about an unmarked document in
+the second, which is precisely the cross-surface alias the prefix exists to prevent. All three are pinned by tests
+that fail without the guard (mutation-checked). The `0o000` shapes need local filesystem state — git cannot store
+such a directory — so those two tests `chmod` to build the shape and skip on a box that can read it anyway.
+
 **Two documentation-truth defects found in review cycle 2, and two factual defects in cycle 3.** Cycle 2: the
 registry header said *"these thirteen are every mechanism either document names"* — inside a sentence whose *"it is
 **not** a claim that …"* negation is the point, so what was stale was the NUMERAL, not a completeness claim (there
