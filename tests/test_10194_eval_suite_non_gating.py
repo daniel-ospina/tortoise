@@ -95,6 +95,14 @@ _WALKED_LEG_KEYS = frozenset({"shards", "slow_shards", "carve_shards",
 #: `test_the_eval_workflow_is_manual_and_reachable_by_every_subtree_file`).
 _NON_GATING_LEG_KEYS = frozenset({"on_demand"})
 
+#: The FLAT legs `test_no_subtree_file_is_in_any_gating_leg` reads back against
+#: the producer, per family. Pinned so a leg added to the map gets a deliberate
+#: decision about its arm: an unwritten arm cannot fire, and this file has
+#: already shipped that mistake once (the `push slow_selected` leg had no
+#: read-back, and only the fact that its arm happened to exist kept it honest).
+_READBACK_FLAT_LEGS = frozenset({"fast_pool", "slow", "env_broken",
+                                "carve_out", "push slow_selected"})
+
 
 def _manifest() -> dict:
     return cs.load_manifest()
@@ -126,8 +134,8 @@ _TIER2_CHANGES = ("tests/eval/ask/test_ask_corpus.py",
 #: ⚠️ The reverse cases are guarded elsewhere, not here: a `push_legs()` key the
 #: selector gains is refused by `_WALKED_LEG_KEYS`/`_NON_GATING_LEG_KEYS` in the
 #: leak test, and a leg whose CONTENT is emptied, filtered or SWAPPED with
-#: another while its name survives is refused there too — every leg family (the
-#: four flat legs, all three shard families, both tier-2 families) is read back
+#: another while its name survives is refused there too — every leg family (all
+#: FIVE flat legs, all three shard families, both tier-2 families) is read back
 #: against the producer's own set, per family, so any map-side mutation of a
 #: leg's membership reds. Two residuals are NOT covered, both measured: a filter
 #: applied to the PRODUCER itself (in `tools/ci_selection.py`) moves both sides
@@ -187,19 +195,31 @@ def _expected_legs(manifest: dict) -> set[str]:
        That one is now refused by TWO arms in the same test: every gating leg
        must be non-empty (only `tier-2 slow_selected [...]` is exempt, and for a
        stated reason), and every leg family is read back against the producer's
-       own set — the four flat legs, all three shard families, and both tier-2
-       families — so a filter inside the map reds even though the leg names
-       survive. The two sides are different code paths (`push_legs()`/`select()`
-       vs this map); an earlier version of this test compared two PRODUCER calls,
-       which no map edit can reach, and its reviewer measured that.
+       own set — all FIVE flat legs (`fast_pool`, `slow`, `env_broken`,
+       `carve_out`, `push slow_selected`), all three shard families, and both
+       tier-2 families — so a filter inside the map reds even though the leg
+       names survive. The flat-leg set is pinned (`_READBACK_FLAT_LEGS`), so a
+       sixth flat leg cannot arrive with no arm. The two sides are different code
+       paths (`push_legs()`/`select()` vs this map); an earlier version of this
+       test compared two PRODUCER calls, which no map edit can reach, and its
+       reviewer measured that.
 
-       ⛔ Two things this docstring must NOT be read as claiming, both measured:
-       it cannot refuse a filter applied to the PRODUCER itself (in
-       `tools/ci_selection.py`) — both sides move together, and pool membership
-       is `leg_coverage_issues()` / `--integrity`'s job — and nothing enumerates
-       the keys `select()` RETURNS, so a new gating key there is unguarded.
-       Neither hides a leak today (the leak check reads the unfiltered sets), which
-       is why they are stated rather than enforced.
+       ⛔ Two residuals, both measured GREEN here, both stated so nobody infers a
+       guard:
+
+       (a) a filter applied to the PRODUCER itself (in `tools/ci_selection.py`)
+           moves both sides together. The fail-closed owner of that property is
+           `fast_files_absent_from_halves()` (plus its pins in
+           `tests/test_ci_selection.py`) — NOT `leg_coverage_issues()`, which
+           returns `[]` for a dropped fast file, and NOT `--integrity`, which
+           prints a `#1266` warning and still exits 0. For a `slow_files` drop
+           nothing reds at all today: measured, `--integrity` clean and the suite
+           green. That is a real hole in the SELECTOR's front end, not in this
+           pin.
+       (b) nothing enumerates the keys `select()` RETURNS, so a new gating key
+           there is unguarded — including by the leak check below, which iterates
+           only the keys this map built. "Today" in the next sentence means "no
+           such key exists", not "the leak guard would catch it".
 
     The count is the manifest's, never a second copy in this file: the two
     `core` rows #11642 added move no shard count at all (measured over
@@ -233,9 +253,10 @@ def _gating_sets(manifest: dict) -> dict[str, list[str]]:
     KIND missing there reds. ⚠️ Two ways this map can go wrong, stated so a
     reader does not infer a guard that is not there: a leg whose CONTENT is
     emptied, filtered or swapped reds in the per-family read-backs — but a key
-    `select()` newly RETURNS is enumerated by nothing, and a filter applied to the
-    PRODUCER (in `tools/ci_selection.py`) moves both sides together. See
-    `_expected_legs()`.
+    `select()` newly RETURNS is enumerated by nothing (the leak check below walks
+    only the keys THIS map built), and a filter applied to the PRODUCER moves both
+    sides together (`fast_files_absent_from_halves()` owns that one, not this
+    file). See `_expected_legs()`.
     """
     legs = cs.push_legs(manifest)
     out: dict[str, set[str]] = {
@@ -361,7 +382,7 @@ def test_no_subtree_file_is_in_any_gating_leg():
     def _shard_sets(entries):
         return {e["name"]: set(e["files"]) for e in entries}
 
-    map_by_family = {
+    producer_by_family = {
         "fast_pool": {_bare(f) for f in cs.fast_pool(manifest)},
         "slow": set(producer["slow"]),
         "env_broken": set(producer["env_broken"]),
@@ -370,7 +391,17 @@ def test_no_subtree_file_is_in_any_gating_leg():
                                for f in cs.select([], "push",
                                                   manifest)["slow_selected"]},
     }
-    for family, producer_set in map_by_family.items():
+    # Pinned as a SET, so a fifth flat leg cannot be added to the map without
+    # someone deciding whether it gets a read-back here — an arm that is never
+    # written is an arm that cannot fire (measured: dropping the
+    # `push slow_selected` arm left this file 8 passed, and a filter on that leg
+    # then went green too).
+    assert set(producer_by_family) == _READBACK_FLAT_LEGS, (
+        "the per-family read-back does not cover every flat gating leg the map "
+        f"walks: missing {sorted(_READBACK_FLAT_LEGS - set(producer_by_family))}, "
+        f"extra {sorted(set(producer_by_family) - _READBACK_FLAT_LEGS)}. A leg "
+        "with no read-back has nothing checking its membership.")
+    for family, producer_set in producer_by_family.items():
         assert legs[family] == producer_set, (
             f"the `{family}` leg does not carry the producer's own set — a "
             "filter applied inside `_gating_sets()` while the leg NAME survives "
@@ -394,8 +425,6 @@ def test_no_subtree_file_is_in_any_gating_leg():
             f"{sorted(set(got) - set(want))[:8]}\nshards-only-in-producer: "
             f"{sorted(set(want) - set(got))[:8]}\ncontent-differs: "
             f"{sorted(k for k in set(got) & set(want) if got[k] != want[k])[:8]}")
-        assert not [k for k in got if got[k] != want.get(k)], (
-            f"`{family}` leg content differs from the producer's")
     for changed in _TIER2_CHANGES:
         sel = cs.select([changed], "pull_request", manifest)
         for key, field, drop_all in (
