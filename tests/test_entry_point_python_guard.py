@@ -637,16 +637,25 @@ _DELIBERATE_BARE_FORM: frozenset[tuple[str, str]] = frozenset(
         # mechanism, so the exemption is what the record's own decision requires —
         # rewriting the doc line instead would reverse it.
         #
-        # ⛔ This entry has been killed twice by a rewrite of the line it names, so
-        # its history is the warning: added with `#11755` (`217d46bac5`); deadened
-        # when `#11756` (`7c45d5af1f`) rewrote the doc line to `uv run python`;
-        # retired as dead weight by `#11757` (`900d4aafc6`) on that basis; then
-        # `#11759` (`6ba6fac984`) restored the record's original form and
-        # re-declared this set as its exemption — which left `main` red on
-        # `test_no_doc_or_usage_advertises_the_form_the_guard_refuses` until the key
-        # came back here. Membership is the exact STRIPPED line, so the key can only
-        # be revived by restoring the line it names, never by re-declaring it, and
-        # it dies again the moment the doc line is reworded.
+        # ⛔ This entry has been killed twice, so its history is the warning — and
+        # the ORDER below is measured, not remembered (`git merge-base
+        # --is-ancestor`): added with `#11755` (`217d46bac5`); deadened when
+        # `#11756` (`7c45d5af1f`) rewrote the doc line to `uv run python`; made
+        # live AGAIN when `#11759` (`6ba6fac984`) restored the record's original
+        # form and named this set as its mechanism in the DOC — that commit does
+        # not touch this file, so the key never left and simply began to match a
+        # live line again; then removed by `#11757` (`900d4aafc6`) on the stale
+        # premise that the doc still carried `uv run python`, which MOVED `main`'s
+        # red from the dead-key test to
+        # `test_no_doc_or_usage_advertises_the_form_the_guard_refuses` instead of
+        # clearing it — until the key came back here.
+        #
+        # ⛔ The lesson is the retirement step, not the restore: re-measure the doc
+        # line before retiring this key, because a commit message saying the line
+        # was rewritten proves nothing about the line today. Membership is the
+        # exact STRIPPED line, so the key can only be revived by restoring the line
+        # it names, never by re-declaring it, and it dies again the moment the doc
+        # line is reworded.
         (
             "docs/plans/2026-11-10-issue-11689-e1e2-owned-floors.md",
             "$ python3 tools/capstone_preregistration_check.py --dir "
