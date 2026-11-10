@@ -434,21 +434,22 @@ cmd_alive() {
   # witness below: `cat … || true` collapses them, and a port that EXISTS but
   # cannot be read is a permissions/torn-state fault, not "alloc never ran". The
   # sentence may not name an absence the probe did not observe — and it is THREE
-  # states, not two: ABSENT (`! -f`), EXISTS and EMPTY (`-f && ! -s` — the read
-  # succeeded and returned nothing), and EXISTS with content that could not be read
-  # (`-s` needs no read permission, so that is the fault case). Reporting a
-  # successful empty read as an unreadable file is the same conflation in the other
-  # direction (#11675 review, findings 4/5), and it must not send the reader to a
-  # permissions hunt: `record` never writes the file empty, so an empty one is a
-  # torn write or a truncating tool.
+  # states, not two: ABSENT (`! -f`), EXISTS with a readable file that yields no port
+  # value (`-f`, and either `! -s` or `-r` — the read SUCCEEDED and returned nothing,
+  # which a whitespace-only file also does once command substitution strips the
+  # newlines), and EXISTS with content that could not be read (`-s` AND `! -r` — the
+  # permission positive, since `-s` is a size test that needs no read access).
+  # Reporting a successful empty read as an unreadable file is the same conflation in
+  # the other direction, and a `-s`-only gate did exactly that (#11675 review,
+  # findings 4/5).
   local no_port_clause="no port was recorded for this name"
   local port_unreadable=""
   if [[ -z "$port" && -f "$dir/${name}.port" ]]; then
     port_unreadable="${name}.port"
-    if [[ -s "$dir/${name}.port" ]]; then
+    if [[ -s "$dir/${name}.port" && ! -r "$dir/${name}.port" ]]; then
       no_port_clause="a port file EXISTS (${port_unreadable}) with content but could not be read"
     else
-      no_port_clause="a port file EXISTS (${port_unreadable}) and is EMPTY"
+      no_port_clause="a port file EXISTS (${port_unreadable}) but carries no port value (empty, or only whitespace)"
     fi
   fi
   local at_port="" stranger=""

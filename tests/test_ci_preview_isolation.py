@@ -1198,8 +1198,8 @@ def test_the_no_port_verdict_does_not_borrow_an_untaken_identity_leg(
         assert "port file EXISTS" in verified.stdout, (
             "a readable-but-empty port file was reported as one that was never "
             "recorded, in the MATCHED-witness sentence: " + verified.stdout)
-        assert "and is EMPTY" in verified.stdout, (
-            "the empty case must be NAMED as empty, not merged into 'could not be "
+        assert "carries no port value" in verified.stdout, (
+            "the no-value case must be NAMED as such, not merged into 'could not be "
             "read' — the other cause, with a different remedy (a permissions or "
             "torn-state hunt), so one sentence for both sends the reader to the "
             "wrong one: " + verified.stdout)
@@ -1223,20 +1223,54 @@ def test_the_no_port_verdict_does_not_borrow_an_untaken_identity_leg(
         assert "no start-time witness was recorded" not in empty.stdout, empty.stdout
         assert "our recorded process" not in empty.stdout, empty.stdout
 
-        # Same rule for the port file, and it is THREE states: absent, EXISTS and
-        # EMPTY (`-f && ! -s` — the read succeeded and returned nothing), and
-        # EXISTS with content that could not be read (`-s` needs no read
-        # permission). Collapsing the last two is the same conflation in the other
-        # direction, and the RECYCLED branch (exit 8) computes its port clause from
-        # the same value, so it used to name an absence it never observed.
+        # Same rule for the port file, and it is THREE states: absent, EXISTS with
+        # no port VALUE (`-f`, and `! -s` or `-r` — the read succeeded and returned
+        # nothing, which a whitespace-only file also does once command substitution
+        # strips the newlines), and EXISTS with content that could not be read
+        # (`-s` AND `! -r`: `-s` alone is a size test that passes on a file this uid
+        # cannot read, so it does not by itself establish "could not be read").
+        # Collapsing the last two is the same conflation in the other direction, and
+        # the RECYCLED branch (exit 8) computes its port clause from the same value,
+        # so it used to name an absence it never observed.
         (state_dir / "app.port").write_text("")
         port_empty = _script("alive", "--name", "app", env=state)
         assert port_empty.returncode == 9, port_empty.stdout + port_empty.stderr
-        assert "port file EXISTS" in port_empty.stdout and "EMPTY" in port_empty.stdout, (
+        assert "port file EXISTS" in port_empty.stdout and "carries no port value" in port_empty.stdout, (
             "an empty port file was reported as one that was never recorded, or as "
             "one that could not be read: "
             + port_empty.stdout)
         assert "no port was recorded" not in port_empty.stdout, port_empty.stdout
+
+        # ⛔ …and the THIRD state has its own leg, because a sentence nobody drives
+        # is the shape this whole arm exists to catch (measured: a mutant emitting
+        # the no-value sentence for an unreadable file left this file green).
+        # Root ignores the mode this state needs, so skip there — the sibling
+        # root-skip above is the same reason.
+        if os.geteuid() != 0:
+            (state_dir / "app.port").write_text("4999\n")
+            (state_dir / "app.port").chmod(0o000)
+            try:
+                unreadable = _script("alive", "--name", "app", env=state)
+                assert unreadable.returncode == 9, unreadable.stdout + unreadable.stderr
+                assert "with content but could not be read" in unreadable.stdout, (
+                    "an unreadable port file was NOT named as unreadable: "
+                    + unreadable.stdout)
+                assert "carries no port value" not in unreadable.stdout, (
+                    "an unreadable port file was reported as one with no value: "
+                    + unreadable.stdout)
+            finally:
+                (state_dir / "app.port").chmod(0o644)
+            (state_dir / "app.port").write_text("")
+
+        # …and a file that is NOT readable but yields no port must not be called
+        # unreadable when it was read fine (whitespace only): `-s` is true there.
+        (state_dir / "app.port").write_text("\n\n")
+        whitespace = _script("alive", "--name", "app", env=state)
+        assert whitespace.returncode == 9, whitespace.stdout + whitespace.stderr
+        assert "with content but could not be read" not in whitespace.stdout, (
+            "a readable whitespace-only port file was reported as unreadable: "
+            + whitespace.stdout)
+        (state_dir / "app.port").write_text("")
 
         # …and the RECYCLED (exit 8) sentence derives its port clause from the
         # SAME value, so it may not say "no port was recorded" over a port file
@@ -1248,7 +1282,7 @@ def test_the_no_port_verdict_does_not_borrow_an_untaken_identity_leg(
         assert "no port was recorded for this name" not in recycled.stdout, (
             "the RECYCLED verdict named a port absence it did not observe: "
             + recycled.stdout)
-        assert "EMPTY" in recycled.stdout, (
+        assert "carries no port value" in recycled.stdout, (
             "the RECYCLED verdict did not carry the three-way port clause: "
             + recycled.stdout)
     finally:
