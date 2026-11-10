@@ -612,9 +612,9 @@ def build_or_query(
 def index_text(*parts) -> str:
     """Dual-stack index-text builder: ' '.join of non-empty parts.
 
-    The indexed text is content ∪ search_keys — the TF-IDF fallback stacks
-    (``fallback_snapshot`` and ``fallback_tfidf``) mirror the real backend's
-    multi-field Point FTS index with it. Accepts ``str``, ``None``, and
+    The indexed text is :data:`POINT_INDEX_TEXT_FIELDS` — the TF-IDF fallback
+    stacks (``fallback_snapshot`` and ``fallback_tfidf``) mirror the real
+    backend's multi-field Point FTS index with it. Accepts ``str``, ``None``, and
     list/tuple parts: E3's pre-flatten graph values are arrays (and the
     eval ingest passes lists), so each element joins as its own chunk —
     ``index_text("a b", ["c d", "e"]) == "a b c d e"``.
@@ -633,3 +633,39 @@ def index_text(*parts) -> str:
         if s:
             chunks.append(s)
     return " ".join(chunks)
+
+
+#: #11682 — the ``Point`` label's LEXICAL field set: exactly the properties the
+#: Point FULLTEXT index is declared over, and exactly the parts every
+#: index-text mirror joins.
+#:
+#: ONE declaration, read by the index DDL
+#: (``projection/__init__.py::_FULLTEXT_INDEX_LABEL_FIELDS``, whose Point entry
+#: IS this tuple), by the in-process BM25 leg's corpus read
+#: (``search_engine.run_bm25_query``) and by the degraded snapshot lane
+#: (``fallback_snapshot``) — so the lexical stacks cannot disagree about what a
+#: Point says. A field added here reaches all of them; a field added in ONE of
+#: them is the drift this constant exists to prevent.
+#:
+#: ``quote`` is the point's VERBATIM source text (persisted by the projection,
+#: read back by the SDK). It is its own indexed field rather than text appended
+#: to ``search_keys``: ``search_keys`` is E3's paraphrase/synonym vocabulary (the
+#: A4 PRF expansion leg harvests its tokens), while ``quote`` is the wording the
+#: speaker actually used. Before #11682 no retrieval surface searched it, so a
+#: query phrased the way it was said matched nothing unless the paraphrase
+#: happened to keep the same words — the lossy regime the architecture
+#: (EXTRACTOR-V4 §S1) and #8488's research both name.
+POINT_INDEX_TEXT_FIELDS: tuple[str, ...] = ("content", "search_keys", "quote")
+
+
+def point_index_text(point: dict) -> str:
+    """The index text for ONE Point dict, joined in
+    :data:`POINT_INDEX_TEXT_FIELDS` order.
+
+    The one join every mirror calls, so the field list lives in exactly one
+    place: whatever ``point.get(field)`` returns joins (a list-valued legacy
+    ``search_keys`` still flattens through :func:`index_text`; an absent
+    ``quote`` contributes nothing, so an UNQUOTED point's index text is
+    byte-identical to the pre-#11682 text).
+    """
+    return index_text(*(point.get(field) for field in POINT_INDEX_TEXT_FIELDS))

@@ -59,6 +59,9 @@ from tortoise.index_catalogue import (  # #3154/#522/#3441: the ONE presence che
     index_catalogue_has_field,
     index_row_has_field,
 )
+from tortoise.sparse import (  # #11682: the ONE Point lexical field-set seam
+    POINT_INDEX_TEXT_FIELDS,
+)
 from tortoise.vector_write import (  # #4520: the ONE clear-then-set vector seam
     clear_then_set_prefix,
     set_embedding_clause,
@@ -6556,7 +6559,13 @@ _RANGE_INDEX_LABEL_PROPS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 _FULLTEXT_INDEX_LABEL_FIELDS: tuple[tuple[str, list[str]], ...] = (
-    ("Point", ["content", "search_keys"]),  # R2 (#1541) D3
+    # R2 (#1541) D3 — content ∪ search_keys; #11682 adds the VERBATIM ``quote``
+    # (the field the point's source text is persisted in). The tuple is the ONE
+    # declaration in ``tortoise.sparse``, so every index-text mirror (the BM25
+    # leg, the degraded snapshot lane) joins the same fields — see
+    # ``POINT_INDEX_TEXT_FIELDS`` for why quote is its own field and not text
+    # appended to ``search_keys``.
+    ("Point", list(POINT_INDEX_TEXT_FIELDS)),
     # #244: AgentSession events populate name (not subject) — index both so
     # session name matches surface through FTS.
     ("Event", ["subject", "name"]),
@@ -19386,6 +19395,12 @@ class FalkorProjection(
     _REQUIRED_FULLTEXT_INDEXES = (
         ("Point", "content", "FULLTEXT"),
         ("Point", "search_keys", "FULLTEXT"),
+        # #11682: the point's VERBATIM source text must be in the index — a
+        # quote-only phrase is otherwise unreachable by the lexical leg (the
+        # defect this entry makes un-shippable), and a graph carrying only the
+        # pre-#11682 two-field index reads NOT current, so it takes the
+        # drop→recreate migration instead of silently keeping the gap.
+        ("Point", "quote", "FULLTEXT"),
         ("Event", "subject", "FULLTEXT"),
         ("Event", "name", "FULLTEXT"),
         ("Subject", "name", "FULLTEXT"),
@@ -19528,23 +19543,40 @@ class FalkorProjection(
         "AND typeof(n.search_keys) = 'List' RETURN 1 LIMIT 1"
     )
 
-    def _point_fts_search_keys_field_missing(self) -> bool:
-        """Is the Point FULLTEXT index still the legacy single-field form?
+    #: The fields the Point FULLTEXT index is SUPPOSED to carry — the SAME
+    #: list the sweep CREATES it with, so the migration's target cannot drift
+    #: from the schema it migrates to (the ``_EVENT_FTS_TARGET_FIELDS`` rule).
+    _POINT_FTS_TARGET_FIELDS: tuple[str, ...] = tuple(
+        dict(_FULLTEXT_INDEX_LABEL_FIELDS)["Point"])
+
+    def _point_fts_field_missing(self) -> bool:
+        """Is the Point FULLTEXT index missing ANY field it is declared with?
 
         The SCHEMA half of the legacy branch's precondition (#5444).
-        That branch exists to drop→recreate ``Point(content)`` into
-        ``Point(content, search_keys)``, and gating it on the DATA precondition
-        alone meant a legacy graph whose data is already FLAT never upgraded:
-        the field stayed missing, the probe stayed not-current, and every
-        construction re-ran the whole sweep — #4465's churn, permanently, with
-        ``search_keys`` never indexed.
+        That branch exists to drop→recreate a legacy index into the DECLARED
+        field set, and gating it on the DATA precondition alone meant a legacy
+        graph whose data is already FLAT never upgraded: the field stayed
+        missing, the probe stayed not-current, and every construction re-ran
+        the whole sweep — #4465's churn, permanently, with the missing field
+        never indexed.
+
+        #5444 asked the question about ONE field (``search_keys``) because that
+        was the only widening the set had. #11682 adds ``quote``, and the same
+        trap applies verbatim: a probe that only looks for ``search_keys``
+        returns False on a two-field index, so the destructive half never runs
+        and ``quote`` stays unindexed — silently, forever. So the question is
+        asked against :attr:`_POINT_FTS_TARGET_FIELDS`, the SAME list the sweep
+        creates, and a THIRD widening is covered by construction rather than by
+        remembering to edit this method.
 
         A probe that cannot run returns True (repair, never assume done).
         """
         try:
             for row in self.g.query("CALL db.indexes()").result_set:
                 if row and row[0] == "Point":
-                    return "search_keys" not in (row[2] or {})
+                    kinds = row[2] or {}
+                    return any(f not in kinds
+                               for f in self._POINT_FTS_TARGET_FIELDS)
             return True
         except Exception:
             return True
@@ -19572,7 +19604,7 @@ class FalkorProjection(
         index a peer had just created.
 
         So the destructive half is gated on the SCHEMA half — the same
-        reasoning as ``_point_fts_search_keys_field_missing`` (#5444).
+        reasoning as ``_point_fts_field_missing`` (#5444).
 
         Requires the field to be indexed AS FULLTEXT (a RANGE index on
         ``name`` cannot answer ``queryNodes``), read from the kinds map
@@ -19640,7 +19672,8 @@ class FalkorProjection(
         """The ONE-TIME Point data fixup, callable from EITHER create branch.
 
         Flattens array-valued ``search_keys`` to a space-joined string, then
-        drop→recreates the Point FTS index and mints ``point_fts_v2``.
+        drop→recreates the Point FTS index (with its DECLARED field set —
+        ``_POINT_FTS_TARGET_FIELDS``) and mints ``point_fts_v2``.
 
         A shared helper so BOTH branches flatten identically: a RESTORE/DR
         graph — array-valued ``search_keys`` with no index (the dump carries
@@ -19693,7 +19726,13 @@ class FalkorProjection(
             # FalkorDB 6.0.0 REJECTS -- so this migration could never complete
             # on that engine, and the failure was swallowed. The helper tries
             # the Cypher DDL first.
-            self._create_fulltext_index("Point", ["content", "search_keys"])
+            # #11682: recreate with the DECLARED field set (now including the
+            # verbatim ``quote``), never a literal — a hardcoded list here would
+            # recreate a two-field index and leave the probe not-current
+            # forever, i.e. the drop→recreate churn this migration exists to
+            # end.
+            self._create_fulltext_index(
+                "Point", list(self._POINT_FTS_TARGET_FIELDS))
             created = True
             self.g.query("MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true")
         except Exception as e:
@@ -20214,7 +20253,7 @@ class FalkorProjection(
                                 # and without it the probe stays not-current and
                                 # every construction re-runs the full sweep.
                                 if (self._array_valued_search_keys_exist()
-                                        or self._point_fts_search_keys_field_missing()):
+                                        or self._point_fts_field_missing()):
                                     self._fix_point_search_keys()
                             except Exception:
                                 pass

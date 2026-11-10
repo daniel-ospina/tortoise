@@ -1,7 +1,8 @@
 """#10122 — a Point's ``name`` is STORED but not lexically indexed (advisory pin).
 
 THE DEFECT, measured on both lanes. The Point FULLTEXT index is created over
-``content`` + ``search_keys`` only (``tortoise/projection/__init__.py``::
+``content`` + ``search_keys`` (+ the verbatim ``quote``, #11682) only
+(``tortoise/projection/__init__.py``::
 ``_FULLTEXT_INDEX_LABEL_FIELDS``), yet the write path ACCEPTS and STORES
 ``name`` on a Point: ``create_point("statement", "body", name="…")`` and
 ``update_point(pid, name="…")`` both succeed and the node holds ``n.name``.
@@ -324,13 +325,23 @@ def test_the_point_index_field_set_is_pinned():
     Without this, adding any other field (a `title`) would red nothing, and
     adding `name` would only red the behavioural pin — this states the set the
     ruling depends on, so a future change has to face it explicitly.
+
+    #11682 faced it and added `quote` DELIBERATELY — the point's verbatim
+    source text, the field the issue makes part of the lexical surface. The
+    ruling above is about `name` (an identifier the write path accepts but the
+    index does not hold) and is untouched: `name` is still absent here, and the
+    advisory is what keeps it honest. `quote` is not `name` — it is the
+    original wording a query is phrased in, so indexing it is the correctness
+    fix #11682 lands, and `sparse.POINT_INDEX_TEXT_FIELDS` keeps the BM25 and
+    snapshot mirrors on the same set.
     """
     from tortoise.projection import _FULLTEXT_INDEX_LABEL_FIELDS
 
-    assert dict(_FULLTEXT_INDEX_LABEL_FIELDS)["Point"] == ["content", "search_keys"], (
+    assert dict(_FULLTEXT_INDEX_LABEL_FIELDS)["Point"] == [
+        "content", "search_keys", "quote"], (
         "the Point fulltext field set changed — the #10122 ruling (option A: "
         "warn, do NOT index `name`) and the #8486 measurement gate both rest "
-        "on this exact set")
+        "on this exact set; #11682 added `quote` on purpose")
 
 
 def test_a_name_only_update_silenced_by_stored_content(sdk, caplog):

@@ -1330,8 +1330,15 @@ def test_legacy_single_field_point_index_is_upgraded_with_flat_data(graph_factor
     sweep (#4465's churn, permanently) and ``search_keys`` was never indexed.
 
     Mutation check (must stay true): dropping
-    ``or self._point_fts_search_keys_field_missing()`` from that gate leaves the
+    ``or self._point_fts_field_missing()`` from that gate leaves the
     index single-field and fails the ``search_keys in fields`` assertion.
+
+    #11682 note: the probe now asks about the WHOLE declared set
+    (``_POINT_FTS_TARGET_FIELDS``) rather than ``search_keys`` alone — this
+    test still passes, because the migration it triggers now recreates the
+    THREE-field index; ``tests/test_11682_quote_indexed.py`` pins the wider
+    case (a two-field index whose only missing field is ``quote``), which a
+    ``search_keys``-only probe could never have migrated.
     """
     proj = graph_factory()
     g = proj.g

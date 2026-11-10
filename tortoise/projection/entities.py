@@ -1140,8 +1140,9 @@ def flatten_search_keys_prop(props: dict) -> None:
     ``_POINT_FLATTEN_LIST_PROPS`` keys (today: ``search_keys``).
 
     Those props must be FLAT space-joined STRINGS in the graph: FalkorDB's
-    fulltext index (``db.idx.fulltext.createNodeIndex``,
-    ``("Point", ["content", "search_keys"])``) does NOT index array-valued
+    fulltext index (``db.idx.fulltext.createNodeIndex``, over
+    ``sparse.POINT_INDEX_TEXT_FIELDS`` — ``content``/``search_keys``/``quote``
+    since #11682) does NOT index array-valued
     properties (verified on server v4.16.7: a list-valued ``search_keys`` never
     matches, the flat string does). E3's canonical PAYLOAD keeps the list
     (``commit_schema`` pins ``list[str]``); the GRAPH value is derived here.
@@ -1178,12 +1179,17 @@ def flatten_search_keys_prop(props: dict) -> None:
 def point_identifier_aliases(props: dict) -> list[str]:
     """#8933 Stage 2 — the identifier aliases this Point's INDEXED TEXT implies.
 
-    Derived from ``content`` ∪ ``search_keys`` — the exact text the ``Point``
-    fulltext index already holds (``("Point", ["content", "search_keys"])``,
-    ``projection/__init__.py``) — and written into ``search_keys``, which is
-    already one of its fields. So the alias needs **no schema change, no new
-    indexed property and no DDL**: it is additive text in a channel that is
-    already indexed.
+    Derived from ``content`` ∪ ``search_keys`` — the identifier channel the
+    ``Point`` fulltext index already holds (two of its declared fields,
+    ``sparse.POINT_INDEX_TEXT_FIELDS``, ``projection/__init__.py``) — and
+    written into ``search_keys``, which is already one of its fields. So the
+    alias needs **no schema change, no new indexed property and no DDL**: it is
+    additive text in a channel that is already indexed.
+
+    ⛔ ``quote`` is deliberately NOT an alias source (#11682). It is indexed
+    now, but it is the speaker's PROSE: deriving aliases from it would spend
+    index space on ``sprint2024`` from "sprint 2024" — exactly the noise the
+    ``space_separated=False`` rule below refuses on the write side.
 
     Two properties this function deliberately has, both from the ruling:
 

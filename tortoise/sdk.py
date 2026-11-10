@@ -6914,7 +6914,8 @@ def _warn_point_name_not_lexically_indexed(
     gap) — and never mutates ``props``, because the node still stores it.
 
     THE DEFECT. The Point FULLTEXT index holds ``content`` + ``search_keys``
-    only, while the write doors ACCEPT ``name`` on a Point and the node stores
+    (and, since #11682, the verbatim ``quote``) — never ``name`` — while the
+    write doors ACCEPT ``name`` on a Point and the node stores
     it. The stored name is therefore invisible to the lexical leg: a query for
     the point's OWN exact name returns nothing — MEASURED on the embedded and
     the docker lane (#10122: the name-only point is absent from
@@ -6938,8 +6939,8 @@ def _warn_point_name_not_lexically_indexed(
     there is nothing to advise. WHICH text that is depends on the door:
     ``create_point`` compares against the payload it is about to write (the
     whole write), while ``update_point`` compares against the STORED
-    ``content``/``search_keys`` it reads in its own probe, because a name-only
-    update carries no indexed text of its own. ``update_entity``'s Point branch
+    ``content``/``search_keys``/``quote`` it reads in its own probe, because a
+    name-only update carries no indexed text of its own. ``update_entity``'s Point branch
     still compares payload-only — an asymmetry that is deliberate for now
     (threading the same read there is its own change) and named in
     ``test_10122_point_name_not_indexed.py``.
@@ -18667,14 +18668,21 @@ class TortoiseSDK:
                 "OPTIONAL MATCH (n:Point {id:$id}) "
                 "RETURN count(n), "
                 "coalesce(head(collect(n.content)), ''), "
-                "coalesce(head(collect(n.search_keys)), '')",
+                "coalesce(head(collect(n.search_keys)), ''), "
+                "coalesce(head(collect(n.quote)), '')",
                 params={"id": id},
             ).result_set[0]
             if _name_row[0]:
                 _warn_point_name_not_lexically_indexed(
                     props, door="update_point",
                     stored={"content": _name_row[1],
-                            "search_keys": _name_row[2]})
+                            "search_keys": _name_row[2],
+                            # #11682: quote is an INDEXED field now, so the
+                            # stored half of the verdict must read it —
+                            # otherwise a name whose tokens appear only in the
+                            # point's verbatim quote would be called
+                            # unfindable while the index can answer it.
+                            "quote": _name_row[3]})
 
         # #1088: with LIVE as the create default, an ordinary flow reaches
         # here with status='live' on a point that is ALREADY live. That is an

@@ -1925,11 +1925,13 @@ def clamp_lexical_fusion_weight(weights: dict[str, float] | None) -> dict[str, f
 
 
 #: Entity families this leg CAN serve (#8488) — and the ONLY ones it may
-#: attempt. Its corpus text is ``index_text(coalesce(content, _searchText),
-#: search_keys)``, i.e. fields that actually exist on the label:
+#: attempt. Its corpus text is ``point_index_text`` (the ``Point`` family) or
+#: ``index_text(coalesce(content, _searchText), search_keys)``, i.e. fields
+#: that actually exist on the label:
 #:
-#: * ``point``    → ``content`` ∪ ``search_keys`` — the ``Point`` fulltext
-#:   index's declared fields, byte-for-byte;
+#: * ``point``    → ``content`` ∪ ``search_keys`` ∪ ``quote`` — the ``Point``
+#:   fulltext index's declared fields, byte-for-byte (one declaration:
+#:   ``sparse.POINT_INDEX_TEXT_FIELDS``, #11682);
 #: * ``document`` / ``source`` → ``_searchText`` (a ``:Source`` stores no raw
 #:   bytes, D10 — the text lives on ``_searchText``, the field its own FTS
 #:   index is declared on).
@@ -1974,11 +1976,13 @@ def run_bm25_query(
     only a ubiquitous one earns, and a 30x repetition scores the same as a
     single occurrence.
 
-    The indexed text is ``index_text(coalesce(content, _searchText),
-    search_keys)`` — the SAME fields each served label's own FTS index is
+    The indexed text is the SAME fields each served label's own FTS index is
     declared on (``tortoise.sparse``; see ``BM25_ENTITY_TYPES`` for the
     per-family mapping), so the lexical stacks cannot disagree about what a
-    document says. That claim is only true because the CORPUS is tokenised with
+    document says: for a Point that is ``sparse.POINT_INDEX_TEXT_FIELDS``
+    (``content`` ∪ ``search_keys`` ∪ the verbatim ``quote``, #11682), read
+    through ``point_index_text`` so the field list has one home. That claim is
+    only true because the CORPUS is tokenised with
     the WRITE side of the #8933 identifier asymmetry (``bm25_scores`` /
     ``bm25_tokens(..., space_separated_identifiers=False)``): the write path
     stores ``err4032`` for ``ERR-4032`` and NOTHING for the prose "sprint
@@ -2086,7 +2090,7 @@ def run_bm25_query(
         return []
 
     from .bm25 import bm25_rank
-    from .sparse import index_text
+    from .sparse import point_index_text
 
     # Label via the ONE declaration (#4997) rather than a per-leg derivation
     # (#5407 has not migrated run_fts_query off its own); a document IS a
@@ -2117,10 +2121,17 @@ def run_bm25_query(
         # ``_searchText`` (the multi-field FTS index's field) be scored rather
         # than skipped. One row over the cap is requested on purpose — see
         # ``truncated`` below.
+        # #11682: ``quote`` rides the corpus read on the Point family — the
+        # field the verbatim source text lives in. It is selected for EVERY
+        # entity type the leg serves (one Cypher, one row shape): ``quote`` is
+        # absent on Subject/Object/Event-shaped labels, but those families are
+        # refused above, and on the document/source family the coalesce arm
+        # already supplies the text. Requesting a property a node lacks is a
+        # NULL, not an error.
         cypher = (
             f"MATCH (n:{label}) WHERE {' AND '.join(where)} "
             f"RETURN n.{id_field}, coalesce(n.content, n._searchText, ''), "
-            "n.search_keys, "
+            "n.search_keys, coalesce(n.quote, ''), "
             f"{recency_key_expr('n')} "
             f"ORDER BY {recency_tie_clause('n', id_field)} LIMIT $cap"
         )
@@ -2161,7 +2172,9 @@ def run_bm25_query(
                     count=0, declined=True)
             return []
         docs = [
-            (row[0], index_text(row[1], row[2])) for row in rows if row[0]
+            (row[0], point_index_text({
+                "content": row[1], "search_keys": row[2], "quote": row[3],
+            })) for row in rows if row[0]
         ]
         # #10121: the arm's own tie must follow the SAME recency-then-id rule as
         # every other leg. It sorts its whole corpus itself, so fixing only the
@@ -2169,7 +2182,7 @@ def run_bm25_query(
         # sort (measured before this fix: the just-created point absent from
         # ``run_bm25_query(limit=5)`` on a 21-row tie, rank 20 of 21).
         recency = {
-            row[0]: ("" if len(row) <= 3 or row[3] is None else str(row[3]))
+            row[0]: ("" if len(row) <= 4 or row[4] is None else str(row[4]))
             for row in rows if row[0]
         }
         ranked = bm25_rank(
@@ -5118,13 +5131,19 @@ def fallback_tfidf(query: str, points: list[dict], limit: int = 10,
 
     points should be dicts with at least 'id', 'content', 'pointKind'.
 
-    R2 (#1541) D4: the indexed text is ``index_text(content, search_keys)``
-    — content ∪ search_keys — the embedded-stack counterpart of the real
-    backend's multi-field Point FTS index (surface-11 normalization is a
-    shared code path via tortoise.sparse, not a magic parity layer). Points
+    R2 (#1541) D4: the indexed text is ``sparse.point_index_text``
+    — content ∪ search_keys (∪ quote, #11682) — the embedded-stack counterpart
+    of the real backend's multi-field Point FTS index (surface-11 normalization
+    is a shared code path via tortoise.sparse, not a magic parity layer). Points
     dicts from ``self.query`` carry ``search_keys`` when present (additive;
     absent → byte-identical to the pre-R2 path). The returned payload keeps
     the REAL content (the alias text is index-only, never surfaced).
+
+    #11682: the join reads ``POINT_INDEX_TEXT_FIELDS``, so a Point dict that
+    carries ``quote`` contributes it too — the SAME field set the real
+    backend's FTS index is declared on. A dict without ``quote`` is unchanged
+    (absent contributes nothing), so every pre-#11682 caller stays
+    byte-identical.
 
     #2678: ``force_sparse=True`` forwards to ``search_points`` so the caller
     gets the DETERMINISTIC token-overlap scorer and the ``match_source="tfidf"``
@@ -5142,13 +5161,13 @@ def fallback_tfidf(query: str, points: list[dict], limit: int = 10,
     try:
         from tortoise.embeddings import search_points
 
-        from .sparse import index_text
+        from .sparse import point_index_text
         meta = {p["id"]: p for p in points if p.get("id")}
         # R2: alias text is index-only — restore the real content on the
         # results (search_points echoes the dicts it was handed).
         real_content = {p["id"]: p.get("content", "") for p in points if p.get("id")}
         indexed = [
-            {**p, "content": index_text(p.get("content"), p.get("search_keys"))}
+            {**p, "content": point_index_text(p)}
             for p in points
         ]
         results = search_points(query, indexed, threshold=0.0, limit=limit,
