@@ -486,7 +486,7 @@ deliberate deferral); the record read path (`#7970`) is deferred; `#8497` is CLO
 uri="$(uv run python tools/test_lane.py uri)" && eval "$uri"
 # 1. throwaway Postgres + the record migrations
 docker run -d --name cap7950-pg -e POSTGRES_PASSWORD=cap -e POSTGRES_DB=capstone \
-  -p 127.0.0.1:15499:5432 postgres:16
+  -p 127.0.0.1:15499:5432 pgvector/pgvector:pg16
 uv run --with psycopg2-binary python docs/evidence/7950-capstone/probes/e2e_postgres_bootstrap.py
 # 2. the criteria
 TORTOISE_DB_URI="$TORTOISE_DB_URI" uv run pytest \
