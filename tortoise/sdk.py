@@ -12979,6 +12979,11 @@ class TortoiseSDK:
         renders its store through a procedure therefore defeats this bound, which is why the door
         is a bound on the statement TEXT and not a claim of totality. Where the reader cannot prove
         a target it REFUSES (see :func:`tortoise.vector_write::statement_write_target_problem`).
+        INSIDE the grammar the reader is complete over what the engine accepts as an IDENTIFIER —
+        both spellings, bare (`e`) and backtick-quoted (`` `b` ``), which FalkorDB lexes as the same
+        token, not as a string — and it blanks Cypher comments before reading, so neither an
+        accepted spelling nor a `)` inside `/* … */` can hide a write target (#11641's fourth
+        review round found both live here).
         """
         _declared_labels = {label for label, _id_prop in _RAW_WRITE_DOOR_LABELS}
         _named_labels = statement_node_labels(statement)

@@ -26,6 +26,13 @@ RED proof (each assertion fails on the pre-fix tree):
 * `test_the_door_refuses_a_statement_that_WRITES_TO_an_unproved_target` — before the write-target
   reader the door proved only the labels a statement NAMES, so `MATCH (e:Event …) CREATE (p) SET
   p += $props, <embedding on p>` passed and landed a `Vectorf32` on the label-less node `[]`;
+* `test_the_door_refuses_a_BACKTICK_QUOTED_write_target` — a backtick-quoted alias (`` `b` ``) is an
+  IDENTIFIER to the engine, not a string, and every reader in the seam used to match only the bare
+  spelling: the door accepted `` … (`b`:Batch …) SET e += $props, `b`.embedding = … `` and stored the
+  vector on `:Batch`;
+* `test_a_CYPHER_COMMENT_cannot_hide_a_write_target` — a `)` inside `/* … */` drove the depth scan
+  negative and deleted every following clause from the reader, so a `CREATE (p) SET
+  p.embedding = …` behind a comment was invisible and accepted;
 * `test_the_declared_restore_labels_are_the_served_vocabulary` — before the fix `restore_graph`
   declared `LABELS_AT_RUNTIME`, so row 2 had no label to compare and read `PARTIAL`.
 """
@@ -60,6 +67,7 @@ from tortoise.vector_write import (
     statement_label_mutations,
     statement_node_labels,
     statement_pattern_labels,
+    statement_unattributed_set_items,
     statement_write_aliases,
     statement_write_target_problem,
 )
@@ -394,6 +402,175 @@ def test_the_target_readers_see_the_alias_a_pattern_binds_and_nothing_else() -> 
     assert statement_label_mutations("MATCH (e:Event) REMOVE e.embedding") == frozenset()
     assert statement_label_mutations("MATCH (e:Event) SET e:Foo") == {"e"}
 
+
+
+# ── the door: an ACCEPTED identifier spelling the readers could not see (#11641, 4th round) ───
+
+@pytest.mark.parametrize("statement, named, problem_fragment, door_fragment", [
+    # The review's reproduction, verbatim. A served label is NAMED in the MATCH and the vector is
+    # stored through a BACKTICK-QUOTED alias bound to `:Batch`. Before this fix the naming reader's
+    # optional alias group could not match a backtick (so it read `{'Event'}` and passed) and the
+    # write-alias reader found no `SET` head in `` `b`.embedding `` (so it asked about `e` and was
+    # satisfied) — measured ACCEPTED at `9d389cc`, vector on `:Batch`.
+    ("MATCH (e:Event {eventId:'seed'}), (`b`:Batch {id:'b1'}) "
+     "SET e += $props, `b`.embedding = $embedding", {"Batch", "Event"},
+     "outside the allowed set", "door stores on"),
+    # A quoted LABEL spelling: `` :`Batch` `` is the same label to the engine.
+    ("MATCH (`b`:`Batch` {id:$eid}) SET `b` += $props", {"Batch"},
+     "outside the allowed set", "door stores on"),
+    # ⛔ The sharpest row. The NAMED bound is fully satisfied here — one served label, no
+    # interpolation — so ONLY the write-target half can refuse it: `` `p` `` is bound by
+    # `CREATE (`p`)` with NO label, and the vector lands on a node no `entity_type` reaches.
+    ("MATCH (`e`:Event {eventId:$eid}) CREATE (`p`) SET `p` += $props, "
+     + set_embedding_clause("`p`"), {"Event"}, "NO LABEL", "WRITE TARGET"),
+    # A label mutation spelled with quotes — the mutation reader had no head to read either.
+    ("MATCH (`e`:Event {eventId:$eid}) REMOVE `e`:Event SET `e`:Foo, "
+     + set_embedding_clause("`e`"), {"Event"}, "MUTATES", "WRITE TARGET"),
+])
+def test_the_door_refuses_a_BACKTICK_QUOTED_write_target(
+        statement: str, named: set[str], problem_fragment: str, door_fragment: str) -> None:
+    """A backtick-quoted alias is an IDENTIFIER to the engine, so the readers must see it.
+
+    FalkorDB's lexer returns ``Token::IdentifierOrKeyword`` for a backticked span
+    (`graph/src/parser/lexer.rs` @ `0f45a86`) — it does NOT read it as a string — so a reader that
+    accepted only the bare spelling was blind to a spelling the engine accepts, which is the
+    fail-OPEN direction for a bound on where a vector lands.
+
+    ⛔ NON-VACUITY, asserted first: `statement_node_labels(statement) == named` (with the quoted
+    label now READ, not skipped) and `statement_interpolates_label(...) is False`, so the shape is
+    visible to the other two guards and it is the write-target half that refuses it.
+    """
+    assert statement_node_labels(statement) == named, statement_node_labels(statement)
+    assert statement_interpolates_label(statement) is False, statement
+    problem = statement_write_target_problem(statement, {"Event"})
+    assert problem is not None, f"the reader did NOT see this store: {statement}"
+    assert problem_fragment in problem, problem
+    with pytest.raises(ValueError) as refused:
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={},
+             embedding=VEC, lane="test")
+    assert "_event_raw_write_door" in str(refused.value), (
+        "the refusal must name the writer a reader can go look at"
+    )
+    assert door_fragment in str(refused.value), str(refused.value)
+
+
+@pytest.mark.parametrize("statement", [
+    # The product's own MERGE shape with EVERY identifier quoted, built with the real helpers — so
+    # a fix that refused backticks wholesale (the cheap way to pass the refuse rows above) reds.
+    "MERGE (`e`:Event {eventId:$eid}) " + clear_then_set_prefix("`e`")
+    + "SET `e` += $props, " + set_embedding_clause("`e`"),
+    "MATCH (`e`:Event {eventId:$eid}) SET `e` += $props",
+])
+def test_a_BACKTICK_QUOTED_real_shape_is_still_inside_the_bound(statement: str) -> None:
+    """The other direction: the engine's other identifier spelling must not be refused.
+
+    This row is load-bearing against the wrong fix. A guard that simply refused every backtick
+    would pass all four refuse rows while breaking a spelling FalkorDB accepts and a caller may
+    legitimately use — so the quoted product shape must reach the journal exactly as the bare one
+    does, and `` REMOVE `e`.embedding `` must not be read as a label mutation.
+    """
+    assert statement_node_labels(statement) == {"Event"}, statement
+    assert statement_pattern_labels(statement) == {"e": frozenset({"Event"})}, (
+        statement_pattern_labels(statement))
+    assert statement_write_aliases(statement) == {"e"}, statement_write_aliases(statement)
+    assert statement_label_mutations(statement) == frozenset(), (
+        statement_label_mutations(statement))
+    assert statement_unattributed_set_items(statement) == (), statement
+    assert statement_write_target_problem(statement, {"Event"}) is None, (
+        statement_write_target_problem(statement, {"Event"}))
+    with pytest.raises(AssertionError, match="journal was reached"):
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={},
+             embedding=VEC, lane="test")
+
+
+@pytest.mark.parametrize("statement", [
+    # A BLOCK comment carrying an unbalanced `)` — the shape that used to delete every following
+    # clause from the depth scan, leaving the reader satisfied by the one target before it.
+    ("MATCH (e:Event {eventId:$eid}) SET e += $props /* ) */ CREATE (p) "
+     "SET p.embedding = $embedding"),
+    # The same in a LINE comment.
+    ("MATCH (e:Event {eventId:$eid}) SET e += $props // )\nCREATE (p) "
+     "SET p.embedding = $embedding"),
+])
+def test_a_CYPHER_COMMENT_cannot_hide_a_write_target(statement: str) -> None:
+    """A comment is not syntax — reading one as syntax is a fail-open, and it was live.
+
+    `_depths` decrements on every `)` outside a quote, so a `)` inside `/* … */` drove the depth
+    negative and every following character read as "quoted": the `CREATE (p)` + `SET p.embedding`
+    after the comment became invisible, the reader's only target was `e`, and the door ACCEPTED while
+    the vector landed on the label-less node `p` (measured at `9d389cc`). FalkorDB's lexer skips
+    `// …` and `/* … */` between tokens, so blanking them is what the engine does too.
+
+    ⛔ NON-VACUITY: `p` appearing in the write aliases is the proof the comment is gone — before the
+    fix this set was `{'e'}`.
+    """
+    assert "p" in statement_write_aliases(statement), (
+        f"the commented-out clause is still invisible: {sorted(statement_write_aliases(statement))}"
+    )
+    problem = statement_write_target_problem(statement, {"Event"})
+    assert problem is not None and "NO LABEL" in problem, problem
+    with pytest.raises(ValueError) as refused:
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={},
+             embedding=VEC, lane="test")
+    assert "WRITE TARGET" in str(refused.value), str(refused.value)
+
+
+def test_a_set_item_with_NO_alias_head_is_refused() -> None:
+    """A `SET` item the reader cannot attribute is refused, not skipped.
+
+    Cypher permits a PropertyExpression whose atom is a parenthesised expression, so `` SET (CASE
+    WHEN $c THEN p ELSE e END).embedding = $embedding `` names no alias. A reader that skipped such
+    an item would prove a target from the OTHER items (here a labelled `CREATE (p:Event …)`) while
+    the vector actually landed on `e` or wherever the expression pointed — the same false PASS as an
+    invisible alias, one grammar level up. Fail-closed is the only safe reading.
+    """
+    statement = ("MATCH (e:Event {eventId:$eid}) CREATE (p:Event {eventId:$x}) "
+                 "SET (CASE WHEN $c THEN p ELSE e END).embedding = $embedding")
+    # The other two guards are satisfied — that is the point: only the attribution rule refuses.
+    assert statement_node_labels(statement) == {"Event"}, statement_node_labels(statement)
+    assert statement_interpolates_label(statement) is False, statement
+    assert statement_unattributed_set_items(statement), statement
+    problem = statement_write_target_problem(statement, {"Event"})
+    assert problem is not None and "not a plain alias" in problem, problem
+    with pytest.raises(ValueError) as refused:
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={},
+             embedding=VEC, lane="test")
+    assert "WRITE TARGET" in str(refused.value), str(refused.value)
+
+
+def test_a_real_event_write_with_a_QUOTED_alias_lands_on_event(tmp_path) -> None:
+    """The quoted spelling is real: the ENGINE accepts it, and the write stays reachable.
+
+    The readers are text readers, so the one thing they cannot prove by themselves is that a
+    backtick-quoted alias means what the lexer says it means. This writes through the door with every
+    identifier quoted and reads the vector back out of `run_vector_query` — so a "fix" that only
+    taught the readers a spelling the engine rejects would red here instead of shipping.
+    """
+    sdk = TortoiseSDK(str(tmp_path / f"{uuid4().hex}.db"))
+    try:
+        proj = sdk._get_proj()
+        written = sdk._event_raw_write_door(
+            proj,
+            "MERGE (`e`:Event {eventId:$eid}) " + clear_then_set_prefix("`e`")
+            + "SET `e` += $props, " + set_embedding_clause("`e`"),
+            event_id="evt-11641-bt",
+            props={"eventId": "evt-11641-bt", "eventKind": "DocumentCreated"},
+            event_kind="DocumentCreated",
+            embedding=VEC,
+            lane="test-11641-bt",
+        )
+        assert written is True
+        rows = proj.g.query(
+            "MATCH (`e`:Event {eventId:'evt-11641-bt'}) RETURN typeof(`e`.embedding)"
+        ).result_set
+        assert rows and rows[0][0] == "Vectorf32", rows
+        hits = run_vector_query(proj.g, VEC, limit=10, is_embedded=True,
+                                entity_type="event", excluded_statuses=())
+        assert "evt-11641-bt" in [hit[0] for hit in hits], (
+            f"the quoted-alias write is not reachable through the query leg: {hits}"
+        )
+    finally:
+        sdk.close()
 
 
 # ── restore_graph: refused artifact, and the legitimate one it must still restore ─────────────

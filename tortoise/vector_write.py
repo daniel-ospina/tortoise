@@ -194,14 +194,28 @@ def served_store_labels() -> frozenset[str]:
 #: a writer prove the labels its statement NAMES; an interpolation is the shape that fact cannot be
 #: read off, and a writer using one must declare a bound instead (see
 #: `require_served_store_labels`).
-_STATEMENT_LABEL_RE = re.compile(r"\(\s*(?:[A-Za-z_]\w*\s*)?:\s*([A-Za-z_]\w*)")
+#: A Cypher identifier in its BARE spelling. ⛔ This is NOT the whole spelling surface — see
+#: :data:`_IDENT_FRAGMENT` and :func:`_identifier_at`; keeping ONE definition of the bare form is
+#: what stops the readers below disagreeing about what an identifier is.
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_]\w*")
+
+#: A Cypher identifier, EITHER spelling: bare (``e``) or backtick-quoted (`` `b` ``). One token to
+#: the engine — FalkorDB's lexer returns ``Token::IdentifierOrKeyword`` for a backticked span
+#: (`graph/src/parser/lexer.rs` @ `0f45a86`), it does NOT read it as a string — so a reader that
+#: accepted only the bare spelling was BLIND to an identifier the engine accepts. That blindness is
+#: the fail-open direction and it was live on this very guard (#11641, measured at `9d389cc`).
+_IDENT_FRAGMENT = rf"(?:{_IDENTIFIER_RE.pattern}|`[^`]+`)"
+
+_STATEMENT_LABEL_RE = re.compile(
+    rf"\(\s*(?:{_IDENT_FRAGMENT}\s*)?:\s*({_IDENT_FRAGMENT})")
 
 #: A node label rendered by INTERPOLATION inside a node pattern — `(n:{safe_labels})`. It is the
 #: EXACT complement of :data:`_STATEMENT_LABEL_RE`: same prefix (so a nested map literal
 #: `{meta: {a: 1}}` cannot trip it), but a `{` where a label identifier would be. Kept beside that
 #: pattern because the two together say the whole truth about what a statement names — the reader
 #: sees the LITERAL labels, this sees the ones no reader can read off.
-_INTERPOLATED_LABEL_RE = re.compile(r"\(\s*(?:[A-Za-z_]\w*\s*)?:\s*\{")
+_INTERPOLATED_LABEL_RE = re.compile(
+    rf"\(\s*(?:{_IDENT_FRAGMENT}\s*)?:\s*\{{")
 
 
 def statement_node_labels(statement: str) -> frozenset[str]:
@@ -222,8 +236,14 @@ def statement_node_labels(statement: str) -> frozenset[str]:
     and a bound that asks only the first is a false PASS — `MATCH (e:Event …) CREATE (p) SET p += …`
     returns `{'Event'}` here while storing on the label-less node `[]` (measured, #11641). A door
     must ask both; the two live here so the answers cannot drift apart.
+
+    Labels are returned UNQUOTED, so `` (`b`:Batch) `` and `` (b:Batch) `` both read ``Batch`` —
+    the engine strips the quotes too, and reporting them would make a served label look unserved.
+    Cypher comments are blanked first, so a label named inside a comment is not a label this
+    statement binds.
     """
-    return frozenset(_STATEMENT_LABEL_RE.findall(statement))
+    return frozenset(label.strip("`") for label in
+                     _STATEMENT_LABEL_RE.findall(_blank_comments(statement)))
 
 
 def statement_interpolates_label(statement: str) -> bool:
@@ -239,7 +259,7 @@ def statement_interpolates_label(statement: str) -> bool:
     both: *which labels does the statement name* (:func:`statement_node_labels`) and *does it name
     one by interpolation* (this). Nothing here inspects a graph — it is a text-level bound.
     """
-    return bool(_INTERPOLATED_LABEL_RE.search(statement))
+    return bool(_INTERPOLATED_LABEL_RE.search(_blank_comments(statement)))
 
 
 #: ── the WRITE TARGET: the node the statement writes TO (#11641) ──────────────────────────────
@@ -280,12 +300,113 @@ _CLAUSE_KEYWORD_RE = re.compile(
 #: predecessor is tested (see :func:`_scan_node_patterns`).
 _NOT_A_PATTERN_PREFIX = re.compile(r"[A-Za-z0-9_$)\]}]", re.UNICODE)
 
-#: A Cypher alias / label identifier.
-_IDENTIFIER_RE = re.compile(r"[A-Za-z_]\w*")
+def _blank_comments(statement: str) -> str:
+    """``statement`` with every Cypher COMMENT blanked to spaces — same length, same indices.
 
-#: A clause item's head: the alias a ``SET``/``REMOVE`` item writes, then the rest of the item
-#: (``.prop = …``, ``+= $map``, ``= $map``, ``:Label``).
-_ITEM_HEAD_RE = re.compile(r"\s*([A-Za-z_]\w*)\s*(.*)\Z", re.DOTALL)
+    ⛔ A comment is not syntax, and reading one as syntax is a FAIL-OPEN. ``_depths`` decrements on
+    every ``)`` outside a quote, so a ``)`` inside ``/* … */`` drove the depth negative and silently
+    removed EVERY FOLLOWING clause from the write-target reader — measured at `9d389cc`: a ``CREATE
+    (p)`` and its embedding write placed AFTER such a comment in an otherwise-valid statement were
+    invisible, the reader's only target was ``e``, and the door ACCEPTED while the vector landed on
+    the label-less node ``p``. FalkorDB's lexer skips ``// …`` and ``/* … */`` between tokens, so
+    blanking is what the engine does too.
+
+    An UNTERMINATED ``/*`` is NOT a comment — the lexer leaves that ``/`` for the parser to reject —
+    so no span is opened for it here. Quoted spans (strings and backticked identifiers) are copied
+    through untouched: a ``//`` inside ``'a//b'`` is text, not a comment.
+    """
+    out = list(statement)
+    index = 0
+    length = len(statement)
+    quote: str | None = None
+    escaped = False
+    while index < length:
+        char = statement[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\" and quote != "`":
+                escaped = True
+            elif char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in ("'", '"', "`"):
+            quote = char
+            index += 1
+            continue
+        if char == "/" and index + 1 < length:
+            if statement[index + 1] == "/":
+                end = statement.find("\n", index)
+                end = length if end < 0 else end
+            elif statement[index + 1] == "*":
+                close = statement.find("*/", index + 2)
+                if close < 0:                 # unterminated — NOT a comment
+                    index += 2
+                    continue
+                end = close + 2
+            else:
+                index += 1
+                continue
+            for position in range(index, end):
+                out[position] = " "
+            index = end
+            continue
+        index += 1
+    return "".join(out)
+
+
+def _identifier_at(text: str, index: int) -> tuple[str, int] | None:
+    """Read the Cypher IDENTIFIER at ``index`` — bare (``e``) or backtick-quoted (`` `b` ``).
+
+    Returns ``(name, end)`` with the quotes STRIPPED (the engine strips them too), or ``None`` when
+    no identifier starts here.
+
+    ⛔ WHY BOTH SPELLINGS, AND WHY THIS IS THE ONLY READER. A backticked span is an identifier to the
+    engine, not a string (:data:`_IDENT_FRAGMENT`). Every reader in this module used to match the
+    bare form directly, so a quoted alias or label was invisible to all of them at once — and
+    ``_depths`` marks the span ``-1`` (it must: a comma or paren INSIDE an identifier is not
+    syntax), which is why the quoting could not simply be dropped. The measured fail-open at
+    `9d389cc` (#11641):
+
+        MATCH (e:Event {eventId:'seed'}), (`b`:Batch {id:'b1'}) SET e += $props, `b`.embedding = …
+
+    ``statement_node_labels`` read only ``Event`` (its alias group could not match a backtick) and
+    ``statement_write_aliases`` found no ``SET`` head in `` `b`.embedding ``, so the door accepted it
+    and stored a ``Vectorf32`` on ``:Batch`` — reachable by no ``entity_type``, with
+    ``stores=("Event",)`` and DoD row 2 both still green.
+
+    The repo's own class readers already accept the quoted spelling for exactly this reason
+    (``tests/test_9079_onboarding_declared_lane.py::_labels_written``).
+    """
+    if index >= len(text):
+        return None
+    if text[index] == "`":
+        close = text.find("`", index + 1)
+        if close <= index + 1:                # unterminated, or an EMPTY name — no identifier
+            return None
+        return text[index + 1:close], close + 1
+    match = _IDENTIFIER_RE.match(text, index)
+    if match is None:
+        return None
+    return match.group(0), match.end()
+
+
+def _item_head(item: str) -> tuple[str, str] | None:
+    """Split one ``SET``/``REMOVE`` item into ``(alias, rest)`` — ``e`` and ``.embedding = …``.
+
+    ``rest`` is what tells a PROPERTY write from a LABEL mutation (``:Label``), so the head reader
+    has to accept both identifier spellings (:func:`_identifier_at`) — otherwise `` `b`.embedding ``
+    yields no head and the alias `b` never appears as a write target at all.
+    """
+    cursor = 0
+    while cursor < len(item) and item[cursor].isspace():
+        cursor += 1
+    identifier = _identifier_at(item, cursor)
+    if identifier is None:
+        return None
+    name, end = identifier
+    return name, item[end:].strip()
 
 
 def _depths(statement: str) -> list[int]:
@@ -420,21 +541,21 @@ def _scan_node_patterns(statement: str, depths: list[int],
         elif statement[cursor] == "{":           # `({…})` — anonymous, properties only
             pass
         else:
-            identifier = _IDENTIFIER_RE.match(statement, cursor)
+            identifier = _identifier_at(statement, cursor)
             if identifier is None:
                 recognised = False
             else:
-                after = identifier.end()
+                name, after = identifier
                 while after < close and statement[after].isspace():
                     after += 1
                 tail = statement[after] if after < close else ")"
                 if tail == "(":               # `name(` — a function call, not a pattern
                     recognised = False
                 elif tail == ":":
-                    alias = identifier.group(0)
+                    alias = name
                     labels = _read_labels(statement, after + 1, close)
                 elif tail in "){-<|" or tail == "]":
-                    alias = identifier.group(0)
+                    alias = name
                 else:                          # `(x IN …)`, `(x WHERE …)` — not a pattern
                     recognised = False
         if recognised:
@@ -460,11 +581,11 @@ def _read_labels(statement: str, cursor: int, close: int) -> set[str]:
             break
         if statement[cursor] in "{$":       # a rendered label — unreadable, so no label recorded
             break
-        identifier = _IDENTIFIER_RE.match(statement, cursor)
+        identifier = _identifier_at(statement, cursor)
         if identifier is None:
             break
-        labels.add(identifier.group(0))
-        cursor = identifier.end()
+        label, cursor = identifier
+        labels.add(label)
         while cursor < close and statement[cursor].isspace():
             cursor += 1
         if cursor < close and statement[cursor] == ":":
@@ -489,9 +610,10 @@ def statement_pattern_labels(statement: str) -> dict[str, frozenset[str]]:
     ⚠️ This is the BINDING reader, not the write reader: it does not say which of those aliases the
     statement writes. Pair it with :func:`statement_write_aliases`.
     """
-    depths = _depths(statement)
+    text = _blank_comments(statement)
+    depths = _depths(text)
     bindings: dict[str, frozenset[str]] = {}
-    for alias, labels, _start in _scan_node_patterns(statement, depths):
+    for alias, labels, _start in _scan_node_patterns(text, depths):
         if alias is None:
             continue
         bindings[alias] = bindings.get(alias, frozenset()) | labels
@@ -514,20 +636,21 @@ def statement_write_aliases(statement: str) -> frozenset[str]:
     Scanned at ANY depth, so a store nested in ``FOREACH`` / ``CALL { … }`` contributes its alias
     instead of hiding behind a well-behaved outer clause.
     """
-    depths = _depths(statement)
+    text = _blank_comments(statement)
+    depths = _depths(text)
     aliases: set[str] = set()
-    for keyword, start, end in _clause_bodies(statement, depths):
+    for keyword, start, end in _clause_bodies(text, depths):
         base = depths[start] if start < len(depths) else 0
         if keyword in ("CREATE", "MERGE"):
             for alias, _labels, _pattern_start in _scan_node_patterns(
-                    statement, depths, start, end):
+                    text, depths, start, end):
                 if alias is not None:
                     aliases.add(alias)
         elif keyword == "SET":
-            for item in _split_items(statement, start, end, base, depths):
-                head = _ITEM_HEAD_RE.match(item)
+            for item in _split_items(text, start, end, base, depths):
+                head = _item_head(item)
                 if head is not None:
-                    aliases.add(head.group(1))
+                    aliases.add(head[0])
     return frozenset(aliases)
 
 
@@ -540,17 +663,42 @@ def statement_label_mutations(statement: str) -> frozenset[str]:
     the bound. ``REMOVE a.prop`` / ``REMOVE a.embedding`` is a PROPERTY removal and is NOT a
     mutation — it is how :func:`clear_then_set_prefix` clears a vector before rewriting it.
     """
-    depths = _depths(statement)
+    text = _blank_comments(statement)
+    depths = _depths(text)
     aliases: set[str] = set()
-    for keyword, start, end in _clause_bodies(statement, depths):
+    for keyword, start, end in _clause_bodies(text, depths):
         if keyword not in ("SET", "REMOVE"):
             continue
         base = depths[start] if start < len(depths) else 0
-        for item in _split_items(statement, start, end, base, depths):
-            head = _ITEM_HEAD_RE.match(item)
-            if head is not None and head.group(2).startswith(":"):
-                aliases.add(head.group(1))
+        for item in _split_items(text, start, end, base, depths):
+            head = _item_head(item)
+            if head is not None and head[1].startswith(":"):
+                aliases.add(head[0])
     return frozenset(aliases)
+
+
+def statement_unattributed_set_items(statement: str) -> tuple[str, ...]:
+    """``SET`` items whose WRITE HEAD this reader cannot attribute to an alias.
+
+    A ``SET`` item's head is a plain variable in every shape this product uses, but Cypher also
+    permits a PropertyExpression whose atom is a PARENTHESISED expression — ``SET (CASE WHEN $c THEN
+    p ELSE q END).embedding = $embedding``. Such an item names no alias, so a reader that skipped it
+    silently would prove a target from the OTHER items (say a labelled ``CREATE (p:Event …)``) while
+    the vector actually landed on ``q`` — the same false PASS as an invisible alias, one grammar
+    level up. Refusing an item that cannot be attributed is the fail-CLOSED reading, and it costs
+    nothing: no statement in this repo writes through an expression head.
+    """
+    text = _blank_comments(statement)
+    depths = _depths(text)
+    items: list[str] = []
+    for keyword, start, end in _clause_bodies(text, depths):
+        if keyword != "SET":
+            continue
+        base = depths[start] if start < len(depths) else 0
+        for item in _split_items(text, start, end, base, depths):
+            if _item_head(item) is None:
+                items.append(item)
+    return tuple(items)
 
 
 def statement_write_target_problem(statement: str, allowed) -> str | None:
@@ -567,10 +715,18 @@ def statement_write_target_problem(statement: str, allowed) -> str | None:
     statement that exposes NO write target the reader can prove is refused too — the fail-closed
     reading, because "I could not find where it writes" is not "it writes somewhere safe".
 
+    ⛔ WHAT IT IS COMPLETE OVER (so the residual below can be sized): both identifier SPELLINGS —
+    bare ``e`` and backtick-quoted `` `e` `` (:func:`_identifier_at`) — at every position it reads;
+    and Cypher COMMENTS (``// …``, ``/* … */``) are blanked before any reader sees them, so a ``)``
+    or a clause hidden in a comment cannot shift the depth out from under the scan. Those two were
+    live fail-opens on this guard before #11641's fourth review round, and both were reached without
+    leaving the grammar.
+
     ⛔ ACCEPTED RESIDUAL — what a text reader cannot see, named here rather than left implied:
     a store rendered by a shape the clause grammar does not phrase as ``SET``/``REMOVE``/``CREATE``/
-    ``MERGE`` (a stored procedure that mutates the node, ``CALL apoc.*``, or a helper that builds
-    the clause text) is invisible to this reader. That is the same class of limit
+    ``MERGE`` — a stored procedure that mutates the node (``CALL apoc.*``), or clause text a helper
+    builds. Inside the grammar this reader refuses what it cannot attribute (an unlabelled target, a
+    label mutation, a ``SET`` item with a non-alias head). That is the same class of limit
     :func:`statement_node_labels` states for labels it cannot read off, and it is why the door's
     own docstring says the bound is on the statement TEXT: a caller that renders its store through
     a procedure defeats it, and that case stays a matter for review rather than a claim of
@@ -580,6 +736,7 @@ def statement_write_target_problem(statement: str, allowed) -> str | None:
     bindings = statement_pattern_labels(statement)
     targets = statement_write_aliases(statement)
     mutations = statement_label_mutations(statement)
+    unattributed = statement_unattributed_set_items(statement)
 
     problems: list[str] = []
     if mutations:
@@ -591,6 +748,11 @@ def statement_write_target_problem(statement: str, allowed) -> str | None:
         problems.append(
             "it exposes NO write target this reader can prove (no `SET <alias> …` item and no "
             "node pattern introduced by `CREATE`/`MERGE`)")
+    if unattributed:
+        problems.append(
+            f"it has a `SET` item whose write HEAD is not a plain alias {list(unattributed)}, so "
+            "the node it writes cannot be proved — name the alias in the `SET` item instead of "
+            "writing through an expression")
     unbound = sorted(alias for alias in targets if alias not in bindings)
     unlabelled = sorted(alias for alias in targets
                         if alias in bindings and not bindings[alias])
