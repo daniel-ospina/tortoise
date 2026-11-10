@@ -1527,10 +1527,15 @@ RECORD_MIGRATION_DIR = "supabase/migrations/"
 #     `tests/test_9078_record_written_by_production_path.py::test_the_record_schema_ships_with_the_wheel`
 #     pins the tuple's names INTO the shipped patterns (the other), so together a
 #     new `*_record_*.sql` missing from the tuple is red in CI;
-#   * the deploy step runs `supabase db push --linked --include-all --yes`, which
+#   * the deploy step — `.github/workflows/supabase-deploy.yml`, step `Apply
+#     migrations` — runs `supabase db push --linked --include-all --yes`, which
 #     applies EVERY `supabase/migrations/*.sql` — so this rule is NOT a statement
-#     about what gets applied. A non-record migration is out of scope because its
-#     pins are not the ones asleep, not because it is unapplied.
+#     about what gets applied. (`--yes` is not a typo to tidy away: on CLI v3
+#     every command that changes a HOSTED project is consent-gated and fails
+#     unattended without it, #10896 — so it is part of the command this comment
+#     quotes. Named by file and step, not by line number, so the next reader
+#     verifies it with one read.) A non-record migration is out of scope because
+#     its pins are not the ones asleep, not because it is unapplied.
 _RECORD_MIGRATION_RE = re.compile(r"^[^/]+_record_.*\.sql$")
 
 
