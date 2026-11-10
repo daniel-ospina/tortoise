@@ -7137,9 +7137,15 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
         assert _stated_month_day(content) == _stated_month_day(quote), (
             _stated_month_day(content), _stated_month_day(quote), content[:80])
     # ⛔ AND THE LOOP IS NOT VACUOUS: emptying its iterable left all of §24 green
-    #     (cycle 11), so the count and the agreement are asserted together.
-    assert len(iso_bound) == 2 and all(
-        _stated_month_day(c) == _stated_month_day(q) for c, q in iso_bound)
+    #     (cycle 11). The gap is closed by the two assertions ABOVE, and nothing
+    #     extra is asserted here — `len(iso_bound) == 2` immediately precedes the
+    #     loop, and `iso_bound` is a list comprehension never reassigned after it,
+    #     so a re-statement of the count and of the agreement would be a
+    #     conjunction of two predicates already executed over the same immutable
+    #     list by a pure helper: no edit could red it without reding one of them
+    #     first. That is the tautology this file deletes elsewhere (#11730
+    #     review, cycle 17), so it is not restored under a comment claiming to
+    #     guard vacuity.
     # 3d. ⛔ AND THE HELPER ITSELF IS DISCRIMINATED, because both census rows
     #     AGREE: an equality over two agreeing rows cannot tell "compares
     #     month-and-day" from "compares presence", which is the cycle-9 P1 one
