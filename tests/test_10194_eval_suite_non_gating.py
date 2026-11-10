@@ -138,7 +138,19 @@ def _gating_sets(manifest: dict) -> dict[str, list[str]]:
 
 EXPECTED_LEGS = {
     "fast_pool", "slow", "env_broken", "carve_out",
-    *(f"test ({c})" for c in "abcdefghij"),
+    # ⛔ `k` is `main`'s count, not this PR's (#11660). `config/ci-surfaces.yml`
+    # reads `fast_shards: 11` — bumped in `efc472108f`, this branch's merge base (and
+    # `main`'s tip when the branch was cut) — while this pin still listed `a`..`j`,
+    # so the assertion below was RED on `main` independently of #11642 (measured:
+    # still red at `main`'s current tip, `a577d0e2`). The count is
+    # that manifest LITERAL (`fast_shard_count`, and `split_fast_gate` says so:
+    # "N comes from the manifest's `fast_shards` … NOT capped by the file count"),
+    # never a pool-size threshold, so a lane that unregisters files must NOT drop
+    # `k` — the two `core` rows #11642 added move no shard count at all (measured:
+    # strip both and `push_legs` still yields `a`..`k`, 1153 files).
+    # A leg added or renamed without landing here reads as a pass over a set
+    # nobody walked, which is what this pin refuses.
+    *(f"test ({c})" for c in "abcdefghijk"),
     *(f"test-slow ({c})" for c in "abcde"),
     *(f"test-carve-out ({c})" for c in "abc"),
     *(f"tier-2 test_files [{c}]" for c in
