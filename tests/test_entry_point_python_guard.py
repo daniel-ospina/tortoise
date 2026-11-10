@@ -595,7 +595,7 @@ _SURFACES_OUT_OF_SCOPE: dict[str, str] = {
 #: RECORD and keeps the form that ran. A *reproduction instruction* with expected
 #: output — a docs command block, a plan doc's smoke step — is an INSTRUCTION and
 #: takes the guarded form, because its purpose is that a reader re-runs it. That
-#: is why `docs/plans/2026-09-26-5042-…:208` and
+#: is why `docs/plans/2026-09-26-5042-…:209` and
 #: `docs/ci/merge-throughput-measurements.md:524` stay `uv run python` while the
 #: four entries below do not.
 #:
@@ -746,6 +746,32 @@ _CARDINALITY_WORDS = {
 }
 
 
+def _comment_region_above(prefix: str) -> list[str]:
+    """The comment region immediately above the text `prefix` ends at.
+
+    Collected from the bottom up so the region is bounded by the first line that is
+    NOT part of a comment block: a non-blank line that does not start with `#`. That
+    bound is what keeps the "exactly one occurrence" assertion below meaningful — a
+    copy of the sentence higher in the file, past the code that ends the block, is
+    outside the region and cannot satisfy the pin.
+
+    Reading the REGION rather than the last contiguous run of `#:` lines is the
+    round-2 correction (#11754 review). A blank line, or a bare `#` separator,
+    anywhere in the block is a re-wrap of the paragraph — not a deletion of the
+    sentence — but scoping to a contiguous `#:` run made every break INSIDE the ~28
+    lines below the sentence read as *"the comment block no longer carries the
+    sentence"*, across a sentence that was present and correct. That message invites
+    the author to reword the pattern, i.e. to weaken the pin, so a false red here is
+    the failure mode this guard exists to avoid.
+    """
+    region: list[str] = []
+    for line in reversed(prefix.splitlines()):
+        if line.strip() and not line.lstrip().startswith("#"):
+            break
+        region.append(line)
+    return list(reversed(region))
+
+
 def _cardinality_of(token: str) -> int | None:
     """A cardinality token as `int` — a word from `_CARDINALITY_WORDS`, or digits.
 
@@ -772,28 +798,16 @@ def test_the_record_exemption_prose_counts_the_set_it_describes():
     """
     source = Path(__file__).read_text(encoding="utf-8")
     before = source.partition("_DELIBERATE_BARE_FORM: frozenset")[0]
-    # The prose is the CONTIGUOUS `#:` run immediately above the definition, not
-    # every `#:` line in the file. The scoping is load-bearing: over the whole file
-    # head the search below takes the LEFTMOST match, so a stray earlier copy of
-    # the sentence satisfied this pin while the block that actually describes the
-    # set drifted (measured, #11754 review finding 3: decoy sentence above + prose
-    # `three` over a four-member set PASSED).
-    #
-    # The run is allowed to be followed by blank lines, because a spacer between
-    # the paragraph and the definition is a RE-WRAP of the block, not a deletion of
-    # the sentence — anchoring at `\Z` alone reported *"the comment block no longer
-    # carries the sentence"* over a present and correct sentence (#11754 review).
-    run = re.search(r"((?:^#:.*\n)+)(?:[ \t]*\n)*\Z", before, re.MULTILINE)
-    # Each line is a `#:` comment and may be re-wrapped at any column, so strip the
-    # marker per line and join to one line rather than pinning a line break. Lines
-    # whose body is EMPTY contribute nothing to the sentence — dropping them is what
-    # keeps a blank `#:` in the middle of the paragraph from reading as a broken
-    # sentence (`"while the"` + `"#:"` + `"four entries…"` joined naively yields
-    # `while the  four`, which no longer matches; measured, #11754 review).
+    # The prose is the COMMENT REGION immediately above the definition, not every
+    # `#:` line in the file. The scoping is load-bearing: over the whole file head
+    # the search below takes the LEFTMOST match, so a stray earlier copy of the
+    # sentence satisfied this pin while the block that actually describes the set
+    # drifted (measured, #11754 review: decoy sentence above + prose `three` over a
+    # four-member set PASSED).
     prose = " ".join(
         re.sub(r"\s+", " ", line[2:]).strip()
-        for line in (run.group(1) if run else "").splitlines()
-        if line[2:].strip()
+        for line in _comment_region_above(before)
+        if line.startswith("#:") and line[2:].strip()
     )
     matches = re.findall(r"while the ([a-z]+|\d+) entries below do not", prose)
     assert matches, (
