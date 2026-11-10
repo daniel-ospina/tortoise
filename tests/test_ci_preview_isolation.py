@@ -571,6 +571,209 @@ def test_ready_requires_the_preview_to_SERVE_not_just_bind(tmp_path: Path, state
         _reap(broken.pid, *([healthy.pid] if healthy is not None else []))
 
 
+def _pid_state_letter(pid: int) -> str:
+    """The kernel's state letter for `pid` (`Z` = zombie), `""` when it is gone."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return subprocess.run(
+            ["ps", "-o", "state=", "-p", str(pid)], capture_output=True, text=True
+        ).stdout.strip()[:1]
+    return stat[stat.rfind(") ") + 2:].split(" ", 1)[0]
+
+
+def _function_body(text: str, name: str) -> str:
+    """The lines of `name() { … }` in a bash script, without the signature/brace."""
+    out: list[str] = []
+    inside = False
+    for line in text.splitlines():
+        if not inside:
+            inside = bool(re.match(rf"^{re.escape(name)}\(\)\s*\{{", line))
+            continue
+        if line == "}":
+            break
+        out.append(line)
+    return "\n".join(out)
+
+
+def test_alive_calls_a_zombie_GONE_not_alive(tmp_path: Path, state) -> None:
+    """A zombie answers kill(0) forever, and the dump asserted a CAUSE from it.
+
+    This is the first of the three false-verdict paths the fresh-context review of
+    PR #11675 measured in the `ci.yml` steps. The pre-fix step branched on a bare
+    `kill -0 "$pid"`, so an unreaped preview read as ALIVE and the step then told
+    the reader the red was "the specs' or the content's, not a dead server" — from
+    a process that had already exited. RED on the pre-fix code: `kill -0`
+    SUCCEEDS here (asserted below, so the arm can never pass for the wrong
+    reason), while `alive` must report GONE.
+    """
+    if not hasattr(os, "fork"):  # pragma: no cover — Windows only
+        pytest.skip("no zombie can be produced without a real child process")
+    # A real child that exits WITHOUT being reaped: `subprocess.Popen` holds the
+    # pid until `wait()`/`poll()`, so the child stays a zombie. Deliberately not
+    # `os.fork()` — forking a multi-threaded pytest process warns (and can
+    # deadlock) for no benefit here.
+    child = _spawn(["/bin/sleep", "2"], tmp_path)
+    pid = child.pid
+    try:
+        assert _script("record", "--name", "app", "--pid", str(pid), env=state).returncode == 0, (
+            "the child must be recorded while it is still running, like a boot step does"
+        )
+        deadline = time.time() + 15
+        while time.time() < deadline and _pid_state_letter(pid) != "Z":
+            time.sleep(0.05)
+        assert _pid_state_letter(pid) == "Z", (
+            "the child never became an unreaped zombie — this arm cannot measure"
+        )
+        assert subprocess.run(["bash", "-c", f"kill -0 {pid}"]).returncode == 0, (
+            "the harness cannot measure: the pre-fix primitive must still SUCCEED on "
+            "a zombie, which is exactly why it produced a false ALIVE"
+        )
+        result = _script("alive", "--name", "app", env=state)
+        assert result.returncode == 1, (
+            "an unreaped zombie was not reported as GONE — a preview that exited is "
+            f"being called alive: {result.stdout}{result.stderr}"
+        )
+        assert "GONE" in result.stdout and "DIED MID-RUN" in result.stdout, result.stdout
+        assert " is ALIVE" not in result.stdout, result.stdout
+    finally:
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            child.wait(timeout=20)
+
+
+def test_alive_refuses_a_recycled_pid(tmp_path: Path, state) -> None:
+    """A recycled pid is a stranger: the process we started is still GONE.
+
+    The second false-verdict path. `stop` already refuses to signal a pid whose
+    start time changed (`test_stop_refuses_a_pid_whose_start_time_changed`), and
+    the READ needs the same guard: the pre-fix step reported the stranger as our
+    ALIVE preview.
+    """
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    try:
+        assert _script("record", "--name", "app", "--pid", str(victim.pid), env=state).returncode == 0
+        (Path(state["PREVIEW_STATE"]) / "app.start").write_text("1\n")  # a different process
+        result = _script("alive", "--name", "app", env=state)
+        assert result.returncode == 8, (
+            "a pid whose start time no longer matches the boot witness was not "
+            f"reported as RECYCLED: {result.stdout}{result.stderr}"
+        )
+        assert "RECYCLED" in result.stdout, result.stdout
+        assert "is ALIVE" not in result.stdout, result.stdout
+    finally:
+        _reap(victim.pid)
+
+
+def test_alive_tells_a_stopped_preview_from_one_that_never_started(
+    tmp_path: Path, state
+) -> None:
+    """The third false-verdict path: `stop` deletes the pid file on EVERY branch.
+
+    So "no pid file" is a double boot failure as often as it is a boot that never
+    ran — and the pre-fix step asserted the opposite ("no pid was recorded at
+    boot — it never started") for both. `record`'s boot witness is what separates
+    them, and both states must be distinguishable.
+    """
+    never = _script("alive", "--name", "app", env=state)
+    assert never.returncode == 6, never.stdout
+    assert "NEVER RECORDED" in never.stdout, never.stdout
+
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    try:
+        assert _script("record", "--name", "app", "--pid", str(victim.pid), env=state).returncode == 0
+        assert _script("stop", "--name", "app", env=state).returncode == 0
+        stopped = _script("alive", "--name", "app", env=state)
+        assert stopped.returncode == 5, (
+            "a preview that WAS recorded and then stopped is reported the same as one "
+            f"that never started: {stopped.stdout}{stopped.stderr}"
+        )
+        assert "RECORDED, then STOPPED" in stopped.stdout, stopped.stdout
+        assert "NEVER RECORDED" not in stopped.stdout, stopped.stdout
+        assert "does NOT mean the preview never started" in stopped.stdout, stopped.stdout
+    finally:
+        _reap(victim.pid)
+
+
+def test_alive_separates_a_serving_preview_from_a_surviving_one(
+    tmp_path: Path, state
+) -> None:
+    """The PROCESS surviving and the SERVER serving are two facts, not one.
+
+    The middle verdict the `ci.yml` step used to carry must not be lost when the
+    branch collapses into one helper call: a live wrangler whose bundle/workerd is
+    not answering is a preview that did NOT die and did NOT serve, and the log is
+    read differently for each. Exit 0 is reserved for alive-AND-serving so the
+    step's `::error::` prefix lands on both failure shapes.
+    """
+    result = _script("alloc", "--name", "app", "--base", "18988", env=state)
+    assert result.returncode == 0, result.stderr
+    port = int(result.stdout.strip())
+
+    broken = _spawn_http(port, 500, tmp_path)
+    healthy = None
+    try:
+        assert _wait_port(port), f"the decoy listener never bound :{port}"
+        assert _script("record", "--name", "app", "--pid", str(broken.pid), env=state).returncode == 0
+        result = _script("alive", "--name", "app", env=state)
+        assert result.returncode == 7, (
+            "an alive process whose port answers 500 was reported as a preview that "
+            f"served: {result.stdout}{result.stderr}"
+        )
+        assert "is ALIVE" in result.stdout and "did not serve" in result.stdout, result.stdout
+        assert "SURVIVED" not in result.stdout, result.stdout
+
+        _reap(broken.pid)
+        deadline = time.time() + 10
+        while time.time() < deadline and _port_answers(port):
+            time.sleep(0.05)
+
+        healthy = _spawn_http(port, 200, tmp_path)
+        assert _wait_port(port), f"the healthy listener never bound :{port}"
+        assert _script("record", "--name", "app", "--pid", str(healthy.pid), env=state).returncode == 0
+        result = _script("alive", "--name", "app", env=state)
+        assert result.returncode == 0, (
+            f"a serving, surviving preview was not reported whole: {result.stdout}{result.stderr}"
+        )
+        assert "SURVIVED" in result.stdout, result.stdout
+    finally:
+        _reap(broken.pid, *([healthy.pid] if healthy is not None else []))
+
+
+def test_alive_takes_its_liveness_and_identity_from_the_guarded_predicates() -> None:
+    """The `ci.yml` arm only pins the CALL; the semantics must be pinned here.
+
+    A later edit that swapped `pid_running` for a bare `kill -0`, or dropped the
+    start-time witness, would re-open the zombie and pid-reuse false-ALIVE paths
+    while the workflow arm stayed green — so the mechanism is pinned where it
+    lives, next to the boot witness that makes "stopped" distinguishable.
+    """
+    text = SCRIPT.read_text()
+    body = _function_body(text, "cmd_alive")
+    assert body, "`.github/scripts/preview-server.sh` has no `cmd_alive` function"
+    assert "pid_running" in body, (
+        "`alive` no longer uses the zombie-aware predicate `record`/`stop` use, so an "
+        "unreaped preview reads as a surviving one:\n" + body
+    )
+    assert "pid_starttime" in body, (
+        "`alive` reports a recycled pid as ours — the start-time witness `record` "
+        "writes and `stop`'s PID-REUSE GUARD re-checks is missing:\n" + body
+    )
+    assert not re.search(r"\bkill\s+-0\b", "\n".join(_cut_comment(l) for l in body.splitlines())), (
+        "`alive` decides liveness with a bare `kill -0`, which a zombie answers "
+        "forever:\n" + body
+    )
+    assert "booted" in body, (
+        "`alive` cannot tell a preview that was recorded and then STOPPED from one "
+        "that never started (that is what `record`'s boot witness is for):\n" + body
+    )
+    assert re.search(r"^\s*alive\)\s*cmd_alive", text, re.MULTILINE), (
+        "`alive` is not dispatched from `main`, so every arm above is unreachable "
+        "from the workflow that calls it"
+    )
+
+
 def test_the_helper_carries_no_process_name_kill() -> None:
     """The mechanism itself must stay scoped — a `pkill` inside the helper is the bug."""
     text = SCRIPT.read_text()
@@ -930,43 +1133,41 @@ def test_a_preflight_red_dumps_the_preview_servers_own_logs(
     # whether the server died or the specs were wrong, and both misreadings are
     # measured: #10305 read a 500 as unreachability, #8059 read a dead preview as
     # a `--d1`/`dist` problem, and PR #11675's own red (job 129650228746) read a
-    # mid-run death as 11 app-origin spec failures. `kill -0` on the pid the BOOT
-    # recorded — the same per-job pid file `preview-server.sh` writes — is what
-    # separates them, and the two verdicts must be distinguishable in the log.
+    # mid-run death as 11 app-origin spec failures.
+    #
     # ⛔ A `#` COMMENT MUST NOT SATISFY A GATE (#11675). `run` is the whole
     # shell blob, prose included, so a plain `in run` is satisfied by a comment
     # that merely NAMES the call — the regression this assertion exists for
-    # (deleting the probe, leaving `# was: bash "$PREVIEW" ready …` behind) has
-    # been measured green. `_cut_comment` is this file's own answer to that, and
-    # the POSITIVE `elif …; then` form is required so an inverted gate
-    # (`elif ! bash "$PREVIEW" ready …`) cannot pass either.
+    # (deleting the probe, leaving `# was: bash "$PREVIEW" alive …` behind) has
+    # been measured green. `_cut_comment` is this file's own answer to that.
     code = "\n".join(_cut_comment(line) for line in run.splitlines())
-    assert "kill -0" in code, (
-        "the dump does not check whether the recorded pid is still ALIVE, so it "
-        f"cannot say a preview DIED mid-run: {code}"
-    )
-    # ⛔ A LIVE PID IS NOT A SURVIVING PREVIEW. `kill -0` proves the process
-    # exists and nothing else — `preview-server.sh`'s `ready` states the three
-    # facts separately (liveness, something ANSWERS on the port, that answer is
-    # HTTP) and names the shape that matters here: a wrangler whose listener is up
-    # while its bundle/workerd starts answers a connect and never a 200. So the
-    # SURVIVED verdict must be gated on the helper's own probe, and `kill -0` may
-    # only distinguish "alive but failing the HTTP probe" from "gone". That
-    # middle verdict must NOT say the port answers nothing: `ready` fails on
-    # liveness, on a free port AND on any non-200 (its last leg is `curl -f`, so
-    # a 500 — this step's own #10305 shape — lands here with the port very much
-    # bound), so the branch may only report that the probe failed.
-    gate = 'elif bash "$PREVIEW" ready --name "$name"; then'
+    gate = 'bash "$PREVIEW" alive --name "$name"'
     assert gate in code, (
-        "the SURVIVED verdict is deduced from `kill -0` alone (or the probe is "
-        "present only in a comment, or negated): a live pid whose port answers "
-        f"nothing would be reported as a surviving preview. Expected {gate!r} in "
-        f"the step's CODE: {code}"
+        "the dump does not ask `preview-server.sh alive` whether OUR recorded "
+        "process survived, so it cannot say a preview DIED mid-run: "
+        f"{code}"
     )
+    # ⛔ `kill -0` IS THE PRIMITIVE THIS REPLACED — it must not come back here.
+    # A zombie answers kill(0) forever and a recycled pid belongs to a stranger,
+    # so a step that branches on it can print a categorical ALIVE over a preview
+    # that is gone and then assert the CAUSE of the red. `alive` applies
+    # `pid_running` (zombie test) AND the boot-time start witness (the same
+    # PID-REUSE GUARD `stop` applies); `test_alive_*` below pin that it really
+    # does. One call per server, so the two jobs cannot drift.
+    assert "kill -0" not in code, (
+        "the dump decides liveness with a bare `kill -0`, which a ZOMBIE answers "
+        "forever and a RECYCLED pid answers for a different process — call "
+        f"`preview-server.sh alive` instead: {code}"
+    )
+    # The verdict PROSE lives in `cmd_alive` alone. It was once copy-pasted into
+    # both jobs (verbatim, 25 lines each), which is two definitions of "the
+    # preview survived" — the second one drifts. The step prints the helper's own
+    # line and decides only whether it is an annotation.
     for verdict in ("ALIVE", "DIED MID-RUN"):
-        assert verdict in run, (
-            f"the dump has no distinguishable {verdict!r} verdict, so a dead "
-            f"preview and a failing spec read alike: {run}"
+        assert verdict not in run, (
+            f"the step restates the {verdict!r} verdict instead of printing '"
+            "`preview-server.sh alive`'s own message — that is a second "
+            f"definition of it: {run}"
         )
     # ⛔ THE ORDERING IS THE WHOLE VERDICT. `stop-all` deletes each `<name>.pid`
     # (`preview-server.sh` `cmd_stop`), so a dump that runs AFTER the teardown

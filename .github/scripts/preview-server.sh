@@ -51,10 +51,23 @@
 #                                             free-check and wrangler's exit on
 #                                             EADDRINUSE are what keep a peer's server
 #                                             from being graded.
+#   alive --name N                            exit 0 iff OUR recorded process is still
+#                                             running (not a zombie, start time still
+#                                             matching the boot witness) AND the port
+#                                             still answers HTTP; every other outcome
+#                                             gets its OWN exit code and message — see
+#                                             `cmd_alive`. This is the verb a FAILURE
+#                                             dump calls: it separates "the preview died
+#                                             mid-run" from "the specs were wrong",
+#                                             which a bare `kill -0` cannot do.
 #   stop --name N                             signal the recorded tree only
 #   stop-all                                  stop every server this job recorded
 #
 # Exit codes: 0 ok · 2 usage · 3 no free port · 4 unusable pid
+#   `alive` adds its own: 7 alive-but-not-serving · 8 pid recycled · 5 recorded then
+#   stopped · 6 never recorded · 1 gone (died mid-run). The MESSAGE carries the same
+#   fact; the step only decides whether to prefix `::error::`, so the code is the
+#   contract and the prose is for the human reading the red.
 set -euo pipefail
 
 PROG="$(basename "$0")"
@@ -126,6 +139,40 @@ pid_state() {
 pid_running() {
   kill -0 "$1" 2>/dev/null || return 1
   [[ "$(pid_state "$1")" != "Z" ]]
+}
+
+# Is $1 OUR recorded process? Two questions, not one (#11675 review):
+#
+#   (a) it is RUNNING at all — `pid_running`, because a zombie answers kill(0)
+#       forever and must never be read as alive;
+#   (b) it is the same PROCESS — the start-time witness `record` wrote, re-read
+#       here. Pids are recycled, and comparing the pid against its creation time
+#       is the portable identity rule (psutil's own: "reliable process identity
+#       requires comparing the PID with the process creation time"). Linux's
+#       race-free alternative — `pidfd_open` (man 2), which stays bound to the
+#       process across a pid's reuse — is not available to a bash helper that
+#       also runs on macOS, so the witness is the answer here.
+#
+# $2 is the boot-witnessed start time. An EMPTY witness means identity cannot be
+# checked at all: that degrades the READ to liveness-only, never to a wrong
+# VERDICT that a stranger is ours (#5049).
+pid_is_ours() {
+  local pid="$1" recorded="$2" now
+  pid_running "$pid" || return 1
+  [[ -n "$recorded" ]] || return 0
+  now="$(pid_starttime "$pid" 2>/dev/null || true)"
+  [[ -n "$now" && "$now" == "$recorded" ]]
+}
+
+# The port legs: (a) something must be LISTENING, and (b) it must answer an HTTP
+# success. Factored out so `ready` and `alive` cannot drift into two definitions
+# of "the preview is serving" — they already shared this prose once.
+serves_now() {
+  local port="$1"
+  [[ -n "$port" ]] || return 1
+  port_free "$port" && return 1
+  curl -fsS --max-time 2 "http://127.0.0.1:${port}/" >/dev/null 2>&1 || return 1
+  return 0
 }
 
 pid_starttime() {
@@ -207,6 +254,13 @@ cmd_record() {
   start="$(pid_starttime "$pid")" || { printf '%s: cannot read the start time of pid %s\n' "$PROG" "$pid" >&2; return 4; }
   printf '%s\n' "$start" > "$dir/${name}.start"
   printf '%s\n' "$pid" > "$dir/${name}.pid"
+  # The BOOT WITNESS, and it is deliberately never removed — not by `stop`, not
+  # by `stop-all`. `stop` deletes `.pid`/`.start`/`.port` on EVERY branch, and
+  # the boot step's own retry loop calls `stop` between attempts, so a missing
+  # pid file has two causes that must not be reported alike: a preview that WAS
+  # recorded and was then stopped, and a boot that never reached `record`. Only
+  # this file separates them (#11675 review, third false-verdict path).
+  printf '%s %s\n' "$pid" "$start" > "$dir/${name}.booted"
 }
 
 # `--name N` (the workflow form) and a bare positional (debugging form).
@@ -231,25 +285,102 @@ cmd_ready() {
   [[ -f "$dir/${name}.pid" && -f "$dir/${name}.port" ]] || return 1
   pid="$(cat "$dir/${name}.pid")"
   port="$(cat "$dir/${name}.port")"
-  # (a) The pid we recorded must still be ALIVE. Three facts are checked here and
-  # NOTHING relates them to each other: (a) liveness, (b) something ANSWERS on the
-  # port, (c) that answer is an HTTP success. Mapping the port's listener to a pid
-  # needs `ss`/`lsof`, which the runner image does not guarantee, so a
-  # live-but-unbound pid beside a PEER's listener still passes. What narrows that
-  # window is `alloc`'s pre-boot free-check and wrangler's own exit on
-  # EADDRINUSE, not this probe (#2757).
-  kill -0 "$pid" 2>/dev/null || return 1
-  # (b) …and something must be LISTENING there.
-  port_free "$port" && return 1
-  # (c) …and it must be SERVING, not merely bound: a wrangler whose listener is up
-  # while its bundle/workerd is still starting answers a connect but never a 200,
-  # and the suites behind this gate require HTTP 200
-  # (`tests/e2e/test_session_login_flow.py` exits the run when it is not). `-f`
-  # fails on HTTP >= 400; `--max-time` keeps a listener that accepts but never
-  # replies from stalling the 240-iteration loop. This is the pre-fix `curl -fsS`
-  # requirement, kept beside the properties the #10283 fix added.
-  curl -fsS --max-time 2 "http://127.0.0.1:${port}/" >/dev/null 2>&1 || return 1
+  # (a) The pid we recorded must still be ALIVE AND still be OURS. Three facts are
+  # checked here and NOTHING relates them to each other: (a) liveness+identity,
+  # (b) something ANSWERS on the port, (c) that answer is an HTTP success.
+  # Mapping the port's listener to a pid needs `ss`/`lsof`, which the runner image
+  # does not guarantee, so a live-but-unbound pid beside a PEER's listener still
+  # passes. What narrows that window is `alloc`'s pre-boot free-check and
+  # wrangler's own exit on EADDRINUSE, not this probe (#2757).
+  #
+  # (a) is `pid_is_ours`, not a bare `kill -0`: a zombie answers kill(0) forever,
+  # and a RECYCLED pid would let a stranger satisfy this leg while our server is
+  # gone — then (c) could pass on the stranger's answer, which is the #2757 shape
+  # one step over (#11675 review).
+  pid_is_ours "$pid" "$(cat "$dir/${name}.start" 2>/dev/null || true)" || return 1
+  # (b)+(c) …something must be LISTENING there, and it must be SERVING, not merely
+  # bound: a wrangler whose listener is up while its bundle/workerd is still
+  # starting answers a connect but never a 200, and the suites behind this gate
+  # require HTTP 200 (`tests/e2e/test_session_login_flow.py` exits the run when it
+  # is not). `-f` fails on HTTP >= 400; `--max-time` keeps a listener that accepts
+  # but never replies from stalling the 240-iteration loop. This is the pre-fix
+  # `curl -fsS` requirement, kept beside the properties the #10283 fix added.
+  serves_now "$port" || return 1
   return 0
+}
+
+# ── alive: "did OUR preview survive the run?" ────────────────────────────────
+#
+# The ONE question a failure dump has to answer before a log can be read for a
+# cause, and the reason this verb exists: both `ci.yml` preview-diagnostic steps
+# decided it with a bare `kill -0 "$pid"`, which is wrong in THREE ways measured
+# by the review of PR #11675.
+#
+#   * A ZOMBIE answers kill(0) forever, so an unreaped wrangler read as ALIVE —
+#     and the step then asserted the CAUSE of the red ("the specs' or the
+#     content's, not a dead server") from a process that had already exited.
+#     `pid_running` is the predicate `record`/`stop` already use.
+#   * A RECYCLED pid is a different process, so the same bare probe read a
+#     stranger as ours. The identity witness is the start time `record` wrote
+#     and `stop`'s PID-REUSE GUARD already re-checks; see `pid_is_ours`.
+#   * "No pid file" was reported as "it never started" — but `stop` deletes the
+#     pid file on every branch and the boot retry loop calls it, so the truth was
+#     the OPPOSITE of the message in the common double-boot-failure case. The
+#     `.booted` witness `record` writes separates the two.
+#
+# Exit codes (see the header table): 0 alive and serving · 7 alive but not
+# serving · 8 pid recycled · 5 recorded then stopped · 6 never recorded · 1 gone.
+cmd_alive() {
+  local name
+  name="$(name_flag alive "$@")"
+  local dir pfile pid port recorded now
+  dir="$(state_dir)"
+  pfile="$dir/${name}.pid"
+  port="$(cat "$dir/${name}.port" 2>/dev/null || true)"
+  local at_port=""
+  [[ -n "$port" ]] && at_port=" on :${port}"
+
+  # NAMES are for humans; the exit code is what the step branches on, and every
+  # state below gets its own so a reader (and a test) can tell them apart.
+  if [[ ! -f "$pfile" ]]; then
+    if [[ -f "$dir/${name}.booted" ]]; then
+      printf '%s\n' "${PROG}: ${name}: RECORDED, then STOPPED — this job DID start a preview and its pid file is gone, which is what stop does on every branch (the boot step's retry loop calls it between attempts, and so may a spec). This does NOT mean the preview never started: read the boot step's own log for why it was stopped."
+      return 5
+    fi
+    printf '%s\n' "${PROG}: ${name}: NEVER RECORDED — no pid was ever recorded for this name in this job's state dir, so the boot step never reached record: read its log. A preview that started and was then stopped reports itself as RECORDED, then STOPPED, not as this."
+    return 6
+  fi
+
+  pid="$(cat "$pfile")"
+  recorded="$(cat "$dir/${name}.start" 2>/dev/null || true)"
+
+  # Zombies answer kill(0) forever: liveness is `pid_running`, never bare kill -0.
+  if ! pid_running "$pid"; then
+    printf '%s\n' "${PROG}: ${name}: pid ${pid}${at_port} is GONE — the process this job recorded is no longer running (it exited, or it is a zombie that has not been reaped), so this preview DIED MID-RUN. Its log is the cause, and every ECONNREFUSED in the specs above is a SYMPTOM of it."
+    return 1
+  fi
+
+  # The PID-REUSE GUARD `stop` already applies, applied to the READ: a pid whose
+  # start time changed is a different process, and the preview we started is gone.
+  if [[ -n "$recorded" ]]; then
+    now="$(pid_starttime "$pid" 2>/dev/null || true)"
+    if [[ -n "$now" && "$now" != "$recorded" ]]; then
+      printf '%s\n' "${PROG}: ${name}: pid ${pid} was RECYCLED — it is running, but its start time (${now}) no longer matches the one witnessed at boot (${recorded}), so it is a DIFFERENT process and the preview this job started is GONE. It DIED MID-RUN; its log is the cause, and anything answering${at_port} is a stranger's answer, never this preview's."
+      return 8
+    fi
+  fi
+
+  if [[ -z "$port" ]]; then
+    printf '%s\n' "${PROG}: ${name}: pid ${pid} is ALIVE — our recorded process: not a zombie, and its start time still matches the boot witness. No port was recorded for this name, so whether it was still SERVING is not answerable from here; the log is the next read."
+    return 0
+  fi
+
+  if serves_now "$port"; then
+    printf '%s\n' "${PROG}: ${name}: pid ${pid} on :${port} is ALIVE (our recorded process: not a zombie, and its start time still matches the boot witness) and :${port} answers HTTP — this preview SURVIVED the run, so the red is the specs' or the content's, not a dead server. This does NOT prove the listener on the port is ours: alloc's pre-boot free-check and wrangler's own exit on EADDRINUSE are what exclude a peer's server, not this probe."
+    return 0
+  fi
+  printf '%s\n' "${PROG}: ${name}: pid ${pid} on :${port} is ALIVE (our recorded process: not a zombie, and its start time still matches the boot witness) but :${port} does not answer an HTTP success — nothing is listening there, or the answer is a non-2xx. The PROCESS survived and the SERVER did not serve; the log is where the cause is."
+  return 7
 }
 
 cmd_stop() {
@@ -334,9 +465,10 @@ main() {
     dir) state_dir ;;
     record) cmd_record "$@" ;;
     ready) cmd_ready "$@" ;;
+    alive) cmd_alive "$@" ;;
     stop) cmd_stop "$@" ;;
     stop-all) cmd_stop_all ;;
-    *) die "usage: $PROG {alloc|dir|record|ready|stop|stop-all} ..." ;;
+    *) die "usage: $PROG {alloc|dir|record|ready|alive|stop|stop-all} ..." ;;
   esac
 }
 

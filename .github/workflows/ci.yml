@@ -2464,17 +2464,21 @@ jobs:
           # Both servers, by name, through the same per-run/per-job state dir the
           # boot steps wrote to (#10283) — never a shared path under `$TMPDIR`
           # that a peer job's write could point at.
+          #
+          # ⛔ ONE call per server answers the whole question (`preview-server.sh
+          # alive`), and the helper's OWN message names the state. This step used
+          # to branch on a bare `kill -0 "$pid"`, which is wrong three ways: a
+          # ZOMBIE answers kill(0) forever, a RECYCLED pid is a stranger, and a
+          # stopped preview (whose pid file `stop` deletes) was reported as never
+          # having started. `alive` applies `pid_running` (not a zombie) AND the
+          # boot-time start witness (the same PID-REUSE GUARD `stop` uses), and
+          # keeps "alive but not serving" distinct from "our process is still
+          # running". The step only decides whether a verdict is an annotation.
           for name in marketing app; do
-            pid="$(cat "${PREVIEW_STATE}/${name}.pid" 2>/dev/null || true)"
-            port="$(cat "${PREVIEW_STATE}/${name}.port" 2>/dev/null || true)"
-            if [ -z "$pid" ]; then
-              echo "::error::${name}: no pid file at teardown — read the boot step's own log; a boot that TIMED OUT is stopped by the retry loop, and stop deletes this file, so this does NOT mean it never started"
-            elif bash "$PREVIEW" ready --name "$name"; then
-              echo "${name}: pid ${pid} is ALIVE and :${port} answers HTTP — this preview did not die; the red is the specs' or the content's, not a dead server. (This does NOT prove the listener is ours: a peer on this port is excluded by alloc's pre-boot free-check and by wrangler's own EADDRINUSE exit, not by this probe.)"
-            elif kill -0 "$pid" 2>/dev/null; then
-              echo "::error::${name}: pid ${pid} is alive but does NOT pass the preview-server.sh ready probe — ready stops at the FIRST failing fact, so either nothing is listening on :${port} or the answer is not an HTTP success (a non-200, or slower than its 2s cap); the log below is where the cause is"
+            if out="$(bash "$PREVIEW" alive --name "$name")"; then
+              echo "$out"
             else
-              echo "::error::${name}: pid ${pid} on :${port} is GONE — the preview DIED MID-RUN; its log below is the cause, and every ECONNREFUSED above is a SYMPTOM of it"
+              echo "::error::${out}"
             fi
             echo "--- ${PREVIEW_STATE}/${name}.log ---"
             tail -80 "${PREVIEW_STATE}/${name}.log" 2>/dev/null || echo "(no ${name}.log)"
@@ -2708,17 +2712,16 @@ jobs:
           # died or the specs were wrong, and #8059 is that misreading measured
           # (a dead preview reported as a `--d1`/`dist` problem). Same shape in
           # both jobs, so the next preview red names its own cause.
+          #
+          # ⛔ ONE call per server (`preview-server.sh alive`) answers it, and it is
+          # deliberately not a bare `kill -0`: a ZOMBIE answers kill(0) forever, a
+          # RECYCLED pid belongs to a stranger, and "no pid file" means a stop ran
+          # as often as it means no boot. See `cmd_alive`'s header.
           for name in auth app; do
-            pid="$(cat "${PREVIEW_STATE}/${name}.pid" 2>/dev/null || true)"
-            port="$(cat "${PREVIEW_STATE}/${name}.port" 2>/dev/null || true)"
-            if [ -z "$pid" ]; then
-              echo "::error::${name}: no pid file at teardown — read the boot step's own log; a boot that TIMED OUT is stopped by the retry loop, and stop deletes this file, so this does NOT mean it never started"
-            elif bash "$PREVIEW" ready --name "$name"; then
-              echo "${name}: pid ${pid} is ALIVE and :${port} answers HTTP — this preview did not die; the red is the specs' or the content's, not a dead server. (This does NOT prove the listener is ours: a peer on this port is excluded by alloc's pre-boot free-check and by wrangler's own EADDRINUSE exit, not by this probe.)"
-            elif kill -0 "$pid" 2>/dev/null; then
-              echo "::error::${name}: pid ${pid} is alive but does NOT pass the preview-server.sh ready probe — ready stops at the FIRST failing fact, so either nothing is listening on :${port} or the answer is not an HTTP success (a non-200, or slower than its 2s cap); the log below is where the cause is"
+            if out="$(bash "$PREVIEW" alive --name "$name")"; then
+              echo "$out"
             else
-              echo "::error::${name}: pid ${pid} on :${port} is GONE — the preview DIED MID-RUN; its log below is the cause, and every ECONNREFUSED above is a SYMPTOM of it"
+              echo "::error::${out}"
             fi
             echo "--- ${PREVIEW_STATE}/${name}.log ---"
             tail -80 "${PREVIEW_STATE}/${name}.log" 2>/dev/null || echo "(no ${name}.log)"
