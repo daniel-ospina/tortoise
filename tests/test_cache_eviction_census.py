@@ -116,8 +116,13 @@ class _FakeGraph:
             # Label-less nodes, MEASURED — never a residual (multi-label nodes make
             # `total - sum(counts)` go negative; see `resident_counts`).
             return self._Result([[self._unlabelled]])
-        if statement.startswith("MATCH (n:") and "count(n)" in statement:
-            label = statement[len("MATCH (n:"):].split(")")[0]
+        if re.fullmatch(r"MATCH \(n:(.+)\) RETURN count\(n\)", statement):
+            # ⛔ AN EXACT per-label count, the one form `resident_counts` issues. A
+            # statement that merely STARTS `MATCH (n:` and carries `count(n)` — a
+            # predicate-carrying count, i.e. a population read — must NOT be answered
+            # here: it would silently get a LABEL's count (0 for an undeclared label),
+            # and a future test could then assert a demotion production never produces.
+            label = statement[len("MATCH (n:"):-len(") RETURN count(n)")]
             return self._Result([[self._counts.get(label.strip("`"), 0)]])
         if statement.startswith("MATCH (n) RETURN count(n)"):
             if self.true_total is not None:
