@@ -1186,11 +1186,22 @@ def test_the_no_port_verdict_does_not_borrow_an_untaken_identity_leg(
             "record", "--name", "app", "--pid", str(victim.pid), env=state
         ).returncode == 0
 
-        # The matched-witness shape keeps the claim: positive control.
+        # The matched-witness shape keeps the claim: positive control, and it also
+        # pins the FIRST exit-9 sentence's port leg (an empty port file must not be
+        # reported as one that was never recorded) — the second sentence is pinned
+        # further down, so neither printf can regress unobserved.
+        (state_dir / "app.port").write_text("")
         verified = _script("alive", "--name", "app", env=state)
         assert verified.returncode == 9, verified.stdout + verified.stderr
         assert "our recorded process" in verified.stdout, (
             "the positive control lost the verified claim: " + verified.stdout)
+        assert "port file EXISTS" in verified.stdout, (
+            "a readable-but-empty port file was reported as one that was never "
+            "recorded, in the MATCHED-witness sentence: " + verified.stdout)
+        assert "(unreadable, or empty)" in verified.stdout, (
+            "the empty case is not named among the causes the read could not "
+            "tell apart: " + verified.stdout)
+        (state_dir / "app.port").unlink()
 
         # No witness at all: the verdict may say the leg was not taken…
         (state_dir / "app.start").unlink()
@@ -1204,19 +1215,28 @@ def test_the_no_port_verdict_does_not_borrow_an_untaken_identity_leg(
         # …and a witness that EXISTS but cannot be read must not be called absent.
         (state_dir / "app.start").write_text("")
         empty = _script("alive", "--name", "app", env=state)
-        assert "EXISTS" in empty.stdout and "could not be read" in empty.stdout, (
-            "an empty witness was reported as one that was never recorded: "
-            + empty.stdout)
+        assert "EXISTS" in empty.stdout and "could not be read (unreadable, or empty)" in empty.stdout, (
+            "an empty witness was reported without its own cause (unreadable vs "
+            "empty): " + empty.stdout)
         assert "no start-time witness was recorded" not in empty.stdout, empty.stdout
         assert "our recorded process" not in empty.stdout, empty.stdout
 
-        # Same rule for the port file: EXISTS-but-unreadable is not "never".
+        # Same rule for the port file in the UNTAKEN-identity sentence.
         (state_dir / "app.port").write_text("")
         port_gone = _script("alive", "--name", "app", env=state)
         assert port_gone.returncode == 9, port_gone.stdout + port_gone.stderr
         assert "port file EXISTS" in port_gone.stdout, (
             "an empty port file was reported as one that was never recorded: "
             + port_gone.stdout)
+
+        # …and in the RECYCLED sentence, which reads the same port state.
+        (state_dir / "app.start").write_text("1\n")
+        (state_dir / "app.port").write_text("")
+        recycled = _script("alive", "--name", "app", env=state)
+        assert recycled.returncode == 8, recycled.stdout + recycled.stderr
+        assert "port file EXISTS" in recycled.stdout, (
+            "the RECYCLED sentence asserted that no port was recorded although "
+            "the file exists: " + recycled.stdout)
     finally:
         _reap(victim.pid)
 

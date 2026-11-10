@@ -433,6 +433,10 @@ cmd_alive() {
   # cannot be read is a permissions/torn-state fault, not "alloc never ran". The
   # sentence may not name an absence the probe did not observe.
   local port_unreadable=""
+  # …and a readable-but-EMPTY port file is a third cause, not a permission fault:
+  # the read succeeded and returned nothing (`record` never writes it empty, a
+  # torn write or a truncating tool does), so the sentence must not send the reader
+  # to a permissions hunt. Both variants share the branch below.
   if [[ -z "$port" && -f "$dir/${name}.port" ]]; then
     port_unreadable="${name}.port"
   fi
@@ -444,6 +448,10 @@ cmd_alive() {
   # (#11675 review, finding 2).
   if [[ -n "$port" ]]; then
     stranger="anything answering on :${port} is a stranger's answer, never this preview's"
+  elif [[ -n "$port_unreadable" ]]; then
+    # Same rule as the branch below: a port file that EXISTS is not one that was
+    # never written, and saying it was sends the reader to the boot step.
+    stranger="anything answering at all is a stranger's answer, never this preview's, and a port file EXISTS (${port_unreadable}) but could not be read (unreadable, or empty), so WHERE it would answer was NOT checked"
   else
     stranger="anything answering at all is a stranger's answer, never this preview's, and no port was recorded for this name so WHERE it would answer was NOT checked"
   fi
@@ -554,7 +562,7 @@ cmd_alive() {
     # file that EXISTS but could not be read is not "no port was recorded".
     local no_port_why="no port was recorded for this name"
     if [[ -n "$port_unreadable" ]]; then
-      no_port_why="a port file EXISTS (${port_unreadable}) but could not be read, so no port is known"
+      no_port_why="a port file EXISTS (${port_unreadable}) but could not be read (unreadable, or empty), so no port is known"
     fi
     if [[ -n "$recorded" && "$ident" -eq 0 ]]; then
       printf '%s\n' "${PROG}: ${name}: pid ${pid} is ALIVE — our recorded process: not a zombie, and ${identity} — but ${no_port_why}, so whether it was still SERVING was NOT checked. This is NOT an alive-and-serving verdict; the log is the next read."
