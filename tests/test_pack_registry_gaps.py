@@ -2566,9 +2566,22 @@ class TestCoreHierarchy:
             if sdk is not None:
                 sdk.close()
 
-        assert len(expected) > 1, (
-            "`expand_kind('Object')` collapsed to the bare kind, so this pin "
-            f"cannot distinguish an expansion from its head: {sorted(expected)}")
+        # The guard has to make ITS OWN claim true. `len(expected) > 1` did not
+        # (review round 3, P3-2): the `spelling` direction (#11000's fourth) keeps
+        # TWO members alive with the subclass widening deleted —
+        # `expand_kind("Object")` is then `['Object', 'core:Object']`, the head in
+        # both spellings — so the count passed on exactly the collapse it names
+        # and this pin stayed GREEN on the mutant. The head's spellings are named
+        # exhaustively below, so "at least one member that is NOT the head" is the
+        # property the pin needs; a count of 2 is a fact about the spelling rule,
+        # not about the widening. (A literal pack kind would be the other way to
+        # say it, but it would false-red when a pack drops or renames that kind —
+        # the false diagnosis this pin was rewritten to avoid.)
+        head_spellings = {"Object", "core:Object"}
+        assert expected - head_spellings, (
+            "`expand_kind('Object')` collapsed to the head and its `core:` "
+            "spelling, so this pin cannot distinguish an expansion from its "
+            f"head: {sorted(expected)}")
         assert len(carriers) == 1, (
             "exactly one call must hand the filter the EXPANSION; "
             f"{len(carriers)} did: {[c for c, _ in carriers]}")

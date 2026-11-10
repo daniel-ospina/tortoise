@@ -855,7 +855,22 @@ def test_the_dashboard_e2e_gate_names_the_shared_preflight_module() -> None:
     )
 
 
-def test_a_preflight_red_dumps_the_preview_servers_own_logs() -> None:
+@pytest.mark.parametrize(
+    "job_name,servers",
+    [
+        # The two `ci.yml` jobs that boot `wrangler pages dev` previews and then
+        # run specs against them. They are pinned TOGETHER because the diagnostic
+        # step was written for one and not the other, and that asymmetry is
+        # exactly the defect this arm closed: #10305 added it to `dashboard-e2e`,
+        # and `legal-e2e` — same boot steps, same helper, same failure mode — kept
+        # red-ing undiagnosably until #11675.
+        ("dashboard-e2e", ("auth", "app")),
+        ("legal-e2e", ("marketing", "app")),
+    ],
+)
+def test_a_preflight_red_dumps_the_preview_servers_own_logs(
+    job_name: str, servers: tuple[str, ...]
+) -> None:
     """A preflight red is undiagnosable unless the servers' logs are read.
 
     The measured failure (#10305, job 124361929728) reddened on
@@ -866,8 +881,17 @@ def test_a_preflight_red_dumps_the_preview_servers_own_logs() -> None:
     the diagnostic step: it exists, it runs on FAILURE, and it reads the logs
     through the same per-job state directory the boot wrote to (`dir`), never a
     shared `/tmp/wrangler*.log` path.
+
+    #11675 added the second parametrisation after the SAME absence reddened the
+    required `legal-e2e` check on PR #11675 itself (job 129650228746): `:8808`
+    was ready at 05:42:03Z, 11 app-origin specs then failed
+    `ERR_CONNECTION_REFUSED`, and the teardown printed `app (pid 983187) already
+    exited` while the marketing preview was still serving — a preview that DIED
+    MID-RUN, whose own log went unread, so the red could not be diagnosed after
+    the fact. `legal-e2e` boots the same two previews through the same helper and
+    had no such step, from #10305 until now.
     """
-    job = _load_workflow("ci.yml")["jobs"]["dashboard-e2e"]
+    job = _load_workflow("ci.yml")["jobs"][job_name]
     # Selected by SHAPE, not by name: the two boot steps also call
     # `preview-server.sh … dir` and `tail` a log (their OWN, and only when the
     # boot fails). A step that dumps BOTH servers' logs is the only one that
@@ -890,9 +914,25 @@ def test_a_preflight_red_dumps_the_preview_servers_own_logs() -> None:
         f"any other condition it does not run for the red it exists for: {step.get('if')!r}"
     )
     run = str(step["run"])
-    for name in ("auth", "app"):
+    for name in servers:
         assert name in run, f"the dump does not name the {name} log: {run}"
     assert "/tmp/wrangler" not in run, (
         "the dump reads a shared /tmp path; the boot writes to the per-job "
         f"state dir `preview-server.sh dir` (#10283): {run}"
     )
+    # The LIVENESS verdict (#11675). A log alone leaves the reader guessing
+    # whether the server died or the specs were wrong, and both misreadings are
+    # measured: #10305 read a 500 as unreachability, #8059 read a dead preview as
+    # a `--d1`/`dist` problem, and PR #11675's own red (job 129650228746) read a
+    # mid-run death as 11 app-origin spec failures. `kill -0` on the pid the BOOT
+    # recorded — the same per-job pid file `preview-server.sh` writes — is what
+    # separates them, and the two verdicts must be distinguishable in the log.
+    assert "kill -0" in run, (
+        "the dump does not check whether the recorded pid is still ALIVE, so it "
+        f"cannot say a preview DIED mid-run: {run}"
+    )
+    for verdict in ("ALIVE", "DIED MID-RUN"):
+        assert verdict in run, (
+            f"the dump has no distinguishable {verdict!r} verdict, so a dead "
+            f"preview and a failing spec read alike: {run}"
+        )
