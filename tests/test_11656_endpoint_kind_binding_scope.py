@@ -119,16 +119,16 @@ class TestTheInventoryTheScopeCites:
         assert len(haspart) == 1, [(r["_ns"], r.get("fromKind"), r.get("toKind")) for r in haspart]
         assert (haspart[0]["fromKind"], haspart[0]["toKind"]) == ("dev:theme", "dev:epic")
 
-        # The miscount's source: `semantics: hasPart` rides SEVERAL DIFFERENT predicates. The exact
-        # count moves with main (+1 at the merge head), so pin the shape — a population of distinct
-        # predicates, none of them `hasPart` — rather than a number that would red on an unrelated edit.
+        # The miscount's source: `semantics: hasPart` rides SEVERAL DIFFERENT predicates — **five** rows over
+        # **four** distinct predicates at this head (`decomposesInto`, `contains` ×2, `partOf`,
+        # `partOfSprint`), which is the figure the scope §1.3 and the brief §3.2 both state. Pinned as a count
+        # because both docs now assert it: a pack edit that changes it must red here rather than leave the
+        # prose wrong.
         semantics_only = [r for r in _declared_relations()
                           if r.get("semantics") == "hasPart" and r.get("predicate") != "hasPart"]
-        assert len(semantics_only) >= 4, "the miscount's source: several distinct predicates CARRY hasPart meaning"
-        # A SHAPE pin, not the count: the miscount counted four DIFFERENT predicates carrying this meaning,
-        # so if they ever collapse into one predicate the evidence for "`semantics:` is not a declaration" is
-        # gone. (`predicate != "hasPart"` above already guarantees the row is not the declaration itself.)
-        assert len({r["predicate"] for r in semantics_only}) >= 4, sorted({r["predicate"] for r in semantics_only})
+        assert len(semantics_only) == 5, [r["predicate"] for r in semantics_only]
+        assert {r["predicate"] for r in semantics_only} == {
+            "decomposesInto", "contains", "partOf", "partOfSprint"}, sorted({r["predicate"] for r in semantics_only})
 
     def test_the_repeated_predicates_are_addresses_contains_targets(self):
         """D3's evidence, on the correct rows (the corrected §1.3 / brief §4.4)."""
@@ -240,25 +240,34 @@ class TestTheThirdDoorExists:
         MERGEs the journaled rel type, so gating the door live and not here reproduces the
         `derived == replay(journal)` divergence on the door §1.1 calls dominant.
 
-        Pinned as a SHAPE, not a line: the fold's own code names the rels it carries (`ownedBy`/`hasPart`/
-        `dependsOn`, #9553 class 4), which is the evidence that they are DECLARED predicates. If that note or
-        the fold goes, the scope's §1.2 item 6 and pin 15b have to be re-derived — so this reds rather than
-        letting the claim rot.
+        ⛔ **Every assertion below is scoped to a WINDOW starting at the fold marker**, because the same
+        strings occur elsewhere in this 17k-line module and a whole-file `in` check cannot fail: `MERGE
+        (a)-[:{etype}]->(b)` also appears in the `DirectEdgeRepoint` leg, and `#9553 class 4` in two
+        unrelated places. A file-wide assertion would stay green if the creation fold were deleted.
+
+        The predicate is in a DIFFERENT key per producer: `edge_type` for a structural-lane record
+        (`sdk.py:12142`), a `label` property for a `create_direct_edge` record (`sdk.py:29214`/`:29238`,
+        restored through `DIRECT_EDGE_ATTR_KEYS`). That distinction is the scope's §1.2 item 6.
         """
-        source = (REPO_ROOT / "tortoise" / "projection" / "__init__.py").read_text()
-        assert "fold ``DirectEdgeCreated``" in source or "fold `DirectEdgeCreated`" in source, (
-            "the DirectEdgeCreated fold is no longer recognisable in projection/__init__.py — re-derive §1.2 "
-            "item 6 and pin 15b"
+        lines = (REPO_ROOT / "tortoise" / "projection" / "__init__.py").read_text().splitlines()
+        starts = [i for i, ln in enumerate(lines) if "fold ``DirectEdgeCreated``" in ln]
+        assert len(starts) == 1, f"expected exactly one DirectEdgeCreated fold marker, found {len(starts)}"
+        window = "\n".join(lines[starts[0]: starts[0] + 400])
+
+        assert "`ownedBy`/`hasPart`/" in window, (
+            "the note naming the rels a structural-lane record carries is gone from the fold — that note is "
+            "the evidence that they are DECLARED predicates (scope §1.2 item 6)"
         )
-        assert "#9553 class 4" in source, (
-            "the note naming the rels this fold carries is gone — the evidence that they are DECLARED "
-            "predicates (ownedBy/hasPart/dependsOn) needs re-deriving"
+        assert 'f"MERGE (a)-[:{etype}]->(b)"' in window, (
+            "the fold no longer writes a PARAMETERISED rel type — if it is a literal now, a declared predicate "
+            "cannot reach it and scope §1.2 item 6 has to be re-derived"
         )
-        # The edges this fold writes are parameterised: a literal rel type would make the fold
-        # unable to carry a declared predicate, and the scope's item 6 would be wrong.
-        assert 'f"MERGE (a)-[:{etype}]->(b)"' in source, (
-            "the DirectEdgeCreated fold no longer writes a PARAMETERISED rel type — if it is now a literal, "
-            "re-derive whether a declared predicate can reach it at all"
+        assert 'etype = ev.get("edge_type")' in window, (
+            "the fold no longer reads `edge_type` — re-derive where a replay record's predicate comes from"
+        )
+        assert "DIRECT_EDGE_ATTR_KEYS" in window, (
+            "the fold no longer restores DIRECT_EDGE_ATTR_KEYS, so a create_direct_edge record's `label` "
+            "property is not replayed — the second producer's predicate key would be lost"
         )
 
 

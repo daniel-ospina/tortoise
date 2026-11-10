@@ -71,11 +71,23 @@ Object pair is writable today with no gate. **⇒ `create_direct_edge` is IN sco
    live-only gate **diverges on `rebuild_all`**: the `derived == replay(journal)` class. The code says the
    two write one shape (*"#7902 fold-parity"*).
 6. `projection/__init__.py`, the **`DirectEdgeCreated` replay fold** (`rebuild_all` pass-2b, fold starts
-   `:16955`; the edge MERGE is `:17109`, *"mirroring create_direct_edge byte-for-byte on the edge shape"*)
-   — the second fold, one for the *other* label door. ⛔ **This is not a corner:** its own code records the
-   rels a `DirectEdgeCreated` can carry — *"the structural-edge lane's `ownedBy`/`hasPart`/`dependsOn`/…
-   (#9553 class 4)"* (`:17065`) — i.e. **declared predicates**. Gating item 2 live and this fold not gated
-   reproduces the same divergence as item 5, on the door §1.1 says is dominant.
+   `:16955`; it reads `etype = ev.get("edge_type")` at `:17027` and MERGEs it at `:17109`, *"mirroring
+   create_direct_edge byte-for-byte on the edge shape"*) — the second fold, for the **other** label door.
+   ⛔ **Where the predicate lives in a record at this fold is PRODUCER-DEPENDENT, and getting it wrong
+   makes the gate a no-op:**
+   - **structural-edge lane** (`sdk._record_structural_edge`, `sdk.py:12079`) journals `edge_type=rel`
+     (`sdk.py:12142`), so `edge_type` **is** the declared predicate — `ownedBy`/`hasPart`/`dependsOn`, which
+     the fold's own code names (*"the structural-edge lane's `ownedBy`/`hasPart`/`dependsOn`/… (#9553
+     class 4)"*, `:17065`);
+   - **`create_direct_edge`** does **not** put its label in the rel type: it writes
+     `rel_type = op_type  # IMPL / NAND` (`sdk.py:29214`) and carries the declared predicate as an edge
+     **property** — `attrs["label"] = label` (`sdk.py:29238`), restored by this fold through
+     `DIRECT_EDGE_ATTR_KEYS` (`edges.py:90-91`, applied at `__init__.py:17126`).
+
+   ⇒ the rule at this fold must read the predicate as **`ev["label"]` when present, else `ev["edge_type"]`**.
+   A gate keyed on `edge_type` alone sees `IMPL`/`NAND` — a predicate no pack declares — returns `unbound`, and
+   never enforces the dominant door. Gating item 2 live and this fold not gated reproduces the same divergence
+   as item 5, on the door §1.1 says is dominant.
 
 ⚠️ **This list is an inventory, NOT a completeness claim — and that distinction is the point.** The scoping
 lane's own handoff on #11656 (comment 3020037081) records the failure class: four rounds each asserted a writer
@@ -167,14 +179,15 @@ a superset (measured: `kind_forms_for('dev:issue')` has `issue` but not `pm:issu
 `pm:issue` but not `issue`), both sides case-folded because kinds are stored **verbatim**
 (`domain_validators.py:562`).
 
-**Where each call site gets its kinds — no new query at any of them:**
+**Where each call site gets its kinds — no extra round trip at any of them:**
 
 | site | source |
 |---|---|
 | `create_operator` | the existing per-label probe (`sdk.py:23460`) — add the kind property to its `RETURN`, the same zero-extra-round-trip shape `#2351` uses for `claimClass` |
 | `create_direct_edge` | its own existing probe (`sdk.py:29142-29146`) returns `id, is_operator, status, claimClass` — add the kind property |
 | `create_edge` / `create_about_edge` | `_resolve_entity` already returns `properties` (consumed for the `aboutDocument` refusal at `edges.py:2933`) |
-| `_create_edges` (fold) | it already resolves the descriptor's endpoints |
+| `_create_edges` (operator fold) | it already resolves the descriptor's endpoints |
+| **`DirectEdgeCreated` fold** | its per-label endpoint probe (`projection/__init__.py:17090-17093`) returns **only `p.id`** — the label sweep supplies the node LABEL (`Point`/`Object`/`Subject`/`Event`), not the kind property. It must add the kind property to that `RETURN`, the same shape as the two rows above; without it the rule is called with no kind and the fold's gate reports `unknown_kind` for every record |
 
 **`create_operator`'s synthetic node carries no kind** — the pair is `(source_id, each target_id)` from the
 **arguments**; never read it off the stored typed edges.
@@ -278,7 +291,7 @@ undeclared.
 | 13 | **mutation**: deleting the binding test reds ≥1 pin | the guard asserted by prose |
 | 14 | **`create_direct_edge`** refuses a declared mismatched label (both `link_entities` and `ingest` arms) | the P0 — an ungated third door |
 | 15 | the **operator** replay fold (`_create_edges`) produces the same verdict as live | `rebuild_all` divergence |
-| 15b | the **`DirectEdgeCreated`** replay fold (`projection/__init__.py` pass-2b) produces the same verdict as live, for a declared rel it carries (`ownedBy`/`hasPart`/`dependsOn`) | the same divergence on the second fold — the door §1.1 calls dominant |
+| 15b | the **`DirectEdgeCreated`** replay fold (`projection/__init__.py` pass-2b) produces the same verdict as live — **and it reads the predicate from `ev["label"]` when present, else `ev["edge_type"]`** (§1.2 item 6) | the same divergence on the second fold; and a gate keyed on `edge_type` alone sees only `IMPL`/`NAND` for `create_direct_edge` records and silently never enforces the dominant door |
 | 16 | `resolve_enforcement` resolves over **installed** packs, not the catalog max | one pack blocking another's predicate |
 | 17 | the prevention guidance lists the declared pairs for an endpoint pair and omits none | a silent gap between gate and guidance |
 | 18 | **writer census** — a mechanical re-derivation of every parameterised-rel-type Cypher write site under `tortoise/` (regex over `MERGE`/`CREATE (…)-[:{rel}]->`, filtered to a non-literal rel type), asserting each routes through `kind_pair_verdict` or is named in a declared exemption list | **a new writer silently bypassing the gate** — the completeness claim that failed four review rounds on #11656 (§1.2). A hand-counted list cannot prevent this; a census can |
@@ -313,7 +326,7 @@ the declared kinds; a read-side census reports the pre-existing population.
 |---|---|---|
 | R1 | a refusal on a **legitimate** legacy write | the rule is a write gate, never retro-applied; `rebuild_all` must not refuse a committed record |
 | R2 | the O(nodes) installed-pack read per write | §7 — never per write |
-| R3 | live/replay divergence | pin 15 |
+| R3 | live/replay divergence | pins 15 **and 15b** — one per replay fold |
 | R4 | the gate reads "done" while nothing emits business relations | pin 17 is a unit/contract test |
 | R5 | a false refusal from the layer case before #11000 lands | §5.3 — `unbound` + pin 12 |
 | R6 | blocking by default surprises an existing caller | it is the ruling; `enforcement.relations[predicate] = warn` is the declared escape, and pin 9 proves it |
@@ -341,5 +354,5 @@ the declared kinds; a read-side census reports the pre-existing population.
 | "`mismatch` → refuse, unconditionally" beside "read the level through `resolve_enforcement`" | contradictory — the map's default is `warn` and no pack declares a level. Fixed by §2.1 | fresh review (P1) |
 | "both kinds in the declaring pack's vocabulary" | disables **8** of 35 cross-universe declarations. Fixed by §5.2 | fresh review (P1) |
 | "leaves 31 untested" | `create_edge` covers 2 ⇒ leaves **33** | fresh review (P2) |
-| "five call sites" / "four writers" (revision 3) | **six**, and **two** of them are replay folds — the operator fold *and* the `DirectEdgeCreated` fold (`projection/__init__.py` pass-2b), which carries `ownedBy`/`hasPart`/`dependsOn`. Fixed by §1.2 item 6, §4, pins 15/15b | fresh review (P1) — found by opening the second fold's own `#9553 class 4` note |
+| "five call sites" / "four writers" (revision 3) | **six**, and **two** of them are replay folds — the operator fold *and* the `DirectEdgeCreated` fold (`projection/__init__.py` pass-2b), which carries declared predicates from **two** producers: rel type for the structural-edge lane, a `label` property for `create_direct_edge`. Fixed by §1.2 item 6, §4, pins 15/15b | fresh review (P1) — found by opening the second fold's own `#9553 class 4` note |
 | the list of call sites presented as the specification | an **inventory**, not a completeness claim: four review rounds each asserted a writer set and each was wrong. Completeness is now **measured** (pin 18) | the scoping lane's handoff on #11656, confirmed by a fresh review |
