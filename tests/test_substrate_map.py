@@ -1627,12 +1627,18 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     it, never to widen the assertion. The narrow pattern is still the exception, so
     the argument stands at this head.
 
-    Every statement of the three MEASURED FIGURES in §5's measurement sentence is
+    Every statement of the three HEAD figures in §5's measurement sentence is
     read OUT OF THE DOC and compared to `_label_hits()`: `_LABEL_CLAIM` for the bold
     lines/files pair, `_QUOTED_GREP` for the same pair as quoted command output,
     `_NARROW_CLAIM` for the word — each searched inside §5 only and required to
     appear EXACTLY ONCE, so neither a decoy elsewhere in the document nor a second
-    statement inside §5 can bind the pin. That anchoring is not theoretical: an
+    statement inside §5 can bind the pin. The sentence's OTHER number pair — "It was
+    `55` across `17` when this was first measured at `4f68a2aa7`" — is deliberately
+    NOT read by any of them: it is marked as-of a sha, which is this document's
+    convention for a figure that must not move, and pinning it would mean
+    re-measuring a past commit on every run (and failing in a shallow clone where
+    that commit is absent). It was correct when written; a reader re-deriving it
+    should run the measurement at the named commit. That anchoring is not theoretical: an
     unanchored `search` binds the first match ANYWHERE, so a decoy
     `still matches **six**` earlier in the doc satisfied the narrow pin while §5
     itself said **seven** (measured, before this pin existed), and `smc._section`

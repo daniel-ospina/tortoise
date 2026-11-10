@@ -234,7 +234,7 @@ private helpers still has those call sites to consider.
 
 `vet_gate.py` is consequently **not** a `depends on` leaf: it carries one
 internal dependency of its own — `value_gate`, the stdlib-only identifier
-predicate that both it and `extractor_v2` import (`vet_gate.py:150`).
+predicate that both it and `extractor_v2` import (`vet_gate.py:149`).
 `tools/substrate_map_check.py`'s `check_leaf_rows` re-measures exactly this: a
 row whose `depends on` cell says `*leaf*` must import nothing under `tortoise/`
 at module level, and a row that does is a drift (§10).
@@ -256,20 +256,17 @@ symbol pair this guard does check: the writers' retired-key allowlist
 `4f68a2aa7`) and the graph migration `relabel_legacy_documents`
 (`migrate_kinds.py:167`).
 
-**How to read a line pointer in this section:** the interface-map table above is
-frozen at the frontmatter's `measured_at_commit`, so its line numbers are as-of
-that commit and drift at head by design. The **symbol-anchored** pointers in
-*this* subsection's prose are maintained at HEAD — that is what
-`test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names` checks; the
-bare `cache_eviction.py:<n>` pointer is pinned by
-`test_every_cited_line_in_this_section_still_carries_the_prose_it_describes` — and
-a pointer that legitimately names a past commit marks it ("at `4f68a2aa7`").
-(The other bare `file.py:<n>` pointers in this section — `extractor_v2.py:157`,
-`extractor_v2.py:8464`, `source_identity.py:271`, the `quota.py` sites — carry no
-pin of their own; they are prose that a reader re-derives, and this sentence must
-not claim otherwise.)
-Without that sentence the two conventions look like one, and a reader who
-re-derives the stale half concludes the live half is stale too.
+**How to read a line pointer in this section:** everything from §5's heading down
+to `### The one interface that must not be broken` — the interface-map table AND
+the prose under it — is as-of the frontmatter's `measured_at_commit`, so those
+line numbers drift at head by design. The prose BELOW that heading (this
+subsection) is maintained at HEAD, and two pins hold it there:
+`test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names` for
+`` `SYMBOL` (`file:line`) `` pointers, and
+`test_every_cited_line_in_this_section_still_carries_the_prose_it_describes` for
+the rest. A pointer that legitimately names a past commit marks it ("at
+`4f68a2aa7`"). Without that sentence the conventions look like one, and a reader
+who re-derives the stale half concludes the live half is stale too.
 
 ⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,
 and the reason is measured: `:Document` occurs on **63** lines across **19**
