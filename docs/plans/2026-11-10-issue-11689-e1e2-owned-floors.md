@@ -343,8 +343,13 @@ What it does NOT cost is the **anti-tamper** pin, and the difference is the fix 
 quibble: a reproduction pin is a moving target, a **content** pin is a constant. The log may never
 change again, so `sha256(e1-e2.log)` is one hex string forever, and
 `test_the_committed_log_is_frozen_and_stays_unscored` asserts it (`_FROZEN_LOG_SHA256`). That is what
-catches a hand-edit that keeps the log self-consistent — `real_facts=90` → `91` on **both** arms
-passes the census checker, which reconciles the log with *itself*. Remaining E1/E2 coverage is that
+catches an edit the census checker **cannot** see: the checker reconciles the log with *itself*, so it
+only notices an edit that makes two of the log's own lines disagree. Editing one of the log's
+free-text/`note=` spans is invisible to it — MEASURED on `split-implemented=no note=…`, where the
+checker still reports "structurally sound" — and the digest pin reds on exactly that.
+(An edit that DOES break the log's arithmetic, such as `real_facts=90` → `91` on both arms, is caught
+by the checker's own V4/V5 rules instead; that is a different, already-covered shape.)
+Remaining E1/E2 coverage is that
 digest, the note-state tests (one per branch), the census check's V-rules over the committed log, and
 the ordering gate's content bound.
 

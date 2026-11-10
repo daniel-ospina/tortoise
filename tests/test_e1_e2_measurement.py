@@ -82,9 +82,11 @@ _LOG = _REPO_ROOT / "docs" / "evidence" / "7949-capstone" / "e1-e2.log"
 #: `e1-e2.log`'s bytes, pinned as a CONSTANT (#11746 review P2). The *reproduction* pin is
 #: gone — it demanded a re-take the pre-registration forbids — but a *content* pin is a
 #: different thing and stays satisfiable forever: this log may never change again, so its
-#: digest is a constant rather than a re-take target. Without it, a hand-edit that keeps the
-#: log self-consistent (e.g. `real_facts=90` → `91` on BOTH arms) passes the census checker
-#: (which reconciles the log WITH ITSELF) and the ordering gate that does not run here.
+#: digest is a constant rather than a re-take target. Without it, an edit the census checker
+#: CANNOT see still changes the evidence: the checker reconciles the log with ITSELF, so it
+#: only sees an edit that makes two of the log's own lines disagree. Editing one of the log's
+#: free-text/`note=` spans (`split-implemented=no note=…`, MEASURED: the checker still reports
+#: "structurally sound") leaves every remaining gate green.
 _FROZEN_LOG_SHA256 = "9e44d4f13d716e063bb50bc4305ba14e5e8b81709275e914a44eac1e61de5f37"
 
 sys.path.insert(0, str(_REPO_ROOT))
@@ -501,9 +503,10 @@ def test_the_committed_log_is_frozen_and_stays_unscored():
       reds instead of leaving a stale "does not apply" claim behind;
     * its bytes are a **constant digest**. Freezing removes the reproduction pin, not the
       anti-tamper one: a content pin stays satisfiable forever precisely because the log
-      may never change again. Without it, a hand-edit that keeps the log self-consistent
-      (`real_facts=90` → `91` on BOTH arms) passes the census checker, which reconciles
-      the log WITH ITSELF;
+      may never change again. Without it, an edit the census checker cannot see still
+      changes the evidence — the checker reconciles the log with ITSELF, so it only catches
+      an edit that makes two of the log's own lines disagree; editing a free-text/`note=`
+      span (MEASURED: the checker still says "structurally sound") is invisible to it;
     * it is still the `UNPREREGISTERED`, exit-3 artefact the exemption is granted to,
       so it can never be read as a scored run.
 
@@ -2901,9 +2904,10 @@ def test_the_probe_arms_every_switch_explicitly(monkeypatch):
     which is an OFF arm only while the flag is default-OFF. With the mechanical
     half defaulting ON, a pop-only arm silently becomes the ON arm and the
     before/after comparison collapses — the highest-consequence regression in
-    this change (both E1 arms would collapse into one configuration, and — because
-    this log is frozen — `test_the_committed_log_is_frozen_and_stays_unscored` would
-    red rather than a re-take being available to paper over it).
+    this change. No re-take is available to paper over it (the log is frozen by the
+    pre-registration), so the pin that has to catch it is the BEHAVIOUR half below —
+    which drives the real pipeline and reads the two arms' switches — not the digest
+    pin, which never runs the probe and so cannot see a behaviour regression at all).
 
     Both halves are pinned: the SOURCE writes the value explicitly in both
     directions, and the BEHAVIOUR — driven through the real pipeline — reports
