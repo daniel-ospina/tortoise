@@ -68,6 +68,14 @@ The "same entity+attribute" gate needs data S3 does not return today. Two additi
 
 ### D3 — Entity resolution: two-phase, LLM-bounded, degrade-to-ADD
 
+> ⛔ **SUPERSEDED on its fallback clause by §4.4's S3-disambiguation row (`#11653`).** A
+> failed, timed-out or undecided disambiguation no longer "degrades to ADD": the affected
+> candidate is **HELD** (`resolve_entities` returns `new` and `held` as disjoint populations,
+> the phase-2 contract carries an explicit `new` verdict, and `execute_embed` creates only the
+> licensed set). The rest of this section — the two phases, the bounded call, the validation
+> ladder — still describes the mechanism; the plan's own contract text below was written
+> before the ruling and is kept as the plan's record.
+
 New `resolve_entities(entity_refs, search, model=None) -> ResolutionMap` in `extractor_v2.py`:
 
 - **Phase 1 (deterministic):** the existing `_find_existing_entity` (exact → bare → ambiguous) for every embed entity.

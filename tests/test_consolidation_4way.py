@@ -379,7 +379,16 @@ class TestExecuteEmbedConsolidation:
 
 class TestEntityResolution:
     """D3 — two-phase entity resolution (deterministic first, bounded LLM
-    fallback; degrade-to-ADD; never blocks)."""
+    fallback; never blocks).
+
+    ⛔ #11653 REVERSED the second half of this contract: a failed or undecided
+    disambiguation no longer *degrades to ADD*. The affected candidate is HELD
+    (`res["held"]`, with its reason) and only a positive absence verdict
+    (`res["new"]`) reaches the payload — §4.4 I1, and its S3 disambiguation
+    row's *FAIL-CLOSED on `new`*. The assertions below that read `res["map"]`
+    are unchanged; `test_model_failure_degrades_to_phase1_never_raises` keeps
+    its name for the "never raises" half only.
+    """
 
     def test_phase1_exact_no_model_call(self):
         search = {"entities": [{"id": "obj1", "name": "Joseph",
@@ -560,9 +569,13 @@ class TestResolutionOrchestration:
 
         conv = [{"role": "user", "content": "Joe runs every morning at 6am."}]
         out = v2.extract_session_v2(self._model(boom), conv, session_id="s1")
-        # P1: the pipeline still returns a payload (degrade-to-ADD)
+        # P1: the pipeline still returns a payload, and the candidate the
+        # resolver could not decide is HELD, not asserted new (#11653).
         assert out["payload"] is not None
         assert out["payload"]["points"], "capture must not be blocked"
+        assert "Joe" not in [e["name"] for e in out["payload"]["entities"]], (
+            "a failed disambiguation minted the entity it could not identify")
+        assert [h["name"] for h in out["resolution_held"]] == ["Joe"]
         assert any("failed" in w for w in out["warnings"])
 
     def test_phase1_resolution_no_llm_call(self, monkeypatch):

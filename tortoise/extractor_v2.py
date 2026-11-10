@@ -5781,16 +5781,37 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
     return None, "none"
 
 
+#: Why a candidate's identity is UNRESOLVED — the reason a HOLD record carries
+#: (#11653). Every one of them is a state in which the run has NOT established
+#: that the entity does not exist, so §4.4's I1 forbids asserting `new`.
+HOLD_AMBIGUOUS = "ambiguous"
+HOLD_DISAMBIGUATION_FAILED = "disambiguation_failed"
+HOLD_DISAMBIGUATION_UNDECIDED = "disambiguation_undecided"
+HOLD_REASONS: tuple[str, ...] = (HOLD_AMBIGUOUS, HOLD_DISAMBIGUATION_FAILED,
+                                 HOLD_DISAMBIGUATION_UNDECIDED)
+
+#: The ``held`` record kind of an ENTITY candidate S3 could not identify (#11653).
+#: A DISTINCT kind from `identity_hold.HOLD_ENDPOINT` on purpose: the hold store's
+#: drain mints POINTS from the records it reads, so an entity written there would
+#: be re-minted as a claim for a node. The two populations share one run-level
+#: list (I2: one place says what the run held) and nothing else.
+_HELD_ENTITY_KIND = "entity"
+
 _RESOLUTION_SYSTEM = (
     "You are the ENTITY RESOLUTION assistant for the Tortoise epistemic "
     "memory. You map NEW entity names from a conversation to EXISTING "
-    "entities already in the knowledge graph. Resolve ONLY confident "
+    "entities already in the knowledge graph, and you say which new names "
+    "denote an entity that is NOT in that table. Resolve ONLY confident "
     "aliases: same referent, case/variant/abbreviation forms (\"Joe\" → "
-    "\"Joseph\", \"NYC\" → \"New York City\"). NEVER guess: an ambiguous or "
-    "unclear name must be omitted. Never invent ids. "
+    "\"Joseph\", \"NYC\" → \"New York City\"). Never invent ids. "
+    "⛔ Decide EVERY name you are given: a name you can map goes in "
+    "`resolutions`; a name whose referent is NOT any existing entity goes in "
+    "`new`. A name in NEITHER list is reported as a FAILED disambiguation and "
+    "the candidate is held — so do not omit one because you are unsure: an "
+    "unsure name is ambiguous and belongs in neither list ON PURPOSE. "
     "Output ONE JSON object: {\"resolutions\": [{\"name\": str, "
-    "\"resolves_to\": str}]} where resolves_to is the existing entity's "
-    "id or exact name."
+    "\"resolves_to\": str}], \"new\": [str]} where resolves_to is the "
+    "existing entity's id or exact name."
 )
 
 
@@ -5805,15 +5826,19 @@ def _resolution_prompt(existing: list[dict], new_names: list[str]) -> str:
     return (f"EXISTING ENTITIES (id | name | kind):\n{table}\n\n"
             f"NEW ENTITY NAMES:\n{names}\n\n"
             "Return {\"resolutions\":[{\"name\": ..., \"resolves_to\": "
-            "existing-id-or-name}]} — every resolution must match an id or "
-            "exact name in the EXISTING ENTITIES table; ambiguous → omit.")
+            "existing-id-or-name}], \"new\": [names that are NOT any "
+            "existing entity]} — every resolution must match an id or exact "
+            "name in the EXISTING ENTITIES table, and EVERY new name must "
+            "appear in exactly one of the two lists. An ambiguous name goes "
+            "in NEITHER list: it is held, never asserted new.")
 
 
 def resolve_entities(entity_refs: list[dict], search: dict,
                      model=None, stats: dict | None = None) -> dict:
     """D3: two-phase entity resolution — returns
     {"map": {name: {"id", "name"}}, "records": [{"name", "resolves_to",
-    "mode"}], "warnings": [...]}.
+    "mode"}], "new": [name], "held": [{"name", "kind", "reason"}],
+    "warnings": [...]}.
 
     Phase 1 (deterministic): the existing ``_find_existing_entity`` (exact
     → bare → ambiguous) for every ref — no model call.
@@ -5824,8 +5849,46 @@ def resolve_entities(entity_refs: list[dict], search: dict,
     contract; every resolution validated against the candidate table (id
     or normalized-name match) — invalid/ambiguous dropped with a warning,
     never guessed.
-    Failure/timeout → warning + phase-1-only map (degrade to ADD semantics
-    at the caller — unresolved entities keep their names). NEVER raises.
+    NEVER raises.
+
+    ⛔ #11653 — WHAT HAPPENS TO THE REMAINDER (this is the whole point of the
+    return shape). `new` and `held` are DISJOINT populations, and only `new`
+    licenses the caller to create an entity:
+
+    * MEASURED ABSENCE (`new`) — the mechanical pass found no candidate of
+      that name (mode ``none``) and no resolver that answered said otherwise.
+      That is the one state that licenses an ADD.
+    * UNRESOLVED (`held`) — everything else, with the reason: ``ambiguous``
+      (phase 1 found >1 namespace-colliding matches and phase 2 did not pick
+      one), ``disambiguation_failed`` (the phase-2 call raised/timed out) or
+      ``disambiguation_undecided`` (the call answered and named neither a
+      resolution nor `new` for this name).
+
+    A name phase 2 RESOLVED is in NEITHER population (it is in `map`): the two
+    populations are the disposition of what is left UNRESOLVED, so a resolved
+    name can never be reported held.
+
+    ⛔ BOUNDARY, stated so this is not read as the blanket create gate. This
+    population is §4.4's **S3-disambiguation** row (FAIL-CLOSED on `new`) — the
+    candidates whose disambiguation DID NOT COMPLETE. A run whose LOOKUP did not
+    run at all (degraded, or a candidate whose own query was never issued) is
+    §4.4's SEPARATE **S3-lookup** row, whose recorded assignment is
+    ``#10998``'s blanket create gate (``failure_policy.created_record`` already
+    reports those candidates as ``found: None`` — the #5095 record half). Not
+    folded in here: doing so would move every capture run on a degraded lookup
+    from "creates entities" to "creates nothing" under an issue that owns the
+    disambiguation, and would make this function the second owner of a guarantee
+    §4.2 puts in exactly one place.
+
+    §4.4 I1: *an unresolved identity is NEVER asserted `new`* — and §4.4's S3
+    disambiguation row is *FAIL-CLOSED on `new`*, HOLD "unless the lookup
+    returned exactly ONE exact-key match, which attaches mechanically". The
+    pre-#11653 shape returned only `map`, so every name outside it was read by
+    the caller as *"create it"*: a failed or undecided disambiguation
+    MANUFACTURED THE DUPLICATE S3 exists to prevent, and no caller could tell
+    that from a genuine new entity. `held` is that distinction. The population
+    is reported on the run (``held``, a warning naming each reason, and the
+    ``entity_identity_held`` census class) — never dropped (I2).
     """
     existing = [e for e in (search or {}).get("entities", []) or []
                 if isinstance(e, dict) and e.get("id")]
@@ -5847,8 +5910,14 @@ def resolve_entities(entity_refs: list[dict], search: dict,
                             "mode": mode})
         else:
             unmatched.append({"name": name, "kind": kind, "mode": mode})
+    #: The names phase 2 positively declared ABSENT (distinct referents). Only
+    #: this verdict — never the absence of a verdict — licenses an ADD.
+    declared_new: set[str] = set()
+    disambiguation_ran = False
+    disambiguation_failed = False
     # Phase 2 — bounded LLM fallback for the unmatched/ambiguous remainder
     if model is not None and existing and unmatched:
+        disambiguation_ran = True
         try:
             prompt = _resolution_prompt(
                 existing, [u["name"] for u in unmatched])
@@ -5856,6 +5925,15 @@ def resolve_entities(entity_refs: list[dict], search: dict,
                              max_tokens=500, stats=stats)
             parsed = _parse_json(resp)
             unmatched_names = {u["name"] for u in unmatched}
+            for item in (parsed.get("new") or []):
+                cand = str(item or "").strip()
+                if not cand:
+                    continue
+                if cand in unmatched_names:
+                    declared_new.add(cand)
+                else:
+                    warnings.append(f"new-verdict {cand!r} is not among the "
+                                    "unmatched names — dropped")
             for item in (parsed.get("resolutions") or []):
                 if not isinstance(item, dict):
                     continue
@@ -5880,10 +5958,53 @@ def resolve_entities(entity_refs: list[dict], search: dict,
                                 "resolves_to": resolved[cand]["id"],
                                 "mode": "llm"})
         except Exception as e:  # noqa: BLE001, RUF100 — degrade, never block
-            warnings.append(f"entity-resolution LLM fallback failed "
-                            f"({type(e).__name__}: {e}) — phase-1 results "
-                            "only (degrade to ADD)")
-    return {"map": resolved, "records": records, "warnings": warnings}
+            disambiguation_failed = True
+            warnings.append(
+                f"entity-resolution LLM fallback failed "
+                f"({type(e).__name__}: {e}) — the candidates it was asked to "
+                "decide are HELD for a later run (§4.4 I1: held, not "
+                "asserted new)")
+    # ── the disposition of every UNMATCHED candidate (#11653) ─────────────
+    held: list[dict] = []
+    new: list[str] = []
+    for u in unmatched:
+        name = u["name"]
+        if name in resolved:
+            # ⛔ PHASE 2 MAY HAVE RESOLVED AN *UNMATCHED* NAME — that is its
+            # whole job (a phase-1 `none`/`ambiguous` candidate the resolver
+            # mapped to a candidate). Such a name is RESOLVED, so it belongs to
+            # neither population; labelling it `held` (or `new`) would publish a
+            # hold that did not happen on the SUCCESS path and feed I2's census a
+            # false claim (measured in review: `Joe -> Joseph` reported
+            # "Joe — identity UNRESOLVED (disambiguation_undecided)" while the
+            # run created Joseph). The mutation this guards is the missing
+            # `continue`.
+            continue
+        if u["mode"] == "ambiguous":
+            # A mechanical collision the resolver did not pick between. §4.4's
+            # S3 disambiguation row is FAIL-CLOSED on `new`: a name that matches
+            # SEVERAL existing entities is the last one that may be created as a
+            # third. Nothing but a positive choice attaches it.
+            reason = HOLD_AMBIGUOUS
+        elif disambiguation_failed:
+            reason = HOLD_DISAMBIGUATION_FAILED
+        elif disambiguation_ran and name not in declared_new:
+            # ⛔ The old contract made this state INVISIBLE: "ambiguous → omit"
+            # meant an undecided name and a confidently-absent name both left the
+            # answer empty, and the caller created both. An omission is now the
+            # HOLD signal and `declared_new` the only ADD licence.
+            reason = HOLD_DISAMBIGUATION_UNDECIDED
+        else:
+            # Phase 1 found no candidate of this name and no resolver that
+            # answered said otherwise: the one measured absence.
+            new.append(name)
+            continue
+        held.append({"name": name, "kind": u["kind"], "reason": reason})
+        warnings.append(
+            f"entity '{name[:60]}' — identity UNRESOLVED ({reason}): HELD, not "
+            "created (§4.4 I1, #11653)")
+    return {"map": resolved, "records": records, "new": new, "held": held,
+            "warnings": warnings}
 
 
 def _apply_entity_resolution(embed_list: dict, resolution_map: dict) -> dict:
@@ -9688,7 +9809,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                   session_date: str | None = None,
                   edus: list[dict] | None = None,
                   merge_flagged: frozenset[str] | set[str] = frozenset(),
-                  hold_store: object | None = None) -> dict:
+                  hold_store: object | None = None,
+                  held_entities: Mapping[str, str] | object | None = None) -> dict:
     """S5: deterministic embed EXECUTION (not a flash prompt).
 
     Maps the complete embed list to the Layer-1 commit payload in dependency
@@ -9724,12 +9846,35 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     carries it to a later run against the same graph, where a resolved lookup
     commits it exactly once.
 
+    ⛔ #11653 (the ENTITY half of the same invariant): an ENTITY whose S3
+    identity is unresolved is not created either. ``held_entities`` is S3's own
+    verdict — ``resolve_entities``'s ``held`` population, as
+    ``{name: reason}`` or a bare iterable of names — and every named entity is
+    reported in ``held`` (kind ``entity``, with its reason) instead of being
+    appended to the payload. This is what makes a failed disambiguation
+    distinguishable from a measured absence: `#resolve_entities` returns BOTH,
+    and only its `new` list reaches the payload. An entity held here is NOT
+    persisted in the ``hold_store`` — that store's drain mints POINTS, so
+    persisting an entity into it would re-mint a claim instead of carrying a
+    node; the entity half's drainable home belongs with #10998's create gate.
+    The run reports the hold, its reason and the census class, which is I2's
+    *"records the loss"* arm.
+
     Returns {"payload", "chain_notes", "link_before_create", "warnings",
              "minted_kinds", "stats", "held", "held_drained", "hold"}.
     """
     master = master or build_master_list()
     idx = _index_search(search)
     warnings: list[str] = []
+    # #11653: the entity population S3 could not identify, normalised to
+    # `{name: reason}` so the hold record carries WHY it is unresolved.
+    if isinstance(held_entities, Mapping):
+        _entity_holds: dict[str, str] = {
+            str(_k).strip(): str(_v or "") for _k, _v in held_entities.items()
+            if str(_k).strip()}
+    else:
+        _entity_holds = {str(_k).strip(): "" for _k in (held_entities or ())
+                         if str(_k).strip()}
     # #10997: the run-level identity state the mint gate reads, and the two
     # populations it reports. `held` is what this run did NOT mint and did NOT
     # drop (I2). `held_drained` is this run's DRAIN of what a previous run held —
@@ -9782,6 +9927,25 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if key in seen_entities:
             continue
         seen_entities.add(key)
+        if name in _entity_holds:
+            # ⛔ #11653 — S3 could not identify this entity, so nothing here may
+            # assert it is `new` (§4.4 I1). It is held (reported, with the
+            # reason S3 gave) and NOT appended to the payload: `payload
+            # ["entities"]` is the commit's create list, one `create_entity` per
+            # entry, so the payload is where the node count is decided. No
+            # `link_before_create` record either — a create that did not happen
+            # must not publish a "searched for / found" entry (#5095's rule).
+            held.append({
+                "kind": _HELD_ENTITY_KIND,
+                "content": name,
+                "ref": name,
+                "where": f"entity '{name}'",
+                "session_ref": session_id,
+                "reason": _entity_holds[name],
+                "persisted": False,
+                "key": f"{_HELD_ENTITY_KIND}\0{name}",
+            })
+            continue
         existing, match_mode = _find_existing_entity(
             idx["entities"], name, kind)
         if existing:
@@ -11304,6 +11468,19 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
 
     if held:
         _held_ids = {r.get("key") or (r["content"], r["where"]) for r in held}
+        # #11653: HOW MANY, AND WHY, per reason. `held` now carries two classes —
+        # the operator endpoints #10997 owns and the ENTITY candidates whose S3
+        # identity was unresolved — and they do not share a reason (an endpoint's
+        # is the run-level lookup state; an entity's is the candidate's own, from
+        # `resolve_entities`). One aggregate sentence for both would have said
+        # "their identity lookup was `resolved`" about an entity held because the
+        # disambiguation for it failed, which is exactly the kind of true-sounding
+        # false report this whole change removes.
+        _reasons: dict[str, int] = {}
+        for _r in held:
+            _why = str(_r.get("reason") or _lookup)
+            _reasons[_why] = _reasons.get(_why, 0) + 1
+        _why_text = ", ".join(f"{k}={v}" for k, v in sorted(_reasons.items()))
         # ⛔ The carry-forward clause describes what ACTUALLY persisted, not
         # whether a store object was passed (#10997 review round 4, P3). With a
         # store that raises on write (read-only volume, full disk, bad
@@ -11311,21 +11488,39 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # write FAILED … so it is NOT carried forward", and this aggregate line
         # said the opposite — two contradicting warnings in one list, on the line
         # an operator/census reads.
-        _persisted = sum(1 for r in held if r.get("persisted"))
+        # #11653: ENTITY holds are excluded from that arithmetic on purpose —
+        # they are never written to the store (its drain mints POINTS, so an
+        # entity record there would re-mint a claim for a node), so counting them
+        # as "persisted=False" compressions would report a store failure that
+        # never happened.
+        _endpoint_holds = [r for r in held
+                           if r.get("kind") != _HELD_ENTITY_KIND]
+        _entity_held = [r for r in held if r.get("kind") == _HELD_ENTITY_KIND]
+        _persisted = sum(1 for r in _endpoint_holds if r.get("persisted"))
         if hold_store is None:
             _carried = "; NOT carried forward — no hold store was supplied"
-        elif _persisted == len(held):
+        elif _persisted == len(_endpoint_holds):
             _carried = ("; carried in the hold store for the next run against "
                         "this graph")
         else:
             _carried = (
-                f"; {_persisted} of {len(held)} occurrence(s) carried in the "
-                f"hold store, {len(held) - _persisted} NOT persisted (the store "
-                "write failed) and therefore NOT carried forward")
+                f"; {_persisted} of {len(_endpoint_holds)} occurrence(s) carried "
+                f"in the hold store, {len(_endpoint_holds) - _persisted} NOT "
+                "persisted (the store write failed) and therefore NOT carried "
+                "forward")
+        if _entity_held:
+            _carried += (
+                f"; {len(_entity_held)} ENTITY hold(s) are NOT carried forward "
+                "— an entity's drainable home belongs with #10998's create gate "
+                "(this store's drain mints points)")
         warnings.append(
-            f"S3 HOLD (#10997): {len(_held_ids)} candidate(s) held because their "
-            f"identity lookup was {_lookup} — not minted (I1) and not dropped "
-            "(I2)" + _carried)
+            f"S3 HOLD (#10997): {len(_held_ids)} candidate(s) held — identity "
+            f"UNRESOLVED ({_why_text}); run lookup was {_lookup} — not minted "
+            "(I1) and not dropped (I2)" + _carried +
+            # #11653: the ENTITY half of the same invariant, named so a reader of
+            # this sentence knows which issue owns the create gate it describes.
+            (" [entity candidates: #11653 — held, never asserted new]"
+             if _entity_held else ""))
 
     return {
         "payload": payload,
@@ -11351,6 +11546,17 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             # ref named by two operators is ONE held item (one store key).
             "held": len({r.get("key") or (r["content"], r["where"])
                          for r in held}),
+            # #11653: the ENTITY half of the same population, and the reasons
+            # behind the whole set — the census the issue asks for, so "a run
+            # held N entities" is a number the run carries rather than a claim
+            # a reader has to infer from the absence of nodes.
+            "held_entities": sum(1 for r in held
+                                 if r.get("kind") == _HELD_ENTITY_KIND),
+            "held_reasons": {
+                _why: sum(1 for r in held
+                          if str(r.get("reason") or _lookup) == _why)
+                for _why in sorted({str(r.get("reason") or _lookup)
+                                    for r in held})},
             # #10997 review round 3: the COMMITTED subset, not `len(held_drained)`.
             # A run that drains, mints and then PRUNES every endpoint reported
             # `held_drained=N` with `committed: False` on all N — a census that
@@ -13936,6 +14142,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # (nothing to resolve against). Never blocks capture (P1).
     resolution_records: list[dict] = []
     resolution_warnings: list[str] = []
+    #: #11653: S3's HELD population — entities whose identity this run could not
+    #: establish. Carried into `execute_embed`, which refuses to create them.
+    resolution_held: list[dict] = []
     # #3359: the D3 entity-resolution LLM fallback makes a REAL provider
     # call. Without a stats dict it contributed nothing to the session cost
     # roll-up — silently understating spend for every session that hit it.
@@ -13943,6 +14152,10 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # after the try/except so a resolution failure still reports the spend
     # it already made.
     resolution_stats: dict = {}
+    # ⛔ #11653: the pass keeps its original trigger — a healthy lookup WITH
+    # candidates, the only state in which a DISAMBIGUATION can happen at all.
+    # A run whose lookup did not run has nothing to disambiguate, and its create
+    # gate is §4.4's separate S3-lookup row (#10998), not this one.
     if search and not search.get("degraded") and (search.get("entities") or []):
         ent_refs = [{"name": str(e.get("name", "")).strip(),
                      "kind": str(e.get("kind", "")).strip()}
@@ -13957,6 +14170,12 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                         complete_list, res["map"])
                 resolution_records = res.get("records") or []
                 resolution_warnings = res.get("warnings") or []
+                resolution_held = res.get("held") or []
+                if resolution_held:
+                    # §4.4's *"recorded loudly, never only in `warnings`"*: a
+                    # deterministic census class, once per run, with the reasons
+                    # and the candidates named on `result["resolution_held"]`.
+                    _bump_census_class(error_census, "entity_identity_held")
                 # #1695 Task 5: post-resolution re-key — the resolution may
                 # rename entities; the participant-slot kinds are re-applied
                 # (idempotent — kinds don't change, names may) so the typed
@@ -13965,7 +14184,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                     slot_rekeys += _rekey_slots(complete_list)
             except Exception as e:  # noqa: BLE001, RUF100 — resolve_entities is
                 # guarded internally, but the orchestrator never dies on
-                # resolution (P1: degrade to phase-1/ADD semantics)
+                # resolution (P1: the run degrades to phase-1/mechanical
+                # semantics; a disambiguation that did not finish HELDs its
+                # candidates, it never asserts them new — #11653)
                 errors.append(f"entity resolution failed: {type(e).__name__}: {e}")
                 # D1 (#1746): deterministic class for the previously-
                 # uncensused resolution failure path.
@@ -14022,6 +14243,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         result = execute_embed(complete_list, search, session_id=session_id,
                                story_arc=story_arc, master=master,
                                session_date=session_date, edus=edus,
+                               # #11653: S3's held verdict decides the create.
+                               held_entities={h["name"]: h.get("reason", "")
+                                              for h in resolution_held},
                                merge_flagged=_merge_flagged_contents(
                                    vet_s2_stats, vet_union_stats))
     except Exception as e:  # S5 must NEVER block the pipeline (design §7.4)
@@ -14273,6 +14497,13 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 for r in resolution_records])
     if resolution_warnings:
         result["warnings"] = resolution_warnings + (result.get("warnings") or [])
+    if resolution_held:
+        # #11653: the evidence surface for the held ENTITY candidates. S3's own
+        # verdict, beside the resolution records it also publishes — a reader can
+        # tell "resolved to X" from "held (reason)" from "measured absent"
+        # without re-deriving it from the absence of a node.
+        result["resolution_held"] = resolution_held
+        result.setdefault("stats", {})["resolution_held"] = len(resolution_held)
     if s4_warnings:
         result["warnings"] = s4_warnings + (result.get("warnings") or [])
     result["stats"]["elapsed_s"] = round(time.time() - t0, 1)
@@ -14676,7 +14907,13 @@ def _bump_census_class(error_census: dict[str, int], cls: str) -> None:
     classifier's fail-open per-item counters — rerank/adjudication/retrieval
     failures never raise, so no ``errors`` entry pairs THOSE bumps).
     ``embedding_error`` / ``unclassified_terminal`` are ADDITIVE ONLY (no
-    ``errors`` entry pairs them). The structural len-equality holds on the
+    ``errors`` entry pairs them). ``entity_identity_held`` (#11653) is
+    ADDITIVE ONLY on the same terms, and it is bumped ONCE PER RUN: the class
+    says *"this run held at least one entity for an unresolved identity"*, while
+    WHICH candidates (and why) is `result["resolution_held"]` and
+    `stats["held_reasons"]` — the raise-paired shape (one bump per item) would
+    make the class a count of occurrences that no `errors` entry can reconcile.
+    The structural len-equality holds on the
     raise-paired classes; the flag-only classes are governed by their own
     A/B thresholds (parse-census equality computes on the class
     INTERSECTION, per the plan)."""
