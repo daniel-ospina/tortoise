@@ -88,11 +88,14 @@ goldens failed the ORDER layer while the two CONTENT layers passed, i.e. the
 row SET was intact and only the sequence moved. Re-captured from the docker
 lane on ``tests/_assembly_graph.build_base_graph`` /
 ``build_out_of_subgraph_gold`` with ``question_date="2026-09-10"`` and a
-FakeReader, per the policy above: ``GOLD_LEGACY_CANARY`` and three
-``_A4_OFF_ORDERED`` entries (the canary, plus the two A4=0 orderings whose
-dated-spine position moved); ``GOLD_LEGACY_CURRENT`` / ``_MISFIRE`` / ``_AGO`` /
-``_COMPARE`` were byte-identical and are untouched, and the FIRED/HOSTED
-goldens are unaffected (their spine is rendered from dated events, not from the
+FakeReader, per the policy above: exactly TWO records moved — the byte-golden
+``GOLD_LEGACY_CANARY`` and the ``_A4_OFF_ORDERED`` entry for ``CANARY_QUESTION``
+— plus one more ``_A4_OFF_ORDERED`` entry,
+``"which came first - the couch or the dog bed?"`` (in both, the "new sofa
+delivered" row rotates from position 3 to 5: one causal event, not incidental
+churn); ``GOLD_LEGACY_CURRENT`` / ``_MISFIRE`` / ``_AGO`` / ``_COMPARE`` and the
+other three ``_A4_OFF_ORDERED`` entries were byte-identical and are untouched,
+and the FIRED/HOSTED goldens are unaffected (their spine is rendered from dated events, not from the
 fused pool). NO ``_FROZEN_CHUNKS`` / ``_PRE_3804_CHUNKS`` / ``_A4_OFF_ROWS``
 edit accompanied this: those are the independent CONTENT record.
 
