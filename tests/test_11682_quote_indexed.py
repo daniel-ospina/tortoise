@@ -51,6 +51,11 @@ WHAT THIS PINS (each revert must red a named test):
            legacy no-vector arm reds too, and
            `test_the_bm25_corpus_select_and_join_carry_every_declared_field`
            goes on red for the BM25 mirror's own select/join;
+  * revert ``search_engine.fallback_tfidf``'s join to
+    ``index_text(content, search_keys)``
+        -> ``test_the_fallback_tfidf_join_reads_the_quote`` reds (the
+           last-resort TF-IDF entry point, whose inputs carry ``quote`` from
+           the eval ingest and ``assembly``);
 
 ⚠️ FIXTURE PROVENANCE: ``VERBATIM`` is CONSTRUCTED prose (authored for this
 module, punctuated the way a real utterance is), NOT a captured transcript —
@@ -474,3 +479,29 @@ def test_a_pre_11682_two_field_index_is_upgraded_to_carry_the_quote(sdk) -> None
         g, QUOTE_ONLY_TERM, entity_type="point")], (
             "the ALREADY-WRITTEN point must become findable by its verbatim "
             "quote — the FULLTEXT recreate re-indexes existing nodes")
+
+
+def test_the_fallback_tfidf_join_reads_the_quote() -> None:
+    """``search_engine.fallback_tfidf`` joins the SAME declared set.
+
+    Its inputs are POINT DICTS — the eval ingest and ``assembly`` carry the
+    quote — so a join that ignored it would put the two lexical stacks back in
+    disagreement on the last-resort tier, the one that runs when every FalkorDB
+    strategy has failed. Pinned hermetically (no DB) because this arm is a pure
+    function over the dicts it is handed.
+
+    FAIL VALUE: revert its join to ``index_text(content, search_keys)`` and the
+    quote-only query ties at zero, so the DECOY — first in the list on purpose —
+    takes the single slot (#11706 round 3).
+    """
+    from tortoise.search_engine import fallback_tfidf
+
+    points = [
+        {"id": "decoy", "content": DECOY, "pointKind": "statement"},
+        {"id": "p1", "content": PARAPHRASE, "quote": VERBATIM,
+         "pointKind": "statement"},
+    ]
+    hits = [r["id"] for r in fallback_tfidf(
+        QUOTE_ONLY_TERM, points, limit=1, force_sparse=True)]
+    assert hits == ["p1"], (
+        f"fallback_tfidf did not read the quote; hits={hits}")

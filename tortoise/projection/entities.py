@@ -1188,13 +1188,16 @@ def point_identifier_aliases(props: dict) -> list[str]:
 
     ⛔ ``quote`` is deliberately NOT an alias source (#11682). It is indexed
     now, but it is the speaker's PROSE, and the write-side extractor
-    (``space_separated=False``) still mints an alias from any EXPLICIT
-    ``-``/``_`` spelling — so prose would contribute ``costeffective`` from
-    "cost-effective", ``endtoend`` from "end-to-end", and similar composites
-    that belong to nobody's identifier vocabulary. The alias channel is the
-    extractor's own keys; the verbatim quote is the index's. (The exclusion is
-    not what refuses ``sprint2024`` — ``space_separated=False`` already does
-    that for any whitespace-separated pair.)
+    (``space_separated=False``) mints an alias from any explicit ``-``/``_``
+    spelling whose segments include a digit run of at least
+    ``MIN_DIGIT_SEGMENT_LEN`` — so prose would contribute ``iso9001`` from
+    "ISO-9001" and ``q32024`` from "Q3-2024" (measured), i.e. composites that
+    belong to nobody's identifier vocabulary. The alias channel is the
+    extractor's own keys; the verbatim quote is the index's. (Pure-word
+    hyphenations mint nothing — ``cost-effective`` and ``end-to-end`` both
+    produce ``[]`` — and ``sprint2024`` from "sprint 2024" is already refused by
+    the whitespace rule; this exclusion is about the digit-bearing prose
+    spellings that DO mint.)
 
     Two properties this function deliberately has, both from the ruling:
 
