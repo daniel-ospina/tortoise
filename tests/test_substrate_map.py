@@ -86,11 +86,15 @@ _POPULATION_CLAIM = re.compile(
 #: non-population span, measured GREEN). Extract every span positionally, then filter.
 _NO_SECOND_POPULATION = re.compile(r"`([^`]+)`")
 
-#: What a population can be spelled as: one path segment (letters, digits, `.`, `-`, `_`)
-#: with an optional trailing slash. Without this shape test the backtick scan above also
-#: pairs the CLOSING backtick of one command with the OPENING backtick of the next and
-#: reads " → 63 lines," as a population.
-_POPULATION_TOKEN = re.compile(r"[A-Za-z0-9_.\-]+/?")
+#: What a population can be spelled as. ⛔ NOT "one segment with an optional trailing
+#: slash" — that exempted a second population carrying an INTERIOR slash before it ever
+#: reached the comparison (`tests/unit/`, `docs/architecture/` were measured GREEN while
+#: `tests/` redded), i.e. the shape filter quietly became a hole in the pin. A candidate
+#: is any backticked span with no whitespace and no arrow: the two `git grep` commands are
+#: excluded by prefix, node labels by their leading `:`, and the POPULATION this pin
+#: measures is exempted by VALUE (itself, a trailing slash, or anything under it) rather
+#: than by shape, so a second population cannot dodge the comparison by spelling.
+_NON_POPULATION_SPAN = re.compile(r"[^\s→]+")
 
 _COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
 
@@ -1755,22 +1759,23 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
             "§5's measurement parenthetical is never closed — the tail of that clause "
             "is where a second population would be stated, so this pin cannot read it"
         )
-    # Not to the parenthetical's close: a second population can sit AFTER it and still
-    # be the same sentence (measured GREEN: "… count)" and `tests/` is counted in both
-    # figures."), so the slice runs to the sentence's own end — the nearer of the next
-    # period and the next newline — and the parenthetical's close is just where the
-    # quote's own text provably stops.
-    sentence_end = len(section)
-    for stop in (section.find(".", close_at + 1), section.find("\n", close_at + 1)):
-        if stop != -1:
-            sentence_end = min(sentence_end, stop)
+    # Not to the parenthetical's close: a second population can sit AFTER it and still be
+    # the same sentence (measured GREEN: "… count)" and `tests/` is counted in both
+    # figures."). Nor to the end of the LINE — this section is hard-wrapped, so a
+    # population wrapped onto the next line was GREEN too. The slice runs to the sentence's
+    # period, falling back to the end of the PARAGRAPH, and the parenthetical's close is
+    # only where the quote's own text provably stops.
+    sentence_end = section.find(".", close_at + 1)
+    if sentence_end == -1:
+        paragraph_end = section.find("\n\n", close_at + 1)
+        sentence_end = len(section) if paragraph_end == -1 else paragraph_end
     tail = section[open_at + 1 : sentence_end]
     extra = [
         token
         for token in _NO_SECOND_POPULATION.findall(tail)
-        if not token.startswith("git grep")
-        and _POPULATION_TOKEN.fullmatch(token)
-        and token != _TRACKED_DIR + "/"
+        if not token.startswith(("git grep", ":"))
+        and _NON_POPULATION_SPAN.fullmatch(token)
+        and not (token == _TRACKED_DIR or token.startswith(_TRACKED_DIR + "/"))
     ]
     assert not extra, (
         f"§5's measurement parenthetical names another path after the quote — "
