@@ -27,7 +27,7 @@ reading for a value whose TAIL is unreadable (``2023-05-20 02:21 PDT``,
 ``2023/05/20 (Sat) 02:21 (approx)``, ``2023-05-20T+05:00``) — an unparseable tail
 means the exact INSTANT is unknown, not that the stated DAY is.
 
-⚠ TWO DELIBERATE EXCLUSIONS from that union, both of them the fabricated-day
+⚠ THREE DELIBERATE EXCLUSIONS from that union, all of them the fabricated-day
 class this module exists to end, stated so a later reader does not "restore the
 union" by re-adding them:
 
@@ -36,7 +36,14 @@ union" by re-adding them:
   wrote;
 * a pure 9+-digit number read as a date (``20230520.3``, ``202305201112``) —
   the same truncation artifact seen from the other side; see the epoch rule
-  below for what those ARE read as.
+  below for what those ARE read as;
+* a compact / ISO-week date with a MALFORMED offset tail (``20230520+5:00``,
+  ``20230520+050``, ``2023W206+5:00``) — ``origin/main`` dated these by
+  truncating at ten characters, and the offset gate below deliberately accepts
+  only a WELL-FORMED offset (``[+-]\\d{2}`` and up), because a loose gate is the
+  same truncation artifact wearing an offset's clothes. No in-repo writer emits
+  any of them; if one ever does, widen the gate to ``[+-]\\d{1,2}`` and say so
+  here, rather than letting the prefix reading guess a day.
 
 ⛔ MONTH GRANULARITY IS NOT COERCED. A value naming only ``YYYY/MM`` (or
 ``2026-09``) has NO day, and this resolver returns ``None`` rather than
@@ -110,9 +117,10 @@ writes ``2023/05/20 (Sat) 02:21``; ``validity.read_caller_end`` refuses a 9+
 digit numeric string at the write door), so reachability is a directly written
 graph property or a legacy row — the legacy class this module still serves. Nor
 is this the compact-with-OFFSET family (``20230520-0500``, ``2026W243-05:00``):
-that reads through :func:`_compact_date_offset` on the offset as its gate, never
-on trailing digits, so it stays dated. The digit-count rule is deliberate and
-pinned
+that reads through :func:`_compact_date_offset` on a WELL-FORMED offset as its
+gate, never on trailing digits, so it stays dated — while a MALFORMED offset
+tail is one of the three stated exclusions above. The digit-count rule is
+deliberate and pinned
 (``tests/test_11646_producer_date_shape.py::test_a_pure_number_is_never_truncated_into_a_fabricated_day``);
 reversing it is a REOPEN of that rule, not a bug fix.
 

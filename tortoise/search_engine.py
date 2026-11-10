@@ -3554,7 +3554,19 @@ def _created_sort_key(value):
         if "/" in s:
             instant = _calendar_datetime(s)
             if instant is not None:
-                return (0, instant.timestamp())
+                # ⛔ INSIDE the guard: ``.timestamp()`` raises ValueError for a
+                # naive instant outside the platform's range — ``0001/01/01``,
+                # and on a +05:30 host even ``9999/12/31 23:59`` — and this
+                # measure is reached UNGUARDED from ``_recency_factors``,
+                # ``support.sort``, ``validity._names_an_instant`` and
+                # ``read_caller_end`` (which would then emit a raw ValueError
+                # instead of its #9202 refusal, host-dependently). The dashed
+                # path below was safe only by accident: it sits inside the try.
+                # Unrepresentable → the unparseable bucket, as documented.
+                try:
+                    return (0, instant.timestamp())
+                except (ValueError, OverflowError, OSError):
+                    pass
         try:
             from datetime import date, datetime
             iso = s.replace("Z", "+00:00")

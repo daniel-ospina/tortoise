@@ -103,13 +103,19 @@ _END_UNKNOWN_MARKER_SET = frozenset(END_UNKNOWN_MARKERS)
 #: durable); read it with ``dict(END_WRITE_OUTCOMES)``.
 END_WRITE_OUTCOMES: dict[str, int] = {"shaped": 0, "refused": 0}
 
-#: A date the read measure CANNOT order but whose INTENT is unambiguous: year
-#: first, 1-2 digit month/day, ONE consistent separator. ``_created_sort_key``
-#: requires ``len(s) >= 10`` plus a ``-``/``T``, so ``2024-3-1`` (8 chars) and
-#: ``2024/03/01`` name no instant to it — representational variance, NORMALISED
-#: silently rather than refused (ONTOLOGY §4.7, #9202). A day/month-first form
-#: (``03/04/2024``) deliberately does NOT match: it parses both ways, so it is
-#: "legible but ambiguous" and belongs in the refuse column (§0).
+#: A date the read measure COULD NOT ORDER before #11646 and whose INTENT is
+#: unambiguous: year first, 1-2 digit month/day, one date spelling. Two of them
+#: still do not order (``2024-3-1`` is 8 chars, under the measure's length
+#: gate), while a SLASH date does now — the read measure was widened so the
+#: ingest producer's shape can be ordered at all, which means ``2024/03/01``
+#: reaches this door as *already an instant*. That is exactly why the
+#: canonicalisation below is LOAD-BEARING rather than a convenience: a variant
+#: the measure now orders must still be re-spelled, or this door stores a form
+#: it used to refuse (cycle 4, finding 3). Representational variance is
+#: NORMALISED silently rather than refused (ONTOLOGY §4.7, #9202). A
+#: day/month-first form (``03/04/2024``) deliberately does NOT match: it parses
+#: both ways, so it is "legible but ambiguous" and belongs in the refuse column
+#: (§0).
 #:
 #: The DATE part, not the whole string: un-padded fields beside a TIME
 #: (``2024-3-1T12:00:00``) are the SAME human sloppiness and name the SAME
@@ -382,10 +388,11 @@ def read_caller_end(value: object, declared_precision: object = None,
 
     * ``shaped_token is None`` — write ``stored_value`` as the end. Either the
       caller's value is a real orderable instant (returned UNTOUCHED: a stored
-      instant is never re-spelled), or it is representational variance the read
-      measure could not order (``2024-3-1``, ``2024/03/01``, and the same
-      un-padded date beside a time: ``2024-3-1T12:00:00``), normalised to the
-      ISO form **silently** — same instant, same meaning, nothing to report.
+      instant is never re-spelled), or it is representational variance that
+      reaches this door in an orderable but non-canonical spelling
+      (``2024-3-1``, ``2024/03/01``, the mixed-separator ``2024/03-01``, and the
+      same un-padded date beside a time: ``2024-3-1T12:00:00``), normalised to
+      the ISO form **silently** — same instant, same meaning, nothing to report.
       Only the DATE is re-spelled; a time-of-day is kept as the caller wrote it,
       and the pair is accepted only when the read measure can order it.
     * ``shaped_token is not None`` — the value DECLARES NO DATE (blank, or one of

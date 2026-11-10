@@ -6,10 +6,11 @@ cached LongMemEval corpus
 ``question_date='2023/05/30 (Tue) 23:40'`` and
 ``haystack_dates[0]='2023/05/20 (Sat) 02:21'`` — 500/500 questions and every
 haystack date in that shape, 0 ISO (re-measured for #11646; #3011 measured the
-same shape 23,867/23,867 on the frozen dataset). ``tools/longmem_eval/ingest.py``
-writes exactly that string into ``createdAt`` (:246), ``when``/``validFrom``
-(:260-261) and the session's ``startedAt`` (:300), so these are the values the
-three seams actually meet in a graph.
+same shape 23,867/23,867 on the frozen dataset). The two ingest lanes write
+exactly that string: ``tools/longmem_eval/ingest.py`` into ``createdAt`` (:246)
+and the session's ``startedAt``/``endedAt`` (:300), and
+``tools/longmem_eval/ingest_v2.py`` into ``when``/``validFrom`` (:260-261) — so
+these are the values the three seams actually meet in a graph.
 
 Before #11646 all three seams assumed ISO:
 
@@ -570,10 +571,43 @@ def test_an_unrepresentable_instant_does_not_raise_out_of_a_read_path():
                   "9999-12-31T23:30:00-05:00",        # ISO form
                   "0001-01-01 (Sat) 02:21+05:00"):    # min date
         for seam in (calendar_date, _norm_date, time_aware._as_date,
-                     _calendar_date):
+                     _calendar_date, _created_sort_key):
             seam(value)  # must not raise
+    # ⛔ ``_created_sort_key`` is the one that actually regressed (cycle 5,
+    # finding 1): a naive instant outside the platform range made
+    # ``.timestamp()`` raise out of the read MEASURE, which
+    # ``validity._names_an_instant`` → ``end_state`` / ``read_caller_end`` and
+    # ``support.sort`` all call. It must bucket, never raise — and a slashed
+    # value is the shape the widened grammar newly admits there. The BUCKET is
+    # asserted only where every host agrees (year 1 is unrepresentable
+    # everywhere); near year 9999 the answer is legitimately host-dependent, so
+    # there the property is the absence of an exception.
+    assert _created_sort_key("0001/01/01 00:00") == (1, "0001/01/01 00:00")
+    assert _created_sort_key("9999/12/31 23:59")[0] in (0, 1)
     # and the assembly ladder falls through / floors rather than aborting
     assert _norm_date("9999-12-31 (Sat) 23:30-05:00") == date(9999, 12, 31)
     assert _norm_date("0001-01-01 (Sat) 02:21+05:00") is None   # pre-1970 floor
     assert _tier_and_date({"when": "9999-12-31 (Sat) 23:30-05:00"}) == (
         "when", date(9999, 12, 31))
+
+
+def test_the_reader_never_receives_a_full_timestamp_for_a_day_precision_bound():
+    """Cycle 5, finding 2. ``validFrom`` is written in the producer's shape by
+    ``tools/longmem_eval/ingest_v2.py``; once #11646 made such a bound
+    ORDERABLE, ``retrieval._display_bound`` rendered the whole string —
+    ``[valid since 2023/05/20 (Sat) 02:21]`` — beside ``precision='day'``, which
+    the marker's contract forbids ("no full timestamps in the reader context").
+    The bound is rendered as its DAY, through the same truncation rule."""
+    from tortoise.retrieval import _display_bound, _validity_marker
+
+    hit = {"id": "p-1"}
+    assert _display_bound(PRODUCER_SESSION_DATE, "valid_from", hit) == (
+        ISO_SESSION_DATE)
+    assert _validity_marker({"valid_from": PRODUCER_SESSION_DATE}) == (
+        "[valid since 2023-05-20]")
+    # an ISO instant is unchanged (the arm that already owned this rule)
+    assert _display_bound("2024-06-01T12:00:00Z", "valid_from", hit) == (
+        "2024-06-01")
+    # text that names no day survives whole, never as a fragment
+    assert _display_bound("not-a-date-at-all", "valid_from", hit) == (
+        "not-a-date-at-all")
