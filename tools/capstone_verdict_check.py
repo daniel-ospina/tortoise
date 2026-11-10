@@ -142,7 +142,19 @@ CRITERIA = ("E1", "E2", "E3", "E4", "E5")
 #: has run yet. `#10984`–`#10988` own those runs. A table that carries one is checked by V1–V12
 #: exactly as an `E`-row is, `V12`'s CLOSED-``blocked_by`` refusal included.
 A_CRITERIA = ("A1", "A2", "A3", "A4", "A5")
-RECOGNISED_CRITERIA = CRITERIA + A_CRITERIA
+#: The capstone row `#11673` registered on the owner's 2026-11-05 ruling (`#7949` comment
+#: `6664402530`): per-pack *declared → writable → written*. It is RECOGNISED here and NOT added to
+#: ``CRITERIA``, for the reason this module already states about the A-rows — and for one more that
+#: is specific to it: ``CRITERIA`` is the epic's CLOSING rule ("5/5"), which is a separate recorded
+#: decision this change does not reach. V2 demands one row per member, so adding `E6` there would
+#: red every verdict table that predates the row — including the shipped `capstone.log` refusal
+#: record, whose bytes §7/§8 of the pre-registration forbid editing in place. Recognising it is what
+#: makes the row SCOREABLE: before this, a table carrying `E6` was refused as *"not an E1–E5 or
+#: A1–A5 criterion"*, so the registration's own `§8` precondition (its add-commit strictly earlier
+#: than any `E6` scored log) could never be exercised. A table that carries it is checked by V1–V12
+#: exactly as an `E`-row is, `V12`'s CLOSED-`blocked_by` refusal included.
+E6_CRITERIA = ("E6",)
+RECOGNISED_CRITERIA = CRITERIA + A_CRITERIA + E6_CRITERIA
 STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", "S5", "S6")
 #: The two states a CONDITIONAL step may be accounted in (#10215). ``observed``
 #: means the pass did work; ``idle`` means its flag was ON, it did no work, and
@@ -919,7 +931,7 @@ def check(record: dict, *, repo: Path,
     for criterion in seen:
         if criterion not in RECOGNISED_CRITERIA:
             f.add("V2", f"rows[{criterion}]",
-                  "not an E1–E5 or A1–A5 criterion")
+                  "not an E1–E5, A1–A5 or E6 criterion")
 
     # A block that is `[]`/`"x"`/`5` is REPORTED here and read as empty below.
     # `.get` on a non-object raised AttributeError and escaped as exit 1 on a

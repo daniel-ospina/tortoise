@@ -337,16 +337,22 @@ def test_unknown_criterion_is_a_finding():
 
     Non-vacuity: the old version relabelled E5 to "E6", which deleted E5 and let
     the missing-row arm satisfy the assertion. A sixth row keeps 5/5 present, so
-    only the "not an E1–E5 or A1–A5 criterion" branch can produce this finding.
+    only the "not an … criterion" branch can produce this finding.
 
     The vocabulary widened on 2026-11-06 (`#10982`): the record now registers `A1`–`A5`, so the
-    gate must RECOGNISE them (`RECOGNISED_CRITERIA`) without making them REQUIRED — and `E6` is
-    still unknown, which is what keeps this arm non-vacuous.
+    gate must RECOGNISE them (`RECOGNISED_CRITERIA`) without making them REQUIRED.
+
+    ⛔ IT WIDENED AGAIN ON 2026-11-10 AND THIS ARM'S ID MOVED WITH IT (`#11673`). `E6` is now a
+    RECOGNISED capstone row — the sixth the owner ruled on 2026-11-05 — so `E6` is no longer unknown
+    and the unknown id here is `E7`. That move is REQUIRED by the new row and is the arm's whole
+    point: leaving `E6` here would assert the opposite of what the tree does. `E6` is recognised but
+    NOT in `CRITERIA`, so the epic's closing rule is still 5/5 (`test_the_shipped_log_is…` depends
+    on it) — the same recognised-not-required shape `#10982` used for the `A`-rows.
     """
     rec = _record()
-    rec["rows"].append(dict(rec["rows"][4], criterion="E6"))
+    rec["rows"].append(dict(rec["rows"][4], criterion="E7"))
     msgs = _messages(rec)
-    assert any("not an E1–E5 or A1–A5 criterion" in m for m in msgs), msgs
+    assert any("not an E1–E5, A1–A5 or E6 criterion" in m for m in msgs), msgs
 
 
 # ── V4/V5: green means measured, with a file ─────────────────────────────
@@ -4317,3 +4323,30 @@ def test_g5_refuses_a_malformed_step_declaration(tmp_path, monkeypatch):
     reason = cvc.extract_block(out.read_text())["run"]["reason"]
     assert "step declaration is unreadable" in reason, reason
     assert "BEFORE the pass" in reason, reason
+
+
+def test_the_sixth_capstone_row_is_RECOGNISED_and_not_REQUIRED():
+    """`E6` is a capstone row the scorer must ACCEPT, and the closing rule still says 5/5 (#11673).
+
+    Two halves, and the second is the one that would break shipped artefacts if it were confused
+    with the first:
+
+    * RECOGNISED — before this, a table carrying an `E6` row was refused as *"not an E1–E5 or A1–A5
+      criterion"*, so the pre-registration's own §8 precondition (its add-commit strictly earlier
+      than any `E6` scored log) could never be exercised, because no `E6` log could exist;
+    * NOT REQUIRED — `CRITERIA` is the epic's CLOSING rule (`#7949`: "5/5"), which this change does
+      not reach. V2 demands one row per member, so adding `E6` there would red every table that
+      predates the row, including the shipped `capstone.log` refusal record — whose bytes §7/§8 of
+      the pre-registration forbid editing in place.
+    """
+    assert "E6" in cvc.RECOGNISED_CRITERIA
+    assert "E6" not in cvc.CRITERIA
+    assert cvc.CRITERIA == ("E1", "E2", "E3", "E4", "E5")
+    rec = _record()
+    rec["rows"].append(dict(rec["rows"][4], criterion="E6"))
+    msgs = _messages(rec)
+    assert not any("not an E1–E5, A1–A5 or E6 criterion" in m for m in msgs), msgs
+    assert not any("row is MISSING" in m for m in msgs), msgs
+    # …and it is held to the DECIDED-ONCE rule as a recognised row: two `E6` rows are a finding.
+    rec["rows"].append(dict(rec["rows"][4], criterion="E6"))
+    assert any("2 rows" in m and "decided once" in m for m in _messages(rec))

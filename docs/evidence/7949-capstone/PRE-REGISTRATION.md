@@ -75,6 +75,7 @@ argument should treat E1's bar as **unconfirmed**, which is exactly how `#9110` 
 | **E5** | **yes** — `#7947`: `EXTRACTOR-V4-ARCHITECTURE.md` §10, committed `ecc7bc8ca` (2026-10-19) | a threshold for the **re-run**, disclosed as post-visible (§10.2): the measurement predates this record and sits BELOW the bar |
 | **A1**, **A3**, **A4**, **A5** | **no at registration** — the field asks whether a measurement of the row was visible to the registration's author **at `a6085af84`** (§10.3, the same anchor E3 uses), and every reading of these metrics postdates it. ⛔ **The ground is NOT "no measurement exists anywhere"**: the owner's 2026-11-04 `live-v4` hand reading is a prior of A1/A3/A4/A5 (it is quoted as each row's `threshold_basis`), and `capstone-measured-9152448d.log` — committed `31f996f91`, 2026-11-04, **in this directory** — carries A1's object population and a COMPLETE edge-type enumeration on the pinned corpus, plus A5's `Subject` count. Both postdate `a6085af84`, so `false` holds; what a reader must apply is the discount that the bar's author HAD seen those figures (§10.11) | a threshold for the **scoring run** (`#10984`–`#10988`), disclosed as post-visible |
 | **A2** | **no** — no S3 RESOLVE attach/mint census has ever been taken on any graph, committed or not | a genuine pre-registration, prior to its first run |
+| **E6** | **yes** — two priors predate this row: the owner's 2026-11-05 baseline (`#7949` comment `6664402530`: 32 of 36 declared relations writable, 4 unbound) and `docs/evidence/11083/pack-relation-census.json`, committed `f5c69f7478` on 2026-11-08 by `#11543` (§10.21) | a threshold for the **scoring run**, disclosed as post-visible — and this is the row whose disclosure costs least, because its bar is a zero-tolerance COUNT (`= 0`): there is no measured value it could have been fitted to. The count it registers has MOVED since that baseline, which §10.21 states rather than absorbs |
 
 **⇒ §0's table was wrong about E5, and had been since this file was written.** The struck row above
 is the original, preserved rather than edited; it claimed no measurement existed anywhere for E5,
@@ -434,15 +435,17 @@ reporting one is the defect, not the small number.
 | **A3** | statements that **join a chain** under the definition registered here — carrying at least one incident `IMPL`/`NAND` edge **and** at least one such edge crossing a batch boundary (a different `Event` root, with an `eventId` on **both** ends) — with the CHEAP rate (any incident `IMPL`/`NAND`, no cross-batch requirement) reported beside it and explicitly NOT the bar | the statements written by the run that carry an `eventId` — `Point` nodes whose `pointKind` is `statement` **and** whose `eventId` is present (floor of at least 30 statements AND an event-root coverage of at least 0.50); the unstamped statements and the `NULL` `pointKind` population are reported separately, never folded in | `cross_batch_rate >= 0.50` over the stamped statements; the cheap rate and the coverage are reported and never compared to this bar |
 | **A4** | typed claims — **claim** Points (neither a truthy `is_episodic` nor a truthy `is_operator`) whose `pointKind` is present, not blank and not `statement` — reported by kind, with the `statement` and `NULL`/blank populations reported beside them | all **claim** `Point` nodes written by the run (floor of at least 30 typed statements); the excluded turn-row and operator-Point populations are counted and reported beside it, never folded in | UNMEASURED(the bar is owner-gated on the D3 fork — `#10988` and `#1022` decide whether A4 overrides D3; until that is ruled the row is REPORTED and compared to no bar, above the floor of `>= 30` typed statements) |
 | **A5** | `:Subject` nodes written by the run, and the **four subject-edge families** (`aboutSubject`, `memberOf`, `ownedBy`, `managedBy`) counted per family (`count(DISTINCT r)`), plus the statements carrying at least one of them | the distinct actors the A-corpus names — `a5_actors`, floor of at least 30 named actors — with the `:Subject` count and the `Point` population reported beside them, never used as the actor denominator | `>= 1` `:Subject` per distinct actor named in the A-corpus and `>= 1` statement carrying a subject edge; a family that is zero is named with its reason rather than averaged away |
+| **E6** | declared relation rows that are **unbound and unexplained** — every `relations[]` / `hierarchies[]` row whose `relation_write_verdict` is `predicate-not-in-allowlist` and which is **not** marked `declarationOnly: true` with a reason, **plus** every row that binds a write path but reports no `effective_direction` | **every** declared row across the installed packs, counted from the registry at the run's head — `population.declared` in `docs/evidence/11083/pack-relation-census.json`, **42** at the `#11083` stamp (36 relations + 6 hierarchy paths); a pack set that resolves to fewer than `e6_declared_rows` rows is REFUSED, never scored on an empty population | `unbound_and_unexplained = 0` — and the census's `written` column (`direct` / `mediated` / `none`) is reported beside it, **never** the bar: `A1` already measures what the **written** graph answers |
 
 ⚠️ The **step set** these rows are measured over is not all-unconditional: §11 records which of §4.1's
 eight steps are required and which is conditional on the pipeline having work for it (`#10215`).
 
 ⚠️ **The five `A`-rows were added on 2026-11-06 by `#10982` (§10.11) and are NOT required rows.**
-`pins.required_criteria_rows` stays `[E1, E2, E3, E4, E5]`: the `A`-rows name criteria whose scoring runs
-`#10984`–`#10988` own, and a registration may not turn a row into a gate before anyone has measured it.
-A verdict table that omits them is not refused; a table that carries one is held to the same rules as
-`E`-row (`V12` refuses a row whose `blocked_by` has CLOSED).
+`pins.required_criteria_rows` stays `[E1, E2, E3, E4, E5, E6]` — the sixth entry is `E6`, added by
+`#11673` (§10.21) on the owner's 2026-11-05 ruling, **not** an `A`-row: the `A`-rows name criteria
+whose scoring runs `#10984`–`#10988` own, and a registration may not turn a row into a gate before
+anyone has measured it. A verdict table that omits them is not refused; a table that carries one is
+held to the same rules as `E`-row (`V12` refuses a row whose `blocked_by` has CLOSED).
 
 ### 3.2 E1 — volume falls, and the bar is bounded by the shipped detector
 
@@ -703,6 +706,63 @@ The probe already applies exactly this to `A3`'s statement denominator and `A4`'
 denominator, for the same reason; registering the rule here is what makes it the row's and not the
 instrument's private convention.
 
+### 3.8 `E6` — the packs' declared business logic is constructed (`#11673`)
+
+The owner's ruling of 2026-11-05 (`#7949` comment `6664402530`) added a sixth capstone row in these
+words: *"the point is that the business logic of the packs should be followed so we're constructing
+the packs' business logic of connections as ontologies"*. The row is **per-pack: declared → writable
+→ written**. `#11083` built the census for it and closed without registering it, which is the defect
+`#11673` fixes: an acceptance criterion the epic names and the registration does not carry has no bar,
+so no run could ever be refused against it.
+
+**What it measures.** Two defects in the DECLARATION, both countable and both zero-tolerance:
+
+1. **A declared row with no write path and no explanation.** `pack_registry.relation_write_verdict`
+   is the ONE resolver (`#2766`), so a row it reports as `predicate-not-in-allowlist` binds no write
+   path at all. That is not automatically a defect — `pm`'s `onBoard` is deliberately retired with
+   `declarationOnly: true` and its reason recorded in the pack (a board is a VIEW over cards, not a
+   container of them) — so the metric counts a row that is unbound **and** unexplained. Deleting a
+   declaration is therefore not a way to satisfy this bar, which is the property `#11083` was asked
+   for: the count must not fall by removing the word.
+2. **A row that binds a write path but states no direction.** `effective_direction` is where the
+   writer learns which way confidence runs (`#2766`, and `#11083`'s `produces` correction: a label can
+   carry no direction, a meaning can). A row whose sense is neither declared nor resolved from its
+   semantics falls back to a default nobody registered, so an INVERTED meaning reads as plausible.
+
+**What it does NOT measure, and the boundary against `A1`.** `A1` (§3.7) measures what the **written**
+graph can answer — `object→object` edges by written relation family, plus rollup queries answered. `E6`
+measures the **declaration → write chain** across every declared row in every installed pack. They are
+different questions and this row must not restate `A1`: the `written` column of the census is
+**reported beside** `E6` and is never its bar, because a bar on it would duplicate `A1` and let one
+defect red two rows. `A1`'s own §3.7 bullet states the same boundary from its side (*"**Not `E6`**
+(`#11083`)"*). Neither row is evidence for the other: `E6` can be GREEN while `A1` is RED (every
+relation writable, no edge ever written by the pipeline), and `A1` can be GREEN while `E6` is RED (the
+one written family satisfied by a caller while a declared row binds no path).
+
+**The bar's basis, and why a count and not a ratio.** The measured state at `#11083`'s stamp was 32 of
+36 declared relations writable with four unbound — all four in `packs/project-management/`, declared in
+the legacy `from`/`to` shape with no `mechanism`. `#11237`'s relations write path then bound them, and
+at this head the census reads **42 declared rows, 41 `writable`, 1 `declaration-only` (with its
+reason), 0 `predicate-not-in-allowlist`**, with an `effective_direction` on every row that has a write
+path. So `E6` is **GREEN on both halves at registration**, and that is stated rather than dressed as a
+near miss: the bar is not fitted to a gap, it is the invariant the row exists to keep true — that no
+NEW declaration lands unbound or direction-less. A rate over 42 rows would be a second way to report
+the same count and would let 41/42 read as a pass.
+
+**The floor, and the false PASS it refuses.** `denominator_floors.e6_declared_rows: 30`. Without a
+floor the row is scorable on an empty population: a registry that failed to load its packs reports
+`population.declared: 0` and therefore `unbound_and_unexplained: 0` — a GREEN at the top of a row whose
+whole subject is missing. The value is `30` because this record applies that floor uniformly (E1's
+object floor, and every §3.7 `A`-row floor), not because 30 was fitted to today's 42.
+
+**One instrument, and it already exists.** The census is `tools/pack_relation_census.py`, whose
+committed artifact is `docs/evidence/11083/pack-relation-census.json`; it emits every cell this metric
+reads per row (`verdict`, `declaration_only`, `declaration_only_reason`, `effective_direction`,
+`written`) and derives `population.declared`. So `E6` is a REGISTRATION over an existing instrument,
+not a new measurement, and no second census is introduced. ⚠️ The artifact's `verdicts` aggregate is
+over `relations[]` only; the metric is over the ROWS of both surfaces, which is why it reads the
+per-row cells and the population rather than that aggregate.
+
 ---
 
 ## 4. The tie-break — which criterion wins when they disagree
@@ -782,14 +842,14 @@ as if it were an entry in this table. Adding a log there is a deliberate act wit
 
 Exit 0 only when **all** of these hold:
 
-1. **The five rows carry all three parts.** Every criteria row (E1–E5) names a metric, a denominator
+1. **The six rows carry all three parts.** Every criteria row (E1–E6) names a metric, a denominator
    and a **numeric** threshold. A row with a placeholder — *"to be decided"*, *"TBD"*, an em dash — or
    with any of the three missing **fails**.
 
    Two additions to that arm, both forced by `#10982` and both stated rather than assumed:
 
-   - **It is no longer E1–E5.** The table carries twelve rows (§3.1); the arm applies to every row in
-     it, not only the five the epic closes on.
+   - **It is no longer E1–E6.** The table carries thirteen rows (§3.1); the arm applies to every row in
+     it, not only the six the record requires.
    - **A REGISTERED non-bar is complete, and a floor is not a bar.** A threshold that declares
      `UNMEASURED(<ground>)` is complete **only** when its ground names the issue that gates the row
      (A4 names `#10988`/`#1022`) — and the floor clause beside it (`` … above the floor of
@@ -997,8 +1057,8 @@ split:
   held_out: [wp04_aurora_perf, wp05_retro_writeup, wp07_bluepeak_followup]
   tune_counts: {units: 53, operator_edges: 7, value_bearing_units: 5, hedge_scope_sentences: 21}
   held_out_counts: {units: 37, operator_edges: 8, value_bearing_units: 9, hedge_scope_sentences: 8}
-criteria: [E1, E1b, E2a, E2b, E3, E4, E5, A1, A2, A3, A4, A5]
-required_criteria_rows: [E1, E2, E3, E4, E5]
+criteria: [E1, E1b, E2a, E2b, E3, E4, E5, A1, A2, A3, A4, A5, E6]
+required_criteria_rows: [E1, E2, E3, E4, E5, E6]
 steps:
   source: "EXTRACTOR-V4-ARCHITECTURE.md §4.1 — the eight top-level steps"
   unconditional: [S0, S1, S2.1, S2.2, S3, S5, S6]
@@ -1023,6 +1083,9 @@ prior_measurements:
   E2a: bc547406f
   E2b: bc547406f
   E5: ecc7bc8ca     # EXTRACTOR-V4-ARCHITECTURE.md §10, 2026-10-19 — PREDATES this record (§10.2)
+  E6: f5c69f7478    # docs/evidence/11083/pack-relation-census.json — committed 2026-11-08 (#11543), PREDATES
+                    # this row (§10.21); the owner's 2026-11-05 baseline (#7949 comment 6664402530) is
+                    # quoted as its threshold_basis
 e4_denominator: 15
 denominator_floors:
   e1_objects: 30
@@ -1045,6 +1108,10 @@ denominator_floors:
   a4_typed_statements: 30
   a5_points: 30
   a5_actors: 30
+  # #11673: E6's floor is a POPULATION floor like the rest, and it is the one that refuses the
+  # false PASS at the top of the row — a registry that failed to load its packs reports zero
+  # declared rows, and `unbound_and_unexplained = 0` would then read GREEN over an absent subject.
+  e6_declared_rows: 30
 a1_relation_families:
   - hasPart
 a1_relation_family_fold:
@@ -1139,6 +1206,7 @@ except where noted; the alternative was to omit the provenance and let a reader 
 | **6,533 / 2,614 / 402** on **7,870** Objects and **27,324** reference edges (A2 basis) | `tortoise/definite_description_backfill.py:15-23` — re-derivable |
 | **64** Objects / **19** Subjects / **21** `aboutSubject` (the A-row figures §10.11 discloses) | `capstone-measured-9152448d.log:271` (`"Object": 64`), `:275`, `:299-309` — re-derivable |
 | the **nine** A-row floors (§3.7) | `pins.denominator_floors` in this file, cross-checked against `preregistration.json` **both ways** by `tools/capstone_preregistration_check.py` |
+| **42** declared rows · **41** `writable` · **1** `declaration-only` · **0** `predicate-not-in-allowlist` · **41 of 42** carrying an `effective_direction` (E6's population and its state at this head) | `docs/evidence/11083/pack-relation-census.json` — re-derivable with `uv run python tools/pack_relation_census.py --write-probe --json`; the `written` family is a GRAPH fact and needs the probe, the declaration half is hermetic. ⚠️ The issued baseline for this row was **32 of 36 writable, 4 unbound** (`#7949` comment `6664402530`, 2026-11-05); `#11237` bound those four, so the figures here are re-measured, not inherited (§10.21) |
 | §1.6.4's censuses — v2 `Object 1 / Point 27 / Event 2 / Session 1 / Operator 0`, m2 `0 / 149 / 1 / 1 / 0` — and the `5.5×` ratio | `tests/test_7949_c2_door.py` (`test_the_negative_control_is_measured_and_the_two_lanes_DISAGREE`), measured on `wp01_quarry_debug` under `TORTOISE_SESSION_LLM_MOCK=1`, one embedded graph per arm |
 | 5 of 15 operator edges (§1.6.3, E4) | `tests/eval/write_path/receipts/w2b-operator-2026-10-24-8503-b.json` — the receipt `select_e4_receipt()` selects at the frozen `fixtures_hash` `dd7e8520…` (`operator_audit.edge_correct = 5`, extractor `tortoise.extractor_v2::extract_session_v2`) |
 
@@ -1249,9 +1317,12 @@ what a reader needs and what the field name alone cannot carry.
 
 **New value:** `"measurement_visible_to_author": true` for `E5`, with a
 `measurement_visible_to_author_basis` naming the artefact; §0's row is **struck, not deleted**, and
-replaced by three rows — `E3` (no measurement at registration: the census postdates this record),
+replaced by four rows — `E3` (no measurement at registration: the census postdates this record),
 `E4` (measured `2026-10-19T01:39:26Z`, its artefact only landed `d50217273` on 2026-10-22, so nothing
-was *visible* to this record's author — §10.4) and `E5` (measured, post-visible).
+was *visible* to this record's author — §10.4), `E5` (measured, post-visible) and — added later by
+`#11673` (§10.21), which is why this sentence names four rather than the three this entry shipped
+with — `E6` (post-visible: the owner's 2026-11-05 baseline and the committed `#11083` census both
+predate the row).
 
 The measurement: `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §10 — *the
 raw-vs-narrative measurement* — landed in **`ecc7bc8ca`, 2026-10-19** ("… (#7947) (#9071)"; #7947 CLOSED
@@ -1928,6 +1999,99 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 - **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
   touched; `document_sha256` is re-cut in this same merge, per §8's rule for *any* edit to this
   file.
+
+### 10.21 — the sixth row: `E6` is registered as a REQUIRED capstone criterion (`#11673`, 2026-11-10)
+
+**What was added, and on what authority.** The owner ruled on 2026-11-05 (`#7949` comment
+`6664402530`) that the capstone gains a sixth row — *"we can add a sixth row, the point is that the
+business logic of the packs should be followed so we're constructing the packs' business logic of
+connections as ontologies"* — defined as per-pack **declared → writable → written**. `#11083` built
+the census for it and closed **without registering the row**, so the epic's own acceptance criterion
+had no bar: any run could report whatever it liked about the packs' declared logic and nothing could
+refuse it. `#11673` registers it here, as a **re-registration in the `#9736` class** (a new id added
+in the open, with its own before-arm and its own disclosure), never as an edit to a registered row.
+
+**The superseded pins, quoted rather than deleted.**
+
+```yaml
+criteria: [E1, E1b, E2a, E2b, E3, E4, E5, A1, A2, A3, A4, A5]
+required_criteria_rows: [E1, E2, E3, E4, E5]
+```
+
+…and this entry's replacement, which is what the pins fence at §7 now carries:
+
+```yaml
+criteria: [E1, E1b, E2a, E2b, E3, E4, E5, A1, A2, A3, A4, A5, E6]
+required_criteria_rows: [E1, E2, E3, E4, E5, E6]
+```
+
+**No existing row moves.** `E1`–`E5`, `E1b`, `E2a`, `E2b` and `A1`–`A5` keep their metrics,
+denominators, thresholds, class sets and floors untouched; the corpus pin, the split, the salience
+pins and the step set are unchanged; no committed verdict is re-scored and no `*.log` is added or
+touched. `E6` is therefore the only new row and the only new floor.
+
+**Why it is REQUIRED, and what that does not change.** A required row is a row the RECORD may not be
+silent about: `tools/capstone_preregistration_check.py`'s `REQUIRED_CRITERIA` gains `E6` in this same
+change, so a registration without it is refused. That is the whole of what "required" means here, and
+the boundary is worth stating because the two neighbouring sets are deliberately different:
+
+- `REGISTERED_NON_BAR_ROWS` stays `frozenset({"A4"})`. `E6` is **not** bar-less — it carries
+  `unbound_and_unexplained = 0` — so adding it there would have been a second deliberate tool change
+  with its own disclosure argument, and it is not needed (§7 item 1).
+- `tools/capstone_verdict_check.py` gains `E6` to `RECOGNISED_CRITERIA` **only**. Before that, a
+  verdict table carrying an `E6` row was refused as *"not an E1–E5 or A1–A5 criterion"* — so this
+  row's own §8 precondition (its add-commit strictly earlier than any `E6` scored log) could never be
+exercised, because no `E6` log could exist. `CRITERIA` — the epic's CLOSING rule, *"5/5"* — is NOT
+  changed: it is a separate recorded decision (`#7949`), and V2 demands one row per member, so growing
+  it here would red every table that predates the row, including the shipped `capstone.log` refusal
+  record whose bytes §7/§8 forbid editing in place.
+
+**The bar, and the `A1` boundary in both directions.** `E6`'s bar is a COUNT of declared rows that are
+**unbound and unexplained**, and it is not the census's `written` column. `A1` (§3.7) already measures
+what the **written** graph answers; a bar on `written` would duplicate `A1` and let one defect red two
+rows. `A1`'s bullet carries the same boundary from its side (*"**Not `E6`** (`#11083`)"*), and §3.8 is
+this row's own statement of what it measures and does not.
+
+**The disclosure, CORRECTED — this row IS post-visible.** `#11673`'s own checklist proposed the
+opposite (*"`E6` is **not** post-visible: it had no prior measurement"*), and that is **false at this
+head**: two priors predate the row and are cited in `prior_measurements.E6`. The owner's 2026-11-05
+baseline reads 32 of 36 declared relations writable with four unbound; and
+`docs/evidence/11083/pack-relation-census.json` was committed `f5c69f7478` on **2026-11-08**, two days
+before this entry — the row's population, its verdicts and its direction cells are all readable from a
+committed artefact. So `measurement_visible_to_author` is `true`, and the discount a reader must apply
+is stated rather than denied. It is affordable here for a specific reason: the bar is `= 0`, a
+zero-tolerance count, so there is no measured value it could have been fitted to — a bar fitted to the
+measured 4 would have read `<= 4`.
+
+**The measured state at this head, re-derived and not remembered.** `#11083`'s body quoted 32 of 36
+writable with four unbound; that is **provenance-stale**. `#11237`'s relations write path bound those
+four, and the committed census now reads **42 declared rows — 41 `writable`, 1 `declaration-only`, 0
+`predicate-not-in-allowlist`** — with an `effective_direction` on all 41 rows that bind a write path.
+The one `declaration-only` row is `pm`'s `onBoard`, retired **with** its reason recorded in the pack
+(a board is a VIEW over cards), which is exactly the shape the metric excludes rather than the defect
+it counts. ⇒ **`E6` is GREEN on both halves at registration.** That is disclosed, not dressed as a
+near miss: the bar is the invariant the row exists to keep true — no NEW declaration lands unbound or
+direction-less — and a zero-tolerance count that is currently met is what a rule looks like before it
+is broken, not evidence that it is unnecessary.
+
+**The floor, and the false PASS it refuses.** `denominator_floors.e6_declared_rows: 30` is new in this
+entry. Without it, the row is scorable on an EMPTY population: a registry that failed to load its
+packs reports `population.declared: 0`, so `unbound_and_unexplained` is also `0` and the row reads
+GREEN over a subject that is not there. `30` is the value because this record applies that floor
+uniformly (E1's object floor and every `A`-row floor, §3.7) rather than fitting one to today's 42.
+
+**The instrument is named, not rebuilt.** `tools/pack_relation_census.py` and its committed artifact
+`docs/evidence/11083/pack-relation-census.json` already emit every cell the metric reads per row
+(`verdict`, `declaration_only`, `declaration_only_reason`, `effective_direction`, `written`) and derive
+`population.declared`. `E6` is therefore a registration over an existing measurement: no second
+census, no second record, no new gate. ⚠️ The artifact's `verdicts` aggregate covers `relations[]`
+only; the metric spans the ROWS of both surfaces, which is why §3.1's row names the per-row cells and
+the population rather than that aggregate.
+
+**Why an amendment and not a second registration.** Same ground as §10.11: the record's corpus pin is a
+single `fixtures_hash`, its checker parses one criteria table and one machine record, and
+`measurement_visible_to_author` is per-row. A second registration would duplicate the corpus pin and
+split the gate, which is the failure shape `#10982` already refused for the `A`-rows.
 
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 

@@ -120,12 +120,20 @@ def test_the_a_rows_are_registered_but_not_REQUIRED():
 
     FAILS IF `required_criteria_rows` grows — that would demand `A1`–`A5` of every verdict table,
     including the committed one, for rows nobody has run yet (`#10984`–`#10988` own those runs).
+
+    ⛔ AND THE SET DID MOVE ONCE, FOR A ROW THAT IS NOT AN `A`-ROW (`#11673`). `E6` is the capstone's
+    sixth row, added on the owner's 2026-11-05 ruling (`#7949` comment `6664402530`), and it is
+    REQUIRED — so the assertion below is no longer "unchanged since §10.11", it is "exactly the six
+    `E`-rows and no `A`-row". Both halves are asserted: the equality alone would pass on a set that
+    happened to have the right length, and the A-row half is the one this test has always protected.
     """
-    assert check.REQUIRED_CRITERIA == ("E1", "E2", "E3", "E4", "E5")
+    assert check.REQUIRED_CRITERIA == ("E1", "E2", "E3", "E4", "E5", "E6")
+    assert not (set(A_ROWS) & set(check.REQUIRED_CRITERIA)), (
+        "an A-row became REQUIRED — that demands rows nobody has run from every verdict table")
     text = PREREG.read_text()
-    assert "required_criteria_rows: [E1, E2, E3, E4, E5]" in text
+    assert "required_criteria_rows: [E1, E2, E3, E4, E5, E6]" in text
     pins = check.parse_pins(text)
-    assert pins["required_criteria_rows"] == ["E1", "E2", "E3", "E4", "E5"]
+    assert pins["required_criteria_rows"] == ["E1", "E2", "E3", "E4", "E5", "E6"]
     # …and the RECOGNISED set did grow, or the rows would be unreachable.
     assert set(pins["criteria"]) >= set(A_ROWS)
     # ⛔ The A1 family pin exists in BOTH artefacts, and must be the same list: the pins fence is the

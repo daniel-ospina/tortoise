@@ -82,6 +82,12 @@ FULL_ROWS = _rows(
     "| E4 | wired+persisted operator edges | the **15** planted operator edges | `= 15 of 15` |",
     "| E5 | narrative-arm marker claims | raw-arm marker claims over **29** sentences "
     "| `>= 0.90` ratio |",
+    # ⛔ `E6` is HERE because `REQUIRED_CRITERIA` gained it (#11673, §10.21). A fixture that builds
+    # the five rows and omits the sixth is a document `check_completeness` now correctly refuses
+    # ("criterion E6 has no row"), so every synthetic-document arm below would red on the fixture
+    # rather than on what it tests. The cell values are deliberately different from the real
+    # registration's: these arms test the RULES, never the record's own numbers.
+    "| E6 | unbound declared rows | every declared row | `= 0` |",
 )
 
 
@@ -7328,3 +7334,105 @@ def test_a_malformed_record_conditional_entry_is_REPORTED_not_skipped():
     rec["steps"]["conditional"] = [*rec["steps"]["conditional"], {"condition": "no step key"}]
     failures = check.check_step_partition(check.parse_pins(PREREG.read_text()), rec)
     assert any("steps.conditional carries an entry that is not a" in f for f in failures), failures
+
+
+# ── the sixth capstone row, and the SHARED instrument it is registered in (#11673) ──
+
+
+def test_the_sixth_capstone_row_is_registered_and_REQUIRED():
+    """`E6` is a row of the record AND a member of the gate's required set (#11673).
+
+    Both halves, because either alone is inert: a row the constant does not name is a criterion the
+    gate never demands (the state `#11083` left the epic in), and a constant naming an absent row
+    refuses every bundle. §10.21 records the registration; this pins the mechanism.
+    """
+    assert check.CORE_REQUIRED_CRITERIA == ("E1", "E2", "E3", "E4", "E5")
+    assert check.REQUIRED_CRITERIA == ("E1", "E2", "E3", "E4", "E5", "E6")
+    # …and `E6` is NOT a registered non-bar: it has a countable bar, so it never joins that
+    # register (adding a member there is a separate tool change with its own disclosure argument).
+    assert "E6" not in check.REGISTERED_NON_BAR_ROWS
+    rows = {r["id"]: r for r in check.parse_criteria_rows(PREREG.read_text())}
+    assert "E6" in rows, "the criteria table carries no E6 row"
+    for part in ("metric", "denominator", "threshold"):
+        assert not check.is_placeholder(rows["E6"][part]), (part, rows["E6"])
+    # The bar is a COUNT with a comparator, so the numeric arms are satisfied without an exemption.
+    assert "= 0" in check._plain(rows["E6"]["threshold"])
+    # …and the machine record agrees with the table, cell for cell, and pins its floor.
+    record = json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    by_id = {c["id"]: c for c in record["criteria"]}
+    for part in ("metric", "denominator", "threshold"):
+        assert check._plain(str(by_id["E6"][part])) == check._plain(rows["E6"][part]), part
+    assert by_id["E6"]["floor"] == "e6_declared_rows"
+    assert record["denominator_floors"]["e6_declared_rows"] == 30
+
+
+def test_the_capstone_declaration_is_the_full_set_not_a_broader_narrowing():
+    """The pins declaration and the tool constant may not drift apart at the CAPSTONE.
+
+    `required_criteria_for` narrows to the core set only on an EXACT core declaration, so a
+    record-only edit that dropped `E6` from the capstone's own pins would un-require the sixth row
+    with nothing else moving. This is the leg that reds on it — the declaration is pinned OUTSIDE
+    the record, in the gate's own suite.
+    """
+    pins = check.parse_pins(PREREG.read_text())
+    assert pins["required_criteria_rows"] == list(check.REQUIRED_CRITERIA)
+    assert check.required_criteria_for(pins) is check.REQUIRED_CRITERIA or (
+        check.required_criteria_for(pins) == check.REQUIRED_CRITERIA)
+    assert pins["criteria"] == ["E1", "E1b", "E2a", "E2b", "E3", "E4", "E5",
+                                "A1", "A2", "A3", "A4", "A5", "E6"]
+
+
+def test_a_bundle_that_shares_the_slot_vocabulary_is_not_asked_for_the_sixth_row():
+    """The instrument is SHARED, so the required set is per-bundle (#11673).
+
+    `docs/evidence/5087-hypothesis` uses the E1–E5 slot names for different measurements and
+    declares the core set. Demanding the capstone's sixth row of it would red a correct bundle —
+    and its registration says in as many words that the set is the *"checker's slot vocabulary"*.
+    """
+    pins = check.parse_pins((SIBLING_DIR / check.PREREG_NAME).read_text())
+    assert pins["required_criteria_rows"] == list(check.CORE_REQUIRED_CRITERIA)
+    assert check.required_criteria_for(pins) == check.CORE_REQUIRED_CRITERIA
+    report = check.run(SIBLING_DIR, use_git=False, use_corpus=False)
+    assert report["ok"], report["failures"]
+
+
+def test_a_declaration_outside_the_two_sanctioned_sets_is_refused():
+    """A third set is how a required row disappears by editing the record alone."""
+    pins = check.parse_pins(PREREG.read_text())
+    rows = check.parse_criteria_rows(PREREG.read_text())
+    derived = check.derive_corpus_facts(pins)
+    pins["required_criteria_rows"] = ["E1", "E2", "E3", "E4"]
+    failures = check.check_pins(pins, derived, rows)
+    assert any("must be one of" in f for f in failures), failures
+    # …and the same set minus nothing but the sixth entry is the core set, which IS sanctioned: the
+    # refusal above is of a set that drops a CORE slot, not of the core set itself.
+    pins["required_criteria_rows"] = list(check.CORE_REQUIRED_CRITERIA)
+    failures = check.check_pins(pins, derived, rows)
+    assert not any("must be one of" in f for f in failures), failures
+
+
+def test_a_table_that_DEFINES_the_sixth_row_without_REQUIRING_it_is_refused():
+    """The capstone's own defect shape, refused mechanically (#11673).
+
+    A registration that describes a criterion and does not require it is exactly what `#11083` left
+    behind: the row's home acquired, the gate never asking. The core declaration is legal for a
+    bundle that has no such row — and refused for a table that carries one.
+    """
+    pins = check.parse_pins(PREREG.read_text())
+    rows = check.parse_criteria_rows(PREREG.read_text())
+    derived = check.derive_corpus_facts(pins)
+    pins["required_criteria_rows"] = list(check.CORE_REQUIRED_CRITERIA)
+    failures = check.check_pins(pins, derived, rows)
+    assert any("the criteria table carries ['E6']" in f for f in failures), failures
+    # non-vacuity: the same declaration over a table WITHOUT the row is not refused on this ground
+    failures = check.check_pins(pins, derived, [r for r in rows if r["id"] != "E6"])
+    assert not any("the criteria table carries" in f for f in failures), failures
+
+
+def test_the_capstone_is_refused_when_the_sixth_row_is_absent():
+    """The completeness arm, on a synthetic body: the row's absence is a finding, not a skip."""
+    body = FULL_ROWS.replace(
+        "| E6 | unbound declared rows | every declared row | `= 0` |\n", "")
+    assert "E6" not in body
+    failures = check.check_completeness(check.parse_criteria_rows(body))
+    assert any("criterion E6 has no row" in f for f in failures), failures
