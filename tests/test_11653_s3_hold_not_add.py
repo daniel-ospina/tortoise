@@ -315,6 +315,33 @@ class TestTheOtherArms:
         assert set(res["new"]) & set(_held_names(res)) == set()
         assert set(res["new"]) | set(_held_names(res)) == unmatched
 
+    def test_a_name_held_for_one_kind_is_not_new_for_another(self):
+        """The two populations stay DISJOINT even when one NAME spans two kinds.
+
+        Review F3/F4 (#11693): phase 1's mode is KIND-dependent
+        (`_find_existing_entity(existing, name, kind)`), so the same name emitted
+        twice with different kinds can be `none` for one and `ambiguous` for the
+        other — the name then landed in BOTH populations. Today's live path is
+        fail-closed (`execute_embed` keys on `held`), but `new` is the ADD licence
+        the contract publishes, so a consumer following it would mint exactly the
+        duplicate #11653 removes. Measured before the fix: this input gave
+        `new == ["Acme"]` AND `held[0]["name"] == "Acme"`.
+
+        Pinned by NAME-level disjointness, not by the loop's per-candidate shape:
+        `set(res["new"]) & {h["name"] for h in res["held"]}` is the property a
+        caller relies on, and it reds if the `_held_names` subtraction is reverted.
+        """
+        res = v2.resolve_entities(
+            [{"name": "Acme", "kind": "core:organisation"},
+             {"name": "Acme", "kind": "core:person"}],
+            _search({"id": "a1", "name": "Acme", "kind": "dev:person"},
+                    {"id": "a2", "name": "Acme", "kind": "ops:person"}))
+        held = _held_names(res)
+        assert "Acme" in held, res["held"]
+        assert "Acme" not in res["new"], (
+            f"`new` still licenses a create for a name it also holds: {res}")
+        assert set(res["new"]) & set(held) == set(), res
+
 
 class TestTheHoldRemovesOneNodeNotTheSession:
     """⛔ The held entity's name must not be left dangling in the payload.
@@ -707,6 +734,65 @@ class TestTheRunReports:
         assert store.pending() == [], (
             "an ENTITY was written to a store whose drain mints Points — a later "
             "run would mint the entity's name as a claim Point")
+
+
+class TestTheHoldIsNormalisedBothSides:
+    """F3 (review at `febe0f61d5`): identity in this module is `_norm`.
+
+    The hold's own bookkeeping may key on the display spelling — records quote the
+    model's text and `mention_held` publishes it — but every COMPARISON must go
+    through `_norm`, on both sides. Keyed on raw text, a hold taken for `Acme` did
+    not strip a claim naming `"  ACME "`: the strip reported 0, the reference
+    survived, Layer-1 refused the payload (`about_entities reference unknown
+    entities`) and the SDK returned before `_post_commit` — the whole session lost
+    to keep one node from being duplicated. Measured before the fix:
+    `stripped: 0`, `L1 ok: False`.
+    """
+
+    @pytest.mark.parametrize("spelling", ["Acme", "  ACME  ", "acme", "  Acme "])
+    def test_a_claim_naming_any_spelling_of_a_held_surface_is_stripped(
+            self, monkeypatch, spelling):
+        from tortoise import referentiality
+
+        monkeypatch.setattr(referentiality, "enabled", lambda: True)
+        monkeypatch.setattr(referentiality, "judge",
+                            lambda surface: (referentiality.RULE_CHANNEL, "held"))
+        embed = {
+            "entities": [{"name": "Acme", "kind": "core:organisation"}],
+            "points": [{"content": "a claim", "about_entities": [spelling]}],
+            "events": [], "operators": [],
+        }
+        out = v2.route_mentions(embed, "")
+        assert out["points"][0]["about_entities"] == [], (
+            f"a held surface spelled {spelling!r} was not stripped: "
+            f"{out['points'][0]['about_entities']!r}")
+        assert (out.get("mention_stats") or {}).get("hold_abandoned_no_claim") == 0, (
+            "the carrier was not recognised, so the hold was abandoned (fail-open)")
+
+    def test_the_display_spelling_is_what_the_record_and_published_hold_carry(
+            self, monkeypatch):
+        """The other half of F3: normalising the SET (not the comparison) would
+        silently drop every record whose casing differed — I2 says never dropped."""
+        from tortoise import referentiality
+
+        monkeypatch.setattr(referentiality, "enabled", lambda: True)
+        monkeypatch.setattr(
+            referentiality, "judge",
+            lambda surface: ("referentiality.generic_head", "generic head"))
+        embed = {
+            "entities": [{"name": "The Problem", "kind": "core:concept"}],
+            "points": [{"content": "a claim", "about_entities": ["The Problem"]}],
+            "events": [], "operators": [],
+        }
+        out = v2.route_mentions(embed, "")
+        stats = out.get("mention_stats") or {}
+        assert len(out["mentions"]) == 1, (
+            f"the mention record was dropped: {out['mentions']!r}")
+        assert stats["by_rule"] == {"referentiality.generic_head": 1}, (
+            f"the rule that held it was lost: {stats.get('by_rule')!r}")
+        assert out["mention_held"] == [
+            {"surface": "The Problem", "rule_id": "referentiality.generic_head"}], (
+            f"the hold must publish the model's own spelling: {out['mention_held']!r}")
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -6020,8 +6020,8 @@ def resolve_entities(entity_refs: list[dict], search: dict,
         warnings.append(
             f"entity '{name[:60]}' — identity UNRESOLVED ({reason}): HELD, not "
             "created (§4.4 I1, #11653)")
-    return {"map": resolved, "records": records, "new": new, "held": held,
-            "warnings": warnings}
+    return {"map": resolved, "records": records, "held": held,  # F4: `new` below is filtered
+            "new": [n for n in new if n not in {h["name"] for h in held}], "warnings": warnings}
 
 
 def _apply_entity_resolution(embed_list: dict, resolution_map: dict) -> dict:
@@ -9885,13 +9885,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     warnings: list[str] = []
     # #11653: the entity population S3 could not identify, normalised to
     # `{name: reason}` so the hold record carries WHY it is unresolved.
-    if isinstance(held_entities, Mapping):
+    if isinstance(held_entities, Mapping):  # keys NORMALISED (F3)
         _entity_holds: dict[str, str] = {
-            str(_k).strip(): str(_v or HOLD_DISAMBIGUATION_UNDECIDED)
-            for _k, _v in held_entities.items() if str(_k).strip()}
+            _norm(_k): str(_v or HOLD_DISAMBIGUATION_UNDECIDED)
+            for _k, _v in held_entities.items() if _norm(_k)}
     else:
-        _entity_holds = {str(_k).strip(): HOLD_DISAMBIGUATION_UNDECIDED
-                         for _k in (held_entities or ()) if str(_k).strip()}
+        _entity_holds = {_norm(_k): HOLD_DISAMBIGUATION_UNDECIDED
+                         for _k in (held_entities or ()) if _norm(_k)}
     # ⛔ `HOLD_REASONS` IS THIS SEAM'S VOCABULARY, and this is the only place it
     # can be enforced: `held_entities` is a PARAMETER, so a reason arrives from a
     # CALLER (`extract_session_v2` forwards S3's own verdicts), not from this
@@ -9965,7 +9965,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if key in seen_entities:
             continue
         seen_entities.add(key)
-        if name in _entity_holds:
+        if _norm(name) in _entity_holds:  # F3: identity is `_norm`
             # ⛔ #11653 — S3 could not identify this entity, so nothing here may
             # assert it is `new` (§4.4 I1). It is held (reported, with the
             # reason S3 gave) and NOT appended to the payload: `payload
@@ -9979,7 +9979,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "ref": name,
                 "where": f"entity '{name}'",
                 "session_ref": session_id,
-                "reason": _entity_holds[name],
+                "reason": _entity_holds[_norm(name)],
                 "persisted": False,
                 "key": f"{_HELD_ENTITY_KIND}\0{name}",
             })
@@ -12166,8 +12166,8 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
         for carrier in [*points, *events]:
             names = carrier.get("about_entities")
             if ((isinstance(names, list)
-                 and any(str(a).strip() == surface for a in names))
-                    or surface in _slot_ref_names(carrier)):
+                 and any(_norm(a) == _norm(surface) for a in names))
+                    or _norm(surface) in {_norm(x) for x in _slot_ref_names(carrier)}):
                 carriers.append(carrier)
         return carriers
 
@@ -12288,7 +12288,7 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     # caller's fail-open guard then voided the ENTIRE selection — the hold, the
     # about_entities strip and the prune (review cycle 3, P1).
     for surface in _operator_endpoint_surfaces(embed_list.get("operators")):
-        if not surface or surface in held_surfaces or surface in abandoned_surfaces:
+        if not surface or _norm(surface) in {_norm(h) for h in held_surfaces} or _norm(surface) in {_norm(a) for a in abandoned_surfaces}:
             continue
         verdict = _referentiality.judge(surface)
         if verdict is not None:
@@ -12438,7 +12438,7 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
             # `channel_refused_surfaces`. That is the run-disagrees-with-itself class
             # this PR closes, in the evidence a lane reads to decide whether mentions
             # are being lost (review at `ea790070d`, P3).
-            if surface in held_surfaces:
+            if _norm(surface) in {_norm(h) for h in held_surfaces}:
                 continue                   # a carrier already wrote its record
             # A mention with no resolvable claim AND no carrier is not a record.
             stats["channel_refused_no_claim"] += 1
@@ -12592,8 +12592,8 @@ def _strip_held_slot_refs(slots: dict, held_surfaces: set[str]) -> dict:
         if role in _SLOT_ENTITY_ROLES and isinstance(refs, list):
             kept = [ref for ref in refs
                     if not (isinstance(ref, dict)
-                            and str(ref.get("name") or "").strip()
-                            in held_surfaces)]
+                            and _norm(ref.get("name") or "")
+                            in {_norm(h) for h in held_surfaces})]
             if len(kept) != len(refs):
                 changed = True
             if kept:
@@ -12626,7 +12626,7 @@ def _strip_reference_sets(carrier: dict, held_surfaces: set[str]) -> dict:
     names = carrier.get("about_entities")
     if isinstance(names, list):
         pruned = [a for a in names
-                  if str(a).strip() not in held_surfaces]
+                  if _norm(a) not in {_norm(h) for h in held_surfaces}]
         if len(pruned) != len(names):
             out = {**out, "about_entities": pruned}
     slots = carrier.get("slots")
@@ -12721,7 +12721,7 @@ def _prune_held_operators(operators: object,
             if isinstance(target, dict):
                 endpoints += [str(target.get(k) or "").strip()
                               for k in ("src", "dst")]
-        if any(e in held_surfaces for e in endpoints if e):
+        if any(_norm(e) in {_norm(h) for h in held_surfaces} for e in endpoints if e):
             dropped += 1
             continue
         kept.append(op)
