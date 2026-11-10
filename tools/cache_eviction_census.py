@@ -343,13 +343,16 @@ def main(argv: list[str] | None = None) -> int:
         # other — `load_parity_report` refuses a report that names no graph, so a
         # FOREIGN census cannot be re-badged by repeating `--graph` here
         # (review P1 on #11004; the `--parity-graph` help carries the same rule).
-        # ⚠️ What is NOT closed, here or anywhere on this path: a census of the SAME
-        # graph measured EARLIER. Its `graph` matches by construction, so the name
-        # comparison passes it, and the only staleness guard downstream is
-        # `assess()`'s over-count check (`entry.nodes > resident_total`), which fires
-        # only when the report's population EXCEEDS the resident node count
-        # (review P2 on #11097). Stated in `--parity-graph`'s help as well, where the
-        # operator reads it at the moment of choosing the flag.
+        # ⚠️ What is NOT closed HERE: a census of the SAME graph measured EARLIER. Its
+        # `graph` matches by construction, so the name comparison passes it; what
+        # refuses it downstream is `assess()`'s per-population bound — the report's
+        # count is compared against the population's OWN resident count
+        # (`POPULATION_RESIDENT_COUNT`), so a stale report claiming more nodes than the
+        # population now holds is demoted. The whole-graph over-count check
+        # (`entry.nodes > resident_total`) remains as the looser backstop for a bad
+        # mirror (review P2 on #11097; #10976 residual comment 6689906625). Stated in
+        # `--parity-graph`'s help as well, where the operator reads it at the moment of
+        # choosing the flag.
         return _usage_error(
             parser,
             f"--parity-graph {args.parity_graph!r} must be the graph being measured "

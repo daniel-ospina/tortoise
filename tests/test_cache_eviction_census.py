@@ -27,6 +27,7 @@ from tortoise.cache_eviction import (
     CACHE_CEILING_ENV,
     DERIVED_LABELS,
     PARITY_INSTRUMENTS,
+    POPULATION_RESIDENT_COUNT,
     TRUTH_LABELS,
     Assessment,
     CacheReadError,
@@ -38,6 +39,7 @@ from tortoise.cache_eviction import (
     load_parity_report,
     measure_state,
     node_total,
+    population_resident_count,
     resident_counts,
 )
 
@@ -56,9 +58,18 @@ class _FakeGraph:
     name created it and it appeared in `GRAPH.LIST`, `tools/engine_probe.py`).
     """
 
-    def __init__(self, counts: dict[str, int], *, unlabelled: int = 0) -> None:
+    def __init__(self, counts: dict[str, int], *, unlabelled: int = 0,
+                 populations: dict[str, int] | None = None) -> None:
         self._counts = dict(counts)
         self._unlabelled = unlabelled
+        #: population -> how many nodes its OWN predicate answers for, in THIS graph.
+        #: ⛔ Explicit, never derived from the label counts: the turn population is a
+        #: SUBSET of `:Point` (`is_episodic = true`), which is the whole reason the
+        #: licence bound cannot use the label/whole-graph total. A population the fixture
+        #: does not name answers 0 — so a report for it is DEMOTED, and a test that
+        #: expected a licence has to state the population's real size rather than
+        #: inherit a number from a label that is not the population.
+        self._populations = dict(populations or {})
         #: (verb, statement) for EVERY statement, so a test can assert the VERB.
         self.queries: list[tuple[str, str]] = []
         # The TRUE node count. Defaults to the label sum so ordinary fixtures stay
@@ -85,6 +96,11 @@ class _FakeGraph:
         )
 
     def _answer(self, statement: str):
+        if "is_episodic = true" in statement and "count(" in statement:
+            # The POPULATION's own count (a predicate, not a label). Mirrored by
+            # `POPULATION_RESIDENT_COUNT`; answered from the fixture's own declaration.
+            name = "turn" if ":Point" in statement else ""
+            return self._Result([[self._populations.get(name, 0)]])
         if "db.labels" in statement:
             return self._Result([[label] for label in self._counts])
         if "size(labels(n)) = 0" in statement:
@@ -223,7 +239,8 @@ def test_the_truth_labels_are_never_silently_treated_as_evictable():
     # form of "a CLEAN turn census licenses evicting every `:Point`". Verified by
     # mutation: marking every derived-authority row eligible once ANY population is
     # proven survived the earlier, Point-less fixture green.
-    g = _FakeGraph({"Source": 50, "GraphEvent": 5_000, "Point": 10_000, "Object": 900})
+    g = _FakeGraph({"Source": 50, "GraphEvent": 5_000, "Point": 10_000, "Object": 900},
+                   populations={"turn": 2_000})
     c = _FakeClient(used=900, maxmemory=1_000)
     # A CLEAN turn census — which must license the TURN population and NOTHING else.
     report = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
@@ -294,7 +311,7 @@ def test_a_clean_byte_verdict_still_publishes_the_licence():
     so `CLEAN`, but the entry budget a consumer enforces may be exceeded by orders of
     magnitude (many small turn nodes, the shape #10976 describes).
     """
-    g = _FakeGraph({"Point": 10})
+    g = _FakeGraph({"Point": 10}, populations={"turn": 10})
     c = _FakeClient(used=500, maxmemory=10_000)
     report = ParityReport(
         instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
@@ -1086,7 +1103,12 @@ def test_a_report_claiming_more_nodes_than_the_graph_holds_does_not_prove():
     nodes on a 120/120 report — a licence for 120 nodes in an empty graph, which is
     the number a sweeper would size itself from.
     """
-    g = _FakeGraph({"Point": 5})
+    # ⚠️ The fixture makes the POPULATION statement over-count too (`turn`: 120 on a
+    # 5-node graph), because that is the only way this guard is reachable now: the
+    # population bound in `assess` refuses a claim above the population FIRST, and a bad
+    # mirror of an instrument's predicate is exactly what this second check still
+    # catches. With an honest population count the report is demoted one gate earlier.
+    g = _FakeGraph({"Point": 5}, populations={"turn": 120})
     c = _FakeClient(used=900, maxmemory=1_000)
     stale = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
                          measured_nodes=120, total_nodes=120, graph_name="tortoise")
@@ -1133,7 +1155,7 @@ def test_an_unreachable_cache_refuses_rather_than_exiting_like_a_typo():
 
 def test_exit_two_licenses_only_the_listed_populations():
     """The plan must name what may NOT go, so exit 2 cannot read as a blanket licence."""
-    g = _FakeGraph({"Point": 10_000, "Object": 900})
+    g = _FakeGraph({"Point": 10_000, "Object": 900}, populations={"turn": 2_000})
     c = _FakeClient(used=900, maxmemory=1_000)
     report = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
                           measured_nodes=2_000, total_nodes=2_000,
@@ -1223,7 +1245,9 @@ def test_the_size_cross_check_uses_the_true_total_not_the_label_sum():
     """
     # 10,000 real nodes: 8,000 `Point`-only + 2,000 `Point:Object` (so the label sum is
     # 12,000 while the graph holds 10,000).
-    g = _FakeGraph({"Point": 10_000, "Object": 2_000})
+    # ⚠️ Population statement over-counts as well (11,000), so the label-sum regression
+    # is measured HERE rather than caught by the population bound one gate earlier.
+    g = _FakeGraph({"Point": 10_000, "Object": 2_000}, populations={"turn": 11_000})
     g.true_total = 10_000
     c = _FakeClient(used=900, maxmemory=1_000)
     inflated = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
@@ -1927,3 +1951,198 @@ def test_the_cli_PRINTS_the_licence_on_a_CLEAN_verdict(monkeypatch, capsys, tmp_
     assert "LICENSED (byte-clean)" in err, err
     assert "turn" in err and "7 nodes" in err, err
     assert "BYTE" in err, err
+
+
+# --------------------------------------------------------------------------- #
+# Round-5 findings (#10976 owner residual, comment 6689906625).
+# --------------------------------------------------------------------------- #
+
+#: The shape the defect was measured in: 25,000 nodes resident, only 500 of them in
+#: the `turn` population, and a stale report claiming 20,000 turns.
+_STALE_GRAPH = {"Point": 25_000}
+_STALE_POPULATION = {"turn": 500}
+_STALE_CLAIM = 20_000
+
+
+def test_a_stale_report_cannot_size_a_sweep_beyond_its_own_population():
+    """⛔ The licence's staleness guard was the WHOLE graph's node total.
+
+    Measured before the fix (lane container, `docs/evidence/10976-licence/`): a graph
+    holding 25,000 nodes with **500** `is_episodic = true` turns answered a 20,000/20,000
+    CLEAN report with `verdict: PLAN` and `plan["evictable"] = [{population: turn, nodes:
+    20000}]` — a cap **40x** the population it bounds, because 20,000 < 25,000. The
+    executor spends that cap directly (`licence_remaining`), so the runaway guard the
+    cap exists for was two orders of magnitude too loose.
+
+    Nothing unserved could be deleted (gate 3 asks the record per node) — but "evicting
+    more nodes than the instrument measured is evicting nodes nothing proved" was false
+    as a property, which is what this pins.
+    """
+    g = _FakeGraph(_STALE_GRAPH, populations=_STALE_POPULATION)
+    c = _FakeClient(used=900, maxmemory=1_000)
+    stale = ParityReport(instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
+                         measured_nodes=_STALE_CLAIM, total_nodes=_STALE_CLAIM,
+                         graph_name="tortoise")
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={PARITY_INSTRUMENTS["turn"]: stale})
+
+    assert result.verdict == "REFUSED", result.plan
+    assert result.eligible_classes == ()
+    assert result.plan["evictable"] == []
+    reason = " ".join(result.problems)
+    # Both numbers must be in the refusal: an operator has to see WHICH population is
+    # short and by how much, or the next step is a re-investigation. ⛔ BIND THE PHRASE,
+    # not the bare number — `str(500)` is satisfied by the label row's `25000`, so a
+    # message reworded to drop the population size would keep a numeric assertion green.
+    assert str(_STALE_CLAIM) in reason, reason
+    assert f"holds only {_STALE_POPULATION['turn']}" in reason, reason
+    assert g.mutated == []
+
+
+def test_an_honest_report_of_the_same_population_still_licenses_it():
+    """The positive arm — the fix must not shut a gate that is legitimately open.
+
+    Without this, deleting the population bound entirely would keep the refusal test
+    green: a refusal-only suite cannot tell "the bound works" from "the bound is shut".
+    """
+    g = _FakeGraph(_STALE_GRAPH, populations=_STALE_POPULATION)
+    c = _FakeClient(used=900, maxmemory=1_000)
+    honest = ParityReport(instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
+                          measured_nodes=_STALE_POPULATION["turn"],
+                          total_nodes=_STALE_POPULATION["turn"],
+                          graph_name="tortoise")
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={PARITY_INSTRUMENTS["turn"]: honest})
+
+    assert result.verdict == "PLAN", result.problems
+    assert [e["population"] for e in result.plan["evictable"]] == ["turn"]
+    assert result.plan["evictable"][0]["nodes"] == _STALE_POPULATION["turn"]
+    assert g.mutated == []
+
+
+def test_a_report_claiming_fewer_nodes_than_the_population_still_licenses_that_smaller_cap():
+    """A SMALLER claim is the safe direction and must survive: it caps the sweep LOWER.
+
+    The bound is an upper bound (`>`), not equality. Requiring equality would refuse a
+    report measured while the population was smaller — over-tightening a gate that is
+    allowed to be conservative, and one a future "the numbers must match" simplification
+    would silently make permanent.
+    """
+    g = _FakeGraph(_STALE_GRAPH, populations=_STALE_POPULATION)
+    c = _FakeClient(used=900, maxmemory=1_000)
+    smaller = ParityReport(instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
+                           measured_nodes=400, total_nodes=400, graph_name="tortoise")
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={PARITY_INSTRUMENTS["turn"]: smaller})
+
+    assert result.verdict == "PLAN", result.problems
+    assert result.plan["evictable"][0]["nodes"] == 400
+
+
+def test_the_population_count_mirrors_the_instrument():
+    """The population predicate has ONE owner — and a test that reds when it drifts.
+
+    `tools/turn_parity_census.py` owns the turn population's shape (#3551). The census
+    may not import a script at RUNTIME, so `POPULATION_RESIDENT_COUNT["turn"]` is a
+    mirror; this is the drift pin, and it compares the EXECUTED constant rather than the
+    instrument's source text. A mirror that silently narrowed or widened the predicate
+    would change the ceiling every licence is measured against, with no error anywhere.
+    ⚠️ `tools/purge_legacy_turns.py` and `tools/backfill_graph_turns.py` are further
+    textual carriers of this predicate; this pin binds the one whose report the licence
+    is actually sized from.
+    """
+    # ⛔ IDENTITY, not source-text containment. A containment check is satisfied by ANY
+    # occurrence of the string — and the instrument carries `is_episodic = true` in a
+    # dozen docstrings, so the accidental change this pin exists for (edit the executed
+    # constant, leave the old statement in prose) would keep it green. Bind the constant
+    # itself: a rename, a removal or a changed predicate all red.
+    from tools.turn_parity_census import _GRAPH_EPISODIC_COUNT_CYPHER
+
+    def squash(text: str) -> str:
+        # The instrument writes the statement as ADJACENT literals split across source
+        # lines (`"... true " "RETURN count(t)"`), so compare on collapsed whitespace.
+        return " ".join(text.split())
+
+    assert squash(POPULATION_RESIDENT_COUNT["turn"]) == squash(
+        _GRAPH_EPISODIC_COUNT_CYPHER
+    ), (
+        "POPULATION_RESIDENT_COUNT['turn'] and the instrument's own count statement "
+        "have drifted — the census and the instrument now measure different "
+        "populations (#3551 owns the predicate)"
+    )
+    # …and the predicate must keep the two halves that make it the POPULATION rather
+    # than the label: `:Point` (turns live there) and `is_episodic` (the recorded
+    # delete predicate, #10017). `is_episodic` is stamped on `:Source`/`:Object` nodes
+    # too, so dropping `:Point` would INFLATE the ceiling.
+    assert ":Point" in POPULATION_RESIDENT_COUNT["turn"]
+    assert "is_episodic" in POPULATION_RESIDENT_COUNT["turn"]
+
+
+def test_every_registered_population_has_a_resident_count_statement():
+    """A population licensed without a count statement could not be bounded at all.
+
+    `population_resident_count` refuses rather than defaulting — this pins that the
+    registry can never reach that refusal by construction, and that no count statement
+    outlives its population.
+    """
+    assert set(POPULATION_RESIDENT_COUNT) == set(PARITY_INSTRUMENTS), (
+        "every licensed population needs its OWN resident-count statement, and a "
+        "statement for a population nothing licenses is dead code that reads as a "
+        "bound"
+    )
+
+
+def test_no_two_populations_share_a_resident_count_statement():
+    """⛔ A COPY-PASTED STATEMENT IS A FAIL-OPEN BOUND, not a harmless duplicate.
+
+    Registering a second population and copying `turn`'s count into its slot would bound
+    that population by the TURN population's size — a stale report for it would then
+    license up to the turn count, and the whole-graph backstop cannot see it (a subgraph
+    count never exceeds the graph's total). The next population's registry entry is the
+    one place this defect would be introduced, so pin it here rather than in a reviewer's
+    head: each population must be counted by its OWN statement.
+    """
+    statements = list(POPULATION_RESIDENT_COUNT.values())
+    assert len(set(statements)) == len(statements), (
+        f"two populations share one count statement: {POPULATION_RESIDENT_COUNT} — "
+        f"each population must be counted by the statement for ITS OWN predicate"
+    )
+
+
+def test_an_empty_population_count_read_is_a_refusal_not_zero():
+    """`0` and "could not read" are opposite findings, and only one is safe to threshold.
+
+    `RETURN count(...)` always yields one row, so an empty result means the reading did
+    not happen. Softening it to `0` would demote every report for the population with
+    the message "this graph holds only 0 …" — a fact about the graph nobody measured,
+    and a refusal indistinguishable from the record not being ready.
+    """
+
+    class _NoRows:
+        class _Result:
+            def __init__(self) -> None:
+                self.result_set: list = []
+
+        def ro_query(self, statement, params=None):
+            return _NoRows._Result()
+
+    with pytest.raises(CacheReadError):
+        population_resident_count(_NoRows(), "turn")
+
+
+def test_a_population_with_no_count_statement_is_a_refusal_not_a_guess():
+    """A population licensed without a bound must not be bounded by a default.
+
+    Defaulting to `0` would silently demote it forever; defaulting to the whole-graph
+    total would silently restore the defect this change closes. Both are guesses.
+    """
+
+    class _Graph:
+        def ro_query(self, statement, params=None):  # pragma: no cover — never reached
+            raise AssertionError("a population with no statement must not be read")
+
+    with pytest.raises(CacheReadError):
+        population_resident_count(_Graph(), "no-such-population")
