@@ -415,6 +415,15 @@ def _merge_key(value: object) -> str:
     With that split, applying this to ``session_key_of``'s output is a true
     no-op (its identity legs already return the normalised form), which is
     what keeps the DEFAULT path of the merge byte-identical.
+
+    ⚠️ The exemption is on the WHOLE key, so the two sides must agree on
+    spelling INSIDE the ``idx:`` namespace too. A bespoke caller that builds
+    its own raw ``seed_order`` carrying a padded ``idx:``-prefixed id
+    (``"idx:3 "``) while its fetch returns ``"idx:3"`` loses that group
+    (measured: the group is dropped, not tailed, because ``groups`` ends up
+    empty). Nothing in the shipped paths can do that — ``seeded_sessions``
+    rejects every ``idx:`` key (``_is_real_session_id``) and the fetch builds
+    both sides from the same stored string.
     """
     text = value if isinstance(value, str) else ""
     if not text:

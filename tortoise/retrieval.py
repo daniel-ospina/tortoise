@@ -751,8 +751,9 @@ def session_key_of(hit: dict) -> str:
 
     Identity semantics, in precedence order (#3591, #10540):
 
-    * ``session_id`` — through :func:`normalize_session_key` — present and
-      truthy ⇒ that id;
+    * ``session_id`` — through :func:`normalize_session_key` — present,
+      truthy and a ``str`` ⇒ that id (a truthy NON-``str`` is not an identity
+      and falls through to the legs below, #11382);
     * else ``lme_session_index`` PRESENT (an explicit ``-1`` included) ⇒
       ``idx:{n}``, the eval lane's own index bucket. Distinct indices are
       distinct buckets even when ``session_id`` is absent/empty (``""`` is
@@ -831,15 +832,31 @@ def session_key_of(hit: dict) -> str:
     hit used to get IS the defect, not the bucket it names.
 
     Precedence — why ``sessionId`` sits AFTER the index bucket (#10540):
-    every key an identified hit already had stays BYTE-IDENTICAL — a hit
-    carrying ``session_id`` keeps that id, and a hit carrying
-    ``lme_session_index`` keeps its index bucket (the eval's pool hits carry
-    BOTH, ``tools/longmem_eval/retrieve.py``, so a census measured before
-    this change — #8713's, which this arm must not disturb — cannot move).
-    The keys that DO change are exactly the PHANTOM ones — ``idx:point:{id}``,
-    and the ``idx:-1`` bucket that a hit carrying no ``id`` falls to — which
-    is the defect: a hit that reaches that branch today falls back only
-    because it carries no identity in a spelling this function reads.
+    on that change every key an identified hit already had stayed
+    BYTE-IDENTICAL — a hit carrying ``session_id`` kept that id, and a hit
+    carrying ``lme_session_index`` kept its index bucket (the eval's pool hits
+    carry BOTH, ``tools/longmem_eval/retrieve.py``, so a census measured
+    before it — #8713's, which this arm must not disturb — could not move).
+    The keys #10540 changed were exactly the PHANTOM ones — ``idx:point:{id}``,
+    and the ``idx:-1`` bucket that a hit carrying no ``id`` fell to — which
+    was the defect: a hit reached that branch only because it carried no
+    identity in a spelling the function read.
+
+    ⚠️ #11382 SUPERSEDES the "byte-identical" half of that paragraph, and
+    does it on purpose: normalising BOTH legs moves exactly THREE shapes, and
+    the first is a REAL identity, not a phantom. Measured pre-fix → post-fix:
+    ``session_id='  s1  '`` ⇒ ``'  s1  '`` → ``'s1'`` (a padded-but-real id
+    — #9599's shape — whose key moves because it is the defect: it could only
+    ever half-match the graph's raw group key); ``session_id=5`` ⇒ ``5`` →
+    the index / wire / per-hit bucket; ``session_id='   '`` ⇒ ``'   '`` →
+    the per-hit bucket. The last two are the fail-closed direction
+    :func:`_session_admission_key`'s divergence list records, and no in-repo
+    pool carries either. Everything else — every #8713 census key included
+    (snake + index, unpadded; product turns, whose identity is camel-only) —
+    is byte-identical, because the strip is a NO-OP on a real product hit
+    (the wire value was already sanitised at its producer) and on every eval
+    id. The fully measured surface is the #11382 land description; this page
+    states the one that decides measurements.
 
     ⛔ Neither leg is FILTERED, but BOTH are ``strip()``ped through ONE
     helper — :func:`normalize_session_key` — and (#11382) the two legs are
