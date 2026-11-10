@@ -1515,10 +1515,30 @@ SOURCE_PATTERNS = {
 # member nobody has written yet, and it is what makes the completeness pin in
 # `tests/test_ci_selection.py` RUN on a migration-only diff: `core` is a surface,
 # so it arms the slow legs, whereas the tier-1 smoke set does not carry that test.
-# The per-migration `CORE_ALSO` entries stay, though they are now FULLY redundant
-# (selection AND the `_selection_relevant()` keep-signal both come from the rule
-# above): they are kept as the per-migration rationale, which the rule — one
-# regex — has no room to carry.
+# The per-file `CORE_ALSO` record entries stay, though they are now FULLY
+# redundant (selection AND the `_selection_relevant()` keep-signal both come from
+# the rule above): they are kept as the per-migration rationale, which the rule —
+# one regex — has no room to carry.
+# ⛔ THE SHARED `supabase/migrations/2026101200000` PREFIX ENTRY IS **NOT** REDUNDANT,
+# and it sits inside that enumeration, so the paragraph above must not be read as
+# covering it (#11728 review P2). The entry is a PREFIX, not a filename —
+# `CORE_ALSO` is matched with plain `path.startswith()`, so it also
+# claims `20261012000006_recover_team_key_expiry.sql` — which is NOT a member of
+# this family (`is_record_migration_path()` is False for it, and it is not in
+# `RECORD_MIGRATIONS`). That entry is that file's ONLY claim: with it removed,
+# `select([…/20261012000006_recover_team_key_expiry.sql])` drops from
+# `surfaces: ['core']` to `surfaces: []` — the #1349/#3332/#3616 silent-drop class.
+# At that time nothing redded, because the completeness pin covered only
+# `*_record_*.sql`; so this file's claim is pinned too, in its own test —
+# `tests/test_ci_selection.py::
+# test_the_shared_prefix_is_the_only_claim_on_a_migration_outside_the_family`.
+# That test asserts the file EXISTS (without that arm the pin would outlive a
+# rename: `select()` never stats a path, so a wholly synthetic name still returns
+# `surfaces: ['core']` from this prefix), reds on exactly this deletion, and reds
+# if a second claimant appears. Both `surfaces` values are the claim, deliberately
+# not quoted as `n=` counts: this block's own rule is that a count here is a dated
+# anchor, and the tier-1 size behind `surfaces: []` moves with ANY new tier-1 test.
+# Re-derive either in one `select()` call.
 RECORD_MIGRATION_DIR = "supabase/migrations/"
 # Deliberately the family the wheel SHIPS and the record reader PARSES. Three facts,
 # stated exactly because two earlier versions of this comment got them wrong:
@@ -2271,7 +2291,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # migration selects `core` (and keeps the path past the
              # NON_PYTHON_PREFIXES filter) with no entry here at all. It is kept
              # as this migration's rationale. The completeness pin is
-             # tests/test_ci_selection.py::test_every_record_migration_selects_core_and_both_readers,
+             # tests/test_ci_selection.py::test_every_record_migration_selects_core_and_its_readers,
              # which asserts the structural claim (so the NEXT `*_record_*.sql`
              # selects `core` AND runs the pin) and does not depend on this list.
              "supabase/migrations/20261109000001_record_embedding_vector.sql",
