@@ -81,9 +81,11 @@
 #   probes) · 9 alive, but NO port was recorded, so SERVING was not checked ·
 #   12 the pid FILE itself could not be read, so the dump took NO verdict at all
 #   (never reported as GONE — it measured nothing). 0 is
-#   therefore never returned on a leg that was not taken. The MESSAGE carries the
-#   same fact; the step only decides whether to prefix `::error::`, so the code is
-#   the contract and the prose is for the human reading the red.
+#   therefore never returned when the SERVING leg was not taken; the IDENTITY leg
+#   may be untaken on a serving verdict, and the message says so — see `alive`
+#   above. The MESSAGE carries the same fact; the step only decides whether to
+#   prefix `::error::`, so the code is the contract and the prose is for the human
+#   reading the red.
 set -euo pipefail
 
 PROG="$(basename "$0")"
