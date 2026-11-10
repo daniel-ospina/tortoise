@@ -7150,12 +7150,17 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
     # true today. That is why the row carries the rename and not a re-wording of the
     # document: rewriting §3 to restore the phrase would falsify a record to clear a
     # red.
-    # ⚠️ Comment drift, named rather than silently folded in: the three prose sites
-    # at `:4260`, `:4481` and `:6094` still quote the OLD §3 wording as the example of
-    # the stem-match trap. `#11688`'s rename also removed the `exempt*` substring from
-    # that sentence, so those examples are historical now; they red nothing, and
-    # rewriting main's prose about a measurement taken at an earlier head is a
-    # separate change, not this one.
+    # ⚠️ Comment drift, named rather than silently folded in: three prose sites IN
+    # THIS FILE still quote the OLD §3 wording as the example of the stem-match trap
+    # — the `is exempt` row's comment in `DENIAL_MARKERS`, the `exempts`/`exempting`
+    # frame comment under `DENIAL_PATTERNS`, and the `documents_own_exemption_prose`
+    # fixture (Probe 16) that reuses the sentence. ⛔ NOT §3 itself: `#11688`
+    # (`24e53f2b`) renamed that clause to *"The carve-out is about CONTENT…"*, which
+    # is also what removed the `exempt*` substring from it — so those three examples
+    # are historical now. They red nothing, and rewriting main's prose about a
+    # measurement taken at an earlier head is a separate change, not this one. ⛔ And
+    # named by SYMBOL, not by `:LINE`: the bare-citation form this file's leg 40 bans
+    # is exactly what let the two numbers this comment used to carry drift by two.
     "the exemption": (
         "contradiction vocabulary — the DEFINITE-articled form of the owner's "
         "verbatim denial (`a counted writer may not be called **an exemption**`), "
