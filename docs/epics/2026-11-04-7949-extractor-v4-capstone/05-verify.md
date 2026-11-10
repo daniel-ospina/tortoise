@@ -61,7 +61,7 @@ that a comment references would break the trail.
 | E2E-5 reproducible from the door | ✅ | #10982 + #10983 |
 | E2E-6 volume without fact loss | ✅ | #10989 |
 | E2E-7 closed claims re-derive | ✅ | #10990 |
-| E2E-8 typed attribution | ✅ | #10988 |
+| E2E-8 things and events carry their declared labels (per layer) | ✅ | #10988 |
 | **E2E-9 retry/replay (money)** | ✅ | ⛔ **no owner** — decompose gap #1, assigned to #10983 |
 | **E2E-10 `BLOCKED(402)`** | ✅ | ⛔ **no owner** — same gap |
 
@@ -129,7 +129,10 @@ gated; the epic's ten rows are unproven, which is the whole point of a capstone.
    **never calls it** — no issue owns that call site. **This is the epic's real blocker**, not any closed issue.
 2. The **quota** (`#10976`): the capture door returns 402 at the cap, so A1/A2/A3/A5 report `BLOCKED — capture
    refused 402` until it moves.
-3. The **D3 reopen** (owner) decides whether A4 has a target at all.
+3. **A4 now has a target** — the D3 question it was blocked on is answered (owner, 2026-11-09: classification on
+   by default; the declared kinds are the point). A4 asks whether **things and events carry the labels the
+   ontology declares for them**, reported **per layer** (things / events / claims) — because the old framing
+   counted labels on the claim layer, the one layer that is deliberately uniform, and so could never fail.
 
 ### What this pipeline bought, stated plainly
 

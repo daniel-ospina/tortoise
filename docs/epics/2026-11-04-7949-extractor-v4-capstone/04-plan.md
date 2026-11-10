@@ -100,7 +100,7 @@ dispatch(evals-on-demand, corpus=a-corpus, head)
   → G0 preregistration readable            (refuse if not)   <- NEW on this lane (OWED, C2)
   → G1 posted-payload hash == the row's pin (refuse if not)   <- NEW on this lane (OWED, C2)
   → capture via POST /v1/sessions           (402 ⇒ BLOCKED, stop)
-  → census (deterministic: edges, kinds, subjects, pointKind, attribution)
+  → census (deterministic: edges, kinds, per-layer labels, subjects, pointKind, attribution)
   → scoring (A1 vs sealed gold; A2/A3/A5 vs thresholds)
   → repeat run for the model-proposed arms  ⇒ report disagreement vs policy
   → rows → verdict gate (V1…V12) → table attached to #7949
@@ -129,14 +129,16 @@ dispatch → capstone_run.py --prereg preregistration.json --corpus tests/eval/w
 
 ```
 dispatch → census over live-v4 at head (READ-ONLY, no capture, no spend)
-  → typed / statement / NULL shares · per-writer attribution of the typed population
-  → floor n > 0 (100 % of 0 is not attribution) → row → #7949
+  → per-layer label coverage (things / events / claims): declared kinds present, labelled vs unlabelled
+  → typed / statement / NULL shares + per-writer split, reported beside it as DIAGNOSTICS
+  → floor ≥ 1 labelled node (0 of 0 labelled is not coverage) → row → #7949
 ```
 - **Why its own workflow:** it captures nothing and spends nothing, so it can run when the quota is exhausted — the
   one A-row that survives `#10976`. Conflating it with W2a is what the first version did.
 - **Handoff:** none; read-only.
-- **Failure modes:** the graph at C1's head is not the graph measured (name the head); `NULL` folded into
-  `statement`; a typed share quoted without its denominator.
+- **Failure modes:** the graph at C1's head is not the graph measured (name the head); the three layers blended
+  into one percentage; a declared kind absent from the graph reported as covered; `NULL` folded into `statement`;
+  a share quoted without its denominator.
 
 ### W3 — Milestone workflow
 
@@ -158,10 +160,12 @@ and 7 with no workflow of their own. W3 **composes** W2a–W2c; it does not repl
 owner answers on #1022 (a) overrides D3 | (b) it was aimed at #4432's drift
   → relay to the decision home + ONTOLOGY §5 (OVERRIDES line if (a))
   → C7 (#10988) gains its target (or re-scopes to attribution only)
-  → E2E-8 unchanged (asserts attribution, never a count)
+  → A4 does NOT wait on this answer: E2E-8 scores per-layer label coverage, so that row is measured
+    whether or not the D3 question resolves
 ```
 - **Manual intervention trigger:** the owner's answer. **Automation:** none, deliberately.
-- **Failure mode:** a lane picking a typed-claim target before the answer — the forbidden adoption.
+- **Failure mode:** a lane picking **C7's** typed-claim target before the answer — the forbidden adoption. A4 no
+  longer depends on that answer, which is exactly why the governance flow cannot be used to defer it.
 
 ---
 
@@ -220,13 +224,13 @@ failure, not a skip — so the A-rows carry them too, and §6 I1 freezes the *co
 | field | A1 | A2 | A3 | A4 | A5 |
 |---|---|---|---|---|---|
 | `id` | `A1` | `A2` | `A3` | `A4` | `A5` |
-| `metric` | edges of declared types + rollup precision | attach/mint/held distribution | unlinked share + both S5 jobs | attribution of typed population | subjects + 4 families + 2 readers |
-| `denominator` | transitive label set | definite-description candidates | statements written by the run | typed population of the named graph | bindable subject slots |
-| `floor` (+ `kind`) | ≥30 pairs · *sample sufficiency* | ≥30 candidates · *sample sufficiency* | ≥30 statements · *sample sufficiency* | n>0 · *non-vacuity* | ≥5 slots · *constructibility* |
-| `threshold` | precision ≥ 0.80 **and** direct-set reachability | attach > mint, 100 % classified | share lower **and** component arm positive | 100 % attributed | families non-zero **and** readers non-empty |
+| `metric` | edges of declared types + rollup precision | attach/mint/held distribution | unlinked share + both S5 jobs | per-layer label coverage: the declared kinds present, and things/events carrying the label the ontology declares for them (the per-writer split and the typed/`statement`/`NULL` shares are reported **diagnostics**) | subjects + 4 families + 2 readers |
+| `denominator` | transitive label set | definite-description candidates | statements written by the run | the things-and-events population of the named graph, counted per layer | bindable subject slots |
+| `floor` (+ `kind`) | ≥30 pairs · *sample sufficiency* | ≥30 candidates · *sample sufficiency* | ≥30 statements · *sample sufficiency* | ≥1 labelled node · *non-vacuity* | ≥5 slots · *constructibility* |
+| `threshold` | precision ≥ 0.80 **and** direct-set reachability | attach > mint, 100 % classified | share lower **and** component arm positive | **appears + labelled** — the percentage is **reported, not chased**, and there is no `≥ X %` bar | families non-zero **and** readers non-empty |
 | `corpus_id` | `a-corpus` | `a-corpus` | `a-corpus` | `fleet-graph` | `a-corpus` |
-| floor number (read from `denominator_floors`) | `a1_labelled_pairs: 30` | `a2_candidates: 30` | `a3_statements: 30` | `a4_typed_points: 1` | `a5_slots: 5` |
-| `threshold_basis` | the ~10 pp resolution argument (`EXTRACTOR-V4-ARCHITECTURE.md:1197`) | same | the owner's own 9,910/15,534 baseline | "100 % of 0 is not attribution" | presence question, not a statistic |
+| floor number (read from `denominator_floors`) | `a1_labelled_pairs: 30` | `a2_candidates: 30` | `a3_statements: 30` | `a4_labelled_nodes: 1` | `a5_slots: 5` |
+| `threshold_basis` | the ~10 pp resolution argument (`EXTRACTOR-V4-ARCHITECTURE.md:1197`) | same | the owner's own 9,910/15,534 baseline | "0 of 0 labelled is not coverage; a declared kind that is absent, or a node left unlabelled, is a failing run" | presence question, not a statistic |
 | `max_realizations` | 2 | 2 | 2 | 1 (read-only) | 2 |
 | `measurement_visible_to_author` | **`false`** — no prior A-row measurement exists (the honest answer) + the basis that says so | `false` + basis | `false` + basis | `false` + basis | `false` + basis |
 
@@ -249,10 +253,15 @@ precisely the risk D-S4 exists to close. So the A-floors are added **to that map
 
 ```json
 "denominator_floors": { "a1_labelled_pairs": 30, "a2_candidates": 30, "a3_statements": 30,
-                        "a4_typed_points": 1, "a5_slots": 5 }
+                        "a4_labelled_nodes": 1, "a5_slots": 5 }
 ```
 and **one spelling**: `floor_kind` (never `kind`) — the field names the KIND of floor (*sample sufficiency* /
 *non-vacuity* / *constructibility*) and carries no number.
+
+⚠️ **A4's floor key is named for the metric it floors.** `a4_labelled_nodes: 1` means **at least one thing or event
+carrying a label the ontology declares for it** — the *non-vacuity* floor under per-layer label coverage. The key is
+not carried over from the old framing: a retired metric key would let C1 register a REFUSED boundary for a number
+nothing measures any more, which is the exact class of stale flag D-S4 exists to keep out of the record.
 
 ⛔ **P1 from the substep-8 gate: the five keys must land in BOTH homes or C1's first commit is a hard red.** The
 checker fails closed on any record `denominator_floors` key with **no** counterpart in
@@ -429,7 +438,7 @@ exactly the same gates** - not "CI". W2a's "the lane is `workflow_dispatch` only
 ### 5.3 Component boundaries
 
 - **C1** owns the record + the census extension; **C2** owns the door + the A-corpus artefact; **C3–C6** own the
-  four object-layer rows; **C7** attribution only; **C8** the guard; **C9** the re-derivation.
+  four object-layer rows; **C7** the A4 label census (attribution as its diagnostic); **C8** the guard; **C9** the re-derivation.
 - ⛔ **The boundary, corrected after the owner's 2026-11-05 ruling: this epic is a CAPSTONE PLUS ONE IMPLEMENTATION
   COMPONENT (C10).** The earlier "three named exceptions" is false as of the ruling — C10 derives the structural
   write vocabulary **in the product write path**, which is production code. The exception list is **four**:
@@ -709,11 +718,27 @@ population, or blocked-by `#5087` by id. ⚠️ *Corrected: the first version qu
 re-deriving a registered threshold; surface 11's named failure mode is exactly "ratio passes while the absolute floor
 fails".*
 
-### E2E-8 · the typed population is attributable — **Tier E**
-- **Given** today's typed `pointKind` population
-- **When** attribution runs
-- **Then** **100 %** of typed points name their writer, and typed / `statement` / **`NULL`** are reported separately
-- **And** **no numeric target** is asserted (the count is the D3 reopen's)
+### E2E-8 · things and events carry their declared labels — **Tier E**
+- **Given** the fleet graph at C1's named head, and the labels the core ontology plus the installed packs declare
+- **When** the read-only census runs (no capture, no spend)
+- **Then** things and events **carry the labels the ontology declares for them** — a plan is labelled `plan`, a decision is labelled `decision` — reported **per layer** (things / events / claims), never as one blended percentage
+- **And** the bar is *appears + labelled*: the declared kinds the graph should produce **appear at all**, and things/events are not left unlabelled, with the coverage percentage **reported, not chased**
+- **And** a **failing run** is concrete: a declared kind that should appear is **absent**, **or** a thing/event carries no label the ontology declares for it — `RED` for that layer, with the offending nodes named, and never averaged away by a green claim layer
+- **And** attribution is reported beside it as a **diagnostic** — per writer, with typed / `statement` / **`NULL`** reported separately (a share quoted without its `NULL` denominator is not a measurement this epic accepts)
+
+**A4, in plain words.** Every node in the graph is a claim, a thing, or an event, and each carries a label saying
+what kind it is (`statement`, `plan`, `goal`, `workItem`, `code`, `decision`, `deployment`). The core ontology declares
+those labels and packs add more — and **those labels are what decide what may connect to what**. The August decision
+was never "one kind of thing": it was *claims carry `statement`; plans, goals and decisions belong on the thing and
+event layers.*
+
+> So the criterion is: after a capture, **things and events carry the labels the ontology declares for them** — a plan
+> is labelled `plan`, a decision is labelled `decision` — reported **per layer** (things / events / claims) rather
+> than as one blended percentage, so a failing layer cannot hide in an average.
+
+⚠️ **This replaces "attribute the typed population, no target"**, which counted labels on the *claim* layer — the one
+layer deliberately uniform — and therefore could not fail. **The D3 question it was blocked on is answered** (owner,
+2026-11-09: classification on by default; the declared kinds are the point), so A4 has a target now.
 
 ### E2E-9 · a replayed receipt REFUSES, and a true retry is one session — **Tier E** (its contract pin is CI)
 - **Given** a capture response whose `meta.mode == "replayed"` and whose stored `capture_ok` is not `false`
@@ -732,7 +757,8 @@ fails".*
 **CI-eligible counterparts (must exist, must stay sub-second):** for each Tier-E case, the **contract** half is a CI
 pin — E2E-1→I1/I3/I9 (criteria + gold present and sealed + the answer's shape), E2E-2/3/4→I4 (state vocabulary),
 E2E-5→I2 (per-row corpus map), **E2E-6→the E1/E2a/E2b threshold-verbatim pin** (test-design surface 1),
-E2E-7→the stale-figure pin, E2E-8→the `NULL`-denominator pin, **E2E-9→the retry/replay contract pin** and
+E2E-7→the stale-figure pin, E2E-8→the per-layer label-coverage pin (the `NULL` denominator kept as a reported
+share), **E2E-9→the retry/replay contract pin** and
 **E2E-10→the `BLOCKED(402)` state pin** (both offline over canned receipts/responses — CI-tier, needing no graph).
 **A Tier-E case without its CI contract pin is not done** — that pairing is the whole point of #11454.
 ⚠️ *Corrected: E2E-6 had no twin in the very paragraph that makes the twin mandatory, and the two new cases
@@ -854,7 +880,7 @@ Every in-scope item (1–9) has a §7 case or a §4/§6 contract; the tier rule 
 | A4 | C6 follows D-S3: measure here, **file a real mechanism gap under `#5087`** | C6 |
 | A5 | C1: the **A-row criteria** (+ `threshold_basis`, `measurement_visible_to_author`, `max_realizations`), the **A-floors in BOTH homes**, the **per-row corpus map**, the **enum derived** with `SUB_ROW_PARENT`, and the **three literal row lists replaced** | C1 |
 | A6 | C2: the **A-corpus artefact**, the A-lane's **G0/G1**, the **point-budget pointer**, and the **runner-register entry** | C2 |
-| A7 | C7: A4 = **read-only fleet census** at a named head, `n>0`, no target | C7 |
+| A7 | C7: A4 = **read-only fleet census** at a named head, measuring **per-layer label coverage** on the **appears + labelled** bar with the percentage reported, floor **≥1 labelled node** | C7 |
 | A8 | C8/C9: **`BLOCKED(402)` as an acceptance branch**; C9 reports **`N/15` as RED** with attribution, and E5's **full** bar | C8, C9 |
 | A9 | every A-row child cites **#11454** for its tier, and carries a **CI contract twin** (E2E-9/E2E-10 included) | all |
 
