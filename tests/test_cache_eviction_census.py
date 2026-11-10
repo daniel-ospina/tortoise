@@ -1123,6 +1123,12 @@ def test_a_report_claiming_more_nodes_than_the_graph_holds_does_not_prove():
     # `test_the_population_count_mirrors_the_instrument`, and
     # `test_a_row_multiplying_count_statement_is_a_documented_residual` pins what this
     # guard does NOT catch.
+    # ⛔ The fixture MODELS READ SKEW, not a graph shape. `assess()` reads each
+    # population's count and only THEN the graph total (that order is what keeps
+    # additions between the two reads from demoting an honest report — #11726), so
+    # `population > total` is a state the two reads can DISAGREE about, never one a
+    # quiescent graph produces. That is exactly the failure this guard exists for: an
+    # operator's record describing a graph that no longer exists.
     g = _FakeGraph({"Point": 5}, populations={"turn": 120})
     c = _FakeClient(used=900, maxmemory=1_000)
     stale = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
@@ -2505,6 +2511,12 @@ def test_no_two_populations_share_a_resident_count_statement():
     count never exceeds the graph's total). The next population's registry entry is the
     one place this defect would be introduced, so pin it here rather than in a reviewer's
     head: each population must be counted by its OWN statement.
+
+    ⚠️ SCOPE — THIS PIN IS TEXTUAL. It catches an exact copy and a reflowed copy (the
+    realistic shapes); a SEMANTICALLY identical re-spelling (`WHERE true = t.is_episodic`,
+    or a superset carrying an extra filter) is NOT detected. Whoever ADDS a population
+    must therefore own that population's predicate and bound rather than inherit this
+    assertion — the semantic-duplicate gap is filed as #11726.
     """
     # ⛔ SQUASHED, not verbatim. A Cypher statement's identity is semantic, and the
     # realistic copy-paste failure is the same one-liner REFLOWED across source lines —

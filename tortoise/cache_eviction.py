@@ -1071,7 +1071,6 @@ def assess(
     """
     state = measure_state(client, graph_name, ceiling_bytes=ceiling_bytes)
     counts = resident_counts(graph)
-    total_nodes = node_total(graph)
     config = config_labels()
     reports = dict(parity_reports or {})
     #: The instant THIS pass ages the reports against, and it is taken AFTER the state and
@@ -1288,7 +1287,16 @@ def assess(
     # What this DOES catch is the worst case — a claim above every node the graph holds,
     # whatever produced it. One integer compare, independent of any predicate, so it
     # stays.
-    resident_total = total_nodes
+    #
+    # ⚠️ ITS REACH IS READ SKEW, and the read order below is what keeps that honest. The
+    # total is read HERE — AFTER every per-population count — rather than beside them:
+    # a graph that GAINS nodes between the two reads then satisfies
+    # ``resident_population <= total`` by construction, so an honest report cannot be
+    # demoted by this check. (Read before the counts, it could: a legitimate 500/500
+    # report measured REFUSED when the total read answered 5, which is the false block
+    # #11726 records.) What remains reachable is the opposite skew — nodes REMOVED
+    # between a population count and this read.
+    resident_total = node_total(graph)
     checked: list[ClassReading] = []
     for entry in classes:
         if entry.eligible and entry.nodes > resident_total:
