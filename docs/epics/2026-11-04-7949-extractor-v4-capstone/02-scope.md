@@ -118,7 +118,7 @@ note **or a justified skip citing the brief**. Both are **justified skips**, cit
    does **not** adopt the mechanical standard over **D6**.
 9. **The 25,000-point quota / cache eviction** — `#10976`'s root (the graph is at its ceiling; measured).
    ⛔ **But it is a BLOCKING PRECONDITION for every A-row, not merely a neighbour.** The capture door refuses
-   with **HTTP 402** when `count + est > max_points` (`hosted_api.py:17368` (condition) / `:17378` (402)), counting non-episodic Points +
+   with **HTTP 402** when `count + est > max_points` (`hosted_api.py:18205` — that exact expression — and the 402 at `:18216` via `quota_refusal_payload`; **the symbol is authoritative and the line is a convenience**, per `00-plan.md:27-30`), counting non-episodic Points +
    Object + Subject — and the team was **measured at that cap** (`-32006 … limit reached (25000)`). So while the
    cap holds, **the acceptance capture is refused before it writes anything** and every A-row is unrunnable.
    The A-runs therefore name: **the org/graph they write to**, its **headroom**, the **point budget the A-corpus
@@ -459,3 +459,9 @@ and it is cheap to close."*
 
 **Do NOT proceed until the human confirms.** On confirmation: dispatch the scope reviewer, then (separately)
 the `duplication-architecture` reviewer, and record both verdicts here.
+
+**Recorded:** the `duplication-architecture` verdicts **are** in this file (§"`duplication-architecture` review —
+verdicts recorded", `:400`). The scope reviewer's **3 cycles** (cosmetic-only, all fixed) do **not** live here —
+they are recorded on the `#7949` pipeline comment of **2026-11-08T00:17:36Z** (`epic-scope ×3 … cosmetic-only`),
+which is the artifact `05-verify.md`'s row cites. Nothing further is owed by this file; the earlier wording
+promised a record this artifact does not carry.
