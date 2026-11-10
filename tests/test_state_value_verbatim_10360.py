@@ -6408,14 +6408,15 @@ def _magnitude_in_play(missing: list[tuple], content_slots: list[tuple]) -> bool
 
     A magnitude is in play only where the missing slot has a COUNTERPART among
     the leftovers:
-      * both spellings carry a DIFFERENT scale word over the same digits
-        (`12 thousand` against `12 million`) — two spellings, no way to say
+      * the two sides carry DIFFERENT scale words (`12 thousand` against
+        `12 million`, and `2000 thousand` against `2 million`, where the
+        mantissas differ too) — two spellings of one magnitude, no way to say
         which is right. The SAME scale word with a different mantissa is not
         this case: the scale cancels, the mantissa is what differs, and the
         shipped `_value_slot_divergence` JUDGES that pair — a classifier that
         called it unjudged would refuse a judgement the rule makes;
       * the digits are zero-extended (`12000000` against `12 million`) — one
-        value, a numeric form and a scaled one.
+        value, a numeric form and a scaled one, with a scale word on one side.
 
     ⛔ EVERY missing slot must be explained, not just one (review cycle 10):
     returning True on the first explained pair certified the whole row, so a
@@ -6484,6 +6485,14 @@ def _retention_class(content: str, quote: str) -> str | None:
     content_slots = v2._value_slots_scaled(content)
     quote_slots = v2._value_slots_scaled(quote)
     if not content_slots:
+        # ⛔ THE EXEMPTION IS GATED ON `not content_slots`, so it covers a row whose
+        # ONLY value is written in an excluded form. A MULTI-value row that mixes
+        # one excluded form with a bound value (`we have 1,234 events and 5000
+        # nodes`) is still judged, and its excluded-form value is counted as a
+        # LOSS — the false-accusation direction, recorded rather than fixed
+        # because it is not reachable on this corpus (all 7 excluded rows bind
+        # no slot at all) and `len(dropped) == 1` would red if such a row were
+        # added (#11730 review, cycle 13).
         if (_CLOCK_FORM.search(content) or _ISO_DATE_FORM.search(content)
                 or _SEPARATOR_FORM.search(content)):
             return "CONTENT_EXCLUDED_FORM"
@@ -6818,9 +6827,12 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
     #     content_scale)` guard and NOT the every-slot rule — a revert of the
     #     every-slot rule kept all 122 tests green. The discriminating pairs are
     #     (a2) and (a3); the header said otherwise and was wrong.
-    #     (a) an unrelated slot's SCALE WORD (or a zero extension) does not rescue
-    #         a missing value that has no counterpart; these four rows all flip to
-    #         UNJUDGED if that guard is dropped;
+    #     (a) the (quote_scale or content_scale) guard and the every-slot rule,
+    #         TOGETHER: each row below has TWO missing quote slots and only one is
+    #         a zero-extension candidate, so reverting EITHER clause alone leaves
+    #         them LOST — measured (cycle 13). They flip to UNJUDGED only when
+    #         both are reverted, so they do not pin either clause on its own:
+    #         the guard's own pin is (b) below, the every-slot rule's is (a2).
     for content, quote in (("we shipped 3000 events",
                             "we shipped 30 batches and 12 events"),
                            ("we shipped 12000 events",
@@ -6942,16 +6954,21 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
     #     AGREE: an equality over two agreeing rows cannot tell "compares
     #     month-and-day" from "compares presence", which is the cycle-9 P1 one
     #     level down (a `_stated_month_day` reduced to `(0, 0)` when any date is
-    #     present left all three §24 tests green). One pair per direction.
+    #     present left all three §24 tests green). ⛔ ONE PAIR PER COMPONENT: a
+    #     pin that varies the day AND the month is carried by the day alone, so
+    #     the month needs a pair with the SAME day and a different month
+    #     (cycle 13: a helper reduced to `(0, day)` was silent over every pin
+    #     below until this one was added).
     assert _stated_month_day("due 2026-11-02") == _stated_month_day(
         "land by November 2")
     assert _stated_month_day("due 2026-12-25") != _stated_month_day(
         "land by November 2"), "the checker must compare month-and-day, not presence"
-    # ⛔ THE DAY TOO, not just the month (cycle 11): both census ISO rows are
-    # NOVEMBER, so a helper reduced to `(month, 0)` stayed green while a content
-    # rewritten `2026-11-19` against a quote `November 2` compared EQUAL.
+    # the DAY on its own — same month, different day;
     assert _stated_month_day("due 2026-11-19") != _stated_month_day(
         "land by November 2"), "the checker must compare the DAY too"
+    # the MONTH on its own — same day, different month;
+    assert _stated_month_day("due 2026-12-02") != _stated_month_day(
+        "land by November 2"), "the checker must compare the MONTH too"
     assert _stated_month_day("nothing here") is None
     # 4. A value-free point is not a row at all.
     assert _retention_class("the team prefers intervals",
