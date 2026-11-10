@@ -987,9 +987,12 @@ def assess(
     total_nodes = node_total(graph)
     config = config_labels()
     reports = dict(parity_reports or {})
-    #: The instant THIS pass began, taken before any measurement is issued. It is the
-    #: reference the report ages are measured against, so a report stamped after it is a
-    #: clock disagreement rather than freshness (see :meth:`ParityReport.age_seconds`).
+    #: The instant THIS pass ages the reports against, and it is taken AFTER the state and
+    #: counts are read (so it is a LATER reference than any of them): a report stamped after
+    #: it is a clock disagreement rather than freshness (see
+    #: :meth:`ParityReport.age_seconds`). The direction is the safe one — a later reference
+    #: makes every age LARGER, so it can only demote a report, never license one — and that
+    #: is why the ordering is stated rather than the instant hoisted above the reads.
     pass_started_at = time.time()
     max_report_age, max_report_age_source = _resolve_max_report_age(
         max_report_age_seconds)
@@ -1322,6 +1325,7 @@ def load_parity_report(path: str, *, graph_name: str) -> ParityReport:
         population.episodic_graph_nodes   the DELETE SET — every node the read returned
         dry_run.would_delete_turn_nodes   the nodes it proved AND proposed to purge
         dry_run.held_back_turn_nodes      the turn nodes it could NOT prove
+        measured_at                       when the census measured — REQUIRED evidence
         verdict                           "CLEAN" | "REFUSED"
 
     so coverage is ``would_delete_turn_nodes`` out of ``episodic_graph_nodes``. A CLEAN
