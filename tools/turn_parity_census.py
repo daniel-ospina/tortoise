@@ -2230,10 +2230,11 @@ def census(graph: dict, record: dict, *, sample: int,
     executor's runaway cap (``tortoise/cache_evictor.py`` gate 2), so a census of the
     SAME graph taken in an EARLIER pass would otherwise size a sweep from a population
     that no longer exists — measured: a stale report claiming 20,000 turns on a graph
-    holding 500 licenses 40x the population the cap exists to bound. The default is this
-    process's UTC clock at the instant the comparison is assembled (the reading's own
-    instant, never the consumer's), and it stays overridable so a test can pin it
-    instead of racing a clock.
+    holding 500 licenses 40x the population the cap exists to bound. The CLI takes it
+    BEFORE either leg is read (``main``), so the age can only be overstated — refusing,
+    never licensing; this default is the fallback for a caller that assembles the
+    comparison without one (a test pinning the clock, or ``purge_legacy_turns``), and it
+    is the comparison's own instant, never the consumer's.
     """
     nodes, rows = graph["nodes"], record["rows_by_key"]
     measured_at = measured_at or _utc_now_iso()
@@ -2807,6 +2808,15 @@ def main(argv: list[str] | None = None) -> int:
                 "real tenant, never a guess.\n")
             return 1
 
+    # ⛔ THE STAMP IS TAKEN BEFORE EITHER LEG IS READ (review P3 at `2c37345e`,
+    # measured). `census()` USED TO default the stamp at its own entry, which runs AFTER
+    # both legs — so the artifact named an instant LATER than the data it describes and
+    # the consumer's age (`pass_started_at - measured_at`) came out SMALLER by the read
+    # duration. The consumer deliberately takes its reference so an age can only GROW;
+    # a producer that shrinks it is the one optimism a fail-closed freshness bound
+    # cannot afford — a report could pass a 3600 s bound while being older than it says.
+    # Stamped here, the age can only be overSTATED, which refuses, never licenses.
+    measured_at = _utc_now_iso()
     try:
         measured_graph = resolve_graph_name(args.uri, args.db_path,
                                             args.graph_name)
@@ -2885,7 +2895,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         report = census(graph, record, sample=args.sample,
-                        graph_name=measured_graph)
+                        graph_name=measured_graph, measured_at=measured_at)
     except CensusError as exc:
         sys.stderr.write(f"turn_parity_census: {exc}\n")
         return 3
