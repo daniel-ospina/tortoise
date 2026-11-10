@@ -333,7 +333,7 @@ cmd_ready() {
 cmd_alive() {
   local name
   name="$(name_flag alive "$@")"
-  local dir pfile pid port recorded now
+  local dir pfile pid port recorded now identity
   dir="$(state_dir)"
   pfile="$dir/${name}.pid"
   port="$(cat "$dir/${name}.port" 2>/dev/null || true)"
@@ -370,16 +370,27 @@ cmd_alive() {
     fi
   fi
 
+  # ⛔ A VERDICT MAY NOT CLAIM A FACT THE PROBE NEVER TOOK. Identity is checked
+  # only when `record` left a start-time witness; when it did not, the sentence
+  # says so rather than asserting a match nobody performed — the same class of
+  # defect as the bare `kill -0` this verb replaced.
+  local identity
+  if [[ -n "$recorded" ]]; then
+    identity="its start time still matches the boot witness"
+  else
+    identity="no start-time witness was recorded, so its IDENTITY was NOT checked"
+  fi
+
   if [[ -z "$port" ]]; then
-    printf '%s\n' "${PROG}: ${name}: pid ${pid} is ALIVE — our recorded process: not a zombie, and its start time still matches the boot witness. No port was recorded for this name, so whether it was still SERVING is not answerable from here; the log is the next read."
+    printf '%s\n' "${PROG}: ${name}: pid ${pid} is ALIVE — our recorded process: not a zombie, and ${identity}. No port was recorded for this name, so whether it was still SERVING is not answerable from here; the log is the next read."
     return 0
   fi
 
   if serves_now "$port"; then
-    printf '%s\n' "${PROG}: ${name}: pid ${pid} on :${port} is ALIVE (our recorded process: not a zombie, and its start time still matches the boot witness) and :${port} answers HTTP — this preview SURVIVED the run, so the red is the specs' or the content's, not a dead server. This does NOT prove the listener on the port is ours: alloc's pre-boot free-check and wrangler's own exit on EADDRINUSE are what exclude a peer's server, not this probe."
+    printf '%s\n' "${PROG}: ${name}: pid ${pid} on :${port} is ALIVE (our recorded process: not a zombie, and ${identity}) and :${port} answers HTTP — this preview SURVIVED the run, so the red is the specs' or the content's, not a dead server. This does NOT prove the listener on the port is ours: alloc's pre-boot free-check and wrangler's own exit on EADDRINUSE are what exclude a peer's server, not this probe."
     return 0
   fi
-  printf '%s\n' "${PROG}: ${name}: pid ${pid} on :${port} is ALIVE (our recorded process: not a zombie, and its start time still matches the boot witness) but :${port} does not answer an HTTP success — nothing is listening there, or the answer is a non-2xx. The PROCESS survived and the SERVER did not serve; the log is where the cause is."
+  printf '%s\n' "${PROG}: ${name}: pid ${pid} on :${port} is ALIVE (our recorded process: not a zombie, and ${identity}) but :${port} does not answer an HTTP success — nothing is listening there, or the answer is a non-2xx. The PROCESS survived and the SERVER did not serve; the log is where the cause is."
   return 7
 }
 

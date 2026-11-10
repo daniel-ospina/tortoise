@@ -741,6 +741,31 @@ def test_alive_separates_a_serving_preview_from_a_surviving_one(
         _reap(broken.pid, *([healthy.pid] if healthy is not None else []))
 
 
+def test_alive_does_not_claim_an_identity_it_could_not_check(tmp_path: Path, state) -> None:
+    """A verdict may not assert a fact the probe never took.
+
+    Identity is checked only against the start-time witness `record` writes. If
+    that file is gone (a hand-written pid file, a truncated state dir) the verb
+    still has a liveness answer — and must say WHICH answer it has, because the
+    same class of overclaim is what this whole finding is about: the step asserted
+    "not a dead server" from a probe that had not asked.
+    """
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    try:
+        assert _script("record", "--name", "app", "--pid", str(victim.pid), env=state).returncode == 0
+        (Path(state["PREVIEW_STATE"]) / "app.start").unlink()
+        result = _script("alive", "--name", "app", env=state)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "IDENTITY was NOT checked" in result.stdout, (
+            "`alive` claims the start time matches the boot witness even though no "
+            f"witness exists: {result.stdout}"
+        )
+        assert "still matches the boot witness" not in result.stdout, result.stdout
+    finally:
+        _reap(victim.pid)
+
+
 def test_alive_takes_its_liveness_and_identity_from_the_guarded_predicates() -> None:
     """The `ci.yml` arm only pins the CALL; the semantics must be pinned here.
 
@@ -760,9 +785,8 @@ def test_alive_takes_its_liveness_and_identity_from_the_guarded_predicates() -> 
         "`alive` reports a recycled pid as ours — the start-time witness `record` "
         "writes and `stop`'s PID-REUSE GUARD re-checks is missing:\n" + body
     )
-    assert not re.search(r"\bkill\s+-0\b",
-                        "\n".join(_cut_comment(line)
-                                  for line in body.splitlines())), (
+    code_only = "\n".join(_cut_comment(line) for line in body.splitlines())
+    assert not re.search(r"\bkill\s+-0\b", code_only), (
         "`alive` decides liveness with a bare `kill -0`, which a zombie answers "
         "forever:\n" + body
     )
