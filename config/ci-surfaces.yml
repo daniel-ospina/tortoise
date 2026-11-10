@@ -4925,9 +4925,12 @@ surfaces:
   # #10997's OTHER half (I3) — the run-level transaction — is ABSENT, and this
   # file is the call that can SEE the absence. §4.4 I3 says a committed run is
   # ALL-OR-NOTHING, while `_extract_session_v2` journals each phase as it
-  # succeeds: the pin drives a capture whose POINT write fails and asserts the
-  # journal still gained `ObjectRegistered` + `EventRecorded`, so
-  # `derived = replay(journal)` reproduces a half-applied run. The absence is
+  # succeeds AND its points loop is fail-soft (`sdk.py:17116-17125` continues),
+  # so the pin drives a capture whose POINT write fails and asserts the journal
+  # gained TWO records: `ObjectRegistered` (entity phase, BEFORE the failure)
+  # and `EventRecorded` (events phase, AFTER it — the run keeps writing).
+  # `derived = replay(journal)` therefore reproduces a half-applied run in both
+  # directions. The absence is
   # recorded today only in prose (the `failure_policy` row's note); this is the
   # node `#10998`'s plan requires before a `commit_transaction` row exists
   # ("`pins:` naming a node that reds when S3-attach/S5-connect/S6-commit share

@@ -1,5 +1,5 @@
 """#10997's second half — **I3 is ABSENT**, measured: a failed capture still
-commits everything it wrote before the failure.
+commits what it wrote before the failure — and then keeps writing after it.
 
 THE DEFECT THIS PINS
 --------------------
@@ -15,20 +15,31 @@ transaction boundary"*). §4.4's **I3** says the opposite of what runs:
     derived graph, unchanged. A partial run is not an observable state.
 
 `_extract_session_v2` (the capture door, `tortoise/sdk.py`) writes a run in
-PHASES — entities, then points, then operators — and each write journals its
-own record *at the moment it succeeds*. Nothing buffers the earlier phases and
-nothing rolls them back, so a failure in a LATER phase leaves the EARLIER ones
-committed in the graph and in the journal. A "failed" capture is therefore
-observable, partially applied — exactly what I3 forbids.
+PHASES — entities, then points, then events, then operators (`sdk.py:16795`
+points, `:17255` events, `:17318` operators) — and each write journals its own
+record *at the moment it succeeds*. Nothing buffers an earlier phase and nothing
+rolls anything back.
+
+The points loop is **fail-soft**: its `except` counts the failure, appends the
+error and **continues** (`sdk.py:17116-17125`), and nothing between the phases
+gates on that count. So a point-write failure does not end the run — it is
+recorded, and the run **keeps writing**: the events phase and the operators
+phase behind it commit anyway. A "failed" capture is therefore observable,
+partially applied, and in two directions at once (a record from before the
+failure AND records from after it) — exactly what I3 forbids.
 
 WHAT IS MEASURED HERE (both directions, so the pin cannot pass vacuously)
 ------------------------------------------------------------------------
 * A capture whose **point** write fails returns `extracted == []` with a
-  `point write failed` error — and its journal has GAINED `ObjectRegistered`
-  and `EventRecorded`, the two phases that ran BEFORE the failure. **That is
-  the I3 violation**, and it is what `test_a_failed_capture…` pins.
-* The same capture **without** the injection journals `PointAdded` as well
-  (and `EntityLinked`), while still carrying `ObjectRegistered` — so the
+  `point write failed` error — and its journal has GAINED **two** records:
+  `ObjectRegistered` (the entity phase, which ran BEFORE the failure) and
+  `EventRecorded` (the events phase, which ran AFTER it, because the points
+  loop continues). ⛔ The post-failure record is the sharper half of the
+  violation and the file says so rather than folding both into "before": a
+  fix that only rolls back the phases that PRECEDED the failure leaves the
+  journal non-empty.
+* The same capture **without** the injection journals `PointAdded` and
+  `EntityLinked` as well, while still carrying `ObjectRegistered` — so the
   difference the pin reads is the injected failure and the phase it lands in,
   not a property of the fixture.
 * An injected **entity** write failure removes `ObjectRegistered` from the
@@ -53,10 +64,14 @@ call can see is the drift the register exists to prevent** (`#5095` review A3,
 the same rule `tests/test_5095_s3_identity_policy.py::TestTheRemainingAbsence`
 follows).
 
-MUTATION: make the run atomic (buffer or roll back the phases that preceded a
-later failure) → the journal delta in `test_a_failed_capture…` becomes empty →
-this file REDS, which is the signal that I3 has landed and the registry must be
-updated. That red is the deliverable, not a regression.
+LANDING SIGNAL — stated precisely, because a half-fix must not pass it: I3 has
+landed when a failed run's journal delta is **EMPTY**, however the fix
+compensates (staging, buffering, or compensating writes). ⛔ Rolling back only
+the phases that PRECEDED the failure does NOT satisfy it: the events phase
+commits AFTER the point failure, so that fix leaves `EventRecorded` behind and
+this file stays green on the wrong behaviour. On a real I3 landing, arm 1's
+first assertion (`journal == []`) reds, which is the signal that the registry
+must be updated. That red is the deliverable, not a regression.
 """
 
 from __future__ import annotations
@@ -173,19 +188,28 @@ def _run_capture(base: Path, *, fail_phase: str | None, tag: str) -> dict:
             sdk.close()
 
 
-def test_a_failed_capture_still_commits_the_phases_that_preceded_the_failure(tmp_path):
-    """**THE PIN.** I3 is violated: a run that FAILS has already committed.
+def test_a_failed_capture_still_commits_before_and_after_the_failure(tmp_path):
+    """**THE PIN.** I3 is violated in BOTH directions: a run that FAILS has
+    already committed, and then keeps committing.
 
     `§4.4 I3`: *"A committed run is ALL-OR-NOTHING … A partial run is not an
     observable state."* The run below reports its own failure — `extracted` is
     empty and `errors` carries the point-write failure — and yet the journal
-    holds `ObjectRegistered` and `EventRecorded`, the two phases that ran
-    before it. `derived = replay(journal)` therefore reproduces a HALF-APPLIED
-    run, which is the state I3 says cannot exist.
+    holds `ObjectRegistered` (the entity phase, BEFORE the failure) **and**
+    `EventRecorded` (the events phase, AFTER it: the points loop's `except`
+    continues — `sdk.py:17116-17125` — and nothing gates the phases behind it
+    on the failure count). `derived = replay(journal)` therefore reproduces a
+    HALF-APPLIED run, which is the state I3 says cannot exist.
 
-    MUTATION: make the phases share one transaction → `journal` is empty here →
-    RED, signalling that a `commit_transaction` row may be added and this
-    absence pin replaced by its positive counterpart.
+    ⛔ Both records are asserted separately and labelled, because they are not
+    the same fact: a fix that rolls back only the phases that PRECEDED the
+    failure leaves `EventRecorded` behind, and this file must not read that
+    half-fix as a landing.
+
+    MUTATION: make the run atomic so its journal delta is EMPTY, however it
+    compensates (staging, buffering, or compensating writes) → the assertion
+    below reds, signalling that a `commit_transaction` row may be added and
+    this absence pin replaced by its positive counterpart.
     """
     failed = _run_capture(tmp_path, fail_phase="point", tag="pin")
 
@@ -200,32 +224,47 @@ def test_a_failed_capture_still_commits_the_phases_that_preceded_the_failure(tmp
         "here")
 
     assert failed["journal"], (
-        "the failed run left NO journal record. If the S3-attach / S5-connect / "
-        "S6-commit phases now share ONE transaction, I3 HAS LANDED: replace "
-        "this absence pin with its positive counterpart and update "
+        "the failed run left NO journal record — its journal delta is EMPTY. "
+        "If a failed capture now commits nothing at all, I3 HAS LANDED "
+        "(whatever the mechanism: staging, buffering or compensating writes): "
+        "replace this absence pin with its positive counterpart and update "
         "`config/v4-mechanisms.yml` (the `failure_policy` note's I3 clause, and "
         "the `commit_transaction` row #10998's scoping plans) — do not simply "
         "delete this file")
 
-    # The phases that precede the points loop, named individually so a partial
-    # fix that only stops journaling ONE of them is still visible.
+    # BEFORE the failure: the entity phase journals as it writes, so its record
+    # exists by the time the points phase raises.
     assert "ObjectRegistered" in failed["journal"], (
-        f"expected the entity phase's record in a failed run's journal, got "
-        f"{failed['journal']}")
+        f"expected the entity phase's record (the write that PRECEDED the "
+        f"failure) in a failed run's journal, got {failed['journal']}")
+    # AFTER the failure: the events phase (sdk.py:17255) runs behind the points
+    # loop, and the loop's `except` continues — so the run COMMITS a record
+    # after it has already recorded its own failure. This is the sharper half
+    # of the violation; do not relabel it as a pre-failure phase.
     assert "EventRecorded" in failed["journal"], (
-        f"expected the event phase's record in a failed run's journal, got "
-        f"{failed['journal']}")
+        f"expected the events phase's record — written AFTER the point failure, "
+        f"because the points loop continues — in a failed run's journal, got "
+        f"{failed['journal']}. If this is now absent, the EVENTS phase is "
+        f"gated on the points failure, which is a PARTIAL fix: I3 needs an "
+        f"empty journal delta, not one phase gated")
 
 
-def test_the_control__an_unfailed_capture_journals_the_phase_after_the_injection(
+def test_the_control__an_unfailed_capture_journals_more(
         tmp_path):
     """**NON-VACUITY.** The same capture, un-injected, journals MORE.
 
-    Without this arm the pin above would still pass if the fixture journaled
-    those two records for reasons unrelated to the failure. Here the identical
-    conversation produces `PointAdded` — the phase the pin's injection kills —
-    and still carries `ObjectRegistered`, so the two journals differ by exactly
-    the failure, not by the fixture.
+    Without this arm the pin would still pass if the fixture journaled those
+    records for reasons unrelated to the failure. Here the identical
+    conversation produces `PointAdded` and `EntityLinked` too — the records the
+    pin's injection kills — while still carrying `ObjectRegistered` and
+    `EventRecorded`, so the two journals differ by exactly the failure, not by
+    the fixture.
+
+    ⛔ Note the order this asserts, because it is the pin's own subject: in the
+    clean run `EventRecorded` is the LAST record (`ObjectRegistered,
+    PointAdded, EntityLinked, EventRecorded`), which is what proves the events
+    phase runs BEHIND the points loop — and therefore that the pin's
+    `EventRecorded` is a POST-failure write, not a pre-failure one.
     """
     ok = _run_capture(tmp_path, fail_phase=None, tag="ok")
 
@@ -238,6 +277,15 @@ def test_the_control__an_unfailed_capture_journals_the_phase_after_the_injection
     assert "PointAdded" in ok["journal"], (
         f"the control capture journals no PointAdded ({ok['journal']}) — the "
         f"pin's `extracted == []` then proves nothing about the points phase")
+    # The ORDER, not just membership: the events phase is behind the points
+    # loop, so its record must come after PointAdded in a clean run. This is
+    # the fact the pin's post-failure `EventRecorded` rests on.
+    assert ok["journal"].index("PointAdded") < ok["journal"].index(
+        "EventRecorded"), (
+        f"the events phase's record no longer follows the points phase's "
+        f"({ok['journal']}) — the write order this file describes has moved, "
+        f"so the pin's claim that `EventRecorded` is a POST-failure write must "
+        f"be re-derived before it is trusted")
 
 
 def test_the_injection_seam_is_a_real_write_not_a_no_op(tmp_path):
