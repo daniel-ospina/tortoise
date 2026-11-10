@@ -1,11 +1,11 @@
 ---
 name: tortoise-onboarding
-description: "Install and connect Tortoise for your agent — self-adjudicate your harness (Claude Code / Cursor / Codex / Pi = self-install; Claude Desktop / Claude Web = teach-human), write the MCP config, verify with tortoise_health, checkpoint harness-connected, and reach the decide protocol without any local skill file. Self-hosted: Docker-first install (Compose daemon + FalkorDB sidecar); embedded is the eval-only fallback. Successor to AGENT_ONBOARDING.md (archived)."
+description: "Install and connect Tortoise for your agent — self-adjudicate your harness (Claude Code / Cursor / Codex / Pi = self-install; Claude Desktop / Claude Web = teach-human), write the MCP config, verify with tortoise_graph_overview(section=\"health\"), checkpoint harness-connected, and reach the decide protocol without any local skill file. Self-hosted: Docker-first install (Compose daemon + FalkorDB sidecar); embedded is the eval-only fallback. Successor to AGENT_ONBOARDING.md (archived)."
 domain: capability
 type: Workflow
 status: live
 tags: [tortoise, onboarding, mcp, harness, install, self-hosted, connect, onboarding-state, decide]
-summary: "The ONE live Tortoise onboarding script — reads onboarding state, self-adjudicates the harness, installs/connects (self-hosted: Docker-first, Compose + FalkorDB; embedded = eval-only fallback), verifies via tortoise_health, checkpoints harness-connected, and runs the generic MCP-tool decide protocol."
+summary: "The ONE live Tortoise onboarding script — reads onboarding state, self-adjudicates the harness, installs/connects (self-hosted: Docker-first, Compose + FalkorDB; embedded = eval-only fallback), verifies via tortoise_graph_overview(section=\"health\"), checkpoints harness-connected, and runs the generic MCP-tool decide protocol."
 created: 2026-09-02
 updated: 2026-10-14
 allowed-tools: read write bash
@@ -250,7 +250,8 @@ and the dashboard wizard (`website/apps/dashboard/src/harnesses.js`).
 > It is what makes a **restart-pending** install distinguishable from one that
 > never happened (§1's `restart_pending` row). It does NOT claim the harness is
 > connected: `harness-connected` remains §4's job, and only after
-> `tortoise_health` succeeds in the NEW session. **Teach-human harnesses
+> `tortoise_graph_overview(section="health")` succeeds in the NEW session.
+> **Teach-human harnesses
 > (Claude Desktop / Claude Web / ChatGPT) have no config write and no REST
 > surface — they never record this step.**
 >
@@ -344,7 +345,8 @@ with the variable placed into the app's environment via `launchctl setenv` /
 (private file — never commit). Skills load from `.agents/skills` when the
 project folder is open; the Desktop flow defers the installer to a one-time
 terminal or the agent running it inside the project. First-time MCP calls may
-prompt for approval — `tortoise_health` and the read tools are safe to allow.
+prompt for approval — `tortoise_graph_overview` and the read tools are safe to
+allow.
 
 ### Pi (self-install)
 
@@ -505,7 +507,8 @@ reload (or a restart that reuses the old process env) silently keeps the
 stale or absent value. Tell the user: quit Pi, open a new terminal, and start
 Pi again from it.
 
-**4. Verify in that new session** — call `tortoise_health` (§4); it must name
+**4. Verify in that new session** — call `tortoise_graph_overview(section="health")`
+(§4); it must name
 the organization you expect. The pre-restart session cannot verify: its MCP
 client was built before the export.
 
@@ -514,8 +517,8 @@ client was built before the export.
 > to the *previous* org and returns data from the wrong graph with no error.
 > Observed live 2026-09-12: a stale key quietly reached a different, fully
 > populated organization — every tool answered normally, none of it from the
-> graph the user thought they were querying. If `tortoise_health` reports
-> an org you did not expect, the process env is stale — relaunch from a new
+> graph the user thought they were querying. If `tortoise_graph_overview(section="health")`
+> reports an org you did not expect, the process env is stale — relaunch from a new
 > shell; editing `.mcp.json` will not help.
 
 ### Claude Desktop (teach-human)
@@ -613,14 +616,16 @@ Never hand-edit inside markers you did not write; the next refresh discards it.
 
 ## 4. Verify, then checkpoint harness-connected
 
-1. Call `tortoise_health` (MCP tool, all 6 harnesses once connected). It
-   must report the graph reachable + your organization context.
+1. Call `tortoise_graph_overview(section="health")` (MCP tool, all 6 harnesses
+   once connected). It must report the graph reachable + your organization
+   context.
 2. On failure: retry once, then diagnose against these THREE outcomes, in
    this order — the first is the commonest and the easiest to misread:
    - **The session has not loaded the server yet** — the `tortoise_*` tools
      are absent from `tools/list`, or the call failed before any auth
      exchange. This is NOT a broken config. Have the human restart the
-     client, then retry `tortoise_health` in the NEW session: a session
+     client, then retry `tortoise_graph_overview(section="health")` in the NEW
+     session: a session
      started after the config write reads the config on disk. Never route
      this outcome to a different connector.
    - **Credential rejected** — a 401, an empty `Authorization: Bearer`, or a
@@ -630,7 +635,7 @@ Never hand-edit inside markers you did not write; the next refresh discards it.
    - **Unsupported / the config write is invalid** — offer the teach-human
      fallback (the connector steps for Desktop/Web) or re-run the universal
      command.
-   Never claim connected on a failed `tortoise_health`.
+   Never claim connected on a failed `tortoise_graph_overview(section="health")`.
 3. On success — **write the harness-connected checkpoint** (idempotent
    first-write-wins keyed-MERGE; replay is a no-op, so re-running this write
    is safe):
@@ -919,8 +924,9 @@ feature.
 
 Use ONLY the standard Tortoise MCP tools (all always-listable during
 onboarding; none require a local skill file). Verify the live connection
-first with `tortoise_health` — a failed health check means the decide
-cannot reach the graph (never decide against a dead connection):
+first with `tortoise_graph_overview(section="health")` — a failed health check
+means the decide cannot reach the graph (never decide against a dead
+connection):
 
 1. **Refine the decision with the user.** Write it as a short domain label
    (e.g. `2026-Q3-db-migration`). Get the options right first — the user owns
