@@ -6402,10 +6402,21 @@ def test_the_fail_open_half_is_MEASURED_so_a_gap_is_not_read_as_a_LOSS():
     # derives from its own constants asserts nothing — `split` above is already
     # pinned): the registry row publishes this figure, so the figure and the
     # measurement cannot drift apart.
+    # ⛔ AND TO THE `state_value_carve_out` ROW SPECIFICALLY, not to the FILE.
+    # The claim is "THIS row publishes the measured figure", so the assertion has
+    # to read the text that claim is about: `in row_text` over all ~9,000 lines
+    # stayed GREEN if another mechanism's row ever carried the same sentence
+    # while this row drifted back to the reach-only reading it replaces — a
+    # fail-open direction on a new guard, in the one pin whose whole job is that
+    # the figure and the measurement cannot diverge (#11730 review finding 3;
+    # MEASURED: a decoy row appended with the sentence, and the sentence deleted
+    # from this row, was GREEN before this line and RED after it).
     row_text = (pathlib.Path(__file__).resolve().parent.parent
                 / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
-    assert f"{stated} of 112 STATED" in row_text, (
-        f"the registry row does not publish the measured {stated} of 112 STATED")
+    row = _residual_region(row_text)
+    assert f"{stated} of 112 STATED" in row, (
+        f"the `state_value_carve_out` row does not publish the measured "
+        f"{stated} of 112 STATED")
 
     lost = set()
     retained = []
@@ -6428,10 +6439,15 @@ def test_the_fail_open_half_is_MEASURED_so_a_gap_is_not_read_as_a_LOSS():
     # this class calls retained — that is what "a detection gap, not a loss"
     # means. A rule widened to flag a layout mismatch reds here, which is the
     # direction the row's next lane would move it.
-    # The loop's own population — the rows the split above already counts, so
-    # this guards the loop (it cannot measure the census); what the loop ASSERTS
-    # is the other artefact, and THAT is the load-bearing pin.
-    assert len(retained) == RETENTION_SPLIT["LAYOUT_RETAINED"], len(retained)
+    # ⛔ THE LOOP'S POPULATION IS NOT ASSERTED HERE. `len(retained)` IS
+    # `split["LAYOUT_RETAINED"]` by construction, and `split == RETENTION_SPLIT`
+    # is asserted above — so a count here could not go red without that line
+    # going red first, which makes it an assertion no edit can falsify rather
+    # than a second opinion (#11730 review finding 1: the reachability step of
+    # reachability–infection–propagation is never entered, so it is not a weak
+    # guard, it is not a guard). The population is pinned where it can move: by
+    # the split above, and as a literal in
+    # `test_the_classifier_DISCRIMINATES_in_both_directions`.
     for content, quote in retained:
         assert v2._value_slot_divergence(content, quote) == (), (content, quote)
 
@@ -6532,16 +6548,18 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
     # 3b. The excluded-form class is a MEASURED class on the census, not only a
     #     synthetic shape: those 7 rows really do carry a clock or ISO token and
     #     really are rows the shipped slot projection finds nothing to align in.
-    #     (Entailed by the class, kept so the census rows are visible at the
-    #     point of assertion — the split assert above is the real pin.)
+    #     ⛔ THAT IS STATED HERE AND NOT ASSERTED: `_retention_class` reaches
+    #     `CONTENT_EXCLUDED_FORM` only when the content has no slot AND carries a
+    #     clock/ISO token, so both predicates held over rows it selected are
+    #     `f(x) == f(x)` — entailed by the branch that assigned the class, with no
+    #     reachable edit whose change reaches them (#11730 review finding 2). The
+    #     count below is the part that CAN move, and it is a literal: a corpus
+    #     edit that re-labels a row reds here. The class's discriminating power is
+    #     pinned synthetically above (3) and by the split in the test above.
     excluded = [
-        (content, quote) for _s, _a, klass, content, quote in _census_rows()
+        content for _s, _a, klass, content, _quote in _census_rows()
         if klass == "CONTENT_EXCLUDED_FORM"]
     assert len(excluded) == 7, len(excluded)
-    for content, _quote in excluded:
-        assert v2._value_slots_scaled(content) == (), content[:80]
-        assert (_ISO_DATE_FORM.search(content)
-                or _CLOCK_FORM.search(content)), content[:80]
     # 4. A value-free point is not a row at all.
     assert _retention_class("the team prefers intervals",
                             "the team prefers intervals") is None
