@@ -267,9 +267,11 @@ subsection) is maintained at HEAD, and two pins hold it there:
 `test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names` for
 `` `SYMBOL` (`file:line`) `` pointers, and
 `test_every_cited_line_in_this_section_still_carries_the_prose_it_describes` for
-the rest. A pointer that legitimately names a past commit marks it ("at
-`4f68a2aa7`"). Without that sentence the conventions look like one, and a reader
-who re-derives the stale half concludes the live half is stale too.
+`cache_eviction.py:<n>` pointers. Any OTHER bare `file.py:<n>` pointer in this
+subsection is a re-derivation duty, not a measured fact — stating it as held would
+claim coverage no test has. A pointer that legitimately names a past commit marks
+it ("at `4f68a2aa7`"). Without that sentence the conventions look like one, and a
+reader who re-derives the stale half concludes the live half is stale too.
 
 ⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,
 and the reason is measured: `:Document` occurs on **63** lines across **19**

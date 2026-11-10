@@ -53,7 +53,7 @@ _LABEL_CLAIM = re.compile(
 #: The POPULATION §5 states its figure over, read out of the count sentence itself.
 #: Without this, §5 could say `files under `tests/`` and stay green — measured: 43 passed
 #: and `substrate_map_check --check` CLEAN while the sentence claimed the `tortoise/`
-#: figure for `tests/`, which is several times larger than the one this pin measures. The adjacent
+#: figure for `tests/`, which is more than twice as large as the one this pin measures. The adjacent
 #: quoted `git grep` still carried `-- tortoise/`, so only the prose population was
 #: free to lie — and §5's own next sentence ("re-derives both numbers over the **same**
 #: population this sentence is stated in") asserts the very thing nothing read.
@@ -1704,7 +1704,7 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
         f"§5 states its `:Document` figure over {populations!r}, but this pin measures "
         f"`{_TRACKED_DIR}/` — the count and the file count are only true for the "
         f"population they were measured over, so naming a different one (e.g. "
-        "`tests/`, a population several times larger than the one this pin measures) "
+        "`tests/`, a population more than twice as large as the one this pin measures) "
         "makes the sentence false "
         "while every number here stays green. State `files under "
         f"`{_TRACKED_DIR}/``, or measure the population you name"
