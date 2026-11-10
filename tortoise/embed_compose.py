@@ -89,8 +89,14 @@ later lane:**
      ``tools/dod_5090_probe.py::WRITER_CENSUS``, and ``tortoise/embed_writer_register.py``
      declares the writers that are legitimately OUTSIDE the gate — ``create_point``
      is a GATED writer, so it carries NO declaration row in the register and no
-     census row (the register's own prose names it as gated), and ``graph-scripts/backfill_embeddings.py`` (below) is outside the
-     discovery walk entirely. This change gates one writer and no other.
+     census row (the register's own prose names it as gated). This change gates
+     one writer and no other.
+   * ``graph-scripts/backfill_embeddings.py`` re-encodes ``:Point`` rows from
+     ``text_prop: "content"`` and lives outside ``tortoise/``, so the discovery
+     walk (which scans ``tortoise/`` only) never sees it: it is OUTSIDE the
+     census population, not merely undeclared within it. An armed graph
+     therefore needs it to embed ``embeddingText or content`` before a backfill
+     may run — the fourth stated boundary, and gap (d) in ``.env.example``.
 6. **The truncation budget.** ``EMBED_WORD_BUDGET`` (512, the same cap
    ``embeddings._truncate_for_embedding`` applies at encode time) is spent
    HEAD-FIRST on the quote, and the names line is RESERVED out of it: the quote
