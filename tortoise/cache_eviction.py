@@ -925,7 +925,7 @@ def assess(
     # ⚠️ THIS IS THE SECOND, LOOSER CHECK, and it has a NARROW residual job the
     # arithmetic does not let it escape. The bound that matters is applied per population
     # in the loop above (:func:`population_resident_count`): the whole-graph total let a
-    # report claim 40x its own population (measured, #10976 comment 6689906625 /
+    # report claim 40x its own population (measured, #10976 comment 6689914601 /
     # `docs/evidence/10976-licence/`).
     #
     # ⛔ WHAT THIS CATCHES, EXACTLY — the operands are ``entry.nodes`` (the REPORT'S
@@ -1059,8 +1059,13 @@ def assess(
         }
     elif not eligible:
         # ⛔ THE REFUSAL. Over the bound and NOTHING is proven — so nothing may go.
-        # This is the correct answer today: #10593 + #7879 are open, so the record
-        # cannot serve, and a sweep would destroy the only copy of a node.
+        # This is the correct answer whenever NOTHING is proven: an unserved node has the
+        # graph as its only copy, so a sweep would destroy it (gate 3 asks per node).
+        # ⚠️ RECORD READINESS IS NOT THE REASON, and this comment said it was: `#10593`
+        # closed COMPLETED on 2026-11-06 (write-healthy, measured non-vacuously), so the
+        # record CAN serve; what is missing is a CLEAN parity census for the graph being
+        # swept. `#7879` (the epic) remains open, which is a statement about the record's
+        # role as system of record, not about whether it can serve a node today.
         verdict = "REFUSED"
         plan = {
             "evictable": [],
@@ -1167,8 +1172,9 @@ def load_parity_report(path: str, *, graph_name: str) -> ParityReport:
     # gate (verdict PLAN, exit 2, `plan["evictable"]` naming N nodes) that a real report
     # with an unrecognised name could not — the exact inversion this check's own comment
     # names. `tools/turn_parity_census.py` now emits `instrument`, so the honest path
-    # reopens by itself; while #10593/#7879 are open this direction costs nothing,
-    # because every verdict today is a refusal.
+    # reopens by itself; while no CLEAN census report exists for the graph being swept
+    # this direction costs nothing, because the licence is empty either way (gate 2 —
+    # and note the verdict may still be `CLEAN`, which is its BYTE state, not a licence).
     instrument = payload.get("instrument")
     if instrument is None:
         raise CacheReadError(

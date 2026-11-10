@@ -1978,7 +1978,7 @@ def test_the_cli_PRINTS_the_licence_on_a_CLEAN_verdict(monkeypatch, capsys, tmp_
 
 
 # --------------------------------------------------------------------------- #
-# Round-5 findings (#10976 owner residual, comment 6689906625).
+# Round-5 findings (#10976 owner residual, comment 6689914601).
 # --------------------------------------------------------------------------- #
 
 #: The shape the defect was measured in: 25,000 nodes resident, only 500 of them in
@@ -2316,9 +2316,14 @@ def test_a_row_multiplying_count_statement_is_a_documented_residual():
 
     ⛔ WHY THIS IS THE IRREDUCIBLE BAND, and not a checker someone forgot to write:
     refusing on the MIRROR's count vs the graph total (`resident_population >
-    node_total`) is not sound — it cannot tell an inflated statement from a live cache
-    that gained nodes between the two reads (the total is read first), so it would
-    false-block. Refusing on `resident_population > report.total_nodes` is worse: the
+    node_total`) is not sound — it cannot tell an inflated statement from a graph that
+    LOST nodes between the population read and the total read (the total is read AFTER
+    every population count, `cache_eviction.py`'s `resident_total = node_total(graph)`),
+    so it would false-block. Only removals can make `resident_population > node_total`
+    in that order; a cache that GAINED nodes raises the total with the population, so
+    gains cannot produce the false block this docstring used to name — the direction is
+    stated once, correctly, in `cache_eviction.py`'s backstop comment. Refusing on
+    `resident_population > report.total_nodes` is worse: the
     report's total is frozen at measurement time, so it would refuse every legitimate
     growth. That is why the residual rests on the identity pin
     (`test_the_population_count_mirrors_the_instrument`), which binds the mirror to the

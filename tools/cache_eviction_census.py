@@ -360,8 +360,10 @@ def main(argv: list[str] | None = None) -> int:
         # count is compared against the population's OWN resident count
         # (`POPULATION_RESIDENT_COUNT`), so a stale report claiming more nodes than the
         # population now holds is demoted. The whole-graph over-count check
-        # (`entry.nodes > resident_total`) remains as the looser backstop for a bad
-        # mirror (review P2 on #11097; #10976 residual comment 6689906625). Stated in
+        # (`entry.nodes > resident_total`) remains as a one-integer backstop whose only
+        # reachable trigger is read skew — NOT a second detector for a bad mirror, since
+        # a subgraph count cannot exceed the graph total (review P2 on #11097; #10976
+        # residual comment 6689914601). Stated in
         # `--parity-graph`'s help as well, where the operator reads it at the moment of
         # choosing the flag.
         return _usage_error(
