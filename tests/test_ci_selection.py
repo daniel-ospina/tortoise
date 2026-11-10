@@ -1341,6 +1341,24 @@ def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
     assert "test_website_static.py" in r["test_files"], (
         f"{_witness} does not select test_website_static.py")
     assert r["slow_run"] is False, f"{_witness} must not pull a slow leg"
+    # ⛔ AND THE APP ORIGIN'S THREE ICON FILES, which no derivation above can reach: the
+    # page-derived population globs `website/*.html`, and the opened-file derivation
+    # resolves `self.CONSTANT = "…"` shapes — a `ICON_FILES = ("favicon.ico", …)` TUPLE
+    # is neither. MEASURED before these entries:
+    # `select(["website/apps/dashboard/public/favicon.ico"])` -> `surfaces: []`, so
+    # re-exporting the app's icon merged green with the cross-deployment byte comparison
+    # absent (#11407 / #11318 silent-drop class).
+    for _app_icon in ("favicon.ico", "favicon.png", "apple-touch-icon.png"):
+        _witness = f"website/apps/dashboard/public/{_app_icon}"
+        assert (REPO / _witness).is_file(), f"the app-origin icon this test guards is gone: {_witness}"
+        _r = _sel([_witness])
+        assert _r["surfaces"] == ["onboarding"], (
+            f"{_witness} selects {_r['surfaces']} — the icon contract opens its bytes, so a "
+            "change to it must select the guard that compares it with the marketing copy")
+        assert "test_website_static.py" in _r["test_files"], (
+            f"{_witness} does not select test_website_static.py")
+        assert _r["slow_run"] is False, f"{_witness} must not pull a slow leg"
+
     for changed in sorted(derived | opened):
         assert (REPO / changed).is_file(), f"the asset this test guards is gone: {changed}"
         r = _sel([changed])

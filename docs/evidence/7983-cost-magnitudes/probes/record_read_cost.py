@@ -34,9 +34,15 @@ deliberately NOT planted**, so the per-tenant footprint this reports is a
 Run (throwaway container; the DSN is not a product endpoint):
 
     docker run -d --name rho7983-pg -e POSTGRES_PASSWORD=rho -e POSTGRES_DB=record \
-        -p 127.0.0.1:15499:5432 postgres:16
+        -p 127.0.0.1:15499:5432 pgvector/pgvector:pg16
     uv run --with psycopg2-binary python \
         docs/evidence/7983-cost-magnitudes/probes/record_read_cost.py
+
+⛔ `pgvector/pgvector:pg16`, NOT `postgres:16` (#11642): the record's schema now
+carries `20261109000001_record_embedding_vector.sql`, whose first statement is
+`CREATE EXTENSION vector` — on a plain image this container cannot apply the
+list this probe is pinned to, and every run dies at APPLY-MIGRATIONS with
+`extension "vector" is not available`.
 """
 
 from __future__ import annotations
@@ -111,6 +117,17 @@ MIGRATIONS = [
     # de-TOASTing header rather than a type change (jsonb carries a 1-byte version
     # tag on top) — small, but this probe's whole output is small differences.
     "20261102000002_record_point_search_keys_text.sql",
+    # #11642 / #4051 V1 — the vector move. Listed because the list is pinned to
+    # `RECORD_MIGRATIONS` in EQUALITY (#9550) and the figures this probe publishes
+    # must describe the SHIPPED schema. ⚠️ It needs `CREATE EXTENSION vector` to
+    # apply — the reason CI's postgres legs run `pgvector/pgvector:pg16`; on a
+    # plain `postgres:16` this list reds on `extension "vector" is not available`
+    # before a row is read. ⚠️ Its three GENERATED `embedding_vec
+    # public.vector(384)` columns are STORED, so they add row width: the §17.4
+    # row-width figures this probe publishes are due a re-measurement against a
+    # schema that carries them, and that is a measurement to re-run — not a list
+    # entry to trim.
+    "20261109000001_record_embedding_vector.sql",
 ]
 
 #: §17.4.1's published rates, restated so the arithmetic below is auditable and
