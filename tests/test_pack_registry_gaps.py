@@ -1910,8 +1910,10 @@ class TestCoreHierarchy:
         `expand_kind("core:team")` is spared at this head, but NOT by the guard:
         the closure takes one round, so it reaches `core:team → team →
         synth:team` and never `synth:team → x:synth:team`. Both spellings are
-        asserted below anyway — a future fixpoint would widen `core:team` too,
-        and that leg is what would catch it.
+        asserted below anyway — a future fixpoint that ALSO dropped the guard
+        would widen `core:team` too, and that leg is what would catch it. (A
+        fixpoint alone changes nothing: with the guard in place this loop is
+        already at its fixpoint after one round — measured.)
 
         `equivalentTo` only has to CONTAIN ':' (an unresolved target is a warning
         and the pack stays loaded), so this shape is accepted by the registry.
