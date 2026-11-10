@@ -27,7 +27,7 @@ reading for a value whose TAIL is unreadable (``2023-05-20 02:21 PDT``,
 ``2023/05/20 (Sat) 02:21 (approx)``, ``2023-05-20T+05:00``) — an unparseable tail
 means the exact INSTANT is unknown, not that the stated DAY is.
 
-⚠ THREE DELIBERATE EXCLUSIONS from that union, all of them the fabricated-day
+⚠ FOUR DELIBERATE EXCLUSIONS from that union, all of them the fabricated-day
 class this module exists to end, stated so a later reader does not "restore the
 union" by re-adding them:
 
@@ -45,7 +45,17 @@ union" by re-adding them:
   only a WELL-FORMED offset (``[+-]\\d{2}`` and up), because a loose gate is the
   same truncation artifact wearing an offset's clothes. No in-repo writer emits
   any of them; if one ever does, widen the gate to ``[+-]\\d{1,2}`` and say so
-  here, rather than letting the prefix reading guess a day.
+  here, rather than letting the prefix reading guess a day;
+* a DASHED / slashed date with a DIGIT immediately after the day field
+  (``2023-05-201``, ``2023-05-2012:00``, ``2023-05-20123``) — same class, other
+  side: ``origin/main`` cut at ten characters and dated the day ``20``, but the
+  text cannot say whether ``201`` is a three-digit day or day ``20`` with a
+  glued ``1``. This is deliberately the OTHER half of the three-digit-day
+  exclusion above, which is why the ``(?!\\d)`` guard in
+  ``_CALENDAR_SHAPE_RE`` is load-bearing: loosening it to keep ``2023-05-201``
+  as 2023-05-20 would also re-date ``2023-05-072`` as 2023-05-07, i.e. re-add
+  the fabrication. A ``HH:MM``-suffixed spelling that genuinely needs the day
+  gets its own explicit arm, never a loosened guard.
 
 ⛔ MONTH GRANULARITY IS NOT COERCED. A value naming only ``YYYY/MM`` (or
 ``2026-09``) has NO day, and this resolver returns ``None`` rather than
@@ -217,7 +227,11 @@ _INSTANT_RE = re.compile(
     r"(?:\s*\([A-Za-z]{2,9}\))?"
     r"(?:[T\s]+(?P<hour>\d{2})"
     r"(?::(?P<minute>\d{2})(?::(?P<second>\d{2})(?:[.,](?P<fraction>\d+))?)?)?)?"
-    r"\s*(?P<offset>[Zz]|[+-]\d{2}(?::?\d{2}(?::?\d{2})?)?)?\s*\Z"
+    # the OFFSET's own fractional seconds are part of the offset grammar, not
+    # the time's: ``+05:00:00.5`` is an offset ``fromisoformat`` accepts, and a
+    # grammar that refused it fell through to the prefix reading — stating the
+    # WRITTEN day where this seam must truncate in UTC (cycle 6, finding 1).
+    r"\s*(?P<offset>[Zz]|[+-]\d{2}(?::?\d{2}(?::?\d{2}(?:[.,]\d+)?)?)?)?\s*\Z"
 )
 
 #: The same value with a BASIC-format (colon-less) time — ``2023-05-05T0221+05``,
@@ -235,7 +249,7 @@ _BASIC_TIME_INSTANT_RE = re.compile(
     r"(?:\s*\([A-Za-z]{2,9}\))?"
     r"[T\s]+(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})?"
     r"(?:[.,](?P<fraction>\d+))?"
-    r"\s*(?P<offset>[Zz]|[+-]\d{2}(?::?\d{2}(?::?\d{2})?)?)?\s*\Z"
+    r"\s*(?P<offset>[Zz]|[+-]\d{2}(?::?\d{2}(?::?\d{2}(?:[.,]\d+)?)?)?)?\s*\Z"
 )
 
 #: The date-only spellings ``date.fromisoformat`` accepts beyond the dashed
@@ -271,11 +285,11 @@ _COMPACT_DATETIME_RE = re.compile(
 #: instant) and what ``origin/main`` returned.
 _COMPACT_DATE_OFFSET_RE = re.compile(
     r"^(?P<date>\d{8}|\d{4}-?W\d{2}(?:-?\d)?)"
-    r"(?P<offset>[Zz]|[+-]\d{2}(?::?\d{2}(?::?\d{2})?)?)$")
+    r"(?P<offset>[Zz]|[+-]\d{2}(?::?\d{2}(?::?\d{2}(?:[.,]\d+)?)?)?)$")
 
 _OFFSET_RE = re.compile(
     r"^(?P<sign>[+-])(?P<hours>\d{2})"
-    r"(?::?(?P<minutes>\d{2})(?::?(?P<seconds>\d{2}))?)?$")
+    r"(?::?(?P<minutes>\d{2})(?::?(?P<seconds>\d{2})(?:[.,]\d+)?)?)?$")
 
 #: A pure-number string in the SECONDS-epoch range (9-10 digits, optional
 #: fraction). 8 digits is a compact date; 11+ is a millisecond epoch. The sign
@@ -405,6 +419,18 @@ def _string_instant(s: str) -> datetime | None:
     d = _date_only_shape(s)
     if d is not None:
         return datetime(d.year, d.month, d.day, tzinfo=UTC)
+    # ⛔ The instant view must accept the SAME shape set as the day view
+    # (cycle 6, finding 3): ``_string_date`` carries this arm because
+    # ``origin/main``'s assembly parser read the family, and this module's own
+    # docstring points an ordering consumer here. Without it
+    # ``calendar_datetime("20230520T02:21:00Z")`` is None while
+    # ``calendar_date`` dates it — a later consumer would read a dated family as
+    # un-orderable.
+    if _COMPACT_DATETIME_RE.match(s) is not None:
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except ValueError:
+            return None
     return None
 
 

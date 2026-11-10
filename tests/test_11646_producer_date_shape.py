@@ -649,3 +649,32 @@ def test_the_reader_never_receives_a_full_timestamp_for_a_day_precision_bound():
     # text that names no day survives whole, never as a fragment
     assert _display_bound("not-a-date-at-all", "valid_from", hit) == (
         "not-a-date-at-all")
+
+
+def test_an_offset_with_fractional_seconds_reaches_the_utc_truncation():
+    """Cycle 6, finding 1. ``datetime.fromisoformat`` accepts an offset whose
+    SECONDS carry a fraction (``+05:00:00.5``), so the old grammar fell to the
+    prefix reading and stated the WRITTEN day at the assembly boundary while
+    ``retrieval._display_bound`` stated the UTC day — one stored instant, two
+    days, decided by which seam read it. The offset grammar now carries its own
+    fraction and the truncation applies again."""
+    value = "2023-05-20T02:21:00+05:00:00.5"
+    assert _norm_date(value) == date(2023, 5, 19)      # UTC truncation
+    assert calendar_date(value) == date(2023, 5, 20)   # the written day
+    assert calendar_datetime(value) is not None
+    # and the reader is told the same day the spine used, not the other one
+    from tortoise.retrieval import _display_bound
+    assert _display_bound(value, "valid_from", {"id": "p"}) == "2023-05-19"
+
+
+def test_the_instant_view_accepts_every_shape_the_day_view_dates():
+    """Cycle 6, finding 3. ``calendar_datetime`` is documented as the view an
+    ORDERING consumer wants, so a family the day view dates must not be
+    un-orderable there — otherwise a later consumer silently drops rows this
+    module says are dated."""
+    assert calendar_date("20230520T02:21:00Z") == date(2023, 5, 20)
+    assert calendar_datetime("20230520T02:21:00Z") is not None
+    assert calendar_date("2023-W43-2T11:00:00") == date(2023, 10, 24)
+    assert calendar_datetime("2023-W43-2T11:00:00") is not None
+    # a stated-but-impossible offset is still refused, in BOTH views
+    assert calendar_datetime("2023/05/20T02:00:00+25:00") is None
