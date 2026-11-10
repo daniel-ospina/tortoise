@@ -2119,15 +2119,26 @@ def run_bm25_query(
             })
     else:
         def _corpus_text(row) -> str:
-            # The family's PRE-#11682 text, unchanged here: the coalesced
-            # content/_searchText arm ∪ ``search_keys``. ⚠️ That is one field
-            # WIDER than the `:Source` label's declared FTS set
-            # (``("Source", ["_searchText"])``): ``search_keys`` is not one of
-            # its fields. It is INERT today — no Source writer sets
-            # ``search_keys`` (it is absent from ``_Source_NODE_PROPS`` /
-            # ``_SOURCE_EXTRA_PROPS``) — so narrowing it would be a behaviour
-            # change with no observable effect, and it is named here rather
-            # than quietly claimed as parity.
+            # The family's PRE-#11682 text, unchanged by #11682: the
+            # coalesced content/_searchText arm ∪ ``search_keys``.
+            # ⚠️ That is WIDER than the `:Source` label's declared FTS set
+            # (``("Source", ["_searchText"])``) and the extra fields are NOT
+            # inert, so this is a named pre-existing residual rather than
+            # parity claimed by omission (#11706 review):
+            #   * ``search_keys`` is caller-reachable on a ``:Source``: a
+            #     document IS a :Source (D10) and ``_upsert_document`` passes NO
+            #     ``allow_keys`` on purpose (``test_create_document_persists_
+            #     arbitrary_props``, #228), so ``create_document(...,
+            #     search_keys="…")`` persists it and THIS arm would score text
+            #     the label's own FTS index cannot see. (``_upsert_source``'s
+            #     closed ``_SOURCE_EXTRA_PROPS`` does exclude it — that door
+            #     only.)
+            #   * ``content`` is retired on the document route
+            #     (``_DOC_RETIRED_KEYS``), so it is the ``_searchText`` slot in
+            #     practice rather than a second extra field.
+            # Narrowing either one is a behaviour change (a recall loss for such
+            # documents), which is why #11682 did not: it adds ``quote`` for
+            # Points and leaves this arm byte-identical.
             return index_text(row[1], row[2])
 
     id_field = "url" if entity_type in ("source", "document") else "id"
