@@ -101,10 +101,12 @@ def test_live_skill_exists_at_the_defined_path():
     # already occurs once, at the disclosure, so reverting all ten instruction sites
     # left such an assertion GREEN (review finding F1 on PR #11719 — the same
     # NAME-is-weaker-than-the-CALL class this file documents at #10914 below).
-    assert content.count("tortoise_health") == 1, (
+    _retired_hits = [ln for ln in content.splitlines() if "tortoise_health" in ln]
+    assert len(_retired_hits) == 1 and "retired" in _retired_hits[0], (
         "the served document must name the RETIRED `tortoise_health` only in its "
-        f"retirement disclosure; found {content.count('tortoise_health')} mention(s). "
-        'The verify call is tortoise_graph_overview(section="health") (#5439)')
+        f"retirement disclosure; found {len(_retired_hits)} line(s) naming it: "
+        f"{_retired_hits[:3]}. The verify call is "
+        'tortoise_graph_overview(section="health") (#5439)')
     assert '1. Call `tortoise_graph_overview(section="health")`' in content, (
         "the §4 verify step must name the ADVERTISED health section — a retired "
         "name is absent from `tools/list`, so a client that honours its granted "
