@@ -29,7 +29,7 @@ note **or a justified skip citing the brief**. Both are **justified skips**, cit
 | **Architecture** — which transport, and does the door contract change the boundary? | is the acceptance's *door* in scope, or assumed? | **justified skip** — `01-research-brief.md` §Open decisions → the two-option transport table (what each proves / does not), plus §Tech Stack on declared-ontology prompting and structural validation. The boundary question is answered there; no further external query is warranted for an internal transport choice. |
 | **Ontology** — how is `hasPart` read, and does the direct-vs-transitive distinction change what A1 can promise? | does the rollup need a direct-part relation ONTOLOGY lacks? | **justified skip** — `01-research-brief.md` §UX Pattern Research (the direct-vs-transitive finding, three sources) + §Assumptions Register **A-g (rejected)**. The finding is that ONTOLOGY §3.7's inverse-traversal model *can* answer "part of" but **conflates immediate with inherited parts**; the boundary consequence is recorded in §Scope Boundaries below (we do not add a `partOf` edge; we constrain the query's reading). |
 
-> `> **Findings date:** 2026-11-05 — provenance: both notes derive from `01-research-brief.md` (queries of
+> **Findings date:** 2026-11-05 — provenance: both notes derive from `01-research-brief.md` (queries of
 > 2026-11-05), not from new queries. Dedup rule respected: no question is asked that the brief already answers.
 
 **Two axes rate `low`** (UX, Accessibility) — no axis-research note required (skill: only `medium+`).
@@ -63,22 +63,22 @@ note **or a justified skip citing the brief**. Both are **justified skips**, cit
    customer-visible readers) **or** the honest finding that it is not, with the reason — *"which of
    `#4889` / 'still empty' is true"*.
 5. **A4 evidence — the declared labels appear on the right nodes.** **A4, in plain words.** Every node in the graph is a claim, a thing, or an event, and each carries a label saying
-what kind it is (`statement`, `plan`, `goal`, `workItem`, `code`, `decision`, `deployment`). The core ontology declares
-those labels and packs add more — and **those labels are what decide what may connect to what**. The August decision
-was never "one kind of thing": it was *claims carry `statement`; plans, goals and decisions belong on the thing and
-event layers.* So the criterion is:
+    what kind it is (`statement`, `plan`, `goal`, `workItem`, `code`, `decision`, `deployment`). The core ontology declares
+    those labels and packs add more — and **those labels are what decide what may connect to what**. The August decision
+    was never "one kind of thing": it was *claims carry `statement`; plans, goals and decisions belong on the thing and
+    event layers.* So the criterion is:
 
-> after a capture, **things and events carry the labels the ontology declares for them** — a plan is labelled `plan`,
-> a decision is labelled `decision` — and we report that **per layer** (things, events, claims) rather than as one
-> blended percentage, so a failing layer cannot hide in an average.
+    > after a capture, **things and events carry the labels the ontology declares for them** — a plan is labelled `plan`,
+    > a decision is labelled `decision` — and we report that **per layer** (things, events, claims) rather than as one
+    > blended percentage, so a failing layer cannot hide in an average.
 
-Measured as **appears + labelled**, with the percentage reported rather than chased: the declared kinds the corpus
-should produce actually appear at all, and things/events are not sitting unlabelled. A coverage percentage over
-unknown corpora is a number that gets optimised instead of understood.
+    Measured as **appears + labelled**, with the percentage reported rather than chased: the declared kinds the corpus
+    should produce actually appear at all, and things/events are not sitting unlabelled. A coverage percentage over
+    unknown corpora is a number that gets optimised instead of understood.
 
-⚠️ **This replaces "attribute the typed population, no target"**, which counted labels on the *claim* layer — the one
-layer that is deliberately uniform — and therefore could not fail. **The D3 question it was blocked on is answered**
-(owner, 2026-11-09: classification is on by default; the declared kinds are the point), so A4 has a target now.
+    ⚠️ **This replaces "attribute the typed population, no target"**, which counted labels on the *claim* layer — the one
+    layer that is deliberately uniform — and therefore could not fail. **The D3 question it was blocked on is answered**
+    (owner, 2026-11-09: classification is on by default; the declared kinds are the point), so A4 has a target now.
 6. **E1 + E2** — the registered volume criterion and the value-survival / no-fusion guard. ⚠️ **Corrected
    twice:** not "same run" (two lanes are involved) and **not "same corpus as 1–5"** — the E-row denominators
    are properties of the **fixture** (`value_bearing_units: 14`, `planted_units: 90`,
@@ -90,7 +90,7 @@ layer that is deliberately uniform — and therefore could not fail. **The D3 qu
    acceptance run through a **named transport** (see §Scope Decisions).
 9. **Reporting** — every number lands on `#7949` as evidence, with its corpus, command and head sha.
 
-9. **E6 evidence** — the **sixth** acceptance criterion, registered on this epic by **`#11083`** (2026-11-07): for
+10. **E6 evidence** — the **sixth** acceptance criterion, registered on this epic by **`#11083`** (2026-11-07): for
    **each installed pack**, every declared relation whose endpoints both occur in the corpus is **materialised**, and
    a census reports **declared → writable → written** with the delta named. ⚠️ It was **missing from this pipeline's
    own artifacts** until 2026-11-07 (they were built on E1–E5 + A1–A5). Its *writable* column is `#11484`'s, its
@@ -195,6 +195,7 @@ Written **before** journeys, as the skill requires. Behavioural, not presentatio
 without knowing an interface.
 
 ### E2E-1: the declared hierarchy reaches the graph, and a rollup answers
+
 **Given:** a registered corpus that exercises one pack's declared hierarchy (dev's `Theme→Epic→Issue`), and a
 before-census showing **0** object→object edges of any type
 **When:** the whole pipeline runs through the named transport and the pack is installed on the graph
@@ -205,6 +206,7 @@ non-empty answer that matches **hand-labelled ground truth**
 part where direct is claimed
 
 ### E2E-2: attaching instead of minting, with the facts intact
+
 **Given:** a corpus whose statements reference things by definite description (`the <X>`)
 **When:** the pipeline runs
 **Then:** each candidate is recorded as **attached / minted / held**, and the `the <X>` share of Objects falls
@@ -212,6 +214,7 @@ part where direct is claimed
 is absent from the graph without a recorded refusal
 
 ### E2E-3: a claim joins a chain, and crosses a batch boundary
+
 **Given:** two sessions where the second refers to something the first recorded
 **When:** both run through the same graph
 **Then:** the statement from the second session carries an IMPL or NAND (it is not one of the unlinked 9,910)
@@ -221,6 +224,7 @@ is absent from the graph without a recorded refusal
 evidence
 
 ### E2E-4: the subject layer answers, or the reason it cannot is named
+
 **Given:** a corpus with agent/team activity
 **When:** the pipeline runs
 **Then:** `Subject` nodes exist and at least one of `aboutSubject` / `memberOf` / `ownedBy` / `managedBy` is
@@ -230,6 +234,7 @@ non-zero
 is not the graph measured — and `#4889` is confirmed or **reopened** accordingly
 
 ### E2E-5: the numbers are reproducible from the door
+
 **Given:** the pre-registered criterion set, extended with the A-rows
 **When:** the census runs twice from the same head, same corpus, same transport
 **Then:** every **deterministic census** quantity is **identical** across the two runs — edges by type and
@@ -249,6 +254,7 @@ another lane.
 **And:** the same corpus through the **other** transport is shown to **disagree** — the negative control
 
 ### E2E-6: the volume win cannot be bought with lost facts
+
 **Given:** the A1/A2/A3 mechanisms are **shipped by their owners** (`#11001`/`#10997`/`#10998`+`#10999`) and armed
 in the run
 **When:** the registered volume and guard criteria are scored on the run named by D-S1's matrix
@@ -257,6 +263,7 @@ in the run
 **And:** if E2a fails, the epic is **blocked** even though every other number improved
 
 ### E2E-7: the two closed claims re-derive at this head
+
 **Given:** the planted-operator corpus and the **unpatched** extractor (the existing test monkeypatches
 `extract_session_v2`, so today no proof exists)
 **When:** the operator measurement runs at this head
@@ -268,6 +275,7 @@ shipped verdict table, `5/15` corrected by `E1-E5-PROOFS.md`) so the stale one c
 id with the ratio/floor asymmetry recorded (never reported as green)
 
 ### E2E-8 · things and events carry their declared labels
+
 **Given:** the fleet graph at C1's named head, and the labels the core ontology plus the installed packs declare
 **When:** the read-only census runs over that head (no capture, no spend)
 **Then:** **things and events carry the labels the ontology declares for them** — a plan is labelled `plan`, a
@@ -420,7 +428,7 @@ and it is cheap to close."*
 
 ## Step 5 (gate) — Ready for approval
 
-```
+```text
 ## Epic Scope Ready for Review
 
 **Scope:** IN — A1/A2/A3/A5 evidence, A4 per-layer label coverage (**appears + labelled**, the percentage

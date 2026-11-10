@@ -31,7 +31,7 @@ The owner's question (2026-11-04):
 
 Measured on the hosted fleet graph `live-v4` that night, it does neither:
 
-```
+```text
 object→object edges:      []              ← ZERO, of every relation type
 objects:                  5,314           (dev:code 1,030 · core:tool 646 · core:workflow 237 …)
 claims attached:          23,814 aboutObject edges   ← the last hop works
@@ -159,6 +159,7 @@ fleet captures land in `_extract_session_v2` → `extract_session_v2` (`tortoise
 `_extract_session_llm`). ⚠️ **The brief's premise — "today the fleet writes through the legacy rule
 extractor" — is false at this head.**
 **Seam ledger, corrected** (the first version listed a default-**ON** seam as default-off):
+
 - genuinely **default-off**: `TORTOISE_VET`, `TORTOISE_CLASSIFY_LATER`, `TORTOISE_S2_DECISION_SEAM`,
   `TORTOISE_VALUE_GATE`;
 - ⚠️ **default-ON**: `TORTOISE_S4_DELTA` (`extractor_v2.py:1141` is
@@ -216,7 +217,7 @@ was added after a decompose-gate review caught the lane about to duplicate all o
 - ⛔ **The measured verdict, read from the SHIPPED table — not from a summary of it.**
   `docs/evidence/7949-capstone/capstone-measured-9152448d.log:105-111`:
 
-  ```
+  ```text
   E1 | BLOCKED | unmeasured | e1-e2.log          | #5333
   E2 | BLOCKED | unmeasured | e1-e2.log          | #10360
   E3 | RED     | 157/397    | capstone-measured-9152448d.log | #9736
@@ -255,6 +256,7 @@ was added after a decompose-gate review caught the lane about to duplicate all o
     green.
 
 ⇒ **Three consequences the decomposition must honour:**
+
 1. **Do not rebuild the instrument.** Extend it. (C1)
 2. **Use the registered thresholds, not the epic body's prose.** `4/4` is stale; E4 is `15 of 15`. (C9)
 3. **The registered corpus is a fixture, and one arm runs `m2`** — the exact path R6 says proves nothing
@@ -313,6 +315,7 @@ denominator decision.**
 | all rows (contract) | **C2** | the fixture-corpus / `m2`-arm reconciliation the registered record leaves open |
 
 ### C1 · Extend the existing instrument; register the A-rows
+
 **Serves:** all ten rows (the instrument). **⛔ Not a new census, not a new pre-registration.**
 **Produces:** (a) the **A-row criteria** added to the pinned registration's schema (`#9075`'s
 `capstone-preregistration/v1` — a versioned amendment with its own `document_sha256`, the way `#9736`
@@ -328,6 +331,7 @@ refuses a row whose `blocked_by` has CLOSED (V12).
 **Not this child:** a second census, a second registration, or a new gate.
 
 ### C2 · The door, and the fixture-corpus reconciliation
+
 **Serves:** all ten rows (the contract the brief calls out). **Produces:** the door named in code
 (`_capture_lane()` → `_extract_session_v2`, §2 R6), the corrected seam ledger (R6), and — the sharp part
 — **a decision about the registered corpus**: it is a **fixture** (`tests/eval/write_path`, pinned by
@@ -342,6 +346,7 @@ extended census can read; the negative control's measured difference; and the co
 in the registration, not in prose.
 
 ### C3 · A1 — the EVIDENCE that the pack's declared relations became edges, and that a rollup answers *(mechanism owned by `#11001`; E3's anchor obligation ROUTED to `#9736`, not carried)*
+
 **Corpus:** one whose content exercises a **named** pack's hierarchy (dev's `Theme→Epic→Issue`, whose
 predicates are `decomposesInto`/`hasPart`).
 **Produces:** the **evidence** half — the registered A1 criterion (C1), the before/after census through the
@@ -365,6 +370,7 @@ not to take one.
 (ONTOLOGY §3.7: inverse traversal covers "part of").
 
 ### C4 · A2 + E1 — S3 attaches instead of minting
+
 **Corpus:** the definite-description population (`the <X>`, 62.3 % of Objects; 37.7 % referenced by
 exactly one point — `#4894`'s audit).
 **Produces:** the **attach rate** (attached / minted / **held**, three buckets) as a first-class reported
@@ -384,6 +390,7 @@ lesson stands — `execute_embed({})` must not be the suppression (it is the sol
 supersessions and chain notes).
 
 ### C5 · A3 — the EVIDENCE that both S5 jobs reached the graph *(mechanism owned by `#10998`/`#10999`)*
+
 **Produces:** the **measurement** of both jobs — chain-join rate before/after, each job reported
 separately, the cross-batch link observed in the graph and a dependent rollup answered — plus the registered
 A3 criterion. ⛔ **The jobs themselves are `#10999` (Job 1) and `#10998` (Job 2)**; this child implements
@@ -396,6 +403,7 @@ fan-out respected; C8 holds.
 `connections_incomplete` recorded), job 2 **FAIL-CLOSED on the write of the affected item** (`HOLD`).
 
 ### C6 · A5 — Subjects are populated
+
 **The contradiction to adjudicate:** `#4889` ("the Subject layer is unpopulated in production") is
 **CLOSED**, and the owner measured **26 Subjects against 19,300 points**. One of those is false.
 **Produces:** the binder's attach rate (`bind_point_subjects`, `tortoise/subject_binding.py:341`, called
@@ -408,12 +416,14 @@ corpus, or the graph served is not the graph measured — are decided by evidenc
 or the honest finding that the corpus has no bindable subjects, recorded as such (**not** a pass).
 
 ### C7 · A4 — typing (⛔ BLOCKED on the D3 reopen)
+
 **Filed because the measurement is legitimate; no target may be set.** **Produces:** the provenance of
 today's **109 typed points** (which writer — `extractor.py::_classify_point_kind` vs the v2 lane) and the
 typed/`statement`/**NULL** shares. **Decides nothing.** Target: 100 % attribution, and a pointer to the
 D3 answer's home before any numeric target exists.
 
 ### C8 · E2 (and E1 non-regression) — the guard
+
 **The only child that can falsify C3/C4/C5.** **Operates on the REGISTERED criteria** — **E2a `≥ 13 of
 14`**, **E2b fusion `≤ 0.05`** — and must state that the row is currently **BLOCKED/unmeasured**
 (`#10360`: no committed artifact carries the registered denominators), reporting the **1/14** (flags-on;
@@ -425,6 +435,7 @@ not present it as its own bar; (ii) **E1's movement belongs to C4**, so this chi
 **non-regression** arm only.
 
 ### C9 · E4 + E5 — re-derive both stale bars
+
 **E4's registered bar is `= 15 of 15`** (`e4_denominator: 15`), not the epic body's `4/4` — that figure
 is the `#2552`-era comparable (`0/4 → 4/4`), reported as history, never as the threshold. ⚠️ **Two E4
 figures are in the tree and both are named:** `2/15` in the shipped verdict table and **`5/15`** in
@@ -477,6 +488,7 @@ behaviour.
 A4 ("0.6 % typed is the ceiling the capstone must beat") points **opposite** to D3. A later owner ruling
 may reverse an earlier one (§16.3/O4) — but the reversal must be recorded where the next lane reads it.
 **The fork:**
+
 - **(a)** A4 **overrides** D3 — typed claims must rise above 0.6 %. Then the decision home (`#1022`) and
   `ONTOLOGY.md` §5 each carry an `OVERRIDES:` line, and C7 gains a numeric target.
 - **(b)** A4 was aimed at `#4432`'s docs-vs-code drift (`ONTOLOGY.md` says statement-only while
