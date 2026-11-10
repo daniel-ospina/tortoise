@@ -144,7 +144,20 @@ def test_live_skill_exists_at_the_defined_path():
         f"name across {len(_retired_hits)} line(s): {_retired_hits[:3]}. The "
         f"disclosure sentence is {_disclosure!r}. "
         'The verify call is tortoise_graph_overview(section="health") (#5439)')
-    assert '1. Call `tortoise_graph_overview(section="health")`' in content, (
+    # ⛔ THE VERIFY PIN IS WRAP-INSENSITIVE TOO, for the same reason the two
+    # assertions above are (review finding on `f36e0a5abb`, P3 — measured there
+    # before this was written). It was `in content`, a raw-text, line-shaped pin
+    # sitting three lines under a comment stating that pins are matched against
+    # the whitespace-NORMALISED document "so re-wrapping the paragraph cannot red
+    # a correct document". Measured: re-wrapping §4's step the way it renders —
+    # "1. Call" / "   `tortoise_graph_overview(section=\"health\")` (MCP tool, …)"
+    # — leaves the document CORRECT and reds this pin. A false block on true prose
+    # trains the next author to delete the pin instead of keeping the order (the
+    # #3429 failure this file already records below). `_flat` is in scope from
+    # above, so the fix is the haystack: the rendered `1. Call …` prefix is kept,
+    # which is what makes it non-vacuous — the ChatGPT disclosure carries the bare
+    # call string, but it does not carry the imperative.
+    assert '1. Call `tortoise_graph_overview(section="health")`' in _flat, (
         "the §4 verify step must name the ADVERTISED health section — a retired "
         "name is absent from `tools/list`, so a client that honours its granted "
         "tool list has no function to call (#5439)")
