@@ -7420,8 +7420,9 @@ def _writable_id(val) -> bool:
     ``_project_record_view``) all use ``_writable_container_id`` — this
     predicate PLUS the blank clause, i.e. the same owner, so a journal replay
     and a sidecar restore cannot disagree — while the caller-facing doors (the
-    SDK's ``capture_session`` / ``commit_session`` and the hosted
-    ``SessionRequest`` boundary) use ``tortoise.ids.session_id_refusal``, where
+    SDK's ``capture_session`` / ``commit_session``, the hosted ``SessionRequest``
+    boundary and, since #8290, ``commit_schema.CommitPayload``) use
+    ``tortoise.ids.session_id_refusal``, where
     a caller can be told WHY. ⚠️ That list is the whole replay surface: a new
     carrier outside it is ungated by construction, so add it here AND in
     ``tests/test_9599_blank_session_id.py``'s docstring. The blank-NAME class

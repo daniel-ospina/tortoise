@@ -1,4 +1,4 @@
-// tortoise-hook-version: 18
+// tortoise-hook-version: 19
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -40,6 +40,16 @@
 // shipped bytes move. `session verify`'s "it captures with older logic"
 // wording is imprecise for this one generation; the classification and the
 // repair it prompts are right.
+//
+// Generation 19 (#11662): the MARKER moves onto bytes that already shipped —
+// the same shape as generation 4. #11636 edited this artifact and left the
+// header at 18, so `detect_artifact_install` graded every install made from the
+// pre-#11636 generation-18 bytes as `modified-artifact` ("marker matches (18)
+// but its bytes differ — local edit"): the user was told they had hand-edited a
+// file they never touched. Nothing in this file behaves differently from
+// generation 18's bytes; the bump exists so those installs read as STALE
+// ("reinstall"), which is the truthful advice. Both halves of the Pi seam move
+// together — `contract_version_for("pi")` grades them as ONE contract.
 //
 // Generation 18 (capture-loss, #10479 review): the ADMISSION GUARD stopped
 // re-parsing every meta on every turn. It asked `spoolSaturated` (a `JSON.parse`

@@ -264,7 +264,11 @@ from tortoise.session_projection import (  # #5498: the ONE session projection
     SESSION_LIST_FIELDS,
     session_extraction_status,  # #3520: the ONE extraction-status derivation
 )
-from tortoise.session_schema import demo_session_id  # #3554: the ONE demo-session id derivation
+from tortoise.session_schema import (  # #3554 / #8290: ONE demo-session derivation + exclusion
+    DEMO_SESSION_ID_PREFIX,
+    demo_session_id,
+    is_demo_session_id,
+)
 from tortoise.supabase_control import _service_key  # #3677
 
 # #1677: the multi-worker admission gate. Imported at module scope (not inside
@@ -15098,7 +15102,7 @@ def _seed_demo_graph(org_id: str, sdk=None) -> dict:
     # ⚠️ NOT RETROACTIVE, the same posture as the `tags` note above: the sentinel
     # short-circuits before any write, so a demo graph seeded BEFORE this keeps
     # its `epi_turn*` nodes AND its session's declared turn counter, which still
-    # reads 3 — the two are undone by DIFFERENT statements, and only the node
+    # declares 3 — the two are undone by DIFFERENT statements, and only the node
     # delete is irreversible.
     # ⛔ RE-SEEDING DOES NOT REPAIR THEM — a re-seed writes nothing for those
     # ids and deletes nothing (unlike the `tags` case, whose `MERGE` re-writes
@@ -15120,12 +15124,21 @@ def _seed_demo_graph(org_id: str, sdk=None) -> dict:
     # `:Session` along with them. ⛔ That is a READ-BEFORE-WRITE rule, not two
     # suggestions: doing the re-seed without the delete lands the quiet
     # half-state above. The node delete ALONE is not the repair either: it
-    # leaves `declared=3, served=0`, so on an armed, journaling deployment the
-    # demo session's read refuses with `record_unavailable` (503), and on an
-    # unarmed one it serves `{"turns": 3, "turn_points": []}` — the exact split
-    # the counter note above exists to eliminate. Destructive, so it is out of
-    # this change's scope and belongs to §9.1's residual (a) — a graph-side
-    # removal no instrument ships today. ⛔ NOT `#10017`'s purge, though these
+    # leaves `declared=3, served=0` — the exact split the counter note above
+    # exists to eliminate. ⚠️ That split is STORED state, and since #8290 no
+    # session read surface publishes it: the demo id is absent from
+    # `GET /v1/sessions`, answers 404 on `GET /v1/sessions/{id}`, and is `None`
+    # from `TortoiseSDK.get_session`. The pre-#8290 read-door observations once
+    # recorded here (an armed `record_unavailable` 503, an unarmed
+    # `{"turns": 3, "turn_points": []}`) are therefore no longer reachable
+    # through the demo id at all. The split is still WRONG — the shared rule
+    # (`record_read.served_turn_count`) refuses the shortfall and is pinned
+    # directly in `tests/test_10000_turns_record_only.py` — and it becomes
+    # visible again the moment a read door is added or the exclusion narrowed,
+    # which is why the repair still moves BOTH halves. Destructive, so it is
+    # out of this change's scope and belongs to §9.1's residual (a) — a
+    # graph-side removal no instrument ships today.
+    # ⛔ NOT `#10017`'s purge, though these
     # are `pointKind='event'` `:Point`s wired to the demo session: turn SHAPE
     # is `is_episodic` + `pointKind='event'` + `is_operator=false` + a single-session
     # `<sid>_t<digits>` id
@@ -15142,10 +15155,12 @@ def _seed_demo_graph(org_id: str, sdk=None) -> dict:
     # IS read and lands in the `non_decimal_suffix` anomaly class instead, so
     # the census refuses (`outside_population` → `census-not-clean`). Either
     # way it purges nothing (#11325).
-    # Blast radius: opt-in sample content that
-    # `org.point_count` excludes — but the demo `:Session` is still returned by
-    # the session reads, so the pre-existing nodes stay reachable there and in
-    # search (with their counter, which is why the repair must move both).
+    # Blast radius: opt-in sample content that `org.point_count` excludes. The
+    # demo `:Session` itself is no longer served by ANY session read surface
+    # (#8290) — absent from the list, 404 by id, `None` from the SDK — so the
+    # pre-existing `epi_turn*` nodes stay reachable only through the SEARCH
+    # reads this change declares as an open residual, and they still sit beside
+    # the session's declared counter (which is why the repair must move both).
 
     # ── Epistemic Layer — claims with evidence ───────────────────
     epistemic_points = _DEMO_EPISTEMIC_POINTS
@@ -17263,8 +17278,13 @@ class SessionRequest(BaseModel):
     # #4005 — the validator lives on ``CommitPayload``; there is no
     # ``CommitRecord`` class, and citing one sent a review to re-derive a third
     # spelling); this is the same sentence at the boundary — ONE predicate for
-    # all three DOORS (the two SDK doors and this one), so they cannot drift
-    # apart. ⛔ The blank rule has a SECOND, deliberate home one layer down: the
+    # every DOOR (the two SDK doors, the commit-payload Layer-1 model and this
+    # one), so they cannot drift apart. ⚠️ ``CommitPayload`` used to carry its
+    # OWN ad-hoc blank test, which is how the #8290 review found the RESERVED
+    # demo namespace admitted on the public ``POST /v1/sessions/commit`` while
+    # refused here and at the two SDK doors — a namespace gated at three of four
+    # doors is not reserved. It now delegates to the same predicate.
+    # ⛔ The blank rule has a SECOND, deliberate home one layer down: the
     # REPLAY half is ``projection._writable_container_id`` (``_writable_id``
     # PLUS this same blank clause), which gates both journal carriers and the
     # sidecar restores and landed on main with #9594 from the #9553 review P2 —
@@ -22254,14 +22274,35 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
     # issuecomment-6305730612 (DECISION RELAY).
     sdk = await _data_sdk_offloaded(org)
     try:
-        # #2600: actor filter rides a MATCH-level WHERE (before the OPTIONAL
-        # CONTAINS so the count(p) grouping semantics hold); the appended
-        # RETURN columns (actor_user_id/harness) sit AFTER count(p) so the
-        # existing r[0..3] mapping is untouched.
-        # #2599: machine_id and model appended after harness — r[6]/r[7].
+        # #8290: the demo/sample Session is EXCLUDED from the list. "Captured
+        # sessions" is the user's OWN filings, and #2360's owner-recorded
+        # exclusion already removes the demo POINTS from the count-of-record
+        # digest — leaving the container visible here made two surfaces
+        # disagree about whether the sample was the user's own. The prefix is
+        # DERIVED (`session_schema.DEMO_SESSION_ID_PREFIX`), never re-spelled,
+        # and cannot collide with a mintable id (`mint_session_id()` =
+        # `session_<12 hex>` — `demo_` is neither hex nor 12 chars long), and
+        # the namespace is RESERVED at EVERY caller-id door
+        # (`ids.session_id_refusal` — the two SDK doors, the commit payload
+        # model and the hosted `SessionRequest` boundary), so a caller cannot
+        # file a real capture into the excluded set either.
+        #
+        # ⛔ The `s.id IS NULL` disjunct is deliberate Cypher three-valued-logic
+        # care, not noise: `NULL STARTS WITH $p` is NULL, and a WHERE drops a
+        # NULL predicate — so the bare `NOT s.id STARTS WITH` form would silently
+        # remove a session that carries NO id at all, which this list served
+        # before #8290. The exclusion must be exactly the demo SET, never also
+        # "every session whose id happens to be null".
+        #
+        # The conditions + params live in `_session_list_conds` (END of module,
+        # where a definition shifts no cited line), so a test runs this WHERE
+        # against a real graph instead of string-matching it. ⛔ Its operand is
+        # `toString(s.id)`: `STARTS WITH` RAISES on a legacy non-string id and the
+        # fail-soft handler below then serves `{"sessions": []}` for an org that
+        # HAS captures (#3892) — see the helper for the measurement.
+        _session_conds, _query_params = _session_list_conds(actor_filter)
         query = (
-            "MATCH (s:Session) "
-            + ("WHERE s.actor_user_id = $uid " if actor_filter else "")
+            "MATCH (s:Session) WHERE " + " AND ".join(_session_conds) + " "
             + "OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point) "
             # #3555: the NON-TURN filter, matching get_session_detail (both its
             # count and its points list, added under #822). It replaces the
@@ -22297,8 +22338,7 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
         # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
         rows = await asyncio.to_thread(
             lambda: sdk._get_proj().g.query(
-                query,
-                params={"uid": actor_filter} if actor_filter else None,
+                query, params=_query_params,
             ).result_set)
     except Exception:
         import logging
@@ -22598,6 +22638,14 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     _session_user_org (?org_id= → non-member 403); keys are org-scoped.
     """
     _require_scope(org, "graphs:read", "get_session_detail")
+    # #8290: the demo/sample Session is not readable by id either — the
+    # exclusion must be the SAME set on every session read surface or the
+    # surfaces disagree about whether the sample is the user's own (the exact
+    # defect #8290 reported, one door over). 404 is the not-found shape this
+    # route already serves, so a demo id is indistinguishable from an id that
+    # was never captured — which is what it is: the user never captured it.
+    if is_demo_session_id(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
     # #3718: the construction is off the loop (see list_points).
     #
     # CONTRACT, scoped: `#1591` covers a MISSING/BROKEN org graph — a STORE
@@ -47910,3 +47958,59 @@ async def operator_data_source_demand(request: Request):
 # Restored in #833: accidentally deleted with the superseded file-based
 # replay surface (0875221) — guarded by TestMCPMount in test_hosted_api.py.
 app.mount("/mcp", mcp_http_app)
+
+
+# ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
+#
+# ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
+# ABSOLUTE line number from 179 tracked files (449 distinct
+# ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
+# caller would shift every cite below it. Python resolves the name at CALL time,
+# so `list_sessions` can call a function defined after it — the same reason
+# `extractor_v2` keeps its late helpers at the bottom. Both figures above are
+# MEASURED, not hand-counted: `tools/hosted_api_cite_census.py --check` verifies
+# them (nightly on main, via `.github/workflows/main-health-nightly.yml`) and
+# `--refresh` re-states them, so do not edit them by hand.
+def _session_list_conds(actor_filter: str | None) -> tuple[list[str], dict]:
+    """The MATCH-level `WHERE` for `list_sessions`, as ``(conditions, params)``.
+
+    One home for a predicate whose exact text decides whether a tenant's session
+    list is right, so a test can run it against a REAL graph instead of
+    asserting the source string.
+
+    * **#8290 — the demo/sample Session is EXCLUDED.** "Captured sessions" is the
+      user's OWN filings, and #2360's owner-recorded exclusion already removes the
+      demo POINTS from the count-of-record digest — leaving the container visible
+      made two surfaces disagree about whether the sample was the user's own. The
+      prefix is DERIVED (`session_schema.DEMO_SESSION_ID_PREFIX`), never
+      re-spelled, and cannot collide with a mintable id (`mint_session_id()` =
+      `session_<12 hex>`); the namespace is also RESERVED at every caller-id door
+      (`ids.session_id_refusal`), so a caller cannot file a real capture into the
+      excluded set either.
+    * **The `s.id IS NULL` disjunct is Cypher three-valued-logic care**, not
+      noise: `NULL STARTS WITH $p` is NULL and a WHERE drops a NULL predicate, so
+      the bare `NOT ...` form would ALSO remove a Session that carries no id —
+      which this list served before #8290. The exclusion must be exactly the demo
+      SET.
+    * **`toString(s.id)`, not `s.id`** (#8290 review, P1 — MEASURED on the
+      embedded engine). `STARTS WITH` is a STRING predicate: against a non-NULL
+      non-string `id` the engine RAISES `Type mismatch: expected String or Null
+      but was Integer`, and the route's fail-soft handler turns that into
+      `rows = []` — `200 {"sessions": []}` for an org that HAS captures, the
+      "reports an org that has sessions as empty" shape `#3892` forbids. A
+      non-string id is legacy-producible (pre-#9599 the capture door kept any
+      TRUTHY id and wrote it verbatim as `MERGE (s:Session {id:$sid})` — which is
+      why `ids.session_id_refusal` exists now), so the predicate tolerates it:
+      `toString(123)` matches nothing, `toString(NULL)` is NULL and is still kept
+      by the disjunct.
+    * **#2600 — the actor filter rides the SAME MATCH-level WHERE.** It must not
+      be appendable only on a branch: the common (no-filter) path would then
+      silently lose the demo exclusion.
+    """
+    conds = ["(s.id IS NULL OR NOT toString(s.id) STARTS WITH $demo_prefix)"]
+    params: dict = {"demo_prefix": DEMO_SESSION_ID_PREFIX}
+    if actor_filter:
+        # before the OPTIONAL MATCH so the count(p) grouping semantics hold
+        conds.insert(0, "s.actor_user_id = $uid")
+        params["uid"] = actor_filter
+    return conds, params

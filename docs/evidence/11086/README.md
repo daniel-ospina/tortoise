@@ -14,8 +14,13 @@ aboutObjects: "#11086, #5008, #4899, #11445, STORAGE-ARCHITECTURE.md §12.2a, EX
 ## ⛔ This measurement is POST-ARMING, and the ordering `#5008` chose has already been inverted
 
 `#5008` decided the ordering explicitly: *"the rate effect is measurable before it is
-trusted."* `STORAGE-ARCHITECTURE.md` recorded the gate as *"flag-gated **off by default**
-(`TORTOISE_EMBED_GATE`), so the graph is unchanged until the rate effect is measured."*
+trusted."* `STORAGE-ARCHITECTURE.md` §12.2a now records the gate as *"flag-gated **off in the
+code** (`TORTOISE_EMBED_GATE`) and **armed in the shipped template**"* — the sentence this change
+rewrote, quoted as it stands today. ⛔ Before the rewrite the same note said the gate was off by
+default, "so the graph is unchanged until the rate effect is measured"; the earlier revision of
+this record quoted that wording as live, but it no longer matches anything in the file it was
+attributed to (#11576 review P3). The state it described is exactly the one this inversion
+destroyed, so it is named here as the superseded claim rather than quoted as current.
 
 **PR #11445 turned `TORTOISE_EMBED_GATE` ON in `.env.example`, and the measurement was never taken.**
 So the graph was no longer unchanged, and the measurement that was supposed to precede the change did
