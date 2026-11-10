@@ -11477,7 +11477,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert "hasPart" in ext[1764 - 1] and '"predicate":' in ext[1764 - 1], (
         f"extractor_v2.py:1764 reads {ext[1764 - 1].strip()[:90]!r}, not the schema "
         "line that spells the predicate allowlist")
-    assert "`extractor_v2.py:11119`" in text, (
+    assert "`extractor_v2.py:11283`" in text, (
         "the record must cite the comment that says nothing consumes the channel")
     # The SAME line is cited a SECOND time as a bare `:11119`, inside the
     # reproduction block's comment. A bare cite carries no file token, so the
@@ -11490,11 +11490,11 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # for `both now read`, the `# §0/§2` heading and `MENTIONS`. The prose above carries the
     # PREFIXED form `extractor_v2.py:11119`; this is the only statement without a file token,
     # so exactly one bare occurrence is the claim.
-    assert re.findall(r"(?<!extractor_v2\.py):11119", text) == [":11119"], (
-        "the reproduction block must state the live number `:11119` exactly once as a BARE "
+    assert re.findall(r"(?<!extractor_v2\.py):11283", text) == [":11283"], (
+        "the reproduction block must state the live number `:11283` exactly once as a BARE "
         "cite — re-stale it and this record's only reproduction path points at a dead line")
-    assert "nothing in this tree consumes" in ext[11119 - 1], (
-        f"extractor_v2.py:11119 reads {ext[11119 - 1].strip()[:90]!r}, not the "
+    assert "nothing in this tree consumes" in ext[11283 - 1], (
+        f"extractor_v2.py:11283 reads {ext[11283 - 1].strip()[:90]!r}, not the "
         "comment stating nothing consumes `result[\"relations\"]`")
 
     # A1's environment block: the reproduction that states A1's producer claim — the
@@ -11561,7 +11561,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # this bundle's recurring defect, so the tail is named, not counted) — including arms that need
     # no history at all.
     live_mentions = [i for i, line in enumerate(ext, 1) if "create_operator" in line]
-    assert live_mentions == [9234, 9252, 9259, 9639], (
+    assert live_mentions == [9355, 9373, 9380, 9760], (
         f"extractor_v2.py's create_operator mentions are at {live_mentions}, not the "
         "four the record quotes — an insertion above them moves the quote; re-derive "
         "the record's block (its `create_operator` line AND this list) rather than the list")
