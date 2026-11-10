@@ -157,8 +157,11 @@ with a different answer, so it gets its own default. Both are pinned (§6 pins 8
 > *declared* pair contradicted by the write blocks instead of warning, because #1934 answered the
 > **undeclared-label** question (a vocabulary gap, where warn is right) and this default answers the
 > declared-pair question; the later owner ruling D1 (`#11656`, 2026-11-09) rules refuse-where-declared.
-> Recorded here so the departure reads as intentional at the point a lane implements it, and so the
-> next reader holding #1934's closed ruling cannot mistake this default for an accident.
+> Recorded here **and on `#1934` itself** (comment 6759287749, relayed with a cross-reference on `#11656`
+> comment 6759288785) so the departure reads as intentional at the point a lane implements it, and so the
+> next reader holding #1934's closed ruling cannot mistake this default for an accident. ⚠️ The marker's
+> home is the ISSUE: this block is the ledger copy, `#1934` is the artifact a lane reads (review P3-2,
+> PR #11671).
 
 ## 3. Alternatives considered and rejected
 
@@ -408,4 +411,16 @@ the declared kinds; a read-side census reports the pre-existing population.
 | "leaves 31 untested" | `create_edge` covers 2 ⇒ leaves **33** | fresh review (P2) |
 | "five call sites" / "four writers" (revision 3) | **six**, and **two** of them are replay folds — the operator fold *and* the `DirectEdgeCreated` fold (`projection/__init__.py` pass-2b), which carries declared predicates from **two** producers: rel type for the structural-edge lane, a `label` property for `create_direct_edge`. Fixed by §1.2 item 6, §4, pins 15/15b | fresh review (P1) — found by opening the second fold's own `#9553 class 4` note |
 | the list of call sites presented as the specification | an **inventory**, not a completeness claim: four review rounds each asserted a writer set and each was wrong. Completeness is now **measured** (pin 18) | the scoping lane's handoff on #11656, confirmed by a fresh review |
+| §2.1's **"Recorded here"** for the `#1934` departure (revision 4) | the marker's **home is the ISSUE**, not this ledger: it is now on `#1934` itself (comment 6759287749 — the `OVERRIDES:` line naming #1934's warn-not-block), relayed with a cross-reference on `#11656` (comment 6759288785); this doc keeps the ledger copy | fresh review (P3-2) — `#1934` was CLOSED and held **0** `OVERRIDES` comments, so the departure read as an accident at the only artifact a lane reads |
 | "reached from `sdk.apply_relation_edges` (`sdk.py:17200`)" (revision 3) | **that symbol does not exist** — `TortoiseSDK` has no such method. It is `tortoise.relation_write.apply_relation_edges` (`relation_write.py:791`), imported inside `_extract_session_v2` at `sdk.py:17200` and called at `:17201`. And the pair→writer **join** is not in `plan_hierarchy_edges` (`:631`, which matches the already-resolved `edge.from_kind`/`edge.to_kind`): it is in `declared_hierarchy` (`pack_hierarchy.py:339`) → `_resolve` (`:263`) → `_binding` (`:306`) + `_matching_row` (`:333`). Fixed by §5.5, and pinned by `test_the_fourth_reader_is_the_pair_to_writer_resolver` inside `_resolve`'s own source | fresh review (P2) — found by opening `sdk.py:17200`, which is an *import* |
+
+## 11. Downward-closure example correction (the brief's §4.3)
+
+Review P3-1 found the **brief's** transitivity example named `dev:requirement` as a kind reached downward
+from `WorkItem`. It is not a kind — it is a read-only legacy spelling of `product-strategy:requirement`
+(`pack_registry.LEGACY_KIND_ALIASES`) — and the declared row (`requirement: WorkItem`) is a **direct child**,
+not a grandchild. Corrected in `docs/research/2026-11-09-11656-kindpair-enforcement.md` §4.3 to
+`Object` → `Project` → `dev:epic`, and pinned so it cannot rot back
+(`test_every_carries_example_resolves_to_a_declared_kind`,
+`test_the_downward_example_is_a_pack_kind_two_levels_below_a_core_kind`). Nothing in §5, D2 or pins 4/12
+moved: the closure is still transitive in both directions — only the example that demonstrated it was wrong.

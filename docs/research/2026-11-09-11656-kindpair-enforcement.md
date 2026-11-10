@@ -266,7 +266,17 @@ Subject   -> 12 kinds: 'Subject','legalPerson','naturalPerson','organization','r
 ```
 
 Upward closure is **transitive** (`dev:issue` reaches `Object` *through* `WorkItem`), and downward closure
-reaches grandchildren (`WorkItem` carries `dev:requirement`). **Good news for this issue:** the check needs
+reaches grandchildren (`Object` carries `dev:epic` *through* `Project` — a CORE kind carrying a PACK kind).
+⚠️ **Correction (revision 4):** this example used to name `dev:requirement`, reached downward from `WorkItem`,
+and was wrong twice over (review P3-1, PR #11671). `dev:requirement` is a **read-only legacy spelling** of
+`product-strategy:requirement` (`pack_registry.LEGACY_KIND_ALIASES`), not a declared kind — it surfaces inside
+an expansion while never being one, and `dev` says so itself (`packs/dev/manifest.yaml:33-35`). And the row
+that exists, `requirement: WorkItem` (`packs/product-strategy/manifest.yaml:21`), is a **direct child** of
+`WorkItem`, not a grandchild either way. Both halves are pinned, so the example cannot rot back:
+`test_every_carries_example_resolves_to_a_declared_kind` and
+`test_the_downward_example_is_a_pack_kind_two_levels_below_a_core_kind` in
+`tests/test_11656_endpoint_kind_binding_scope.py`.
+**Good news for this issue:** the check needs
 `actual ∈ expand_kind(declared_parent)`, which works; and because `declared_parent ∈ expand_kind(actual)`
 now works too, the direction has to be **pinned** rather than assumed in either reading.
 
@@ -679,9 +689,11 @@ legibility, per the AX admission test:**
    warn→refuse transition is a policy change, not a code change. *(§10.1 — the SHACL pattern.)*
 
 This is **not** a reversal of #1934: #1934's warn contract covers the *undeclared* pair, and §9.1 keeps
-warn exactly for the case where no remedy is performable. It should still be **stated on #1934** so the
-distinction is recorded where the next lane reads it, with a line naming the default it departs from
-(**#1934's warn-not-block**, which is what `resolve_enforcement` falls back to — `enforcement.py:65`).
+warn exactly for the case where no remedy is performable. It is **stated on #1934** (comment 6759287749 — the
+`OVERRIDES:` line naming **#1934's warn-not-block**, which is what `resolve_enforcement` falls back to,
+`enforcement.py:65`), with a cross-reference on #11656 (comment 6759288785), so the distinction is recorded
+where the next lane reads it rather than only in the scope's ledger copy. ✅ Done: review P3-2 on PR #11671
+found this had been prescribed but not performed.
 
 **D2 — subclass acceptance: unchanged from §5** (closure over `expand_kind(declared)`, both spellings
 folded, `equivalentTo` included). The graph already holds the confirming constraint: *"the closure must be

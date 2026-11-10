@@ -45,7 +45,12 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
-from tortoise.pack_registry import PackRegistry
+from tortoise.pack_registry import (
+    CORE_KINDS,
+    CORE_SUBCLASSES,
+    LEGACY_KIND_ALIASES,
+    PackRegistry,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PACKS_DIR = REPO_ROOT / "packs"
@@ -276,6 +281,71 @@ class TestTheInventoryTheScopeCites:
         issue = registry.expand_kind("dev:issue")
         assert "WorkItem" in issue, "#11000 Leg A regressed: `dev:issue` no longer carries its `subclassOf` parent"
         assert "Object" in issue, "upward closure is no longer transitive: `dev:issue` should reach `Object`"
+
+    def test_every_carries_example_resolves_to_a_declared_kind(self):
+        """The brief's transitivity examples must name KINDS the expansion really carries (§4.3).
+
+        Review P3-1 (PR #11671) found §4.3's downward example — *"`WorkItem` carries `dev:requirement`"* —
+        false, and it had survived ten review rounds because nothing resolves prose. `dev:requirement` is
+        **not a kind**: it is a READ-ONLY legacy spelling of `product-strategy:requirement`
+        (`pack_registry.LEGACY_KIND_ALIASES`), so it shows up inside `expand_kind("WorkItem")` without ever
+        being declared — which is exactly how the sentence looked true. The row that does exist,
+        `requirement: WorkItem`, is a **direct child**, so "grandchild" was wrong too.
+
+        This pin resolves EVERY `` `X` carries `Y` `` example in the brief against the registry, the same way
+        `test_every_cited_markdown_path_resolves` resolves its citations, so a wrong example reds here
+        instead of rotting in prose. The depth half of the finding is
+        `test_the_downward_example_is_a_pack_kind_two_levels_below_a_core_kind`.
+        """
+        registry = PackRegistry(PACKS_DIR)
+        registry.load_all()
+        declared = {kind for kinds in registry.list_all_kinds().values() for kind in kinds} | set(CORE_KINDS)
+        legacy_spellings = {s for spellings in LEGACY_KIND_ALIASES.values() for s in spellings}
+
+        examples = re.findall(r"`([A-Za-z][\w:-]*)` carries `([A-Za-z][\w:-]*)`", BRIEF_DOC.read_text())
+        assert examples, (
+            "the brief makes no `X` carries `Y` transitivity example at all — §4.3's job is to state the "
+            "closure WITH an example, so a scanner that finds none is asserting nothing"
+        )
+        for parent, child in examples:
+            assert child not in legacy_spellings, (
+                f"the brief says `{parent}` carries `{child}`, but `{child}` is a READ-ONLY legacy spelling "
+                f"({sorted(legacy_spellings)}), not a declared kind: it appears in an expansion without being "
+                "a kind, which is how review P3-1's `dev:requirement` example read as true"
+            )
+            assert child in declared, (
+                f"the brief says `{parent}` carries `{child}`, but no pack or CORE row declares `{child}`"
+            )
+            assert child in registry.expand_kind(parent), (
+                f"the brief says `{parent}` carries `{child}`, but the expansion does not carry it — "
+                f"measured {sorted(registry.expand_kind(parent))}"
+            )
+
+    def test_the_downward_example_is_a_pack_kind_two_levels_below_a_core_kind(self):
+        """§4.3's corrected downward example — `Object` → `Project` → `dev:epic` — is really two levels.
+
+        The finding's second half: the old example was one level (`requirement: WorkItem`), presented as
+        "grandchildren". This pin holds the replacement to the depth the sentence claims: the grandchild is
+        a PACK kind, its declared parent is a CORE kind, and that parent is itself a child of the kind the
+        sentence starts from — so it cannot be restated as a direct-child example later either.
+        """
+        registry = PackRegistry(PACKS_DIR)
+        registry.load_all()
+
+        # The chain the sentence names, one link at a time.
+        assert "Project" in CORE_SUBCLASSES["Object"], (
+            "`Project` is no longer a CORE child of `Object` — §4.3's corrected example lost its middle link"
+        )
+        assert "dev:epic" in registry.expand_kind("Project"), (
+            "`dev:epic` is no longer carried by `Project` (`packs/dev/manifest.yaml` `subclassOf`)"
+        )
+        assert "dev:epic" in registry.expand_kind("Object"), (
+            "downward closure is no longer transitive: `Object` should reach the PACK kind `dev:epic`"
+        )
+        # …and NOT a direct child of `Object`, which is what makes it a grandchild rather than a restatement.
+        assert "dev:epic" not in CORE_SUBCLASSES["Object"], (
+            "`dev:epic` is now a DIRECT child of `Object`, so §4.3's example no longer demonstrates two levels"
+        )
 
 
 class TestTheSeveritySeamThePrecedenceMustAnswerFor:
