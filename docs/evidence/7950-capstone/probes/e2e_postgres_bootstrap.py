@@ -97,6 +97,7 @@ MIGRATIONS = [
     # refused and DROPPED, which is the 302-row incident. A probe that measured
     # that schema would certify a record the shipped writes cannot fill.
     "20261102000002_record_point_search_keys_text.sql",
+    "20261109000001_record_embedding_vector.sql",  # #11642's GENERATED embedding_vec
 ]
 DSN = "postgresql://postgres:cap@127.0.0.1:15499/capstone"
 

@@ -89,6 +89,7 @@ RECORD_MIGRATIONS = [
     # Postgres stands up both, so a list that disagrees here would drift the moment
     # the duplicate is revived.
     "20261102000002_record_point_search_keys_text.sql",
+    "20261109000001_record_embedding_vector.sql",  # #11642, kept EQUAL (#9550)
 ]
 DSN = os.environ.get(
     "CAPSTONE_PG_DSN", "postgresql://postgres:cap@127.0.0.1:15499/capstone")
