@@ -179,6 +179,7 @@ from tortoise.retrieval import (
     DEFAULT_POOL_SESSION_CAP,
     TURN_POINT_KIND,
     guard_and_recap_pool,
+    normalize_session_key,
     session_key_of,
 )
 
@@ -351,6 +352,15 @@ def seeded_sessions(pool: list[dict], *,
     seeded hit to resolve its Session (``Session-[:CONTAINS]->hit``), so a
     seed without one would spend the budget on a session the query cannot
     name. Pool hits always carry their id.
+
+    ⛔ The emitted ``session_id`` is :func:`retrieval.normalize_session_key`'d
+    (#11382), whichever ``session_key`` produced it — including a
+    caller-supplied one. This value is not cosmetic: it is the ``seed_order``
+    anchor :func:`reinjection_merge_order` splices a fetched group against,
+    and the group key comes from the GRAPH (``coalesce(p.session_id, s.id)``)
+    while this one comes from the POOL HIT — two separately-produced strings.
+    Normalising both sides is the fix; normalising one side is the bug. It is
+    also why a custom key cannot reintroduce the mismatch by being raw.
     """
     if not pool or window < 1 or limit < 1:
         return []
@@ -364,7 +374,7 @@ def seeded_sessions(pool: list[dict], *,
         if admitted is not None and not admitted(hit):
             continue
         admitted_seen += 1
-        sid = key(hit)
+        sid = normalize_session_key(key(hit))
         pid = str(hit.get("id") or "")
         if not pid or not _is_real_session_id(sid) or sid in seen:
             continue
@@ -432,7 +442,11 @@ def source_session_chunk_pass(
       ``ok``            — the query ran (False on any failure).
       ``by_session``    — {session key: [{id, session_id,
                           lme_chunk_index}]} post-budget, deterministic
-                          order, DISTINCT ids.
+                          order, DISTINCT ids. The key AND each row's
+                          ``session_id`` are
+                          :func:`retrieval.normalize_session_key`'d
+                          (#11382) — see the loop's own note for why the
+                          graph side and the seed side must agree.
       ``total``         — the injected DISTINCT-item count (== sum of the
                           groups).
       ``dropped_by_cap``— rows the per-session/total budgets dropped.
@@ -494,7 +508,18 @@ def source_session_chunk_pass(
     total_cap_hit = False
     seen_pids: set[str] = set()
     for pid, sid, idx in rows or []:
-        sid = str(sid or "")
+        # #11382: the group key and the seed key are two INDEPENDENTLY
+        # produced strings (this one from the graph, the seed one from the
+        # pool hit), so both run through the same normalisation. Without
+        # this the seed is CHARGED (it spent a graph pass, and the total
+        # budget below) and then DROPPED, because ``reinjection_merge_order``
+        # builds its groups by iterating ``seed_order``: a padded stored id
+        # never matched the stripped seed, surfacing as ``sessions=0,
+        # injected=0`` with a non-zero ``total`` and nothing naming why.
+        # Collapsing two raw spellings of one session (``s1`` / ``  s1  ``)
+        # into one group is the intended reading — they ARE one identity —
+        # and the per-session cap then counts them jointly.
+        sid = normalize_session_key(str(sid or ""))
         pid = str(pid or "")
         if not sid or not pid or pid in seen_pids:
             continue
