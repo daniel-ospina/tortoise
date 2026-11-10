@@ -27,7 +27,10 @@ issues derived from, kept because comments reference it. **The current plan is `
 Owner direction: `#7949` comment `6645275147`
 (2026-11-04) and this lane's brief (`.lane-brief.md`, 2026-11-04).
 
-**Head at authoring:** `641e5f1b37`. Every `file:line` below was read at that head. ⚠️ **The symbol is
+**Head at authoring:** `641e5f1b37` — the tree this document was written against. Its cites were read at
+that head OR at a later one (the D6 row has since moved from `:1200` to `:1400`, "D6 as ruled" from `:977` to
+`:1095`), and the ones a review caught are re-pointed at the head this PR merges at; where they disagree, the
+symbol wins. ⚠️ **The symbol is
 authoritative and the line number is a convenience** — this repo carries a citation-rot guard
 (`tests/test_extractor_v4_citation_rot.py`) for exactly that reason.
 

@@ -228,10 +228,10 @@ Two recorded decisions and one closed-but-unsettled metric sit under the owner's
    > ⚠️ **RESOLVED AFTER THIS STAGE — do not act on the fork above.** The owner ruling of 2026-11-09 replaced A4
    > with *"things and events carry the labels the ontology declares for them, reported per layer"*, bar =
    > appears + labelled, percentage **reported, not chased**. Both arms (a) and (b) are therefore closed:
-   > **C7 does not gain a comparator, and does not follow `#4432`.** See `02-scope.md:76-81` for the A4 half (the ruling's own words, and the `D3`
-   > question it closes) and `04-plan.md` §4.4 for the `C7`/`#4432` half (the comparator reopen test and the
-   > pin that refuses a registered non-bar without an owner decision) — this file recorded the ruling, the
-   > later stage resolves the fork. This file is the **record of the align stage** and is left as
+   > **C7 does not gain a comparator, and does not follow `#4432`.** See `02-scope.md:76-82` for the A4 half (the ruling's own words at `:82`, and the `D3`
+   > question it closes) and `04-plan.md` §W4 (`:163-175`) for the `C7`/`#4432` half — the comparator reopen
+   > test and the `OWNER_DECISION` pin that refuses a registered non-bar live in §4.4. The ruling's home is
+   > `#4432` comment `6751932659`; this file recorded the ruling, the later stage resolves the fork. This file is the **record of the align stage** and is left as
    > written — a later stage resolving a fork this stage opened is the pipeline working, not a contradiction;
    > read the ruling, not the fork.
 2. **ASK — §13.8 Q1**, to-graph connection by model or mechanically: recorded **OPEN**

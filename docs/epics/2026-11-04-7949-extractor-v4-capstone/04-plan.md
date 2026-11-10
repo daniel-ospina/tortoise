@@ -162,6 +162,11 @@ and 7 with no workflow of their own. W3 **composes** W2a–W2c; it does not repl
 
 ### W4 — The D3 reopen workflow (the only human-blocked flow)
 
+✅ **ANSWERED 2026-11-09** — the owner ruled on `#4432` (`#4432` comment `6751932659`): S2.3 classification goes ON by
+default, so `D3`'s fork is moot rather than decided one way or the other. The flow below has FIRED; C7
+(`#10988`) re-scopes to **attribution only** and gains no comparator, and the ruling is relayed onto that
+issue (comment `6759593760`). Read the flow as the record of what happened, not as work still waiting.
+
 ```text
 owner answers on #1022 (a) overrides D3 | (b) it was aimed at #4432's drift
   → relay to the decision home + ONTOLOGY §5 (OVERRIDES line if (a))
@@ -438,7 +443,7 @@ load-bearing rather than decorative:
   that imports it — not reporting a finding.
 
 **A4's registration is therefore decided once, here, and it is (b): A4 stays a non-bar.** The owner ruling of
-2026-11-09 — relayed into `02-scope.md:80-81`, and recorded on this PR — sets A4's bar as
+2026-11-09 — relayed into `02-scope.md:76-82`, and recorded on `#4432` comment `6751932659`, which is its home — sets A4's bar as
 *"appears + labelled, percentage reported not chased"*: a **rule**, not a threshold. Giving it a comparator would
 reverse that ruling, which is a reopen, not a plan edit.
 
@@ -457,7 +462,7 @@ record today (`docs/evidence/7949-capstone/preregistration.json`, mirrored chara
 | `metric` | "typed claims — **claim** Points … not `statement`" | per-layer label coverage (D-S4) |
 | `denominator` | "all **claim** `Point` nodes … floor of at least 30 typed statements" | the things-and-events population, per layer |
 | `floor` | `a4_typed_statements` (30) | the non-vacuity floor, under a key named for the new metric |
-| `blocked_by` | `#10988` — **still OPEN** | cleared: the owner ruling answered the D3 question it was blocked on |
+| `blocked_by` | `#10988` — **still OPEN** | **cleared**: the owner ruling answered the D3 question it was blocked on, and the ruling is RELAYED onto `#10988` (comment `6759593760`) so the lane that picks C7 up reads it rather than the issue's now-stale "BLOCKED on the D3 reopen" title |
 
 ⛔ §4.1's field table carries **no `blocked_by` column** — a gap in this plan, not a licence to leave the field
 standing: a row still carrying `blocked_by: #10988` reads `BLOCKED`, which is the difference between R4's "A4 can
@@ -952,7 +957,7 @@ expansion the scope gate recorded; repo search carried every finding). Recorded 
 |---|---|---|---|
 | **F1** | ⛔ **P0 — the fixture lane's G1 REFUSES the committed record today** (`capstone_run.py`'s fail-closed `if not frozen.get("sha256")`, `:1186`, needs `corpus.sha256`; the record has none), so **all six fixture rows cannot be produced**; and the plan added two more pin kinds beside the one key the probe reads | `unify-contract-keep-drivers` | **§4.2**: G1 dispatches on `pinned_by`; the A-corpus key renamed **`posted_payload_sha256`** (the old spelling collides with `tortoise/export.py`'s envelope digest); owners C1 (record) / C2 (probe) |
 | **F2** | ⛔ **P0 — the enum invariant was arithmetically FALSE** (record ids − sub-rows = 4, not 5: there is **no plain `E2` row**); and **three hardcoded literals silently drop the A-rows** (`probes/capstone_run.py:687`, `:750`, `probes/capstone_measure.py:244`) while V2's "5 rows" still passes | `unify-contract-keep-drivers` | **§4.4**: the invariant gains `SUB_ROW_PARENT`; the three literals are in C1's scope; **and `PRE-REGISTRATION.md`'s table + `document_sha256` are re-cut in the same commit** |
-| **F3** | ⛔ **P1 — §5.4 INVERTED the door's retry contract**: "fresh `session_id`" double-mints, while the door's TRUE retry is a **same-session** re-POST with `capture_ok=false`, and `409` carries `Retry-After: 30` (not terminal); the citation `:17212-17217` pointed at the 422 branch | `unify-contract-keep-drivers` | **§5.4**: the contract is the door's (`meta.mode`, `capture_ok`, `Retry-After`), cited at `hosted_api.py:1245-1254` (the `429` capacity refusal and the `409` in-flight refusal, both carrying `Retry-After: 30`), `retry_failed_capture` at `:18131`, its gate at `:18159`, and `"mode": "replayed"` at `:18717` |
+| **F3** | ⛔ **P1 — §5.4 INVERTED the door's retry contract**: "fresh `session_id`" double-mints, while the door's TRUE retry is a **same-session** re-POST with `capture_ok=false`, and `409` carries `Retry-After: 30` (not terminal); the citation `:17212-17217` claimed the 422 branch | `unify-contract-keep-drivers` | **§5.4**: the contract is the door's (`meta.mode`, `capture_ok`, `Retry-After`), cited at `hosted_api.py:1245-1254` (the `429` capacity refusal and the `409` in-flight refusal, both carrying `Retry-After: 30`), `retry_failed_capture` at `:18131`, its gate at `:18159`, and `"mode": "replayed"` at `:18717` |
 | **F4** | **P1 — a new `s3_attach` row would split a mechanism `failure_policy` already declares**, whose absence pin reds the day C4's create gate lands; `preconditions:` is ordering, not composition | `unify` | **§5.3 / I8**: **one row — `failure_policy`**; record the shipped half in `code:`/`tests:`/`symbols:`; name the reddening pin + the flip condition |
 | **F5** | **P2 — §5.2a's new job is a fourth non-gating runner joining no register**, and "Tier E" then names three unreconciled populations (`on_demand:` test files · script-driven runs · the new job) that `leg_coverage_issues()` cannot all see | `unify-contract-keep-drivers` | **§5.2a**: C2 owns the **register entry** (`config/ci-surfaces.yml` `on_demand:` + `docs/ci/affected-test-selection.md`); **`03-test-design.md` §5 must name all three populations** |
 | **F6** *(suppressed)* | I7 declared a budget **snapshot** that duplicates the door's live readers | `unify-contract-keep-drivers` | **I7** now points at `org_info` / `quota.count_org_usage` / the 402 payload, and declares only **when it was read** |
