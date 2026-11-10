@@ -80,10 +80,12 @@ _NARROW_CLAIM = re.compile(r"still matches \*\*(\w+)\*\*")
 #:
 #: ⛔ The pathspec is PART of the pinned text. §5 quotes these commands as the way to
 #: reproduce its figure, and the figure is stated over `tortoise/`; a bare
-#: `git grep -n ':Document'` run from the repo root answers 311 lines / 83 files, not
-#: 63 / 19, so a reader following the quote wrote it off as stale. Requiring
+#: `git grep -n ':Document'` run from the repo root answers a population several
+#: times larger, spread across `tests/`, `docs/`, `tools/` and this file itself — so
+#: a reader following the quote wrote the figure off as stale. Requiring
 #: `-- tortoise/` here means the quote cannot drift back onto a population this pin
-#: does not measure.
+#: does not measure. (No numerals: that population moves every time a line mentions
+#: the label, including the lines of this comment.)
 _QUOTED_GREP = re.compile(
     r"`git grep -n ':Document' -- tortoise/` → (\d+) lines,\s*\n"
     r"`git grep -l ':Document' -- tortoise/` → (\d+) files"
@@ -1641,7 +1643,7 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
         "read a different section; keep one heading"
     )
     section = smc._section(doc, heading)
-    assert section, (
+    assert section.strip(), (
         "§5's heading is present but §5 has NO BODY after it — these pins read "
         "that section, so restore its contents rather than re-stating the heading"
     )
@@ -1670,8 +1672,10 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     quoted = _QUOTED_GREP.findall(section)
     assert quoted, (
         "§5 no longer quotes its `git grep` output — keep each command on its own "
-        "line so the two results stay readable, or re-state the measurement and "
-        "re-measure it rather than dropping it"
+        "line so the two results stay readable, and keep `-- tortoise/`: the figure "
+        "is stated over `tortoise/`, and the repo-root population is a different "
+        "measurement. Or re-state the measurement and re-measure it rather than "
+        "dropping it"
     )
     assert len(quoted) == 1, (
         f"§5 quotes its `git grep` output {len(quoted)} times inside the anchored "
