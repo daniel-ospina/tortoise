@@ -354,7 +354,7 @@ This PR lands `tests/test_11656_endpoint_kind_binding_scope.py`, which holds **2
 (two are parametrised over the two docs — `test_every_cited_markdown_path_resolves` and
 `test_neither_doc_cites_a_line_keyed_reference`, one case per doc; that is the whole 27→29 delta). The two
 populations are deliberately different: the file pins the
-**scoping facts this document rests on** — the inventory (§2.1), the three doors (§1.1), the two replay folds
+**scoping facts this document rests on** — the inventory (§1), the three doors (§1.1), the two replay folds
 (§1.2 item 6), the four readers (§5.5), and the two docs' registration/resolution — while the 19 rows above
 (`1…15`, `15b`, `16–18`) are the pins the *implementation* must satisfy. The 19↔27 difference is the
 reader-and-doc pins the review cycles added. A body or summary that reported "18 pins" was reporting this
@@ -406,9 +406,9 @@ the declared kinds; a read-side census reports the pre-existing population.
   map **only**; it carries **no** `fromKind`/`toKind` field, so the pair map is derived **inside this issue**
   from `list_relations()`. Not a blocking dependency.
 
-## 10. Errata carried from revision 1 (auditable)
+## 10. Errata — corrections made to earlier revisions of this document (auditable)
 
-| revision 1 claim | the truth | how it was found |
+| earlier claim | the truth | how it was found |
 |---|---|---|
 | "two writers: `create_operator` + `create_edge`" | **three** — `create_direct_edge` takes a `label` and validates nothing | fresh review (P0) |
 | "`hasPart` declared by 4 packs with 4 different pairs" | `hasPart` as a predicate is declared **once**; the **five** rows that produced the miscount carried `semantics: hasPart` over **four** different predicates (`decomposesInto`, `contains` ×2, `partOf`, `partOfSprint`). Real evidence: `addresses` ×6, `contains` ×2, `targets` ×2 | fresh review (P1), confirmed by recount |

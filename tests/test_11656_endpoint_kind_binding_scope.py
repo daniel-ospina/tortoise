@@ -759,7 +759,23 @@ class TestTheDocsAreDiscoverableAndResolve:
         (round-17 P2-1).
         """
         source = Path(__file__).read_text()
-        functions = len(re.findall(r"^    def test_", source, re.M))
+        # pytest collects MODULE-LEVEL functions and CLASS methods — never a nested `def`. Counting with
+        # `^    def test_` silently assumed every test is a 4-space-indented method, so a module-level
+        # `def test_...` left this pin GREEN while the file's real population grew (review round 19, P3):
+        # the pin would then be certifying a coverage figure it had under-counted. Derive the population the
+        # way the collector does, not the way the file happens to be indented today.
+        tree = ast.parse(source)
+        functions = 0
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+                functions += 1
+            elif isinstance(node, ast.ClassDef):
+                functions += sum(
+                    1
+                    for member in node.body
+                    if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and member.name.startswith("test_")
+                )
         # `collected` = functions + the extra cases of every `@pytest.mark.parametrize` arm.
         extra = sum(
             len(cases.split(",")) - 1
@@ -929,23 +945,35 @@ class TestTheDocsAreDiscoverableAndResolve:
             return "tortoise." + p[: -len(".py")].replace("/", ".")
 
         def _ast_declares(path: Path, symbol: str) -> bool:
-            """True when every dotted part of `symbol` is declared somewhere in `path`.
+            """True when `symbol` resolves down `path`'s AST the way `getattr` resolves against a module.
 
-            For a non-importable file (`tests/`, `tools/`) the symbol is checked by NAME from the AST rather
-            than by importing it — importing a test module into a test module is what this avoids, but a
-            name that the file never defines is still the dead end this row exists to catch.
+            The first part must be declared at MODULE level; each later part must be declared in the body of
+            the `ClassDef` the previous part resolved to. Flattening every name in the file into one set —
+            the first revision of this helper — accepts `SomeOtherClass.method` and even a function-local
+            variable, which is the same wrong-qualifier defect (`_EdgeHandlers._upsert_point_edges`) this
+            row exists to catch, so class qualification is resolved rather than erased.
             """
-            tree = ast.parse(path.read_text())
-            declared: set[str] = set()
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    declared.add(node.name)
-                elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                    for target in targets:
-                        if isinstance(target, ast.Name):
-                            declared.add(target.id)
-            return all(part in declared for part in symbol.split("."))
+
+            def _scope(body: list[ast.stmt]) -> dict[str, dict]:
+                declared: dict[str, dict] = {}
+                for node in body:
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        declared[node.name] = {}
+                    elif isinstance(node, ast.ClassDef):
+                        declared[node.name] = _scope(node.body)
+                    elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                        for target in targets:
+                            if isinstance(target, ast.Name):
+                                declared[target.id] = {}
+                return declared
+
+            scope = _scope(ast.parse(path.read_text()).body)
+            for part in symbol.split("."):
+                if part not in scope:
+                    return False
+                scope = scope[part]
+            return True
 
         unresolved = []
         for doc in (SCOPE_DOC, BRIEF_DOC):

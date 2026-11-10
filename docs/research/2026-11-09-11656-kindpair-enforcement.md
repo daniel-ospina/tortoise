@@ -230,7 +230,7 @@ sites), `decide_wiring`, `mining`, connectors — and the largest future produce
 | mechanism | semantics | blocks a write? |
 |---|---|---|
 | OWL / `rdfs:domain` / `rdfs:range` | **inference rules, not constraints** | **never** — asserting `Bob teaches Scooter` *entails* Bob is a Teacher, it does not reject an untyped Bob |
-| SHACL `sh:class` | closed-world constraint → **report** | **no** — `sh:severity` *"has no impact on the validation"*; it is a label for the tool |
+| SHACL `sh:class` | closed-world constraint → **report** | **no**, on SHACL **1.0**: `sh:severity` *"has no impact on the validation"* — and that sentence sits in §2.1.4's explicitly **informative** remainder. ⚠️ Version-qualified on purpose: SHACL **1.2** replaces it with the disallowed-level-set rule (§10.1 below), under which the policy set **does** decide what blocks. The two editions are different claims, not conflicting ones |
 | Neo4j | uniqueness / existence / property-type / key | **no endpoint-kind constraint type exists at all** |
 | Kafka Schema Registry | compatibility on **schema registration** | blocks the **schema**, never an individual record |
 
