@@ -636,14 +636,20 @@ _DELIBERATE_BARE_FORM: frozenset[tuple[str, str]] = frozenset(
         # `tests/test_entry_point_python_guard.py`'s `_DELIBERATE_BARE_FORM`" — a
         # sentence that was FALSE on `main` until this key returned.
         #
-        # Both PRs were correct at their own head and red together, which is why the
-        # key is neither a mistake nor a re-declaration:
+        # The key is neither a mistake nor a re-declaration, which is why the record may
+        # rely on it (#11774 review, finding 1: this preamble used to read "both PRs
+        # were correct at their own head and red together", and measured at each PR's
+        # OWN head that is false — `7c45d5af1f` (#11756) and `900d4aafc6` (#11757) were
+        # both RED, and the pair that was red-together is the pair `#11757` should not
+        # have been — so the sentence endorsed the deletion pattern this block exists
+        # to warn against):
         #   · `#11756` (`7c45d5af1f`) rewrote the record to `uv run python`, leaving
         #     this key matching no live line;
         #   · `#11757` deleted a key that was LIVE at its own head — its merge parent
-        #     `215e7d9d8b` already contained `#11759` (restored ~3 min earlier) and
-        #     the file was GREEN there, so the removal CREATED the doc-scan red
-        #     rather than clearing a dead key. It is not the model to copy (#11774);
+        #     `215e7d9d8b` already contained `#11759` (restored 37 s earlier; `#11757`
+        #     merged 3 min after it) and the file was GREEN there, so the removal
+        #     CREATED the doc-scan red rather than clearing a dead key. It is not the
+        #     model to copy (#11774);
         #   · `#11759` restored the `python3` record relying on a key `#11757` had
         #     already removed.
         # The merged tree therefore advertised the refused form with nothing exempting
@@ -811,6 +817,34 @@ def _cardinality_of(token: str) -> int | None:
     return int(token) if token.isdigit() else _CARDINALITY_WORDS.get(token.lower())
 
 
+def _cardinality_claims_in(source: str) -> list[str]:
+    """Every cardinality claim in the `#:` block above `_DELIBERATE_BARE_FORM`.
+
+    ONE seam, deliberately: the region selection, the `#:` filtering, the formatting
+    normalisation and the claim match all happen here, so the pin cannot drift from what
+    `test_the_prose_pin_reads_through_formatting_but_not_wording` measures. The earlier
+    split — helpers used by the pin, each tested separately — let a revert of the pin's
+    CALL SITE leave the whole suite green while the false red returned; measured in
+    review of #11777 (R8/R9/R10 green, R11 red), which is the `[pin-defensive-claim]`
+    class: measure the pin's effect, not the helper's.
+
+    The region is the COMMENT REGION immediately above the definition, not every `#:`
+    line in the file — the scoping is load-bearing, because a decoy earlier in the file
+    otherwise satisfies a leftmost search while the block that actually describes the
+    set drifts (measured, #11754 review: decoy above + prose `three` over a four-member
+    set PASSED).
+    """
+    before = source.partition("_DELIBERATE_BARE_FORM: frozenset")[0]
+    prose = _normalise_prose(
+        " ".join(
+            line[2:].strip()
+            for line in _comment_region_above(before)
+            if line.startswith("#:") and line[2:].strip()
+        )
+    )
+    return _stated_cardinalities(prose)
+
+
 def test_the_record_exemption_prose_counts_the_set_it_describes():
     """The `_DELIBERATE_BARE_FORM` comment states the exemption set's cardinality
     in prose — *"…stay `uv run python` while the <N> entries below do not"*.
@@ -824,22 +858,7 @@ def test_the_record_exemption_prose_counts_the_set_it_describes():
     describe THIS set — the same non-rot rule
     `test_the_record_exemptions_all_still_match_a_live_line` applies to the keys.
     """
-    source = Path(__file__).read_text(encoding="utf-8")
-    before = source.partition("_DELIBERATE_BARE_FORM: frozenset")[0]
-    # The prose is the COMMENT REGION immediately above the definition, not every
-    # `#:` line in the file. The scoping is load-bearing: over the whole file head
-    # the search below takes the LEFTMOST match, so a stray earlier copy of the
-    # sentence satisfied this pin while the block that actually describes the set
-    # drifted (measured, #11754 review: decoy sentence above + prose `three` over a
-    # four-member set PASSED).
-    prose = _normalise_prose(
-        " ".join(
-            line[2:].strip()
-            for line in _comment_region_above(before)
-            if line.startswith("#:") and line[2:].strip()
-        )
-    )
-    matches = _stated_cardinalities(prose)
+    matches = _cardinality_claims_in(Path(__file__).read_text(encoding="utf-8"))
     assert matches, (
         "the `_DELIBERATE_BARE_FORM` comment block no longer carries the sentence "
         "'while the <N> entries below do not'. This pin must NOT rot into passing "
@@ -873,39 +892,84 @@ def test_the_record_exemption_prose_counts_the_set_it_describes():
 
 
 def test_the_prose_pin_reads_through_formatting_but_not_wording():
-    """Non-vacuity of the tolerance, both directions (#11775).
+    """Non-vacuity of the tolerance, both directions, driven through the PIN's OWN seam.
 
-    The pin above reds through `_normalise_prose` / `_stated_cardinalities`, and the
-    reason it must is that its failure message prescribes the one remedy that
-    disables it — *"update the pattern in this test"*. So the tolerance is
-    load-bearing and cannot be left untested: without it, `**four**`, `` `four` `` and
-    a sentence-initial `Four` all reddened as *"the sentence is gone"* while the
-    sentence was present and correct (measured, #11754 review F5).
+    The pin reds through `_cardinality_claims_in`, and the reason the tolerance matters
+    is that the pin's failure message prescribes the one remedy that disables it —
+    *"update the pattern in this test"*. So a false red here costs the property itself,
+    and the tolerance cannot be left untested: without it `**four**`, `` `four` `` and a
+    sentence-initial `Four` all reddened as *"the sentence is gone"* while the sentence
+    was present and correct (measured, #11754 review F5).
 
-    The opposite direction matters just as much — a REWORDED sentence must still read
-    as absent, or the pin becomes a fuzzy match that passes on prose it never read.
+    These cases are built as synthetic SOURCE blocks and fed to `_cardinality_claims_in`
+    — the same function the pin calls — so that reverting the pin's call site (leaving
+    the helpers in place as dead tolerance) reds here instead of passing the whole file
+    (measured in review of #11777: R8/R9 green before this seam existed, R11 red).
+
+    The opposite direction matters just as much — a REWORDED sentence must still read as
+    absent, or the pin becomes a fuzzy match that passes on prose it never read.
     """
+
+    def claims(*comment_lines: str) -> list[str]:
+        block = "".join(f"#: {line}\n" for line in comment_lines)
+        return _cardinality_claims_in(f"{block}_DELIBERATE_BARE_FORM: frozenset({{}})")
+
     for variant in (
         "while the four entries below do not.",
         "while the **four** entries below do not.",
         "while the `four` entries below do not.",
         "while the Four entries below do not.",
         "while the FOUR entries below do not.",
-        "while the   four\n entries below do not.",
     ):
-        stated = _stated_cardinalities(_normalise_prose(variant))
+        stated = claims(variant)
         assert stated, f"{variant!r}: a formatting difference must not read as absence"
         assert _cardinality_of(stated[0]) == 4, f"{variant!r} -> {stated}"
 
-    assert _stated_cardinalities(
-        _normalise_prose("while the entries below are exempt")
-    ) == [], "a reworded sentence must read as ABSENT, not as an approximate hit"
-    # A word outside the table is still a CLAIM: the sentence is found and the number
-    # is unreadable — reported that way, never silently treated as absent.
-    unknown = _stated_cardinalities(_normalise_prose("while the **some** entries below do not"))
+    # A re-wrap (the sentence split across lines by a bare `#` separator) is formatting
+    # too: the round-2 correction this seam descends from exists for exactly this case.
+    assert _cardinality_of(claims("while the **four**", "", "entries below do not.")[0]) == 4
+
+    assert claims("while the entries below are exempt") == [], (
+        "a reworded sentence must read as ABSENT, not as an approximate hit"
+    )
+    # A word outside the table is still a CLAIM: the sentence is found and the number is
+    # unreadable — reported that way, never silently treated as absent.
+    unknown = claims("while the **some** entries below do not.")
     assert unknown == ["some"], unknown
     assert _cardinality_of(unknown[0]) is None
     assert _cardinality_of("fourteen") is None
+    # Scoping survives the seam: a decoy copy INSIDE the block is still two claims.
+    assert len(claims("while the four entries below do not.", "while the four entries below do not.")) == 2
+
+
+def test_the_pin_reads_through_the_seam_rather_than_its_own_copy():
+    """The pin's CALL SITE, which no behavioural test can observe.
+
+    Every other arm in this file measures a function's behaviour, and that cannot see
+    the one edit that reintroduces #11775: leaving the seam correct while the pin goes
+    back to its own inline extraction. Measured in review of #11777 — with the helpers
+    intact and the pin inlined, the whole file stayed GREEN (R8/R9), and the tolerance
+    became dead code that reads as coverage. So this asserts the wiring itself.
+
+    Its limit, stated rather than hidden: this is a SHAPE pin (it reads this file's
+    source), so an edit that rewrites the pin *and* this assertion defeats it. That is
+    an adversarial edit, and it lands in a visible diff; the class being prevented here
+    is the accidental revert, which it does catch. `AGENTS.md`'s `[pin-defensive-claim]`
+    row is the reason the limit is written down instead of implied.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    pin = source.partition("def test_the_record_exemption_prose_counts_the_set_it_describes()")[2]
+    body = pin.partition("\ndef ")[0]
+    assert "_cardinality_claims_in(" in body, (
+        "the cardinality pin no longer reads through `_cardinality_claims_in` — it has "
+        "its own copy of the extraction again, so the formatting tolerance is dead code "
+        "and the next `**four**` reds with 'the sentence is gone' (that is #11775). "
+        "Call the seam."
+    )
+    assert "re.findall" not in body and "re.sub" not in body, (
+        "the cardinality pin does its own matching again; the seam exists so the pin and "
+        "its tolerance test cannot drift (#11777 review B1)."
+    )
 
 
 def test_no_doc_or_usage_advertises_the_form_the_guard_refuses():
