@@ -1724,12 +1724,18 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     # == 1` passed a document that ADDED a second, looser pattern to the same clause
     # (measured: `(`\\(\\w*:Document`, or as a bare `:Document`)` left 43 green) while
     # the sentence then asserted that a pattern matching every line matches six.
-    clause = re.search(r"one narrow enough(.*?)still matches", section, re.DOTALL)
-    assert clause, (
+    clauses = re.findall(r"one narrow enough(.*?)still matches", section, re.DOTALL)
+    assert clauses, (
         "§5's 'one narrow enough … still matches' clause is gone — re-measure it rather "
         "than dropping it; the six is the count FOR the pattern named in that clause"
     )
-    stated_patterns = re.findall(r"`([^`]*)`", clause.group(1))
+    assert len(clauses) == 1, (
+        f"§5 states the 'one narrow enough … still matches' clause {len(clauses)} "
+        "times inside the anchored section — `findall` binds the FIRST, so an earlier "
+        "copy naming the right pattern would let the clause under the six name a "
+        "different one; keep one clause, or pin each one"
+    )
+    stated_patterns = re.findall(r"`([^`]*)`", clauses[0])
     assert stated_patterns == [_NARROW_PATTERN], (
         "§5's narrow clause must name exactly one pattern, `"
         f"{_NARROW_PATTERN}`, and it names {stated_patterns!r} — the 'six' below is "
