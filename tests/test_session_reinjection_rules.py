@@ -2826,7 +2826,7 @@ def test_a_non_str_custom_key_is_dropped_not_stringified_11382():
     "5", which can FUSE with a real one) both leave every other test green —
     measured: the one-line ``else str(value)`` mutant passed the entire
     six-file seam batch with only this test red once it existed (before it, the
-    batch was green: 849 on the head of the round that found the gap, 852 when
+    batch was green: 849 on the head of the round that found the gap, 851 when
     the pin landed — the batch's size moves with every test added, so the figure
     that matters is "nothing else reds"). So the arm needed a row of its own, exactly like the fail-closed
     snake-id arm one helper over.
