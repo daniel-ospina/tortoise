@@ -264,9 +264,10 @@ three moves have since been made, one per workstream: the #10976
 census's own note on why node labels do not partition the node set
 (`cache_eviction.py:956`, which is also one of the two that lifted the file
 count, being a new file), #8447's ingest door (`tortoise/ingest.py`, the
-`REFUSED_NOT_FOUND` enum docstring), and #9601's record backup
-(`tortoise/hosted_backup.py`, likewise a new file, whose six mentions are the
-dump-and-restore prose about pre-D10 artifacts). All three are the point rather
+`REFUSED_NOT_FOUND` enum docstring), and #11729's runtime-label writers
+(`tortoise/hosted_backup.py` — an EXISTING file that carried no `:Document`
+mention at `4f68a2aa7`, which is the second file the count gained; its six added
+mentions are the dump-and-restore prose about pre-D10 artifacts). All three are the point rather
 than an accident: this population grows for good reasons, so the figure tracks
 the tree and not a past commit.
 `tests/test_substrate_map.py` re-derives both numbers over the **same**

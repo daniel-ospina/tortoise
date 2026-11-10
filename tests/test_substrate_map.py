@@ -1556,9 +1556,10 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     moved to **63** lines across **19** files, in three moves, one per workstream:
     `cache_eviction.py:956` (the #10976 census's note on why labels do not partition
     the node set), #8447's ingest door (`tortoise/ingest.py`, the
-    `REFUSED_NOT_FOUND` enum docstring), and #9601's record backup
-    (`tortoise/hosted_backup.py`, a new file whose six mentions are the
-    dump-and-restore prose about pre-D10 artifacts). That move is the mechanism
+    `REFUSED_NOT_FOUND` enum docstring), and #11729's runtime-label writers
+    (`tortoise/hosted_backup.py` — an EXISTING file that carried no `:Document` mention
+    at `4f68a2aa7`, which is the second file the count gained; its six added mentions
+    are the dump-and-restore prose about pre-D10 artifacts). That move is the mechanism
     working: the census landed, this check reddened, and §5 was re-measured instead
     of the number being quietly widened or the guard loosened.
 
@@ -1724,7 +1725,7 @@ def test_every_cited_line_in_this_section_still_carries_the_prose_it_describes()
     the pointer was not. A reader re-examining the no-regex-check decision follows
     that pointer as the evidence — and lands on `)`.
 
-    The count pin above cannot catch this: it pins the NUMBER (57/18), not where the
+    The count pin above cannot catch this: it pins the NUMBER (63/19), not where the
     number came from. This is the same silent-staleness class the PR closed for
     `Pinned by tests/…` citations with
     `test_every_pin_reference_in_ci_selection_names_a_test_that_exists`: a citation

@@ -1290,8 +1290,7 @@ def assess(
     # wrong about the reach in one direction or the other; the criterion above is the
     # whole of it, and the two arms that pin it are named below. The measured example: a
     # population 500 counted as 2,000 on a 25,000-node graph with a 1,500 claim passes
-    # BOTH guards, and the same graph with a 30,000 ceiling and a 25,000 claim is equally
-    # untouched — the multiplier is irrelevant, only `claim <= node_total` bounds the hole.
+    # BOTH guards — the 30,000/25,000 pair below is the same reach, from the other side.
     #
     # ⛔ A MIRROR-VS-TOTAL CHECK IS NOT "NO DETECTION" — it is UNSOUND, which is a
     # different fact and the one this paragraph asserts. Refusing on
