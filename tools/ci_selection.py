@@ -2594,8 +2594,9 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `test_entry_point_python_guard.py` cases naming
              # `tools/measure_11086_gate_rate.py` at 23:46Z, while the PR merged at
              # 23:02Z — a red merged over, not a pin that never ran (#11660's shard was
-             # watchdog-killed before it reached the file, and its gate job had already
-             # failed on `test_bounded_raw_clients_3065`, which named that tool). So the
+             # watchdog-killed before it reached the file, while its shard `test (f)`
+             # (129600940876) had already failed on `test_bounded_raw_clients_3065`,
+             # which named that tool — before the merge). So the
              # recurrence has TWO causes and this entry closes ONE: a tools-only change
              # can still land with no surface selected, and a shard that has not
              # reported yet can carry a red past the merge. The per-file remedy below is

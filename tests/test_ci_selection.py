@@ -20447,8 +20447,9 @@ def test_the_11086_and_11642_tools_select_core():
     # NOT: a pin that never ran. #11658's own CI ran it and failed both cases for
     # `tools/measure_11086_gate_rate.py` (run 42714341603, job `test (d)`
     # 129500375789, 23:46Z) while the PR merged at 23:02Z; #11660's shard was
-    # watchdog-killed before it reached the file and its gate job had already
-    # failed on `test_bounded_raw_clients_3065`, naming that tool. What THIS test
+    # watchdog-killed before it reached the file, while its shard `test (f)`
+    # (129600940876) had already failed on `test_bounded_raw_clients_3065`, naming
+    # that tool — before the merge. What THIS test
     # pins is the other, still-open cause: `tools/` is a flat NON_PYTHON_PREFIXES
     # entry and neither path matches a SOURCE_PATTERNS row, so a tools-only diff
     # came back `changed == []`, took the docs-only early return and selected NO
