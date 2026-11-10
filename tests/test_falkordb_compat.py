@@ -67,6 +67,18 @@ class _EngineGraph:
                 raise Exception("Attribute 'embedding' is already indexed")
             self._vector_index_created = True
             return _ResultSet([])
+        if "db.indexes()" in low:
+            # #11642: the retirement gate reads the catalogue before it drops
+            # anything, so the mock must answer it or the gate refuses to drop.
+            if not self._vector_index_created:
+                return _ResultSet([])
+            return _ResultSet([("Point", "Point", {"embedding": ["VECTOR"]})])
+        if "drop index" in low and "embedding" in low:
+            if not self._vector_index_created:
+                raise Exception("No such index")
+            self._vector_index_created = False
+            self.dropped = True
+            return _ResultSet([])
         if "db.idx.vector.querynodes" in low:
             if self.vector_api == "none":
                 raise Exception(
@@ -393,46 +405,99 @@ class TestVersionProbeCacheKeyServerMode:
 # ── _ensure_indexes vector branch ───────────────────────────────────────────
 
 class TestEnsureIndexesVectorApi:
-    """Vector index creation uses the API the engine registers (#1359)."""
+    """#1359's engine-API resolution is RETIRED by #11642 — inverted, not deleted.
 
-    @pytest.mark.parametrize("vector_api,expected", [
-        ("procedure", "procedure"),
-        ("cypher", "cypher"),
-    ])
-    def test_vector_index_created_with_engine_api(self, vector_api, expected):
+    ⛔ THIS CLASS USED TO PIN WHICH API `_ensure_indexes` USED TO *CREATE* the
+    in-graph `Point.embedding` HNSW index: `createNodeIndex` on a
+    procedure-capable engine, `CREATE VECTOR INDEX` on a Cypher-native one, and
+    a WARNING when neither worked. The owner's 2026-11-07 decision retired that
+    index (its `vectorset` was rebuilt on every cold restore — `#7846`), so the
+    property worth pinning INVERTED: on a store whose replacement is ARMED the
+    store must DISCOVER an existing index from the catalogue and DROP it, must
+    never create one, and must leave the handle `None` so
+    `required_embedding_dim` reports the documented no-index lane.
+
+    ⛔ "MUST NEVER CREATE" IS THE **ARMED** POSTURE (#11660 review round 7,
+    P2-2). The gate is symmetric: an UNARMED store is `main`'s posture and does
+    create one, because a store must never be left with neither an in-graph ANN
+    index nor a record leg. Both arms are pinned — here (create stops when
+    armed) and in `tests/test_4997_vector_index_parity.py`
+    (`test_a_FRESH_store_with_no_replacement_still_GETS_its_ANN_index`, which
+    owns the unarmed arm and the "no drop while unarmed" arm).
+
+    The engine-API distinction is not lost with the creation — `run_vector_query`
+    still needs it for the two `queryNodes` signatures, which
+    `TestVectorIndexApiConsumption` below and the docker lane both cover. What
+    deleting this class would lose is the only pin on the RETIREMENT's shape.
+    """
+
+    @pytest.mark.parametrize("vector_api", ["procedure", "cypher", "none"])
+    def test_an_ARMED_store_never_asks_an_engine_to_create_a_vector_index(
+            self, vector_api, monkeypatch):
+        """ARMED ⇒ no creation on ANY engine API, and no handle resolved.
+
+        Arming is the condition under which creation must stop: the record
+        answers the dense read, so the in-graph index has a replacement and must
+        go. Without the arming env this same call CREATES (see the class
+        docstring) — which is why the posture is set explicitly rather than
+        inherited from the ambient environment.
+        """
+        monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+        monkeypatch.setenv("TORTOISE_RECORD_VECTOR_LEG", "1")
         graph = _EngineGraph(vector_api=vector_api)
         proj = _bare_projection(graph)
         proj._ensure_indexes()
 
-        assert proj._vector_index_api == expected
-        vector_creates = [c for c in graph.calls
-                          if "vector" in c.lower()
-                          and ("createnodeindex" in c.lower()
-                               or "create vector index" in c.lower())]
-        assert vector_creates, "no vector index creation attempt recorded"
+        assert proj._vector_index_api is None, (
+            "an in-graph vector-index API was resolved on an ARMED store — "
+            "#11642 retired that index there, so no engine capability may be "
+            "recorded as if one exists")
+        creates = [c for c in graph.calls
+                   if "vector" in c.lower()
+                   and ("createnodeindex" in c.lower()
+                        or "create vector index" in c.lower())]
+        assert not creates, (
+            f"the in-graph vector index was CREATED on an ARMED "
+            f"{vector_api!r} engine: {creates}")
 
-    def test_procedure_engine_uses_procedure_first(self):
-        """Procedure engine → createNodeIndex called, NO Cypher fallback."""
+    def test_an_existing_vector_index_is_dropped(self, monkeypatch):
+        # The retirement is authorised only when the Postgres dense leg is
+        # armed (#11660 review round 4): the index and its replacement are one
+        # decision, so this pin exercises the ARMED posture.
+        monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+        monkeypatch.setenv("TORTOISE_RECORD_VECTOR_LEG", "1")
+        """The retirement's positive half: a store that HAS one loses it.
+
+        This is the migration for every already-deployed graph — the one a cold
+        restore currently pays 436.5 s (untuned) to rebuild the index for.
+        """
+        graph = _EngineGraph(vector_api="procedure")
+        graph._vector_index_created = True  # a store from before the move
+        proj = _bare_projection(graph)
+        proj._ensure_indexes()
+
+        assert getattr(graph, "dropped", False), (
+            "the store held a vector index and the setup did not drop it")
+        assert proj._vector_index_api is None
+
+    def test_a_store_with_no_vector_index_emits_no_drop(self):
+        """The steady state costs ZERO DDL — the gate is the catalogue.
+
+        `_ensure_indexes` is reached from the hosted PER-REQUEST path, so an
+        unconditional `DROP INDEX` would be a FAILING DDL round trip per
+        request, and it reds the repeated-bootstrap pin in
+        `tests/test_indexes.py`.
+        """
         graph = _EngineGraph(vector_api="procedure")
         proj = _bare_projection(graph)
         proj._ensure_indexes()
 
-        assert proj._vector_index_api == "procedure"
-        assert any("db.idx.vector.createNodeIndex" in c for c in graph.calls)
-        assert not any("CREATE VECTOR INDEX FOR" in c for c in graph.calls)
+        drops = [c for c in graph.calls
+                 if "drop index" in c.lower() and "embedding" in c.lower()]
+        assert not drops, f"a clean store was sent a DROP: {drops}"
 
-    def test_cypher_engine_falls_back_to_create_vector_index(self):
-        """Cypher-native engine → createNodeIndex fails (not registered),
-        `CREATE VECTOR INDEX` used instead."""
-        graph = _EngineGraph(vector_api="cypher")
-        proj = _bare_projection(graph)
-        proj._ensure_indexes()
-
-        assert proj._vector_index_api == "cypher"
-        assert any("CREATE VECTOR INDEX FOR" in c for c in graph.calls)
-
-    def test_embedded_skips_vector_index(self):
-        """Embedded mode → vector index creation NEVER attempted (unchanged)."""
+    def test_embedded_skips_the_vector_branch_entirely(self):
+        """Embedded mode → no catalogue probe, no drop, no creation (unchanged)."""
         graph = _EngineGraph(vector_api="cypher")
         proj = object.__new__(FalkorProjection)
         proj._is_embedded = True
@@ -444,18 +509,8 @@ class TestEnsureIndexesVectorApi:
 
         assert proj._vector_index_api is None
         assert not any("VECTOR" in c.upper() and "INDEX" in c.upper()
+                       and "FULLTEXT" not in c.upper()
                        for c in graph.calls)
-
-    def test_both_apis_fail_records_none_and_logs_warning(self, caplog):
-        """Neither API works → _vector_index_api stays None + warning."""
-        graph = _EngineGraph(vector_api="none")
-        proj = _bare_projection(graph)
-        with caplog.at_level("WARNING", logger="tortoise.projection"):
-            proj._ensure_indexes()
-
-        assert proj._vector_index_api is None
-        assert any("Failed to create vector index" in r.message
-                   for r in caplog.records)
 
 
 # ── run_vector_query / degradation_chain consume _vector_index_api ─────────

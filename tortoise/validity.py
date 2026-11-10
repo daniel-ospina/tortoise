@@ -103,13 +103,19 @@ _END_UNKNOWN_MARKER_SET = frozenset(END_UNKNOWN_MARKERS)
 #: durable); read it with ``dict(END_WRITE_OUTCOMES)``.
 END_WRITE_OUTCOMES: dict[str, int] = {"shaped": 0, "refused": 0}
 
-#: A date the read measure CANNOT order but whose INTENT is unambiguous: year
-#: first, 1-2 digit month/day, ONE consistent separator. ``_created_sort_key``
-#: requires ``len(s) >= 10`` plus a ``-``/``T``, so ``2024-3-1`` (8 chars) and
-#: ``2024/03/01`` name no instant to it — representational variance, NORMALISED
-#: silently rather than refused (ONTOLOGY §4.7, #9202). A day/month-first form
-#: (``03/04/2024``) deliberately does NOT match: it parses both ways, so it is
-#: "legible but ambiguous" and belongs in the refuse column (§0).
+#: A date the read measure COULD NOT ORDER before #11646 and whose INTENT is
+#: unambiguous: year first, 1-2 digit month/day, one date spelling. Two of them
+#: still do not order (``2024-3-1`` is 8 chars, under the measure's length
+#: gate), while a SLASH date does now — the read measure was widened so the
+#: ingest producer's shape can be ordered at all, which means ``2024/03/01``
+#: reaches this door as *already an instant*. That is exactly why the
+#: canonicalisation below is LOAD-BEARING rather than a convenience: a variant
+#: the measure now orders must still be re-spelled, or this door stores a form
+#: it used to refuse (cycle 4, finding 3). Representational variance is
+#: NORMALISED silently rather than refused (ONTOLOGY §4.7, #9202). A
+#: day/month-first form (``03/04/2024``) deliberately does NOT match: it parses
+#: both ways, so it is "legible but ambiguous" and belongs in the refuse column
+#: (§0).
 #:
 #: The DATE part, not the whole string: un-padded fields beside a TIME
 #: (``2024-3-1T12:00:00``) are the SAME human sloppiness and name the SAME
@@ -120,8 +126,23 @@ END_WRITE_OUTCOMES: dict[str, int] = {"shaped": 0, "refused": 0}
 #: ``_names_an_instant``. (Review P3: a padded date normalised while the padded
 #: date-TIME beside it was refused — one sloppiness, two verdicts.)
 _DATE_VARIANT_RE = re.compile(
-    r"^(?P<year>\d{4})(?P<sep>[-/])(?P<month>\d{1,2})(?P=sep)(?P<day>\d{1,2})"
-    r"(?P<rest>[T ]\S*)?$"
+    # the day separator is independent of the month's: ``2024/03-01`` and
+    # ``2024-03/01`` are variants ``_names_an_instant`` now ORDERS (the read
+    # measure widened for #11646), so this door must canonically re-spell them
+    # instead of storing a variant it used to refuse (review cycle 4, finding 3).
+    r"^(?P<year>\d{4})[-/](?P<month>\d{1,2})[-/](?P<day>\d{1,2})"
+    # ``rest`` covers a TIME part AND an OFFSET-ONLY tail, and the offset arm
+    # must be as WIDE as ``_INSTANT_RE``'s — ``[Zz]`` and a bare ``±HH`` included.
+    # A narrower arm (``±HH:MM`` at minimum) left the rest of the family falling
+    # past this helper into the "already an instant" short-circuit, so ONE
+    # defect class had THREE outcomes at the door (measured):
+    #   read_caller_end("2024/3/1+05:00") -> ("2024-03-01+05:00", None)  # re-spelled
+    #   read_caller_end("2024/3/1+05")    -> ("2024/3/1+05", None)       # ⛔ verbatim
+    #   read_caller_end("2023/05/20Z")    -> ("2023/05/20Z", None)       # ⛔ verbatim
+    #   read_caller_end("2024/3/1Z")      -> ValueError                  # refused
+    # Storing a slash-spelled bound is not cosmetic: it is invisible to the
+    # lexicographic ``STARTS WITH`` window pre-filters (#9406).
+    r"(?P<rest>(?:[T ]\S*|[Zz]|[+-]\d{2}(?::?\d{2}(?::?\d{2})?)?))?$"
 )
 
 #: An epoch supplied as a STRING. ``_created_sort_key`` reads an epoch from a
@@ -324,6 +345,40 @@ def _end_refusal(value: object, fault: str) -> ValueError:
     return ValueError(message)
 
 
+def _canonical_variant_spelling(value: object) -> str | None:
+    """The canonical dashed/padded spelling of a date-field VARIANT, else None.
+
+    ``2024/03/01`` and ``2024-3-1`` name the same instant as ``2024-03-01``;
+    this door stores the canonical form, and answers ``None`` when the value is
+    not a variant OR is already canonical — so a byte-identical value still
+    takes the "accepted, never re-spelled" path.
+
+    #11646 is why this is its own step: widening the READ measure to order the
+    slash spelling (the ingest producer's shape) made such a variant reach
+    ``read_caller_end`` as *already an instant*, so the canonicalisation
+    downstream of that check stopped running. A time part is kept verbatim and
+    validated by the same read measure, so ``2024/3/1Txx`` still falls through
+    to the refusal arms and is reported rather than silently half-shaped.
+    """
+    if not isinstance(value, str):
+        return None
+    token = value.strip()
+    match = _DATE_VARIANT_RE.match(token)
+    if match is None:
+        return None
+    try:
+        canonical = date(int(match["year"]), int(match["month"]),
+                         int(match["day"])).isoformat()
+    except ValueError:
+        return None                # the refusal arms below name the component
+    if token[:10] == canonical:
+        return None                # already canonical — never re-spell
+    rest = match["rest"] or ""
+    if rest and not _names_an_instant(canonical + rest):
+        return None                # the refusal arms below name the fault
+    return canonical + rest
+
+
 def read_caller_end(value: object, declared_precision: object = None,
                     ) -> tuple[object, str | None]:
     """#9202: read a caller's ``validTo`` for INTENT on the way in.
@@ -336,10 +391,11 @@ def read_caller_end(value: object, declared_precision: object = None,
 
     * ``shaped_token is None`` — write ``stored_value`` as the end. Either the
       caller's value is a real orderable instant (returned UNTOUCHED: a stored
-      instant is never re-spelled), or it is representational variance the read
-      measure could not order (``2024-3-1``, ``2024/03/01``, and the same
-      un-padded date beside a time: ``2024-3-1T12:00:00``), normalised to the
-      ISO form **silently** — same instant, same meaning, nothing to report.
+      instant is never re-spelled), or it is representational variance that
+      reaches this door in an orderable but non-canonical spelling
+      (``2024-3-1``, ``2024/03/01``, the mixed-separator ``2024/03-01``, and the
+      same un-padded date beside a time: ``2024-3-1T12:00:00``), normalised to
+      the ISO form **silently** — same instant, same meaning, nothing to report.
       Only the DATE is re-spelled; a time-of-day is kept as the caller wrote it,
       and the pair is accepted only when the read measure can order it.
     * ``shaped_token is not None`` — the value DECLARES NO DATE (blank, or one of
@@ -374,6 +430,17 @@ def read_caller_end(value: object, declared_precision: object = None,
     """
     if value is None:
         return None, None          # absent = OPEN end, not an un-datable one
+    # #11646: a date-field VARIANT is canonicalised BEFORE the instant check.
+    # Widening the read measure to order ``2024/03/01`` (and the ingest
+    # producer's slash shape) means such a variant is now "already an instant"
+    # — without this arm the door would store whatever spelling the caller
+    # sent, which is exactly the padding/separator tolerance #9202 review P3
+    # settled (a padded date was finished silently while the padded date-TIME
+    # beside it was refused). A canonical value returns ``None`` from the
+    # helper and is then stored byte-identical by the arm below.
+    canonical_variant = _canonical_variant_spelling(value)
+    if canonical_variant is not None:
+        return canonical_variant, None
     if _names_an_instant(value):
         return value, None         # a real instant: accepted, never re-spelled
     if isinstance(value, str):

@@ -79,6 +79,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from .calendar_date import calendar_date as _calendar_day  # #11646
 from .live import is_terminal_status
 
 __all__ = [
@@ -170,8 +171,6 @@ _PREFER_LATEST_RE = re.compile(
     r"|start(?:ed|s)?|quit|end(?:ed)? up)\b"
 )
 
-_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-
 
 @dataclass(frozen=True)
 class TemporalIntent:
@@ -213,13 +212,17 @@ def detect_temporal_intent(text: str | None) -> TemporalIntent:
 
 
 def _as_iso_date(question_date: str | None) -> str | None:
-    """The ``YYYY-MM-DD`` form of a question date, or ``None``."""
-    if question_date is None:
-        return None
-    s = str(question_date).strip()
-    if len(s) >= 10 and _ISO_DATE_RE.match(s[:10]):
-        return s[:10]
-    return None
+    """The ``YYYY-MM-DD`` form of a question date, or ``None``.
+
+    The shape set is ``tortoise.calendar_date``'s — ONE resolver for every
+    stored/question date in the read path (#11646). Before that, this seam
+    matched a bare ``YYYY-MM-DD`` prefix, so the producer's real
+    ``2023/05/20 (Sat) 03:29`` returned ``None`` and the C6 ``(as of <date>)``
+    dense anchor was a silent no-op on the whole corpus. Written-day
+    semantics (the default): the anchor names the day the dataset says.
+    """
+    d = _calendar_day(question_date)
+    return None if d is None else d.isoformat()
 
 
 def inject_query_date(query: str, question_date: str | None) -> str:
@@ -269,13 +272,20 @@ def dense_query_for(query: str | None, *, time_aware: bool,
 def _as_date(value) -> str | None:
     """Normalize a stored date value to ``YYYY-MM-DD``, or ``None``.
 
-    The codebase writes ISO-8601 strings AND numeric epochs, sometimes into
-    the same property (``supersede_point`` copies the successor's stored
-    ``validFrom`` into the predecessor's ``validTo``, and a stored numeric
-    ``validFrom`` is legal — see ``tests/test_validity_windows.py``). A
-    naive ``str(v)[:10]`` misreads an epoch, so epochs are converted through
-    ``datetime`` and everything is compared at the same DAY granularity the
-    reader's ``[valid …]`` markers use. Unparseable values return ``None``.
+    The codebase writes ISO-8601 strings, the ingest producer's
+    ``2023/05/20 (Sat) 03:29``, AND numeric epochs, sometimes into the same
+    property (``supersede_point`` copies the successor's stored ``validFrom``
+    into the predecessor's ``validTo``, and a stored numeric ``validFrom`` is
+    legal — see ``tests/test_validity_windows.py``). A naive ``str(v)[:10]``
+    misreads an epoch, so the shapes are resolved by ONE parser
+    (``tortoise.calendar_date``, #11646 — never a fourth local copy) and
+    everything is compared at the same DAY granularity the reader's
+    ``[valid …]`` markers use. Unparseable values return ``None``.
+
+    Before #11646 the producer's shape was unparseable here, so a PRESENT
+    question date fell through to the wall clock in
+    :func:`resolve_question_date` and the valid-time selection evaluated at
+    *today* — the defect the issue measured.
 
     ⛔ ``None`` does NOT mean "not stale" here, and this docstring used to say
     it did ("treated as 'no window information', never as stale") — the very
@@ -295,30 +305,18 @@ def _as_date(value) -> str | None:
 
     The measure that decides "names an instant" is
     ``search_engine._created_sort_key`` (via ``validity._names_an_instant``),
-    never this function alone: it is why an epoch spelled as a STRING
-    (``"1900000000"``) is un-datable here and there, while the NUMBER
-    ``1900000000`` is the 2030-03-17 instant in both.
+    never this function alone. The two disagree DELIBERATELY on one spelling:
+    an epoch spelled as a STRING (``"1900000000"``) is dated HERE (the 2030-03-17
+    day) because a day makes no instant claim, while that same measure buckets it
+    as un-orderable — the #9202 ruling, so a present-but-un-orderable window end
+    reads ``END_UNKNOWN``. The NUMBER ``1900000000`` is the 2030-03-17 instant in
+    both. (This sentence previously said the string was "un-datable here and
+    there"; only "there" was true — corrected with #11646.)
     """
     if value is None or isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)):
-        try:
-            return datetime.fromtimestamp(float(value), UTC).date().isoformat()
-        except (OverflowError, OSError, ValueError):
-            return None
-    s = str(value).strip()
-    if not s:
-        return None
-    if len(s) >= 10 and _ISO_DATE_RE.match(s[:10]):
-        return s[:10]
-    try:
-        epoch = float(s)
-    except ValueError:
-        return None
-    try:
-        return datetime.fromtimestamp(epoch, UTC).date().isoformat()
-    except (OverflowError, OSError, ValueError):
-        return None
+    d = _calendar_day(value)
+    return None if d is None else d.isoformat()
 
 
 def is_stale_entry(entry: dict, *, question_date: str | None = None) -> bool:

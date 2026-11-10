@@ -691,6 +691,17 @@ def test_the_pin_judges_a_real_population():
 #: payload, not a value invented here — an invented value proves only that the
 #: predicate agrees with itself).
 NOT_BOUND_BY_A_PYTHON_VALUE: frozenset[str] = frozenset({
+    # ── the vector move (#11642) ────────────────────────────────────
+    # GENERATED ALWAYS AS (record_embedding_vector(embedding)) STORED on each
+    # table, so NO Python value can ever be bound to it: Postgres refuses a
+    # write that names a generated column (`column "embedding_vec" can only be
+    # updated to DEFAULT`, measured), which is why `record_projection.
+    # GENERATED_COLUMNS` drops a payload key of this name instead of binding it.
+    # It is enumerated here because it is a DECLARED column of the record — the
+    # closure above requires every one to be judged, an expression, or named.
+    "event.embedding_vec",
+    "point.embedding_vec",
+    "source.embedding_vec",
     # ── event ───────────────────────────────────────────────────────
     "event.captured_at",
     "event.classification_level",

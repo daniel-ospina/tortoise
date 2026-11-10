@@ -4677,7 +4677,20 @@ jobs:
         # fails and the runner aborts pre-step — a false red with zero tests
         # run). The action binds loopback (#7637) and exports
         # `TEST_RECORD_DB_URI`; paired with the teardown step below.
+        #
+        # ⛔ `pgvector/pgvector:pg16`, NOT the default `postgres:16` (#11642).
+        # `20261109000001_record_embedding_vector.sql` runs
+        # `CREATE EXTENSION vector` and declares three `vector(384)` columns, so
+        # on a plain Postgres image every record leg would fail at
+        # APPLY-MIGRATIONS — and the PGlite schema drill cannot cover it either
+        # (`@electric-sql/pglite` ships no pgvector; `validate.mjs` NAMES the
+        # skip). This job is therefore the ONE place the vector migration is
+        # applied for real, which is why the image is pinned here rather than
+        # skipped: a migration that no CI leg can apply is a migration nobody
+        # has run.
         uses: ./.github/actions/postgres-provision
+        with:
+          image: pgvector/pgvector:pg16
       - name: Provision the DRILL's scratch Postgres — a SECOND server (#9567 D8)
         # D8 is "restore from the record's own backup", and `run_restore_drill`
         # REFUSES a scratch target that is the same database as the record
@@ -4694,6 +4707,13 @@ jobs:
         with:
           dsn_var: TEST_RECORD_SCRATCH_URI
           label_var: TORTOISE_CI_POSTGRES_LABEL_SCRATCH
+          # ⛔ THE SAME IMAGE AS THE FIRST PROVISIONER (#11660 review round 4,
+          # P1). `tests/test_9567_record_capstone.py::drilled` applies
+          # `RECORD_MIGRATIONS` to the SCRATCH server too, so
+          # `20261109000001_record_embedding_vector.sql` runs here as well — on a
+          # plain `postgres:16` that is `extension "vector" is not available` and
+          # the D8 drill reds on a required leg.
+          image: pgvector/pgvector:pg16
       - name: Run the record's Postgres legs (armed — #9551)
         run: |
           set +e
@@ -4737,12 +4757,22 @@ jobs:
           # is a nondeterministic RED on a required context, which is why the
           # ctime arm burns an inode-clock tick instead of skipping when a tick
           # boundary happens not to fall between two calls (#9558 cycle 2, P1).
+          # #11642 (PR #11660 review F10): the dense leg's LIVE half. Nothing
+          # else in this repo executes `record_vector.vector_search` — the
+          # DB-free `test_11642_vector_move.py` asserts its CONSTANT and its
+          # residual algebra and says so — so the shortfall comparison, the SQL,
+          # the terminal-status predicate (#689) and the canonical operator
+          # identity (#943) were asserted by strings. This job is the only one
+          # that can run it (`pgvector/pgvector:pg16` above), which is why the
+          # file is here and not merely registered on `core`: there it collects
+          # and skips, and a skip on this job reds the leg gate below.
           timeout -s INT -k 10 12m stdbuf -oL python -m pytest \
             tests/test_9078_record_written_by_production_path.py \
             tests/test_9555_narrative_carrier.py \
             tests/test_9664_capstone_connector_to_record.py \
             tests/test_record_searchkeys_10620.py \
             tests/test_9881_rename_reaches_the_record.py \
+            tests/test_11642_vector_move_live.py \
             tests/test_9558_record_write_cost.py \
             tests/test_9567_record_capstone.py \
             -v --timeout=300 -p no:cacheprovider -r fEs \

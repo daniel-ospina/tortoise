@@ -173,9 +173,21 @@ behind them. Everything else in the search path is unchanged.
 
 **What the move costs, stated so it is not discovered late:**
 
-- `public.point/source/event.embedding` is **`jsonb`** today, and **`pgvector` appears in 0 of 80
-  migrations** — so this is a **column-type migration plus a full index build and a backfill** of existing
-  rows, not a query edit.
+- `public.point/source/event.embedding` is **`jsonb`** and **stays `jsonb`**, and **`pgvector` appears in 1 of 81
+  migrations** (`20261109000001_record_embedding_vector.sql`, `#11642`) — so this WAS a full index build and a
+  backfill, not a query edit. ⛔ **UPDATE AT THIS HEAD (`#11642`, measured on pgvector 0.8.7 / Postgres 16.15):**
+  the payload column is deliberately NOT converted — a `jsonb → vector(384)` type change would rewrite the
+  record's write and read seams and could not represent the caller-supplied embeddings of other widths that
+  PR #3018 stores verbatim. The ANN-indexed half is a **GENERATED `embedding_vec vector(384)`** beside it.
+  Measured: backfill 20,000 rows **6.9 s**; HNSW build at `maintenance_work_mem` = 64 MB **4.0–4.2 s**
+  (index 39 MB); the same build at 4 MB **37.4 s** with pgvector's "no longer fits into maintenance_work_mem"
+  warning — it COMPLETES, so the build degrades in time and never into an OOM; top-10 parity against exact
+  scan on a clustered 20k corpus **25/25 probes identical**; a cold logical `pg_dump`/`pg_restore` of the
+  20k vectors including the index **10.9 s**, against the **436.5 s** untuned / **191.8 s** tuned `vectorset`
+  rebuild this replaces (`#7846`, which also deadlocked the instance). **§6.1's shortfall assertion is now
+  load-bearing in a second way:** a filtered ANN under pgvector's DEFAULT `hnsw.iterative_scan = off` returns
+  **0 rows where 152 match** (measured, `LIMIT 500`); `strict_order` returns 150. `tortoise/record_vector.py`
+  sets it explicitly and asserts the shortfall.
 - **A walk starts from seeds.** Under a bounded window (§7) a seed may not be resident, so the walk must
   **materialise its seeds before traversing** — a write on the query path — priced in §7 with the rebuild
   headroom that makes it survivable, which §1.5 ranks as the #1 production risk.

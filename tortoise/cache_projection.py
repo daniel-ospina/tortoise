@@ -230,12 +230,27 @@ from .security import validate_rel_type
 from .session_source_display import SESSION_SOURCE_SUMMARY_PREFIX
 from .stored_form import STORED_VECTOR_PROPS, VERBATIM_MARKER, is_verbatim
 
+#: Columns POSTGRES computes, so a record→cache read must skip them (#11642).
+#: ⛔ ALIASED from `record_projection`, never re-listed: `GENERATED_COLUMNS` is
+#: the ONE declaration of "the projection must never bind this", and a second
+#: copy here is how the writer and the reader start disagreeing about the same
+#: column. The failure it prevents is not cosmetic: without the skip,
+#: `_props_from_row` reaches its final `UnknownRecordColumn` raise, and
+#: `read_record_view` / `record_serve.read_node` both do `SELECT *` — so EVERY
+#: record row read would raise on the first row after the migration applied.
+_GENERATED_COLUMNS = _rp.GENERATED_COLUMNS
+#: The same object under its public name, so a caller outside this module reads
+#: the ONE declaration rather than a copy (`tests/test_cache_projection.py`'s
+#: unclassified-column pin reads it, and `__all__` re-exports it).
+GENERATED_COLUMNS = _GENERATED_COLUMNS
+
 __all__ = [
     "ADDITIONAL_PRIMARY_COLUMNS",
     "CACHE_FORBIDDEN_COLUMNS",
     "DERIVED_FROM_RECORD",
     "EVENT_STREAM_FOLDS",
     "FOLD_ON_CREATE_DEFAULTS",
+    "GENERATED_COLUMNS",
     "KEY_PROPERTY",
     "NODE_TABLES",
     "PACKAGED_PLACEMENT_TABLE",
@@ -2394,6 +2409,18 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
             continue
         if column in placed:
             # A placed column the schema does NOT authorise: DERIVED/VOLATILE.
+            continue
+        if column in _GENERATED_COLUMNS:
+            # #11642 — a GENERATED column is DERIVED, and Postgres owns it.
+            # `public.point/source/event.embedding_vec` is
+            # `GENERATED ALWAYS AS (record_embedding_vector(embedding)) STORED`,
+            # so it is not authority the cache may hold: the graph keeps
+            # `embedding`, and a projected copy of the ANN projection would be a
+            # second, unreconciled truth about the same vector. It is skipped
+            # BEFORE the unknown-column raise below rather than added to the
+            # placement table, because the placement table describes what the
+            # RECORD stores and what the CACHE rebuilds — and nothing rebuilds
+            # this: Postgres recomputes it from `embedding` on every write.
             continue
         raise UnknownRecordColumn(
             f"{table}.{column} is not classified by the placement table, not "
