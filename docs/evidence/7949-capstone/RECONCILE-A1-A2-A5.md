@@ -170,7 +170,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `4e6a3ce612bd^` every one of its hits is this file's own lines — so the operand has to name the
    bundle alone, with this file excluded:
    `git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
-   ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'` → **all 40 hits are the bundle's own registration**
+   ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'` → **all 42 hits are the bundle's own registration**
    (#10982 landed it after this record was written) — the bundle CITES the predicate, it does not
    produce it; the producer claim is the call-shaped grep above, which is still empty. The **0 hits**
    the `exit 1` in earlier revisions of this record was taken at is that EXCLUDED command in the tree
@@ -682,9 +682,9 @@ git grep -in 'rollup' -- '*.py' '*.md'                      # no graph rollup qu
 # not a producer — the bundle CITES the predicate, it does not produce it. The producer
 # claim is the call-shaped grep above, which is still empty:
 git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
-    ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'    # 40 lines, exit 0 — all in the bundle
-                                                            # (PRE-REGISTRATION.md 22,
-                                                            # preregistration.json 8,
+    ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'    # 42 lines, exit 0 — all in the bundle
+                                                            # (PRE-REGISTRATION.md 23,
+                                                            # preregistration.json 9,
                                                             # probes/capstone_measure.py 10)
 
 # A2 (§2) — the shipped arm moves the share by exactly zero, on a tree that HAS #10997

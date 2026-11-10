@@ -4729,11 +4729,11 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # so the shift cannot be avoided by shortening it — a line count above a
         # cite moves the cite.
         ("E1-E5-PROOFS.md", 'declares `STEPS = ("S0"', (
-            ("146", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+            ("179", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
-        ("E1-E5-PROOFS.md", "_step_accounting` (`:699`) refuses a GREEN row whose", (
-            ("699", "def _step_accounting("),
+        ("E1-E5-PROOFS.md", "_step_accounting` (`:732`) refuses a GREEN row whose", (
+            ("732", "def _step_accounting("),
         ), "capstone_verdict_check"),
         # ⛔ A SECOND DOCUMENT PRINTS THE SAME DECLARATION (#10601 review round 2).
         # `docs/00_index.md`'s capstone row cites this gate too, and it moved
@@ -4743,7 +4743,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # and the rows above covered ONE document. Every doc that prints a
         # `tools/*.py` number needs its own row here, not just the first one.
         ("docs/00_index.md", "declares the eight steps", (
-            ("146", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+            ("179", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
         # ⛔ THE VET BLOCK'S OWN "BEFORE" CLAIM (#10833 review, P2 — the SECOND
@@ -11640,7 +11640,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
             encoding="utf-8", errors="replace").splitlines() if mention.search(line))
         if n:
             per_file[relpath.removeprefix("docs/evidence/7949-capstone/")] = n
-    assert per_file == {"PRE-REGISTRATION.md": 22, "preregistration.json": 8,
+    assert per_file == {"PRE-REGISTRATION.md": 23, "preregistration.json": 9,
                         "probes/capstone_measure.py": 10}, (
         f"the bundle's hasPart/hierarchies mentions are {per_file} — the record's §5 "
         "self-matching note states them per file; re-derive the note (and this map) "

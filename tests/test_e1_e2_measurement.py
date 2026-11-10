@@ -1544,7 +1544,8 @@ def test_the_real_pre_registration_schema_names_why_it_cannot_score_this_run(
     e_floors = sorted(k for k in artifact["denominator_floors"] if k.startswith("e"))
     assert e_floors == [
         "e1_min_before_share", "e1_objects", "e2b_surviving_units",
-        "e3_derived_nodes", "e5_rate_min_sentences"], artifact["denominator_floors"]
+        "e3_derived_nodes", "e5_rate_min_sentences",
+        "e6_declared_rows"], artifact["denominator_floors"]
     assert artifact["corpus"]["path"] == "tests/eval/write_path"
     code, text = _run_with_prereg(monkeypatch, artifact)
     assert code == 3, text

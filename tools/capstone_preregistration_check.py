@@ -381,7 +381,7 @@ CROSS_CHECKED_CORPUS_KEYS = (
 #: unexplained rows), so it is NOT a member of ``REGISTERED_NON_BAR_ROWS`` and the assertion below
 #: must stay satisfied.
 CORE_REQUIRED_CRITERIA = ("E1", "E2", "E3", "E4", "E5")
-REQUIRED_CRITERIA = CORE_REQUIRED_CRITERIA + ("E6",)
+REQUIRED_CRITERIA = (*CORE_REQUIRED_CRITERIA, "E6")
 #: The ONLY rows the record registers as bar-less (`UNMEASURED(...)`, §3.1's A4). Pinned here so the
 #: completeness gate can tell a registered non-bar from a required row that declares itself one —
 #: the branch also skips both numeric arms, so an unscoped version was a false PASS (#10982).
