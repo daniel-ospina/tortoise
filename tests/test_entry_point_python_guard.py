@@ -628,40 +628,30 @@ _DELIBERATE_BARE_FORM: frozenset[tuple[str, str]] = frozenset(
             "$ python3 tools/edge_census.py census --uri "
             "'docker://:falkordb@localhost:6379' \\",
         ),
-        # The `11689` plan doc's entry — bullet 2, a `$`-prompted transcript WITH
-        # its captured `FAIL — 1 problem(s): …` output. The doc states the class
-        # itself ("**This transcript is a RECORD, so it keeps the form that ran.** …
-        # the line is exempted in `tests/test_entry_point_python_guard.py`'s
-        # `_DELIBERATE_BARE_FORM` rather than rewritten. Rewriting it would state a
-        # command the machine never executed.") and names THIS set as its
-        # mechanism, so the exemption is what the record's own decision requires —
-        # rewriting the doc line instead would reverse it. That sentence in the doc
-        # was FALSE on `main` until this key came back.
-        #
-        # ⛔ REVIVED by `#11757`'s own rule. That PR removed this key and wrote down
+        # ⛔ REVIVED, by #11757's own rule. That PR removed this key as dead and said
         # how it comes back: "an exemption can only be revived by restoring the line
-        # it names — never by re-declaring the key." The line IS back, so the key
-        # returns; nothing here re-declares an exemption for text that is gone.
+        # it names — never by re-declaring the key." The line IS back: `#11759`
+        # (`6ba6fac9844a`) restored the record to the form that ran and stated, in the
+        # plan doc itself, that "the line is exempted in
+        # `tests/test_entry_point_python_guard.py`'s `_DELIBERATE_BARE_FORM`" — a
+        # sentence that was FALSE on `main` until this key returned.
         #
-        # The ORDER is measured, not remembered (`git merge-base --is-ancestor`):
-        # added with `#11755` (`217d46bac5`); deadened when `#11756` (`7c45d5af1f`)
-        # rewrote the doc line to `uv run python`; made live AGAIN when `#11759`
-        # (`6ba6fac984`) restored the record's original form and named this set as
-        # its mechanism in the DOC — that commit does not touch this file, so the
-        # key never left and simply began to match a live line again; then removed
-        # by `#11757` (`900d4aafc6`), whose own tree already CONTAINED `#11759`, on
-        # the premise that the doc still carried `uv run python`. That removal MOVED
-        # `main`'s red from the dead-key test to
-        # `test_no_doc_or_usage_advertises_the_form_the_guard_refuses` instead of
-        # clearing it — until the key came back here.
+        # Both PRs were correct at their own head and red together, which is why the
+        # key is neither a mistake nor a re-declaration:
+        #   · `#11756` (`7c45d5af1f`) rewrote the record to `uv run python`, leaving
+        #     this key matching no live line;
+        #   · `#11757` deleted the then-dead key — correctly, at a head that predated
+        #     `#11759` and merged ~3 min after it;
+        #   · `#11759` restored the `python3` record relying on a key `#11757` had
+        #     already removed.
+        # The merged tree therefore advertised the refused form with nothing exempting
+        # it: `test_no_doc_or_usage_advertises_the_form_the_guard_refuses` red on
+        # `origin/main` at `900d4aafc61a`, with no branch content involved.
         #
-        # ⛔ The lesson is the retirement step, not the restore: re-measure the doc
-        # line before retiring this key, because a commit message saying the line
-        # was rewritten proves nothing about the line today — `#11757` merged three
-        # minutes AFTER the commit that made this line live again. Membership is the
-        # exact STRIPPED line, so the key can only be revived by restoring the line
-        # it names, never by re-declaring it, and it dies again the moment the doc
-        # line is reworded.
+        # Keeping the record verbatim is `#11759`'s recorded decision (THE BOUNDARY
+        # above: rewriting a RECORD falsifies evidence provenance), so the key returns
+        # rather than the line being rewritten — the resolution that satisfies both
+        # PRs' stated rules instead of reversing either.
         (
             "docs/plans/2026-11-10-issue-11689-e1e2-owned-floors.md",
             "$ python3 tools/capstone_preregistration_check.py --dir "
