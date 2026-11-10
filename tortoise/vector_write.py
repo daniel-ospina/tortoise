@@ -154,6 +154,7 @@ __all__ = [
     "statement_stores_embedding_in_a_map",
     "statement_unattributed_set_items",
     "statement_uses_unmodelled_scope",
+    "statement_vector_in_a_foreign_map_key",
     "statement_vector_in_a_foreign_property",
     "statement_write_aliases",
     "statement_write_target_problem",
@@ -571,18 +572,29 @@ def _split_items(statement: str, start: int, end: int, base: int,
                  depths: list[int]) -> list[str]:
     """Split a clause body on the commas at ITS OWN depth — never on a comma inside a map, a
     list, a function call or a string (``SET e.meta = {a: {b: 1}}`` is ONE item)."""
-    items: list[str] = []
+    return [statement[a:b].strip()
+            for a, b in _split_item_spans(statement, start, end, base, depths)]
+
+
+def _split_item_spans(statement: str, start: int, end: int, base: int,
+                      depths: list[int]) -> list[tuple[int, int]]:
+    """The ``[start, end)`` SPANS :func:`_split_items` renders as stripped text.
+
+    The span form exists for a reader that must SEARCH a blanked copy of the statement (so a string
+    literal is not read as code) but must still REPORT the caller's own text — index-preserving
+    blanking (:func:`_blank_string_literals`) makes the two agree, and a report rendered out of the
+    blanked copy would show a caller spaces where their literal was.
+    """
+    spans: list[tuple[int, int]] = []
     current = start
     for index in range(start, end):
         if depths[index] == base and statement[index] == ",":
-            item = statement[current:index].strip()
-            if item:
-                items.append(item)
+            if statement[current:index].strip():
+                spans.append((current, index))
             current = index + 1
-    tail = statement[current:end].strip()
-    if tail:
-        items.append(tail)
-    return items
+    if statement[current:end].strip():
+        spans.append((current, end))
+    return spans
 
 
 def _scan_node_patterns(statement: str, depths: list[int],
@@ -908,20 +920,35 @@ def statement_vector_in_a_foreign_property(statement: str) -> tuple[str, ...]:
     cheap fail-closed reading costs nothing. It is the same judgement as
     :func:`statement_stores_embedding_in_a_map`, one grammar level over.
 
-    ⚠️ It does NOT cover a whole-alias write (``SET e += $props``) whose MAP carries an
-    ``embedding`` — that item has no single target property, and the key arrives from data rather
-    than from the statement's text. That is the pre-existing `#4520` hole (`$props` can carry a plain
-    ``List`` into the vector property), tracked on its own; refusing every ``SET e += $props`` here
-    would refuse the product's own event write.
+    ⚠️ TWO RESIDUALS, stated at their true size rather than left to be re-derived:
+
+    * a whole-alias write whose MAP KEY **arrives from data** (``SET e += $props``) has no target
+      property to read. That is the pre-existing `#4520` hole (`$props` can carry a plain ``List``
+      into the vector property), tracked on its own; refusing every ``SET e += $props`` here would
+      refuse the product's own event write. ⛔ A map written as a LITERAL in the statement text is
+      NOT this residual — its key is in the text — and it is read by the sibling
+      :func:`statement_vector_in_a_foreign_map_key`.
+    * a vector that arrives as a bare PARAMETER under some other name (``SET e.vector = $vec``) is
+      invisible to a TEXT reader: nothing in the statement says ``$vec`` is a ``Vectorf32``, and
+      refusing every ``SET <alias>.<prop> = $param`` would refuse the product's own scalar writes.
+      The same class as `#4520`'s data-typed key, and it needs a typed seam, not a wider regex.
+
+    Strings and comments are blanked before the search, so ``SET e.note = 'vecf32($e) is the shape'``
+    is TEXT and is accepted — reading a literal as code refused a legitimate statement with a message
+    that was not even true, the error class :func:`_blank_string_literals` exists to remove. The
+    refusal MESSAGE still renders the caller's own text, not the blanked copy, and the backticked
+    spelling of the property (``e.`vector` ``) is an identifier, so it stays readable and refused.
     """
     text = _blank_comments(statement)
-    depths = _depths(text)
+    blanked = _blank_string_literals(text)
+    depths = _depths(blanked)
     foreign: list[str] = []
-    for keyword, start, end in _clause_bodies(text, depths):
+    for keyword, start, end in _clause_bodies(blanked, depths):
         if keyword != "SET":
             continue
         base = depths[start] if start < len(depths) else 0
-        for item in _split_items(text, start, end, base, depths):
+        for span_start, span_end in _split_item_spans(blanked, start, end, base, depths):
+            item = blanked[span_start:span_end].strip()
             head = _item_head(item)
             if head is None:
                 continue
@@ -931,7 +958,70 @@ def statement_vector_in_a_foreign_property(statement: str) -> tuple[str, ...]:
             if match.group("prop").lower() == EMBEDDING_PROPERTY:
                 continue
             if _VECTOR_EXPR_RE.search(head[1]):
-                foreign.append(item.strip())
+                foreign.append(statement[span_start:span_end].strip())
+    return tuple(foreign)
+
+
+#: A property-MAP key — ``{vector: …}``, ``{`key`: …}``, ``{eventId: …, count: …}``. Paired with the
+#: ENTRY's VALUE so a vector expression under a key that is not ``embedding`` is refused: a map is the
+#: one store shape whose target property is written LITERALLY in the statement text but not as a
+#: dotted ``SET`` item, which is exactly the axis :func:`statement_vector_in_a_foreign_property`
+#: cannot see, and the key does NOT arrive from data (that is the `#4520` residual above).
+_MAP_ENTRY_KEY_RE = re.compile(
+    r"[{,]\s*`?(?P<key>[A-Za-z_][A-Za-z_0-9]*)`?\s*:")
+
+
+def _map_entry_value_end(text: str, depths: list[int], start: int, base: int) -> int:
+    """End index of the map ENTRY whose VALUE begins at ``start``.
+
+    The value runs to the first comma at the map's OWN depth, or to the bracket that closes it —
+    never across a nested map, list or call (``{a: {b: 1}, c: …}`` is TWO entries, and ``{a: {b: 1}}``
+    is ONE value that spans the inner map). Read off :func:`_depths` like every other splitter here,
+    so a comma inside ``'a, b'`` cannot end an entry — :func:`_blank_string_literals` has already
+    turned that text into spaces.
+    """
+    for index in range(start, len(text)):
+        depth = depths[index]
+        if depth == base and text[index] == ",":
+            return index
+        if depth < base and text[index] in ")]}":
+            return index
+    return len(text)
+
+
+def statement_vector_in_a_foreign_map_key(statement: str) -> tuple[str, ...]:
+    """Map ENTRIES that put a vector under a key OTHER than ``embedding``.
+
+    ⛔ THE SIBLING OF :func:`statement_vector_in_a_foreign_property`, and the shape its own
+    "whole-alias write" carve-out does NOT cover: ``SET e = {vector: vecf32($embedding)}`` /
+    ``SET e += {vector: …}`` / ``CREATE (e:Event {vector: …})`` write the target property
+    literally in the statement text, so this is not the `#4520` data-keyed hole — the key is right
+    there, and a vector expression under it lands a ``Vectorf32`` in a property ``run_vector_query``
+    never queries (it reads :data:`EMBEDDING_PROPERTY` and nothing else), on a SERVED label, with
+    every other leg in this seam reading true.
+
+    Refused, not reasoned about, on the same judgement as the dotted sibling: no writer in this repo
+    stores a vector under any other map key, so the fail-closed reading costs nothing, and a map key
+    named ``embedding`` is already refused wholesale by
+    :func:`statement_stores_embedding_in_a_map`.
+
+    Strings and comments are blanked first, so ``SET e.note = '{vector: vecf32($e)}'`` is text, not a
+    map (and a comment cannot fabricate a key).
+    """
+    text = _blank_comments(statement)
+    text = _blank_string_literals(text)
+    depths = _depths(text)
+    foreign: list[str] = []
+    for match in _MAP_ENTRY_KEY_RE.finditer(text):
+        key = match.group("key")
+        if key.lower() == EMBEDDING_PROPERTY:
+            continue
+        if match.end() >= len(depths):
+            continue
+        base = depths[match.end()]
+        end = _map_entry_value_end(text, depths, match.end(), base)
+        if _VECTOR_EXPR_RE.search(text[match.end():end]):
+            foreign.append(f"{{{key}: …}}")
     return tuple(foreign)
 
 
@@ -1199,7 +1289,11 @@ def statement_write_target_problem(statement: str, allowed) -> str | None:
     node; an alias bound to DIFFERING label sets (:func:`statement_conflicting_bindings`) is refused
     for the same reason across ``UNION`` arms; and a vector placed in a property MAP
     (:func:`statement_stores_embedding_in_a_map`) is refused because a map on an anonymous pattern
-    or on a relationship is a store no alias-based reader can follow. Each of those was a live
+    or on a relationship is a store no alias-based reader can follow; the PROPERTY a store lands in
+    is proved too (:func:`statement_vector_in_a_foreign_property` for a dotted ``SET`` item and
+    :func:`statement_vector_in_a_foreign_map_key` for a map key), because a served label carrying
+    the vector in a property nothing queries passes every label-based leg and still fails `#5090`
+    row 2. Each of those was a live
     fail-open on this guard before #11641's review rounds, and every one was reached WITHOUT leaving
     the grammar — the ``FOREACH`` shadow through a construct the grammar ACCEPTS (see
     :func:`statement_foreach_rebound_aliases`).
@@ -1262,6 +1356,14 @@ def statement_write_target_problem(statement: str, allowed) -> str | None:
             f"it stores a VECTOR in a property that is not `{EMBEDDING_PROPERTY}` "
             f"({list(foreign_props)}) — the read path queries `{EMBEDDING_PROPERTY}` and nothing "
             "else, so a vector in any other property is paid for and unreachable; store it in "
+            f"`{EMBEDDING_PROPERTY}` on a labelled alias")
+    foreign_map_keys = statement_vector_in_a_foreign_map_key(statement)
+    if foreign_map_keys:
+        problems.append(
+            f"it stores a VECTOR under a property-MAP key that is not `{EMBEDDING_PROPERTY}` "
+            f"({list(foreign_map_keys)}) — the key is written literally here (it is not carried by a "
+            "`$props` parameter), so the store IS provable, and it lands where the read path — which "
+            f"queries `{EMBEDDING_PROPERTY}` and nothing else — never looks; write the vector to "
             f"`{EMBEDDING_PROPERTY}` on a labelled alias")
     diverged = sorted(alias for alias in targets if alias in conflicting)
     if diverged:

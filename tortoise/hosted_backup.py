@@ -3392,11 +3392,13 @@ def restore_backup(
     closed.
 
     ``allow_unserved_vectors`` (#11641): the SAME repair-on-read shape for the
-    VECTOR half. ⚠️ The counts land under ``result["restored"]`` — this function wraps
-    ``_restore_into_temp_verify_swap``'s return, so it is
-    ``restored["restored"]["dropped_vectors"]`` / ``["dropped_vector_labels"]``, NOT a
+    VECTOR half. ⚠️ The counts are NESTED: this function returns
+    ``result = {"restored": <the counts>, …}``, so the key path is
+    ``result["restored"]["dropped_vectors"]`` / ``["dropped_vector_labels"]`` — NOT a
     top-level key (``restore_graph``'s own docstring is the one that describes the
-    flat dict). An artifact may carry a vector on a label no read path serves —
+    flat dict). Both vector keys are present under the flag even when nothing was
+    dropped (``0`` and ``[]``), so a caller needs no guard around them.
+    An artifact may carry a vector on a label no read path serves —
     every graph written before D10 still holds ``(:Document {id, …})`` with an
     ``embedding`` — and the strict path refuses the whole artifact. With this flag
     every other node and edge is restored, the unserved vectors are DROPPED, the

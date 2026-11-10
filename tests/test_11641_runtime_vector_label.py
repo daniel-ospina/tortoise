@@ -72,6 +72,7 @@ from tortoise.vector_write import (
     statement_rebound_aliases,
     statement_unattributed_set_items,
     statement_uses_unmodelled_scope,
+    statement_vector_in_a_foreign_map_key,
     statement_vector_in_a_foreign_property,
     statement_write_aliases,
     statement_write_target_problem,
@@ -1566,6 +1567,141 @@ def test_a_vector_in_a_FOREIGN_property_is_refused_by_the_door() -> None:
     # (the `$props`-carried embedding is the pre-existing #4520 hole, tracked separately).
     assert statement_vector_in_a_foreign_property(
         "MATCH (e:Event {eventId:'seed'}) SET e += $props") == ()
+
+
+@pytest.mark.parametrize("statement", [
+    # `SET <alias> = {…}` — a whole-alias map write whose key IS in the statement text.
+    "MATCH (e:Event {eventId:'seed'}) SET e = {vector: vecf32($embedding)}",
+    # …and the merge spelling (`+=`), which keeps the other properties.
+    "MATCH (e:Event {eventId:'seed'}) SET e += {vector: vecf32($embedding)}",
+    # The backticked spelling of the KEY is an identifier to the engine, not a string.
+    "MATCH (e:Event {eventId:'seed'}) SET e += {`vector`: vecf32($embedding)}",
+    # A bare `$embedding` under a foreign key is the same store with the coercion left to the engine.
+    "MATCH (e:Event {eventId:'seed'}) SET e += {vec: $embedding}",
+    # A pattern MAP: the vector is in the CREATE's own property map, beside the served label.
+    "CREATE (e:Event {eventId:'seed', vector: vecf32($embedding)})",
+    # The serving label written CORRECTLY beside the foreign one in the same statement — the correct
+    # store must not launder the other one.
+    "MERGE (e:Event {eventId:'seed'}) SET e += {vector: vecf32($embedding)}, "
+    + set_embedding_clause("e"),
+], ids=["set-equals-map", "set-plus-equals-map", "backticked-key",
+        "bare-param-under-foreign-key", "create-pattern-map", "beside-the-correct-store"])
+def test_a_vector_in_a_FOREIGN_MAP_KEY_is_refused_by_the_door(statement: str) -> None:
+    """The PROPERTY axis again, through a map: the key is in the text, so it is provable.
+
+    Round 7 proved the dotted spelling (`SET e.vector = vecf32($embedding)`) and deliberately stayed
+    out of the whole-alias write, on the ground that `$props` carries its keys from DATA. A map
+    LITERAL is not that case: `{vector: vecf32($embedding)}` writes the key in the statement text,
+    so the store is as provable as a dotted one — and it was ACCEPTED, landing a `Vectorf32` in a
+    property `run_vector_query` never queries, on the served `:Event` label, with every label leg
+    reading true. Refused here, as the sibling of the dotted reader.
+    """
+    assert statement_vector_in_a_foreign_map_key(statement) == ("{vector: …}",) \
+        or statement_vector_in_a_foreign_map_key(statement) == ("{vec: …}",), \
+        statement_vector_in_a_foreign_map_key(statement)
+    problem = statement_write_target_problem(statement, {"Event"})
+    assert problem is not None and "VECTOR" in problem, problem
+    with pytest.raises(ValueError) as refused:
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={},
+             embedding=VEC, lane="test")
+    assert "VECTOR" in str(refused.value), str(refused.value)
+
+
+def test_the_legitimate_MAP_shapes_are_still_accepted() -> None:
+    """The other direction — without it a reader that refuses every map would pass the test above.
+
+    A scalar key, a nested map with no vector, and the product's own event write are all statements
+    the engine accepts and this door must keep accepting. A key named `embedding` is not here on
+    purpose: that one is refused wholesale by `statement_stores_embedding_in_a_map`, unchanged.
+    """
+    for ok in (
+        "MATCH (e:Event {eventId:'seed'}) SET e += {count: 1}",
+        "MATCH (e:Event {eventId:'seed'}) SET e.meta = {a: {b: 1}}, " + set_embedding_clause("e"),
+        "MATCH (e:Event {eventId:'seed'}) SET " + set_embedding_clause("e"),
+        "MERGE (e:Event {eventId:$eid}) " + clear_then_set_prefix("e")
+        + "SET e += $props, " + set_embedding_clause("e"),
+    ):
+        assert statement_vector_in_a_foreign_map_key(ok) == (), ok
+        assert statement_write_target_problem(ok, {"Event"}) is None, ok
+
+
+def test_a_vector_MENTIONED_in_a_STRING_does_not_refuse_the_statement(tmp_path) -> None:
+    """A string literal is TEXT — and reading it as code was a NEW false block on this head.
+
+    `SET e.note = 'vecf32($e) is the shape'` names the store shape in prose. The dotted sibling
+    searched the raw item, so the door REFUSED a legitimate statement with a message that was not
+    even true — the exact error class `_blank_string_literals` exists to remove (round 5's
+    `SET e.note = '(b:Batch)'` was the same defect in the NAMING readers). Both directions here: the
+    readers accept it, and the door WRITES it (so a "fix" that silently drops the note reds too).
+    """
+    statement = (
+        "MERGE (e:Event {eventId:$eid}) " + clear_then_set_prefix("e")
+        + "SET e += $props, e.note = 'vecf32($embedding) is the shape, $embedding is the param', "
+        + set_embedding_clause("e")
+    )
+    assert statement_vector_in_a_foreign_property(statement) == (), \
+        statement_vector_in_a_foreign_property(statement)
+    assert statement_vector_in_a_foreign_map_key(statement) == (), \
+        statement_vector_in_a_foreign_map_key(statement)
+    assert statement_write_target_problem(statement, {"Event"}) is None
+
+    sdk = TortoiseSDK(str(tmp_path / f"{uuid4().hex}.db"))
+    try:
+        proj = sdk._get_proj()
+        written = sdk._event_raw_write_door(
+            proj, statement, event_id="evt-note",
+            props={"eventId": "evt-note", "eventKind": "DocumentCreated"},
+            event_kind="DocumentCreated", embedding=VEC, lane="test-11641",
+        )
+        assert written is True
+        rows = proj.g.query(
+            "MATCH (e:Event {eventId:'evt-note'}) RETURN e.note, typeof(e.embedding)"
+        ).result_set
+        assert rows and rows[0][0] == (
+            "vecf32($embedding) is the shape, $embedding is the param"), rows
+        assert rows[0][1] == "Vectorf32", rows
+    finally:
+        sdk.close()
+
+
+def test_the_foreign_map_key_store_would_have_been_UNREACHABLE(tmp_path) -> None:
+    """Why the refusal is not ceremony: executed directly, the shape stores a vector nobody reads.
+
+    The door's own consequence, measured on a live graph — the statement the bound refuses lands a
+    `Vectorf32` in `e.vector`, and `run_vector_query` (which reads `embedding` and nothing else)
+    cannot return that node. The last assertion runs after the DOOR refused, so a refusal that still
+    mutated the graph reds here too.
+    """
+    sdk = TortoiseSDK(str(tmp_path / f"{uuid4().hex}.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.g.query(
+            "MERGE (e:Event {eventId:'evt-foreign'}) "
+            "SET e.vector = vecf32($embedding)",
+            params={"embedding": VEC},
+        )
+        rows = proj.g.query(
+            "MATCH (e:Event {eventId:'evt-foreign'}) RETURN typeof(e.vector)"
+        ).result_set
+        assert rows and rows[0][0] == "Vectorf32", rows
+        assert not [hit for hit in run_vector_query(
+            proj.g, VEC, limit=10, is_embedded=True,
+            entity_type="event", excluded_statuses=()) if hit[0] == "evt-foreign"], (
+            "a vector in a foreign property came back out of the query leg — then the bound was "
+            "refusing something reachable"
+        )
+        # …and a REFUSED door call leaves that graph untouched.
+        with pytest.raises(ValueError):
+            DOOR(_NoJournal(), None,
+                 "MATCH (e:Event {eventId:'evt-foreign'}) "
+                 "SET e += {vector: vecf32($embedding)}",
+                 event_id="evt-foreign", props={}, embedding=VEC, lane="test")
+        rows = proj.g.query(
+            "MATCH (e:Event {eventId:'evt-foreign'}) RETURN e.vector"
+        ).result_set
+        assert rows and rows[0][0] is not None, rows
+    finally:
+        sdk.close()
 
 
 def test_restore_graph_still_restores_a_served_label(tmp_path) -> None:

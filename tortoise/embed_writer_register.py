@@ -165,7 +165,12 @@ new unlabelled `p` that a name-keyed map still reads as the label the first patt
 labels the statement NAMES (`::statement_node_labels`); the labels it renders by INTERPOLATION
 (`::statement_interpolates_label` — a caller could otherwise satisfy the first leg with one literal
 served pattern and store through a second, interpolated one); and the alias it WRITES TO
-(`::statement_write_target_problem`). So a store on an unbound, unlabelled or label-mutated target
+(`::statement_write_target_problem`), together with the PROPERTY that store targets
+(`::statement_vector_in_a_foreign_property` for a dotted `SET` item and
+`::statement_vector_in_a_foreign_map_key` for a map key — a `Vectorf32` on a SERVED node in a
+property other than `embedding` passes every label leg and is still unreachable, because
+`run_vector_query` reads `embedding` and nothing else). So a store on an unbound, unlabelled or
+label-mutated target
 is refused too, and a caller can no longer pass by naming a served label it does not store on.
 Review still catches the label the DECLARATION names. ⛔ THE RESIDUAL, VERBATIM, because an earlier
 revision of this paragraph claimed totality and was measured FALSE: the bound refuses the DECLARED
