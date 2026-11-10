@@ -1801,7 +1801,8 @@ blob says *"these thirteen are every mechanism either document names"*), which i
 the row named 2 of the 4 call sites that run the clamp/dedupe (missing `execute_embed` — the `mentions_recorded`
 accounting this row is about — and `extract_session_v2`); and a typo (`carriers`). All corrected, and the
 relay this entry claims is now a fact rather than a plan — **the disposition is recorded on `#5064` as comment
-`6759903508`**, not only here.
+`6759903508`, corrected by `6762271557`** (that first comment said `(a) + (b)`, and (a) as the issue words it is a
+marker in a `docs/architecture/` doc — no such marker exists; the marker is at the declaration site), not only here.
 
 **Provenance.** Review cycle 1 (reviewer B: the two fail-opens above, both measured; reviewer A: the disposition had
 to be relayed onto `#5064` rather than stated only in this narrative, and five records still described a
@@ -1809,7 +1810,13 @@ one-directory surface — the records are corrected here and the relay is the co
 reviewer over the corrected artifact: the two documentation-truth defects above). Cycle 3 (a fresh reviewer over the
 final head: the clamp/dedupe attribution and the stale selection counts — both measured against `extractor_v2` and
 `tools/ci_selection.py`). Cycle 4 (a fresh reviewer over cycle 3's head: a stale headline count, a quote the base
-blob does not carry, two unlisted call sites and a typo). The mechanism's absence is unchanged and still tracked by
+blob does not carry, two unlisted call sites and a typo). Cycle 5 (over the head that produced, after the branch was
+merged with `main` and the inherited red fixed: a stated cause of that red which blamed SELECTION when the shards
+were cancelled, and a replacement noun colliding with this document's own `state_value_carve_out` row). Cycle 6
+(five more: a docstring still saying `Mention` bounds every field, a count quoted a head late, a `§7.3` that does not
+exist, `(filed separately)` with no issue number, and the `(a) + (b)` disposition wording). Cycle 7 (a `carve-out`
+location claim that §3 itself falsifies, the relay cited to the comment its own text disavows, an inverted phrase
+attribution, a `cycle-5 note` cited to the wrong file, and this Provenance list ending three cycles early).** The mechanism's absence is unchanged and still tracked by
 `#11239`; `#5064`'s Target 3 is not moved by this change, because a gate that can SEE an absence is not a mechanism
 that is built.
 
@@ -1835,11 +1842,13 @@ collided again and the second time with a REGISTRY ROW. *"The carve-out is about
 sits on §7's second subsection, *"State values and numeric facts — the carve-out is NARROWER than it looks"*,
 `EXTRACTOR-V4-ARCHITECTURE.md:1345`) and this
 same gate scans: at the FIRST-replacement head that sentence read `The carve-out is about CONTENT`, which made ten
-`carve-out` occurrences with nine naming that mechanism; this head has nine, none of them §3's. The sentence now says
+`carve-out` occurrences with nine naming that mechanism; this head has nine, all nine naming it — one of them in §3
+itself (`EXTRACTOR-V4-ARCHITECTURE.md:504`), which is why the reworded sentence must not add a tenth. The sentence now says
 *"**This clause** is about CONTENT"*, a phrase that names no mechanism at all.
 Loosening
 `MARKERS_ABSENT_BY_DESIGN` to a frame-aware
-read would have narrowed a deliberately COARSE instrument, which is the shape this file's cycle-5 note refuses
+read would have narrowed a deliberately COARSE instrument, which is the shape the cycle-5 note in
+`tests/test_9397_about_edge_properties.py:4257` refuses
 (*"A denial the documents' plural noun can satisfy is not a denial"*), and the exemption's own
 `MARKERS_ABSENT_BY_DESIGN` entry now records why the bare noun belongs to
 the denial vocabulary: a document that wants a synonym for an exemption must not borrow the denial's own noun.
