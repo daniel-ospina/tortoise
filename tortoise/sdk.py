@@ -48350,8 +48350,8 @@ class TortoiseSDK:
 
     _CALIBRATION_MARKER_KEY = "calibration_milestone"
     # Gate B criterion (epic-264 align): ≥70% human-reviewed precision.
-    # Enforced at write time — a below-target record would falsely open
-    # Gate B via calibration_passed().
+    # ⛔ NOT enforced at this head: #4282 retired `record_calibration`, its only
+    # reader, so this constant RECORDS the criterion, it no longer gates a write.
     _CALIBRATION_PRECISION_TARGET = 0.70
     def calibration_passed(self) -> bool:
         """True once the Gate B calibration milestone marker is stored.

@@ -264,8 +264,11 @@ def test_calibration_marker_key_is_the_persisted_literal():
     `tortoise/record_restore.py` classify as DATA — silently reads False. So the
     LITERAL is asserted here.
 
-    FAILS IF the constant is renamed or re-spelled, which is exactly when the
-    graphs in the field would stop answering.
+    FAILS IF the constant's VALUE is re-spelled — that is the case where the
+    graphs already in the field would stop answering. An attribute RENAME also
+    reds it (harmlessly): the reader and any writer move with the attribute, so
+    the stored key is untouched and no field graph is affected — do not read
+    that red as evidence of data breakage.
     """
     assert TortoiseSDK._CALIBRATION_MARKER_KEY == "calibration_milestone"
 
