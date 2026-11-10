@@ -208,10 +208,12 @@ PARITY_INSTRUMENTS: dict[str, str] = {
 #: `RETURN count(...)`) and pinned by
 #: ``tests/test_cache_eviction_census.py::test_the_population_count_mirrors_the_instrument``:
 #: a consumer may not import a script, so the only way to keep ONE definition in practice
-#: is a test that reds when the two drift. Mirror it exactly — ``is_episodic`` is also
-#: stamped on ``:Source``/``:Object`` nodes (``graph-scripts/backfill_is_episodic.py``), so
-#: dropping the ``:Point`` half would INFLATE the ceiling and re-open exactly the hole
-#: this closes.
+#: is a test that reds when the two drift. Mirror it exactly — ``is_episodic`` also rides
+#: NON-``:Point`` labels, so dropping the ``:Point`` half would INFLATE the ceiling and
+#: re-open exactly the hole this closes: ``graph-scripts/backfill_is_episodic.py`` stamps
+#: ``:Session``/``:Event``/``:Source``, and the entity door writes it on ``:Object`` too
+#: (``TortoiseSDK.create_entity(is_episodic=…)`` → ``_create_entity`` — the backfill does
+#: NOT stamp ``:Object``, so cite the two sources and not one).
 #:
 #: A population registered in :data:`PARITY_INSTRUMENTS` with no entry here is a REFUSAL
 #: (:func:`population_resident_count`), never a defaulted bound.
