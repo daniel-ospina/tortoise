@@ -194,7 +194,7 @@ check against. Unvalidated, and out of this epic's scope.
 |---|---|---|---|
 | **A-a** `live-v4` baseline is accurate (0 object→object edges; 62.3 % `the <X>`; 26 Subjects) | **high** | owner-measured 2026-11-04, per-kind breakdowns | C1's extended census re-derives it |
 | **A-b** packs declare part-whole object relations; schema + writers admit them | **high** | tree (`dev:142,148,193`; `edges.py:621-630`; ONTOLOGY §3.7) **and** the literature's declarative-ontology pattern [1] [4] | C3 |
-| **A-c** the gap is the declaration→consumer seam, not a missing writer | **high** | zero `create_edge` in `extractor_v2.py`; `hierarchies` validated-only | C3 |
+| **A-c** the gap is the declaration→consumer seam, not a missing writer | **high** | zero `create_edge` in `extractor_v2.py`; `hierarchies` is read on the live write path (`relation_write.plan_relation_edges` ← `sdk.py:17200`) and what is missing is its **emitter** (`apply_hierarchy_edges`, zero production callers) | C3 |
 | **A-d** a corpus through the fleet's **transport** exists or is capturable | **medium** | registered corpus is a fixture; the committed arm drives the SDK, not `POST /v1/sessions`; **E1b's `m2` control has no committed artifact** | C1 + C2 |
 | **A-e** `TAGGED: 0` is a gap | **rejected** | no extraction path writes `tags` | none — recorded so it never becomes a target |
 | **A-f** E1–E5 needs a new instrument | **rejected** | `#9075` + `capstone_measure.py` + verdict gate, committed | C1 extends it |

@@ -277,10 +277,10 @@ production caller today**; the two live `kind=` callers (`projection/entities.py
 does not install still decides the level. The label leg never reaches this seam at all:
 `create_operator` does its own inline membership check (`enforcement.py:6`).
 
-### 5.5 The prevention half (D5) — extend, and do not add a fourth resolver
+### 5.5 The prevention half (D5) — extend the resolver that already exists
 
 ⚠️ **Revision 1 said `fromKind`/`toKind` are "acted on in exactly one place". That is false** — there are
-**three** production readers, and one of them is D5's own job:
+**four** production readers, and two of them are D5's own job:
 
 - `domain_validators.py:396-410` — one pack's portfolio shape.
 - `sdk._resolve_traversal_path` (`sdk.py:42773`; the live call is `sdk.py:38605`) — **kind pair → `{predicate, fromKind, toKind}`**,
@@ -290,6 +290,13 @@ does not install still decides the level. The label leg never reaches this seam 
   `compile_value_brief` (`:395`, `:458`); its output rides `pack_refs` and is consumed by
   `extractor_v2._select_pack_kinds` (`extractor_v2.py:999`, called at `:1322`) to choose **which kinds to offer together**. **Wired**,
   for a narrower job than this issue needs.
+- ⛔ **`pack_hierarchy._matching_row` (`:194-210`) + `_binding` (`:213`) — the pair→WRITER resolver, and it
+already exists.** `_matching_row` joins a hierarchy entry to its `relations[]` row on the declared
+  `(fromKind, toKind)` (plus `predicate`/`semantics` — `decomposesInto` with `semantics: hasPart` is one
+  declaration written twice), and `_binding` turns the match into a write-path verdict. It is
+  **production-reachable on the live path**: `relation_write.plan_relation_edges` (`:631`) calls
+  `plan_hierarchy_edges` over `declared_hierarchy(registry)`, reached from `sdk.apply_relation_edges`
+  (`sdk.py:17200`). **Reuse its join — this is the "do not add a fourth resolver" rule applied to itself.**
 
 **The delta:** use that same map to choose **which relation labels to offer for a pair**, derived from
 `ontology.relations[]` (36 declared relations, **35 of them kind-bearing** — `pm:onBoard` is `declarationOnly`
@@ -379,7 +386,7 @@ the declared kinds; a read-side census reports the pre-existing population.
 |---|---|---|
 | "two writers: `create_operator` + `create_edge`" | **three** — `create_direct_edge` takes a `label` and validates nothing | fresh review (P0) |
 | "`hasPart` declared by 4 packs with 4 different pairs" | `hasPart` as a predicate is declared **once**; the **five** rows that produced the miscount carried `semantics: hasPart` over **four** different predicates (`decomposesInto`, `contains` ×2, `partOf`, `partOfSprint`). Real evidence: `addresses` ×6, `contains` ×2, `targets` ×2 | fresh review (P1), confirmed by recount |
-| "`fromKind`/`toKind` acted on in exactly one place" | **three** readers, incl. `_resolve_traversal_path` which is D5's own job | fresh review (P1) |
+| "`fromKind`/`toKind` acted on in exactly one place" | **four** readers, incl. `_resolve_traversal_path` which is D5's own job, and **`pack_hierarchy._matching_row`/`_binding` — a pair→writer resolver that already exists and must be reused, not rebuilt** | fresh review (P1) |
 | "`_relation_endpoint_refs` has no production consumer" | it is **wired**, for kind co-selection | `[VGATE]` round 1 |
 | "30 of 32 declare a mechanism" | **35 of 35** (34 IMPL + 1 NAND), incl. `hasPart`/`dependsOn` | `[VGATE]` round 1 |
 | "`mismatch` → refuse, unconditionally" beside "read the level through `resolve_enforcement`" | contradictory — the map's default is `warn` and no pack declares a level. Fixed by §2.1 | fresh review (P1) |

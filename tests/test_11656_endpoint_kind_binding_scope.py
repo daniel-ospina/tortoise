@@ -364,8 +364,32 @@ class TestTheThirdDoorExists:
         )
 
 
-class TestThePairHasThreeProductionReaders:
-    """⛔ The review's P1: "exactly one place" is false, and the prevention half must not build a fourth."""
+class TestThePairHasProductionReaders:
+    """⛔ The review's P1: "exactly one place" is false — there are FOUR, and one already IS the pair→writer
+    resolver the prevention half must reuse rather than rebuild."""
+
+    def test_the_fourth_reader_is_the_pair_to_writer_resolver(self):
+        """`pack_hierarchy._matching_row` matches on the DECLARED pair; `_binding` resolves the writer.
+
+        §5.5's rule is "do not add a fourth resolver". The fourth *reader* is already that resolver: it joins a
+        hierarchy entry to its `relations[]` row on `(fromKind, toKind)` (plus `predicate`/`semantics`) and is
+        reachable on the live write path (`relation_write.plan_relation_edges` ← `sdk.apply_relation_edges`).
+        A lane that re-implements this join builds the thing the section forbids.
+        """
+        from tortoise import pack_hierarchy
+
+        source = inspect.getsource(pack_hierarchy._matching_row)
+        assert 'rel.get("fromKind") != from_kind' in source, (
+            "`_matching_row` no longer matches on the declared fromKind — re-derive §5.5's reader list"
+        )
+        assert 'rel.get("toKind") != to_kind' in source, "`_matching_row` no longer matches on the declared toKind"
+        assert callable(pack_hierarchy._binding)
+        assert callable(pack_hierarchy.declared_hierarchy)
+
+        registry = PackRegistry(PACKS_DIR)
+        registry.load_all()
+        declared = pack_hierarchy.declared_hierarchy(registry)
+        assert len(declared) == 6, [type(d).__name__ for d in declared]
 
     def test_the_readers_exist_and_the_catalog_carries_the_pair(self):
         from tortoise.sdk import TortoiseSDK

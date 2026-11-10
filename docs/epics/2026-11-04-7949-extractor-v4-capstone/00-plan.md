@@ -141,7 +141,7 @@ above (they declare `mechanism: IMPL`, so the `operator` path binds; the predica
 set). The **`mechanism`** leg *is* read at the write door by `declared_mechanisms`
 (`pack_registry.py:1006`, matching at `:1121`), consumed by `create_operator`. Unread: (i) the
 **`semantics`** leg — surfaced at `:800`, and nothing derives an op_type or direction from it; and (ii)
-**`hierarchies`** — validated only (`pack_registry.py:2341-2346`). ⚠️ The operator writers (`commit_ops.py:426-429`,
+**`hierarchies`** — `hierarchies` is **schema-validated** (`pack_registry.py:2341-2346`) **and read**: carried at `:1937`, resolved by `pack_hierarchy.declared_hierarchy` (6 entries over the shipped packs, all `structural`), and consulted on the **live** relation write path — `relation_write.plan_relation_edges` (`:631`) routes a statement to `create_edge` when a declared hierarchy covers the stated pair (*"a DECLARED hierarchy over the stated pair wins"*), reached from `sdk.apply_relation_edges` (`sdk.py:17200`). What is missing is its **EMITTER**: `apply_hierarchy_edges` has zero production callers (`tools/pack_relation_census.py:505`). ⚠️ The operator writers (`commit_ops.py:426-429`,
 `mcp_server.py:4322`) are the **Point-layer** mechanism; they are not evidence about Object→Object.
 
 **R5 · The declared-mechanism registry is a contract, not a list.** `config/v4-mechanisms.yml` — 13 rows,
