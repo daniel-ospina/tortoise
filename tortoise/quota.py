@@ -1123,8 +1123,7 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
         # ``is_episodic=True`` to ``create_event`` — the rename changed the
         # NAME, not the write, so the count does not move with it), the
         # ``sessionCaptured`` Event minted by the hosted capture path, and the
-        # hosted
-        # commit path, which sets
+        # hosted commit path, which sets
         # ``e.is_episodic=true`` on its AgentSession Event and on its
         # extracted occurrence Events. Those stay EXCLUDED — that exclusion is
         # what keeps this change from re-charging the capture users the #947
