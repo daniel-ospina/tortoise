@@ -597,7 +597,7 @@ _SURFACES_OUT_OF_SCOPE: dict[str, str] = {
 #: takes the guarded form, because its purpose is that a reader re-runs it. That
 #: is why `docs/plans/2026-09-26-5042-…:208` and
 #: `docs/ci/merge-throughput-measurements.md:524` stay `uv run python` while the
-#: three entries below do not.
+#: four entries below do not.
 #:
 #: #11744 (main red at `3173971283f9`): the `11689` plan doc's entry is the
 #: `$`-prompted transcript WITH its captured `FAIL — 1 problem(s): …` output, under
@@ -628,19 +628,30 @@ _DELIBERATE_BARE_FORM: frozenset[tuple[str, str]] = frozenset(
             "$ python3 tools/edge_census.py census --uri "
             "'docker://:falkordb@localhost:6379' \\",
         ),
-        # RETIRED — do NOT re-add this key (#11757). It exempted the plan doc's
-        # `$ python3 tools/capstone_preregistration_check.py …` transcript. #11756
-        # then rewrote that line to `uv run python` (measured: the new form
-        # reproduces the block's recorded FAIL output verbatim, so the record still
-        # describes a command that runs), which left this key matching NO live line —
-        # `test_the_record_exemptions_all_still_match_a_live_line` reddened main.
-        # The exemption is dead weight now, not protection: the doc no longer
-        # carries the bare form, so the doc-scan test does not need it either.
-        # ⛔ Re-adding THIS key reddens the dead-key test again, because its text
-        # (`$ python3 …`) no longer appears in the doc. Membership is the exact
-        # stripped line, so an exemption can only be revived by restoring the line
-        # it names — never by re-declaring the key. If that record is ever put back
-        # in the bare form, re-derive the key from the live line and say why there.
+        # The `11689` plan doc's entry — bullet 2, a `$`-prompted transcript WITH
+        # its captured `FAIL — 1 problem(s): …` output. The doc states the class
+        # itself ("**This transcript is a RECORD, so it keeps the form that ran.** …
+        # the line is exempted in `tests/test_entry_point_python_guard.py`'s
+        # `_DELIBERATE_BARE_FORM` rather than rewritten. Rewriting it would state a
+        # command the machine never executed.") and names THIS set as its
+        # mechanism, so the exemption is what the record's own decision requires —
+        # rewriting the doc line instead would reverse it.
+        #
+        # ⛔ This entry has been killed twice by a rewrite of the line it names, so
+        # its history is the warning: added with `#11755` (`217d46bac5`); deadened
+        # when `#11756` (`7c45d5af1f`) rewrote the doc line to `uv run python`;
+        # retired as dead weight by `#11757` (`900d4aafc6`) on that basis; then
+        # `#11759` (`6ba6fac984`) restored the record's original form and
+        # re-declared this set as its exemption — which left `main` red on
+        # `test_no_doc_or_usage_advertises_the_form_the_guard_refuses` until the key
+        # came back here. Membership is the exact STRIPPED line, so the key can only
+        # be revived by restoring the line it names, never by re-declaring it, and
+        # it dies again the moment the doc line is reworded.
+        (
+            "docs/plans/2026-11-10-issue-11689-e1e2-owned-floors.md",
+            "$ python3 tools/capstone_preregistration_check.py --dir "
+            "docs/evidence/7949-capstone \\",
+        ),
     }
 )
 
@@ -710,7 +721,7 @@ def test_the_record_exemptions_all_still_match_a_live_line():
     )
 
 
-_NUMBER_WORDS = {
+_CARDINALITY_WORDS = {
     "one": 1,
     "two": 2,
     "three": 3,
@@ -721,41 +732,80 @@ _NUMBER_WORDS = {
     "eight": 8,
     "nine": 9,
     "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
 }
+
+
+def _cardinality_of(token: str) -> int | None:
+    """A cardinality token as `int` — a word from `_CARDINALITY_WORDS`, or digits.
+
+    Digits are accepted so that a set which outgrows the word table is not reported
+    as *"the sentence is gone"* when the sentence is present and correct (#11754
+    review, finding 4: an 11-member set with prose `eleven` reddened with a message
+    telling the author to restore a sentence they had written).
+    """
+    return int(token) if token.isdigit() else _CARDINALITY_WORDS.get(token)
 
 
 def test_the_record_exemption_prose_counts_the_set_it_describes():
     """The `_DELIBERATE_BARE_FORM` comment states the exemption set's cardinality
-    in prose — *"…stay `uv run python` while the four entries below do not"*.
-    Nothing pinned that number, so it drifted silently: the `#11725` diff grew the
-    set to FOUR entries while the prose still said "three" (review finding 2,
-    PR #11754). The set's own description is the only cardinality a reader has, so
-    it must describe THIS set — the same non-rot rule
+    in prose — *"…stay `uv run python` while the <N> entries below do not"*.
+    Nothing pinned that number, so it can drift silently: the set gains or loses an
+    entry while the prose goes on describing the set it used to be. That is not
+    hypothetical — it is what this test was written for, and it is also why the
+    prose said "four" over a set whose fourth member had gone dead (#11756 rewrote
+    the doc line at source rather than keep the exemption).
+
+    The set's own description is the only cardinality a reader has, so it must
+    describe THIS set — the same non-rot rule
     `test_the_record_exemptions_all_still_match_a_live_line` applies to the keys.
     """
     source = Path(__file__).read_text(encoding="utf-8")
-    head = source.split("_DELIBERATE_BARE_FORM: frozenset", 1)[0]
-    # The prose is a `#:` comment block, so it may be re-wrapped at any column;
-    # join it to one line before matching rather than pinning a line break.
+    before = source.partition("_DELIBERATE_BARE_FORM: frozenset")[0]
+    # The prose is the CONTIGUOUS `#:` run immediately above the definition, not
+    # every `#:` line in the file. The scoping is load-bearing: over the whole file
+    # head the search below takes the LEFTMOST match, so a stray earlier copy of
+    # the sentence satisfied this pin while the block that actually describes the
+    # set drifted (measured, #11754 review finding 3: decoy sentence above + prose
+    # `three` over a four-member set PASSED).
+    run = re.search(r"((?:^#:.*\n)+)\Z", before, re.MULTILINE)
+    # Each line is a `#:` comment and may be re-wrapped at any column, so strip the
+    # marker per line and join to one line rather than pinning a line break.
     prose = " ".join(
-        re.sub(r"\s+", " ", block).strip()
-        for block in re.findall(r"^#:(.*)$", head, re.MULTILINE)
+        re.sub(r"\s+", " ", line[2:]).strip()
+        for line in (run.group(1) if run else "").splitlines()
     )
-    match = re.search(
-        r"while the (" + "|".join(_NUMBER_WORDS) + r") entries below do not", prose
-    )
-    assert match, (
-        "the `_DELIBERATE_BARE_FORM` comment no longer states its cardinality as "
-        "'while the <N> entries below do not' — this pin must NOT rot into passing "
+    matches = re.findall(r"while the ([a-z]+|\d+) entries below do not", prose)
+    assert matches, (
+        "the `_DELIBERATE_BARE_FORM` comment block no longer carries the sentence "
+        "'while the <N> entries below do not'. This pin must NOT rot into passing "
         "on absence, because that sentence is what tells a reader how big the "
-        "exemption set is; restore it"
+        "exemption set is. If you REWORDED it, update the pattern in this test to "
+        "match the new wording — do not drop the sentence."
     )
-    stated_word = match.group(1)
-    assert _NUMBER_WORDS[stated_word] == len(_DELIBERATE_BARE_FORM), (
-        f"the `_DELIBERATE_BARE_FORM` comment says '{stated_word}' "
-        f"({_NUMBER_WORDS[stated_word]}) but the set holds "
-        f"{len(_DELIBERATE_BARE_FORM)} entries — the prose describes a set that no "
-        f"longer exists. Update the word when you add or remove an entry."
+    # EXACTLY one. Scoping to the block above is not enough on its own: a second
+    # copy of the sentence inside the SAME block satisfies a leftmost `re.search`
+    # while the real one drifts, which is a false PASS of the property this test
+    # exists for (measured, #11754 review finding 3). Two statements of a set's
+    # size is also just ambiguous prose, so requiring one is honest on its own.
+    assert len(matches) == 1, (
+        "the `_DELIBERATE_BARE_FORM` comment states its cardinality "
+        f"{len(matches)} times ({matches}) — the sentence must appear exactly "
+        "once, so that a stale copy cannot satisfy this pin while the sentence "
+        "describing the set says something else."
+    )
+    stated = _cardinality_of(matches[0])
+    assert stated is not None, (
+        f"the `_DELIBERATE_BARE_FORM` comment says 'while the {matches[0]} "
+        "entries below do not', which this test cannot read as a number. Write it "
+        "as a word from `_CARDINALITY_WORDS` or as digits."
+    )
+    assert stated == len(_DELIBERATE_BARE_FORM), (
+        f"the `_DELIBERATE_BARE_FORM` comment says '{matches[0]}' ({stated}) "
+        f"but the set holds {len(_DELIBERATE_BARE_FORM)} entries — the prose "
+        "describes a set that no longer exists. Update the word when you add or "
+        "remove an entry."
     )
 
 
