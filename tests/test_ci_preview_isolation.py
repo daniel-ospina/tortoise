@@ -667,6 +667,138 @@ def test_alive_refuses_a_recycled_pid(tmp_path: Path, state) -> None:
         _reap(victim.pid)
 
 
+def test_the_recycled_sentence_is_WELL_FORMED_when_no_port_was_recorded(
+    tmp_path: Path, state
+) -> None:
+    """The RECYCLED message spliced an empty port suffix into a clause.
+
+    `anything answering${at_port} is a stranger's answer` with `at_port=""` renders
+    "anything answering is a stranger's answer" — a malformed sentence in the one
+    verdict a failure dump exists to make readable. Every SIBLING branch already
+    guards the empty port (`the no-port branch says "no port was recorded … was
+    NOT checked"`); only this one spliced, and the `no-port` leg is unreachable
+    through the workflow today (`alloc` precedes `record`), which is why it
+    survived (#11675 review, finding 2).
+
+    RED on the pre-fix code: the no-port arm produced the double-space-free but
+    ungrammatical "anything answering is a stranger's answer", with no statement
+    that WHERE it answers was not checked.
+    """
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    try:
+        assert _script(
+            "record", "--name", "app", "--pid", str(victim.pid), env=state
+        ).returncode == 0
+        (Path(state["PREVIEW_STATE"]) / "app.start").write_text("1\n")
+        assert not (Path(state["PREVIEW_STATE"]) / "app.port").exists()
+
+        no_port = _script("alive", "--name", "app", env=state)
+        assert no_port.returncode == 8, no_port.stdout
+        assert "anything answering is a stranger's answer" not in no_port.stdout, (
+            "the RECYCLED sentence spliced an EMPTY port suffix into the clause: "
+            f"{no_port.stdout}"
+        )
+        assert "answering at all is a stranger's answer" in no_port.stdout, no_port.stdout
+        assert "WHERE it would answer was NOT checked" in no_port.stdout, (
+            "the no-port RECYCLED verdict must say the leg it did NOT take, like its "
+            f"sibling branches: {no_port.stdout}"
+        )
+
+        # …and the port-carrying form still names the port: the guard must not
+        # have replaced the useful sentence with the vague one everywhere.
+        (Path(state["PREVIEW_STATE"]) / "app.port").write_text("18997\n")
+        with_port = _script("alive", "--name", "app", env=state)
+        assert with_port.returncode == 8, with_port.stdout
+        assert "anything answering is a stranger's answer" not in with_port.stdout
+        assert "anything answering on :18997 is a stranger's answer" in with_port.stdout, (
+            with_port.stdout
+        )
+    finally:
+        _reap(victim.pid)
+
+
+def test_alive_names_a_record_that_RAN_and_REFUSED(tmp_path: Path, state) -> None:
+    """`record` exit 4 means the preview SPAWNED AND DIED, and it said "never started".
+
+    `cmd_record` refuses with exit 4 on its two failure paths (the pid is not
+    running, or its start time cannot be read) BEFORE it can write the `.booted`
+    witness, so `alive` took the no-witness branch and printed "NEVER RECORDED —
+    … the boot step never reached record". That is the OPPOSITE mechanism, and it
+    is the single most common "the preview DIED" case: every boot step calls
+    `record … || true` and `ci.yml` says in terms what exit 4 means ("wrangler
+    already died, so there is nothing to record"). It points the reader at the
+    boot wiring instead of at a process that spawned and exited — the same defect
+    class as the bare `kill -0` this verb replaced (#11675 review, finding 1).
+
+    RED on the pre-fix code: the refusal left the state dir EMPTY, so `alive`
+    returned 6 and claimed "the boot step never reached record".
+    """
+    refused = _script("record", "--name", "app", "--pid", "999999", env=state)
+    assert refused.returncode == 4, (
+        f"the harness cannot measure: recording a dead pid must REFUSE (rc 4): {refused.stderr}"
+    )
+
+    result = _script("alive", "--name", "app", env=state)
+    assert result.returncode == 10, (
+        "a `record` that RAN and REFUSED was not given its own verdict — it was "
+        f"folded into {result.returncode}: {result.stdout}"
+    )
+    assert "RECORD REFUSED" in result.stdout, result.stdout
+    assert "STARTED AND DIED" in result.stdout, result.stdout
+    # ⚠️ The trailer NAMES the alternative verdict ("A boot that never reached
+    # record reports itself as NEVER RECORDED, not as this") on purpose — it is a
+    # cross-reference, not a claim about THIS state — so the arm below matches the
+    # CLAIM and the exit code, never a bare token that the cross-reference also
+    # carries.
+    assert "so the boot step never reached record" not in result.stdout, (
+        "the verdict CLAIMS the opposite mechanism — the boot step DID reach record: "
+        f"{result.stdout}"
+    )
+    assert "no pid was ever recorded for this name" not in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize("which", ["pid", "start", "booted"])
+def test_a_refusal_is_superseded_by_a_later_successful_record(
+    tmp_path: Path, state, which: str
+) -> None:
+    """A refusal witness must not OUTLIVE the boot that later succeeded.
+
+    The boot step's retry loop can refuse on attempt 1 and succeed on attempt 2,
+    so a stale `.refused` would report a preview that DID boot as one that never
+    could. Each state-dir artefact is checked separately because `alive` reads
+    each of them on its own branch, and the refusal must lose to all three.
+    """
+    dead = _script("record", "--name", "app", "--pid", "999999", env=state)
+    assert dead.returncode == 4, dead.stderr
+    assert (Path(state["PREVIEW_STATE"]) / "app.refused").exists(), (
+        "the harness cannot measure: a refused record must leave its witness"
+    )
+
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    try:
+        assert _script(
+            "record", "--name", "app", "--pid", str(victim.pid), env=state
+        ).returncode == 0
+        assert not (Path(state["PREVIEW_STATE"]) / "app.refused").exists(), (
+            "a successful record left the earlier refusal witness in place"
+        )
+        assert (Path(state["PREVIEW_STATE"]) / f"app.{which}").exists(), (
+            f"the harness cannot measure: a successful record must write app.{which}"
+        )
+        assert _script("stop", "--name", "app", env=state).returncode == 0
+        stopped = _script("alive", "--name", "app", env=state)
+        assert stopped.returncode == 5, (
+            "a preview that recorded successfully and was then stopped reports "
+            f"itself as {stopped.returncode}, not as RECORDED-then-STOPPED: {stopped.stdout}"
+        )
+        assert "RECORDED, then STOPPED" in stopped.stdout, stopped.stdout
+        assert "RECORD REFUSED" not in stopped.stdout, stopped.stdout
+    finally:
+        _reap(victim.pid)
+
+
 def test_alive_tells_a_stopped_preview_from_one_that_never_started(
     tmp_path: Path, state
 ) -> None:

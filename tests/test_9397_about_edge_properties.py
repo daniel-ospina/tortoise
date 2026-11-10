@@ -4265,6 +4265,18 @@ DENIAL_MARKERS: tuple[str, ...] = (
     "is exempt",
     "is exempted",
     "an exemption",
+    # ⚠️ `the exemption` is a member here but NOT in `MARKERS_ABSENT_BY_DESIGN`:
+    # `EXTRACTOR-V4-ARCHITECTURE.md` §3 acquired the sentence *"The exemption is
+    # about CONTENT, not the declaration site …"* (#11665), and it is TRUE prose
+    # about a PROMPT-RULE carve-out, not about a census row — so the declaration
+    # that this spelling was absent went stale, and a stale declaration is how a
+    # live marker gets quietly exempted (the assertion below reds on exactly the
+    # opposite condition). The marker stays a DENIAL MARKER: the sentence is not a
+    # denial of the class, so it does not red the document scan, but the moment a
+    # passage calls a counted writer *the exemption* the frame still has the
+    # spelling to match. Removing the entry is the fix that keeps the doc's own
+    # prose intact; rewording the doc to please the gate would be clearing a red
+    # by weakening the record.
     "the exemption",
     "carries nothing",
     "writes nothing",
@@ -7089,11 +7101,6 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
         "contradiction vocabulary — the indefinite-articled form the owner's "
         "decision quotes verbatim ('called an exemption'). Absent from both "
         "documents until someone writes it"
-    ),
-    "the exemption": (
-        "contradiction vocabulary — the definite-articled form. Absent from both "
-        "documents until someone writes it; the documents write `both exemptions` "
-        "and `merely exempting` instead, neither of which is a denial"
     ),
     "counts as a writer": (
         "contradiction vocabulary — the VERB form of 'called counted', absent from "

@@ -72,7 +72,9 @@
 #
 # Exit codes: 0 ok · 2 usage · 3 no free port · 4 unusable pid
 #   `alive` adds its own: 7 alive-but-not-serving · 8 pid recycled · 5 recorded then
-#   stopped · 6 never recorded · 1 gone (died mid-run, or it exited between the two
+#   stopped · 6 never recorded · 10 record was ATTEMPTED and REFUSED (the process
+#   was already gone when the boot step tried to register it — `ci.yml`'s own
+#   "wrangler already died") · 1 gone (died mid-run, or it exited between the two
 #   probes) · 9 alive, but NO port was recorded, so SERVING was not checked. 0 is
 #   therefore never returned on a leg that was not taken. The MESSAGE carries the
 #   same fact; the step only decides whether to prefix `::error::`, so the code is
@@ -290,12 +292,35 @@ cmd_record() {
   done
   [[ -n "$name" ]] || die "record: --name is required"
   [[ "$pid" =~ ^[0-9]+$ ]] || die "record: --pid must be numeric"
-  pid_running "$pid" || { printf '%s: pid %s is not running — nothing recorded\n' "$PROG" "$pid" >&2; return 4; }
 
   local dir start
   dir="$(state_dir)"
   mkdir -p "$dir"
-  start="$(pid_starttime "$pid")" || { printf '%s: cannot read the start time of pid %s\n' "$PROG" "$pid" >&2; return 4; }
+  # ⛔ THE REFUSAL WITNESS, written BEFORE either refusal can fire. Exit 4 on
+  # either path means the process this job spawned was ALREADY GONE, which
+  # `ci.yml` spells out ("`|| true`: exit 4 means wrangler already died, so there
+  # is nothing to record") — the single most common "the preview DIED" case. The
+  # boot witness below is unreachable on both, so without this file `alive`
+  # reported that state as "NEVER RECORDED … the boot step never reached record",
+  # i.e. it named the OPPOSITE mechanism and pointed the reader at the boot wiring
+  # instead of at a process that spawned and exited (#11675 review, finding 1: the
+  # same defect class as the bare `kill -0` this verb replaced).
+  #
+  # It records the pid AND which predicate refused, because the two refusals send
+  # the reader to different places: "not running" means the spawn died, "cannot
+  # read the start time" means `/proc` lost it under us. Never removed — not by
+  # `stop`, not by `stop-all` — for the same reason `.booted` is not.
+  pid_running "$pid" || {
+    printf 'refused %s not-running\n' "$pid" > "$dir/${name}.refused"
+    printf '%s: pid %s is not running — nothing recorded\n' "$PROG" "$pid" >&2
+    return 4
+  }
+
+  start="$(pid_starttime "$pid")" || {
+    printf 'refused %s no-start-time\n' "$pid" > "$dir/${name}.refused"
+    printf '%s: cannot read the start time of pid %s\n' "$PROG" "$pid" >&2
+    return 4
+  }
   printf '%s\n' "$start" > "$dir/${name}.start"
   printf '%s\n' "$pid" > "$dir/${name}.pid"
   # The BOOT WITNESS, and it is deliberately never removed — not by `stop`, not
@@ -305,6 +330,11 @@ cmd_record() {
   # recorded and was then stopped, and a boot that never reached `record`. Only
   # this file separates them (#11675 review, third false-verdict path).
   printf '%s %s\n' "$pid" "$start" > "$dir/${name}.booted"
+  # A successful `record` SUPERSEDES an earlier refusal for this name (the boot
+  # step's retry loop can refuse on attempt 1 and succeed on attempt 2). Without
+  # this, the stale refusal would be read by `alive` if the pid file later went
+  # missing — reporting a preview that DID boot as one that never could.
+  rm -f "$dir/${name}.refused"
 }
 
 # `--name N` (the workflow form) and a bare positional (debugging form).
@@ -372,10 +402,17 @@ cmd_ready() {
 #     pid file on every branch and the boot retry loop calls it, so the truth was
 #     the OPPOSITE of the message in the common double-boot-failure case. The
 #     `.booted` witness `record` writes separates the two.
+#   * "No pid file" ALSO folded in `record` ATTEMPTED AND REFUSED — the exit-4
+#     paths (the process was already gone, or its start time was unreadable)
+#     return before `.booted` can be written. That is `ci.yml`'s "wrangler already
+#     died", and it was reported as "the boot step never reached record", which
+#     is the OPPOSITE mechanism. The `.refused` witness separates it
+#     (#11675 review, finding 1).
 #
 # Exit codes (see the header table): 0 alive and serving · 7 alive but not
-# serving · 8 pid recycled · 5 recorded then stopped · 6 never recorded · 1 gone ·
-# 9 alive but no port recorded, so SERVING was not checked.
+# serving · 8 pid recycled · 5 recorded then stopped · 6 never recorded ·
+# 10 record attempted and REFUSED · 1 gone · 9 alive but no port recorded, so
+# SERVING was not checked.
 cmd_alive() {
   local name
   name="$(name_flag alive "$@")"
@@ -383,8 +420,17 @@ cmd_alive() {
   dir="$(state_dir)"
   pfile="$dir/${name}.pid"
   port="$(cat "$dir/${name}.port" 2>/dev/null || true)"
-  local at_port=""
+  local at_port="" stranger=""
   [[ -n "$port" ]] && at_port=" on :${port}"
+  # …and the RECYCLED sentence cannot splice an empty `at_port` into the middle of
+  # a clause ("anything answering is a stranger's answer"), so it carries its own
+  # port-aware form — the same guard the no-port branch below already applies
+  # (#11675 review, finding 2).
+  if [[ -n "$port" ]]; then
+    stranger="anything answering on :${port} is a stranger's answer, never this preview's"
+  else
+    stranger="anything answering at all is a stranger's answer, never this preview's, and no port was recorded for this name so WHERE it would answer was NOT checked"
+  fi
 
   # NAMES are for humans; the exit code is what the step branches on, and every
   # state below gets its own so a reader (and a test) can tell them apart.
@@ -392,6 +438,17 @@ cmd_alive() {
     if [[ -f "$dir/${name}.booted" ]]; then
       printf '%s\n' "${PROG}: ${name}: RECORDED, then STOPPED — this job DID start a preview and its pid file is gone, which is what stop does on every branch (the boot step's retry loop calls it between attempts, and so may a spec). This does NOT mean the preview never started: read the boot step's own log for why it was stopped."
       return 5
+    fi
+    if [[ -f "$dir/${name}.refused" ]]; then
+      # The boot step DID call `record`, and `record` RAN — it just refused, which
+      # means the process this job spawned was already gone (or `/proc` lost its
+      # start time) at the moment it was registered. That is a preview that
+      # STARTED AND DIED before it could be recorded, NOT a boot wiring problem,
+      # and conflating the two is the defect this branch removes.
+      local why
+      why="$(cat "$dir/${name}.refused" 2>/dev/null || true)"
+      printf '%s\n' "${PROG}: ${name}: RECORD REFUSED — the boot step DID reach record and record REFUSED (${why#refused }), because the process it had just spawned was already gone (or its start time could not be read) when it was registered. This is a preview that STARTED AND DIED, not one that never started: read the boot step's own log for why the process exited. A boot that never reached record reports itself as NEVER RECORDED, not as this."
+      return 10
     fi
     printf '%s\n' "${PROG}: ${name}: NEVER RECORDED — no pid was ever recorded for this name in this job's state dir, so the boot step never reached record: read its log. A preview that started and was then stopped reports itself as RECORDED, then STOPPED, not as this."
     return 6
@@ -428,7 +485,7 @@ cmd_alive() {
         return 1
         ;;
       2)
-        printf '%s\n' "${PROG}: ${name}: pid ${pid} was RECYCLED — it is running, but its start time (${PID_IDENTITY_NOW}) no longer matches the one witnessed at boot (${recorded}), so it is a DIFFERENT process and the preview this job started is GONE. It DIED MID-RUN; its log is the cause, and anything answering${at_port} is a stranger's answer, never this preview's."
+        printf '%s\n' "${PROG}: ${name}: pid ${pid} was RECYCLED — it is running, but its start time (${PID_IDENTITY_NOW}) no longer matches the one witnessed at boot (${recorded}), so it is a DIFFERENT process and the preview this job started is GONE. It DIED MID-RUN; its log is the cause, and ${stranger}."
         return 8
         ;;
       *) identity="its start time could NOT be read, so its IDENTITY was NOT checked" ;;
