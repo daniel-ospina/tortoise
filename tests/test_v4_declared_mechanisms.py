@@ -172,14 +172,21 @@ below still state what a marker comparison cannot reach.
     linked directory is not descended, so a marker behind it would get no
     verdict), which is a verdict of its own and not a silent hole. No link exists
     there today; a NON-markdown link is an uncovered source, as above;
-  * a SURFACE that cannot be READ (a directory that exists but refuses `listdir`)
-    is a verdict, not an empty design: `is_dir()` answers about the inode, and
-    `Path.rglob` swallows the `PermissionError` and yields nothing, so without
-    that probe an unreadable surface was indistinguishable from a
-    declaration-free one — the gate's primary direction silently empty. Measured
-    before the guard on a `0o000` directory holding a marker with no row:
-    `markers: {}`, `errors: []` (review cycle 4, P2). This is a verified
-    read-at-the-surface failure, unlike the permanent prose limit above it;
+  * a DIRECTORY in a surface that cannot be READ (one that exists but refuses
+    `scandir`, at the surface root or at any depth below it) is a verdict, not an
+    empty design: `is_dir()` answers about the inode, and `Path.rglob` swallows
+    the `PermissionError` and yields nothing, so without that probe an unreadable
+    directory was indistinguishable from a declaration-free one — the gate's
+    primary direction silently empty. Measured before the guard on a `0o000`
+    directory holding a marker with no row: `markers: {}`, `errors: []` (review
+    cycles 4 and 5, P2; probing only the ROOT left the nested case open, so the
+    walk collects its own errors). This is a verified read-at-the-directory
+    failure, unlike the permanent prose limit above it;
+  * two surfaces whose DIRECTORIES share a basename cannot qualify a document
+    identity, so that pair is a verdict rather than a silent alias:
+    `_document_name` prefixes with `surface.name`, which is what separates
+    `architecture/x.md` from `epics/x.md`, and two `plans/` surfaces would
+    collapse to one identity per document (review cycle 5, P2);
   * the sibling `*-CHANGELOG.md` is NOT scanned (`CHANGELOG_SUFFIX`): #8542 moved
     status and change narration into those files, so an entry recording a marker
     change may legitimately quote the convention, and scanning it would turn that
@@ -666,36 +673,68 @@ def declaration_markers(
             f"cannot compare the declared set against anything (fail closed, "
             f"never an empty pass)"
         ]
-    # ⛔ A PRESENT-BUT-UNREADABLE SURFACE IS ITS OWN VERDICT (review cycle 4, P2).
-    # `is_dir()` answers about the inode, not about permission to read it, and
-    # `Path.rglob` SWALLOWS the `PermissionError` that `os.listdir` raises and
-    # yields `[]` — so an unreadable surface was indistinguishable from a
+    # ⛔ A SURFACE WHOSE DIRECTORY NAME IS NOT UNIQUE CANNOT QUALIFY A DOCUMENT
+    # IDENTITY (review cycle 5, P2). `_document_name` qualifies a document with
+    # its surface's BASENAME, which is what separates `architecture/x.md` from
+    # `epics/x.md` — but only because those two names differ, and nothing asserted
+    # it. Two surfaces sharing a basename published ONE identity per document, so
+    # a marker in the first satisfied a row about an unmarked document in the
+    # second: the cross-surface alias `_document_name` exists to prevent, re-opened
+    # by the name that was supposed to prevent it. Verdict rather than a silent
+    # coin-flip between the two surfaces.
+    shared_names = sorted(
+        name
+        for name in {surface.name for surface in surfaces}
+        if sum(1 for s in surfaces if s.name == name) > 1
+    )
+    if shared_names:
+        return markers, [
+            f"two declaration surfaces share the directory name "
+            f"{', '.join(shared_names)} — every document under them would "
+            f"publish the SAME identity, so a marker in one surface would "
+            f"satisfy a row about an unmarked document in the other (fail "
+            f"closed, never a cross-surface alias): the surface's own directory "
+            f"name is what qualifies a document identity"
+        ]
+    # ⛔ AN UNREADABLE DIRECTORY ANYWHERE IN A SURFACE IS ITS OWN VERDICT (review
+    # cycles 4 and 5, P2). `is_dir()` answers about the inode, not about
+    # permission to read it, and `Path.rglob` SWALLOWS the `PermissionError` that
+    # `os.scandir` raises and yields NOTHING — at the surface ROOT and at every
+    # depth below it — so an unreadable directory was indistinguishable from a
     # declaration-free one, and the gate's PRIMARY direction (a marker with no
     # registry row) went silently empty for every document behind it. Measured on
     # a `0o000` directory holding a marker with no row: `markers: {} errors: []`
-    # before this guard. `missing` cannot catch it (`is_dir()` is True) and the
+    # before this guard. `missing` cannot catch it (`is_dir()` is True), the
     # per-document `read_text` verdict cannot either (the walk never reaches the
-    # documents). This is the `#5064` shape at the surface rather than the file:
-    # a scan that could not look must never report "nothing declared".
-    unreadable: list[str] = []
+    # documents), and probing only the ROOT left the nested case open (measured:
+    # `docs/architecture/sub` at `0o000` holding a marker with no row still
+    # reported `markers: {}` with no verdict). So the walk collects its own errors
+    # instead of using `rglob`, which is the one shape that reports a read it was
+    # refused. This is the `#5064` shape at the directory rather than the file: a
+    # scan that could not look must never report "nothing declared".
+    walk_errors: list[str] = []
+    documents: list[tuple[Path, Path]] = []
     for surface in surfaces:
-        try:
-            os.listdir(surface)
-        except OSError as exc:
-            unreadable.append(f"{surface} ({type(exc).__name__})")
-    if unreadable:
+        entries: list[Path] = []
+        for dirpath, dirnames, filenames in os.walk(
+            surface,
+            onerror=lambda exc: walk_errors.append(
+                f"{getattr(exc, 'filename', '?')} ({type(exc).__name__})"
+            ),
+            followlinks=False,
+        ):
+            root = Path(dirpath)
+            entries.extend(root / name for name in dirnames)
+            entries.extend(root / name for name in filenames)
+        documents.extend((surface, entry) for entry in sorted(entries))
+    if walk_errors:
         return markers, [
             f"the declaration-marker surface cannot be READ: "
-            f"{', '.join(unreadable)} — the directory exists, so the walk that "
-            f"returns nothing is a refused read, not an empty design (fail "
-            f"closed, never an empty pass): a declaration behind it could not be "
-            f"compared against the registry at all"
+            f"{', '.join(sorted(set(walk_errors)))} — the directory exists, so "
+            f"the walk that returns nothing is a refused read, not an empty "
+            f"design (fail closed, never an empty pass): a declaration behind it "
+            f"could not be compared against the registry at all"
         ]
-    documents = [
-        (surface, doc)
-        for surface in surfaces
-        for doc in sorted(surface.rglob("*"))
-    ]
     for surface, doc in documents:
         try:
             rel = _document_name(surface, doc, surfaces)
@@ -7712,6 +7751,75 @@ def test_a_surface_that_cannot_be_read_is_a_verdict_not_an_empty_design(
     assert markers == {}
     assert any("cannot be READ" in e for e in errors), errors
     assert any("cannot be READ" in e for e in state_errors), state_errors
+
+
+def test_an_unreadable_SUBDIRECTORY_is_a_verdict_too(tmp_path) -> None:
+    """Probing only the surface ROOT left the fail-open open one level down.
+
+    Measured at the head that added the root probe (review cycle 5, P2):
+    `docs/architecture/sub` at `0o000` holding a marker with no registry row
+    reported `markers: {}`, `errors: []` and NO membership or state verdict —
+    because `os.listdir` only asks whether the SURFACE is listable while `rglob`
+    swallows the `PermissionError` raised at every depth. The gate's primary
+    direction was still silently empty, one directory down, under a comment
+    claiming the opposite. The walk now collects its own errors instead.
+    """
+    docs = tmp_path / "arch"
+    sub = docs / "sub"
+    sub.mkdir(parents=True)
+    (sub / "x.md").write_text(
+        "<!-- v4-mechanism: ghost state: implemented -->\n", encoding="utf-8"
+    )
+    sub.chmod(0o000)
+    try:
+        try:
+            os.listdir(sub)
+        except OSError:
+            pass
+        else:  # pragma: no cover — root (or CAP_DAC_READ_SEARCH) reads anything
+            pytest.skip("this box can read a 0o000 directory, so the shape cannot be built")
+        # the precondition: the surface ITSELF is listable, so the root probe
+        # would have said "fine", and `rglob` says "nothing here".
+        assert os.listdir(docs) == ["sub"]
+        assert list(docs.rglob("*.md")) == []
+        markers, errors = declaration_markers(docs)
+        state_errors = declaration_state_errors([], docs)
+    finally:
+        sub.chmod(0o755)
+    assert markers == {}
+    assert any("cannot be READ" in e for e in errors), errors
+    assert any("sub" in e for e in errors), errors
+    assert any("cannot be READ" in e for e in state_errors), state_errors
+
+
+def test_two_surfaces_sharing_a_DIRECTORY_NAME_are_a_verdict(tmp_path) -> None:
+    """The surface BASENAME is the only thing qualifying a document identity.
+
+    Measured (review cycle 5, P2): with two surfaces both named `plans`, a row
+    declaring `one/plans/x.md` (carrying NO marker) was satisfied by the marker in
+    `two/plans/x.md` — `membership_errors` returned `[]` where a rotted half is
+    owed. `_document_name` qualifies with `surface.name`, so the two surfaces
+    published ONE identity per document: the cross-surface alias the prefix exists
+    to prevent, re-opened by the prefix itself. Nothing asserted the basenames
+    differ, so the gate now refuses rather than silently aliasing.
+    """
+    one = tmp_path / "one" / "plans"
+    two = tmp_path / "two" / "plans"
+    one.mkdir(parents=True)
+    two.mkdir(parents=True)
+    # `one`'s document carries NO marker; `two`'s does — the alias is the whole bug.
+    (one / "x.md").write_text("no marker here\n", encoding="utf-8")
+    (two / "x.md").write_text("<!-- v4-mechanism: x -->\n", encoding="utf-8")
+    surfaces = (one, two)
+    assert [s.name for s in surfaces] == ["plans", "plans"]
+    markers, errors = declaration_markers(surfaces)
+    assert any("share the directory name" in e for e in errors), errors
+    assert markers == {}
+    # ... and every composing verdict carries it, so no caller can read the
+    # alias as agreement: membership must not answer "[]" here.
+    row = _row("x", declared_in=[str(one / "x.md")])
+    assert membership_errors([row], surfaces), "an aliased pair must not pass membership"
+    assert any("share the directory name" in e for e in membership_errors([row], surfaces))
 
 
 def test_a_malformed_marker_breaks_the_state_verdict_too(tmp_path) -> None:
