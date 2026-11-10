@@ -127,8 +127,15 @@ def test_the_register_declares_what_both_seams_enforce() -> None:
 def test_row_2_reads_met_with_no_runtime_label_left() -> None:
     """The issue's target, measured through the instrument rather than asserted about the register.
 
-    Reads the probe's own row-2 verdict, so this cannot pass while the row it is about still
-    holds — the separation `#11492`'s reviews kept getting wrong in the other direction.
+    Reads the probe's own row-2 verdict, so it reds when a writer is declared labels-at-runtime or
+    when a declared label leaves the served set.
+
+    ⚠️ The verdict alone is NOT guard-sensitive: `scored_labels()` derives the row from the
+    register's DECLARATION, so declaration-only assertions here pass with the writers' guards
+    deleted (measured, and named rather than hidden). The three source-reading assertions at the end
+    close that: two pin the DOOR's bound (present, and ordering it before the journal append) and
+    one pins RESTORE_GRAPH's (present, and ordering it before the first node CREATE) — so deleting
+    either writer's guard reds here too, instead of only in the sibling refusal tests.
     """
     from tools.dod_5090_probe import scored_labels, served_labels
 
@@ -140,9 +147,40 @@ def test_row_2_reads_met_with_no_runtime_label_left() -> None:
     assert scored["labels"] <= served_labels(), (
         f"row 2 would print an orphan: {sorted(scored['labels'] - served_labels())}"
     )
-    assert LABELS_AT_RUNTIME not in {
-        entry.stores for entry in EMBED_WRITER_CLASSES.values()}, (
-        "a writer is declared labels-at-runtime again — name the bound instead"
+    # No separate `LABELS_AT_RUNTIME not in any entry` assertion: `scored_labels()` folds every
+    # at-runtime writer into `unresolved`, so the assertion above already reds on one — and a
+    # second, blanket pin would forbid the disposition outright, contradicting
+    # `tortoise/embed_writer_register`'s own (correct) statement that it is a legal SHAPE for a
+    # writer that genuinely has no bound (#11641 review). These two writers are pinned by name in
+    # `test_the_two_former_runtime_label_writers_now_own_their_label`.
+
+    # ── the guard-sensitivity the verdict above does not have ──────────────────────────────────
+    # ENFORCEMENT, not declaration: the bound must EXIST in the writer, and it must run BEFORE the
+    # write it protects (a guard after the CREATE would refuse a dump that had already mutated the
+    # target — the #3895 discipline is about WHERE it runs, not only that it runs).
+    import inspect
+
+    from tortoise.hosted_backup import restore_graph as _restore
+    from tortoise.sdk import TortoiseSDK as _SDK
+
+    restore_src = inspect.getsource(_restore)
+    guard_at = restore_src.index("_require_served_restore_labels(")
+    first_write_at = restore_src.index("CREATE (n:")
+    assert guard_at < first_write_at, (
+        "restore_graph calls the vector-label guard AFTER creating nodes — a refusal would then "
+        "leave the target partially mutated, which is the whole reason #3895 put its check in the "
+        "pre-mutation pass"
+    )
+
+    door_src = inspect.getsource(_SDK._event_raw_write_door)
+    assert "statement_write_target_problem(statement, _declared_labels)" in door_src, (
+        "the door no longer reads the WRITE TARGET — the label-only rule accepts a statement that "
+        "names :Event and stores on an unlabelled alias (measured), so row 2 would read MET over a "
+        "vector no read path reaches"
+    )
+    assert door_src.index("_declared_labels = ") < door_src.index("_journal_event_raw_write("), (
+        "the door's label refusal runs AFTER the journal append — a refused statement would leave "
+        "a record for a node it never wrote, the live/replay divergence its own contract forbids"
     )
 
 
@@ -170,6 +208,15 @@ DOOR = TortoiseSDK._event_raw_write_door
     "CREATE (b:Batch {id:$eid}) SET b += $props",
     "MATCH (e:Event {eventId:$eid}), (b:Batch {id:$eid}) SET b += $props",
     "MATCH (e {eventId:$eid}) SET e += $props",
+    # ⛔ THE WRITE-TARGET ESCAPES (#11641 review). Each NAMES a declared label, so the label-only
+    # half of the bound passed them — measured: the first one was accepted and the `:Batch` node
+    # came out holding a `Vectorf32`, i.e. a vector paid for that no read path reaches, which is
+    # the false pass this issue exists to close. The bound must read where the store LANDS.
+    "MATCH (e:Event {eventId:$eid}) MATCH (b {id:'b1'}) SET b.embedding = vecf32($embedding)",
+    "MATCH (e:Event {eventId:$eid}) MATCH (b) SET b.embedding = $embedding",
+    "MATCH (e:Event {eventId:$eid}) MATCH (n:{lbl}) SET n.embedding = $embedding",
+    "MATCH (e:Event {eventId:$eid}) SET e += $props, n.embedding = $embedding",
+    "MATCH (e:Event {eventId:$eid}), (b) " + set_embedding_clause("b"),
 ])
 def test_the_door_refuses_a_statement_outside_its_label(statement: str) -> None:
     with pytest.raises(ValueError) as refused:
@@ -180,7 +227,12 @@ def test_the_door_refuses_a_statement_outside_its_label(statement: str) -> None:
     )
     assert ("no read path" in str(refused.value)
             or "door stores on" in str(refused.value)
-            or "NO node label" in str(refused.value)), str(refused.value)
+            or "NO node label" in str(refused.value)
+            or "STORES a vector through alias" in str(refused.value)
+            or "WRITE TARGET" in str(refused.value)
+            or "write target" in str(refused.value)
+            or "INTERPOLATION" in str(refused.value)
+            or "alias(es)" in str(refused.value)), str(refused.value)
 
 
 @pytest.mark.parametrize("statement", [
@@ -330,15 +382,18 @@ def test_the_door_refuses_a_statement_that_WRITES_TO_an_unproved_target(
         statement: str, named: set[str], problem_fragment: str, door_fragment: str) -> None:
     """The refused shapes a reader of NAMED labels cannot see (P1, the review's reproduction).
 
-    `statement_node_labels` returns the labels a statement MENTIONS, so every one of these passes
-    that bound while the vector lands somewhere else — on a label-less node (reachable by no
-    `entity_type`), or on a label the statement itself mutates.
+    `statement_node_labels` returns the labels a statement MENTIONS. FOUR of these rows pass that
+    bound while the vector lands somewhere else — on a label-less node (reachable by no
+    `entity_type`), or on a served label the statement itself then MUTATES away. The FIFTH row
+    (`:Batch`, outside the door's set) is refused by the named-label bound as well, and is here to
+    pin that the write-target reader independently reports it too: if only one of the two readers
+    saw it, the other would be silently narrower than it claims.
 
-    ⛔ NON-VACUITY, asserted first: the old readers really do see nothing wrong with the statement.
-    `statement_node_labels(statement) == named` proves the named-label bound had a label to read and
-    was satisfied by it, and `statement_write_target_problem(...)` being non-None proves the write
-    target is what refuses it. On the pre-fix tree the door therefore reached the JOURNAL (the fake
-    raises), which is the RED direction for every row.
+    ⛔ NON-VACUITY, asserted first: `statement_node_labels(statement) == named` proves the
+    named-label bound had a label to read, and `statement_write_target_problem(...)` being non-None
+    proves the WRITE TARGET is what that reader recognises — including on the fifth row, where the
+    two readers overlap by design. On the pre-fix tree the door therefore reached the JOURNAL (the
+    fake raises), which is the RED direction for every row.
     """
     assert statement_node_labels(statement) == named, statement_node_labels(statement)
     problem = statement_write_target_problem(statement, {"Event"})
@@ -618,36 +673,80 @@ def test_restore_graph_refuses_an_unserved_label(tmp_path, labels) -> None:
     )
 
 
+def test_a_pre_d10_document_dump_still_restores_under_the_repair_path(tmp_path) -> None:
+    """``#11641`` review finding: the refusal must not make a REAL artifact unrestorable.
+
+    The refusal above is correct for a dump that should never have been written — but a dump written
+    BEFORE the D10 relabel still holds ``(:Document {id, ...})`` with an ``embedding`` (``:Document``
+    was a vector seam before ``#4524``), and the documented repair is
+    ``migrate_kinds.relabel_legacy_documents(sdk)`` run ON THE RESTORED GRAPH. A refusal with no way
+    past it therefore does not protect the vector — it makes every OTHER node and edge in that
+    backup unrecoverable and blocks the migration that would have fixed it. `allow_dangling_edges`
+    is the precedent (`#3895`): the same class of artifact, the same explicit, non-silent repair.
+    """
+    proj = _proj(tmp_path)
+    artifact = _dump([
+        {"dump_id": 1, "labels": ["Document"],
+         "props": {"id": "d1", "documentKind": "article", "embedding": VEC}},
+        {"dump_id": 2, "labels": ["Point"],
+         "props": {"id": "p1", "content": "a point", "pointKind": "claim",
+                   "embedding": VEC}},
+    ])
+    counts = restore_graph(proj.g, artifact, allow_unserved_vectors=True)
+    # The NODES are restored — that is the half the migration needs.
+    assert counts["nodes"] == 2, counts
+    # …the unserved VECTOR is dropped, and reported rather than silent.
+    assert counts["dropped_vectors"] == 1, counts
+    assert counts["dropped_vector_labels"] == ["Document"], counts
+    # `__dump_id` is the restore's own bookkeeping and is swept at the end, so query the node by
+    # the identity the dump carried.
+    rows = proj.g.query(
+        "MATCH (d:Document {id:'d1'}) RETURN typeof(d.embedding), d.id, d.documentKind"
+    ).result_set
+    assert rows and rows[0][0] == "Null", (
+        "the unserved vector survived the repair path — it would land where no read path reaches"
+    )
+    assert (rows[0][1], rows[0][2]) == ("d1", "article"), rows
+    # …and the served one still landed, so the flag is not a blanket disable.
+    served = proj.g.query(
+        "MATCH (p:Point {id:'p1'}) RETURN typeof(p.embedding)").result_set
+    assert served and served[0][0] == "Vectorf32", served
+
+
 def test_restore_graph_still_restores_a_served_label(tmp_path) -> None:
-    """The legitimate direction, for every served label AND a multi-label node.
+    """The legitimate direction, for EVERY served label AND a multi-label node.
+
+    "Every" is not rhetorical: the node set is built from `_VECTOR_RESTORE_LABELS`, so adding a
+    served label widens this test instead of leaving a served label that no dump ever exercises
+    (the first draft here named only `Point` and `Event` while its docstring claimed the whole set).
 
     The multi-label case is not decoration: `MATCH (n:Point)` matches a node that also carries
     `:Foo`, so such a vector IS reachable and must restore — grouped under its SERVED label.
     """
     proj = _proj(tmp_path)
-    nodes = [
-        {"dump_id": 1, "labels": ["Point"],
-         "props": {"id": "p1", "content": "a point", "pointKind": "claim", "embedding": VEC}},
-        {"dump_id": 2, "labels": ["Event"],
-         "props": {"eventId": "e1", "eventKind": "DocumentCreated", "embedding": VEC}},
-        {"dump_id": 3, "labels": ["Point", "TestMarker"],
+    nodes: list[dict] = []
+    for i, (label, id_prop) in enumerate(sorted(_VECTOR_RESTORE_LABELS), start=1):
+        nodes.append({"dump_id": i, "labels": [label],
+                      "props": {id_prop: f"v{i}", "embedding": VEC}})
+    nodes += [
+        {"dump_id": 90, "labels": ["Point", "TestMarker"],
          "props": {"id": "p3", "content": "multi-label", "pointKind": "claim",
                    "embedding": VEC}},
-        {"dump_id": 4, "labels": ["Subject"], "props": {"id": "s1", "name": "no vector"}},
+        {"dump_id": 91, "labels": ["Subject"], "props": {"id": "s1", "name": "no vector"}},
     ]
     counts = restore_graph(proj.g, _dump(nodes))
-    assert counts["nodes"] == 4, counts
+    assert counts["nodes"] == len(nodes), counts
 
-    for label, key, value in (
-        ("Point", "id", "p1"),
-        ("Event", "eventId", "e1"),
-        ("Point", "id", "p3"),
-    ):
+    for i, (label, id_prop) in enumerate(sorted(_VECTOR_RESTORE_LABELS), start=1):
         rows = proj.g.query(
-            f"MATCH (n:{label} {{{key}:$v}}) RETURN typeof(n.embedding)",
-            params={"v": value},
+            f"MATCH (n:{label} {{{id_prop}:$v}}) RETURN typeof(n.embedding)",
+            params={"v": f"v{i}"},
         ).result_set
-        assert rows and rows[0][0] == "Vectorf32", (label, value, rows)
+        assert rows and rows[0][0] == "Vectorf32", (label, id_prop, rows)
+    # …the multi-label node too, under its served label.
+    rows = proj.g.query(
+        "MATCH (n:Point {id:'p3'}) RETURN typeof(n.embedding)").result_set
+    assert rows and rows[0][0] == "Vectorf32", rows
     # …and the label-scoped write did not smear: the node that carried NO vector still carries none.
     assert proj.g.query(
         "MATCH (n:Subject {id:'s1'}) RETURN n.embedding"

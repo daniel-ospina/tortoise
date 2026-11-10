@@ -51,9 +51,9 @@ rule exists to close.
   (`::test_the_instrument_and_the_product_declare_the_same_writers`), and the three `stores`
   shapes — a label tuple, `NO_LIVE_VECTOR`
   (`::test_a_no_live_vector_declaration_executes_no_store_clause`) and `LABELS_AT_RUNTIME`
-  (`::test_a_runtime_label_declaration_is_named_not_guessed` for the dump importer,
-  `::test_a_writer_that_EXECUTES_a_store_is_never_declared_no_live_vector` for the
-  caller's-statement door — the two live entries, one pin each).
+  (`::test_the_two_former_runtime_label_writers_now_own_their_label`, which reads the `no-bound:`
+  marker a declaration of that shape now has to carry — `#11641` gave both of the writers that used
+  to carry it a real bound, so the disposition has no live entry left to pin one-per-writer).
   ⛔ A label tuple needs **two** pins and both are required, one per direction:
   `::test_every_declared_label_re_derives_at_this_head` proves nothing DECLARED has stopped being
   stored, and `::test_a_declared_label_set_covers_every_label_its_own_store_targets` proves nothing
@@ -95,8 +95,11 @@ fifteen because its own Cypher names two labels), and a label interpolated at ru
 `LABELS_AT_RUNTIME` dispositions below exist at all. ⚠️ `#11641` removed the last use of
 `LABELS_AT_RUNTIME`: a runtime label is no longer a dead end, because a writer can BOUND it at its
 own seam and then declare the set (`restore_graph` refuses a dump whose vector-bearing node carries
-no served label; `_event_raw_write_door` refuses a caller statement naming a label it does not
-store on). The disposition remains a legal SHAPE for a writer that has no bound — it is now unused
+no served label — the ONE explicit exception is its `allow_unserved_vectors` repair-on-read path,
+which drops the vector, keeps the node and REPORTS it, for artifacts a pre-D10 writer already
+produced; `_event_raw_write_door` refuses a caller statement that names no label, names one outside
+its set, renders one by interpolation, or stores through an alias it never binds to a declared
+label). The disposition remains a legal SHAPE for a writer that has no bound — it is now unused
 by any live entry, which is the state `#5090` row 2 wants. Note the two-label pair is NOT in this list:
 `_event_plain_merge` and `_rebuild_all_replay` keep their `MERGE`s in their own bodies, which is
 why their own Cypher NAMES two labels instead of none. A second derivation in the grader would be a
@@ -143,11 +146,14 @@ right only while the suffix cannot change the alias.) The `NO_LIVE_VECTOR` pin p
 symbol's own body (plus one hop of module constants) executes no store clause, which is NOT the
 same as proving the writer stores nothing — a door that EXECUTES A CALLER-SUPPLIED statement
 (`sdk::_event_raw_write_door`) carries no marker and is caught only by review. ⚠️ `#11641` gave
-that door a BOUND (`sdk::_RAW_WRITE_DOOR_LABELS`, refused at the seam) rather than a marker:
-review still catches the label the declaration names, and the bound catches a label OUTSIDE it PLUS
-the alias the statement WRITES TO (`tortoise.vector_write::statement_write_target_problem`) — a
-store on an unbound, unlabelled or label-mutated target is refused too, so a caller can no longer
-pass by naming a served label it does not store on. ⚠️ That reader sees statement TEXT: a store
+that door a BOUND (`sdk::_RAW_WRITE_DOOR_LABELS`, refused at the seam) rather than a marker, and it
+is a THREE-leg bound: the labels the statement NAMES
+(`tortoise.vector_write::statement_node_labels`), the labels it renders by INTERPOLATION
+(`::statement_interpolates_label` — a caller could otherwise satisfy the first leg with one literal
+served pattern and store through a second, interpolated one), and the alias it WRITES TO
+(`::statement_write_target_problem`). So a store on an unbound, unlabelled or label-mutated target
+is refused too, and a caller can no longer pass by naming a served label it does not store on.
+Review still catches the label the DECLARATION names. ⚠️ That reader sees statement TEXT: a store
 rendered by a mutating procedure, or by clause text a helper builds, stays outside it — the door's
 own docstring names that residual instead of claiming totality.
 
@@ -385,17 +391,24 @@ CLASSES: tuple[str, ...] = (RECOGNISED_PRODUCER, EXEMPT)
 NO_LIVE_VECTOR = "no-live-vector"
 
 #: A writer whose vector IS stored, but on a label chosen at RUNTIME and NOT bounded at its own
-#: seam — a dump import (`hosted_backup::restore_graph` creates `(n:{safe_labels})` from the file)
-#: or a store keyed on a runtime label. Declared rather than guessed, and it HOLDS `#5090` DoD row 2:
-#: the row's rule is *"no vector is stored without a path to query it"*, and a runtime label is
-#: precisely the case where the served-set comparison cannot be made. `no-live-vector` would be a
-#: LIE here and a guessed label would be a fabrication.
+#: seam — formerly a dump import (`hosted_backup::restore_graph` created `(n:{safe_labels})` from the
+#: file), or a store keyed on a runtime label. Declared rather than guessed, and it HOLDS `#5090`
+#: DoD row 2: the row's rule is *"no vector is stored without a path to query it"*, and a runtime
+#: label is precisely the case where the served-set comparison cannot be made. `no-live-vector`
+#: would be a LIE here and a guessed label would be a fabrication.
+#: ⚠️ Both writers that used to be that example now carry a BOUND instead (`#11641`), so this
+#: paragraph describes the SHAPE, not a live entry — see the note below.
 #:
 #: ⚠️ `#11641` left this disposition with NO live entry on purpose — it is a legal SHAPE, not a
 #: resting place. The answer to a runtime label is a BOUND at the writer's own seam plus the label
 #: set that bound makes true (see `restore_graph`'s `_VECTOR_RESTORE_LABELS` and
 #: `_event_raw_write_door`'s `_RAW_WRITE_DOOR_LABELS`, which both REFUSE a store outside the set).
 #: Reach for this only when a writer genuinely has no bound, and say in its reason why it has none.
+#: That sentence is not a wish: the reason must carry the marker `no-bound:`
+#: (`test_the_two_former_runtime_label_writers_now_own_their_label` reads it), because an assertion
+#: that simply forbade this disposition would contradict the paragraph above — and its failure
+#: message would tell a future author to do the one thing it refuses (#11641 review). The marker is
+#: how a reader tells a writer that genuinely has no bound from one whose bound nobody wrote.
 LABELS_AT_RUNTIME = "labels-at-runtime"
 
 #: The two non-label dispositions :attr:`WriterClass.stores` admits.
@@ -603,7 +616,9 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "#11085",
             # `#11641`: a LABEL SET, because the restore no longer inherits its label from the file.
             # `_require_served_restore_labels` refuses — pre-mutation — any vector-bearing node
-            # whose labels include none of these, so the vector pass can only write
+            # whose labels include none of these (the default path; `allow_unserved_vectors` is the
+            # explicit repair-on-read exception, and it DROPS such a vector rather than writing it),
+            # so the vector pass can only write
             # label-scoped against a served label (`MATCH (n:<label> {__dump_id:r.id})`). The
             # declaration is exactly the query path's vocabulary; a test pins it in BOTH
             # directions against `tortoise.security`, so a label added to or dropped from the

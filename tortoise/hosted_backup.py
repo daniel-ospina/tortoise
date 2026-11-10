@@ -81,6 +81,7 @@ from tortoise.index_catalogue import (  # #3154/#3441: the ONE presence check
     index_catalogue_has_field,
 )
 from tortoise.vector_write import (  # #4520: the ONE clear-then-set vector seam
+    EMBEDDING_PROPERTY,
     clear_then_set_prefix,
     require_served_store_labels,  # #11641: the ONE bound on WHERE a vector may be stored
     set_embedding_clause,
@@ -916,7 +917,9 @@ def _first_live_node_id(g, ids: set[int]) -> int | None:
     return None
 
 
-def _require_served_restore_labels(node_rows) -> None:
+def _require_served_restore_labels(
+    node_rows, *, allow_unserved_vectors: bool = False,
+) -> tuple[set[int], list[str]]:
     """``#11641`` — a restored vector may only land on a label the read path serves.
 
     Runs in `restore_graph`'s PRE-MUTATION validation pass, beside ``#3895``'s dangling-edge check
@@ -930,33 +933,59 @@ def _require_served_restore_labels(node_rows) -> None:
     that defect through the one operation that could notice it.
 
     A node with SEVERAL labels is fine as long as one of them is served: Cypher's ``MATCH (n:Point)``
-    matches a node that also carries ``:Foo``, so such a vector IS reachable, and the restore binds
+    matches a node that also carries ``:Foo``, so such a vector *is* reachable, and the restore binds
     the write to the served label (see the vector pass below).
+
+    ⛔ ``allow_unserved_vectors`` is a REPAIR-ON-READ path, not a convenience, and it exists for the
+    same reason ``allow_dangling_edges`` does: an artifact ALREADY WRITTEN by a pre-fix writer must
+    stay recoverable, and a refusal that cannot be lifted turns a recovery into an outage at DR time.
+    The population is real and documented, not hypothetical — every graph written before D10 still
+    holds ``(:Document {id, …})`` (`tests/test_5140_d10_relabel_migration.py`), ``:Document`` was a
+    vector store before ``#4524``, and the repair is ``migrate_kinds.relabel_legacy_documents(sdk)``
+    run ON THE RESTORED GRAPH. Refusing the whole dump makes that repair unreachable, so this flag
+    DROPS the unserved vector, KEEPS the node (so the relabel can still run) and REPORTS every label
+    it dropped — never silently, and never as the default.
+
+    Returns ``(dump ids to strip, sorted labels whose vectors were dropped)`` — empty unless
+    ``allow_unserved_vectors``. The ids are returned rather than the props being mutated here,
+    because a validator that edits the artifact it validated is how a refusal and a repair start
+    disagreeing about what was checked.
     """
     # The declaration must still name labels the query path serves. Fail closed at the seam, not
     # only in a test: a vocabulary that shrank under this constant would otherwise turn every
     # restore into a write against a label nothing can read.
     require_served_store_labels(
         _VECTOR_RESTORE_LABEL_SET, writer="tortoise.hosted_backup::restore_graph")
+    strip: set[int] = set()
+    dropped: set[str] = set()
     for dump_id, labels, props in node_rows:
-        if not isinstance(props.get("embedding"), list):
+        if not isinstance(props.get(EMBEDDING_PROPERTY), list):
             continue
-        if not _VECTOR_RESTORE_LABEL_SET.intersection(labels):
-            raise ValueError(
-                f"Malformed dump node {dump_id!r}: it carries a vector on label(s) "
-                f"{list(labels)!r}, none of which `run_vector_query` serves "
-                f"({sorted(_VECTOR_RESTORE_LABEL_SET)}). Restoring it would store a vector no "
-                "read path can reach, so the artifact is refused before the target graph is "
-                "touched (#11641)."
-            )
+        if _VECTOR_RESTORE_LABEL_SET.intersection(labels):
+            continue
+        if allow_unserved_vectors:
+            strip.add(dump_id)
+            dropped.update(labels or ("<unlabelled>",))
+            continue
+        raise ValueError(
+            f"Malformed dump node {dump_id!r}: it carries a vector on label(s) "
+            f"{list(labels)!r}, none of which `run_vector_query` serves "
+            f"({sorted(_VECTOR_RESTORE_LABEL_SET)}). Restoring it would store a vector no "
+            "read path can reach, so the artifact is refused before the target graph is "
+            "touched (#11641). Pass `allow_unserved_vectors=True` to restore it WITHOUT that "
+            "vector and repair the label afterwards — the path a pre-D10 `:Document` dump needs."
+        )
+    return strip, sorted(dropped)
 
 
-def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False) -> dict:
+def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
+                  allow_unserved_vectors: bool = False) -> dict:
     """Rebuild the graph from a logical dump into graph handle ``g``.
 
     Returns ``{"nodes": N, "edges": M}``; with ``allow_dangling_edges=True``
     the returned dict additionally carries ``dropped_edges`` and
-    ``dropped_edge_endpoints``.
+    ``dropped_edge_endpoints``, and with ``allow_unserved_vectors=True`` it
+    carries ``dropped_vectors`` and ``dropped_vector_labels``.
 
     Raises ValueError on unsafe labels/types, unsupported dump format, or an
     edge whose endpoint is not in the dump's node list. The last one is the
@@ -981,6 +1010,15 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False) -> dict:
     with a restored ``seq``. New dumps carry it exactly; old dumps (no
     ``event_meta`` key) have it re-derived from the restored ``:GraphEvent``
     log.
+
+    ``allow_unserved_vectors`` is the SAME repair-on-read shape for ``#11641``'s
+    vector bound: an artifact may carry a vector on a label no read path serves
+    (every graph written before D10 still holds ``:Document``), and a refusal
+    that cannot be lifted would make that artifact — and the relabel migration
+    that repairs it — unreachable at DR time. It restores every other node and
+    edge, DROPS the unserved vectors, KEEPS the nodes so the migration can still
+    run, and reports the count + the dropped labels. Never the default, and not
+    revision-gated (see the note at the check itself).
     """
     if not isinstance(dump, dict) or dump.get("format") != DUMP_FORMAT:
         raise ValueError(
@@ -1040,7 +1078,13 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False) -> dict:
     # carries a vector is about to be written label-scoped below, so the label it will be written
     # against must be one `run_vector_query` serves. Checked HERE, before any node is created, so a
     # refusal leaves the target untouched and the import endpoint quarantines the artifact.
-    _require_served_restore_labels(node_rows)
+    # ⛔ NOT revision-gated, unlike `allow_dangling_edges`: a dangling edge was a defect of ONE
+    # writer version (rev 2 provably cannot produce one), whereas an unserved vector is a property
+    # of the graph's CONTENT and can sit in a dump of ANY revision — a graph written before D10
+    # still holds `:Document`. A version gate here would refuse the very artifacts the repair path
+    # exists for.
+    strip_vector_ids, dropped_vector_labels = _require_served_restore_labels(
+        node_rows, allow_unserved_vectors=allow_unserved_vectors)
 
     edge_rows: list[tuple[int, int, str, dict]] = []
     for e in edges:
@@ -1079,6 +1123,13 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False) -> dict:
 
     for dump_id, labels, props in node_rows:
         props = dict(props)
+        if dump_id in strip_vector_ids:
+            # `allow_unserved_vectors` (#11641): the node is restored WITHOUT its vector, so the
+            # migration that relabels it can still run. Popped here rather than only skipped in the
+            # vector pass below — the node CREATE would otherwise carry the plain-list value and
+            # leave an `embedding` that is neither served nor absent (a plain list also poisons
+            # vector search, which is why the vecf32 pass exists at all).
+            props.pop(EMBEDDING_PROPERTY, None)
         props[_DUMP_ID_PROP] = dump_id
         safe_labels = ":".join(labels)
         if safe_labels:
@@ -1094,19 +1145,30 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False) -> dict:
     #
     # #11641: the write NAMES the label it stores on, taken from the declaration above, instead of
     # matching a bare `(n {__dump_id:r.id})` and letting the node's own label decide where the
-    # vector landed. `_require_served_restore_labels` has already refused any vector-bearing node
-    # with no served label, so every row here has one; a multi-label node is grouped under its
-    # served label, which is the label a read queries it by. One statement per label (≤5) rather
-    # than one per node.
+    # vector landed. On the STRICT path `_require_served_restore_labels` has already refused any
+    # vector-bearing node with no served label, so every row here has one; under
+    # `allow_unserved_vectors` the rows it marked instead REACH the `label is None` branch below,
+    # which drops the vector and keeps the node. A multi-label node is grouped under its served
+    # label either way, which is the label a read queries it by. One statement per label (≤5)
+    # rather than one per node.
     embed_rows_by_label: dict[str, list[dict]] = {}
+    dropped_vectors = 0
     for dump_id, labels, props in node_rows:
-        vector = props.get("embedding")
+        vector = props.get(EMBEDDING_PROPERTY)
         if not isinstance(vector, list):
             continue
         label = next(
             (l for l in labels if l in _VECTOR_RESTORE_LABEL_SET),  # noqa: E741
             None,
         )
+        if label is None:
+            # `_require_served_restore_labels` refused this above unless the caller opted into the
+            # repair path, so here it means "drop the vector, keep the node". The explicit check is
+            # not redundant: without it the `None` key reaches `sorted()` below and raises
+            # `TypeError`, which the import endpoint does NOT map to a 422 + quarantine (it maps
+            # `ValueError`) — so a moved guard would turn a refused artifact into a 500.
+            dropped_vectors += 1
+            continue
         embed_rows_by_label.setdefault(label, []).append(
             {"id": dump_id, "v": vector})
     for label in sorted(embed_rows_by_label):
@@ -1220,6 +1282,12 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False) -> dict:
         # raised above. Reported, never silent.
         result["dropped_edges"] = len(unlinkable)
         result["dropped_edge_endpoints"] = missing_endpoints
+    if dropped_vectors:
+        # Only reachable with allow_unserved_vectors=True — same rule: the strict
+        # path raised before any node was created. Reported, never silent, and the
+        # NODES are still restored so a relabel migration can repair them.
+        result["dropped_vectors"] = dropped_vectors
+        result["dropped_vector_labels"] = dropped_vector_labels
     return result
 
 
@@ -2339,6 +2407,7 @@ def _promote_payload_fork_free(
     expected_nodes: int,
     expected_edges: int,
     allow_dangling_edges: bool = False,
+    allow_unserved_vectors: bool = False,
 ) -> dict:
     """Install a VERIFIED payload into ``live_g`` with NO ``GRAPH.COPY``.
 
@@ -2383,7 +2452,8 @@ def _promote_payload_fork_free(
             f"temp graph {temp_name} intact"
         )
     promoted = restore_graph(
-        live_g, payload, allow_dangling_edges=allow_dangling_edges)
+        live_g, payload, allow_dangling_edges=allow_dangling_edges,
+        allow_unserved_vectors=allow_unserved_vectors)
     if (promoted.get("nodes") != expected_nodes
             or promoted.get("edges") + int(promoted.get("dropped_edges", 0))
             != expected_edges):
@@ -2899,6 +2969,7 @@ def _restore_into_temp_verify_swap(
     expected_edges: int | None = None,
     stamp: Callable[[], None] | None = None,
     allow_dangling_edges: bool = False,
+    allow_unserved_vectors: bool = False,
 ) -> dict:
     """Temp-graph restore → verify → atomic swap — the shared stage behind
     ``restore_backup`` and the hosted ``POST /v1/organizations/{org_id}/import``
@@ -2968,7 +3039,8 @@ def _restore_into_temp_verify_swap(
     temp_g = db.select_graph(temp_name)
     try:
         counts = restore_graph(
-            temp_g, payload, allow_dangling_edges=allow_dangling_edges)
+            temp_g, payload, allow_dangling_edges=allow_dangling_edges,
+            allow_unserved_vectors=allow_unserved_vectors)
     except Exception:
         # validation failure (unsafe label, dangling edge, malformed edge) —
         # drop the staging graph; the live graph was never touched
@@ -3157,6 +3229,7 @@ def _restore_into_temp_verify_swap(
                 live_name=live_name, temp_name=temp_name,
                 expected_nodes=expected_nodes, expected_edges=expected_edges,
                 allow_dangling_edges=allow_dangling_edges,
+                allow_unserved_vectors=allow_unserved_vectors,
             )
         except Exception as promo_exc:
             logger.exception(
@@ -3235,6 +3308,7 @@ def restore_backup(
     target_graph: str | None = None,
     drill: bool = False,
     allow_dangling_edges: bool = False,
+    allow_unserved_vectors: bool = False,
 ) -> dict:
     """Restore an org graph from a stored backup: verify → temp graph → swap.
 
@@ -3347,6 +3421,7 @@ def restore_backup(
         live_name=live_name,
         stamp=(None if drill else lambda: _stamp_backup_restored(registry, org_id)),
         allow_dangling_edges=allow_dangling_edges,
+        allow_unserved_vectors=allow_unserved_vectors,
     )
     result["backup_key"] = backup_key
     return result

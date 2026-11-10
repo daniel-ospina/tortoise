@@ -936,7 +936,7 @@ LABEL_EVIDENCE: dict[str, tuple[str, str, str, frozenset[str]]] = {
     # interpolates its labels; the door executes its caller's statement).
     "tortoise.hosted_backup::restore_graph": (
         "tortoise/hosted_backup.py", "restore_graph",
-        "_require_served_restore_labels(node_rows)",
+        "_require_served_restore_labels(",
         frozenset({"Point", "Subject", "Object", "Source", "Event"})),
     "tortoise.sdk::_event_raw_write_door": (
         "tortoise/sdk.py", "_event_raw_write_door",
@@ -1336,7 +1336,7 @@ def test_the_two_former_runtime_label_writers_now_own_their_label() -> None:
     """
     restore = EMBED_WRITER_CLASSES["tortoise.hosted_backup::restore_graph"]
     assert restore.stores == ("Point", "Subject", "Object", "Source", "Event"), restore.stores
-    assert any("_require_served_restore_labels(node_rows)" in own
+    assert any("_require_served_restore_labels(" in own
                for own in _declared_symbol_bodies("tortoise.hosted_backup::restore_graph")), (
         "`restore_graph` no longer bounds the labels it restores a vector onto — without that "
         "refusal the dump's own labels decide where the vector lands and the label tuple above is "
@@ -1354,9 +1354,23 @@ def test_the_two_former_runtime_label_writers_now_own_their_label() -> None:
     # And the disposition itself must stay a live SHAPE (it is exercised synthetically by
     # `tests/test_dod_5090_probe.py`): no entry here uses it, which is the point — zero writers
     # should have an unnameable label while these two bounds exist.
-    assert LABELS_AT_RUNTIME not in {
-        entry.stores for entry in EMBED_WRITER_CLASSES.values()
-    }, "a writer is declared labels-at-runtime again — name its bound, or say why it has none"
+    #
+    # ⚠️ NOT a blanket ban (`#11641` review): the register states this is a legal SHAPE for a writer
+    # that genuinely has no bound, so forbidding it outright would contradict that prose — and the
+    # failure message would tell a future author to "say why it has none", which the assertion then
+    # refused. What is pinned is that reaching for it is ACCOUNTED FOR: the reason carries the
+    # `no-bound:` marker the register's own note requires. `scored_labels()` independently folds any
+    # at-runtime writer into row 2's HOLD set, so the disposition can never be reached silently.
+    for key, entry in sorted(EMBED_WRITER_CLASSES.items()):
+        if entry.stores != LABELS_AT_RUNTIME:
+            continue
+        assert "no-bound:" in entry.reason, (
+            f"{key} is declared labels-at-runtime with no `no-bound:` marker in its reason — the "
+            "disposition is for a writer that genuinely has no bound, and the marker is how a "
+            "reader tells that apart from a writer whose bound nobody wrote. Prefer a bound at the "
+            "writer's own seam (`_VECTOR_RESTORE_LABELS`, `_RAW_WRITE_DOOR_LABELS`); if there "
+            "genuinely is none, name it with `no-bound:` in the reason and say why."
+        )
 
 
 def test_a_writer_that_EXECUTES_a_store_is_never_declared_no_live_vector() -> None:
