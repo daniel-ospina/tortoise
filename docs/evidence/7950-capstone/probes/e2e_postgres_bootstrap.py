@@ -97,6 +97,20 @@ MIGRATIONS = [
     # refused and DROPPED, which is the 302-row incident. A probe that measured
     # that schema would certify a record the shipped writes cannot fill.
     "20261102000002_record_point_search_keys_text.sql",
+    # #11642 / #4051 V1 — the vector move: `CREATE EXTENSION vector`, the
+    # `record_embedding_vector(jsonb)` converter, three GENERATED
+    # `embedding_vec public.vector(384)` columns and their HNSW indexes.
+    #
+    # ⚠️ Applied for the reason every forward entry above gives — the probe stands
+    # up the SHIPPED schema — and the consequence of omitting it is SILENT, not
+    # loud: the write path DROPS `embedding_vec` (it is GENERATED,
+    # `record_projection.GENERATED_COLUMNS`) and `read_record_view` is
+    # `SELECT * FROM public.<table>`, so a probe Postgres without this file simply
+    # answers the columns it has and the probe measures a pre-vector schema —
+    # nothing raises `42703` here. What reds is the `#9550` EQUALITY pin in
+    # `tests/test_7950_capstone_probe.py`: silently measuring the old schema is
+    # precisely the defect the pin exists for.
+    "20261109000001_record_embedding_vector.sql",
 ]
 DSN = "postgresql://postgres:cap@127.0.0.1:15499/capstone"
 

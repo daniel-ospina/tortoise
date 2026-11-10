@@ -1934,7 +1934,11 @@ multiplier = 1 / (f + (1 + rho) / 778.7)      -> 0.99x at f = 1.00, 4.83x at f =
 # The probe only CONNECTS — this container is the precondition, and a fresh one
 # needs ~10 s before pg_isready says yes (a 6 s sleep produced two failed runs).
 docker run -d --name rho7983-pg -e POSTGRES_PASSWORD=rho -e POSTGRES_DB=record \
-    -p 127.0.0.1:15499:5432 postgres:16
+    -p 127.0.0.1:15499:5432 pgvector/pgvector:pg16
+# ⛔ `pgvector/pgvector:pg16`, NOT `postgres:16` (#11642): the record's schema now
+# carries `20261109000001_record_embedding_vector.sql`, whose first statement is
+# `CREATE EXTENSION vector`. On a plain image this container cannot apply the
+# migration list the probe is pinned to, and the run dies at APPLY-MIGRATIONS.
 until docker exec rho7983-pg pg_isready -U postgres; do sleep 2; done
 uv run --with psycopg2-binary python \
   docs/evidence/7983-cost-magnitudes/probes/record_read_cost.py
@@ -2008,7 +2012,7 @@ below as a correct measurement **as of 2026-10-17**, not as today's schema.
 | `ρ`'s line | measured | base / denominator |
 |---|---|---|
 | **planted content width** | **1,133 B** over the **49.0%** of Points that carry content · **555 B over ALL** | calibrated to the dogfood's two means (1,121.4 B / 549.1 B) and measured back. ⚠️ The dogfood's **19,061 B content tail is NOT planted** — no TOAST regime — so the footprint below is a **LOWER BOUND** for a tenant whose text hits it |
-| **record row width** | **1,263–1,266 B median, 1,421–1,423 B mean** | n = 2,000 rows per run, two runs; the vector written as the schema's own `embedding jsonb` — `pg_column_size(t)`, i.e. the HEAP tuple: a TOASTed vector counts as its pointer, so this is the ROW width and NOT the 2,136 B/node on-disk figure below (which adds indexes, TOAST pages and page fill) |
+| **record row width** | **1,263–1,266 B median, 1,421–1,423 B mean** | n = 2,000 rows per run, two runs; the vector written as the schema's own `embedding jsonb` — `pg_column_size(t)`, i.e. the HEAP tuple: a TOASTed vector counts as its pointer, so this is the ROW width and NOT the 2,136 B/node on-disk figure below (which adds indexes, TOAST pages and page fill) · ⚠️ Measured **before `#11642`'s three `embedding_vec vector(384) GENERATED ALWAYS … STORED` columns**, which are stored and therefore add row width, so a re-run on the shipped schema reports a larger mean — the figures here are the pre-move measurement, and re-measuring them is a follow-up, not a list to trim |
 | **record footprint per tenant** | **191,643,648 B = 0.1916 GB** | 89,701 nodes ⇒ **2,136 B per node on disk** (heap + indexes + TOAST) — **1.28×** the cache's 0.1499 GB for the same nodes |
 | **keyed miss fetch (IOPS)** | **5.2 blocks MEAN** over the miss mix (**4** median, **7** max) | `WHERE org_id, graph_id, node_key` — the record's own PK probe, DETOASTED · 200 samples. The mean is what IOPS sums over: 60% of Points carry no vector, so the median describes the common case and the mean describes the bill |
 | **keyed miss fetch (bytes out)** | **2,312 B mean** (**1,306** median, **5,408** max) | `octet_length(t::text)` — the wire bytes a text-mode client receives, which is what egress is charged on |

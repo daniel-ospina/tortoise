@@ -89,6 +89,11 @@ RECORD_MIGRATIONS = [
     # Postgres stands up both, so a list that disagrees here would drift the moment
     # the duplicate is revived.
     "20261102000002_record_point_search_keys_text.sql",
+    # #11642 / #4051 V1 — the vector move. The chain probe's list is the DEAD
+    # duplicate of the bootstrap's, kept EQUAL on purpose (#9550): the same
+    # Postgres stands up both, so a list that disagrees here would drift the
+    # moment the duplicate is revived.
+    "20261109000001_record_embedding_vector.sql",
 ]
 DSN = os.environ.get(
     "CAPSTONE_PG_DSN", "postgresql://postgres:cap@127.0.0.1:15499/capstone")
