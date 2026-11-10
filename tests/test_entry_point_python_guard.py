@@ -636,14 +636,34 @@ _DELIBERATE_BARE_FORM: frozenset[tuple[str, str]] = frozenset(
         # `tests/test_entry_point_python_guard.py`'s `_DELIBERATE_BARE_FORM`" — a
         # sentence that was FALSE on `main` until this key returned.
         #
-        # Both PRs were correct at their own head and red together, which is why the
-        # key is neither a mistake nor a re-declaration:
+        # The key is neither a mistake nor a re-declaration, which is why the record may
+        # rely on it (#11774 review, finding 1). This preamble used to claim "both PRs were
+        # correct at their own head and red together"; measured at each PR's OWN head that
+        # is false — `7c45d5af1f` (#11756) and `900d4aafc6` (#11757) were EACH red at its own
+        # head, so the sentence endorsed the deletion pattern this block exists to warn
+        # against (#11777 review round 8, finding 7: the earlier phrasing of this
+        # correction was unparseable):
         #   · `#11756` (`7c45d5af1f`) rewrote the record to `uv run python`, leaving
         #     this key matching no live line;
-        #   · `#11757` deleted the then-dead key — correctly, at a head that predated
-        #     `#11759` and merged ~3 min after it;
-        #   · `#11759` restored the `python3` record relying on a key `#11757` had
-        #     already removed.
+        #   · `#11757` deleted a key that was LIVE at its MERGE PARENT — `215e7d9d8b`
+        #     already contained `#11759` (restored 37 s earlier; `#11757` merged 3 min
+        #     after it) and the file was GREEN there, so the removal CREATED the doc-scan
+        #     red rather than clearing a dead key. It is not the model to copy (#11774).
+        #     "Merge parent" is the measured anchor and no other: the key is present (1) at
+        #     `#11757`'s own base `24e53f2b22`, where the doc line was already `uv run
+        #     python` so the key matched no live line (DEAD), and ABSENT (0) at its own head
+        #     `64726782f2` and at its merge commit `900d4aafc6` — so "live at its own head" is
+        #     false under both readings of "its own head" this block uses (#11777 review
+        #     round 10);
+        #   · `#11759` restored the `python3` record, and this key with it, at 15:18:13Z
+        #     (`179e688661`) — 15 min after `#11756` merged (15:03:02Z) — and its own merge
+        #     (15:45:12Z) preceded `#11757`'s merge parent `215e7d9d8b` (15:45:49Z, PR
+        #     #11753's `mergedAt`; the commit's own clock reads 15:45:48Z, which would make the
+        #     37 s above a 36 s);
+        #     `#11757` removed the key 3 min 35 s after `#11759`'s merge, on a base where it
+        #     had just been revived — so the record relied on a key that was live when it was
+        #     written, not one "already removed" (#11777 review round 8: an earlier phrasing of
+        #     this bullet re-anchored bullet 2's 37 s to `#11756`, where the true gap is 42 min).
         # The merged tree therefore advertised the refused form with nothing exempting
         # it: `test_no_doc_or_usage_advertises_the_form_the_guard_refuses` red on
         # `origin/main` at `900d4aafc61a`, with no branch content involved.
@@ -754,8 +774,8 @@ def _comment_region_above(prefix: str) -> list[str]:
     Reading the REGION rather than the last contiguous run of `#:` lines is the
     round-2 correction (#11754 review). A blank line, or a bare `#` separator,
     anywhere in the block is a re-wrap of the paragraph — not a deletion of the
-    sentence — but scoping to a contiguous `#:` run made every break INSIDE the ~28
-    lines below the sentence read as *"the comment block no longer carries the
+    sentence — but scoping to a contiguous `#:` run made every break INSIDE the
+    region below the sentence read as *"the comment block no longer carries the
     sentence"*, across a sentence that was present and correct. That message invites
     the author to reword the pattern, i.e. to weaken the pin, so a false red here is
     the failure mode this guard exists to avoid.
@@ -768,44 +788,162 @@ def _comment_region_above(prefix: str) -> list[str]:
     return list(reversed(region))
 
 
+def _normalise_prose(prose: str) -> str:
+    """`prose` with the round's TWO markdown emphasis markers and its re-wrap removed.
+
+    Exactly two markers are stripped — `*` (which covers `*four*` and `**four**`) and the
+    backtick — and runs of whitespace are collapsed to one space. Both are formatting, not
+    wording: *"while the four entries below do not"* states the same set size as *"while the
+    `four` entries below do not"* or *"while the **four** entries below do not"*.
+    Capitalisation is folded downstream, by `_cardinality_of`, so a sentence-initial `Four`
+    is read rather than dropped.
+
+    What it does NOT strip, stated rather than implied (#11777 review round 7, finding 2):
+    underscore emphasis (`_four_`) and HTML emphasis (`<em>four</em>`) both survive as
+    wording and would read as *"the sentence is gone"*. That is a deliberate bound, not an
+    oversight — this comment block uses `*`/`**` exclusively (`:595` is the live example,
+    a few lines above the sentence), so the other two notations would be a NEW idiom, and
+    the marker set is a list a reader can check against the block rather than a claim about
+    markdown in general.
+
+    This matters more than it looks: a false red here reports *"the sentence is gone"* and
+    hands the author the one remedy that disables the property — *"update the pattern in this
+    test"* — so reddening on formatting costs the pin itself (#11775).
+    """
+    return re.sub(r"\s+", " ", re.sub(r"[*`]", "", prose)).strip()
+
+
+def _stated_cardinalities(prose: str) -> list[str]:
+    """Every `<N>` in a `while the <N> entries below do not` claim in `prose`.
+
+    Matching is deliberately narrow — the sentence, not a fuzzy "a number near the
+    word *entries*" — because the pin's value is that a REWORDED sentence reads as
+    absent rather than as an approximate hit. `[A-Za-z]+` (rather than `[a-z]+`) is
+    what lets `_normalise_prose` leave capitalisation to `_cardinality_of`'s
+    lower-casing instead of silently dropping the claim (#11775).
+    """
+    return re.findall(r"while the ([A-Za-z]+|\d+) entries below do not", prose)
+
+
 def _cardinality_of(token: str) -> int | None:
     """A cardinality token as `int` — a word from `_CARDINALITY_WORDS`, or digits.
 
     Digits are accepted so that a set which outgrows the word table is not reported
     as *"the sentence is gone"* when the sentence is present and correct (#11754
     review, finding 4: an 11-member set with prose `eleven` reddened with a message
-    telling the author to restore a sentence they had written).
+    telling the author to restore a sentence they had written). Case is folded for
+    the same reason — a sentence-initial *Four* is the same claim (#11775).
     """
-    return int(token) if token.isdigit() else _CARDINALITY_WORDS.get(token)
+    return int(token) if token.isdigit() else _CARDINALITY_WORDS.get(token.lower())
 
 
-def test_the_record_exemption_prose_counts_the_set_it_describes():
-    """The `_DELIBERATE_BARE_FORM` comment states the exemption set's cardinality
-    in prose — *"…stay `uv run python` while the <N> entries below do not"*.
-    Nothing pinned that number, so it can drift silently: the set gains or loses an
-    entry while the prose goes on describing the set it used to be. That is not
-    hypothetical — it is what this test was written for, and it is also why the
-    prose said "four" over a set whose fourth member had gone dead (#11756 rewrote
-    the doc line at source rather than keep the exemption).
+def _cardinality_claims_in(source: str) -> list[str]:
+    """Every cardinality claim in the `#:` block above `_DELIBERATE_BARE_FORM`.
 
-    The set's own description is the only cardinality a reader has, so it must
-    describe THIS set — the same non-rot rule
-    `test_the_record_exemptions_all_still_match_a_live_line` applies to the keys.
+    ONE seam, deliberately: the region walk, the `#:` filtering, the formatting
+    normalisation and the claim match all happen here, so the pieces cannot drift apart
+    the way they did when the pin called two helpers inline. Which of those four the
+    tests actually MEASURE is stated per arm below, rather than claimed for all four at
+    once (#11777 review round 2, findings 1 and 2):
+
+      * region scoping — measured by the decoy arm: a `#:` copy of the sentence ABOVE the
+        non-comment line that ends the block, which the whole-file head would satisfy;
+      * `#:` filtering — measured by the BARE `#` line INSIDE the region carrying its own
+        claim (`seven`), which only the filter excludes. Region scoping does NOT cover
+        this one: the bare line is inside the region either way, so dropping the filter
+        alone leaves `['seven', 'four']` and reds the arm (measured, #11777 round 3);
+      * normalisation and the claim match — measured by the formatting and reword rows.
+
+    The pin's CALL SITE is measured too, and by behaviour rather than by shape — but by a test
+    of its OWN, not by the tolerance test. `_assert_the_prose_names_the_set_size` is where the
+    pin's assertions live and takes its source as a parameter, so the tolerance test drives that
+    function's BODY with synthetic sources; it cannot see the pin TEST's body, so an extraction
+    inlined there leaves this seam dead code while the whole file stays green (measured at
+    `354ef36c0a`, #11777 review round 7, finding 1: the file was GREEN, and a `**four**` in the
+    live sentence then reds with *"no longer carries the sentence"* — the #11775 false red,
+    back, with CI green and nothing announcing it). The call site is held the way the body is
+    held, by execution: `test_the_prose_pin_is_the_code_path_the_artifact_runs` replaces this
+    seam for two real runs of the pin test, so a body that reads through the seam takes its
+    VALUE — a deliberately wrong claim must make the pin raise — while a body that
+    re-implements the extraction never consults the stub. (An earlier version of this paragraph
+    said "one REAL run … records the source", which described the superseded call-presence
+    property; a dead `_dead = _cardinality_claims_in(...)` satisfied that, #11777 round 10.)
+
+    The region is the COMMENT REGION immediately above the definition — bounded by the
+    first line that is not part of the comment block — which is what keeps a decoy
+    earlier in the file from satisfying the pin while the block that actually describes
+    the set drifts (measured, #11754 review: decoy above + prose `three` over a
+    four-member set PASSED).
     """
-    source = Path(__file__).read_text(encoding="utf-8")
     before = source.partition("_DELIBERATE_BARE_FORM: frozenset")[0]
-    # The prose is the COMMENT REGION immediately above the definition, not every
-    # `#:` line in the file. The scoping is load-bearing: over the whole file head
-    # the search below takes the LEFTMOST match, so a stray earlier copy of the
-    # sentence satisfied this pin while the block that actually describes the set
-    # drifted (measured, #11754 review: decoy sentence above + prose `three` over a
-    # four-member set PASSED).
-    prose = " ".join(
-        re.sub(r"\s+", " ", line[2:]).strip()
-        for line in _comment_region_above(before)
-        if line.startswith("#:") and line[2:].strip()
+    prose = _normalise_prose(
+        " ".join(
+            line[2:].strip()
+            for line in _comment_region_above(before)
+            if line.startswith("#:") and line[2:].strip()
+        )
     )
-    matches = re.findall(r"while the ([a-z]+|\d+) entries below do not", prose)
+    return _stated_cardinalities(prose)
+
+
+def _assert_the_prose_names_the_set_size(source: str) -> None:
+    """The `_DELIBERATE_BARE_FORM` prose pin over `source` — its body AND its call site.
+
+    Taking the source as a PARAMETER is what makes this function's BODY drivable by the
+    tolerance test below — synthetic sources, no read of this file at that level — and it
+    replaces the shape pin that four review rounds failed to get right. A shape pin has to answer *"does
+    this function read through the seam?"* by reading its syntax, and every phrasing of that
+    question was answered wrongly by a NON-adversarial edit: a text search was defeated by its
+    own marker string (round 3); a bare substring check was satisfied by a comment naming the
+    seam (round 4); a name-presence check was satisfied by a dead `assert` (round 5); the
+    assignment check that replaced it accepted a dead `_dead = _cardinality_claims_in(...)`
+    beside an inline copy, while REJECTING a one-line wrapper that legitimately reads the seam
+    (round 7, measured in both directions). The lesson is not "tighten the predicate again": a
+    shape pin is a second copy of the pin's grammar, so it drifts against the pin exactly as an
+    inlined extraction drifts against the seam.
+
+    Here there is one copy and it is EXECUTED. The tolerance test below drives THIS function
+    with synthetic sources, so an edit that re-implements the extraction inline in THIS body —
+    however it is spelled, wrapped or named — reds on the first `**four**` variant, PROVIDED the
+    copy drops any part of the behaviour: the emphasis or whitespace normalisation, the region
+    scoping, or the `#:` filter. That is the copy #11775 is about, and it is measured (a verbatim
+    `re.findall` inline reds with *"no longer carries the sentence"*).
+
+    This body is NOT the whole call site, and an earlier draft of this docstring said it was:
+    the extraction can equally be inlined into the pin TEST's body, which leaves this function
+    dead and the tolerance test still green on it, so the file is GREEN with the seam covered by
+    nothing — and a `**four**` in the live sentence then reds as *"no longer carries the
+    sentence"*, the #11775 false red restored behind a green CI (#11777 review round 7, finding
+    1, measured at `354ef36c0a`: inline copy → 553 passed, 2 skipped; inline copy + `**four**`
+    → 1 failed, 552 passed). The pin test's body is therefore held separately and the same way,
+    by execution: `test_the_prose_pin_is_the_code_path_the_artifact_runs` replaces
+    `_cardinality_claims_in` for two real runs of the pin test, so a body that reads through the
+    seam takes its VALUE — a deliberately wrong claim must make the pin raise — while a body
+    that re-implements the extraction never consults the stub. Call-presence alone is not the
+    property: one vestigial `_dead = _cardinality_claims_in(...)` beside an inline copy
+    satisfied the earlier version of that test (measured, #11777 review at `a1809fde`).
+
+    The boundary, stated rather than glossed: a copy that re-assembles the same helpers in the
+    same order is behaviourally identical **on real input**, so no test that reads the artifact
+    can tell them apart — the call-site arm distinguishes them only by SUBSTITUTING the seam's
+    value, which is why it exists and why the tolerance test alone cannot do it. And telling
+    them apart is not what this property needs: the property is that the
+    pin tolerates formatting and reds on drift; a duplicate that preserves both keeps it. What
+    a duplicate costs is that `_cardinality_claims_in` stops being the one place the extraction
+    lives, which is a reviewable diff choice, not a silently-lost guarantee — and it is why the
+    seam's docstring claims one seam rather than claiming a duplicate is impossible.
+
+    Nor does the property disappear with the suite green. The tolerance test below asserts the
+    artifact's own prose as well as its synthetic arms, and the pin asserts it through this
+    function, so DELETING EITHER test still leaves the other measuring the real file (measured,
+    #11777 review round 8, finding 1: before that second call, deleting the pin left the suite
+    green with the prose unguarded). Defeating every arm therefore takes TWO edits: an inline
+    extraction in this body or in the pin test's body, AND the removal of the test that measures
+    THAT body — the tolerance test below, or the call-site test beside it — and, for the
+    artifact's own prose, both tests. A visibly larger diff than any edit that leaves one arm
+    standing.
+    """
+    matches = _cardinality_claims_in(source)
     assert matches, (
         "the `_DELIBERATE_BARE_FORM` comment block no longer carries the sentence "
         "'while the <N> entries below do not'. This pin must NOT rot into passing "
@@ -836,6 +974,309 @@ def test_the_record_exemption_prose_counts_the_set_it_describes():
         "describes a set that no longer exists. Update the word when you add or "
         "remove an entry."
     )
+
+
+def test_the_record_exemption_prose_counts_the_set_it_describes():
+    """The `_DELIBERATE_BARE_FORM` comment states the exemption set's cardinality
+    in prose — *"…stay `uv run python` while the <N> entries below do not"*.
+    Nothing pinned that number, so it can drift silently: the set gains or loses an
+    entry while the prose goes on describing the set it used to be. That is not
+    hypothetical — it is what this test was written for, and it is also why the
+    prose said "four" over a set whose fourth member had gone dead (#11756 rewrote
+    the doc line at source and LEFT the exemption entry, which then matched no live line).
+    ⛔ Measured at source, because two rounds have now proposed "corrections" to that sentence
+    and BOTH invert it: `#11756` (`7c45d5af1f`) rewrote
+    `docs/plans/2026-11-10-issue-11689-e1e2-owned-floors.md:310` from `$ python3 …` to
+    `$ uv run python …` and KEPT the exemption entry, which then matched no live line (the
+    key IS present at that head); `#11757` (`900d4aafc6`) deleted the entry and moved the
+    prose `four` -> `three`. Claims that `#11756` "removed the member" or that
+    `900d4aafc6` "rewrote the doc line" are false — do not re-apply them (#11777: round 5's
+    note made that inversion and is falsified at the named commits; this lane's round-9 edit
+    made it again and was reverted).
+
+    The set's own description is the only cardinality a reader has, so it must
+    describe THIS set — the same non-rot rule
+    `test_the_record_exemptions_all_still_match_a_live_line` applies to the keys.
+    """
+    _assert_the_prose_names_the_set_size(Path(__file__).read_text(encoding="utf-8"))
+
+
+def test_the_prose_pin_is_the_code_path_the_artifact_runs(monkeypatch):
+    """The PIN TEST's body must read through `_cardinality_claims_in` — measured by CALLING it.
+
+    The tolerance test drives `_assert_the_prose_names_the_set_size`, so it measures that
+    function's BODY. It cannot see the pin TEST's body: inline the extraction there and
+    `_assert_the_prose_names_the_set_size` becomes dead code that the tolerance test goes on
+    exercising, so the whole file stays green — measured at `354ef36c0a` (#11777 review round 7,
+    finding 1), and with the inline copy in place a `**four**` in the live sentence reds with
+    *"no longer carries the sentence"*, i.e. the #11775 false red is back while CI is green.
+
+    So the call site is held the way the body is held: by execution. `_cardinality_claims_in`
+    is replaced for the duration of two real runs of the pin test. A body that reads through the
+    seam takes its VALUE and reds when the value disagrees; a body that re-implements the
+    extraction never consults the stub at all, and reds on ARM 1 below — with the remedy in ARM
+    1's OWN message, since the tolerance test cannot fail in that direction. ARM 1 asks the seam's
+    VALUE to disagree and requires the pin to raise on THAT claim; ARM 2 then asks the identity
+    question (this file, not a sample). Neither is call-presence: a vestigial
+    `_dead = _cardinality_claims_in(...)` satisfies a call count while leaving the value unread.
+
+    ⛔ ARM 1 exists because call-presence is NOT the property, and the first version of this
+    test asserted only that (`assert seen`, `assert seen[0] == …`). A pin body that keeps ONE
+    vestigial `_dead = _cardinality_claims_in(source)` call beside an inline copy satisfies
+    both of those while reading nothing from the seam — measured, #11777 review at `a1809fde`:
+    `1 passed` with the inline copy shipped, and with `**four**` in the live sentence the pin
+    went GREEN on a stray quote elsewhere in this file instead of reding, i.e. exactly the
+    cover the round-7 finding said this test removes. A stub whose VALUE must drive the
+    outcome cannot be satisfied by a call whose value is discarded.
+
+    The stubbed claim is derived from `len(_DELIBERATE_BARE_FORM)` — the set the prose
+    describes — so these arms measure the CALL SITE and nothing else; whether the live prose
+    states that size is the pin test's own job, above.
+    """
+    seen: list[str] = []
+    stated = str(len(_DELIBERATE_BARE_FORM))
+
+    # ARM 1 — a WRONG claim from the seam must make the pin RAISE, and raise ON THAT CLAIM. An
+    # inline copy never asks the stub, sees the live (correct) prose, and so never raises: this
+    # arm reds below, carrying the remedy (a bare `pytest.raises` could not — its failure is only
+    # `DID NOT RAISE`, which names neither the cause nor the fix).
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_cardinality_claims_in",
+        lambda source: [str(len(_DELIBERATE_BARE_FORM) + 1)],
+    )
+    raised: AssertionError | None = None
+    try:
+        test_the_record_exemption_prose_counts_the_set_it_describes()
+    except AssertionError as exc:
+        raised = exc
+
+    assert raised is not None, (
+        "the cardinality pin's body no longer reads through `_cardinality_claims_in`: handed a "
+        "claim the set does NOT support, the pin PASSED — so it never consulted the seam. A copy "
+        "that re-implements the extraction there leaves the seam dead while every other test "
+        "keeps passing (measured, #11777 review round 7), and a vestigial "
+        "`_dead = _cardinality_claims_in(...)` line does not help. Restore the call to "
+        "`_assert_the_prose_names_the_set_size` — that call IS the pin's one path through it."
+    )
+    assert "but the set holds" in str(raised), (
+        "the pin raised, but not on the cardinality the seam handed it, so the seam's value "
+        f"never reached the assertion. It raised: {raised}"
+    )
+
+    # ARM 2 — the CORRECT claim must let it pass, and must be handed THIS file's source. ARM 1
+    # has already established that the value reaches the assertion, so the only question left is
+    # identity: a sample would let the pin measure something other than the artifact.
+    def record_and_answer(source: str) -> list[str]:
+        seen.append(source)
+        return [stated]
+
+    monkeypatch.setattr(sys.modules[__name__], "_cardinality_claims_in", record_and_answer)
+    test_the_record_exemption_prose_counts_the_set_it_describes()
+
+    handed = seen[0] if seen else None
+    assert handed == Path(__file__).read_text(encoding="utf-8"), (
+        "the pin reads through the seam, but not with THIS FILE's source — it must hand over "
+        "`Path(__file__).read_text(...)`, or it measures a sample instead of the artifact "
+        f"(handed: {'nothing' if handed is None else repr(handed[:60]) + '…'})."
+    )
+
+
+def test_the_prose_pin_reads_through_formatting_but_not_wording():
+    """Non-vacuity of the tolerance, both directions, through the seam AND the pin's body.
+
+    The pin reds through `_cardinality_claims_in`, and the reason the tolerance matters
+    is that the pin's failure message prescribes the one remedy that disables it —
+    *"update the pattern in this test"*. So a false red here costs the property itself,
+    and the tolerance cannot be left untested: without it `**four**`, `` `four` `` and a
+    sentence-initial `Four` all reddened as *"the sentence is gone"* while the sentence
+    was present and correct (measured, #11754 review F5).
+
+    Two levels, on purpose. The first half drives `_cardinality_claims_in` — the seam — and
+    labels each arm with the mechanism it measures. The second half drives
+    `_assert_the_prose_names_the_set_size` — the pin's BODY, not its call site — with synthetic
+    sources: an inline extraction in THAT body reds here on the first `**four**` variant,
+    because an inline copy cannot read emphasis (measured: replacing the body's seam call with
+    a non-tolerant `_stated_cardinalities` walk leaves `2 failed` in the targeted selection).
+    The pin TEST's body is a DIFFERENT surface that this half cannot see — with the extraction
+    inlined there and this seam intact the whole file stayed GREEN at `354ef36c0a` (measured,
+    #11777 review round 7, finding 1), which is why
+    `test_the_prose_pin_is_the_code_path_the_artifact_runs` holds that surface separately, by
+    execution.
+
+    The opposite direction matters just as much — a REWORDED sentence must still read as
+    absent, or the pin becomes a fuzzy match that passes on prose it never read.
+    """
+
+    def claims(*comment_lines: str) -> list[str]:
+        block = "".join(f"#: {line}\n" for line in comment_lines)
+        return _cardinality_claims_in(f"{block}_DELIBERATE_BARE_FORM: frozenset({{}})")
+
+    def claims_in_source(source: str) -> list[str]:
+        return _cardinality_claims_in(source)
+
+    for variant in (
+        "while the four entries below do not.",
+        "while the **four** entries below do not.",
+        "while the `four` entries below do not.",
+        "while the Four entries below do not.",
+        "while the FOUR entries below do not.",
+    ):
+        stated = claims(variant)
+        assert stated, f"{variant!r}: a formatting difference must not read as absence"
+        assert _cardinality_of(stated[0]) == 4, f"{variant!r} -> {stated}"
+
+    # A re-wrap — the sentence split across lines of the comment block — is formatting
+    # too, and the round-2 correction this seam descends from exists for exactly this
+    # case. The middle line is an empty `#:` line, which is what the artifact's real
+    # paragraph breaks look like (`:601`); a BARE `#` separator is the other shape the
+    # region walk tolerates, so both are exercised (#11777 review round 2, finding 2: an
+    # earlier version of this comment called an empty `#:` line "a bare `#` separator").
+    assert _cardinality_of(claims("while the **four**", "", "entries below do not.")[0]) == 4
+    assert _cardinality_of(
+        claims_in_source(
+            "#: while the **four**\n"
+            "#\n"
+            "#: entries below do not.\n"
+            "_DELIBERATE_BARE_FORM: frozenset({})"
+        )[0]
+    ) == 4
+    # WHITESPACE is the other half of the normalisation and has its own carrier: extra
+    # spaces inside a `#:` line, which the `" ".join` does not collapse (#11777 review
+    # round 5, finding 1 — this branch had no arm; without it a re-spaced sentence reads as
+    # *gone*, which is the false red that hands the author the de-pinning remedy).
+    respaced = claims_in_source(
+        "#:  while  the four entries below do not.\n_DELIBERATE_BARE_FORM: frozenset({})"
+    )
+    assert respaced, "a re-spaced sentence must still be READ, not reported as absent"
+    assert _cardinality_of(respaced[0]) == 4
+
+    assert claims("while the entries below are exempt") == [], (
+        "a reworded sentence must read as ABSENT, not as an approximate hit"
+    )
+    # A word outside the table is still a CLAIM: the sentence is found and the number is
+    # unreadable — reported that way, never silently treated as absent.
+    unknown = claims("while the **some** entries below do not.")
+    assert unknown == ["some"], unknown
+    assert _cardinality_of(unknown[0]) is None
+    assert _cardinality_of("fourteen") is None
+    # The DIGITS branch, which had no arm of its own before (#11777 review round 4,
+    # non-blocking finding 3): a set that outgrows the word table is written `13`, and a
+    # pin that could not read a numeral would report the sentence missing while it sat in
+    # front of it — the false red this whole change exists to remove.
+    assert _cardinality_of("13") == 13
+    assert claims("while the 4 entries below do not.") == ["4"]
+    assert _cardinality_of(claims("while the 4 entries below do not.")[0]) == 4
+    # A duplicate INSIDE the block is two claims — the pin's `len(matches) == 1` arm is
+    # what rejects it. (This is the duplicate arm, NOT the scoping arm.)
+    assert len(claims("while the four entries below do not.", "while the four entries below do not.")) == 2
+    # SCOPING and FILTERING, and the reason they are measured here rather than trusted:
+    # a `#:` copy of the sentence ABOVE the code that ends the comment block is a
+    # different block and may not be read, and a bare `#` line inside the block is prose
+    # the seam does not parse. Dropping EITHER the region walk or the `#:` filter makes
+    # this RED — which is what pins those two mechanisms, rather than claiming them
+    # measured (#11777 review round 2, finding 1).
+    assert claims_in_source(
+        "#: while the nine entries below do not.\n"
+        "ROOT = Path(__file__).resolve().parent\n"
+        "# a bare hash line: while the seven entries below do not.\n"
+        "#: while the four entries below do not.\n"
+        "_DELIBERATE_BARE_FORM: frozenset({})"
+    ) == ["four"], "neither the decoy above the block nor the bare `#` line is a claim"
+
+    # ------------------------------------------------------------------
+    # The second level: the PIN ITSELF, with the source as a parameter.
+    #
+    # Every arm below runs `_assert_the_prose_names_the_set_size` — the body the real pin
+    # executes — so what is measured is the code path the artifact goes through, not a
+    # helper beside it. Sizes are derived from the live set, so the arms above and the
+    # digits ones below do not need editing when the set gains or loses an entry; only the
+    # prose does.
+    #
+    # One conditional limit, stated because a silent coverage loss is the failure this whole
+    # change is about (#11777 review round 9, finding 1): `word` is a WORD only while the set
+    # fits `_CARDINALITY_WORDS` (twelve). Past that it is `str(size)`, and the two case arms
+    # (`Four`/`FOUR`) then degenerate into copies of the plain digits arm, because digits have
+    # no case — so case-folding at the CALL SITE stops being measured. The seam-level arms
+    # above still measure it, with hard-coded `Four`/`FOUR` and no dependency on the set size
+    # (verified RED at size 13, where the call-site arms are the ones that go quiet), so the
+    # fold itself is never unpinned; only the duplicate-copy detection loses that one signal.
+    # ------------------------------------------------------------------
+    size = len(_DELIBERATE_BARE_FORM)
+    # `str(size)` when the set outgrows the word table: the digits arms below then carry the
+    # coverage, which is the case `_cardinality_of`'s digits branch exists for. Without the
+    # default this raises `StopIteration` — an opaque failure on a CORRECT change, which is
+    # the false-red-with-a-misleading-signal family this whole PR is about (#11777 round 8,
+    # findings 2 and 5).
+    word = next((w for w, n in _CARDINALITY_WORDS.items() if n == size), str(size))
+
+    def pin_source(*comment_lines: str) -> str:
+        block = "".join(f"#: {line}\n" for line in comment_lines)
+        return f"{block}_DELIBERATE_BARE_FORM: frozenset({{}})"
+
+    # Tolerated: the pin must PASS on every formatting of the same claim. Anything here
+    # that raises is a false red, and its message would prescribe de-pinning the pattern.
+    for variant in (
+        f"while the {word} entries below do not.",
+        f"while the **{word}** entries below do not.",
+        f"while the `{word}` entries below do not.",
+        f"while the {word.capitalize()} entries below do not.",
+        f"while the {word.upper()} entries below do not.",
+        f"while the {size} entries below do not.",
+        f"while the **{size}** entries below do not.",
+    ):
+        _assert_the_prose_names_the_set_size(pin_source(variant))
+
+    # A truly BLANK line inside the block is the third re-wrap carrier, and the one no arm
+    # covered before (#11777 round 8, finding 3: reverting `_comment_region_above` to stop the
+    # region at a blank line left this whole test green). A legitimate paragraph break must
+    # not read as *"the sentence is gone"*.
+    _assert_the_prose_names_the_set_size(
+        f"#: while the {word}\n\n#: entries below do not.\n_DELIBERATE_BARE_FORM: frozenset({{}})"
+    )
+
+    # The artifact's OWN prose, asserted here as well as in the pin, so that deleting EITHER
+    # test leaves the other measuring the real file rather than a suite that is green because
+    # nothing checks it (#11777 round 8, finding 1 — measured: one deletion used to suffice).
+    _assert_the_prose_names_the_set_size(Path(__file__).read_text(encoding="utf-8"))
+
+    # …including a re-wrap (an empty `#:` line between the halves) and a re-spaced line,
+    # through the pin: these are the two carriers the seam-level arms above pin
+    # individually, and running them here is what makes the pin's own read of them real.
+    _assert_the_prose_names_the_set_size(pin_source(f"while the **{word}**", "", "entries below do not."))
+    _assert_the_prose_names_the_set_size(
+        f"#:  while  the {word} entries below do not.\n_DELIBERATE_BARE_FORM: frozenset({{}})"
+    )
+
+    # SCOPING and FILTERING at the CALL SITE, not only in the seam: a pin copy that walked
+    # from the top of the file would read the decoy, and one that parsed bare `#` lines would
+    # read two claims. Both are measured here through the pin itself, because the seam-level
+    # arm above cannot see a copy that re-assembles the seam (measured, #11777 round 7).
+    _assert_the_prose_names_the_set_size(
+        f"#: while the nine entries below do not.\n"
+        "ROOT = Path(__file__).resolve().parent\n"
+        f"#: while the {word} entries below do not.\n"
+        "_DELIBERATE_BARE_FORM: frozenset({})"
+    )
+    _assert_the_prose_names_the_set_size(
+        f"#: while the {word} entries below do not.\n"
+        "# a bare hash line: while the nine entries below do not.\n"
+        "_DELIBERATE_BARE_FORM: frozenset({})"
+    )
+
+    # REJECTED, and each with the pin's own message — so the pin is exercised in the
+    # direction that protects the property, not only in the direction that tolerates edits.
+    with pytest.raises(AssertionError, match="no longer carries the sentence"):
+        _assert_the_prose_names_the_set_size(pin_source("while the entries below are exempt"))
+    with pytest.raises(AssertionError, match="states its cardinality 2 times"):
+        _assert_the_prose_names_the_set_size(
+            pin_source(f"while the {word} entries below do not.", f"while the {word} entries below do not.")
+        )
+    with pytest.raises(AssertionError, match="cannot read as a number"):
+        _assert_the_prose_names_the_set_size(pin_source("while the some entries below do not."))
+    # The drift this whole change is about: prose one above the set it describes.
+    with pytest.raises(AssertionError, match="but the set holds"):
+        _assert_the_prose_names_the_set_size(pin_source(f"while the {size + 1} entries below do not."))
 
 
 def test_no_doc_or_usage_advertises_the_form_the_guard_refuses():
