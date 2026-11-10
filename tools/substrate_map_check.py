@@ -51,15 +51,17 @@ tree disagree:
 - **whether any issue is open or closed.** That is the tracker's job and it needs
   the network; the document records the measurement command and a dated result
   instead (§1 / §9 of the doc).
-- **whether `:Document` is still minted.** `:Document` occurs on 55 lines across
-  17 files under `tortoise/` in the tree this was written against (`git grep -n`
-  counts LINES, `git grep -l` counts FILES — the two are not the same number,
-  and the doc's figure is the line one), and every one of those lines is prose
-  naming the *retired* label (a docstring, a comment, an RST literal). A pattern
-  loose enough to catch a mint catches those; one narrow enough to skip them still
-  matches the RST literals. The honest options were a hand-maintained allowlist of
-  docstrings or no regex check at all, so the label claim stays evidence in the
-  doc (§5).
+- **whether `:Document` is still minted.** In the tree this was written against
+  (`4f68a2aa7`) `:Document` occurs on 55 lines across 17 files under `tortoise/`
+  (`git grep -n` counts LINES, `git grep -l` counts FILES — the two are not the
+  same number, and the doc's figure is the line one). §5 of the doc carries the
+  same measurement against the tree it ships with, re-measured whenever that
+  population moves; this paragraph is the argument, not the number. Every one of
+  those lines is prose naming the *retired* label (a docstring, a comment, a printed
+  message, an RST literal). A pattern loose enough to catch a mint catches those; one narrow
+  enough to skip them still matches the RST literals. The honest options were a
+  hand-maintained allowlist of docstrings or no regex check at all, so the label
+  claim stays evidence in the doc (§5).
 
 A guard that claimed either and silently could not deliver it would be the same
 false PASS the document exists to prevent.
@@ -131,6 +133,11 @@ INTERFACE_SYMBOLS: tuple[tuple[str, str], ...] = (
     ("def build_master_list", "tortoise/extractor_v2.py"),
     ("def compile_vocab", "tortoise/commit_schema.py"),
     ("def compile_value_brief", "tortoise/value_extractor.py"),
+    # §5's aggregator row names this as the replay entrypoint beside
+    # `_ensure_indexes`, and a lane plans a rebase on that cell — but it was
+    # absent from this tuple, so renaming it left `--check` CLEAN and the row's
+    # claim false with every guard green. Measured before adding it here.
+    ("def _ensure_indexes", "tortoise/projection/__init__.py"),
 )
 
 _FRONTMATTER_SHA = re.compile(r"^measured_at_commit:\s*([0-9a-f]{7,40})\s*$", re.M)
@@ -474,7 +481,7 @@ def check_leaf_rows(doc: str) -> list[str]:
     `*leaf*` cells are the only ones asserting EMPTINESS — and emptiness is the claim
     a lane plans a rebase on. Shipped wrong once: the `vet_gate.py` row said `*leaf*`
     while that file opens with a module-level `from . import value_gate`
-    (`vet_gate.py:149`), a defect the inbound-count fix beside it did not reach
+    (`vet_gate.py:150`), a defect the inbound-count fix beside it did not reach
     (#5086 review cycle 5, P2).
     """
     section = _section(doc, "## 5.")

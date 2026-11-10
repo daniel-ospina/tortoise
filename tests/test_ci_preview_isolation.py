@@ -29,7 +29,9 @@ Two halves are pinned here, and they are DIFFERENT kinds of assertion:
 ⚠️ What `ready` does NOT prove: that the port's LISTENER belongs to our pid
 tree. Proving that needs a socket→pid mapping (`ss`/`lsof`) that the runner
 image does not guarantee, so `ready` asserts (a) the pid we recorded is still
-alive, (b) the port is bound, and (c) that listener answers HTTP successfully.
+alive **and still OURS** — the start-time witness `record` wrote, re-read, and
+refused when it cannot be re-read — (b) the port is bound, and (c) that listener
+answers HTTP successfully.
 (c) is the pre-fix `curl -fsS` requirement, kept: a bound listener is not a
 serving server, and the specs behind this gate require 200 —
 `test_ready_requires_the_preview_to_SERVE_not_just_bind` is the arm that pins it.
@@ -571,6 +573,910 @@ def test_ready_requires_the_preview_to_SERVE_not_just_bind(tmp_path: Path, state
         _reap(broken.pid, *([healthy.pid] if healthy is not None else []))
 
 
+def _pid_state_letter(pid: int) -> str:
+    """The kernel's state letter for `pid` (`Z` = zombie), `""` when it is gone."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return subprocess.run(
+            ["ps", "-o", "state=", "-p", str(pid)], capture_output=True, text=True
+        ).stdout.strip()[:1]
+    return stat[stat.rfind(") ") + 2:].split(" ", 1)[0]
+
+
+def _function_body(text: str, name: str) -> str:
+    """The lines of `name() { … }` in a bash script, without the signature/brace."""
+    out: list[str] = []
+    inside = False
+    for line in text.splitlines():
+        if not inside:
+            inside = bool(re.match(rf"^{re.escape(name)}\(\)\s*\{{", line))
+            continue
+        if line == "}":
+            break
+        out.append(line)
+    return "\n".join(out)
+
+
+def test_alive_calls_a_zombie_GONE_not_alive(tmp_path: Path, state) -> None:
+    """A zombie answers kill(0) forever, and the dump asserted a CAUSE from it.
+
+    This is the first of the three false-verdict paths the fresh-context review of
+    PR #11675 measured in the `ci.yml` steps. The pre-fix step branched on a bare
+    `kill -0 "$pid"`, so an unreaped preview read as ALIVE and the step then told
+    the reader the red was "the specs' or the content's, not a dead server" — from
+    a process that had already exited. RED on the pre-fix code: `kill -0`
+    SUCCEEDS here (asserted below, so the arm can never pass for the wrong
+    reason), while `alive` must report GONE.
+    """
+    if not hasattr(os, "fork"):  # pragma: no cover — Windows only
+        pytest.skip("no zombie can be produced without a real child process")
+    # A real child that exits WITHOUT being reaped: `subprocess.Popen` holds the
+    # pid until `wait()`/`poll()`, so the child stays a zombie. Deliberately not
+    # `os.fork()` — forking a multi-threaded pytest process warns (and can
+    # deadlock) for no benefit here.
+    child = _spawn(["/bin/sleep", "2"], tmp_path)
+    pid = child.pid
+    try:
+        assert _script("record", "--name", "app", "--pid", str(pid), env=state).returncode == 0, (
+            "the child must be recorded while it is still running, like a boot step does"
+        )
+        deadline = time.time() + 15
+        while time.time() < deadline and _pid_state_letter(pid) != "Z":
+            time.sleep(0.05)
+        assert _pid_state_letter(pid) == "Z", (
+            "the child never became an unreaped zombie — this arm cannot measure"
+        )
+        assert subprocess.run(["bash", "-c", f"kill -0 {pid}"]).returncode == 0, (
+            "the harness cannot measure: the pre-fix primitive must still SUCCEED on "
+            "a zombie, which is exactly why it produced a false ALIVE"
+        )
+        result = _script("alive", "--name", "app", env=state)
+        assert result.returncode == 1, (
+            "an unreaped zombie was not reported as GONE — a preview that exited is "
+            f"being called alive: {result.stdout}{result.stderr}"
+        )
+        assert "GONE" in result.stdout and "DIED MID-RUN" in result.stdout, result.stdout
+        assert " is ALIVE" not in result.stdout, result.stdout
+    finally:
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            child.wait(timeout=20)
+
+
+def test_alive_refuses_a_recycled_pid(tmp_path: Path, state) -> None:
+    """A recycled pid is a stranger: the process we started is still GONE.
+
+    The second false-verdict path. `stop` already refuses to signal a pid whose
+    start time changed (`test_stop_refuses_a_pid_whose_start_time_changed`), and
+    the READ needs the same guard: the pre-fix step reported the stranger as our
+    ALIVE preview.
+    """
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    try:
+        assert _script("record", "--name", "app", "--pid", str(victim.pid), env=state).returncode == 0
+        (Path(state["PREVIEW_STATE"]) / "app.start").write_text("1\n")  # a different process
+        result = _script("alive", "--name", "app", env=state)
+        assert result.returncode == 8, (
+            "a pid whose start time no longer matches the boot witness was not "
+            f"reported as RECYCLED: {result.stdout}{result.stderr}"
+        )
+        assert "RECYCLED" in result.stdout, result.stdout
+        assert "is ALIVE" not in result.stdout, result.stdout
+    finally:
+        _reap(victim.pid)
+
+
+def test_the_recycled_sentence_is_WELL_FORMED_when_no_port_was_recorded(
+    tmp_path: Path, state
+) -> None:
+    """The RECYCLED message spliced an empty port suffix into a clause.
+
+    `anything answering${at_port} is a stranger's answer` with `at_port=""` renders
+    "anything answering is a stranger's answer" — a malformed sentence in the one
+    verdict a failure dump exists to make readable. Every SIBLING branch already
+    guards the empty port (`the no-port branch says "no port was recorded … was
+    NOT checked"`); only this one spliced, and the `no-port` leg is unreachable
+    through the workflow today (`alloc` precedes `record`), which is why it
+    survived (#11675 review, finding 2).
+
+    RED on the pre-fix code: the no-port arm produced the double-space-free but
+    ungrammatical "anything answering is a stranger's answer", with no statement
+    that WHERE it answers was not checked.
+    """
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    try:
+        assert _script(
+            "record", "--name", "app", "--pid", str(victim.pid), env=state
+        ).returncode == 0
+        (Path(state["PREVIEW_STATE"]) / "app.start").write_text("1\n")
+        assert not (Path(state["PREVIEW_STATE"]) / "app.port").exists()
+
+        no_port = _script("alive", "--name", "app", env=state)
+        assert no_port.returncode == 8, no_port.stdout
+        assert "anything answering is a stranger's answer" not in no_port.stdout, (
+            "the RECYCLED sentence spliced an EMPTY port suffix into the clause: "
+            f"{no_port.stdout}"
+        )
+        assert "answering at all is a stranger's answer" in no_port.stdout, no_port.stdout
+        assert "WHERE it would answer was NOT checked" in no_port.stdout, (
+            "the no-port RECYCLED verdict must say the leg it did NOT take, like its "
+            f"sibling branches: {no_port.stdout}"
+        )
+
+        # …and the port-carrying form still names the port: the guard must not
+        # have replaced the useful sentence with the vague one everywhere.
+        (Path(state["PREVIEW_STATE"]) / "app.port").write_text("18997\n")
+        with_port = _script("alive", "--name", "app", env=state)
+        assert with_port.returncode == 8, with_port.stdout
+        assert "anything answering is a stranger's answer" not in with_port.stdout
+        assert "anything answering on :18997 is a stranger's answer" in with_port.stdout, (
+            with_port.stdout
+        )
+    finally:
+        _reap(victim.pid)
+
+
+def test_alive_names_a_record_that_RAN_and_REFUSED(tmp_path: Path, state) -> None:
+    """`record` exit 4 means the preview SPAWNED AND DIED, and it said "never started".
+
+    `cmd_record` refuses with exit 4 on its two failure paths (the pid is not
+    running, or its start time cannot be read) BEFORE it can write the `.booted`
+    witness, so `alive` took the no-witness branch and printed "NEVER RECORDED —
+    … the boot step never reached record". That is the OPPOSITE mechanism, and it
+    is the single most common "the preview DIED" case: every boot step calls
+    `record … || true` and `ci.yml` says in terms what exit 4 means ("wrangler
+    already died, so there is nothing to record"). It points the reader at the
+    boot wiring instead of at a process that spawned and exited — the same defect
+    class as the bare `kill -0` this verb replaced (#11675 review, finding 1).
+
+    RED on the pre-fix code: the refusal left the state dir EMPTY, so `alive`
+    returned 6 and claimed "the boot step never reached record".
+    """
+    refused = _script("record", "--name", "app", "--pid", "999999", env=state)
+    assert refused.returncode == 4, (
+        f"the harness cannot measure: recording a dead pid must REFUSE (rc 4): {refused.stderr}"
+    )
+
+    result = _script("alive", "--name", "app", env=state)
+    assert result.returncode == 10, (
+        "a `record` that RAN and REFUSED was not given its own verdict — it was "
+        f"folded into {result.returncode}: {result.stdout}"
+    )
+    assert "RECORD REFUSED" in result.stdout, result.stdout
+    assert "STARTED AND DIED" in result.stdout, result.stdout
+    # ⚠️ The trailer NAMES the alternative verdict ("A boot that never reached
+    # record reports itself as NEVER RECORDED, not as this") on purpose — it is a
+    # cross-reference, not a claim about THIS state — so the arm below matches the
+    # CLAIM and the exit code, never a bare token that the cross-reference also
+    # carries.
+    assert "so the boot step never reached record" not in result.stdout, (
+        "the verdict CLAIMS the opposite mechanism — the boot step DID reach record: "
+        f"{result.stdout}"
+    )
+    assert "no pid was ever recorded for this name" not in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize("which", ["pid", "start", "booted"])
+def test_a_refusal_is_superseded_by_a_later_successful_record(
+    tmp_path: Path, state, which: str
+) -> None:
+    """A refusal witness must not OUTLIVE the boot that later succeeded.
+
+    The boot step's retry loop can refuse on attempt 1 and succeed on attempt 2,
+    so a stale `.refused` would report a preview that DID boot as one that never
+    could. Each state-dir artefact is checked separately because `alive` reads
+    each of them on its own branch, and the refusal must lose to all three.
+    """
+    dead = _script("record", "--name", "app", "--pid", "999999", env=state)
+    assert dead.returncode == 4, dead.stderr
+    assert (Path(state["PREVIEW_STATE"]) / "app.refused").exists(), (
+        "the harness cannot measure: a refused record must leave its witness"
+    )
+
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    try:
+        assert _script(
+            "record", "--name", "app", "--pid", str(victim.pid), env=state
+        ).returncode == 0
+        assert not (Path(state["PREVIEW_STATE"]) / "app.refused").exists(), (
+            "a successful record left the earlier refusal witness in place"
+        )
+        assert (Path(state["PREVIEW_STATE"]) / f"app.{which}").exists(), (
+            f"the harness cannot measure: a successful record must write app.{which}"
+        )
+        assert _script("stop", "--name", "app", env=state).returncode == 0
+        stopped = _script("alive", "--name", "app", env=state)
+        assert stopped.returncode == 5, (
+            "a preview that recorded successfully and was then stopped reports "
+            f"itself as {stopped.returncode}, not as RECORDED-then-STOPPED: {stopped.stdout}"
+        )
+        assert "RECORDED, then STOPPED" in stopped.stdout, stopped.stdout
+        assert "RECORD REFUSED" not in stopped.stdout, stopped.stdout
+    finally:
+        _reap(victim.pid)
+
+
+def test_alive_tells_a_stopped_preview_from_one_that_never_started(
+    tmp_path: Path, state
+) -> None:
+    """The third false-verdict path: `stop` deletes the pid file on EVERY branch.
+
+    So "no pid file" is a double boot failure as often as it is a boot that never
+    ran — and the pre-fix step asserted the opposite ("no pid was recorded at
+    boot — it never started") for both. `record`'s boot witness is what separates
+    them, and both states must be distinguishable.
+    """
+    never = _script("alive", "--name", "app", env=state)
+    assert never.returncode == 6, never.stdout
+    assert "NEVER RECORDED" in never.stdout, never.stdout
+
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    try:
+        assert _script("record", "--name", "app", "--pid", str(victim.pid), env=state).returncode == 0
+        assert _script("stop", "--name", "app", env=state).returncode == 0
+        stopped = _script("alive", "--name", "app", env=state)
+        assert stopped.returncode == 5, (
+            "a preview that WAS recorded and then stopped is reported the same as one "
+            f"that never started: {stopped.stdout}{stopped.stderr}"
+        )
+        assert "RECORDED, then STOPPED" in stopped.stdout, stopped.stdout
+        assert "NEVER RECORDED" not in stopped.stdout, stopped.stdout
+        assert "does NOT mean the preview never started" in stopped.stdout, stopped.stdout
+    finally:
+        _reap(victim.pid)
+
+
+def test_alive_separates_a_serving_preview_from_a_surviving_one(
+    tmp_path: Path, state
+) -> None:
+    """The PROCESS surviving and the SERVER serving are two facts, not one.
+
+    The middle verdict the `ci.yml` step used to carry must not be lost when the
+    branch collapses into one helper call: a live wrangler whose bundle/workerd is
+    not answering is a preview that did NOT die and did NOT serve, and the log is
+    read differently for each. Exit 0 is reserved for alive-AND-serving so the
+    step's `::error::` prefix lands on both failure shapes.
+    """
+    result = _script("alloc", "--name", "app", "--base", "18988", env=state)
+    assert result.returncode == 0, result.stderr
+    port = int(result.stdout.strip())
+
+    broken = _spawn_http(port, 500, tmp_path)
+    healthy = None
+    try:
+        assert _wait_port(port), f"the decoy listener never bound :{port}"
+        assert _script("record", "--name", "app", "--pid", str(broken.pid), env=state).returncode == 0
+        result = _script("alive", "--name", "app", env=state)
+        assert result.returncode == 7, (
+            "an alive process whose port answers 500 was reported as a preview that "
+            f"served: {result.stdout}{result.stderr}"
+        )
+        assert "is ALIVE" in result.stdout and "did not serve" in result.stdout, result.stdout
+        assert "SURVIVED" not in result.stdout, result.stdout
+
+        _reap(broken.pid)
+        deadline = time.time() + 10
+        while time.time() < deadline and _port_answers(port):
+            time.sleep(0.05)
+
+        healthy = _spawn_http(port, 200, tmp_path)
+        assert _wait_port(port), f"the healthy listener never bound :{port}"
+        assert _script("record", "--name", "app", "--pid", str(healthy.pid), env=state).returncode == 0
+        result = _script("alive", "--name", "app", env=state)
+        assert result.returncode == 0, (
+            f"a serving, surviving preview was not reported whole: {result.stdout}{result.stderr}"
+        )
+        assert "SURVIVED" in result.stdout, result.stdout
+    finally:
+        _reap(broken.pid, *([healthy.pid] if healthy is not None else []))
+
+
+def test_alive_does_not_claim_an_identity_it_could_not_check(tmp_path: Path, state) -> None:
+    """A verdict may not assert a fact the probe never took.
+
+    Identity is checked only against the start-time witness `record` writes. If
+    that file is gone (a hand-written pid file, a truncated state dir) the verb
+    still has a liveness answer — and must say WHICH answer it has, because the
+    same class of overclaim is what this whole finding is about: the step asserted
+    "not a dead server" from a probe that had not asked.
+    """
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    try:
+        assert _script("record", "--name", "app", "--pid", str(victim.pid), env=state).returncode == 0
+        (Path(state["PREVIEW_STATE"]) / "app.start").unlink()
+        result = _script("alive", "--name", "app", env=state)
+        # 9, not 0: no port was recorded for this name, so the SERVING leg was not
+        # taken either and `0` ("alive AND serving") is not this verb's to return —
+        # its own arm,
+        # `test_alive_refuses_to_call_an_unchecked_port_leg_a_serving_verdict`.
+        assert result.returncode == 9, result.stdout + result.stderr
+        assert "IDENTITY was NOT checked" in result.stdout, (
+            "`alive` claims the start time matches the boot witness even though no "
+            f"witness exists: {result.stdout}"
+        )
+        assert "still matches the boot witness" not in result.stdout, result.stdout
+    finally:
+        _reap(victim.pid)
+
+
+def test_alive_does_not_claim_an_identity_it_could_not_READ(tmp_path: Path, state) -> None:
+    """A witness that EXISTS but cannot be re-read is still not a match.
+
+    The sibling arm below deletes `.start`, so it only covers *no witness*. The
+    harder state is a witness that IS there and a start-time read that FAILS —
+    the process exited in the window between `alive`'s liveness probe and its
+    start-time probe, or the host could not answer (psutil documents the
+    pid + creation-time rule as *inherently racy*, so that window is designed
+    for). The pre-fix code branched the sentence on the WITNESS
+    (`[[ -n "$recorded" ]]`) instead of on the comparison, so it printed *"its
+    start time still matches the boot witness"* for a comparison it never ran —
+    measured on this arm's exact state.
+
+    The capability gap is simulated the way #5049 describes it — an `awk` that
+    cannot answer, first on `PATH` — so the script under test is the REAL file,
+    unmodified. RED on the pre-fix code (verified by running it): the sentence
+    claimed a match.
+    """
+    blind = tmp_path / "blind-bin"
+    blind.mkdir()
+    # BOTH read paths, because the gap must be simulated where the helper reads:
+    # Linux goes `/proc` + `awk`, a host without `/proc` (a developer's macOS — the
+    # branch `pid_state`/`pid_starttime` ship for) goes through `ps`. A blind `awk`
+    # alone is a NO-OP there, so this arm false-redded on macOS — "`alive` claims
+    # the start time matches" — for a capability the platform never uses. Blinding
+    # both keeps the arm about the STATE (a witness that cannot be re-read)
+    # instead of about one implementation.
+    for tool in ("awk", "ps"):
+        (blind / tool).write_text("#!/bin/sh\nexit 1\n")
+        (blind / tool).chmod(0o755)
+
+    port = _script("alloc", "--name", "app", "--base", "18789", env=state)
+    assert port.returncode == 0, port.stderr
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    try:
+        assert _script(
+            "record", "--name", "app", "--pid", str(victim.pid), env=state
+        ).returncode == 0
+        # Positive control: with a working `awk` the same state DOES report the
+        # match, so the arm below cannot pass for the wrong reason (no match was
+        # ever expected here).
+        control = _script("alive", "--name", "app", env=state)
+        assert control.returncode == 7, control.stdout + control.stderr
+        assert "still matches the boot witness" in control.stdout, control.stdout
+
+        result = _script(
+            "alive", "--name", "app",
+            env={**state, "PATH": f"{blind}:{state['PATH']}"},
+        )
+        assert "still matches the boot witness" not in result.stdout, (
+            "`alive` claims the start time matches the boot witness although the "
+            f"read that would have compared them never ran: {result.stdout}"
+        )
+        assert "its start time could NOT be read" in result.stdout, result.stdout
+        assert "IDENTITY was NOT checked" in result.stdout, result.stdout
+        # The liveness answer DOES stand — a host gap degrades the read, never a
+        # verdict (#5049), so the process is still reported alive.
+        assert " is ALIVE" in result.stdout, result.stdout
+        assert result.returncode == 7, result.stdout + result.stderr
+    finally:
+        _reap(victim.pid)
+
+
+def test_alive_does_not_borrow_an_unchecked_identity_for_a_serving_verdict(
+    tmp_path: Path, state
+) -> None:
+    """Serving + an UNREADABLE witness: exit 0, but the verdict may not say SURVIVED.
+
+    The header's old `iff` said exit 0 required the start-time witness to be
+    re-read AND to match, while `cmd_alive` fell through to 0 when the re-read
+    FAILED and the port answered — the block a CI author reads first asserted an
+    invariant the code did not have, and the message spent it: *"this preview
+    SURVIVED the run, so the red is the specs' or the content's, not a dead
+    server"* is a CAUSAL verdict, drawn from an identity leg the probe had not
+    taken (`#11675` review, finding 3). The state is designed for, not exotic: the
+    pid + creation-time rule is documented as inherently racy, so a process can
+    exit between the liveness probe and the start-time probe.
+
+    Exit 0 STAYS on this state — a non-zero would mark a live, serving preview
+    dead on a box that cannot read `/proc`, which is a false red — so what this
+    pins is the claim: alive-and-serving, with the identity leg named as
+    unchecked, and no SURVIVED verdict riding on it.
+
+    RED on the pre-fix code (measured): it printed SURVIVED and claimed the red
+    was not a dead server.
+    """
+    blind = tmp_path / "blind-bin"
+    blind.mkdir()
+    (blind / "awk").write_text("#!/bin/sh\nexit 1\n")
+    (blind / "awk").chmod(0o755)
+
+    allocated = _script("alloc", "--name", "app", "--base", "18679", env=state)
+    assert allocated.returncode == 0, allocated.stderr
+    port = int(allocated.stdout.strip())
+
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    server = _spawn_http(port, 200, tmp_path)
+    try:
+        assert _wait_port(port), f"the listener never bound :{port}"
+        assert _script(
+            "record", "--name", "app", "--pid", str(victim.pid), env=state
+        ).returncode == 0
+        result = _script(
+            "alive", "--name", "app",
+            env={**state, "PATH": f"{blind}:{state['PATH']}"},
+        )
+        assert result.returncode == 0, (
+            "an alive, serving preview must stay exit 0 even when the identity leg "
+            f"could not be taken: {result.stdout}{result.stderr}"
+        )
+        assert "IDENTITY was NOT checked" in result.stdout, result.stdout
+        assert "SURVIVED" not in result.stdout, (
+            "`alive` graded the preview SURVIVED from a start-time leg it never "
+            f"took: {result.stdout}"
+        )
+        assert "ALIVE AND SERVING" in result.stdout, result.stdout
+    finally:
+        _reap(victim.pid, server.pid)
+
+
+def test_alive_refuses_to_call_an_unchecked_port_leg_a_serving_verdict(
+    tmp_path: Path, state
+) -> None:
+    """`0` means "alive AND serving"; a leg that was NOT taken may not return it.
+
+    The contract block said `exit 0 iff … AND the port still answers HTTP`, while
+    the no-port branch returned 0 — a claim broader than the code, in the block a
+    CI author reads first (the #11675 review's P3). `alloc` always precedes
+    `record` in the workflow, so this is not a live CI defect; it is the same
+    class of overclaim the rest of this verb exists to remove, and the fix gives
+    the state its own code so the contract's `iff` is true.
+
+    RED on the pre-fix code (measured): it returned 0 and called itself ALIVE.
+    """
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    try:
+        assert _script(
+            "record", "--name", "app", "--pid", str(victim.pid), env=state
+        ).returncode == 0
+        assert not (Path(state["PREVIEW_STATE"]) / "app.port").exists(), (
+            "the harness cannot measure: `record` must not have written a port"
+        )
+        result = _script("alive", "--name", "app", env=state)
+        assert result.returncode == 9, (
+            "no port was recorded, so SERVING was never checked, yet `alive` "
+            f"returned its alive-and-serving code: {result.stdout}{result.stderr}"
+        )
+        assert "SERVING was NOT checked" in result.stdout, result.stdout
+        assert "SURVIVED the run" not in result.stdout, result.stdout
+    finally:
+        _reap(victim.pid)
+
+
+def test_both_exit_code_lists_name_every_cause_their_sentences_produce():
+    """The two exit-code lists are PROSE, and nothing pinned them, so they drifted
+    from the code twice in one review (`#11675` rounds 13 and 15).
+
+    Two clauses are checked, because the same drift happened in both: `9` (four causes)
+    and `12` (three). `cmd_alive` returns `9` for four on-disk facts, and its sentence
+    names each: no
+    port file; a file that is EMPTY; a file holding content that is not a port number
+    (which is where a whitespace-only file lands — `$(cat …)` strips only trailing
+    newlines, so `"   "` survives as a non-empty non-number and used to reach exit 7);
+    and a file whose content could not be read. The header table and the
+    `cmd_alive` list each enumerate those causes independently; both have now been
+    wrong in both directions, and the in-code list even says it "must not drift from"
+    the header table — which is exactly what happened. The `12` clause had the same
+    defect: both lists said the pid file "could not be read" while the code also
+    returns `12` for a READABLE file that is empty or holds a non-number, and its own
+    message already says "unreadable, empty, or not numeric".
+
+    ⛔ Each check is scoped to the `9 …` CLAUSE, not the whole comment block, because
+    the same block also carries `12 the pid FILE itself could not be read`: a
+    block-wide `"could not be read" in block` is satisfied by the pid-file clause, so
+    deleting the CAUSE from the port clause stayed green (measured). The clauses are
+    separated by the lists' own `·`, so the segment is the unit.
+    """
+    blocks = []
+    current: list[str] = []
+    for line in SCRIPT.read_text().splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            # Drop the comment MARKER as well as the newline: a phrase this pin
+            # requires ("not numeric") can straddle a line wrap, and leaving `#` in
+            # would make it read "not # numeric" (measured).
+            current.append(re.sub(r"^#+\s?", "", stripped))
+            continue
+        if current:
+            blocks.append(" ".join(current))
+            current = []
+    if current:
+        blocks.append(" ".join(current))
+    port_lists = [b for b in blocks if "no port is known" in b.lower()]
+    assert len(port_lists) == 2, (
+        "expected exactly two exit-code lists naming the no-port state (the header "
+        f"table and `cmd_alive`'s), found {len(port_lists)} — a list that moved, "
+        "merged or vanished makes this pin vacuous instead of red")
+    for block in port_lists:
+        clauses = [c for c in block.split("\u00b7") if "no port is known" in c.lower()]
+        assert len(clauses) == 1, (
+            "the no-port state must be described by exactly one `·`-separated clause "
+            f"of an exit-code list, found {len(clauses)}: {block[:300]}")
+        clause = clauses[0].lower()
+        for cause in ("empty", "not a port number", "could not be read"):
+            assert cause in clause, (
+                f"an exit-code list enumerates the no-port causes without naming "
+                f"{cause!r}, which `cmd_alive` does produce — a reader auditing the "
+                "code from the list alone is told about fewer causes than exist: "
+                + clause[:400])
+        assert "none" in clause or "no port was recorded" in clause, (
+            "an exit-code list omits the ABSENT cause (no port file at all), which is "
+            "the one `alloc`-never-ran state the whole code exists to report: "
+            + clause[:400])
+
+        # …and the SAME class one clause away: `12` is returned for an unreadable pid
+        # file, an EMPTY one, and one whose content is not a number — as the code's own
+        # `PID FILE UNREADABLE` message says. Both lists said only "could not be read",
+        # which is one of three and the wrong one for the other two.
+        pid_clauses = [c for c in block.split("\u00b7") if "no pid could be read" in c.lower()]
+        assert len(pid_clauses) == 1, (
+            "the pid-unreadable state must be described by exactly one `\u00b7`-separated "
+            f"clause of an exit-code list, found {len(pid_clauses)}: {block[:300]}")
+        pid_clause = pid_clauses[0].lower()
+        for cause in ("unreadable", "empty", "not numeric"):
+            assert cause in pid_clause, (
+                f"an exit-code list enumerates the `12` causes without naming "
+                f"{cause!r}, which the code produces and its own message states — a "
+                "reader is sent to a permissions hunt for a file that was read fine: "
+                + pid_clause[:400])
+
+
+def test_a_later_refusal_outranks_an_earlier_boot(tmp_path: Path, state) -> None:
+    """The retry loop can SUCCEED, be STOPPED, and then be REFUSED.
+
+    `record` writes `.booted` on success and `.refused` when the process it was
+    handed was already gone; `stop` deletes the pid file and keeps both. Checking
+    `.booted` first reported that state as "RECORDED, then STOPPED" and discarded
+    the one datum that says the LAST spawn STARTED AND DIED — the mechanism the
+    `.refused` witness was added to surface. The later witness wins, and a tie
+    goes to the refusal (it is the more specific statement about the attempt that
+    explains the red).
+
+    RED on the pre-fix code (**verified by running it**): rc 5 for this sequence.
+    """
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    try:
+        assert _script(
+            "record", "--name", "app", "--pid", str(victim.pid), env=state
+        ).returncode == 0
+        assert _script("stop", "--name", "app", env=state).returncode == 0
+        refused = _script("record", "--name", "app", "--pid", "999999", env=state)
+        assert refused.returncode == 4, refused.stderr
+        state_dir = Path(state["PREVIEW_STATE"])
+        both_witnesses = (
+            (state_dir / "app.booted").exists()
+            and (state_dir / "app.refused").exists()
+        )
+        assert both_witnesses, (
+            "the harness cannot measure: this state needs BOTH witnesses on disk")
+        result = _script("alive", "--name", "app", env=state)
+        assert result.returncode == 10, (
+            "the LAST attempt was a refusal, but `alive` reported "
+            f"{result.returncode}: {result.stdout}{result.stderr}"
+        )
+        assert "RECORD REFUSED" in result.stdout, result.stdout
+        assert "EARLIER attempt DID record" in result.stdout, (
+            "the message must keep BOTH facts — a later refusal AND an earlier "
+            f"successful boot: {result.stdout}"
+        )
+    finally:
+        _reap(victim.pid)
+
+
+def test_an_unreadable_pid_file_is_not_the_gone_verdict(tmp_path: Path, state) -> None:
+    """A pid file this probe cannot READ is not evidence that the preview DIED.
+
+    Under `set -euo pipefail` the unguarded `cat` exited 1 with EMPTY stdout, so
+    the step printed a blank `::error::` and the code said GONE. The dump took no
+    verdict at all, and the recorded process may well be alive — every sibling
+    read in `cmd_alive` already carried the `|| true` this one lacked.
+
+    Two unreadable shapes, because they fail on DIFFERENT hosts: a file with no
+    pid in it (deterministic everywhere), and a mode-000 file, which only denies
+    the read when the process is NOT root — root holds `CAP_DAC_OVERRIDE` and
+    reads it anyway, so that half skips rather than redding a correct helper
+    (the convention `test_e2e_wrangler_prewarm.py:839` already uses).
+
+    RED on the pre-fix code (**verified by running it**): the mode-000 shape gave
+    rc 1 with no output, and the empty shape gave rc 1 wearing the GONE code.
+    """
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    pfile = Path(state["PREVIEW_STATE"]) / "app.pid"
+    try:
+        assert _script(
+            "record", "--name", "app", "--pid", str(victim.pid), env=state
+        ).returncode == 0
+
+        pfile.write_text("")
+        empty = _script("alive", "--name", "app", env=state)
+        assert empty.returncode == 12, (
+            "a pid file with no pid in it measured nothing, so `alive` must not "
+            f"answer with a state verdict: {empty.returncode} "
+            f"{empty.stdout}{empty.stderr}"
+        )
+        assert "PID FILE UNREADABLE" in empty.stdout, empty.stdout
+        assert " is GONE" not in empty.stdout, (
+            f"the empty pid file was reported as the gone verdict: {empty.stdout}")
+
+        if os.geteuid() == 0:
+            pytest.skip(
+                "root ignores the file mode this arm needs to make the read fail")
+        pfile.write_text(str(victim.pid))
+        pfile.chmod(0o000)
+        result = _script("alive", "--name", "app", env=state)
+        assert result.returncode == 12, (
+            "the pid file could not be read, so no verdict was taken — `alive` "
+            f"must not answer with the GONE code: {result.returncode} "
+            f"{result.stdout}{result.stderr}"
+        )
+        assert "PID FILE UNREADABLE" in result.stdout, (
+            "a blank `::error::` is the failure this arm exists to catch: "
+            f"{result.stdout!r} / {result.stderr!r}"
+        )
+        assert " is GONE" not in result.stdout, (
+            "the unreadable state must not be REPORTED as the gone verdict: "
+            f"{result.stdout}")
+    finally:
+        with contextlib.suppress(OSError):
+            pfile.chmod(0o644)
+        _reap(victim.pid)
+
+
+def test_the_no_port_verdict_does_not_borrow_an_untaken_identity_leg(
+    tmp_path: Path, state
+) -> None:
+    """Exit 9 reports liveness only, so its SENTENCE may not claim identity.
+
+    `0` and `7` were re-worded when the identity leg was not taken; this branch
+    was missed, and it printed "our recorded process" in the same clause that
+    admitted the identity was never checked. Nothing pinned either sentence, so a
+    revert to the single-printf form left the whole file green (measured).
+
+    Also pins the ABSENT-vs-unreadable distinction for the two files this branch
+    reads: a `.start`/`.port` that EXISTS but cannot be read may not be reported
+    as one that was never written — the same conflation `12` exists to prevent
+    for the pid file.
+    """
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    state_dir = Path(state["PREVIEW_STATE"])
+    try:
+        assert _script(
+            "record", "--name", "app", "--pid", str(victim.pid), env=state
+        ).returncode == 0
+
+        # The matched-witness shape keeps the claim: positive control, and it also
+        # pins the FIRST exit-9 sentence's port leg (an empty port file must not be
+        # reported as one that was never recorded) — the second sentence is pinned
+        # further down, so neither printf can regress unobserved.
+        (state_dir / "app.port").write_text("")
+        verified = _script("alive", "--name", "app", env=state)
+        assert verified.returncode == 9, verified.stdout + verified.stderr
+        assert "our recorded process" in verified.stdout, (
+            "the positive control lost the verified claim: " + verified.stdout)
+        assert "port file EXISTS" in verified.stdout, (
+            "a readable-but-empty port file was reported as one that was never "
+            "recorded, in the MATCHED-witness sentence: " + verified.stdout)
+        assert "is EMPTY" in verified.stdout, (
+            "the EMPTY case must be NAMED as such, not merged into 'could not be "
+            "read' — the other cause, with a different remedy (a permissions or "
+            "torn-state hunt), so one sentence for both sends the reader to the "
+            "wrong one: " + verified.stdout)
+        (state_dir / "app.port").unlink()
+
+        # No witness at all: the verdict may say the leg was not taken…
+        (state_dir / "app.start").unlink()
+        absent = _script("alive", "--name", "app", env=state)
+        assert absent.returncode == 9, absent.stdout + absent.stderr
+        assert "no start-time witness was recorded" in absent.stdout, absent.stdout
+        assert "our recorded process" not in absent.stdout, (
+            "an untaken identity leg was still reported as a verified one: "
+            + absent.stdout)
+
+        # …and a witness that EXISTS but cannot be read must not be called absent.
+        (state_dir / "app.start").write_text("")
+        empty = _script("alive", "--name", "app", env=state)
+        assert "EXISTS" in empty.stdout and "could not be read (unreadable, or empty)" in empty.stdout, (
+            "an empty witness was reported without its own cause (unreadable vs "
+            "empty): " + empty.stdout)
+        assert "no start-time witness was recorded" not in empty.stdout, empty.stdout
+        assert "our recorded process" not in empty.stdout, empty.stdout
+
+        # Same rule for the port file, and it is THREE states: absent, EXISTS with
+        # no port VALUE (`-f`, and `! -s` or `-r` — the read succeeded and returned
+        # nothing, which a whitespace-only file also does once command substitution
+        # strips the newlines), and EXISTS with content that could not be read
+        # (`-s` AND `! -r`: `-s` alone is a size test that passes on a file this uid
+        # cannot read, so it does not by itself establish "could not be read").
+        # Collapsing the last two is the same conflation in the other direction, and
+        # the RECYCLED branch (exit 8) computes its port clause from the same value,
+        # so it used to name an absence it never observed.
+        (state_dir / "app.port").write_text("")
+        port_empty = _script("alive", "--name", "app", env=state)
+        assert port_empty.returncode == 9, port_empty.stdout + port_empty.stderr
+        assert "port file EXISTS" in port_empty.stdout and "is EMPTY" in port_empty.stdout, (
+            "an empty port file was reported as one that was never recorded, or as "
+            "one that could not be read: "
+            + port_empty.stdout)
+        assert "no port was recorded" not in port_empty.stdout, port_empty.stdout
+
+        # ⛔ …and the THIRD state has its own leg, because a sentence nobody drives
+        # is the shape this whole arm exists to catch (measured: a mutant emitting
+        # the no-value sentence for an unreadable file left this file green).
+        # Root ignores the mode this state needs, so skip there — the sibling
+        # root-skip above is the same reason.
+        if os.geteuid() != 0:
+            (state_dir / "app.port").write_text("4999\n")
+            (state_dir / "app.port").chmod(0o000)
+            try:
+                unreadable = _script("alive", "--name", "app", env=state)
+                assert unreadable.returncode == 9, unreadable.stdout + unreadable.stderr
+                assert "with content but could not be read" in unreadable.stdout, (
+                    "an unreadable port file was NOT named as unreadable: "
+                    + unreadable.stdout)
+                assert "is EMPTY" not in unreadable.stdout and "not a port number" not in unreadable.stdout, (
+                    "an unreadable port file was reported as one with no value: "
+                    + unreadable.stdout)
+            finally:
+                (state_dir / "app.port").chmod(0o644)
+            (state_dir / "app.port").write_text("")
+
+        # …and a file that is NOT EMPTY but yields no port must not be called
+        # unreadable when it was read fine (whitespace only): `-s` is true there.
+        (state_dir / "app.port").write_text("\n\n")
+        whitespace = _script("alive", "--name", "app", env=state)
+        assert whitespace.returncode == 9, whitespace.stdout + whitespace.stderr
+        assert "with content but could not be read" not in whitespace.stdout, (
+            "a readable whitespace-only port file was reported as unreadable: "
+            + whitespace.stdout)
+
+        # ⛔ …and NON-NEWLINE whitespace is not a port at all: `$(cat …)` strips only
+        # TRAILING NEWLINES (bash §3.5.4), so `"   "` survives the substitution as a
+        # non-empty value and used to be spliced into " on :   " and handed to
+        # `serves_now` — measured: exit 7, "does not answer an HTTP success", i.e. a
+        # SERVING verdict taken against a value that is not a port. Same for a tab and
+        # for "abc". All three now take the no-port path and say why.
+        for garbage in ("   ", "\tabc", "abc\n"):
+            (state_dir / "app.port").write_text(garbage)
+            bogus = _script("alive", "--name", "app", env=state)
+            assert bogus.returncode == 9, (
+                f"a port file holding {garbage!r} was treated as a port and put the "
+                "SERVING leg to a probe against it: " + bogus.stdout)
+            assert "not a port number" in bogus.stdout, (
+                f"a port file holding {garbage!r} was not named as a non-number: "
+                + bogus.stdout)
+            assert " on :" not in bogus.stdout, (
+                "a non-port value was spliced into the sentence as a port: "
+                + bogus.stdout)
+        (state_dir / "app.port").write_text("")
+
+        # …and the RECYCLED (exit 8) sentence derives its port clause from the
+        # SAME value, so it may not say "no port was recorded" over a port file
+        # that EXISTS. Forced by stamping a witness that no longer matches the live
+        # start time — the same technique `test_the_recycled_verdict_...` uses.
+        (state_dir / "app.start").write_text("1\n")
+        recycled = _script("alive", "--name", "app", env=state)
+        assert recycled.returncode == 8, recycled.stdout + recycled.stderr
+        assert "no port was recorded for this name" not in recycled.stdout, (
+            "the RECYCLED verdict named a port absence it did not observe: "
+            + recycled.stdout)
+        assert "is EMPTY" in recycled.stdout, (
+            "the RECYCLED verdict did not carry the three-way port clause: "
+            + recycled.stdout)
+    finally:
+        _reap(victim.pid)
+
+
+def test_ready_refuses_a_witness_that_no_longer_describes_the_recorded_pid(
+    tmp_path: Path, state
+) -> None:
+    """The boot gate's identity leg is a BEHAVIOUR change, and nothing pinned it.
+
+    `cmd_ready`'s (a) leg was replaced by `pid_is_ours` — which can now refuse a
+    preview that a bare `kill -0` accepted (a zombie, or a recycled pid beside a
+    peer's listener: the #2757 shape one step out). Reverting that call to
+    `kill -0 "$pid"` reddened NOTHING in the diff, so the guard's value could not
+    vary under any mutation for the reader who assumed it was covered.
+
+    RED on that mutant (**verified by applying it**): the refusal arm below then
+    returns 0. Two arms are needed for it to be discriminating — the untouched
+    witness is the positive control, and the port still SERVES 200, so the refusal
+    can only come from the identity leg (a dead port refuses under either
+    primitive).
+    """
+    port = _script("alloc", "--name", "app", "--base", "18801", env=state)
+    assert port.returncode == 0, port.stderr
+    listener = _spawn_http(int(port.stdout.strip()), 200, tmp_path)
+    try:
+        assert _wait_port(int(port.stdout.strip())), "the decoy listener never bound"
+        assert _script(
+            "record", "--name", "app", "--pid", str(listener.pid), env=state
+        ).returncode == 0
+        healthy = _script("ready", "--name", "app", env=state)
+        assert healthy.returncode == 0, (
+            "the positive control failed: our own recorded listener serves 200 and "
+            f"was still reported NOT ready — {healthy.stdout}{healthy.stderr}"
+        )
+
+        # The witness now describes a DIFFERENT process; the listener still serves.
+        (Path(state["PREVIEW_STATE"]) / "app.start").write_text("1\n")
+        recycled = _script("ready", "--name", "app", env=state)
+        assert recycled.returncode == 1, (
+            "a recorded pid whose boot witness no longer matches was reported READY "
+            "while the port answered 200 — a recycled pid beside a serving listener "
+            f"passes the boot gate: {recycled.stdout}{recycled.stderr}"
+        )
+    finally:
+        _reap(listener.pid)
+
+
+def test_alive_takes_its_liveness_and_identity_from_the_guarded_predicates() -> None:
+    """The `ci.yml` arm only pins the CALL; the semantics must be pinned here.
+
+    A later edit that swapped `pid_running` for a bare `kill -0`, or dropped the
+    start-time witness, would re-open the zombie and pid-reuse false-ALIVE paths
+    while the workflow arm stayed green — so the mechanism is pinned where it
+    lives, next to the boot witness that makes "stopped" distinguishable.
+    """
+    text = SCRIPT.read_text()
+    body = _function_body(text, "cmd_alive")
+    assert body, "`.github/scripts/preview-server.sh` has no `cmd_alive` function"
+    # ⛔ EXECUTABLE lines only for the POSITIVE pins: the function's own prose names
+    # `pid_running` and the boot witness, so a comment satisfied a body-substring
+    # assertion and a mutant that DELETED the liveness block passed the whole file
+    # (measured: `# Zombies answer kill(0) forever: liveness is `pid_running`…`
+    # alone kept this arm green, while the helper returned ALIVE-and-SERVING for a
+    # process that had already exited). `code_only` is built here, before the
+    # assertions, not after them for the negative arms.
+    code_only = "\n".join(_cut_comment(line) for line in body.splitlines())
+    assert "pid_running" in code_only, (
+        "`alive` no longer CALLS the zombie-aware predicate `record`/`stop` use, so an "
+        "unreaped preview reads as a surviving one (naming it in a comment is not "
+        "calling it):\n" + body
+    )
+    assert "pid_identity" in code_only, (
+        "`alive` no longer takes its identity from the shared predicate `record` and "
+        "`ready` use, so one question has two answers again (the drift that made it "
+        "print a comparison it never ran):\n" + body
+    )
+    assert not re.search(r"\bpid_starttime\b", code_only), (
+        "`alive` re-derives the start-time comparison instead of reading the shared "
+        "predicate's answer, so a witness it could not READ can be reported as a "
+        "match (finding 1 of the #11675 review):\n" + body
+    )
+    assert not re.search(r"\bkill\s+-0\b", code_only), (
+        "`alive` decides liveness with a bare `kill -0`, which a zombie answers "
+        "forever:\n" + body
+    )
+    assert "booted" in code_only, (
+        "`alive` cannot tell a preview that was recorded and then STOPPED from one "
+        "that never started (that is what `record`'s boot witness is for):\n" + body
+    )
+    assert re.search(r"^\s*alive\)\s*cmd_alive", text, re.MULTILINE), (
+        "`alive` is not dispatched from `main`, so every arm above is unreachable "
+        "from the workflow that calls it"
+    )
+
+
 def test_the_helper_carries_no_process_name_kill() -> None:
     """The mechanism itself must stay scoped — a `pkill` inside the helper is the bug."""
     text = SCRIPT.read_text()
@@ -855,7 +1761,28 @@ def test_the_dashboard_e2e_gate_names_the_shared_preflight_module() -> None:
     )
 
 
-def test_a_preflight_red_dumps_the_preview_servers_own_logs() -> None:
+@pytest.mark.parametrize(
+    "job_name,servers",
+    [
+        # The `ci.yml` jobs that boot `wrangler pages dev` previews, run specs
+        # against them, AND carry the diagnostic step. They are pinned TOGETHER
+        # because the step was written for one and not the others, and that
+        # asymmetry is exactly the defect this arm closed: #10305 added it to
+        # `dashboard-e2e`, and `legal-e2e` — same boot steps, same helper, same
+        # failure mode — kept red-ing undiagnosably until #11675. `welcome-e2e`
+        # is the THIRD such job (`PREVIEW_JOBS`, above, and
+        # `preview-server.sh`'s own header) and it is NOT in this list because it
+        # still has no dump step — the same asymmetry, still open there and
+        # recorded on #10283. Registering it here without the step would red this
+        # pin, which is the correct outcome, not a reason to omit it from the
+        # comment.
+        ("dashboard-e2e", ("auth", "app")),
+        ("legal-e2e", ("marketing", "app")),
+    ],
+)
+def test_a_preflight_red_dumps_the_preview_servers_own_logs(
+    job_name: str, servers: tuple[str, ...]
+) -> None:
     """A preflight red is undiagnosable unless the servers' logs are read.
 
     The measured failure (#10305, job 124361929728) reddened on
@@ -866,8 +1793,17 @@ def test_a_preflight_red_dumps_the_preview_servers_own_logs() -> None:
     the diagnostic step: it exists, it runs on FAILURE, and it reads the logs
     through the same per-job state directory the boot wrote to (`dir`), never a
     shared `/tmp/wrangler*.log` path.
+
+    #11675 added the second parametrisation after the SAME absence reddened the
+    required `legal-e2e` check on PR #11675 itself (job 129650228746): `:8808`
+    was ready at 05:42:03Z, 11 app-origin specs then failed
+    `ERR_CONNECTION_REFUSED`, and the teardown printed `app (pid 983187) already
+    exited` while the marketing preview was still RUNNING — a preview that DIED
+    MID-RUN, whose own log went unread, so the red could not be diagnosed after
+    the fact. `legal-e2e` boots the same two previews through the same helper and
+    had no such step, from #10305 until now.
     """
-    job = _load_workflow("ci.yml")["jobs"]["dashboard-e2e"]
+    job = _load_workflow("ci.yml")["jobs"][job_name]
     # Selected by SHAPE, not by name: the two boot steps also call
     # `preview-server.sh … dir` and `tail` a log (their OWN, and only when the
     # boot fails). A step that dumps BOTH servers' logs is the only one that
@@ -890,9 +1826,70 @@ def test_a_preflight_red_dumps_the_preview_servers_own_logs() -> None:
         f"any other condition it does not run for the red it exists for: {step.get('if')!r}"
     )
     run = str(step["run"])
-    for name in ("auth", "app"):
+    for name in servers:
         assert name in run, f"the dump does not name the {name} log: {run}"
     assert "/tmp/wrangler" not in run, (
         "the dump reads a shared /tmp path; the boot writes to the per-job "
         f"state dir `preview-server.sh dir` (#10283): {run}"
+    )
+    # The LIVENESS verdict (#11675). A log alone leaves the reader guessing
+    # whether the server died or the specs were wrong, and both misreadings are
+    # measured: #10305 read a 500 as unreachability, #8059 read a dead preview as
+    # a `--d1`/`dist` problem, and PR #11675's own red (job 129650228746) read a
+    # mid-run death as 11 app-origin spec failures.
+    #
+    # ⛔ A `#` COMMENT MUST NOT SATISFY A GATE (#11675). `run` is the whole
+    # shell blob, prose included, so a plain `in run` is satisfied by a comment
+    # that merely NAMES the call — the regression this assertion exists for
+    # (deleting the probe, leaving `# was: bash "$PREVIEW" alive …` behind) has
+    # been measured green. `_cut_comment` is this file's own answer to that.
+    code = "\n".join(_cut_comment(line) for line in run.splitlines())
+    gate = 'bash "$PREVIEW" alive --name "$name"'
+    assert gate in code, (
+        "the dump does not ask `preview-server.sh alive` whether OUR recorded "
+        "process survived, so it cannot say a preview DIED mid-run: "
+        f"{code}"
+    )
+    # ⛔ `kill -0` IS THE PRIMITIVE THIS REPLACED — it must not come back here.
+    # A zombie answers kill(0) forever and a recycled pid belongs to a stranger,
+    # so a step that branches on it can print a categorical ALIVE over a preview
+    # that is gone and then assert the CAUSE of the red. `alive` applies
+    # `pid_running` (zombie test) AND the boot-time start witness (the same
+    # PID-REUSE GUARD `stop` applies); `test_alive_*` below pin that it really
+    # does. One call per server, so the two jobs cannot drift.
+    assert "kill -0" not in code, (
+        "the dump decides liveness with a bare `kill -0`, which a ZOMBIE answers "
+        "forever and a RECYCLED pid answers for a different process — call "
+        f"`preview-server.sh alive` instead: {code}"
+    )
+    # The verdict PROSE lives in `cmd_alive` alone. It was once copy-pasted into
+    # both jobs (verbatim, 25 lines each), which is two definitions of "the
+    # preview survived" — the second one drifts. The step prints the helper's own
+    # line and decides only whether it is an annotation.
+    for verdict in ("ALIVE", "DIED MID-RUN"):
+        assert verdict not in run, (
+            f"the step restates the {verdict!r} verdict instead of printing '"
+            "`preview-server.sh alive`'s own message — that is a second "
+            f"definition of it: {run}"
+        )
+    # ⛔ THE ORDERING IS THE WHOLE VERDICT. `stop-all` deletes each `<name>.pid`
+    # (`preview-server.sh` `cmd_stop`), so a dump that runs AFTER the teardown
+    # finds no pid file at all and missays every preview as unstarted — while
+    # every assertion above still passes, because they only read the dump's own
+    # text. Pin the position instead of trusting it.
+    names = [str(s.get("name", "")) for s in job["steps"]]
+    dump_at = names.index(str(step.get("name", "")))
+    teardown_at = next(
+        (i for i, s in enumerate(job["steps"])
+         if "preview-server.sh" in str(s.get("run", ""))
+         and "stop-all" in str(s.get("run", ""))),
+        None,
+    )
+    assert teardown_at is not None, (
+        f"no `preview-server.sh stop-all` teardown in {job_name}: {names}"
+    )
+    assert dump_at < teardown_at, (
+        "the log dump runs AFTER the preview teardown, which deletes the pid "
+        "files the dump reads — every preview would then be reported as never "
+        f"having started: dump at {dump_at}, teardown at {teardown_at} in {names}"
     )

@@ -50,14 +50,128 @@ _LABEL_CLAIM = re.compile(
     r"occurs on \*\*(\d+)\*\*\s+lines(?:\s+across\s+\*\*(\d+)\*\*\s+files)?"
 )
 
+#: §5's `:Document` claim paragraph, pinned as ONE canonical form: the
+#: `⚠️ **The claim …**` line and the measurement sentence it leads into.
+#:
+#: Without this, §5 could say `files under `tests/`` and stay green — measured: 43 passed
+#: and `substrate_map_check --check` CLEAN while the sentence claimed the `tortoise/`
+#: figure for `tests/`. The adjacent quoted `git grep` still carried `-- tortoise/`, so only
+#: the prose population was free to lie — and §5's own next sentence ("re-derives both
+#: numbers over the **same** population this sentence is stated in") asserts the very thing
+#: nothing read.
+#:
+#: ⛔ Every earlier version of this pin tried to ENUMERATE the ways a second population
+#: could be smuggled into the sentence — connectors, parens, backtick pairs, path shapes,
+#: slashless words, command spellings — and each version was defeated by a spelling it had
+#: not listed (seven rounds, each measured GREEN on a sentence that was false about the
+#: repo). The list approach cannot win: there is always another spelling.
+#:
+#: So the sentence is pinned VERBATIM instead, with only the four figures free. Anything
+#: inserted anywhere in it — a second population, a third command, a dotted filename, a
+#: differently-cased word, a prose phrase like "the whole repository" — breaks the match,
+#: because the match is the whole sentence and not a scan of its parts. The cost is
+#: deliberate and fail-closed: a reworded sentence REDS, and the fix is to re-measure and
+#: update this constant together with the sentence, which is exactly the re-measure the
+#: document exists to force.
+#:
+#: ⛔ The span starts at §5's `⚠️ **The claim …**` line, not at `:Document`, and the pin
+#: requires it to BEGIN a paragraph. A span that starts inside the sentence is a SUFFIX:
+#: text in front of it never reaches the match, so a second population could sit there —
+#: measured at the head before this boundary existed, all three GREEN (43 passed) while the
+#: sentence stated the `tortoise/` figure over `tests/`, a population several times larger:
+#:
+#:     and the reason is measured: in `tests/`, `:Document` occurs on …   -> GREEN
+#:     and the reason is measured over `tests/`: `:Document` occurs on …  -> GREEN
+#:     For `tests/`: ⚠️ **The claim "`:Document` is not minted" …             -> GREEN
+#:
+#: The first two are now inside the match (they break the lead-in literal); the third is
+#: caught by the line anchor the pattern carries (`^`, `re.MULTILINE` — the span must start
+#: a LINE) together with the paragraph-boundary assertion in the pin (that line must start
+#: the PARAGRAPH, so a scope phrase on its own line above the span is read too). `search`
+#: can always be preceded by text, so the boundary — not the literal alone — is what makes
+#: "the whole sentence" true.
+_MEASUREMENT_TEMPLATE = (
+    '⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,\n'
+    "and the reason is measured: `:Document` occurs on **{lines}** lines across **{files}**\n"
+    "files under `{pop}/` (`git grep -n ':Document' -- {pop}/` → {{quoted_lines}} lines,\n"
+    "`git grep -l ':Document' -- {pop}/` → {{quoted_files}} files — "
+    "the file count is not the line count)."
+)
+
+
+def _measurement_paragraph() -> re.Pattern[str]:
+    """§5's claim paragraph as a pattern, with only the four figures free."""
+    literal = _MEASUREMENT_TEMPLATE.format(lines="{lines}", files="{files}", pop=_TRACKED_DIR)
+    pieces = re.split(r"(\{lines\}|\{files\}|\{quoted_lines\}|\{quoted_files\})", literal)
+    pattern = ""
+    for piece in pieces:
+        if piece in ("{lines}", "{files}", "{quoted_lines}", "{quoted_files}"):
+            pattern += r"(\d+)"
+        else:
+            pattern += re.escape(piece)
+    # Anchored at a LINE START on purpose: the template begins at the sentence's own
+    # lead-in, so text inserted between that lead-in and the figure — "measured: as in
+    # `tests/`, `:Document` occurs …" — breaks the match instead of sliding in before it.
+    return re.compile("^" + pattern, re.MULTILINE)
+
 _COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
+
+#: The narrow pattern §5 quotes as its evidence, as ONE owner: `_label_hits()`
+#: measures with this constant and the pin below asserts the document quotes THIS
+#: pattern. It used to be written inline in `_label_hits` and quoted separately in
+#: the doc, so the doc could state a pattern nothing measured (measured: `:Document\\b`
+#: in §5 — matching every line — left 43 passed and `substrate_map_check` CLEAN)
+#: while the guard kept measuring six with its own copy: the document asserting
+#: evidence for a pattern no guard used, in the sentence the no-regex-check
+#: decision rests on.
+_NARROW_PATTERN = r"\(\w*:Document"
+
+#: The narrow-pattern half of §5's measurement, as the document states it — a
+#: WORD, not a digit (`still matches **six** lines`). Parsed rather than left to
+#: the literal pin in the test below, because that literal is a number hard-coded
+#: HERE: a document saying "seven" against a tree that measures six used to pass,
+#: since `narrow == N` never reads the doc. This is the doc→tree link the
+#: LINES/FILES pair already gets from `_LABEL_CLAIM`, applied to the third number
+#: §5 states.
+_NARROW_CLAIM = re.compile(r"still matches \*\*(\w+)\*\*")
+
+#: §5's narrow clause as ONE anchored span: the lead-in phrase, the pattern named in
+#: backticks, and the bold count word — all three in the same match. Binding them
+#: together is what stops a DECOY; pinning each on its own let two independent
+#: searches be satisfied by two different sentences. Measured before this shape
+#: existed: reword the clause's lead-in and leave an earlier copy of the phrase naming
+#: `\(\w*:Document`, and §5 could state a pattern that matches ZERO lines as the one
+#: that "still matches **six**" with the whole suite green (43 passed).
+_NARROW_CLAUSE = re.compile(
+    r"one narrow enough.*?`([^`]*)`\)\s*still matches \*\*(\w+)\*\*", re.DOTALL
+)
+
+#: The SAME two numbers restated in §5 as the quoted `git grep` output — a second
+#: statement of the measurement, inside the same sentence and outside
+#: `_LABEL_CLAIM`'s shape, so a hand-edit there could contradict the bold claim
+#: and stay green (measured: the quote alone set to 57 / 18 passed). Pinned to the
+#: same `_label_hits()` tuple, exactly once, because §5 stating a number twice is
+#: the drift the document exists to stop.
+#:
+#: ⛔ The pathspec is PART of the pinned text. §5 quotes these commands as the way to
+#: reproduce its figure, and the figure is stated over `tortoise/`; a bare
+#: `git grep -n ':Document'` run from the repo root answers a population several
+#: times larger, spread across `tests/`, `docs/`, `tools/` and this file itself — so
+#: a reader following the quote wrote the figure off as stale. Requiring
+#: `-- tortoise/` here means the quote cannot drift back onto a population this pin
+#: does not measure. (No numerals: that population moves every time a line mentions
+#: the label, including the lines of this comment.)
+_QUOTED_GREP = re.compile(
+    r"`git grep -n ':Document' -- tortoise/` → (\d+) lines,\s*\n"
+    r"`git grep -l ':Document' -- tortoise/` → (\d+) files"
+)
 
 #: The population §5's claim is stated in: every **tracked** file under
 #: `tortoise/`, any suffix. Derived from the index rather than from an extension
 #: filter so the check measures the same set the sentence's `git grep` does —
-#: `rglob("*.py")` omitted the 28 tracked non-`.py` files under `tortoise/`
+#: `rglob("*.py")` omitted the tracked non-`.py` files under `tortoise/`
 #: (`SKILL.md`, `config/*.json|*.yaml`, `pi-hooks/*.ts`, …), so a `:Document`
-#: added to one of them raised the true figure while the check still saw 55 and
+#: added to one of them raised the true figure while the check still saw the old and
 #: passed: a latent false CLEAN on the number the no-regex-check decision rests
 #: on (#5086 review P3, cycle 4).
 _TRACKED_DIR = "tortoise"
@@ -132,7 +246,7 @@ def _label_hits() -> tuple[int, int, int]:
             continue
         files += 1
         lines += len(hits)
-        narrow += sum(1 for line in hits if re.search(r"\(\w*:Document", line))
+        narrow += sum(1 for line in hits if re.search(_NARROW_PATTERN, line))
     return lines, files, narrow
 
 
@@ -692,8 +806,8 @@ def test_the_d10_retirement_mechanism_is_checked(monkeypatch) -> None:
     Reachable: `migrate_kinds.py` does not declare `build_master_list`, so
     retargeting the pair is a real file that genuinely lacks the symbol — exactly
     what deleting the migration would leave behind. The `:Document` label itself
-    is deliberately NOT regex-checked (55 prose lines across 17 files at this
-    head — pinned by `test_the_document_label_prose_count_is_the_LINE_count`), so
+    is deliberately NOT regex-checked (the figure §5 states
+    at this head — pinned by `test_the_document_label_prose_count_is_the_LINE_count`), so
     the retirement is guarded through these two symbols instead.
     """
     monkeypatch.setattr(
@@ -1144,19 +1258,21 @@ def test_the_label_population_is_every_tracked_file_not_just_py(monkeypatch) -> 
     Reachable — and it WAS the shipped state: `_label_hits()` walked
     `(REPO / "tortoise").rglob("*.py")` while §5's sentence states its figure in
     `git grep`'s population (all tracked files under `tortoise/`). The two sets
-    differ by **28** tracked non-`.py` files (`tortoise/onboarding/SKILL.md`,
+    differ by the tracked non-`.py` files (`tortoise/onboarding/SKILL.md`,
     `tortoise/config/*.json|*.yaml`, `tortoise/pi-hooks/*.ts`, …), so a
     `:Document` occurrence added to one of them raises the true figure while a
-    `.py`-only walk still returns 55 — the assertion then compares 55 against a
-    document that says 55 and PASSES, leaving the stale number in place. That is
-    the false-CLEAN class this file exists to close.
+    `.py`-only walk keeps reporting the OLD one — the assertion then compares that
+    against a document stating the same figure and PASSES, leaving the stale
+    number in place. That is the false-CLEAN class this file exists to close. (No
+    numerals in this paragraph on purpose: the figure moves, and a numeral here is
+    a statement of it that nothing reads — the failure mode §5's new pins close.)
 
     The control asserts on the POPULATION `_label_hits` ITSELF reads — recorded
     by spying on `Path.read_text` — not on the helper it happens to call. That
     distinction is load-bearing: the first cut of this fix asserted only that
     `_tracked_files_under()` returns a non-`.py` file, which stayed green with
     `_label_hits`'s own loop reverted to `rglob("*.py")` — the two populations
-    are numerically identical today (all 55 hits are in `.py` files), so the
+    are numerically identical today (every hit is in a `.py` file), so the
     count matches either way and the latent false CLEAN survives behind a green
     suite. A control on the helper is not a control on the count (#5086 review
     P2, cycle 5).
@@ -1298,7 +1414,7 @@ def test_a_leaf_row_that_imports_internally_is_drift() -> None:
     Reachable, and it WAS the shipped state (#5086 review cycle 5, P2 — the half
     of finding 3 the inbound-count fix left behind): the interface map's `depends
     on` column said `*leaf*` for `vet_gate.py` while that file opens with a
-    module-level `from . import value_gate` (`vet_gate.py:149`). Every other row
+    module-level `from . import value_gate` (`vet_gate.py:150`). Every other row
     lists the modules it depends on, so the `*leaf*` cells are the only ones
     asserting EMPTINESS — and emptiness is what a lane plans a rebase on.
 
@@ -1553,54 +1669,240 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
 
     The figure is pinned to the TREE, not to `4f68a2aa7`, because that is what §5
     claims it is: population = every tracked file under `tortoise/`. It has since
-    moved to **64** lines across **19** files, in four moves, one per workstream:
+    moved to the figure §5 states, in four moves, one per workstream:
     `cache_eviction.py:956` (the #10976 census's note on why labels do not partition
     the node set), #8447's ingest door (`tortoise/ingest.py`, the
     `REFUSED_NOT_FOUND` enum docstring), #11729's runtime-label writers
-    (`tortoise/hosted_backup.py` — an EXISTING file that carried no `:Document` mention
-    at `4f68a2aa7`, which is the second file the count gained; its six added mentions
-    are the dump-and-restore prose about pre-D10 artifacts), and #11682's own
-    `tortoise/search_engine.py:2107` corpus-join comment (one line, an existing file).
-    Each move is the mechanism
+    (`tortoise/hosted_backup.py` — a file the population had not previously reached,
+    carrying no `:Document` mention at `4f68a2aa7`; its added mentions are the
+    dump-and-restore prose about pre-D10 artifacts), and #11682's own
+    `tortoise/search_engine.py:2107` corpus-join comment (one line, an existing
+    file). Each move is the mechanism
     working: the census landed, this check reddened, and §5 was re-measured instead
     of the number being quietly widened or the guard loosened.
 
     §5's second number is pinned with it: the narrow `\\(\\w*:Document` pattern
-    matching **six** lines now — the two RST literals in `migrate_kinds.py:63,170`,
-    that same `cache_eviction.py:956` comment, and three of `hosted_backup.py`'s
-    (`:116`, `:948`, `:3429`) that name the pre-D10 node shape in double-backtick
-    literals — is what makes *"a guard would have needed a hand-maintained
-    allowlist"* a measurement rather than an assertion, and it moved 2 → 3 → 6 with
-    the line count. The pin is exact for the same reason the
+    matching **six** lines now — the RST literals in `migrate_kinds.py` (the
+    pre-D10 shape comment and `relabel_legacy_documents`'s docstring), that same
+    `cache_eviction.py:956` comment, and the ones in `hosted_backup.py` that name
+    the pre-D10 node shape in double-backtick literals — is what makes *"a guard would have needed a hand-maintained
+    allowlist"* a measurement rather than an assertion, and it has moved with the
+    line count. The pin is exact for the same reason the
     first one is: a narrow pattern that starts matching most of the prose is the day
     §5's exclusion argument stops being true, and the honest response is to re-measure
-    it, never to widen the assertion. Six of sixty-four is still the exception, so
+    it, never to widen the assertion. The narrow pattern is still the exception, so
     the argument stands at this head.
+
+    Every statement of the three HEAD figures in §5's measurement sentence is
+    read OUT OF THE DOC and compared to `_label_hits()`: `_LABEL_CLAIM` for the bold
+    lines/files pair, `_QUOTED_GREP` for the same pair as quoted command output,
+    `_NARROW_CLAIM` for the word — each searched inside §5 only and required to
+    appear EXACTLY ONCE, so neither a decoy elsewhere in the document nor a second
+    statement inside §5 can bind the pin. The sentence's OTHER number pair — "It was
+    `55` across `17` when this was first measured at `4f68a2aa7`" — is deliberately
+    NOT read by any of them: it is marked as-of a sha, which is this document's
+    convention for a figure that must not move, and pinning it would mean
+    re-measuring a past commit on every run (and failing in a shallow clone where
+    that commit is absent). It was correct when written; a reader re-deriving it
+    should run the measurement at the named commit. That anchoring is not theoretical: an
+    unanchored `search` binds the first match ANYWHERE, so a decoy
+    `still matches **six**` earlier in the doc satisfied the narrow pin while §5
+    itself said **seven** (measured, before this pin existed), and `smc._section`
+    binds the FIRST copy of its heading, so a duplicate heading above §5 could do
+    the same — hence the heading-count assertion. The literal pin below is then the
+    doc-independent backstop.
     """
     doc = _doc()
-    match = _LABEL_CLAIM.search(doc)
+    heading = "## 5. The interface map — what changes hands"
+    copies = doc.count(heading)
+    assert copies, (
+        "§5's heading `## 5. The interface map — what changes hands` is MISSING — "
+        "these pins anchor to it, so restore it rather than falling back to a "
+        "whole-document search"
+    )
+    assert copies == 1, (
+        f"the document carries {copies} copies of §5's heading — `_section` binds "
+        "the FIRST, so a duplicate heading above the real §5 would let these pins "
+        "read a different section; keep one heading"
+    )
+    section = smc._section(doc, heading)
+    assert section.strip(), (
+        "§5's heading is present but §5 has NO BODY after it — these pins read "
+        "that section, so restore its contents rather than re-stating the heading"
+    )
+    match = _LABEL_CLAIM.search(section)
     assert match, (
         "§5's `:Document` measurement sentence is gone or was reworded — re-measure "
         "it rather than dropping it; the no-regex-check decision rests on it"
     )
-    claimed_lines = int(match.group(1))
-    claimed_files = int(match.group(2)) if match.group(2) else None
-    lines, files, narrow = _label_hits()
-    assert claimed_files is not None, (
-        f"§5 states {claimed_lines} lines but no file count — the tree has {lines} "
-        f"lines across {files} files; state BOTH, because confusing the two is the "
-        "defect this pins"
+    assert len(_LABEL_CLAIM.findall(section)) == 1, (
+        "§5 now states the line/file count MORE THAN ONCE inside the anchored section "
+        "— `search` binds the first, so a second statement is drift this pin would "
+        "silently read past; keep one statement, or pin each one"
     )
+    # ── The paragraph, verbatim ───────────────────────────────────────────────
+    # Everything about "one population, one reproducible command pair, nothing else" is
+    # enforced by ONE anchored match on the sentence's canonical form (see
+    # `_MEASUREMENT_TEMPLATE`): only the four figures are free, so no second population,
+    # third command, dotted filename, differently-cased word or prose scope phrase can be
+    # inserted without the match failing.
+    paragraph = _measurement_paragraph().search(section)
+    assert paragraph, (
+        "§5's `⚠️ **The claim …**` line and the `:Document` measurement sentence it leads "
+        "into are gone or were reworded — this pin reads them VERBATIM, with only the four "
+        "figures free. Re-measure the tree, then update §5's paragraph and "
+        "`_MEASUREMENT_TEMPLATE` together; do not paraphrase it, because a paraphrase is "
+        "where a second population hides"
+    )
+    # The match must BEGIN a paragraph. A `search` can always be preceded by text, so the
+    # literal alone pins the span only where it starts; a prefix on the same line as the
+    # span's first character is outside it and would be unread — measured GREEN at the head
+    # before this guard existed: `For `tests/`: ⚠️ **The claim "`:Document` is not minted" …`
+    # with the figures left correct (43 passed), stating the `tortoise/` figure over a
+    # population several times larger.
+    before = section[: paragraph.start()]
+    assert paragraph.start() == 0 or before.endswith("\n\n"), (
+        "§5's `:Document` claim does not begin a paragraph — this pin matches it from "
+        "`⚠️ **The claim` through the measurement sentence and requires that span to start "
+        "a paragraph, so a second population or a scope phrase placed in front of it REDS "
+        "instead of being skipped by `search`. Put the claim on its own paragraph, or "
+        "extend the template and re-measure"
+    )
+    claimed_lines, claimed_files, quoted_lines, quoted_files = (
+        int(group) for group in paragraph.groups()
+    )
+    lines, files, narrow = _label_hits()
     assert (claimed_lines, claimed_files) == (lines, files), (
         f"§5 claims {claimed_lines} lines across {claimed_files} files; the tree has "
         f"{lines} lines across {files} files — re-measure the claim (§5)"
     )
+    assert (quoted_lines, quoted_files) == (lines, files), (
+        f"§5's quoted `git grep` output claims {quoted_lines} lines / {quoted_files} files, "
+        f"and the tree has {lines} / {files} — re-measure the quote (§5)"
+    )
+    quoted = _QUOTED_GREP.findall(section)
+    assert quoted, (
+        "§5 no longer quotes its `git grep` output in the pinned shape. The quote "
+        "must read exactly, in §5's body: the line "
+        "`git grep -n ':Document' -- tortoise/` → N lines, then on the next line "
+        "`git grep -l ':Document' -- tortoise/` → N files. The arrow must be `→`, "
+        "both commands must keep the `-- tortoise/` pathspec, and each stays on its "
+        "own line — those are part of the pinned text, not formatting. Re-measure and "
+        "restore it; do not drop the quote"
+    )
+    assert len(quoted) == 1, (
+        f"§5 quotes its `git grep` output {len(quoted)} times inside the anchored "
+        "section — this pin wants exactly one restatement, so a second cannot drift "
+        "unnoticed; keep one, or pin each one"
+    )
+    assert tuple(int(n) for n in quoted[0]) == (lines, files), (
+        f"§5's quoted `git grep` output says {quoted[0][0]} lines / {quoted[0][1]} "
+        f"files; the tree has {lines} lines across {files} files — re-measure the "
+        "quote too: it states the same measurement, and it used to be unpinned"
+    )
+    narrow_claim = _NARROW_CLAIM.search(section)
+    assert narrow_claim, (
+        "§5's narrow `\\(\\w*:Document` sentence is gone or was reworded — re-measure "
+        "it rather than dropping it; the exclusion argument rests on it"
+    )
+    assert len(_NARROW_CLAIM.findall(section)) == 1, (
+        "§5 now states the narrow count MORE THAN ONCE inside the anchored section — "
+        "`search` binds the first, so a second statement is drift that this pin would "
+        "silently read past; keep one statement, or pin each one"
+    )
+    word = narrow_claim.group(1).lower()
+    # Pin the PATTERN the six is a count OF, IN THE SAME SPAN as the six: `section.count(...)
+    # == 1` passed a document that ADDED a second, looser pattern to the same clause
+    # (measured: `(`\\(\\w*:Document`, or as a bare `:Document`)` left 43 green), and
+    # pinning the phrase and the pattern in SEPARATE searches still passed a decoy — an
+    # earlier copy of the phrase bound the right pattern while the sentence carrying the
+    # six named one matching zero lines (measured: 43 passed). One anchored span fixes
+    # both: the phrase, the pattern and the bold word must come from the same sentence.
+    #
+    # This is also why the decoy family cannot come back through the count word: a decoy
+    # rich enough to satisfy this span (`one narrow enough … still matches **N**`) is a
+    # second `_NARROW_CLAIM`, and that arm already requires exactly one.
+    clauses = _NARROW_CLAUSE.findall(section)
+    assert clauses, (
+        "§5's 'one narrow enough … `(pattern)` … still matches **word**' clause is gone "
+        "or was reworded — re-measure it rather than dropping it; the six is the count "
+        "FOR the pattern named in that clause"
+    )
+    assert len(clauses) == 1, (
+        f"§5 states the 'one narrow enough … still matches **…**' clause {len(clauses)} "
+        "times inside the anchored section — `findall` binds the FIRST, so an earlier "
+        "copy could carry the pattern while the clause under the six names a different "
+        "one; keep one clause, or pin each one"
+    )
+    stated_pattern, clause_word = clauses[0]
+    assert (stated_pattern, clause_word.lower()) == (_NARROW_PATTERN, word), (
+        "§5's narrow clause must name the pattern `"
+        f"{_NARROW_PATTERN}` and the count word {word!r} in the SAME sentence; it "
+        f"names {stated_pattern!r} / {clause_word!r} — the six is the count FOR THAT "
+        "PATTERN, so anything else (a looser pattern, a second one alongside it, or a "
+        "phrase copied from another sentence) states evidence for a measurement "
+        "nothing takes"
+    )
+    assert word in _COUNT_WORDS, (
+        f"§5 states the narrow count as {word!r}, which is not a count word this pin "
+        f"can decode ({', '.join(_COUNT_WORDS)}); the tree measures {narrow} — state "
+        "it as a word, or extend _COUNT_WORDS deliberately"
+    )
+    claimed_narrow = _COUNT_WORDS.index(word) + 1
+    assert claimed_narrow == narrow, (
+        f"§5 says the narrow `\\(\\w*:Document` pattern still matches "
+        f"{claimed_narrow} lines; the tree measures {narrow} — re-measure the claim "
+        "(§5), never widen the assertion"
+    )
     assert narrow == 6, (
         f"the narrow `\\(\\w*:Document` pattern now matches {narrow} lines, not the 6 "
-        "§5 records (2 RST literals in `migrate_kinds.py`, the `cache_eviction.py` "
-        "comment, and 3 pre-D10 shape literals in `hosted_backup.py`) — the exclusion "
-        "argument needs re-measuring"
+        "this pin was cut against — the exclusion argument needs re-measuring (§5), "
+        "never the assertion widening"
     )
+
+
+#: The prefixes a second population has been measured in FRONT of the pinned span while the
+#: pin stayed green — two inside the sentence, one on the same line as its first character.
+#: Each keeps the figures correct and adds nothing but a scope phrase, which is exactly what
+#: a suffix match cannot see.
+_MEASURED_PREFIXES = (
+    # inside the sentence, before `:Document`
+    (
+        "and the reason is measured: `:Document` occurs on",
+        "and the reason is measured: in `tests/`, `:Document` occurs on",
+    ),
+    # the same slot, spelled as a scope for the measurement itself
+    (
+        "and the reason is measured: `:Document` occurs on",
+        "and the reason is measured over `tests/`: `:Document` occurs on",
+    ),
+    # in front of the span's first character, on the same line
+    ("⚠️ **The claim", "For `tests/`: ⚠️ **The claim"),
+    # a scope phrase on its own line above the span: the line anchor alone admits it, so
+    # this is the case ONLY the paragraph boundary catches.
+    ("\n\n⚠️ **The claim", "\n\nin `tests/`:\n⚠️ **The claim"),
+)
+
+
+@pytest.mark.parametrize("before_span,with_prefix", _MEASURED_PREFIXES)
+def test_a_second_population_in_FRONT_of_the_pinned_span_is_read(
+    monkeypatch, before_span: str, with_prefix: str
+) -> None:
+    """Fails if the pin can be satisfied by a SUFFIX of §5's claim paragraph.
+
+    Reachable — this WAS the shipped state at `4323344f32`: `_MEASUREMENT_TEMPLATE` began at
+    `:Document`, so a population named in front of it (`… measured over `tests/`: `:Document`
+    occurs on the bold figure …`) satisfied the pin and left 43 passed while the sentence stated
+    the `tortoise/` figure over `tests/` — the false PASS the verbatim template was cut to
+    stop, reached from the other side of the span. Each prefix below was measured GREEN there
+    and RED at this head.
+    """
+    doc = _doc()
+    assert doc.count(before_span) == 1, "the shipped paragraph no longer contains this span"
+    mutated = doc.replace(before_span, with_prefix)
+    monkeypatch.setattr(sys.modules[__name__], "_doc", lambda: mutated)
+    with pytest.raises(AssertionError, match=r"does not begin a paragraph|gone or were reworded"):
+        test_the_document_label_prose_count_is_the_LINE_count()
 
 
 #: A `cache_eviction.py:<n>` pointer, and the window after it searched for the commit a
@@ -1727,7 +2029,7 @@ def test_every_cited_line_in_this_section_still_carries_the_prose_it_describes()
     the pointer was not. A reader re-examining the no-regex-check decision follows
     that pointer as the evidence — and lands on `)`.
 
-    The count pin above cannot catch this: it pins the NUMBER (63/19), not where the
+    The count pin above cannot catch this: it pins the two counts, not where the
     number came from. This is the same silent-staleness class the PR closed for
     `Pinned by tests/…` citations with
     `test_every_pin_reference_in_ci_selection_names_a_test_that_exists`: a citation

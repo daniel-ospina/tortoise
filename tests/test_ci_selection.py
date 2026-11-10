@@ -4661,7 +4661,7 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
     # as the per-migration rationale — selection AND the `_selection_relevant()`
     # keep-signal now come from the family rule, so they are fully redundant. The
     # completeness of the family is pinned by
-    # `test_every_record_migration_selects_core_and_both_readers`, whose own
+    # `test_every_record_migration_selects_core_and_its_readers`, whose own
     # mutation checks DO discriminate (disabling the structural rule, narrowing
     # the glob, or narrowing the selector's regex each red it). The doc paths
     # below are unaffected: nothing claims them structurally.
@@ -4787,7 +4787,7 @@ def test_the_semantic_id_key_migration_selects_every_reader_of_the_contract():
     # (`ci_selection.is_record_migration_path()`), so `core` is selected either
     # way. What pins this path is the assertions below, which red if the selector
     # stops claiming it; the family's completeness is pinned by
-    # `test_every_record_migration_selects_core_and_both_readers`.
+    # `test_every_record_migration_selects_core_and_its_readers`.
     changed = "supabase/migrations/20261027000001_record_semantic_id_key.sql"
 
     r = _sel([changed])
@@ -4803,7 +4803,7 @@ def test_the_semantic_id_key_migration_selects_every_reader_of_the_contract():
         assert reader in r["test_files"], (reader, r)
 
 
-def test_every_record_migration_selects_core_and_both_readers():
+def test_every_record_migration_selects_core_and_its_readers():
     # #10080 (category A — a no-op gate): the forward record migrations were
     # claimed by HAND-WRITTEN `CORE_ALSO` coverage (11 per-file entries plus the
     # shared `2026101200000` prefix = 12 entries for 16 members — a DATED ANCHOR,
@@ -4849,16 +4849,37 @@ def test_every_record_migration_selects_core_and_both_readers():
     # reason: each is registered on `core` and is NOT in `tier1`, so it is ABSENT
     # from the tier-1-only return that a `surfaces: []` selection produces
     # (`select()`'s `"surfaces": [], "full": False` return emits `tier1` minus
-    # `uri_requiring` minus `on_demand`; none of the three is in `_tier1()`).
+    # `slow` minus `uri_requiring` minus `on_demand`; none of the three is in
+    # `_tier1()`).
     # ⚠️ NOT because they are slow files — an earlier version of
     # this comment said that and the mechanism is INVERTED: `select()` SUBTRACTS
     # `slow` from both tiers (`files -= slow`, #1371), so a slow reader could never
     # appear in `test_files` and the assertions below would red on every arm.
     # `test_record_schema_placement.py` stood here until the #11728 P3 and cannot
-    # fail: it is tier1 (config/ci-surfaces.yml), and tier1 ⊆ `test_files` on every
-    # return path (measured: the `off_family` selection below — `surfaces: []`,
-    # n=84 — still carries it). A vacuous assertion is worse than none: it reads as
-    # coverage.
+    # fail: it is tier1 (config/ci-surfaces.yml), and on a `surfaces: []` return
+    # `test_files` is declared `tier1` minus `slow` minus `uri_requiring` minus
+    # `on_demand` (`tools/ci_selection.py`).
+    # ⚠️ That is a MEASUREMENT of one selection, not a consequence of the
+    # subtraction, and the selection is the SEPARATE `off_family` one below —
+    # `surfaces: []`, `n=84` at `2026-11-10` — NOT the `['core']` path this test's
+    # own loop produces. The arm cannot fail only while tier-1 intersects none of
+    # the three subtracted sets, which is empty TODAY (measured `2026-11-10`:
+    # `tier1 & slow`, `tier1 & uri_requiring` and `tier1 & on_demand` are each
+    # `[]`, and the `off_family` `test_files` carries all 84 of 84). `select()`
+    # keeps its subtraction "instead of depending on that staying true", and
+    # `test_uri_requiring_selection.py::test_docs_only_early_return_subtracts_the_lane`
+    # INJECTS a `uri_requiring` member into tier-1 precisely because the
+    # intersection is allowed to move — which is why the `in test_files` arm is
+    # backstopped by the `reader not in tier1` pin below rather than by prose.
+    # ⚠️ The invariant is NOT `tier1 ⊆ test_files` on every return path, which an
+    # earlier version of this comment claimed: the tier-2 path ALSO subtracts
+    # `slow` and `carve_out` (`tools/ci_selection.py`), and three tier-1 members
+    # are `carve_out` (`test_config.py`, `test_guard.py`,
+    # `test_reaper_orphan.py`), so they are absent from `test_files` on e.g. the
+    # `api` selection (measured `2026-11-10`: 81 of 84 present on this test's own
+    # `['core']` selections, `n=802`). Scoped to the path measured, because the
+    # over-broad form is exactly the vacuity this block exists to prevent. A
+    # vacuous assertion is worse than none: it reads as coverage.
     #
     # #11728 review P2: that axis is PINNED below, not merely described — a reader
     # promoted into `tier1` (an ordinary edit for a fast DB-free pin) would make its
@@ -4873,17 +4894,27 @@ def test_every_record_migration_selects_core_and_both_readers():
     for reader in readers:
         assert reader not in tier1, (
             f"{reader} is in tier1, so its `in test_files` arm below can no longer "
-            "discriminate (tier1 ⊆ test_files on every return path) — pick a "
+            "discriminate (on the `surfaces: []` return, `test_files` is `tier1` "
+            "minus `slow` minus `uri_requiring` minus `on_demand`, and none of the "
+            "three intersects tier-1 today — measured, not guaranteed) — pick a "
             "`core`-registered reader that is not in tier1, or drop the arm"
         )
     # Non-vacuity, measured on the PRE-FIX state and stated exactly: with the
     # structural rule disabled AND this member's `CORE_ALSO` entry removed,
-    # `select()` returns `surfaces: []`, n=84, and every reader assertion reds.
+    # `select()` returns `surfaces: []`, n=84 at `2026-11-10` (re-derive with one
+    # `select()` call — the tier-1 file count moves), and every reader assertion
+    # reds.
     # ⚠️ Disabling the rule ALONE changes nothing for a member that still has its
-    # entry — measured on the embedding migration: `surfaces: ['core']`, n=801,
-    # both readers present — which is the same measurement that makes those entries
+    # entry — measured on the embedding migration: `surfaces: ['core']`, every
+    # reader present — which is the same measurement that makes those entries
     # redundant rather than load-bearing, and why the synthetic arm below is the
-    # one the rule alone carries.
+    # one the rule alone carries. ⚠️ The sentence above quotes no `n=` on purpose:
+    # the file count it would state moves with any new TEST FILE, not with a new
+    # assertion added to an existing one, and nothing reds on the sentence. The
+    # `n=84` stated elsewhere in this block is a measurement of ONE specific
+    # selection — correct today, re-derivable in a single `select()` call — and not
+    # a claim about how many such migrations there are. Both of its mentions carry
+    # the `2026-11-10` anchor date, so the block's own anchor rule holds.
     for name in migrations:
         r = _sel([f"supabase/migrations/{name}"])
         assert r["full"] is False, (name, r)
@@ -4911,11 +4942,90 @@ def test_every_record_migration_selects_core_and_both_readers():
     assert rm["slow_run"] is True, rm
     assert any("test_ci_selection.py" in s for s in rm["slow_selected"]), rm
 
-    # The family rule is scoped to the record family ON PURPOSE: a migration
-    # outside it keeps selecting no surface (51 of 81 `supabase/migrations/*.sql`
-    # do), so this fix does not silently widen to the whole migrations directory.
+    # The family rule is scoped to the record family ON PURPOSE. A migration
+    # OUTSIDE it that NOTHING ELSE claims keeps selecting no surface, so this fix
+    # does not widen to the whole migrations directory — and one that DOES select
+    # `core` without being a record migration does so through its own `CORE_ALSO`
+    # entry, not through this rule (the shared `2026101200000` PREFIX entry is
+    # exactly that case; its claim is pinned by
+    # `test_the_shared_prefix_is_the_only_claim_on_a_migration_outside_the_family`,
+    # not here). ⚠️ Deliberately no live count here: it moves on ANY new
+    # `supabase/migrations/*.sql` — not just a record one — and nothing reds on the
+    # sentence, so a count written here rots into a false claim in the very file
+    # whose subject is claims that rot. Sweep the directory through `select()`
+    # instead — one call answers it for whatever is there today.
     off_family = _sel(["supabase/migrations/20990101000000_unlisted.sql"])
     assert off_family["surfaces"] == [], off_family
+
+    # The scope limit is NOT the same statement as "only `*_record_*.sql` is
+    # claimed": the shared `supabase/migrations/2026101200000` CORE_ALSO PREFIX
+    # also claims a NON-member. That entry's claim is a different subject, so it
+    # is pinned in its own test rather than here —
+    # `test_the_shared_prefix_is_the_only_claim_on_a_migration_outside_the_family`.
+
+
+def test_the_shared_prefix_is_the_only_claim_on_a_migration_outside_the_family(
+    monkeypatch,
+):
+    # #11728 review P2 (round 10; re-scoped in round 11): the shared
+    # `supabase/migrations/2026101200000` CORE_ALSO PREFIX claims
+    # `20261012000006_recover_team_key_expiry.sql`, which is OUTSIDE the record
+    # family — `is_record_migration_path()` is False for it — so the prefix entry
+    # is that file's ONLY claim and the one entry in the family enumeration that
+    # must never be tidied away as "redundant": without it the file silently
+    # selects no surface (#1349/#3332/#3616 silent-drop class).
+    #
+    # WHY ITS OWN TEST. The subject here is a NON-member, so it does not belong in
+    # `test_every_record_migration_selects_core_and_its_readers`, whose name
+    # (renamed in round 10 to match what it asserts) scopes it to the family. A
+    # pin filed under a test named for a different subject set is found by no one
+    # — the same name/assertion mismatch this series already fixed once.
+    neighbour = "supabase/migrations/20261012000006_recover_team_key_expiry.sql"
+    # The FILE must exist, or this pin is VACUOUS rather than covering it:
+    # `select()` never stats a path, so `_sel()` on a renamed, deleted or wholly
+    # synthetic name still returns `['core']` from the PREFIX (measured
+    # `2026-11-10` on `_sel(["supabase/migrations/20261012000006_does_not_exist.sql"])`).
+    # Without this arm the pin outlives its own subject and still READS as
+    # coverage — the failure mode this file calls out as "a vacuous assertion is
+    # worse than none".
+    assert (REPO / neighbour).is_file(), neighbour
+    assert not cs.is_record_migration_path(neighbour), neighbour
+    # "its ONLY claim" is MEASURED here, not asserted in prose: enumerating the
+    # claimants means a SECOND one reds, at which point the `CORE_ALSO` comment in
+    # `tools/ci_selection.py` is false and must be narrowed — which is the point
+    # of pinning a claim instead of commenting on it.
+    claimants = [p for p in cs.CORE_ALSO if neighbour.startswith(p)]
+    assert claimants == ["supabase/migrations/2026101200000"], (
+        "the shared-prefix claim on this migration is no longer the ONLY one — "
+        "narrow the `CORE_ALSO` comment in tools/ci_selection.py and this test "
+        "rather than deleting the arm",
+        claimants,
+    )
+    rn = _sel([neighbour])
+    assert rn["surfaces"] == ["core"], (
+        f"{neighbour} lost its only claim — it is NOT a record migration, so the "
+        "family rule does not cover it and only the shared `2026101200000` "
+        "CORE_ALSO prefix entry does; removing that entry silently un-claims it",
+        rn,
+    )
+    # NON-VACUITY, proven by the suite rather than asserted in prose: with that one
+    # entry removed, the same selection drops to `surfaces: []` (`n=84` at
+    # `2026-11-10`, the tier-1-only return). `select()` reads `CORE_ALSO` at call
+    # time, so the
+    # `monkeypatch` of the module global IS the deletion — the same mechanism the
+    # #11728 review's mutation used.
+    monkeypatch.setattr(
+        cs,
+        "CORE_ALSO",
+        tuple(p for p in cs.CORE_ALSO if p != "supabase/migrations/2026101200000"),
+    )
+    rn_off = _sel([neighbour])
+    assert rn_off["surfaces"] == [], (
+        f"removing the shared `2026101200000` CORE_ALSO prefix entry did NOT "
+        f"un-claim {neighbour} — so the arm above proves nothing about that "
+        "entry, and the comment naming it as this file's only claim is wrong",
+        rn_off,
+    )
 
 
 def test_the_tenancy_migration_selects_the_posture_pins():
