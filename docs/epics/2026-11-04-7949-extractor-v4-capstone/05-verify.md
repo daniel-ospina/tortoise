@@ -112,9 +112,9 @@ Epic:          #7949 — extractor v4 CAPSTONE
 Status:        READY FOR DECOMPOSITION WORK — NOT ready to close
 
 Artifacts:     8/8 present
-Coherence:     3 issues found (1 scope↔plan E2E count drift, 1 stale-blocker P0, 10 residual issue divergences)
+Coherence:     12 findings = 3 classes (1 scope↔plan E2E count drift, 1 stale-blocker P0, 10 residual issue divergences)
 E2E Alignment: 8/10 chained; 2 gaps (E2E-9, E2E-10) named and assigned to #10983
-Review Gates:  15/15 ran (3 of them distinct duplication passes); 5 declared deviations (D1 gating granularity, D2 approval channel, D3 research write-back failure, D4 retained 00-plan.md)
+Review Gates:  15/15 ran (3 of them distinct duplication passes); 5 declared deviations (D1 gating granularity, D2 approval channel, D3 research write-back failure, D4 retained 00-plan.md, **D5 citations keyed to line numbers that rot on merge**)
 ```
 
 **Decision: PROCEED** — into the children, **not** into closing the epic. The planning pipeline is complete and

@@ -233,7 +233,7 @@ evidence
 non-zero
 **And:** the customer-visible readers (search `subject`, `get_org_structure`) return non-empty
 **Or:** the run reports *why* — the binder did not run, the corpus has no bindable slots, or the graph served
-is not the graph measured — and `#4889` is confirmed or **reopened** accordingly
+is not the graph measured — and `#4889`'s adjudication is recorded as **row metadata** accordingly (a test may not assert issue state)
 
 ### E2E-5: the numbers are reproducible from the door
 
