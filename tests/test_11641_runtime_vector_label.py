@@ -1021,9 +1021,14 @@ def test_the_product_FOREACH_clear_guard_is_still_INSIDE_the_bound() -> None:
     """The anti-vacuity half: `clear_then_set_prefix` IS a `FOREACH`, and must stay accepted.
 
     A fix that refused `FOREACH` wholesale (the cheap way to pass the rows above) would break every
-    overwrite writer's clear guard. Its loop variable is `_`, which no pattern binds, so the
-    collision rule does not reach it — pinned on the reader AND on the door, the same way the
-    channel does for every other accepted shape in this file.
+    overwrite writer that splices this ATOMIC clear guard. Its loop variable is `_`, which no
+    pattern binds, so the collision rule does not reach it — pinned on the reader AND on the door,
+    the same way the channel does for every other accepted shape in this file.
+
+    ⚠️ NOT every overwrite writer splices it: `clear_embedding`'s call sites issue their clear as
+    their OWN statement (`MATCH <pattern> REMOVE <alias>.embedding`), because this dialect rejects
+    an interleaved guard, so those writers contain no `FOREACH` and a wholesale refusal would leave
+    them untouched. Scoped that way on purpose — "every overwrite writer" is false of the tree.
     """
     statement = ("MATCH (e:Event {eventId:$eid}) " + clear_then_set_prefix("e")
                  + "SET e += $props, " + set_embedding_clause("e"))

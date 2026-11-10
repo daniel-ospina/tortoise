@@ -1145,7 +1145,8 @@ def statement_write_target_problem(statement: str, allowed) -> str | None:
     (:func:`statement_stores_embedding_in_a_map`) is refused because a map on an anonymous pattern
     or on a relationship is a store no alias-based reader can follow. Each of those was a live
     fail-open on this guard before #11641's review rounds, and every one was reached WITHOUT leaving
-    the grammar.
+    the grammar — the ``FOREACH`` shadow through a construct the grammar ACCEPTS (see
+    :func:`statement_foreach_rebound_aliases`).
 
     ⛔ WHAT IT IS NOT COMPLETE OVER, and why a DOOR must pair it with
     :func:`statement_uses_unmodelled_scope`: this reader keys bindings by NAME across the whole
@@ -1192,6 +1193,7 @@ def statement_write_target_problem(statement: str, allowed) -> str | None:
     rebound_by_foreach = statement_foreach_rebound_aliases(statement)
 
     problems: list[str] = []
+
     if map_store:
         problems.append(
             "it stores the vector inside a property MAP (`{embedding: …}`) — a map on an "
