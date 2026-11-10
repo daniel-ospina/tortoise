@@ -55,10 +55,10 @@ note **or a justified skip citing the brief**. Both are **justified skips**, cit
    (within-batch vs to-graph). That last clause is not decoration: it is the evidence the owner's `§13.8 Q1`
    answer is waiting on (`01-research-brief.md` Rec. 3). ⚠️ **The set is DERIVED, not persisted** (F4): the
    write path already carries `batch_id` in `RelationUpsert.attrs` (`tortoise/record_projection.py`: the dataclass at
-   `:945`, its `attrs` tuple at `:951-952` — keyed by symbol, since this row moved twice), and
+   `:953`, its `attrs` tuple at `:959` — keyed by symbol, since this row moved twice), and
    "this batch" vs "a previous batch" is exactly that distinction — so the tier is **reported from `batch_id`**
    and no new edge property is added. A persisted marker would have to update the five MAP-form writers and
-   `sdk.py:17985`'s per-door `_honours` set in the same change, and a free-form `props` key is the branch this
+   `sdk.py:18029`'s per-door `_honours` set in the same change, and a free-form `props` key is the branch this
    scope refuses (`STORAGE-ARCHITECTURE.md` §11.4/§13: an OPEN set no guard bounds).
 4. **A5 evidence** — the `Subject` layer either populated (count + the four subject-edge families + the
    customer-visible readers) **or** the honest finding that it is not, with the reason — *"which of
@@ -133,7 +133,8 @@ the HOLD half and is `not-implemented`. So after C4 the write path would impleme
 cannot see: the `#5064` defect running **inverted**, in the epic whose own instrument extends that registry.
 **The scope requires one of two statements in C4's child, not silence:** (a) C4 adds a row (a new `s3_attach`,
 or a `preconditions:` edge onto `failure_policy`), or (b) C4 records **why** the registry cannot express it,
-citing `00-plan.md:366`'s criterion ("only if the registry's contract can express it"). Silence is the defect.
+citing this file's own criterion, restated here so it does not depend on a superseded
+section: **only if the registry's contract can express it**. Silence is the defect.
 
 ### Boundary Rationale
 
@@ -410,7 +411,7 @@ disposition table; **no fix loop entered**.
 |---|---|---|---|
 | **F1** | *"the pre-registered criterion set" is **seven** declarations, not one — `preregistration.json` ids, `PRE-REGISTRATION.md` §7, `capstone_preregistration_check.py:370/373`, the **closed enum** at `capstone_verdict_check.py:135` (`RECOGNISED_CRITERIA` = `CRITERIA` + `A_CRITERIA` at `:144-145`; refused at the V2 loop, `:918-922`), `probes/capstone_measure.py:244` (one literal, not two), `probes/capstone_run.py`'s `OWNERS`, and `blocker-states.json` `cited_by` — and the only consistency assertions bind a tuple to a copy of itself | `unify-contract-keep-drivers` | **Folded into C1's contract:** the A-rows are added to the record's `criteria[].id` and the verdict gate's enum is **derived** from it (or a test asserts `record ids == verdict enum` minus declared sub-rows); `capstone_run.OWNERS` needs an A-row entry or the V12 `cited_by` shape has no owner pointer. **Two schemas move, not one** (`capstone-preregistration/v1` **and** `capstone-verdict-v1`). |
 | **F2** | the **corpus pin** already carries **three incompatible shapes** (`fixtures_hash` in the record; `corpus.sha256`/`items` demanded by `capstone_run.py`'s G1 — the fail-closed `if not frozen.get("sha256")` at `:1186`, which **fail-closes** against the committed record; a derived `e1e2_corpus.json`), five readers, and the **sibling bundle `5087-hypothesis` shares the same schema** — so "a second pin inside the same registration" is a **schema fork in effect**, not an extension | `unify-contract-keep-drivers` | **Folded into C1:** unify the pin **contract** (one required key set, one hash-pin helper reusing `compute_fixtures_hash`/`verify_manifest`, a per-corpus derivation registered *beside* the one it replaces), and reconcile the `sha256`/`items` vs `fixtures_hash` split that already makes the run probe refuse the record. The A-corpus is a genuinely **different kind** (no planted units), so its derivation is **named**, not implied. |
-| **F3** | C4 builds a write-path mechanism with **no `config/v4-mechanisms.yml` row**; the scope dropped the registry its own plan carried | *(architecture — no duplication verdict)* | **Folded into the boundary** (§Registry statement): C4 must state (a) a row, or (b) why the registry cannot express it, citing `00-plan.md:366`. Silence is the defect. |
+| **F3** | C4 builds a write-path mechanism with **no `config/v4-mechanisms.yml` row**; the scope dropped the registry its own plan carried | *(architecture — no duplication verdict)* | **Folded into the boundary** (§Registry statement): C4 must state (a) a row, or (b) why the registry cannot express it, against the criterion stated at line 134 above (*only if the registry's contract can express it*) — stated there rather than pointed at in `00-plan.md`, whose §4 is history-only under its own banner. Silence is the defect. |
 | **F4** | tier-provenance is an **edge attribute** proposal that never says so, over an existing `RelationUpsert.attrs` vocabulary that already carries `batch_id` | `unify-contract-keep-drivers` | **Folded into in-scope item 3:** the set is **DERIVED from `batch_id`** and reported, not persisted; no new property, no `_honours` change, no free-form `props`. |
 | **F5** | **G0–G6 live in the SDK probe; the A-rows run through `POST /v1/sessions`** — so E2E-5's "G1 mismatch rule" enforces **nothing on the lane it was quoted to defend** | `unify` | **Folded into E2E-5:** the mismatch claim is scoped to the **E-rows**, and the **A-lane must add its own check** (hash of the posted payload set vs the row's pin) or state that it carries none. |
 | **P2 (suppressed)** | the sealed-gold rule proves **WHEN**, never **WHO**; and it restates a sealing mechanism the repo already has | `unify` | **Folded into D-S4:** the gold records the **labeller's identity** beside the hash, and sealing **reuses** `verify_manifest`/`compute_fixtures_hash` rather than restating one. |

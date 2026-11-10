@@ -238,6 +238,14 @@ failure, not a skip — so the A-rows carry them too, and §6 I1 freezes the *co
 | `corpus_id` | `a-corpus` | `a-corpus` | `a-corpus` | `fleet-graph` | `a-corpus` |
 | floor number (read from `denominator_floors`) | `a1_labelled_pairs: 30` | `a2_candidates: 30` | `a3_statements: 30` | `a4_labelled_nodes: 1` | **`a5_actors: 30`** (registered) |
 | `threshold_basis` | the ~10 pp resolution argument (`EXTRACTOR-V4-ARCHITECTURE.md:1397`, restated `:1533`) | same | the owner's own 9,910/15,534 baseline | "0 of 0 labelled is not coverage; a declared kind that is absent, or a node left unlabelled, is a failing run" | presence question, not a statistic |
+| `max_realizations` | 2 | 2 | 2 | 1 (read-only) | 2 |
+| `measurement_visible_to_author` | **`false`** — no prior A-row measurement exists (the honest answer) + the basis that says so | `false` + basis | `false` + basis | `false` + basis | `false` + basis |
+
+**On A5's floor:** the table above is the *complete* set §6 I1 freezes, and these two trailing rows are fields, not
+footnotes. The paragraph immediately below is the argument for A5's floor; it sits after the table so the table
+stays one table, because a paragraph inside it splinters the last two rows into literal pipe text — the
+`measurement_visible_to_author` row is the field this section says the checker treats as a hard failure when it is
+missing, so a rendering that drops it is exactly the skip the rule forbids.
 
 ⛔ **P1 — A5's floor is the REGISTERED one, and `a5_slots` is not a floor key this plan may invent.** An earlier
 revision of this table gave A5 `a5_slots: 5` and called it a *new key* (§4.4 below), which collides with the record
@@ -254,8 +262,6 @@ the `metric` cell, and `02-scope.md:235` already states the honest outcome — a
 ("the binder did not run / the corpus has no bindable slots") instead of reading as a zero. A5 is therefore **not** a
 second re-authored row: §4.4's *"it re-authors A4's row, so the set stays 12"* stays true, and no registered A5
 text moves.
-| `max_realizations` | 2 | 2 | 2 | 1 (read-only) | 2 |
-| `measurement_visible_to_author` | **`false`** — no prior A-row measurement exists (the honest answer) + the basis that says so | `false` + basis | `false` + basis | `false` + basis | `false` + basis |
 
 ⛔ **P1 from the substep 6–7 gate: `pinned_by` was about to recreate the P0 it just fixed.** The **retained**
 `corpus` block carries `pinned_by` as **free prose** (*"fixture revision (fixtures_hash), not a graph dump"*), while
@@ -344,7 +350,7 @@ map; it is pinned by `(org, graph, head)` and its `BLOCKED` reason names the hea
 
 ⛔⛔ **P0, found by the `duplication-architecture` review: the fixture lane's G1 REFUSES the committed record
 TODAY, and §4.2's earlier claim that "`corpus` stays ⇒ the six fixture rows are safe" is false.** The record's
-`corpus` block carries **no `sha256` and no `items`**, while `probes/capstone_run.py:1184` fail-closes with *"the
+`corpus` block carries **no `sha256` and no `items`**, while `probes/capstone_run.py:1186` fail-closes with *"the
 pre-registration freezes no corpus.sha256 — G1 would be a no-op"*; the checker's own note records the same
 (*"refuses at G1 (the registration freezes no corpus sha)"*). So **all six fixture rows** (E1, E1b, E2a, E2b, E4,
 E5) **cannot be produced at this record** — W2b was built on a pin that is already refusing.
@@ -357,7 +363,7 @@ a name collision in a pin is how the wrong digest gets compared.
 
 ⛔ **The first version also RETYPED `corpus` into `corpora`, which would have failed the
 majority of the epic.** `capstone_preregistration_check.py` reads `record["corpus"]` and cross-checks nine
-`CROSS_CHECKED_CORPUS_KEYS` against `pins.corpus`; and `capstone_run.py:1184` **fail-closes every run at G1** with
+`CROSS_CHECKED_CORPUS_KEYS` against `pins.corpus`; and `capstone_run.py:1186` **fail-closes every run at G1** with
 *"the pre-registration freezes no corpus.sha256"* — so removing `corpus` refuses all six fixture rows
 (E1, E1b, E2a, E2b, E4, E5). ⇒ **`corpus` STAYS**, `corpora` is **purely additive**, and **one CI pin asserts
 `corpora.fixture.{path,fixtures_hash} == corpus.{path,fixtures_hash}`** — otherwise the fixture is described twice
@@ -513,9 +519,11 @@ The architecture above declares Tier E the home of all measurement. **No existin
 
 ⚠️ **And the new job must join the register, or it is a fourth unrecorded runner.** The repo's non-gating-runner
 contract is a **lane membership** statement plus a **runner register** whose own words are *"this comment is the
-record"* (`config/ci-surfaces.yml`, the `# ── THE NON-GATING LANE (`on_demand:`) ──` block at `:11868-11900`, key
-`on_demand:` at `:11887` — cite the block by that heading, not by a line range: at the bundle's authoring head
-`641e5f1b37` the block sat at `:10339` and a forward merge moved it. The lane→runner table is
+record"* (`config/ci-surfaces.yml`, the `# ── THE NON-GATING LANE (`on_demand:`) ──` block — **cite it by that
+heading, not by a line number**: the block's line range was `:10339` at the bundle's authoring head `641e5f1b37`,
+was `:11868-11900` (key `on_demand:` at `:11887`) at the pre-rebase head the seventh round read, and sits at
+`:11929` (key at `:11948`) at the rebased head — a number in this sentence would be stale by the next forward
+merge, which is why the heading is the citation. The lane→runner table is
 `docs/ci/affected-test-selection.md:134-138`). The A-lane runs a **script** (`capstone_run.py`), not a test file, so
 it **cannot be an `on_demand:` member** and `leg_coverage_issues()` **cannot see it**.
 ⇒ **"Tier E" names three unreconciled populations** — `on_demand:` test files (the only one any check sees),
@@ -619,7 +627,7 @@ core**. So:
 
 | path | derivation | where |
 |---|---|---|
-| **operator / label path** | ✅ **already derived** from the packs: `declared \|= {r.get("predicate") for r in reg.list_relations()}` | `tortoise/sdk.py:23189` → `pack_registry.py:609` (`declared_relation_predicates()`) |
+| **operator / label path** | ✅ **already derived** from the packs: `declared \|= {r.get("predicate") for r in reg.list_relations()}` | `tortoise/pack_registry.py:635` (the union inside `declared_relation_predicates()` at `:609`) |
 | **structural path** | ⛔ **a static literal** — and it is **1 of FIVE declarations in one file**, and **not the one the verdict reads**: `relation_write_paths` reads **`STRUCTURAL_WRITE_PREDICATES`** (the union), while `create_edge` gates on `_VALID_EDGE_PREDICATES` | `projection/edges.py:621` (`_VALID_EDGE_PREDICATES`) · `:639` (`_VALID_ABOUT_EDGE_PREDICATES`) · `:655` (`STRUCTURAL_WRITE_PREDICATES`) · `:54` (`DERIVABLE_STRUCTURAL_RELS`) · `:1129` (`structural_edge_carrier`) · the reader `from .projection.edges import STRUCTURAL_WRITE_PREDICATES` at `pack_registry.py:723` (used `:729`) |
 | **per-graph gating** | ✅ **the resolver exists and is THREE-VALUED** — `pack_state.graph_installed_namespaces(sdk, *, graph_name=None)`: `None` ⇒ no `:PackInstall` records ⇒ **catalog union**; a `frozenset` ⇒ recorded ∪ already-in-data; an **empty** frozenset ⇒ a configured graph whose set is deliberately empty (`#2728`), where the union fallback **must not** apply. The SDK v2 master's write gate stays ungated (`#5202`) | `tortoise/pack_state.py:1170`; caveat in `docs/EXPANSION_PACKS.md` (`#2714`/`#2728`) |
 

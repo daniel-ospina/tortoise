@@ -147,7 +147,7 @@ document, do not re-route**. See R11/E3 for why that constrains C3.
 vocabulary are comments). A1 cannot be satisfied by "enabling something"; something has to emit.
 
 **R4 · The declarations have two legs, and only one is unread.** `relation_write_paths` /
-`relation_write_verdict` (`tortoise/pack_registry.py:534-585`) return **`writable`** for the relations
+`relation_write_verdict` (`tortoise/pack_registry.py:734`) return **`writable`** for the relations
 above (they declare `mechanism: IMPL`, so the `operator` path binds; the predicate is in the structural
 set). The **`mechanism`** leg *is* read at the write door by `declared_mechanisms`
 (`pack_registry.py:598-820`, matching at `:804`), consumed by `create_operator`. Unread: (i) the
@@ -420,8 +420,8 @@ fan-out respected; C8 holds.
 from `sdk.py`'s point-creation path at `:16848` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
 the four subject-edge family counts, and the **customer-visible** consequence
 (search `subject`, `get_org_structure`). The three candidate explanations — the binder never runs (note
-`subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:4598` and
-consumed at `sdk.py:9244`/`:9297` — ⚠️ another probe's docstring sits in the same region of `sdk.py`, which is why
+`subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:4782` and
+consumed at `sdk.py:9288`/`:9341` — ⚠️ another probe's docstring sits in the same region of `sdk.py`, which is why
 this pair is keyed by **symbol**), the slots are absent in the
 corpus, or the graph served is not the graph measured — are decided by evidence.
 **Proof:** Subjects `26 → N` on a real corpus, four families non-zero, both customer readers non-empty —
