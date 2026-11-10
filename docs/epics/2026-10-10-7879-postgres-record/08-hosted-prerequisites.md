@@ -139,8 +139,37 @@ and `ConfidenceChanged` is a **`NoRecordEffect`** — the EP carve-out in execut
 |---|---|
 | the seam | `tortoise/record_writer.py` — `write_live_record`, `_default_connect` |
 | arming surface | `tortoise/record_writer.py` — `RECORD_DSN_ENV` (`TORTOISE_RECORD_DSN`), **default OFF** |
+| dense-leg CUTOVER | `tortoise/record_vector.py` — `ARMING_ENV` (`TORTOISE_RECORD_VECTOR_LEG`), **default OFF**. The second switch, and it is not the same question as the DSN: a DSN is the record being *reachable*, this is the record answering the **dense (vector) read**. See the box below — leaving it off is a measured posture, not an oversight. |
 | production call sites | `record_writer.write_live_record` (`EventAPI._emit` — the v1 extractor, `ingest`, `docs_miner`, `mining`, CLI), `tortoise/mining.py` (`_emit_event`), `tortoise/sdk.py` (`_emit_event`) |
 | tenant carrier | `record_writer.use_record_tenant`, installed by `tortoise/mcp_auth.py`; by-value on the hosted REST lane |
+
+> ⛔ **`TORTOISE_RECORD_VECTOR_LEG` — what an operator must know before touching it.** `#11642`
+> moved the dense retrieval leg to the record, and `#11660` made the cutover a **deliberate act,
+> default OFF**, because the record is a journal fold with **no backfill**: it holds a vector only
+> for content written AFTER the move is deployed. So the four facts, in the order that matters:
+>
+> 1. **The in-graph vector index is retired on a store whose replacement is ARMED** — the next
+>    setup drops a `Point.embedding` HNSW index if it finds one and never creates another. That is
+>    the decision (owner, 2026-11-07), and the ARM GATE is symmetric (#11660 review round 7, P2-2):
+>    an UNARMED store behaves exactly as `main` did — it keeps an index it has and still gains one
+>    it lacks — because a store must never be left with neither an in-graph index nor a record leg.
+> 2. **With the leg unarmed — the default — the graph keeps its ANN index**, so dense
+>    `Point`/`Source`/`Event` reads are unchanged; a label with NO index is `#4997`'s defect and the
+>    setup reports it at **WARNING** (`#4997/#11642` line). Retiring the index is what arming does,
+>    so a store that arms without a backfilled record trades its ANN index for a full scan (see 3).
+> 3. **Arming it (`TORTOISE_RECORD_VECTOR_LEG=1`) WITHOUT a backfilled record silently drops every
+>    pre-existing point out of the dense pool** — the trace reports `mechanism=pgvector, reason=ok`,
+>    because the shortfall assertion counts against the record's own predicate. **Back-fill first,
+>    then arm.** A record still holding 0 rows is the state `#11469` measured on the dogfood tenant.
+> 4. **The switch is an ENV var; the rollback of the index itself is a CODE constant.** Unarming
+>    `TORTOISE_RECORD_VECTOR_LEG` restores the WARNING (where a label really has no index) and puts
+>    the store back on `main`'s posture on the next setup, which re-creates the index; the constant
+>    `VECTOR_INDEX_RETIRED` is the unconditional revert (see its comment).
+>
+> Both conditions are asked by `projection.vector_index_retired()`, which is what decides the log
+> LEVEL — a DSN alone used to answer it and muted the alarm on an unarmed store (`#11660` review
+> round 6, P1-3). Neither switch is provisioned in `fly.toml`, `entrypoint.sh` or
+> `.github/workflows/deploy-hosted.yml` today: the leg is dark in production, by decision.
 
 ⛔ **Symbols, not line numbers, on purpose.** Every number this table used to carry had drifted onto
 unrelated text — a bare `)`, a `contextvars` line, a tuple member, a blank line — because a line
@@ -168,8 +197,8 @@ raised) and §17.1-correct (record after the append, before the cache fold).
 
 ### A5. Embeddings — **durable today, not searchable, and that is not a defect**
 
-`embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). **No migration and no module uses `pgvector`** — `grep -riE 'pgvector|vector\('` over all 80
-migrations returns **0**, and `git grep -il pgvector -- 'tortoise/*'` is **0**. The word itself
+`embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). ⛔ **THIS PARAGRAPH WAS TRUE UNTIL `#11642` AND IS KEPT AS THE MEASURED RECORD OF WHAT THE MOVE REPLACED — do not read it as the state of this head.** At the census point **no migration and no module used `pgvector`**. **At this head** the same census is: `grep -riE 'pgvector|vector\('` over all 81
+migrations returns **30** (it returned **0** at that pin), all 30 in ONE file — `20261109000001_record_embedding_vector.sql` (the `CREATE EXTENSION`, the `record_embedding_vector` converter, three `vector(384)` GENERATED columns and three HNSW indexes) — and `git grep -il pgvector -- 'tortoise/*'` is **4**, in `record_projection.py`, `projection/__init__.py`, `record_vector.py` and `search_engine.py` (it was **0**). `#11642` implemented V1. The word itself
 appears in prose only — e.g. this document, §12.1c's decided record, this epic's
 `03-schema.md`, and the competitor notes. So the record is a **durability carrier** for vectors, not a retrieval index — which was
 exactly right while §2.0 kept the cache fully populated, and **V1 is now DECIDED** (§12.1c/§14.3, 2026-11-07):
@@ -709,7 +738,7 @@ R1 keeps is the rotation hazard, not a pending arming.
 `8767b1c8b` measurement **there was no dedicated table for it** — the text was carried as data, in the
 `point.content` column and in the layer-1 `journal_event.payload` mirror of the record that wrote it
 (see below) — `grep -riE 'narrative|raw_turn|raw_text|transcript'` over all
-65 migrations returned **0** (at this head, 80 migrations, the same command matches it on 62 lines — 7 in `20261025000001_record_tenancy_role_and_guc.sql` (R6's grants and
+65 migrations returned **0** (at this head, 81 migrations, the same command matches it on 62 lines — 7 in `20261025000001_record_tenancy_role_and_guc.sql` (R6's grants and
 tenant policy for that very table), 36 in `20261023000001_record_session_narrative.sql` and 19 in
 `20261024000001_record_session_narrative_carrier.sql` — the table this
 item's DECIDED block adds);
@@ -1087,7 +1116,7 @@ Row counts in the record afterwards (§A3, §A8):
 journal_event 36 · source 2 · event 4 · session 2 · object 4 · subject 0 · point 4
 relation 0 · node_identity 17 · points with embedding 4 · points with content 4
 session.capture_redactions → NULL on both rows            ← R4 / #9264, PRE-FIX measure
-point.embedding type → jsonb                              ← A5 (no pgvector)
+point.embedding type → jsonb                              ← A5 (no pgvector)   ⚠️ STILL jsonb after #11642 — the vector is a GENERATED `embedding_vec` beside it
 ```
 
 ⚠️ The `capture_redactions` row above is what that run **measured**, kept as measured. After
@@ -1107,7 +1136,7 @@ cd supabase/tests/pglite && npm install && npm run validate
 ```text
 grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/ \
   docs/infra-runbook.md                    → (no output) when taken; ⚠️ 1 line after #9556/R8 (see below)
-grep -riE 'pgvector|vector\(' supabase/migrations/*.sql | wc -l              → 0
+grep -riE 'pgvector|vector\(' supabase/migrations/*.sql | wc -l              → 0   ⚠️ 30 after #11642 (one file: 20261109000001_record_embedding_vector.sql)
 grep -riE 'narrative|raw_turn|raw_text|transcript' supabase/migrations/*.sql → 0   ⚠️ see below
 grep -rn 'app.current_org_id' --include=*.py tortoise/ tools/                → 0 setters   ⚠️ see below
 grep -rn 'rebuild_from_record' tortoise/__main__.py                          → 1 (the verb's docstring)
@@ -1191,7 +1220,9 @@ The block's `grep -rn 'app.current_org_id' --include=*.py tortoise/ tools/ → 0
 pre-R6 reading. R6's tenancy boundary now ships the GUC, so the same grep returns
 **2 lines at `ff6379eb2`** — `tortoise/record_projection.py:227` (`TENANT_GUC =
 "app.current_org_id"`) and its docstring at `:3269`, the offsets `c5cbcbb4f` (R6's tenancy boundary)
-introduced — and **12 lines at this head**: `54a3e7abe` (R9's backup role must BYPASS RLS) added three
+introduced — and **13 lines at this head** (#11642's `tortoise/record_vector.py` added the thirteenth:
+its module docstring names the GUC when it explains why the searcher can never invent a tenant — the
+tripwire doing its job): `54a3e7abe` (R9's backup role must BYPASS RLS) added three
 `tortoise/record_backup.py` mentions, #9555 (R7's narrative fetch) added three more —
 `tortoise/record_text.py` ×2 and `tortoise/__main__.py` ×1 — and #10017's copy added the ninth,
 in `tools/backfill_copy_turns.py`: the comment on its floor read that states why the read must go

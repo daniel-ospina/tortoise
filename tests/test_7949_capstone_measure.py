@@ -11204,7 +11204,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     #11376 did not move these lines), the `:12929` `vet_enabled` live-cite, the
     bundle's `hasPart`/`hierarchies` split, and the four further LIVE cites a fresh
     review found still unwatched (`pack_hierarchy.py:431`, the
-    `probes/capstone_measure.py:275-283` window and the `sdk.py:17637` cite it carries
+    `probes/capstone_measure.py:275-283` window and the `sdk.py:17681` cite it carries
     INSIDE it, `identity_hold.py:125`, `value_gate.py:81`) — and, measured before
     this pin existed, re-staling ANY of them
     left every suite green: the record is in no `_BUNDLE_DOCS` entry and
@@ -12036,7 +12036,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "record cites that window as the `references` writer, so re-derive the cite")
     # ⛔ The record states this window TWICE — as the cite pinned above and as the
     # reproduction command — and only the first was watched (measured: re-staling the second
-    # to `274,282` left the leg GREEN). Symmetric with the `sed -n '17637p'` arm for the
+    # to `274,282` left the leg GREEN). Symmetric with the `sed -n '17681p'` arm for the
     # sibling capture-path cite, which was watched from the start.
     assert re.findall(
         r"sed -n '(\d+),(\d+)p' docs/evidence/7949-capstone/probes/capstone_measure\.py",
