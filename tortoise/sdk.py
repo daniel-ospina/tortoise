@@ -7064,8 +7064,8 @@ def _warn_point_name_not_lexically_indexed(
         "%s: this Point stores name=%r, but %s appears in %s (%s) — so a "
         "lexical query for the name can only reach this point through other "
         "evidence, and will not rank on the name itself (#10122). Put the "
-        "identifier in `content` or in `search_keys`: `name` is not lexically "
-        "indexed on a Point (%s). The write is accepted as-is — "
+        "identifier in one of the indexed fields listed above: `name` is not "
+        "lexically indexed on a Point (%s). The write is accepted as-is — "
         "warn-not-block, #1934.",
         door, name, basis, where, "/".join(fields), label_clause,
     )
@@ -39045,6 +39045,14 @@ class TortoiseSDK:
                 # ``search_provenance_enabled`` already declares for
                 # provenance — a declared boundary, not an oversight of #3804
                 # or of #8658.
+                # ⚠️ #11682 widened it by ONE key: ``quote`` is now in
+                # ``_SNAPSHOT_QUERY`` as INDEX TEXT for the lexical mirror
+                # (parity with the real FTS index). That does NOT surface
+                # anything — ``search_snapshot`` never sets ``quote`` on its
+                # results — so a degraded hit still carries none of the four
+                # columns and the boundary above is unchanged on the SURFACE.
+                # The corpus-side retention is bounded by the existing caps
+                # (``MAX_CORPUS_POINTS`` × ``MAX_SNAPSHOT_ENTRIES``).
                 #
                 # R17 (``tests/test_assembly_sdk.py``): naming these rows is a
                 # DELIBERATE content change, so the assembly goldens were
@@ -39857,8 +39865,8 @@ class TortoiseSDK:
         original query tokens keep their OR slots and the harvested aliases fill
         the bounded expansion tail (``build_or_query``'s A4 cap — never
         displacing an original token). Points in OTHER sessions that carry the
-        subject's keys in their index text (content \u222a search_keys) now match
-        and join the fts leg.
+        subject's keys in their index text (content ∪ search_keys ∪ quote —
+        the Point lexical field set, #11682) now match and join the fts leg.
 
         Fail-open contract (mirrors A4 #2070): any fetch/query failure or an
         empty expansion returns ``None`` and the caller keeps the ORIGINAL fts

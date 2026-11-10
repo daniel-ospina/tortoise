@@ -33,9 +33,19 @@ So this file pins four things, and the reasons differ:
   #8486-gated index change lands, this test reds on purpose and must be
   flipped DELIBERATELY — that is the point of keeping it.
 
-Zero ranking effect is part of the contract: the advisory writes nothing and
-moves no score, so the index's fields and collection statistics are unchanged.
-The helper does no graph read of its own — the one non-payload input is the
+Zero ranking effect is part of the ADVISORY's contract: it writes nothing and
+moves no score, so an advisory firing (or not firing) changes neither the
+index's fields nor its collection statistics.
+
+⚠️ That is a statement about the advisory, NOT a promise that the index set is
+frozen. **#11682 later widened it deliberately** — the Point FULLTEXT index now
+carries the verbatim `quote`, which IS a ranking change (it moves collection
+statistics, so a point whose own text did not change can score differently
+once a peer gains a quote; measured by #11706's first review round). The
+owner's ordering on this issue is the one that governs it: fixes first, the
+#8486 batch measures afterwards. The widening is recorded in
+`docs/architecture/STORAGE-ARCHITECTURE.md §12.1b`. The helper does no graph
+read of its own — the one non-payload input is the
 stored text the `update_point` door reads and hands over.
 
 LANE NOTE. Module-level ``pytestmark = pytest.mark.embedded_only`` — the lane

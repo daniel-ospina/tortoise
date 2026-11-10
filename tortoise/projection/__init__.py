@@ -20195,8 +20195,9 @@ class FalkorProjection(
                     # fallback (its docstring records the measured forms).
                     self._create_fulltext_index(label, fields)
                     if label == "Point":
-                        # R2 (#1541) D3: a FRESH DB created the two-field
-                        # index directly — mark the migration done so a later
+                        # R2 (#1541) D3: a FRESH DB created the DECLARED-field
+                        # index directly (two fields then; `quote` joined in
+                        # #11682) — mark the migration done so a later
                         # boot (create → "already") never re-enters the
                         # drop→recreate path (marker guards churn).
                         #

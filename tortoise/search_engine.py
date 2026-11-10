@@ -431,9 +431,16 @@ def search_provenance_enabled() -> bool:
     ``provenance`` block however the flag is set. This is a boundary, not an
     oversight: the snapshot keeps a deliberately LEAN projection
     (``fallback_snapshot._SNAPSHOT_QUERY`` — id/content/pointKind/status/
-    outdated/search_keys/has_answer, no provenance columns) and adding those to
-    it is a separate, policy-governed change to the corpus it caches. A
-    degraded run therefore gets no provenance enrichment. The enrichment is
+    outdated/search_keys/has_answer, no ``source_ref``/``captured_at``) and
+    adding those to it is a separate, policy-governed change to the corpus it
+    caches. A degraded run therefore gets no provenance enrichment.
+    ⚠️ #11682 adds ONE key to that corpus — the verbatim ``quote``, because it
+    is index text the lexical mirror must carry (its absence was the defect).
+    It is **corpus-only**: ``fallback_snapshot.search_snapshot`` never sets
+    ``quote`` on its ``SearchResult``s, so the SURFACE this paragraph describes
+    is unchanged and a degraded hit still carries none of #8658's four columns.
+    Retention is bounded by the same caps that already hold ``content``
+    (``MAX_CORPUS_POINTS`` × ``MAX_SNAPSHOT_ENTRIES``). The enrichment is
     also POINT-ONLY: the flag-gated fetch and the two columns it reads
     (``n.extractedFrom`` / ``n.createdAt``) sit inside the project search's
     ``if entity_type == "point":`` branch, while ``SearchResult`` is constructed

@@ -610,11 +610,18 @@ def build_or_query(
 
 
 def index_text(*parts) -> str:
-    """Dual-stack index-text builder: ' '.join of non-empty parts.
+    """Generic index-text builder: ' '.join of non-empty parts.
 
-    The indexed text is :data:`POINT_INDEX_TEXT_FIELDS` — the TF-IDF fallback
-    stacks (``fallback_snapshot`` and ``fallback_tfidf``) mirror the real
-    backend's multi-field Point FTS index with it. Accepts ``str``, ``None``, and
+    The PARTS are the caller's choice — this function knows no field set. A
+    Point's index text is :func:`point_index_text` (which joins
+    :data:`POINT_INDEX_TEXT_FIELDS`); the callers that pass a deliberate
+    SUBSET are equally real and must stay that way — ``projection/entities.py``
+    feeds ``point_identifier_aliases`` ``content`` ∪ ``search_keys`` only,
+    because ``quote`` is prose and must never mint an identifier alias
+    (``space_separated=False``). The TF-IDF fallback stacks
+    (``fallback_snapshot`` and ``fallback_tfidf``) mirror the real backend's
+    multi-field Point FTS index through ``point_index_text``. Accepts ``str``,
+    ``None``, and
     list/tuple parts: E3's pre-flatten graph values are arrays (and the
     eval ingest passes lists), so each element joins as its own chunk —
     ``index_text("a b", ["c d", "e"]) == "a b c d e"``.
@@ -639,13 +646,19 @@ def index_text(*parts) -> str:
 #: Point FULLTEXT index is declared over, and exactly the parts every
 #: index-text mirror joins.
 #:
-#: ONE declaration, read by the index DDL
+#: ONE declaration of the FIELD SET, read by the index DDL
 #: (``projection/__init__.py::_FULLTEXT_INDEX_LABEL_FIELDS``, whose Point entry
 #: IS this tuple), by the in-process BM25 leg's corpus read
 #: (``search_engine.run_bm25_query``) and by the degraded snapshot lane
-#: (``fallback_snapshot``) — so the lexical stacks cannot disagree about what a
-#: Point says. A field added here reaches all of them; a field added in ONE of
-#: them is the drift this constant exists to prevent.
+#: (``fallback_snapshot``). What that buys, stated exactly: every JOIN goes
+#: through :func:`point_index_text`, so the readers cannot disagree about the
+#: order or the shape of the text. It does NOT automatically widen a mirror's
+#: SQL/Cypher COLUMN LIST — the BM25 corpus read and ``_SNAPSHOT_QUERY`` select
+#: their columns explicitly, so a field added here still has to be added there
+#: (the snapshot's gap is what #11682's own review caught: the constant said
+#: "reaches all of them" while ``_SNAPSHOT_QUERY`` had to be edited by hand).
+#: ``tests/test_11682_quote_indexed.py`` now walks THIS tuple against both
+#: selects, so a fourth field reds instead of drifting silently.
 #:
 #: ``quote`` is the point's VERBATIM source text (persisted by the projection,
 #: read back by the SDK). It is its own indexed field rather than text appended

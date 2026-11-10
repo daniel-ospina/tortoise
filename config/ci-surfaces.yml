@@ -3903,6 +3903,15 @@ surfaces:
   # that module alone would otherwise select no surface and the guard would
   # never run.
   - test_source_fts.py
+  # #11682: the Point lexical field set — the verbatim `quote` must reach the
+  # index and BOTH mirrors (BM25 corpus, degraded snapshot). Same `core`
+  # reason as `test_source_fts.py` directly above: its subjects
+  # (`tortoise/search_engine.py`, `tortoise/sparse.py`, `fallback_snapshot.py`)
+  # either fall to the `core` fallback or are not the selecting module, so a
+  # search-only PR would otherwise leave this guard asleep — and an
+  # unregistered `tests/test_*.py` would run in NO leg at all (the
+  # #1349/#2938/#10694 silent-drop class).
+  - test_11682_quote_indexed.py
   - test_source_identity.py
   # #5024 (T6): the `:Source` version transition must be JOURNALLED and
   # REPEAT-SAFE — a changed `contentHash` writes a `SourceVersioned` record

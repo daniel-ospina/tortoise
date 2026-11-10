@@ -107,9 +107,16 @@ def index_kind_absent(rows, label: str, field: str, kind: str) -> bool:
 
 
 #: What `test (g)` drops before it reads the catalogue: the retired
-#: `:Point(pointKind)` range field, and the label's legacy two-field fulltext
-#: index (`content` + `search_keys`). The two vacuity guards at the call site
+#: `:Point(pointKind)` range field, and the label's legacy fulltext index
+#: (`content` + `search_keys` — the fields that index carried when this wait was
+#: written; #11682 later added `quote`). The two vacuity guards at the call site
 #: assert exactly these are gone, so the wait must assert the same thing.
+#:
+#: ⛔ A SUBSET is the right statement, not a stale one: `test (g)` drops the
+#: WHOLE Point fulltext index, and this predicate only asks whether the drop is
+#: visible. Please do not "sync" it to the declared field set — a fixture that
+#: models the pre-drop row (content + search_keys) would then read as
+#: "drop visible" and the wait would certify before the engine applied it.
 POINT_RANGE_FIELD = "pointKind"
 POINT_FULLTEXT_FIELDS = ("content", "search_keys")
 

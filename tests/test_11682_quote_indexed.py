@@ -32,8 +32,13 @@ WHAT THIS PINS (each revert must red a named test):
            un-findable, and the probe stays not-current forever);
   * revert the BM25 corpus read to content ∪ search_keys
         -> ``test_the_bm25_mirror_finds_the_quote_too`` reds;
-  * drop the ``quote`` from ``_SNAPSHOT_QUERY`` / its row mapping
-        -> the snapshot parity assertion inside the BM25 test reds.
+  * drop the ``quote`` from ``_SNAPSHOT_QUERY``
+        -> the ``"quote" in _SNAPSHOT_QUERY`` assertion reds, and so does
+           ``test_every_declared_field_is_selected_by_the_snapshot_mirror``,
+           which walks the WHOLE declared set against that query;
+  * drop ``"quote": r[7]`` from the snapshot's ROW MAPPING (or shift it)
+        -> the ``row["quote"] == VERBATIM`` / ``row["has_answer"] is False``
+           assertions in `test_the_bm25_mirror_finds_the_quote_too` red;
 
 BOTH DIRECTIONS are asserted, and the negative controls are explicit: the
 content-only word is still found (the leg was not narrowed), a word in NEITHER
@@ -111,6 +116,25 @@ def test_point_index_text_includes_the_quote_and_degrades_without_it() -> None:
                              "quote": None}) == ""
 
 
+def test_every_declared_field_is_selected_by_the_snapshot_mirror() -> None:
+    """The constant governs the JOIN; each mirror selects its own columns.
+
+    A field added to ``POINT_INDEX_TEXT_FIELDS`` reaches the DDL and both
+    joins, but NOT ``_SNAPSHOT_QUERY``'s column list — that had to be edited by
+    hand for ``quote`` (#11706 review round 1, F3). This walk is what makes a
+    FOURTH field red instead of the mirror silently leaving the declared set
+    and feeding ``point_index_text`` a dict that never selected it.
+    """
+    from tortoise import fallback_snapshot as fs
+    from tortoise.sparse import POINT_INDEX_TEXT_FIELDS
+
+    for field in POINT_INDEX_TEXT_FIELDS:
+        assert (f"n.{field}" in fs._SNAPSHOT_QUERY
+                or f"coalesce(n.{field}" in fs._SNAPSHOT_QUERY), (
+                    f"the snapshot mirror does not select {field!r} — the "
+                    "declared Point lexical field set and this mirror drifted")
+
+
 # ── live (docker lane) ────────────────────────────────────────────────────
 
 
@@ -133,6 +157,25 @@ def _quoted_point(sdk) -> str:
         "statement", PARAPHRASE, quote=VERBATIM, source_turn_id=1)["id"]
     sdk.create_point("statement", DECOY)
     return pid
+
+
+def _point_fulltext_fields(graph) -> set[str] | None:
+    """The Point FULLTEXT field set, read from the row that carries FULLTEXT.
+
+    Row-per-label is what this engine returns today, but taking the LAST Point
+    row would read another index's fields if the engine ever split them; the
+    FULLTEXT row is the same rule ``_schema_is_current`` and the migration
+    probe use.
+    """
+    for row in graph.query("CALL db.indexes()").result_set:
+        if not row or row[0] != "Point":
+            continue
+        kinds = row[2] or {}
+        fields = {f for f, ks in kinds.items()
+                  if "FULLTEXT" in {str(k).upper() for k in (ks or ())}}
+        if fields:
+            return fields
+    return None
 
 
 def test_a_verbatim_quote_only_phrase_is_findable_by_the_fts_leg(sdk) -> None:
@@ -190,6 +233,20 @@ def test_the_bm25_mirror_finds_the_quote_too(sdk) -> None:
     assert "quote" in fs._SNAPSHOT_QUERY, (
         "the snapshot mirror must carry the verbatim quote (#11682)")
 
+    # …and the ROW MAPPING must consume it, not just select it. A wrong column
+    # index is silent: `quote` and `has_answer` would swap keys, the query-string
+    # assertion above would still pass, and the mirror's corpus text would be
+    # built from the wrong field (#11706 review round 1, F5).
+    snap = fs.build_snapshot(sdk._get_proj())
+    assert snap is not None, "the snapshot did not build on a two-point graph"
+    row = next(p for p in snap["points"] if p["id"] == pid)
+    assert row["quote"] == VERBATIM, (
+        "the snapshot's row mapping did not carry the verbatim quote; "
+        f"row={row}")
+    assert row["has_answer"] is False, (
+        "the row mapping crossed its columns — `has_answer` reads the quote "
+        f"column; row={row}")
+
 
 def test_a_pre_11682_two_field_index_is_upgraded_to_carry_the_quote(sdk) -> None:
     """The migration, measured on an ALREADY-WRITTEN point.
@@ -223,7 +280,12 @@ def test_a_pre_11682_two_field_index_is_upgraded_to_carry_the_quote(sdk) -> None
     except Exception as e:
         pytest.skip(f"engine cannot create a fulltext index: {e}")
 
-    # The legacy state: the point exists, its quote is not indexed.
+    # The legacy state, pinned on the CATALOGUE (not only on a query that also
+    # returns [] when no index exists at all): the point exists, the index is
+    # EXACTLY the pre-#11682 shape, and its quote is not indexed.
+    assert _point_fulltext_fields(g) == {"content", "search_keys"}, (
+        "fixture not reached: expected the pre-#11682 two-field index, got "
+        f"{_point_fulltext_fields(g)}")
     assert [i for i, _ in run_fts_query(
         g, QUOTE_ONLY_TERM, entity_type="point")] == [], (
             "fixture not reached: the two-field index should NOT match a "
@@ -234,10 +296,7 @@ def test_a_pre_11682_two_field_index_is_upgraded_to_carry_the_quote(sdk) -> None
 
     proj._ensure_indexes()
 
-    fields = None
-    for row in g.query("CALL db.indexes()").result_set:
-        if row and row[0] == "Point":
-            fields = set((row[2] or {}).keys())
+    fields = _point_fulltext_fields(g)
     assert fields and "quote" in fields, (
         f"the sweep must widen the Point index to carry the quote, got {fields}")
     assert proj._schema_is_current() is True

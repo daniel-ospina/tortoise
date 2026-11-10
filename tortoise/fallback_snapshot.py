@@ -610,9 +610,10 @@ def build_snapshot(proj) -> dict | None:
     # R2 (#1541) D4: the corpus text is content ∪ search_keys — the
     # embedded-stack counterpart of the real backend's multi-field Point
     # FTS index (surface-11 normalization is the shared index_text builder).
-    # #11682: the join is ``sparse.point_index_text``, so the field list is the
-    # SAME declaration the real index is created from (content ∪ search_keys ∪
-    # quote); a point with no quote contributes nothing, unchanged.
+    # #11682 adds `quote` to BOTH sides of that parity — the real index and
+    # this corpus — so the join below is ``sparse.point_index_text``: the same
+    # declaration the real index is created from (content ∪ search_keys ∪
+    # quote). A point with no quote contributes nothing; unchanged.
     from tortoise.sparse import point_index_text
     texts = [point_index_text(p) for p in points]
     try:
