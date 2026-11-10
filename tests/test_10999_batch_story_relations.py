@@ -1995,3 +1995,64 @@ def test_the_reconciled_payload_no_longer_422s_end_to_end():
     layer1, payload = cs.validate_payload_dict(copy.deepcopy(result["payload"]))
     assert payload is not None
     assert layer1.ok, layer1.errors
+
+
+def test_the_WORKING_path_reconciles_a_held_norm_equal_reference():
+    """Finding 1 (P2) of the review at `750c45d3`: the merge block on the
+    WORKING path was load-bearing and untested.
+
+    Every §11 case above takes `apply_vet`'s nothing-to-do early return (no
+    decisions, no `prior`), so deleting the merge at `apply_vet`'s Rule 4 —
+
+        held_canonical, held_warnings = _reconcile_held_layer1_spellings(out, …)
+
+    — reddened nothing. It is the ONLY leg that repairs this reference when the
+    batch discarded something: `to_restore` is empty here (the reference
+    normalises onto the held name), so Rule 4's loop never sees it, and the
+    payload 422s exactly as it did on the early-return path.
+    """
+    emission = _held_and_ref("Retry Storm", "RETRY STORM")
+    emission["entities"].append({"name": "Z", "kind": "core:rule"})
+    # a DISCARD on an UNRELATED entity is what leaves the early return
+    out, warns = vg.apply_vet(emission, _discard_entity(emission, 1))
+    assert [e["name"] for e in out["entities"]] == ["Retry Storm"], out
+    assert out["points"][0]["about_entities"] == ["Retry Storm"], warns
+    assert any("re-spelled" in w and "RETRY STORM" in w for w in warns), warns
+
+
+def test_an_ambiguous_reference_on_the_working_path_reports_the_REWRITE():
+    """Finding 2 (P3) of the review at `750c45d3`: the ambiguity warning said
+    "left as written … the payload will fail" — and on the working path both
+    halves of that sentence were FALSE.
+
+    Reachable configuration: `Billing` (core:rule) and `billing` (core:plan) are
+    one `_norm` key but two Layer-1 Objects; a point references `BILLING`; the
+    DISCARD on `billing` is downgraded to KEEP because it is referenced, which
+    sets `canonical["billing"] = "billing"`. `_rewrite_entity_references` then
+    applies that entry to EVERY reference under the key, so the ambiguous
+    reference IS rewritten — while the warning claimed it was left as written
+    and would fail.
+
+    The rewrite is the downgrade arm's own pre-existing behaviour (and it is the
+    fail-open direction: the alternative is rejecting the session). What must be
+    true is the RECORD: the ambiguity stays named, and the pass says it rewrote
+    the key rather than refusing it. The recorded decision — "ambiguity is
+    refused, not guessed" — must not read as satisfied when the attribution was
+    in fact a fold.
+    """
+    emission = {
+        "entities": [{"name": "Billing", "kind": "core:rule"},
+                     {"name": "billing", "kind": "core:plan"}],
+        "points": [{"content": "p", "about_entities": ["BILLING"]}],
+        "events": [], "operators": [], "relations": [],
+    }
+    out, warns = vg.apply_vet(emission, _discard_entity(emission, 1))
+    assert [e["name"] for e in out["entities"]] == ["Billing", "billing"], out
+    # fail-open: the reference is accepted under the kept spelling …
+    assert out["points"][0]["about_entities"] == ["billing"], warns
+    ambiguous = [w for w in warns if "matches 2 emitted entities" in w]
+    assert ambiguous, warns
+    # … and the warning says so, instead of claiming a refusal that did not happen
+    assert "left as written" not in ambiguous[0], ambiguous
+    assert "rewrote the key to 'billing'" in ambiguous[0], ambiguous
+    assert "NOT disambiguated" in ambiguous[0], ambiguous

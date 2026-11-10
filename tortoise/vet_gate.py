@@ -1123,7 +1123,9 @@ def _layer1_reference_spellings(embed_list: object,
 
 def _reconcile_held_layer1_spellings(
         embed_list: object,
-        discarded_ids: set[str]) -> tuple[dict[str, str], list[str]]:
+        discarded_ids: set[str],
+        settled: Mapping[str, str] | None = None
+) -> tuple[dict[str, str], list[str]]:
     """Re-spell a Layer-1 reference whose ``_norm`` ALREADY matches a held name.
 
     ⛔ This is the one class Rule 4's loop structurally cannot reach, which is
@@ -1155,6 +1157,13 @@ def _reconcile_held_layer1_spellings(
 
     Returns ``(canonical, warnings)`` — the same ``_norm``-keyed map
     :func:`_rewrite_entity_references` consumes, and the warnings it owes.
+
+    ``settled`` is what another leg of THIS pass already put in ``canonical``
+    (Rule 2's DISCARD-downgrade arm, which re-spells a reference onto the entity
+    it kept). It exists for the warning's TRUTH: another leg's entry is applied
+    to every reference under the key, so an ambiguous reference is rewritten to
+    it — claiming "left as written" there would state the opposite of what the
+    pass then does (review at ``750c45d3``, finding 2).
     """
     held: dict[str, set[str]] = {}
     for entity in _section_items(embed_list, "entities"):
@@ -1176,12 +1185,27 @@ def _reconcile_held_layer1_spellings(
         if len(emitted) > 1:
             unresolved = sorted(used - emitted)
             if unresolved:
-                warnings.append(
-                    f"vet: reference {unresolved[0]!r} matches "
-                    f"{len(emitted)} emitted entities that differ only in "
-                    f"spelling ({', '.join(sorted(map(repr, emitted)))}) — "
-                    "left as written; Layer-1 identity is EXACT, so the "
-                    "payload will fail unless the extractor disambiguates")
+                differs = ", ".join(sorted(map(repr, emitted)))
+                settled_to = (settled or {}).get(key)
+                if settled_to is not None:
+                    # Truthful record: the rewrite DOES happen (the key is
+                    # already in `canonical` from another leg) — it is just not
+                    # a disambiguation, and the pass must not say it refused.
+                    warnings.append(
+                        f"vet: reference {unresolved[0]!r} matches "
+                        f"{len(emitted)} emitted entities that differ only in "
+                        f"spelling ({differs}) and is NOT disambiguated — "
+                        f"another reconcile in this pass rewrote the key to "
+                        f"{settled_to!r}; Layer-1 identity is EXACT, so that "
+                        "spelling is accepted, but which of the entities the "
+                        "reference means was never decided")
+                else:
+                    warnings.append(
+                        f"vet: reference {unresolved[0]!r} matches "
+                        f"{len(emitted)} emitted entities that differ only in "
+                        f"spelling ({differs}) — left as written; Layer-1 "
+                        "identity is EXACT, so the payload will fail unless "
+                        "the extractor disambiguates")
             continue
         (winner,) = emitted
         mismatched = sorted(spelling for spelling in used
@@ -1675,7 +1699,7 @@ def apply_vet(embed_list: Mapping[str, Any],
     # write an exact spelling a reference names, and their keys are disjoint
     # from these anyway (they are in ``to_restore``, i.e. NOT in ``present``).
     held_canonical, held_warnings = _reconcile_held_layer1_spellings(
-        out, discarded_ids)
+        out, discarded_ids, settled=canonical)
     warnings.extend(held_warnings)
     for _held_key, _held_spelling in held_canonical.items():
         canonical.setdefault(_held_key, _held_spelling)
