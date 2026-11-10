@@ -7065,10 +7065,13 @@ def _warn_point_name_not_lexically_indexed(
         "lexical query for the name can only reach this point through other "
         "evidence, and will not rank on the name itself (#10122). Put the "
         "identifier in `content` or in `search_keys` — the two alias-bearing "
-        "fields; `name` is not lexically indexed on a Point (%s), and the "
-        "verbatim `quote` is indexed but is PROSE (a provenance anchor, never "
-        "an alias source, #11682), so an identifier there is not findable as "
-        "an identifier. The write is accepted as-is — warn-not-block, #1934.",
+        "fields; `name` is not lexically indexed on a Point (%s). The "
+        "verbatim `quote` is indexed too, but it is PROSE — a provenance "
+        "anchor, never an alias source (#11682) — so an identifier written "
+        "there matches only on its own SEGMENTS (`build_or_query` expands "
+        "`capstone-9664` to capstone|capstone9664), never as the composite "
+        "alias the extractor mints into `search_keys`. The write is accepted "
+        "as-is — warn-not-block, #1934.",
         door, name, basis, where, "/".join(fields), label_clause,
     )
 
