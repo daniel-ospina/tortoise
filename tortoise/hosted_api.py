@@ -9696,9 +9696,19 @@ async def _check_org_limit_off_loop(org: dict, resource: str, *,
     ``unavailable`` (#10967) reaches the CARRY only (``_carry_allowances_off_loop``,
     and through it ``_cp_offload``): the count half rides ``_graph_offload``,
     which passes its own ``_graph_unavailable`` unconditionally because a graph
-    bound miss is a graph-capacity fact, not a control-plane one. Only the carry
-    can mis-name its own dependency, which is why only the carry takes a
-    factory.
+    bound miss is a graph-capacity fact, not a control-plane one. Among the two
+    reads THIS seam submits, only the carry can mis-name its dependency — which
+    is why only the carry takes a factory.
+
+    ⚠️ That scoping statement is about THIS seam, not about the `sessions` gate
+    as a whole: for ``resource="sessions"`` the gate has a THIRD, CONTROL-PLANE
+    read (the ``capture_extraction`` meter) that rides INSIDE the count's
+    ``_graph_offload`` submission, so it can refuse with the graph copy. It is
+    latent today (no production resolver arms a token allowance) and it is the
+    capture door's declared residual **#10949** — do not read the sentence above
+    as proof that the counting half cannot misdescribe its dependency, and do
+    not try to fix #10949 by handing the count this factory (the fix belongs in
+    `quota.enforce_org_limit`'s meter threading).
 
     The gate's two ALLOWANCE reads belong to two different pools (and, for
     `sessions`, a THIRD — the extractor's meter, riding inside the count's graph
