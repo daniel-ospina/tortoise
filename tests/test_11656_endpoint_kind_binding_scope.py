@@ -240,7 +240,11 @@ class TestTheInventoryTheScopeCites:
                 cross.append(r["predicate"])
         assert sorted(cross) == ["constrainedBy", "deploysTo", "implements", "manifests", "marks"], cross
         assert sorted(layer) == ["assignedTo", "assignedTo", "holds"], layer
-        assert len(cross) + len(layer) == 8
+        # ⛔ No `len(cross) + len(layer) == 8` row here. The two exact sorted rows above FIX both lists, so
+        # such a row is determined by them: any edit that makes it false has already reddened line 241 or
+        # 242 first, and it can never be the failing row under any mutation (review F3 — a DEAD assertion in
+        # a file whose header says every assertion below must be able to FAIL). The 5 + 3 = 8 arithmetic is
+        # the message those two rows carry, not a third claim.
 
     def test_a_layer_valued_declaration_binds_after_11000s_six_leg(self):
         """Pin 12 (§5.3): `toKind: Subject` must **bind**, not sit `unbound` forever.
@@ -470,12 +474,57 @@ class TestThePairHasProductionReaders:
         )
 
     def test_the_readers_exist_and_the_catalog_carries_the_pair(self):
-        from tortoise.sdk import TortoiseSDK
+        """§5.5 readers 1 and 3, asserted as CALLS — not as `callable()` plus a source substring.
+
+        ⛔ **Review F2: §5.5 says FOUR readers and this file pinned two of them, part of a third.**
+        `callable(module_level_fn)` is a tautology, and `'"fromKind"' in source` cannot tell the
+        `ontology.relations` leg from the `extraction.relationTemplates` leg (each alone satisfies it), so
+        deleting EITHER `_pair(...)` call stayed green. And `domain_validators._portfolio_mark_contract` —
+        the reader plan §5.2 calls the load-bearing one, the sentence §6 pin 10 is justified by — was not
+        mentioned in this file at all while the `ci-surfaces.yml` entry claimed the four were pinned. Both
+        are now pinned by calling them, and `test_resolve_traversal_path_…` below pins reader 2.
+        """
+        from tortoise import domain_validators
         from tortoise.value_extractor import _relation_endpoint_refs
 
-        assert callable(TortoiseSDK._resolve_traversal_path)
-        assert callable(_relation_endpoint_refs)
-        assert '"fromKind"' in inspect.getsource(_relation_endpoint_refs)
+        # ── Reader 3: `value_extractor._relation_endpoint_refs` ───────────────────────────────────────
+        # BEHAVIOURAL: one relation + one relationTemplate in, the UNDIRECTED kind→kind adjacency out for
+        # BOTH declaration sites. Reds if either `_pair(...)` line is deleted (the other leg's `fromKind`
+        # literal is still in the source, which is exactly why the substring check could not fail), and reds
+        # if the closure stops being undirected or stops including same-namespace partners.
+        raw = {
+            "ontology": {"relations": [{"fromKind": "a:x", "toKind": "b:y", "predicate": "p"}]},
+            "extraction": {"relationTemplates": [{"fromKind": "a:m", "toKind": "c:n"}]},
+        }
+        assert _relation_endpoint_refs(raw) == {
+            "a:x": ["b:y"], "b:y": ["a:x"], "a:m": ["c:n"], "c:n": ["a:m"],
+        }, (
+            "`_relation_endpoint_refs` no longer collects from BOTH declaration sites — §5.5 reader 3, whose "
+            "output decides which kinds compact mode offers together"
+        )
+
+        # ── Reader 1: `domain_validators._portfolio_mark_contract` ────────────────────────────────────
+        # §5.2 makes `portfolio:marks` the load-bearing case BECAUSE this reader reads it. The
+        # manifest-edit-FOLLOWS behaviour is
+        # `tests/test_investment_portfolio_manager_pack.py::test_the_mark_contract_follows_a_manifest_edit`;
+        # what this file needs is the claim its own comment makes — that the reader is still there and still
+        # answers from the declaration rather than from the constants it falls back to.
+        assert callable(domain_validators._portfolio_mark_contract)
+        mark_row = next(
+            r for r in _declared_relations()
+            if r["_ns"] == "portfolio" and r.get("predicate") == "marks"
+        )
+        assert domain_validators._portfolio_mark_contract() == (
+            mark_row["fromKind"], mark_row["toKind"], mark_row["predicate"],
+        ), (
+            "`_portfolio_mark_contract` no longer answers with the portfolio pack's own `marks` declaration "
+            "(`portfolio:valuationMark → venture:investment`) — §5.2's load-bearing case and §6 pin 10 rest "
+            "on this reader reading the manifest"
+        )
+        assert "_pack_relations()" in inspect.getsource(domain_validators._portfolio_mark_contract), (
+            "the reader stopped consulting the loaded pack and now returns the module constants, which is "
+            "the hardcoded-copy drift §5.5 says to reuse it to avoid"
+        )
 
         registry = PackRegistry(PACKS_DIR)
         registry.load_all()
@@ -486,7 +535,14 @@ class TestThePairHasProductionReaders:
         )
 
     def test_resolve_traversal_path_is_a_kind_pair_to_predicate_resolver(self):
-        """It IS `allowed_relations(from_kind, to_kind)` in production (scope §5.5)."""
+        """It IS `allowed_relations(from_kind, to_kind)` in production (scope §5.5 reader 2) — CALLED.
+
+        ⛔ **Review F2: the existence checks this replaces stayed green over `return None` inserted as the
+        first statement of the body**, while §5.5's "it IS `allowed_relations(...)` in production" became
+        false. So the resolver is exercised on a REAL declared pair and its answer is held to the catalog:
+        the comment must be a declared `(fromKind, toKind, predicate)` row, and its bare kind suffixes must
+        be the ones the path names.
+        """
         from tortoise.sdk import TortoiseSDK
 
         method = TortoiseSDK._resolve_traversal_path
@@ -494,6 +550,28 @@ class TestThePairHasProductionReaders:
         source = inspect.getsource(method)
         assert "list_relations" in source
         assert "fromKind" in source
+
+        # `__new__` rather than the constructor: the resolver touches no `self` attribute and needs no DB,
+        # so this exercises the real bound method without building a graph.
+        resolved = TortoiseSDK.__new__(TortoiseSDK)._resolve_traversal_path("Product→Feature")
+        assert resolved, (
+            "`_resolve_traversal_path('Product→Feature')` resolved nothing — §5.5's reader 2 is then not a "
+            "kind-pair→predicate resolver at all, and D5 would have to be implemented twice"
+        )
+        assert set(resolved) >= {"predicate", "fromKind", "toKind"}, resolved
+
+        registry = PackRegistry(PACKS_DIR)
+        registry.load_all()
+        declared = {
+            (r.get("fromKind"), r.get("toKind"), r.get("predicate"))
+            for r in registry.list_relations()
+        }
+        assert (resolved["fromKind"], resolved["toKind"], resolved["predicate"]) in declared, (
+            f"the resolver returned {resolved!r}, which is NOT a declared relation — it must answer from the "
+            "catalog (§5.5 reader 2), not from a re-derived pair"
+        )
+        assert resolved["fromKind"].split(":")[-1].lower() == "product", resolved
+        assert resolved["toKind"].split(":")[-1].lower() == "feature", resolved
 
 
 class TestTheDocsAreDiscoverableAndResolve:
