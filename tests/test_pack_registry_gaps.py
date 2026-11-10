@@ -2402,28 +2402,53 @@ class TestReadFilterKinds:
         `tortoise/`, not just `sdk.py`, because a read-filter site can land
         anywhere (the validator's already does). A deliberate membership caller
         has to say so by updating these allow-lists.
+
+        Scope, stated so this is not overclaimed: the rule reports a call from
+        any module/function pair that is not allow-listed, INCLUDING a call in a
+        module body or a class body (attributed to `<module>`, never allowed) and
+        a call in a nested `def` (attributed to the innermost one). It does NOT
+        report a NEW call added inside the one allow-listed function itself —
+        that is what an allow-list keyed on a function name means, and the
+        alternative (keying on a line span) would red on every unrelated
+        refactor of `_operator_scope_clauses`. The residual is the intended
+        escape hatch: a membership caller must be added to the allow-list, where
+        a reviewer sees it.
         """
         import ast
 
-        # `attr` -> the (module, enclosing function) pairs allowed to call it
+        # `attr` -> the (repo-relative module, innermost enclosing function) pairs
+        # allowed to call it. Keyed on the RELATIVE path, not the basename: a
+        # future `tortoise/<sub>/sdk.py` must not be exempt at every function.
         allowed = {
-            "_expand_kind": {("sdk.py", "_operator_scope_clauses")},
-            "expand_kind": {("sdk.py", "_expand_kind")},  # the wrapper itself
+            "_expand_kind": {("tortoise/sdk.py", "_operator_scope_clauses")},
+            "expand_kind": {("tortoise/sdk.py", "_expand_kind")},  # the wrapper
         }
-        offenders: list[tuple[str, str]] = []
+        offenders: list[tuple[str, str, str]] = []
         for path in sorted((REPO / "tortoise").rglob("*.py")):
             tree = ast.parse(path.read_text())
-            for node in ast.walk(tree):
-                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    continue
-                for inner in ast.walk(node):
-                    if not (isinstance(inner, ast.Call)
-                            and isinstance(inner.func, ast.Attribute)
-                            and inner.func.attr in allowed):
+            rel = str(path.relative_to(REPO))
+
+            def visit(node: ast.AST, scope: str, rel: str = rel) -> None:
+                """Attribute each call to its INNERMOST enclosing function.
+
+                Two holes the previous shape had, both closed here: it walked
+                each `FunctionDef` subtree, so (a) a call in a module body or a
+                class body was INVISIBLE, and (b) a nested `def` was attributed
+                to every function around it instead of to itself. `"<module>"`
+                is never allow-listed, so a module-level call is always reported.
+                """
+                for child in ast.iter_child_nodes(node):
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        visit(child, child.name)
                         continue
-                    if (path.name, node.name) not in allowed[inner.func.attr]:
-                        offenders.append(
-                            (str(path.relative_to(REPO)), node.name, inner.func.attr))
+                    if (isinstance(child, ast.Call)
+                            and isinstance(child.func, ast.Attribute)
+                            and child.func.attr in allowed
+                            and (rel, scope) not in allowed[child.func.attr]):
+                        offenders.append((rel, scope, child.func.attr))
+                    visit(child, scope)
+
+            visit(tree, "<module>")
         assert not offenders, (
             "a membership-set caller appeared outside the allow-list — read "
             "filters take `read_filter_kinds` (#11679): "

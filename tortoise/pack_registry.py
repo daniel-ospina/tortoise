@@ -3391,8 +3391,16 @@ class PackRegistry:
         filtered ``objectKind IN [… 'WorkItem', 'core:WorkItem' …]`` and returned
         every ``core:WorkItem`` object the classifier had labelled.
 
-        The set is the membership bucket MINUS the ancestors (and their stored
-        spellings), so everything that is not broader survives untouched: it
+        The set is GROWN from a snapshot of the DOWN-clean buckets taken before
+        the closure (``down_base``) by the descendants walk only, then closed
+        over equivalence — it is never derived by subtracting ancestors from
+        the membership bucket. It happens to EQUAL
+        ``expand_kind(kind)`` minus its ancestors (and their stored spellings),
+        but that identity is a consequence of the construction, not the
+        construction: subtraction would couple this table to the closure's
+        source expression, so a third inheritance relation could put an ancestor
+        in a bucket this table never walks up to notice. What the set BUYS is
+        unchanged — everything that is not broader survives untouched: it
         equals the pre-#11667 read behaviour for a pack child
         (``read_filter_kinds("dev:issue") == ["dev:issue", "pm:issue"]``) while
         a root with no ancestors (``Object``, ``Subject``, ``Point``, ``Event``,
