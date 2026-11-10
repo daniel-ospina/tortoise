@@ -96,6 +96,57 @@ def _bare(name: str) -> str:
     return name[:-3] if name.endswith(".py") else name
 
 
+#: The changed-file probes for the tier-2 (PR) selection — one surface-owner of
+#: each subtree, plus a direct eval-test edit.
+_TIER2_CHANGES = ("tests/eval/ask/test_ask_corpus.py",
+                  "tests/longmem_eval/test_vector_arm.py",
+                  "tools/longmem_eval/run.py",
+                  "tortoise/embeddings.py")
+
+
+#: The leg KINDS, which stay LITERAL. A producer added to the selector later is
+#: not walked at all unless it is added to `_gating_sets()` below, and that
+#: silent omission is exactly what `_expected_legs()` must make loud.
+_LEG_KINDS = frozenset({"fast_pool", "slow", "env_broken", "carve_out",
+                        "push slow_selected"})
+
+
+def _expected_legs(manifest: dict) -> set[str]:
+    """The leg names `_gating_sets()` must produce, at THIS manifest's counts.
+
+    The shard LABELS are DERIVED from the three reviewed literals the producers
+    themselves read (`fast_shards` / `slow_shards` / `carve_shards`, through the
+    selector's own accessors) rather than being spelled out here a second time.
+
+    Why derived, and not `"abcdefghij"` (#11698): a hardcoded label list is a
+    second copy of a config value whose own comment calls it a WALL-CLOCK LEVER
+    — so bumping it is a legitimate, reviewed change. When `fast_shards` became
+    11 (#11576 / `efc472108f6a`), that copy reddened `main` with "the leg list
+    this test walks changed — a new gating set was added ... NOT covered here",
+    which was false in both halves: no gating set was added, and the 11th shard
+    WAS covered (the leak assertions walk every shard the manifest declares). A
+    tripwire that fires on the config's own reviewed value accuses the selector
+    of a change that did not happen, and a false red of this shape is repaired by
+    editing the literal — which is how the drift is absorbed instead of reported.
+
+    What the derivation does NOT give up: if the selector produces fewer (or
+    differently named) shards than the manifest declares — a real defect — the
+    equality below still fails, and it now names the declared count rather than a
+    stale one. Label SPELLING has its own pin
+    (`tests/test_ci_selection.py::test_shard_labels_are_a_superset_when_s_changes`).
+    """
+    return {
+        *_LEG_KINDS,
+        *(f"test ({c})" for c in cs.shard_labels(cs.fast_shard_count(manifest))),
+        *(f"test-slow ({c})"
+          for c in cs.shard_labels(cs.slow_shard_count(manifest))),
+        *(f"test-carve-out ({c})"
+          for c in cs.shard_labels(cs.carve_shard_count(manifest))),
+        *(f"tier-2 test_files [{c}]" for c in _TIER2_CHANGES),
+        *(f"tier-2 slow_selected [{c}]" for c in _TIER2_CHANGES),
+    }
+
+
 def _gating_sets(manifest: dict) -> dict[str, list[str]]:
     """Every GATING file set the selector produces, bare-named, per leg.
 
@@ -103,8 +154,8 @@ def _gating_sets(manifest: dict) -> dict[str, list[str]]:
     push matrix's fast shards, its slow/carve-out/env-broken legs, the tier-2
     selection for a change in each relevant surface, and the full selection. A
     set added to the selector later is covered only if it is added here too —
-    which is why `_leg_names()` below asserts this map's leg list, so a silent
-    omission is impossible to mistake for a pass.
+    which is why `_expected_legs()` above asserts this map's leg KIND list, so a
+    silent omission is impossible to mistake for a pass.
     """
     legs = cs.push_legs(manifest)
     out: dict[str, set[str]] = {
@@ -122,10 +173,7 @@ def _gating_sets(manifest: dict) -> dict[str, list[str]]:
     # Tier-2 (PR) selection: the path that would re-select the eval files if the
     # lane were subtracted on `push` only. Driven by one changed file per
     # surface-owner of these subtrees, plus a direct eval-test edit.
-    for changed in ("tests/eval/ask/test_ask_corpus.py",
-                    "tests/longmem_eval/test_vector_arm.py",
-                    "tools/longmem_eval/run.py",
-                    "tortoise/embeddings.py"):
+    for changed in _TIER2_CHANGES:
         sel = cs.select([changed], "pull_request", manifest)
         out[f"tier-2 test_files [{changed}]"] = {_bare(f) for f in sel["test_files"]
                                                  if f != "ALL"}
@@ -134,21 +182,6 @@ def _gating_sets(manifest: dict) -> dict[str, list[str]]:
     full = cs.select([], "push", manifest)
     out["push slow_selected"] = {_bare(f) for f in full["slow_selected"]}
     return out
-
-
-EXPECTED_LEGS = {
-    "fast_pool", "slow", "env_broken", "carve_out",
-    *(f"test ({c})" for c in "abcdefghij"),
-    *(f"test-slow ({c})" for c in "abcde"),
-    *(f"test-carve-out ({c})" for c in "abc"),
-    *(f"tier-2 test_files [{c}]" for c in
-      ("tests/eval/ask/test_ask_corpus.py", "tests/longmem_eval/test_vector_arm.py",
-       "tools/longmem_eval/run.py", "tortoise/embeddings.py")),
-    *(f"tier-2 slow_selected [{c}]" for c in
-      ("tests/eval/ask/test_ask_corpus.py", "tests/longmem_eval/test_vector_arm.py",
-       "tools/longmem_eval/run.py", "tortoise/embeddings.py")),
-    "push slow_selected",
-}
 
 
 def test_the_subtree_is_not_empty():
@@ -191,10 +224,13 @@ def test_no_subtree_file_is_in_any_gating_leg():
     """
     manifest = _manifest()
     legs = _gating_sets(manifest)
-    assert set(legs) == EXPECTED_LEGS, (
+    expected = _expected_legs(manifest)
+    assert set(legs) == expected, (
         "the leg list this test walks changed — a new gating set was added to "
         "the selector (or one renamed) and is NOT covered here, which reads as "
-        "a pass over a set nobody checked")
+        f"a pass over a set nobody checked.\ndeclared-but-missing: "
+        f"{sorted(expected - set(legs))}\nproduced-but-declared-absent: "
+        f"{sorted(set(legs) - expected)}")
     subtree = {_bare(f) for f in _subtree_files()}
     leaks = {leg: sorted(subtree & files) for leg, files in legs.items()
              if subtree & files}
