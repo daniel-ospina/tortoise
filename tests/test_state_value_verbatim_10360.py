@@ -36,6 +36,7 @@ import pathlib
 import re
 import sys
 import traceback
+from collections import Counter
 
 import pytest
 
@@ -6223,14 +6224,16 @@ def test_the_registry_rows_measured_disclosures_are_pinned():
 # `LAYOUT_LOST` rows — the classes where the content binds no slot, or binds the
 # wrong one. One, not fifty.
 #
-# ⛔ THAT DENOMINATOR IS ELEVEN, NOT 112, AND THE GAP IS NAMED RATHER THAN GLOSSED
-# (#11730 review, cycle 8): the 7 `CONTENT_EXCLUDED_FORM` rows are NOT checkable
-# for agreement — a value dropped while the content keeps its clock is invisible
-# to a projection that cannot bind a clock slot at all (measured: none of the 7
-# binds a slot for its clock token, so there is no slot to compare it against;
-# the 2 that bind anything bind an ISO date). That IS residual (c) — a
-# clock/ISO rewrite is not caught — and its size on this corpus is pinned below
-# (`len(excluded) == 7`) so the blind spot cannot grow silently.
+# ⛔ TWO DENOMINATORS, BOTH STATED, NEITHER GLOSSED (#11730 review, cycles 8–9):
+#   * **10** — the rows where a dropped value is VISIBLE at all (8 + 2). "ONE"
+#     is a count over these, not over 112.
+#   * **105** — the rows this projection can CHECK at all (112 − the 7
+#     `CONTENT_EXCLUDED_FORM`). A value dropped while the content keeps its
+#     CLOCK is invisible to a projection that binds no slot for a clock token,
+#     which is residual (c) itself; the ISO half of that class IS checkable and
+#     is checked below (`iso_bound`, by month-and-day agreement). The blind
+#     spot's size is pinned (`len(excluded) == 7`, `len(iso_bound) == 2`) so it
+#     cannot grow silently.
 #
 # ⚠️ SCOPE, so this is not read as a survival figure: this is the COMMITTED
 # census corpus (7 sealed sessions × 2 arms, real `deepseek-v4-flash`
@@ -6255,6 +6258,33 @@ def test_the_registry_rows_measured_disclosures_are_pinned():
 _CLOCK_FORM = re.compile(r"\b\d{1,2}:\d{2}\s*(?:am|pm)?\b|\b\d{1,2}\s*(?:am|pm)\b",
                          re.IGNORECASE)
 _ISO_DATE_FORM = re.compile(r"\b(?:19|20)\d{2}-\d{2}-\d{2}\b")
+
+#: The spelled month names the corpus's quotes use, for the one agreement check
+#: the excluded-form class CAN carry: an ISO date in the content against the
+#: month-and-day the quote spells out (`2026-11-02` against `November 2`).
+_MONTH_NUMBERS = {name: number for number, name in enumerate(
+    ("january", "february", "march", "april", "may", "june", "july",
+     "august", "september", "october", "november", "december"), start=1)}
+_SPELLED_DATE = re.compile(
+    r"\b(" + "|".join(_MONTH_NUMBERS) + r")\s+(\d{1,2})\b", re.IGNORECASE)
+
+
+def _stated_month_day(text: str) -> tuple[int, int] | None:
+    """The month and day a text states, as numbers, in either form.
+
+    `2026-11-02` and `November 2` both give ``(11, 2)``; the identity is what
+    lets the excluded-form class CHECK agreement instead of asserting presence
+    (review cycle 9, P1: `"2" in content` is a substring search over a
+    one-digit core, so a content rewritten to `2026-12-25` stayed green).
+    """
+    iso = _ISO_DATE_FORM.search(text)
+    if iso:
+        _year, month, day = iso.group(0).split("-")
+        return int(month), int(day)
+    spelled = _SPELLED_DATE.search(text)
+    if spelled:
+        return _MONTH_NUMBERS[spelled.group(1).lower()], int(spelled.group(2))
+    return None
 
 #: A bare count of the sentence's own nouns ("one risk", "two workers") is not a
 #: state value: the engine binds it as a quantity, which is why the determiner
@@ -6291,23 +6321,65 @@ def _value_pairs(text: str) -> list[tuple[str, str]]:
             in v2._value_slots_scaled(text)]
 
 
-def _same_magnitude_number(one: tuple, other: tuple) -> bool:
-    """Do two cores denote the same digits at a different MAGNITUDE?
+def _digits(core: tuple) -> str:
+    """A core's digit string, with the decimal point dropped.
 
-    `12` (beside the scale word `million`) and `12000000` are the same number
-    written two ways: the longer digit string is the shorter one followed by
-    nothing but zeros. That is a STRING relation, not a magnitude table —
-    `#2817` rules out folding magnitudes (residual (m)), and this decider never
-    folds one: it only separates "a magnitude is in play" from "a value is
-    missing", which is the difference between the UNJUDGED and LOST classes.
+    `1.2` and `1200000` are the same number written as a decimal scale and as
+    digits; dropping the point makes them comparable by the padding relation
+    below without any magnitude arithmetic. Empty when the core carries no
+    digits at all (a clock binds `02`/`00`, which never reaches this path).
     """
-    left, right = str(one[1]), str(other[1])
-    if not left or not right:
+    return str(core[1]).replace(".", "").lstrip("0") or "0"
+
+
+def _same_magnitude_number(one: tuple, other: tuple) -> bool:
+    """Are two cores the same number at a different MAGNITUDE?
+
+    `12` (beside the scale word `million`) and `12000000` are one value written
+    two ways: the longer digit string is the shorter one followed by nothing but
+    zeros. That is a STRING relation, not a magnitude table — `#2817` rules out
+    folding magnitudes (residual (m)), and this decider never folds one: it only
+    separates "a magnitude is in play" from "a value is missing".
+
+    ⛔ EQUAL digits are NOT this relation (review cycle 9): `3 batches` in a
+    quote and `3 million events` in the content share the digits and are not the
+    same value, so treating equality as a magnitude pair let one unrelated
+    scaled slot excuse an outright drop. Equality is only a magnitude question
+    when BOTH spellings carry a scale word, which the caller tests.
+    """
+    left, right = _digits(one), _digits(other)
+    if not left or not right or left == right:
         return False
-    if left == right:
-        return True
     longer, shorter = ((left, right) if len(left) > len(right) else (right, left))
     return longer.startswith(shorter) and set(longer[len(shorter):]) <= {"0"}
+
+
+def _magnitude_in_play(missing: list[tuple], content_slots: list[tuple]) -> bool:
+    """Is one of the MISSING values a magnitude this projection cannot compare?
+
+    `missing` are the quote slots no content slot accounts for; `content_slots`
+    are the slots LEFT OVER after each quote slot has consumed one match, so a
+    duplicate cannot satisfy two quote values (review cycle 9: `stated` was a
+    SET, so `we shipped 2 bugs` against `… and 2 fixes` counted as retained).
+
+    A magnitude is in play only where the missing slot has a COUNTERPART among
+    the leftovers:
+      * both spellings carry a scale word over the same digits (`12 thousand`
+        against `12 million`) — two spellings, no way to say which is right;
+      * the digits are zero-extended (`12000000` against `12 million`) — one
+        value, a numeric form and a scaled one.
+    An unrelated slot's scale is NOT a counterpart, whatever its anchor, and an
+    unscaled quote value against a scaled content value is not a counterpart
+    either (`3 batches` against `3 million events` is a DROP, not a magnitude).
+    """
+    for _anchor, quote_core, quote_scale in missing:
+        for _ca, content_core, content_scale in content_slots:
+            if quote_scale and content_scale:
+                if _digits(quote_core) == _digits(content_core):
+                    return True
+            elif _same_magnitude_number(content_core, quote_core):
+                return True
+    return False
 
 
 def _retention_class(content: str, quote: str) -> str | None:
@@ -6344,9 +6416,21 @@ def _retention_class(content: str, quote: str) -> str | None:
     if (tuple((a, s) for a, _, s in content_slots)
             == tuple((a, s) for a, _, s in quote_slots)):
         return "ALIGNED"
-    stated = {(str(core), scale) for _a, core, scale in content_slots}
-    missing = [(anchor, core, scale) for anchor, core, scale in quote_slots
-               if (str(core), scale) not in stated]
+    stated = Counter((str(core), scale) for _a, core, scale in content_slots)
+    missing = []
+    leftovers = list(content_slots)
+    for anchor, core, scale in quote_slots:
+        key = (str(core), scale)
+        if stated[key]:
+            stated[key] -= 1
+            # consume ONE content slot per quote slot, so a duplicate value in
+            # the quote cannot be satisfied twice by one content value
+            for index, (_ca, content_core, content_scale) in enumerate(leftovers):
+                if (str(content_core), content_scale) == key:
+                    leftovers.pop(index)
+                    break
+        else:
+            missing.append((anchor, core, scale))
     if missing:
         # ⛔ A MAGNITUDE is not comparable here: `12 million` against
         # `12 billion` binds the same core (residual (m)), and `12000000`
@@ -6355,7 +6439,7 @@ def _retention_class(content: str, quote: str) -> str | None:
         # point; calling it RETAINED would certify a six-orders drop. Unjudged.
         #
         # ⛔ AND THE SCALE TEST IS KEYED ON THE MAGNITUDE, NOT ON AN ANCHOR, in
-        # both directions (#11730 review, two cycles):
+        # both directions (#11730 review, three cycles):
         #   * an unrelated scale word must not launder a dropped value into
         #     "unjudged" — `we shipped 3 million events` / `… and 4 batches`
         #     loses `4 batches` outright, and so does `the east shard holds 2
@@ -6364,15 +6448,13 @@ def _retention_class(content: str, quote: str) -> str | None:
         #     anchor is the NEIGHBOURING TOKEN and repeats in a parallel clause);
         #   * a magnitude pair must not be filed as a DROP just because the
         #     anchor was reworded — `12000000` against `we are INGESTING 12
-        #     million` is the same value in two forms.
-        # `_same_magnitude_number` is a STRING relation (the longer digits are the
-        # shorter followed only by zeros), never a magnitude table, so it decides
-        # "unjudged" vs "lost" without folding anything.
-        if any(quote_scale
-               or (content_scale
-                   and _same_magnitude_number(content_core, quote_core))
-               for _qa, quote_core, quote_scale in missing
-               for _ca, content_core, content_scale in content_slots):
+        #     million` is the same value in two forms;
+        #   * a missing SCALED value with no counterpart at all (`3 million
+        #     events` dropped from a content that kept `4 batches`) is a DROP,
+        #     not a magnitude question.
+        # `_magnitude_in_play` is a STRING relation, never a magnitude table, so
+        # it decides "unjudged" vs "lost" without folding anything.
+        if _magnitude_in_play(missing, leftovers):
             return "LAYOUT_UNJUDGED"
         return "LAYOUT_LOST"
     return "LAYOUT_RETAINED"
@@ -6424,7 +6506,8 @@ THE_ONE_CONTENT_MISSING_VALUE = (
 
 
 def test_the_fail_open_half_is_MEASURED_so_a_gap_is_not_read_as_a_LOSS():
-    """50 fail open; 29 of them retain the value, and 1 of 112 drops one.
+    """50 fail open; 29 of them retain the value, and 1 of the 10 rows where a
+    drop is VISIBLE drops one (1 of the 105 the projection can check at all).
 
     This is the difference the row could not state: the fail-open count is a
     DETECTION figure. Reading it as retention (62 of 112) leaves 29 rows of
@@ -6617,6 +6700,32 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
             "a reworded anchor must not turn a magnitude pair into a loss")
     assert v2._value_slot_divergence("we have 12 thousand events",
                                      "we have 12 million events") == ()
+    # 2d. ⛔ THREE SHAPES THE CYCLE-9 REVIEW MEASURED, all of them the same
+    #     defect one spelling further on, and all now pinned:
+    #     (i) EQUAL digits are not a magnitude pair — `3 batches` against content
+    #         `3 million events` shares the digits and is a DROP, not residual (m);
+    assert _retention_class("we shipped 3 million events",
+                            "we shipped 3 million events and 3 batches") == (
+        "LAYOUT_LOST"), (
+            "equal digits on an unscaled missing slot are not a magnitude pair")
+    #     (ii) a missing SCALED value with NO counterpart is a drop — the old
+    #          unconditional `quote_scale` arm filed the dropped `3 million` as
+    #          unjudged because it carried a scale word;
+    assert _retention_class("we shipped 4 batches",
+                            "we shipped 3 million events and 4 batches") == (
+        "LAYOUT_LOST"), "a dropped scaled value with no counterpart is a loss"
+    #     (iii) one content value cannot satisfy TWO quote values: the match is a
+    #           MULTISET, not a set (`stated` was a set, so `2 fixes` was
+    #           certified retained by the `2 bugs` slot).
+    assert _retention_class("we shipped 2 bugs",
+                            "we shipped 2 bugs and 2 fixes") == (
+        "LAYOUT_LOST"), "one content value cannot state two quote values"
+    #     (iv) a DECIMAL spelling is the same number as its digit form (`1.2`
+    #          million = 1200000, `0.5` million = 500000).
+    assert _retention_class("we have 1.2 million events",
+                            "we have 1200000 events") == "LAYOUT_UNJUDGED"
+    assert _retention_class("we have 0.5 million events",
+                            "we have 500000 events") == "LAYOUT_UNJUDGED"
     # 3. An excluded FORM is its own class — residual (c) is not a loss.
     assert _retention_class("we cut over at 2am",
                             "we cut over at 2am") == "CONTENT_EXCLUDED_FORM"
@@ -6637,22 +6746,25 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
         content for _s, _a, klass, content, _quote in _census_rows()
         if klass == "CONTENT_EXCLUDED_FORM"]
     assert len(excluded) == 7, len(excluded)
-    # 3c. ⛔ THE BLIND SPOT'S SIZE IS PINNED RATHER THAN GLOSSED (#11730 review,
-    #     cycle 8). A value dropped while the content keeps its clock is
-    #     invisible to this projection: the projection binds no slot for a clock
-    #     token, so there is nothing to compare the quote against. Measured: of
-    #     the 7 excluded rows exactly 2 bind ANY quote-side slot, and both bind
-    #     an ISO date rather than a clock (`November 2` → `2`, `November 9` →
-    #     `9`), whose digits the content restates (`2026-11-02`, `2026-11-09`) —
-    #     so those 2 ARE checkable and are checked here. The other 5 carry a
-    #     clock the projection cannot bind, which is residual (c) itself.
+    # 3c. ⛔ THE BLIND SPOT'S SIZE IS PINNED AND THE PART THAT IS CHECKABLE IS
+    #     ACTUALLY CHECKED (#11730 review, cycles 8 and 9). A value dropped while
+    #     the content keeps its CLOCK is invisible to this projection: it binds no
+    #     slot for a clock token, so there is nothing to compare the quote
+    #     against — that is residual (c) itself. But the ISO half IS checkable:
+    #     of the 7 excluded rows exactly 2 bind ANY quote-side slot, and both bind
+    #     an ISO date, which the content restates as a real date. So the check is
+    #     an AGREEMENT between the two forms, not a substring search — cycle 9
+    #     measured that `"2" in content` stayed green when the content was
+    #     rewritten to `2026-12-25` (and to the sibling row's `2026-11-09`)
+    #     against a quote that says `November 2`.
     iso_bound = [(c, q) for _s, _a, klass, c, q in _census_rows()
                  if klass == "CONTENT_EXCLUDED_FORM"
                  and v2._value_slots_scaled(q)]
     assert len(iso_bound) == 2, [q[:60] for _c, q in iso_bound]
     for content, quote in iso_bound:
-        for _anchor, core, _scale in v2._value_slots_scaled(quote):
-            assert str(core[1]) in content, (str(core[1]), content[:80])
+        assert _stated_month_day(quote) is not None, quote[:80]
+        assert _stated_month_day(content) == _stated_month_day(quote), (
+            _stated_month_day(content), _stated_month_day(quote), content[:80])
     # 4. A value-free point is not a row at all.
     assert _retention_class("the team prefers intervals",
                             "the team prefers intervals") is None
