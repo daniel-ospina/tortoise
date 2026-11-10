@@ -278,7 +278,8 @@ a docstring, a comment, a printed message, or an RST literal in
 `migrate_kinds.py:63` describing the pre-D10 shape. A pattern loose enough to
 catch a mint also catches those,
 and one narrow enough to skip them (`\(\w*:Document`) still matches **six**
-lines — the RST literals in `migrate_kinds.py:63,170`, that same
+lines — the RST literals in `migrate_kinds.py` (the pre-D10 shape comment and
+`relabel_legacy_documents`'s docstring), that same
 `cache_eviction.py:956` comment, and the rest in `hosted_backup.py` (the
 served-label declaration, the validator's docstring and `restore_backup`'s),
 which arrived with #11729. The exception is still an exception, so the exclusion

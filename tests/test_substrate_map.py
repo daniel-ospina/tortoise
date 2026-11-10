@@ -1163,7 +1163,7 @@ def test_the_label_population_is_every_tracked_file_not_just_py(monkeypatch) -> 
     Reachable — and it WAS the shipped state: `_label_hits()` walked
     `(REPO / "tortoise").rglob("*.py")` while §5's sentence states its figure in
     `git grep`'s population (all tracked files under `tortoise/`). The two sets
-    differ by **28** tracked non-`.py` files (`tortoise/onboarding/SKILL.md`,
+    differ by the tracked non-`.py` files (`tortoise/onboarding/SKILL.md`,
     `tortoise/config/*.json|*.yaml`, `tortoise/pi-hooks/*.ts`, …), so a
     `:Document` occurrence added to one of them raises the true figure while a
     `.py`-only walk keeps reporting the OLD one — the assertion then compares that
@@ -1585,10 +1585,10 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     of the number being quietly widened or the guard loosened.
 
     §5's second number is pinned with it: the narrow `\\(\\w*:Document` pattern
-    matching **six** lines now — the two RST literals in `migrate_kinds.py:63,170`,
-    that same `cache_eviction.py:956` comment, and three of `hosted_backup.py`'s
-    (`:116`, `:948`, `:3429`) that name the pre-D10 node shape in double-backtick
-    literals — is what makes *"a guard would have needed a hand-maintained
+    matching **six** lines now — the RST literals in `migrate_kinds.py` (the
+    pre-D10 shape comment and `relabel_legacy_documents`'s docstring), that same
+    `cache_eviction.py:956` comment, and the ones in `hosted_backup.py` that name
+    the pre-D10 node shape in double-backtick literals — is what makes *"a guard would have needed a hand-maintained
     allowlist"* a measurement rather than an assertion, and it moved 2 → 3 → 6 with
     the line count. The pin is exact for the same reason the
     first one is: a narrow pattern that starts matching most of the prose is the day
