@@ -1854,3 +1854,42 @@ created) by the count check, and left open because the text mutations all the gu
 are string edits. (5) The retirement scan is a bounded word list, and it now READS each row's
 continuation lines, so a claim wrapped onto a second line is caught; a synonym outside the list
 (`DELETED`, `SUPERSEDED`, `DEPRECATED`) is not.
+## 2026-11-10 — the declared set gained a SECOND SURFACE: 13 rows → 14 (`#5064` / `#11239`)
+
+`config/v4-mechanisms.yml` compared its rows against `docs/architecture/**/*.md` markers and nothing else, so a
+mechanism declared anywhere else read exactly like a shipped one. DM1 — *"a mention is **a property on the claim
+Point that carried it**"* (`docs/epics/2026-11-05-5087-extractor-v4/05-plan.md` §4) — is declared only there, while
+**no write door persists `mentions`**: `sdk._CAPTURE_PASSTHROUGH_ORDER` carries
+`quote/when/search_keys/source_turn_id/span_start/span_end`, the REST `CreatePointRequest` has no such field, and
+neither `hosted_api` nor `selfhost_api` names it. So a capture's `stats["mentions_recorded"]` counted records the
+write DISCARDS, and the gate was green over it — #5064's root sentence with one directory of margin.
+
+**What changed.** `DECLARATION_SURFACES` is `docs/architecture` + `docs/epics` (both recursive; `docs/**` stays out,
+because an unbounded scan lets unrelated prose red or silently satisfy the gate), consumed by ONE definition that
+feeds the marker walk, the attribution rule and the coverage rule. Document identity is surface-qualified when more
+than one surface is scanned, so `architecture/x.md` and `epics/x.md` cannot satisfy each other's rows. `mention_record`
+is a row: `not-implemented`, `tracking_issue: 11239`, pinned by
+`tests/test_referentiality_11021.py::test_the_mention_record_is_payload_only_and_says_so`, with
+`commit_schema.Mention` recorded as the half that IS built — and the plan states the state at the declaration site
+(`<!-- v4-mechanism: mention_record state: not-implemented -->`), so a reader of DM1 meets the absence where it is
+declared instead of inferring presence from an adopted shape.
+
+**Disposition taken, and it is the one #5064 reserved.** The issue recorded three options and left the choice to
+whoever owned closure: (a) a row + a marker in a `docs/architecture/` doc, (b) widen the scan to the plan that
+declares it, (c) record DM1 as an explicit exclusion. This is **(a) + (b)**: the row exists AND the scanned surface
+includes the plan, so the same class of declaration cannot hide in `docs/epics/` again — rather than (c), which
+would have documented the blindness instead of closing it. The alternatives were not "adopt with a caveat": (c)
+leaves the mechanism invisible, and an architecture-doc marker with no declaration behind it is the detached-marker
+limit this gate already states.
+
+**Two fail-opens found in review and fixed before landing.** (1) `_scanned_targets` returns RESOLVED paths while the
+document name was computed against the UNRESOLVED surface, so a symlinked surface made `relative_to` raise, the
+exception was swallowed, and a declared document carrying no marker reported CLEAN — now both sides resolve and an
+unnamable declared document is its own fail-closed verdict. (2) An empty surface tuple made `declaration_markers(())`
+return `({}, [])`, i.e. the state half of the gate compared nothing and reported agreement — now a first-class
+`surface is EMPTY` verdict. Both are pinned by tests that fail without the guard.
+
+**Provenance.** Review cycle 1 (reviewer B: the two fail-opens above, both measured; reviewer A: the disposition had
+to be relayed onto #5064, and five records still described a one-directory surface — all corrected here). The
+mechanism's absence is unchanged and still tracked by `#11239`; `#5064`'s Target 3 is not moved by this change,
+because a gate that can SEE an absence is not a mechanism that is built.
