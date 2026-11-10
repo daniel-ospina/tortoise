@@ -1091,9 +1091,15 @@ def test_a_non_str_session_identity_is_discarded_not_keyed_11382():
     with no ``id`` and no ``lme_session_index``, ``{"session_id": 5}`` and
     ``{"session_id": 6}`` are the SAME ``idx:-1`` bucket — and so is a hit
     carrying no identity at all. Pinned deliberately rather than left silent,
-    because the alternative (keying the raw int) is the raising shape this arm
-    replaces: pre-#11382 the two were distinct dict keys AND every
-    key-reading caller crashed on them. It binds only the untyped seam
+    because the alternative (keying the raw int) is the shape this arm
+    replaces: pre-#11382 the two were distinct dict keys, and the callers that
+    read the key as TEXT crashed on them — ``seeded_sessions`` (through
+    ``_is_real_session_id``'s ``.startswith``), ``coverage_loop.coverage_gap``
+    and ``reader_window_displacement``. ⚠️ Not EVERY caller did: measured on
+    the pre-fix tree, ``dedup_pool``, ``session_diverse_order`` and
+    ``reinjection_merge_order`` only DICT-KEY the value and returned normally
+    — which is why the hazard was a crash on three callers, not a universal
+    one. It binds only the untyped seam
     ``retrieval.session_key_of`` documents — no in-repo pool carries a
     non-``str`` session id — and it is the same answer the camel leg has given
     since #10540, now spelled by both.
