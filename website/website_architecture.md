@@ -366,7 +366,7 @@ Rules:
 
 ## 6.7 Icon surface (2026-11-09)
 
-One mark, on every origin, at a URL that moves when the bytes do (#11407).
+One mark, on every **Pages** origin (`premiselabs.co`, `tortoise.premiselabs.co`, `app.premiselabs.co`), at a URL that moves when the bytes do (#11407). ⚠️ **Not every origin:** the OAuth consent page is a Python string served from the API host (`tortoise/oauth.py:2210`, `_CONSENT_HTML`), it declares no icon, and that origin serves no `/favicon.ico` either (measured: 404) — tracked as **#11699**, and excluded here because no tree on disk holds the file it would have to point at.
 
 | Asset | Where | Served as |
 | --- | --- | --- |

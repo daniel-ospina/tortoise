@@ -4816,8 +4816,8 @@ class TestSiteIconAndSocialPreviewContract:
 
         ⛔ SPLIT OUT OF THE TRIO GUARD for the reason `_icon_mark_violations` is: the
         apple-touch branch fires only when a page declares `sizes=` on that link, and
-        NO page does — measured at this head, 14 pages carry 14 apple links and 0 of
-        them declare one. Inline it was therefore unreachable, and a check whose
+        NO page does — measured at this head, 24 surfaced documents carry 24 apple links
+        and 0 of them declare one. Inline it was therefore unreachable, and a check whose
         failure path never runs cannot be told apart from a no-op.
         `test_the_declared_sizes_guard_refuses_a_wrong_apple_slot` now feeds it the
         link the branch is written for, in both directions.
@@ -4880,7 +4880,7 @@ class TestSiteIconAndSocialPreviewContract:
         """NON-VACUITY: the branches no page in this tree drives must still be able to RED.
 
         ⛔ WHY. The apple-touch `sizes` branch fires only when a page declares `sizes=` on
-        that link, and none does (14 apple links, 0 declaring one, measured at this
+        that link, and none does (24 apple links, 0 declaring one, measured at this
         head), so inline it was dead code. The trio's `icon`/rel membership is the same
         class of hole from the other side: every page here spells `rel` in lower case,
         so the case-insensitive read is unobservable on the real population.
@@ -6039,12 +6039,8 @@ class TestSiteIconAndSocialPreviewContract:
                 f"{expected_pages[label]} it declares: "
                 f"{sorted(p.name for p in pages)} — a page that stopped being discovered "
                 "passes every assertion below by not being graded")
-            violations = []
-            for page in pages:
-                violations += self._surface_icon_violations(
-                    label, page.name, page.read_text(), root, expected, origins,
-                    page_url=self._page_url(page, root))
-            assert not violations, "\n".join(violations)
+            found = self._grade_surface(label, pages, root, origins, expected)
+            assert not found, "\n".join(found)
 
         # ⛔ NO GLOB REACHES THESE — they are STRINGS in TypeScript, not pages on disk, so
         # each is graded through `_surface_icon_violations` on its own text, against the
@@ -6101,19 +6097,46 @@ class TestSiteIconAndSocialPreviewContract:
                 page_url=page_url)
             assert not violations, "\n".join(violations)
 
-    def _page_url(self, page: Path, root: Path) -> str:
-        """The URL a page is SERVED at, or the site root when it cannot be derived.
+    def _grade_surface(self, label: str, pages, root: Path,
+                       origins: frozenset[str], expected: dict[str, str]) -> list[str]:
+        """Every violation on one SURFACE, driven through the real page-URL threading.
 
-        The marketing site is served from `website/`, so `website/faq.html` is `/faq.html`
-        and `website/pricing/index.html` is `/pricing/`. A project whose staged root is not
-        the page's ancestor (the dashboard's `index.html` above `public/`) falls back to the
-        site root: every one of those pages uses root-relative hrefs, so the fallback cannot
-        silently accept a document-relative one.
+        Split out of `test_every_surface_declares_the_same_versioned_icon_set` so a test can
+        drive a NESTED page through `_page_url` rather than passing `page_url=` itself: with
+        the loop inlined, replacing `page_url=self._page_url(page, root)` with `page_url=None`
+        — or making `_page_url` return a constant — left every assertion green (review
+        round 4). A guard whose threading no test executes cannot be told from a no-op.
+        """
+        violations: list[str] = []
+        for page in pages:
+            violations += self._surface_icon_violations(
+                label, page.name, page.read_text(), root, expected, origins,
+                page_url=self._page_url(page, root))
+        return violations
+
+    def _page_url(self, page: Path, root: Path) -> str | None:
+        """The URL a page is SERVED at — or `None` when this guard cannot know it.
+
+        The marketing site is served from `website/`, so `website/faq.html` is `/faq.html`.
+        (`website/pricing/index.html` would be `/pricing/`, and this resolves it correctly;
+        the MARKETING surface does not discover nested pages at all — that is #4111, not a
+        base-resolution bug.)
+
+        ⛔ `None` IS NOT THE SITE ROOT (review round 4). A project whose staged root is not
+        the page's ancestor — the dashboard's `index.html` above `public/`, the blog-admin
+        console served at `/admin`, the `/auth/confirm` Function — cannot have its served
+        path derived here, and returning `SITE_ROOT` for those pages resolved a DOCUMENT-
+        RELATIVE href against the MARKETING root and graded it green, while the browser
+        requests `/admin/favicon.ico` (answered by the admin gate Function) or
+        `/auth/favicon.ico` (a 404). Measured: `href="favicon.ico?v=…"` on
+        `apps/blog-admin/index.html`, on its committed `dist/index.html`, and in
+        `functions/auth/confirm.ts` were all green. `None` makes the collector REFUSE a
+        document-relative href instead of guessing, which is the only honest answer.
         """
         try:
             rel = page.parent.relative_to(root)
         except ValueError:
-            return self.SITE_ROOT
+            return None
         if rel == Path("."):
             return self.SITE_ROOT
         return self.SITE_ROOT + rel.as_posix() + "/"
@@ -6178,6 +6201,18 @@ class TestSiteIconAndSocialPreviewContract:
             # this surface's own origin is accepted in both the absolute and
             # root-relative spellings. `test_the_app_tree_accepts_an_absolute_href_on_
             # its_own_origin` drives all four directions through a real app page.
+            # ⛔ A DOCUMENT-RELATIVE HREF ON A PAGE WHOSE SERVED URL IS UNKNOWN IS
+            # UNGRADEABLE, NOT RESOLVABLE (review round 4). Guessing `SITE_ROOT` graded
+            # `/admin/favicon.ico` and `/auth/favicon.ico` green while the browser asked the
+            # admin gate Function and a 404 respectively. Say so instead.
+            if page_url is None and not href.startswith("/") and "://" not in href:
+                violations.append(
+                    f"{page_name} declares the document-relative icon href {href!r}, but this "
+                    "surface's served URL cannot be derived from the tree — use a "
+                    "root-relative href (`/favicon.png?v=…`), which is what every page here "
+                    "already does, or the tab request goes to a path that serves something "
+                    "else (or nothing)")
+                continue
             resolved = self._icon_ref(
                 href, origins=origins, base=page_url or self.SITE_ROOT)
             if not resolved:
@@ -6253,22 +6288,98 @@ class TestSiteIconAndSocialPreviewContract:
             if not any(token in self.ICON_RELS for token in tokens):
                 continue
             href = link.get("href", "")
-            resolved = self._icon_ref(href, origins=origins)
+            # Same base as the href loop above: resolving this one against the site root
+            # false-RED a nested page whose LOCAL `apple-touch-icon.png` was named under
+            # `rel="icon"` — a cross-relation swap that had not happened (review round 4).
+            resolved = self._icon_ref(
+                href, origins=origins, base=page_url or self.SITE_ROOT)
             if not resolved:
                 continue  # data:/foreign/not-a-URL is already reported above
-            if "apple-touch-icon" in tokens and resolved != apple_asset:
+            # ⛔ THE ASSET IS NAMED BY ITS FILE, NOT BY ITS ROOT PATH (review round 4). A
+            # nested page's own `apple-touch-icon.png` resolves to `/settings/…`, which is
+            # not `/apple-touch-icon.png`, so a path comparison false-RED a page that had
+            # swapped nothing. The relation names an ASSET, so the file name is the test.
+            if "apple-touch-icon" in tokens and Path(resolved).name != self.ICON_APPLE:
                 violations.append(
                     f"{page_name} declares {href!r} under rel=\"apple-touch-icon\", but "
                     f"that relation names {apple_asset} — iOS keys the saved home-screen "
                     "mark off this relation and resolves competing links to one, so a "
                     "cross-relation extra can replace the opaque 180 px tile with a "
                     "rounded/transparent one (#11407)")
-            elif "icon" in tokens and resolved == apple_asset:
+            elif "icon" in tokens and Path(resolved).name == self.ICON_APPLE:
                 violations.append(
                     f"{page_name} declares {href!r} under rel=\"icon\", but that is the "
                     "apple-touch-icon asset — a relation names an ASSET here, so a "
                     "cross-relation extra swaps a mark rather than adding one (#11407)")
         return [f"{label}: {v}" for v in violations]
+
+    def test_a_document_relative_icon_href_needs_a_known_page_url(self, tmp_path):
+        """A page whose served URL cannot be derived must REFUSE a relative href.
+
+        Three real surfaces are in that position — the blog-admin console (served at `/admin`
+        and `/admin/`, and `website/apps/blog-admin/vite.config.ts` documents the RFC 3986
+        merge), the dashboard's `index.html` (above `public/`), and the `/auth/confirm`
+        Function (rendered at `/auth/confirm`). For all three the guard cannot know the base,
+        and returning the SITE ROOT for them resolved `favicon.ico?v=…` against the MARKETING
+        root and graded it green while the browser requested `/admin/favicon.ico` (answered by
+        the admin gate Function) or `/auth/favicon.ico` (a 404).
+
+        This also pins the THREADING: `_page_url` is exercised here (not bypassed with an
+        explicit `page_url=`), and `_grade_surface` is the same path the real surface loop
+        takes — so making `_page_url` return a constant, or dropping the argument in the loop,
+        reds here.
+        """
+        expected = {f"/{name}": hashlib.sha256((self.WEB / name).read_bytes()).hexdigest()[:12]
+                    for name in self.ICON_FILES}
+        for name in self.ICON_FILES:
+            (tmp_path / name).write_bytes((self.WEB / name).read_bytes())
+
+        # ---- `_page_url` itself, both branches -------------------------------------
+        assert self._page_url(self.WEB / "faq.html", self.WEB) == self.SITE_ROOT
+        assert self._page_url(self.WEB / "pricing" / "index.html", self.WEB) == (
+            self.SITE_ROOT + "pricing/")
+        assert self._page_url(
+            self.WEB / "apps" / "dashboard" / "index.html", tmp_path) is None, (
+            "a page whose staged root is NOT its ancestor has no derivable served URL — "
+            "returning the site root here is what graded /admin and /auth/favicon.ico green")
+
+        # ---- a nested page, through the REAL surface loop --------------------------
+        nested = tmp_path / "settings"
+        nested.mkdir()
+        for name in self.ICON_FILES:
+            (nested / name).write_bytes((self.WEB / name).read_bytes())
+        relative = (self.WEB / "apps" / "dashboard" / "public" / "signup.html").read_text()
+        for name, digest in expected.items():
+            relative = relative.replace(f'href="{name}?v={digest}"', f'href="{name.lstrip("/")}?v={digest}"')
+        nested_page = nested / "index.html"
+        nested_page.write_text(relative)
+
+        assert self._grade_surface(
+            "sandbox", [nested_page], tmp_path, self.ICON_ORIGINS, expected) == [], (
+            "a nested page's document-relative hrefs resolve against ITS OWN directory, where "
+            "the same three files are present — this is the case that proves the threading: "
+            "with `page_url=None` (or a constant base) it resolves against the site root")
+
+        # ---- and a relative href with NO derivable base is reported ---------------
+        orphan = tmp_path / "orphan"
+        orphan.mkdir()
+        (orphan / "index.html").write_text(relative)
+        found = self._grade_surface(
+            "sandbox", [orphan / "index.html"], nested, self.ICON_ORIGINS, expected)
+        assert found, (
+            "a document-relative href on a page whose base cannot be derived must be REFUSED, "
+            "not silently resolved against the site root")
+        assert "document-relative icon href" in found[0], found[0]
+
+        # ---- and a root-relative href on the same kind of page is still fine ------
+        rooted = relative
+        for name, digest in expected.items():
+            rooted = rooted.replace(f'href="{name.lstrip("/")}?v={digest}"', f'href="{name}?v={digest}"')
+        (orphan / "index.html").write_text(rooted)
+        assert self._grade_surface(
+            "sandbox", [orphan / "index.html"], nested, self.ICON_ORIGINS, expected) == [], (
+            "an absolute (root-relative) href needs no base, so the fallback must not refuse "
+            "it — that would be a false red on every real page")
 
     def test_the_app_tree_grades_the_icon_rel_by_name(self):
         """NON-VACUITY for the app-tree half: a swapped `rel` must red, both directions.
