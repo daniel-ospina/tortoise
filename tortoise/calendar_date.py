@@ -430,14 +430,27 @@ def _string_instant(s: str) -> datetime | None:
     #
     # ⚠ NOT the same shape set as the day view, and the difference is
     # DELIBERATE (cycle 7, finding 1 — an earlier version of this comment
-    # claimed parity, which would invite the one change this module forbids):
-    # the day view's TOLERANT PREFIX fallback dates values whose tail is
-    # unreadable (``2023-05-20 02:21 PDT``, ``… (approx)``, ``T24:00``), and the
-    # instant view must NOT widen to it. An unreadable tail means the INSTANT is
-    # unknown while the stated DAY is known; deriving an instant there would
-    # fabricate one, which is the whole distinction this module exists to keep.
-    # So: the INSTANT view takes whole-value families only; the DAY view takes
-    # those AND the tolerant prefix.
+    # claimed parity, which would invite the one change this module forbids).
+    # TWO kinds of divergence, and they have different mechanisms:
+    #
+    # 1. the day view's TOLERANT PREFIX fallback dates a value whose tail is
+    #    unreadable (``2023-05-20 02:21 PDT``, ``… (approx)``, ``T+05:00``), and
+    #    the instant view must NOT widen to it. An unreadable tail means the
+    #    INSTANT is unknown while the stated DAY is known; deriving an instant
+    #    there would fabricate one, which is the whole distinction this module
+    #    exists to keep;
+    # 2. one WHOLE-VALUE shape also diverges, and it is NOT the prefix:
+    #    ``2023-05-20T24:00:00`` matches BOTH views' grammar. The day view takes
+    #    its stated DATE (``_match_date``), while the instant view refuses the
+    #    hour (``_match_naive`` → ``None``) — hour 24 is not a clock reading, so
+    #    there is no instant to name. Verified by patching ``_prefix_date`` out:
+    #    the day is still dated. ⛔ Do not "fix" this by letting ``_match_naive``
+    #    roll 24:00 to the next midnight: that invents an instant from an hour
+    #    the value does not have.
+    #
+    # So: the INSTANT view takes whole-value families whose instant it can
+    # actually state; the DAY view takes everything whose calibrated day is
+    # readable, by whole-value grammar OR by prefix.
     #
     # ⚠ The claim is scoped to THIS arm, not universal: the compact /
     # ISO-week date with an OFFSET and no time is whole-value and day-dated

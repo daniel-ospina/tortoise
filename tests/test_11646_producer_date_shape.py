@@ -696,6 +696,11 @@ def test_the_instant_view_takes_whole_value_date_times_and_refuses_unreadable_ta
     # ⛔ the DAY is known, the INSTANT is not: the day view dates these and the
     # instant view must keep refusing them. Fabricating UTC midnight here would
     # invent an instant from text that says none — the class #11646 exists to end.
+    # NOTE the two mechanisms differ: ``T24:00:00`` is WHOLE-VALUE (it matches
+    # both views' grammar; the day view takes the stated date, the instant view
+    # refuses hour 24), while the other three diverge through the tolerant
+    # PREFIX fallback. Both are asserted here because both are divergences a
+    # later lane could "harmonise" in the fabricating direction.
     for unreadable_tail in ("2023-05-20 02:21 PDT",
                             "2023/05/20 (Sat) 02:21 (approx)",
                             "2023-05-20T24:00:00",
@@ -713,8 +718,10 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
     ``datetime.timestamp()`` in the READER'S zone. That was invisible before
     #11646: ``_created_sort_key`` bucketed the shape as unparseable, so
     ``validate_validity_window`` (which orders with the SAME measure) skipped
-    the pair on every host. Now the bound IS orderable, so a window mixing it
-    with an ISO bound is refused or accepted depending on where the read runs.
+    the pair on every host. Now the bound IS orderable, so a MIXED PAIR whose
+    two bounds fall within the reader's zone offset of each other can be
+    refused on one host and accepted on another — only a pair that close
+    diverges, which the scoping note on the assertions below states.
 
     Recorded, not endorsed: fixing it means either revisiting the ``#3982``
     ruling or giving the producer's shape its own deterministic anchor — the
