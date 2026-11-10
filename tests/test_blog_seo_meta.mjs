@@ -1900,9 +1900,15 @@ console.log("the blog's link preview and icon");
   const links = [...shell.matchAll(/<link\b[^>]*>/g)].map((m) => m[0]);
   const linkAttr = (tag, name) =>
     (tag.match(new RegExp(`\\b${name}="([^"]*)"`)) ?? [])[1] ?? null;
+  // ⛔ THE QUERY IS SPLIT OFF THE HREF (#11407). Every icon href carries a
+  // `?v=<sha256[:12]>` cache-buster so a re-exported mark cannot leave a browser (or an
+  // edge holding a 4-hour `max-age`) drawing the superseded artwork; an equality test on
+  // the raw attribute then fails on a correct tag. The PATH is still what has to match,
+  // so `rel=preload` — the defect this reader exists for — is still refused.
+  const hrefPath = (tag) => (linkAttr(tag, "href") ?? "").split("?")[0];
   const linkWith = (rel, href) =>
     links.find((tag) =>
-      (linkAttr(tag, "rel") ?? "").split(/\s+/).includes(rel) && linkAttr(tag, "href") === href);
+      (linkAttr(tag, "rel") ?? "").split(/\s+/).includes(rel) && hrefPath(tag) === href);
 
   assert(
     links.length > 0,
@@ -1920,6 +1926,33 @@ console.log("the blog's link preview and icon");
     Boolean(linkWith("apple-touch-icon", "/apple-touch-icon.png")),
     "the blog shell links /apple-touch-icon.png as rel=apple-touch-icon — iOS otherwise draws a page screenshot",
   );
+  // ...and each of the three is VERSIONED, which is what makes the tab repaint after the
+  // artwork changes. The static pages are held to the same property by
+  // `test_every_surface_declares_the_same_versioned_icon_set`.
+  for (const [rel, href] of [
+    ["icon", "/favicon.ico"],
+    ["icon", "/favicon.png"],
+    ["apple-touch-icon", "/apple-touch-icon.png"],
+  ]) {
+    // ⛔ THE SAME PREDICATE AS THE PRESENCE ASSERTIONS ABOVE — `linkWith` (not a second,
+    // inlined copy of it). Two spellings of "is this link here" drift: a later edit to one
+    // (e.g. also matching `sizes`) would silently not apply to the other, so the version
+    // check would grade a tag the presence check never looked at (review round 10).
+    const tag = linkWith(rel, href);
+    // ⛔ A MISSING LINK IS ALREADY A REPORTED FAILURE ABOVE, AND `assert` DOES NOT THROW IN
+    // THIS FILE (`fail` only increments a counter). Dereferencing `undefined` here threw an
+    // uncaught `TypeError`, which aborts the MODULE — so the card assertions below never ran
+    // and the aggregate summary never printed. Measured on a `_lib.ts` copy with the
+    // `favicon.png` link removed: 31,713 assertions executed and no summary, against 31,729
+    // and a printed summary with this guard (16 lost). One defect must not hide the rest
+    // (the same rule `test_website_static.py` states for its foreign-href direction).
+    if (tag === undefined) continue;
+    assert(
+      /\?v=[0-9a-f]{12}$/.test(linkAttr(tag, "href") ?? ""),
+      `the blog shell links ${href} with a ?v=<sha256[:12]> cache-buster that moves when the bytes do (#11407) — got ${linkAttr(tag, "href")}`,
+    );
+  }
+
   assert(
     !shell.includes("favicon.svg"),
     "the blog no longer links its own SVG mark, so the tab glyph does not change between / and /blog",

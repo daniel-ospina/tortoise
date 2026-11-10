@@ -1134,9 +1134,9 @@ export function htmlPage(opts: { head: string; body: string; extraHead?: string 
 <html lang="en">
 <head>
 ${opts.head}
-<link rel="icon" href="/favicon.ico" sizes="32x32 48x48">
-<link rel="icon" type="image/png" href="/favicon.png" sizes="256x256">
-<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" href="/favicon.ico?v=62885cadb6d1" sizes="32x32 48x48">
+<link rel="icon" type="image/png" href="/favicon.png?v=49f77b817262" sizes="256x256">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png?v=d528e4e4021a">
 ${opts.extraHead ?? ""}
 <style>
 :root{--bg:#060b14;--bg-soft:#0b1220;--text:#cbd5e1;--text-dim:#94a3b8;--accent:#06b6d4;--border:#1e293b;--serif:Georgia,'Times New Roman',serif;--mono:ui-monospace,SFMono-Regular,'SF Mono',Menlo,'Cascadia Code','Fira Code','JetBrains Mono',monospace}
