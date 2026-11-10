@@ -7439,12 +7439,17 @@ def test_the_define_without_require_refusal_is_NOT_defeated_by_the_row_ID_spelli
     passed: the guard was inert for one character of edit. Non-vacuity is the last leg — the same
     declaration over a table with no sixth row is still not refused, so the arm is not simply
     always-firing.
+
+    ⛔ SEPARATORS ARE SPELLING TOO, and the first fix of this arm's subject missed them: measured at
+    `01a73846ad70`, `E.6` / `E-6` / `E 6` were still NOT refused (`family='e.6'`), because `_plain`
+    strips markdown emphasis but leaves an INTERIOR separator. They are in the loop below, so the
+    mutant is any one of them — the guard's claim is *whatever the row calls itself*.
     """
     pins = check.parse_pins(PREREG.read_text())
     rows = check.parse_criteria_rows(PREREG.read_text())
     derived = check.derive_corpus_facts(pins)
     pins["required_criteria_rows"] = list(check.CORE_REQUIRED_CRITERIA)
-    for spelling in ("E6", "E6a", "e6", "E6 (declared)", "**E6**"):
+    for spelling in ("E6", "E6a", "e6", "E6 (declared)", "**E6**", "E.6", "E-6", "E 6"):
         respelled = [dict(r) for r in rows]
         for row in respelled:
             if row["id"] == "E6":
@@ -7455,6 +7460,29 @@ def test_the_define_without_require_refusal_is_NOT_defeated_by_the_row_ID_spelli
     # non-vacuity: the refusal is about the ROW, not about the declaration being core
     failures = check.check_pins(pins, derived, [r for r in rows if r["id"] != "E6"])
     assert not any("the criteria table carries" in f for f in failures), failures
+
+
+def test_criterion_family_normalizes_only_what_it_claims_to():
+    """`criterion_family` is what the reverse-shape guard binds on, so its contract is pinned.
+
+    Sub-rows collapse to their slot (`E2a`/`E2b` → `e2`), markdown emphasis and INTERIOR separators
+    are irrelevant (`E.6` → `e6`), and a DIGIT RUN stays whole — `E10` is not `E1`, which is what
+    keeps a future tenth row from being read as the first one's slot. A cell that is not a
+    criterion id at all keeps its normalized text (`sixth` → `sixth`), so the guard's control leg
+    (a table with no sixth row) cannot be satisfied by mapping everything to one slot.
+    """
+    assert check.criterion_family("E6") == "e6"
+    assert check.criterion_family("`E6`") == "e6"
+    assert check.criterion_family("E6a") == "e6"
+    assert check.criterion_family("e6") == "e6"
+    assert check.criterion_family("E6 (declared)") == "e6"
+    assert check.criterion_family("E.6") == "e6"
+    assert check.criterion_family("E-6") == "e6"
+    assert check.criterion_family("E 6") == "e6"
+    assert check.criterion_family("E2a") == "e2"
+    assert check.criterion_family("A4") == "a4"
+    assert check.criterion_family("E10") == "e10"
+    assert check.criterion_family("sixth") == "sixth"
 
 
 def test_the_capstone_is_refused_when_the_sixth_row_is_absent():

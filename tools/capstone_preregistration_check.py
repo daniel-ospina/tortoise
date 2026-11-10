@@ -628,12 +628,19 @@ def is_placeholder(cell: str) -> bool:
 #: on purpose, because the refusal below is about the slot being DEFINED while the gate never
 #: demands it, not about the row's label. ⛔ #11688 review, issue 1: the exact-membership test this
 #: replaces was defeated by spelling the row `E6a` — one character, and the guard was inert.
-_CRITERION_FAMILY = re.compile(r"^([a-z]\d+)", re.IGNORECASE)
+#:
+#: ⛔ AND SEPARATORS COUNT AS SPELLING TOO. `_plain` removes markdown emphasis but leaves an
+#: INTERIOR `.`/`-`/space, so `E.6` / `E-6` / `E 6` still read as a family of their own and the
+#: refusal stayed inert for them — measured at `01a73846ad70` (refused=False for all three, while
+#: `E6a`/`e6`/`E6 (declared)`/`**E6**` were refused). The cell is a LABEL, not a path or a number,
+#: so every non-alphanumeric is dropped before the slot is read: `E.6` → `e6`. A digit run stays
+#: whole, so `E10` is never `E1`.
+_CRITERION_FAMILY = re.compile(r"^([a-z]\d+)")
 
 
 def criterion_family(row_id: str) -> str:
-    """The slot a criterion row names: markdown-stripped, casefolded, sub-row suffix removed."""
-    plain = _plain(row_id).casefold()
+    """The slot a criterion row names: markdown- and separator-stripped, casefolded, no sub-row."""
+    plain = re.sub(r"[^a-z0-9]", "", _plain(row_id).casefold())
     match = _CRITERION_FAMILY.match(plain)
     return match.group(1) if match else plain
 
