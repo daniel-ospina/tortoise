@@ -1,10 +1,16 @@
 # #4282: four of the seven tests this PR removed were removed with the methods they pin —
 # `test_a_multi_source_point_prefers_the_source_that_has_an_entity`,
 # `test_chain_keeps_a_stable_key_set_when_the_source_has_no_references_edge`,
-# `test_reads_do_not_raise_when_the_raw_is_unreachable`,
-# `test_the_read_path_filters_a_pre_existing_payload_bearing_source` — which this PR
-# deletes outright (see `tortoise/sdk_retired.py`). The surviving capture door is driven
-# by the rest of this file under its private name `_capture_session`.
+# `test_reads_do_not_raise_when_the_raw_is_unreachable` — plus
+# `test_the_read_path_filters_a_pre_existing_payload_bearing_source`, which pinned
+# **TWO** drivers and only ONE of them left (see `tortoise/sdk_retired.py`). Its first
+# half drove `get_provenance_chain` (deleted, so that half goes with the method); its
+# second half drove `get_entity`, which SURVIVES (`sdk.py::TortoiseSDK.get_entity` →
+# `_get_entity`, and its `:Source` payload filter is still live) — so that half is
+# RE-AIMED onto `test_the_root_read_path_filters_a_pre_existing_payload_bearing_source`
+# below, which already builds the legacy payload-bearing node.
+# The surviving capture door is driven by the rest of this file under its private name
+# `_capture_session`.
 #
 # ⛔ The other THREE were RESTORED (#10226 review, 2 × P1 + 1 × P2) because their drivers
 # all SURVIVE and only the removal ledger said otherwise — the same "cut because it
@@ -893,6 +899,20 @@ def test_the_root_read_path_filters_a_pre_existing_payload_bearing_source(sdk):
     troot = trav["entity"]
     assert "content" not in troot and "text" not in troot, sorted(troot)
     assert body not in repr(trav), "tortoise_traverse handed the raw payload back"
+
+    # The THIRD door onto the same node: the PRIMARY entity read (`sdk._get_entity`,
+    # exposed as the MCP tool `tortoise_get_entity`), whose filter is the round-4 fix of
+    # the same #5196 defect. #10226 review, P2: the assertion that pinned it was the
+    # SECOND half of `test_the_read_path_filters_a_pre_existing_payload_bearing_source`,
+    # and that test was removed for its FIRST half's driver (`get_provenance_chain`) —
+    # so the removal took a live pin with it, and a regression that re-served the raw
+    # payload bytes through `get_entity` passed CI green. Re-aimed here, on the node
+    # this test already poisons.
+    ent = s.get_entity(RAW_URL)
+    assert "content" not in ent and "text" not in ent, sorted(ent)
+    assert body not in repr(ent), "get_entity handed the raw payload back"
+    # …and the filter must not eat the declared surface.
+    assert ent.get("url") == RAW_URL and ent.get("contentHash") == "h1", ent
 
 
 def test_an_undeclared_document_prop_is_persisted_but_never_served(sdk):
