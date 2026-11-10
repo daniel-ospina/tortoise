@@ -1064,16 +1064,20 @@ def test_both_exit_code_lists_name_every_no_port_cause_the_sentence_produces():
     """The two exit-code lists are PROSE, and nothing pinned them, so they drifted
     from the code twice in one review (`#11675` rounds 13 and 15).
 
-    `cmd_alive` returns `9` for three different on-disk facts — no port file, a port
-    file that carries no port value (zero bytes, or only whitespace, which the read
-    strips), and a port file whose content could not be read — and its sentence names
-    all three. The header table and the `cmd_alive` list each enumerate the causes
-    independently; both said "is empty, or could not be read" while the third existed,
-    so a reader auditing the exit code from the list alone was told about two of the
-    three. The in-code list even says it "must not drift from" the header table, which
-    is exactly what happened.
+    `cmd_alive` returns `9` for four on-disk facts, and its sentence names each: no
+    port file; a file that is EMPTY; a file holding content that is not a port number
+    (which is where a whitespace-only file lands — `$(cat …)` strips only trailing
+    newlines, so `"   "` survives as a non-empty non-number and used to reach exit 7);
+    and a file whose content could not be read. The header table and the
+    `cmd_alive` list each enumerate those causes independently; both have now been
+    wrong in both directions, and the in-code list even says it "must not drift from"
+    the header table — which is exactly what happened.
 
-    RED on the pre-fix text: neither block mentions `whitespace`.
+    ⛔ Each check is scoped to the `9 …` CLAUSE, not the whole comment block, because
+    the same block also carries `12 the pid FILE itself could not be read`: a
+    block-wide `"could not be read" in block` is satisfied by the pid-file clause, so
+    deleting the CAUSE from the port clause stayed green (measured). The clauses are
+    separated by the lists' own `·`, so the segment is the unit.
     """
     blocks = []
     current: list[str] = []
@@ -1083,22 +1087,31 @@ def test_both_exit_code_lists_name_every_no_port_cause_the_sentence_produces():
             current.append(stripped)
             continue
         if current:
-            blocks.append(" ".join(current).lower())
+            blocks.append(" ".join(current))
             current = []
     if current:
-        blocks.append(" ".join(current).lower())
-    port_lists = [b for b in blocks if "no port is known" in b]
+        blocks.append(" ".join(current))
+    port_lists = [b for b in blocks if "no port is known" in b.lower()]
     assert len(port_lists) == 2, (
         "expected exactly two exit-code lists naming the no-port state (the header "
         f"table and `cmd_alive`'s), found {len(port_lists)} — a list that moved, "
         "merged or vanished makes this pin vacuous instead of red")
     for block in port_lists:
-        for cause in ("whitespace", "could not be read"):
-            assert cause in block, (
+        clauses = [c for c in block.split("\u00b7") if "no port is known" in c.lower()]
+        assert len(clauses) == 1, (
+            "the no-port state must be described by exactly one `·`-separated clause "
+            f"of an exit-code list, found {len(clauses)}: {block[:300]}")
+        clause = clauses[0].lower()
+        for cause in ("empty", "not a port number", "could not be read"):
+            assert cause in clause, (
                 f"an exit-code list enumerates the no-port causes without naming "
                 f"{cause!r}, which `cmd_alive` does produce — a reader auditing the "
                 "code from the list alone is told about fewer causes than exist: "
-                + block[:400])
+                + clause[:400])
+        assert "none" in clause or "no port was recorded" in clause, (
+            "an exit-code list omits the ABSENT cause (no port file at all), which is "
+            "the one `alloc`-never-ran state the whole code exists to report: "
+            + clause[:400])
 
 
 def test_a_later_refusal_outranks_an_earlier_boot(tmp_path: Path, state) -> None:
@@ -1239,8 +1252,8 @@ def test_the_no_port_verdict_does_not_borrow_an_untaken_identity_leg(
         assert "port file EXISTS" in verified.stdout, (
             "a readable-but-empty port file was reported as one that was never "
             "recorded, in the MATCHED-witness sentence: " + verified.stdout)
-        assert "carries no port value" in verified.stdout, (
-            "the no-value case must be NAMED as such, not merged into 'could not be "
+        assert "is EMPTY" in verified.stdout, (
+            "the EMPTY case must be NAMED as such, not merged into 'could not be "
             "read' — the other cause, with a different remedy (a permissions or "
             "torn-state hunt), so one sentence for both sends the reader to the "
             "wrong one: " + verified.stdout)
@@ -1276,7 +1289,7 @@ def test_the_no_port_verdict_does_not_borrow_an_untaken_identity_leg(
         (state_dir / "app.port").write_text("")
         port_empty = _script("alive", "--name", "app", env=state)
         assert port_empty.returncode == 9, port_empty.stdout + port_empty.stderr
-        assert "port file EXISTS" in port_empty.stdout and "carries no port value" in port_empty.stdout, (
+        assert "port file EXISTS" in port_empty.stdout and "is EMPTY" in port_empty.stdout, (
             "an empty port file was reported as one that was never recorded, or as "
             "one that could not be read: "
             + port_empty.stdout)
@@ -1296,7 +1309,7 @@ def test_the_no_port_verdict_does_not_borrow_an_untaken_identity_leg(
                 assert "with content but could not be read" in unreadable.stdout, (
                     "an unreadable port file was NOT named as unreadable: "
                     + unreadable.stdout)
-                assert "carries no port value" not in unreadable.stdout, (
+                assert "is EMPTY" not in unreadable.stdout and "not a port number" not in unreadable.stdout, (
                     "an unreadable port file was reported as one with no value: "
                     + unreadable.stdout)
             finally:
@@ -1311,6 +1324,25 @@ def test_the_no_port_verdict_does_not_borrow_an_untaken_identity_leg(
         assert "with content but could not be read" not in whitespace.stdout, (
             "a readable whitespace-only port file was reported as unreadable: "
             + whitespace.stdout)
+
+        # ⛔ …and NON-NEWLINE whitespace is not a port at all: `$(cat …)` strips only
+        # TRAILING NEWLINES (bash §3.5.4), so `"   "` survives the substitution as a
+        # non-empty value and used to be spliced into " on :   " and handed to
+        # `serves_now` — measured: exit 7, "does not answer an HTTP success", i.e. a
+        # SERVING verdict taken against a value that is not a port. Same for a tab and
+        # for "abc". All three now take the no-port path and say why.
+        for garbage in ("   ", "\tabc", "abc\n"):
+            (state_dir / "app.port").write_text(garbage)
+            bogus = _script("alive", "--name", "app", env=state)
+            assert bogus.returncode == 9, (
+                f"a port file holding {garbage!r} was treated as a port and put the "
+                "SERVING leg to a probe against it: " + bogus.stdout)
+            assert "not a port number" in bogus.stdout, (
+                f"a port file holding {garbage!r} was not named as a non-number: "
+                + bogus.stdout)
+            assert " on :" not in bogus.stdout, (
+                "a non-port value was spliced into the sentence as a port: "
+                + bogus.stdout)
         (state_dir / "app.port").write_text("")
 
         # …and the RECYCLED (exit 8) sentence derives its port clause from the
@@ -1323,7 +1355,7 @@ def test_the_no_port_verdict_does_not_borrow_an_untaken_identity_leg(
         assert "no port was recorded for this name" not in recycled.stdout, (
             "the RECYCLED verdict named a port absence it did not observe: "
             + recycled.stdout)
-        assert "carries no port value" in recycled.stdout, (
+        assert "is EMPTY" in recycled.stdout, (
             "the RECYCLED verdict did not carry the three-way port clause: "
             + recycled.stdout)
     finally:

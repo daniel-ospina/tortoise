@@ -78,9 +78,9 @@
 #   stopped · 6 never recorded · 10 record was ATTEMPTED and REFUSED (the process
 #   was already gone when the boot step tried to register it — `ci.yml`'s own
 #   "wrangler already died") · 1 gone (died mid-run, or it exited between the two
-#   probes) · 9 alive, but NO port is KNOWN (none was recorded — or a port file
-#   exists and carries no port value, being empty or holding only whitespace, or it
-#   could not be read), so SERVING was not checked ·
+#   probes) · 9 alive, but NO port is KNOWN (none was recorded — or a port file that
+#   is EMPTY, holds content that is not a port number, or could not be read), so
+#   SERVING was not checked ·
 #   12 the pid FILE itself could not be read, so the dump took NO verdict at all
 #   (never reported as GONE — it measured nothing). 0 is
 #   therefore never returned when the SERVING leg was not taken; the IDENTITY leg
@@ -421,9 +421,9 @@ cmd_ready() {
 # Exit codes (see the header table, which this list must not drift from):
 # 0 alive and serving · 7 alive but not serving · 8 pid recycled · 5 recorded
 # then stopped · 6 never recorded · 10 record attempted and REFUSED · 1 gone ·
-# 9 alive but no port is KNOWN (none recorded, or the port file carried no port
-#   value — empty, or only whitespace — or it could not be read), so SERVING was
-#   not checked · 12 the pid FILE
+# 9 alive but no port is KNOWN (none recorded, or the port file is EMPTY, holds
+#   content that is not a port number, or could not be read), so SERVING was not
+#   checked · 12 the pid FILE
 # itself could not be read, so NO verdict was taken (never reported as gone).
 cmd_alive() {
   local name
@@ -432,26 +432,42 @@ cmd_alive() {
   dir="$(state_dir)"
   pfile="$dir/${name}.pid"
   port="$(cat "$dir/${name}.port" 2>/dev/null || true)"
+  # ⛔ A PORT IS A NUMBER, and `$(cat …)` is not a validator: it strips only
+  # TRAILING NEWLINES (bash §3.5.4), so a file holding "   " yields port="   ",
+  # which is non-empty — it would be spliced into " on :   ", handed to
+  # `serves_now`, and reported as exit 7 "does not answer an HTTP success", i.e. a
+  # SERVING leg measured against a value that is not a port. Measured before this
+  # guard: "   ", "<tab>" and "abc" each returned 7 with the whitespace/value in the
+  # sentence. A non-numeric value is no more a port than an absent file, so it takes
+  # the no-port path — where the clause says which shape it was.
+  [[ "$port" =~ ^[0-9]+$ ]] || port=""
   # ⛔ The SAME absent-vs-unreadable rule as the pid file and the start-time
   # witness below: `cat … || true` collapses them, and a port that EXISTS but
   # cannot be read is a permissions/torn-state fault, not "alloc never ran". The
-  # sentence may not name an absence the probe did not observe — and it is THREE
-  # states, not two: ABSENT (`! -f`), EXISTS with a readable file that yields no port
-  # value (`-f`, and either `! -s` or `-r` — the read SUCCEEDED and returned nothing,
-  # which a whitespace-only file also does once command substitution strips the
-  # newlines), and EXISTS with content that could not be read (`-s` AND `! -r` — the
-  # permission positive, since `-s` is a size test that needs no read access).
-  # Reporting a successful empty read as an unreadable file is the same conflation in
-  # the other direction, and a `-s`-only gate did exactly that (#11675 review,
-  # findings 4/5).
+  # sentence may not name an absence the probe did not observe, and it must say which
+  # shape it actually saw. FOUR on-disk facts reach this point with no usable port:
+  #
+  #   no file                                  -> "no port was recorded for this name"
+  #   file, size 0                             -> "… but is EMPTY"
+  #   file, size > 0, readable, not a number   -> "… holds content that is not a port number"
+  #   file, size > 0, unreadable (`! -r`)      -> "… with content but could not be read"
+  #
+  # The last two are separated by `-r`, the POSIX permission primary — `-s` alone is a
+  # SIZE test that passes on a file this uid cannot read, so gating on `-s` alone
+  # reported a successful empty read as unreadable (measured, #11675 review 4/5). The
+  # non-numeric arm is what a whitespace-only file now lands in, because the guard
+  # above blanks it: `$(cat …)` strips only trailing newlines, so "   " survives as a
+  # non-empty value that is not a port (measured: it used to reach exit 7).
   local no_port_clause="no port was recorded for this name"
   local port_unreadable=""
   if [[ -z "$port" && -f "$dir/${name}.port" ]]; then
     port_unreadable="${name}.port"
     if [[ -s "$dir/${name}.port" && ! -r "$dir/${name}.port" ]]; then
       no_port_clause="a port file EXISTS (${port_unreadable}) with content but could not be read"
+    elif [[ -s "$dir/${name}.port" ]]; then
+      no_port_clause="a port file EXISTS (${port_unreadable}) and holds content that is not a port number"
     else
-      no_port_clause="a port file EXISTS (${port_unreadable}) but carries no port value (empty, or only whitespace)"
+      no_port_clause="a port file EXISTS (${port_unreadable}) but is EMPTY"
     fi
   fi
   local at_port="" stranger=""
