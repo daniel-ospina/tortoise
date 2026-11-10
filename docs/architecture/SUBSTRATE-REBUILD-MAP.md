@@ -234,7 +234,7 @@ private helpers still has those call sites to consider.
 
 `vet_gate.py` is consequently **not** a `depends on` leaf: it carries one
 internal dependency of its own — `value_gate`, the stdlib-only identifier
-predicate that both it and `extractor_v2` import (`vet_gate.py:149`).
+predicate that both it and `extractor_v2` import (`vet_gate.py:150`).
 `tools/substrate_map_check.py`'s `check_leaf_rows` re-measures exactly this: a
 row whose `depends on` cell says `*leaf*` must import nothing under `tortoise/`
 at module level, and a row that does is a drift (§10).
@@ -258,10 +258,16 @@ symbol pair this guard does check: the writers' retired-key allowlist
 
 **How to read a line pointer in this section:** the interface-map table above is
 frozen at the frontmatter's `measured_at_commit`, so its line numbers are as-of
-that commit and drift at head by design. The pointers in *this* subsection's
-prose are maintained at HEAD — that is what
-`test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names` checks — and
+that commit and drift at head by design. The **symbol-anchored** pointers in
+*this* subsection's prose are maintained at HEAD — that is what
+`test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names` checks; the
+bare `cache_eviction.py:<n>` pointer is pinned by
+`test_every_cited_line_in_this_section_still_carries_the_prose_it_describes` — and
 a pointer that legitimately names a past commit marks it ("at `4f68a2aa7`").
+(The other bare `file.py:<n>` pointers in this section — `extractor_v2.py:157`,
+`extractor_v2.py:8464`, `source_identity.py:271`, the `quota.py` sites — carry no
+pin of their own; they are prose that a reader re-derives, and this sentence must
+not claim otherwise.)
 Without that sentence the two conventions look like one, and a reader who
 re-derives the stale half concludes the live half is stale too.
 

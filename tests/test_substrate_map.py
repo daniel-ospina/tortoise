@@ -53,7 +53,7 @@ _LABEL_CLAIM = re.compile(
 #: The POPULATION §5 states its figure over, read out of the count sentence itself.
 #: Without this, §5 could say `files under `tests/`` and stay green — measured: 43 passed
 #: and `substrate_map_check --check` CLEAN while the sentence claimed the `tortoise/`
-#: figure for `tests/`, which actually has 153 lines across 27 files. The adjacent
+#: figure for `tests/`, which is several times larger than the one this pin measures. The adjacent
 #: quoted `git grep` still carried `-- tortoise/`, so only the prose population was
 #: free to lie — and §5's own next sentence ("re-derives both numbers over the **same**
 #: population this sentence is stated in") asserts the very thing nothing read.
@@ -1350,7 +1350,7 @@ def test_a_leaf_row_that_imports_internally_is_drift() -> None:
     Reachable, and it WAS the shipped state (#5086 review cycle 5, P2 — the half
     of finding 3 the inbound-count fix left behind): the interface map's `depends
     on` column said `*leaf*` for `vet_gate.py` while that file opens with a
-    module-level `from . import value_gate` (`vet_gate.py:149`). Every other row
+    module-level `from . import value_gate` (`vet_gate.py:150`). Every other row
     lists the modules it depends on, so the `*leaf*` cells are the only ones
     asserting EMPTINESS — and emptiness is what a lane plans a rebase on.
 
@@ -1681,7 +1681,8 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
         f"§5 states its `:Document` figure over {populations!r}, but this pin measures "
         f"`{_TRACKED_DIR}/` — the count and the file count are only true for the "
         f"population they were measured over, so naming a different one (e.g. "
-        "`tests/`, which has 153 lines across 27 files) makes the sentence false "
+        "`tests/`, a population several times larger than the one this pin measures) "
+        "makes the sentence false "
         "while every number here stays green. State `files under "
         f"`{_TRACKED_DIR}/``, or measure the population you name"
     )

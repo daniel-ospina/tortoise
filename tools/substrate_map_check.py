@@ -476,7 +476,7 @@ def check_leaf_rows(doc: str) -> list[str]:
     `*leaf*` cells are the only ones asserting EMPTINESS — and emptiness is the claim
     a lane plans a rebase on. Shipped wrong once: the `vet_gate.py` row said `*leaf*`
     while that file opens with a module-level `from . import value_gate`
-    (`vet_gate.py:149`), a defect the inbound-count fix beside it did not reach
+    (`vet_gate.py:150`), a defect the inbound-count fix beside it did not reach
     (#5086 review cycle 5, P2).
     """
     section = _section(doc, "## 5.")
