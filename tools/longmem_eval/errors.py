@@ -54,6 +54,32 @@ EVAL_ERROR_CLASSES = (
     "ingest", "parse", "unknown",
 )
 
+#: Extractor census classes that are HEALTHY SIGNATURES, never extraction
+#: failures — the extractor bumps each with **no** paired ``errors`` entry
+#: (``tortoise/extractor_v2.py``'s census docstring, "ADDITIVE ONLY") and each
+#: names a state the pipeline is DESIGNED to reach:
+#:
+#:   * ``entity_identity_held`` (#11653) — S3 held an unresolved identity
+#:     instead of minting it as a new node. The hold IS the fix, so a healthy
+#:     run reaches this state routinely: phase-2 resolution runs on every
+#:     normal ingest that has candidates.
+#:
+#: ⛔ They MUST NOT fold into ``error_census`` (#11653 review, finding 1).
+#: ``run_integrity_gate`` reads a non-empty ``error_census`` as "extraction
+#: FAILED" and returns ``reasons == []`` — which its own contract calls GREEN
+#: — so folding a healthy signature here skipped all five integrity tiers for
+#: a question with no error at all (a no-op gate), and stopped ``run.py``
+#: writing its post-ingest cache marker, so the question re-ingested on every
+#: run. Keep the fold's own stated intent: a session extraction EXCEPTION.
+NON_FATAL_EXTRACTOR_CENSUS = frozenset({"entity_identity_held"})
+
+
+def fatal_census(error_census: dict | None) -> dict:
+    """The fatal subset of an extractor census, with the non-fatal
+    HEALTHY signatures removed (see ``NON_FATAL_EXTRACTOR_CENSUS``)."""
+    return {k: v for k, v in (error_census or {}).items()
+            if k not in NON_FATAL_EXTRACTOR_CENSUS}
+
 _SITES = ("reader", "judge", "ingest")
 
 # ── #1786/#1806 retry budget constants (results-relevant knobs) ────────────

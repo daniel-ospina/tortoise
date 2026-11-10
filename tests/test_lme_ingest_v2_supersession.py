@@ -122,6 +122,22 @@ def _story_for(transcript: str) -> str:
     return "User talks about the gym."
 
 
+def _resolution_answer(user: str) -> str:
+    """D3 phase 2 in the #11653 contract: resolve nothing, and SAY that every
+    asked name is a distinct entity (under `new`).
+
+    An empty ``resolutions`` list used to mean *"no aliases → create them"*; a
+    name in NEITHER list now means *"the disambiguation did not decide"* and is
+    HELD (§4.4 I1). A fixture that stays silent would therefore create no
+    entities at all — a fixture artefact, not the behaviour under test.
+    """
+    tail = user.split("NEW ENTITY NAMES:", 1)[-1]
+    names = [ln.strip()[2:].strip() for ln in tail.splitlines()
+             if ln.strip().startswith("- ")]
+    return json.dumps({"resolutions": [],
+                       "new": [n for n in names if n and n != "(none)"]})
+
+
 def _model_with_embed(embed_fn):
     """_model() with the GRAPH MAPPER embed swappable — the dup/resume test
     ingests the SAME question twice with different embeds (edge-less first,
@@ -130,7 +146,7 @@ def _model_with_embed(embed_fn):
         if "STORY SUMMARIZER" in system:
             return _story_for(user)
         if "ENTITY RESOLUTION" in system:
-            return json.dumps({"resolutions": []})
+            return _resolution_answer(user)
         if "GAP REVIEWER" in system:
             return json.dumps({"entities": [], "events": [], "points": [],
                                "operators": [], "retractions": [],
@@ -152,8 +168,9 @@ def _model():
             return _story_for(user)
         if "ENTITY RESOLUTION" in system:
             # D3 phase-2 fallback: never guess an alias — the plan names are
-            # distinct entities (gym-plan-A superseded, gym-plan-B new).
-            return json.dumps({"resolutions": []})
+            # distinct entities (gym-plan-A superseded, gym-plan-B new), which
+            # the answer must SAY under `new` (#11653: an omitted name is HELD).
+            return _resolution_answer(user)
         if "GAP REVIEWER" in system:
             return json.dumps({"entities": [], "events": [], "points": [],
                                "operators": [], "retractions": [],
