@@ -4779,8 +4779,12 @@ def test_the_semantic_id_key_migration_selects_every_reader_of_the_contract():
     # key_properties()` takes the LAST declaration in the migration chain, and
     # `cache_projection`/`read_ledger` delegate to it. So the three READERS of
     # that contract plus the schema pin must run on a change to this file ALONE.
-    # Mutation check: removing its CORE_ALSO row (or the arm above) fails both
-    # this test and the tuple arm above with `surfaces == []`.
+    # Mutation check: removing its CORE_ALSO row no longer reds this test or the
+    # tuple arm — the record family is claimed structurally since #10080/#11728
+    # (`ci_selection.is_record_migration_path()`), so `core` is selected either
+    # way. What pins this path is the assertions below, which red if the selector
+    # stops claiming it; the family's completeness is pinned by
+    # `test_every_record_migration_selects_core_and_both_readers`.
     changed = "supabase/migrations/20261027000001_record_semantic_id_key.sql"
 
     r = _sel([changed])
@@ -4798,9 +4802,10 @@ def test_the_semantic_id_key_migration_selects_every_reader_of_the_contract():
 
 def test_every_record_migration_selects_core_and_both_readers():
     # #10080 (category A — a no-op gate): the forward record migrations were
-    # claimed by a HAND-WRITTEN `CORE_ALSO` entry each, and nothing pinned the
-    # COMPLETENESS of that enumeration — the tuple arm above pins only the paths
-    # someone remembered to add. Measured on #11703's head: of the 16
+    # claimed by HAND-WRITTEN `CORE_ALSO` coverage (11 per-file entries plus the
+    # shared `2026101200000` prefix = 12 entries for 16 members), and nothing
+    # pinned the COMPLETENESS of that enumeration — the tuple arm above pins only
+    # the paths someone remembered to add. Measured on #11703's head: of the 16
     # `supabase/migrations/*_record_*.sql` files,
     # `20261109000001_record_embedding_vector.sql` (the #11642 vector move) was
     # the ONE that selected no surface at all, so a migration-only edit to it
@@ -4869,8 +4874,10 @@ def test_the_tenancy_migration_selects_the_posture_pins():
     # deleting the sequence grant) selected NO PYTHON surface: the PGlite posture
     # suite already ran (the workflow selects it from its own `supabase/migrations/`
     # prefix output), but `tests/test_record_tenancy_guc.py` — the suite that pins
-    # this migration's text — did not. Mutation check: removing the CORE_ALSO entry makes
-    # this assertion fail with `surfaces == []`.
+    # this migration's text — did not. Mutation check: removing the CORE_ALSO
+    # entry no longer reds this assertion (`core` now comes from the structural
+    # record-family claim, #10080/#11728); the assertions below red if the
+    # selector stops claiming the path at all.
     changed = "supabase/migrations/20261025000001_record_tenancy_role_and_guc.sql"
 
     r = _sel([changed])
@@ -4892,8 +4899,10 @@ def test_the_source_canonical_index_migration_selects_the_resolver_pins():
     # that surface is ALREADY selected).
     #
     # Measured before the CORE_ALSO entry: `_sel([<this path>])` ->
-    # `surfaces: []`, `full: false`. Mutation check: removing the entry makes the
-    # assertions below fail with `surfaces == []`.
+    # `surfaces: []`, `full: false`. Mutation check: removing the entry no longer
+    # reds the assertions below — `core` comes from the structural record-family
+    # claim since #10080/#11728 — and they red if that claim is lost for this
+    # path.
     changed = "supabase/migrations/20261025000002_record_source_canonical_index.sql"
 
     r = _sel([changed])

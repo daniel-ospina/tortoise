@@ -1501,7 +1501,9 @@ SOURCE_PATTERNS = {
 # silent-drop class). No TOOL_CARVEOUTS entry is needed: that
 # tuple is redundant for any path already listed here.
 # #10080: the FORWARD RECORD MIGRATION family, claimed STRUCTURALLY rather than by
-# enumeration. `CORE_ALSO` below carries one hand-written entry per member, and
+# enumeration. `CORE_ALSO` below carries hand-written coverage per member — 11 per-file
+# entries plus the shared `supabase/migrations/2026101200000` prefix, which
+# carries `20261012000001`–`…05`, i.e. 12 entries for 16 members — and
 # nothing pinned the completeness of that list — so a member nobody registered
 # selected NO surface at all (measured on #11703's head: 1 of the 16
 # `supabase/migrations/*_record_*.sql` files). The rule keyed on
@@ -1521,8 +1523,10 @@ RECORD_MIGRATION_DIR = "supabase/migrations/"
 #   * the reader does NOT glob: `record_projection._read_migrations()` iterates
 #     the hardcoded `RECORD_MIGRATIONS` tuple, and
 #     `tests/test_9231_record_migrations_trigger.py::test_every_record_migration_the_wheel_ships_is_named`
-#     is what pins that tuple EQUAL to the shipped family, so a new
-#     `*_record_*.sql` missing from the tuple is red in CI;
+#     pins the shipped family INTO that tuple (one direction), and
+#     `tests/test_9078_record_written_by_production_path.py::test_the_record_schema_ships_with_the_wheel`
+#     pins the tuple's names INTO the shipped patterns (the other), so together a
+#     new `*_record_*.sql` missing from the tuple is red in CI;
 #   * the deploy step runs `supabase db push --linked --include-all --yes`, which
 #     applies EVERY `supabase/migrations/*.sql` — so this rule is NOT a statement
 #     about what gets applied. A non-record migration is out of scope because its
