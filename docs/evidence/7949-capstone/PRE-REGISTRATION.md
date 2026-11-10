@@ -2043,7 +2043,10 @@ the boundary is worth stating because the two neighbouring sets are deliberately
 - `REGISTERED_NON_BAR_ROWS` stays `frozenset({"A4"})`. `E6` is **not** bar-less — it carries
   `unbound_and_unexplained = 0` — so adding it there would have been a second deliberate tool change
   with its own disclosure argument, and it is not needed (§7 item 1).
-- `tools/capstone_verdict_check.py` gains `E6` to `RECOGNISED_CRITERIA` **only**. Before that, a
+- `tools/capstone_verdict_check.py` gains `E6` to `RECOGNISED_CRITERIA` **and** to `CLOSING_CRITERIA`
+  — recognition is the first half; the second is that `V9`/`--require-green`, the arm that decides the
+  epic's close, now runs over the six-row set, so a five-row GREEN table cannot close it (see the
+  correction below, which replaced this bullet's original `**only**` claim). Before either, a
   verdict table carrying an `E6` row was refused as *"not an E1–E5 or A1–A5 criterion"* — so this
   row's own §8 precondition (its add-commit strictly earlier than any `E6` scored log) could never be
 exercised, because no `E6` log could exist.
@@ -2086,8 +2089,8 @@ and `semantics` and to retire `onBoard` as `declarationOnly` with its reason, an
 `relation_write_verdict` is declarative, so the census committed IN that commit already reads **42
 declared rows — 41 `writable`, 1 `declaration-only`, 0 `predicate-not-in-allowlist`** — with an
 `effective_direction` on all 41 rows that bind a write path. (`#11237`/`#11548` owns the runtime
-WRITER, i.e. `written`, and landed 2026-11-09 — it is not what bound these rows. **SPECIAL:** the
-`verdicts` aggregate in that artifact sum over `relations[]` only; the 41 is the per-row count across
+WRITER, i.e. `written`, and landed 2026-11-09 — it is not what bound these rows.) ⚠️ Note: the
+`verdicts` aggregate in that artifact sums over `relations[]` only; the 41 is the per-row count across
 both surfaces, verified 2026-11-10: 35 `relations[]` cells + 6 per-pack hierarchy cells.
 The one `declaration-only` row is `pm`'s `onBoard`, retired **with** its reason recorded in the pack
 (a board is a VIEW over cards), which is exactly the shape the metric excludes rather than the defect
