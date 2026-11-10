@@ -1029,14 +1029,14 @@ def test_the_schema_lane_also_authorizes_the_documented_corpus_fixup(
 
     `_ensure_indexes`' docstring says the graph-metadata lane also authorizes
     exactly ONE corpus write: the `search_keys` array→string flatten inside
-    `_fix_point_search_keys`, which two `except` branches of the sweep reach.
+    `_fix_point_array_fts_props`, which two `except` branches of the sweep reach.
     That claim is only worth the test behind it, so this seeds the owed state
     (a Point whose `search_keys` is still the pre-R2 ARRAY), runs the sweep with
     the guard ARMED, and requires BOTH halves:
 
       * the flatten LANDED — so the lane really does cover the corpus write. Drop
         the `with _graph_metadata_write_scope("schema-ddl")` wrapper and the
-        `SET` is refused, `_fix_point_search_keys`' own `except Exception`
+        `SET` is refused, `_fix_point_array_fts_props`' own `except Exception`
         swallows it, `search_keys` stays an array and this assertion reddens;
       * the lane is NOT a general permission — a `CREATE` issued after the sweep
         returns is still refused (`DirectCacheWriteRefused`), which is the
@@ -1066,9 +1066,9 @@ def test_the_schema_lane_also_authorizes_the_documented_corpus_fixup(
             "CREATE (n:Point {id:'search-keys-owed', content:'owed search keys', "
             "search_keys:['alpha','beta']})"
         )
-    assert proj._array_valued_search_keys_exist(), (
+    assert proj._array_valued_fts_prop_exists(), (
         "the fixture did not create the owed fixup state — without an array "
-        "`search_keys` the sweep never reaches `_fix_point_search_keys` and "
+        "`search_keys` the sweep never reaches `_fix_point_array_fts_props` and "
         "this test would pass vacuously"
     )
 

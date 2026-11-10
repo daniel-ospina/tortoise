@@ -1069,7 +1069,7 @@ S6  COMMIT
 | arm | what it expresses | where |
 |---|---|---|
 | **generic status write** — the arm a relocation would use | `update_entity(<object>, status=…)` journals `EntityMutated`; the op classifier labels a status write `restatus` and the record carries the **applied** map. Replay is the **same** `SET n += $s` the live write ran, on the canonical label — Objects included | producer `sdk.py:33029` (`classify_entity_mutation_op`); fold `projection/__init__.py:18664` over `_ENTITY_MUTATION_STATE_OPS` (`:7383`) |
-| **`ObjectSuperseded`** — the successor form, which does **NOT** fit a relocation | live CAS fold + rebuild pass-1b sweep | `projection/entities.py:4059`; `projection/__init__.py:14280`; producer `commit_ops.apply_supersessions` |
+| **`ObjectSuperseded`** — the successor form, which does **NOT** fit a relocation | live CAS fold + rebuild pass-1b sweep | `projection/entities.py:4090`; `projection/__init__.py:14280`; producer `commit_ops.apply_supersessions` |
 
 ⚠️ **The second arm is unusable here by construction:** `apply_supersessions` only folds a live target onto a **visible, distinct successor** (`commit_ops.py:1408`), and a bare description has none — *"supersede it with nothing"* is not expressible. The relocation target is therefore `archived` **by generic status write**, never by `ObjectSuperseded`.
 

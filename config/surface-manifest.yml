@@ -2183,11 +2183,14 @@ rows:
   canonical: null
   job: 'Review graph connections (READ-ONLY — never mutates the graph). Hygiene counterpart to connect: mode=add
     surfaces related-but-missing connections as suggestions {from, to, suggested_relation, reason, similarity} (nudge,
-    don''t enforce); mode=prune flags illogical/stale IMPL/NAND connections {from, to, relation, issue, suggested_action,
-    detail} with issue in (contradictory, stale, contested) and action in (review, prune, re-point); mode=both runs
-    both and returns {add: [...], prune: [...]}. Optional scope (topic text or Point id) narrows the candidate pool
-    to the retrieval-NEAREST points — a focus filter, not an exact-match or relevance gate (mode=add also applies
-    similarity_threshold; mode=prune has no similarity bar).'
+    don''t enforce; pairs extracted from the SAME DOCUMENT Source are EXCLUDED — shared provenance is not a missing
+    connection — while a shared capture-session Source is a window, not a document, and excludes nothing, so a short
+    or empty add list is the exclusion working, not a graph with nothing to connect); mode=prune flags illogical/stale
+    IMPL/NAND connections {from, to, relation, issue, suggested_action, detail} with issue in (contradictory, stale,
+    contested) and action in (review, prune, re-point); mode=both runs both and returns {add: [...], prune: [...]}.
+    Optional scope (topic text or Point id) narrows the candidate pool to the retrieval-NEAREST points — a focus
+    filter, not an exact-match or relevance gate (mode=add also applies similarity_threshold; mode=prune has no
+    similarity bar).'
   dependency: declares TortoiseSDK.review_connections (resolves)
   lifecycle: active
   used_by: never called, tooling, docs

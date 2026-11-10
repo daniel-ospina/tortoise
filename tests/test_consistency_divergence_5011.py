@@ -1408,7 +1408,7 @@ def test_a_legacy_array_search_keys_is_not_a_divergence(proj, tmp_path):
     sides. A graph that still holds the legacy ARRAY (#5444's fixup-owed state)
     carries the same content as the flattened string, so it must not be
     reported as a content divergence — the array state has its own detector
-    (`_array_valued_search_keys_exist`), and a repair of it must not read as an
+    (`_array_valued_fts_prop_exists`), and a repair of it must not read as an
     unrecorded mutation of this check's baseline.
 
     (1) Fails if the legacy array is reported diverged.

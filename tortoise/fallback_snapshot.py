@@ -49,12 +49,16 @@ MAX_SNAPSHOT_ENTRIES = 8
 # Holds ALL non-operator points (incl. terminal statuses + outdated flag);
 # the serve-time exclusion in search_snapshot mirrors self.query's two-mode
 # semantics (#1391: terminal statuses + outdated excluded unless include_terminal).
+#
+# #11682: ``quote`` is selected because it is one of the Point FTS index's
+# DECLARED fields and the snapshot's index text must mirror that set; a point
+# without one coalesces to '' (the pre-#11682 corpus text, unchanged).
 _SNAPSHOT_QUERY = (
     "MATCH (n:Point) "
     "WHERE (n.is_operator = false OR n.is_operator IS NULL) "
     "RETURN n.id, n.content, n.pointKind, n.status, "
     "       coalesce(n.outdated, false), coalesce(n.search_keys, ''), "
-    "       coalesce(n.has_answer, false)"
+    "       coalesce(n.has_answer, false), coalesce(n.quote, '')"
 )
 
 
@@ -591,7 +595,10 @@ def build_snapshot(proj) -> dict | None:
              # A5 (#2070): stored evidence mark rides the snapshot hits —
              # wired through the degraded lane (snapshot graph carries the
              # mark when the extractor wrote it; product graphs: zero marks).
-             "has_answer": bool(r[6])}
+             "has_answer": bool(r[6]),
+             # #11682: the verbatim source text — one of the Point FTS
+             # index's declared fields, so the mirror must carry it too.
+             "quote": r[7] or ""}
             for r in rows
         ]
     except Exception as e:  # noqa: BLE001, RUF100
@@ -603,8 +610,12 @@ def build_snapshot(proj) -> dict | None:
     # R2 (#1541) D4: the corpus text is content ∪ search_keys — the
     # embedded-stack counterpart of the real backend's multi-field Point
     # FTS index (surface-11 normalization is the shared index_text builder).
-    from tortoise.sparse import index_text
-    texts = [index_text(p["content"], p["search_keys"]) for p in points]
+    # #11682 adds `quote` to BOTH sides of that parity — the real index and
+    # this corpus — so the join below is ``sparse.point_index_text``: the same
+    # declaration the real index is created from (content ∪ search_keys ∪
+    # quote). A point with no quote contributes nothing; unchanged.
+    from tortoise.sparse import point_index_text
+    texts = [point_index_text(p) for p in points]
     try:
         from tortoise.embeddings import EmbeddingModel
         model = EmbeddingModel.get()
@@ -751,12 +762,12 @@ def search_snapshot(
     if (not scored and query_vec is None) or vectors_failed:
         # Cached vectors unavailable/failed — legacy in-memory scorer (same inputs).
         # R2 (#1541) D4: the scorer sees the indexed text (content ∪
-        # search_keys) — same union the real stack indexes; the returned
-        # payload keeps the REAL content (alias text is index-only).
-        from tortoise.sparse import index_text
+        # search_keys ∪ quote, #11682) — same union the real stack indexes; the
+        # returned payload keeps the REAL content (alias text is index-only).
+        from tortoise.sparse import point_index_text
         real_content = {p["id"]: p["content"] for p in points}
         indexed = [
-            {**p, "content": index_text(p["content"], p.get("search_keys"))}
+            {**p, "content": point_index_text(p)}
             for p in points
         ]
         scored = search_points(query, indexed, threshold=threshold, limit=limit)

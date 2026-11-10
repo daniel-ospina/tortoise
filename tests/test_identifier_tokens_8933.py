@@ -1059,8 +1059,8 @@ class TestWritePathLive:
         Array-valued ``search_keys`` is a state this repo MAINTAINS, not a
         hypothetical legacy shape: ``flatten_search_keys_prop`` flattens the
         PAYLOAD, a later ``update_entity`` (``SET n += $props``, no flatten,
-        #5482) can put an array back, and ``_array_valued_search_keys_exist`` /
-        ``_array_search_keys_rows`` exist precisely because such rows can be
+        #5482) can put an array back, and ``_array_valued_fts_prop_exists`` /
+        ``_array_fts_prop_rows`` exist precisely because such rows can be
         present at any time. ``' ' + <list>`` is not a string expression, so the
         pre-fix clause made the whole ``_persist_extra_props`` statement raise
         ``Type mismatch: expected String or Null but was List`` — a write whose
