@@ -648,9 +648,18 @@ class TestResolutionNarrative:
         assert middle not in prompt, "the middle is what gets elided"
         assert v2._RESOLUTION_NARRATIVE_ELISION.strip() in prompt, (
             "the elision is marked, so a reader can see evidence is missing")
-        # review round 2: when the PIPELINE elided, the trusted turn says so
+        # review round 2: when the PIPELINE elided, the trusted turn says so.
         assert "MIDDLE is omitted" in prompt, (
             "the truncation claim belongs to the trusted turn")
+        # Review round 5: `in prompt` only proves the sentence exists SOMEWHERE
+        # — a claim emitted inside the untrusted region it describes (the
+        # marker's natural-looking neighbour) kept this suite green. The
+        # property is POSITION: the claim must sit outside the closed region,
+        # so the model can attribute it to us and a session cannot borrow it.
+        assert prompt.index("MIDDLE is omitted") > prompt.rindex(
+            "<<<END-UNTRUSTED-S1-STORY-"), (
+            "the truncation claim must sit OUTSIDE the untrusted region it "
+            "describes, or it is the session's word rather than ours")
         # ... and the constant states what the region actually carries: the
         # marker is inside the budget, not stacked on top of it (measured at
         # 4023 when the marker was added after cap//2 + cap//2).
