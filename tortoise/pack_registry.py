@@ -3436,7 +3436,8 @@ class PackRegistry:
                 direct_parents.setdefault(full_child, set()).add(parent)
                 direct_children.setdefault(parent, set()).add(full_child)
 
-        # The `core:`-prefixed spelling is the fourth kind of equivalence, and a
+        # The `core:`-prefixed spelling is one of the three equivalence families
+        # (`equivalentTo`, `LEGACY_KIND_ALIASES`, and this seed), and a
         # first-class one: a core kind is spelled BARE (`WorkItem`) by pack
         # declarations and `core:`-prefixed (`core:WorkItem`) by the classifier's
         # candidate index (`extractor_v2.CORE_OBJECT_KEYS` / `SUBJECTS` /
@@ -3589,14 +3590,15 @@ class PackRegistry:
         #   * DOWN — a root gathers all its descendants (`Object` gains
         #            `WorkItem`, then `dev:issue`/`dev:pullRequest`/…).
         #
-        # Equivalence (`equivalentTo`, `LEGACY_KIND_ALIASES`) is symmetric and is
-        # traversed inside BOTH, because equivalent kinds have the same
-        # extension. The bare↔namespaced pair is NOT one of these — it is the
-        # ONE-DIRECTIONAL `bare_inherits` relation seeded above (a bare bucket
-        # gains its namespaced forms; a namespaced bucket does not gain the bare
-        # name), and it enters the walk through `sources` rather than through
-        # `equivalences`. That is why `expand_kind("issue")` carries `dev:issue`
-        # while `expand_kind("dev:issue")` carries no bare `issue`.
+        # Equivalence (`equivalentTo`, `LEGACY_KIND_ALIASES`, and the `core:`
+        # alias seed above) is symmetric and is traversed inside BOTH, because
+        # equivalent kinds have the same extension. The bare↔namespaced pair is
+        # NOT one of these — it is the ONE-DIRECTIONAL `bare_inherits` relation
+        # seeded above (a bare bucket gains its namespaced forms; a namespaced
+        # bucket does not gain the bare name), and it enters the walk through
+        # `sources` rather than through `equivalences`. That is why
+        # `expand_kind("issue")` carries `dev:issue` while
+        # `expand_kind("dev:issue")` carries no bare `issue`.
         #
         # Termination is structural, not bounded by a counter: `direct_parents`
         # is acyclic (a pack kind is never a parent, and `CORE_SUBCLASSES` rows
