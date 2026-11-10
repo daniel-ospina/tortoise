@@ -667,11 +667,19 @@ def test_an_offset_with_fractional_seconds_reaches_the_utc_truncation():
     assert _display_bound(value, "valid_from", {"id": "p"}) == "2023-05-19"
 
 
-def test_the_instant_view_accepts_every_whole_value_shape_the_day_view_dates():
+def test_the_instant_view_takes_whole_value_date_times_and_refuses_unreadable_tails():
     """Cycle 6, finding 3. ``calendar_datetime`` is documented as the view an
-    ORDERING consumer wants, so the whole-value families the day view dates must
-    not be un-orderable there — otherwise a later consumer silently drops rows
-    this module says are dated.
+    ORDERING consumer wants, so a whole-value DATE+TIME family the day view dates
+    must not be un-orderable there — otherwise a later consumer silently drops
+    rows this module says are dated.
+
+    Scoped to the DATE+TIME families on purpose: whole-value shapes the day view
+    dates but this view deliberately refuses are an EPOCH spelled as a STRING
+    (the #9202 owner ruling, the asymmetry stated in ``calendar_date``'s module
+    docstring) and a compact / ISO-week date + offset with no time
+    (``20230520+05:00``, ``2026W243-05:00`` — the gap named on #11646/#11708).
+    A description claiming every whole-value shape would invite the widening
+    this module forbids.
 
     ⛔ The last block is the FALSIFIER for the distinction cycle 7 restored: the
     day view dates a value whose TAIL is unreadable, and the instant view must
