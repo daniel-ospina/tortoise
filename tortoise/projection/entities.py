@@ -1141,10 +1141,13 @@ def _point_source_transit(p: dict):
 #: ``sparse.point_index_text``, which flattens. The predicate for membership is
 #: *a declared FULLTEXT field a write door can receive as a list* — ``content``
 #: is the counter-example (a string by contract, never flattened, so NOT here).
-#: The projection's one-time array fixup reads THIS declaration too
-#: (``_FLATTEN_FIXUPS`` in ``projection/__init__.py``), and the parity pin in
-#: ``tests/test_11682_quote_indexed.py`` makes a key added here WITHOUT a fixup
-#: statement a red instead of pre-existing rows silently skipped.
+#: The projection's one-time array fixup MIRRORS this declaration —
+#: ``_FLATTEN_FIXUPS`` in ``projection/__init__.py`` is a hand-maintained literal
+#: table (each row's ``(key, rows, set)`` statement is spelled out, never built
+#: from the key name, so a property name is never spliced into Cypher), so it does
+#: not READ this frozenset at runtime. What makes the two agree is the parity pin
+#: in ``tests/test_11682_quote_indexed.py``, which reds a key added here WITHOUT
+#: a fixup row instead of pre-existing rows being silently skipped.
 _POINT_FLATTEN_LIST_PROPS: frozenset = frozenset({"search_keys", "quote"})
 
 

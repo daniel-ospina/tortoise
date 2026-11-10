@@ -7096,7 +7096,6 @@ from tortoise.projection.entities import (  # noqa: E402, I001
     _EntityHandlers,
     _is_persistable_prop_value,
     _PERSISTABLE_MAX_DEPTH,
-    _POINT_FLATTEN_LIST_PROPS as _POINT_FLATTEN_LIST_PROPS,  # #11682: the array fixup reads the declaration
     _stated_tags,
     _storable_bound,
     _store_holds_prop_value,
