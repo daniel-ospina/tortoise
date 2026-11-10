@@ -939,6 +939,14 @@ def statement_vector_in_a_foreign_property(statement: str) -> tuple[str, ...]:
     that was not even true, the error class :func:`_blank_string_literals` exists to remove. The
     refusal MESSAGE still renders the caller's own text, not the blanked copy, and the backticked
     spelling of the property (``e.`vector` ``) is an identifier, so it stays readable and refused.
+
+    ⛔ THE COMPARISON IS CASE-EXACT, and that is not stylistic (`#11641` round 10, P1-1). Property
+    names are case-SENSITIVE — ``e.EMBEDDING`` and ``e.embedding`` are two different keys, which the
+    engine demonstrates by holding both at once — and the read path keys on the literal
+    ``'embedding'`` (``search_engine``: ``db.idx.vector.queryNodes(…, 'embedding', …)`` and
+    ``WHERE n.embedding IS NOT NULL``). A case-insensitive compare therefore ACCEPTED
+    ``SET e.EMBEDDING = vecf32($embedding)`` and landed a ``Vectorf32`` in a property no read
+    reaches.
     """
     text = _blank_comments(statement)
     blanked = _blank_string_literals(text)
@@ -956,7 +964,7 @@ def statement_vector_in_a_foreign_property(statement: str) -> tuple[str, ...]:
             match = _SET_ITEM_PROPERTY_RE.match(head[1])
             if match is None:
                 continue  # a whole-alias write — no single property, see the warning above
-            if match.group("prop").lower() == EMBEDDING_PROPERTY:
+            if match.group("prop") == EMBEDDING_PROPERTY:
                 continue
             if _VECTOR_EXPR_RE.search(head[1]):
                 foreign.append(statement[span_start:span_end].strip())
@@ -1008,6 +1016,13 @@ def statement_vector_in_a_foreign_map_key(statement: str) -> tuple[str, ...]:
 
     Strings and comments are blanked first, so ``SET e.note = '{vector: vecf32($e)}'`` is text, not a
     map (and a comment cannot fabricate a key).
+
+    ⛔ THE KEY COMPARISON IS CASE-EXACT for the same reason the dotted sibling's is (`#11641` round
+    10, P1-1): a map key is a PROPERTY NAME, property names are case-sensitive, and the read path
+    queries the literal ``'embedding'``. Compared case-insensitively, ``{EMBEDDING: vecf32($e)}``
+    was read as "the embedding property" and skipped — while the separate
+    :func:`statement_stores_embedding_in_a_map` leg is also case-exact, so that key matched NEITHER
+    reader and the store was accepted.
     """
     text = _blank_comments(statement)
     text = _blank_string_literals(text)
@@ -1015,7 +1030,7 @@ def statement_vector_in_a_foreign_map_key(statement: str) -> tuple[str, ...]:
     foreign: list[str] = []
     for match in _MAP_ENTRY_KEY_RE.finditer(text):
         key = match.group("key")
-        if key.lower() == EMBEDDING_PROPERTY:
+        if key == EMBEDDING_PROPERTY:
             continue
         if match.end() >= len(depths):
             continue

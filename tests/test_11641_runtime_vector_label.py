@@ -1712,6 +1712,140 @@ def test_the_foreign_map_key_store_would_have_been_UNREACHABLE(tmp_path) -> None
         sdk.close()
 
 
+# ── round 10: the PROPERTY name is CASE-SENSITIVE (#11641 P1-1) and the drop counts agree (P2-2) ──
+
+
+def test_the_engine_treats_EMBEDDING_and_embedding_as_DIFFERENT_keys(tmp_path) -> None:
+    """The PREMISE of the case rows, measured on the engine rather than assumed.
+
+    `#11641` round 10, P1-1: both foreign-property readers compared the name case-INSENSITIVELY
+    (``prop.lower() == "embedding"`` in the dotted leg, ``key.lower()`` in the map leg), so
+    ``e.EMBEDDING`` counted as the embedding property. That is only wrong because property names
+    are case-SENSITIVE — the read path keys on the literal ``'embedding'`` (``search_engine``:
+    ``db.idx.vector.queryNodes(…, 'embedding', …)`` and ``WHERE n.embedding IS NOT NULL``), and
+    Neo4j's Cypher Manual says the same ("properties are case sensitive … ``name`` is different
+    from ``Name``").
+
+    So this pins the fact both fixes depend on: a vector written under ``EMBEDDING`` leaves
+    ``e.embedding`` NULL — a store no read reaches. If the engine ever made property names
+    case-insensitive this row would red, and the case-exact comparisons would then be a false block
+    rather than a bound.
+    """
+    proj = _proj(tmp_path)
+    proj.g.query(
+        "CREATE (e:Event {eventId:'seed'}) SET e.EMBEDDING = vecf32($v)", params={"v": VEC})
+    rows = proj.g.query(
+        "MATCH (e:Event {eventId:'seed'}) RETURN e.embedding, typeof(e.EMBEDDING)"
+    ).result_set
+    assert rows[0][0] is None, (
+        "`EMBEDDING` and `embedding` resolved to the SAME property — the case-exact comparison in "
+        f"`statement_vector_in_a_foreign_property` would now refuse a reachable store: {rows}"
+    )
+    assert rows[0][1] == "Vectorf32", rows
+
+
+@pytest.mark.parametrize("prop", ["EMBEDDING", "EmBeDdInG"])
+def test_a_vector_under_a_DIFFERENTLY_CASED_embedding_is_REFUSED(prop: str) -> None:
+    """Round 10, P1-1: only the CANONICAL spelling is the embedding property.
+
+    Measured on the round-10 head before this fix: ``SET e.EMBEDDING = vecf32($embedding)`` was
+    ACCEPTED and the node came out holding ``EMBEDDING = Vectorf32`` (see the premise row above).
+    The accept direction is asserted here too, so a fix that refuses the property write outright
+    cannot pass: ``e.embedding`` and ``e.`embedding` `` are the SAME key to the engine (a backtick
+    is Cypher's other identifier spelling), so both stay accepted.
+    """
+    foreign = f"MATCH (e:Event {{eventId:'seed'}}) SET e.{prop} = vecf32($embedding)"
+    assert statement_vector_in_a_foreign_property(foreign) == (
+        f"e.{prop} = vecf32($embedding)",), statement_vector_in_a_foreign_property(foreign)
+    problem = statement_write_target_problem(foreign, {"Event"})
+    assert problem is not None and "VECTOR" in problem, problem
+    with pytest.raises(ValueError) as refused:
+        DOOR(_NoJournal(), None, foreign, event_id="e1", props={}, embedding=VEC, lane="test")
+    assert "VECTOR" in str(refused.value), str(refused.value)
+
+    for ok in (
+        "MATCH (e:Event {eventId:'seed'}) SET e.embedding = vecf32($embedding)",
+        "MATCH (e:Event {eventId:'seed'}) SET e.`embedding` = vecf32($embedding)",
+    ):
+        assert statement_vector_in_a_foreign_property(ok) == (), ok
+        assert statement_write_target_problem(ok, {"Event"}) is None, ok
+
+
+@pytest.mark.parametrize("key", ["EMBEDDING", "EmBeDdInG"])
+def test_a_vector_under_a_DIFFERENTLY_CASED_MAP_KEY_is_REFUSED(key: str) -> None:
+    """Round 10, P1-1 on the MAP leg: the key is a property name, so case is exact here too.
+
+    ⛔ This leg needed its OWN fix, not the dotted one: at the round-10 head the map reader compared
+    ``key.lower()`` while :func:`statement_stores_embedding_in_a_map` compares the key EXACTLY, so
+    ``{EMBEDDING: vecf32($e)}`` matched NEITHER — the foreign leg skipped it as "the embedding
+    property" and the map-store leg did not recognise the key at all. An accepted store, on a served
+    label, in a property no read path queries.
+    """
+    statement = f"MATCH (e:Event {{eventId:'seed'}}) SET e += {{{key}: vecf32($embedding)}}"
+    assert statement_vector_in_a_foreign_map_key(statement) == (f"{{{key}: …}}",), \
+        statement_vector_in_a_foreign_map_key(statement)
+    problem = statement_write_target_problem(statement, {"Event"})
+    assert problem is not None and "VECTOR" in problem, problem
+    with pytest.raises(ValueError) as refused:
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={}, embedding=VEC, lane="test")
+    assert "VECTOR" in str(refused.value), str(refused.value)
+
+
+#: Two served nodes, so an edge can be LINKABLE — the shape that separates P2-2's two keys.
+
+def _dump_with_two_served_nodes(edges: list[dict]) -> dict:
+    return {
+        "format": DUMP_FORMAT,
+        "nodes": [
+            {"dump_id": 1, "labels": ["Point"],
+             "props": {"id": "p1", "content": "a", "pointKind": "claim"}},
+            {"dump_id": 2, "labels": ["Point"],
+             "props": {"id": "p2", "content": "b", "pointKind": "claim"}},
+        ],
+        "edges": edges,
+    }
+
+
+def test_the_drop_COUNT_and_the_drop_LABELS_describe_the_SAME_set(tmp_path) -> None:
+    """Round 10, P2-2: the two keys disagreed about one event.
+
+    Measured on the round-10 head, on a dump whose ONLY edge (``1->99``) was dangling and carried an
+    ``embedding``: ``{'nodes': 1, 'edges': 0, 'dropped_edges': 1, 'dropped_edge_endpoints': [99],
+    'dropped_vectors': 0, 'dropped_vector_labels': ['<relationship:SUPPORTS>']}`` — a label list
+    reporting a vector the count says was not dropped, because the pre-mutation pass recorded the
+    label while the write loop ``continue``d past the strip.
+
+    The labels are now derived from the rows the strip LOOPS actually touched: every flagged node is
+    created (so its vector IS popped) and a flagged edge is stripped only when it is linkable. So a
+    dangling edge's vector appears in NEITHER key — the dangling edge is what ``dropped_edges`` /
+    ``dropped_edge_endpoints`` report — and a linkable one appears in both.
+    """
+    proj = _proj(tmp_path)
+    dangling = restore_graph(
+        proj.g,
+        _dump_with_two_served_nodes([
+            {"src": 1, "dst": 99, "type": "SUPPORTS", "props": {"embedding": VEC}}]),
+        allow_unserved_vectors=True, allow_dangling_edges=True)
+    assert dangling["dropped_vectors"] == 0, dangling
+    assert dangling["dropped_vector_labels"] == [], (
+        "a vector that was NOT stripped is still reported as dropped — the two keys describe "
+        f"different sets: {dangling}"
+    )
+    # …the edge itself is still reported, by the keys that describe EDGES.
+    assert dangling["dropped_edges"] == 1, dangling
+    assert dangling["dropped_edge_endpoints"] == [99], dangling
+
+    # The same vector on a LINKABLE edge appears in BOTH keys, so the fix is not "report nothing".
+    proj2 = _proj(tmp_path)
+    linkable = restore_graph(
+        proj2.g,
+        _dump_with_two_served_nodes([
+            {"src": 1, "dst": 2, "type": "SUPPORTS", "props": {"embedding": VEC}}]),
+        allow_unserved_vectors=True)
+    assert linkable["dropped_vectors"] == 1, linkable
+    assert linkable["dropped_vector_labels"] == ["<relationship:SUPPORTS>"], linkable
+
+
 def test_restore_graph_still_restores_a_served_label(tmp_path) -> None:
     """The legitimate direction, for EVERY served label AND a multi-label node.
 

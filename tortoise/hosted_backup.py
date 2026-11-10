@@ -924,7 +924,7 @@ def _first_live_node_id(g, ids: set[int]) -> int | None:
 
 def _require_served_restore_labels(
     node_rows, edge_rows=(), *, allow_unserved_vectors: bool = False,
-) -> tuple[set[int], list[str], frozenset[int]]:
+) -> tuple[set[int], frozenset[int]]:
     """``#11641`` — a restored vector may only land on a label the read path serves.
 
     Runs in `restore_graph`'s PRE-MUTATION validation pass, beside ``#3895``'s dangling-edge check
@@ -959,10 +959,18 @@ def _require_served_restore_labels(
     nodes are, and ``dump_graph`` round-trips whatever it is given. So the edge rows are scanned by
     the same rule, and a relationship type joins the dropped-label report as ``<relationship:TYPE>``.
 
-    Returns ``(dump node ids to strip, sorted labels whose vectors were dropped, dump edge indexes to
-    strip)`` — all empty unless ``allow_unserved_vectors``. The ids are returned rather than the
+    Returns ``(dump node ids whose vector must be stripped, dump edge indexes whose vector must be
+    stripped)`` — both empty unless ``allow_unserved_vectors``. The ids are returned rather than the
     props being mutated here, because a validator that edits the artifact it validated is how a
     refusal and a repair start disagreeing about what was checked.
+
+    ⛔ IT DOES NOT RETURN THE LABEL REPORT, and the reason is `#11641` round 10's P2-2 finding: this
+    pass is PRE-MUTATION, so it cannot know which flagged EDGE will actually be stripped — an edge
+    whose endpoint never materialises is skipped by the write loop before its strip, and the flagged
+    labels then described a vector that was never dropped (`dropped_vectors: 0` beside
+    `dropped_vector_labels: ['<relationship:SUPPORTS>']`, measured on a dump whose only edge was
+    dangling). `restore_graph` derives the labels from the rows the strip LOOPS actually touched, so
+    the two keys describe one set.
     """
     # The declaration must still name labels the query path serves. Fail closed at the seam, not
     # only in a test: a vocabulary that shrank under this constant would otherwise turn every
@@ -970,7 +978,6 @@ def _require_served_restore_labels(
     require_served_store_labels(
         _VECTOR_RESTORE_LABEL_SET, writer="tortoise.hosted_backup::restore_graph")
     strip: set[int] = set()
-    dropped: set[str] = set()
     strip_edges: set[int] = set()
     for dump_id, labels, props in node_rows:
         if not isinstance(props.get(EMBEDDING_PROPERTY), list):
@@ -979,7 +986,6 @@ def _require_served_restore_labels(
             continue
         if allow_unserved_vectors:
             strip.add(dump_id)
-            dropped.update(labels or ("<unlabelled>",))
             continue
         raise ValueError(
             f"Malformed dump node {dump_id!r}: it carries a vector on label(s) "
@@ -1000,7 +1006,6 @@ def _require_served_restore_labels(
             continue
         if allow_unserved_vectors:
             strip_edges.add(index)
-            dropped.add(f"<relationship:{rel_type}>")
             continue
         raise ValueError(
             f"Malformed dump edge {src!r}->{dst!r} ({rel_type}): it carries a vector in its "
@@ -1012,7 +1017,7 @@ def _require_served_restore_labels(
             "only this vector and reports it. That lever is deliberately NOT exposed on the "
             "customer import route, for the same reason `allow_dangling_edges` is not (#3895)."
         )
-    return strip, sorted(dropped), frozenset(strip_edges)
+    return strip, frozenset(strip_edges)
 
 
 def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
@@ -1024,7 +1029,10 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
     ``dropped_edge_endpoints``, and with ``allow_unserved_vectors=True`` it
     ALWAYS carries ``dropped_vectors`` and ``dropped_vector_labels`` (zero and
     empty when nothing was dropped — unlike ``dropped_edges``, which appears only
-    when something was, so a caller reading either key needs no guard).
+    when something was, so a caller reading either key needs no guard). ⛔ The
+    two describe the SAME set: the labels are derived from the rows the strip
+    loops actually touched, so a flagged row the write loop skips (a dangling
+    edge) appears in NEITHER — it is what ``dropped_edges`` reports.
 
     Raises ValueError on unsafe labels/types, unsupported dump format, or an
     edge whose endpoint is not in the dump's node list. The last one is the
@@ -1056,8 +1064,8 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
     that cannot be lifted would make that artifact — and the relabel migration
     that repairs it — unreachable at DR time. It restores every other node and
     edge, DROPS the unserved vectors, KEEPS the nodes so the migration can still
-    run, and reports the count + the dropped labels. Never the default, and not
-    revision-gated (see the note at the check itself).
+    run, and reports the count + the labels of the vectors it ACTUALLY dropped. Never the default,
+    and not revision-gated (see the note at the check itself).
 
     ⛔ The bound covers the dump's EDGE property bags as well as its nodes, and
     the strict path refuses both. A relationship carries no label at all, so an
@@ -1147,7 +1155,7 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
     # of the graph's CONTENT and can sit in a dump of ANY revision — a graph written before D10
     # still holds `:Document`. A version gate here would refuse the very artifacts the repair path
     # exists for.
-    (strip_vector_ids, dropped_vector_labels,
+    (strip_vector_ids,
      strip_edge_vector_indexes) = _require_served_restore_labels(
         node_rows, edge_rows,
         allow_unserved_vectors=allow_unserved_vectors)
@@ -1252,6 +1260,25 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
         for _s, _d, _t, _p in unlinkable
         for endpoint in (_s, _d)
         if endpoint not in present_ids
+    })
+
+    # ⛔ THE REPORTED LABELS DESCRIBE THE VECTORS ACTUALLY STRIPPED — the same set `dropped_vectors`
+    # counts — and NOT the rows the pre-mutation pass flagged (`#11641` round 10, P2-2). That pass
+    # runs before anything is written, so it cannot know that an edge whose endpoint never
+    # materialised is `continue`d below BEFORE its strip; reporting its type made the two keys
+    # disagree about one event (`dropped_vectors: 0` beside
+    # `dropped_vector_labels: ['<relationship:SUPPORTS>']`, measured). Both are derived from the sets
+    # the strip loops themselves walk: every flagged node is created (so its vector IS popped), and a
+    # flagged edge is stripped only when it is linkable.
+    dropped_vector_labels = sorted({
+        label
+        for dump_id, labels, _props in node_rows
+        if dump_id in strip_vector_ids
+        for label in (labels or ("<unlabelled>",))
+    } | {
+        f"<relationship:{edge_rows[index][2]}>"
+        for index in strip_edge_vector_indexes
+        if _linkable(edge_rows[index])
     })
 
     for index, (s, d, safe_type, props) in enumerate(edge_rows):
