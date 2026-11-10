@@ -7061,13 +7061,18 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
         "counted writer described this way"
     ),
     "carries nothing": (
-        "contradiction vocabulary — the verb form of `carries no property`, "
-        "which is the spelling the documents use today"
+        "contradiction vocabulary — the verb form of `carries no property`. Absent "
+        "from both documents today (measured: 0 occurrences of either), and kept "
+        "live in `DENIAL_MARKERS`/`CLASS_VERDICT_MARKERS` so the frame catches a "
+        "counted writer the moment one is described this way"
     ),
     "drops confidence": (
-        "contradiction vocabulary — the documents write the articled form "
-        "(`drops the binder's confidence`), so the non-articled verb is absent "
-        "by design until someone writes it"
+        "contradiction vocabulary — NO document writes this in either voice: the "
+        "`drops the …` hits in both documents are unrelated prose (`drops the "
+        "anchor`, `drops the arm`), and the transferred-`confidence` behaviour is "
+        "stated the other way round — an `about*` edge *keeps the binder's "
+        "`confidence` across a supersede (`live == rebuild`)*. The non-articled "
+        "verb is therefore absent by design until someone writes it"
     ),
     "false positive no longer": (
         "contradiction vocabulary — the post-negated form of 'called counted', "
