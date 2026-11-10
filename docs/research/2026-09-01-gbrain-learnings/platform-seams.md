@@ -272,8 +272,8 @@ Two further findings from the same pass:
 
 ### #2122's Cursor row — release-cadence re-check (2026-11-10)
 
-#2122's own target says *"re-check per-turn injection on Cursor release cadence"*, and the
-section above is dated 2026-10-11. Re-fetched Cursor's hook reference on 2026-11-10
+The issue's own target says *"re-check per-turn injection on Cursor release cadence"* (#2122),
+and the section above is dated 2026-10-11. Re-fetched Cursor's hook reference on 2026-11-10
 (`https://cursor.com/docs/agent/hooks`, `web_fetch` = rung 3, primary source). One finding
 holds, one is new and was undisclosed:
 
