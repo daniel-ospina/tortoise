@@ -31,7 +31,7 @@ edge's endpoints have those kinds.** 36 declared relations across 7 packs; 35 ca
 > ⚠️ **Re-measured at `3d63339d` after `main` was merged into this branch.** The merge brought three new
 > kind-bearing declarations (`pm:blocks` → `pm:card→pm:card`, `pm:partOfSprint` → `pm:sprint→pm:card`,
 > `pm:assignedTo` → `pm:card→Subject`, all `IMPL`) plus `pm:onBoard`, which declares one `from`/`to` and no kinds. The figures below were first measured at `e809803e` (32 kind-bearing, 31 `IMPL` + 1 `NAND`,
-> 30 Object→Object, 7 disabled by §5.2) and are restated here at **this** head: **35 kind-bearing,
+> 30 direct-shape (26 Object→Object), 7 disabled by §5.2) and are restated here at **this** head: **35 kind-bearing,
 > 34 `IMPL` + 1 `NAND`, 28 Object→Object (33 direct-shape), 8 disabled by §5.2**. The argument does not move — every
 > kind-bearing declaration still rides the operator path, and `create_edge` is still the wrong seam — but the
 > counts are what a lane implements against and what pins 1, 8 and 16 assert, so they are stated at the head
@@ -61,7 +61,12 @@ operator-mediated … `Subject`/`Event` endpoints are not Point-bearing and take
 direct-shape but not Object↔Object** (3 `Object→Subject`, 1 `Object→Event`, 1 `Event→Object`), and **2
 Point-involved** (`agent-ops:groundedIn` via `pointKinds: rationale`, `product-strategy:addresses`
 `useCase→feature` via `pointKinds: useCase`) — so **33 of the 35** take the direct shape through
-`link_entities`/`ingest`, and the other 2 reify into an operator. ⚠️ The earlier "32 of 35" figure was the
+`link_entities` and through `ingest` alike, and **the other 2 are reified by `ingest` only**. ⛔ The Point gate
+is `ingest`'s, not `create_direct_edge`'s: `_effective_route` is called only inside `ingest`/its helpers
+(`sdk.py:27455`, `:28378`, `:28445`), and `create_direct_edge`'s own docstring says so — *"`ingest()` adds the
+terminal-endpoint guard below PLUS the Point-mediated route gate (#8499)"* (`sdk.py:29066-29067`). So
+`link_entities` writes those 2 as Object→Point direct edges today, which is why pin 14's `link_entities` arm
+must cover a Point-bearing pair. ⚠️ The earlier "32 of 35" figure was the
 **non-`Subject`** count relabelled (35 − 3 `Subject`), which absorbed the four non-`Subject` non-Object rows.
 So a declared IMPL label over a mismatched **direct-shape** pair is writable today with no gate. **⇒ `create_direct_edge` is IN scope, gating the `label` only**
 (its epistemic semantics are untouched).
@@ -311,7 +316,7 @@ undeclared.
 | 11 | `addresses` between two non-declared kind pairs → `unbound`, **not** `mismatch` | the predicate-name-global error (six pairs) |
 | 12 | a layer-valued declaration (`toKind: Subject`) is `unbound` **and** the pin names #11000 | false refusals, and a silent un-pin when §6 lands |
 | 13 | **mutation**: deleting the binding test reds ≥1 pin | the guard asserted by prose |
-| 14 | **`create_direct_edge`** refuses a declared mismatched label (both `link_entities` and `ingest` arms) | the P0 — an ungated third door |
+| 14 | **`create_direct_edge`** refuses a declared mismatched label — **both** the `link_entities` arm (including a **Point-bearing** pair: that route has no Point gate, §1.1) and the `ingest` arm | the P0 — an ungated third door |
 | 15 | the **operator** replay fold (`_create_edges`) produces the same verdict as live **and still writes the committed edge** (verdict equality alone is satisfied by a fold that classifies then `continue`s before its `MERGE`) | `rebuild_all` divergence |
 | 15b | the **`DirectEdgeCreated`** replay fold (`projection/__init__.py` pass-2b) produces the same verdict as live **and still writes the committed edge**, and it reads the predicate from `ev["label"]` when present, else `ev["edge_type"]` (§1.2 item 6) | the same divergence on the second fold; a verdict-only pin is green over a skip; and a gate keyed on `edge_type` alone sees only `IMPL`/`NAND` for `create_direct_edge` records and silently never enforces the dominant door |
 | 16 | `resolve_enforcement` resolves over **installed** packs, not the catalog max | one pack blocking another's predicate |
