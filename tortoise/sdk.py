@@ -7064,9 +7064,11 @@ def _warn_point_name_not_lexically_indexed(
         "%s: this Point stores name=%r, but %s appears in %s (%s) — so a "
         "lexical query for the name can only reach this point through other "
         "evidence, and will not rank on the name itself (#10122). Put the "
-        "identifier in one of the indexed fields listed above: `name` is not "
-        "lexically indexed on a Point (%s). The write is accepted as-is — "
-        "warn-not-block, #1934.",
+        "identifier in `content` or in `search_keys` — the two alias-bearing "
+        "fields; `name` is not lexically indexed on a Point (%s), and the "
+        "verbatim `quote` is indexed but is PROSE (a provenance anchor, never "
+        "an alias source, #11682), so an identifier there is not findable as "
+        "an identifier. The write is accepted as-is — warn-not-block, #1934.",
         door, name, basis, where, "/".join(fields), label_clause,
     )
 

@@ -320,10 +320,18 @@ def test_the_bm25_mirror_finds_the_quote_too(sdk) -> None:
     # the text per point at serve time. Dropping the vectors must not lose the
     # quote, or the tier that answers on a graph with no vectorizer at all is
     # the one mirror nobody pinned (#11706 review P1-2).
-    legacy_only = dict(snap, doc_vecs=None, vectorizer=None, model_id=None)
-    assert pid in [r["id"] for r in fs.search_snapshot(
-        QUOTE_ONLY_TERM, legacy_only, threshold=0.01)], (
-            "the snapshot's legacy in-memory scorer must index the quote too")
+    # ⛔ The mask is load-bearing HERE TOO: ``search_points`` re-resolves an
+    # embedder unless ``force_sparse`` is set (``embeddings.py``:
+    # ``model = None if force_sparse else EmbeddingModel.get()``), so outside
+    # the mask this "no-vector" arm would score DENSELY on any lane where a
+    # model resolves and would return the point for ANY query — blind to the
+    # join it claims to pin (#11706 review, round 4).
+    with mask_embedder():
+        legacy_only = dict(snap, doc_vecs=None, vectorizer=None, model_id=None)
+        assert pid in [r["id"] for r in fs.search_snapshot(
+            QUOTE_ONLY_TERM, legacy_only, threshold=0.01)], (
+                "the snapshot's legacy in-memory scorer must index the quote "
+                "too")
 
 
 def test_the_bm25_mirror_is_per_family(sdk) -> None:

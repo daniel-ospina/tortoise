@@ -19567,8 +19567,18 @@ class FalkorProjection(
         returns False on a two-field index, so the destructive half never runs
         and ``quote`` stays unindexed — silently, forever. So the question is
         asked against :attr:`_POINT_FTS_TARGET_FIELDS`, the SAME list the sweep
-        creates, and a THIRD widening is covered by construction rather than by
-        remembering to edit this method.
+        creates, so a THIRD widening is covered HERE by construction.
+
+        ⛔ But not everywhere, and the difference matters (#11706 review, round
+        4): this probe only runs INSIDE a sweep, and the sweep is gated on
+        ``_schema_is_current()``, which derives ``required`` from the LITERAL
+        ``_REQUIRED_FULLTEXT_INDEXES`` — not from this tuple. So a field added
+        to :data:`POINT_INDEX_TEXT_FIELDS` without a matching
+        ``("Point", <field>, "FULLTEXT")`` entry leaves an EXISTING graph
+        reading CURRENT, the sweep is skipped, and this probe never runs: the
+        field is created on fresh databases only.
+        ``tests/test_5407_index_label_parity.py`` carries the parity pin
+        (declared ⊆ required) that makes that a red instead of a silent no-op.
 
         A probe that cannot run returns True (repair, never assume done).
         """
