@@ -2292,9 +2292,12 @@ def run_vector_query(
     for (``#8488``).
 
     pg_vector (#11642 / #4051 V1) is the ANN leg from the POSTGRES RECORD:
-    a callable ``(entity_type, query_vec, limit) -> rows | None``, normally
-    :func:`tortoise.record_vector.searcher`'s product. It is tried FIRST and
-    records :data:`MECHANISM_PGVECTOR` when it answers. ``None`` from the
+    a callable
+    ``(entity_type, query_vec, limit, excluded_statuses) -> rows | None``,
+    normally :func:`tortoise.record_vector.searcher`'s product — the SAME
+    four-slot contract recorded there, and the arity this function's own
+    annotation and call site use. It is tried FIRST and records
+    :data:`MECHANISM_PGVECTOR` when it answers. ``None`` from the
     callable means this label is not served from the record
     (``object``/``subject`` — see ``record_vector.LABEL_SERVED``), and the call
     falls through to the graph branches below, which is that label's real path

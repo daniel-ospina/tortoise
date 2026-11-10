@@ -185,6 +185,49 @@ def test_the_shortfall_compares_strictly_and_only_on_the_short_path(monkeypatch)
         f"smaller than the limit already pays one (executed: {executed})")
 
 
+# ── the pg_vector contract: the PROSE states the arity the CALL uses ──────
+
+def test_the_pg_vector_docstring_names_every_argument_the_call_passes():
+    """The contract text is derived from the call, not re-typed beside it.
+
+    ⛔ THIRD RECURRENCE OF THE SAME DRIFT (#11660 round 6 P3-7, round 4 N3, and
+    round 8 P3-1). `run_vector_query`'s docstring described the `pg_vector`
+    callable as ``(entity_type, query_vec, limit)`` while its own annotation
+    and its call site pass a FOURTH argument, `excluded_statuses` (the `#689`
+    terminal-status exclusion this PR threads end-to-end).
+
+    Why a sentence is worth a pin: a caller who writes a searcher to that
+    three-argument description gets `TypeError`, and `run_vector_query` catches
+    it with `except Exception` — so every dense read silently becomes an
+    unnamed `scan_fallback` to the graph, which is exactly the `#4999` "a
+    fallback must report the fallback" invisibility this branch exists to
+    avoid. A docstring cannot red on its own, so this pin reads the CALL and
+    requires the paragraph to name every argument it passes: reflowing or
+    rewording the prose stays green, dropping a parameter reds.
+    """
+    import inspect
+
+    from tortoise import search_engine
+
+    src = inspect.getsource(search_engine.run_vector_query)
+    call = src.split("pg_rows = pg_vector(", 1)[1].split(")", 1)[0]
+    passed = [part.strip() for part in call.split(",") if part.strip()]
+    assert passed == [
+        "entity_type", "query_vec", "limit", "excluded_statuses"], (
+        f"the call site is the contract the docstring has to state: {passed}")
+
+    doc = search_engine.run_vector_query.__doc__ or ""
+    assert "pg_vector (#11642" in doc, "the parameter's own paragraph is gone"
+    para = doc.split("pg_vector (#11642", 1)[1].split("\n\n", 1)[0]
+    missing = [name for name in passed if name not in para]
+    assert not missing, (
+        f"the pg_vector paragraph documents {len(passed) - len(missing)} of the "
+        f"{len(passed)} arguments the function actually passes; missing "
+        f"{missing}. A caller who follows the prose writes a searcher that "
+        f"raises TypeError on the missing one, and `except Exception` turns "
+        f"every dense read into an unnamed scan_fallback (#11660 P3).")
+
+
 # ── arming ─────────────────────────────────────────────────────────────────
 
 def test_no_tenant_means_no_searcher(monkeypatch):
