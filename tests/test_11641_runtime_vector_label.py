@@ -190,6 +190,66 @@ def test_row_2_reads_met_with_no_runtime_label_left() -> None:
     )
 
 
+# ── the NAMING readers read text, and a text reader has to know what TEXT is ────────────────
+#
+# #11641's second review round found the naming legs quote-BLIND while the write-target leg was
+# quote-aware: `SET e.note = '(b:Batch)'` made `statement_node_labels` return `{'Batch', 'Event'}`,
+# so the door refused a legitimate statement and named a label the statement never binds. Making
+# the readers quote-aware is a change in their ANSWER, so it is pinned in BOTH directions here —
+# a fix whose whole subject is "the reader said something different" with no pin is a change that
+# can be reverted silently.
+
+@pytest.mark.parametrize("statement, expected", [
+    # a STRING literal is not a pattern: the label inside it is text
+    ("MATCH (e:Event {eventId:$eid}) SET e.note = '(b:Batch)'", {"Event"}),
+    # …and it is not an interpolation either (this string made `statement_interpolates_label` True)
+    ("MATCH (e:Event {eventId:$eid}) SET e.note = '(n:{x})'", {"Event"}),
+    # a label in a COMMENT is not a label the statement binds
+    ("MATCH (e:Event {eventId:$eid}) // (b:Batch)\nSET e += $props", {"Event"}),
+    # a BACKTICK is Cypher's spelling of an IDENTIFIER, not a string: it must keep reading
+    ("MATCH (`b`:Event {eventId:$eid}) SET b += $props", {"Event"}),
+    # ⛔ and a quote INSIDE a backticked identifier must not open a phantom string (measured at
+    # `66da0c05`: it blanked the rest of the statement, so the door refused a legal write AND a
+    # stray `:Secret` pattern placed after it became invisible)
+    ("MATCH (`a'b`:Event {eventId:$eid}) SET `a'b`.embedding = vecf32($embedding)", {"Event"}),
+    ("MATCH (e:Event {eventId:$eid}), (`x'y`:Event {id:$z}), (s:Secret) "
+     "SET e.embedding = vecf32($embedding)", {"Event", "Secret"}),
+])
+def test_the_naming_readers_know_what_text_is(statement: str, expected: set) -> None:
+    assert statement_node_labels(statement) == expected, statement_node_labels(statement)
+    if "(n:{x})" in statement and "'(n:{x})'" in statement:
+        assert statement_interpolates_label(statement) is False, (
+            "an interpolation spelled inside a STRING literal is not an interpolation"
+        )
+
+
+def test_a_rebound_alias_is_refused_because_the_reader_unions_by_name() -> None:
+    """A fail-OPEN that lived INSIDE the grammar, found at `66da0c05`.
+
+    `WITH b AS e` re-points `e` at a different node, so the label a pattern proved for `e` no longer
+    describes what the store touches — and because the readers union bindings per alias NAME, all
+    three legs passed while the vector landed on the LABEL-LESS node. Refused rather than reasoned
+    about: proving which binding is live at the store needs real scope analysis.
+    """
+    rebound = ("MATCH (e:Event {eventId:$eid}) WITH e AS f MATCH (b) WHERE b.id = $eid "
+               "WITH b AS e SET e.embedding = vecf32($embedding)")
+    problem = statement_write_target_problem(rebound, {"Event"})
+    assert problem is not None and "REBINDS" in problem, problem
+    # …and the door refuses it, before the journal (the fake proves the ordering).
+    with pytest.raises(ValueError, match="REBINDS"):
+        DOOR(_NoJournal(), None, rebound, event_id="e1", props={}, embedding=VEC, lane="test")
+    # The accept direction: projecting an alias WITHOUT re-pointing it is not a rebind.
+    for ok in (
+        "MATCH (e:Event {eventId:$eid}) WITH e, e.eventId AS eid2 "
+        + "SET e += $props, " + set_embedding_clause("e"),
+        "MATCH (e:Event {eventId:$eid}) WITH e WHERE e.eventId = $eid "
+        + "SET e += $props, " + set_embedding_clause("e"),
+    ):
+        assert statement_write_target_problem(ok, {"Event"}) is None, (
+            f"a non-rebinding projection was refused: {ok}"
+        )
+
+
 # ── the door: refused shapes, and the real shape that must keep working ────────────────────────
 
 class _NoJournal:

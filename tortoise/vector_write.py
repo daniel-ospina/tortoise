@@ -148,6 +148,7 @@ __all__ = [
     "statement_label_mutations",
     "statement_node_labels",
     "statement_pattern_labels",
+    "statement_rebound_aliases",
     "statement_unattributed_set_items",
     "statement_write_aliases",
     "statement_write_target_problem",
@@ -234,6 +235,14 @@ def _blank_string_literals(statement: str) -> str:
     BACKTICKED spans are NOT blanked: a backtick is Cypher's spelling of an IDENTIFIER (the engine's
     lexer returns ``Token::IdentifierOrKeyword`` for it), so `` (`b`:Batch) `` must keep reading as
     the alias ``b``. A single or double quote opens a STRING, which can never be a node label.
+
+    ⛔ A BACKTICK IS TRACKED, exactly as :func:`_blank_comments` tracks it, because a ``'`` INSIDE a
+    backticked identifier is part of that identifier and not the start of a string. Without the
+    state, ``MATCH (`a'b`:Event …) SET `a'b`.embedding = …`` opened a phantom string at the ``'``
+    and blanked the REST of the statement: the door refused a legal statement with "names NO node
+    label", and — the fail-open half — a stray pattern placed after such an identifier became
+    invisible while leg 3 (which never blanks) still proved a target from the part before it
+    (measured at `66da0c05`). One module, one reading of the grammar.
     """
     out = list(statement)
     index = 0
@@ -243,18 +252,20 @@ def _blank_string_literals(statement: str) -> str:
     while index < length:
         char = statement[index]
         if quote is not None:
-            out[index] = " "
+            if quote != "`":
+                out[index] = " "
             if escaped:
                 escaped = False
-            elif char == "\\":
+            elif char == "\\" and quote != "`":
                 escaped = True
             elif char == quote:
                 quote = None
             index += 1
             continue
-        if char in ("'", '"'):
+        if char in ("'", '"', "`"):
             quote = char
-            out[index] = " "
+            if char != "`":
+                out[index] = " "
         index += 1
     return "".join(out)
 
@@ -748,6 +759,40 @@ def statement_unattributed_set_items(statement: str) -> tuple[str, ...]:
     return tuple(items)
 
 
+#: A ``WITH``/``RETURN`` projection item that RE-BINDS an alias by name: ``… AS e``.
+#: ``WITH b AS e`` re-points ``e`` at a different node, so every pattern-derived binding for ``e``
+#: stops describing what the later ``SET e.…`` touches. Reads both identifier spellings.
+_REBIND_RE = re.compile(
+    rf"\bAS\s+({_IDENT_FRAGMENT})", re.IGNORECASE)
+
+
+def statement_rebound_aliases(statement: str) -> frozenset[str]:
+    """Aliases the statement RE-BINDS with ``AS`` — ``WITH b AS e``.
+
+    ⛔ This closes a fail-OPEN that lived INSIDE the grammar, so it is not part of the text reader's
+    accepted residual (measured at `66da0c05`): a statement that matches ``(e:Event …)``, re-points
+    ``e`` at an UNLABELLED node via ``WITH b AS e``, and then stores the vector through ``e``.
+    It passes all three legs — ``e`` IS bound to ``Event`` by a pattern, and the store names ``e`` —
+    while the vector lands on the label-less node, i.e. exactly the `#5090` row-2 defect leg 3 was
+    added to refuse.
+
+    ⚠️ The statement is DESCRIBED, not spelled: `tortoise.embed_writer_register` finds a store by
+    scanning a writer's own source text, docstrings included (see :func:`statement_node_labels`), so
+    a literal store clause here makes this reader look like a writer. The bindings are unioned per alias NAME across the whole text, so a later
+    ``AS e`` re-point has to be read as "the binding this reader proved no longer describes the
+    write". Refused rather than reasoned about: proving which of two bindings is live at the store
+    needs real scope analysis, and no statement in this product does it.
+
+    A plain ``WITH e, e.eventId AS note`` is NOT a rebind of ``e`` (the ``AS`` names ``note``), so
+    only an ``AS`` whose TARGET is an alias the patterns also bind is a rebind — see
+    :func:`statement_write_target_problem`, which joins the two.
+    """
+    text = _blank_comments(statement)
+    text = _blank_string_literals(text)
+    return frozenset(alias.strip("`")
+                     for alias in _REBIND_RE.findall(text))
+
+
 def statement_write_target_problem(statement: str, allowed) -> str | None:
     """Report what is wrong with the WRITE TARGET of ``statement``, or ``None`` when nothing is.
 
@@ -764,10 +809,12 @@ def statement_write_target_problem(statement: str, allowed) -> str | None:
 
     ⛔ WHAT IT IS COMPLETE OVER (so the residual below can be sized): both identifier SPELLINGS —
     bare ``e`` and backtick-quoted `` `e` `` (:func:`_identifier_at`) — at every position it reads;
-    and Cypher COMMENTS (``// …``, ``/* … */``) are blanked before any reader sees them, so a ``)``
-    or a clause hidden in a comment cannot shift the depth out from under the scan. Those two were
-    live fail-opens on this guard before #11641's fourth review round, and both were reached without
-    leaving the grammar.
+    Cypher COMMENTS (``// …``, ``/* … */``) are blanked before any reader sees them, so a ``)`` or a
+    clause hidden in a comment cannot shift the depth out from under the scan; and an alias
+    RE-BOUND by ``AS`` (:func:`statement_rebound_aliases`) is refused, because this reader unions
+    bindings per alias NAME, so ``WITH b AS e`` would leave a proved label describing a different
+    node. Each of those three was a live fail-open on this guard before #11641's review rounds, and
+    every one was reached WITHOUT leaving the grammar.
 
     ⛔ ACCEPTED RESIDUAL — what a text reader cannot see, named here rather than left implied:
     a store rendered by a shape the clause grammar does not phrase as ``SET``/``REMOVE``/``CREATE``/
@@ -784,8 +831,17 @@ def statement_write_target_problem(statement: str, allowed) -> str | None:
     targets = statement_write_aliases(statement)
     mutations = statement_label_mutations(statement)
     unattributed = statement_unattributed_set_items(statement)
+    rebound = statement_rebound_aliases(statement)
 
     problems: list[str] = []
+    shadowed = sorted(alias for alias in targets
+                      if alias in rebound and alias in bindings)
+    if shadowed:
+        problems.append(
+            f"it REBINDS alias(es) {shadowed} with `AS` (`WITH <other> AS {shadowed[0]}`), so the "
+            "label its pattern proved no longer describes what the store touches — this reader "
+            "unions bindings per alias NAME, so a rebind makes the proved label describe a "
+            "different node")
     if mutations:
         problems.append(
             f"it MUTATES a label on alias(es) {sorted(mutations)} (`SET <a>:X` / `REMOVE <a>:X`), "
