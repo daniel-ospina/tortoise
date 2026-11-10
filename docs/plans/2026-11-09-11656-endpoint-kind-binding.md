@@ -35,7 +35,8 @@ edge's endpoints have those kinds.** 36 declared relations across 7 packs; 35 ca
 > 34 `IMPL` + 1 `NAND`, 32 Object→Object, 8 disabled by §5.2**. The argument does not move — every
 > kind-bearing declaration still rides the operator path, and `create_edge` is still the wrong seam — but the
 > counts are what a lane implements against and what pins 1, 8 and 16 assert, so they are stated at the head
-> they were measured on. Reproduce with the one-liner in the research brief §2.1.
+> they were measured on. Reproduce with the one-liner in the research brief §2.1. The `.py:line` citations
+> below are verified at the same merged head; they are line numbers, so a later `main` will move them.
 
 ### 1.1 Three doors, not one — and the direct door is the dominant one
 
@@ -46,15 +47,15 @@ issue's own target.** Measured:
 |---|---|
 | `create_operator` | `create_operator(op_type, src, [dst], label=<predicate>)` — and `ingest`'s reified arm |
 | `create_edge` / `create_about_edge` | the structural predicates only |
-| **`create_direct_edge`** | **`link_entities` `sdk.py:17163-17171`**: `if upper in ("IMPL","NAND") and operator is not True:` → `create_direct_edge(upper, from, to, …, label=label, …)`. **`ingest` reaches it too** (`sdk.py:27493`, the "operator-less per §8" arm) |
+| **`create_direct_edge`** | **`link_entities` `sdk.py:18070-18078`**: `if upper in ("IMPL","NAND") and operator is not True:` → `create_direct_edge(upper, from, to, …, label=label, …)`. **`ingest` reaches it too** (`sdk.py:28497`, the "operator-less per §8" arm) |
 
 `create_direct_edge` takes `label` and validates **nothing** about declarations or kinds — its guards are
 `op_type ∈ {IMPL,NAND}`, endpoints differ, confidence range, direction, endpoint exists / not-operator /
 not-terminal, and the claim-class override. `undeclared_relation` fires only in `create_operator`
-(`sdk.py:22259`).
+(`sdk.py:23196`).
 
 **And the direct door is the *dominant* shape for Object↔Object, not a corner.** `_point_mediated_route`
-(`sdk.py:24066`) reifies only when a `:Point` is involved — *"Object↔Object keeps the direct shape"* — and
+(`sdk.py:25041`) reifies only when a `:Point` is involved — *"Object↔Object keeps the direct shape"* — and
 **32 of the 35** kind-bearing declarations are Object→Object. So a declared IMPL label over a mismatched
 Object pair is writable today with no gate. **⇒ `create_direct_edge` is IN scope, gating the `label` only**
 (its epistemic semantics are untouched).
@@ -66,7 +67,7 @@ Object pair is writable today with no gate. **⇒ `create_direct_edge` is IN sco
 3. `projection/edges.py::_EdgeHandlers.create_edge`
 4. `projection/edges.py::_EdgeHandlers.create_about_edge`
 5. `projection/edges.py::_EdgeHandlers._create_edges` (**the replay fold**, `:1497`, from
-   `projection/entities.py:2993`) — it MERGEs operator edges directly and never calls `create_edge`. A
+   `projection/entities.py:3021`) — it MERGEs operator edges directly and never calls `create_edge`. A
    live-only gate **diverges on `rebuild_all`**: the `derived == replay(journal)` class. The code says the
    two write one shape (*"#7902 fold-parity"*).
 
@@ -150,7 +151,7 @@ a superset (measured: `kind_forms_for('dev:issue')` has `issue` but not `pm:issu
 
 | site | source |
 |---|---|
-| `create_operator` | the existing per-label probe (`sdk.py:22523`) — add the kind property to its `RETURN`, the same zero-extra-round-trip shape `#2351` uses for `claimClass` |
+| `create_operator` | the existing per-label probe (`sdk.py:23460`) — add the kind property to its `RETURN`, the same zero-extra-round-trip shape `#2351` uses for `claimClass` |
 | `create_direct_edge` | its own existing probe (`sdk.py:28140+`) returns `id, is_operator, status, claimClass` — add the kind property |
 | `create_edge` / `create_about_edge` | `_resolve_entity` already returns `properties` (consumed for the `aboutDocument` refusal at `edges.py:2933`) |
 | `_create_edges` (fold) | it already resolves the descriptor's endpoints |
@@ -162,7 +163,9 @@ a superset (measured: `kind_forms_for('dev:issue')` has `issue` but not `pm:issu
 
 ### 5.1 The installed-pack filter (net-new, small)
 
-`list_relations()` is whole-catalog and already called on every labelled `create_operator` (`sdk.py:22253`),
+`list_relations()` is whole-catalog and already reached on every labelled `create_operator` — through
+`pack_registry.declared_relation_predicates()` (#2766), which `create_operator` calls at
+`sdk.py:23188` when it builds the declared set —
 so the rows are free; the missing piece is `relations_for_namespaces(names) -> rows`, honouring
 `ResolvedPackSet`'s **tri-state** (`None` ⇒ catalog union; `frozenset()` ⇒ deliberately empty; a set ⇒
 recorded ∪ data). Reuse `pack_state.resolved_pack_set_for_graph` — it exists for bare-graph seams.
@@ -191,7 +194,7 @@ alone. `portfolio:marks` is the load-bearing case: `domain_validators._portfolio
 ### 5.3 Layer-valued declarations (dependency on #11000)
 
 `Subject` is a **layer** (`CORE_ENTITY_TYPES`), not a kind; the manifest validator already accepts it as a
-core kind (`pack_registry.py:1669`), and `:2294` already treats entity types as hierarchy parents — so the
+core kind (`pack_registry.py:2041`), and `:2294` already treats entity types as hierarchy parents — so the
 reading is *"a Subject or any subtype"* (W3C SHACL UCR, verbatim).
 
 ⚠️ `expand_kind('Subject') == ['Subject']` today because ONTOLOGY §6's core hierarchy is not in the expansion

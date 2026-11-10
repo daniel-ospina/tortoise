@@ -21,6 +21,11 @@ The issue's O/I/T is sound as a *goal statement*. Its **prescribed location is w
 records what was measured, what the field does, what already exists in the repo, and the four decisions
 that must be settled before a scope can converge.
 
+> **Line citations in this brief are re-based at the head this PR merges** (`main` merged into
+> `chore/7949-capstone-decomposition` at `3d63339d`); the numbers themselves were first measured at
+> `e809803e` and re-measured at that same merged head — see the scope's §1 note for the count revision
+> `main`'s pack edits forced.
+
 ---
 
 ## 1. What the issue gets right
@@ -44,7 +49,7 @@ Measured over all 7 shipped packs (`packs/*/manifest.yaml`), **re-measured at `3
 was merged into the branch** (the merge added three kind-bearing declarations — `pm:card→pm:card`,
 `pm:sprint→pm:card`, `pm:card→Subject`, all `IMPL` — plus `pm:assignedTo`): **36 declared relations, 35
 carrying `fromKind`+`toKind`.** ⚠️ **All 35 carry a CORE mechanism** — 34 `IMPL` plus 1 `NAND`
-(`product-strategy:competesWith`) — and `relation_write_paths()` (`pack_registry.py:534`) binds the
+(`product-strategy:competesWith`) — and `relation_write_paths()` (`pack_registry.py:615`) binds the
 **operator** path on `mechanism ∈ CORE_PREDICATES`. That includes `hasPart` and `dependsOn`, which also
 declare `mechanism: IMPL`; they are the only two that **additionally** bind the structural path.
 
@@ -69,8 +74,8 @@ visible **only as call arguments**, never as an edge.
 Consequences, both load-bearing:
 
 1. `create_operator` is the correct seam, and it is also the *cheap* seam: kinds are already in hand there
-   (§4.1). The two seams were written anticipating this change and name it — `sdk.py:22242` (*"the
-   kind-pair leg is an epic-level gap"*) and `sdk.py:22268` (*"(3) endpoint kinds → `direction_basis
+   (§4.1). The two seams were written anticipating this change and name it — `sdk.py:23173` (*"the
+   kind-pair leg is an epic-level gap"*) and `sdk.py:23205` (*"(3) endpoint kinds → `direction_basis
    'kind-pair'` — a SEPARATE scoped change, not implemented here"*).
 2. **A post-hoc census over stored edges cannot see a violation at all** without reconstructing
    `(source, target)` from the `INPUT idx 0` + `IMPL` pair. This is why the sixth capstone row (#11083)
@@ -86,19 +91,19 @@ three primitives covers it automatically; the point is that the third primitive 
 
 ### 2.4 The third door, and why revision 1 of the scope got it wrong (the P0)
 
-`create_direct_edge(op_type, source_id, target_id, *, …, label=…)` (`sdk.py:28036`) accepts a **`label`** — and
+`create_direct_edge(op_type, source_id, target_id, *, …, label=…)` (`sdk.py:29040`) accepts a **`label`** — and
 a label *is* a declared `relations[].predicate`. It validates **nothing** about declarations or kinds: its
 guards are `op_type ∈ {IMPL,NAND}`, endpoints differ, confidence range, direction, endpoint exists /
 not-an-operator / not-terminal, and the claim-class override. `undeclared_relation` fires only in
-`create_operator` (`sdk.py:22259`).
+`create_operator` (`sdk.py:23196`).
 
 Two callers reach it with a declared label:
 
-- `link_entities` (`sdk.py:17163-17171`): `if upper in ("IMPL","NAND") and operator is not True:` →
+- `link_entities` (`sdk.py:18070-18078`): `if upper in ("IMPL","NAND") and operator is not True:` →
   `create_direct_edge(upper, from, to, …, label=label, …)`.
-- `ingest`'s plain-operator arm (`sdk.py:27493`).
+- `ingest`'s plain-operator arm (`sdk.py:28497`).
 
-**And it is the dominant shape, not a corner.** `_point_mediated_route` (`sdk.py:24066`) reifies only when a
+**And it is the dominant shape, not a corner.** `_point_mediated_route` (`sdk.py:25041`) reifies only when a
 `:Point` is involved — *"Object↔Object keeps the direct shape"* — and **32 of the 35** kind-bearing
 declarations are Object→Object. So a declared IMPL label over a mismatched Object pair is writable today with
 no gate, and a scope that excludes this door leaves the issue's own target false. It is **in scope**, gating
@@ -160,7 +165,7 @@ body**.
 ### 3.3 A gate at the two live primitives leaves the replay fold ungated
 
 `create_operator` (live) and `_EdgeHandlers._create_edges` (`projection/edges.py:1497`, replay/fold,
-reached from `projection/entities.py:2993`) are the two writers of the *same* operator-edge shape, and
+reached from `projection/entities.py:3021`) are the two writers of the *same* operator-edge shape, and
 the code says so (*"#7902 fold-parity: live create_operator writes the same typed + INPUT edges this
 replay does"*). A live-only gate **diverges on `rebuild_all`** — the documented `derived == replay(journal)`
 failure class. Beyond that, a two-door gate cannot reach six further writers: `_link_source`,
@@ -214,7 +219,7 @@ WorkItem    -> ['WorkItem','dev:issue','dev:pullRequest','marketing:content',
 dev:epic    -> ['dev:epic']                      ← 'Project' ABSENT
 ```
 
-The bug is visible in the code — `pack_registry.py:2847` binds `parent` and never reads it (`# noqa: B007`)
+The bug is visible in the code — `pack_registry.py:3278` binds `parent` and never reads it (`# noqa: B007`)
 — under a comment that claims the opposite. **Good news for this issue:** the check needs
 `actual ∈ expand_kind(declared_parent)`, which works today. `#11000` is therefore **not** a blocker, provided
 the direction is pinned.
@@ -335,7 +340,7 @@ safe one here. No decision needed unless the owner wants a migration.
 
 | issue says | measured | effect |
 |---|---|---|
-| gate `create_edge` / `create_direct_edge` / `ingest` | ⚠️ **Corrected (revision 2): `create_direct_edge` is IN scope.** It takes a `label` (`sdk.py:28036`), `link_entities` passes one (`:17163-17169`) and `ingest` reaches it too (`:27493`), it validates nothing about declarations, and `_point_mediated_route` keeps Object↔Object on the direct shape — 30 of 32 declarations. See §2.4 | gate **`create_operator`** + **`create_direct_edge`** (both label doors) + `create_edge`/`create_about_edge` (**2/32**, which also bind the operator path) + the replay fold; `ingest` inherits all of them |
+| gate `create_edge` / `create_direct_edge` / `ingest` | ⚠️ **Corrected (revision 2): `create_direct_edge` is IN scope.** It takes a `label` (`sdk.py:29040`), `link_entities` passes one (`:17163-17169`) and `ingest` reaches it too (`:27493`), it validates nothing about declarations, and `_point_mediated_route` keeps Object↔Object on the direct shape — 30 of 32 declarations. See §2.4 | gate **`create_operator`** + **`create_direct_edge`** (both label doors) + `create_edge`/`create_about_edge` (**2/32**, which also bind the operator path) + the replay fold; `ingest` inherits all of them |
 | "one write gate, not two" | live and replay are **two writers of one shape** | the rule is one *function*; the fold (`_create_edges`) must call it too, or `rebuild_all` diverges |
 | reads `pack_state.graph_installed_namespaces` | that read is **O(nodes)** (8 whole-graph property scans; ~6 ms at 300 nodes, linear) and deliberately uncached | must not run per write. `resolved_pack_set_for_graph` exists for bare-graph seams; a cache must be data-leg-keyed or it reintroduces #5163 |
 | depends on `#11484` (corrected) | ⚠️ **I10 does not carry the pair map.** `docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md:628` defines `allowed_predicates(graph)` as `predicate -> {admitted_by, verb, record_carried}` with `verb ∈ {create_edge, create_about_edge, ingest}` — **no `fromKind`/`toKind` field**, and the verb enum excludes `create_operator`, the door 32/32 ride. I10 supplies the predicate→verb/namespace map **only.** | #11656 derives the pair map itself from `list_relations()` (32 populated pairs). **Not a blocking dependency.** If the owner wants I10 to own the pairs, that is an I10 amendment — do not assume it. |

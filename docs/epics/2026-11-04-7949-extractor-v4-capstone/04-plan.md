@@ -478,7 +478,7 @@ mapped logically."* That reframes A1, and the check found a gap that A1 as scope
 **Three vocabularies exist. They do not line up.**
 
 | vocabulary | what it holds | who reads it |
-|---|---|---|---|
+|---|---|---|
 | **V1 — the ontology's declared Object↔Object section** | `docs/ONTOLOGY.md` **§3.7**: exactly **two** predicates — `wasDerivedFrom` (provenance) and `hasPart` (composition, inverse traversal covers "part of") | humans; the design |
 | **V2 — the ontology's enforced write vocabulary** | **§3.9** *"Valid Predicate Vocabulary (code)"*: **16 generic** predicates — `performs, produces, uses, authoredBy, ownedBy, managedBy, hasMember, holdsRole, memberOf, reportsTo, participatesIn, hasPart, related, dependsOn, references, wasDerivedFrom` — **plus the `about*` family's 6**, which live in `_VALID_ABOUT_EDGE_PREDICATES` and are written by a **different verb** | `create_edge` and `create_about_edge` |
 | **V3 — what the packs declare** | `dev`: `decomposesInto`(→hasPart), `implements`(→addresses), `deploysTo`(→addresses), **`dependsOn`**(→addresses), `causes`(→supports), `fixes`(→addresses), `addresses`(→addresses) · `venture`: **`funds`, `produces`, `managedBy`, `holds`, `related`, `dependsOn`** · `product-strategy`: `addresses`, `opposes`, `supports` · **every one `mechanism: IMPL`** | `list_relations()`, the classifier's kind index, the write-path verdict |
