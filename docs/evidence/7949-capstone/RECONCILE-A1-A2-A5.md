@@ -68,7 +68,7 @@ landing from a branch. **So: an ancestry `1` and a `--all` grep both fail to ans
 no longer prints its base number.** `#11205` (S5 Job 1, `316a572ce2`, 2026-11-06T22:40:32Z) added an
 **entity↔entity `relations` channel** to the extractor contract, whose predicate allowlist includes
 `hasPart` (`tortoise/extractor_v2.py:1764`). It does **not** discharge A1: it is **transport only** —
-nothing in `tortoise/` consumes `result["relations"]` (`extractor_v2.py:11362`, and
+nothing in `tortoise/` consumes `result["relations"]` (`extractor_v2.py:11423`, and
 `git grep -n 'result\["relations"\]' -- tortoise/` prints that comment and no consumer at all), and
 materialising them as Object→Object edges is **`#11237`** (OPEN). ⛔ **FALSE in this record's merged
 tree — see the fifth-landing amendment below:** the consumer landed as **`#11548`**, and that grep now
@@ -95,12 +95,12 @@ record said nothing called.** `#11237`'s write path landed as **`#11548`** (`e49
 S5 Job 1 remainder — the relations channel gets a write path (`#11237`)*): a new module
 `tortoise/relation_write.py` is the consumer `#10999` did not have, called from
 `TortoiseSDK._extract_session_v2` at `tortoise/sdk.py:17245` (`relation_write = apply_relation_edges(` —
-the `from tortoise.relation_write import apply_relation_edges` is the line above it, `:17244`, and the
+the `from tortoise.relation_write import apply_relation_edges` is the line above it, `:17313`, and the
 binding below is the result), fed **only** by
 the typed record (`out["relations"]`) and never by the story text (`#10000`). Two measurements, both
 taken on this merge:
 
-- `git grep -n 'result\["relations"\]' -- tortoise/` → **3** lines (`extractor_v2.py:11362`,
+- `git grep -n 'result\["relations"\]' -- tortoise/` → **3** lines (`extractor_v2.py:11423`,
   `relation_write.py:7`, `sdk.py:17232`), against the *"that comment and no consumer at all"* this
   record was written with.
 - `git grep -n 'plan_hierarchy_edges' -- tortoise/` → **8** lines, four of them in `relation_write.py`
@@ -192,7 +192,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    (`docs/ONTOLOGY.md` §3.9), and the measured run writes **7** of them (`(Source)-[:references]->…`,
    produced by `_EdgeHandlers.link_source_to_event` — `probes/capstone_measure.py:275-283`, reached from
    the capture path at `tortoise/sdk.py:17681`). (The probe's own docstring cites it too and was
-   re-derived with it — `#11212` had already corrected a stale `:17465` there, and `#11459`'s +102
+   re-derived with it — `#11212` had already corrected a stale `:17534` there, and `#11459`'s +102
    insertion then moved both; both now read `17681`.) What is missing is the *declared part-whole* edge, not every structural
    edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second
    producer" the epic forbids).
@@ -344,9 +344,9 @@ _vet_enabled() or _value_gate_enabled())` assignment (`extractor_v2.py:11731-117
 (`is_truthy(os.environ.get(ENV_FLAG, "1"))`).
 `extractor_v2.py:1183` is the **`TORTOISE_VET` toggle**, still OFF by default — cite it for that and
 nothing else. ⚠️ **A line cite is pinned to a base, and cites drift SITE BY SITE.** Three points, each
-named by the sha it is true at, so every delta has a reproducible operand: `:11351-11352` / `:1153` at
+named by the sha it is true at, so every delta has a reproducible operand: `:11412-11413` / `:1153` at
 **`aa414b4d5`** (the `#11211` landing — ⚠️ the immediate parent of the next point, `80c912244^`, holds
-`:11358`, i.e. **+373**, so the delta depends on which pre-merge base you pick) → `:11731-11732` / `:1154`
+`:11419`, i.e. **+373**, so the delta depends on which pre-merge base you pick) → `:11800-11801` / `:1154`
 at **`80c912244`** (**+380** / **+1**) → `:12302-12303` / `:1154` at **`d69faaf38`** (**+571** / **+0**).
 So a bare "re-anchor on merge" is not
 one arithmetic, and an arithmetic that is right for one base is already wrong for the next: **cite the
@@ -715,12 +715,12 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
                                                           # sdk.create_operator) and 0 at this base — a
                                                           # count is only as good as the base it was taken at
 # ⛔ THREE hits in this record's merged tree since #11548 landed the consumer (#11237):
-# extractor_v2.py:11362 (the stale comment), relation_write.py:7, sdk.py:17232.
+# extractor_v2.py:11423 (the stale comment), relation_write.py:7, sdk.py:17232.
 # ⛔ AND THE CONCLUSION THIS ROW WAS WRITTEN WITH IS NOW FALSE — `relation_write.py` IS that
 # consumer. Its own docstring says so ("#10999 built the `relations` channel as transport only …
 # and nothing consumed it. … This module is that consumer"), and `_extract_session_v2` calls it at
 # `sdk.py:17245` (`capture_session` reaches it at `sdk.py:15448`). Of the three hits only ONE is still prose-about-absence (the stale comment at
-# `extractor_v2.py:11362`); the other two are the consumer announcing itself. Read §0's amendment
+# `extractor_v2.py:11423`); the other two are the consumer announcing itself. Read §0's amendment
 # above, never "nothing consumes it".
 # ⛔ Both sides of the #11534 × #8290 forward-merge printed a different number, and neither matched
 # the other: the branch printed 10906 / :7 / 17181 at its own tip, main printed 11119 / :7 / 17188
@@ -730,7 +730,7 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
 # this record's base: ONE hit" was itself stale — that base predates #11205, whose comment is the
 # hit.) Re-measured at the merge.
 git grep -n 'result\["relations"\]' -- tortoise/        # at this record's merged tree: THREE hits —
-                                                          # :11362 (the stale "nothing consumes it"
+                                                          # :11423 (the stale "nothing consumes it"
                                                           # comment), relation_write.py:7 (the
                                                           # CONSUMER's docstring) and sdk.py:17232 (the
                                                           # #10999 transport-only note). ⛔ NOT "no
