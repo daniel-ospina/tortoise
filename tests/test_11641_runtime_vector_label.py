@@ -1744,7 +1744,7 @@ def test_the_engine_treats_EMBEDDING_and_embedding_as_DIFFERENT_keys(tmp_path) -
     assert rows[0][1] == "Vectorf32", rows
 
 
-@pytest.mark.parametrize("prop", ["EMBEDDING", "EmBeDdInG"])
+@pytest.mark.parametrize("prop", ["EMBEDDING", "EmBeDdInG", "`EMBEDDING`"])
 def test_a_vector_under_a_DIFFERENTLY_CASED_embedding_is_REFUSED(prop: str) -> None:
     """Round 10, P1-1: only the CANONICAL spelling is the embedding property.
 
@@ -1753,6 +1753,13 @@ def test_a_vector_under_a_DIFFERENTLY_CASED_embedding_is_REFUSED(prop: str) -> N
     The accept direction is asserted here too, so a fix that refuses the property write outright
     cannot pass: ``e.embedding`` and ``e.`embedding` `` are the SAME key to the engine (a backtick
     is Cypher's other identifier spelling), so both stay accepted.
+
+    ⛔ THE BACKTICKED SPELLING IS ITS OWN ROW, not a duplicate of the bare one: the reader strips the
+    optional backticks INSIDE its regex (``_SET_ITEM_PROPERTY_RE``), so ``e.`EMBEDDING` `` and
+    ``e.EMBEDDING`` reach the comparison by two different paths. Pinning only the bare one would leave
+    the regex's backtick handling unproven in the REFUSE direction — a regex that captured the
+    backticks as part of the name would still refuse a foreign key by accident, while the ACCEPT row
+    below (``e.`embedding` ``) is the one that would red. Together the pair pins both halves.
     """
     foreign = f"MATCH (e:Event {{eventId:'seed'}}) SET e.{prop} = vecf32($embedding)"
     assert statement_vector_in_a_foreign_property(foreign) == (
@@ -1771,8 +1778,11 @@ def test_a_vector_under_a_DIFFERENTLY_CASED_embedding_is_REFUSED(prop: str) -> N
         assert statement_write_target_problem(ok, {"Event"}) is None, ok
 
 
-@pytest.mark.parametrize("key", ["EMBEDDING", "EmBeDdInG"])
-def test_a_vector_under_a_DIFFERENTLY_CASED_MAP_KEY_is_REFUSED(key: str) -> None:
+@pytest.mark.parametrize(
+    ("spelling", "key"),
+    [("EMBEDDING", "EMBEDDING"), ("EmBeDdInG", "EmBeDdInG"), ("`EMBEDDING`", "EMBEDDING")],
+)
+def test_a_vector_under_a_DIFFERENTLY_CASED_MAP_KEY_is_REFUSED(spelling: str, key: str) -> None:
     """Round 10, P1-1 on the MAP leg: the key is a property name, so case is exact here too.
 
     ⛔ This leg needed its OWN fix, not the dotted one: at the round-10 head the map reader compared
@@ -1780,8 +1790,13 @@ def test_a_vector_under_a_DIFFERENTLY_CASED_MAP_KEY_is_REFUSED(key: str) -> None
     ``{EMBEDDING: vecf32($e)}`` matched NEITHER — the foreign leg skipped it as "the embedding
     property" and the map-store leg did not recognise the key at all. An accepted store, on a served
     label, in a property no read path queries.
+
+    ``spelling`` is what appears in the statement, ``key`` what the refusal reports: the map reader
+    strips the optional backticks inside ``_MAP_ENTRY_KEY_RE``, so ``{`EMBEDDING`: …}`` reports the
+    bare ``EMBEDDING`` — and is a row of its own because a backticked key takes the other branch of
+    that regex.
     """
-    statement = f"MATCH (e:Event {{eventId:'seed'}}) SET e += {{{key}: vecf32($embedding)}}"
+    statement = f"MATCH (e:Event {{eventId:'seed'}}) SET e += {{{spelling}: vecf32($embedding)}}"
     assert statement_vector_in_a_foreign_map_key(statement) == (f"{{{key}: …}}",), \
         statement_vector_in_a_foreign_map_key(statement)
     problem = statement_write_target_problem(statement, {"Event"})
