@@ -467,13 +467,20 @@ def _string_instant(s: str) -> datetime | None:
     # them is how this comment went wrong before:
     #
     # A. ACCEPTANCE. The INSTANT view takes a whole-value family when the
-    #    value's own grammar yields a coherent CLOCK READING. A ZONE-less
+    #    value's own grammar yields a coherent CLOCK READING — or, for a
+    #    date-only family, no clock at all, which is taken as UTC midnight
+    #    (``_date_only_shape``). A ZONE-less
     #    reading is still taken and left NAIVE for #3982 to place in the
     #    READER's zone — which is what ``2023/05/20 (Sat) 02:21`` gets — so an
     #    unstated ZONE is never a refusal here. What IS refused is an unreadable
     #    clock (hour 24, an impossible offset) or a family with no arm at all.
     #    The DAY view takes everything whose calendar day is readable, by
-    #    whole-value grammar OR by prefix. FOUR whole-value families are refused
+    #    whole-value grammar OR by the tolerant prefix — but ⚠ the PREFIX arm
+    #    matches DASHED / SLASHED prefixes only, so a COMPACT or ISO-week
+    #    date+TIME whose tail is unreadable is undated by BOTH views
+    #    (``20230520T24:00:00`` and ``2023-W43-2T11:00:00+25:00`` are ``None``
+    #    from ``calendar_date`` too, while the dashed ``2023-05-20T24:00:00``
+    #    is dated). FOUR whole-value families are refused
     #    by ``calendar_datetime`` — the HOUR-24 spelling is the first (item 2
     #    above), the other three follow — and they are NOT the same kind of
     #    refusal:
@@ -487,8 +494,9 @@ def _string_instant(s: str) -> datetime | None:
     #        ``20230520T02:21:00Z`` and ``2023-W43-2T11:00:00``, while the
     #        DATE-ONLY offset-or-``Z`` spelling has no arm. ⚠ The axis is the
     #        FORM, NOT the separators: the CALENDAR form is armed by
-    #        ``_INSTANT_RE``'s date-only branch, so ``2023-05-20+05:00``, ``2023-05-20Z`` and
-    #        ``2023/05/20+05:00`` ARE accepted as that offset's midnight — while
+    #        ``_INSTANT_RE``'s date-only branch, so ``2023-05-20+05:00``,
+    #        ``2023-05-20Z`` and ``2023/05/20+05:00`` ARE accepted as that
+    #        offset's midnight — while
     #        the DASHED ISO-WEEK spelling ``2023-W43-2+05:00`` is refused like
     #        the rest of its family. That is a GAP for the compact/ISO-week
     #        family, not a ruling — tracked as #11708 — and it is not the
@@ -497,7 +505,12 @@ def _string_instant(s: str) -> datetime | None:
     #        ``…+00:99``) — refused by a DELIBERATE GUARD, neither a ruling nor a
     #        gap: the DAY is stated and dated, the INSTANT cannot be computed,
     #        and refusing it is what keeps ``END_UNKNOWN`` honest (see item 3
-    #        above).
+    #        above). ⚠ The guard is reached by the ``/``-spelled family; for a
+    #        DASHED or COMPACT spelling the stdlib NORMALISES an out-of-range
+    #        MINUTES field (``+00:99`` → ``+01:39``) instead of refusing it, so
+    #        ``validity._names_an_instant`` still reports ``True`` and
+    #        ``end_state`` says ``END_KNOWN`` for it — the #9202 false PASS,
+    #        still live for those spellings and tracked as #11735.
     #
     # B. ORDERABILITY. A DIFFERENT gate, and it is about ``_created_sort_key``,
     #    not about acceptance: its gate is ``s[0].isdigit() and len(s) >= 10

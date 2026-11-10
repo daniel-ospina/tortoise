@@ -926,8 +926,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     # the separation falls between their offsets, the closed end being the
     # ACCEPTING host's offset (higher for a producer-as-START, lower for a
     # producer-as-END — see ``commit_schema.validate_validity_window``) — and
-    # when BOTH bounds are naive the offsets CANCEL, so every host agrees. This check reports
-    # rather than refuses, but the verdict it reports is that measure under a
+    # when BOTH bounds are naive the offsets CANCEL, so every host agrees.
+    # This check reports rather than refuses, but the verdict it reports is that
+    # measure under a
     # host-dependent key: not a new asymmetry, but a newly reachable one (the
     # shape used to bucket as unparseable, so the pair was skipped everywhere).
     # It is RECORDED and PINNED rather than changed: flipping the reading is a
