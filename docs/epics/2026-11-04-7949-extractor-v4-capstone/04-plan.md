@@ -344,7 +344,7 @@ map; it is pinned by `(org, graph, head)` and its `BLOCKED` reason names the hea
 
 ⛔⛔ **P0, found by the `duplication-architecture` review: the fixture lane's G1 REFUSES the committed record
 TODAY, and §4.2's earlier claim that "`corpus` stays ⇒ the six fixture rows are safe" is false.** The record's
-`corpus` block carries **no `sha256` and no `items`**, while `probes/capstone_run.py:1184` fail-closes with *"the
+`corpus` block carries **no `sha256` and no `items`**, while `probes/capstone_run.py:1186` fail-closes with *"the
 pre-registration freezes no corpus.sha256 — G1 would be a no-op"*; the checker's own note records the same
 (*"refuses at G1 (the registration freezes no corpus sha)"*). So **all six fixture rows** (E1, E1b, E2a, E2b, E4,
 E5) **cannot be produced at this record** — W2b was built on a pin that is already refusing.
@@ -357,7 +357,7 @@ a name collision in a pin is how the wrong digest gets compared.
 
 ⛔ **The first version also RETYPED `corpus` into `corpora`, which would have failed the
 majority of the epic.** `capstone_preregistration_check.py` reads `record["corpus"]` and cross-checks nine
-`CROSS_CHECKED_CORPUS_KEYS` against `pins.corpus`; and `capstone_run.py:1184` **fail-closes every run at G1** with
+`CROSS_CHECKED_CORPUS_KEYS` against `pins.corpus`; and `capstone_run.py:1186` **fail-closes every run at G1** with
 *"the pre-registration freezes no corpus.sha256"* — so removing `corpus` refuses all six fixture rows
 (E1, E1b, E2a, E2b, E4, E5). ⇒ **`corpus` STAYS**, `corpora` is **purely additive**, and **one CI pin asserts
 `corpora.fixture.{path,fixtures_hash} == corpus.{path,fixtures_hash}`** — otherwise the fixture is described twice
