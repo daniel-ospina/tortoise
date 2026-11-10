@@ -102,11 +102,20 @@ class _FakeGraph:
         )
 
     def _answer(self, statement: str):
-        if "is_episodic = true" in statement and "count(" in statement:
-            # The POPULATION's own count (a predicate, not a label). Mirrored by
-            # `POPULATION_RESIDENT_COUNT`; answered from the fixture's own declaration.
-            name = "turn" if ":Point" in statement else ""
-            return self._Result([[self._populations.get(name, 0)]])
+        # ⛔ THE POPULATION READ IS RECOGNISED BY IDENTITY, not by a literal in the text
+        # (#11709 review, P3). The old form keyed on `"is_episodic = true" in
+        # statement`, so a SECOND population whose statement carries another predicate
+        # — anything starting `MATCH (n:` and containing `count(n)` — fell through to
+        # the LABEL branch below and answered that label's count (0 for a label the
+        # fixture does not declare) instead of raising `unexpected statement`. A future
+        # test could then assert a demotion production would never produce. Matching the
+        # registered statement exactly answers every registered population from its own
+        # declared size, and an UNREGISTERED one cannot reach this method at all
+        # (`population_resident_count` refuses before issuing any read).
+        squashed = " ".join(statement.split())
+        for name, registered in POPULATION_RESIDENT_COUNT.items():
+            if " ".join(registered.split()) == squashed:
+                return self._Result([[self._populations.get(name, 0)]])
         if "db.labels" in statement:
             return self._Result([[label] for label in self._counts])
         if "size(labels(n)) = 0" in statement:
@@ -2558,12 +2567,74 @@ def test_a_population_with_no_count_statement_is_a_refusal_not_a_guess():
     total would silently restore the defect this change closes. Both are guesses.
     """
 
+    # ⛔ The stub must ANSWER a count, not raise (#11709 review, P1). `_read_statement`
+    # wraps ANY exception as `CacheReadError("… unreadable …")`, so a raising stub is
+    # converted into the very exception this test expects — from the WRONG branch — and
+    # the whole-graph default (`.get(population, "MATCH (n) RETURN count(n)")`) then
+    # reads a number successfully and the row stays GREEN. Measured at the reviewed
+    # head: `CacheReadError: … unreadable … (got 'MATCH (n) RETURN count(n)')` — the
+    # default WAS taken and the population WAS bounded by a guess. Answering a count
+    # makes any defaulted statement succeed (it would return 999 and this test would
+    # fail on the missing `pytest.raises`), and the `match` binds the refusal to the
+    # MISSING-STATEMENT branch rather than accepting any `CacheReadError` at all.
+    # The `0` half is covered by this same shape: a `0` default returns 0, and a
+    # whole-graph default returns 999.
     class _Graph:
-        def ro_query(self, statement, params=None):  # pragma: no cover — never reached
-            raise AssertionError("a population with no statement must not be read")
+        class _Result:
+            def __init__(self, rows):
+                #: ANY read SUCCEEDS — so a defaulted statement would be USED, never
+                #: refused, and this test would fail on its missing `pytest.raises`.
+                self.result_set = rows
 
-    with pytest.raises(CacheReadError):
+        def ro_query(self, statement, params=None):
+            return _Graph._Result([[999]])
+
+    with pytest.raises(CacheReadError, match="no resident-count statement"):
         population_resident_count(_Graph(), "no-such-population")
+
+
+def test_the_graph_total_is_read_AFTER_every_population_count():
+    """⛔ Pin the READ ORDER, because reverting it left every suite green (#11709).
+
+    The total is read AFTER the per-population counts so that a graph which GAINS nodes
+    between the two reads satisfies `resident_population <= total` by construction: an
+    honest 500/500 report cannot be demoted by the whole-graph backstop. Read BEFORE the
+    counts it could be — a legitimate 500/500 report measured REFUSED when the total read
+    answered 5, the false block #11726 records.
+
+    The property is the ORDER, so that is what is asserted. A behavioural fixture cannot
+    see it: `node_total` is answered from graph metadata, and a fixture that answers
+    differently on the two reads models a graph that does not exist. Statement order is
+    the cheapest true statement of the invariant, and it reds on the pre-fix order.
+    """
+    g = _FakeGraph(_STALE_GRAPH, populations=_STALE_POPULATION)
+    c = _FakeClient(used=900, maxmemory=1_000)
+    honest = ParityReport(instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
+                          measured_nodes=_STALE_POPULATION["turn"],
+                          total_nodes=_STALE_POPULATION["turn"],
+                          graph_name="tortoise")
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={PARITY_INSTRUMENTS["turn"]: honest})
+
+    # The honest arm still licenses (so this test cannot pass by refusing everything).
+    assert result.verdict == "PLAN", result.problems
+    assert [e["population"] for e in result.plan["evictable"]] == ["turn"]
+
+    total_at = g.statements.index("MATCH (n) RETURN count(n)")
+    population_at = [
+        i for i, s in enumerate(g.statements)
+        if s == POPULATION_RESIDENT_COUNT["turn"]
+    ]
+    assert population_at, (
+        "the population was never counted, so this test measured nothing — a report "
+        "that is not eligible never reaches the bound it is meant to exercise"
+    )
+    assert all(i < total_at for i in population_at), (
+        "the graph total is read BEFORE the population counts: a graph that GAINS "
+        "nodes between the two reads then demotes an honest report through the "
+        "whole-graph backstop (#11726) — read it after them"
+    )
 
 
 def test_a_row_multiplying_count_statement_is_a_documented_residual():
