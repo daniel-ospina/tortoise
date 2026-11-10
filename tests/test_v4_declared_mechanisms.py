@@ -172,6 +172,14 @@ below still state what a marker comparison cannot reach.
     linked directory is not descended, so a marker behind it would get no
     verdict), which is a verdict of its own and not a silent hole. No link exists
     there today; a NON-markdown link is an uncovered source, as above;
+  * a SURFACE that cannot be READ (a directory that exists but refuses `listdir`)
+    is a verdict, not an empty design: `is_dir()` answers about the inode, and
+    `Path.rglob` swallows the `PermissionError` and yields nothing, so without
+    that probe an unreadable surface was indistinguishable from a
+    declaration-free one — the gate's primary direction silently empty. Measured
+    before the guard on a `0o000` directory holding a marker with no row:
+    `markers: {}`, `errors: []` (review cycle 4, P2). This is a verified
+    read-at-the-surface failure, unlike the permanent prose limit above it;
   * the sibling `*-CHANGELOG.md` is NOT scanned (`CHANGELOG_SUFFIX`): #8542 moved
     status and change narration into those files, so an entry recording a marker
     change may legitimately quote the convention, and scanning it would turn that
@@ -207,6 +215,7 @@ meets an ordering instead of a surprise.
 from __future__ import annotations
 
 import ast
+import os
 import re
 import sys
 import tokenize
@@ -656,6 +665,31 @@ def declaration_markers(
             f"{', '.join(str(m) for m in missing)} is not a directory — the gate "
             f"cannot compare the declared set against anything (fail closed, "
             f"never an empty pass)"
+        ]
+    # ⛔ A PRESENT-BUT-UNREADABLE SURFACE IS ITS OWN VERDICT (review cycle 4, P2).
+    # `is_dir()` answers about the inode, not about permission to read it, and
+    # `Path.rglob` SWALLOWS the `PermissionError` that `os.listdir` raises and
+    # yields `[]` — so an unreadable surface was indistinguishable from a
+    # declaration-free one, and the gate's PRIMARY direction (a marker with no
+    # registry row) went silently empty for every document behind it. Measured on
+    # a `0o000` directory holding a marker with no row: `markers: {} errors: []`
+    # before this guard. `missing` cannot catch it (`is_dir()` is True) and the
+    # per-document `read_text` verdict cannot either (the walk never reaches the
+    # documents). This is the `#5064` shape at the surface rather than the file:
+    # a scan that could not look must never report "nothing declared".
+    unreadable: list[str] = []
+    for surface in surfaces:
+        try:
+            os.listdir(surface)
+        except OSError as exc:
+            unreadable.append(f"{surface} ({type(exc).__name__})")
+    if unreadable:
+        return markers, [
+            f"the declaration-marker surface cannot be READ: "
+            f"{', '.join(unreadable)} — the directory exists, so the walk that "
+            f"returns nothing is a refused read, not an empty design (fail "
+            f"closed, never an empty pass): a declaration behind it could not be "
+            f"compared against the registry at all"
         ]
     documents = [
         (surface, doc)
@@ -7633,6 +7667,51 @@ def test_an_unreadable_surface_is_not_a_vacuous_pass(tmp_path) -> None:
     """A missing docs dir must red THIS verdict too, not pass it empty."""
     errors = declaration_state_errors([_row("x")], tmp_path / "nope")
     assert any("is not a directory" in e for e in errors), errors
+
+
+def test_a_surface_that_cannot_be_read_is_a_verdict_not_an_empty_design(
+    tmp_path,
+) -> None:
+    """`is_dir()` is not permission to read, and `rglob` hides the difference.
+
+    Measured before the guard (review cycle 4, P2): a surface at mode `0o000`
+    holding a marker with NO registry row returned `markers: {}`, `errors: []` —
+    `Path.rglob` swallows the `PermissionError` that `os.listdir` raises and
+    yields `[]`, so an unreadable surface read exactly like a declaration-free
+    one and the gate's PRIMARY direction (a marker with no row) went silently
+    empty for every document behind it. `missing` cannot catch it — `is_dir()`
+    is True — and the per-document `read_text` verdict cannot either, because the
+    walk never reaches a document.
+
+    This is #5064's root at the SURFACE instead of the file: a scan that could
+    not look must never report "nothing declared".
+    """
+    docs = tmp_path / "epics"
+    docs.mkdir()
+    (docs / "p.md").write_text(
+        "<!-- v4-mechanism: no_row_here state: built -->\n", encoding="utf-8"
+    )
+    docs.chmod(0o000)
+    try:
+        try:
+            os.listdir(docs)
+        except OSError:
+            pass
+        else:  # pragma: no cover — root (or CAP_DAC_READ_SEARCH) reads anything
+            pytest.skip("this box can read a 0o000 directory, so the shape cannot be built")
+        # the precondition the guard exists for: the walk says "nothing here"
+        assert list(docs.rglob("*.md")) == []
+        markers, errors = declaration_markers(docs)
+        # …and the composing verdict carries it rather than swallowing it, so the
+        # whole gate reds on an unreadable surface instead of reporting agreement.
+        # ⛔ Measured INSIDE the unreadable window: the mode must not be restored
+        # first, or the second call reads a readable directory and passes.
+        state_errors = declaration_state_errors([_row("x")], docs)
+    finally:
+        docs.chmod(0o755)
+    assert markers == {}
+    assert any("cannot be READ" in e for e in errors), errors
+    assert any("cannot be READ" in e for e in state_errors), state_errors
 
 
 def test_a_malformed_marker_breaks_the_state_verdict_too(tmp_path) -> None:

@@ -1881,10 +1881,21 @@ declares it, (c) record DM1 as an explicit exclusion. This is **(b) plus the reg
 DECLARATION SITE** — not (a) as the issue worded it: the marker sits in the plan that declares DM1, not in a
 `docs/architecture/` doc, which would have been a marker with no declaration behind it (the detached-marker limit
 this gate already states). So the row exists AND the scanned surface
-includes the plan, so the same class of declaration cannot hide in `docs/epics/` again — rather than (c), which
-would have documented the blindness instead of closing it. The alternatives were not "adopt with a caveat": (c)
-leaves the mechanism invisible, and an architecture-doc marker with no declaration behind it is the detached-marker
-limit this gate already states.
+includes the plan, so a declaration that CARRIES A MARKER cannot hide in `docs/epics/`
+again — rather than (c), which would have documented the blindness instead of closing it. The
+alternatives were not "adopt with a caveat": (c) leaves the mechanism invisible, and an
+architecture-doc marker with no declaration behind it is the detached-marker limit this gate
+already states.
+
+⚠️ **What the widening does NOT close, stated here because this is the entry a reader will cite.**
+An UNMARKED prose declaration is still invisible in the epic surface — the marker convention, not
+the widening, is what makes a declaration visible. `05-plan.md` §4's own shape table is the live
+evidence: DM1 has a row because a lane added one, while **DM2–DM6 (the contract's mention channel,
+the held set, kind widening, the hierarchy edge, the census artifact) carry no row and no marker**,
+so the same class of declared-and-absent mechanism demonstrably still hides in the directory this
+PR widened the scan to. The gate's module docstring states this limit in full ("an UNMARKED prose
+declaration is invisible, in every shape") and the registry header says it too; this sentence is
+the one place that must not read as a stronger claim than those.
 
 **Two fail-opens found in review and fixed before landing.** (1) `_scanned_targets` returns RESOLVED paths while the
 document name was computed against the UNRESOLVED surface, so a symlinked surface made `relative_to` raise, the
