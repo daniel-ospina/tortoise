@@ -82,7 +82,7 @@ def test_m2_in_capture_repeat_is_content_hash_hit_single_node(sdk, monkeypatch):
         },
         {"role": "user", "content": "ok"},
     ]
-    res = sdk.capture_session(conv)
+    res = sdk._capture_session(conv)
     verdicts = [p["dedup"] for p in res["points"]]
     assert verdicts == [DEDUP_NEW, DEDUP_CONTENT_HASH_HIT], verdicts
     # both occurrences report the canonical point (same id)
@@ -112,7 +112,7 @@ def test_m2_in_capture_paraphrase_is_rephrase_linked_single_node(sdk, monkeypatc
         },
         {"role": "user", "content": "ok"},
     ]
-    res = sdk.capture_session(conv)
+    res = sdk._capture_session(conv)
     verdicts = [p["dedup"] for p in res["points"]]
     assert verdicts == [DEDUP_NEW, DEDUP_REPHRASE_LINKED], verdicts
     assert len({p["id"] for p in res["points"]}) == 1
@@ -134,7 +134,7 @@ def test_m2_distinct_claims_stay_new(sdk, monkeypatch):
         },
         {"role": "user", "content": "ok"},
     ]
-    res = sdk.capture_session(conv)
+    res = sdk._capture_session(conv)
     assert all(p["dedup"] == DEDUP_NEW for p in res["points"])
     assert len(_claim_nodes(sdk._get_proj())) == len(res["points"])
 
@@ -154,7 +154,7 @@ def test_m2_load_bearing_connective_swap_keeps_both_claims(sdk, monkeypatch):
         {"role": "assistant", "content": "We ship or test the build."},
         {"role": "user", "content": "ok"},
     ]
-    res = sdk.capture_session(conv)
+    res = sdk._capture_session(conv)
     verdicts = [p["dedup"] for p in res["points"]]
     assert verdicts == [DEDUP_NEW, DEDUP_NEW], verdicts
     claims = _claim_nodes(sdk._get_proj())
@@ -179,7 +179,7 @@ def test_m2_operator_wired_repeat_kept_distinct_with_warning(sdk, monkeypatch):
         },
         {"role": "user", "content": "ok"},
     ]
-    res = sdk.capture_session(conv)
+    res = sdk._capture_session(conv)
     verdicts = [p["dedup"] for p in res["points"]]
     assert verdicts == [DEDUP_NEW, DEDUP_NEW], verdicts
     assert any("not deduped" in w for w in res["warnings"]), res["warnings"]
@@ -208,7 +208,7 @@ def test_m2_one_sided_state_drop_keeps_both_claims(sdk, monkeypatch):
         {"role": "assistant", "content": "The flag for the rollout."},
         {"role": "user", "content": "ok"},
     ]
-    res = sdk.capture_session(conv)
+    res = sdk._capture_session(conv)
     verdicts = [p["dedup"] for p in res["points"]]
     assert verdicts == [DEDUP_NEW, DEDUP_NEW], (verdicts, res["points"])
     claims = _claim_nodes(sdk._get_proj())
@@ -245,7 +245,7 @@ def test_m2_role_inversion_keeps_both_claims(sdk, monkeypatch, prior, rival):
         {"role": "assistant", "content": rival},
         {"role": "user", "content": "ok"},
     ]
-    res = sdk.capture_session(conv)
+    res = sdk._capture_session(conv)
     verdicts = [p["dedup"] for p in res["points"]]
     assert verdicts == [DEDUP_NEW, DEDUP_NEW], (verdicts, res["points"])
     claims = _claim_nodes(sdk._get_proj())
@@ -264,8 +264,8 @@ def test_v2_cross_session_reingest_is_content_hash_hit(sdk):
         {"role": "user", "content": "The database schema needs normalization before the release."},
         {"role": "user", "content": "ok"},
     ]
-    r1 = sdk.capture_session(conv)
-    r2 = sdk.capture_session(conv)  # fresh auto session id, same content
+    r1 = sdk._capture_session(conv)
+    r2 = sdk._capture_session(conv)  # fresh auto session id, same content
     assert all(p["dedup"] == DEDUP_NEW for p in r1["points"])
     assert r2["points"] and all(p["dedup"] == DEDUP_CONTENT_HASH_HIT for p in r2["points"]), [
         p["dedup"] for p in r2["points"]
@@ -317,7 +317,7 @@ def test_v2_seam_in_capture_payload_repeat_folds(sdk, monkeypatch):
     import tortoise.extractor_v2 as ev2
     monkeypatch.setattr(
         ev2, "extract_session_v2", _stub_extractor([content, content]))
-    res = sdk.capture_session([{"role": "user", "content": "hello"}])
+    res = sdk._capture_session([{"role": "user", "content": "hello"}])
     verdicts = [p["dedup"] for p in res["points"]]
     assert verdicts == [DEDUP_NEW, DEDUP_CONTENT_HASH_HIT], verdicts
     assert len({p["id"] for p in res["points"]}) == 1
@@ -337,7 +337,7 @@ def test_v2_seam_cross_id_content_hit_no_phantom_no_churn(sdk, monkeypatch):
     import tortoise.extractor_v2 as ev2
     monkeypatch.setattr(ev2, "extract_session_v2",
                         _stub_extractor([content]))
-    res = sdk.capture_session([{"role": "user", "content": "hello"}])
+    res = sdk._capture_session([{"role": "user", "content": "hello"}])
     assert res["points"]
     entry = res["points"][0]
     assert entry["dedup"] == DEDUP_CONTENT_HASH_HIT, entry
@@ -369,7 +369,7 @@ def test_v2_noop_gate_only_surfaces_capture_provenanced_identical(sdk, monkeypat
         {"point_id": "pt_deadbeef", "reason": "paraphrase",
          "overlap": 0.8, "evidence": "value-signature equal"}])
     monkeypatch.setattr(ev2, "extract_session_v2", para)
-    res = sdk.capture_session([{"role": "user", "content": "hello"}])
+    res = sdk._capture_session([{"role": "user", "content": "hello"}])
     assert res["points"] == [], res["points"]
     assert any("not surfaced" in w for w in res["warnings"]), res["warnings"]
 
@@ -378,7 +378,7 @@ def test_v2_noop_gate_only_surfaces_capture_provenanced_identical(sdk, monkeypat
     noops = [{"point_id": orphan["id"], "reason": "identical",
               "overlap": 1.0, "evidence": "exact"}]
     monkeypatch.setattr(ev2, "extract_session_v2", _stub_extractor([], noops))
-    res2 = sdk.capture_session([{"role": "user", "content": "hello"}])
+    res2 = sdk._capture_session([{"role": "user", "content": "hello"}])
     assert res2["points"] == [], res2["points"]
     assert any("not surfaced" in w for w in res2["warnings"]), res2["warnings"]
 
@@ -396,7 +396,7 @@ def test_v2_fold_lane_reports_stored_passthrough_props(sdk, monkeypatch):
     content = "the fold lane must report the canonical's stored props"
     monkeypatch.setattr(ev2, "extract_session_v2",
                         _stub_extractor([content]))
-    first = sdk.capture_session([{"role": "user", "content": "hello"}])
+    first = sdk._capture_session([{"role": "user", "content": "hello"}])
     assert len(first["points"]) == 1, first["points"]
     canonical_id = first["points"][0]["id"]
     assert canonical_id.startswith("pt_"), canonical_id
@@ -412,7 +412,7 @@ def test_v2_fold_lane_reports_stored_passthrough_props(sdk, monkeypatch):
         {"point_id": canonical_id, "reason": "identical",
          "overlap": 1.0, "evidence": "exact"}])
     monkeypatch.setattr(ev2, "extract_session_v2", fold)
-    second = sdk.capture_session([{"role": "user", "content": "hello"}])
+    second = sdk._capture_session([{"role": "user", "content": "hello"}])
     assert len(second["points"]) == 1, second["points"]
     entry = second["points"][0]
     assert entry["id"] == canonical_id, entry
@@ -478,7 +478,7 @@ def test_capture_never_promotes_a_folded_explicit_draft(sdk, monkeypatch):
     #    and provenance the fold surface requires.
     monkeypatch.setattr(ev2, "extract_session_v2",
                         _stub_extractor(["explicitly staged claim"]))
-    first = sdk.capture_session([{"role": "user", "content": "seed"}])
+    first = sdk._capture_session([{"role": "user", "content": "seed"}])
     canonical_id = first["points"][0]["id"]
     assert canonical_id.startswith("pt_"), canonical_id
     # 2. The agent stages it draft and it carries NO EP calibration (its own
@@ -494,7 +494,7 @@ def test_capture_never_promotes_a_folded_explicit_draft(sdk, monkeypatch):
         {"point_id": canonical_id, "reason": "identical",
          "overlap": 1.0, "evidence": "exact"}])
     monkeypatch.setattr(ev2, "extract_session_v2", fold)
-    res = sdk.capture_session([{"role": "user", "content": "hello"}])
+    res = sdk._capture_session([{"role": "user", "content": "hello"}])
     after = sdk.get_point(canonical_id)
     assert after["status"] == "draft", (
         "an explicitly-drafted point a later capture deduped onto was "
@@ -540,7 +540,7 @@ def test_capture_promotes_a_new_operator_over_an_already_calibrated_fold(
 
     # 1st capture mints the two canonicals (no operator wired).
     monkeypatch.setattr(ev2, "extract_session_v2", _stub_extractor([a, b]))
-    first = sdk.capture_session([{"role": "user", "content": "hello"}])
+    first = sdk._capture_session([{"role": "user", "content": "hello"}])
     assert {p["id"] for p in first["points"]} == {pid_a, pid_b}, first["points"]
 
     proj = sdk._get_proj()
@@ -563,7 +563,7 @@ def test_capture_promotes_a_new_operator_over_an_already_calibrated_fold(
                   "direction": "unidirectional"}]
     monkeypatch.setattr(ev2, "extract_session_v2",
                         _stub_extractor([a, b], operators=operators))
-    second = sdk.capture_session([{"role": "user", "content": "hello"}])
+    second = sdk._capture_session([{"role": "user", "content": "hello"}])
     assert [p["dedup"] for p in second["points"]] == [
         DEDUP_CONTENT_HASH_HIT, DEDUP_CONTENT_HASH_HIT], second["points"]
 
@@ -611,7 +611,7 @@ def test_capture_promotes_operator_when_all_payload_folds_are_paraphrase(
 
     # 1st capture mints the two canonicals (no operator wired).
     monkeypatch.setattr(ev2, "extract_session_v2", _stub_extractor([a, b]))
-    first = sdk.capture_session([{"role": "user", "content": "hello"}])
+    first = sdk._capture_session([{"role": "user", "content": "hello"}])
     assert {p["id"] for p in first["points"]} == {pid_a, pid_b}, first["points"]
 
     proj = sdk._get_proj()
@@ -641,7 +641,7 @@ def test_capture_promotes_operator_when_all_payload_folds_are_paraphrase(
                   "direction": "unidirectional"}]
     monkeypatch.setattr(ev2, "extract_session_v2",
                         _stub_extractor([], noops=noops, operators=operators))
-    second = sdk.capture_session([{"role": "user", "content": "hello"}])
+    second = sdk._capture_session([{"role": "user", "content": "hello"}])
     assert second["points"] == [], (
         "paraphrase folds must never be surfaced: " + repr(second["points"]))
 
@@ -720,8 +720,8 @@ def test_hosted_and_mirror_reingest_parity(client):
     import tortoise.hosted_api as ha_mod
 
     sdk = ha_mod._make_sdk(namespace="team-001")
-    m1 = sdk.capture_session(conv)
-    m2 = sdk.capture_session(conv)
+    m1 = sdk._capture_session(conv)
+    m2 = sdk._capture_session(conv)
     assert m1["points"] and all(p["dedup"] == DEDUP_CONTENT_HASH_HIT for p in m1["points"]), m1[
         "points"
     ]
@@ -770,7 +770,7 @@ def test_sdk_mirror_speaks_memory_write_v1_verb(sdk, monkeypatch):
         {"role": "assistant",
          "content": "Therefore we should ship serve --http first."},
     ]
-    res = sdk.capture_session(conv, session_id="w5-verb-mirror", harness="pi")
+    res = sdk._capture_session(conv, session_id="w5-verb-mirror", harness="pi")
     # S12: the frozen verb speaks on the mirror, not only on hosted.
     assert res["protocol_version"] == "memory_write_v1", res
     assert res["status"] in ("ok", "partial"), res

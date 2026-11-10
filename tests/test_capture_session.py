@@ -1,3 +1,6 @@
+# #4282: the tests below were removed with the methods they pin — `test_commit_session_is_not_refused_when_consented`, `test_commit_session_refuses_without_consent_before_extraction`, `test_commit_session_threads_session_date` — which this
+# PR deletes outright (see `tortoise/sdk_retired.py`). The surviving capture door is
+# driven by the rest of this file under its private name `_capture_session`.
 """SDK capture_session tests (#312 delta 4 + delta 5 speaker tagging, #822).
 
 #822: LLM extraction is the default (and only) capture extraction — the regex
@@ -39,30 +42,6 @@ def _server_uri_set() -> bool:
     return scheme in _SUPPORTED and bool(urlparse(uri).hostname)
 
 
-def test_commit_session_threads_session_date(sdk, monkeypatch):
-    """T10 (#1533): commit_session threads session_date into
-    extract_session_v2 — ISO-now by default (D8: capture time = session
-    date), explicit value honored."""
-    import tortoise.extractor_v2 as ev2
-
-    received = []
-
-    def _fake_extract(model, conversation, **kw):
-        received.append(kw.get("session_date"))
-        return {"payload": None, "minted_kinds": [], "supersessions": [],
-                "chain_notes": [], "link_before_create": [],
-                "warnings": [], "story_arc": "", "search": {},
-                "stats": {}, "errors": ["no payload produced"]}
-
-    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
-
-    r = sdk.commit_session(CONV)
-    assert r["ok"] is False  # no payload → never reports ok=True
-    assert len(received) == 1
-    assert received[0]  # ISO now by default — non-empty
-    # explicit session_date= is honored verbatim
-    sdk.commit_session(CONV, session_date="2026-08-01")
-    assert received[1] == "2026-08-01"
 
 
 # ── #3662: the SDK transmission path requires explicit consent ────────────
@@ -148,70 +127,26 @@ def _extract_with_payload(payload: dict, extracted: list):
     return _fake
 
 
-def test_commit_session_refuses_without_consent_before_extraction(
-        sdk, monkeypatch):
-    """FAIL-ON (before the fix): extraction runs and `_post_commit` is reached,
-    so the recorder is hit and the result is `ok=True`.
-
-    The refusal must land BEFORE extraction: an unconsented transmission must
-    not spend a BYOK provider call over the raw conversation, and the CLI's
-    gated twins (`session capture` / `sessions import`) also refuse before any
-    work. `monkeypatch.delenv` is the explicit negative the suite-wide
-    `_capture_consent_default_on` grant (tests/conftest.py) requires."""
-    import tortoise.extractor_v2 as ev2
-
-    monkeypatch.delenv("TORTOISE_CAPTURE", raising=False)
-    posted: list = []
-    monkeypatch.setattr("tortoise.sdk._post_commit",
-                        lambda *a, **k: posted.append(a) or {"ok": True})
-    extracted: list = []
-    monkeypatch.setattr(ev2, "extract_session_v2",
-                        _extract_with_payload(_valid_v2_payload(), extracted))
-    out = sdk.commit_session(CONV)
-    assert out["ok"] is False, out
-    assert any("explicit consent" in e for e in out["errors"]), out["errors"]
-    assert extracted == [], "the refusal must precede extraction"
-    assert posted == [], "an unconsented commit must not POST"
-    # The decline carries the same result shape as every other non-ok return
-    # of this method (e.g. the v1 gate-failure path), so a caller that
-    # uniformly reads `payload` on `not ok` does not KeyError on this branch.
-    assert "payload" in out and out["payload"] is None, out
 
 
-def test_commit_session_is_not_refused_when_consented(sdk, monkeypatch):
-    """Control: the refusal is consent-dependent, not always-on.
-
-    Without this, a gate that refused unconditionally would pass the negative
-    test above."""
-    import tortoise.extractor_v2 as ev2
-
-    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
-    posted: list = []
-    monkeypatch.setattr("tortoise.sdk._post_commit",
-                        lambda *a, **k: posted.append(a) or {"ok": True})
-    extracted: list = []
-    monkeypatch.setattr(ev2, "extract_session_v2",
-                        _extract_with_payload(_valid_v2_payload(), extracted))
-    out = sdk.commit_session(CONV)
-    assert extracted, "the consented path must not be refused before extraction"
-    # The fail-on companion to the refusal test: this SAME mocked extraction is
-    # one that genuinely reaches the transmitting primitive, so `posted == []`
-    # there is the gate's doing and not an early return for another reason.
-    assert posted, "the consented path must reach the transmitting primitive"
-    assert out["ok"] is True, out
-    assert not any("explicit consent" in str(e)
-                   for e in out.get("errors", [])), out
 
 
 def test_capture_session_module_isolates_real_home(tmp_path):
-    """#3662 review (P2): pin the HOME isolation the refusal test depends on.
+    """#3662 review (P2): pin the HOME isolation the module-wide fixture gives.
 
-    ``test_commit_session_refuses_without_consent_before_extraction`` reaches
-    ``record_capture_declined()``, which resolves and CREATES
-    ``$HOME/.tortoise/capture-consent-notice``. Without the module-wide HOME
-    isolation (see ``_isolated_home``) that path is the developer's real
-    ``$HOME`` and the durable #3615 notice leaks onto their machine. Assert the
-    resolved location, not the notice text.
+    ⚠️ The fixture's ORIGINAL justification is gone: it existed because
+    ``test_commit_session_refuses_without_consent_before_extraction`` drove
+    ``record_capture_declined()``, which CREATED
+    ``$HOME/.tortoise/capture-consent-notice`` — and `#4282` retired that test
+    with the public ``commit_session`` door. What survives is the READ side:
+    ``_post_commit`` refuses through ``capture_consent.capture_declined_reason()``
+    (pinned by ``test_capture_consent.py::test_sdk_post_commit_refuses_without_consent_and_never_posts``),
+    and that resolution reads ``Path.home()`` on the very path this module
+    drives 120+ times. The isolation therefore stays — it is what keeps a
+    future consent-declining test HERE from resolving the developer's real
+    ``$HOME`` — but it is pinned on the RESOLUTION it still guarantees, not on
+    a writer this file no longer has. Assert the resolved location, not the
+    notice text.
     """
     from tortoise.capture_consent import capture_notice_path
 
@@ -363,15 +298,19 @@ def _pinned_provider_routing_env(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _isolated_home(monkeypatch, tmp_path):
-    """#3662 review (P2): never let this module write into the developer's real
+    """#3662 review (P2): never let this module resolve the developer's real
     ``$HOME``.
 
-    The unconsented-refusal test below drives
+    ⚠️ Restated after `#4282` (the wording below used to name a test that PR
+    deleted): the fixture was added because an unconsented-refusal test drove
     ``capture_consent.capture_declined_reason()`` → ``record_capture_declined()``,
     which resolves ``Path.home()/.tortoise/capture-consent-notice`` and CREATES
     it — so a normal pytest run left the durable #3615 migration notice in the
     real ``$HOME``, and the next interactive ``tortoise`` command printed it.
-    Mirrors ``test_capture_consent.py::_isolated`` for the HOME half only: the
+    That test went with the public ``commit_session`` door, so nothing here
+    writes the notice any more; the fixture is kept because the consent READ
+    still resolves ``Path.home()`` on the path this module drives, and pinning
+    it costs nothing. Mirrors ``test_capture_consent.py::_isolated`` for the HOME half only: the
     suite-wide ``_capture_consent_default_on`` grant stays in force here (unlike
     that file's decline matrix), so the consented control test is unaffected.
     """
@@ -398,7 +337,7 @@ CONV = [
 
 
 def test_capture_session_shape(sdk):
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["session_id"].startswith("session_")
     assert res["turns"] == 3
     assert res["extracted"] >= 1
@@ -455,7 +394,7 @@ def test_capture_v2_persists_passthrough_props_on_node(sdk, monkeypatch):
 
     monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
 
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     assert len(res["points"]) == 1, res["points"]
     pid = res["points"][0]["id"]
@@ -530,7 +469,7 @@ def test_capture_derives_the_money_value_onto_the_node(sdk, monkeypatch):
         "The tranche released EUR 800 last week.",
         quote="the tranche released EUR 800"))
 
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     pid = res["points"][0]["id"]
     amount, currency, exponent, verbatim, as_of = _read_money_row(sdk, pid)
@@ -567,7 +506,7 @@ def test_capture_derives_money_from_content_not_the_200_char_quote(
 
     _install_fake_extract(monkeypatch, _money_payload(
         long_content, quote=long_content[:200]))
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     amount = _read_money_row(sdk, res["points"][0]["id"])[0]
     assert amount == 80_000, amount
@@ -576,7 +515,7 @@ def test_capture_derives_money_from_content_not_the_200_char_quote(
     _install_fake_extract(monkeypatch, _money_payload(
         "the pilot phase stayed inconclusive", quote="EUR 800 released",
         pid="pt_2817_quote_only"))
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     assert _read_money_row(sdk, res["points"][0]["id"])[0] is None, res["points"]
 
@@ -597,7 +536,7 @@ def test_capture_keeps_the_claim_when_the_derived_amount_is_unstorable(
     content = "The facility size was EUR 123456789012345678 for the year."
     _install_fake_extract(monkeypatch, _money_payload(content))
 
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     assert res["extracted"] == 1, res
     pid = res["points"][0]["id"]
@@ -617,7 +556,7 @@ def test_capture_never_types_an_ambiguous_amount(sdk, monkeypatch):
     _install_fake_extract(monkeypatch, _money_payload(
         "R$ 1.234,56 was committed to the tranche."))
 
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     pid = res["points"][0]["id"]
     assert _read_money_row(sdk, pid)[0] is None, _read_money_row(sdk, pid)
@@ -692,7 +631,7 @@ def test_a_money_derivation_failure_stays_point_local(sdk, monkeypatch):
         "the tranche released EUR 800 last week",
         "the explode claim reached the seam"))
 
-    res = sdk.capture_session(CONV)          # must NOT raise
+    res = sdk._capture_session(CONV)          # must NOT raise
     written = [p["text"] for p in res["points"]]
     assert written == ["the tranche released EUR 800 last week"], res["points"]
     assert any("derivation exploded" in e for e in res["errors"]), res["errors"]
@@ -714,7 +653,7 @@ def test_capture_reports_money_abstentions_once_per_capture(sdk, monkeypatch):
     _install_fake_extract(monkeypatch,
                           _money_channel(*_UNANCHORED_CLAIMS))
 
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     assert res["extracted"] == 3, res
     channel = _money_warnings(res)
@@ -735,7 +674,7 @@ def test_capture_keeps_the_named_abstention_reportable_through_the_seam(
     _install_fake_extract(monkeypatch, _money_payload(
         "1.234,56 last quarter"))
 
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     channel = _money_warnings(res)
     assert len(channel) == 1, channel
@@ -754,7 +693,7 @@ def test_capture_says_nothing_about_a_claim_with_no_number(
     _install_fake_extract(monkeypatch, _money_payload(
         "we plan to hire engineers and revisit the plan"))
 
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     assert _money_warnings(res) == [], res.get("warnings")
 
@@ -772,11 +711,11 @@ def test_capture_money_receipt_is_the_same_on_a_dedup_hit(sdk, monkeypatch):
     content = _UNANCHORED_CLAIMS[0]
     _install_fake_extract(monkeypatch, _money_payload(content))
 
-    first = sdk.capture_session(CONV)
+    first = sdk._capture_session(CONV)
     assert first["ok"] is True, first
     assert first["points"][0]["dedup"] == "new", first["points"]
 
-    second = sdk.capture_session(CONV)
+    second = sdk._capture_session(CONV)
     assert second["ok"] is True, second
     # The second capture resolved to the existing canonical — no prop writes.
     assert second["points"][0]["dedup"] == "content_hash_hit", second["points"]
@@ -858,7 +797,7 @@ def test_capture_dedup_hit_reports_stored_props_not_payload(sdk, monkeypatch):
         [None, None, None, None]
 
     _install_fake_extract(monkeypatch, _passthrough_payload(content))
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     assert len(res["points"]) == 1, res["points"]
     # Resolved to the PRE-EXISTING canonical, no new node minted.
@@ -885,7 +824,7 @@ def test_capture_dedup_hit_reports_stored_values_over_payload(
         search_keys=["original", "keys"], source_turn_id="turn-0")
 
     _install_fake_extract(monkeypatch, _passthrough_payload(content))
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["points"][0]["id"] == canonical["id"], res["points"]
     assert res["points"][0]["props"] == {
         "quote": "ORIGINAL quote",
@@ -919,7 +858,7 @@ def test_capture_create_path_omits_unstored_passthrough_props(
     payload["points"][0]["source_turn_id"] = None
 
     _install_fake_extract(monkeypatch, payload)
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     assert len(res["points"]) == 1, res["points"]
     pid = res["points"][0]["id"]
@@ -1014,7 +953,7 @@ def test_capture_w5_phase_c_ep_on_ingest_calibrates_wired_claims(sdk, monkeypatc
         {"role": "assistant", "content": "Therefore we should ship serve "
                                            "--http first."},
     ]
-    res = sdk.capture_session(conv)
+    res = sdk._capture_session(conv)
     assert res["ok"] is True, res
     ids = [p["id"] for p in res["points"]]
     assert len(ids) >= 2, res
@@ -1099,7 +1038,7 @@ def test_capture_w5_phase_c_promotion_is_rebuild_durable(tmp_path, monkeypatch):
             {"role": "assistant", "content": "Therefore we should ship serve "
                                                "--http first."},
         ]
-        res = sdk.capture_session(conv)
+        res = sdk._capture_session(conv)
         assert res["ok"] is True, res
         ids = [p["id"] for p in res["points"]]
         assert len(ids) >= 2, res
@@ -1221,7 +1160,7 @@ def test_capture_w5_phase_c_full_dream_effective_post_capture(sdk, monkeypatch):
         {"role": "assistant", "content": "Therefore we should ship serve "
                                            "--http first."},
     ]
-    res = sdk.capture_session(conv)
+    res = sdk._capture_session(conv)
     assert res["ok"] is True and res["extracted"] >= 2
     d = sdk.dream(full=True, require_calibration=False, warm_start=False)
     assert d.get("total_affected") >= 2, d
@@ -1229,7 +1168,7 @@ def test_capture_w5_phase_c_full_dream_effective_post_capture(sdk, monkeypatch):
 
 
 def test_capture_session_turns_are_speaker_tagged(sdk):
-    sdk.capture_session(CONV)
+    sdk._capture_session(CONV)
     proj = sdk._get_proj()
     rows = proj.g.query(
         "MATCH (t:Point {pointKind:'event'}) RETURN t.speaker ORDER BY t.id"
@@ -1238,9 +1177,9 @@ def test_capture_session_turns_are_speaker_tagged(sdk):
 
 
 def test_capture_session_idempotent(sdk):
-    sdk.capture_session(CONV)
+    sdk._capture_session(CONV)
     sid = sdk._get_proj().g.query("MATCH (s:Session) RETURN s.id").result_set[0][0]
-    sdk.capture_session(CONV, session_id=sid)  # re-capture same session
+    sdk._capture_session(CONV, session_id=sid)  # re-capture same session
     proj = sdk._get_proj()
     turns = proj.g.query("MATCH (t:Point {pointKind:'event'}) RETURN count(t)").result_set
     assert turns[0][0] == 3, "re-capture must not duplicate turn points"
@@ -1257,13 +1196,13 @@ def test_capture_session_no_provider_stores_turns(sdk, no_provider_keys):
 
     Supersedes the pre-#3892 ``..._fails_closed`` expectation (ValueError
     before any write), which the owner's ruling reversed."""
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True
     assert res["extraction_mode"] == "no-provider"
     # P1 #1529: the empty/blank gate still precedes every write — an EMPTY
     # conversation keylessly stores NOTHING (turns=0, no Session stub) and
     # returns the structured empty receipt rather than raising.
-    empty = sdk.capture_session([])
+    empty = sdk._capture_session([])
     assert empty["ok"] is False
     assert empty["extraction_mode"] == "empty"
     assert empty["turns"] == 0
@@ -1292,7 +1231,7 @@ def test_keyless_capture_stores_turns_and_stays_searchable(sdk, no_provider_keys
     assert _build_session_llm_extractor() is None, "keys leaked into the test"
 
     sid = "sess-3892-keyless"
-    res = sdk.capture_session(CONV, session_id=sid)
+    res = sdk._capture_session(CONV, session_id=sid)
 
     # ── (4) the receipt is truthful ─────────────────────────────────────
     assert res["session_id"] == sid
@@ -1362,7 +1301,7 @@ def test_keyless_capture_is_extraction_upgradable_with_a_key(
     No network and no real provider: the "key appearing" is the offline
     MockModel seam appearing."""
     sid = "sess-3892-upgrade"
-    first = sdk.capture_session(CONV, session_id=sid)
+    first = sdk._capture_session(CONV, session_id=sid)
     assert first["extraction_mode"] == "no-provider"
     assert first["extracted"] == 0
 
@@ -1375,7 +1314,7 @@ def test_keyless_capture_is_extraction_upgradable_with_a_key(
 
     # The key appears (offline seam — still no LLM, no network).
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
-    second = sdk.capture_session(CONV, session_id=sid)
+    second = sdk._capture_session(CONV, session_id=sid)
     assert second["extraction_mode"] == "llm:mock", second["extraction_mode"]
     assert second["extracted"] >= 1, second
     # The re-attempt is convergent: the deterministic turn ids are reused,
@@ -1398,13 +1337,13 @@ def test_m2_lane_refuses_the_keyless_retry_and_says_so(
     What must NOT happen is a silent, misleading replay: the receipt carries
     an additive warning naming the keyless-pending state and the remedy."""
     sid = "sess-3892-m2-refused"
-    first = sdk.capture_session(CONV, session_id=sid)
+    first = sdk._capture_session(CONV, session_id=sid)
     assert first["extraction_mode"] == "no-provider"
     assert first["extracted"] == 0
 
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
-    second = sdk.capture_session(CONV, session_id=sid)
+    second = sdk._capture_session(CONV, session_id=sid)
     assert second["extraction_mode"] == "replayed", second["extraction_mode"]
     assert second["extracted"] == 0
     assert any("TORTOISE_SESSION_EXTRACTOR=m2" in w
@@ -1426,13 +1365,13 @@ def test_keyless_recapture_does_not_remint_the_session_event(
     mint (which re-journals EventRecorded and refreshes startedAt per call).
     The Event count stays 1 across repeated keyless captures."""
     sid = "sess-3892-remint"
-    sdk.capture_session(CONV, session_id=sid)
+    sdk._capture_session(CONV, session_id=sid)
     proj = sdk._get_proj()
     first_started = proj.g.query(
         "MATCH (e:Event {eventKind:'sessionCaptured'}) RETURN e.startedAt"
     ).result_set[0][0]
-    sdk.capture_session(CONV, session_id=sid)
-    sdk.capture_session(CONV, session_id=sid)
+    sdk._capture_session(CONV, session_id=sid)
+    sdk._capture_session(CONV, session_id=sid)
     rows = proj.g.query(
         "MATCH (e:Event {eventKind:'sessionCaptured'}) "
         "RETURN count(e), collect(e.startedAt)").result_set[0]
@@ -1452,7 +1391,7 @@ def test_keyless_recapture_never_clobbers_a_recorded_lane(
     No LLM runs: the keyless legs are keyless, and the final M2-lane leg is
     the offline MockModel seam (a REPLAY, so no extraction happens at all)."""
     sid = "sess-3892-lane-preserve"
-    sdk.capture_session(CONV, session_id=sid)
+    sdk._capture_session(CONV, session_id=sid)
     proj = sdk._get_proj()
     # Simulate the prior attempt: a FAILED v2 capture (live claims, lane v2).
     proj.g.query(
@@ -1461,7 +1400,7 @@ def test_keyless_recapture_never_clobbers_a_recorded_lane(
         params={"sid": sid})
 
     # A keyless re-capture must NOT rewrite that record.
-    res = sdk.capture_session(CONV, session_id=sid)
+    res = sdk._capture_session(CONV, session_id=sid)
     assert res["extraction_mode"] == "no-provider"
     ok, lane = proj.g.query(
         "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
@@ -1473,7 +1412,7 @@ def test_keyless_recapture_never_clobbers_a_recorded_lane(
     # attempt's claims.
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
-    again = sdk.capture_session(CONV, session_id=sid)
+    again = sdk._capture_session(CONV, session_id=sid)
     assert again["extraction_mode"] == "replayed", again["extraction_mode"]
     assert again["extracted"] == 0
 
@@ -1482,8 +1421,8 @@ def test_capture_session_llm_points_fresh_per_capture(sdk, monkeypatch):
     monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")  # M2-mock-specific
     """#822: M2 extraction mints a fresh ULID per Point per capture —
     content-hash dedup is a later pipeline stage (epic #909 W-2 #784)."""
-    sdk.capture_session(CONV)
-    sdk.capture_session(CONV)
+    sdk._capture_session(CONV)
+    sdk._capture_session(CONV)
     stmt = sdk._get_proj().g.query(
         "MATCH (p:Point) WHERE p.pointKind IS NULL RETURN count(p)"
     ).result_set
@@ -1494,7 +1433,7 @@ def test_capture_session_llm_points_fresh_per_capture(sdk, monkeypatch):
 
 def test_capture_session_turn_cap(sdk):
     with pytest.raises(ValueError, match="turn cap"):
-        sdk.capture_session([{"role": "user", "content": "x"}] * 201, max_turns=200)
+        sdk._capture_session([{"role": "user", "content": "x"}] * 201, max_turns=200)
 
 
 def test_capture_session_turn_cap_record(sdk, caplog):
@@ -1503,7 +1442,7 @@ def test_capture_session_turn_cap_record(sdk, caplog):
     import logging
     with caplog.at_level(logging.WARNING, logger="tortoise.sdk"), \
             pytest.raises(ValueError, match="turn cap"):
-        sdk.capture_session(
+        sdk._capture_session(
             [{"role": "user", "content": "x"}] * 201, max_turns=200)
     hits = [r.getMessage() for r in caplog.records
             if "turn_cap_exceeded" in r.getMessage()]
@@ -1512,7 +1451,7 @@ def test_capture_session_turn_cap_record(sdk, caplog):
 
 
 def test_capture_session_creates_event(sdk):
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     proj = sdk._get_proj()
     events = proj.g.query(
         "MATCH (e:Event {eventKind:'sessionCaptured'}) RETURN count(e)"
@@ -1556,7 +1495,7 @@ def test_capture_session_stamps_operator_event_ids(sdk, monkeypatch):
         {"role": "assistant", "content": "Therefore we should ship serve "
                                            "--http first."},
     ]
-    res = sdk.capture_session(conv)
+    res = sdk._capture_session(conv)
     assert res["ok"] is True, res
     proj = sdk._get_proj()
     eid = proj.g.query(
@@ -1581,7 +1520,7 @@ def test_capture_session_source_is_agent_session(sdk):
     metadata + a references edge to the sessionCaptured Event — not the
     document-typed stub the extraction projection's _link_source default
     auto-creates (title=url, empty contentHash, no metadata)."""
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     sid = res["session_id"]
     proj = sdk._get_proj()
     rows = proj.g.query(
@@ -1628,7 +1567,7 @@ def test_capture_session_source_materialized_when_event_write_fails(sdk, monkeyp
         raise RuntimeError("falkordb down")
 
     monkeypatch.setattr(sdk, "create_event", boom)
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     sid = res["session_id"]
     proj = sdk._get_proj()
     rows = proj.g.query(
@@ -1641,7 +1580,7 @@ def test_capture_session_source_materialized_when_event_write_fails(sdk, monkeyp
 
 def test_capture_session_event_recorded_write_lands(sdk):
     """EventRecorded entity write actually lands: full payload on the Event node."""
-    sdk.capture_session(CONV)
+    sdk._capture_session(CONV)
     proj = sdk._get_proj()
     rows = proj.g.query(
         "MATCH (e:Event {eventKind:'sessionCaptured'}) "
@@ -1669,7 +1608,7 @@ def test_capture_session_event_write_failure_logs_warning(sdk, caplog, monkeypat
 
     monkeypatch.setattr(sdk, "create_event", boom)
     with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
-        res = sdk.capture_session(CONV)
+        res = sdk._capture_session(CONV)
     assert res["turns"] == 3, "turn/session writes must still succeed"
     assert res["session_id"].startswith("session_")
     assert any(
@@ -1686,12 +1625,12 @@ def test_capture_session_zero_extraction(sdk):
         {"role": "user", "content": "the weather today is fine"},
         {"role": "assistant", "content": "yes it is"},
     ]
-    res = sdk.capture_session(plain)
+    res = sdk._capture_session(plain)
     # 2 utterances → 2 LLM points (the value gate is epic #909's future
     # value_extractor; M2 is utterance→point).
     assert res["extracted"] == 1, res
     # Empty conversation → 0 extractions, turns still land.
-    res = sdk.capture_session([])
+    res = sdk._capture_session([])
     assert res["extracted"] == 0
     sid = res["session_id"]
     proj = sdk._get_proj()
@@ -1713,7 +1652,7 @@ def test_capture_session_contains_edges_when_speaker_repeats(sdk):
     P1 #1529: content must be non-blank ("x" is below the 3-char sentence
     floor → the whole-conversation blank gate would fire pre-mutation)."""
     repeat = [{"role": "user", "content": "okay we proceed"}] * 3
-    res = sdk.capture_session(repeat)
+    res = sdk._capture_session(repeat)
     sid = res["session_id"]
     proj = sdk._get_proj()
     rows = proj.g.query(
@@ -1727,7 +1666,7 @@ def test_capture_session_contains_edges_when_speaker_repeats(sdk):
 def test_capture_session_contains_edges_to_extractions(sdk):
     """Extraction-side CONTAINS edges: M2 LLM Points must be wired to the
     session, and extraction actually creates the epistemic Points (#822)."""
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["extracted"] >= 1, "CONV must produce at least one point each"
     sid = res["session_id"]
     proj = sdk._get_proj()
@@ -1758,7 +1697,7 @@ def test_capture_session_role_coerced_to_string(sdk):
         {"role": 123, "content": "I think the top issue is auth."},
         {"role": {"a": 1}, "content": "we decided to ship serve --http."},
     ]
-    res = sdk.capture_session(conv)
+    res = sdk._capture_session(conv)
     assert res["turns"] == 2, "all turns must complete — no partial session left"
     proj = sdk._get_proj()
     rows = proj.g.query(
@@ -1776,7 +1715,7 @@ def test_capture_session_exactly_at_cap(sdk):
     P1 #1529: content must be non-blank so the cap boundary — not the blank
     gate — is what's exercised."""
     conv = [{"role": "user", "content": "okay"}] * 3
-    res = sdk.capture_session(conv, max_turns=3)
+    res = sdk._capture_session(conv, max_turns=3)
     assert res["turns"] == 3
 
 
@@ -1790,7 +1729,7 @@ def test_capture_session_non_string_content_coerced(sdk):
         {"role": "user", "content": 12345},
         {"role": "assistant", "content": {"text": "we decided to ship v2"}},
     ]
-    res = sdk.capture_session(conv)
+    res = sdk._capture_session(conv)
     assert res["turns"] == 2, "all turns must complete — no partial session left"
     rows = sdk._get_proj().g.query(
         "MATCH (t:Point {pointKind:'event'}) RETURN t.content ORDER BY t.id"
@@ -1833,7 +1772,7 @@ def test_capture_session_long_turn_extracts_only_stored_text(sdk, monkeypatch):
     )
     past_cut = "evidence suggests the fix landed."
     content = before + past_cut
-    res = sdk.capture_session([{"role": "user", "content": content}])
+    res = sdk._capture_session([{"role": "user", "content": content}])
     proj = sdk._get_proj()
     turn = proj.g.query(
         "MATCH (t:Point {pointKind:'event'}) RETURN t.content"
@@ -1865,7 +1804,7 @@ def test_capture_session_falsy_non_string_content_not_swallowed(sdk):
         {"role": "assistant", "content": []},
         {"role": "user", "content": None},
     ]
-    res = sdk.capture_session(conv)
+    res = sdk._capture_session(conv)
     assert res["turns"] == 5, "all turns must complete — no partial session left"
     rows = sdk._get_proj().g.query(
         "MATCH (t:Point {pointKind:'event'}) RETURN t.content ORDER BY t.id"
@@ -1896,7 +1835,7 @@ def test_capture_session_event_object_canonical_about_edge(sdk):
     canonical aboutObject edge — traversable both directions, and the dead
     INSTANTIATES predicate is not emitted by the canonical producer."""
     # 1. Session pipeline creates the sessionCaptured Event.
-    sdk.capture_session(CONV)
+    sdk._capture_session(CONV)
     proj = sdk._get_proj()
     ev = proj.g.query(
         "MATCH (e:Event {eventKind:'sessionCaptured'}) RETURN e.eventId, e.id"
@@ -2030,7 +1969,7 @@ def test_capture_session_v2_default_routes_and_writes(sdk):
     session Source extractedFrom link + eventId provenance."""
     import os
     os.environ.pop("TORTOISE_SESSION_EXTRACTOR", None)
-    res = sdk.capture_session([{"role": "user", "content": "x"},
+    res = sdk._capture_session([{"role": "user", "content": "x"},
                                {"role": "assistant", "content": "we decided"}])
     assert res["extracted"] >= 1
     proj = sdk._get_proj()
@@ -2057,7 +1996,7 @@ def test_capture_session_v2_mock_seam_satisfies_provider_gate(
     (normalized like the sibling gates — strict == "1" would diverge the
     inner gate from the outer gates and 500 again)."""
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", " 1 ")
-    res = sdk.capture_session([{"role": "user", "content": "x"},
+    res = sdk._capture_session([{"role": "user", "content": "x"},
                                {"role": "assistant", "content": "we decided"}])
     assert res["extracted"] >= 1
 
@@ -2089,7 +2028,7 @@ def test_capture_session_v2_default_adapter_is_uncapped(sdk, monkeypatch):
 
     monkeypatch.setattr(sdk_module, "_model_adapter", _fake_model_adapter)
 
-    res = sdk.capture_session([{"role": "user", "content": "x"},
+    res = sdk._capture_session([{"role": "user", "content": "x"},
                                {"role": "assistant", "content": "we decided"}])
     assert captured["model_id"] == "deepseek/deepseek-v4-flash"
     assert captured["max_tokens"] is None, (
@@ -2121,7 +2060,7 @@ def test_capture_session_v2_extract_model_override_stays_capped(sdk, monkeypatch
 
     monkeypatch.setattr(sdk_module, "_model_adapter", _fake_model_adapter)
 
-    res = sdk.capture_session([{"role": "user", "content": "x"},
+    res = sdk._capture_session([{"role": "user", "content": "x"},
                                {"role": "assistant", "content": "we decided"}])
     assert captured["model_id"] == "deepseek/deepseek-v4-pro"
     assert captured["max_tokens"] == 4000, (
@@ -2236,7 +2175,7 @@ def test_capture_session_gate_match_openai_key_alone_rejected(
     on a venice-configured machine."""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-only")
     with pytest.raises(ValueError, match="DEEPSEEK_API_KEY"):
-        sdk.capture_session([{"role": "user", "content": "x"},
+        sdk._capture_session([{"role": "user", "content": "x"},
                              {"role": "assistant", "content": "we decided"}])
 
 
@@ -2253,7 +2192,7 @@ def test_capture_session_gate_match_explicit_provider_with_wrong_key(sdk, monkey
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-only")
     monkeypatch.setenv("TORTOISE_EXTRACTOR_PROVIDER", "deepseek-direct")
     with pytest.raises(ValueError, match="DEEPSEEK_API_KEY"):
-        sdk.capture_session([{"role": "user",
+        sdk._capture_session([{"role": "user",
                               "content": "we decided to ship serve first."}])
 
 
@@ -2270,7 +2209,7 @@ def test_capture_session_deepseek_direct_route_recorded(
     requests_log = []
     _install_fake_provider(monkeypatch, requests_log)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
-    res = sdk.capture_session([{"role": "user", "content": "x"},
+    res = sdk._capture_session([{"role": "user", "content": "x"},
                                {"role": "assistant", "content": "we decided"}])
     assert res["extraction_mode"] == "llm:deepseek-direct"
     assert res["extraction_provider"] == "deepseek-direct"
@@ -2307,7 +2246,7 @@ def test_capture_session_venice_only_receipt_reports_extraction(
     _install_fake_provider(monkeypatch, requests_log)
     monkeypatch.delenv("TORTOISE_EXTRACTOR_PROVIDER", raising=False)
     monkeypatch.setenv("VENICE_API_KEY", "vz-key")
-    res = sdk.capture_session([{"role": "user", "content": "x"},
+    res = sdk._capture_session([{"role": "user", "content": "x"},
                                {"role": "assistant", "content": "we decided"}])
     assert res["extraction_mode"] == "llm:venice", (
         "a venice-only capture reported "
@@ -2353,7 +2292,7 @@ def test_capture_session_failover_records_fallback_route(
 
     monkeypatch.setattr(DeepSeekDirectModel, "complete", _flaky_ds_complete)
 
-    res = sdk.capture_session([{"role": "user", "content": "x"},
+    res = sdk._capture_session([{"role": "user", "content": "x"},
                                {"role": "assistant", "content": "we decided"}])
     assert res["extraction_mode"] == "llm:openrouter", \
         "failover must record the fallback route on the wire"
@@ -4550,7 +4489,7 @@ def test_extract_session_llm_in_tree_lane_advertises_nothing_unstored(
 def test_capture_session_empty_conversation_fails_closed(sdk):
     """P1: empty conversation never ok=True — nothing committed, no Session
     stub, extraction_mode 'empty', turns=0 (E2E-8 owned negative)."""
-    res = sdk.capture_session([])
+    res = sdk._capture_session([])
     assert res["ok"] is False
     assert res["extraction_mode"] == "empty"
     assert res["turns"] == 0
@@ -4616,13 +4555,13 @@ def test_capture_session_blank_conversation_fails_closed(sdk):
         [{"role": "user", "content": _capture_truncation_marker(5001) + " "}],
     )
     for conv in blank_convos:
-        res = sdk.capture_session(conv)
+        res = sdk._capture_session(conv)
         assert res["ok"] is False, conv
         assert res["extraction_mode"] == "empty", conv
         assert res["turns"] == 0, conv
         assert any("empty" in e.lower() for e in res["errors"]), conv
     # floor boundary, non-blank side
-    res = sdk.capture_session([{"role": "user", "content": "abc"}])
+    res = sdk._capture_session([{"role": "user", "content": "abc"}])
     assert res["ok"] is True and res["extraction_mode"] in ("llm:mock", "llm"), res
 
 
@@ -4632,7 +4571,7 @@ def test_capture_session_v2_failure_surfaces_errors(sdk, monkeypatch):
     import tortoise.extractor_v2 as ev2
     monkeypatch.setattr(ev2, "extract_session_v2",
                         lambda *a, **kw: _v2_out(errors=["RuntimeError: provider returned 500"]))
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is False
     assert res["extraction_mode"] == "error"
     assert res["extracted"] == 0
@@ -4655,7 +4594,7 @@ def test_capture_session_m2_failure_surfaces_errors(sdk, monkeypatch):
     monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
     monkeypatch.setattr("tortoise.sdk._build_session_llm_extractor",
                         lambda: _FailingSessionExtractor())
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is False
     assert res["extraction_mode"] == "error"
     assert any("RuntimeError" in e and "500" in e for e in res["errors"])
@@ -4675,7 +4614,7 @@ def test_capture_session_partial_emission_ok_false_points_land(sdk, monkeypatch)
     monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
     monkeypatch.setattr("tortoise.sdk._build_session_llm_extractor",
                         lambda: _PartialFailingSessionExtractor())
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is False
     assert res["extraction_mode"] == "error"
     assert res["extracted"] == len(res["points"]) >= 1
@@ -4703,7 +4642,7 @@ def test_capture_session_zero_extraction_is_warning_not_failure(sdk, monkeypatch
     monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
     monkeypatch.setattr("tortoise.sdk._build_session_llm_extractor",
                         lambda: _EmptyOutputExtractor())
-    res = sdk.capture_session(
+    res = sdk._capture_session(
         [{"role": "user", "content": "the weather today is fine"}])
     assert res["ok"] is True
     assert res["extraction_mode"] == "llm"
@@ -4715,7 +4654,7 @@ def test_capture_session_zero_extraction_is_warning_not_failure(sdk, monkeypatch
 def test_capture_session_success_shape_consistent_with_graph(sdk):
     """P1: on ok=True the graph actually has the Event, every extracted
     point carries its eventId, and the turn stream matches the response."""
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True and res["errors"] == []
     proj = sdk._get_proj()
     eid = proj.g.query(
@@ -4740,7 +4679,7 @@ def test_capture_session_event_write_failure_keeps_structured_success(sdk, monke
     def boom(*args, **kwargs):
         raise RuntimeError("falkordb down")
     monkeypatch.setattr(sdk, "create_event", boom)
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     assert res["extraction_mode"] in ("llm:mock", "llm")
     assert any("Event" in w or "event" in w.lower() for w in res["warnings"]), res
@@ -4762,7 +4701,7 @@ def test_capture_session_event_write_no_id_warns(sdk, monkeypatch):
     id/eventId silently skips stamping — must surface as an additive warning."""
     monkeypatch.setattr(sdk, "create_event",
                         lambda *a, **kw: {"name": "no-id-event"})
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     assert any("Event" in w or "event" in w.lower() for w in res["warnings"]), res
     unstamped = sdk._get_proj().g.query(
@@ -4785,7 +4724,7 @@ def test_capture_session_stamping_failure_warns_and_leaves_points(sdk, monkeypat
         return _real_query(query, **params)
 
     monkeypatch.setattr(_raw, "query", _boom_stamp)
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     # #8501: the EVENT MINT and the provenance STAMP are separate halves now, so
     # this failure is reported as the stamp it is — the mint succeeded here.
@@ -4803,7 +4742,7 @@ def test_capture_session_source_materialization_failure_warns(sdk, monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("source write failed")
     monkeypatch.setattr(sdk, "_materialize_session_source", boom)
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     assert any("Source" in w or "source" in w for w in res["warnings"]), res
 
@@ -4816,7 +4755,7 @@ def test_capture_session_two_warnings_sources_no_clobber(sdk, monkeypatch):
                         lambda: _EmptyOutputExtractor())
     monkeypatch.setattr(sdk, "create_event",
                         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("event down")))
-    res = sdk.capture_session(
+    res = sdk._capture_session(
         [{"role": "user", "content": "the weather today is fine"}])
     joined = " | ".join(res["warnings"])
     assert "no points" in joined, res["warnings"]
@@ -4837,14 +4776,14 @@ def test_capture_session_recapture_never_clobbers_source_turn_id(sdk, monkeypatc
     across two DIFFERENT sessions: each genuine capture's points share that
     capture's deterministic eventId, and the two sessions' eventIds differ."""
     monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
-    res1 = sdk.capture_session(CONV)
+    res1 = sdk._capture_session(CONV)
     sid = res1["session_id"]
     proj = sdk._get_proj()
     turn_id = f"{sid}_t0"
     proj.g.query(
         "MATCH (p:Point {id:$id}) SET p.source_turn_id='turn-42'",
         params={"id": turn_id})
-    res2 = sdk.capture_session(CONV, session_id=sid)  # re-capture same session
+    res2 = sdk._capture_session(CONV, session_id=sid)  # re-capture same session
     assert res2["extraction_mode"] == "replayed", res2
     assert res2["points"] == [], "replay must not re-extract (0 new claims)"
     rows = proj.g.query(
@@ -4860,7 +4799,7 @@ def test_capture_session_recapture_never_clobbers_source_turn_id(sdk, monkeypatc
     assert len(evs) == 1, f"replay must not mint a second Event: {evs}"
     # Per-capture provenance across DIFFERENT sessions: capture session B,
     # assert its claims share B's eventId and it differs from A's.
-    res3 = sdk.capture_session(CONV)  # fresh session B
+    res3 = sdk._capture_session(CONV)  # fresh session B
     evs_b = proj.g.query(
         "MATCH (e:Event {eventKind:'sessionCaptured'}) RETURN e.eventId"
     ).result_set
@@ -4896,7 +4835,7 @@ def test_recapture_shorter_conversation_deletes_orphaned_turns(sdk):
     """
     conv = [{"role": "user" if i % 2 == 0 else "assistant",
              "content": f"turn number {i}"} for i in range(10)]
-    res = sdk.capture_session(conv)
+    res = sdk._capture_session(conv)
     sid = res["session_id"]
     assert res["turns"] == 10
     proj = sdk._get_proj()
@@ -4909,7 +4848,7 @@ def test_recapture_shorter_conversation_deletes_orphaned_turns(sdk):
 
     assert _wired() == {f"{sid}_t{i}" for i in range(10)}
 
-    sdk.capture_session([{"role": "user", "content": "shorter re-capture"}],
+    sdk._capture_session([{"role": "user", "content": "shorter re-capture"}],
                         session_id=sid)
 
     # Indicator 1: the stored turn_count and the CONTAINS walk agree.
@@ -4934,9 +4873,9 @@ def test_recapture_prune_spares_claims_and_other_sessions(sdk):
     graph. A prune scoped on "everything CONTAINS-wired but not in the new
     window" would delete both.
     """
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     sid = res["session_id"]
-    other = sdk.capture_session(CONV)["session_id"]
+    other = sdk._capture_session(CONV)["session_id"]
     proj = sdk._get_proj()
 
     wired = set(proj.g.query(
@@ -4948,7 +4887,7 @@ def test_recapture_prune_spares_claims_and_other_sessions(sdk):
     assert claims, f"premise: extraction CONTAINS-wires claims: {wired}"
     other_turns = {f"{other}_t{i}" for i in range(3)}
 
-    sdk.capture_session([{"role": "user", "content": "shorter re-capture"}],
+    sdk._capture_session([{"role": "user", "content": "shorter re-capture"}],
                         session_id=sid)
 
     survivors = set(proj.g.query(
@@ -5089,7 +5028,7 @@ def test_capture_session_hands_both_lanes_the_shared_extraction_window(
          "content": "I think the auth dead-end is the top issue."},
         {"role": "user", "content": "X" + " " * 6000},
     ]
-    sdk.capture_session(mixed, session_id="sess-6246-wiring")
+    sdk._capture_session(mixed, session_id="sess-6246-wiring")
 
     assert seen, "the v2 lane was never reached"
     assert len(seen[0]) == 2, "the turn list was renumbered, not blanked"
@@ -5194,7 +5133,7 @@ def test_capture_stores_a_truncation_marker_with_the_true_length(sdk):
     from tortoise.sdk import _CAPTURE_TURN_CAP
     content = "design discussion " * 500   # several times the cap, see the assert
     assert len(content) > _CAPTURE_TURN_CAP
-    sdk.capture_session([{"role": "user", "content": content}])
+    sdk._capture_session([{"role": "user", "content": content}])
     stored = sdk._get_proj().g.query(
         "MATCH (t:Point {pointKind:'event'}) RETURN t.content"
     ).result_set[0][0]
@@ -5233,7 +5172,7 @@ def test_an_expanding_redaction_reports_the_true_pre_redaction_length(sdk):
     key = "AKIA" + "ABCDEFGHIJKLMNOP"          # aws_access_key_id, 20 chars
     content = "y" * 4900 + " " + key + " tail " + "z" * 2000
     assert len(content) == 6927 > _CAPTURE_TURN_CAP
-    sdk.capture_session([{"role": "user", "content": content}])
+    sdk._capture_session([{"role": "user", "content": content}])
     stored = sdk._get_proj().g.query(
         "MATCH (t:Point {pointKind:'event'}) RETURN t.content"
     ).result_set[0][0]
@@ -5301,7 +5240,7 @@ def test_a_complete_turn_with_an_expanding_credential_is_not_falsely_marked(sdk)
     prefix = "My AWS key is " + key + " and the rest is filler. "
     content = prefix + "y" * (_CAPTURE_TURN_CAP - len(prefix))
     assert len(content) == _CAPTURE_TURN_CAP, "the turn must be exactly at the cap"
-    sdk.capture_session([{"role": "user", "content": content}])
+    sdk._capture_session([{"role": "user", "content": content}])
     stored = sdk._get_proj().g.query(
         "MATCH (t:Point {pointKind:'event'}) RETURN t.content"
     ).result_set[0][0]
@@ -5333,7 +5272,7 @@ def test_capture_extraction_input_and_stored_turn_agree_with_the_marker(
     monkeypatch.setattr(sdk_mod.TortoiseSDK, "_extract_session_v2", spy)
     content = "reasoning about the storage redesign. " * 400   # far past the cap
     assert len(content) > _CAPTURE_TURN_CAP
-    sdk.capture_session([{"role": "user", "content": content}])
+    sdk._capture_session([{"role": "user", "content": content}])
     stored = sdk._get_proj().g.query(
         "MATCH (t:Point {pointKind:'event'}) RETURN t.content"
     ).result_set[0][0]
@@ -5410,7 +5349,7 @@ def test_capture_extraction_input_is_stored_window(sdk, monkeypatch):
 
     content = ("plain filler text without triggers. " * 200) + "evidence suggests the fix landed."
     assert len(content) > 5000
-    sdk.capture_session([{"role": "user", "content": content}])
+    sdk._capture_session([{"role": "user", "content": content}])
     assert seen and all(len(c) <= 5000 for c in seen[0]), \
         "extraction input must be the stored window"
 
@@ -5697,7 +5636,7 @@ def test_a_blank_over_cap_turn_is_not_marked(sdk):
     assert len(banded) == _CAPTURE_TURN_CAP
 
     # And end to end: a mixed conversation stores no synthetic marker.
-    sdk.capture_session(
+    sdk._capture_session(
         [{"role": "user", "content": "real content here"},
          {"role": "user", "content": " " * 6000}],
         session_id="sess-4897-blank-marker")
@@ -5732,7 +5671,7 @@ def test_content_past_the_cap_is_marked_not_dropped(sdk):
         f"content past the cap must not be dropped unmarked; got {out[-60:]!r}")
     assert len(out) == _CAPTURE_TURN_CAP
 
-    sdk.capture_session(
+    sdk._capture_session(
         [{"role": "user", "content": "real content here"},
          {"role": "user", "content": content}],
         session_id="sess-4897-past-cap")
@@ -5826,7 +5765,7 @@ def test_a_marker_only_turn_yields_no_claim(sdk, monkeypatch):
         {"role": "user", "content": "a" * 4958 + "." + " " * 500},
     ]
     monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
-    res = sdk.capture_session(mixed)
+    res = sdk._capture_session(mixed)
     assert res["ok"] is True, res["errors"]
     marked = [p for p in res["points"]
               if _CAPTURE_TRUNCATION_SENTINEL in (p.get("text") or "")]
@@ -6000,7 +5939,7 @@ def test_capture_writes_mitigates_artifact(sdk, monkeypatch):
                "supersessions": [], "client_commit_id": "ccid"}
     monkeypatch.setattr(ev2, "extract_session_v2",
                         lambda *a, **kw: _v2_out(payload=payload))
-    res = sdk.capture_session(
+    res = sdk._capture_session(
         [{"role": "user", "content": "we can raise the price."}])
     assert res["ok"] is True, res["errors"]
     proj = sdk._get_proj()
@@ -6047,7 +5986,7 @@ def test_capture_mitigates_deep_miss_dropped_not_raised(sdk, monkeypatch):
                "supersessions": [], "client_commit_id": "ccid"}
     monkeypatch.setattr(ev2, "extract_session_v2",
                         lambda *a, **kw: _v2_out(payload=payload))
-    res = sdk.capture_session(
+    res = sdk._capture_session(
         [{"role": "user", "content": "we can raise the price."}])
     assert res["ok"] is True, \
         "a deep-miss mitigation must never fail the capture"
@@ -6076,7 +6015,7 @@ def test_client_commit_id_capture_parity(sdk, monkeypatch):
         return out
 
     monkeypatch.setattr(ev2, "extract_session_v2", spy)
-    res = sdk.capture_session([{"role": "user",
+    res = sdk._capture_session([{"role": "user",
                                 "content": "we adopted strategy B, dropping A."}])
     assert res["ok"] is True, res["errors"]
     payload = captured.get("payload")
@@ -7068,14 +7007,14 @@ def test_sdk_mirror_capture_stamps_actor_from_contextvar(tmp_path, monkeypatch):
     sdk = TortoiseSDK(db_path=str(tmp_path / "mirror.db"))
     tok = _current_actor_user_id.set(_ACTOR_A)
     try:
-        r1 = sdk.capture_session(
+        r1 = sdk._capture_session(
             [{"role": "user", "content": "mirror stamp test."},
              {"role": "assistant", "content": "confirmed."}],
             session_id="s-mirror-2600")
         assert r1["ok"] is True, r1
         _current_actor_user_id.reset(tok)
         tok = _current_actor_user_id.set(_ACTOR_B)
-        r2 = sdk.capture_session(
+        r2 = sdk._capture_session(
             [{"role": "user", "content": "mirror stamp test."},
              {"role": "assistant", "content": "confirmed."}],
             session_id="s-mirror-2600")
@@ -7097,7 +7036,7 @@ def test_sdk_mirror_capture_no_actor_legacy_shape(tmp_path, monkeypatch):
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     from tortoise.sdk import TortoiseSDK
     sdk = TortoiseSDK(db_path=str(tmp_path / "mirror-none.db"))
-    r = sdk.capture_session(
+    r = sdk._capture_session(
         [{"role": "user", "content": "unattributed mirror capture."},
          {"role": "assistant", "content": "roger."}],
         session_id="s-mirror-none-2600")
@@ -7192,13 +7131,13 @@ def test_phase_e_surfaced_cross_session_reingest_counts_zero_added(sdk):
          "content": "The database schema needs normalization before the release."},
         {"role": "user", "content": "ok"},
     ]
-    r1 = sdk.capture_session(conv)
+    r1 = sdk._capture_session(conv)
     assert r1["points"], r1
     assert all(p["dedup"] == DEDUP_NEW for p in r1["points"])
     assert r1["surfaced"], "first ingest must expose the marker data"
     assert len(r1["surfaced"]) == len(r1["points"])
     # same content, fresh auto session id → cross-session content-hash re-ingest
-    r2 = sdk.capture_session(conv)
+    r2 = sdk._capture_session(conv)
     assert r2["points"] and all(
         p["dedup"] == DEDUP_CONTENT_HASH_HIT for p in r2["points"]), [
         p["dedup"] for p in r2["points"]]
@@ -7220,7 +7159,7 @@ def test_phase_e_surfaced_m2_in_capture_fold_counts_minted_once(sdk, monkeypatch
          "content": "The database schema needs normalization before the release."},
         {"role": "user", "content": "ok"},
     ]
-    res = sdk.capture_session(conv)
+    res = sdk._capture_session(conv)
     verdicts = [p["dedup"] for p in res["points"]]
     assert verdicts == ["new", "content_hash_hit"], verdicts
     surfaced = res["surfaced"]
@@ -7344,7 +7283,7 @@ def test_phase_e_sdk_mirror_verification_fail_open_omits_marker(sdk, monkeypatch
         return real_query(query, params=params, timeout=timeout)
 
     monkeypatch.setattr(raw, "query", failing_query)
-    res = sdk.capture_session(conv)
+    res = sdk._capture_session(conv)
     assert res["points"], "the capture itself commits"
     assert res["surfaced"] == [], (
         "a failed verification read must omit the marker, never fabricate it")
@@ -7602,12 +7541,12 @@ def test_capture_replayed_and_m2_stats_empty(sdk, monkeypatch):
     """#2335 WI-1a: replayed + M2 branches carry stats == {} (no extractor_v2
     telemetry exists there — empty-on-replay/M2 semantics)."""
     # First capture (mock seam → M2 llm path).
-    res1 = sdk.capture_session(
+    res1 = sdk._capture_session(
         [{"role": "user", "content": "x"},
          {"role": "assistant", "content": "we decided"}])
     sid = res1["session_id"]
     # Re-capture same id → replayed branch.
-    res2 = sdk.capture_session(
+    res2 = sdk._capture_session(
         [{"role": "user", "content": "x"},
          {"role": "assistant", "content": "we decided"}],
         session_id=sid)
@@ -7631,7 +7570,7 @@ def test_capture_resp_carries_stats_v2(sdk, monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
 
-    res = sdk.capture_session(
+    res = sdk._capture_session(
         [{"role": "user", "content": "x"},
          {"role": "assistant", "content": "we decided"}])
     assert "stats" in res
@@ -7659,7 +7598,7 @@ def test_capture_observation_line_v2(sdk, monkeypatch, caplog):
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
 
     with caplog.at_level(_log.INFO, logger="tortoise.sdk"):
-        sdk.capture_session(
+        sdk._capture_session(
             [{"role": "user", "content": "x"},
              {"role": "assistant", "content": "we decided"}],
             session_id="obs-v2")
@@ -7682,12 +7621,12 @@ def test_capture_observation_line_replayed(sdk, caplog):
     """#2335 WI-1d: a replay emits the observation line with mode=replayed
     and NO fabricated size fields (stats {} on replay — absent-when-no-data)."""
     import logging as _log
-    sdk.capture_session(
+    sdk._capture_session(
         [{"role": "user", "content": "x"},
          {"role": "assistant", "content": "we decided"}],
         session_id="obs-replay")
     with caplog.at_level(_log.INFO, logger="tortoise.sdk"):
-        sdk.capture_session(
+        sdk._capture_session(
             [{"role": "user", "content": "x"},
              {"role": "assistant", "content": "we decided"}],
             session_id="obs-replay")
@@ -7725,7 +7664,7 @@ def test_capture_error_contract_partial_headline(sdk, monkeypatch):
             "error_census": {"partial_parse": 1},
         }
     monkeypatch.setattr(ev2, "extract_session_v2", _v2_out)
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is False
     # headline: human, no STAGE NAMES / internal jargon tokens
     headline = res["errors"][0]
@@ -7746,7 +7685,7 @@ def test_capture_error_contract_partial_headline(sdk, monkeypatch):
 def test_capture_clean_has_empty_diagnostics(sdk):
     """#2335 WI-2: a clean capture carries diagnostics == [] (always-present
     additive field, empty on success)."""
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True
     assert res["diagnostics"] == []
     # no report hook on a clean capture
@@ -7771,7 +7710,7 @@ def test_capture_error_contract_unmapped_passthrough(sdk, monkeypatch):
             "error_census": {},
         }
     monkeypatch.setattr(ev2, "extract_session_v2", _v2_out)
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is False
     assert res["errors"] == ["RuntimeError: provider returned 500"]
     assert res["diagnostics"] == ["RuntimeError: provider returned 500"]
@@ -7805,7 +7744,7 @@ def test_capture_error_contract_stage_failure_headlines(sdk, monkeypatch):
             "error_census": {},
         }
     monkeypatch.setattr(ev2, "extract_session_v2", _v2_out)
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is False
     for headline in res["errors"]:
         for tok in ("S1", "S2", "S4", "S5", "ValueError", "RuntimeError",
@@ -7863,10 +7802,10 @@ def test_capture_true_retry_failed_session_reattempts(sdk, monkeypatch):
     conv = [{"role": "user", "content": "we decided X"}]
     sid = "retry-session-2335"
     # First capture FAILS (extraction error; turn points + Session land).
-    res1 = sdk.capture_session(conv, session_id=sid)
+    res1 = sdk._capture_session(conv, session_id=sid)
     assert res1["ok"] is False, res1
     # Same-session re-capture RE-ATTEMPTS (not "replayed").
-    res2 = sdk.capture_session(conv, session_id=sid)
+    res2 = sdk._capture_session(conv, session_id=sid)
     assert res2["extraction_mode"] != "replayed", res2
     assert res2["ok"] is True, res2
     assert calls["n"] == 2, "the retry must re-run extraction"
@@ -7901,9 +7840,9 @@ def test_capture_succeeded_session_still_replays(sdk, monkeypatch):
 
     conv = [{"role": "user", "content": "we decided X"}]
     sid = "success-session-2335"
-    res1 = sdk.capture_session(conv, session_id=sid)
+    res1 = sdk._capture_session(conv, session_id=sid)
     assert res1["ok"] is True
-    res2 = sdk.capture_session(conv, session_id=sid)
+    res2 = sdk._capture_session(conv, session_id=sid)
     assert res2["extraction_mode"] == "replayed", res2
     assert res2["points"] == []
     assert calls["n"] == 1, "a succeeded session's re-capture must NOT re-extract"
@@ -7934,7 +7873,7 @@ def test_capture_true_retry_v2_only_m2_failed_session_replays(
         lambda: _PartialFailingSessionExtractor())
     conv = [{"role": "user", "content": "we decided X"}]
     sid = "m2-failed-2335"
-    res1 = sdk.capture_session(conv, session_id=sid)
+    res1 = sdk._capture_session(conv, session_id=sid)
     assert res1["ok"] is False, res1
     assert res1["extracted"] >= 1, "m2 partial claim must land live"
     proj = sdk._get_proj()
@@ -7944,7 +7883,7 @@ def test_capture_true_retry_v2_only_m2_failed_session_replays(
         params={"sid": sid}).result_set[0][0]
     assert live1 == res1["extracted"], "live claims must be CONTAINS-wired"
     # Same-session re-capture under m2: REPLAY (no re-extraction — no dup).
-    res2 = sdk.capture_session(conv, session_id=sid)
+    res2 = sdk._capture_session(conv, session_id=sid)
     assert res2["extraction_mode"] == "replayed", res2
     assert res2["points"] == []
     assert calls["n"] == 1, "m2 failed session must NOT re-extract on re-POST"
@@ -8003,7 +7942,7 @@ def test_capture_true_retry_heals_unstamped_first_attempt(
     def _fail_mint(*a, **kw):
         raise RuntimeError("simulated mint failure")
     monkeypatch.setattr(sdk, "create_event", _fail_mint)
-    res1 = sdk.capture_session(conv, session_id=sid)
+    res1 = sdk._capture_session(conv, session_id=sid)
     assert res1["ok"] is False, res1
     assert res1["extracted"] >= 1, "attempt-1 claim must land"
     proj = sdk._get_proj()
@@ -8019,7 +7958,7 @@ def test_capture_true_retry_heals_unstamped_first_attempt(
     # Attempt 2 (TRUE retry): claim folds onto the existing node
     # (content_hash_hit) + mint succeeds + the heal stamps it.
     monkeypatch.setattr(sdk, "create_event", real_create_event)
-    res2 = sdk.capture_session(conv, session_id=sid)
+    res2 = sdk._capture_session(conv, session_id=sid)
     assert res2["ok"] is True, res2
     assert res2["extraction_mode"] != "replayed", res2
     unstamped2 = proj.g.query(

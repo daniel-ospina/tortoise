@@ -323,7 +323,9 @@ def test_capture_session_fails_over_on_403_key_limit(monkeypatch, tmp_path):
     """#4860 requirement 4 — end-to-end reachability of the rotation.
 
     The sealed measurement path is ``runner.run_benchmark`` →
-    ``sdk.capture_session`` (runner.py calls it directly for every session)
+    ``sdk._capture_session`` (runner.py calls it directly for every session; the
+    door was the public ``capture_session`` until #4282 retired it and kept the
+    body under the private name)
     → the v2 provider chain (``_extract_session_v2`` → ``_model_adapter`` →
     ``build_extractor_model``). This drives that EXACT capture call with the
     REAL 3-provider ``RotatingModel`` and the REAL
@@ -424,7 +426,7 @@ def test_capture_session_fails_over_on_403_key_limit(monkeypatch, tmp_path):
     db = tmp_path / "keylimit_capture.db"
     sdk = TortoiseSDK(db_path=str(db), namespace=f"test_403kl_{uuid.uuid4().hex[:8]}")
     try:
-        capture = sdk.capture_session(
+        capture = sdk._capture_session(
             [{"role": "user", "content": "we decided X"},
              {"role": "assistant", "content": "the plan is durable"}],
             session_id="wp_kl_403", harness="pi",

@@ -459,6 +459,66 @@ def assert_fresh_graph(before: dict, *, arm: str, graph: str, uri: str) -> None:
                f"over a previous run's Points. Use a new --graph-prefix, or drop the graph at {uri}")
 
 
+def assert_capture_lane(sdk=None) -> None:
+    """Refuse BY NAME when #4282's deletion removed the entry point the S3 arm drives.
+
+    #4282 deleted ``TortoiseSDK.capture_session`` (owner ruling 2026-10-27). This arm replays the
+    corpus through that exact method, so post-#4282 it can never run — and the honest outcome is
+    a refusal that says the authorised deletion removed the entry point, NOT an ``AttributeError``
+    on session 1 of every arm (the difference between "the arm raised" — a bug — and "the door is
+    gone" — the truth).
+
+    ⛔ CALLED FROM ``main()``'s PREREQUISITES, BEFORE ``open_log`` (review r6 F3). A refusal that
+    exits 3 after the eleven header lines are flushed leaves a header-only ``*.log`` inside the
+    evidence bundle, which reads as the setup of a run that never started AND trips the
+    one-measured-log refusal (exit 2) on the next attempt, because the documented reproduce
+    command passes no ``--overwrite``. Post-#4282 this refusal fires on EVERY invocation, so it
+    must leave no file at all. ``run_arm`` calls this too, as defence in depth for a direct
+    caller; one predicate, so the two cannot disagree.
+
+    ``hasattr`` on the CLASS is the right probe: ``TortoiseSDK.__getattr__`` raises
+    ``AttributeError`` for an unknown name, so a missing method cannot be masked into a pass,
+    and the check has no side effects. The surviving in-process door is the private
+    ``TortoiseSDK._capture_session`` — main's whole capture body (``:Session``, the
+    ``(Source)-[:references]->(Event)`` link, the provenance stamps), restored by the #10226
+    forward-merge — NOT ``_extract_session_v2``, which is only the extractor half. A
+    measurement re-pointed at it is a NEW instrument with its own pre-registration over the
+    pre-registered corpus.
+
+    The two call sites share this ONE predicate, so they cannot drift apart in WHICH condition
+    they test. They are not bit-identical probes: the class probe checks the class attribute and
+    an instance probe would also see an attribute assigned in ``__init__``. They agree at this
+    head (no such assignment exists), and a future divergence is FAIL-CLOSED — a false refusal,
+    never a false pass that lets the arm proceed to an ``AttributeError``.
+
+    Sibling shapes, stated precisely: the capstone probes REFUSE by name
+    (``probes/capstone_run.py:1248``, ``probes/capstone_measure.py:1210``);
+    ``10000-turns-bytes/probe_turn_bytes.py:249`` carries the same predicate but DEGRADES
+    instead, because its census is one block of a probe whose subject is store bytes.
+    """
+    if sdk is None:
+        from tortoise.sdk import TortoiseSDK
+        sdk = TortoiseSDK
+    # ⛔ TWO names are tested, because the two halves of this arm use DIFFERENT ones:
+    # the refusal is about the PUBLIC door the arm was pre-registered against, and the
+    # drive call reads the PRIVATE body. Testing only the public name meant an object
+    # that carried it (an adapter, a future SDK, a test double) passed the gate and then
+    # died on a missing private attribute — `tests/test_s3_prior_ablation.py`'s `FakeSDK`
+    # hit exactly that until it defined both. A gate that cannot detect the state its own
+    # next line requires is not a gate.
+    missing = [n for n in ("capture_session", "_capture_session") if not hasattr(sdk, n)]
+    if missing:
+        refuse(f"s3-ablation: REFUSED — the entry point this arm drives ({', '.join(missing)}) "
+               "is absent. #4282 retired the PUBLIC TortoiseSDK.capture_session "
+               "name (owner ruling 2026-10-27), the entry point this arm drives, so no arm "
+               "can be measured through it. The surviving in-process door is the private "
+               "`TortoiseSDK._capture_session` — main's whole capture body (`:Session`, the "
+               "`(Source)-[:references]->(Event)` link, the provenance stamps), restored by "
+               "the #10226 forward-merge — NOT `_extract_session_v2`, which is only the "
+               "extractor half. A measurement re-pointed at it is a NEW instrument with its "
+               "own pre-registration")
+
+
 def read_point_contents(uri: str) -> list[dict]:
     """Every ``:Point`` in the arm's graph, as grading input (NOT a census).
 
@@ -596,6 +656,11 @@ def run_arm(arm: str, graph: str, sessions: list[str], census, golds: dict[str, 
     rows: list[dict] = []
     try:
         sdk = TortoiseSDK(graph_name=graph)
+        # ⛔ #4282 deleted `TortoiseSDK.capture_session` — the entry point this arm drives. The
+        # REFUSAL ITSELF is raised by `main()`'s FIRST run-precondition check, long before the log
+        # file exists (r6 F3); this call is DEFENCE IN DEPTH for a direct `run_arm` caller. Both use
+        # the one predicate, so they cannot drift apart in what they test.
+        assert_capture_lane(sdk)
         before = created_counts(census(uri))
         # "A FRESH disposable graph" is a PREMISE of the measurement (pre-registration §0), so it is
         # refused when false instead of assumed (review P2): a reused `--graph-prefix`, or two runs
@@ -614,7 +679,10 @@ def run_arm(arm: str, graph: str, sessions: list[str], census, golds: dict[str, 
             witness.clear()
             calls["real_session"] = 0
             calls["intercepted"] = 0
-            receipt = sdk.capture_session(_turns(sid), session_id=sid)
+            # #4282: the public door is retired — this arm calls the PRIVATE
+            # body; `assert_capture_lane` refuses by name before it can run, so the
+            # arm is unreachable by design rather than broken.
+            receipt = sdk._capture_session(_turns(sid), session_id=sid)
             stats = receipt.get("stats") or {}
             # ⚠️ THE RECEIPT CARRIES NO `search` BLOCK ON THIS LANE. `capture_session` ->
             # `_extract_session_v2` never surfaces S3's report onto the meta it returns (only
@@ -998,6 +1066,14 @@ def main(argv: list[str] | None = None) -> int:
     if refusal is not None:
         print(f"s3-ablation: REFUSED — {refusal}", file=sys.stderr)
         return 2
+
+    # ⛔ #4282 DELETED THE METHOD THIS ARM DRIVES, and post-#4282 that is true on EVERY invocation.
+    # So it is the FIRST run-precondition refusal, ahead of the env checks AND ahead of the
+    # repairable-looking ones (the `source_sha` pin, the dirty tree, the corpus hash): those invite
+    # an operator to repair a pin or clean a tree for an instrument that cannot execute at all, which
+    # is the same masking the r6-F3 ordering fix ended, one stage earlier. The check is
+    # env-invariant, has no side effects, and is the cheapest of the set.
+    assert_capture_lane()
     bars = pins["hypothesis_bars"]
     floors = pins["denominator_floors"]
     changed = assert_source_sha(str(pins["source_sha"]), head)

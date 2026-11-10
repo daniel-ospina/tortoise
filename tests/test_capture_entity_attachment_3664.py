@@ -51,7 +51,7 @@ def _capture(sdk, session_id: str) -> str:
     """Create a durable WorkItem Object the link pass can resolve, then
     capture. Returns the session id."""
     sdk.create_object("test/repo#42", objectKind="pm:issue")
-    r = sdk.capture_session(CONV, session_id=session_id)
+    r = sdk._capture_session(CONV, session_id=session_id)
     assert r["ok"] is True, r
     return session_id
 

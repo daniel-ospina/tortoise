@@ -122,7 +122,7 @@ def test_capture_commit_remaps_rekeyed_operator_endpoint(sdk, monkeypatch):
           "direction": "unidirectional"}])
     monkeypatch.setattr(ev2, "extract_session_v2", _extract_returning(payload))
 
-    r = sdk.capture_session(CONV, session_id="s4716")
+    r = sdk._capture_session(CONV, session_id="s4716")
     assert r.get("ok") is True, r
     proj = sdk._get_proj()
     edges = _impl_edges(proj)
@@ -159,7 +159,7 @@ def test_capture_commit_remaps_mitigates_target_triple(sdk, monkeypatch):
                      "op_type": "IMPL"}}])
     monkeypatch.setattr(ev2, "extract_session_v2", _extract_returning(payload))
 
-    r = sdk.capture_session(CONV, session_id="s4716")
+    r = sdk._capture_session(CONV, session_id="s4716")
     assert r.get("ok") is True, r
     proj = sdk._get_proj()
     # the declared target IMPL committed between the RESOLVED risk id and the
@@ -211,7 +211,7 @@ def test_capture_commit_remaps_pt_supersession_ref(sdk, monkeypatch):
                         "evidence": "decision reversal"}])
     monkeypatch.setattr(ev2, "extract_session_v2", _extract_returning(payload))
 
-    r = sdk.capture_session(CONV, session_id="s4716")
+    r = sdk._capture_session(CONV, session_id="s4716")
     assert r.get("ok") is True, r
     proj = sdk._get_proj()
     rows = proj.g.query(
@@ -252,7 +252,7 @@ def test_capture_commit_resolves_mitigates_reason_for_a_folded_endpoint(
                 "overlap": 1.0, "evidence": "exact normalized content match",
                 "content": prior, "reason": "identical"}]))
 
-    r = sdk.capture_session(CONV, session_id="s4716")
+    r = sdk._capture_session(CONV, session_id="s4716")
     assert r.get("ok") is True, r
     proj = sdk._get_proj()
     contents = [c for (c,) in proj.g.query(
@@ -290,7 +290,7 @@ def test_capture_commit_single_prefixes_an_unresolvable_mitigates_reason(
                      "op_type": "IMPL"}}])
     monkeypatch.setattr(ev2, "extract_session_v2", _extract_returning(payload))
 
-    r = sdk.capture_session(CONV, session_id="s4716")
+    r = sdk._capture_session(CONV, session_id="s4716")
     assert r.get("ok") is True, r
     contents = [c for (c,) in sdk._get_proj().g.query(
         "MATCH (o:Point {is_operator:true})-[:mitigated_by]->(m:Point) "

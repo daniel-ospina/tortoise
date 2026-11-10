@@ -3513,8 +3513,11 @@ def _registry_with_bound_and_wide_keys(tmp_path, monkeypatch):
     try:
         org = reg.org_create("org-10180-bound")
         org_id = org["id"]
-        reg.org_update(org_id, max_points=10_000, max_graphs=10,
-                       max_sessions=10_000)
+        # ⛔ `sdk.org_update` was deleted by #4282 (tenancy administration is a
+        # console operation in the approved tenancy block, no recorded
+        # destination), so there is no in-process door to raise this org's
+        # limits — and none is needed: the fixture exists for the two KEY
+        # SHAPES (`graph_id` set / NULL), and no assertion below reads a limit.
         graph = reg._graph_create(org_id, "graph-10180-bound", kind="custom")
         bound = reg.apikey_create(org_id, "bound-10180",
                                   graph_id=graph["graph_id"],

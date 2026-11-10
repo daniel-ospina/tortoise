@@ -26,7 +26,7 @@ and a behavioural test alone cannot see WHY the exclusion is safe.
 ⚠️ **NOT a fake, and not "no graph" either — read this before re-laning.**
 Three tests here build a throwaway EMBEDDED engine and run real Cypher against
 it: ``test_a_real_capture_cannot_be_filed_under_the_reserved_namespace`` (the
-SDK doors), ``test_the_list_where_survives_a_legacy_non_string_session_id``
+SDK capture door), ``test_the_list_where_survives_a_legacy_non_string_session_id``
 (the composed WHERE) and
 ``test_the_lifetime_baseline_excludes_the_sample_at_the_query``
 (``LIFETIME_MEMORY_QUERY``). That engine is
@@ -91,7 +91,7 @@ def test_the_demo_namespace_is_reserved_at_the_one_door_predicate():
 
     The pre-fix soundness argument was about ``mint_session_id()`` only — and
     the capture doors are NOT mint-only: ``SessionRequest.session_id`` and the
-    two SDK doors accept a CALLER-SUPPLIED id of any shape. A genuine capture
+    SDK capture door accept a CALLER-SUPPLIED id of any shape. A genuine capture
     filed as ``session_demo_…`` would then be written, paid for, and invisible
     on all three read surfaces. The namespace is now closed at the ONE predicate
     every door shares, so the read exclusion cannot swallow a real capture.
@@ -281,7 +281,7 @@ def test_sdk_read_uses_the_shared_predicate():
 
 
 def test_the_commit_door_refuses_a_reserved_id_too():
-    """The FOURTH caller-id door (#8290 review P1).
+    """The THIRD caller-id door — the FOURTH before #4282 retired ``commit_session``.
 
     `POST /v1/sessions/commit`'s Layer-1 model judged `session_id` with its own
     ad-hoc blank test instead of the shared predicate, so a reserved-prefix id
@@ -315,7 +315,7 @@ def test_the_commit_door_refuses_a_reserved_id_too():
 def test_the_commit_door_never_advises_a_mint_it_cannot_do():
     """The 422 detail must not name a remedy this door rejects (#11576 review P2).
 
-    All four caller-id doors share ``ids.session_id_refusal``, but only three of
+    The three caller-id doors share ``ids.session_id_refusal``, but only two of
     them MINT: ``CommitPayload.session_id`` is a required ``str``
     (``Field(min_length=1)``) written VERBATIM by the handler, and ``None`` — or an
     omission — is a 400 ``missing_required_fields``. The shared text used to end
@@ -442,7 +442,7 @@ def test_a_real_capture_cannot_be_filed_under_the_reserved_namespace(tmp_path):
     """NON-VACUITY for the whole exclusion, at the DOOR the user actually uses.
 
     Pinning ``session_id_refusal`` alone would leave this green if a door
-    stopped calling it. This drives the REAL SDK doors (embedded lane —
+    stopped calling it. This drives the REAL SDK capture door (embedded lane —
     FalkorDBLite, no docker) with a reserved id and asserts the refusal is
     audible AND that
     nothing was written — the capture that would otherwise have become
@@ -456,14 +456,17 @@ def test_a_real_capture_cannot_be_filed_under_the_reserved_namespace(tmp_path):
     client = TortoiseSDK(str(tmp_path / "tortoise.db"),
                          event_log_path=str(tmp_path / "events" / "sdk.jsonl"))
     try:
-        for door, res in (
-            ("capture", client.capture_session(turns, session_id=reserved)),
-            ("commit", client.commit_session(turns, session_id=reserved)),
-        ):
-            assert res["ok"] is False, (door, res)
-            errors = [str(e) for e in (res.get("errors") or [])]
-            assert any("RESERVED demo/sample namespace" in e for e in errors), (
-                door, errors)
+        # ⛔ ONE arm, not two: the SDK's `commit_session` door is DELETED by
+        # #4282 (its `_commit_session_v1`/`_v2` bodies still exist but run the
+        # extractor, so they cannot be driven as a refusal), and the surviving
+        # commit boundary is `POST /v1/sessions/commit`'s Layer-1 model, pinned
+        # by `test_the_commit_door_refuses_a_reserved_id_too` and
+        # `test_the_commit_door_rule_is_BOUND_to_the_session_id_field` below.
+        # The capture door survives privately, which is what is driven here.
+        res = client._capture_session(turns, session_id=reserved)
+        assert res["ok"] is False, res
+        errors = [str(e) for e in (res.get("errors") or [])]
+        assert any("RESERVED demo/sample namespace" in e for e in errors), errors
         # ⛔ LABEL SCAN, not an equality seek (#9599's lesson): what matters is
         # that NO :Session was written under the reserved id.
         written = client._get_proj().g.query(
@@ -544,7 +547,8 @@ def test_the_list_where_survives_a_legacy_non_string_session_id(tmp_path):
 
 
 def test_the_hosted_capture_door_refuses_a_reserved_id_too():
-    """The THIRD caller-id door, BOUND to ``SessionRequest.session_id`` (#8290 P2).
+    """The second of the three caller-id doors, BOUND to ``SessionRequest.session_id``
+    (#8290 P2; it was the third of four before #4282).
 
     ``CommitPayload`` has a bound arm above; ``SessionRequest`` — the model the
     public ``POST /v1/sessions`` boundary validates — had none, so reverting its
@@ -662,7 +666,7 @@ def test_the_lifetime_baseline_excludes_the_sample_at_the_query(tmp_path):
 #: ``LIFETIME_MEMORY_QUERY``. Spelled here rather than imported — the NUMBER is
 #: the claim's subject, and importing the API module for it would pull the whole
 #: stack into a fast suite.
-_PIVOT = 23246
+_PIVOT = 23249
 
 #: The one pattern that defines a "cite target" lives in
 #: ``tools/hosted_api_cite_census.py`` — ONE implementation, so the note's stated
@@ -992,9 +996,12 @@ def test_the_predicate_docstring_names_every_production_caller():
     assert "from tortoise.session_schema import is_demo_session_id" in scorecard
     assert re.search(r"if is_demo_session_id\(", scorecard), (
         "the scorecard caller the docstring now names must still be a CALL")
-    # and the FOURTH `mint_session_id()` site is recorded where the mint's own
-    # docstring counts its create sites — not left to a commit message, which is
-    # where the review found the false version of this claim (P3, #11576)
+    # and `extract_session_v2` is recorded where the mint's own docstring counts
+    # its SURVIVING create sites (the second of three since #4282: the private
+    # `_capture_session` body first, then `extract_session_v2`, then the hosted
+    # handler) — not left to a
+    # commit message, which is where the review found the false version of this
+    # claim (P3, #11576)
     assert "extract_session_v2" in _src("tortoise/ids.py"), (
         "ids.py must still name ``extractor_v2.extract_session_v2`` among the "
         "four create sites the mint replaced")

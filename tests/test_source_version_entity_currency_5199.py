@@ -7,8 +7,8 @@ falsifiable test shows a revised source stales a derived `:Object` without
 deleting it.
 
 The first two were answered by a **Point**-addressed read:
-``TortoiseSDK.get_provenance_chain(point_id)`` reports each ``references``
-link's note, and ``search_engine.read_currency_links`` returns a Point's
+``TortoiseSDK.get_provenance_chain(point_id)`` (deleted by #4282) reported each
+``references`` link's note; the read it wrapped survives as a graph query, and ``search_engine.read_currency_links`` returns a Point's
 ``extractedFrom`` pairs, which ``search_engine.aggregate_currency`` folds per
 §4.6. Neither can be asked about an entity. A
 derived `:Object`/`:Event` carries **no** ``extractedFrom`` link — it reaches

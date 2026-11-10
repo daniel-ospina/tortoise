@@ -311,7 +311,7 @@ def test_operator_nodes_enter_retrievable_layer_and_survive_strip(
     fixture = corpus.load_fixture(sid)
     conv = runner.parse_roundtrip(
         sid, fixture["conversation"], fixture["harness"], workdir=lane["workdir"])
-    cap = sdk.capture_session(conv, session_id=sid, harness=fixture["harness"])
+    cap = sdk._capture_session(conv, session_id=sid, harness=fixture["harness"])
     assert cap.get("ok") is True, cap
 
     snap = runner.snapshot_session(sdk, sid)
@@ -534,7 +534,7 @@ def test_fold_lane_commit_leg_keeps_every_operator_after_a_rekey(
         sid, fixture["conversation"], fixture["harness"],
         workdir=lane["workdir"])
     with caplog.at_level(logging.WARNING, logger="tortoise.commit_ops"):
-        cap = sdk.capture_session(
+        cap = sdk._capture_session(
             conv, session_id=sid, harness=fixture["harness"])
     assert cap.get("ok") is True, cap
 
@@ -600,7 +600,7 @@ def test_fold_lane_commit_leg_reaches_the_retrievable_layer(
             conv = runner.parse_roundtrip(
                 sid, fixture["conversation"], fixture["harness"],
                 workdir=lane["workdir"])
-            cap = sdk.capture_session(
+            cap = sdk._capture_session(
                 conv, session_id=sid, harness=fixture["harness"])
             assert cap.get("ok") is True, cap
             snap = runner.snapshot_session(sdk, sid)
@@ -670,7 +670,7 @@ def test_fold_lane_commit_leg_rekey_stamps_the_operators_it_created(
         sid, fixture["conversation"], fixture["harness"],
         workdir=lane["workdir"])
     with caplog.at_level(logging.WARNING, logger="tortoise.commit_ops"):
-        cap = sdk.capture_session(
+        cap = sdk._capture_session(
             conv, session_id=sid, harness=fixture["harness"])
     assert cap.get("ok") is True, cap
     assert "operator write skipped" not in caplog.text, caplog.text
@@ -748,7 +748,7 @@ def test_fold_lane_commit_leg_stamps_every_node_when_a_triple_repeats(
     conv = runner.parse_roundtrip(
         sid, fixture["conversation"], fixture["harness"],
         workdir=lane["workdir"])
-    cap = sdk.capture_session(
+    cap = sdk._capture_session(
         conv, session_id=sid, harness=fixture["harness"])
     assert cap.get("ok") is True, cap
 

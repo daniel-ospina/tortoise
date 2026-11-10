@@ -1,3 +1,11 @@
+# #4282: six tests here drove `sdk.retrieval_legs`, one of the 26 public methods this
+# PR retired (`tortoise/sdk_retired.py`). The METHOD was a three-line wrapper over
+# surface that SURVIVES — `recall_state(..., leg_trace=)` plus `declared_degraded_read`
+# and `require_hybrid_read` — so they are REBUILT on that surface (`_retrieval_legs`
+# below) rather than dropped with the wrapper. Dropping them would leave the read
+# path's own `scope_kinds=scope_kinds` forwarding (`tortoise/sdk.py`) pinned by
+# nothing, which is the exact defect #4199 exists to prevent. The surviving capture
+# door is driven under its private name `_capture_session`.
 """#4199 — the dense leg's health is judged against the READ's own scope.
 
 THE DEFECT (reproduced on this branch before the fix — see ``## Proof`` below)
@@ -138,7 +146,7 @@ def _capture_unembedded_turns(sdk, monkeypatch, session_id: str) -> list[str]:
     never a hand-written raw Cypher node.
     """
     _no_embedder(monkeypatch)
-    assert sdk.capture_session(CONV, session_id=session_id)["turns"] == len(CONV)
+    assert sdk._capture_session(CONV, session_id=session_id)["turns"] == len(CONV)
     rows = sdk._get_proj().g.query(
         "MATCH (t:Point) WHERE t.id STARTS WITH $p RETURN t.id, t.embedding "
         "ORDER BY t.id",
@@ -166,6 +174,36 @@ def _vector_entry(trace: list[dict]) -> dict:
     entries = _vector_entries(trace)
     assert len(entries) == 1, trace
     return entries[0]
+
+
+def _retrieval_legs(sdk, query: str, *, kind: str | None = None,
+                    limit: int = 10, lane: str | None = None) -> dict:
+    """The retired ``sdk.retrieval_legs`` probe, rebuilt on SURVIVING surface.
+
+    #4282 deleted the SDK wrapper; everything it composed survives, so the pin
+    moves here instead of going with it — ONE ``recall_state`` call carrying the
+    observational ``leg_trace``, the C1 declaration from
+    ``declared_degraded_read``, and ``hybrid`` from the one gate predicate
+    ``require_hybrid_read`` so the two fields cannot disagree. The wrapper's
+    ``require_hybrid`` fail-loud arm had no caller left in the tree and is not
+    reproduced.
+    """
+    leg_trace: list[dict] = []
+    sdk.recall_state(query, kind=kind, limit=limit, leg_trace=leg_trace)
+    marker = declared_degraded_read(leg_trace)
+    refusal_reason: str | None = None
+    try:
+        require_hybrid_read(leg_trace or None, lane=lane)
+        hybrid = True
+    except HybridReadUnavailableError as exc:
+        hybrid = False
+        refusal_reason = exc.reason
+    return {
+        "legs": leg_trace,
+        "declared_degraded_read": marker,
+        "hybrid": hybrid,
+        "hybrid_refusal_reason": refusal_reason,
+    }
 
 
 # ── 1. The falsifier: a partially-embedded corpus reads DEGRADED ───────────
@@ -199,7 +237,7 @@ def test_partial_turn_corpus_read_is_declared_degraded(
             "the fixture must build the measured partial state (scope HAS "
             f"nodes, NONE embedded), got {in_scope}")
 
-        legs = sdk.retrieval_legs("auth dead-end", kind="event", limit=5)
+        legs = _retrieval_legs(sdk, "auth dead-end", kind="event", limit=5)
     finally:
         sdk.close()
 
@@ -252,7 +290,7 @@ def test_an_out_of_scope_object_arm_cannot_launder_the_read(
         # production "plus any embedded Object" shape that laundered.
         obj = sdk.create_object("website config", objectKind="other")
 
-        legs = sdk.retrieval_legs("auth dead-end", kind="event", limit=5)
+        legs = _retrieval_legs(sdk, "auth dead-end", kind="event", limit=5)
     finally:
         sdk.close()
 
@@ -317,7 +355,7 @@ def test_a_terminal_in_scope_object_arm_cannot_launder_the_read(
             params={"i": obj["id"]}).result_set
         assert rows and rows[0][0] == "retracted" and rows[0][1] is True, rows
 
-        legs = sdk.retrieval_legs("auth dead-end", kind="event", limit=5)
+        legs = _retrieval_legs(sdk, "auth dead-end", kind="event", limit=5)
     finally:
         sdk.close()
 
@@ -380,13 +418,14 @@ def test_fully_embedded_turn_corpus_still_reports_hybrid(
     sdk = sdk_factory()
     try:
         _embedder(monkeypatch, embedder)
-        assert sdk.capture_session(CONV, session_id="sess-4199-full")["turns"] == 2
+        assert sdk._capture_session(
+            CONV, session_id="sess-4199-full")["turns"] == 2
         rows = sdk._get_proj().g.query(
             "MATCH (t:Point) WHERE t.is_episodic=true RETURN t.embedding"
         ).result_set
         assert rows and all(r[0] is not None for r in rows), rows
 
-        legs = sdk.retrieval_legs("auth dead-end", kind="event", limit=5)
+        legs = _retrieval_legs(sdk, "auth dead-end", kind="event", limit=5)
     finally:
         sdk.close()
 
@@ -413,7 +452,7 @@ def test_unscoped_read_keeps_reporting_hybrid(
         _embedder(monkeypatch, embedder)
         sdk.create_point("statement", "auth dead-end top issue claim", id="ext-1")
 
-        legs = sdk.retrieval_legs("auth dead-end", limit=5)
+        legs = _retrieval_legs(sdk, "auth dead-end", limit=5)
     finally:
         sdk.close()
 
@@ -438,8 +477,8 @@ def test_empty_kind_scope_read_is_not_refused(
     try:
         _embedder(monkeypatch, embedder)
         sdk.create_point("statement", "auth dead-end top issue claim", id="ext-1")
-        legs = sdk.retrieval_legs(
-            "auth dead-end", kind="kind-nobody-wrote", limit=5)
+        legs = _retrieval_legs(
+            sdk, "auth dead-end", kind="kind-nobody-wrote", limit=5)
     finally:
         sdk.close()
 

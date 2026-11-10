@@ -42,7 +42,7 @@ def captured(tmp_path, monkeypatch):
     events = tmp_path / "events"
     events.mkdir()
     sdk = TortoiseSDK(str(db), event_log_path=str(events / "events.jsonl"))
-    res = sdk.capture_session(CONV)
+    res = sdk._capture_session(CONV)
     assert res["ok"] is True and res["extracted"] >= 1, res
     snap = runner.snapshot_session(sdk, res["session_id"])
     yield sdk, res["session_id"], snap

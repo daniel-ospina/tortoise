@@ -702,7 +702,7 @@ def test_an_unarmed_capture_opens_no_record_connection(capture_sdk, no_record_ds
     monkeypatch.setattr(record_writer, "_default_connect", _must_not_connect)
     sdk, _journal = capture_sdk()
     before = dict(monitoring.record_write_failure_counts())
-    receipt = sdk.capture_session([
+    receipt = sdk._capture_session([
         {"role": "user", "content": "We chose FalkorDB for the hot cache."},
         {"role": "assistant", "content": "Noted."},
     ])
@@ -742,7 +742,7 @@ def test_an_armed_capture_without_a_tenant_is_refused_and_counted(
     # module-level Prometheus Counter, so `>= 1` would pass on some OTHER
     # test's refusal — an accident, not this claim.
     before = dict(monitoring.record_write_failure_counts())
-    receipt = sdk.capture_session([
+    receipt = sdk._capture_session([
         {"role": "user", "content": "We chose FalkorDB for the hot cache."},
         {"role": "assistant", "content": "Noted."},
     ])
@@ -869,7 +869,7 @@ def test_an_armed_capture_without_a_journal_is_counted_not_silent(
                        "postgresql://record:record@127.0.0.1:1/record")
     sdk, _journal = capture_sdk(journal=False)
     before = dict(monitoring.record_write_failure_counts())
-    receipt = sdk.capture_session([
+    receipt = sdk._capture_session([
         {"role": "user", "content": "We chose FalkorDB for the hot cache."},
         {"role": "assistant", "content": "Noted."},
     ])
@@ -1233,7 +1233,7 @@ def test_the_sdk_door_reads_durability_off_its_log(capture_sdk, monkeypatch):
     assert log.durable is True, "a real journal is durable by default"
     log.durable = False
     before = dict(monitoring.record_non_journal_skip_counts())
-    sdk.capture_session([{"role": "user", "content": "We chose FalkorDB."}])
+    sdk._capture_session([{"role": "user", "content": "We chose FalkorDB."}])
     after = dict(monitoring.record_non_journal_skip_counts())
     assert after.get("no_durable_journal", 0) > before.get(
         "no_durable_journal", 0), after
@@ -1935,7 +1935,7 @@ def test_a_malformed_dsn_on_the_journal_less_lane_is_counted(
     monkeypatch.setenv(record_writer.RECORD_DSN_ENV, "mysql://not-postgres/nope")
     sdk, _journal = capture_sdk(journal=False)
     before = dict(monitoring.record_write_failure_counts())
-    receipt = sdk.capture_session([
+    receipt = sdk._capture_session([
         {"role": "user", "content": "We chose FalkorDB for the hot cache."},
         {"role": "assistant", "content": "Noted."},
     ])
@@ -2256,7 +2256,7 @@ def _capture(capture_sdk, monkeypatch,
     sdk, journal_path = capture_sdk()
     before = dict(monitoring.record_write_failure_counts())
     with use_record_tenant(*tenant):
-        receipt = sdk.capture_session([
+        receipt = sdk._capture_session([
             {"role": "user", "content": "We chose FalkorDB for the hot cache."},
             {"role": "assistant", "content": "Noted: FalkorDB holds the hot cache."},
         ])

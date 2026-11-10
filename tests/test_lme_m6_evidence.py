@@ -1072,7 +1072,7 @@ def test_session_id_written_by_sdk_capture_path(tmp_path, monkeypatch):
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     sdk = _fresh_sdk(tmp_path)
     try:
-        res = sdk.capture_session([
+        res = sdk._capture_session([
             {"role": "user", "content": "We decided to ship the strategy "
                                         "document first."},
             {"role": "assistant", "content": "Agreed, the strategy is durable."},

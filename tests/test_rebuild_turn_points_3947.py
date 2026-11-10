@@ -74,7 +74,7 @@ def captured(tmp_path):
     """A scratch store + JSONL journal holding one captured 3-turn session."""
     log_path = str(tmp_path / "events" / "sdk.jsonl")
     sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
-    res = sdk.capture_session(CONV, session_id=SESSION_ID)
+    res = sdk._capture_session(CONV, session_id=SESSION_ID)
     assert res["ok"] is True
     assert res["turns"] == 3
     yield sdk, log_path
@@ -89,7 +89,7 @@ def unjournaled(tmp_path):
     the state the fix has to make a rebuild REFUSE rather than erase.
     """
     sdk = TortoiseSDK(str(tmp_path / "tortoise.db"))
-    res = sdk.capture_session(CONV, session_id=SESSION_ID)
+    res = sdk._capture_session(CONV, session_id=SESSION_ID)
     assert res["ok"] is True and res["turns"] == 3
     yield sdk, str(tmp_path)
     sdk.close()
@@ -324,12 +324,12 @@ def test_recapture_journals_the_stored_status_not_a_literal_draft(tmp_path):
     log_path = str(tmp_path / "events" / "sdk.jsonl")
     sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
     try:
-        sdk.capture_session(CONV, session_id=SESSION_ID)
+        sdk._capture_session(CONV, session_id=SESSION_ID)
         proj = sdk._get_proj()
         pid = f"{SESSION_ID}_t0"
         proj.g.query("MATCH (t:Point {id:$id}) SET t.status='live'",
                      params={"id": pid})
-        sdk.capture_session(CONV, session_id=SESSION_ID)  # re-capture
+        sdk._capture_session(CONV, session_id=SESSION_ID)  # re-capture
 
         turns = [e for e in EventLog(log_path).read_all()
                  if (e.get("point") or {}).get("id") == pid]
@@ -363,8 +363,8 @@ def test_recapture_shorter_does_not_resurrect_turns_on_rebuild(tmp_path):
     log_path = str(tmp_path / "events" / "sdk.jsonl")
     sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
     try:
-        sdk.capture_session(CONV, session_id=SESSION_ID)  # 3 turns
-        sdk.capture_session([{"role": "user", "content": "shorter re-capture"}],
+        sdk._capture_session(CONV, session_id=SESSION_ID)  # 3 turns
+        sdk._capture_session([{"role": "user", "content": "shorter re-capture"}],
                             session_id=SESSION_ID)        # 1 turn
         proj = sdk._get_proj()
         stale = [f"{SESSION_ID}_t{i}" for i in (1, 2)]
@@ -391,7 +391,7 @@ def test_recapture_shorter_does_not_resurrect_turns_on_rebuild(tmp_path):
 
         # GROW BACK: the journaled delete must not suppress a turn a LATER
         # capture re-writes under the same deterministic id.
-        sdk.capture_session(CONV, session_id=SESSION_ID)  # 3 turns again
+        sdk._capture_session(CONV, session_id=SESSION_ID)  # 3 turns again
         assert _turn_ids(proj) == [f"{SESSION_ID}_t{i}" for i in range(3)]
         proj.rebuild(EventLog(log_path), confirm_destructive=True)
         assert _turn_ids(proj) == [f"{SESSION_ID}_t{i}" for i in range(3)], (
