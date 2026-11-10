@@ -2459,7 +2459,12 @@ class TestCoreHierarchy:
         # fake result so the filter block actually runs, and the sdk's projection
         # replaced by a recorder, so the assertion is on the Cypher params the
         # read really issues. `expanded = [kind]` (the widening deleted, DM4's
-        # measurement then false) leaves a single bare `kind_0` here.
+        # measurement then false) takes the ONE-member branch and leaves a single
+        # bare `kind` param here — `kind_0…n` is created only by the multi-member
+        # branch (`len(expanded) == 1` at `sdk.py:38566` selects between them), so
+        # naming `kind_0` would send a reader after a parameter the mutant never
+        # produces. `_kind_values` reads the params BY VALUE, so either spelling
+        # is seen.
         class _FilterGraph:
             def __init__(self):
                 self.calls: list[tuple[str, dict]] = []
