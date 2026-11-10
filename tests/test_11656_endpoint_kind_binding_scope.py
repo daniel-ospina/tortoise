@@ -266,28 +266,67 @@ def _collected_test_nodes(source: str) -> list[ast.AST]:
         for node in body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
                 nodes.append(node)
-            elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
-                # ⛔ Recurse, because pytest collects a nested-class method
-                # (`TestOuter::TestInner::test_...` — measured with `--collect-only`).
-                # ⛔ But ONLY into `Test*` classes: pytest's default `python_classes = Test`, so a
-                # `class Helpers:` holding a `test_` method is collected by NOBODY (measured) and counting
-                # it is the OVERCOUNT direction — the one whose tempting "fix" is to falsify the document.
-                _walk(node.body, module_level=False)
             elif module_level and isinstance(node, ast.ClassDef) and node.name in case_classes:
                 # A `unittest.TestCase` subclass is collected by name-independent discovery — but only at
                 # MODULE level, and its own body is NOT walked as a container: a `Test*` class nested inside
                 # `FoldCase(unittest.TestCase)` is collected by nobody (measured — `--collect-only` lists
                 # only `FoldCase::test_outer`), so recursing here would over-count in the direction whose
                 # tempting fix is to falsify the document.
+                # ⛔ This branch MUST precede the `Test*` one below. Round-27 P3, measured: a TestCase
+                # subclass whose name ALSO starts with `Test` (`class TestFoo(unittest.TestCase)` holding a
+                # nested `class TestInner` with one method) was taken by the name branch first, which walked
+                # the body as a container and reported **(2, 2)** where `--collect-only` collects **1** —
+                # the over-count direction, and one of the three shapes this passed off as impossible.
                 nodes.extend(
                     member
                     for member in node.body
                     if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
                     and member.name.startswith("test_")
                 )
+            elif (
+                isinstance(node, ast.ClassDef)
+                and node.name.startswith("Test")
+                and _pytest_collects_class(node)
+            ):
+                # ⛔ Recurse, because pytest collects a nested-class method
+                # (`TestOuter::TestInner::test_...` — measured with `--collect-only`).
+                # ⛔ But ONLY into `Test*` classes: pytest's default `python_classes = Test`, so a
+                # `class Helpers:` holding a `test_` method is collected by NOBODY (measured) and counting
+                # it is the OVERCOUNT direction — the one whose tempting "fix" is to falsify the document.
+                _walk(node.body, module_level=False)
 
     _walk(tree.body, module_level=True)
     return nodes
+
+
+def _pytest_collects_class(node: ast.ClassDef) -> bool:
+    """False for the two `Test*` shapes pytest's collector REFUSES — both measured with `--collect-only`.
+
+    A bare `node.name.startswith("Test")` walk counts both of them, i.e. in the OVERCOUNT direction, and
+    round-27 P3 measured exactly that against the helper's own fail-closed promise:
+
+      * `__test__ = False` on the class — pytest reports `no tests collected` for it;
+      * a class-level `__init__` — pytest will not instantiate the class (`no tests collected`, plus a
+        `PytestCollectionWarning`), so none of its methods is a case.
+
+    Neither is modelled by counting; both are modelled exactly by returning False here, which is why this
+    is a predicate and not a raise (unlike the arms in `_derive_population`, these two ARE answerable).
+    """
+    for stmt in node.body:
+        if isinstance(stmt, ast.Assign):
+            targets = [t for t in stmt.targets if isinstance(t, ast.Name)]
+            if any(t.id == "__test__" for t in targets) and (
+                isinstance(stmt.value, ast.Constant) and stmt.value.value is False
+            ):
+                return False
+        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            if stmt.target.id == "__test__" and (
+                isinstance(stmt.value, ast.Constant) and stmt.value.value is False
+            ):
+                return False
+        elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name == "__init__":
+            return False
+    return True
 
 
 def _derive_population(source: str) -> tuple[int, int]:
@@ -308,7 +347,9 @@ def _derive_population(source: str) -> tuple[int, int]:
       * a `parametrize` **stacked** twice on one function (pytest collects the PRODUCT of the arms)
       * a `parametrize` on the **class** (it applies to every method in it)
       * an `argname` driven by a module-level `@pytest.fixture(params=...)` (the case count is the fixture's)
-      * an **empty** case list (pytest collects 0, so the function itself is not a collected case)
+      * an **empty** case list — pytest collects the function ONCE and SKIPS it (measured: `1 skipped`,
+        plus `got empty parameter set`), so the arithmetic would report **0** where pytest collects 1: an
+        UNDERCOUNT, the direction that agrees with a stale doc number and stays green
       * a case list that is not an inline list/tuple literal
       * a `pytestmark` binding, at module or class level — it applies a mark to EVERY test in its scope,
         so whether it multiplies cases cannot be answered without modelling per-module/class marks
@@ -436,8 +477,9 @@ def _derive_population(source: str) -> tuple[int, int]:
                 continue
             if not cases.elts:
                 unreadable.append(
-                    f"`{node.name}`: empty case list — pytest collects 0 cases for it, so the function is "
-                    "not a collected case and this derivation would over-count it"
+                    f"`{node.name}`: empty case list — pytest collects it once and SKIPS it (measured: "
+                    "`1 skipped`), so the arithmetic would report 0 where pytest collects 1 — an undercount, "
+                    "the direction a stale doc number would agree with"
                 )
                 continue
             argnames = decorator.args[0]
@@ -674,8 +716,12 @@ class TestTheInventoryTheScopeCites:
             ("object", "point"): 1,
             ("point", "object"): 1,
         }, f"the direct-shape partition moved: {dict(partition)}"
-        direct_shape = sum(n for (a, b), n in partition.items() if "point" not in (a, b))
-        assert direct_shape == 33, partition
+        # ⛔ NO `assert direct_shape == 33` here. That sum is ARITHMETIC over the six cells asserted above
+        # (28 + 3 + 1 + 1), so it could not fail once the dict assert passed — the F3 class this file
+        # deletes elsewhere, and round-27 P3 measured it (`_LAYER_AXES['Subject'] = 'object'` reds the dict
+        # assert while the sum still computes 33, so the line was dead weight, not a second claim). The `33`
+        # figure is still pinned, INDEPENDENTLY, where it is published: the ledger row below derives
+        # `direct_shape` from a fresh partition and holds the scope doc and the index to it.
 
     def test_the_layer_axis_table_buckets_each_layer_and_leaves_the_guard_reachable(self):
         """Round-26 P3: six of `CORE_ENTITY_TYPES`' seven layers were mapped to `subject`.
@@ -1065,7 +1111,11 @@ class TestThePairHasProductionReaders:
         )
 
         # ⛔ The symbol the docs must name. `sdk.apply_relation_edges` does not exist; this does.
-        assert relation_write.apply_relation_edges, (
+        # `assert relation_write.apply_relation_edges` was a TAUTOLOGY (a function object is always truthy,
+        # and a rename reds as an `AttributeError` inside the expression rather than as an assertion) —
+        # round-27 P3, in the docstring ten lines above that condemns exactly that shape. `getattr(...,
+        # None)` makes the rename a real assertion failure.
+        assert callable(getattr(relation_write, "apply_relation_edges", None)), (
             "`tortoise.relation_write.apply_relation_edges` is gone — re-derive §5.5's live-path claim"
         )
         assert not hasattr(TortoiseSDK, "apply_relation_edges"), (
@@ -1494,7 +1544,9 @@ class TestTheDocsAreDiscoverableAndResolve:
 
         It also holds `_derive_population` to its FAIL-CLOSED promise. Round-21 measured four shapes pytest
         collects that the first version of the helper silently counted as zero extras (stacked arms = the
-        product, a class-level arm = per-method, a fixture-`params` argname, an empty list = 0 collected).
+        product, a class-level arm = per-method, a fixture-`params` argname, an empty list = **1 skipped** —
+        round-27 P3 corrected that last one: this docstring said `0 collected`, and removing the raise would
+        have reported 0 where pytest reports 1).
         A silent zero in that direction agrees with a stale doc number, which is green and wrong, so each of
         those is now a `pytest.raises` case rather than an assumption.
 
@@ -1559,6 +1611,41 @@ class TestTheDocsAreDiscoverableAndResolve:
             "would otherwise be 1, and the old `split(\",\")` derivation counts the comma INSIDE each tuple"
         )
 
+        # --- Round-27 P3: three `Test*` shapes pytest REFUSES to collect, each of which the name-only walk
+        # counted — measured with `--collect-only` at 0 / 0 / 1 respectively. The `Test*`-named TestCase is
+        # the sharp one: its body must not be walked as a container, and only the ordering of the two class
+        # branches decides that. Comparing the derived pair to the measured count means reverting either half
+        # of the fix reds here instead of silently certifying a population no run produces. ---
+        refused = tmp_path / "synthetic_refused.py"
+        refused.write_text(
+            "import unittest\n"
+            "\n"
+            "class TestHasInit:\n"
+            "    def __init__(self):\n"
+            "        self.x = 1\n"
+            "    def test_never_collected(self):\n"
+            "        pass\n"
+            "\n"
+            "class TestDisabled:\n"
+            "    __test__ = False\n"
+            "    def test_never_collected(self):\n"
+            "        pass\n"
+            "\n"
+            "class TestCaseNamedWithTest(unittest.TestCase):\n"
+            "    def test_outer(self):\n"
+            "        pass\n"
+            "\n"
+            "    class TestInner:\n"
+            "        def test_not_collected(self):\n"
+            "            pass\n"
+        )
+        assert _derive_population(refused.read_text()) == (1, 1), (
+            "pytest collects exactly ONE case in this module "
+            "(`TestCaseNamedWithTest::test_outer`) and NONE from the `__init__` or `__test__ = False` "
+            "classes — measured with `--collect-only` — so a derivation returning more certifies a "
+            f"population that does not exist: {_derive_population(refused.read_text())}"
+        )
+
         # --- ISSUE 2: the AST symbol check keeps class qualification. ---
         assert _ast_declares(module, "test_module_level") is True
         assert _ast_declares(module, "TestOuter.test_a_method") is True
@@ -1597,7 +1684,7 @@ class TestTheDocsAreDiscoverableAndResolve:
                 "def three_cases(request):\n    return request.param\n"
                 "def test_fixture_driven(three_cases):\n    pass\n"
             ),
-            "empty case list (pytest collects 0)": (
+            "empty case list (pytest collects 1 skipped)": (
                 "import pytest\n"
                 "@pytest.mark.parametrize('x', [])\n"
                 "def test_empty(x):\n    pass\n"
