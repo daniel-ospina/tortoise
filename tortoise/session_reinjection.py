@@ -427,26 +427,32 @@ def _merge_key(value: object) -> str:
     ``seeded_sessions`` rejects every ``idx:`` key (``_is_real_session_id``)
     and the fetch builds both sides from the same stored string.
 
-    ⚠️ A non-``str`` key maps to ``""``, i.e. it is not a session: a bespoke
-    caller whose ``session_key`` returns an ``int`` (e.g. the raw
-    ``lme_session_index``) therefore has those seeds dropped from ``order``
-    and all such hits collapsed into one empty bucket. Pre-#11382 they were
-    dict-keyed as-is (the ``int`` itself). No SHIPPED caller supplies a
+    ⚠️ A non-``str`` key maps to ``""``, i.e. it is not a session. MEASURED,
+    for a bespoke caller whose ``session_key`` returns an ``int`` (e.g. the raw
+    ``lme_session_index``): ``seeded_sessions`` drops every seed BEFORE any
+    fetch (``[]`` — there is nothing left to collapse into a bucket), and
+    ``reinjection_merge_order`` drops the groups too, returning the base pool's
+    own order. Pre-#11382 those keys matched and spliced, so the direction of
+    this change on that path is a DROP, not a fusion — and
+    ``test_a_non_str_custom_key_is_dropped_not_stringified_11382`` pins it,
+    because the stringifying alternative (``str(5)`` → a session literally
+    named ``"5"``, which CAN fuse with a real one) passes every other test.
+    No SHIPPED caller supplies a
     custom ``session_key=`` to this pair: the only shipped sites that pass one
     to ``dedup_pool`` are ``tortoise/ask_lane.py``:607,
     ``tools/ask_recall_bench.py``:276 and ``tools/gen_ask_transcripts.py``:215
     (``guard_and_recap_pool`` forwards its own ``None``-default parameter, and
-    ``tools/longmem_eval/retrieve.py`` takes the default on both its calls).
+    the three ``tools/longmem_eval/retrieve.py`` calls all take the default).
     The TESTS do supply one — ``session_key=raw_key`` in
     ``tests/test_session_reinjection_rules.py`` is what pins the merge
     contract — and ``dedup_pool``'s custom-key path is covered in
     ``tests/test_ask_sdk.py`` / ``tests/test_ask_retrieval_levers.py``. So this
     is a bespoke-path change, and it is the same fail-closed direction
-    :func:`retrieval.normalize_session_key` takes everywhere else. ⚠️ The
-    collapse reaches the per-session cap too: every non-``str`` key becomes the
-    ONE ``""`` bucket, so a bespoke caller that keyed by an ``int`` now shares
-    one cap window across sessions it used to keep apart (no shipped caller is
-    in that shape).
+    :func:`retrieval.normalize_session_key` takes everywhere else. ⚠️ Where the
+    collapse IS observable is ``dedup_pool``'s per-session cap: every
+    non-``str`` key becomes the ONE ``""`` bucket, so a bespoke caller that
+    keyed by an ``int`` now shares one cap window across sessions it used to
+    keep apart (no shipped caller is in that shape).
     """
     text = value if isinstance(value, str) else ""
     if not text:

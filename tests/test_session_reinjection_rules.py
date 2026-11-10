@@ -2799,3 +2799,77 @@ def test_the_population_scan_excludes_the_guards_own_body():
         "guard's `def` prefix instead of the END of its body, so this pin can "
         "grade its own commentary (the round-10/11 self-grading class, returned "
         "one block down)")
+
+
+def test_a_non_str_custom_key_is_dropped_not_stringified_11382():
+    """#11382: the merge's ``_merge_key`` FAILS CLOSED on a non-``str`` key —
+    it does not stringify it into a session name.
+
+    Why this needs its own pin: the two directions are behaviourally opposite
+    and only one is right. ``_merge_key(5)`` returning ``""`` (not a session,
+    so the group is dropped) and returning ``"5"`` (a session literally named
+    "5", which can FUSE with a real one) both leave every other test green —
+    measured: the one-line ``else str(value)`` mutant passes the whole 849-test
+    seam batch. So the arm needed a row of its own, exactly like the fail-closed
+    snake-id arm one helper over.
+
+    ⚠️ And the docstring's story is the MEASURED one, not the tidy one: with a
+    custom key that returns an ``int``, ``seeded_sessions`` drops every seed
+    BEFORE any fetch (``[]`` — there is nothing to collapse into a bucket), and
+    ``reinjection_merge_order`` drops the groups as well, returning the base
+    pool unchanged. Pre-#11382 those keys matched and spliced, so this is a
+    bespoke-path DROP, not a fusion.
+    """
+    from tortoise.session_reinjection import _merge_key
+
+    assert _merge_key(5) == ""
+    assert _merge_key(True) == ""
+    assert _merge_key(None) == ""
+    # ... a str key is still stripped, so the fail-closed arm cannot be
+    # "return the value unchanged" either
+    assert _merge_key("  5  ") == "5"
+    assert _merge_key("idx:3 ") == "idx:3 "
+
+    def int_key(hit: dict):
+        return hit.get("lme_session_index")
+
+    pool = [_chunk("p1", ""), _chunk("p2", "")]
+    for rank, hit in enumerate(pool):
+        hit["lme_session_index"] = rank
+    # seeds are dropped before the fetch — not stringified into "0"/"1"
+    assert seeded_sessions(pool, session_key=int_key) == []
+    # ... and the merge drops the groups too, returning the base pool's order
+    merged = reinjection_merge_order(
+        [dict(h) for h in pool],
+        {0: [{"id": "t1", "text": "t"}], 1: [{"id": "t2", "text": "t"}]},
+        seed_order=[0, 1], session_key=int_key, max_chunks_per_session=9)
+    assert [h["id"] for h in merged] == ["p1", "p2"], (
+        "a non-str custom key must not acquire an identity: under a "
+        "stringifying mutant these groups splice as '0'/'1'")
+
+
+def test_a_padded_phantom_snake_id_converges_and_goes_unseeded_11382():
+    """#11382, the disclosed CONVERGENCE — pinned, because it loses something.
+
+    An id whose STRIPPED form lands inside the ``idx:`` namespace
+    (``' idx:3 '`` → ``'idx:3'``) now resolves to the phantom key. Two
+    consequences, both measured and both asserted here:
+
+    * the snake spelling now agrees with the camel/wire spelling (which already
+      behaved that way at ``origin/main``, because ``_safe_session_tag``
+      strips) and with an unrelated ``lme_session_index: 3`` bucket;
+    * ⚠️ the snake spelling is consequently NOT SEEDED — at ``8ad61c2ba1``
+      ``seeded_sessions([{"id":"p1","session_id":" idx:3 "}])`` returned
+      ``[(' idx:3 ', 'p1')]`` and spliced; at this head it returns ``[]``,
+      because the strip lands the key on ``_is_real_session_id``'s phantom
+      rejection. So a shape the write door should not have produced stops
+      working BY ACCIDENT, which is the half the fix's prose previously
+      disclosed without a pin.
+    """
+    # the convergence: three spellings, ONE phantom key
+    assert session_key_of({"id": "p", "session_id": " idx:3 "}) == "idx:3"
+    assert session_key_of({"id": "p", "sessionId": " idx:3 "}) == "idx:3"
+    assert session_key_of({"id": "p", "lme_session_index": 3}) == "idx:3"
+    # ... and the loss that follows from it, on both spellings
+    for spell in ("session_id", "sessionId"):
+        assert seeded_sessions([{"id": "p1", spell: " idx:3 "}]) == [], spell
