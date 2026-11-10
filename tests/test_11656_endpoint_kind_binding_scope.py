@@ -70,9 +70,9 @@ def _kind_bearing(rows: list[dict]) -> list[dict]:
 class TestTheInventoryTheScopeCites:
     """§1 of the scope: the counts that decide which doors must be gated.
 
-    These moved when `origin/main` was merged into this branch (+2 kind-bearing declarations). They are
-    re-measured here rather than quoted, because the review of the previous revision found three figures
-    that had been carried forward.
+    These moved when `origin/main` was merged into this branch (+3 kind-bearing declarations, 32 -> 35).
+    They are re-measured here rather than quoted, because the review of the previous revision found three
+    figures that had been carried forward.
     """
 
     def test_totals(self):
@@ -81,14 +81,32 @@ class TestTheInventoryTheScopeCites:
         assert len(_kind_bearing(rows)) == 35, "35 of them carry fromKind+toKind (32 before origin/main moved)"
 
     def test_every_kind_bearing_declaration_carries_a_core_mechanism(self):
-        """31 IMPL + 1 NAND.
+        """34 IMPL + 1 NAND.
 
-        This is the fact that makes the OPERATOR path (32/32) the seam and `create_edge` (2/32) a partial one.
-        If a pack ever adds a kind-bearing relation on a non-core mechanism, the seam choice has to be
-        re-derived — so it must red, not drift.
+        This is the fact that makes the OPERATOR path (35/35) the seam — and the reason a `create_edge`-only
+        gate covers 2 of 35, a partial one. If a pack ever adds a kind-bearing relation on a non-core
+        mechanism, the seam choice has to be re-derived — so it must red, not drift.
         """
         mechanisms = Counter(r.get("mechanism") for r in _kind_bearing(_declared_relations()))
         assert mechanisms == {"IMPL": 34, "NAND": 1}, mechanisms
+
+    def test_the_routing_the_gate_choice_rests_on(self):
+        """The number §1.2's table and §5.3a both rest on: which write paths each declaration binds.
+
+        `relation_write_paths()` is the real routing predicate — the `mechanism` counts above are only a
+        proxy for it. Measured at this head: 33 declarations bind the OPERATOR path alone, and exactly 2
+        (`hasPart`, `dependsOn`) ALSO bind the structural path — which is why a `create_edge`-only gate
+        covers 2 of 35 and an operator-path gate covers 35 of 35. A change to `CORE_PREDICATES` or to
+        `relation_write_paths` itself must red here rather than leave the scope silently wrong.
+        """
+        from tortoise.pack_registry import relation_write_paths
+
+        bearing = _kind_bearing(_declared_relations())
+        operator_only = [r["predicate"] for r in bearing if relation_write_paths(r) == ("operator",)]
+        structural = [r["predicate"] for r in bearing if "structural" in relation_write_paths(r)]
+        assert len(operator_only) == 33, Counter(operator_only)
+        assert sorted(structural) == ["dependsOn", "hasPart"], sorted(structural)
+        assert all("operator" in relation_write_paths(r) for r in bearing), "every one rides the operator path"
 
     def test_haspart_is_declared_exactly_once(self):
         """⛔ The review's P1: revision 1 claimed "4 packs, 4 different pairs".
@@ -106,7 +124,10 @@ class TestTheInventoryTheScopeCites:
         semantics_only = [r for r in _declared_relations()
                           if r.get("semantics") == "hasPart" and r.get("predicate") != "hasPart"]
         assert len(semantics_only) >= 4, "the miscount's source: several distinct predicates CARRY hasPart meaning"
-        assert "hasPart" not in {r["predicate"] for r in semantics_only}
+        # A SHAPE pin, not the count: the miscount counted four DIFFERENT predicates carrying this meaning,
+        # so if they ever collapse into one predicate the evidence for "`semantics:` is not a declaration" is
+        # gone. (`predicate != "hasPart"` above already guarantees the row is not the declaration itself.)
+        assert len({r["predicate"] for r in semantics_only}) >= 4, sorted({r["predicate"] for r in semantics_only})
 
     def test_the_repeated_predicates_are_addresses_contains_targets(self):
         """D3's evidence, on the correct rows (the corrected §1.3 / brief §4.4)."""
@@ -120,12 +141,13 @@ class TestTheInventoryTheScopeCites:
         assert len(pairs) == 6, "6 declarations over 6 DISTINCT pairs — not 6 uses of one pair"
         assert len([r for r in addresses if r["_ns"] == "product-strategy"]) == 4
 
-    def test_the_declarations_a_naive_binding_test_would_disable_are_seven(self):
+    def test_the_declarations_a_naive_binding_test_would_disable_are_eight(self):
         """D3 must bind the vocabulary a declaration NAMES, not only the declaring pack's.
 
-        5 name a foreign namespace explicitly; 2 are layer-valued (`toKind: Subject`). Under the naive
-        "both kinds in the declaring pack" test all 7 become permanently `unbound` — never enforced, never
-        warned about — and `portfolio:marks` is load-bearing (`domain_validators._portfolio_mark_contract`).
+        5 name a foreign namespace explicitly; 3 rows over 2 predicates are layer-valued (`toKind: Subject` —
+        `assignedTo` twice, `holds`). Under the naive "both kinds in the declaring pack" test all 8 become
+        permanently `unbound` — never enforced, never warned about — and `portfolio:marks` is load-bearing
+        (`domain_validators._portfolio_mark_contract`).
         """
         bearing = _kind_bearing(_declared_relations())
         cross, layer = [], []

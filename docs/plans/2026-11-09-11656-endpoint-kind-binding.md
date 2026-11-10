@@ -121,7 +121,7 @@ with a different answer, so it gets its own default. Both are pinned (§6 pins 8
 
 | alternative | why rejected |
 |---|---|
-| Gate `create_edge` only (the issue's own prescription) | covers 2 of 32 — 6 %. |
+| Gate `create_edge` only (the issue's own prescription) | covers 2 of 35 — 6 %. |
 | Exclude `create_direct_edge` (revision 1) | **false**: it takes a `label`, and it is the dominant shape for the 32 Object→Object declarations. |
 | Predicate-name-global constraint | refuses most of `addresses`' six pairs (and the 17/47 live edges). The modelling error RDFS names. |
 | Refuse on unknown kind too | contradicts `EXTRACTOR-V4-ARCHITECTURE.md` §4.4 S2.3 (*"FAIL-OPEN, never raises … `unclassified` is honest"*) and the AX admission test. |

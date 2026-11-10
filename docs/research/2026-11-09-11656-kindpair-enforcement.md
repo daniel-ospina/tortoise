@@ -35,7 +35,7 @@ that must be settled before a scope can converge.
 - `fromKind`/`toKind` are acted on in **three** places, and none of them is a general write gate.
   ⚠️ **Correction (revision 2):** this said "exactly one place". The three are —
   `domain_validators.py:396-410` (one pack's portfolio-shape rule); `sdk._resolve_traversal_path`
-  (`:41450`, live at `:37465`) which resolves a **kind pair → `{predicate, fromKind, toKind}`**, i.e. D5's own
+  (`:42773`, live at `:38605`) which resolves a **kind pair → `{predicate, fromKind, toKind}`**, i.e. D5's own
   job (but by bare suffix, first-match-wins, so unusable as a gate); and
   `value_extractor._relation_endpoint_refs` (`:44`), the kind→kind adjacency wired to kind co-selection.
 - The rule belongs on the write path, not in a per-pack validator: a customer's pack ships tomorrow and
