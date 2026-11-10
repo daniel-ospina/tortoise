@@ -836,7 +836,10 @@ mechanisms:
       the rule cannot align), 2 differ only on the determiner `one`, 7 state the
       value in a CLOCK/ISO form this row EXCLUDES BY DESIGN (residual (c) — their
       class reads the content's FORM and never its agreement with the quote, so
-      they are form-excluded, NOT checkable), 4 have no slot on the quote side,
+      they are form-excluded, NOT checkable; the same class also covers the third
+      excluded form, a SEPARATOR-bearing numeral `1,234` — `#2817`'s "no
+      separator rule at all" — which this corpus carries no row of), 4 have no
+      slot on the quote side,
       and 8 state no value — of which exactly ONE drops a state value the quote
       carries (the `thirty seconds` lease grace,
       `wp07_bluepeak_followup`/narrative, named by

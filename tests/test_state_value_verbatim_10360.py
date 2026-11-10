@@ -6205,7 +6205,13 @@ def test_the_registry_rows_measured_disclosures_are_pinned():
 #      both are the SAME sentence in the two arms.
 #    * 7 state the value in a form the row EXCLUDES BY DESIGN (residual (c)):
 #      4 carry a clock (`2am`, `02:00`, `9:40am`/`1:05pm`) and 3 an ISO date
-#      (`2026-11-02`, `2026-11-09`, `2026-10-09`). ⛔ The class is assigned from
+#      (`2026-11-02`, `2026-11-09`, `2026-10-09`). ⛔ The class ALSO covers the
+#      third excluded form — a separator-bearing numeral (`1,234`, `#2817`'s
+#      "no separator rule at all") — which this corpus happens not to contain: a
+#      row whose only value is separator-spelled would otherwise fall into
+#      `CONTENT_NO_VALUE`, whose quote slot is counted as a DROPPED value, i.e.
+#      a positive claim about text the projection never read. ⛔ The class is
+#      assigned from
 #      the CONTENT alone — it says the value is stated in a FORM the rule
 #      excludes, NEVER that it was checked against the quote; residual (c) is
 #      exactly that a clock/ISO REWRITE is not caught, so quote agreement is not
@@ -6257,6 +6263,14 @@ def test_the_registry_rows_measured_disclosures_are_pinned():
 _CLOCK_FORM = re.compile(r"\b\d{1,2}:\d{2}\s*(?:am|pm)?\b|\b\d{1,2}\s*(?:am|pm)\b",
                          re.IGNORECASE)
 _ISO_DATE_FORM = re.compile(r"\b(?:19|20)\d{2}-\d{2}-\d{2}\b")
+#: A separator-bearing numeral (`1,234`, `1.234`) is the THIRD form the
+#: engine puts outside the judged set (`_separator_reads_ambiguously`, the
+#: recorded #2817 decision: no separator rule at all). Without it a row whose
+#: only value is separator-spelled fell into `CONTENT_NO_VALUE`, whose quote
+#: slot then counted as a DROPPED value — a positive claim about text the
+#: projection never read (#11730 review, cycle 12). Census-inert: no row on
+#: this corpus carries the form, so the split is unchanged.
+_SEPARATOR_FORM = re.compile(r"\d[,.\u00a0 ]\d{3}(?!\d)")
 
 #: The spelled month names the corpus's quotes use, for the one agreement check
 #: the excluded-form class CAN carry: an ISO date in the content against the
@@ -6416,8 +6430,15 @@ def _magnitude_in_play(missing: list[tuple], content_slots: list[tuple]) -> bool
         explained = False
         for _ca, content_core, content_scale in content_slots:
             if quote_scale and content_scale:
-                if (quote_scale != content_scale
-                        and _digits(quote_core) == _digits(content_core)):
+                # ⛔ TWO DIFFERENT SCALE WORDS ARE A MAGNITUDE QUESTION whatever
+                # the mantissas are (#11730 review, cycle 12): `2000 thousand`
+                # against `2 million` is the SAME value, and requiring equal
+                # digits filed it as a positive claim — a value ABSENT — which
+                # this projection cannot support. The SAME scale word is not a
+                # magnitude question: there the scale cancels, the mantissa is
+                # what differs, and the shipped rule JUDGES it
+                # (`1.2 million` against `12 million`).
+                if quote_scale != content_scale:
                     explained = True
                     break
             elif ((quote_scale or content_scale)
@@ -6447,7 +6468,10 @@ def _retention_class(content: str, quote: str) -> str | None:
                             magnitude table; residual (m)). Neither retained nor
                             lost: unjudged.
     CONTENT_EXCLUDED_FORM — the content binds no slot, but states the value in
-                            a CLOCK/ISO form the row excludes by design ((c)).
+                            a form the row excludes by design ((c)): a CLOCK, an
+                            ISO date, or a SEPARATOR-BEARING numeral (`1,234`),
+                            the three forms `_value_form_outside_judged` puts
+                            outside the judged set.
                             ⛔ NOT counted as STATED: the class reads the
                             content's FORM, never its agreement with the quote.
     CONTENT_NO_VALUE      — the content binds no slot and carries no excluded form.
@@ -6460,7 +6484,8 @@ def _retention_class(content: str, quote: str) -> str | None:
     content_slots = v2._value_slots_scaled(content)
     quote_slots = v2._value_slots_scaled(quote)
     if not content_slots:
-        if _CLOCK_FORM.search(content) or _ISO_DATE_FORM.search(content):
+        if (_CLOCK_FORM.search(content) or _ISO_DATE_FORM.search(content)
+                or _SEPARATOR_FORM.search(content)):
             return "CONTENT_EXCLUDED_FORM"
         return "CONTENT_NO_VALUE"
     if not quote_slots:
@@ -6786,12 +6811,16 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
                             "we have 1200000 events") == "LAYOUT_UNJUDGED"
     assert _retention_class("we have 0.5 million events",
                             "we have 500000 events") == "LAYOUT_UNJUDGED"
-    # 2e. ⛔ EVERY CLAUSE ABOVE IS PINNED BY BEHAVIOUR, not by the comment that
-    #     describes it (#11730 review, cycle 11: reverting the every-slot rule
-    #     kept all 122 tests green, because the repros appeared only in the
-    #     commit message). Each row below moved when its clause was reverted:
-    #     (a) ONE explained slot does not excuse a row whose OTHER missing value
-    #         has no counterpart at all;
+    # 2e. ⛔ EVERY CLAUSE ABOVE IS PINNED BY A CASE THAT MOVED WHEN THAT CLAUSE WAS
+    #     REVERTED, and the rows are grouped BY THE CLAUSE THEY PIN (#11730
+    #     review, cycles 11–12). ⛔ Cycle 12 measured that the four (a) rows below
+    #     have NO explained slot at all, so they pin the `(quote_scale or
+    #     content_scale)` guard and NOT the every-slot rule — a revert of the
+    #     every-slot rule kept all 122 tests green. The discriminating pairs are
+    #     (a2) and (a3); the header said otherwise and was wrong.
+    #     (a) an unrelated slot's SCALE WORD (or a zero extension) does not rescue
+    #         a missing value that has no counterpart; these four rows all flip to
+    #         UNJUDGED if that guard is dropped;
     for content, quote in (("we shipped 3000 events",
                             "we shipped 30 batches and 12 events"),
                            ("we shipped 12000 events",
@@ -6801,11 +6830,28 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
                            ("the fleet holds 700 nodes",
                             "the fleet holds 7 regions and 40 nodes")):
         assert _retention_class(content, quote) == "LAYOUT_LOST", (content, quote)
+    #     (a2) EVERY missing slot must be explained, not just one: `12 million`
+    #         IS explained (`12000000`, zero-extended) while the `9 nodes` beside
+    #         it is simply dropped, so the row is LOST. This is the only shape
+    #         that distinguishes the every-slot rule from first-wins.
+    assert _retention_class(
+        "we shipped 12000000 events and 5 nodes",
+        "we shipped 12 million events and 9 nodes") == "LAYOUT_LOST", (
+            "one explained slot must not excuse another missing value")
+    #     (a3) … and the compensated-scale pair is NOT a magnitude question when
+    #         the scale words are the SAME: `1.2 million` against `12 million` is a
+    #         10x rewrite the shipped rule JUDGES, so the classifier must not
+    #         call it unjudged. This is the only shape that distinguishes the
+    #         `quote_scale != content_scale` clause.
+    assert _retention_class("we have 1.2 million events",
+                            "we are ingesting 12 million events") == (
+        "LAYOUT_LOST"), (
+            "the same scale word cancels, so a different mantissa is a rewrite")
     #     (b) a zero extension with NO scale word on either side is a different
     #         number the shipped rule JUDGES, not a magnitude question;
     assert _retention_class("we ordered 2000 batches",
                             "we shipped 2 batches") == "LAYOUT_LOST"
-    #     (c) the SAME scale word with a different mantissa is that pair too;
+    #     (c) an unscaled missing value is not rescued by a scaled content slot;
     assert _retention_class("we shipped 3 million events",
                             "we shipped 3 batches") == "LAYOUT_LOST"
     #     (d) a unit form the engine tolerates is a RESTATEMENT, not a loss —
@@ -6813,6 +6859,18 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
     #         `20%`, the same tolerance the file's battery at the top pins).
     assert _retention_class("we ordered 20 percent",
                             "we shipped 20%") == "LAYOUT_RETAINED"
+    #     (e) TWO DIFFERENT scale words are a magnitude question whatever the
+    #         mantissas are — `2000 thousand` and `2 million` are the SAME value,
+    #         so calling that pair LOST would be a positive claim the projection
+    #         cannot support (cycle 12, the false-accusation direction).
+    for content, quote in (("we shipped 2000 thousand units",
+                            "we shipped 2 million units"),
+                           ("we have 1200 thousand events",
+                            "we have 1.2 million events"),
+                           ("the fleet holds 20 hundred nodes",
+                            "the fleet holds 2 thousand nodes")):
+        assert _retention_class(content, quote) == "LAYOUT_UNJUDGED", (
+            content, quote)
     # 2f. ⛔ `_digits` CANNOT RETURN AN EMPTY STRING, which is what lets
     #     `_same_magnitude_number` decide on equality alone (#11730 review, cycle
     #     11). The census never reaches either shape — `_value_slots_scaled`
@@ -6830,6 +6888,18 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
                             "we cut over at 2am") == "CONTENT_EXCLUDED_FORM"
     assert _retention_class("due 2026-11-09", "due November 9") == (
         "CONTENT_EXCLUDED_FORM")
+    # 3a. … and so is the THIRD excluded form, a separator-bearing numeral. This
+    #     corpus carries none, so it is pinned synthetically: without the arm the
+    #     row would fall into `CONTENT_NO_VALUE` and its quote slot would be
+    #     counted as a DROPPED value (#11730 review, cycle 12).
+    assert _retention_class("we have 1,234 events",
+                            "we have 1234 events") == "CONTENT_EXCLUDED_FORM"
+    assert _retention_class("we have 1.234 events",
+                            "we have 1234 events") == "CONTENT_EXCLUDED_FORM"
+    #     … and it is still a FORM class, not a value class: a plain numeral that
+    #     the projection CAN bind stays in the judged set.
+    assert _retention_class("we have 1234 events",
+                            "we have 1234 events") == "ALIGNED"
     # 3b. The excluded-form class is a MEASURED class on the census, not only a
     #     synthetic shape: those 7 rows really do carry a clock or ISO token and
     #     really are rows the shipped slot projection finds nothing to align in.
