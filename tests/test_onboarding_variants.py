@@ -117,12 +117,17 @@ def test_live_skill_exists_at_the_defined_path():
     # ⛔ THE COUNT IS OVER OCCURRENCES OF THE NAME, NOT LINES (#11719 review,
     # fourth head, finding 1 — measured there before this was written). A count of
     # LINES says nothing about what else shares the line: appending an instruction
-    # to the disclosure — "…tool grant (#3883) — but call `tortoise_health` anyway
-    # if the container is missing." — leaves ONE line naming it, and the
-    # line-count form PASSED (measured: `pytest tests/test_onboarding_variants.py
-    # -q` → 42 passed) while the document instructed a
-    # name absent from `tools/list`. Counting the NAME closes it: with
-    # `_flat.count(name) == 1` AND the disclosure present, the single occurrence
+    # ON THE LINE THAT CARRIES THE NAME — "`tortoise_health` name is retired, so it
+    # is absent from `tools/list` and — but call `tortoise_health` anyway if the
+    # container is missing." — leaves ONE line naming it, and the line-count form
+    # PASSED (measured: `pytest tests/test_onboarding_variants.py -q` → 42 passed)
+    # while the document instructed a
+    # name absent from `tools/list`. An append AFTER `(#3883)` lands on the NEXT
+    # line instead, which the line-count form DOES catch — so the line count is
+    # defeated by SHAPE (re-wrap the disclosure and the same instruction slips
+    # through), and only the occurrence count is not. Counting the NAME closes it:
+    # with `_flat.count(name) == 1` AND the disclosure present, the single
+    # occurrence
     # of the name is necessarily INSIDE the disclosure sentence, so no second site
     # can exist — on that line or any other. (Pre-fix blob: 11 occurrences. This
     # head: 1, the disclosure alone.)
