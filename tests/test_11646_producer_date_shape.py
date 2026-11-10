@@ -742,23 +742,34 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
     ``reader_offset < separation`` (the naive bound's WALL CLOCK minus the other
     bound's instant — 2h21 = 8460 s here, NOT the 1260 s difference of the two
     sort keys: the naive key has already absorbed the reader's offset), producer
-    as the END uses the same separation with the comparison INVERTED, and with
-    BOTH bounds producer-shaped the offsets cancel so every host agrees. Two
-    hosts therefore disagree only when the separation falls between their
-    offsets, the closed end being the ACCEPTING host's offset — higher for a
-    producer-as-START, lower for a producer-as-END — so the two orientations
-    close at opposite ends (measured: the END pair with a 7200 s separation is
-    ACCEPTED at ``Africa/Johannesburg`` +02:00 and REFUSED at ``Asia/Kolkata``
-    +05:30). The distance alone decides nothing: two hosts 1h apart can disagree
+    as the END uses the same separation with the comparison INVERTED. With BOTH
+    bounds producer-shaped ONE host reads both, so the reader's offset CANCELS
+    — except across an OFFSET TRANSITION on that host (a DST change OR a
+    permanent standard-offset change) that leaves a local time in a nonexistent
+    hour. The two values then carry different offsets, and the verdict moves
+    only when the pair's separation is AT MOST the offset change — the shifted
+    value need only REACH the other bound, and a zero-length window is
+    well-formed (measured at a 60 min shift: 20, 30 and 60 min separations flip,
+    61 min does not): the US spring-forward pair is REFUSED at
+    ``UTC``/``Asia/Kolkata`` and ACCEPTED at ``America/Los_Angeles``, and
+    ``Asia/Pyongyang``'s PERMANENT +08:30 → +09:00 change does the same under its
+    30 min shift with no DST at all (the class is NOT DST-specific — review
+    cycle 10). Two hosts therefore disagree only when the separation falls
+    between their offsets, the closed end being the ACCEPTING host's offset —
+    higher for a producer-as-START, lower for a producer-as-END — so the two
+    orientations close at opposite ends (measured: the END pair with a 7200 s
+    separation is ACCEPTED at ``Africa/Johannesburg`` +02:00 and REFUSED at
+    ``Asia/Kolkata`` +05:30). The distance alone decides nothing: two hosts 1h apart can disagree
     about a pair 13h30 apart, and a pair 20h apart answers the same on every
     host.
 
     Recorded, not endorsed: fixing it means either revisiting the ``#3982``
     ruling or giving the producer's shape its own deterministic anchor — the
     separate decision recorded on #11646 — so it is escalated as a decision
-    instead of changed here. What this pin buys is
-    a red test the day the divergence MOVES, and an explicit statement of the
-    three zones the record names.
+    instead of changed here. What this pin buys is a red test the day the
+    divergence MOVES, and an explicit statement of every zone the record names
+    (the four zones above, each asserted, plus ``Asia/Pyongyang`` for the
+    permanent-shift case).
 
     Subprocesses are used because ``TZ`` must be set before the first
     ``import time`` for ``datetime.timestamp()``/``astimezone`` to see it; each
@@ -781,23 +792,29 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
         "print(verdict('" + PRODUCER_SESSION_DATE + "', '2023-05-20'))\n"
         "print(verdict('2023-05-20', '" + PRODUCER_SESSION_DATE + "'))\n"
         "print(verdict('" + PRODUCER_SESSION_DATE + "', '2023/05/20 (Sat) 02:30'))\n"
+        "print(verdict('2023/03/12 (Sun) 03:10', '2023/03/12 (Sun) 02:50'))\n"
+        "print(verdict('2018/05/05 (Sat) 00:10', '2018/05/04 (Fri) 23:50'))\n"
+        "print(verdict('2023-05-20', '2023/05/20 (Sat) 02:00'))\n"
     )
     env_base = {"PATH": str(Path(sys.executable).parent), "PYTHONPATH": str(
         Path(__file__).resolve().parent.parent)}
     observed = {}
-    for zone in ("UTC", "Asia/Kolkata", "America/Los_Angeles"):
+    for zone in ("UTC", "Asia/Kolkata", "America/Los_Angeles",
+                 "Africa/Johannesburg"):
         out = subprocess.run([sys.executable, "-c", script], capture_output=True,
                              text=True, timeout=120,
                              env={**env_base, "TZ": zone}, check=True).stdout
         lines = out.strip().splitlines()
-        key, forward, reverse, both_naive = lines[-4:]
-        observed[zone] = (key, forward, reverse, both_naive)
-    # all three order the value now (before #11646 every one of them bucketed)
+        (key, forward, reverse, both_naive, dst_straddle, perm_shift,
+         end_7200) = lines[-7:]
+        observed[zone] = (key, forward, reverse, both_naive, dst_straddle,
+                          perm_shift, end_7200)
+    # all four order the value now (before #11646 every one of them bucketed)
     assert all("(0," in k for k, *_ in observed.values()), observed
     # the epoch — and therefore the window verdict — is decided by the HOST
-    assert len({k for k, *_ in observed.values()}) == 3, observed
+    assert len({k for k, *_ in observed.values()}) == 4, observed
     # ⚠ scoped: the split follows the pair's separation against the two hosts'
-    # OFFSETS, not the pair's own distance — these three zones span far more
+    # OFFSETS, not the pair's own distance — these four zones span far more
     # than this pair's 2h21 separation, which is why it splits. A pair further
     # apart than the offset range (~14h one way, ~12h the other) agrees
     # everywhere, so this is not "a mixed window is host-dependent" in general
@@ -809,12 +826,45 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
     assert observed["UTC"][1] == "refused"
     assert observed["Asia/Kolkata"][1] == "accepted"
     assert observed["America/Los_Angeles"][1] == "refused"
-    # producer as the END: the mirror image, in the same three zones
+    # +02:00 sits BETWEEN the 0 and +05:30 probes, so a threshold regression that
+    # only moves the middle host would otherwise leave this pin green
+    assert observed["Africa/Johannesburg"][1] == "refused"
+    # producer as the END: the mirror image, in the same zones
     assert observed["UTC"][2] == "accepted"
     assert observed["Asia/Kolkata"][2] == "refused"
     assert observed["America/Los_Angeles"][2] == "accepted"
+    assert observed["Africa/Johannesburg"][2] == "accepted"
     # BOTH bounds zone-less: the reader's offset cancels, so every host agrees.
     # The pair is 9 MINUTES apart on purpose — with a day-sized gap the
     # assertion survives an asymmetric reading (one bound local, the other in
     # UTC), which is the break a cancellation pin exists to catch.
-    assert {v for *_, v in observed.values()} == {"accepted"}, observed
+    # …EXCEPT across an offset transition on the host, where the two local
+    # readings carry DIFFERENT offsets (and, where the shift is at least the
+    # pair's separation, a wall-inverted pair stops cancelling)
+    # (review cycle 9 of PR 11705). The pair straddles the US spring-forward gap:
+    # 02:50 does not exist that morning, so a US host reads it at -08:00 and
+    # 03:10 at -07:00, which un-inverts a pair refused on a transition-free host.
+    for zone, expected in (("UTC", "refused"), ("Asia/Kolkata", "refused"),
+                           ("America/Los_Angeles", "accepted"),
+                           ("Africa/Johannesburg", "refused")):
+        assert observed[zone][4] == expected, (zone, observed[zone])
+    for zone in ("UTC", "Asia/Kolkata", "America/Los_Angeles",
+                 "Africa/Johannesburg"):
+        assert observed[zone][5] == "refused", (zone, observed[zone])
+    # the END pair with a 7200 s separation — the instance the prose names for
+    # the closed-end rule — asserted in the same zones, so no zone named in the
+    # record is unmeasured (review cycle 12 of PR 11705)
+    for zone, expected in (("UTC", "accepted"), ("Asia/Kolkata", "refused"),
+                           ("America/Los_Angeles", "accepted"),
+                           ("Africa/Johannesburg", "accepted")):
+        assert observed[zone][6] == expected, (zone, observed[zone])
+    # …and the class is NOT DST-specific: Asia/Pyongyang's offset changed
+    # PERMANENTLY (+08:30 -> +09:00 on 2018-05-05, no DST on either side), which
+    # leaves 00:00-00:30 nonexistent all the same, so the same wall-inverted pair
+    # un-inverts there. Pinned, because "it is only DST" is the wrong rule.
+    pyongyang = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True,
+        timeout=120, env={**env_base, "TZ": "Asia/Pyongyang"}, check=True,
+    ).stdout.strip().splitlines()[-2]  # the PERMANENT-shift line, not the END pair
+    assert pyongyang == "accepted", pyongyang
+    assert {o[3] for o in observed.values()} == {"accepted"}, observed

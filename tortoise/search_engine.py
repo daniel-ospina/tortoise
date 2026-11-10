@@ -3665,10 +3665,19 @@ _DECORATION_TIMEOUT_MS = 200
 #: so which hosts disagree is decided by where the pair's separation falls
 #: against their two OFFSETS — the distance alone decides nothing: refusal is
 #: ``reader_offset < (naive - other)`` when the naive value is the START (the
-#: sign INVERTS for an END), and when BOTH bounds are naive the offsets CANCEL
-#: and every host agrees. Measured: two hosts 1h apart disagree about a pair
-#: 13h30 apart, while a pair 20h apart answers the same on every host. That
-#: affects not only ``sdk.supersede_point``'s inversion guard
+#: sign INVERTS for an END). When BOTH bounds are naive ONE host reads both, so
+#: the reader's offset CANCELS and every host agrees — except where the pair
+#: straddles an OFFSET TRANSITION on that host (a DST change OR a permanent
+#: standard-offset change) that leaves a local time in a nonexistent hour: the two
+#: values then carry different offsets, and the verdict moves only when the pair's
+#: separation is AT MOST that offset change (equality is enough: the shifted value
+#: need only reach the other bound, and a zero-length window is well-formed).
+#: Measured at a 60 min shift: 20 min, 30 min and 60 min separations flip, 61 min
+#: does not. The US spring-forward pair is REFUSED at UTC and ACCEPTED at
+#: ``America/Los_Angeles``, and ``Asia/Pyongyang``'s PERMANENT +08:30 → +09:00
+#: change does the same with no DST at all. Separately, two hosts 1h apart
+#: disagree about a pair 13h30 apart, while a pair 20h apart answers the same on
+#: every host. That affects not only ``sdk.supersede_point``'s inversion guard
 #: (inverted on UTC and ``America/Los_Angeles``, not inverted on
 #: ``Asia/Kolkata``), but also ``commit_schema.validate_validity_window`` (the
 #: write door reached by ``create_point`` / ``update_point`` /

@@ -525,8 +525,20 @@ def validate_validity_window(valid_from: object, valid_to: object) -> None:
       formula written in keys predicts the wrong verdict for both orientations);
     * producer as the END: the same separation, and the comparison INVERTS —
       ``reader_offset > separation``;
-    * BOTH bounds producer-shaped: the offsets CANCEL, so the verdict is the
-      same on every host.
+    * BOTH bounds producer-shaped: ONE host reads both, so the reader's offset
+      CANCELS — EXCEPT where the pair straddles an OFFSET TRANSITION on that
+      host (a DST change OR a permanent standard-offset change) that leaves one
+      of the two local times in a NONEXISTENT HOUR: the two values then carry
+      different offsets. That alone does NOT move the verdict — it moves only
+      when the pair's wall separation is AT MOST the offset change, because the
+      shifted value need only REACH the other bound and a zero-length window is
+      well-formed (measured at a 60 min shift: 20 min, 30 min and 60 min
+      separations flip, 61 min does not). Measured instances: the US
+      spring-forward pair ``("2023/03/12 (Sun) 03:10", "2023/03/12 (Sun)
+      02:50")`` is REFUSED at ``UTC``/``Asia/Kolkata`` and ACCEPTED at
+      ``America/Los_Angeles``; and ``Asia/Pyongyang``'s PERMANENT +08:30 → +09:00
+      change (2018-05-05, no DST either side) does the same to a 20 min pair
+      under its 30 min shift — so the class is NOT DST-specific.
 
     Two hosts therefore disagree only when the separation falls between their
     offsets, and WHICH end is closed follows from the orientation — it is closed
@@ -551,10 +563,13 @@ def validate_validity_window(valid_from: object, valid_to: object) -> None:
     is not a reopen. Either way it is escalated as a decision rather than fixed
     here. The divergence is PINNED for BOTH orientations —
     ``tests/test_11646_producer_date_shape.py::test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded``
-    asserts the producer-as-START verdict (refused / refused / accepted) AND the
-    producer-as-END verdict (accepted / accepted / refused) at three zones, so a
-    change that moves either reds before it can move silently. The both-naive
-    case is recorded here and asserted in the same test.
+    asserts, at FOUR zones, the producer-as-START verdict (UTC refused,
+    ``Asia/Kolkata`` accepted, ``America/Los_Angeles`` refused,
+    ``Africa/Johannesburg`` refused) AND the producer-as-END verdict (accepted /
+    refused / accepted / accepted, in that order), so a change that moves either
+    reds before it can move silently. The both-naive case, both offset-transition
+    cases and the 7200 s END pair are recorded here and asserted in the same
+    test.
 
     #6140 — an unorderable START is not refused here, and this function does
     not warn about it either. Its caller

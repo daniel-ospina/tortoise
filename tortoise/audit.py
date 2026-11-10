@@ -925,18 +925,28 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     # epoch is ``wall_clock - reader_offset``, so two hosts disagree only when
     # the separation falls between their offsets, the closed end being the
     # ACCEPTING host's offset (higher for a producer-as-START, lower for a
-    # producer-as-END — see ``commit_schema.validate_validity_window``) — and
-    # when BOTH bounds are naive the offsets CANCEL, so every host agrees.
-    # This check reports rather than refuses, but the verdict it reports is that
-    # measure under a
-    # host-dependent key: not a new asymmetry, but a newly reachable one (the
-    # shape used to bucket as unparseable, so the pair was skipped everywhere).
+    # producer-as-END — see ``commit_schema.validate_validity_window``). When
+    # BOTH bounds are naive ONE host reads both, so the reader's offset CANCELS
+    # — except where the pair straddles an OFFSET TRANSITION on that host (a DST
+    # change OR a permanent standard-offset change) that leaves a local time in a
+    # nonexistent hour: the two values then carry different offsets, and the
+    # verdict MOVES only when the pair's separation is AT MOST the offset change
+    # (equality is enough — a zero-length window is well-formed; measured at a
+    # 60 min shift: 20/30/60 min flip, 61 min does not). Measured: the US
+    # spring-forward pair flips between UTC and America/Los_Angeles, and
+    # Asia/Pyongyang's PERMANENT +08:30 → +09:00 change
+    # in 2018 does the same with no DST at all. This check reports rather than
+    # refuses, but the verdict it reports is that measure under a host-dependent
+    # key: not a new asymmetry, but a newly reachable one (the shape used to
+    # bucket as unparseable, so the pair was skipped everywhere).
     # It is RECORDED and PINNED rather than changed: flipping the reading is a
     # reopen of #3982, and anchoring the producer's shape on its own is the
     # SEPARATE decision recorded on #11646 — either way a decision, not a
     # cleanup here. The pin is
     # ``tests/test_11646_producer_date_shape.py::test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded``,
-    # which asserts ``validate_validity_window``'s verdict at three zones.
+    # which asserts ``validate_validity_window``'s verdict at FOUR zones (UTC,
+    # Asia/Kolkata, America/Los_Angeles, Africa/Johannesburg) plus a fifth child
+    # at Asia/Pyongyang for the permanent-shift case.
     #
     # ⛔ The `fix` is LIFECYCLE-AWARE (#7819), and the scan deliberately keeps
     # terminal rows. It must not drop them: the population this check exists

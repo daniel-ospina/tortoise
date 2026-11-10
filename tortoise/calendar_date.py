@@ -469,21 +469,23 @@ def _string_instant(s: str) -> datetime | None:
     # A. ACCEPTANCE. The INSTANT view takes a whole-value family when the
     #    value's own grammar yields a coherent CLOCK READING — or, for a
     #    date-only family, no clock at all, which is taken as UTC midnight
-    #    (``_date_only_shape``). A ZONE-less
-    #    reading is still taken and left NAIVE for #3982 to place in the
-    #    READER's zone — which is what ``2023/05/20 (Sat) 02:21`` gets — so an
+    #    (``_date_only_shape``). A ZONE-less reading is still taken and left
+    #    NAIVE for #3982 to place in the READER's zone — which is what
+    #    ``2023/05/20 (Sat) 02:21`` gets — so an
     #    unstated ZONE is never a refusal here. What IS refused is an unreadable
     #    clock (hour 24, an impossible offset) or a family with no arm at all.
-    #    The DAY view takes everything whose calendar day is readable, by
-    #    whole-value grammar OR by the tolerant prefix — but ⚠ the PREFIX arm
-    #    matches DASHED / SLASHED prefixes only, so a COMPACT or ISO-week
-    #    date+TIME whose tail is unreadable is undated by BOTH views
-    #    (``20230520T24:00:00`` and ``2023-W43-2T11:00:00+25:00`` are ``None``
-    #    from ``calendar_date`` too, while the dashed ``2023-05-20T24:00:00``
-    #    is dated). FOUR whole-value families are refused
-    #    by ``calendar_datetime`` — the HOUR-24 spelling is the first (item 2
-    #    above), the other three follow — and they are NOT the same kind of
-    #    refusal:
+    #    The DAY view is the WIDER view, but only for the families this note
+    #    enumerates: it dates by whole-value grammar, by its tolerant prefix, by
+    #    the compact / ISO-week date+offset family and by an epoch string
+    #    (the epoch bullet below). ⚠ NOT "everything with a readable calendar
+    #    day": the PREFIX arm matches DASHED / SLASHED prefixes only, so a
+    #    COMPACT or ISO-week spelling whose tail is unreadable is undated by BOTH
+    #    views (``20230520T24:00:00``, ``2023-W43-2T11:00:00+25:00`` and
+    #    ``2023-W43-2x`` are ``None`` from ``calendar_date`` too, while the
+    #    dashed ``2023-05-20T24:00:00`` is dated). FOUR whole-value families are
+    #    refused by ``calendar_datetime`` — the HOUR-24 spelling is the first
+    #    (item 2 above), the other three follow — and they are NOT the same kind
+    #    of refusal:
     #      * an EPOCH SPELLED AS A STRING — refused BY RULING (#9202; the
     #        asymmetry is stated in the module docstring);
     #      * a COMPACT / ISO-week DATE + OFFSET (or ``Z``) carrying NO TIME —
