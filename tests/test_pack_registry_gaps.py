@@ -2500,7 +2500,9 @@ class TestCoreHierarchy:
         # read really issues. `expanded = [kind]` (the widening deleted, DM4's
         # measurement then false) takes the ONE-member branch and leaves a single
         # bare `kind` param here — `kind_0…n` is created only by the multi-member
-        # branch (`len(expanded) == 1` at `sdk.py:38566` selects between them), so
+        # branch (the `len(expanded) == 1` test INSIDE the post-retrieval filter
+        # selects between the two spellings; cited by shape, not by line — a line
+        # number in a 40k-line module is stale by the next unrelated edit), so
         # naming `kind_0` would send a reader after a parameter the mutant never
         # produces. `_kind_values` reads the params BY VALUE, so either spelling
         # is seen.
