@@ -8590,7 +8590,9 @@ def test_the_full_selection_job_and_leg_counts_match_the_shipped_shards():
     `legs = fast + slow + carve` shard counts from the manifest, `non_matrix_pr = every job in
     `python-ci.yml` minus the matrix jobs minus the push-gated ones, and the in-flight figure is
     NOT derived — it is `sum(caps) + eligible non-matrix` and is pinned by the sibling test
-    above, which is also why `:798`'s ""at most 17"" is correct at 10 fast legs. `17` therefore
+    above, which is also why `:798`'s ""at most 17"" holds at ANY shard count: it is
+    `9 capped matrix slots + 8 eligible non-matrix`, and the cap is per matrix, so a
+    shard-count change moves the LEG total and not the in-flight total. `17` therefore
     appears twice on that line with two different meanings; only the LEG count is this pin's.
 
     Coverage is asserted per source, so deleting a stale sentence is not a way to pass: the pin
