@@ -5794,23 +5794,122 @@ _RESOLUTION_SYSTEM = (
 )
 
 
-def _resolution_prompt(existing: list[dict], new_names: list[str]) -> str:
+# #11654: how much of the run's narrative the resolution prompt carries.
+# The narrative is S3's DISAMBIGUATION INPUT (owner ruling 2026-09-23, §S3:
+# *"we can use the narrative to disambiguate when uncertain"*) — the one
+# artefact that answers "is this the same entity?".  Bounded by a constant,
+# not a config knob, and pinned to the same 4000 characters the payload
+# already carries ``story_arc`` at, so the prompt cost stays O(1) in the
+# narrative's length rather than growing with the session.
+_RESOLUTION_NARRATIVE_MAX_CHARS = 4000
+#: When the story is longer than the cap, HEAD **and** TAIL are kept and the
+#: middle is elided. A head-only window loses exactly the evidence this input
+#: exists to carry: a narrative introduces who someone is early and re-uses the
+#: short form later, so "Michael … our contact at Kaironis" (head) and "Mike
+#: said" (tail) can sit on opposite sides of a long session.
+#:
+#: The marker lives INSIDE the untrusted body, so a session's own text can carry
+#: it verbatim and appear to claim an elision that never happened. That claim is
+#: therefore made by the TRUSTED turn instead (`_resolution_prompt` says the
+#: middle was omitted only when ``_bounded_narrative`` reports it really was),
+#: and the marker is a separator, never the evidence that truncation occurred.
+_RESOLUTION_NARRATIVE_ELISION = "\n[… story truncated …]\n"
+
+
+def _bounded_narrative(story: str) -> tuple[str, bool]:
+    """``story`` trimmed to the constant, keeping both ends.
+
+    Returns ``(body, truncated)``. The body — elision marker included — is at
+    most ``_RESOLUTION_NARRATIVE_MAX_CHARS``: the marker is 23 characters of
+    the budget rather than 23 characters on top of it, so the constant states
+    what the prompt actually carries (a guard or budget computed from it must
+    not under-count the region).
+
+    ``truncated`` is returned rather than re-derived at the call site: two
+    places deciding *"was this elided?"* is how the prompt and its own
+    description drift apart, the same class of defect #11654's first cut had.
+    """
+    cap = _RESOLUTION_NARRATIVE_MAX_CHARS
+    if len(story) <= cap:
+        return story, False
+    half = (cap - len(_RESOLUTION_NARRATIVE_ELISION)) // 2
+    return f"{story[:half]}{_RESOLUTION_NARRATIVE_ELISION}{story[-half:]}", True
+
+
+def _resolution_prompt(existing: list[dict], new_names: list[str],
+                       narrative: str = "") -> str:
     """D3 phase-2 prompt: the existing-entity candidate table + the new
     names to resolve (the JSON contract pinned in the prompt so the model
-    output is parseable and validated against the table)."""
+    output is parseable and validated against the table) + (#11654) the
+    run's NARRATIVE, which §S3 makes a required input: identity is
+    referential, so a bare string cannot answer *"is this the same Object
+    A?"* and only the surrounding prose can.
+
+    ``narrative=""`` renders the pre-#11654 prompt byte-for-byte — a run
+    with no narrative (S1 degraded) has no context to pass, and inventing
+    one is worse than omitting it.
+
+    The narrative is verbatim session text, so it rides inside the untrusted
+    envelope (#10311) every other session-text region uses — phase 2's answer
+    rewrites entity names onto the payload, so a forged instruction in the
+    story must never arrive as a trusted turn.
+    """
     lines = [f"- {e.get('id', '')} | {e.get('name', '')} | {e.get('kind', '')}"
              for e in existing if e.get("name")]
     table = "\n".join(lines) if lines else "(none)"
     names = "\n".join(f"- {n}" for n in new_names) if new_names else "(none)"
+    story = str(narrative or "").strip()
+    # #10311: the narrative is verbatim session text, so it rides inside the
+    # UNTRUSTED envelope every other session-text region uses. S3 phase 2 is a
+    # WRITE-path prompt (its answer rewrites entity names onto the payload), so
+    # an instruction forged inside the story must not arrive as a trusted turn —
+    # the candidate-table validation bounds WHICH id a name binds to, never the
+    # identity judgment itself, so a mis-merge would be exactly the corruption
+    # this fix exists to prevent, delivered through its own evidence channel.
+    # The helper returns "" for an empty body, which is what keeps the
+    # narrative-absent render byte-identical to the pre-#11654 prompt.
+    body, elided = _bounded_narrative(story)
+    block = _render_untrusted_block("S1 STORY", body)
+    if block:
+        context = ("NARRATIVE (the S1 story of the conversation these names "
+                   "come from — the evidence that answers whether a new "
+                   "name and an existing entity are the SAME real "
+                   f"entity):\n{block}\n\n")
+        if elided:
+            # The elision marker sits INSIDE the untrusted body above, so the
+            # session could carry that text verbatim. The claim that evidence
+            # is missing is therefore made HERE, in the trusted turn, and only
+            # when the pipeline really dropped something — and it also warns
+            # against reading across the cut, since the head and the tail are
+            # not adjacent in the original.
+            context += ("The story was longer than the space allowed: its "
+                        "MIDDLE is omitted above, so the head and the tail "
+                        "are NOT adjacent in the original.\n\n")
+        rule = ("The NARRATIVE is ADDITIONAL evidence for identity: when it "
+                "establishes that a new name and an existing entity are the "
+                "same referent (an alias, a short form, a surname, a "
+                "company's short name), resolve to it. It supplements — it "
+                "never replaces — the spelling evidence named in your "
+                "system instructions (case, variant and abbreviation "
+                "forms): a name the narrative does not mention can still be "
+                "the same entity, so use the narrative to resolve what the "
+                "spellings alone leave uncertain. Where neither establishes "
+                "identity, the name is ambiguous → omit.")
+    else:
+        context = ""
+        rule = ""
     return (f"EXISTING ENTITIES (id | name | kind):\n{table}\n\n"
+            f"{context}"
             f"NEW ENTITY NAMES:\n{names}\n\n"
+            f"{rule + ' ' if rule else ''}"
             "Return {\"resolutions\":[{\"name\": ..., \"resolves_to\": "
             "existing-id-or-name}]} — every resolution must match an id or "
             "exact name in the EXISTING ENTITIES table; ambiguous → omit.")
 
 
 def resolve_entities(entity_refs: list[dict], search: dict,
-                     model=None, stats: dict | None = None) -> dict:
+                     model=None, stats: dict | None = None,
+                     narrative: str = "") -> dict:
     """D3: two-phase entity resolution — returns
     {"map": {name: {"id", "name"}}, "records": [{"name", "resolves_to",
     "mode"}], "warnings": [...]}.
@@ -5826,6 +5925,14 @@ def resolve_entities(entity_refs: list[dict], search: dict,
     never guessed.
     Failure/timeout → warning + phase-1-only map (degrade to ADD semantics
     at the caller — unresolved entities keep their names). NEVER raises.
+
+    ``narrative`` (#11654) is the run's S1 story — the disambiguation
+    context §S3 declares a required input (owner ruling 2026-09-23: *"we
+    can use the narrative to disambiguate when uncertain"*). It reaches
+    ONLY phase 2's prompt: phase 1 stays deterministic and
+    narrative-blind, and an empty narrative renders the pre-#11654 prompt
+    unchanged. It is evidence for the decision, never a source of ids —
+    the candidate-table validation below is untouched.
     """
     existing = [e for e in (search or {}).get("entities", []) or []
                 if isinstance(e, dict) and e.get("id")]
@@ -5851,7 +5958,8 @@ def resolve_entities(entity_refs: list[dict], search: dict,
     if model is not None and existing and unmatched:
         try:
             prompt = _resolution_prompt(
-                existing, [u["name"] for u in unmatched])
+                existing, [u["name"] for u in unmatched],
+                narrative=narrative)
             resp = _complete(model, _RESOLUTION_SYSTEM, prompt,
                              max_tokens=500, stats=stats)
             parsed = _parse_json(resp)
@@ -13950,8 +14058,12 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                     if isinstance(e, dict) and e.get("name")]
         if ent_refs:
             try:
+                # #11654: the run's narrative is S3's disambiguation
+                # context (§S3) — computed a stage earlier, and until now
+                # never handed to the resolver.
                 res = resolve_entities(ent_refs, search, model=model,
-                                       stats=resolution_stats)
+                                       stats=resolution_stats,
+                                       narrative=story_arc)
                 if res.get("map"):
                     complete_list = _apply_entity_resolution(
                         complete_list, res["map"])
