@@ -11493,8 +11493,8 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert re.findall(r"(?<!extractor_v2\.py):11362", text) == [":11362"], (
         "the reproduction block must state the live number `:11362` exactly once as a BARE "
         "cite — re-stale it and this record's only reproduction path points at a dead line")
-    assert "nothing in this tree consumes" in ext[11283 - 1], (
-        f"extractor_v2.py:11362 reads {ext[11283 - 1].strip()[:90]!r}, not the "
+    assert "nothing in this tree consumes" in ext[11362 - 1], (
+        f"extractor_v2.py:11362 reads {ext[11362 - 1].strip()[:90]!r}, not the "
         "comment stating nothing consumes `result[\"relations\"]`")
 
     # A1's environment block: the reproduction that states A1's producer claim — the
@@ -11561,7 +11561,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # this bundle's recurring defect, so the tail is named, not counted) — including arms that need
     # no history at all.
     live_mentions = [i for i, line in enumerate(ext, 1) if "create_operator" in line]
-    assert live_mentions == [9355, 9373, 9380, 9760], (
+    assert live_mentions == [9372, 9390, 9397, 9777], (
         f"extractor_v2.py's create_operator mentions are at {live_mentions}, not the "
         "four the record quotes — an insertion above them moves the quote; re-derive "
         "the record's block (its `create_operator` line AND this list) rather than the list")

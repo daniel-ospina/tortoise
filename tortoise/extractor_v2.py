@@ -9887,11 +9887,11 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # `{name: reason}` so the hold record carries WHY it is unresolved.
     if isinstance(held_entities, Mapping):
         _entity_holds: dict[str, str] = {
-            str(_k).strip(): str(_v or "") for _k, _v in held_entities.items()
-            if str(_k).strip()}
+            str(_k).strip(): str(_v or HOLD_DISAMBIGUATION_UNDECIDED)
+            for _k, _v in held_entities.items() if str(_k).strip()}
     else:
-        _entity_holds = {str(_k).strip(): "" for _k in (held_entities or ())
-                         if str(_k).strip()}
+        _entity_holds = {str(_k).strip(): HOLD_DISAMBIGUATION_UNDECIDED
+                         for _k in (held_entities or ()) if str(_k).strip()}
     # ⛔ `HOLD_REASONS` IS THIS SEAM'S VOCABULARY, and this is the only place it
     # can be enforced: `held_entities` is a PARAMETER, so a reason arrives from a
     # CALLER (`extract_session_v2` forwards S3's own verdicts), not from this
@@ -9899,8 +9899,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # `stats["held_reasons"]` and `result["resolution_held"]` — the census an
     # operator reads — while naming a state the design never decided. Fail CLOSED
     # in both directions rather than silently widening the vocabulary: the item is
-    # still HELD, and its reason is recorded as the undecided class with a
-    # warning naming what arrived (#11693 review, P3).
+    # still HELD, and its reason is the undecided class with a warning naming
+    # what arrived — and so is an EMPTY reason, never the run-level lookup (#11693 P3).
     _unknown_reasons = sorted({r for r in _entity_holds.values()
                                if r and r not in HOLD_REASONS})
     if _unknown_reasons:
@@ -11634,9 +11634,9 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             # #11653 review P1: what the hold had to REMOVE to stay a hold rather
             # than a rejected session — the carriers whose reference sets named a
             # held entity, and the operators dropped instead of being minted.
-            # Additive and always present (0/0 on a run with no entity hold), so a
-            # reader can tell "nothing was stripped" from "nothing was
-            # attempted" without inferring either.
+            # Additive and always present: 0/0 means NO hold OR a hold with nothing
+            # to strip — the pair cannot tell those apart, so read `held_entities`
+            # for which run this was (a discrimination they cannot make).
             "held_entity_refs_stripped": held_refs_stripped,
             "held_entity_operators_dropped": held_operators_dropped,
             "held_reasons": {
@@ -14293,17 +14293,17 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             try:
                 res = resolve_entities(ent_refs, search, model=model,
                                        stats=resolution_stats)
-                if res.get("map"):
-                    complete_list = _apply_entity_resolution(
-                        complete_list, res["map"])
+                # ⛔ #11653: captured BEFORE the apply — a raise from it must not
+                # lose the hold (the entity it could not identify is then MINTED).
                 resolution_records = res.get("records") or []
                 resolution_warnings = res.get("warnings") or []
                 resolution_held = res.get("held") or []
                 if resolution_held:
-                    # §4.4's *"recorded loudly, never only in `warnings`"*: a
-                    # deterministic census class, once per run, with the reasons
-                    # and the candidates named on `result["resolution_held"]`.
+                    # §4.4's *"recorded loudly, never only in `warnings`"*: one deterministic census class per run, with the reasons and the candidates named on `result["resolution_held"]`.
                     _bump_census_class(error_census, "entity_identity_held")
+                if res.get("map"):
+                    complete_list = _apply_entity_resolution(
+                        complete_list, res["map"])
                 # #1695 Task 5: post-resolution re-key — the resolution may
                 # rename entities; the participant-slot kinds are re-applied
                 # (idempotent — kinds don't change, names may) so the typed

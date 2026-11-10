@@ -485,6 +485,27 @@ class TestTheVocabularyIsEnforced:
         assert any("some_future_reason" in w and "HOLD_REASONS" in w
                    for w in out["warnings"]), out["warnings"]
 
+    def test_an_empty_reason_is_the_undecided_class_not_the_run_lookup(self):
+        """The bare-iterable shape carries NO reason — and must not borrow one.
+
+        `execute_embed(held_entities=["Acme"])` is the documented iterable
+        shape, and it arrives with reason `""`. The census fell back to the
+        run-level lookup state (`_lookup`), so a COMPLETE lookup published
+        `held_reasons: {"resolved": 1}` — *an entity held with reason
+        "resolved"*, a state the design never decided, on the very census that
+        exists to tell an operator WHY (P3, #11693 review).
+        """
+        for shape in (["Acme"], {"Acme": ""}):
+            out = v2.execute_embed(_EMBED, _search(_CANDIDATE),
+                                   session_id="s1", held_entities=shape)
+            assert out["stats"]["held_entities"] == 1
+            assert out["stats"]["held_reasons"] == {
+                v2.HOLD_DISAMBIGUATION_UNDECIDED: 1}, (shape, out["stats"]["held_reasons"])
+            assert "resolved" not in out["stats"]["held_reasons"], (
+                "an entity hold published the run-level lookup state as its "
+                f"reason: {out['stats']['held_reasons']!r}")
+            assert out["held"][0]["reason"] == v2.HOLD_DISAMBIGUATION_UNDECIDED
+
     def test_a_declared_reason_passes_through_untouched(self):
         """Non-vacuity: the three declared reasons are NOT rewritten."""
         for reason in v2.HOLD_REASONS:
@@ -590,6 +611,88 @@ class TestTheRunReports:
         assert l1.ok, (
             "the run's own payload is refused by Layer-1, so this capture "
             f"commits NOTHING (the duplicate traded for memory loss): {l1.errors}")
+
+    def test_an_apply_failure_does_not_mint_the_held_entity(self, monkeypatch):
+        """P1-A (#11693 review): a raise from the APPLY must not lose the hold.
+
+        `_apply_entity_resolution` iterates two channels of RAW model output
+        (`about_entities`, typed slot values) with no type guard, downstream of
+        the only sanitizer (`_clean_slots` runs inside `execute_embed`), so a
+        non-iterable slot value raises `TypeError` out of it. The three
+        `res.get(...)` captures used to sit BELOW that call, so the `except`
+        path saw `resolution_held == []`: `held_entities={}` reached
+        `execute_embed`, and the entity S3 could not identify was **MINTED** —
+        the duplicate this issue exists to remove.
+
+        ⛔ The test above (`_Boom`) raises from the RESOLVER, a different arm:
+        it stays GREEN with this ordering bug restored. This one raises from
+        the APPLY with a NON-EMPTY `map`, so the arm actually executes.
+        """
+        embed = {"entities": [{"name": "Acme", "kind": "core:organisation"},
+                              {"name": "Beta", "kind": "core:organisation"}],
+                 "events": [],
+                 "points": [{"content": "Beta signed the deal",
+                             "pointKind": "statement",
+                             "about_entities": ["Beta"]}],
+                 "operators": [], "chain_notes": [],
+                 "link_before_create": []}
+        empty_gaps = {"entities": [], "events": [], "points": [],
+                      "operators": [], "chain_notes": [],
+                      "link_before_create": []}
+
+        def responder(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "Beta signed the deal."
+            if "GRAPH MAPPER" in system:
+                return json.dumps(embed)
+            if "GAP REVIEWER" in system:
+                return json.dumps(empty_gaps)
+            if "ENTITY RESOLUTION" in system:
+                # ONE name resolved (so `map` is non-empty and the apply RUNS),
+                # ONE left undecided — the HOLD this arm must not lose.
+                return json.dumps({"resolutions": [
+                    {"name": "Acme", "resolves_to": "obj_acme"}],
+                    "new": []})
+            raise AssertionError(f"unexpected system prompt: {system[:50]}")
+
+        class _M:
+            def complete(self, *, system: str, user: str):
+                return responder(system, user)
+
+        def two_candidates(sdk, embed_list, story, **kw):
+            return _search(
+                {"id": "obj_acme", "name": "Acme Corporation",
+                 "kind": "core:organisation"},
+                {"id": "obj_beta", "name": "Beta Holdings",
+                 "kind": "core:organisation"})
+
+        def raising_apply(embed_list, resolution_map):
+            raise TypeError("'int' object is not iterable")
+
+        monkeypatch.setattr(v2, "search_graph", two_candidates)
+        monkeypatch.setattr(v2, "_apply_entity_resolution", raising_apply)
+        out = v2.extract_session_v2(
+            _M(), [{"role": "user", "content": "Beta signed the deal."}],
+            session_id="s1")
+        assert out["payload"] is not None, "capture must never be blocked"
+        assert "Beta" not in [e["name"] for e in out["payload"]["entities"]], (
+            "the apply raised, the hold was lost with it, and the entity S3 "
+            "could not identify was MINTED — the duplicate #11653 removes")
+        assert [h["name"] for h in out["resolution_held"]] == ["Beta"], (
+            f"I2: the hold must survive the apply's failure, got {out['resolution_held']!r}")
+        assert out["resolution_held"][0]["reason"] == v2.HOLD_DISAMBIGUATION_UNDECIDED
+        assert out["stats"]["resolution_held"] == 1
+        assert out["error_census"].get("entity_identity_held") == 1, (
+            "the hold is reported on the CENSUS, not only in warnings")
+        assert out["error_census"].get("entity_resolution_failed") == 1, (
+            "the apply's failure is still censused — both facts are true")
+        assert out["payload"]["points"][0]["about_entities"] == [], (
+            f"the claim still names the held entity: "
+            f"{out['payload']['points'][0]['about_entities']!r}")
+        l1, _ = commit_schema.validate_payload_dict(out["payload"])
+        assert l1.ok, (
+            "the run's own payload is refused by Layer-1, so this capture "
+            f"commits NOTHING: {l1.errors}")
 
     def test_an_entity_hold_is_never_written_to_the_hold_store(self, tmp_path):
         """The trap this fix must not walk into: the hold store's DRAIN mints
