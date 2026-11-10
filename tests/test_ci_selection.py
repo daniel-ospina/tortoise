@@ -4883,10 +4883,12 @@ def test_every_record_migration_selects_core_and_its_readers():
     # entry — measured on the embedding migration: `surfaces: ['core']`, every
     # reader present — which is the same measurement that makes those entries
     # redundant rather than load-bearing, and why the synthetic arm below is the
-    # one the rule alone carries. No `n=` here on purpose, for the same reason as
-    # the block above: both values move (the file count with any new test, the
-    # reader count with any arm added), and nothing reds on the sentence.
-    # Re-derive in one `select()` call.
+    # one the rule alone carries. ⚠️ The sentence above quotes no `n=` on purpose:
+    # the file count it would state moves with any new TEST FILE, not with a new
+    # assertion added to an existing one, and nothing reds on the sentence. The
+    # `n=84` stated elsewhere in this block is a measurement of ONE specific
+    # selection — correct today, re-derivable in a single `select()` call — and not
+    # a claim about how many such migrations there are.
     for name in migrations:
         r = _sel([f"supabase/migrations/{name}"])
         assert r["full"] is False, (name, r)
@@ -4914,13 +4916,15 @@ def test_every_record_migration_selects_core_and_its_readers():
     assert rm["slow_run"] is True, rm
     assert any("test_ci_selection.py" in s for s in rm["slow_selected"]), rm
 
-    # The family rule is scoped to the record family ON PURPOSE: a migration
-    # outside it keeps selecting no surface, so this fix does not silently widen
-    # to the whole migrations directory. ⚠️ NOT asserted as a numerator/denominator:
-    # the count moves on ANY new `supabase/migrations/*.sql` — not just a record
-    # one — and nothing reds on the sentence, so a live count here rots into a
-    # false claim in the very file whose subject is claims that rot (measured
-    # 2026-11-10: 51 of 81 empty; re-derive it with a sweep, do not quote it).
+    # The family rule is scoped to the record family ON PURPOSE. A migration
+    # OUTSIDE it that NOTHING ELSE claims keeps selecting no surface, so this fix
+    # does not widen to the whole migrations directory — and one that DOES select
+    # `core` without being a record migration does so through its own `CORE_ALSO`
+    # entry, not through this rule (the prefix block at the end of this test is
+    # exactly that case). ⚠️ Deliberately no live count here: it moves on ANY new
+    # `supabase/migrations/*.sql` — not just a record one — and nothing reds on the
+    # sentence, so a count written here rots into a false claim in the very file
+    # whose subject is claims that rot.
     off_family = _sel(["supabase/migrations/20990101000000_unlisted.sql"])
     assert off_family["surfaces"] == [], off_family
 
