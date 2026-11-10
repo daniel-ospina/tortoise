@@ -2694,8 +2694,8 @@ def test_every_render_path_carries_the_carve_out_the_guarantee_requires() -> Non
     compact render (`TORTOISE_EXTRACTOR_PROMPT=compact`) appended nothing — no
     `STATE_VALUE_CARVE_OUT` and no user-personal-state vocabulary — so a documented
     render toggle silently removed a declared guarantee on the S2/S4 write path.
-    (Measured on the capstone corpus: 1 of 14 value-bearing planted units survived,
-    against a bar of 13 — #9775's own comment.)
+    (Measured on the capstone corpus: 8 of 14 value-bearing planted units survived,
+    against a bar of 13 — `docs/evidence/9889/e2a-value-units.json`, #10610; the `1 of 14` that stood here is the SUPERSEDED `#9775` reading.)
 
     So the guarantee is pinned as a GUARANTEE, not as string presence on one path.
     Both halves are asserted where they are load-bearing:

@@ -836,12 +836,54 @@ mechanisms:
       halves together.
       ⛔ WHAT IS STILL NOT ENFORCED — read this before improving a number:
       (a) a value the model never EMITS is unrecoverable by any rule in this
-      module; the capstone E2a class (1 of 14, bar >= 13) is that class, and it
-      is UPSTREAM of selection (#9775); (b) 50 of the 112 value-bearing points in
+      module; the capstone E2a class (8 of 14, bar >= 13 — the record's own
+      count, `docs/evidence/9889/e2a-value-units.json` `value_survived`; the
+      `1 of 14` that stood here is the SUPERSEDED `#9775` reading, #10610) is
+      that class, and it is UPSTREAM of selection (#9775); (b) 50 of the 112 value-bearing points in
       the committed census receipts fail open on slot layout, so the rule judges
       62 and refuses 0 today — re-derived by
       `tests/test_state_value_verbatim_10360.py::test_the_residual_is_measured_on_the_committed_census_corpus`
-      from the sealed receipts (produced, not quoted). ⚠️ Unchanged by (ii-bis):
+      from the sealed receipts (produced, not quoted). ⛔ FAIL OPEN IS A
+      DETECTION GAP, NOT A LOST VALUE — measured, not assumed, by
+      `tests/test_state_value_verbatim_10360.py::test_the_fail_open_half_is_MEASURED_so_a_gap_is_not_read_as_a_LOSS`:
+      of those 50, 29 state EVERY value their own quote states (under a layout
+      the rule cannot align), 2 differ only on the determiner `one`, 7 state the
+      value in a CLOCK/ISO form this row EXCLUDES BY DESIGN (residual (c) — their
+      class reads the content's FORM and never its agreement with the quote, so
+      they are form-excluded, NOT checkable; the same class also covers the third
+      excluded form, a SEPARATOR-bearing numeral `1,234` — `#2817`'s "no
+      separator rule at all" — and a fourth, an ACCOUNTING PARENTHETICAL `($4)`,
+      which voids the whole side's slots (`_PAREN_NUMERAL_RE`) so nothing on it is
+      read; this corpus carries no row of either), 4 have no
+      slot on the quote side,
+      and 8 state no value — of which exactly ONE drops a state value the quote
+      carries (the `thirty seconds` lease grace,
+      `wp07_bluepeak_followup`/narrative, named by
+      `test_the_ONE_dropped_state_value_on_the_census_is_NAMED`). ⛔ The DROPPED
+      count has TWO stated denominators and neither is 112: it is 1 of the **10**
+      rows where a dropped value is VISIBLE at all (8 `CONTENT_NO_VALUE` + 2
+      `LAYOUT_LOST`), and 1 of the **105** rows this projection can CHECK (112 −
+      the 7 form-excluded). A value dropped while the content keeps its clock is
+      invisible to a projection that binds no clock slot at all, so the 7 are
+      declared residual (c) — with a measured limit rather than a claim: of the
+      7, exactly 2 bind any quote-side slot and both bind an ISO date, which the
+      content is asserted to RESTATE by month-and-day agreement (a clock-only
+      drop stays invisible, and that blind spot's size is pinned). Retention on the
+      committed census is therefore **91 of 112 STATED (62 ALIGNED + 29
+      LAYOUT_RETAINED), 7 form-excluded (not checkable) and 1 DROPPED** —
+      the remaining 13 carry no state value to state (6 a determiner-only quote,
+      1 whose quote binds no slot at all, 2 a determiner-only quote under a
+      divergent layout, 4 no slot on the quote side); the 62 is the rule's REACH, not its retention. ⚠️ A MAGNITUDE the projection cannot
+      FOLD is UNJUDGED here, not lost: `2000 thousand` against `2 million` and
+      `12000000` against `12 million` are ONE number spelled two ways, and
+      `#2817` rules out the magnitude table such a comparison needs (residual
+      (m)) — the class is stated and empty on this corpus rather than silently
+      folded into either direction. ⛔ TWO scale words under the SAME mantissa is
+      NOT that case and is LOST: if `m1 == m2` and the words differ then
+      `m1·s1 ≠ m2·s2` always, so `12 thousand` against `12 million` (and
+      `12 million` against `12 billion`) is a 1000× rewrite the projection
+      DECIDES by string comparison alone — no table, no ruling crossed. ⚠️ That split is the census
+      corpus, NOT the flags-on E2 arm, so it does not move (b2); ⚠️ Unchanged by (ii-bis):
       the separator exclusion moved neither number on this corpus (re-measured
       after it landed, 62 judged / 0 refused), which is why the pin did not have
       to move; (b2) STRICT VERBATIM
