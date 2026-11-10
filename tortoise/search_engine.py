@@ -16,6 +16,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, asdict, field
 from typing import Any, Literal
 
+from .calendar_date import calendar_datetime as _calendar_datetime  # #11646
 from .env_truthy import is_truthy
 from .security import entity_label, validate_entity_type
 from .validity import window_read_fields  # #2350: ONE read-projection home
@@ -3641,9 +3642,33 @@ _DECORATION_TIMEOUT_MS = 200
 #: fall through to the unparseable bucket.
 #:
 #: Reachability: the caller's gate is ``s[0].isdigit() and len(s) >= 10 and
-#: ("-" in s or "T" in s)``, so every DASHED date of 10+ characters arrives
-#: (bare or with any offset, either sign), a COMPACT form arrives when it bears
-#: a negative offset or a ``T``, and a bare compact date never arrives.
+#: ("-" in s or "T" in s or "/" in s)``, so every DASHED date of 10+
+#: characters arrives (bare or with any offset, either sign), a COMPACT form
+#: arrives when it bears a negative offset or a ``T``, a bare compact date
+#: never arrives, and the ingest producer's ``2023/05/20 (Sat) 02:21`` arrives
+#: by its ``/`` (#11646 — before that it bucketed LAST as unparseable, which is
+#: why ``validity._names_an_instant`` read the producer's dates as naming no
+#: instant).
+#:
+#: ⛔ THE PRODUCER'S SHAPE NAMES A ZONE-LESS INSTANT, SO ITS KEY IS
+#: HOST-DEPENDENT — and that is a recorded residual, not a bug to paper over
+#: here. #3982 deliberately leaves a zone-less date-TIME NAIVE (it defers to
+#: ``datetime.timestamp()``), so the float this arm returns resolves in the
+#: reader's zone. Measured on one stored pair:
+#:
+#:     TZ=UTC                 k('2023/05/20 (Sat) 02:21') -> (0, 1684549260.0)
+#:     TZ=America/Los_Angeles k(…same…)                      -> (0, 1684574460.0)
+#:     TZ=Asia/Kolkata        k(…same…)                      -> (0, 1684529460.0)
+#:
+#: which makes ``sdk.supersede_point``'s inversion guard answer DIFFERENTLY per
+#: host for a mixed producer-shaped / dashed pair (inverted on UTC and
+#: ``America/Los_Angeles``, not inverted on ``Asia/Kolkata``). On ``origin/main``
+#: those values bucketed ``(1, text)``, so the guard was skipped — i.e. this
+#: exposure is NEW, and it is the #3982 divergence reaching a WRITE path.
+#: Reversing #3982 is a recorded decision and is NOT the fix; a deterministic
+#: anchor for the new shape is a separate decision to be argued on #11646. Until
+#: then the guard's host dependence is recorded here and on that issue rather
+#: than silently relied on.
 #:
 #: ``YYYY-DDD`` (ordinal) is absent deliberately: the stdlib cannot parse it
 #: (``date.fromisoformat("2026-161")`` raises), so such values are unparseable
@@ -3665,16 +3690,39 @@ _DATE_ONLY_RE = re.compile(
 def _created_sort_key(value):
     """Sortable key for createdAt values — safe across mixed formats.
 
-    The codebase writes ISO-8601 strings (projection) AND numeric epoch
-    (RedisGraph `timestamp()` in seeded corpora) — a graph can hold both.
-    Comparing them directly raises TypeError in py3. ISO strings are parsed
-    to epoch so mixed-format graphs compare by REAL instant (not format);
-    unparseable values bucket last, deterministically.
+    The codebase writes ISO-8601 strings (projection), the ingest producer's
+    ``2023/05/20 (Sat) 02:21``, AND numeric epoch (RedisGraph `timestamp()` in
+    seeded corpora) — a graph can hold all three. Comparing them directly
+    raises TypeError in py3. ISO-shaped strings are parsed to epoch so
+    mixed-format graphs compare by REAL instant (not format); unparseable
+    values bucket last, deterministically.
+
+    #11646: the producer's shape is parsed by ``tortoise.calendar_date`` (ONE
+    grammar, never a fourth local copy). An epoch spelled as a STRING stays in
+    the unparseable bucket — that is the #9202 ruling, not an oversight: the
+    bucket is what makes a present-but-un-orderable window end ``END_UNKNOWN``.
     """
     if isinstance(value, (int, float)):
         return (0, float(value))
     s = str(value or "")
-    if s and s[0].isdigit() and len(s) >= 10 and ("-" in s or "T" in s):
+    if s and s[0].isdigit() and len(s) >= 10 and (
+            "-" in s or "T" in s or "/" in s):
+        if "/" in s:
+            instant = _calendar_datetime(s)
+            if instant is not None:
+                # ⛔ INSIDE the guard: ``.timestamp()`` raises ValueError for a
+                # naive instant outside the platform's range — ``0001/01/01``,
+                # and on a +05:30 host even ``9999/12/31 23:59`` — and this
+                # measure is reached UNGUARDED from ``_recency_factors``,
+                # ``support.sort``, ``validity._names_an_instant`` and
+                # ``read_caller_end`` (which would then emit a raw ValueError
+                # instead of its #9202 refusal, host-dependently). The dashed
+                # path below was safe only by accident: it sits inside the try.
+                # Unrepresentable → the unparseable bucket, as documented.
+                try:
+                    return (0, instant.timestamp())
+                except (ValueError, OverflowError, OSError):
+                    pass
         try:
             from datetime import date, datetime
             iso = s.replace("Z", "+00:00")
