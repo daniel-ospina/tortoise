@@ -4698,7 +4698,8 @@ class TestSiteIconAndSocialPreviewContract:
 
     def _icon_trio_violations(self, page_name: str, head: str,
                               png: tuple[int, int], ico_sizes: set[int],
-                              apple: tuple[int, int]) -> list[str]:
+                              apple: tuple[int, int], *,
+                              origins: frozenset[str] | None = None) -> list[str]:
         """Every way this page's `<head>` fails the icon contract; empty means it passes.
 
         ⛔ SPLIT OUT SO THE PAGE-LEVEL APPLICATION IS DRIVEN BY A TEST, not only by this
@@ -4716,18 +4717,20 @@ class TestSiteIconAndSocialPreviewContract:
             f"{page_name} does not declare {href} with the rel that makes it an icon — a "
             "page with no icon shows a blank tab and, on a share, no avatar; iOS draws a "
             "screenshot instead of the mark"
-            for href in self._missing_icon_links(links)]
+            for href in self._missing_icon_links(links, origins=origins)]
         # ⛔ EVERY link is audited, and the apple-touch branch is dispatched BY NAME:
         # `"apple-touch-icon".split()` is `["apple-touch-icon"]`, so a `"icon" in rel`
         # filter reaches neither of its branches and the apple link's `sizes` went
         # unchecked while this guard reported the page correct.
         violations += [
             v for v in (self._declared_sizes_violation(
-                page_name, link, png, ico_sizes, apple) for link in links) if v]
+                page_name, link, png, ico_sizes, apple, origins=origins)
+                for link in links) if v]
         return violations
 
     @classmethod
-    def _missing_icon_links(cls, links: list[dict]) -> list[str]:
+    def _missing_icon_links(cls, links: list[dict], *,
+                            origins: frozenset[str] | None = None) -> list[str]:
         """The icon files this `<link>` set fails to declare with the rel that makes it one.
 
         Split out of the trio guard so the SAME predicate can be run against a synthetic
@@ -4737,7 +4740,7 @@ class TestSiteIconAndSocialPreviewContract:
         every page-level assertion green while `rel="ICON"` (valid HTML) reds a correct
         page. A check whose failure path never runs cannot be told apart from a no-op.
         """
-        declared = {(cls._icon_ref(ln.get("href", "")), token)
+        declared = {(cls._icon_ref(ln.get("href", ""), origins=origins), token)
                     for ln in links
                     for token in ln.get("rel", "").lower().split()}
         missing: list[str] = []
@@ -4750,7 +4753,8 @@ class TestSiteIconAndSocialPreviewContract:
 
 
     @classmethod
-    def _icon_ref(cls, href: str) -> str:
+    def _icon_ref(cls, href: str, *,
+                  origins: frozenset[str] | None = None) -> str:
         """The PATH an icon href names when it is THIS site's; "" when it is not.
 
         The query is not part of what is served: `?v=2` on a favicon href is standard
@@ -4764,9 +4768,15 @@ class TestSiteIconAndSocialPreviewContract:
         it from ANOTHER HOST, and the guard reported green on a tab that has no icon
         (or someone else's). Only an href that resolves to one of `SITE_ORIGINS`
         yields a path; anything else yields "" and matches no icon assertion.
+
+        `origins` is the SURFACE's own origin set. It exists because the guard now grades
+        the app tree too, and `app.premiselabs.co` is a real origin of ours that
+        `SITE_ORIGINS` deliberately does not carry (that set is what the marketing
+        `og:image` guard holds a card to — widening IT would loosen a different check).
+        Default `None` keeps every existing caller on `SITE_ORIGINS`.
         """
         url = urlsplit(urljoin(cls.SITE_ROOT, href))
-        if url.hostname not in cls.SITE_ORIGINS:
+        if url.hostname not in (origins if origins is not None else cls.SITE_ORIGINS):
             return ""
         return url.path
 
@@ -4792,7 +4802,8 @@ class TestSiteIconAndSocialPreviewContract:
     @classmethod
     def _declared_sizes_violation(cls, page_name: str, link: dict,
                                   png: tuple[int, int], ico_sizes: set[int],
-                                  apple: tuple[int, int]) -> str | None:
+                                  apple: tuple[int, int], *,
+                                  origins: frozenset[str] | None = None) -> str | None:
         """Why a `<link>`'s declared `sizes=` disagrees with the file's bytes; None = agrees.
 
         ⛔ SPLIT OUT OF THE TRIO GUARD for the reason `_icon_mark_violations` is: the
@@ -4817,7 +4828,7 @@ class TestSiteIconAndSocialPreviewContract:
         defect can never hide the rest.
         """
         rels = link.get("rel", "").lower().split()
-        path = cls._icon_ref(link.get("href", ""))
+        path = cls._icon_ref(link.get("href", ""), origins=origins)
         declared = link.get("sizes")
         if "icon" in rels and path == f"/{cls.ICON_PNG}":
             return cls._sizes_violation(page_name, declared, {png[0]}, cls.ICON_PNG,
@@ -5870,13 +5881,33 @@ class TestSiteIconAndSocialPreviewContract:
     DASHBOARD_ROOT = WEB / "apps" / "dashboard" / "public"
     ICON_FILES = ("favicon.ico", "favicon.png", "apple-touch-icon.png")
 
+    # ⛔ THE TWO RELATIONS THE TRIO USES, BY NAME — never a substring of the value.
+    # `mask-icon` and `apple-touch-icon-precomposed` are DISTINCT relation tokens
+    # (WebKit's own parser and Google's favicon guidance both separate them from `icon`),
+    # so `"icon" in token` simultaneously refused a correct page that adds a legitimate
+    # `mask-icon` and could not tell `rel="icon"` from `rel="apple-touch-icon"`.
+    ICON_RELS = ("icon", "apple-touch-icon")
+
+    # The app SURFACE is its own Pages deployment on its own origin, so its pages may
+    # name `https://app.premiselabs.co/…` absolutely. `SITE_ORIGINS` stays the marketing
+    # pair on purpose: it is what the `og:image` guard holds a card to, and widening THAT
+    # would loosen a different check.
+    ICON_ORIGINS = frozenset({*SITE_ORIGINS, "app.premiselabs.co"})
+
     @classmethod
     def _icon_hrefs(cls, html: str) -> list[str]:
-        """The `href` of every icon link in a page's head, in source order."""
+        """The `href` of every tab-icon / touch-icon link in a page's head, in order.
+
+        ⛔ THE RELATION IS NAMED, NOT SUBSTRING-MATCHED. `mask-icon` and
+        `apple-touch-icon-precomposed` are DISTINCT relation tokens, so the previous
+        `any("icon" in token for token in rel)` counted a legitimate `mask-icon` as a
+        fourth tab icon (a FALSE RED on a correct page) and matched every one of the
+        three kinds identically (the fail-open the rel assertion below closes).
+        """
         out = []
         for link in cls._links(cls._head(html)):
             rel = link.get("rel", "").lower().split()
-            if any("icon" in token for token in rel):
+            if any(token in cls.ICON_RELS for token in rel):
                 out.append(link.get("href", ""))
         return out
 
@@ -5906,9 +5937,11 @@ class TestSiteIconAndSocialPreviewContract:
            Every href therefore carries `?v=<sha256[:12]>`, and the version is asserted
            against the file's OWN bytes below, so a re-export without a bump reds here.
 
-        The `sizes` attributes are already asserted by `test_every_page_declares_the_icon
-        _trio` for the marketing tree; this test is about the SET being identical across
-        trees and self-invalidating, which is what harmonising means.
+        The `sizes` attributes are asserted for the marketing tree by
+        `test_every_page_declares_the_icon_trio`, and for BOTH trees by
+        `_surface_icon_violations` (which runs the same name-dispatching trio guard);
+        this test is about the SET being identical across trees and self-invalidating,
+        which is what harmonising means.
         """
         expected = {}
         for name in self.ICON_FILES:
@@ -5929,37 +5962,131 @@ class TestSiteIconAndSocialPreviewContract:
                 "origin and the marketing origin would show different marks")
 
         surfaces = {
-            "marketing": (self._pages(), self.WEB),
+            "marketing": (self._pages(), self.WEB, self.SITE_ORIGINS),
             "app": ([self.WEB / "apps" / "dashboard" / "index.html",
-                     *sorted(self.DASHBOARD_ROOT.glob("*.html"))], self.DASHBOARD_ROOT),
+                     *sorted(self.DASHBOARD_ROOT.glob("*.html"))],
+                    self.DASHBOARD_ROOT, self.ICON_ORIGINS),
         }
-        for label, (pages, root) in surfaces.items():
+        for label, (pages, root, origins) in surfaces.items():
             assert pages, f"no {label} pages found — the guard would pass vacuously"
+            violations = []
             for page in pages:
-                hrefs = self._icon_hrefs(page.read_text())
-                assert len(hrefs) == 3, (
-                    f"{label}: {page.name} declares {len(hrefs)} icon link(s) — every surface "
-                    "must declare the ICO, the PNG and the apple-touch icon, or the tab "
-                    "falls back to whatever the platform guesses")
-                for href in hrefs:
-                    assert not href.startswith("data:"), (
-                        f"{label}: {page.name} blanks its icon with {href!r} — a blank icon "
-                        "is not a harmonised icon, it is the browser's generic glyph")
-                    path = href.split("?", 1)[0]
-                    assert "/logo.png" not in path, (
-                        f"{label}: {page.name} uses the wordmark as a tab icon ({href!r}) — "
-                        "400x244 squashed into a square slot (#11407)")
-                    assert path in expected, (
-                        f"{label}: {page.name} links {href!r}, which is not one of the three "
-                        f"icon files {sorted(expected)}")
-                    assert (root / path.lstrip("/")).is_file(), (
-                        f"{label}: {page.name} links {href!r}, which does not exist under "
-                        f"{root.name}/ — the tab request 404s")
-                    got = self._href_version(href)
-                    assert got == expected[path], (
-                        f"{label}: {page.name} links {href!r} but the file's sha256 starts "
-                        f"{expected[path]!r} — bump the `?v=` with the bytes, or a browser "
-                        "holding the old icon keeps drawing it (that is the stale-icon bug)")
+                violations += self._surface_icon_violations(
+                    label, page.name, page.read_text(), root, expected, origins)
+            assert not violations, "\n".join(violations)
+
+    def _surface_icon_violations(self, label: str, page_name: str, head: str,
+                                 root: Path, expected: dict[str, str],
+                                 origins: frozenset[str]) -> list[str]:
+        """Every way ONE page on ONE origin breaks the icon contract; empty = it passes.
+
+        Split out of the test above so the page-level application is DRIVEN BY AN
+        ASSERTION on both trees, the way `_icon_trio_violations` was split out for the
+        marketing one.
+
+        ⛔ THE REL IS GRADED HERE, BY NAME, ON BOTH TREES. The first cut folded the app
+        pages through `_icon_hrefs` alone — a count, an href set, an existence check and
+        a `?v=` compare — none of which reads `rel`. So replacing
+        `rel="apple-touch-icon"` with `rel="icon"` on an app page left EVERY assertion
+        green while `app.premiselabs.co` stopped declaring the icon iOS saves to the
+        home screen (it draws a page screenshot instead). That is the href-only blind
+        spot this class already names for the marketing tree — "`<link rel="preload"
+        href="/favicon.ico">` mentions the file and gives the tab no icon at all" — one
+        origin over, and the app origin is the tree #11407 was REPORTED against. The
+        existing trio guard dispatches `apple-touch-icon` by name and checks `sizes`,
+        so running it here closes both gaps with no new predicate.
+        """
+        png = self._png_size((self.WEB / self.ICON_PNG).read_bytes())
+        apple = self._png_size((self.WEB / self.ICON_APPLE).read_bytes())
+        ico_sizes = {i["declared"][0]
+                     for i in self._ico_entries((self.WEB / self.ICON_ICO).read_bytes())}
+
+        violations = self._icon_trio_violations(
+            page_name, head, png, ico_sizes, apple, origins=origins)
+
+        hrefs = self._icon_hrefs(head)
+        if len(hrefs) != 3:
+            violations.append(
+                f"{page_name} declares {len(hrefs)} icon link(s) — every surface must "
+                "declare the ICO, the PNG and the apple-touch icon, or the tab falls back "
+                "to whatever the platform guesses")
+        for href in hrefs:
+            if href.startswith("data:"):
+                violations.append(
+                    f"{page_name} blanks its icon with {href!r} — a blank icon is not a "
+                    "harmonised icon, it is the browser's generic glyph")
+                continue
+            path = href.split("?", 1)[0]
+            if "/logo.png" in path:
+                violations.append(
+                    f"{page_name} uses the wordmark as a tab icon ({href!r}) — 400x244 "
+                    "squashed into a square slot (#11407)")
+                continue
+            if path not in expected:
+                violations.append(
+                    f"{page_name} links {href!r}, which is not one of the three icon "
+                    f"files {sorted(expected)}")
+                continue
+            if not (root / path.lstrip("/")).is_file():
+                violations.append(
+                    f"{page_name} links {href!r}, which does not exist under "
+                    f"{root.name}/ — the tab request 404s")
+                continue
+            if self._href_version(href) != expected[path]:
+                violations.append(
+                    f"{page_name} links {href!r} but the file's sha256 starts "
+                    f"{expected[path]!r} — bump the `?v=` with the bytes, or a browser "
+                    "holding the old icon keeps drawing it (that is the stale-icon bug)")
+        return [f"{label}: {v}" for v in violations]
+
+    def test_the_app_tree_grades_the_icon_rel_by_name(self):
+        """NON-VACUITY for the app-tree half: a swapped `rel` must red, both directions.
+
+        Measured on the code before this: swapping `rel="apple-touch-icon"` for
+        `rel="icon"` on `website/apps/dashboard/public/signup.html` left every assertion
+        in `test_every_surface_declares_the_same_versioned_icon_set` green — 3 hrefs, all
+        three in `expected`, all three files present, all three `?v=` matching. The
+        mutated page is CORRECT by every count and still loses the iOS home-screen mark,
+        which is why the assertion has to reach the relation and not the href.
+        """
+        expected = {f"/{name}": hashlib.sha256((self.WEB / name).read_bytes()).hexdigest()[:12]
+                    for name in self.ICON_FILES}
+        page = self.DASHBOARD_ROOT / "signup.html"
+        head = page.read_text()
+
+        def grade(html: str) -> list[str]:
+            return self._surface_icon_violations(
+                "app", page.name, html, self.DASHBOARD_ROOT, expected, self.ICON_ORIGINS)
+
+        assert grade(head) == [], (
+            "the real app page must pass, or the mutants below prove nothing:\n"
+            + "\n".join(grade(head)))
+
+        # Direction 1 — the touch icon declared as a tab icon (the review's surviving mutant).
+        demoted = head.replace('rel="apple-touch-icon"', 'rel="icon"', 1)
+        assert demoted != head, "fixture drift: signup.html no longer declares the apple rel"
+        caught = grade(demoted)
+        assert any(self.ICON_APPLE in v and "apple-touch-icon" in v for v in caught), (
+            "a page that declares /apple-touch-icon.png under rel=\"icon\" loses the iOS "
+            "home-screen mark and every count/href/version assertion still passes — the "
+            f"rel must be graded. Got: {caught}")
+
+        # Direction 2 — every tab icon declared as a touch icon: count is still 3.
+        promoted = head.replace('rel="icon"', 'rel="apple-touch-icon"')
+        caught = grade(promoted)
+        assert any(self.ICON_ICO in v and "icon" in v for v in caught), (
+            f"a page whose tab icons all claim apple-touch-icon must red. Got: {caught}")
+
+        # Direction 3 — a legitimate `mask-icon` is a DIFFERENT relation: it must not be
+        # counted as a fourth tab icon (the false red the substring filter produced).
+        png_version = expected[f"/{self.ICON_PNG}"]
+        mask_link = (f'  <link rel="mask-icon" href="/{self.ICON_PNG}?v={png_version}" '
+                     'color="#000000">\n')
+        masked = head.replace("</head>", mask_link + "</head>", 1)
+        assert masked != head
+        assert grade(masked) == [], (
+            "a `mask-icon` is not one of the trio and must not be graded as one; the "
+            "substring filter refused this correct page:\n" + "\n".join(grade(masked)))
 
         # The blog's head is a STRING in the SSR function, not a page on disk, so no glob
         # reaches it — and it is the surface a shared link opens.
