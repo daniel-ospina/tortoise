@@ -1214,6 +1214,10 @@ def pane_bindings() -> dict[str, str]:
 #: board can say WHICH store answered, and which one did not and why.
 LIVE_STORE_CMUX_PLURAL = "cmux-sessions-list"
 LIVE_STORE_CMUX_SINGULAR = "cmux-session-list"
+#: The two grammars above are ONE STORE (#11202): a group is unreadable only when
+#: NEITHER grammar answered, so a per-grammar name would blame a argv the reader
+#: cannot act on. This is the name a refusal and the board's provenance use.
+LIVE_STORE_CMUX_GROUP = "cmux-session-store"
 LIVE_STORE_PROCESS = "process-table"
 
 #: The synthetic workspace id for a lane that NO cmux store can enumerate (#8999).
@@ -1248,15 +1252,29 @@ class LiveSessions(dict):
     measured: bool
     error: str
     source: str
+    #: WHICH STORE GROUPS COULD NOT BE READ (#11202), by the `LIVE_STORE_*` name.
+    #:
+    #: ⛔ A STORE THAT REFUSED IS NOT A STORE THAT WAS NEVER ASKED. `source` names
+    #: what ANSWERED, so on its own it makes a read that rested on ONE store look
+    #: like a read of ALL of them — measured 2026-11-09 on a cell, where the board
+    #: answered `process-table` while BOTH cmux grammars refused (the Cloud guest
+    #: CLI carries no per-lane session store at all), and every surface printed
+    #: `board source: rebuilt` with nothing saying the durable store was gone. A
+    #: CLEAN read from one store is honest; a CLEAN read that cannot say it was
+    #: from one store is the "abstention read as freedom" this issue is about.
+    #: The FAILING groups only — a group that answered is in `source`.
+    unreadable: tuple[str, ...]
 
     def __init__(
         self, *args: Any, measured: bool = False, error: str = "", source: str = "",
+        unreadable: tuple[str, ...] = (),
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.measured = measured
         self.error = error
         self.source = source
+        self.unreadable = unreadable
 
 
 def cmux_session_records() -> tuple[list[dict[str, Any]], str, str]:
@@ -1953,6 +1971,16 @@ def live_sessions() -> LiveSessions:
     # of them answered (see the ⛔ above). `source` still names what did answer.
     result.measured = bool(sources) and not proc_error
     result.source = "+".join(sources)
+    # ⛔ AND WHICH GROUP DID NOT ANSWER (#11202), in the SAME datum as the one that
+    # did. `cmux_error` is the whole cmux group failing — one grammar answering
+    # would have made `cmux_source` non-empty — so the group name is exact, and it
+    # is the name the reader is told to act on, not a grammar's argv.
+    result.unreadable = tuple(
+        label for label, failed in (
+            (LIVE_STORE_CMUX_GROUP, not cmux_source and bool(cmux_error)),
+            (LIVE_STORE_PROCESS, bool(proc_error)),
+        ) if failed
+    )
     # ⛔ THE ARM THAT DECIDED THE REFUSAL LEADS. Only `proc_error` poisons
     # `measured` — an unreadable cmux store is covered by the process table, which
     # sees every live lane this user runs — so listing the cmux failure first put a
@@ -2607,6 +2635,11 @@ def build_state(
     liveness_measured = bool(getattr(live, "measured", bool(live)))
     liveness_source = str(getattr(live, "source", "") or "")
     liveness_error = str(getattr(live, "error", "") or "")
+    # …and WHICH store GROUPS could not be read (#11202). A plain dict (a fixture,
+    # an older caller) declares none — absent stays absent, never an empty claim.
+    liveness_unreadable = tuple(
+        s for s in (getattr(live, "unreadable", ()) or ()) if isinstance(s, str) and s
+    )
     # A worktree used by exactly ONE workspace's records clearly belongs to that lane;
     # a worktree shared by several workspaces (a reused checkout) must not be used to
     # cross-attribute, so cwd ownership is decided globally (#9).
@@ -3380,6 +3413,10 @@ def build_state(
             "liveness_measured": liveness_measured,
             "liveness_source": liveness_source,
             "liveness_error": liveness_error,
+            # #11202: the store GROUPS that did not answer, beside the one(s) that
+            # did — so a CLEAN resting on a single store cannot read as a CLEAN
+            # that read them all. A LIST on the wire (JSON has no tuple).
+            "liveness_unreadable": list(liveness_unreadable),
             "process_lanes": sorted(proc_ws),
         },
         "conflicts": conflicts,
