@@ -1553,13 +1553,15 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
 
     The figure is pinned to the TREE, not to `4f68a2aa7`, because that is what §5
     claims it is: population = every tracked file under `tortoise/`. It has since
-    moved to **63** lines across **19** files, in three moves, one per workstream:
+    moved to **64** lines across **19** files, in four moves, one per workstream:
     `cache_eviction.py:956` (the #10976 census's note on why labels do not partition
     the node set), #8447's ingest door (`tortoise/ingest.py`, the
-    `REFUSED_NOT_FOUND` enum docstring), and #11729's runtime-label writers
+    `REFUSED_NOT_FOUND` enum docstring), #11729's runtime-label writers
     (`tortoise/hosted_backup.py` — an EXISTING file that carried no `:Document` mention
     at `4f68a2aa7`, which is the second file the count gained; its six added mentions
-    are the dump-and-restore prose about pre-D10 artifacts). That move is the mechanism
+    are the dump-and-restore prose about pre-D10 artifacts), and #11682's own
+    `tortoise/search_engine.py:2107` corpus-join comment (one line, an existing file).
+    Each move is the mechanism
     working: the census landed, this check reddened, and §5 was re-measured instead
     of the number being quietly widened or the guard loosened.
 
@@ -1572,7 +1574,7 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     the line count. The pin is exact for the same reason the
     first one is: a narrow pattern that starts matching most of the prose is the day
     §5's exclusion argument stops being true, and the honest response is to re-measure
-    it, never to widen the assertion. Six of sixty-three is still the exception, so
+    it, never to widen the assertion. Six of sixty-four is still the exception, so
     the argument stands at this head.
     """
     doc = _doc()

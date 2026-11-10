@@ -2110,7 +2110,7 @@ def test_the_real_machine_record_agrees_with_the_pins():
 
     # ⛔ THE FIELD'S CITES TO FILES OTHER THAN THE PROBE ARE FOUR, AND THIS ARM PINS ONE OF
     # THEM. The arms above pin every `capstone_measure.py` cite in this field; the field also
-    # says the switch is "read PER EMITTED POINT at `extractor_v2.py:9944`", and until this
+    # says the switch is "read PER EMITTED POINT at `extractor_v2.py:10508`", and until this
     # arm nothing bound that number to anything — `grep 9944` over `tests/ tools/ docs/`
     # returned the field itself and no pin (measured). That is the exact asymmetry #10274
     # exists to remove, and it was recorded as a residual by a fresh-context review at
@@ -2119,7 +2119,7 @@ def test_the_real_machine_record_agrees_with_the_pins():
     # is the likeliest of all these numbers to move.
     # ⛔ ONE OF FOUR, STATED AS ONE OF FOUR. Enumerating `([A-Za-z0-9_./]+\.py):(\d+)` over
     # this field gives `sparse.py:226`, `projection/entities.py:1239`,
-    # `subject_binding.py:189`, `extractor_v2.py:9944` and the probe cite
+    # `subject_binding.py:189`, `extractor_v2.py:10508` and the probe cite
     # `probes/capstone_measure.py:527` — so three other-file cites remain UNPINNED by this
     # arm. Measured, scoped so the query cannot match its own prose —
     # `grep -rnE 'sparse\.py:226|entities\.py:1239|subject_binding\.py:189' tests/ --include='*.py'`
