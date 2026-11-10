@@ -5976,7 +5976,13 @@ class TestSiteIconAndSocialPreviewContract:
             "app": ([self.WEB / "apps" / "dashboard" / "index.html",
                      *sorted(self.DASHBOARD_ROOT.rglob("*.html"))],
                     self.DASHBOARD_ROOT, self.ICON_ORIGINS),
-            "app-admin": ([self.WEB / "apps" / "blog-admin" / "index.html"],
+            "app-admin": ([self.WEB / "apps" / "blog-admin" / "index.html",
+                           # The COMMITTED built shell. It is a TRACKED, served artifact and
+                           # the repo's source-of-record (#7749: a source change without a
+                           # rebuild leaves it behind for a whole release), so grading only
+                           # the vite SOURCE let the deployed `/admin` document keep the
+                           # pre-fix head — no icon link, hence the UNVERSIONED fallback.
+                           self.WEB / "apps" / "blog-admin" / "dist" / "index.html"],
                           self.DASHBOARD_ROOT, self.ICON_ORIGINS),
         }
         for label, (pages, root, origins) in surfaces.items():
@@ -5988,28 +5994,42 @@ class TestSiteIconAndSocialPreviewContract:
             assert not violations, "\n".join(violations)
 
         # ⛔ NO GLOB REACHES THESE — they are STRINGS in TypeScript, not pages on disk, so
-        # each is graded by exact `href` instead. The blog head is the surface a shared link
-        # opens. The other two are on the APP origin and rendered a full `<head>` with NO
-        # icon link at all, so both fell back to the UNVERSIONED `/favicon.ico` — the defect
+        # each is graded through `_surface_icon_violations` on its own text, against the
+        # root that actually SERVES it. The blog head is the surface a shared link opens.
+        # The other two are on the APP origin and rendered a full `<head>` with NO icon
+        # link at all, so both fell back to the UNVERSIONED `/favicon.ico` — the defect
         # this test exists to stop, one file over (review round 2).
+        # ⛔ GRADED, NOT SUBSTRING-MATCHED (review round 3). The first cut asserted only
+        # `href="/favicon.ico?v=<sha>" in source`. That is rel-BLIND, so `rel="preload"`
+        # ("mentions the file and gives the tab no icon at all" — this file's own words),
+        # every `rel="icon"` demoted to `apple-touch-icon`, and the whole tag commented
+        # out all passed. Reusing the page predicate closes it with no new code: it
+        # dispatches the rel by NAME, counts the trio, refuses `data:` and the wordmark,
+        # resolves the origin, checks the file exists under the serving root, and compares
+        # the `?v=` to the digest. Each source gets ITS OWN root because a self-rendered
+        # document is served by a project, and asserting existence against the right one
+        # is the point.
         # ⚠️ `website/functions/_middleware.ts`'s refusal page is a deliberate EXCEPTION and
         # stays unlinked: its own contract forbids an outbound request while a credential is
         # in the URL — so it is excluded by DECISION, not by oversight.
         self_rendered = {
             "website/functions/blog/_lib.ts": (
-                self.WEB / "functions" / "blog" / "_lib.ts"),
+                self.WEB / "functions" / "blog" / "_lib.ts", self.WEB, self.SITE_ORIGINS),
             "website/apps/dashboard/functions/auth/confirm.ts": (
-                self.WEB / "apps" / "dashboard" / "functions" / "auth" / "confirm.ts"),
+                self.WEB / "apps" / "dashboard" / "functions" / "auth" / "confirm.ts",
+                self.DASHBOARD_ROOT, self.ICON_ORIGINS),
             "website/apps/dashboard/functions/admin/[[path]].ts": (
-                self.WEB / "apps" / "dashboard" / "functions" / "admin" / "[[path]].ts"),
+                self.WEB / "apps" / "dashboard" / "functions" / "admin" / "[[path]].ts",
+                self.DASHBOARD_ROOT, self.ICON_ORIGINS),
         }
-        for source_label, source in self_rendered.items():
+        for source_label, (source, root, origins) in self_rendered.items():
             rendered = source.read_text()
-            for path, version in expected.items():
-                href = f'href="{path}?v={version}"'
-                assert href in rendered, (
-                    f"{source_label} does not declare {href} — a tab opened on that document "
-                    "would fall back to the UNVERSIONED path and keep drawing a stale mark")
+            assert "<head>" in rendered or "<head " in rendered, (
+                f"{source_label} no longer renders a <head> — if the document moved or was "
+                "removed, update this list rather than letting the guard grade nothing")
+            violations = self._surface_icon_violations(
+                "self-rendered", source_label, rendered, root, expected, origins)
+            assert not violations, "\n".join(violations)
 
     def _surface_icon_violations(self, label: str, page_name: str, head: str,
                                  root: Path, expected: dict[str, str],
