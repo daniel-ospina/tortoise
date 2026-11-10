@@ -427,8 +427,14 @@ class TestTheThirdDoorExists:
             "path to the door is gone and the delta §1.1 counts would have to be re-derived"
         )
 
-    def test_point_mediated_route_only_reifies_a_point_pair(self):
-        """Object↔Object keeps the direct shape; the partition is pinned above (28 / 33 / 2)."""
+    def test_point_mediated_route_docstring_states_the_point_only_rule(self):
+        """⚠️ Pins the DOCSTRING, not the behaviour — named so the title cannot promise more.
+
+        A mutant that made `_point_mediated_route` reify an `Object↔Object` pair would keep this row green; the
+        behavioural half of §1.1's claim is `test_the_direct_shape_partition_28_object_and_33_non_point` above
+        (28 / 33 / 2). This row exists because §1.1's *reading* of the code is what the scope quotes, and a
+        silent docstring edit would change what a lane believes without reddening anything else (review P3).
+        """
         from tortoise.sdk import TortoiseSDK
 
         doc = inspect.getdoc(TortoiseSDK._point_mediated_route) or ""
@@ -588,7 +594,9 @@ class TestThePairHasProductionReaders:
         # `tests/test_investment_portfolio_manager_pack.py::test_the_mark_contract_follows_a_manifest_edit`;
         # what this file needs is the claim its own comment makes — that the reader is still there and still
         # answers from the declaration rather than from the constants it falls back to.
-        assert callable(domain_validators._portfolio_mark_contract)
+        # ⚠️ No `callable(...)` guard here: it is the weaker twin of the assertion below, and this file's own
+        # rule (stated in `test_the_fourth_reader_is_the_pair_to_writer_resolver`) is that a weaker assertion
+        # beside a behavioural one is the F3 tautology class. If the symbol vanished, the call below raises.
         mark_row = next(
             r for r in _declared_relations()
             if r["_ns"] == "portfolio" and r.get("predicate") == "marks"
