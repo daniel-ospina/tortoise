@@ -343,6 +343,14 @@ def test_the_retirement_is_NOT_authorised_while_the_record_leg_is_off(monkeypatc
     This is the P1's pin. The index and its replacement are one decision: retire
     the index while `TORTOISE_RECORD_VECTOR_LEG` is unset and every dense read
     becomes a brute-force `:Point` scan recording `scan_fallback`.
+
+    ⛔ ROUND 7 (P2-2) — the gate is SYMMETRIC, so `main`'s CREATE attempt is still
+    issued here. An unarmed store is `main`'s posture in full: it keeps an index
+    it has (this pin) and gains one it lacks (the sibling pin below). The create
+    attempt on a store that already has the index answers "already" and writes
+    nothing — that is what `main` did on every setup, and `_create_vector_index_api`
+    treats it as success rather than as a second creation. What must NEVER happen
+    here is the DROP.
     """
     monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
     monkeypatch.delenv("TORTOISE_RECORD_VECTOR_LEG", raising=False)
@@ -352,10 +360,49 @@ def test_the_retirement_is_NOT_authorised_while_the_record_leg_is_off(monkeypatc
     assert not any(_is_vector_drop(c) for c in graph.g.calls), (
         "the in-graph index was retired while nothing replaced it — every dense "
         "read would be a full scan")
+    assert graph._vector_index_api in {"procedure", "cypher"}, (
+        "an unarmed store must keep `main`'s posture: the ANN index still exists "
+        "and the handle that blesses a write width must still resolve")
+
+
+def test_a_FRESH_store_with_no_replacement_still_GETS_its_ANN_index(monkeypatch):
+    """The gate is symmetric, or the invariant it states is false (#11660 R7 P2-2).
+
+    The gate's own reason — *a store never ends up with neither an in-graph ANN
+    index nor a record leg* — is as true of NOT CREATING as it is of DROPPING,
+    and round 4 only gated the drop. So on the documented default posture (no
+    `TORTOISE_RECORD_VECTOR_LEG`, no DSN) a FRESH store got no index at all,
+    where `main` created one right here: every dense read a full scan, with no
+    arming condition anywhere on the path.
+
+    Both arms are pinned because either one alone can be satisfied by the wrong
+    code: unarmed must CREATE (falsifier: the pre-fix branch, which returned
+    before ever reaching the catalogue), armed must not (falsifier: making the
+    gate unconditional-create).
+    """
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    monkeypatch.delenv("TORTOISE_RECORD_VECTOR_LEG", raising=False)
+    unarmed = _bare([])
+    unarmed._ensure_indexes()
+    assert any(
+        ("createnodeindex" in c.lower()) or ("create vector index" in c.lower())
+        for c in unarmed.g.calls
+    ), (
+        "an UNARMED store with no index must create one, exactly as `main` did — "
+        "otherwise the retirement lands on a store that has nothing to replace "
+        "it and every dense read becomes a full scan")
+    assert unarmed._vector_index_api in {"procedure", "cypher"}, (
+        "the created index must resolve the handle, or `required_embedding_dim` "
+        "silently loses the write-width guard on every unarmed deployment")
+
+    _arm_the_record_leg(monkeypatch)
+    armed = _bare([])
+    armed._ensure_indexes()
     assert not any(
         ("createnodeindex" in c.lower()) or ("create vector index" in c.lower())
-        for c in graph.g.calls
-    ), "the index must be left ALONE, not re-created, on an armed-retirement no-op"
+        for c in armed.g.calls
+    ), "an ARMED store must never create an in-graph index — the move took it"
+    assert armed._vector_index_api is None
 
 
 def _is_vector_drop(statement: str) -> bool:

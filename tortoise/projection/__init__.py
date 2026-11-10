@@ -700,13 +700,19 @@ _VECTOR_INDEX_GAP_LOCK = threading.Lock()
 
 #: #11642 / #4051 V1 — the in-graph vector index is RETIRED, not missing.
 #:
-#: `_ensure_vector_index_api` no longer creates one and drops any it finds, so
-#: `_vector_indexed_labels` is empty on every store from the next setup onward.
+#: On a store whose REPLACEMENT is armed (a record DSN **and**
+#: `TORTOISE_RECORD_VECTOR_LEG` — :func:`vector_index_retired`)
+#: `_ensure_vector_index_api` creates none and drops any it finds, so
+#: `_vector_indexed_labels` is empty there from the next setup onward. An
+#: UNARMED store is `main`'s posture unchanged — it keeps an index it has and
+#: gains one it lacks — because retiring the index with nothing to replace it
+#: would turn every dense read into a brute-force scan (#11660 review round 7,
+#: P2-2: the arm gate governs BOTH directions, not only the drop).
 #: The #4997 gap warning ("those reads silently full-scan") therefore describes
-#: a state that is now the DESIGN: the dense leg is served from the Postgres
-#: record (`tortoise/record_vector.py`), and a graph full scan is the documented
-#: fallback for the labels the record does not carry (`object`/`subject`) and for
-#: a box with no record armed at all.
+#: a state that is now the DESIGN on an armed store: the dense leg is served
+#: from the Postgres record (`tortoise/record_vector.py`), and a graph full scan
+#: is the documented fallback for the labels the record does not carry
+#: (`object`/`subject`) and for a box with no record armed at all.
 #:
 #: So the pair is still MEASURED and still REPORTED (#11087), and on a store
 #: where the move is LIVE the WARNING is replaced by one INFO naming the
@@ -751,9 +757,12 @@ _VECTOR_INDEX_GAP_LOCK = threading.Lock()
 #: backfill yet), so a DSN no longer implies a replacement: both
 #: `vector_index_retired()` and the reader must agree, or the #4997 warning is
 #: muted on exactly the store that needs it (#11660 review round 6, P1-3).
-#: For an operator: the index is retired unconditionally on the next setup; a
-#: store with no armed record leg full-scans every dense query and says so at
-#: WARNING; arming the leg is `TORTOISE_RECORD_VECTOR_LEG=1` WITH a record DSN.
+#: For an operator: on a store whose replacement is ARMED the index is retired
+#: on the next setup (and one is never created); an UNARMED store is `main`'s
+#: posture — it keeps an index it has, gains one it lacks, and its dense reads
+#: keep the in-graph ANN leg, so nothing regresses while the leg is dark. Arming
+#: the leg is `TORTOISE_RECORD_VECTOR_LEG=1` WITH a record DSN, and only then is
+#: the index retired (#11660 review round 7, P2-2).
 #:
 #: ⚠️ Flipping it is a CODE revert's cheap cousin, not the whole revert: the
 #: record leg stays armed and keeps answering the dense read (`record_vector`),
@@ -20305,13 +20314,16 @@ class FalkorProjection(
         handle ``None`` (``required_embedding_dim`` documents the three
         ``None`` lanes).
 
-        ⛔ #11642: under the default posture this method CREATES NOTHING — it
-        drops an in-graph vector index it finds and leaves ``_vector_index_api``
-        ``None`` (the move took the index to Postgres). The attempts described
-        above are still here, in :meth:`_create_vector_index_api`, reached only
-        when ``VECTOR_INDEX_RETIRED`` is flipped to ``False`` — the rollback
-        switch, and the reason it is a switch rather than a log level (#11660
-        review F9).
+        ⛔ #11642: on a store whose replacement is ARMED this method CREATES
+        NOTHING — it drops an in-graph vector index it finds and leaves
+        ``_vector_index_api`` ``None`` (the move took the index to Postgres).
+        The attempts described above are still here, in
+        :meth:`_create_vector_index_api`, reached whenever the replacement is NOT
+        armed — `main`'s posture for an unarmed box (a store must never be left
+        with neither an in-graph index nor a record leg) and the
+        ``VECTOR_INDEX_RETIRED = False`` rollback switch, which is why that
+        switch is a switch rather than a log level (#11660 review F9, round 7
+        P2-2).
 
         #4997: on the way out this also MEASURES the engine catalog
         (``_record_vector_index_inventory``) so the vector-index gap is a fact
@@ -20374,14 +20386,35 @@ class FalkorProjection(
         # rather than rejected at the write.
         import logging
         _log = logging.getLogger(__name__)
-        # ⛔ #11660 review F9: `VECTOR_INDEX_RETIRED` is read HERE too, not only in
-        # the log-level choice below. The flag's own comment promises that
-        # flipping it to False restores the pre-#11642 posture, and the posture
-        # IS this index existing — a rollback that restored only the WARNING
-        # would leave the operator holding a log line and no index. So the
-        # retirement branch and the recreate branch are both here, and exactly
-        # one of them runs.
-        if not VECTOR_INDEX_RETIRED:
+        # ⛔ ONE PREDICATE DECIDES **BOTH** DIRECTIONS (#11660 review round 7,
+        # P2-2). `vector_index_retired()` asks whether this deployment ARMED
+        # the thing that replaced the index (a record DSN **and**
+        # `TORTOISE_RECORD_VECTOR_LEG`), and the invariant it protects is
+        # symmetric: *a store never ends up with NEITHER an in-graph ANN index
+        # NOR a record leg*. Round 4 gated the DROP on it and left the CREATE
+        # gated on the CONSTANT, so the invariant was false for every fresh
+        # store: an unarmed box kept an index it already had and never gained
+        # one it did not — a behaviour change from `main` (which created it
+        # here), on the documented default posture, with no arming condition
+        # anywhere on the path.
+        #
+        # So BOTH branches now read the same predicate, and the three postures
+        # are exactly the three states an operator can be in:
+        #   * ARMED (`vector_index_retired()` True) — retire: drop one found,
+        #     create none. The record serves the dense leg.
+        #   * UNARMED — `main`'s posture, unchanged: keep an index found, create
+        #     one that is missing, so a store with nothing to replace it never
+        #     loses its ANN search.
+        #   * ROLLED BACK (`VECTOR_INDEX_RETIRED = False`) — the same create
+        #     path, unconditionally; that is what the rollback switch promises
+        #     and `vector_index_retired()` answers False for it, so it needs no
+        #     separate branch to drift out of step with this one.
+        #
+        # ⚠️ The consequence, stated rather than discovered: on an unarmed store
+        # the write path keeps its width blessing (`required_embedding_dim` is
+        # answered from the handle this branch resolves), and the #4997 gap
+        # report keeps its WARNING only where a label really has no index.
+        if not vector_index_retired():
             return self._create_vector_index_api(catalogue_rows)
         self._vector_index_api = None
         dropped = False
@@ -20416,21 +20449,18 @@ class FalkorProjection(
             _log.debug("#11642: vector-index catalogue read failed (%s) — "
                        "leaving any in-graph vector index alone this sweep", e)
             _has_vector_index = False
-        # ⛔ RETIRE ONLY WHEN THE REPLACEMENT IS ARMED (#11660 review round 4,
-        # P1). Dropping the index while `record_vector.ARMING_ENV` is unset
-        # leaves the store with NEITHER an in-graph ANN index NOR a record leg,
-        # so every dense read becomes a brute-force `:Point` scan and records
-        # `scan_fallback` — a regression dressed as a migration. So the drop and
-        # the gap report read the SAME predicate: `vector_index_retired()`.
-        if _has_vector_index and not vector_index_retired():
-            _log.info(
-                "#11642: leaving the in-graph Point.embedding vector index in "
-                "place on %s — the Postgres dense leg is NOT armed "
-                "(TORTOISE_RECORD_VECTOR_LEG unset, or no record DSN), and "
-                "retiring the index without its replacement would turn every "
-                "dense read into a full scan. Arm the record leg; the next "
-                "setup retires it.", self._graph_name)
-            _has_vector_index = False
+        # ⛔ NO "LEAVING IT IN PLACE" LINE HERE ANY MORE (#11660 review round 7,
+        # P2-3). The unarmed case used to fall through to a gate at this point
+        # and emit an INFO — unlatched, and true forever while the leg stayed
+        # unarmed, so it printed once per setup for the life of the deployment
+        # on the HOSTED PER-REQUEST path (`_data_sdk_offloaded(…,
+        # attach_projection=True)` builds a projection per request). That is the
+        # defect the #11087 pair report 200 lines below is latched to avoid, and
+        # the gate that produced it is gone: the armed check now happens BEFORE
+        # the catalogue read, so this code only runs on an ARMED store, where
+        # the index is dropped exactly once and the steady state is silent. An
+        # unarmed store is `main`'s silent success path (#4997 warns when a
+        # label really has no index, which is the only thing worth saying).
         if _has_vector_index:
             for _stmt in (
                 "DROP INDEX ON :Point(embedding)",
@@ -20510,8 +20540,12 @@ class FalkorProjection(
         readable — a rollback path inlined beside its replacement is how one gets
         edited into the other.
 
-        ⛔ Reached ONLY when `VECTOR_INDEX_RETIRED` is False, which is why the
-        default posture pays nothing for its existence.
+        ⛔ Reached whenever the replacement is NOT armed — an unarmed store
+        (`main`'s posture: a store must never be left with neither an in-graph
+        index nor a record leg) or the `VECTOR_INDEX_RETIRED = False` rollback.
+        Both go through :func:`vector_index_retired`, so the create and the drop
+        cannot disagree about which posture the deployment is in (#11660 review
+        round 7, P2-2).
         """
         import logging
 
@@ -20554,11 +20588,11 @@ class FalkorProjection(
     def required_embedding_dim(self) -> int | None:
         """The embedding width THIS store can hold, for the write path to declare.
 
-        ⛔ #11642: this answers ``None`` on EVERY lane since the vector move, and
-        that is the correct answer rather than a regression. The in-graph index
-        is retired (`VECTOR_INDEX_RETIRED`; `_ensure_vector_index_api` drops one
-        it finds and never creates one), so no graph index exists to bless a
-        width.
+        ⛔ #11642: this answers ``None`` on any store whose replacement is ARMED
+        — the in-graph index is retired there (`vector_index_retired()`;
+        `_ensure_vector_index_api` drops one it finds and never creates one), so
+        no graph index exists to bless a width. An UNARMED store keeps `main`'s
+        answer, because it keeps `main`'s index (#11660 review round 7, P2-2).
 
         ⛔ AND THE WIDTH GUARD IS **REMOVED**, NOT MOVED (#11660 review round 6,
         P2-3). An earlier draft of this docstring said it "moved with the index"

@@ -148,19 +148,23 @@ and `ConfidenceChanged` is a **`NoRecordEffect`** — the EP carve-out in execut
 > default OFF**, because the record is a journal fold with **no backfill**: it holds a vector only
 > for content written AFTER the move is deployed. So the four facts, in the order that matters:
 >
-> 1. **The in-graph vector index is retired unconditionally** (`VECTOR_INDEX_RETIRED`) — the next
+> 1. **The in-graph vector index is retired on a store whose replacement is ARMED** — the next
 >    setup drops a `Point.embedding` HNSW index if it finds one and never creates another. That is
->    the decision (owner, 2026-11-07), not a consequence of this switch.
-> 2. **With the leg unarmed — the default — every dense `Point`/`Source`/`Event` read is a
->    brute-force graph scan**, because the index is gone and nothing replaced it. That is
->    `#4997`'s defect, and the setup reports it at **WARNING** (`#4997/#11642` line).
+>    the decision (owner, 2026-11-07), and the ARM GATE is symmetric (#11660 review round 7, P2-2):
+>    an UNARMED store behaves exactly as `main` did — it keeps an index it has and still gains one
+>    it lacks — because a store must never be left with neither an in-graph index nor a record leg.
+> 2. **With the leg unarmed — the default — the graph keeps its ANN index**, so dense
+>    `Point`/`Source`/`Event` reads are unchanged; a label with NO index is `#4997`'s defect and the
+>    setup reports it at **WARNING** (`#4997/#11642` line). Retiring the index is what arming does,
+>    so a store that arms without a backfilled record trades its ANN index for a full scan (see 3).
 > 3. **Arming it (`TORTOISE_RECORD_VECTOR_LEG=1`) WITHOUT a backfilled record silently drops every
 >    pre-existing point out of the dense pool** — the trace reports `mechanism=pgvector, reason=ok`,
 >    because the shortfall assertion counts against the record's own predicate. **Back-fill first,
 >    then arm.** A record still holding 0 rows is the state `#11469` measured on the dogfood tenant.
-> 4. **The switch is an ENV var; the rollback of the index itself is a CODE constant.** Flipping
->    `TORTOISE_RECORD_VECTOR_LEG` back to off restores the WARNING and the graph scan; it does NOT
->    bring the index back, because the drop is gated on `VECTOR_INDEX_RETIRED` (see its comment).
+> 4. **The switch is an ENV var; the rollback of the index itself is a CODE constant.** Unarming
+>    `TORTOISE_RECORD_VECTOR_LEG` restores the WARNING (where a label really has no index) and puts
+>    the store back on `main`'s posture on the next setup, which re-creates the index; the constant
+>    `VECTOR_INDEX_RETIRED` is the unconditional revert (see its comment).
 >
 > Both conditions are asked by `projection.vector_index_retired()`, which is what decides the log
 > LEVEL — a DSN alone used to answer it and muted the alarm on an unarmed store (`#11660` review

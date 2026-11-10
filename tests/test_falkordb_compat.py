@@ -412,10 +412,18 @@ class TestEnsureIndexesVectorApi:
     procedure-capable engine, `CREATE VECTOR INDEX` on a Cypher-native one, and
     a WARNING when neither worked. The owner's 2026-11-07 decision retired that
     index (its `vectorset` was rebuilt on every cold restore — `#7846`), so the
-    property worth pinning INVERTED: the store must now DISCOVER an existing
-    index from the catalogue and DROP it, must never create one, and must leave
-    the handle `None` so `required_embedding_dim` reports the documented
-    no-index lane.
+    property worth pinning INVERTED: on a store whose replacement is ARMED the
+    store must DISCOVER an existing index from the catalogue and DROP it, must
+    never create one, and must leave the handle `None` so
+    `required_embedding_dim` reports the documented no-index lane.
+
+    ⛔ "MUST NEVER CREATE" IS THE **ARMED** POSTURE (#11660 review round 7,
+    P2-2). The gate is symmetric: an UNARMED store is `main`'s posture and does
+    create one, because a store must never be left with neither an in-graph ANN
+    index nor a record leg. Both arms are pinned — here (create stops when
+    armed) and in `tests/test_4997_vector_index_parity.py`
+    (`test_a_FRESH_store_with_no_replacement_still_GETS_its_ANN_index`, which
+    owns the unarmed arm and the "no drop while unarmed" arm).
 
     The engine-API distinction is not lost with the creation — `run_vector_query`
     still needs it for the two `queryNodes` signatures, which
@@ -424,21 +432,33 @@ class TestEnsureIndexesVectorApi:
     """
 
     @pytest.mark.parametrize("vector_api", ["procedure", "cypher", "none"])
-    def test_no_engine_api_is_ever_asked_to_create_a_vector_index(self, vector_api):
+    def test_an_ARMED_store_never_asks_an_engine_to_create_a_vector_index(
+            self, vector_api, monkeypatch):
+        """ARMED ⇒ no creation on ANY engine API, and no handle resolved.
+
+        Arming is the condition under which creation must stop: the record
+        answers the dense read, so the in-graph index has a replacement and must
+        go. Without the arming env this same call CREATES (see the class
+        docstring) — which is why the posture is set explicitly rather than
+        inherited from the ambient environment.
+        """
+        monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+        monkeypatch.setenv("TORTOISE_RECORD_VECTOR_LEG", "1")
         graph = _EngineGraph(vector_api=vector_api)
         proj = _bare_projection(graph)
         proj._ensure_indexes()
 
         assert proj._vector_index_api is None, (
-            "an in-graph vector-index API was resolved — #11642 retired that "
-            "index, so no engine capability may be recorded as if one exists")
+            "an in-graph vector-index API was resolved on an ARMED store — "
+            "#11642 retired that index there, so no engine capability may be "
+            "recorded as if one exists")
         creates = [c for c in graph.calls
                    if "vector" in c.lower()
                    and ("createnodeindex" in c.lower()
                         or "create vector index" in c.lower())]
         assert not creates, (
-            f"the in-graph vector index was CREATED on a {vector_api!r} engine: "
-            f"{creates}")
+            f"the in-graph vector index was CREATED on an ARMED "
+            f"{vector_api!r} engine: {creates}")
 
     def test_an_existing_vector_index_is_dropped(self, monkeypatch):
         # The retirement is authorised only when the Postgres dense leg is

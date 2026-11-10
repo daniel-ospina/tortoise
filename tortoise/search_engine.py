@@ -1098,17 +1098,18 @@ NO_QUERY_VECTOR = "no_query_vector"
 # read (see the #2952 tests). The path is reported additively instead.
 #:
 #: Trace-entry key carrying the mechanism (written by :func:`_trace_entry`,
-#: read by callers); the value is one of the three constants below, and the
+#: read by callers); the value is one of the constants below, and the
 #: key is absent when no path was taken (e.g. ``breaker_open``).
 #:
 #: ⛔ PER-LEG (#8488): the key's value set depends on WHICH leg carries it —
-#: ``vector`` → the three constants below; ``fts`` → ``"bm25"``
+#: ``vector`` → the constants below (FOUR of them since #11642 added
+#: :data:`MECHANISM_PGVECTOR`); ``fts`` → ``"bm25"``
 #: (:data:`LEXICAL_MECHANISM_BM25`) when the lexical slot was scored
 #: in-process by Okapi BM25, absent otherwise. A consumer must therefore
 #: read the value together with ``entry["leg"]``; ``mechanism in
-#: (MECHANISM_INDEX, MECHANISM_SCAN, MECHANISM_SCAN_FALLBACK)`` remains the
-#: right test for "a vector entry took a known path" and is NOT a test for
-#: "the entry is a vector entry".
+#: (MECHANISM_INDEX, MECHANISM_SCAN, MECHANISM_SCAN_FALLBACK,
+#: MECHANISM_PGVECTOR)`` remains the right test for "a vector entry took a
+#: known path" and is NOT a test for "the entry is a vector entry".
 VECTOR_MECHANISM_KEY = "mechanism"
 #: Index-accelerated ``CALL db.idx.vector.queryNodes`` produced the rows.
 MECHANISM_INDEX = "index"

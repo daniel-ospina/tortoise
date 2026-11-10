@@ -174,11 +174,15 @@ LABEL_SERVED: dict[str, tuple[str, str, str, tuple[str | None, str | None]]] = {
 #: reason: a correctness change to the read path is measured before it is trusted.
 #:
 #: ⚠️ Left off, NOTHING regresses: the graph branches answer exactly as they did
-#: before this change (they are the fallback they always were), and the only
-#: difference is that the in-graph vector index is retired — so those reads are
-#: brute-force scans. That cost is the thing to price before arming, and it is
-#: the second reason this is a switch rather than a default: a store that arms it
-#: needs the record backfilled FIRST, not after.
+#: before this change (they are the fallback they always were), AND the in-graph
+#: vector index is not retired either — an unarmed store keeps an index it has
+#: and still gains one it lacks, which is `main`'s posture (#11660 review round
+#: 7, P2-2: the arm gate governs the CREATE as well as the DROP, so a store can
+#: never be left with neither). What arming changes is that the index leaves
+#: once the record answers the dense read. Getting the existing corpus into the
+#: record is the thing to price before arming, and it is the second reason this
+#: is a switch rather than a default: a store that arms it needs the record
+#: backfilled FIRST, not after.
 ARMING_ENV = "TORTOISE_RECORD_VECTOR_LEG"
 
 
