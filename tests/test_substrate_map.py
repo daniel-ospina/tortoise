@@ -58,7 +58,8 @@ _LABEL_CLAIM = re.compile(
 #: free to lie — and §5's own next sentence ("re-derives both numbers over the **same**
 #: population this sentence is stated in") asserts the very thing nothing read.
 _POPULATION_CLAIM = re.compile(
-    r"occurs on \*\*\d+\*\*\s+lines\s+across\s+\*\*\d+\*\*\s+files\s+under\s+`([^`]+)`"
+    r"occurs on \*\*\d+\*\*\s+lines\s+across\s+\*\*\d+\*\*\s+files\s+under\s+"
+    r"`([^`]+)`(?!\s*(?:,|and|or|plus)\s*`)"
 )
 
 _COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
