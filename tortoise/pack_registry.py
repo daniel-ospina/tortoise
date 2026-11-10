@@ -3589,11 +3589,14 @@ class PackRegistry:
         #   * DOWN — a root gathers all its descendants (`Object` gains
         #            `WorkItem`, then `dev:issue`/`dev:pullRequest`/…).
         #
-        # Equivalence (equivalentTo, LEGACY_KIND_ALIASES, bare↔namespaced) is
-        # symmetric and is traversed inside BOTH, because equivalent kinds have
-        # the same extension. That is also what makes the two spellings agree:
-        # `expand_kind("issue")` inherits everything `dev:issue` gained because
-        # the bare form is equivalent to it, not because a bare bucket copies.
+        # Equivalence (`equivalentTo`, `LEGACY_KIND_ALIASES`) is symmetric and is
+        # traversed inside BOTH, because equivalent kinds have the same
+        # extension. The bare↔namespaced pair is NOT one of these — it is the
+        # ONE-DIRECTIONAL `bare_inherits` relation seeded above (a bare bucket
+        # gains its namespaced forms; a namespaced bucket does not gain the bare
+        # name), and it enters the walk through `sources` rather than through
+        # `equivalences`. That is why `expand_kind("issue")` carries `dev:issue`
+        # while `expand_kind("dev:issue")` carries no bare `issue`.
         #
         # Termination is structural, not bounded by a counter: `direct_parents`
         # is acyclic (a pack kind is never a parent, and `CORE_SUBCLASSES` rows

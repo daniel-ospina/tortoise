@@ -1864,8 +1864,14 @@ class TestCoreHierarchy:
         not fire), and it puts `synth:team` in `expand_kind("team")`. With the
         bare-inherited members not round-tripping into the `core:` bucket,
         `expand_kind("core:team")` missed them — the same one-kind-two-answers
-        asymmetry this PR exists to remove, reachable by any pack that registers a
-        kind under an aliased core name.
+        asymmetry this PR exists to remove.
+
+        Reachability is narrow: of the 73 `CORE_ALIASED_KINDS` members only five
+        are registrable this way (`team`, `role`, `organization`, `legalPerson`,
+        `naturalPerson` — the children of §5's `Subject` row). The other 68 are
+        either owned by a canonical axis (the #2786 guard refuses
+        `objectKinds: [plan]`) or PascalCase (`Subject`, `Object`, …) and refused
+        by the camelCase shape check.
         """
         (tmp_path / "synth").mkdir()
         (tmp_path / "synth" / "manifest.yaml").write_text(
