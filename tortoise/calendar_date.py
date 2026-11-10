@@ -482,10 +482,12 @@ def _string_instant(s: str) -> datetime | None:
     #      * a COMPACT / ISO-week DATE + OFFSET (or ``Z``) carrying NO TIME —
     #        ``20230520-05:00``, ``2026W243-05:00``, ``2023-W43-2+05:00`` and
     #        ``20230520Z`` are all day-dated (:func:`_compact_date_offset`) and
-    #        all refused here, because ``_string_instant`` has no arm for the
-    #        COMPACT / ISO-WEEK form at all. ⚠ The axis is the FORM, NOT the
-    #        separators: the CALENDAR form is armed by ``_INSTANT_RE``'s
-    #        date-only branch, so ``2023-05-20+05:00``, ``2023-05-20Z`` and
+    #        all refused here, because ``_string_instant``'s only compact /
+    #        ISO-week arm (``_COMPACT_DATETIME_RE``) REQUIRES A TIME: it reads
+    #        ``20230520T02:21:00Z`` and ``2023-W43-2T11:00:00``, while the
+    #        DATE-ONLY offset-or-``Z`` spelling has no arm. ⚠ The axis is the
+    #        FORM, NOT the separators: the CALENDAR form is armed by
+    #        ``_INSTANT_RE``'s date-only branch, so ``2023-05-20+05:00``, ``2023-05-20Z`` and
     #        ``2023/05/20+05:00`` ARE accepted as that offset's midnight — while
     #        the DASHED ISO-WEEK spelling ``2023-W43-2+05:00`` is refused like
     #        the rest of its family. That is a GAP for the compact/ISO-week
