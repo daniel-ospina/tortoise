@@ -253,6 +253,49 @@ def _unittest_case_classes(module_body: list[ast.stmt]) -> set[str]:
     return case_classes
 
 
+#: pytest's default `python_functions` is `["test"]`, and `unittest.TestLoader.testMethodPrefix` is
+#: `"test"` — a PREFIX, not `test_`. Round-31 P3, measured: `def testalpha` + `def test_beta` collects
+#: **2** while a `test_`-prefixed walk counted **1**, and that under-count is green against a stale doc
+#: number — the direction this file calls dangerous.
+_TEST_NAME_PREFIX = "test"
+
+
+def _is_test_named(node: ast.AST) -> bool:
+    """True if pytest's function-name filter would select this `def`."""
+    return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(
+        _TEST_NAME_PREFIX
+    )
+
+
+def _is_fixture_function(node: ast.AST) -> bool:
+    """True if `@pytest.fixture` (or an alias ending in `fixture`) decorates it.
+
+    `istestfunction` ends `and fixtures.getfixturemarker(obj) is None`, so a fixture named `test_*` is NOT
+    collected. Round-31 P3, measured: `@pytest.fixture def test_fixture` + `def test_a` collects **1**
+    where the derivation counted **2**.
+    """
+    return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+        ast.unparse(decorator).split("(")[0].split(".")[-1].endswith("fixture")
+        for decorator in node.decorator_list
+    )
+
+
+def _is_abstract_class(node: ast.ClassDef) -> bool:
+    """True if the class is abstract by the AST — an `ABC` base or an `@abstractmethod` member.
+
+    `PyCollector.istestclass` and `unittest`'s `pytest_pycollect_makeitem` both end on
+    `inspect.isabstract(obj)` and refuse. Round-31 P3, measured: an abstract `Test*` class collects **0**
+    where the derivation counted **1**, on BOTH collection paths.
+    """
+    if any(ast.unparse(base).split(".")[-1] in ("ABC", "ABCMeta") for base in node.bases):
+        return True
+    return any(
+        isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any("abstractmethod" in ast.unparse(d) for d in member.decorator_list)
+        for member in node.body
+    )
+
+
 def _collected_test_nodes(source: str) -> list[ast.AST]:
     """The test functions pytest would collect from `source` — the collector's own model.
 
@@ -271,7 +314,7 @@ def _collected_test_nodes(source: str) -> list[ast.AST]:
         # its name only exists in the enclosing class's body.
         case_classes = _unittest_case_classes(body)
         for node in body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+            if _is_test_named(node) and not _is_fixture_function(node):
                 nodes.append(node)
             elif isinstance(node, ast.ClassDef) and node.name in case_classes:
                 # A `unittest.TestCase` subclass is collected by name-independent discovery. It applies at
@@ -299,18 +342,30 @@ def _collected_test_nodes(source: str) -> list[ast.AST]:
                 # the defect to an UNDERCOUNT. ⚠️ Not EVERY `__init__` is collectable — see
                 # `_unittest_init_cannot_take_the_instance`: a bare `__init__(self)` is a collection ERROR,
                 # a third state that `_derive_population` fails closed on rather than counting.
-                if _class_refuses_collection(node):
+                if _class_refuses_collection(node) or _is_abstract_class(node):
                     continue
-                nodes.extend(
+                collected = [
                     member
                     for member in node.body
-                    if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and member.name.startswith("test_")
-                )
+                    if _is_test_named(member) and not _is_fixture_function(member)
+                ]
+                # ⛔ `UnitTestCase.collect`'s `runTest` FALLBACK: when no `test*` method is found it yields
+                # the class's own `runTest` as a case. Round-31 P3, measured: a `TestCase` defining only
+                # `runTest` collects **1** (`FoldCase::runTest`) where this walk counted **0** — a silent
+                # UNDERCOUNT of the canonical unittest shape.
+                if not collected:
+                    collected = [
+                        member
+                        for member in node.body
+                        if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and member.name == "runTest"
+                    ]
+                nodes.extend(collected)
             elif (
                 isinstance(node, ast.ClassDef)
                 and (node.name.startswith("Test") or _test_dunder(node.body) is True)
                 and _pytest_collects_class(node)
+                and not _is_abstract_class(node)
             ):
                 # ⛔ A class is selected by NAME **or** by `__test__`, and the `__test__` half is IDENTITY
                 # with `True`, not truthiness — `_pytest/python.py::isnosetest` reads
@@ -431,6 +486,81 @@ def _unittest_init_cannot_take_the_instance(node: ast.ClassDef) -> bool:
     return False
 
 
+def _classes_in_collection_scope(body: list[ast.stmt]) -> list[ast.ClassDef]:
+    """Every class defined in a body pytest's collector can DESCEND INTO — the module body, or a class body.
+
+    ⛔ NOT a function-local class: nothing collects one, so a refusal aimed at it would over-block a module
+    pytest collects without complaint — the direction round-30 P3 measured as a defect of its own, not a
+    safe failure. Recursion follows class bodies only, mirroring `_collected_test_nodes`' own walk.
+    """
+    found: list[ast.ClassDef] = []
+    for node in body:
+        if isinstance(node, ast.ClassDef):
+            found.append(node)
+            found.extend(_classes_in_collection_scope(node.body))
+    return found
+
+
+def _same_scope_blocks(stmt: ast.stmt) -> list[list[ast.stmt]]:
+    """The statement lists a compound statement runs in the SAME scope, in source order.
+
+    Only the compounds that execute in-line (`if`/`try`/loops/`with`) — a `def`/`class` body is a different
+    scope, and an assignment there binds THAT object rather than the enclosing one.
+    """
+    if isinstance(stmt, ast.If):
+        return [stmt.body, stmt.orelse]
+    if isinstance(stmt, ast.Try):
+        return [stmt.body, *[handler.body for handler in stmt.handlers], stmt.orelse, stmt.finalbody]
+    if isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
+        return [stmt.body, stmt.orelse]
+    if isinstance(stmt, (ast.With, ast.AsyncWith)):
+        return [stmt.body]
+    return []
+
+
+def _conditional_test_dunder_binds(body: list[ast.stmt]) -> list[str]:
+    """`__test__` assignments in ONE body that sit inside a conditional/loop/try/with block.
+
+    ⛔ WHETHER such a binding RUNS is a runtime fact, so the value pytest reads is not in the AST at all —
+    and both directions were measured (round-31 P3). `class TestX: __test__ = True` followed by
+    `if FLAG: __test__ = False` with `FLAG = True` collapses to `--collect-only` → **0** while reading only
+    the direct assignment reported **(1, 1)** — an OVERCOUNT, the direction whose tempting "fix" is to write
+    the derived figure into the document. The module-level form is worse: it decides every test in the file.
+
+    The scan descends through same-scope compounds only (`if`/`try`/loops/`with`, see `_same_scope_blocks`).
+    A `def` or `class` body is a DIFFERENT scope whose assignment binds that object, not this one — descending
+    into it would report a binding that never lands here, i.e. over-block.
+    """
+    found: list[str] = []
+
+    def _collect(statements: list[ast.stmt], *, nested: bool) -> None:
+        for stmt in statements:
+            if nested and isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+                targets = (
+                    stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target] if stmt.value else []
+                )
+                names = [
+                    name
+                    for target in targets
+                    for name in (
+                        [target]
+                        if isinstance(target, ast.Name)
+                        else list(target.elts)
+                        if isinstance(target, ast.Tuple)
+                        else []
+                    )
+                ]
+                if any(isinstance(name, ast.Name) and name.id == "__test__" for name in names):
+                    found.append(ast.unparse(stmt)[:72])
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            for block in _same_scope_blocks(stmt):
+                _collect(block, nested=True)
+
+    _collect(body, nested=False)
+    return sorted(set(found))
+
+
 def _derive_population(source: str) -> tuple[int, int]:
     """`(functions, collected)` for `source`, derived from the AST and **failing closed**.
 
@@ -501,12 +631,21 @@ def _derive_population(source: str) -> tuple[int, int]:
 
     # A `Test*` class inheriting another `Test*` class in this module re-collects the parent's methods, which
     # are not in the subclass AST — measured: pytest collects both, the derivation saw only one.
-    module_classes = {n.name for n in ast.parse(source).body if isinstance(n, ast.ClassDef)}
+    # ⛔ MODULE-WIDE, and every depth a collector DESCENDS INTO — not `tree.body` alone (round-31 P3,
+    # measured). A class nested inside a collected `Test*` class whose base is declared one body up
+    # (`class Inner(MyCase)` where `class MyCase(unittest.TestCase)` sits at module level) is collected by
+    # pytest — which also re-collects the PARENT's methods through the child, so that module collects **4**
+    # (`MyCase::test_a`, `TestOuter::Inner::test_a`, `TestOuter::Inner::test_b`, `TestOuter::test_c`) while a
+    # module-level-only scan derived **(2, 2)**: an UNDERCOUNT, the direction that agrees with a stale doc
+    # number and stays green. Same shape one level in (`class Base` beside `class Inner(Base)` inside the
+    # `Test*` body): collected 4, derived **(3, 3)**. Both are refusals, not counts, because the parent's
+    # methods are not in the child's AST.
+    scope_classes = _classes_in_collection_scope(tree.body)
+    module_classes = {n.name for n in scope_classes}
     inheriting = sorted(
         node.name
-        for node in ast.parse(source).body
-        if isinstance(node, ast.ClassDef)
-        and any(isinstance(base, ast.Name) and base.id in module_classes for base in node.bases)
+        for node in scope_classes
+        if any(isinstance(base, ast.Name) and base.id in module_classes for base in node.bases)
     )
 
     # Names whose case count comes from a fixture, not from a `parametrize` arm we can read.
@@ -548,36 +687,117 @@ def _derive_population(source: str) -> tuple[int, int]:
                 f"class `{node.name}`: `__test__` is bound to a non-literal, so whether pytest collects "
                 "this class is a runtime fact this derivation cannot read"
             )
-    # ⛔ A `__test__` assigned from OUTSIDE the body — `TestX.__test__ = False` at module level — is bound
-    # too late for any in-body read, and it is what pytest sees. Measured round-29 P3: pytest collects **0**
-    # for that shape while reading only the class body reported **(1, 1)**. ⛔ It applies to FUNCTIONS too
-    # (round-30 P3): `test_x.__test__ = False` is read by pytest's module collector
-    # (`elif getattr(obj, "__test__", True):` in `_pytest/python.py`'s `PyCollector`) and pytest drops that
-    # test — measured `1` collected where
-    # the derivation counted **(2, 2)**. Both are fail-closed here rather than modelled, because the
-    # binding is not in the object's own AST body and a name-collision guess would be a silent number.
-    _module_class_names = {
+    # ⛔ A `__test__` assigned from OUTSIDE the object's own body is what pytest reads, and it is not in
+    # that object's AST. It is read at THREE sites, and rounds 29-31 P3 measured all of them:
+    #   * `TestX.__test__ = False` at module level, on a CLASS  -> pytest 0, in-body-only scan (1, 1);
+    #   * `test_x.__test__ = False` on a FUNCTION              -> pytest 1 of 2, scan (2, 2);
+    #   * `TestX.test_b.__test__ = False` on a METHOD          -> pytest 1 of 2, scan (2, 2).
+    # So the scan descends into every CLASS body too, and it MODELS a literal: a FALSEY constant drops the
+    # object, a TRUE constant SELECTS it (`isnosetest` reads `__test__ IS True`, so `helper.__test__ = True`
+    # makes pytest collect `helper` — measured 2 for that module). Only a non-literal is unreadable,
+    # because its truthiness is a runtime fact.
+    _bindable = {
         n.name
-        for n in tree.body
+        for _b in [tree.body, *(c.body for c in ast.walk(tree) if isinstance(c, ast.ClassDef))]
+        for n in _b
         if isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
     }
+    _refused_out_of_body: set[str] = set()
+    _forced_out_of_body: set[str] = set()
     _case_names: set[str] = set()
     for _body in [tree.body, *(n.body for n in ast.walk(tree) if isinstance(n, ast.ClassDef))]:
         _case_names |= _unittest_case_classes(_body)
-    for node in tree.body:
-        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
-            continue
-        for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
+
+    def _scan_out_of_body(scan_body: list[ast.stmt]) -> None:
+        for scan_node in scan_body:
+            if not isinstance(scan_node, (ast.Assign, ast.AnnAssign)) or scan_node.value is None:
+                continue
+            scan_targets = (
+                scan_node.targets if isinstance(scan_node, ast.Assign) else [scan_node.target]
+            )
+            for scan_target in scan_targets:
+                if not isinstance(scan_target, ast.Attribute) or scan_target.attr != "__test__":
+                    continue
+                # The bound object is `scan_target.value`: a bare `Name` for `TestX.__test__`, or an
+                # `Attribute` for `TestX.test_b.__test__` — where the bound name is the ATTRIBUTE, not the
+                # last Name in the chain (reading the Name instead bound `TestX` and left `test_b` counted).
+                bound = scan_target.value
+                if isinstance(bound, ast.Name):
+                    obj_name = bound.id
+                elif isinstance(bound, ast.Attribute):
+                    obj_name = bound.attr
+                else:
+                    continue
+                if obj_name not in _bindable and not isinstance(bound, ast.Attribute):
+                    continue
+                if isinstance(scan_node.value, ast.Constant):
+                    if scan_node.value.value:
+                        _forced_out_of_body.add(obj_name)
+                    else:
+                        _refused_out_of_body.add(obj_name)
+                else:
+                    unreadable.append(
+                        f"`{ast.unparse(scan_target)}` is assigned from OUTSIDE the object's body to a "
+                        "NON-literal, so the value pytest reads is a runtime fact this derivation "
+                        "cannot read"
+                    )
+
+    _scan_out_of_body(tree.body)
+    for _cls in ast.walk(tree):
+        if isinstance(_cls, ast.ClassDef):
+            _scan_out_of_body(_cls.body)
+    # ⛔ A refused CLASS also drops its METHODS: `nodes` holds the method nodes, not the class, so a
+    # name filter over `nodes` alone left `TestX.__test__ = False` still counting `test_a`.
+    _refused_members: set[str] = set()
+    for _cls in ast.walk(tree):
+        if isinstance(_cls, ast.ClassDef) and _cls.name in _refused_out_of_body:
+            _refused_members |= {
+                m.name
+                for m in _cls.body
+                if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+    nodes = [
+        node
+        for node in nodes
+        if not (
+            isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+            and (node.name in _refused_out_of_body or node.name in _refused_members)
+        )
+    ]
+    for _all_bodies in [tree.body, *(c.body for c in ast.walk(tree) if isinstance(c, ast.ClassDef))]:
+        for _cand in _all_bodies:
+            if getattr(_cand, "name", None) not in _forced_out_of_body:
+                continue
             if (
-                isinstance(target, ast.Attribute)
-                and target.attr == "__test__"
-                and isinstance(target.value, ast.Name)
-                and target.value.id in _module_class_names
+                _cand in nodes
+                or _is_fixture_function(_cand)
+                or (isinstance(_cand, ast.ClassDef) and _is_abstract_class(_cand))
             ):
+                continue
+            # `__test__ = True` is a POSITIVE selection at `istestclass`/`istestfunction`, so a name the
+            # walk skipped for its SPELLING must still be counted — measured: `helper.__test__ = True`
+            # makes pytest collect `helper` (2 for that module) even though it is not `test`-named.
+            nodes.append(_cand)
+
+    # ⛔ An IMPORTED base is a shape this derivation cannot model: `PyCollector.collect` walks the whole
+    # `__mro__` for methods, and `hasinit`/`hasnew` use `getattr`, so the parent can contribute BOTH cases
+    # and refusals from another module. The same-module `inheriting` arm covers only what it can see.
+    # Measured round-31 P3: an imported base with a test method collects **2** where the derivation said
+    # **1**; an imported base defining `__init__` collects **0** where the derivation said **1**. Fail
+    # closed on ANY base that is not a module-local class, `object`, a `unittest` name, or `ABC`.
+    _local_classes = {n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef)}
+    _known_bases = {"object", "TestCase", "ABC", "ABCMeta"}
+    for _node in ast.walk(tree):
+        if not isinstance(_node, ast.ClassDef):
+            continue
+        for _base in _node.bases:
+            _leaf = ast.unparse(_base).split(".")[-1]
+            if _leaf not in _local_classes and _leaf not in _known_bases:
                 unreadable.append(
-                    f"`{target.value.id}.__test__` is assigned from OUTSIDE the class body, so the value "
-                    "pytest reads is not the one in the class — this derivation cannot read it"
+                    f"class `{_node.name}`: base `{ast.unparse(_base)}` is not defined in this module, so "
+                    "the methods and `__init__`/`__new__` refusals it contributes cannot be read here"
                 )
+                break
     # ⛔ A `unittest.TestCase` whose `__init__` cannot take the argument pytest passes is a collection ERROR,
     # not a count (`UnitTestCase.newinstance` calls `self.obj("runTest")`) — measured: `no tests collected,
     # 1 error`, rc=2. Failing closed is the honest answer; `(0, 0)` would read as a clean empty population.
@@ -1942,6 +2162,46 @@ class TestTheDocsAreDiscoverableAndResolve:
             f"{_derive_population(more.read_text())}"
         )
 
+        # --- Round-31 P3: four more rows of pytest's collection rule, each measured with
+        # `--collect-only`, each a SILENT number before the fix. An ABSTRACT class is refused on BOTH
+        # paths (`inspect.isabstract`); a `@pytest.fixture` named `test_*` is not collected
+        # (`istestfunction` ends on `getfixturemarker(obj) is None`); the function-name filter is the
+        # PREFIX `test` (pytest's `python_functions=["test"]`, unittest's `testMethodPrefix="test"`), not
+        # `test_`; and `UnitTestCase.collect`'s `runTest` FALLBACK yields the class's own `runTest` when it
+        # finds no `test*` method. ---
+        rule = tmp_path / "synthetic_rule_shapes.py"
+        rule.write_text(
+            "import abc\n"
+            "import unittest\n"
+            "\n"
+            "import pytest\n"
+            "\n"
+            "\n"
+            "class TestAbstract(abc.ABC):\n"
+            "    @abc.abstractmethod\n"
+            "    def test_never(self):\n        ...\n"
+            "\n"
+            "    def test_also_never(self):\n        pass\n"
+            "\n"
+            "\n"
+            "@pytest.fixture\n"
+            "def test_fixture():\n    return 1\n"
+            "\n"
+            "\n"
+            "def testalpha():\n"
+            "    pass\n"
+            "\n"
+            "\n"
+            "class FoldCase(unittest.TestCase):\n"
+            "    def runTest(self):\n        pass\n"
+        )
+        assert _derive_population(rule.read_text()) == (2, 2), (
+            "pytest collects exactly TWO here (`testalpha`, and `FoldCase::runTest` from the unittest "
+            "`runTest` fallback). `TestAbstract` is abstract on both paths; `test_fixture` is a fixture; "
+            "and `testalpha` proves the prefix is `test`, not `test_` — a `test_`-prefixed walk sees "
+            f"neither. Got {_derive_population(rule.read_text())}"
+        )
+
         # --- ISSUE 2: the AST symbol check keeps class qualification. ---
         assert _ast_declares(module, "test_module_level") is True
         assert _ast_declares(module, "TestOuter.test_a_method") is True
@@ -2030,16 +2290,10 @@ class TestTheDocsAreDiscoverableAndResolve:
             "module-level `__test__` bound to a non-literal": (
                 "FLAG = True\n__test__ = FLAG\ndef test_a():\n    pass\n"
             ),
-            # Round-29 P3 — two more shapes that got a SILENT number where pytest reads something else.
-            "`__test__` assigned from OUTSIDE the class body": (
-                "class TestX:\n    def test_a(self):\n        pass\nTestX.__test__ = False\n"
-            ),
-            # Round-30 P3 — a `__test__` bound OUTSIDE the object's own body is not in its AST, and a
-            # name-collision guess would be a silent number, so it is an ERROR. Measured for a FUNCTION:
-            # `test_x.__test__ = False` drops that test (pytest's module collector reads
-            # `getattr(obj, "__test__", True)`), so counting it was an OVERCOUNT.
-            "method-level `__test__` assigned after the function": (
-                "def test_disabled():\n    pass\ntest_disabled.__test__ = False\n"
+            # Round-31 P3 — a base this module does not define contributes methods AND
+            # `__init__`/`__new__` refusals through the MRO, which cannot be read here.
+            "class inheriting a base from another module": (
+                "from other import Base2\nclass TestChild(Base2):\n    def test_c(self):\n        pass\n"
             ),
             "`unittest.TestCase` whose `__init__` is a collection ERROR": (
                 "import unittest\n"
@@ -2052,6 +2306,35 @@ class TestTheDocsAreDiscoverableAndResolve:
             with pytest.raises(AssertionError, match="cannot derive the collected count"):
                 _derive_population(source)
             del label  # the dict key documents the case; the assertion is what matters
+
+        # --- Round-31 P3 — three shapes this helper now MODELS rather than refuses, each measured:
+        # a `__test__` bound outside the object's body (on a class, on a method, and on a function), where
+        # a FALSEY literal drops the object and a TRUE one SELECTS it. ---
+        for label, source, expected in (
+            (
+                "`TestX.__test__ = False` drops the whole class",
+                "class TestX:\n    def test_a(self):\n        pass\nTestX.__test__ = False\n",
+                (0, 0),
+            ),
+            (
+                "`TestX.test_b.__test__ = False` drops ONE method",
+                "class TestX:\n    def test_a(self):\n        pass\n"
+                "    def test_b(self):\n        pass\nTestX.test_b.__test__ = False\n",
+                (1, 1),
+            ),
+            (
+                "`helper.__test__ = True` SELECTS a non-`test`-named function",
+                "def helper():\n    pass\nhelper.__test__ = True\ndef test_a():\n    pass\n",
+                (2, 2),
+            ),
+            (
+                "`test_x.__test__ = False` drops that test",
+                "def test_disabled():\n    pass\ntest_disabled.__test__ = False\n"
+                "def test_ok():\n    pass\n",
+                (1, 1),
+            ),
+        ):
+            assert _derive_population(source) == expected, f"{label}: {_derive_population(source)}"
 
         # --- The OVERCOUNT direction: pytest's default `python_classes = Test`, so a NON-`Test` class
         # holding a `test_` method is collected by nobody. Counting it was the direction whose tempting
