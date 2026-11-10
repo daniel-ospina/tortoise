@@ -234,7 +234,7 @@ failure, not a skip — so the A-rows carry them too, and §6 I1 freezes the *co
 | `metric` | edges of declared types + rollup precision | attach/mint/held distribution | unlinked share + both S5 jobs | per-layer label coverage: the declared kinds present, and things/events carrying the label the ontology declares for them (the per-writer split and the typed/`statement`/`NULL` shares are reported **diagnostics**) | subjects + 4 families + 2 readers |
 | `denominator` | transitive label set | definite-description candidates | statements written by the run | the things-and-events population of the named graph, counted per layer | bindable subject slots |
 | `floor` (+ `kind`) | ≥30 pairs · *sample sufficiency* | ≥30 candidates · *sample sufficiency* | ≥30 statements · *sample sufficiency* | ≥1 labelled node · *non-vacuity* | ≥5 slots · *constructibility* |
-| `threshold` | precision ≥ 0.80 **and** direct-set reachability | attach > mint, 100 % classified | share lower **and** component arm positive | **appears + labelled** — the percentage is **reported, not chased**, and there is no `≥ X %` bar | families non-zero **and** readers non-empty |
+| `threshold` | precision ≥ 0.80 **and** direct-set reachability | attach > mint, 100 % classified | share lower **and** component arm positive | **appears + labelled** — the percentage is **reported, not chased**, and there is no `≥ X %` bar. ⛔ **Its registered cell therefore stays `UNMEASURED(<the rule>)`, not a comparator**: A4 is a *registered non-bar* (`REGISTERED_NON_BAR_ROWS`), and the checker refuses a numeric threshold on it (`capstone_preregistration_check.py:4011-4020`). The *rule* is what the verdict reads; the cell records that the bar is a rule | families non-zero **and** readers non-empty |
 | `corpus_id` | `a-corpus` | `a-corpus` | `a-corpus` | `fleet-graph` | `a-corpus` |
 | floor number (read from `denominator_floors`) | `a1_labelled_pairs: 30` | `a2_candidates: 30` | `a3_statements: 30` | `a4_labelled_nodes: 1` | `a5_slots: 5` |
 | `threshold_basis` | the ~10 pp resolution argument (`EXTRACTOR-V4-ARCHITECTURE.md:1197`) | same | the owner's own 9,910/15,534 baseline | "0 of 0 labelled is not coverage; a declared kind that is absent, or a node left unlabelled, is a failing run" | presence question, not a statistic |
@@ -391,6 +391,28 @@ assertion (`:803`), `{len(red)}/5` (`:1350`), the `5/5` strings (`:1369`, `:1536
 `blocker-states.json` must move too** — a non-green A-row reds V12 unless every blocker it cites is covered there,
 which the first version of this section omitted.
 
+⛔ **A sixth artifact moves, and this list omitted it: `REGISTERED_NON_BAR_ROWS`.**
+`capstone_preregistration_check.py:375` pins `REGISTERED_NON_BAR_ROWS = frozenset({"A4"})`, and two arms make it
+load-bearing rather than decorative:
+
+- `:4011-4020` — the **reverse direction**: a row that is in the pin but whose threshold does **not** say
+  `UNMEASURED(...)` is **refused** (*"drop it from `REGISTERED_NON_BAR_ROWS` or restore `UNMEASURED(...)`"*). So
+  writing A4's §4.1 threshold cell as a comparator does not register a bar; it reds the gate.
+- `:376` — a module-level `assert not (REGISTERED_NON_BAR_ROWS & set(REQUIRED_CRITERIA))`. Adding A4 to
+  `REQUIRED_CRITERIA` (which the line above *does* move) fires **at import**, erroring the module and every test
+  that imports it — not reporting a finding.
+
+**A4's registration is therefore decided once, here, and it is (b): A4 stays a non-bar.** The owner ruling of
+2026-11-09 sets A4's bar as *"appears + labelled, percentage reported not chased"* — a **rule**, not a
+threshold — so giving it a comparator would reverse that ruling, which is a reopen, not a plan edit. Concretely,
+C1's amendment must: keep `"A4"` in `REGISTERED_NON_BAR_ROWS`; keep the record's A4 cell as
+`UNMEASURED(<the rule + the owner ruling as its basis>)`, which `:3940-3960` accepts for a pinned non-bar row;
+spend `a4_labelled_nodes: 1` as the *non-vacuity floor* only, never re-scoped as a rate (`:3983-4008` refuses
+that); and leave A4 out of `REQUIRED_CRITERIA`. A4 is still a **verdict row** — it can fail (a declared kind
+absent; a thing or event left unlabelled) — but its verdict comes from the rule, not from a numeric bar. A lane
+that wants A4 to carry a comparator must **reopen the owner ruling first**, and the same commit must then drop
+`"A4"` from the pin.
+
 ### 4.5 What does NOT change
 
 E-rows' metrics, denominators, thresholds, E1b's `m2` arm, E3's class set, and the `REFUSED`-is-neither-pass-nor-fail
@@ -413,7 +435,7 @@ vocabulary. **The A-rows are additive.**
 |---|---|---|
 | **G0** — the record is readable, on the **A-lane** | `prereg` appears **zero times** in `hosted_api.py`; the chain lives only in `capstone_run.py` | **OWED — new** · owner **C2** · refusal under I6 |
 | **G1** — posted-payload hash equals the row's pin, on the **A-lane** | the check does not exist: `payload_sha256` occurs only as an export/import envelope key, and `docs/evidence/7949-capstone/a-corpus/` does not exist | **OWED — new** · owner **C2**; the record-side map is C1's (seam split: C1 = map + CI pin, C2 = run-side hash + refusal) |
-| capture door (`POST /v1/sessions`) | **402 at 25,000 points** (`hosted_api.py:17368` the condition / `:17379` the raise) | `BLOCKED — capture refused 402`; never a zero, never a pass |
+| capture door (`POST /v1/sessions`) | **402 at 25,000 points** (`hosted_api.py:18205` the condition / `:18216` the raise, via `quota_refusal_payload`) | `BLOCKED — capture refused 402`; never a zero, never a pass |
 | registration → verdict gate | a new id the enum refuses | derive the enum (4.4) + a CI pin |
 | corpus pin | a row scored against another row's corpus | per-row `corpus_id`; refuse on mismatch |
 | `create_edge` (the A1 writer's boundary) | it **cannot** carry an anchor (`#5213` option 3) | documented, not fixed; E3's metric is `#9736`'s |
@@ -432,8 +454,10 @@ The architecture above declares Tier E the home of all measurement. **No existin
 | the hosted A-lane needs | the hosted API key + org/graph + a **point budget** - held by no workflow |
 
 ⚠️ **And the new job must join the register, or it is a fourth unrecorded runner.** The repo's non-gating-runner
-contract is a **lane membership** statement plus a **runner register** whose comment is *"the only record that a
-runner exists"* (`config/ci-surfaces.yml:10339-10357`; the lane→runner table is
+contract is a **lane membership** statement plus a **runner register** whose own words are *"this comment is the
+record"* (`config/ci-surfaces.yml`, the `# ── THE NON-GATING LANE (`on_demand:`) ──` block at `:11868-11900`, key
+`on_demand:` at `:11887` — cite the block by that heading, not by a line range: at the bundle's authoring head
+`641e5f1b37` the block sat at `:10339` and a forward merge moved it. The lane→runner table is
 `docs/ci/affected-test-selection.md:134-138`). The A-lane runs a **script** (`capstone_run.py`), not a test file, so
 it **cannot be an `on_demand:` member** and `leg_coverage_issues()` **cannot see it**.
 ⇒ **"Tier E" names three unreconciled populations** — `on_demand:` test files (the only one any check sees),

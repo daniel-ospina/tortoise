@@ -77,7 +77,7 @@ twin **builders** for 9 and 10 are the two gaps.
 |---|---|---|---|
 | `epic-align` | strategy review | ✅ **9 cycles recorded**, 5 of them P-counted → `NO ISSUES FOUND` at cycle 9 | `00-align.md` §6 (7×P1 + 17×P2 fixed across cycles 1/2/5/6/7; cycle 8 cosmetic-only; cycle 3 never run and cycle 4 caught by the decompose gate — both rows record it) |
 | `epic-research` | research brief review | ✅ **GATE B `NO ISSUES FOUND`**, GATE A cosmetic-only → fixed | `01-research-brief.md` |
-| `epic-scope` | scope review | ✅ **3 cycles** → cosmetic-only, all fixed | `02-scope.md` §"review" |
+| `epic-scope` | scope review | ✅ **3 cycles** → cosmetic-only, all fixed | **not in `02-scope.md`** (that file carries no scope-review section by design — its last line says the two reviews are recorded after confirmation). The record is the `#7949` pipeline comment of **2026-11-08T00:17:36Z** (`epic-scope ×3 … cosmetic-only`) |
 | `epic-scope` | **`duplication-architecture`** | ✅ ran, **`ISSUES — DEGRADED`** (registry 401); verdicts recorded, **not** fix-looped | `02-scope.md` §"verdicts recorded" |
 | Test-Design Gate | issue filed with the full map | ✅ **#11454** | — |
 | UX Design Gate | `UX_RATING` determination | ✅ **low**, no routing (below the ≥ medium threshold) | `02-scope.md` §3 |
