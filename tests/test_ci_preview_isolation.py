@@ -1111,7 +1111,14 @@ def test_an_unreadable_pid_file_is_not_the_gone_verdict(tmp_path: Path, state) -
     verdict at all, and the recorded process may well be alive — every sibling
     read in `cmd_alive` already carried the `|| true` this one lacked.
 
-    RED on the pre-fix code (**verified by running it**): rc 1 and no output.
+    Two unreadable shapes, because they fail on DIFFERENT hosts: a file with no
+    pid in it (deterministic everywhere), and a mode-000 file, which only denies
+    the read when the process is NOT root — root holds `CAP_DAC_OVERRIDE` and
+    reads it anyway, so that half skips rather than redding a correct helper
+    (the convention `test_e2e_wrangler_prewarm.py:839` already uses).
+
+    RED on the pre-fix code (**verified by running it**): the mode-000 shape gave
+    rc 1 with no output, and the empty shape gave rc 1 wearing the GONE code.
     """
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
     _wait_alive(victim.pid)
@@ -1120,6 +1127,22 @@ def test_an_unreadable_pid_file_is_not_the_gone_verdict(tmp_path: Path, state) -
         assert _script(
             "record", "--name", "app", "--pid", str(victim.pid), env=state
         ).returncode == 0
+
+        pfile.write_text("")
+        empty = _script("alive", "--name", "app", env=state)
+        assert empty.returncode == 12, (
+            "a pid file with no pid in it measured nothing, so `alive` must not "
+            f"answer with a state verdict: {empty.returncode} "
+            f"{empty.stdout}{empty.stderr}"
+        )
+        assert "PID FILE UNREADABLE" in empty.stdout, empty.stdout
+        assert " is GONE" not in empty.stdout, (
+            f"the empty pid file was reported as the gone verdict: {empty.stdout}")
+
+        if os.geteuid() == 0:
+            pytest.skip(
+                "root ignores the file mode this arm needs to make the read fail")
+        pfile.write_text(str(victim.pid))
         pfile.chmod(0o000)
         result = _script("alive", "--name", "app", env=state)
         assert result.returncode == 12, (

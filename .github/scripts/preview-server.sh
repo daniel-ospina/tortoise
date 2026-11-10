@@ -416,10 +416,11 @@ cmd_ready() {
 #     is the OPPOSITE mechanism. The `.refused` witness separates it
 #     (#11675 review, finding 1).
 #
-# Exit codes (see the header table): 0 alive and serving · 7 alive but not
-# serving · 8 pid recycled · 5 recorded then stopped · 6 never recorded ·
-# 10 record attempted and REFUSED · 1 gone · 9 alive but no port recorded, so
-# SERVING was not checked.
+# Exit codes (see the header table, which this list must not drift from):
+# 0 alive and serving · 7 alive but not serving · 8 pid recycled · 5 recorded
+# then stopped · 6 never recorded · 10 record attempted and REFUSED · 1 gone ·
+# 9 alive but no port recorded, so SERVING was not checked · 12 the pid FILE
+# itself could not be read, so NO verdict was taken (never reported as gone).
 cmd_alive() {
   local name
   name="$(name_flag alive "$@")"
