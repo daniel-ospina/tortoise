@@ -951,6 +951,7 @@ def test_a_citation_separated_by_whitespace_is_refused(tmp_path, monkeypatch):
         "tortoise/pipeline.py#L999999",
         "tortoise/pipeline.py#L16",
         "see tortoise/pipeline.py#L16 here",
+        "tortoise/pipeline.py#L 999999",
     ):
         with monkeypatch.context() as patch:
             _mutated(
