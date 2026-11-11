@@ -304,6 +304,103 @@ def test_absent_and_measured_symmetric_do_not_share_an_ordering_input(sdk):
         "the multiplicative confidence gate treated 'no belief' as a 0.5")
 
 
+def test_set_point_baseline_refuses_a_non_numeric_operand(sdk):
+    """Cycle 21 P3: a Boolean slipped every guard on the BASELINE writer.
+
+    `_reject_unrepresentable_number(True)` returns None (the numeric domain does
+    not treat a Boolean as an altered number) and `True < 0` is False, so
+    `set_point_baseline(claim, True, 0.5)` answered ok and stored `ep_alpha=true`
+    — which every reader then reports ABSENT, because a Boolean is not a number
+    — while the same call set `baseline_set` + `baseline_source="set-by-author"`,
+    freezing the claim against the source-inheritance recompute that would have
+    given it a readable belief. The caller was told the write succeeded.
+    """
+    proj = sdk._get_proj()
+    pid = sdk.create_point("statement", "ZQBASELINE guard probe")["id"]
+
+    for bad in (True, [0.7], "0.7", {"a": 1}):
+        with pytest.raises(ValueError):
+            sdk.set_point_baseline(pid, bad, 0.5)
+        stored = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.ep_alpha, "
+            "coalesce(n.baseline_set, false)", params={"id": pid}).result_set[0]
+        assert stored[0] is None, (bad, stored)
+        assert stored[1] is False, (bad, stored)
+
+    sdk.set_point_baseline(pid, 2.0, 1.0)
+    ann = annotate_ep_batch(proj.g, [pid])[pid]
+    assert ann.ep_state == EP_STATE_BASELINE, ann
+    assert ann.confidence_mean == pytest.approx(2.0 / 3.0, abs=1e-3), ann
+
+
+def test_the_persisted_why_snapshot_encodes_absent_as_absent(sdk):
+    """Cycle 21 P2: the DURABLE half of `why` had no test for its absent arm.
+
+    `why_snapshot._write` does `mean = float(raw_mean) if raw_mean is not None
+    else None`, and nothing could tell that from `… else 0.0` — including
+    `tests/test_why_snapshot_8099.py`, whose only `mean` assertion seeds a
+    MEASURED point (α=3, β=2 → 0.6), a value both variants produce. The file is
+    also `embedded_only`, so it skips on any URI lane. Under the mutation the
+    snapshot node served `confidence_mean: 0.0` for a claim nothing was measured
+    on — "maximum disbelief" in a column named ``mean``, persisted.
+    """
+    from tortoise import why_snapshot
+
+    proj = sdk._get_proj()
+    absent = sdk.create_point("statement", "ZQWHYSNAP no belief")["id"]
+    measured = sdk.create_point("statement", "ZQWHYSNAP measured")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 9.0, "
+                 "n.posterior_beta = 1.0", params={"id": measured})
+
+    summary = why_snapshot.precompute(proj, [absent, measured], purge=False)
+    assert summary.get("enabled", True), summary
+    assert summary.get("written", 0) >= 1, summary
+
+    rows = proj.g.query(
+        "MATCH (w:WhySnapshot) WHERE w.point_id IN $ids "
+        "RETURN w.point_id, w.confidence_mean",
+        params={"ids": [absent, measured]}).result_set
+    stored = {r[0]: r[1] for r in rows}
+    assert absent in stored, (
+        "the snapshot dropped the absent claim rather than encoding its "
+        f"absence: {stored}")
+    assert stored[absent] is None, (
+        "the persisted snapshot stored a NUMBER for a claim nothing was "
+        f"measured on: {stored[absent]!r} — 0.0 is maximum disbelief, not "
+        "'no belief'")
+    assert stored[measured] == pytest.approx(0.9, abs=1e-4), stored
+
+
+def test_the_subgraph_labels_a_terminal_claim_the_same_way_the_ep_block_does(sdk):
+    """Cycle 21 P3: the subgraph half of the #2490 fold was unpinned.
+
+    `SubgraphExpander` sets `ep_state_resolve(state, measured=measured_raw and
+    not is_terminal)`. Dropping the terminal conjunct made `recall_subgraph`
+    label a SUPERSEDED `(1.0, 1.0)` claim `measured` while the `ep` block on
+    the SAME response labelled it `baseline` — the "two halves of one reply
+    disagreeing about one claim" defect this issue removes. No test failed.
+    """
+    from tortoise.ranking import SubgraphExpander
+    from tortoise.why import assemble_why_blocks
+
+    proj = sdk._get_proj()
+    pid = sdk.create_point("statement", "ZQTERM a superseded claim")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 1.0, "
+                 "n.posterior_beta = 1.0, n.status = 'superseded'",
+                 params={"id": pid})
+
+    expanded = SubgraphExpander(projection=proj).expand([pid], depth=1)
+    nodes = expanded.get("nodes") if isinstance(expanded, dict) else expanded
+    node = next(n for n in nodes if n.get("id") == pid)
+    ep = assemble_why_blocks(proj, [pid])[pid].get("ep") or {}
+    assert node["ep_state"] == EP_STATE_BASELINE, (
+        "a superseded claim — whose posterior decayed at the terminalising "
+        f"write — is reported as {node['ep_state']} in the subgraph")
+    assert node["ep_state"] == ep.get("ep_state"), (
+        f"the response contradicts itself: subgraph {node['ep_state']!r} vs "
+        f"the ep block {ep.get('ep_state')!r}")
+
+
 def test_the_object_aggregate_reports_absent_without_a_mean_over_nothing(sdk):
     """Cycle 20: an Object whose about-Points carry NO belief.
 
@@ -2439,23 +2536,56 @@ def test_a_belief_value_the_store_cannot_read_is_refused_at_the_write(sdk):
     proj = sdk._get_proj()
     pid = sdk.create_point("statement", "ZQWRITE guard probe")["id"]
 
+    # Two refusal CLASSES, two owners, deliberately: a value that is not a number
+    # at all is refused HERE (the engine cannot inspect it), while a number the
+    # store cannot hold EXACTLY is refused by the #4647 domain guard with its own
+    # reason. `inf`/`nan` land in the second — so their message is the domain's,
+    # and its "store it as a string" advice does not apply to a belief column
+    # (a string belief is refused here; see the next case).
     for prop, bad in (
         ("posterior_alpha", [0.7]),
         ("posterior_beta", {"a": 1}),
         ("confidence", True),
         ("confidence", "abc"),
         ("confidence", "0.7"),
+    ):
+        with pytest.raises(ValueError) as exc:
+            sdk.update_point(pid, **{prop: bad})
+        assert "must be a number" in str(exc.value), (prop, bad, str(exc.value))
+    for prop, bad in (
         ("posterior_alpha", float("inf")),
         ("posterior_alpha", float("nan")),
     ):
         with pytest.raises(ValueError) as exc:
             sdk.update_point(pid, **{prop: bad})
-        assert "finite number" in str(exc.value), (prop, bad, str(exc.value))
+        assert "not a finite number" in str(exc.value), (prop, bad, str(exc.value))
         # …and nothing was written.
         stored = proj.g.query(
             f"MATCH (n:Point {{id:$id}}) RETURN n.{prop}",
             params={"id": pid}).result_set
         assert stored[0][0] is None, (prop, stored)
+
+    # Cycle 21: a number the store holds EXACTLY is accepted, even when it is not
+    # a builtin float — the representability question belongs to
+    # `numeric_domain.numeric_alteration_reason`, which certifies both of these.
+    # An inline `isinstance(int, float)` refused them and called them
+    # "malformed", a regression against the pre-PR tree.
+    from decimal import Decimal
+
+    sdk.update_point(pid, confidence=Decimal("0.5"))
+    assert annotate_ep_batch(proj.g, [pid])[pid].confidence_mean == pytest.approx(
+        0.5, abs=1e-6)
+    import numpy as np
+
+    sdk.update_point(pid, confidence=np.float64(0.5))
+    assert annotate_ep_batch(proj.g, [pid])[pid].confidence_mean == pytest.approx(
+        0.5, abs=1e-6)
+    # …and one it does NOT hold exactly is refused by the domain, with ITS
+    # reason (a precision loss is not "malformed").
+    with pytest.raises(ValueError) as exc:
+        sdk.update_point(pid, confidence=np.float32(0.1))
+    assert "exactly representable" in str(exc.value) or "alter" in str(
+        exc.value), str(exc.value)
 
     # The legitimate writes still work, including clearing.
     sdk.update_point(pid, confidence=0.42)
