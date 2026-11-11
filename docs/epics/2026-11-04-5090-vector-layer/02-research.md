@@ -155,8 +155,8 @@ comparables now say what that measurement will probably show, and how to run it:
 > *"`:Object` and `:Subject` keep their stored embedding … **No pass may remove those embeddings, and no pass
 > may stop writing them**"*, and it names **`:Object` and `:Subject` and no others**; for `:Event`, `:Source` and
 > `:Document` the 2026-09-24 direction stands (`STORAGE-ARCHITECTURE.md` §12.2c), so this pass's four-label /
-> five-`entity_type` census is never read as covered by that prohibition. What stays open is the DIFFERENT question of whether those
-> labels are **indexed**; the measurements below are the record of the pass, not current text.
+> five-`entity_type` census is never read as covered by that prohibition. What stays open is the DIFFERENT question of **when** those
+> labels are **indexed** — the ruling grants the index; the measurements below are the record of the pass, not current text.
 
 | date | source-tag | finding |
 |---|---|---|

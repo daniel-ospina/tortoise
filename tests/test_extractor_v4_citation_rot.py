@@ -21,7 +21,12 @@ WHAT THIS PINS
 --------------
 1. **`test_the_retracted_passages_do_not_reappear`** — each stale sentence is
    matched as a literal. This is the NON-VACUITY half: every string below was
-   present in the pre-fix document, so this file is red on it.
+   present in the pre-fix document, so this file is red on it. ⚠️ **Two entries
+   are the exception and say so where they sit** — the 2026-09-24
+   "population error" pair was live only at `a9f458b`, an intermediate commit of
+   this branch, so those two are red on the branch history rather than on
+   `origin/main`; they pin a wording this branch itself once carried, not one
+   that ever shipped.
 2. **`test_the_repaired_passages_still_state_the_design_facts`** — the repaired
    passages must POSITIVELY say what landed. A revert of the wording reds.
 3. **`test_the_code_still_agrees_with_the_corrected_passages`** — the code
@@ -286,8 +291,19 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[
         # clause would have stayed green. Pinned separately, so each fact reds
         # on its own deletion.
         STORAGE,
-        "STORAGE §12.2c leaves V3's remainder, for the ruled pair, the INDEX question",
-        "what remains of §14.3 V3 is whether they are INDEXED",
+        "STORAGE §12.2c leaves V3's remainder, for the ruled pair, WHEN the index is built",
+        "what remains of §14.3 V3 is *when* they are INDEXED",
+        "12.2c",
+    ),
+    (
+        # The replacement above swaps the pin's remainder clause; the sentence it
+        # lives in also carries the POSITIVE attribution that V1 settled WHERE the
+        # index lives. That half was pinned by the deleted literal and was dropped
+        # with it, so deleting the attribution would have stayed green. Pinned on
+        # its own, §12.2c-scoped.
+        STORAGE,
+        "STORAGE §12.2c still attributes the 2026-11-07 location decision to V1",
+        "settles where the vector index LIVES (Postgres, 2026-11-07)",
         "12.2c",
     ),
     (

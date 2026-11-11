@@ -230,7 +230,7 @@ Large-scale record-linkage work treats **name transformation** (nickname → can
 > [`6781921075`](https://github.com/daniel-ospina/tortoise/issues/11395#issuecomment-6781921075)) — for **`:Object`
 > and `:Subject`, the two labels that ruling names**: for `:Event`, `:Source` and `:Document` the 2026-09-24
 > direction stands (`STORAGE-ARCHITECTURE.md` §12.1b/§12.2c). What is still open
-> is the DIFFERENT question of whether those labels are **indexed**. Every "rides on V1,
+> is the DIFFERENT question of **when** those labels are **indexed** — the ruling grants the index. Every "rides on V1,
 > which is OPEN" below is the state this brief was written against, kept as the record and **not** as current text.
 
 Each candidate practice below was tested against the recorded decisions **before** cost, quality, or convergence was weighed.
@@ -376,7 +376,7 @@ The issue's mandate names **alias resolution** explicitly, and it is the one run
 | Jev's value is typed routing/cost, not accuracy | **MEDIUM** ⚠️ emerging | X6 + E9 |
 | No off-the-shelf scoped-ER reference exists | **LOW** ⚠️ single-source | X8 + predecessor X9 |
 
-**Adoption gate line:** `Adoption gate: adopt (scoped candidates · deterministic alias normalisation bound to the opaque id · Jev SELECT · placeholder quarantine · entity review queue) | owner question (entity-vector leg — V1's LOCATION is decided 2026-11-07 (Postgres); §14.3 V3's index half — whether these vectors get an index — stays open; the carry half is KEEP 2026-11-10 for :Object/:Subject) | refuse (scope-first identity key — contradicts #3584; replacing S3 — owner sequencing)`.
+**Adoption gate line:** `Adoption gate: adopt (scoped candidates · deterministic alias normalisation bound to the opaque id · Jev SELECT · placeholder quarantine · entity review queue) | owner question (entity-vector leg — V1's LOCATION is decided 2026-11-07 (Postgres); §14.3 V3's index half — *when* these vectors get the index the ruling grants — stays open; the carry half is KEEP 2026-11-10 for :Object/:Subject) | refuse (scope-first identity key — contradicts #3584; replacing S3 — owner sequencing)`.
 
 ---
 

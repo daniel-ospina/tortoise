@@ -346,4 +346,4 @@ the served set is `{Event, Object, Point, Source, Subject}` and only `Point` is 
   `live-v4`, `#10976`) **+ the payload axis as the 2026-09-24 measurement it belongs to: 33,580
   embeddings ≈ 51.6 MB, of which the unindexed `Object`+`Event` 12,657 ≈ 19.4 MB was the removable
   subset.** The ≈50 MB was carried as a current figure long after it was dated, and this epic's own
-  2026-10-08 comment had already narrowed what removal could claim to the 19.4 MB — ⚠️ **and the 2026-11-10 ruling then refused removal for `:Object`/`:Subject` entirely, so the figure is history, not a licence.**
+  2026-10-08 comment had already narrowed what removal could claim to the 19.4 MB — ⚠️ **and the 2026-11-10 ruling then refused removal for `:Object`/`:Subject`, the two labels it names — the 4,798 `:Event` vectors in that figure rest on the 2026-09-24 direction, which authorises no removal either — so the figure is history, not a licence.**
