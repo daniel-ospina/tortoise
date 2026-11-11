@@ -2345,8 +2345,8 @@ def _pack_selection_order(entry: dict) -> tuple:
     revision wins, and that is a deliberate choice: `revision` is the optimistic
     token a client holds, so the HIGHEST published token wins — NOT that the
     newest DECISION wins (a re-pin restarts it; collapse reported). ``props``
-    (the full property map, repr'd) only breaks a revision tie.
-    breaks a revision tie, so the outcome is REPRODUCIBLE even though the
+    — the full property map, repr'd — only breaks a revision tie, so the
+    outcome is REPRODUCIBLE even though the
     capture answers in whatever order the graph returns — the same reason
     `_team_meta_order` carries a secondary key.
     """

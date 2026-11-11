@@ -365,10 +365,11 @@ def migrate(force: bool = False) -> dict:
                     # where it is true.
                     logger.warning(
                         "rebuild: the migrated graph's :PackSelection pack-set "
-                        "marker is NOT confirmed intact (%s) — the capture read "
-                        "the graph it is about to wipe (the fresh `target`), so "
-                        "the marker was NOT OBSERVED, not observed gone — this "
-                        "is not an observed loss (#9752/#11866)", _label)
+                        "marker is NOT confirmed intact (state UNKNOWN — the "
+                        "CAPTURE SOURCE, not a pre-preservation sidecar) — the "
+                        "capture read the graph it is about to wipe (the fresh "
+                        "`target`), so the marker was NOT OBSERVED, not observed "
+                        "gone — this is not an observed loss (#9752/#11866)")
                 else:
                     logger.warning(
                         "rebuild: the migrated graph's :PackSelection pack-set "
@@ -492,10 +493,11 @@ def main(argv: list[str] | None = None) -> int:
                             "pack_selection_state_unknown_inherited")):
                     logger.warning(
                         "migrated graph's :PackSelection pack-set marker is NOT "
-                        "confirmed intact (%s) — the capture read the graph it "
-                        "is about to wipe (the fresh `target`), so the marker "
-                        "was NOT OBSERVED, not observed gone — this is not an "
-                        "observed loss (#9752/#11866).", _label)
+                        "confirmed intact (state UNKNOWN — the CAPTURE SOURCE, "
+                        "not a pre-preservation sidecar) — the capture read the "
+                        "graph it is about to wipe (the fresh `target`), so the "
+                        "marker was NOT OBSERVED, not observed gone — this is "
+                        "not an observed loss (#9752/#11866).")
                 else:
                     logger.warning(
                         "migrated graph's :PackSelection pack-set marker is NOT "

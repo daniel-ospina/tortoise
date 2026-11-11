@@ -1376,7 +1376,11 @@ def test_migrate_route_does_not_report_the_empty_target_as_verified(
     assert result["pack_selection_state_unknown"] is True
     assert result["pack_selection_gap"] == 1
     msgs = [r.getMessage() for r in caplog.records]
-    assert any(":PackSelection" in m and "pre-preservation/UNKNOWN" in m
+    # ⛔ NOT `pre-preservation/UNKNOWN`: this shape has no pre-preservation
+    # sidecar at all — the producer is the route's own empty-capture override —
+    # so the label must name the CAPTURE SOURCE rather than an artefact that
+    # does not exist on this path (#9752 review round 4).
+    assert any(":PackSelection" in m and "CAPTURE SOURCE" in m
                for m in msgs), (
         "the route must NAME the state it cannot observe, or the only surface a "
         f"human runs stays silent: {msgs}")
@@ -1577,7 +1581,12 @@ def test_migrate_cli_reports_the_pack_selection_gap(caplog, monkeypatch):
     with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
         assert mdb.main(["--force"]) == 0
     msgs = " | ".join(r.getMessage() for r in caplog.records)
-    assert "pre-preservation/UNKNOWN" in msgs, msgs
+    # The dict carries no `pack_selection_state_unknown_inherited`, so this is
+    # shape (a): the label names the CAPTURE SOURCE, never the absent sidecar
+    # (#9752 review round 4). The inherited shape keeps `pre-preservation` and is
+    # pinned by `test_migrate_route_keeps_the_error_pointer_for_a_rescue_file`.
+    assert "CAPTURE SOURCE" in msgs, msgs
+    assert "pre-preservation/UNKNOWN" not in msgs, msgs
     assert "restore gap" not in msgs, msgs
     # #11866: `main()` printed the shared consequence on BOTH producers' shape,
     # so the CLI — the surface a human actually runs — said "the pre-wipe
@@ -1853,7 +1862,7 @@ def test_rebuild_all_reports_the_true_absence_it_observed(tmp_path, caplog,
     the actual #9752 harm ("the graph now reads as UNCONFIGURED, a pack the
     admin had REMOVED is back in the approved set") — was pinned by NO test.
     Measured at this head: rewriting it to `elif False:` leaves the whole file
-    GREEN (89 passed across the four rebuild suites, 34 in this one). A report
+    GREEN (94 passed across the four rebuild suites, 39 in this one). A report
     that can be deleted without reddening anything is not a report; it is dead
     code with a log line, which is the class this PR exists to remove.
 
@@ -1909,7 +1918,7 @@ def test_replay_log_reports_the_absence_arm_it_observed(tmp_path, caplog,
     FAILING VALUE: the `else:` under the read-back — the journal-replay path's
     only statement that a lost marker reads as UNCONFIGURED — is unpinned.
     Measured at this head: `logger.error(` → `logger.debug(` on that arm leaves
-    this file GREEN (34 passed), so the single operator-visible signal on the
+    this file GREEN (39 passed), so the single operator-visible signal on the
     journal-only path can be silenced by an edit nothing notices.
 
     REACHABLE: `_replay_log` really runs over a real journal and the read-back

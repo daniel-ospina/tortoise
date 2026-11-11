@@ -1944,9 +1944,9 @@ surfaces:
   # pin that says a rebuilt graph must read as provisioned.
   - test_rebuild_team_meta_marker_5353.py
   # #9752: the :PackSelection pack-set marker across the same wipe+replay. The
-  # `pack_selection` sidecar section lives in tortoise/projection/ (a
-  # SHARED_MODULE, so a change there already selects the full matrix), but the
-  # state the marker pins is written and read by
+  # `pack_selection` sidecar section lives in `tortoise/projection/__init__.py`
+  # (a SHARED_MODULE, so a change to that FILE already selects the full matrix),
+  # but the state the marker pins is written and read by
   # `tortoise/pack_state.py` AND served by the per-graph `GET`/`PUT
   # /v1/graphs/{graph_id}/packs` routes in `tortoise/hosted_api.py` (an exact
   # `api` SOURCE_PATTERN) — so without this arm a hosted_api-only change to the
@@ -5835,10 +5835,12 @@ surfaces:
   # fallback), over the `#2789` guard's probe in tortoise/hosted_api.py.
   - test_rebuild_team_meta_marker_5353.py
   # #9752: the same wipe+replay drives the `pack_selection` sidecar section and
-  # the post-restore marker verification, both in tortoise/projection/ (core
-  # fallback), over `tortoise/pack_state.py`'s marker read
-  # (`resolved_pack_set`) — none of which matches a named SOURCE_PATTERN, so
-  # this arm is what runs it on a projection/pack_state change.
+  # the post-restore marker verification, both in `tortoise/projection/__init__.py`
+  # — which is a SHARED_MODULE, so a change THERE already selects the full matrix
+  # and does not need this arm. What this arm adds is `tortoise/pack_state.py`'s
+  # marker read (`resolved_pack_set`), which matches no named SOURCE_PATTERN, so
+  # without this row a `pack_state.py`-only change could ship the marker rule
+  # unexercised.
   - test_rebuild_pack_selection_marker_9752.py
   # #9210: the SAME wipe+replay, read from the other side — every non-record
   # snapshot-restore leg (`:Batch`, `:Session`, onboarding, `:TeamMeta`, the
@@ -11339,6 +11341,7 @@ durations:
   test_source_rematerialisation_5024.py: 1.4  # #5024: 30 tests (21 + 9 review-round-6 pins), docker FalkorDB — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 1.3
   test_source_version_window_3644.py: 6.1  # #3644: 19 tests, embedded carve-out lane; fleet-contention sensitive — redislite start failures under load, not assertions — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 5.7
   test_rebuild_event_meta_watermark_4653.py: 3.0  # #4653: 29 tests, docker FalkorDB — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.1
+  test_rebuild_pack_selection_marker_9752.py: 2.0  # new in #9752; the row must EXIST rather than default: the `core` registration puts one more fast file in `fast_pool()`, and `--integrity`'s duration-coverage floor is measured against that pool's own size. Flat `DEFAULT_FAST_WEIGHT` because a file a PR ADDS cannot carry a CI junit reading yet (the refresher samples push-to-main runs only — the #3400/#4348 trap), NOT because 2.0 describes it: the file is graph-touching and its own suite took ~8 min embedded at this branch's head, so read 2.0 as a placeholder shard-layout input and re-base it from the first push-to-main sweep — `tools/ci_timing.py --refresh-durations` does that.
   test_restore_seq_3902.py: 0.7  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 0.5
   test_retention_promise.py: 5.6  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 6.4
   test_retired_tools.py: 0.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.3
