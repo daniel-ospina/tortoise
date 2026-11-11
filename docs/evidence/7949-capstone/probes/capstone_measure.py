@@ -3148,6 +3148,12 @@ def _a4_layer_counts(projection, label: str, kind_prop: str) -> dict[str, int]:
     (`is_episodic`) and operator Points (`is_operator`) are not claims, and counting them read
     ~45 % "typed" against the owner's 0.6 % reading. Things and events carry no such exclusion —
     an `:Object` is a thing and an `:Event` is an event, by label.
+
+    ⛔ TRUTHINESS, not `IS NULL`: `create_point(is_episodic=False)` really writes the property
+    (`projection/entities.py:3036`), so an explicit `false` is a CLAIM — `IS NULL` dropped it from
+    the denominator while the capture count reported it as a turn row it is not. The same predicate
+    the file's own `POINT_COMPOSITION_CYPHER` uses; ⛔ NOT `tortoise/quota.py:1133`, which tests
+    `is_episodic` ALONE and would count an operator Point as a claim (#10982 review round 2).
     """
     where = ""
     if label == "Point":
