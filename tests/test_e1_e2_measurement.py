@@ -3337,7 +3337,7 @@ def _dict_name_compares(path):
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if not isinstance(node, ast.Dict):
             continue
-        for key, value in zip(node.keys, node.values):
+        for key, value in zip(node.keys, node.values, strict=True):
             if not (isinstance(key, ast.Constant) and isinstance(value, ast.Compare)):
                 continue
             left, right = value.left, value.comparators[0]
