@@ -270,7 +270,7 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   it cannot red this repository's own prose. Rewriting a citation's delimiter is therefore **not**
   universally refused: `path#LINE` (the bare-number form, which IS what collides with issue refs),
   `path@LINE`, `path-LINE`, `path_LINE`, `path/LINE`, `path,LINE` and
-  `path:L LINE` are **named carve-outs**, exactly as the two below are, because a rule that refuses
+  `path:L LINE` and `path:L16` (the `#L16` sibling of a permalink) are **named carve-outs**, exactly as the two below are, because a rule that refuses
   this page's own issue refs and paths is the false-accusation class one arm over — and so are
   **`path N --flag`** (a numeric ARGUMENT rather than a line, indistinguishable from a command that
   does not start with a recognised program name) and an **HTTP-status line** (a page name followed by
