@@ -2489,8 +2489,15 @@ to answer.
   `9ba2da35`. ⛔ They are not all still live: `main`'s later merges (`#11836` and those after it)
   moved `sdk.py` again, and §10.25 measures that movement DELIBERATELY without a constant for
   exactly this reason, so the `sdk.py` numbers are historical at this head. The other three
-  files' cites still resolve (each re-opened here). Beyond its own entries, nothing outside
-  `tortoise/projection/__init__.py` was re-pointed by this entry.
+  files' cites still resolve for the `extractor_v2.py` group and `projection/entities.py:1478`
+  (re-opened here) — ⛔ **but NOT for `hosted_api.py`**, whose pivot has moved on: `:23466` WAS
+  `life = proj.g.query(LIFETIME_MEMORY_QUERY).result_set` at this entry's own head and reads
+  `    )` on the merged tree, where the pivot is at `:23477`. It moved under `main`'s `#11803`
+  family, not under anything this branch did, and NO gate can see it: the bundle sweep's
+  `_BUNDLE_SOURCES` covers `sdk.py`, `edges.py`, `extractor_v2.py` and `projection/*.py` and not
+  `hosted_api.py`. It is HISTORICAL here too — re-derive by NAME (`LIFETIME_MEMORY_QUERY`'s
+  `proj.g.query(...)` read inside `_read_graph`), never by offset. Beyond its own entries, nothing
+  outside `tortoise/projection/__init__.py` was re-pointed by this entry.
 - **What moved: one citation, and nothing that is a protocol value.** No metric, denominator,
   threshold, class set or corpus pin is changed — every §1-§9 criterion VALUE and the E4
   denominator are the ones this record froze. `document_sha256` is re-cut in this same commit, per

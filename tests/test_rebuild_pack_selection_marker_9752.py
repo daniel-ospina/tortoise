@@ -1574,6 +1574,13 @@ def test_migrate_route_keeps_the_UNCONFIGURED_consequence_on_shape_a(
     assert "not an observed loss" in msg, (
         f"the consequence must stay bounded to what was observed: {msg}")
     assert msg.index("capture read") < msg.index("UNCONFIGURED"), msg
+    # The docstring above promises the RETURNED dict too, and a caller branches
+    # on exactly these two: without these assertions `result` is an unused local
+    # (ruff F841, which reds the repo-wide lint leg) and the claim is false.
+    assert result["pack_selection_state_unknown"] is True, result
+    assert result["pack_selection_state_unknown_inherited"] is False, (
+        "this route's own empty-capture override must report itself as NOT "
+        f"inherited, or the CLI prints the sidecar cause: {result}")
 
 
 def test_migrate_route_keeps_the_error_pointer_for_a_rescue_file(

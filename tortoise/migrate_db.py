@@ -277,7 +277,7 @@ def migrate(force: bool = False) -> dict:
             # it is the same verdict. The sidecar is keyed to `log_dir`, never
             # to the DB's directory: `prewipe_snapshot_path(log_dir)`
             # (`projection/__init__.py:2656`, read at `:14524`) is handed the
-            # SOURCE's `events_dir` below (`:216`), and the rebuild warns
+            # SOURCE's `events_dir` below (`:234`), and the rebuild warns
             # explicitly when the two directories differ (`:14525-14535`).
             #
             # `not pack_selection_expected` makes this the EXACT empty-capture
