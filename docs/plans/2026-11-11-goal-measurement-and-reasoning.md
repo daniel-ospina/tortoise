@@ -73,7 +73,7 @@ Measured at `32c0f39d4b` (with the two `search_engine.py` citations re-anchored 
 | 2 | a reading is never mutated; a correction is a new reading that retires the old | replace | ⛔ | an `:Event` cannot be superseded (`LIFECYCLE_FANOUT_QUERY` is `MATCH (n:Point {id:$id})`, `live.py:386`) — and it **can** be marked: `update_entity(event, status=…)` is accepted and `ep.py:2128` **honours** it (the node is stripped from factors), while **no retrieval leg filters it** (`_STATUS_FILTERED_LABELS` omits `Event`) — **#11825** |
 | 3 | a target states comparator + threshold (+ a due, **proposed — see §6**) | decide | ⛔ | no comparator field on any target — the shipped `portfolio:allocationTarget` (a `target` subclass, `packs/investment-portfolio-manager/manifest.yaml:60`) carries a declared percent value and **no comparison** |
 | 4 | **compare the current reading to the target → a state** | decide | ⛔ | no goal-scoped comparator or threshold exists. The word appears in 7 lines under `tortoise/` — all unrelated commentary, on no goal or target (`rg -c '\bcomparator\b' tortoise/*.py tortoise/pi-hooks/*.ts`): tolerance policy `reconciliation.py:75`, search ordering `search_engine.py:4388`, NaN ordering `:5095`, provider AST `model_adapters.py:596`, stored-form drift `stored_form.py:19` and `:42`, and one test comment `tortoise/pi-hooks/tortoise-capture.test.ts:1827`. The nearest neighbour is `battery/report/classify.py:61-69` with `battery/config/thresholds.yaml` (`classification-delta`, `surfaced-rate`), which does compare a measured value against a declared bar — though for an eval cell, not a goal — and `tools/capstone_preregistration_check.py:419`'s `COMPARATORS` operator set, which reads a preregistration cell's threshold. **None exists in the graph or in `tortoise/`.** The one target still wired to a verdict is `~/.pi/agent/scripts/objective.py:3543` (`waiting < TARGET_PRS` — queue depth, named by the owner). The CI minute figure in the same file is **not** a comparator to cite as precedent: `:3527` prints `GUIDELINE_CI_MIN`, which the owner demoted from target to **guideline** on **#6792** and which `:3540-3542` says "must not be able to flip this word" — the demotion §5 and §6 rest on, and itself an illustration of why a target needs a declared comparator rather than a hardcoded constant |
-| 5 | a state is a claim with a confidence **and** a validity window | replace + weigh | ✅ | `supersede_point`: contiguous `validFrom`/`validTo`, `expiredAt`, `CORRECTS` |
+| 5 | a state is a claim with a confidence **and** a validity window | replace + weigh | ✅ | `supersede_point`: contiguous `validFrom`/`validTo` for a **dated** successor, `expiredAt`, `CORRECTS` (an undated one lets the windows overlap — §4) |
 | 6 | when the state changes the old one **stops counting everywhere** | replace | ⛔ | search omits `Event` from `_STATUS_FILTERED_LABELS`; an Object supersede leaves operators attached and EP silently drops the factor (**#11825**, **#11826**) |
 | 7 | the current state is what belief reads | weigh | ✅ | measured `0.347 → 0.639` on a goal **Object** with no stored confidence of its own, because the claim feeding it changed (the #7860 D12 ruling) |
 | 8 | revising the **target** re-derives the state and retires the old | detect + decide | ⛔ | no invalidation path |
@@ -172,9 +172,9 @@ completeness — "target revised" and "definition changed" (capabilities 8 and 9
 you to enumerate and a function lets you forget.
 
 **Why not C:** the ECA warning is not theoretical — it is the failure mode this repo has already lived
-through once, as five different supersession implementations that nobody chose (§3's summary paragraph, which
-carries #11824's re-measured figures — *"5 as 5 semantic models / 6 functions"* — rather than the issue
-body's superseded count).
+through once, as five separate supersession outcomes of which **only one was ever deliberately chosen**
+(§3's summary paragraph carries #11824's re-measured figures — *"5 as 5 semantic models / 6 functions"* —
+rather than the issue body's superseded count).
 
 **OVERRIDES:** the industry default of a general rule/trigger engine for declarative business logic
 (active databases, workflow engines) — we declare only the **decision**, because the literature that
