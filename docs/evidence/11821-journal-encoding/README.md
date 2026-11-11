@@ -99,13 +99,23 @@ population is **named** from the first PR rather than narrowed silently by a lat
 if it is ever narrowed, and its fixture is deliberately off the float32 grid so the
 assertion cannot pass vacuously.
 
+**And the marker is not the only test, on purpose.** A vector is narrowed only when every
+element is **exactly what a float32 widens to** (`float(np.float32(v)) == v`, checked
+vectorised). Nothing the embedder emits can be off that grid, so an off-grid element is
+somebody else's value — and at least one path hands one over with **no marker at all**
+(`EventAPI.add_point(fields=…)` refuses `embedding_verbatim` as a forged key, because it
+mints it). The grid check makes that population `f64`/untouched by construction, and it
+is what catches in-range-but-off-grid values (`16777217.0`, `1e-50`) that a
+narrow-both-sides-and-compare guard would silently rewrite.
+
 A journal written **before** this change carries no marker and 17-digit values; it reads
 and replays exactly as it always did (`test_a_journal_written_before_this_change_still_reads_and_replays`).
 
 ## Cost, measured
 
-The quantiser is `1.08 ms` per 384-d vector (`float(str(np.float32(x)))` per element) —
-measured on this corpus — against ~50 µs for the `float(x)` loop it replaces. It runs
-once per journalled vector on the write path; the surrounding write (graph + record +
-embed) is ms-scale. Stated rather than hidden: this is a write-path cost traded for a
-44 % smaller vector payload on the one cost line with no revenue attached.
+The quantiser is **1.68 ms** per 384-d vector (`float(str(np.float32(x)))` per element,
+plus the two vectorised grid checks) — measured on this corpus — against **14 µs** for
+the `float(x)` loop it replaces. It runs once per journalled vector on the write path;
+the surrounding write (graph + record + embed) is ms-scale. Stated rather than hidden:
+this is a write-path cost traded for a 44 % smaller vector payload on the one cost line
+with no revenue attached.

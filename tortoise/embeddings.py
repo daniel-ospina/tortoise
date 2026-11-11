@@ -21,7 +21,6 @@ import math
 import os
 import threading
 import time
-import warnings
 
 import numpy as np
 
@@ -34,6 +33,7 @@ from .heavy_imports import (  # #5718: the ONE heavy-import lock + its helpers
     import_torch,
 )
 from .ids import content_hash
+from .stored_form import is_verbatim
 
 
 def _embedder_warmup_enabled() -> bool:
@@ -369,33 +369,64 @@ def shortest_float32_vector(vector: list[float]) -> list[float] | None:
     * a decimal text ~44 % shorter (measured on the pinned 384-d corpus:
       8,414 B → 5,072 B, 21.9 → 13.2 chars/float at the writer's separators).
 
-    ``None`` means **this vector cannot be represented at float32** (an element
-    outside float32's range, e.g. a hand-edited journal carrying ``1e300``).
-    The caller must then leave the values ALONE and declare the width ``f64``:
-    a vector that does not fit the store's width is not ours to narrow, and
-    narrowing it would turn the element into ``inf`` (#5004's total-function
-    rule: a record is a FILE, so this degrades rather than raises).
+    ⛔ **NOT interchangeable with `stored_form.narrow_to_stored_width`**, and a
+    reader must not swap one for the other. Both agree on the float32; they
+    differ on what they RETURN. `narrow_to_stored_width` returns the binary
+    widening — `0.1` → `0.10000000149011612`, 17 digits, what the engine holds
+    — and it is the right answer for a COMPARISON between the record and the
+    cache (#8615). This returns the SHORTEST DECIMAL for that float32 — `0.1`
+    — which is the right answer for the journal's TEXT, and is deliberately
+    OFF the float32 grid as a float64 (it must narrow to it). Both properties
+    are pinned: the grid identity by `stamp_journal_embedding`'s callers, the
+    text by `tests/test_11821_journal_vector_width.py`.
+
+    ``None`` means **this vector is not ours to narrow** — and that is TWO
+    cases, both of which the caller must honour by leaving the values ALONE and
+    declaring the width ``f64`` (#5004's total-function rule: a record is a
+    FILE, so this degrades rather than raises):
+
+    * an element **outside float32's range** (``1e300``) — narrowing would turn
+      it into ``inf``; and
+    * an element **off the float32 grid** (``0.1234567890123``, or
+      ``16777217.0`` which would silently lose a unit, or ``1e-50`` which would
+      silently become ``0.0``). The embedder's output IS the grid — every
+      element is `float(np.float32(x))` — so an off-grid element did not come
+      from it and is somebody's value, not a widening to undo.
+
+    ⛔ THAT SECOND HALF IS THE OWNERSHIP TEST, and it is why the grid check is
+    the primary one. A vector a caller supplied reaches this seam WITHOUT
+    `embedding_verbatim` on at least one path — `EventAPI.add_point(fields=…)`
+    refuses that marker as a forged key, because the door mints it — so
+    "marker absent" is not sufficient evidence that the vector is ours.
+    "Off the float32 grid" is: nothing our embedder emits can be.
     """
     values = [float(x) for x in vector]
+    if not values:
+        return []
+    # Range FIRST, in plain Python: the numpyd cast below would otherwise emit
+    # a `RuntimeWarning` ("overflow encountered in cast") — and the natural
+    # suppression (`warnings.catch_warnings`) mutates PROCESS-GLOBAL filter
+    # state on a path the SDK documents as concurrently written (#5612), where
+    # two interleaved blocks can leave an `ignore` entry behind for the life of
+    # the process. Refusing before the cast needs no suppression at all.
+    f32_max = float(np.finfo(np.float32).max)
+    if any(abs(value) > f32_max for value in values):
+        return None
+    # …then: is every element EXACTLY what a float32 widens to? (`nan` fails
+    # here, since `nan != nan`.) This is the ownership test, not a tolerance.
+    as_f32 = np.asarray(values, dtype=np.float32)
+    if not np.array_equal(as_f32.astype(np.float64),
+                          np.asarray(values, dtype=np.float64)):
+        return None
     # `str` of a numpy float32 is the shortest decimal that round-trips to that
     # float32 (Dragon4 `unique=True` printing), and `float()` of it is therefore
     # the float64 whose own `repr` is that same short text — one step, no search.
-    with warnings.catch_warnings():
-        # An out-of-range element overflows the CAST, which is exactly the case
-        # the vectorised check below turns into `None`; the warning is the
-        # expected signal, not news.
-        warnings.simplefilter("ignore", RuntimeWarning)
-        candidates = [float(str(np.float32(value))) for value in values]
-        # ⛔ `np.asarray(values, float32)` OVERFLOWS to `inf` rather than raising,
-        # so an out-of-range element makes BOTH sides `inf` and the equality
-        # below would pass — measured: `1e300` came back as `inf` with the
-        # payload marked `f32`. A candidate that is not finite is precisely the
-        # "cannot be represented at float32" case, so it is refused first.
-        if not all(math.isfinite(value) for value in candidates):
-            return None
-        if not np.array_equal(np.asarray(candidates, dtype=np.float32),
-                              np.asarray(values, dtype=np.float32)):
-            return None
+    candidates = [float(str(np.float32(value))) for value in values]
+    # Fail CLOSED on a numpy printing contract change (a shorter render that no
+    # longer round-trips would silently narrow to a DIFFERENT float32): the
+    # candidates must still be the same float32 as the input.
+    if not np.array_equal(np.asarray(candidates, dtype=np.float32), as_f32):
+        return None
     return candidates
 
 
@@ -491,7 +522,7 @@ def stamp_journal_embedding(payload: dict, *, creating: bool) -> dict:
     payload["embedding"] = vec
     _stamp_journal_vector_width(payload)
     if (vec is not None and creating
-            and not payload.get("embedding_verbatim")
+            and not is_verbatim(payload)
             # #5004 round-3: a re-capture that did NOT encode a vector (the
             # embedder was unavailable) PRESERVES the node's existing one. The
             # vector may have been computed by a DIFFERENT model, so attesting
@@ -559,7 +590,13 @@ def _stamp_journal_vector_width(payload: dict) -> None:
     if raw is None:
         payload.pop(JOURNAL_VECTOR_WIDTH_KEY, None)
         return
-    if payload.get("embedding_verbatim") or payload.get("embedding_preserved"):
+    # The VERBATIM half is read through `stored_form.is_verbatim`, the module
+    # that owns "may this vector be narrowed?" for the store — so this function
+    # is a READER of that decision, not a second spelling of it. The second arm
+    # is genuinely this seam's own: `embedding_preserved` marks a vector copied
+    # from a PREVIOUS capture (which may be anyone's), and the turn carrier does
+    # not carry the verbatim marker, so it is the only signal there.
+    if is_verbatim(payload) or payload.get("embedding_preserved"):
         payload[JOURNAL_VECTOR_WIDTH_KEY] = JOURNAL_VECTOR_WIDTH_F64
         return
     narrowed = shortest_float32_vector(raw)

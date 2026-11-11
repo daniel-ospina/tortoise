@@ -5,6 +5,7 @@ Runnable without pytest:  .venv/bin/python tests/test_ingest.py
 """
 from __future__ import annotations  # noqa: I001
 
+import json
 import os
 import sys
 import tempfile
@@ -470,11 +471,16 @@ Content here.
             dl_mod.load_manifest = orig_load
             dl_mod.resolve_domain_from_path = orig_resolve
 
-        events = [ln for ln in Path(log_path).read_text(encoding="utf-8").splitlines() if ln.strip()]
-        doc_created = [e for e in events if '"type": "DocumentCreated"' in e]
+        # #11821 P0: parse, do not substring-match — the journal writer is
+        # compact (`{"type":"DocumentCreated"`), and a spaced literal filter
+        # silently matches NOTHING (and makes a `assert not doc_created`
+        # vacuously true).
+        events = [json.loads(ln) for ln in
+                  Path(log_path).read_text(encoding="utf-8").splitlines()
+                  if ln.strip()]
+        doc_created = [e for e in events if e.get("type") == "DocumentCreated"]
         assert doc_created, "expected DocumentCreated event"
-        import json
-        ev = json.loads(doc_created[0])
+        ev = doc_created[0]
         assert ev["document_knowledge_domain"] == "capability", \
             f"expected capability, got {ev.get('document_knowledge_domain')!r}"
     finally:
@@ -512,12 +518,15 @@ def test_main_document_metadata_emitted():
                             "--db", db, "--log", log_path, "--out", out]):
         _run_main(None)
 
-    events = [ln for ln in Path(log_path).read_text(encoding="utf-8").splitlines() if ln.strip()]
-    doc_created = [e for e in events if '"type": "DocumentCreated"' in e]
+    # #11821 P0: parse, do not substring-match — the journal writer is compact
+    # (`{"type":"DocumentCreated"`), so a spaced literal filter matches NOTHING.
+    events = [json.loads(ln) for ln in
+              Path(log_path).read_text(encoding="utf-8").splitlines()
+              if ln.strip()]
+    doc_created = [e for e in events if e.get("type") == "DocumentCreated"]
     assert doc_created, "expected DocumentCreated event"
 
-    import json
-    ev = json.loads(doc_created[0])
+    ev = doc_created[0]
     assert ev["type"] == "DocumentCreated"
     assert ev["title"] == "Research Brief"
     assert ev["document_kind"] == "research"
@@ -538,8 +547,14 @@ def test_main_transcript_no_document():
                             "--db", db, "--log", log_path, "--out", out]):
         _run_main(None)
 
-    events = [ln for ln in Path(log_path).read_text(encoding="utf-8").splitlines() if ln.strip()]
-    doc_created = [e for e in events if '"type": "DocumentCreated"' in e]
+    # #11821 P0: parse, do not substring-match (see the sibling above). A spaced
+    # literal filter made this NEGATIVE assertion vacuously true once the writer
+    # went compact — a spurious DocumentCreated for a transcript would have
+    # passed silently.
+    events = [json.loads(ln) for ln in
+              Path(log_path).read_text(encoding="utf-8").splitlines()
+              if ln.strip()]
+    doc_created = [e for e in events if e.get("type") == "DocumentCreated"]
     assert not doc_created, "DocumentCreated should NOT be emitted for transcript"
     print("PASS test_main_transcript_no_document")
 

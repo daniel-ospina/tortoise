@@ -118,7 +118,10 @@ def test_the_quantiser_is_the_shortest_float32_round_trip_not_a_fixed_width():
     shortest form drops the ones that are not needed (measured: ~1 char/float on
     the corpus, and it is the difference between 5,072 B and 5,190 B).
     """
-    values = [0.5, 0.25, 0.125, 0.1, 1.0, -0.0]
+    # On the float32 grid (what the embedder emits), so the quantiser accepts
+    # them; their SHORTEST texts are what is asserted. A fixed `%.9g` would pad
+    # every one of these to nine significant digits.
+    values = [float(np.float32(v)) for v in (0.5, 0.25, 0.125, 0.1, 1.0, -0.0)]
     quantised = shortest_float32_vector(values)
     assert quantised is not None
     assert [_text(v) for v in quantised] == [
@@ -130,7 +133,7 @@ def test_a_vector_that_does_not_fit_float32_is_left_alone():
 
     `np.asarray([1e300], float32)` OVERFLOWS to `inf` instead of raising, so the
     round-trip check alone passed and the payload came back holding `inf` with
-    the width marked `f32` (measured before the finiteness guard). A vector that
+    the width marked `f32` (measured before the guard). A vector that
     is not representable at float32 is not ours to narrow.
     """
     source = [1e300, 0.5]
@@ -139,6 +142,48 @@ def test_a_vector_that_does_not_fit_float32_is_left_alone():
     assert stamped[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64
     assert stamped["embedding"] == source
     assert shortest_float32_vector(source) is None
+
+
+def test_a_vector_off_the_float32_grid_is_not_ours_to_narrow():
+    """THE OWNERSHIP TEST, and the one the marker cannot make for us.
+
+    `EventAPI.add_point(fields=…)` hands a CALLER's vector to this seam with no
+    `embedding_verbatim` (that door refuses the marker as forged, because it
+    mints it), so "the marker is absent" is not evidence that the vector is
+    ours. "Off the embedder's float32 grid" is: nothing `encode_for_row` emits
+    can be off it.
+
+    The earlier guard compared both sides AFTER a float32 cast, so it could only
+    ever detect overflow — every value below is IN RANGE and would have been
+    silently rewritten: `16777217.0` loses a unit, `1e-50` becomes `0.0`, and a
+    caller's digits are rounded away.
+    """
+    off_grid = [0.1234567890123, 16777217.0, 1e-50, 2.718281828459045]
+    assert shortest_float32_vector(off_grid) is None
+
+    stamped = stamp_journal_embedding(_payload(list(off_grid)), creating=True)
+    assert stamped["embedding"] == off_grid, (
+        "a caller's off-grid vector was rewritten in the durability record")
+    assert stamped[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64
+
+
+def test_the_quantiser_leaves_process_wide_warning_state_alone():
+    """`warnings.catch_warnings()` mutates PROCESS-GLOBAL filter state and is
+    documented as not thread-safe; the SDK documents concurrent writers (#5612).
+    Two interleaved blocks can leave a leaked `ignore` entry behind for the life
+    of the process, muting the numeric warnings that surface a bad vector.
+
+    The refusal is done in plain Python BEFORE any numpyd cast precisely so no
+    suppression is needed at all.
+    """
+    import warnings
+
+    before = list(warnings.filters)
+    shortest_float32_vector([1e300, 0.5])      # out of range: used to warn
+    shortest_float32_vector([0.1, 0.2])        # the normal path
+    shortest_float32_vector([1e-50])           # underflowing to zero
+    assert warnings.filters == before, (
+        "the quantiser changed the process's warning filters")
 
 
 # ── 2. the promise that must not be broken: verbatim / preserved ─────────────

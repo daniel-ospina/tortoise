@@ -3102,8 +3102,13 @@ def test_apply_supersessions_legacy_idless_object_writes_no_jsonl_line(tmp_path)
         def _superseded_lines():
             log = (events / "events.jsonl").read_text(
                 encoding="utf-8").splitlines()
-            return [json.loads(ln) for ln in log
-                    if '"type": "ObjectSuperseded"' in ln]
+            # #11821 P0: parse, do not substring-match. The journal writer is
+            # compact (`{"type":"ObjectSuperseded"`), so the spaced literal
+            # filter this used matched NOTHING — and this is a NEGATIVE pin, so
+            # it was vacuously true: a journalled ObjectSuperseded for an
+            # id-less target would have passed silently.
+            return [rec for rec in (json.loads(ln) for ln in log if ln.strip())
+                    if rec.get("type") == "ObjectSuperseded"]
 
         applied = apply_supersessions(
             proj, sdk,

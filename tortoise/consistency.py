@@ -673,9 +673,19 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset(),
 def _as_f32(vec: list) -> list | None:
     """Round a vector to the store's `vecf32` width, or None if not numeric.
 
-    The journal carries the ingest encoder's float64 (`encode_for_store`), while
-    the node stores `vecf32($embedding)` — so an exact comparison of a faithful
-    replay fails on the last mantissa bits. Compare at the stored width.
+    ⛔ **The premise was RE-STATED for #11821 P0; the conclusion and the
+    narrowing are unchanged, and the narrowing must be KEPT.** The journal no
+    longer carries the ingest encoder's float64 for a vector the writer
+    produced: it carries the **shortest float32 round-trip decimal** (`0.1`,
+    which is OFF the float32 grid as a float64), while the node stores
+    `vecf32($embedding)` (`0.10000000149011612`). So the two still differ on the
+    last mantissa bits — for a different reason than before — and an exact
+    comparison of a faithful replay still fails. Compare at the stored width:
+    `narrow_to_stored_width(journal 0.1)` → `0.10000000149011612` == the node.
+
+    A caller-owned (`embedding_verbatim`) or preserved vector is not narrowed
+    on either side (#11821), so it compares exactly and this step is a no-op
+    for it.
 
     #8615: the rounding itself lives in `tortoise/stored_form.py` — ONE spelling
     shared with the writer (`cache_projection.node_statement`) and with the
