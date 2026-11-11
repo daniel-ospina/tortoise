@@ -3697,16 +3697,36 @@ def test_a_binding_that_names_another_basis_for_the_e2b_floor_is_refused(log_tex
     findings, _ = check.check(wrong)
     assert any("[V15]" in f and "surviving_units_basis=" in f for f in findings), (
         findings)
-    # ⛔ …and a binding that STATES NO COUNT must not hide the basis either.
-    # While this row sat inside the `surviving_units=` branch it could only fire
-    # when a count was stated. The shape the branch let through — measured at
-    # `c48e426a23`: `surviving_units=n/a`, `declared_surviving_floor=n/a`,
-    # `e2b_surviving_units` dropped from `floors_owned=` — came back with ZERO
-    # findings: a floor shed AND a wrong population named, accepted. (Deleting
-    # only the count token was NOT enough — two count-absence rows still refused
-    # that log — so this is a four-edit shape, not a one-token one: #11833 review
-    # r10 P2 corrected the earlier wording here.) Outside the branch the row fires
-    # on any named wrong basis, so the refusal must hold with the count absent.
+    # ⛔ …and the basis is graded on a binding that states NO USABLE COUNT. While
+    # this row sat inside the `surviving_units=` branch, every shape whose count
+    # was `n/a` or absent skipped it, so a binding could name `atomic_points` and
+    # stay GREEN (#11833 review r9 P2).
+    #
+    # ⚠️ The two shapes are NOT interchangeable, and the difference is the whole
+    # correction (#11833 review r10 P2): DELETING `surviving_units=` is refused
+    # twice by rules that predate the dedent — the MATCHED pair rule
+    # (`check.check`, "declares declared_surviving_floor=30 but states no readable
+    # surviving_units=") and the scored-log presence rule ("the scored log's
+    # binding carries no surviving_units=") — so a pin built only on deletion
+    # would pass for the wrong reason. The shape the DEDENT closes is the BLANKED
+    # pair: all six keys kept, `surviving_units`/`declared_surviving_floor` set to
+    # `n/a`, and the floor dropped from `floors_owned`, which satisfies every
+    # presence rule and skips the count branch.
+    blanked = (wrong
+               .replace("surviving_units=90", "surviving_units=n/a", 1)
+               .replace("declared_surviving_floor=30",
+                        "declared_surviving_floor=n/a", 1)
+               .replace("floors_owned=e1_min_before_share,e1_objects,"
+                        "e2b_surviving_units",
+                        "floors_owned=e1_min_before_share,e1_objects", 1))
+    assert "surviving_units=n/a" in blanked, blanked
+    assert "e2b_surviving_units" not in blanked, blanked
+    assert "surviving_units_basis=atomic_points" in blanked, blanked
+    findings, _ = check.check(blanked)
+    assert any("[V15]" in f and "surviving_units_basis=" in f for f in findings), (
+        "a binding that keeps every key, blanks the count pair to `n/a`, drops "
+        "the floor from floors_owned and still NAMES atomic_points as its basis "
+        f"is the shape the dedent closes; V15 said {findings}")
     forged = wrong.replace("surviving_units=90 ", "", 1)
     assert "surviving_units=90" not in forged  # non-vacuity: the token is gone
     assert "surviving_units_basis=atomic_points" in forged, forged
@@ -3714,23 +3734,3 @@ def test_a_binding_that_names_another_basis_for_the_e2b_floor_is_refused(log_tex
     assert any("[V15]" in f and "surviving_units_basis=" in f for f in findings), (
         "a binding that NAMES atomic_points but states no count is still the "
         f"pre-#10989 reading; V15 said {findings}")
-    # ⛔ …and the shape the count branch ACTUALLY accepted must be refused too.
-    # This is the one measured at `c48e426a23` with ZERO findings — the checked
-    # floor is SHED, the population is named wrong, and no count is stated at all.
-    # It is the only assertion in this file whose "before" state is a log the
-    # checker really passed, so it is what reds if the basis row is ever nested
-    # back inside the count branch (#11833 review r10 P3).
-    shed = wrong.replace("declared_surviving_floor=30 ", "declared_surviving_floor=n/a ", 1)
-    shed = shed.replace(
-        "floors_owned=e1_min_before_share,e1_objects,e2b_surviving_units ",
-        "floors_owned=e1_min_before_share,e1_objects ", 1)
-    shed = shed.replace("surviving_units=90 ", "surviving_units=n/a ", 1)
-    assert "surviving_units=n/a" in shed  # non-vacuity: the count is gone
-    assert "declared_surviving_floor=n/a" in shed
-    assert "e2b_surviving_units" not in shed.split("floors_owned=")[1].split()[0], (
-        shed)
-    assert "surviving_units_basis=atomic_points" in shed, shed
-    findings, _ = check.check(shed)
-    assert any("[V15]" in f and "surviving_units_basis=" in f for f in findings), (
-        "a binding that SHEDS the floor and NAMES atomic_points with no count is "
-        f"the shape measured ACCEPTED at c48e426a23; V15 said {findings}")
