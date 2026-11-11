@@ -41,7 +41,12 @@ WHAT IT ASSERTS, in BOTH directions:
       reappear **in any form** — the r6 defect;
   (2) the shipped message really contains the fragment the record quotes — so
       dropping `hosted` from the message (or restoring the unscoped quote in the
-      record) REDs instead of passing silently.
+      record) REDs instead of passing silently;
+  (3) the record's OWN restatements of the same scoping — the `#2122` matrix row
+      and §3.2/§3.3, which state the claim in words that are NOT the quoted
+      fragment — are each still HOSTED-scoped. Without this arm every one of
+      them could be reverted to #11806's universal with the whole file GREEN
+      (measured at r18, all four).
 
 `_SHIPPED_FRAGMENT` is the single string both arms bind to, so the two cannot be
 corrected in opposite directions without this file noticing.
@@ -100,6 +105,10 @@ WHAT IT STILL DOES NOT CATCH, stated so the docstring is not the next over-claim
     see line 309 — REDs. Reword such an entry instead of reproducing the phrase
     verbatim. Likewise the presence arm answers "are these words in this file",
     not "is this an actual quote", so it cannot tell a quote from prose.
+  * (3) pins the four restatements as WORD SEQUENCES, so a legitimate RE-WORDING of
+    the matrix row or of §3.2/§3.3 — even one that KEEPS the hosted scoping — REDs.
+    That is the same trade arms (1)/(2) already take (the claim IS the words):
+    reword such a sentence only together with its `_RESTATEMENTS` row, in one edit.
 
 MUTATION (each verified RED at this head, restoring byte-identical):
   * restore the unscoped quote at `platform-seams.md:315`      → (1) RED
@@ -127,6 +136,14 @@ MUTATION (each verified RED at this head, restoring byte-identical):
     → direction 2's raw-stdout punctuation assert REDs  (r15 P3 #7)
   * revert `_TAG` to the permissive `_TAG_WITH_BARE_ATTRS` form
     → the forged-tag PRESENCE assert REDs          (r12 P3 #1)
+  * drop `hosted` from the record's `#2122` matrix row
+    ("A hosted cloud agent runs neither")            → (3) RED   (r18 P2)
+  * drop `Hosted ` from §3.2's heading
+    ("Hosted cloud agents get NEITHER hook")         → (3) RED   (r18 P2)
+  * drop `**hosted**` from §3.2's "so a hosted Cursor cloud agent
+    runs no Tortoise hook at all"                     → (3) RED   (r18 P2)
+  * drop `Hosted-` from §3.3's "Hosted-cloud-agent users'"
+                                                      → (3) RED   (r18 P2)
 """
 from __future__ import annotations
 
@@ -145,6 +162,25 @@ _PLATFORM_SEAMS_DOC = (_REPO_ROOT / "docs" / "research"
 _SHIPPED_FRAGMENT = "a session running in a hosted cloud agent VM"
 _UNSCOPED_FRAGMENT = "a session running in a cloud agent VM"
 _PY = sys.executable
+
+#: (3) — the record RESTATES the scoping in its own words, four times, and THIS PR
+#: scoped each of them. None of those words is `_SHIPPED_FRAGMENT`, so none was
+#: covered until r18: deleting the single word that scopes any one of them restored
+#: the pre-PR universal with the whole file GREEN (each of the four measured).
+#:
+#: PRESENCE for all four, plus an ABSENCE leg on the matrix row's claim only. An
+#: absence leg is sound only where the unscoped form is NOT a word subsequence of
+#: the scoped one: `a cloud agent runs neither` breaks the sequence at
+#: `a _ cloud`, whereas `a hosted cursor cloud agent runs no tortoise hook`
+#: CONTAINS `cursor cloud agent runs no tortoise hook`, so banning the latter
+#: would RED the CORRECT text — the precise false-RED this file's own review
+#: rounds are about. Hence `None` there rather than a guess.
+_RESTATEMENTS: tuple[tuple[str, "str | None"], ...] = (
+    ("a hosted cloud agent runs neither", "a cloud agent runs neither"),
+    ("hosted cloud agents get neither hook", None),
+    ("a hosted cursor cloud agent runs no tortoise hook", None),
+    ("hosted cloud agent users volunteering memory is therefore pull only", None),
+)
 
 #: A tag's attributes AS MARKUP — `name=value`, quoted or bare. NOT `[^<>\n]*`:
 #: a bare word list is PROSE, and `if a<b and c>d then …` is an ordinary sentence,
@@ -344,6 +380,35 @@ def test_the_record_quotes_the_HOSTED_scoped_fragment():
     # rendering, so a tag strip that swallows prose cannot hide the words either.
     assert _absent(_UNSCOPED_FRAGMENT, doc), (
         "the record quotes the unscoped universal as though it were the message")
+
+
+def test_every_restatement_of_the_scoping_in_the_record_is_HOSTED_scoped():
+    """(3) — the record states the claim four times, not only where it quotes the message.
+
+    The `#2122` matrix row and §3.2/§3.3 put the same scoping in their own words, and
+    THIS PR edited every one of them:
+
+      `A cloud agent runs neither`            → `A hosted cloud agent runs neither`
+      `Cloud agents get NEITHER hook`         → `Hosted cloud agents get NEITHER hook`
+      `a Cursor cloud agent runs no …`        → `a **hosted** Cursor cloud agent runs no …`
+      `Cloud-agent users' …`                  → `Hosted-cloud-agent users' …`
+
+    Unpinned, any one of those four reverts #11806's over-assertion inside the
+    record — the very artifact a future lane cites for #11807 — while this file
+    stays GREEN. That is the same false-PASS class as the message's missing
+    absence leg, one surface over (review r18 P2, measured on all four).
+
+    Mutation: drop the scoping word from any of the four — each REDs here, and the
+    matrix row's unscoped form REDs both its presence and its absence leg."""
+    doc = _PLATFORM_SEAMS_DOC.read_text(encoding="utf-8")
+    normalised_doc = _normalised(doc)
+    for scoped, unscoped in _RESTATEMENTS:
+        assert _normalised(scoped) in normalised_doc, (
+            f"the record no longer states this restatement as HOSTED-scoped: "
+            f"{scoped!r} — #11806's universal is back on that line")
+        if unscoped is not None:
+            assert _absent(unscoped, doc), (
+                f"the record states the UNSCOPED result again: {unscoped!r}")
 
 
 def test_a_stray_angle_bracket_cannot_swallow_the_quoted_sentence():
