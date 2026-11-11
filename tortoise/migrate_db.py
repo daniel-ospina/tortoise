@@ -90,38 +90,15 @@ def _count_source_events(source_db: str) -> int:
 
 
 def _pack_selection_shape(counts: dict) -> tuple[str, str]:
-    """Name WHICH `:PackSelection` shape a non-zero gap is, and what it means.
+    """Delegate to the ONE shape answer (`tortoise.projection`).
 
-    A non-zero `pack_selection_gap` is reported for four different states, and
-    only ONE of them is an observed loss. Reporting them all as "reads as
-    UNCONFIGURED, a removed pack is re-admitted" asserts a loss nobody
-    observed — and on the CONFLICT shape carries a re-pin remedy that would
-    overwrite a NEWER live decision (review round 2 fixed that inside the
-    rebuild's own ERROR log; round 3 found the same collapse here and in
-    `__main__`). Order matters: UNKNOWN (a sidecar that cannot say), then
-    UNVERIFIED (the read never produced a result), then CONFLICT (a DIFFERENT
-    marker is live), then the true restore gap.
-
-    Returns ``(label, consequence)`` for the caller's message.
+    Four consumers report this gap (the two projection recovery callers, this
+    migration route, and the `rebuild` CLI); a second copy of the shape rule
+    here is how the four drifted apart in the first place (review rounds 3-4).
     """
-    counts = counts or {}
-    if counts.get("pack_selection_state_unknown"):
-        return ("pre-preservation/UNKNOWN",
-                "the pre-wipe sidecar cannot say whether the marker existed, so "
-                "the graph may read as UNCONFIGURED — this is not an observed "
-                "loss")
-    if counts.get("pack_selection_verified") is False:
-        return ("UNVERIFIED — the post-restore verification COULD NOT RUN",
-                "the marker is not confirmed intact and NOT observed gone, so "
-                "the graph is not reported as having lost it")
-    if counts.get("pack_selection_conflict"):
-        return ("reported CONFLICT, not a loss",
-                "a DIFFERENT marker is present, so the graph IS configured and "
-                "may hold a NEWER pack set — do not re-pin over it without "
-                "checking which is intended")
-    return ("restore gap",
-            "the graph reads as UNCONFIGURED, so a pack an admin REMOVED can be "
-            "re-admitted with its revision reset")
+    from tortoise.projection import pack_selection_shape
+
+    return pack_selection_shape(counts or {})
 
 
 def migrate(force: bool = False) -> dict:

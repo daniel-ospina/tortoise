@@ -2256,6 +2256,44 @@ def _team_meta_marker(entries) -> dict | None:
 _PACK_SELECTION_LABEL = "PackSelection"
 
 
+def pack_selection_shape(counts: dict) -> tuple[str, str]:
+    """Name WHICH `:PackSelection` gap shape this is, and what it means.
+
+    A non-zero `pack_selection_gap` is reported for four different states and
+    only ONE of them is an observed loss. Every consumer that prints the count
+    used to hardcode the absence consequence ("reads as UNCONFIGURED, its
+    `revision` is 0, a pack the admin REMOVED is back", plus a "re-pin"
+    remedy), which is a FALSE report on the other three — and on the CONFLICT
+    shape the remedy would overwrite a live marker that may be NEWER than the
+    one captured (review rounds 2-4 found this same collapse at seven different
+    sites; this helper is the single answer they now share).
+
+    Order matters: UNKNOWN (a sidecar that cannot say), then UNVERIFIED (the
+    read never produced a result), then CONFLICT (a DIFFERENT marker is live),
+    then the true restore gap.
+
+    Returns ``(label, consequence)`` for the caller's message.
+    """
+    counts = counts or {}
+    if counts.get("pack_selection_state_unknown"):
+        return ("pre-preservation/UNKNOWN",
+                "the pre-wipe sidecar cannot say whether the marker existed, so "
+                "the graph may read as UNCONFIGURED — this is not an observed "
+                "loss")
+    if counts.get("pack_selection_verified") is False:
+        return ("UNVERIFIED — the post-restore verification COULD NOT RUN",
+                "the marker is not confirmed intact and NOT observed gone, so "
+                "the graph is not reported as having lost it")
+    if counts.get("pack_selection_conflict"):
+        return ("reported CONFLICT, not a loss",
+                "a DIFFERENT marker is present, so the graph IS configured and "
+                "may hold a NEWER pack set — do not re-pin over it without "
+                "checking which is intended")
+    return ("restore gap",
+            "the graph reads as UNCONFIGURED, so a pack an admin REMOVED can be "
+            "re-admitted with its revision reset")
+
+
 def _capture_pack_selection(proj) -> list[dict]:
     """Read every `:PackSelection` property map into the `pack_selection` section.
 
@@ -12298,16 +12336,23 @@ class FalkorProjection(
                         # "auto-recovered" line drops `reason`, so without this
                         # leg the operator sees a success shape over the signal
                         # the graph's pack set exists to carry.
+                        #
+                        # The consequence comes from `pack_selection_shape`:
+                        # the absence wording above is true for exactly ONE of
+                        # the four shapes, and asserting it on a CONFLICT (a
+                        # different, possibly NEWER live marker) or an
+                        # UNVERIFIED read is a loss nobody observed (review
+                        # round 4 — rounds 2-3 fixed the producer and three
+                        # consumers, and left this one and `_recover_or_raise`).
+                        _shape, _consequence = pack_selection_shape(result)
                         logger.warning(
                             "auto-recovered empty embedded DB from %s "
                             "(%s events) BUT its :PackSelection pack-set "
-                            "marker is NOT confirmed intact — the graph now "
-                            "reads as UNCONFIGURED, so a pack an admin had "
-                            "REMOVED can be re-admitted with its `revision` "
-                            "reset; see the rebuild ERROR log (#9752). "
+                            "marker is NOT confirmed intact (%s) — %s; see the "
+                            "rebuild ERROR log (#9752). "
                             "Recovery reason: %s",
                             events_dir, result.get("log_points"),
-                            result.get("reason"))
+                            _shape, _consequence, result.get("reason"))
                     elif result.get("corrupt_lines"):
                         # #5612: the third producer-signal leg on this surface,
                         # for the same reason as the two above — the clean
@@ -12420,13 +12465,17 @@ class FalkorProjection(
             # the marker is what makes a graph's pack set DELIBERATE, so a gap
             # here reads as unconfigured, re-enables the self-heal, and can
             # re-admit a pack the admin removed.
+            #
+            # As on the sibling caller above, the CONSEQUENCE is shape-derived:
+            # "reads as UNCONFIGURED / a removed pack is back" is the true-absence
+            # reading only, and printing it over a CONFLICT or an UNVERIFIED read
+            # asserts a loss nobody observed (review round 4).
+            _shape, _consequence = pack_selection_shape(result)
             logger.warning(
                 "recovery completed but the rebuilt graph's :PackSelection "
-                "pack-set marker is NOT confirmed intact — the graph reads as "
-                "UNCONFIGURED, so a pack an admin had REMOVED can be "
-                "re-admitted with its `revision` reset; see the rebuild ERROR "
-                "log (#9752). Recovery reason: %s",
-                result.get("reason"))
+                "pack-set marker is NOT confirmed intact (%s) — %s; see the "
+                "rebuild ERROR log (#9752). Recovery reason: %s",
+                _shape, _consequence, result.get("reason"))
         if result.get("corrupt_lines"):
             # #5612: this caller returns silently on success (its own caller
             # logs only "auto-recovered embedded DB from ..."), so the salvage

@@ -598,6 +598,74 @@ def test_a_different_live_marker_is_reported_as_a_conflict(
         f"marker: {msgs}")
 
 
+def test_recover_from_log_reports_a_conflict_not_a_loss(tmp_path, monkeypatch):
+    """The recovery `reason` must not carry the absence consequence on CONFLICT.
+
+    FAILING VALUE: `recover_from_log`'s reason arm branched on
+    `expected and not restored`, which is true for a CONFLICT too, so the
+    operator record asserted "the graph reads as UNCONFIGURED and a pack an
+    admin had REMOVED can be re-admitted" over a graph that HAS a marker —
+    possibly a NEWER one written by a concurrent `set_graph_packs` (review
+    round 3 fixed the producer; round 4 found this consumer).
+
+    REACHABLE: the real rescue path (a v7 sidecar carrying a marker, an empty
+    graph, the capture supplied by the sidecar) with only the restore leg
+    pointed at different props — exactly what the competing write leaves behind.
+    """
+    from tortoise.consistency import recover_from_log
+
+    sdk, events = _mk_sdk(tmp_path)
+    _write_journal(events)
+    _plant(Path(_sidecar_path(events)),
+           _sidecar_payload(pack_selection=[{"revision": 1,
+                                             "updated_by": "admin"}]))
+    proj = _proj(sdk)
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    real_restore = proj._restore_write
+
+    def _restore_a_different_marker(cypher, *, params=None, reason):
+        if "PackSelection" in cypher:
+            params = {"props": {"revision": 99, "updated_by": "concurrent"}}
+        return real_restore(cypher, params=params, reason=reason)
+
+    monkeypatch.setattr(proj, "_restore_write", _restore_a_different_marker)
+
+    rec = recover_from_log(str(events), proj)
+
+    assert rec.get("pack_selection_conflict") is True, (
+        f"the conflict discriminator must reach the caller's dict: {rec}")
+    assert "reported CONFLICT, not a loss" in rec["reason"], rec["reason"]
+    assert "re-admitted" not in rec["reason"], (
+        "the reason must not carry the absence consequence for a graph that "
+        f"HAS a marker: {rec['reason']}")
+
+
+def test_migrate_route_names_the_conflict_shape(tmp_path, caplog, monkeypatch):
+    """The migration route must not print the loss wording on a CONFLICT.
+
+    FAILING VALUE: both `migrate` warning sites read only the gap (and
+    `state_unknown`), so a CONFLICT printed "the migrated graph reads as
+    UNCONFIGURED, so a pack an admin REMOVED can be re-admitted" — over a graph
+    that holds a marker and may hold a NEWER decision (review round 4).
+    """
+    counts = {"nodes": 0, "edges": 0, "events": 0,
+              "pack_selection_expected": 1, "pack_selection_verified": True,
+              "pack_selection_restored": 0,
+              "pack_selection_gap": 1, "pack_selection_state_unknown": False,
+              "pack_selection_conflict": True}
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
+        result = _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
+
+    assert result["pack_selection_conflict"] is True, (
+        f"the returned dict must carry the discriminator: {result}")
+    assert result["pack_selection_verified"] is True, result
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("reported CONFLICT, not a loss" in m for m in msgs), msgs
+    assert not any("reads as UNCONFIGURED" in m for m in msgs), (
+        f"the absence consequence must not be printed on a conflict: {msgs}")
+
+
 def test_pack_selection_section_and_validator_are_wired():
     """The section cannot silently fall out of the sidecar plumbing.
 
@@ -896,6 +964,21 @@ def test_cmd_rebuild_reports_the_pack_selection_marker(tmp_path, capsys,
     assert "CANNOT be determined" in out.err, out.err
     assert "was NOT restored" not in out.err, out.err
 
+    # The CONFLICT rung (review round 4): a DIFFERENT, possibly NEWER marker is
+    # live, so neither the absence wording nor its "Re-set ... deliberately"
+    # remedy may be printed — that remedy would overwrite the newer decision.
+    counts.update({"pack_selection_expected": 1, "pack_selection_restored": 0,
+                   "pack_selection_state_unknown": False,
+                   "pack_selection_conflict": True})
+    rc = _cmd_rebuild(argparse.Namespace(dir=str(events),
+                                        db=str(tmp_path / "cli4.db")))
+    out = capsys.readouterr()
+
+    assert rc in (None, 0)
+    assert "reported CONFLICT, not a loss" in out.err, out.err
+    assert "was NOT restored" not in out.err, out.err
+    assert "Re-set the graph's packs deliberately" not in out.err, out.err
+
 
 def test_marker_declared_in_the_durability_posture():
     """T2: the class has a DECLARED disposition, not an inference.
@@ -1071,6 +1154,9 @@ def test_recover_from_log_documents_the_pack_selection_keys():
     doc = recover_from_log.__doc__ or ""
     assert "pack_selection_gap" in doc
     assert "pack_selection_state_unknown" in doc
+    assert "pack_selection_conflict" in doc, (
+        "the conflict discriminator is returned but not documented, so a "
+        "caller reading the contract cannot tell a conflict from a loss")
     assert "#9752" in doc
 
 
