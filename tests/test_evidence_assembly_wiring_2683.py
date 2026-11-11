@@ -46,11 +46,23 @@ dedicated per-test graph, the same layer as the sibling eval-lane arm pins
 ABOVE its own distilled point, plus a cross-session restatement of the same
 fact) so the differential isolates the arm: everything after the fetch —
 annotation, per-session dedup, boost, packaging, assembly — is the real path.
-* **the product seam** (tests 4-6) — HERMETIC: no graph, no model, no
-network. The ask lane's only graph-touching calls are
-``sdk.tortoise_fts_query`` and ``sdk.annotate_ask_hits``; both are stubbed and
-everything after them is the real product path, so these tests do not skip on
-a box with no FalkorDB (the seam they pin has no graph in it).
+* **the product seam** (tests 4-6) — HERMETIC: no graph, no model call, no
+network. FOUR substitutions on the graph/reader seam, plus two that hold for
+the whole section, listed so none is invisible. Per test: ``sdk.tortoise_fts_query``
+(the retrieval fetch) and ``sdk.annotate_ask_hits`` (the batch annotation —
+stubbed to a PASS-THROUGH, so the pool arrives WITHOUT the graph-derived
+``session_date``/``speaker`` keys the real call adds) are stubbed;
+``sdk._get_proj()`` — the SDK's projection accessor, which would otherwise
+build a real ``FalkorProjection`` — returns a bare sentinel; and
+``_ask_lane._default_ask_reader_factory`` is replaced by ``_AskCaptureReader``,
+whose MODEL is canned while the reader PLUMBING (the call, its argument, the
+response) is real. For the whole section / module: every ask test drives the
+lane through ``_run_ask``, which wraps ``_retrieval.assemble_context`` in a
+DELEGATING spy (it records the pool, then calls the real function), and the
+autouse ``_no_embedder`` pins the embedder out module-wide. Real throughout:
+per-session dedup, A5 boost, A7 rerank, packaging, assembly and
+``render_context``, so these tests do not
+skip on a box with no FalkorDB (the seam they pin has no graph in it).
 
 Each test names its FAIL VALUE.
 """
@@ -490,21 +502,36 @@ def test_a_tr_question_is_excluded_and_leaves_the_window_untouched(
 #
 # ⛔ The census is NOT the observable here. ``_pkg_stats`` is assigned and
 # never read, and ``run_ask_lane``'s response carries no assembly or census
-# key. Its one WINDOW-derived field is ``retrieved_session_ids``
-# (``ask_lane.py:835``), and it moves between ON and OFF only because the
-# window moved — which is the effect this section measures, not a way to read
-# the census. The READER WINDOW is the mechanism, which is why every
+# key. Its WINDOW-derived fields are ``evidence`` and ``context_tokens``
+# (``render_context(assembled)`` / ``estimate_tokens_ask(evidence)``,
+# ``ask_lane.py:689-690``), ``cost_estimate_usd`` (derived from
+# ``estimate_tokens_ask(evidence)``, ``:814``/``:832``) and
+# ``retrieved_session_ids`` (``_distinct_session_ids(assembled)``, ``:807``;
+# emitted at ``:835``); each moves between ON and OFF only because the window
+# moved — which is the effect this section measures, not a way to read the
+# census.
+# ⛔ That set is MECHANICALLY pinned, not left to prose: test 4 asserts the
+# SET of moved response keys (``_WINDOW_DERIVED_FIELDS``), because the
+# one-field form of this sentence was falsified TWICE (round 2 named
+# ``context_point_count``, which this lane's response does not carry; round 4
+# still missed ``evidence``/``context_tokens``/``cost_estimate_usd``). A fifth
+# field that starts moving reds there instead of re-staling this comment;
+# ``duration_ms`` is excluded as timing noise.
+# The READER WINDOW is the mechanism, which is why every
 # test below asserts on it: the pool handed to ``assemble_context`` (the
 # real window-fill, spied) and, for the flooding test, the text the reader
 # actually received. A pin that asserted the census instead would be pinning
 # the one thing this lane throws away.
 #
-# LAYER: HERMETIC — no graph, no model, no network. On the branch these pins
-# drive, the ask lane's only graph-touching calls are
-# ``sdk.tortoise_fts_query`` and ``sdk.annotate_ask_hits``; both are stubbed,
-# and everything after them
-# (per-session dedup, A5 boost, A7 rerank, packaging, ``assemble_context``,
-# ``render_context``, the reader call) is the REAL product path. Same
+# LAYER: HERMETIC — no graph, no model call, no network. See the module
+# docstring's "the product seam" bullet for the full inventory of six
+# substitutions (four per test, two for the whole section). In one line: the
+# fetch and the batch annotation are STUBBED (annotation as a pass-through, so
+# the pool arrives unannotated), ``sdk._get_proj()`` hands back a bare sentinel
+# instead of a real ``FalkorProjection``, the reader factory returns a canned
+# MODEL over real PLUMBING, the autouse ``_no_embedder`` pins the embedder out,
+# and ``assemble_context`` is a delegating spy. Real throughout: per-session
+# dedup, A5 boost, A7 rerank, packaging, assembly, ``render_context``. Same
 # ``_FakeSDK`` shape as ``tests/test_ask_retrieval_budget.py``.
 
 ASK_QUOTE = "the tea set cost 300 dollars"
@@ -515,6 +542,20 @@ ASK_OTHER_ID = "a2683other"
 ASK_SESSION_1 = "sess2683ask"
 ASK_SESSION_2 = "sess2683ask2"
 ASK_OTHER_FACT = "i live in lisbon"
+
+#: The response fields that move ON-vs-OFF ONLY because the reader window moved:
+#: ``ask_lane.py:689-690`` ``evidence``/``context_tokens``, ``:814`` → ``:832``
+#: ``cost_estimate_usd`` (derived from ``estimate_tokens_ask(evidence)`` plus the
+#: serving lane's rates) and ``:807`` → ``:835`` ``retrieved_session_ids``.
+#: Test 4 asserts the moved set EQUALS this, rather than asserting members one
+#: by one: the section comment's "its one WINDOW-derived field" form was
+#: falsified twice, and a set assertion makes a fifth mover red the test instead
+#: of re-staling the prose. ``duration_ms`` is deliberately absent (timing
+#: noise). Measured, not assumed — three consecutive ON/OFF pairs each moved
+#: ``cost_estimate_usd`` by 0.00049707 → 0.00049539.
+_WINDOW_DERIVED_FIELDS = frozenset(
+    {"evidence", "context_tokens", "cost_estimate_usd",
+     "retrieved_session_ids"})
 
 #: Every env-gated knob ``run_ask_lane`` reads on its call path that can move
 #: the POOL, the WINDOW or the ARM on the LEGACY branch these pins drive.
@@ -703,6 +744,17 @@ def test_the_product_arm_rebinds_the_ask_lane_reader_window(monkeypatch):
     assert _off_resp["retrieved_session_ids"] == [ASK_SESSION_1,
                                                   ASK_SESSION_2], (
         _off_resp["retrieved_session_ids"])
+
+    # The section comment's census claim, MECHANICALLY: the response fields
+    # that move ON-vs-OFF are exactly the window-derived ones it names. The
+    # ``one field`` form of that sentence was falsified twice, so the SET is
+    # asserted here — a field that starts moving without the comment following
+    # reds HERE, and the pre-fix tree reds too (no rebind ⇒ nothing moves ⇒
+    # empty set). ``duration_ms`` is excluded as timing noise; the message
+    # names the full moved set, so a reader sees which field to reconcile.
+    moved = {k for k in on_resp
+             if k != "duration_ms" and on_resp[k] != _off_resp[k]}
+    assert moved == _WINDOW_DERIVED_FIELDS, sorted(moved)
 
 
 # ── 5. the flooding the issue exists to stop, measured on the product lane ─
