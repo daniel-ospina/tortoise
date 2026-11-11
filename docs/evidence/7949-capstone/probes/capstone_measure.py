@@ -3100,7 +3100,7 @@ def label_coverage(counts: dict[str, int], declared: frozenset[str],
         "unlabelled": unlabelled + undeclared_total,
         # ⛔ The ABSENT share, reported as ITS OWN number (`unlabelled = unlabelled_null +
         # unlabelled_undeclared`, exactly). A share quoted without its `NULL` denominator is not a
-        # measurement this epic accepts (plan §3.1 A4), so the decomposition is emitted rather than
+        # measurement this epic accepts (plan §7 E2E-8), so the decomposition is emitted rather than
         # left for a reader to derive — a derived denominator is one a reader can get wrong.
         "unlabelled_null": unlabelled,
         "unlabelled_undeclared": undeclared_total,
@@ -3169,7 +3169,7 @@ def _a4_claim_diagnostics(projection) -> dict:
     """`A4`'s DIAGNOSTIC block: the typed / `statement` / `NULL` shares over CLAIMS.
 
     ⛔ Kept, and kept SEPARATE from the criterion. A4's metric is per-layer label coverage; these
-    three shares and the per-writer split are reported BESIDE it (plan §3.1 A4, §4.1), because
+    three shares and the per-writer split are reported BESIDE it (plan §7 E2E-8, §4.1), because
     "a share quoted without its `NULL` denominator is not a measurement this epic accepts".
     The retired framing is what must not be built — not the diagnostic that was always honest.
     """
@@ -3534,7 +3534,7 @@ def a_row_census_lines(census_a: dict | None) -> list[str]:
     # unlabelled" leg; `coverage` is REPORTED and carries no bar. ⛔ The absent share is rendered
     # BOTH as its total AND as its two halves (`unlabelled = unlabelled_null + unlabelled_undeclared`,
     # exactly) — `label_coverage` computes the decomposition because a share quoted without its
-    # `NULL` denominator is not a measurement this epic accepts (plan §3.1 A4), and a renderer that
+    # `NULL` denominator is not a measurement this epic accepts (plan §7 E2E-8), and a renderer that
     # drops it hands that derivation back to the reader (PR #11837 round-7 P2).
     for layer, _label, _prop in A4_LAYERS:
         block = a4.get(layer) or {}

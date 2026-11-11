@@ -35,7 +35,7 @@ Five properties, each naming the mutation that makes it FAIL:
 4. **`0 of 0` is not coverage** — A4's registered floor is non-vacuity (`a4_labelled_nodes: 1`, plan
    §4.1 / `AM7`), so an empty layer is RED rather than a vacuous 100 %/absent rate.
 5. **the diagnostic survives as a diagnostic** — the typed/`statement`/`NULL` shares and the
-   per-writer split are reported BESIDE the criterion (plan §3.1 A4). ⛔ What must not be built is
+   per-writer split are reported BESIDE the criterion (plan §7 E2E-8). ⛔ What must not be built is
    the retired FRAMING (a typed-share bar); deleting the diagnostic instead is the opposite error,
    and would quote a share without the denominator the epic says it will not accept.
 """
@@ -412,7 +412,7 @@ def test_an_EXPECTED_set_is_the_corpus_fact_the_census_may_not_infer():
 def test_the_typed_statement_NULL_diagnostics_are_reported_beside_the_criterion():
     """FAILS IF the re-authoring DELETES the diagnostic (the opposite error to keeping the old bar).
 
-    Plan §3.1 A4: the per-writer split and the `typed`/`statement`/`NULL` shares are reported BESIDE
+    Plan §7 E2E-8: the per-writer split and the `typed`/`statement`/`NULL` shares are reported BESIDE
     the criterion, because *"a share quoted without its `NULL` denominator is not a measurement this
     epic accepts"*. The retired thing is the FRAMING (a typed-share target), not the number.
     """
@@ -466,9 +466,15 @@ def _full_census(probe) -> dict:
     ⛔ The claims histogram carries an UNDECLARED kind (`constraint`) beside the `NULL`, so BOTH
     halves of the absent share are non-zero and a renderer that drops either one is visible: the
     absent total is 3 = 1 `NULL` + 2 undeclared, and only the `NULL` half may reach `null=`.
+    ⏔ The three layers carry DIFFERENT numbers ON PURPOSE: identical blocks would let a renderer
+    that emits ONE layer under all three keys pass every per-layer assertion below, which is the
+    exact blend A4 exists to red (#11837 review round 2, P2). Populations are 6 / 3 / 2.
     """
+    hist = {"claims": {"statement": 3, "constraint": 2, "NULL": 1},
+            "things": {"project": 1, "NULL": 2},
+            "events": {"NULL": 2}}
     layer = lambda name: probe.label_coverage(  # noqa: E731
-        {"statement": 3, "constraint": 2, "NULL": 1} if name == "claims" else {"NULL": 2},
+        hist[name],
         frozenset({"statement"}) if name == "claims" else frozenset({"project"}),
         layer=name)
     return {
@@ -512,9 +518,21 @@ def test_the_rendered_block_emits_EVERY_layer_with_its_own_denominator():
     """
     probe = _probe()
     rendered = "\n".join(probe.a_row_census_lines(_full_census(probe)))
+    #: `(population, labelled)` as `_full_census`'s fixture builds them. ⛔ A per-layer *key* pin is
+    #: not enough: a renderer reading ONE layer and printing it under all three keys satisfies key
+    #: presence, the halves-sum check and the claims-only value assertion below — measured, GREEN,
+    #: with `block = a4.get("claims")` (#11837 review round 2, P2). The numbers are the pin.
+    layer_shape = {"claims": (6, 3), "things": (3, 1), "events": (2, 0)}
+    assert len({pop for pop, _ in layer_shape.values()}) == len(layer_shape), (
+        "the fixture no longer gives the three layers distinct populations, so this arm cannot "
+        "tell a per-layer render from one that repeats a single layer")
     for layer in ("claims", "things", "events"):
         line = [ln for ln in rendered.splitlines() if ln.startswith(f"a4 {layer} ")]
         assert line, f"the {layer} layer is not rendered:\n{rendered}"
+        want_pop, want_lab = layer_shape[layer]
+        assert f"population={want_pop} labelled={want_lab} " in line[0], (
+            f"the {layer} line does not carry THAT layer's numbers — a renderer emitting one "
+            f"layer under three keys reads as three measured layers:\n{line[0]}")
         for part in ("population", "labelled", "unlabelled", "unlabelled_null",
                      "unlabelled_undeclared", "coverage", "non_vacuity",
                      "declared_present", "declared_absent", "undeclared"):

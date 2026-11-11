@@ -30,7 +30,7 @@ percentage **reported, not chased**; the floor is non-vacuity (`a4_labelled_node
 ⛔ **The retired framing must not be built**: *"typed-claim population measured against a 0.6 % ceiling"*
 is the criterion A4 was re-authored **away from**. The claim layer is deliberately uniform (`statement`,
 `ONTOLOGY.md` §5 option B), so counting labels there could not fail. The typed / `statement` / `NULL`
-shares and the per-writer split survive **as diagnostics** — plan §3.1 A4 accepts no share quoted without
+shares and the per-writer split survive **as diagnostics** — plan §7 E2E-8 accepts no share quoted without
 its `NULL` denominator.
 
 ## 2 · The instrument
