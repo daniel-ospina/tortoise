@@ -33,7 +33,7 @@ import contextvars
 import hashlib
 import json as _json
 import logging
-import math
+import numbers
 import os
 import re
 import stat
@@ -6828,17 +6828,27 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
             _belief_val = props[_belief_key]
             if _belief_val is None:
                 continue
+            # ⛔ Cycle 21: the CLASS refusal covers only values that are not
+            # numbers at all. The representability question ("can the store hold
+            # this without altering it") belongs to its owner,
+            # `numeric_domain.numeric_alteration_reason` (#4647) — the guard
+            # `_sanitize_props` already applies to every OTHER numeric prop a
+            # few lines above. Spelling it inline with `isinstance(int, float)`
+            # refused `Decimal("0.5")` and `np.float32(0.5)`, which the double
+            # type holds EXACTLY (the domain function certifies them), and
+            # diagnosed them as "malformed" — a regression against the pre-PR
+            # tree, where both were stored faithfully.
             if isinstance(_belief_val, bool) or not isinstance(
-                    _belief_val, (int, float)) or not math.isfinite(
-                        float(_belief_val)):
+                    _belief_val, numbers.Number):
                 raise ValueError(
-                    f"{_belief_key!r} must be a finite number (not a "
-                    f"{type(_belief_val).__name__}): a non-numeric belief is "
-                    "not a weaker claim, it is a malformed one — FalkorDB "
-                    "cannot coerce a List/Boolean/string operand, so a single "
-                    "such row breaks every belief read on the batch (#11702, "
-                    "#11841). Pass a float, or None to clear it."
+                    f"{_belief_key!r} must be a number (not a "
+                    f"{type(_belief_val).__name__}): FalkorDB cannot coerce a "
+                    "List/Boolean/string operand, so a single such row breaks "
+                    "every belief read on the batch (#11702, #11841). Pass a "
+                    "float, or None to clear it."
                 )
+            # …and a number it cannot hold exactly is the DOMAIN's refusal, with
+            # its own reason (a precision loss is not "malformed").
     _baseline_props = [k for k in
                        ("ep_alpha", "ep_beta", "baseline_set",
                         "baseline_source")
@@ -33773,6 +33783,22 @@ class TortoiseSDK:
         # refusal paths BELOW land after the update — `written` is only known
         # after the store answers — so each one pops the seat it just planted,
         # #9262.)
+        # #11702 cycle 21: a BOOLEAN is not a Beta count, and it slips every
+        # guard below — `_reject_unrepresentable_number(True)` returns None (the
+        # numeric domain does not treat a Boolean as an altered number) and
+        # `True < 0` is False. Measured: `set_point_baseline(claim, True, 0.5)`
+        # answered ok, stored `ep_alpha=true`, which every reader then reports
+        # ABSENT (a Boolean is not a number) — while the same call set
+        # `baseline_set=true` + `baseline_source="set-by-author"`, freezing the
+        # claim against the source-inheritance recompute that would have given it
+        # a belief. Refused here, like the cycle-20 guard on the generic door.
+        for _name, _val in (("alpha", alpha), ("beta", beta)):
+            if isinstance(_val, bool) or not isinstance(_val, numbers.Number):
+                raise ValueError(
+                    f"Beta {_name} must be a number, not a "
+                    f"{type(_val).__name__}: a Boolean/collection/string "
+                    "operand is not a pseudo-count and cannot be read as a "
+                    "belief (#11702)")
         _reject_unrepresentable_number("alpha", alpha)
         _reject_unrepresentable_number("beta", beta)
         # #11702 cycle 11: a Beta operand is a COUNT. The representability
