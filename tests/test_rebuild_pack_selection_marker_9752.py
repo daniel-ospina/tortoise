@@ -161,7 +161,7 @@ def test_rebuild_all_preserves_the_pack_selection_marker(tmp_path, caplog):
     after = _resolved(sdk)
     assert after.configured is True, (
         "the marker was dropped by the rebuild — the graph now reads as never "
-        "configured, so the self-heal and the union fallback are live (#9752)")
+        "configured, so the union fallback is live (#9752)")
     assert after.revision == before.revision, (
         "the revision a client holds was reset — an optimistic-concurrency "
         "client would silently re-base onto a different decision")
@@ -1504,7 +1504,7 @@ def test_migrate_route_names_the_capture_source_when_it_observed_nothing(
     # this value, so if `migrate()` ever reported `True` here the CLI would go
     # back to naming a sidecar this shape does not have — and, before this
     # assertion, the whole file stayed green through exactly that mutation
-    # (measured: 39 passed with the dict entry forced to `True`).
+    # (39 passed with the dict entry forced to `True`, before the assertion).
     assert result["pack_selection_state_unknown_inherited"] is False, (
         "this route's own empty-capture override must report itself as NOT "
         f"inherited, or the CLI prints the sidecar cause again: {result}")
@@ -1962,8 +1962,11 @@ def test_rebuild_all_reports_the_true_absence_it_observed(tmp_path, caplog,
     FAILING VALUE: `elif pack_selection_missing:` — the one branch that states
     the actual #9752 harm ("the graph now reads as UNCONFIGURED, a pack the
     admin had REMOVED is back in the approved set") — was pinned by NO test.
-    Measured at this head: rewriting it to `elif False:` leaves the whole file
-    GREEN (94 passed across the four rebuild suites, 39 in this one). A report
+    Measured BEFORE the pin below existed: rewriting it to `elif False:` left
+    the whole file GREEN at that reading (39 passed here, 94 across the four
+    rebuild suites). The pin now REDS under exactly that mutation, and the
+    reading is dated rather than claimed current because two lanes have since
+    appended tests to this file. A report
     that can be deleted without reddening anything is not a report; it is dead
     code with a log line, which is the class this PR exists to remove.
 
@@ -2018,8 +2021,9 @@ def test_replay_log_reports_the_absence_arm_it_observed(tmp_path, caplog,
 
     FAILING VALUE: the `else:` under the read-back — the journal-replay path's
     only statement that a lost marker reads as UNCONFIGURED — is unpinned.
-    Measured at this head: `logger.error(` → `logger.debug(` on that arm leaves
-    this file GREEN (39 passed), so the single operator-visible signal on the
+    Measured BEFORE the pin below existed: `logger.error(` → `logger.debug(` on
+    that arm left this file GREEN at that reading (39 passed); it now REDS. The
+    single operator-visible signal on the
     journal-only path can be silenced by an edit nothing notices.
 
     REACHABLE: `_replay_log` really runs over a real journal and the read-back
