@@ -2982,6 +2982,17 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_cloud_agent_limit
     # (#11806 review P1, tracked as #11807).
     assert "USER-level file" in r.stdout, r.stdout
     assert "CLOUD" in r.stdout.upper(), r.stdout
+    # ⛔ BOTH mentions of the scoping are pinned, not one (#11810 review r24 P2).
+    # The message states the HOSTED scope twice — the load-path clause ("which a
+    # hosted Cursor cloud agent VM cannot read") and the consequence clause
+    # ("a session running in a hosted cloud agent VM is NOT captured") — and only
+    # the second was pinned, so dropping `hosted` from the FIRST left the whole
+    # suite GREEN. It is a CLAIM-SHAPED presence leg plus an absence leg on the
+    # unscoped form; the absence needle is provably NOT a substring of the
+    # scoped one (the qualifier sits between "a" and "Cursor"), so it cannot
+    # RED correct text.
+    assert "which a hosted Cursor cloud agent VM cannot read" in r.stdout, r.stdout
+    assert "which a Cursor cloud agent VM cannot read" not in r.stdout, r.stdout
     assert "no editor-lifetime session boundary" in r.stdout, r.stdout
     # #2122: the disclosure must cover the INJECTION hook too, not only
     # capture. Cursor's docs exclude `sessionStart` from cloud agents and say a
@@ -3007,8 +3018,12 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_cloud_agent_limit
     # "hooks are IDE-ONLY"; it must NOT ban accurate prose that negates the
     # term ("these seams are not IDE-only"), which is the phrasing the matrix
     # row itself uses (review round 3, P2).
-    assert "hooks are IDE-ONLY" not in r.stdout, r.stdout
-    assert "hooks are IDE-only" not in r.stdout, r.stdout
+    # ⛔ CASE-INSENSITIVE (#11810 review r24 P3): the guard enumerated two casings,
+    # so a third one — "Both Cursor hooks are IDE-Only." — passed GREEN. The
+    # claim is the absolute, not its casing, so compare on a lowered copy; this
+    # still leaves accurate NEGATED prose alone ("these seams are not IDE-only"
+    # names `seams`, not `hooks`).
+    assert "hooks are ide-only" not in r.stdout.lower(), r.stdout
     # ⛔ AND THE ROUND-1 UNIVERSAL MAY NOT COME BACK UNPINNED. Review round 3
     # measured it: re-appending "neither … reaches a cloud agent" left the whole
     # suite GREEN, because every other assert is a presence pin on prose that
@@ -3070,7 +3085,7 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_cloud_agent_limit
             in cursor_lines[0]), cursor_lines[0]
     assert "Self-Hosted Machines" in cursor_lines[0], cursor_lines[0]
     assert "on Enterprise" in cursor_lines[0], cursor_lines[0]
-    assert "hooks are IDE-ONLY" not in listing.stdout, listing.stdout
+    assert "hooks are ide-only" not in listing.stdout.lower(), listing.stdout
 
 
 # ⛔ THE DOC↔MESSAGE PIN LIVES IN ITS OWN `tier1`-REGISTERED MODULE
