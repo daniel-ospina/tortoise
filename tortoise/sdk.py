@@ -10061,9 +10061,20 @@ def _money_views_for_update(g, props: dict, *, node_id: str,
     query PARAMETER. ``_update_entity`` deliberately passes NO label: it is the
     documented tenant route onto every carrier, and a label here would have to
     enumerate them (Object/Event/Point/Subject, plus any future carrier) — a
-    wrong guess is a HOLE (money on an unlisted label escapes the gate), while
-    the unlabelled scan is only slower. The scan is paid only by a bag that
-    names a money member.
+    wrong guess is a HOLE (money on an unlisted label escapes the gate).
+    ⚠️ The unlabelled pattern is NOT "only marginally slower", which is what an
+    earlier revision of this docstring claimed: FalkorDB indexes are
+    label-scoped, so it can use no label's ``id`` index and the cost is LINEAR
+    in graph size (measured on the lane's FalkorDB: 0.54 ms at 2 nodes → 6.68 ms
+    at 45 002, against a flat ~0.5 ms for the labelled form), and it is paid only
+    by a bag that names a money member. The PROJECTION is what keeps that
+    acceptable: only the money members are read, because ``RETURN
+    properties(n)`` drags the node's ``content`` and its vector along (3.80 ms vs
+    0.51 ms on a ``:Point`` carrying a 1024-dim vector — 7.4x, for five keys).
+    Narrowing the MATCH itself to the labels the write loop already enumerates is
+    tortoise#11867 (filed for this residual, not implied to be fixed here — a
+    label list that drifts from the WRITE's own enumeration would be a hole in
+    this gate, which is why it is not guessed at).
 
     STATED RESIDUAL: ``{id:$id}`` is NARROWER than the write's own key
     discipline. This door reaches a node by its PRIMARY key then its SECONDARY
@@ -10077,14 +10088,22 @@ def _money_views_for_update(g, props: dict, *, node_id: str,
     """
     if not any(key in props for key in MONEY_VALUE_FIELDS):
         return None
+    # ⛔ Project the money members, never `properties(n)`: the whole-node form
+    # drags `content` and the embedding across the wire for five keys (measured
+    # 3.80 ms vs 0.51 ms on a 1024-dim :Point).
     rows = g.query(
-        f"MATCH (n{label} {{id:$id}}) RETURN properties(n)",
+        f"MATCH (n{label} {{id:$id}}) "
+        "RETURN n.amountMinor, n.currency, n.minorUnitExponent, "
+        "       n.verbatim, n.asOf",
         params={"id": node_id},
     ).result_set
     if not rows:
         return [money_view_after_update({}, props)]
-    return [money_view_after_update(stored or {}, props)
-            for (stored,) in rows]
+    return [money_view_after_update(
+                {key: value for key, value in zip(MONEY_VALUE_FIELDS, row)
+                 if value is not None},
+                props)
+            for row in rows]
 
 
 def _refuse_inconsistent_validity_precision(g, props: dict, *,
@@ -47896,11 +47915,20 @@ class TortoiseSDK:
         # this gate's sibling comment rejects.
         #
         # ⚠️ Stated bound: this refuses a MALFORMED bag. A WELL-FORMED money
-        # value is still dropped here, because a `:Source` carries provenance
-        # and has no declared money field at all — that is #3998's closed-surface
-        # decision, not this gate's, and it is pinned by
+        # value is still dropped from the NODE, because a `:Source` carries
+        # provenance and has no declared money field at all — that is #3998's
+        # closed-surface decision, not this gate's, and it is pinned by
         # `tests/test_money_value_2782.py::TestNonSanitizedSeams`
         # ::test_a_wellformed_money_value_on_a_source_is_still_dropped.
+        # ⛔ That bound is about the NODE, and the prose above must not be read
+        # as covering the RECORD: `ev` is what journals a `SourceCreated` row, so
+        # a well-formed value still rides the journal (measured: node money
+        # `[None, None]`, journal record carrying `amountMinor=7000000,
+        # currency='BRL'`) and is dropped again when the replay folds it. The
+        # graph therefore stays consistent, but the value is durable in the
+        # record lane until a `:Source` surface decision says otherwise (#3998) —
+        # recorded here rather than implied away, and pinned by the test's own
+        # journal assertion (#11836 review, tortoise#11863).
         refuse_malformed_money(ev, door="create_source")
         # ── #5024 (T6): ONE clock for the transition ────────────────
         # `_upsert_source`'s ON MATCH sets `updatedAt = coalesce($updatedAt,

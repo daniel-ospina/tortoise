@@ -1229,11 +1229,20 @@ class TestNonSanitizedSeams:
         """⚠️ STATED BOUND, not a claim of closure: a ``:Source`` has no
         declared money field at all (``_SOURCE_EXTRA_PROPS``, #3998's closed
         surface denies undeclared keys), so a WELL-FORMED value is still
-        dropped here. That is a ``:Source`` surface decision — a Source carries
-        provenance, not a value — and not something this gate may widen; the
-        gate's job is that the caller is refused when the shape is one the
-        reader could not read, rather than silently losing an amount."""
-        sdk, _events = journaled_sdk
+        dropped from the NODE. That is a ``:Source`` surface decision — a Source
+        carries provenance, not a value — and not something this gate may widen;
+        the gate's job is that the caller is refused when the shape is one the
+        reader could not read, rather than silently losing an amount.
+
+        ⛔ The bound is about the NODE, and this test says so explicitly: the
+        value still rides the ``SourceCreated`` JOURNAL record (measured:
+        ``amountMinor=7000000, currency='BRL'`` in the journal, ``[None, None]``
+        on the node) and the replay fold drops it again, so the graph stays
+        consistent while the record lane holds a durable value until #3998's
+        surface decision covers it. Pinning the journal half keeps the next
+        reader from reading the node-only assertion as "nothing is stored".
+        """
+        sdk, events = journaled_sdk
         sdk.create_source("https://ex.invalid/b", "web",
                           **money_props(COMMITTED_MINOR, "BRL",
                                         minor_unit_exponent=2))
@@ -1242,6 +1251,14 @@ class TestNonSanitizedSeams:
             "RETURN s.amountMinor").result_set
         assert rows, "the :Source was not created"
         assert rows[0][0] is None, "money reached a :Source surface"
+        journal = events / "events.jsonl"
+        assert journal.exists(), "the create did not journal"
+        text = journal.read_text()
+        assert "SourceCreated" in text, "no SourceCreated record in the journal"
+        assert f'"amountMinor": {COMMITTED_MINOR}' in text, (
+            "the bound moved: the journal no longer carries the well-formed "
+            "value, so this docstring is stale")
+        assert '"currency": "BRL"' in text
 
 
 class TestKnownResidualCreateDoorOnMatch:
