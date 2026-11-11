@@ -12,11 +12,11 @@ aboutObjects: SEARCH-ARCHITECTURE.md, absent belief state, search design revisio
 
 # Search Architecture — Changelog
 
-> **What this is.** The record of *how the search design got where it is* — the work this document drove and
-> the provenance of its rulings. It is the counterpart of `STORAGE-ARCHITECTURE-CHANGELOG.md`, whose §13 issue
-> map is the sibling shape; `SEARCH-ARCHITECTURE.md` has never carried a section→issue index, so there is no
-> map to move yet, and its review record lives on `#4051` (§10 says where the corrections that changed the
-> decision are stated).
+> **What this is.** The record of *how the search design got where it is* — the work `SEARCH-ARCHITECTURE.md`
+> drove and the provenance of its rulings. It is the counterpart of `STORAGE-ARCHITECTURE-CHANGELOG.md`, whose
+> §13 issue map is the sibling shape; `SEARCH-ARCHITECTURE.md` has never carried a section→issue index, so
+> there is no map to move yet, and its review record lives on `#4051` (§10 says where the corrections that
+> changed the decision are stated).
 >
 > **What `SEARCH-ARCHITECTURE.md` is.** The design. It states where the vector index lives, what the graph
 > engine keeps, and the evidence behind each ruling; it does not narrate its own revisions or track the
@@ -55,7 +55,7 @@ directions (a *measured* 0.5 keeps its 0.5).
 `pull_request` run (`43047153399`, head `2fa7d2fe…`) carried a `test (g)` check-run that **started at
 17:16:57Z** and red this nodeid at **17:30:08Z** — so the guard *was* in that shard's population, and the
 shard had simply not started when the merge landed. Nothing had concluded against it; the merge gate did not
-wait. **Why a required shard can be 40+ minutes behind its merge is unresolved** — `#11907` carries the
+wait. **Why a required shard can start ~1h48m after its merge is unresolved** — `#11907` carries the
 follow-up, and its "shard population" reading is that issue's hypothesis, not this record's. `test (g)` is a
 required shard, so the violation made every PR on the repository unmergeable.
 
