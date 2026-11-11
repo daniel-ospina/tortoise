@@ -1380,3 +1380,79 @@ def test_no_surface_fabricates_a_variance_for_an_absent_belief(sdk):
     state_sig = StateRanker(projection=proj)._fetch_point_signals([wide])[wide]
     assert state_sig["variance"] == pytest.approx(1 / 12, abs=1e-6), state_sig
     assert state_sig["contested"] is True, state_sig
+
+
+def test_relationship_peer_block_uses_the_shared_belief_readers(sdk):
+    """`get_relationships_bounded`'s peer block was the last local re-derivation.
+
+    It derived presence from `ep_measured_cypher` and the value/width from the
+    `coalesce(…, 1.0)` operands, so on the LIVE row shape one claim had two
+    answers:
+
+        half pair : peer conf=0.3333 variance=0.0889 contested=True
+                    ep  mean=None  state=absent    variance=0.0  contested=False
+        (0,0)     : peer conf=0.5    variance=0.0      contested=False
+                    ep  mean=None  state=absent    variance=0.0  contested=False
+
+    `contested` is load-bearing here: it promotes a peer into the CRITICAL
+    class, which is exempt from the per-point cap AND the global budget — so a
+    claim nothing measured could displace a real support peer. `sdk.search`
+    attaches this block to every point result, so it is agent-facing.
+    """
+    from tortoise.search_engine import annotate_ep_batch, get_relationships_bounded
+
+    proj = sdk._get_proj()
+    target = sdk.create_point("statement", "the peer-block target")["id"]
+    half = sdk.create_point("statement", "half pair peer")["id"]
+    degenerate = sdk.create_point("statement", "degenerate pair peer")["id"]
+    measured = sdk.create_point("statement", "genuinely wide peer")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 0.5",
+                 params={"id": half})
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 0.0, "
+                 "n.posterior_beta = 0.0", params={"id": degenerate})
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 1.0, "
+                 "n.posterior_beta = 1.0", params={"id": measured})
+    op = sdk.create_point("statement", "the peer-block operator")["id"]
+    proj.g.query(
+        "MATCH (o:Point {id:$o}) SET o.is_operator = true, o.op_type = 'IMPL'",
+        params={"o": op})
+    proj.g.query(
+        "MATCH (o:Point {id:$o}), (t:Point {id:$t}) CREATE (o)-[:IMPL]->(t)",
+        params={"o": op, "t": target})
+    for idx, peer in enumerate((half, degenerate, measured), start=1):
+        proj.g.query(
+            "MATCH (p:Point {id:$p}), (o:Point {id:$o}) "
+            f"CREATE (p)-[:IMPL {{idx:{idx}}}]->(o)",
+            params={"p": peer, "o": op})
+
+    out = get_relationships_bounded(proj.g, [target])
+    assert out.decoration_error == "", out.decoration_error
+    peers = {e["related_id"]: e["peer"] for e in out[target]}
+    eps = annotate_ep_batch(proj.g, [half, degenerate, measured])
+
+    for pid in (half, degenerate):
+        peer, ep = peers[pid], eps[pid]
+        assert peer["confidence"] is None, (
+            "the peer block fabricated a mean for a claim with no belief: "
+            + repr(peer))
+        assert peer["ep_state"] == "absent", peer
+        # `None` (not 0.0) — this block's own convention for "no width
+        # applies" (a mitigation / CORRECTS peer emits `None` too), and it can
+        # never be mistaken for the Beta(1,1) maximum. The `ep` block keeps its
+        # float-typed 0.0 for the same fact; both refuse to invent a number.
+        assert peer["variance"] in (None, 0.0), (
+            "the peer block fabricated a WIDTH from the coalesced 1.0 "
+            "defaults: " + repr(peer))
+        assert peer["variance"] != pytest.approx(0.0833, abs=1e-3), peer
+        assert peer["contested"] is False, (
+            "a claim nothing measured entered the CRITICAL class as contested, "
+            "where it is exempt from the caps and can displace real peers: "
+            + repr(peer))
+        # …and the ep block agrees, which is the whole invariant.
+        assert ep.confidence_mean is None and ep.variance == 0.0, ep
+
+    # A genuinely wide peer keeps its width and its contested flag.
+    assert peers[measured]["confidence"] == pytest.approx(0.5, abs=1e-4), peers[measured]
+    assert peers[measured]["variance"] == pytest.approx(1 / 12, abs=1e-5), peers[measured]
+    assert peers[measured]["contested"] is True, peers[measured]
+    assert eps[measured].variance == pytest.approx(1 / 12, abs=1e-5), eps[measured]

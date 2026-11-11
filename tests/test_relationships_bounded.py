@@ -1479,12 +1479,15 @@ def test_degenerate_measured_peer_decorates_with_the_uniform_fallback():
         "the healthy peer's entry must survive alongside the degenerate one")
     assert peers["A"]["confidence"] == 0.75, peers["A"]  # 3/(3+1)
     assert peers["B"]["confidence"] == 0.5, (
-        "#330's uniform fallback is the house value for a degenerate pair — "
-        "the same 0.5 StateRanker._fetch_point_signals reports for it; NOT the "
-        "GraphRanker sibling, which reads the mirrored column and has no such "
-        "guard. #11702: this is the degenerate-pair mean (α+β <= 0), NOT the "
-        "neutral-absence constant — that one is gone, and absence is None + "
-        "ep_state 'absent' now. got "
+        "#330's uniform fallback is the house value for a degenerate pair, and "
+        "this test double carries the PRE-#11702 11-column row shape, so the "
+        "assembly takes its documented legacy branch. #11702: on the LIVE row "
+        "(16 columns, so the raw α/β + mirror are present) a stored (0,0) pair "
+        "is ABSENT — `confidence: None` + `ep_state: 'absent'`, the same answer "
+        "`annotate_ep_batch`, `why` and all three rankers give it — and this "
+        "0.5 fallback is reachable only for a double that cannot express "
+        "presence. See tests/test_11702_absent_belief_state.py::"
+        "test_relationship_peer_block_uses_the_shared_belief_readers. got "
         f"{peers['B']['confidence']!r}")
     assert peers["B"]["variance"] == 0.0, (
         "_beta_variance's s <= 0 guard — which is why the 0.5 mean does not "
@@ -1559,10 +1562,18 @@ def test_degenerate_persisted_posterior_peer_decorates_on_a_real_graph(
         f"{out.decoration_error}")
     entries = out[a["id"]]
     assert [e["related_id"] for e in entries] == [b["id"]], entries
-    # 0.5 (not None) is what makes this an arm that read as MEASURED: an
-    # unmeasured peer carries confidence None and would never reach the divide.
-    assert entries[0]["peer"]["confidence"] == 0.5, entries[0]["peer"]
-    assert entries[0]["peer"]["variance"] == 0.0, entries[0]["peer"]
+    # #11702: a stored (0.0, 0.0) pair is ABSENT (`α+β > 0` fails the presence
+    # rule), so the LIVE row now answers `None` + `ep_state: "absent"` here —
+    # the same answer `annotate_ep_batch`, `why` and all three rankers give the
+    # same claim. The `0.5` fallback above survives only for a double carrying
+    # the pre-#11702 11-column shape, which cannot express presence at all.
+    #
+    # The #8504 point still holds and is what this test guards: the peer must
+    # DECORATE (no ZeroDivisionError, no batch discard) — asserted through
+    # `decoration_error` and the surviving entry above.
+    assert entries[0]["peer"]["confidence"] is None, entries[0]["peer"]
+    assert entries[0]["peer"]["ep_state"] == "absent", entries[0]["peer"]
+    assert entries[0]["peer"]["variance"] in (None, 0.0), entries[0]["peer"]
     assert entries[0]["peer"]["contested"] is False, entries[0]["peer"]
 
 

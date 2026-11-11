@@ -4101,6 +4101,19 @@ def _recency_factors(entries: list[tuple[str, Any]]) -> dict[str, float]:
     return factors
 
 
+def ep_pair_stored_cypher(alias: str) -> str:
+    """Cypher twin of :func:`ep_pair_stored` (#11702).
+
+    Both coalesced operands present — the condition under which a VARIANCE is
+    a posterior statistic rather than an artifact of the `coalesce(…, 1.0)`
+    defaults. Used wherever a read must decide the WIDTH inside Cypher (an
+    ordering or a class-selection predicate) so the query and the Python
+    assembly cannot disagree about which claims carry a width."""
+    return (f"(coalesce({alias}.posterior_alpha, {alias}.ep_alpha) "
+            f"IS NOT NULL AND coalesce({alias}.posterior_beta, "
+            f"{alias}.ep_beta) IS NOT NULL)")
+
+
 def ep_pair_stored(*, posterior_alpha=None, posterior_beta=None,
                    ep_alpha=None, ep_beta=None) -> bool:
     """True when BOTH operands of the α/β PAIR are persisted (#11702).
@@ -4857,7 +4870,16 @@ def get_relationships_bounded(
                 "  AND NOT (op)-[:mitigated_by]->(other) "
                 "  AND (type(r2) = 'NAND' "
                 f"       OR {_terminal_expression('other.status')} "
+                # #11702: the SELECTION must agree with the flag the assembly
+                # computes. The in-query variance runs on the coalesced 1.0
+                # defaults, so a HALF pair (the public write path can produce
+                # one) read 0.3333 / variance 0.0889 > threshold and entered
+                # the CRITICAL class — which is exempt from the per-point and
+                # global caps — for a claim no surface calls measured. The
+                # pair-stored test and the presence rule come from the one
+                # owner (`ep_has_belief_cypher` / `ep_pair_stored`).
                 f"       OR ({ep_measured_cypher('other')} "
+                f"           AND {ep_pair_stored_cypher('other')} "
                 "           AND (coalesce(other.posterior_alpha, other.ep_alpha, 1.0) * coalesce(other.posterior_beta, other.ep_beta, 1.0)) "
                 "               / ((coalesce(other.posterior_alpha, other.ep_alpha, 1.0) + coalesce(other.posterior_beta, other.ep_beta, 1.0)) ^ 2 "
                 "                  * (coalesce(other.posterior_alpha, other.ep_alpha, 1.0) + coalesce(other.posterior_beta, other.ep_beta, 1.0) + 1)) > $contested_threshold)) "
@@ -4871,7 +4893,14 @@ def get_relationships_bounded(
                 # gate lives INSIDE the projection). #3276: "measured" is
                 # ep_measured_cypher — a #2199 baseline prior is NOT measurement.
                 f"  ({ep_measured_cypher('other')} AND {_alive_flag('other.status')}), "
-                "  other.createdAt, coalesce(other.outdated, false) "
+                "  other.createdAt, coalesce(other.outdated, false), "
+                # #11702: the RAW belief columns (11..14) + the mirror (15), so
+                # the assembly reads the VALUE and the WIDTH through the one
+                # owner instead of re-deriving presence from the coalesced
+                # defaults (a half pair read 0.3333 with variance 0.0889 here
+                # while every other surface answered None + absent).
+                "  other.posterior_alpha, other.ep_alpha, "
+                "  other.posterior_beta, other.ep_beta, other.confidence "
                 "LIMIT $raw_cap",
                 params={"op_ids": list(op_ids), "raw_cap": raw_cap,
                         "contested_threshold": CONTESTED_VARIANCE_THRESHOLD},
@@ -4882,6 +4911,9 @@ def get_relationships_bounded(
                     row[1], row[2], row[4] or "", row[5] or "",
                     float(row[6]), float(row[7]), bool(row[8]), row[9],
                     bool(row[10]),
+                    # #11702: raw α/β + mirror (11..15) for the shared readers.
+                    (row[11], row[12], row[13], row[14], row[15])
+                    if len(row) > 15 else None,
                 )
 
         # The operators of the TOP-K result points are the ones that get
@@ -4914,7 +4946,10 @@ def get_relationships_bounded(
                 # never reads as measured EP in the assembly. #3276: measured
                 # excludes the #2199 baseline prior (see ep_measured_cypher).
                 f"  ({ep_measured_cypher('other')} AND {_alive_flag('other.status')}), "
-                "  other.createdAt, coalesce(other.outdated, false)",
+                "  other.createdAt, coalesce(other.outdated, false), "
+                # #11702: raw belief columns + mirror (see op_crit).
+                "  other.posterior_alpha, other.ep_alpha, "
+                "  other.posterior_beta, other.ep_beta, other.confidence",
                 params={"op_ids": list(expand_ops), "per_op": per_op_cap},
                 timeout=_DECORATION_TIMEOUT_MS,
             ).result_set
@@ -4923,6 +4958,8 @@ def get_relationships_bounded(
                     row[1], row[2], row[4] or "", row[5] or "",
                     float(row[6]), float(row[7]), bool(row[8]), row[9],
                     bool(row[10]),
+                    (row[11], row[12], row[13], row[14], row[15])
+                    if len(row) > 15 else None,
                 )
 
         # Unified endpoint store: critical classes first, then support filler
@@ -4966,9 +5003,43 @@ def get_relationships_bounded(
                 for other_id, ep in op_endpoints.get(op_id, {}).items():
                     if other_id == pid:
                         continue  # self-peer exclusion
-                    et2, other_idx, kind, status, alpha, beta, has_ep, created, outdated = ep  # noqa: RUF059
-                    variance = _beta_variance(alpha, beta)
-                    contested = has_ep and variance > CONTESTED_VARIANCE_THRESHOLD
+                    (et2, _other_idx, kind, status, alpha, beta, has_ep,
+                     created, outdated, raw) = ep
+                    # #11702: ONE owner for presence, one for the width. The
+                    # coalesced α/β above are only the ARITHMETIC inputs; the
+                    # raw columns decide whether a belief and a width EXIST.
+                    # Without this block a HALF pair (α only — writable through
+                    # `sdk.update_point`) read `confidence: 0.3333, variance:
+                    # 0.0889, contested: true` here while `annotate_ep_batch`,
+                    # `why` and all three rankers answered `None` + `"absent"`
+                    # for the same claim; and because `contested` promotes a
+                    # peer into the CRITICAL class (cap- and budget-exempt),
+                    # the fabricated flag displaced real support peers.
+                    if raw is not None:
+                        rpa, rea, rpb, reb, rmirror = raw
+                        pair_stored = ep_pair_stored(
+                            posterior_alpha=rpa, ep_alpha=rea,
+                            posterior_beta=rpb, ep_beta=reb)
+                        state = ep_state_resolve(
+                            ep_state(posterior_alpha=rpa, ep_alpha=rea,
+                                     confidence=rmirror, posterior_beta=rpb,
+                                     ep_beta=reb,
+                                     baseline_set=bool(has_ep)),
+                            measured=has_ep)
+                        value = belief_value(confidence=rmirror,
+                                             posterior_alpha=rpa, ep_alpha=rea,
+                                             posterior_beta=rpb, ep_beta=reb)
+                    else:  # pragma: no cover — pre-#11702 row double
+                        pair_stored = True
+                        state = (EP_STATE_MEASURED if has_ep
+                                 else EP_STATE_BASELINE)
+                        value = (round(_beta_mean(alpha, beta), 4)
+                                 if has_ep else None)
+                    variance = (_beta_variance(alpha, beta)
+                                if pair_stored else 0.0)
+                    contested = (has_ep and state != EP_STATE_ABSENT
+                                 and pair_stored
+                                 and variance > CONTESTED_VARIANCE_THRESHOLD)
                     # #2490: terminal peers (full live.py vocab OR the legacy
                     # outdated=true flag — a flag-outdated live-status peer is
                     # in no status-set member, only the fetched column
@@ -5015,9 +5086,15 @@ def get_relationships_bounded(
                             # pair `_beta_variance`'s own s <= 0 guard yields
                             # variance 0.0, so contested stays False and nothing
                             # above the threshold is claimed.
-                            "confidence": round(_beta_mean(alpha, beta), 4) if has_ep else None,
-                            "variance": round(variance, 6) if has_ep else None,
+                            "confidence": value,
+                            "variance": round(variance, 6) if pair_stored else None,
                             "contested": contested,
+                            # #11702: the state NAME rides beside the value on
+                            # every other surface (`ep` block, rankers); this
+                            # peer block was the one place it did not, so a
+                            # consumer could not tell a `None` value from an
+                            # absent belief and a degenerate pair.
+                            "ep_state": state,
                             "created_at": created,
                         },
                         "family_size": op_family.get((op_id, et2), 0),

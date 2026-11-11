@@ -416,10 +416,15 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
     persisted belief in any form carries ``confidence_mean: None`` and
     ``ep_state: "absent"`` (#11702) — never the Beta(1,1) mean 0.5, which
     admitted a never-measured claim through any floor at or under 0.5 as if it
-    carried neutral evidence. ``variance`` is still the neutral (1,1) width and
-    must not be read as a posterior statistic when the state is ``absent``;
-    ``has_ep``/``measured`` are unchanged by #11702. "Absence of measurement is
-    not low support" still holds — the belief term simply does not participate.
+    carried neutral evidence. ``variance`` is ``0.0`` unless BOTH operands of
+    the α/β pair are stored (`search_engine.ep_pair_stored`, the same rule
+    `annotate_ep_batch` and all three rankers apply): the `coalesce(…, 1.0)`
+    inputs otherwise answer the Beta(1,1) MAXIMUM 1/12, i.e. "there is no
+    belief here, and it is maximally uncertain", and an α-only half pair
+    turned `contested` on so the volunteer surfaced "read the
+    counterargument" for a claim with zero counterarguments. ``has_ep``/
+    ``measured`` are unchanged by #11702. "Absence of measurement is not low
+    support" still holds — the belief term simply does not participate.
 
     #2490: the gate is a PROJECTION-side has_ep OVERRIDE, NOT a WHERE
     insertion — why() explicitly serves terminal ids in the supersession
@@ -1009,10 +1014,16 @@ def item_to_why_entry(item: dict) -> dict | None:
     }
     ep = item.get("ep")
     if isinstance(ep, dict):
+        # #11702: `None` passes through as `None` — the `0.0` defaults read as
+        # "maximum disbelief" for a claim nothing measured, and they are the
+        # same coercion this change removed from `why_snapshot`. The state NAME
+        # rides along too: without it a consumer cannot tell a `None` value
+        # from an absent belief (the §6.3 contract is value + state, always).
         entry["ep"] = {
-            "confidence_mean": ep.get("confidence_mean", 0.0),
-            "variance": ep.get("variance", 0.0),
+            "confidence_mean": ep.get("confidence_mean"),
+            "variance": ep.get("variance"),
             "contested": bool(ep.get("contested", False)),
+            "ep_state": ep.get("ep_state"),
             "has_ep": bool(ep.get("has_ep", False)),
             # #3276: carry the explicit measurement state through the
             # projection (a pre-#3276 item with only has_ep stays honest:

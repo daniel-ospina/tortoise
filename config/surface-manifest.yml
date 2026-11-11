@@ -477,8 +477,10 @@ response_fields:
     identical number, identical key set, identical order. ⚠️ #11702 CHANGED THE LIVE-ROW RULE: an uncalibrated LIVE gap
     now carries null + ep_state "absent" instead of the neutral-0.5 convention this supersedes (see
     recall_ranking.confidence above —
-    SEARCH-ARCHITECTURE.md §6.3 is the superseding decision), and the absent gap is placed after every gap that has a
-    belief'
+    SEARCH-ARCHITECTURE.md §6.3 is the superseding decision). This key is NOT an ordering guarantee on mode=gaps: the
+    gaps score is load/(1+support) and a belief never enters it, so an absent gap is ordered by STRUCTURE alone —
+    exactly as gaps_ranking.ep_state states. (Cycle 3 removed this same "placed after every gap that has a belief"
+    claim from the ep_state row; it had survived here)'
 - response: tortoise_recall
   field: gaps_ranking.confidence_source
   emitted_when: the same rows as gaps_ranking.confidence becomes null — the source reads "uncomputed" instead of
