@@ -200,11 +200,12 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # deliberately has NO row here. It spells the id as the fixture's own
     # `TEST_ORG_ID` (#11905), so there is no literal for this scan to see, and
     # the routing fact stays single-source in the fixture. ⛔ Do NOT re-add a
-    # `{"team-001": …}` row for it: the row #11900 landed here (d206b12b, the
-    # issue's own REJECTED alternative) outlived its literal, and a declaration
-    # with no literal is not documentation — it is a WHITELIST, so a future
-    # `namespace="team-001"` in that file would be silently re-authorised by
-    # it instead of reddening this guard. That failure is already live
+    # `{"team-001": …}` row for it: the row #11900 landed here (d206b12b) is
+    # #11905's own REJECTED alternative — rejected because it re-states a
+    # routing fact the fixture already owns — and it outlived its literal. A
+    # declaration with no literal is not documentation, it is a WHITELIST: a
+    # future `namespace="team-001"` in that file would be silently
+    # re-authorised by it instead of reddening this guard. That failure is already live
     # elsewhere in this table: THREE declared rows outlive their literal —
     # `test_onboarding_state.py` and its `…_split_checkpoint` /
     # `…_split_projection` siblings, all `registry` — tracked as #11929. Cite
