@@ -108,7 +108,7 @@ SPARSE = REPO / "tortoise/sparse.py"
 #: Round 10: `subject_binding.py` reads two `TORTOISE_*` variables through a
 #: PARAMETER (`:210-211 _pick(tau_hi, "TORTOISE_SUBJECT_TAU_HI", …)` -> `:189
 #: os.environ.get(env_name)`), reached from the write path the acceptance takes
-#: (`sdk.py:16716 bind_point_subjects` inside `_extract_session_v2`, on a genuine
+#: (`sdk.py:17089 bind_point_subjects` inside `_extract_session_v2`, on a genuine
 #: create), and it gates whether the `:aboutSubject`/`:aboutObject` edge is
 #: written at all (`:408 decide_binding` -> `if outcome != BOUND: continue` at
 #: `:409-416`; `:405` is the `kind_not_subject` refusal, not this gate).
