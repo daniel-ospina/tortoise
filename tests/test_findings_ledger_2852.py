@@ -184,8 +184,13 @@ def test_mutation_population_is_pinned():
 
     #11902's review added the 25th: a marker-less `host:port` prose token used to be
     installed as the shorthand ANCHOR before the marker test ran, so inserting one in
-    front of a bad shorthand defused its red (measured green). The population and the
-    floor move together.
+    front of a bad shorthand defused its red (measured green).
+
+    #11952 added the 29th: the GitHub permalink spelling (path, `#`, `L`, line number)
+    matched NO pattern in this module, so both an out-of-range and an in-range
+    permalink left the page CLEAN — the likeliest real-world citation form was also
+    the one shape that looked verified and was not. The population and the floor move
+    together.
     """
     # ⛔ EQUALITY, not `>=` (#11902 review P2). A floor cannot see a one-arm shrink:
     # at this head two merges of two 25-arm populations produced 26 arms while the
@@ -196,8 +201,8 @@ def test_mutation_population_is_pinned():
         "the registered population must EQUAL the floor it declares — a `>=` floor "
         "cannot see a one-arm shrink"
     )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 28, (
-        "this line RECORDS the population (27 arms); removing one means editing the "
+    assert flc.MIN_SELF_TEST_MUTATIONS == 29, (
+        "this line RECORDS the population (29 arms); removing one means editing the "
         "floor here too, which is the second place a shrink has to touch"
     )
 
@@ -918,23 +923,35 @@ def test_a_duplicate_in_a_later_sentence_is_rejected(tmp_path, monkeypatch):
 
 
 def test_a_citation_separated_by_whitespace_is_refused(tmp_path, monkeypatch):
-    """FAILS if `path <LINE>` is skipped instead of refused.
+    """FAILS if `path <LINE>` or the GitHub permalink spelling is skipped, not refused.
 
-    \u00a78 promises the `path <LINE>` spelling is refused, and it is the ONE delimiter
-    spelling the refusal measures: every wider set refused correct prose when tried
-    against this repository's own `docs/` (measured \u2014 `_` parses
-    `tests/test_findings_ledger_2852.py`, `-` parses a dated slug, `/` parses plain paths
-    and dates, `#` parses `owner/repo#N` issue refs, `@` parses commit refs, `,` parses
-    calls), so those are NAMED carve-outs in \u00a78 rather than silent gaps. Refused
-    before the fix: `tortoise/pipeline.py 999999` (past the end of a 979-line file) and
-    `tortoise/nope.py 16` (a file that does not exist) both left the page CLEAN, so one
-    character of reformatting defused the red.
+    \u00a78 promises both are refused. `path <LINE>` is the whitespace delimiter; the
+    PERMALINK form (path, `#`, `L`, line number) is the one `#` case that survives the
+    objection which made every other bare `#` a carve-out: an `owner/repo#N` issue ref
+    carries no `L`, so `#L` + digits cannot be mistaken for one — and it is what a human
+    writes when copying a GitHub link (#11952 P1, measured: both an out-of-range and an
+    in-range permalink left the page CLEAN before the arm existed, so the likeliest
+    real-world spelling was also the one that looked verified and was not).
+
+    The rest are NAMED carve-outs in \u00a78 rather than silent gaps, because every wider
+    delimiter set refused correct prose when tried against this repository's own
+    `docs/` (measured \u2014 `_` parses `tests/test_findings_ledger_2852.py`, `-` parses a
+    dated slug, `/` parses plain paths and dates, bare `#` parses `owner/repo#N` issue
+    refs, `@` parses commit refs, `,` parses calls).
 
     The exclusions are asserted here too, because each was a measured false accusation:
     a backticked COMMAND with a numeric argument is a legal \u00a71 evidence form, and an
-    `owner/repo#N` issue ref is not a citation at all.
+    `owner/repo#N` issue ref is not a citation at all. The BARE-NUMBER `#` form is
+    asserted exempt as well — it is the boundary this change is drawn against, and a
+    future widening that swallows it would red this repo's own issue refs.
     """
-    for spelling in ("tortoise/pipeline.py 999999", "tortoise/nope.py 16"):
+    for spelling in (
+        "tortoise/pipeline.py 999999",
+        "tortoise/nope.py 16",
+        "tortoise/pipeline.py#L999999",
+        "tortoise/pipeline.py#L16",
+        "see tortoise/pipeline.py#L16 here",
+    ):
         with monkeypatch.context() as patch:
             _mutated(
                 tmp_path,
@@ -951,6 +968,7 @@ def test_a_citation_separated_by_whitespace_is_refused(tmp_path, monkeypatch):
     for not_a_citation in (
         "uv run python tools/collision_preflight.py 2852 --repo .",
         "daniel-ospina/tortoise#9363",
+        "tortoise/pipeline.py#999999",
         "localhost 6379",
         "fetch-depth 0",
     ):
