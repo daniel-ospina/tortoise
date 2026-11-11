@@ -72,7 +72,9 @@ corrected in opposite directions without this file noticing.
 successive rounds shipped a form-exactness hole here, each one level deeper: r7
 matched `("…")` only (a re-emphasis walked through); r8's bare-words fix was
 still whitespace- and case-exact (a hard wrap inside the phrase walked through —
-this record is hard-wrapped, line 315 is 95 columns); r9 stripped whitespace and
+this record is hard-wrapped, and the §3 sentence "the same scoping applies to the
+exclusion itself" is split across two lines; the 95-column reading is head-bound
+and moves whenever §3 gains a line above it); r9 stripped whitespace and
 case but not PUNCTUATION, so a delimiter INSIDE the phrase walked through. Every
 one of these is the same words and the same claim.
 
@@ -119,7 +121,8 @@ WHAT IT STILL DOES NOT CATCH, stated so the docstring is not the next over-claim
   * this arm is deliberately OVER-BROAD in the safe direction: it bans the words
     wherever they appear in any order-adjacent form, so an HONEST correction that
     quotes the retracted wording to reject it — this record's own house style,
-    see line 309 — REDs. Reword such an entry instead of reproducing the phrase
+    see the §3 sentence that names the retracted IDE-only label in order to
+    reject it — REDs. Reword such an entry instead of reproducing the phrase
     verbatim. Likewise the presence arm answers "are these words in this file",
     not "is this an actual quote", so it cannot tell a quote from prose.
   * (3) pins the seven restatements as WORD SEQUENCES, so a legitimate RE-WORDING of
@@ -150,7 +153,8 @@ WHAT IT STILL DOES NOT CATCH, stated so the docstring is not the next over-claim
     "guard rationale vs guard lines" class.
 
 MUTATION (each verified RED at this head, restoring byte-identical):
-  * restore the unscoped quote at `platform-seams.md:315`      → (1) RED
+  * restore the unscoped quote at §3's "settled for the **hosted VM**"
+    sentence (`platform-seams.md`, section 3.2)                → (1) RED
   * re-add with OTHER delimiters, whole-phrase (`*"…"*`)      → (1) RED (r8)
   * re-add with a LINE BREAK / double space / capital           → (1) RED (r8)
   * re-add with in-phrase `**`, `` ` ``, `*`, `~~`, `_`         → (1) RED (r9)
@@ -612,7 +616,7 @@ def test_the_retracted_project_level_promise_cannot_come_back():
             f"negates the shipped behaviour, drop it")
 
 
-def test_both_hook_source_restatements_name_all_three_sources():
+def test_every_hook_source_restatement_names_all_three_sources():
     """(2b) — item 2 of this PR, at EVERY site where the record restates it.
 
     #11806's correction named only the PROJECT-level source, and naming one of
