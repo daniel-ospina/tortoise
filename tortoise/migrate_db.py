@@ -248,7 +248,7 @@ def migrate(force: bool = False) -> dict:
             # to the DB's directory: `prewipe_snapshot_path(log_dir)`
             # (`projection/__init__.py:2656`, read at `:14524`) is handed the
             # SOURCE's `events_dir` below (`:211`), and the rebuild warns
-            # explicitly when the two directories differ (`:14514-14519`).
+            # explicitly when the two directories differ (`:14525-14535`).
             #
             # `not pack_selection_expected` makes this the EXACT empty-capture
             # signature, so the override retires itself: the day #11866 gives

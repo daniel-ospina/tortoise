@@ -239,7 +239,7 @@ def _cmd_rebuild(args):
         #
         # Without this block a rebuild whose marker restore FAILED prints a
         # clean `Done:` and never mentions the class, while the graph now reads
-        # as UNCONFIGURED — which re-arms the self-heal and the records/union
+        # as UNCONFIGURED — which re-arms the records/union
         # arms and so re-admits a pack an admin REMOVED, with its `revision`
         # reset. That is the same "written and never surfaced on the very path
         # an operator reads" defect the config third state's line was added for
@@ -288,9 +288,9 @@ def _cmd_rebuild(args):
                 "PackSelection: the pre-wipe pack-set marker was NOT restored "
                 "— the wipe is unconditional, only the journal is replayed, "
                 "and no replay pass recreates this marker, so the graph now "
-                "reads as UNCONFIGURED: the self-heal and the records/union "
-                "arms become live again and a pack an admin had REMOVED can "
-                "be re-admitted with its `revision` reset. Re-set the graph's "
+                "reads as UNCONFIGURED: the records/union arms become live "
+                "again and a pack an admin had REMOVED can be re-admitted "
+                "with its `revision` reset. Re-set the graph's "
                 "packs deliberately (#9752).",
                 file=sys.stderr,
             )

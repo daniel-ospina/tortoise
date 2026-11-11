@@ -3878,8 +3878,8 @@ def recover_from_log(events_dir: str, projection) -> dict:
         # replay lands, so these keys plus the `reason` clause are the only
         # record the recovery entry point can hand its caller — an absent
         # marker makes the graph read as UNCONFIGURED, which re-arms the
-        # self-heal and the records/union arms and so re-admits a pack an admin
-        # REMOVED, with its `revision` reset.
+        # records/union arms and so re-admits a pack an admin REMOVED, with its
+        # `revision` reset.
         #
         # Additive, not a chain (the #4641 round-7 rule the onboarding legs
         # apply): a confirmed loss and a pre-preservation UNKNOWN can coexist,

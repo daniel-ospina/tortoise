@@ -2419,8 +2419,13 @@ to answer.
   §10.24 cites: `tortoise/extractor_v2.py`, `tortoise/sdk.py`, `tortoise/hosted_api.py` and
   `tortoise/projection/entities.py` are untouched by it, so §10.24's `:14222`/`:14375`,
   `:14235`/`:14386`, `:14586`/`:14596`, `:16780`/`:14351`, `:1478`, `:16599`/`:15625`,
-  `:17484`, `:17882`, `:17429`/`:17441`/`:17442`, `:2530` and the `hosted_api.py` pivot `:23466`
-  all still resolve at this head (each re-opened; `tools/capstone_preregistration_check.py` exits 0).
+  `:17484`, `:17882`, `:17429`/`:17441`/`:17442`, `:2530` and the `hosted_api.py` pivot `:23466`.
+  Of those, the `extractor_v2.py` group, `entities.py:1478` and `hosted_api.py:23466` still
+  resolve at this head (each re-opened; `tools/capstone_preregistration_check.py` exits 0). ⛔ **The
+  `sdk.py` numbers do NOT** — they were re-opened at `9ba2da35`, and `main`'s `ccf5c4036c`
+  (`#11836`) then landed on this branch and moved that file by `+248` at every one of those sites
+  (`+9` for `:2530`): measured at `45c065cc79`, `:16599` is `# secret to a third-party provider`
+  and `def _extract_session_v2` is at `:16847`. They are HISTORICAL here, not re-asserted.
 - **The bundle's probe cite agrees, and did not before.** `probes/capstone_measure.py:2989` carried
   `:14213-14215` — derived at an intermediate head and then moved by this change's own later
   commits — and `tests/test_7949_capstone_measure.py::test_the_bundles_cites_resolve_where_the_bundle_says_they_do`
@@ -2462,8 +2467,12 @@ to answer.
   file total, and not a value to apply to another line.
 - **Only this cite moved in this file's §10.24 block.** §10.24 also re-points cites in
   `extractor_v2.py`, `sdk.py`, `projection/entities.py` and `hosted_api.py` — this change touches
-  none of those four files, so they resolve at this head unchanged (each re-opened). Beyond its own
-  entries, nothing outside `tortoise/projection/__init__.py` was re-pointed by this entry.
+  none of those four files, so §10.24's values there are exactly the ones it recorded at
+  `9ba2da35`. ⛔ They are not all still live: `main`'s `ccf5c4036c` (`#11836`) moved `sdk.py` by
+  `+248` at every cite that entry carries there (see §10.25's measurement), so the `sdk.py`
+  numbers are historical at this head. The other three files' cites still resolve (each
+  re-opened here). Beyond its own entries, nothing outside `tortoise/projection/__init__.py` was
+  re-pointed by this entry.
 - **What moved: one citation, and nothing that is a protocol value.** No metric, denominator,
   threshold, class set or corpus pin is changed — every §1-§9 criterion VALUE and the E4
   denominator are the ones this record froze. `document_sha256` is re-cut in this same commit, per

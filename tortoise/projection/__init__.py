@@ -2317,8 +2317,8 @@ def _capture_pack_selection(proj) -> list[dict]:
     before, ``configured=True revision=1 namespaces=frozenset()``; after,
     ``configured=False revision=0 namespaces={'venture'}`` — i.e. a pack an
     admin REMOVED comes back into the approved set, the revision a client holds
-    resets, and `get_tenant_packs`' self-heal becomes live again on a graph that
-    was pinned.
+    resets. (`get_tenant_packs`' self-heal also re-arms, but only on a graph
+    holding no `:PackInstall` row — a removal leaves one, so not here.)
 
     The capture is FAITHFUL — every node's property map, in whatever order the
     graph answers — because a capture that silently picked one would hide a
@@ -12365,10 +12365,10 @@ class FalkorProjection(
                     if result.get("pack_selection_gap"):
                         # #9752: the sibling of the team_meta leg above. A
                         # `:PackSelection` marker that did not come back makes
-                        # the graph read as UNCONFIGURED, so the self-heal and
-                        # the records/union fallback arms become live again and
-                        # a pack an admin had REMOVED is back in the approved
-                        # set with its `revision` reset. The clean
+                        # the graph read as UNCONFIGURED, so the records/union
+                        # fallback arms become live again and a pack an admin
+                        # had REMOVED is back in the approved set with its
+                        # `revision` reset. The clean
                         # "auto-recovered" line drops `reason`, so without this
                         # leg the operator sees a success shape over the signal
                         # the graph's pack set exists to carry.
@@ -12504,7 +12504,7 @@ class FalkorProjection(
             # #9752: the marker's own consumer on this caller, the sibling of
             # the team_meta leg above. Its absence is the same log-only defect:
             # the marker is what makes a graph's pack set DELIBERATE, so a gap
-            # here reads as unconfigured, re-enables the self-heal, and can
+            # here reads as unconfigured, re-enables the records/union arms, and can
             # re-admit a pack the admin removed.
             #
             # As on the sibling caller above, the CONSEQUENCE is shape-derived:
@@ -17527,7 +17527,7 @@ class FalkorProjection(
                     "marker is not confirmed restored. The post-restore "
                     "verification below decides the outcome: if its read finds "
                     "NO marker at all, the graph reads as UNCONFIGURED (the "
-                    "self-heal and the records/union arms become live again) "
+                    "records/union arms become live again) "
                     "and a pack an admin had REMOVED can be re-admitted with "
                     "its `revision` reset; if it finds a DIFFERENT marker that "
                     "is a CONFLICT, not a loss (#9752)",
@@ -19173,7 +19173,7 @@ class FalkorProjection(
           the projection cannot place raises BEFORE the wipe — a half-applied
           projection is not reachable.
         * **One-way.** Nothing here reads the cache to decide what to project
-          (``rebuild_all``'s pre-wipe snapshot does exactly that, for six
+          (``rebuild_all``'s pre-wipe snapshot does exactly that, for seven
           graph-only classes; this path deliberately does not — see
           ``tortoise/cache_projection.py``).
         * **The declaration follows the writes.** ``coverage`` is `complete`
