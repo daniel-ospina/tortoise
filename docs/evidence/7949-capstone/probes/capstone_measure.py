@@ -3064,9 +3064,10 @@ def label_coverage(counts: dict[str, int], declared: frozenset[str],
     * `coverage` — **reported, never chased**. `None` at a zero population, because 100 % of 0 is
       not coverage: that is A4's `n > 0` non-vacuity floor, and it is why `non_vacuity` is a
       separate boolean rather than a comparison of this rate.
-    * `undeclared` — kinds present that no layer vocabulary declares, and kinds declared only by
-      ANOTHER layer (`wrong_layer`), kept apart because "a kind nothing declares" and "a kind this
-      layer does not declare" teach different things (the `#9695` distinction).
+    * `undeclared` — kinds present that THIS layer's vocabulary does not declare (the `#9695`
+      distinction — "a kind nothing declares" vs "a kind this layer does not declare" — is the
+      vocabulary's own answer, and `declared_present`/`declared_absent` carry the other side of
+      it; there is deliberately NO third bucket here, because nothing consumes one).
     """
     folded = layer in _A4_CASEFOLDED_LAYERS
     seen: dict[str, int] = {}
@@ -3441,7 +3442,9 @@ def a_row_census(uri: str) -> dict:
     # as DIAGNOSTICS. The `row()` failure path maps ONE level of the `empty` skeleton, so each
     # layer block is a sibling key rather than a nested `layers` dict — a nesting level here would
     # render a failed row as a named gap for the whole layer instead of for the one field that
-    # broke, and the four pinned `a4_*` renders would silently disappear.
+    # broke, and the per-field `UNMEASURED` this row's own pins assert (`a4 claims population=…`,
+    # `tests/test_10988_a4_label_coverage.py::test_a_broken_layer_query_renders_a_NAMED_GAP_and_never_a_zero`)
+    # would collapse into one opaque string for the whole layer.
     result["A4"] = row("A4", _a4_label_coverage,
                        {**{layer: _a4_empty_coverage(layer) for layer, _l, _k in A4_LAYERS},
                         "claim_points": 0, "excluded_capture_rows": 0, "statement": 0,

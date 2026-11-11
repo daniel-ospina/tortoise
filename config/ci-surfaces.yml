@@ -11738,18 +11738,22 @@ durations:
   # the file; a marker on the comment lines above would outlive its own truth
   # (#9110 review P2, the #8254/#2876 stale-basis class).
   test_e1_e2_measurement.py: 26.4  # #9076: flat default until a CI sweep measures this file — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.0 — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 25.0
-  test_10988_a4_label_coverage.py: 0.5  # new in #10988 — a file a PR ADDS can never
-  # carry a CI junit reading (the refresher samples push-to-main runs only), so it takes the
-  # header's flat `DEFAULT_FAST_WEIGHT` until the first post-merge sweep replaces it (#3400/
-  # #4348). The row must EXIST, not merely default: the `core` registration above puts it in
-  # `fast_pool()`, and `--integrity`'s coverage floor is measured against that pool's own size.
-  # MEASURED LOCALLY as context, deliberately NOT as the weight (a local reading is forbidden
-  # as a SHARD-LAYOUT input, #2818/#3419): 15 cases, 3.6 s wall for the whole file (re-measured
-  # after the SDK-registration and `expected` arms were added; the earlier note said 13 and went
-  # stale the moment a case landed — re-measure, do not trust this line). What the
-  # weight covers: one pure function over a hand-built histogram, a fake graph/projection, and
-  # ONE product-vocabulary import (`domain_loader.known_kinds`) that loads the pack registry —
-  # no DB, no model, no network, no subprocess, no `gh`.
+  test_10988_a4_label_coverage.py: 2.0  # unmeasured — new in #10988 — the #3400/#4348 trap, same
+  # rule and same value as every neighbouring PR-added row: a file a PR ADDS can never carry a CI
+  # junit reading (the refresher samples push-to-main runs only), so it takes the header's flat
+  # `DEFAULT_FAST_WEIGHT` (2.0, `tools/ci_selection.py`) until the first post-merge sweep replaces
+  # it. ⛔ The VALUE and the claim must agree (#11837 review, P2): this row shipped `0.5` while its
+  # note said `DEFAULT_FAST_WEIGHT`, and the guard that exists for exactly that
+  # (`_durations_rows_claiming_the_flat_default`) reads ROW lines only, so the claim on a
+  # continuation line was invisible to it. The row must EXIST, not merely default: the `core`
+  # registration above puts it in `fast_pool()`, and `--integrity`'s coverage floor is measured
+  # against that pool's own size. ⛔ The CASE COUNT is deliberately NOT quoted (#11837 review, same
+  # P2): a hand-written count re-stales on every case a later round adds, and this PR re-staled its
+  # own three times (13 -> 14 -> 15). MEASURED LOCALLY as context only, never as the weight (a local
+  # reading is forbidden as a SHARD-LAYOUT input, #2818/#3419): the whole file is under 5 s wall on
+  # this host. What the weight covers: one pure function over a hand-built histogram, a fake
+  # graph/projection, ONE product-vocabulary import (`domain_loader.known_kinds`) that loads the pack
+  # registry, and ONE child interpreter for the SDK-registration arm (no DB, no model, no network).
   test_capstone_a_rows_10982.py: 0.9  # #10982: file-scan + unit arms only (JSON/YAML/markdown parse, one git-free `check.run`, a fake projection); the same rule every neighbouring "new in #NNNN" row states. ⚠️ MEASURED LOCALLY as context, NOT as the weight: ~6 s for this file alone, so the flat 2.0 OVERSTATED it until this push-to-main sweep replaced it from junit — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.0
   test_capstone_preregistration_9075.py: 20.9  # Do NOT substitute a local timing: what the weight covers is a markdown table scan, a YAML pins parse, a JSON record cross-check and a `tests/eval/write_path` fixtures_hash re-derivation (7 sessions of fixtures + gold, no DB, no network, no graph fixture) — a local wall reading is dominated by interpreter and session cost rather than this file's weight, and the map is a SHARD-LAYOUT input. Refresh from the first post-merge sweep — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 9.2
   # The #9109 pin is a file ADDED BY A PR, so it has no CI junit measurement (the
