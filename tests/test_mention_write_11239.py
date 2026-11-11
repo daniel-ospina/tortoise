@@ -132,8 +132,12 @@ _DM1_KEYS = {"surface", "span_start", "span_end", "kind_guess"}
 def _assert_record_is_the_payload_surfaces(prop) -> None:
     """The stored scalar is DM1's declared row, parsed — not a blob."""
     assert isinstance(prop, str), (
-        "the node must hold ONE compact JSON scalar: no path stores an array "
-        f"containing a map; got {prop!r}")
+        "the node must hold ONE compact JSON scalar: nothing in the write path "
+        "STORES an array containing a map — the projection denies it "
+        "(`_persist_extra_props`) and a raw `SET` is degraded to null by the "
+        "driver before dispatch (#7369); neither is a refusal, which is why "
+        "the value must be encoded before it is dispatched; "
+        f"got {prop!r}")
     records = json.loads(prop)
     for rec in records:
         assert set(rec) <= _DM1_KEYS, (
@@ -756,3 +760,74 @@ def test_a_revision_stating_the_payload_spelling_folds_to_the_writers_bytes(env)
         "the two replay engines now agree, so the checker must not red: "
         + str(report.get("divergent_points")))
 
+
+LATEST = [{"surface": "the limit", "span_start": 41, "span_end": 50}]
+
+
+def test_a_creation_after_a_revision_wins_the_mention_record_on_replay(env):
+    """The pass-1b boundary's PER-KEY anchor (review residual on PR #11795).
+
+    `_rebuild_all_replay` folds in two passes: 1a applies every creation, then
+    1b applies every revision. A `PointRevised` therefore reaches the node
+    AFTER creations that were journalled later than it, and its
+    presence-conditional `mentions` clause would overwrite the newer creation's
+    record out of order — so pass 1b gates that clause on
+    `last_mentions_write_by_source[key] > seq`: the boundary is the creation
+    that actually WROTE the record, read from the writer's reported key set.
+
+    That term had NO discriminating row (every branch row stayed green with it
+    deleted), which is the state the review flagged as a residual: a boundary
+    nothing varies is a boundary nobody maintains. This row is the input it
+    exists for — a revision sandwiched between two creations, all three stating
+    the key.
+
+    Measured: the LAST statement in the journal wins (`LATEST`), on both
+    engines — deleting the `last_mentions_write_by_source` term from
+    `skip_mentions` makes the rebuild restore the SECOND statement (`RESTATED`)
+    and `check_consistency` reds the resulting graph on `fields: ['mentions']`.
+    """
+    sdk, events = env
+    pid = sdk.create_point("statement", CONTENT, dedup=True,
+                           status="draft", mentions=MENTIONS)["id"]
+    assert _node_prop(sdk, pid) is not None, "the fixture never stored a record"
+
+    # A revision that STATES the key, journalled BETWEEN the two creations.
+    sdk.update_point(pid, mentions=RESTATED)
+    live = _node_prop(sdk, pid)
+    assert live is not None
+    assert [r["surface"] for r in json.loads(live)] == ["the problem"]
+
+    # A SECOND creation, journalled after the revision, stating a third record.
+    # Hand-written for the same reason the sibling carry-forward row is: no
+    # in-tree producer emits a second `PointAdded` for a claim id.
+    log = events / "events.jsonl"
+    rows = [json.loads(line) for line in log.read_text().splitlines()
+            if line.strip()]
+    assert any(r.get("type") == "PointRevised" and r.get("id") == pid
+               and r.get("mentions") for r in rows), (
+        "this row can only pin the boundary if the journal really holds a "
+        "mention-carrying revision")
+    source = next(r for r in rows
+                  if r.get("type") == "PointAdded"
+                  and (r.get("point") or {}).get("id") == pid)
+    later = json.loads(json.dumps(source))
+    later.pop("seq", None)  # the replay's seq space is the enumerate index
+    later["point"]["mentions"] = [dict(m) for m in LATEST]
+    rows.append(later)
+    log.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    sdk._get_proj().rebuild_all(str(log.parent), confirm_destructive=True)
+    rebuilt = _node_prop(sdk, pid)
+    assert rebuilt is not None, (
+        "the rebuild dropped a record the journal states three times")
+    assert [r["surface"] for r in json.loads(rebuilt)] == ["the limit"], (
+        "the replay folded the OLDER revision OVER the later creation: the "
+        "creation that wrote the record last must win on every engine, or the "
+        f"rebuilt node holds a superseded record ({rebuilt!r})")
+
+    from tortoise.consistency import check_consistency
+
+    report = check_consistency(str(log), sdk._get_proj())
+    assert report["ok"] is True, (
+        "both replay engines fold the same journal to the same record, so the "
+        "checker must not red: " + str(report.get("divergent_points")))

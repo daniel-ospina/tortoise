@@ -9714,11 +9714,16 @@ def _apply_one(points: dict[str, dict], ev: dict,
                 # is the open-set passthrough AFTER `encode_json_record_props`.
                 # The graph MERGE therefore keeps the stored record whenever the
                 # payload states none the writer can persist (absent, `None`,
-                # an empty list the encoder POPS, or a value neither the payload
-                # filter nor the store accepts), and replacing the entry outright
-                # below would drop it from the journal view ONLY — the exact
-                # asymmetry `check_consistency` reports as a `mentions`
-                # divergence whose own action reproduces the graph. When the
+                # an empty list the encoder POPS, or any shape the encoder pops
+                # — everything that is neither a `str` nor a `list`/`tuple`),
+                # and replacing the entry outright below would drop it from the
+                # journal view ONLY — the exact asymmetry `check_consistency`
+                # reports as a `mentions` divergence whose own action reproduces
+                # the graph. ⛔ NOT "a value `_is_persistable_prop_value`
+                # refuses": that filter refutes the payload's OWN list spelling,
+                # which the encoder turns into a storable scalar, so the ENCODER
+                # is the arbiter for this key (`stated_json_record_prop`, review
+                # P1 on PR #11795). When the
                 # payload DOES state one, the fold stores the WRITER's bytes
                 # (the encoded scalar), so a list-shaped journal record folds to
                 # the same value the node holds. Gated on the same
