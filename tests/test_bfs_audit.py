@@ -93,11 +93,19 @@ def _production_string_references(
     - **Python** (`.py`/`.pyi`): the line must QUOTE the symbol with matching straight
       quotes. This is where #11903's false positive lives — a docstring naming the symbol —
       so the bare word is not enough here. Node-shaped references are the AST arm's job.
-    - **Any other file** (manifest, config, registry, `.env`): the BARE WORD, which is what
-      `main`'s grep matched there. There are no docstrings in those files, so the #11903
-      false positive does not exist in this half, and requiring quotes WAS a narrowing:
-      `entry: propagate_shock`, a TOML key or `ENTRY=propagate_shock` all create the
-      dependency and all were RED on `main`. Pinned by `manifest_unquoted.yaml`.
+    - **Any other file** (manifest, config, registry, `.env`, and — see the residual below —
+      prose-bearing `.md`): the BARE WORD, which is what `main`'s grep matched there. Requiring
+      quotes WAS a narrowing: `entry: propagate_shock`, a TOML key or `ENTRY=propagate_shock`
+      all create the dependency and all were RED on `main`. Pinned by `manifest_unquoted.yaml`.
+    - ⚠️ RESIDUAL on the non-Python side, and it is the SAME over-block class as Python's rather
+      than an exemption: "this half carries no prose" is FALSE. `tortoise/` ships 9 tracked
+      `.md` files (`git ls-files 'tortoise/**/*.md'`), and a bare-word mention in any of them
+      REDs this arm — measured: a `tortoise/notes.md` reading "We no longer call
+      propagate_shock anywhere." returns `[('tortoise/notes.md', 1)]`. It is latent, not live
+      (the real tree measures `[]`, and none of the 9 names the symbol) and it is fail-CLOSED —
+      a false red, never a false pass. Pinned by `prose.md` in
+      `test_the_string_literal_arm_catches_what_no_ast_can`, so a suffix filter that silently
+      dropped `.md` from the walk breaks a test instead of narrowing the arm.
 
     The AST leg above is blind to this shape by construction: `getattr(mod,
     "propagate_shock")`, `globals()["propagate_shock"]`, `__all__ = ["propagate_shock"]`
@@ -232,8 +240,11 @@ def test_no_propagate_shock_callers():
     # for naming a symbol in prose is backticks, and the real tree measures empty
     # (`string_refs == []`) — and it is the reason the structural follow-up above is the
     # right long-term arm. Stated so the next reader does not infer a prose exemption this
-    # textual test does not have. Non-Python files do not have docstrings, which is why the
-    # bare-word rule is safe there and is NOT extended to Python.
+    # textual test does not have. The SAME over-block exists on the NON-Python side, for the
+    # same reason: `tortoise/` ships 9 tracked `.md` files, so "no docstrings there" is false —
+    # a bare-word mention in any of them reds. Pinned by `prose.md` below; it is fail-closed (a
+    # false red, never a false pass), latent (none of the 9 names the symbol), and the
+    # structural fix is the one #11918 tracks for the Python side.
     #
     # TRAVERSAL, stated so the next reader can CHECK it rather than infer it. Depth is
     # unbounded (`rglob`); file type is unbounded for the textual arm (every file under
@@ -370,9 +381,10 @@ def test_the_string_literal_arm_catches_what_no_ast_can(tmp_path):
         "getattr_string.py": 'getattr(mod, "propagate_shock")(g, n)\n',
         "registry_key.py": '_HOOKS = {"shock": "propagate_shock"}\n',
         "single_quoted.py": "HOOK = 'propagate_shock'\n",
-        # Non-Python files keep `main`'s BARE-WORD rule: a manifest/config carries no prose,
-        # so the #11903 docstring false positive cannot arise there, and requiring quotes
-        # would miss `entry: propagate_shock` — which `origin/main` red on.
+        # Non-Python files keep `main`'s BARE-WORD rule: a manifest/config/registry carries no
+        # docstring, and requiring quotes would miss `entry: propagate_shock` — which
+        # `origin/main` red on. (A prose-bearing `.md` IS walked and DOES red — see `prose.md`
+        # below; that over-block is fail-closed and declared, not exempted.)
         "manifest_unquoted.yaml": "entry: propagate_shock\n",
     }
     must_stay_green = {
@@ -407,6 +419,14 @@ def test_the_string_literal_arm_catches_what_no_ast_can(tmp_path):
     plugin_dir.mkdir(parents=True, exist_ok=True)
     (plugin_dir / "plugin.yaml").write_text('entry: "propagate_shock"\n', encoding="utf-8")
 
+    # ⛔ The non-Python half is NOT a prose exemption — it is the same over-block, and this
+    # fixture pins that the bare-word rule really reaches `.md`. `tortoise/` ships 9 tracked
+    # `.md` files, so a prose mention there reds this arm; that is fail-CLOSED (a false red,
+    # never a false pass), which is why it is declared and pinned rather than filtered away.
+    (tmp_path / "tortoise" / "prose.md").write_text(
+        "We no longer call propagate_shock anywhere.\n", encoding="utf-8"
+    )
+
     refs = _production_string_references(root=tmp_path)
     found = {Path(p).name for p, _ in refs}
 
@@ -414,6 +434,11 @@ def test_the_string_literal_arm_catches_what_no_ast_can(tmp_path):
         "the string-literal arm does not descend into subpackages, so a re-export registered"
         " in `tortoise/projection/` — where the deprecated definition lives — would read as no"
         f" dependency at all. Paths seen: {sorted({p for p, _ in refs})}"
+    )
+    assert any(p.endswith("prose.md") for p, _ in refs), (
+        "the bare-word rule stopped reaching non-Python PROSE, so a `.md` mention inside"
+        " `tortoise/` would read as no dependency — the parity `main`'s suffix-free grep had."
+        f" Paths seen: {sorted({p for p, _ in refs})}"
     )
     assert any(p.endswith("hermes-plugin/plugin.yaml") for p, _ in refs), (
         "the string-literal arm does not read non-Python files, so a reference carried in a"
