@@ -34525,15 +34525,28 @@ class TortoiseSDK:
             reverted = proj.g.query(
                 "MATCH (n:Point {id:$id}) REMOVE n.ep_alpha, n.ep_beta, "
                 "n.baseline_set, n.baseline_source, n.inherited_at, "
-                "n.posterior_alpha, n.posterior_beta "
+                "n.posterior_alpha, n.posterior_beta, n.confidence "
                 "RETURN count(n)",
                 params={"id": pid},
             ).result_set
             # #2884 D3/FIX-3: the revert REMOVEs the posteriors LIVE, so a
-            # rebuild must replay the CLEAR (the two belief keys carried here;
-            # `confidence` is untouched). `RETURN count(n)` binds the journal
-            # to the committed rows — a missing Point removed nothing and
-            # journals nothing.
+            # rebuild must replay the CLEAR (the belief keys carried here;
+            # `confidence` INCLUDED — #11702 cycle 31). `RETURN count(n)` binds
+            # the journal to the committed rows — a missing Point removed
+            # nothing and journals nothing.
+            #
+            # ⛔ `n.confidence` is NOT optional here, and "`confidence` is
+            # untouched" was true only before #11702. The inherited baseline
+            # now stamps the MIRROR through `set_point_baseline`
+            # (``n.confidence = $c``), and every read is mirror-first, so a
+            # revert that removed the pair and left the mirror turned a claim
+            # the writer deliberately returned to NEUTRAL into a permanent
+            # `confidence_mean` with no pair behind it — on every surface, for
+            # ever, and the journal reproduced it because the record carried no
+            # `confidence` either. The revert's own WHERE already requires
+            # `baseline_source='inherited-from-source' AND n.credibility IS
+            # NULL`, so there is no AUTHORED prior to preserve: an
+            # unconditional clear is the correct reading.
             # SCOPE (honest, #2884 A4): the REMOVE also clears `ep_alpha`,
             # `ep_beta`, `baseline_set`, `baseline_source` and `inherited_at`,
             # and none of those five is journaled (see the note in
@@ -34541,7 +34554,8 @@ class TortoiseSDK:
             if self._event_log_path and reverted and reverted[0][0]:
                 self._emit_event(
                     "ConfidenceChanged", id=pid,
-                    posterior_alpha=None, posterior_beta=None)
+                    posterior_alpha=None, posterior_beta=None,
+                    confidence=None)
             # Clear the stale prior from in-memory evidence cache (#652).
             # set_point_baseline writes (alpha, beta) into self._evidence
             # unconditionally, and _hydrate_evidence is additive-only — so
@@ -44557,6 +44571,28 @@ class TortoiseSDK:
                         point_props["embeddingText"] = None
                     else:
                         point_props = props
+                    # #11702 cycle 31: the SAME mirror rule `update_point`
+                    # gained, through THIS door — and applied to the FINAL
+                    # `point_props`, so it covers both branches above (a caller
+                    # who sends an embedding AND a pair hit the `if` arm and
+                    # skipped it). `_sanitize_props` refuses `credibility` and
+                    # the baseline quartet only, so `posterior_alpha` /
+                    # `posterior_beta` / `confidence` ride through here exactly
+                    # as they did on `update_point` before this PR closed that
+                    # door: a caller writing a new PAIR left the OLD flush
+                    # mirror beside it. Post-#11702 the mirror LEADS on every
+                    # read, so that is a silently-served belief the tenant's own
+                    # write contradicted — reachable as `sdk.update_entity`,
+                    # `sdk.update` on a Point, and `tortoise_update_entity` over
+                    # MCP. The COPY is load-bearing: `_CANONICAL_ENTITY_ID_PROPS`
+                    # visits every label with this same dict, so mutating `props`
+                    # here would stamp a Point-only clear onto the other labels.
+                    if (("posterior_alpha" in point_props
+                         or "posterior_beta" in point_props)
+                            and "confidence" not in point_props):
+                        if point_props is props:
+                            point_props = dict(props)
+                        point_props["confidence"] = None
                     for match_prop in id_keys:
                         res = proj.g.query(
                             f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $p "

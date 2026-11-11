@@ -4702,3 +4702,108 @@ def test_f32_neighbour_is_sign_aware():
         -1.0000001192092896, rel=0, abs=1e-9)
     tie = "-1.000000059604644775390625"   # the exact midpoint, half-to-even
     assert _f32_from_literal(tie, float(tie)) == -1.0
+
+
+def test_the_inheritance_revert_clears_the_mirror_it_stamped(sdk):
+    """Cycle 31 (reviewer P1): the revert removed the PAIR and left the MIRROR.
+
+    `set_point_baseline` — which the inherited-baseline write path goes through —
+    stamps `n.confidence` as well as the pair. The revert arm for a Point that
+    loses all its sources REMOVEd `ep_alpha`, `ep_beta` and both posteriors and
+    left `confidence`, and the journal record it emitted carried no
+    `confidence` either. Before this PR that was harmless (no mirror involved,
+    and the reads fabricated 0.5 anyway); AFTER it, every read is mirror-first,
+    so a claim the writer deliberately returned to NEUTRAL served the old
+    baseline value on every surface, permanently, with no pair behind it — and a
+    rebuild reproduced it, because live and replay agreed.
+
+    The revert's own WHERE already requires
+    `baseline_source='inherited-from-source' AND n.credibility IS NULL`, so
+    there is no authored prior to preserve: the clear is unconditional.
+    """
+    from tortoise.ranking import GraphRanker
+    from tortoise.search_engine import annotate_ep_batch
+
+    pid = sdk.create_point("statement", "inherited claim",
+                           extractedFrom="https://s0.example",
+                           status="live")["id"]
+    proj = sdk._get_proj()
+    proj.g.query(
+        "MATCH (s:Source {url:$url}) SET s.credibilityTier='T0', "
+        "s.sourceDate=$sd, s.ingestedAt=$sd",
+        params={"url": "https://s0.example",
+                "sd": "2024-01-01T00:00:00+00:00"})
+    sdk._apply_source_inheritance(recency_decay=1.0)      # the write path
+    stamped = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.confidence, n.baseline_source",
+        params={"id": pid}).result_set
+    assert stamped and stamped[0][0] is not None, (
+        "fixture did not stamp a mirror — the revert's orphan cannot be "
+        "exercised: " + repr(stamped))
+    assert stamped[0][1] == "inherited-from-source", stamped
+
+    # Delete the only source edge -> no eligible source -> the revert branch.
+    proj.g.query(
+        "MATCH (n:Point {id:$id})-[r:extractedFrom]->(s:Source) DELETE r",
+        params={"id": pid})
+    sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+
+    after = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.confidence, n.posterior_alpha, "
+        "n.ep_alpha, n.baseline_source",
+        params={"id": pid}).result_set
+    assert after, "the Point vanished"
+    assert after[0][1] is None and after[0][2] is None, (
+        "fixture: the revert did not clear the pair: " + repr(after))
+    assert after[0][0] is None, (
+        "the revert cleared the PAIR and left the MIRROR (`n.confidence` = "
+        f"{after[0][0]!r}) — every read is mirror-first, so this claim now "
+        "serves a baseline value that no pair backs, for ever: " + repr(after))
+
+    # …and the READ agrees, which is the property that matters: a reverted
+    # claim is absent, not a stale baseline.
+    ann = annotate_ep_batch(proj.g, [pid])[pid]
+    assert ann.confidence_mean is None, ann
+    assert ann.has_ep is False, ann
+    assert ann.ep_state == "absent", ann
+    graph = GraphRanker(projection=proj)._fetch_point_signals([pid])[pid]
+    assert graph["confidence"] is None, graph
+
+
+def test_update_entity_clearing_the_pair_clears_the_mirror(sdk):
+    """Cycle 31 (reviewer P2): `_update_entity` is the SECOND documented
+    `:Point` update door, and it let a new pair ride through beside the old
+    mirror.
+
+    `_sanitize_props(reject_belief_props=True)` refuses `credibility` and the
+    baseline quartet only — `posterior_alpha` / `posterior_beta` / `confidence`
+    pass straight through, exactly as they did on `update_point` before this PR
+    closed that door. Post-#11702 the mirror LEADS, so a tenant writing a pair
+    through `update_entity` (or `update` on a Point, or `tortoise_update_entity`
+    over MCP) is served a belief their own write contradicted, silently.
+    """
+    from tortoise.search_engine import annotate_ep_batch
+
+    pid = sdk.create_point("statement", "entity-door claim")["id"]
+    proj = sdk._get_proj()
+    sdk.set_point_baseline(pid, 9.0, 1.0)          # mirror 0.9, pair (9, 1)
+    assert annotate_ep_batch(proj.g, [pid])[pid].confidence_mean == pytest.approx(
+        0.9, abs=1e-3)
+
+    sdk.update_entity(pid, posterior_alpha=10.0, posterior_beta=10.0)
+
+    row = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.confidence, n.posterior_alpha, "
+        "n.posterior_beta", params={"id": pid}).result_set
+    assert row, "the Point vanished"
+    assert row[0][1] == pytest.approx(10.0) and row[0][2] == pytest.approx(10.0), (
+        "fixture: the pair did not land through `update_entity`: " + repr(row))
+    assert row[0][0] is None, (
+        "`update_entity` wrote a new α/β pair and left the OLD mirror "
+        f"({row[0][0]!r}) beside it — the mirror leads on every read, so the "
+        "claim is served a belief its own write replaced: " + repr(row))
+
+    ann = annotate_ep_batch(proj.g, [pid])[pid]
+    assert ann.confidence_mean == pytest.approx(0.5), (
+        "the read is still led by the stale mirror rather than the stored "
+        f"pair: {ann}")
