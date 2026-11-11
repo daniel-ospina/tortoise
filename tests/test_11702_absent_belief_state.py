@@ -3795,6 +3795,24 @@ def test_the_twins_parse_the_same_string_language(sdk):
         # to it, and the store reads it — while `'1.1754943e-38'` is below
         # min-normal, rounds UP to it, and the store nulls it.
         "3.40282355e38": 3.40282355e38,
+        # The OVERFLOW edge (cycle 30) — the mirror of the underflow window
+        # below, and the half the rounding rule left to the DOUBLE. Measured on
+        # 4.20.6: the store reads every literal strictly BELOW the float32
+        # overflow midpoint (`2**128 - 2**103`, rounding it down to max) and
+        # nulls one at or above it. `'3.4028235677973366e38'` is below the
+        # midpoint as a LITERAL while its nearest DOUBLE is exactly on it, so
+        # `struct.pack('<f', …)` raised OverflowError here and Python answered
+        # `absent` for a value every Cypher surface served; `'0x1.ffffffp127'`
+        # IS the exact midpoint and is null. BOTH edges are pinned — a rule that
+        # refused the whole band would leave every null row green.
+        "3.402823567797336e38": 3.4028234663852886e38,    # below mid → reads
+        "3.4028235677973366e38": 3.4028234663852886e38,   # below mid (double ON it)
+        "3.4028235677973367e38": None,                    # just above → null
+        "-3.402823567797336e38": -3.4028234663852886e38,
+        "-3.4028235677973366e38": -3.4028234663852886e38,
+        "-3.4028235677973367e38": None,
+        "0x1.fffffefffffffp127": 3.4028234663852886e38,   # 1 ULP below → max
+        "0x1.ffffffp127": None,                           # the exact midpoint
         # The UNDERFLOW edge is INEXACTNESS, not subnormal-ness (cycle 27): the
         # rule refused every subnormal, so a hex literal naming a float32
         # subnormal EXACTLY — which `strtof` accepts — was `absent` here and

@@ -431,6 +431,15 @@ NUMERIC_OPERAND_CYPHER_TEMPLATE = (
 #:   reads; the read band ends a quarter of a subnormal ULP below min-normal.
 _FLOAT32_MIN_NORMAL = 1.1754943508222875e-38
 _FLOAT32_MAX = 3.4028234663852886e38
+#: The float32 OVERFLOW rounding boundary: the exact midpoint between
+#: ``_FLOAT32_MAX`` and ``2**128``. `strtof` reads a literal STRICTLY below it
+#: (rounding DOWN to max) and answers null at or above it (the rounding goes to
+#: ``2**128``, which is not a float32). Measured on FalkorDB 4.20.6:
+#: ``'0x1.ffffffp127'`` IS this midpoint and is null, ``'0x1.fffffefffffffp127'``
+#: is one float32 ULP below and reads as max, and the DECIMAL
+#: ``'3.4028235677973366e38'`` reads even though its nearest DOUBLE is exactly on
+#: the midpoint — which is why this edge cannot be decided from the double.
+_FLOAT32_OVERFLOW_MIDPOINT = 2 ** 128 - 2 ** 103
 #: The LOWEST literal magnitude the store still READS although it is not a
 #: float32: one quarter of a subnormal ULP (2**-149) below min-normal. The read
 #: band is everything from here upward — at or above this value an inexact
@@ -615,7 +624,22 @@ def _f32_from_literal(raw: str, val: float):
     literal carries more precision than the double that `float.fromhex` keeps.
     """
     rounded = _float32(val)
-    if rounded is None or rounded == val:
+    if rounded is None or abs(rounded) >= _FLOAT32_MAX:
+        # The OVERFLOW edge, the mirror of the underflow one, and decided from
+        # the LITERAL for the same reason: `struct.pack('<f', val)` rounds the
+        # DOUBLE, and `float(raw)` is already a rounding of the text. At this
+        # boundary the two disagree — measured on 4.20.6,
+        # `'3.4028235677973366e38'` is strictly BELOW the overflow midpoint as a
+        # literal (`strtof` rounds it down, the store SERVES max) while its
+        # nearest double IS the midpoint (`struct` raises OverflowError), so
+        # Python answered `absent` for a value every Cypher surface measured.
+        exact = _exact_literal_fraction(raw)
+        if exact is None:                   # pragma: no cover — grammar-pinned
+            return rounded
+        if abs(exact) < _FLOAT32_OVERFLOW_MIDPOINT:
+            return -_FLOAT32_MAX if exact < 0 else _FLOAT32_MAX
+        return None
+    if rounded == val:
         return rounded
     step = 1 if val > rounded else -1
     neighbour = _f32_neighbour(rounded, step)
