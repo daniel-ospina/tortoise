@@ -93,8 +93,13 @@ declared by **no** layer vocabulary, which is what makes it the one genuine unde
 The hosted MCP surface answers per-LABEL counts and a `pointKind` histogram, and it exposes **no
 `objectKind`/`eventKind` histogram and no arbitrary Cypher**. So the populations are measured and their
 label histograms are not, and this artifact says so rather than deriving a rate from a query nobody ran.
-The blocker is precise and mechanical: **run `a_row_census(uri)` from a box holding a FalkorDB URI for the
-fleet graph** — `tools/test_lane.py` gives any lane a private one, and the query is read-only.
+The blocker is precise and mechanical: **run `a_row_census(uri)` from a box that holds a FalkorDB URI
+pointing at the fleet graph** — the query is read-only, so no capture and no spend. ⛔ **A lane's private
+test container cannot stand in**: `tools/test_lane.py` mints a throwaway, EMPTY instance, so running the
+census against it returns `population=0`, `coverage=None`, `non_vacuity=False` for every layer — an
+empty-graph reading dressed as a measurement, i.e. a false failing run. Restoring a dump into such a
+container would still be a COPY, not the `pinned_by: graph_head` fleet read. What is missing is fleet-graph
+credentials on the box, and nothing else.
 
 ⛔ **A4's verdict is therefore not claimable from this run.** Two of its three layers have no label
 coverage, and A4 is RED-or-GREEN **per layer**: the claim layer reads covered, and the thing/event layers
@@ -127,12 +132,12 @@ not a residue of the rule classifier and not v2-lane drift.**
 
 ## 4 · The CI contract twin
 
-`tests/test_10988_a4_label_coverage.py` — 14 offline, deterministic cases, each naming the mutation that
+`tests/test_10988_a4_label_coverage.py` — 15 offline, deterministic cases, each naming the mutation that
 reds it: `NULL` and the blank kind are one absent share; `unlabelled` decomposes exactly; the three layers
 are never blended; a layer is judged against its own vocabulary (a point kind on a thing is not coverage);
 object kinds compare case-insensitively; the declared vocabulary includes the SDK's own registered kinds;
 `0 of 0` is not coverage and one labelled node clears the floor; `declared_absent` is reported and decides
-nothing; the diagnostics survive; a broken layer query renders a NAMED gap rather than `population=0`.
+nothing while `expected_absent` names only the kinds a CORPUS expectation requires; the diagnostics survive; a broken layer query renders a NAMED gap rather than `population=0`.
 
 ⛔ The retired framing is **not** in the pin set: nothing there compares a typed share to a bar.
 
