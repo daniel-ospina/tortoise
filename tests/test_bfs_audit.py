@@ -148,23 +148,37 @@ def test_no_propagate_shock_callers():
     # containing every static form, positive and negative, AND a caller inside a
     # subpackage, so the next iteration breaks a test instead of quietly narrowing the gate.
     #
-    # Residual, named rather than hidden — TWO, and they are not the same size.
+    # Residual, named rather than hidden — and the arm's REAL predicate, which is finer than
+    # "a reference carried in a string literal". It is a line test: does this line quote the
+    # symbol with MATCHING STRAIGHT QUOTES (`"propagate_shock"` / `'propagate_shock'`)?
+    # That is a superset of the reference class and a subset of the word grep, and both edges
+    # are measured rather than assumed:
     #
-    # (a) a reference carried in a STRING LITERAL whose content IS the symbol —
-    # `getattr(mod, "propagate_shock")`, `globals()["propagate_shock"]`, an `__all__` entry, a
-    # registry key — is not a node at all, so no AST walk can see it. main's word-grep DID see
-    # these, and replacing that grep with the AST scan would have WIDENED a hole while closing a
-    # false positive: measured on a synthetic tree whose `__all__` names the symbol, the
-    # AST-only gate went GREEN where `origin/main` red. So `_production_string_references` keeps
-    # exactly this class, and asserts it stays absent.
+    # (a) COVERED, and it is why this arm exists. A reference carried in a string literal whose
+    # content IS the symbol — `getattr(mod, "propagate_shock")`,
+    # `globals()["propagate_shock"]`, an `__all__` entry, a registry key — is not a node at all,
+    # so no AST walk can see it. main's word-grep DID see those, and replacing that grep with
+    # the AST scan alone would have WIDENED a hole while closing a false positive: measured on
+    # a synthetic tree whose `__all__` names the symbol, the AST-only gate went GREEN where
+    # `origin/main` red.
     #
-    # (b) a quoted literal that CONTAINS the symbol rather than BEING it —
-    # `exec("propagate_shock(g, n)")`, `raise X("…propagate_shock…")` — is deliberately NOT
-    # matched. Widening the arm to a word-substring test would re-import the false positive
-    # #11903 exists to remove (`"""call propagate_shock(node)"""` is prose, not a caller), and
-    # #11903 is the decision that forbids the word grep. This is a real narrowing against
-    # `origin/main`, recorded rather than hidden, and pinned in `must_stay_green` below so a
-    # later widening is a deliberate choice that breaks a test instead of a silent drift.
+    # (b) NOT MATCHED, deliberately. A quoted literal that CONTAINS the symbol rather than
+    # being delimited by quotes around it — `exec("propagate_shock(g, n)")`,
+    # `raise X("…propagate_shock…")` — is green here. Widening to a word-substring test would
+    # re-import the false positive #11903 exists to remove (`"""call propagate_shock(node)"""`
+    # is prose, not a caller), and #11903 is the decision that forbids the word grep. This is a
+    # real narrowing against `origin/main`, recorded rather than hidden and pinned in
+    # `must_stay_green` below, so a later widening is a deliberate choice that breaks a test
+    # instead of a silent drift. The structural replacement — `ast.Constant` / `ast.JoinedStr`
+    # parts, docstring nodes skipped — closes this case with no prose false positive, and is
+    # filed as a follow-up (#11918) rather than smuggled into a cite repair.
+    #
+    # ⚠️ The matching-quote rule cuts BOTH ways: straight-quoted PROSE (`# "propagate_shock" was
+    # removed`, `"""Do not call "propagate_shock" here."""`) IS flagged by this arm. That is a
+    # latent over-block, not a live one — the repo convention for naming a symbol in prose is
+    # backticks, and the real tree measures empty (`string_refs == []`) — and it is the reason
+    # the structural follow-up above is the right long-term arm. Stated so the next reader does
+    # not infer a prose exemption this textual test does not have.
     #
     # Every node-shaped reference is pinned below, traversal is pinned for BOTH arms, and each
     # arm's positive and negative form sets are pinned by its own fixtures.
