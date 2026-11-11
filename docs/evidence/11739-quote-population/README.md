@@ -149,14 +149,15 @@ population the composed text targets: **98.93% of embedded statements**.
 - **Quote presence ≠ quote quality.** Whether a 137-char verbatim span is a *good* embedding input is
   #10360's question (value fidelity 49.4% vs a 54.4% baseline) and is untouched by this census.
 - **The predicate counted is "non-empty AFTER whitespace collapse"** — `" ".join(value.split())`,
-  which is `tortoise/embed_compose.py::quote_text` byte-for-byte, i.e. **the composer's own arm
-  predicate**: `base = quote_text(quote)` then `if not base: base = content`. So 94.86% is exactly
-  "the share of live Points where the composer takes the quote arm rather than the `content`
-  fallback". A quote that is *present but equal to the title or `content`* still counts, and that
-  **stricter** figure ("carries a *useful* quote") is **not recomputable from this artifact**:
-  `census.json` carries no `content`/title field, so measuring it needs a probe change, which reds
-  the digest pin and forces a re-run. Read 94.86% as "carries a quote", never as "carries a useful
-  quote".
+  which is `tortoise/embed_compose.py::quote_text` (`_collapse`) line for line, i.e. **the
+  composer's own arm predicate**: `compose_embedding_text` takes `base = quote_text(quote)` and
+  falls back to `content` only `if not base` (`_collapse(content)` when a names line is present; the
+  raw string on its byte-identity arm). So 94.86% is exactly "the share of live Points where the
+  composer takes the quote arm rather than the `content` fallback". A quote that is *present but
+  equal to the title or `content`* still counts, and that **stricter** figure ("carries a *useful*
+  quote") is **not recomputable from this artifact**: `census.json` carries no `content`/title
+  field, so measuring it needs a probe change, which reds the digest pin and forces a re-run. Read
+  94.86% as "carries a quote", never as "carries a useful quote".
 
 ## Reproduce
 
