@@ -2382,6 +2382,10 @@ to answer.
 
 ### 10.25 — the §548 blank-`pointKind` cite re-pointed for `#9752`'s own insert (2026-11-11, `#9752`)
 
+> ⛔ **Superseded for the merged tree by §10.26.** The numbers above are the `9ba2da35` head this
+> entry measured — `:14225-14227` really was the window there. A later commit on this same branch
+> inserted above the anchor and did not re-derive the cite, so the live numbers are §10.26's.
+
 > **A successor entry, not an edit to §10.24.** §10.24's numbers are a faithful record of the
 > `#11795` head it names, and §10.19's rule — quoted by §10.23 and by §10.24 above — is that
 > re-numbering a history entry in place would be a false record of what was measured. The tree moved
@@ -2418,3 +2422,38 @@ to answer.
   threshold, class set or corpus pin is changed — every §1-§9 criterion VALUE and the E4
   denominator are the ones this record froze. `document_sha256` is re-cut in this same commit, per
   §8's rule for *any* edit to this file.
+
+### 10.26 — the same §548 cite re-pointed again, for this branch's own `+20` (2026-11-11, `#9752`)
+
+> **A successor entry, not an edit to §10.25.** §10.25's numbers are a faithful record of the
+> `9ba2da35` head it measured, where `:14225-14227` really was the window. The tree moved again
+> under it on this same branch, and the handling is §10.24→§10.25's: a new dated entry.
+
+- **Why this entry exists.** `93dafca241` ("bound the replay success log to the marker it actually
+  restores") added a **+20**-line comment block to `tortoise/projection/__init__.py` ABOVE the anchor
+  §10.25 cites, and did not re-derive the cite. Nothing reddened on the document's side, because
+  §10.25 is stripped from every live-cite gate by `_without_change_history` and
+  `tools/capstone_preregistration_check.py` folds this file to a digest and resolves no line
+  number. The cite's OTHER half lives in code, and that half redded:
+  `probes/capstone_measure.py:2989` carried the same `:14225-14227`, so
+  `tests/test_7949_capstone_measure.py::test_the_bundles_cites_resolve_where_the_bundle_says_they_do`
+  reported `projection_init.py:14225 reads 'if isinstance(er[0], str)]'`, which carries none of the
+  three lines the cite names.
+- **New value — measured at this head, by opening the lines:**
+  `tortoise/projection/__init__.py:14245-14247` — `14245` is
+  `# Ensure pointKind is present (operators often lack it)`, `14246` is
+  `if "pointKind" not in clean:` and `14247` is `clean["pointKind"] = ""`, the same three-line
+  window §10.25 re-pointed to at its own head.
+- **The offset is the cite's, never the file's, and the two offsets here differ by their base.**
+  Against §10.24's `13804` the movement is `+441` (`13804` → `14245`). Against §10.25's `14225` it
+  is `+20` (`14225` → `14245`), and that `+20` is `93dafca241`'s own insert at this site — not a
+  file total, and not a value to apply to another line.
+- **Only this cite moved in this file's §10.24 block.** §10.24's cites are `extractor_v2.py` and
+  `sdk.py` ones; this change touches neither file, so they resolve at this head unchanged. Nothing
+  outside `tortoise/projection/__init__.py` was re-pointed by this entry.
+- **What moved: one citation, and nothing that is a protocol value.** No metric, denominator,
+  threshold, class set or corpus pin is changed — every §1-§9 criterion VALUE and the E4
+  denominator are the ones this record froze. `document_sha256` is re-cut in this same commit, per
+  §8's rule for *any* edit to this file. The probe's cite and this document's cite are re-pointed
+  TOGETHER so they cannot disagree about this anchor, which is the failure §10.25 was written to
+  stop and this entry closes.
