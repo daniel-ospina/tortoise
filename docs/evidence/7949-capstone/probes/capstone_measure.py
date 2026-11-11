@@ -3008,6 +3008,15 @@ def _a4_declared_kinds(kind_prop: str) -> frozenset[str]:
     declares) or the other (reporting a pack-following write as an invention) — the same defect
     `tools/ax_write_eval.py` documents for its own vocabulary.
     """
+    # ⛔ THE PRODUCT'S OWN REGISTRY IS BUILT AT IMPORT TIME, and importing only
+    # `domain_loader` misses half of it: `tortoise.sdk` itself calls
+    # `domain_loader.register_kind` for `option`/`evidence`/`criterion` (and the same
+    # family supplies `diary`), so a census that skipped the import reported FOUR of
+    # the fleet's six declared typed kinds as inventions — measured on the live graph
+    # 2026-11-11: without the import `evidence` 121 and `option` 2 read UNDECLARED, with
+    # it they read declared. A false failing run is the one direction a refusal must not
+    # fail in (`tools/ax_write_eval.py` records the same defect as `#9695` review P1).
+    import tortoise.sdk  # noqa: F401  — its module-level `register_kind` calls ARE the vocabulary
     from tortoise.domain_loader import known_kinds
 
     return frozenset(known_kinds(kind_prop))

@@ -1,0 +1,147 @@
+---
+title: "A4 measured — per-layer label coverage on the fleet graph, with its diagnostics"
+type: evidence
+domain: platform
+doc_status: final
+created: 2026-11-11
+subjects.team: epistemic-team
+aboutSubjects: Tortoise extractor v4
+aboutObjects: "#7949, #10988, #4432, #1022, #10982, #11083"
+---
+
+# A4 measured — per-layer label coverage on the fleet graph (`#10988`)
+
+**Tier: `Tier E` for the graph read (read-only, no capture, no spend — `04-plan.md` §2 W2c); `CI` for the
+contract twin that pins the shape (`tests/test_10988_a4_label_coverage.py`).**
+
+The epic's rule is that a `Tier E` case **without** its CI contract twin is not done (`#11454`), and
+E2E-8's counterpart is *"the per-layer label-coverage pin (the `NULL` denominator kept as a reported
+share)"*. So this artifact carries two halves: the measurement below, and the offline pin that holds the
+shape the measurement is READ through.
+
+## 1 · What A4 is, and what it deliberately is not
+
+A4 was **re-authored** at the epic's decompose gate (2026-11-05, `04-plan.md` §4.1 + `AM7`) and the
+D3 fork it was blocked on was **answered by the owner on 2026-11-09** (home: `#4432` comment
+`6751932659`, relayed onto `#10988`). The criterion is *"things and events carry the labels the ontology
+declares for them — reported **per layer**"*, on the bar **appears + labelled**, with the coverage
+percentage **reported, not chased**; the floor is non-vacuity (`a4_labelled_nodes: 1`).
+
+⛔ **The retired framing must not be built**: *"typed-claim population measured against a 0.6 % ceiling"*
+is the criterion A4 was re-authored **away from**. The claim layer is deliberately uniform (`statement`,
+`ONTOLOGY.md` §5 option B), so counting labels there could not fail. The typed / `statement` / `NULL`
+shares and the per-writer split survive **as diagnostics** — plan §3.1 A4 accepts no share quoted without
+its `NULL` denominator.
+
+## 2 · The instrument
+
+`docs/evidence/7949-capstone/probes/capstone_measure.py`:
+
+| symbol | what it does |
+|---|---|
+| `A4_LAYERS` | the three layers with **their own** kind property — `pointKind` / `objectKind` / `eventKind`. One blended rate is the failure mode §2 W2c lists first: a failing thing/event layer hiding inside a green claim layer |
+| `label_coverage()` | **pure**, so the CI twin can drive it: `NULL` **and** the blank string are ONE absent state; `unlabelled = unlabelled_null + unlabelled_undeclared` exactly, so no present kind leaves the denominator; `declared_present` / `declared_absent` / `undeclared` / `by_kind`; `coverage` is `None` at a zero population (100 % of 0 is not coverage) and `non_vacuity` is the `a4_labelled_nodes: 1` floor |
+| `_a4_declared_kinds()` | the layer's declared vocabulary, **imported** (`domain_loader.known_kinds`) after `import tortoise.sdk`, because the SDK's own `register_kind` calls are half the vocabulary — §3 below is why that import is load-bearing |
+| `_a4_claim_diagnostics()` | the typed / `statement` / `NULL` shares over CLAIMS, keeping the `is_episodic`/`is_operator` exclusion (turn rows are written `pointKind='event'`; 159 of the committed corpus's 354 Points are turn rows) |
+| `_a4_writer_attribution()` | the per-writer split, by **reproduction** (see §4) |
+
+⛔ **Each layer is judged against its own vocabulary.** The sets overlap by owner ruling (`#7813`:
+`plan`/`goal`/`strategy`/`target` are point AND object kinds; `decision` is a point AND event kind), so a
+single shared set would credit a mislabelled thing as coverage — the exact failure A4 exists to catch.
+Object kinds are compared case-insensitively (`§5` mixes `Project`/`WorkItem`/`tag`); point and event
+kinds stay exact, which is what the hosted write validator does.
+
+## 3 · The measurement — fleet graph, read-only, 2026-11-11T03:11Z
+
+Read through the hosted MCP read surface (`tortoise_graph_overview` + `tortoise_query`), no capture and no
+write. **No graph HEAD is exposed by that surface** (`section=status` and `section=health` carry node
+counts and server code state, no revision), so `pinned_by: graph_head` — A4's registered pin kind — is
+**not satisfiable from this box**; what is recorded instead is a **population fingerprint**, which a
+re-run can compare:
+
+```text
+Point 19595 · Event 4670 · Subject 26 · Object 5379 · Source 1578 · total 31248
+non-operator Points 15868 (= 19595 - 3727 operators)
+```
+
+### 3.1 The claim layer
+
+| cell | value |
+|---|---|
+| population (non-operator `Point`) | **15868** |
+| `statement` | **15733** |
+| typed | **135** — `evidence` 121, `decision` 7, `diary` 2, `option` 2, `finding` 1, `jobToBeDone` 1, `useCase` 1 |
+| `NULL` / blank | **0** — every non-operator Point on this graph carries a `pointKind` |
+| declared (labelled) | **15867** — 6 of the 7 typed kinds are declared (`finding` is not) |
+| ✗ undeclared | **1** — `finding` |
+| coverage (reported, never chased) | **0.99994** |
+| `typed_share` (diagnostic) | **0.008508** |
+
+⚠️ **`evidence`, `option` and `diary` are DECLARED**, and that is a measurement, not an assumption:
+they arrive through `tortoise.sdk`'s module-level `register_kind` calls. A census that imported only
+`domain_loader` reported four of these six kinds as inventions — measured on this same graph, and now
+pinned by `test_the_declared_vocabulary_includes_the_kinds_the_SDK_itself_registers`. `finding` is
+declared by **no** layer vocabulary, which is what makes it the one genuine undeclared label here.
+
+### 3.2 Things and events — **UNMEASURED**, and why
+
+| layer | population (measured) | label coverage |
+|---|---|---|
+| things (`:Object`) | **5379** | **UNMEASURED** |
+| events (`:Event`) | **4670** | **UNMEASURED** |
+
+The hosted MCP surface answers per-LABEL counts and a `pointKind` histogram, and it exposes **no
+`objectKind`/`eventKind` histogram and no arbitrary Cypher**. So the populations are measured and their
+label histograms are not, and this artifact says so rather than deriving a rate from a query nobody ran.
+The blocker is precise and mechanical: **run `a_row_census(uri)` from a box holding a FalkorDB URI for the
+fleet graph** — `tools/test_lane.py` gives any lane a private one, and the query is read-only.
+
+⛔ **A4's verdict is therefore not claimable from this run.** Two of its three layers have no label
+coverage, and A4 is RED-or-GREEN **per layer**: the claim layer reads covered, and the thing/event layers
+are unmeasured. Reporting the claim layer's 0.99994 as "A4 passes" is exactly the blended number §2 W2c
+forbids.
+
+### 3.3 The diagnostic — who wrote the typed claims
+
+Attribution is a **reproduction test, not a stored fact**: no Point property records its producer
+(`projection/entities.py`'s `_POINT_HANDLED` declares every persisted property and none names a writer),
+so the rule classifier `tortoise/extractor.py::_classify_point_kind` is re-derived over each node's own
+content and compared with the stored kind.
+
+| writer bucket | count | by kind |
+|---|---|---|
+| `classifier-reproduces` | **4** | `decision` 4 |
+| `caller-supplied` | **130** | `evidence` 120, `decision` 3, `diary` 2, `option` 2, `finding` 1, `jobToBeDone` 1, `useCase` 1 |
+| `unattributed` | **0** measured / **1** unread | one of the 121 `evidence` rows was not returned by the point listing |
+
+`extractor_v2` is excluded **by construction**, not by measurement: its write gate repairs every point
+kind that is not in the master vocabulary to `statement`, so no typed claim can come from that lane. And
+the split is not an over-claim: a caller that hand-supplied the kind the classifier would have derived
+lands in the first bucket, which is why the bucket is named for what is observable.
+
+**What this means, stated plainly.** 130 of 135 typed claims carry a label the rule classifier does **not**
+derive from their own text — they are agent/fleet writes that supplied a kind (a `MEASURED …` note
+labelled `evidence`, an option labelled `option`). 4 are what the rule lane would produce. That is the
+answer to *"what are the 109"* the issue's Scope stage asked: **they are deliberate caller-supplied kinds,
+not a residue of the rule classifier and not v2-lane drift.**
+
+## 4 · The CI contract twin
+
+`tests/test_10988_a4_label_coverage.py` — 14 offline, deterministic cases, each naming the mutation that
+reds it: `NULL` and the blank kind are one absent share; `unlabelled` decomposes exactly; the three layers
+are never blended; a layer is judged against its own vocabulary (a point kind on a thing is not coverage);
+object kinds compare case-insensitively; the declared vocabulary includes the SDK's own registered kinds;
+`0 of 0` is not coverage and one labelled node clears the floor; `declared_absent` is reported and decides
+nothing; the diagnostics survive; a broken layer query renders a NAMED gap rather than `population=0`.
+
+⛔ The retired framing is **not** in the pin set: nothing there compares a typed share to a bar.
+
+## 5 · What is NOT delivered
+
+- `Object`/`Event` label coverage — blocked on a FalkorDB URI (§3.2), not on a decision.
+- A graph-HEAD stamp — `pinned_by: graph_head` has no query on the hosted surface; the population
+  fingerprint above is the substitute, and it is weaker (a mutating graph keeps the same label counts).
+- The `a4_labelled_nodes: 1` floor is **not yet in the pinned record**: `preregistration.json`'s A4 row
+  still carries the RETIRED `floor: a4_typed_statements` with `blocked_by: #10988` (the whole-row rewrite
+  `04-plan.md` §4.1 assigns to C1, `#10982`, which closed without it). That is a record defect of its own,
+  named here rather than silently edited by this lane.
