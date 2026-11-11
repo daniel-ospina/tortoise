@@ -193,21 +193,18 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_8906_points_gate_counts_write_graph.py": {"registry": "prod-coupled"},
     "test_hosted_volunteer_context.py": {"registry": "prod-coupled"},   # #2103 (W4C) — registry control-plane mint/revoke mirrors test_hosted_auth
     "test_capture_phase_d_dedup.py": {"team-001": "team-identity"},  # #2104 (W5-D) — hosted _make_sdk(namespace="team-001") mirror arm
-    # #11702 — the SAME construction as `test_capture_phase_d_dedup`'s mirror
-    # arm, one door over: the `ep_updated` pin drives the REAL `POST /v1/sessions`
-    # route through `tests/test_hosted_api.py`'s `client` fixture (which
-    # authenticates as the shared `team-001` org), then reaches the graph that
-    # route just wrote by rebuilding it with
-    # `hosted_api._make_sdk(namespace="team-001")` and clearing the belief on the
-    # captured node. The literal IS the org identity the endpoint resolves —
-    # `tests/test_hosted_api.py::TEST_ORG_ID` — so a `test_*` rename would
-    # address a graph the route never writes, `_clear_belief` would clear
-    # nothing, and the `ep_updated: true` arm would red on a served response it
-    # never earned. `team-identity`, same class as its sibling above.
-    # MEASURED: without this row the literal reds
-    # `test_namespace_literals_guard_passing_or_routed` on the `test-slow (a)`
-    # shard (the module landed in `e7394a9ad7`, #11803, with no declaration) —
-    # which is how it was found.
+    # #11702 cycle 30 — the SAME construction as test_capture_phase_d_dedup's
+    # mirror arm, landed without a route (e7394a9), which reds this guard on
+    # `test-slow (a)`: `_EP_FLAG_CONV`'s hosted arm drives the REAL
+    # `POST /v1/sessions` route through `tests/test_hosted_api.py`'s `client`
+    # fixture (which authenticates as the shared `team-001` org), then reaches
+    # the graph the route just wrote by rebuilding it with
+    # `hosted_api._make_sdk(namespace="team-001")` and clearing the belief on
+    # the captured node. The literal IS the org identity the endpoint resolves
+    # — a `test_*` rename would address a graph the route never writes, so
+    # `_clear_belief` would clear nothing and the `ep_updated: true` arm would
+    # red on the served response it never earned. `team-identity`, same as its
+    # sibling above.
     "test_11702_absent_belief_state.py": {"team-001": "team-identity"},
     "test_capture_loop_responsiveness.py": {"registry": "prod-coupled"},  # #3086 — the capture-writer loop-affinity proof reaches the graph class via _make_sdk(namespace="registry") to record writer-thread affinity
     # #3718: the concurrent-commit cases read the MeteringRecord back through

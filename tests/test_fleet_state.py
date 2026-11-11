@@ -1543,7 +1543,11 @@ def test_the_open_issue_read_uses_the_scaled_bound(monkeypatch) -> None:
     monkeypatch.setattr(fs, "_capture", capture)
     assert fs.open_issues("o/r") == []
     assert seen["timeout"] == fs.gh_list_timeout(fs.OPEN_ISSUES_LIMIT)
-    assert "--limit" in seen["cmd"] and "2000" in seen["cmd"]
+    # The window is compared against the CONSTANT, not a literal: the bound gets
+    # resized when a repo outgrows it (2000 -> 4000, 2026-11-11), and a test that
+    # pinned the old number would fail on the resize while proving nothing about
+    # whether the read RECEIVED it. This still fails if the read drops `--limit`.
+    assert "--limit" in seen["cmd"] and str(fs.OPEN_ISSUES_LIMIT) in seen["cmd"]
 
     fs.open_prs("o/r")
     assert seen["timeout"] == fs.gh_list_timeout(400)
