@@ -536,10 +536,10 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
             # A DECLARED but DEGENERATE prior (`set_point_baseline(claim, 0, 0)`)
             # has no mean (0/0) and reads `absent` here, so claiming prior-only
             # would contradict `ep_state` beside it AND disagree with the `ep`
-            # block for the same claim. `baseline` is documented as
-            # "confidence_mean IS the declared prior mean (unless a readable
-            # mirror supplies the value)"; a consumer branching on that got
-            # `None`.
+            # block for the same claim. `baseline` is documented as the prior
+            # mean "unless a readable ``n.confidence`` mirror supplies the
+            # value, which LEADS both"; a consumer branching on the bare prior
+            # mean got `None`.
             "baseline": (baseline_set and not measured and not terminal
                          and state == EP_STATE_BASELINE),
         }

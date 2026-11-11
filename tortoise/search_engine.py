@@ -5583,9 +5583,10 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                 # DEGENERATE prior (`set_point_baseline(claim, 0, 0)`, which every
                 # surface reads as `absent` because 0/0 has no mean — #11702
                 # cycle 30) must not claim prior-only beside `ep_state: "absent"`,
-                # because `baseline` is documented as "confidence_mean IS the
-                # declared prior mean (unless a readable mirror supplies the
-                # value)" and a consumer reading it that way got None.
+                # because `baseline` is documented as the prior mean "unless a
+                # readable ``n.confidence`` mirror supplies the value, which
+                # LEADS both" (EpBreakdown's own words) — and a consumer
+                # reading it as the bare prior mean got None.
                 baseline=(baseline_set and not measured and not terminal
                           and state == EP_STATE_BASELINE),
             )

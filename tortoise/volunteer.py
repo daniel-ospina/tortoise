@@ -76,9 +76,13 @@ DEFAULT_MIN_CONFIDENCE = 0.7
 BLOCK_MAX_BYTES = 8 * 1024
 # A FLOOR for the contested-relevance boost in `_eligible` (0.5), never an
 # absent-belief value. #11702 deleted the "repo convention" this constant used
-# to name: an unmeasured claim answers ``confidence_mean: None`` (state
-# ``absent``), and substituting a Beta(1,1) mean for it is the defect that
-# issue removes — see ``ranking.py``'s note where its own copy was deleted.
+# to name: an unmeasured claim with NO readable ``n.confidence`` mirror answers
+# ``confidence_mean: None`` (state ``absent``) — a mirror-only claim is also
+# unmeasured (``measured=bool(has_ep)``, search_engine.py:5490) yet reads
+# ``baseline`` at the mirror's value, which is why the qualifier is load-bearing
+# — and substituting a Beta(1,1) mean for it is the defect that issue removes.
+# See ``ranking.py``'s note where its own copy was deleted, and ``_eligible``
+# below, which states the same rule qualified.
 # This 0.5 only bounds how far below the caller's floor a CONFLICT-RELEVANT
 # claim may sit while still being boosted; it is compared against a real mean.
 NEUTRAL_CONFIDENCE = 0.5

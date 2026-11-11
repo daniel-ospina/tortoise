@@ -5308,7 +5308,7 @@ def test_update_entity_clearing_the_pair_clears_the_mirror(sdk, tmp_path):
 #
 # The defect class that survived six review rounds here is not behavioural: it
 # is a SENTENCE that restates the absence rule at one site while the code and
-# `EpBreakdown`'s canonical statement (`search_engine.py`:1404-1430) say
+# `EpBreakdown`'s canonical statement (`search_engine.py`:1392-1420) say
 # something else. Each round fixed the sites that review named and left the
 # same class at a site nobody had looked at, because nothing checked the CLASS.
 #
@@ -5321,12 +5321,17 @@ def test_update_entity_clearing_the_pair_clears_the_mirror(sdk, tmp_path):
 #    "IS the declared PRIOR mean" is false for exactly the row
 #    `set_point_baseline(3.0, 1.0)` + `update_point(confidence=0.9)`: the
 #    declared prior mean is 0.75 and the field reads 0.9. That sentence stood
-#    at `search_engine.py`:345 while the code nine hundred lines away said
-#    otherwise, and five sibling copies of the same claim did too.
+#    at `search_engine.py`:347 while the code nine hundred lines away said
+#    otherwise. `origin/main`'s belief prose carried NINE unqualified matches
+#    of it in total (`search_engine.py` 6, `why.py` 2, `volunteer.py` 1 — the
+#    numbers this guard measures, not a count taken on trust), plus one
+#    `else ``None``` match below.
 # 2. The `… else the persisted prior mean (ep_alpha/beta), else ``None```
 #    claim must name the mirror as well, or it predicts `None`/absent for a
 #    mirror-only Point — which reads `baseline` at the mirror's value, not
-#    `None` (its sibling copy in `sdk.py` carries the qualifier).
+#    `None`. (`sdk.py` carries no such sentence: the same claim also stands
+#    unqualified in `mcp_server.py`, which is OUTSIDE this PR's declared
+#    five-module scope and is tracked separately rather than widened here.)
 #
 # The check is a PROXIMITY one on normalised prose: a qualifier must follow its
 # claim within the same sentence, so a paragraph that mentions the mirror for a
@@ -5387,11 +5392,23 @@ _QUALIFIER_FORMS = (
     re.compile(r"mirror supplies"),
 )
 
-#: Words that INVERT a qualifier ("the mirror never leads it"). Checked in the
-#: few characters before a matched form, so a negated mention cannot satisfy
-#: the guard by containing the right phrase.
-_QUALIFIER_NEGATIONS = re.compile(r"\b(never|not|no longer|isn't|doesn't)\b",
-                                  re.IGNORECASE)
+#: Words that INVERT a qualifier ("the mirror never leads it", "unless no
+#: readable mirror supplies one"). Scanned in the few characters BEFORE a
+#: matched form — the position where these negate the qualifier itself.
+_QUALIFIER_NEGATIONS = re.compile(
+    r"\b(never|not|no longer|nothing|without|cannot|isn't|doesn't|"
+    r"no readable|no mirror|fails? to)\b",
+    re.IGNORECASE,
+)
+
+#: Negated OBJECTS that follow a qualifier verb ("the mirror supplies
+#: nothing for these rows"). Checked in a short window AFTER the form, and
+#: deliberately NARROWER than `_QUALIFIER_NEGATIONS`: a general after-window
+#: flags correct prose whose next clause negates something else — measured on
+#: "…LEADS it), never a measured one", which is TRUE and was reported as an
+#: unqualified claim.
+_QUALIFIER_OBJECT_NEGATIONS = re.compile(
+    r"\b(nothing|none|no readable|no mirror)\b", re.IGNORECASE)
 
 #: Sites the scan MUST still find, per file. A tripwire that matches nothing
 #: passes vacuously — and this change's first draft already reworded
@@ -5400,8 +5417,13 @@ _QUALIFIER_NEGATIONS = re.compile(r"\b(never|not|no longer|isn't|doesn't)\b",
 #: prose is added or removed; a mismatch means the guard went blind, which is
 #: exactly what it exists to detect.
 _EXPECTED_PRIOR_MEAN_SITES = {
-    "tortoise/search_engine.py": 6,
-    "tortoise/why.py": 2,
+    # 5, not 6: `EpBreakdown.has_ep`'s doc and `annotate_ep_batch`'s contract
+    # QUOTED the bare-claim wording while being fixed. A verbatim quotation of
+    # another site's qualified text is not an independent claim, so the two
+    # quoting sites left this population when they stopped asserting it.
+    "tortoise/search_engine.py": 5,
+    # 1, not 2: `why.py`'s second site is now the same verbatim quotation.
+    "tortoise/why.py": 1,
     "tortoise/volunteer.py": 1,
 }
 _EXPECTED_ABSENT_SITES = {"tortoise/search_engine.py": 1}
@@ -5413,7 +5435,12 @@ def _belief_prose(rel: str) -> str:
     proximity window measures prose rather than line breaks."""
     root = Path(__file__).resolve().parent.parent
     text = (root / rel).read_text(encoding="utf-8")
-    without_markers = re.sub(r"[ \t]*(#|//)[ \t]*", " ", text)
+    # A `#` that opens an ISSUE reference (`#11702`) is prose, not a comment
+    # marker: the marker form is `#` followed by space/end-of-line. Stripping
+    # it blind left ` 11702` in the normalised string, and `_unqualified_claims`
+    # builds its failure message FROM that string — so a failing run handed the
+    # next lane a mangled evidence line with no issue reference.
+    without_markers = re.sub(r"[ \t]*(#|//)[ \t]*(?![0-9])", " ", text)
     return re.sub(r"\s+", " ", without_markers)
 
 
@@ -5447,7 +5474,10 @@ def _qualified(window: str) -> bool:
     for pattern in _QUALIFIER_FORMS:
         for match in pattern.finditer(sentence):
             before = sentence[max(0, match.start() - 24):match.start()]
-            if _QUALIFIER_NEGATIONS.search(before):
+            after = sentence[match.end():min(len(sentence),
+                                             match.end() + 16)]
+            if (_QUALIFIER_NEGATIONS.search(before)
+                    or _QUALIFIER_OBJECT_NEGATIONS.search(after)):
                 continue
             return True
     return False
