@@ -595,8 +595,15 @@ def _exact_literal_fraction(raw: str):
     beside the store's `absent`).
 
     Hex literals are reconstructed through `int(digits, 16)`, which is EXEMPT
-    from that cap (it applies to non-power-of-two bases only), and bounded by
-    `_EXACT_FRACTION_MAX_EXP` so no literal can ask for `Fraction(2) ** 10**9`.
+    from that cap (it applies to non-power-of-two bases only) — but the MANTISSA
+    only. The `p` EXPONENT is base 10, so it is subject to the same cap: an
+    exponent padded to 4,300+ characters (a zero-padded `p-000…149`, which is
+    the spelling a `repr()` grown by padding produces) raised `ValueError`
+    inside `int(...)`, and `annotate_ep_batch`'s blanket handler turned that
+    single row into `{}` for the WHOLE batch — every claim, measured or not,
+    reading `absent`. The leading zeros are stripped before the conversion
+    (they cannot change the exponent) and the result is bounded by
+    `_EXACT_FRACTION_MAX_EXP`, so no literal can ask for `Fraction(2) ** 10**9`.
 
     `Fraction` cannot read a HEX float at all — it raises `ValueError` — so a hex
     literal used to fall through to the DOUBLE's rounding, which is the SAME
@@ -630,9 +637,20 @@ def _exact_literal_fraction(raw: str):
         mantissa, exponent = (text, "") if exp_at < 0 else (
             text[:exp_at], text[exp_at:])
         whole, dot, frac = mantissa.partition(".")
+        written_frac = frac
         if dot:
             frac = frac.rstrip("0")
             mantissa = whole + ("." + frac if frac else "")
+        if dot and written_frac and not written_frac.strip("0") \
+                and not mantissa.strip("+-"):
+            # `.0`, `+.00`, `-.0e5`, `.000E-7`: stripping the zeros empties the
+            # integer part, so the canonicalisation above would hand `Decimal`
+            # the string `""`/`"+"`, which RAISES — returning None where the
+            # literal's exact value is 0. Not reachable through
+            # `numeric_operand` (which short-circuits `val == 0.0` before the
+            # string path), but this helper's contract is "the literal's EXACT
+            # value, or None", and 0 is a value.
+            return Fraction(0)
         text = mantissa + exponent
         try:
             return Fraction(Decimal(text))
@@ -641,7 +659,16 @@ def _exact_literal_fraction(raw: str):
     digits = (match.group("int") or "") + (match.group("frac") or "")
     if not digits:
         return None
-    exponent = int(match.group("exp") or 0)
+    # ⛔ Strip the exponent's leading zeros BEFORE converting. The mantissa is
+    # hex and exempt from CPython's int↔str cap; the exponent is DECIMAL and is
+    # not, so a zero-padded one (4,300+ characters — the same padding that is
+    # cheap for a stored operand everywhere else) raised inside `int()` and the
+    # caller's blanket handler turned it into "no EP on any claim in the batch".
+    exp_text = match.group("exp") or "0"
+    exp_digits = exp_text.lstrip("+-").lstrip("0") or "0"
+    if len(exp_digits) > len(str(_EXACT_FRACTION_MAX_EXP)):
+        return None                    # |exponent| ≥ 10**4 > the bound, short-circuited
+    exponent = int(("-" if exp_text.startswith("-") else "") + exp_digits)
     if abs(exponent) > _EXACT_FRACTION_MAX_EXP:
         return None
     value = Fraction(int(digits, 16), 16 ** len(match.group("frac") or ""))
@@ -1285,22 +1312,30 @@ class EpBreakdown:
     # include-terminal surfaces". Consumers (topic disputed-pair gate,
     # volunteer, mcp) must not read terminal=unmeasured.
     #
-    # ⛔ `has_ep`/`measured` answer "did EP MEASURE this point"; `ep_state` and
-    # `confidence_mean` answer "is a belief READABLE". Those are different
-    # questions and they DO diverge on two shapes this PR's own state fold names
+    # ⛔ `has_ep`/`measured` answer "is there a PERSISTED α column"; `ep_state`
+    # and `confidence_mean` answer "is a belief READABLE". The predicate is
+    # `ep_measured_cypher`: `posterior_alpha IS NOT NULL OR (ep_alpha IS NOT NULL
+    # AND NOT baseline_set)` — an α is persisted. That is NOT the same claim as
+    # "EP wrote it": a plain `update_point(posterior_alpha=…)` satisfies it with
+    # no EP pass anywhere, so this flag is not an EP receipt.
+    #
+    # The two questions DO diverge, on the two shapes this state fold names
     # absent — a HALF pair (`posterior_alpha` with no beta, accepted by
-    # `update_point`) and a `(0, 0)` pair (no mean exists). EP ran on both, so
-    # `measured` stays True; there is no readable belief, so `ep_state` is
-    # `absent` and the mean is `None`. A consumer deciding whether to RE-RUN EP
-    # must read `measured`; one deciding whether to show/number a belief must
-    # read `ep_state`/`confidence_mean`. Do not infer either from the other: in
-    # particular `measured=True` does NOT imply a non-null mean.
+    # `update_point`) and a `(0, 0)` pair (no mean exists). An α is persisted on
+    # both, so `measured` stays True; there is no readable belief, so `ep_state`
+    # is `absent` and the mean is `None`. A consumer deciding whether a stored
+    # posterior can be reasoned from reads `measured`; one deciding whether to
+    # show/number a belief reads `ep_state`/`confidence_mean`. Do not infer
+    # either from the other: `measured=True` does NOT imply a non-null mean, and
+    # it does NOT prove EP ran — so a caller that needs an EP measurement still
+    # has to ask for one rather than reading this flag as its receipt.
     has_ep: bool = False
     # #3276 aliases of the same measurement state, explicit and unambiguous:
-    #   measured=True                     → EP measured (has_ep True) — see the
-    #                                      `has_ep` note above: this does NOT
-    #                                      promise a readable belief (half pair,
-    #                                      zero pair ⇒ ep_state "absent")
+    #   measured=True                     → an α column is persisted (has_ep
+    #                                      True) — see the `has_ep` note above:
+    #                                      this promises NEITHER a readable
+    #                                      belief (half pair, zero pair ⇒
+    #                                      ep_state "absent") NOR an EP pass
     #   measured=False, baseline=True     → prior-only (declared baseline)
     #   measured=False, baseline=False    → ABSENT (#11702): confidence_mean is
     #                                       `None`, never the old neutral 0.5 —

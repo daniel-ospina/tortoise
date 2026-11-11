@@ -386,6 +386,64 @@ def test_a_literal_past_the_int_str_digit_cap_reads_like_its_short_spelling():
                 short, numeric_operand(long), expected)
 
 
+def test_a_padded_hex_exponent_cannot_empty_the_batch():
+    """Cycle 30 P2: the padding axis this cycle bounded had a CRASHING sibling.
+
+    The mantissa of a hex literal is reconstructed with `int(digits, 16)`, which
+    CPython's int↔str cap exempts — but the `p` exponent is base 10 and is NOT
+    exempt. A zero-padded exponent (`p-000…149`, the same cheap padding that
+    makes any stored operand arbitrarily long) raised `ValueError` inside
+    `int()`, and `annotate_ep_batch`'s blanket handler answered `{}` for the
+    whole batch: ONE legacy row made every claim in the response read
+    `ep_state: "absent"`, `confidence_mean: null`, `measured: false` — including
+    claims genuinely measured — and any belief floor then returned nothing.
+
+    Pinned on the HELPER (the batch surface needs a live graph and the helper is
+    where the raise was), and on the shape that matters: the value must be the
+    literal's, not a discarded `None`.
+    """
+    from fractions import Fraction
+
+    from tortoise.search_engine import _exact_literal_fraction
+
+    # A padded exponent is the SAME exponent: value must be unchanged, not None.
+    assert _exact_literal_fraction("0x1p-149") == Fraction(1, 2 ** 149)
+    padded = "0x1p-" + "0" * 4400 + "149"
+    assert len(padded) > 4300, len(padded)
+    assert _exact_literal_fraction(padded) == Fraction(1, 2 ** 149), (
+        f"a {len(padded)}-character exponent of the SAME value read "
+        f"{_exact_literal_fraction(padded)!r} instead of 2**-149 — the literal "
+        "was discarded, and one such row empties the whole batch")
+    assert _exact_literal_fraction("0x1p+1") == 2
+    assert _exact_literal_fraction("0x1p+" + "0" * 4400 + "1") == 2
+    # …and a genuinely out-of-bound exponent still declines, without raising.
+    assert _exact_literal_fraction("0x1p+9999") is None
+    assert _exact_literal_fraction("0x1p+" + "9" * 4400) is None
+
+
+def test_a_zero_literal_with_an_empty_integer_part_is_still_zero():
+    """Cycle 30 P3: the trailing-zero canonicalisation can EMPTY the integer
+    part, and `Decimal("")` raises — so `.0`, `+.00`, `-.0e5` returned `None`
+    where the literal's exact value is 0.
+
+    Latent rather than live — `numeric_operand` short-circuits `val == 0.0`
+    before the string path, so no served value changed — but this helper's
+    contract is "the literal's EXACT value, or None", and 0 is a value. A later
+    caller that reaches the helper directly would otherwise read "absent" for a
+    literal that is exactly zero.
+    """
+    from fractions import Fraction
+
+    from tortoise.search_engine import _exact_literal_fraction
+
+    for spelling in (".0", ".00", "+.0", "-.0", ".0e5", ".000E-7", "+.00e+0"):
+        assert _exact_literal_fraction(spelling) == Fraction(0), (
+            f"{spelling!r} read {_exact_literal_fraction(spelling)!r} — the "
+            "canonicalisation emptied the integer part and `Decimal` raised")
+    # A dot with no digits at all is not a number, and must still decline.
+    assert _exact_literal_fraction(".") is None
+
+
 # ── The property: an absent claim is not ORDERED as a 0.5 ──────────────────
 
 def test_absent_and_measured_symmetric_do_not_share_an_ordering_input(sdk):
