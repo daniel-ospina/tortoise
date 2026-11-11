@@ -98,8 +98,7 @@ quality change. **Live before private-beta:**
 4. the **shortfall assertion** on the vector leg (§6.1), without which a beta customer can silently receive
    fewer results than exist;
 5. the **`null`-not-0.5 rule** for absent belief state (§6.3) — absent state is `null` with
-   `ep_state: "absent"`, never a coalesced 0.5; the per-surface sweep named in §6.3 is the remaining
-   work, not the rule itself;
+   `ep_state: "absent"`, never a coalesced 0.5, on every read/rank surface §6.3 enumerates;
 6. the **two truncation reason strings** (§7) — `degraded: "insufficient_graph"` / `degraded:
    "truncated_boundary"` — because item 1 only makes an incomplete answer *labelled*, not *labelled with a
    reason a caller can branch on*.

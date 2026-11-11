@@ -6,11 +6,31 @@ a live FalkorDB instance — it's a grep-based documentation of the audit result
 Run with: python3 -m pytest tests/test_bfs_audit.py -v
 """
 
+import ast
 import subprocess
 import sys  # noqa: F401
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def _production_ast_references(symbol: str = "propagate_shock") -> list[tuple[str, int]]:
+    """Every AST reference to `symbol` under `tortoise/`, as (path, lineno).
+
+    A `Name`/`Attribute` node is a USE of the symbol — a call, an alias, a reference —
+    regardless of whitespace, line continuations, or how it is later invoked. The
+    `def` name and any docstring mention are NOT nodes of either kind, which is what
+    makes this the right primitive for "does production code depend on it".
+    """
+    refs: list[tuple[str, int]] = []
+    for src in sorted((ROOT / "tortoise").rglob("*.py")):
+        tree = ast.parse(src.read_text(encoding="utf-8"), filename=str(src))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id == symbol:
+                refs.append((str(src.relative_to(ROOT)), node.lineno))
+            elif isinstance(node, ast.Attribute) and node.attr == symbol:
+                refs.append((str(src.relative_to(ROOT)), node.lineno))
+    return refs
 
 
 def _grep(pattern: str, *dirs: str) -> list[str]:
@@ -62,18 +82,37 @@ def test_no_propagate_shock_callers():
             callers["test_files"].append(line)  # test_6707_shock.py
         elif "/tortoise/" in path_part and "#" in line and "replaces" in line.lower():
             callers["comment/reference only"].append(line)
-        elif "/tortoise/" in path_part and "propagate_shock(" not in line:
-            # A MENTION is not a CALL (#11702): prose that names the function —
-            # e.g. the unreachability note inside `propagate_shock`'s own
-            # docstring — invokes nothing. Only a call form (`propagate_shock(`)
-            # can be a caller, and a bare word cannot.
-            callers["comment/reference only"].append(line)
         elif "/tortoise/" in path_part:
             callers["production_code"].append(line)
 
+    # ⛔ A LINE-BASED WORD GREP CANNOT ANSWER THIS QUESTION (#11907).
+    #
+    # The classifier above matches the WORD. Prose that names the function therefore
+    # reads as a caller — `#11702` added exactly such a note to `propagate_shock`'s own
+    # docstring (`projection/propagation.py:70,73`, explaining why the path is
+    # unreachable), and this test reddened on its own documentation.
+    #
+    # The tempting repair — `"propagate_shock(" not in line` ⇒ a reference — is WORSE
+    # than the bug, because a substring is not a call form. Each of these IS a call and
+    # none contains that substring: `propagate_shock (a, b)` (Python allows the space),
+    # a backslash or bracket continuation putting the name at end of line, and an alias
+    # (`f = propagate_shock; f(a, b)`). A gate that passes those is a gate that stopped
+    # gating.
+    #
+    # So the verdict comes from the AST, which answers the question the test is actually
+    # asked: a `Name`/`Attribute` node is the SYMBOL BEING USED; a docstring mention is a
+    # string constant and cannot produce one, and whitespace/continuations/aliases all
+    # still resolve to a reference. Residual, named rather than hidden: a reference whose
+    # name is computed at runtime (`getattr(mod, "propagate_shock")`) is a string to the
+    # parser and invisible here — as it is to any static check.
+    ast_refs = _production_ast_references()
+
     # The only "production" reference is a comment: no actual call
-    assert len(callers["production_code"]) == 0, (
-        f"PRODUCTION CODE CALLS propagate_shock:\n" + "\n".join(callers["production_code"])  # noqa: F541
+    assert not ast_refs, (
+        "PRODUCTION CODE CALLS propagate_shock:\n"
+        + "\n".join(f"{path}:{lineno}" for path, lineno in ast_refs)
+        + "\n\n(word-grep context, which cannot tell a call from a mention:)\n"
+        + "\n".join(callers["production_code"])  # noqa: F541
     )
     assert len(callers["definition (deprecated)"]) == 1, (
         "Expected exactly 1 deprecated definition in projection.py"
