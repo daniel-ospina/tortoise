@@ -1541,8 +1541,8 @@ class StateRanker:
         out = {}
         for row in rows:
             pid, alpha, beta, has_ep, degree = (
-                row[0], numeric_operand(row[1]) or 0.0,
-                numeric_operand(row[2]) or 0.0, bool(row[3]), int(row[4]))
+                row[0], numeric_operand(row[1]),
+                numeric_operand(row[2]), bool(row[3]), int(row[4]))
             measured_raw = has_ep
             # #2490: terminal rows never surface as measured/contested EP (len
             # guard — see GraphRanker). #2598: the len guard also covers the
@@ -1559,7 +1559,13 @@ class StateRanker:
                                           posterior_beta=row[11],
                                           ep_beta=row[12])
                            if len(row) > 12 else True)
-            variance = _beta_variance(alpha, beta) if pair_stored else 0.0
+            # #11702 cycle 20: an UNREADABLE operand has no width either —
+            # `_beta_variance(None, …)` would raise. `alpha`/`beta` are no
+            # longer substituted with 0.0 (which published maximum disbelief at
+            # state `measured`); unreadable stays None, and None is ABSENT.
+            variance = (_beta_variance(alpha, beta)
+                        if (pair_stored and alpha is not None
+                            and beta is not None) else 0.0)
             has_prior = bool(row[7]) if len(row) > 7 else measured_raw
             # #11702: no persisted belief ⇒ `confidence: None`, named by
             # `ep_state`. Never the neutral 0.5, which ordered a never-measured
@@ -1589,7 +1595,8 @@ class StateRanker:
                 conf = numeric_operand(mirror)
                 if conf is not None:
                     pass
-                elif (alpha + beta) > 0:
+                elif (alpha is not None and beta is not None
+                      and (alpha + beta) > 0):
                     # #11702 cycle 14: THROUGH `_beta_mean`, not a bare
                     # division. An overflowing pair
                     # (`update_point(posterior_alpha=1e308,
@@ -2105,8 +2112,8 @@ class GapsRanker:
         out = {}
         for row in rows:
             pid, alpha, beta, has_ep = (
-                row[0], numeric_operand(row[1]) or 0.0,
-                numeric_operand(row[2]) or 0.0, bool(row[3]))
+                row[0], numeric_operand(row[1]),
+                numeric_operand(row[2]), bool(row[3]))
             measured_raw = has_ep
             # #2490: terminal rows never surface as measured/contested EP (len
             # guard — see GraphRanker). #2598: the len guard also covers the test
@@ -2121,7 +2128,13 @@ class GapsRanker:
                                           posterior_beta=row[10],
                                           ep_beta=row[11])
                            if len(row) > 11 else True)
-            variance = _beta_variance(alpha, beta) if pair_stored else 0.0
+            # #11702 cycle 20: an UNREADABLE operand has no width either —
+            # `_beta_variance(None, …)` would raise. `alpha`/`beta` are no
+            # longer substituted with 0.0 (which published maximum disbelief at
+            # state `measured`); unreadable stays None, and None is ABSENT.
+            variance = (_beta_variance(alpha, beta)
+                        if (pair_stored and alpha is not None
+                            and beta is not None) else 0.0)
             has_prior = bool(row[6]) if len(row) > 6 else measured_raw
             # #11702: no persisted belief ⇒ None + the state name, never 0.5.
             if not has_prior:
@@ -2141,7 +2154,8 @@ class GapsRanker:
                 conf = numeric_operand(mirror)
                 if conf is not None:
                     pass
-                elif (alpha + beta) > 0:
+                elif (alpha is not None and beta is not None
+                      and (alpha + beta) > 0):
                     # #11702 cycle 14: THROUGH `_beta_mean`, not a bare
                     # division. An overflowing pair
                     # (`update_point(posterior_alpha=1e308,

@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import uuid
 from decimal import Decimal
 
 import pytest
@@ -248,6 +249,21 @@ def test_absent_and_measured_symmetric_do_not_share_an_ordering_input(sdk):
     """
     absent = _absent_point(sdk)
     measured = _symmetric_point(sdk)
+    # ⛔ Cycle 20: the nodes need a non-zero DEGREE, or this test cannot see the
+    # inversion its own docstring names. With `degree = 0` the connectivity term
+    # is 0 for both rows, so the mutant the docstring forbids (returning the
+    # UNWEIGHTED term instead of `0.5·connectivity`) produces the same numbers
+    # and 285 tests stay green — measured by mutation. At degree 1 connectivity
+    # is 0.5: correct absent 0.25 < measured 0.45, mutant 0.50 > 0.45.
+    for pid in (absent, measured):
+        sdk.create_operator("IMPL", pid, [sdk.create_point(
+            "statement", f"a support for {pid}")["id"]])
+    degrees = {r["id"]: r["recall_ranking"].get("degree", 0) for r in
+               StateRanker(projection=sdk._get_proj()).rerank(
+                   [{"id": absent, "scores": {"rrf": 1.0}},
+                    {"id": measured, "scores": {"rrf": 1.0}}])}
+    assert all(d >= 1 for d in degrees.values()), (
+        f"the fixture did not reach the degree-sensitive arm: {degrees}")
     rows = [{"id": absent, "scores": {"rrf": 1.0}},
             {"id": measured, "scores": {"rrf": 1.0}}]
 
@@ -263,6 +279,14 @@ def test_absent_and_measured_symmetric_do_not_share_an_ordering_input(sdk):
         "an absent belief scored HIGHER than a measured 0.5")
     assert g_out[absent]["final_score"] < g_out[measured]["final_score"], (
         "an absent belief outranked a measured 0.5")
+    # …and it is not BURIED either: the belief TERM is dropped but its WEIGHT
+    # stays, so absence keeps the whole boost's structure. Returning 0.0 (or the
+    # unweighted term) fails one of these two bounds.
+    assert g_out[absent]["graph_boost"] > 0.0, (
+        "the absent arm dropped the remaining term's weight as well — "
+        "'nothing measured this' must be neither buried nor promoted")
+    assert g_out[absent]["graph_boost"] == pytest.approx(
+        0.5 * (1.0 - 1.0 / (1.0 + degrees[absent])), abs=1e-4), g_out[absent]
 
     s_out = {r["id"]: r["recall_ranking"]
              for r in StateRanker(projection=sdk._get_proj()).rerank(rows)}
@@ -278,6 +302,53 @@ def test_absent_and_measured_symmetric_do_not_share_an_ordering_input(sdk):
         "recall ranked an absent belief above a measured 0.5")
     assert s_out[absent]["final_score"] != s_out[measured]["final_score"], (
         "the multiplicative confidence gate treated 'no belief' as a 0.5")
+
+
+def test_the_object_aggregate_reports_absent_without_a_mean_over_nothing(sdk):
+    """Cycle 20: an Object whose about-Points carry NO belief.
+
+    `_fetch_object_signals` filters the `None`s out before averaging (the old
+    `NEUTRAL_CONFIDENCE` 0.5 was the fabrication one level up), and the guard
+    that makes it total was unpinned: keeping the Nones made `sum(confs)` raise
+    `TypeError: unsupported operand type(s) for +: 'int' and 'NoneType'` and 285
+    tests stayed green. Both arms are asserted here — measured and absent — so
+    removing the filter is caught.
+    """
+    proj = sdk._get_proj()
+    # `_fetch_object_signals` lives on StateRanker (the owner that takes the
+    # signal map for a batch of mixed labels).
+    ranker = StateRanker(projection=proj)
+
+    measured_point = sdk.create_point("statement", "ZQOBJ a measured claim")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 9.0, "
+                 "n.posterior_beta = 1.0", params={"id": measured_point})
+    absent_point = sdk.create_point("statement", "ZQOBJ a belief-less claim")["id"]
+
+    # Created with raw Cypher on purpose: `sdk.create_object` DEDUPES by kind
+    # and returned ONE node for two different names (measured: same id twice,
+    # degree 2), which would make both assertions read the same aggregate.
+    measured_obj = f"zqobj-measured-{uuid.uuid4().hex[:8]}"
+    absent_obj = f"zqobj-absent-{uuid.uuid4().hex[:8]}"
+    for oid, name in ((measured_obj, "ZQOBJ measured object"),
+                      (absent_obj, "ZQOBJ absent object")):
+        proj.g.query("CREATE (o:Object {id:$id, name:$name})",
+                     params={"id": oid, "name": name})
+    for oid, pid in ((measured_obj, measured_point), (absent_obj, absent_point)):
+        proj.g.query("MATCH (p:Point {id:$pid}), (o:Object {id:$oid}) "
+                     # `aboutObject` is in `ABOUT_EDGE_TYPES`; a bare `:about`
+                     # edge is not traversed by the aggregate and would have
+                     # produced an "absent" Object for a measured Point.
+                     "MERGE (p)-[:aboutObject]->(o)",
+                     params={"pid": pid, "oid": oid})
+
+    sigs = ranker._fetch_object_signals([measured_obj, absent_obj])
+    assert set(sigs) == {measured_obj, absent_obj}, sigs
+    assert sigs[measured_obj]["confidence"] == pytest.approx(0.9, abs=1e-4), sigs
+    assert sigs[measured_obj]["ep_state"] == EP_STATE_MEASURED, sigs
+    # The absent arm: no value, and a NAMED state — never a mean over nothing.
+    assert sigs[absent_obj]["confidence"] is None, sigs[absent_obj]
+    assert sigs[absent_obj]["ep_state"] == EP_STATE_ABSENT, sigs[absent_obj]
+    assert sigs[absent_obj]["has_ep"] is False, sigs[absent_obj]
 
 
 def test_absent_never_outranks_a_strongly_measured_claim(sdk):
@@ -2352,6 +2423,117 @@ def test_one_malformed_mirror_does_not_discard_the_batch(sdk):
     assert recs[good]["confidence"] == 0.5, recs[good]
 
 
+def test_a_belief_value_the_store_cannot_read_is_refused_at_the_write(sdk):
+    """Cycle 20 P1: `_sanitize_props` guarded property NAMES, not value types.
+
+    `update_point(posterior_alpha=[0.7])` and `update_point(confidence=True)`
+    were ACCEPTED and stored verbatim, and FalkorDB then refuses to inspect
+    them — `toString(<List>)` and `toFloat(<List>)` raise "Type mismatch", which
+    takes the whole QUERY down. Measured consequences of ONE list-valued node:
+    `tortoise_analyze` answered "Query error: …", `recall_subgraph` raised, and
+    the belief signal map for the whole recall batch came back empty — so every
+    result read `absent`, the exact conflation this issue removes, at batch
+    scope. A reader cannot be total over a value the engine will not look at,
+    so the failure is closed at the write, where it belongs.
+    """
+    proj = sdk._get_proj()
+    pid = sdk.create_point("statement", "ZQWRITE guard probe")["id"]
+
+    for prop, bad in (
+        ("posterior_alpha", [0.7]),
+        ("posterior_beta", {"a": 1}),
+        ("confidence", True),
+        ("confidence", "abc"),
+        ("confidence", "0.7"),
+        ("posterior_alpha", float("inf")),
+        ("posterior_alpha", float("nan")),
+    ):
+        with pytest.raises(ValueError) as exc:
+            sdk.update_point(pid, **{prop: bad})
+        assert "finite number" in str(exc.value), (prop, bad, str(exc.value))
+        # …and nothing was written.
+        stored = proj.g.query(
+            f"MATCH (n:Point {{id:$id}}) RETURN n.{prop}",
+            params={"id": pid}).result_set
+        assert stored[0][0] is None, (prop, stored)
+
+    # The legitimate writes still work, including clearing.
+    sdk.update_point(pid, confidence=0.42)
+    assert annotate_ep_batch(proj.g, [pid])[pid].confidence_mean == 0.42
+    # Moving the PAIR clears the mirror (cycle 12's third-writer rule), so the
+    # pair's mean is what the block reports next.
+    sdk.update_point(pid, posterior_alpha=3.0, posterior_beta=1.0)
+    assert annotate_ep_batch(proj.g, [pid])[pid].confidence_mean == pytest.approx(
+        0.75, abs=1e-4)
+    sdk.update_point(pid, confidence=None)
+    assert annotate_ep_batch(proj.g, [pid])[pid].confidence_mean == pytest.approx(
+        0.75, abs=1e-4)
+
+
+def test_the_twins_parse_the_same_string_language(sdk):
+    """Cycle 20 P1/P2: `float()` and `toFloat` are not the same parser.
+
+    Measured divergences, each of which put a DIFFERENT belief on two surfaces
+    for one claim:
+
+    * ``toFloat("Infinity")`` is ``inf`` → `graph_ranking` read maximum
+      certainty 1.0 for a claim with no readable belief (`0.0` on
+      `recall_ranking`, `absent` in the `ep` block — three answers);
+    * ``toFloat("0x1p4")`` is 16.0 while Python rejects hex floats;
+    * ``float("0.7 ")`` is 0.7 while ``toFloat("0.7 ")`` is null — so a value
+      with a trailing space was `measured / 0.7` in the `ep` block and `absent`
+      in every ranker beside it.
+
+    The string spelling is now pinned to the intersection (a plain decimal
+    literal) and the Cypher coercion additionally requires a FINITE result.
+
+    RECORDED RESIDUAL: `toFloat("0x1p4")` is 16.0 and the pinned Python grammar
+    rejects hex floats, so a LEGACY hex-float operand answers `16.0` in Cypher
+    and `None` in Python. It is out of the agreement table on purpose rather
+    than silently tolerated: `_sanitize_props` now refuses a string belief at
+    the write, so this shape can only pre-date that guard, and its consequence
+    is a readable belief (not the maximum-certainty fabrication the finiteness
+    guard closes).
+    """
+    from tortoise.search_engine import numeric_operand, numeric_operand_cypher
+
+    proj = sdk._get_proj()
+    pid = sdk.create_point("statement", "ZQPARSE a string-operand claim")["id"]
+    shapes = {
+        "0.7": 0.7,
+        # Leading whitespace is skipped by `toFloat`, trailing is not — measured
+        # (`" 0.7"` → 0.7, `"0.7 "` → null). The pinned grammar follows.
+        " 0.7": 0.7,
+        "\t0.7": 0.7,
+        "0.7 ": None,
+        " 0.7 ": None,
+        "Infinity": None,
+        "-Infinity": None,
+        "nan": None,
+        "abc": None,
+        "": None,
+        "1e3": 1000.0,
+        "+.5": 0.5,
+        "0.": 0.0,
+    }
+    for raw, expected in shapes.items():
+        proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = $a, "
+                     "n.posterior_beta = '1'", params={"id": pid, "a": raw})
+        cypher = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN "
+            + numeric_operand_cypher("n.posterior_alpha"),
+            params={"id": pid}).result_set[0][0]
+        py = numeric_operand(raw)
+        assert (py is None) == (cypher is None), (
+            f"{raw!r}: python={py!r} cypher={cypher!r} — the twins disagree "
+            "about whether this string is a number")
+        if expected is None:
+            assert py is None and cypher is None, (raw, py, cypher)
+        else:
+            assert py == pytest.approx(expected), (raw, py)
+            assert cypher == pytest.approx(expected, rel=1e-6), (raw, cypher)
+
+
 def test_the_third_ranker_reads_an_unreadable_mirror_like_the_other_two(sdk):
     """Cycle 18 P1: `GraphRanker` was the ONE read that passed the mirror raw.
 
@@ -2440,12 +2622,14 @@ def test_a_boolean_is_not_a_belief_on_either_twin(sdk):
     assert ep_state(posterior_alpha=True, ep_alpha=None,
                     posterior_beta=2.0) == EP_STATE_ABSENT
 
-    # …and the API really does accept one (`update_point(confidence=True)` is
-    # stored as a Boolean), so the reader must be TOTAL for it, not merely
-    # handed a shape it never sees.
+    # …and a Boolean CAN still be in the store: cycle 20 refuses it at the write
+    # (`_sanitize_props`), but data written before that (or by a raw tool) is
+    # still there, so the reader must be TOTAL for it. Pinned through the raw
+    # door deliberately — the API now raises (see the next test).
     proj = sdk._get_proj()
     pid = sdk.create_point("statement", "a claim with a boolean mirror")["id"]
-    sdk.update_point(pid, confidence=True)
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.confidence = true",
+                 params={"id": pid})
     stored = proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN toString(n.confidence)",
         params={"id": pid}).result_set

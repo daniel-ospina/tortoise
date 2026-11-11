@@ -33,6 +33,7 @@ import contextvars
 import hashlib
 import json as _json
 import logging
+import math
 import os
 import re
 import stat
@@ -6806,6 +6807,38 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
             "of those, or set_point_baseline for an explicit belief "
             "(#7951)."
         )
+    # ⛔ #11702 cycle 20: a belief VALUE the store cannot hold as a number is
+    # refused HERE, at the write, not defended against on every read.
+    # `_sanitize_props` guarded the property NAMES and not the value types, so
+    # `update_point(posterior_alpha=[0.7])` and `update_point(confidence=True)`
+    # were accepted and stored verbatim. FalkorDB then REFUSES to inspect them:
+    # `toString(<List>)` and `toFloat(<List>)` raise "Type mismatch", taking the
+    # whole query down — so one node with a list-valued belief made
+    # `tortoise_analyze` answer "Query error: …", made `recall_subgraph` raise,
+    # and blanked the belief signal map for the WHOLE recall batch (every result
+    # then reads `absent`, the exact conflation #11702 removes, at batch scope).
+    # A reader cannot be made total over a value the engine will not look at, so
+    # the failure has to be closed here. A STRING is refused for the same
+    # reason: it round-trips through `toFloat` as a float32 and its grammar is
+    # not the same language Python parses ("0.7 " and "0x1p4" are numbers to one
+    # twin and not the other) — the readers stay total for data already stored
+    # that way, and #11841 owns the wider audit of every belief writer.
+    for _belief_key in ("confidence", "posterior_alpha", "posterior_beta"):
+        if _belief_key in props:
+            _belief_val = props[_belief_key]
+            if _belief_val is None:
+                continue
+            if isinstance(_belief_val, bool) or not isinstance(
+                    _belief_val, (int, float)) or not math.isfinite(
+                        float(_belief_val)):
+                raise ValueError(
+                    f"{_belief_key!r} must be a finite number (not a "
+                    f"{type(_belief_val).__name__}): a non-numeric belief is "
+                    "not a weaker claim, it is a malformed one — FalkorDB "
+                    "cannot coerce a List/Boolean/string operand, so a single "
+                    "such row breaks every belief read on the batch (#11702, "
+                    "#11841). Pass a float, or None to clear it."
+                )
     _baseline_props = [k for k in
                        ("ep_alpha", "ep_beta", "baseline_set",
                         "baseline_source")

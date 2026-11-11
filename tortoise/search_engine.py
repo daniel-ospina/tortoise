@@ -364,6 +364,28 @@ NUMERIC_OPERAND_CYPHER_TEMPLATE = (
     "toFloat(CASE WHEN toString({operand}) IN ['true', 'false'] "
     "THEN null ELSE {operand} END)")
 
+#: The decimal grammar BOTH twins accept for a STRING operand. Python's
+#: ``float()`` and FalkorDB's ``toFloat`` do not parse the same language, and the
+#: differences are not cosmetic:
+#:
+#: * ``float("0.7 ")`` is 0.7 and ``toFloat("0.7 ")`` is null — a trailing space
+#:   (a value copied out of a form or CSV) was a measured 0.7 in the `ep` block
+#:   and `absent` in every ranker beside it;
+#: * ``toFloat("Infinity")`` is ``inf`` and ``toFloat("0x1p4")`` is 16.0, while
+#:   Python rejects both — the FIRST of those put a fabricated maximum-certainty
+#:   1.0 on `graph_ranking` for a claim with no readable belief, and `0.0` from
+#:   `recall_ranking`, beside `absent` in the `ep` block: three answers.
+#:
+#: So the string spelling is pinned to a plain decimal literal, the intersection
+#: of the two languages. A string outside it is ABSENT on both twins.
+#: Measured `toFloat` grammar: leading whitespace is skipped, trailing is not
+#: (`" 0.7"` parses, `"0.7 "` does not). Hex floats (`"0x1p4"` → 16.0) and the
+#: `Infinity`/`nan` spellings parse there too; the first stays a recorded
+#: residual (see `numeric_operand`), the second is nulled by the finiteness
+#: guard in `numeric_operand_cypher`.
+_FLOAT_LITERAL = re.compile(r"\s*[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)"
+                            r"(?:[eE][+-]?[0-9]+)?\Z")
+
 
 def numeric_operand_cypher(operand: str) -> str:
     """Cypher: the TOTAL numeric coercion for one RAW column expression.
@@ -380,7 +402,20 @@ def numeric_operand_cypher(operand: str) -> str:
     all answer NULL, which the presence rule turns into ABSENT — matching
     :func:`numeric_operand`, the Python twin.
     """
-    return NUMERIC_OPERAND_CYPHER_TEMPLATE.format(operand=operand)
+    coerced = NUMERIC_OPERAND_CYPHER_TEMPLATE.format(operand=operand)
+    # …and it must be FINITE. `toFloat` accepts spellings Python does not —
+    # measured: `toFloat("Infinity")` is `inf`, which made a claim with no
+    # readable belief read `mean 1.0` (maximum certainty) on `graph_ranking`
+    # and `0.0` on `recall_ranking` beside `absent` in the `ep` block. There is
+    # no `isfinite` in FalkorDB, so the finite range is spelled as two
+    # comparisons; a NaN makes both NULL, so it falls to the ELSE too.
+    # The bound is the DOUBLE MAX (`sys.float_info.max`), not `1e308`: a stored
+    # `1.7e308` is a perfectly finite double and `_beta_mean` has an
+    # overflow-free identity for exactly that pair — bounding at `1e308` nulled
+    # it and re-broke `test_every_ranker_reads_an_overflowing_pair_the_same_way`.
+    return (f"CASE WHEN {coerced} <= 1.7976931348623157e308 "
+            f"AND {coerced} >= -1.7976931348623157e308 "
+            f"THEN {coerced} ELSE null END")
 
 
 def numeric_operand(raw):
@@ -399,6 +434,14 @@ def numeric_operand(raw):
     """
     if raw is None or isinstance(raw, bool):
         return None
+    if isinstance(raw, str):
+        # The pinned decimal grammar — see `_FLOAT_LITERAL`. Anything FalkorDB
+        # parses and Python does not (hex floats, `Infinity`, a trailing space
+        # Python tolerates and Cypher does not) is exactly the twin split this
+        # coercion exists to prevent, so the STRICTER of the two languages wins.
+        if not _FLOAT_LITERAL.match(raw):
+            return None
+        return float(raw)
     try:
         val = float(raw)
     except (TypeError, ValueError):
