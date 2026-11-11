@@ -10,6 +10,7 @@ Run with: python3 -m pytest tests/test_bfs_audit.py -v
 
 import ast
 import io
+import re
 import subprocess
 import sys
 import tokenize
@@ -79,6 +80,30 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
             IndentationError):
         return None
 
+    # ⛔ ONE COORDINATE SPACE. `ast` reports `col_offset`/`end_col_offset` as
+    # UTF-8 BYTE offsets (CPython ASDL: "col_offset is the byte offset in the utf8
+    # string the parser uses"), while `tokenize.generate_tokens` over a `str`
+    # reports CHARACTER columns. Comparing the two directly makes the prose box's
+    # right edge drift right by one column per extra UTF-8 byte, so a docstring
+    # holding enough non-ASCII swallows a literal that really lies after its
+    # closing quotes — a live `getattr(m, "...")` on the terminator line read as
+    # prose, i.e. the same fail-open the box exists to close. The bytes are
+    # converted to characters here, at the only place that reads AST columns.
+    # `by.splitlines()` is avoided deliberately: it also splits on `\v`, `\f`,
+    # `\x85`, `\u2028`/`\u2029`, which the parser does NOT treat as line ends, so
+    # indices could shift. Split on exactly the parser's own line endings.
+    src_lines = re.split(r"\r\n|\r|\n", src)
+
+    def _char_col(lineno: int, byte_col: int) -> int:
+        """The CHARACTER column of a UTF-8 ``byte_col`` on ``lineno``.
+
+        AST offsets always land on a character boundary; ``errors="ignore"`` only
+        keeps the conversion total (it can never drop a whole character).
+        """
+        if not 1 <= lineno <= len(src_lines):
+            return byte_col
+        return len(src_lines[lineno - 1].encode("utf-8")[:byte_col].decode("utf-8", "ignore"))
+
     # Prose strings: any statement whose whole value is a string literal. Kept as
     # an exact (line, column) BOX, not a line range.
     # ⛔ LINE-granularity is a fail-open: `"""Doc."""; x = getattr(m,
@@ -95,11 +120,13 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
             and isinstance(node.value.value, str)
         ):
             value = node.value
+            right_line = getattr(value, "end_lineno", None) or value.lineno
+            right_col = getattr(value, "end_col_offset", None)
             prose_boxes.append((
                 value.lineno,
-                value.col_offset,
-                getattr(value, "end_lineno", None) or value.lineno,
-                value.end_col_offset if getattr(value, "end_col_offset", None) is not None else 0,
+                _char_col(value.lineno, value.col_offset),
+                right_line,
+                _char_col(right_line, right_col) if right_col is not None else 0,
             ))
 
     def _inside_prose(start: tuple[int, int], end: tuple[int, int]) -> bool:
@@ -219,6 +246,12 @@ def test_the_code_detector_sees_every_shape_it_claims(tmp_path):
         "docstring": ('def f():\n    """propagate_shock is deprecated."""\n', set()),
         "docstring_multiline": (
             'def f():\n    """S2 VET \u2014 the pass\n\n    propagate_shock PERSISTS the\n    blend; it is never invoked.\n    """\n', set()),
+        # A long non-ASCII docstring whose prose mention sits on its LAST line —
+        # the byte/character drift is largest exactly where the box's right edge
+        # is tested, so over-wide containment must still read this as prose.
+        "long_non_ascii_docstring_mention_on_closing_line": (
+            'def f():\n    """\u2014\u2014 the pass\n\n    ' + "\u2014" * 18
+            + ' propagate_shock PERSISTS the blend.\n    """\n', set()),
         "class_docstring": ('class C:\n    """propagate_shock is deprecated."""\n', set()),
         "module_docstring": ('"""propagate_shock is deprecated."""\nvalue = 1\n', set()),
         # PEP 257's TOLERATED forms, which a "first statement of a def" rule misses:
@@ -237,6 +270,23 @@ def test_the_code_detector_sees_every_shape_it_claims(tmp_path):
             'def f():\n    """Doc."""; x = getattr(m, "propagate_shock")\n', {2}),
         "docstring_then_plain_string_same_line": (
             'def f():\n    """Doc."""; y = "propagate_shock"\n', {2}),
+        # ⛔ The SAME two shapes with a NON-ASCII docstring. `ast` columns are
+        # UTF-8 bytes and `tokenize` columns are characters, so an ASCII-only row
+        # cannot see an off-by-N-bytes comparison: the prose box's right edge
+        # drifts right by one column per extra byte and swallows the literal that
+        # follows the closing quotes. 18 em dashes = 36 bytes = 36 columns of
+        # drift on one line — enough for the box built in bytes to contain a token
+        # that sits 36 columns past its true end. This row is the pin for that.
+        "docstring_then_string_same_line_non_ascii": (
+            'def f():\n    """' + "\u2014" * 18 + '"""; x = getattr(m, "propagate_shock")\n', {2}),
+        "docstring_then_plain_string_same_line_non_ascii": (
+            'def f():\n    """' + "\u2014" * 18 + '"""; y = "propagate_shock"\n', {2}),
+        # …and the other direction: a NON-ASCII docstring whose prose mentions the
+        # name on its CLOSING line stays prose. Converting the box's units must
+        # not shrink it past a literal that really is inside it.
+        "docstring_non_ascii_mention_on_closing_line": (
+            'def f():\n    """VET \u2014 the pass\n\n    propagate_shock PERSISTS it.\n    """\n'
+            '    return 1\n', set()),
         "implicit_concat_docstring": (
             'def f():\n    ("prose part one "\n     "propagate_shock mentioned here")\n', set()),
     }
