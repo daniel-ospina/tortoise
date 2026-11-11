@@ -324,8 +324,20 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[
         # the P3 class this file already records for a pin that stopped at one clause.
         STORAGE,
         "STORAGE's §14.3 V3 row carries the 2026-10-08 measured population itself, not only the census pointer",
-        "3,742 embeddings in total (3,741 `Point` + exactly 1 `:Event`",
+        "3,742 embeddings in total (5.48 MiB / 5.75 MB) — a TOTAL, not a per-label split",
         "14.3",
+    ),
+    (
+        # The negative fact §12.2c states and the old pin used to defend: the V1
+        # ruling settles the LOCATION and explicitly NOT whether the labels carry
+        # embeddings. Re-anchored on the sentence as §12.2c now words it — the
+        # replacement pins cover the label breadth and the INDEX remainder, so
+        # without this one an edit attributing the CARRY decision to V1 would
+        # leave every row green.
+        STORAGE,
+        "STORAGE §12.2c keeps the CARRY question out of the V1 ruling",
+        "and not whether either pair carries embeddings",
+        "12.2c",
     ),
     (
         ONTOLOGY,
