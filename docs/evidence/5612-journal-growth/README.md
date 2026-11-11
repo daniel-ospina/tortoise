@@ -86,11 +86,12 @@ vector: 384-d, BAAI/bge-small-en-v1.5, stamped through stamp_journal_embedding (
   PointAdded one already carries a 2-element placeholder vector
   [0.1, 0.2] plus #5004's identity keys at the record's TOP LEVEL (the
   fixture's 'm1'/'r1'/'th1' stubs), so it is NOT a vectorless record:
-  growth over it understates the vector's own cost. The +228 B in the
+  growth over it understates the vector's own cost. The +202 B in the
   decomposition is the POINT-payload copies the stamp inserts, where
-  production writes them — #5004's three identity keys plus, since
-  #11821, the `embedding_width` marker — not a second charge for the
-  baseline keys.
+  production writes them — not a second charge for the baseline keys.
+  (The LIVE seam adds a 26 B fourth key, `embedding_width`, since
+  #11821, so the POST-change decomposition charges 228 B; this block is
+  the pre-change 8,606 B split and keeps its 202 B.)
 
 == the 29-type corpus, measured WHOLE (all 39 committed records — a record-type mix, NOT an operation mix)
   as committed        39 records     8,711 B  mean   223.4 B  p50    218 B  p95    336 B  max    570 B

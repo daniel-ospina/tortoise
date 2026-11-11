@@ -162,11 +162,12 @@ def main() -> int:
     print("  PointAdded one already carries a 2-element placeholder vector")
     print("  [0.1, 0.2] plus #5004's identity keys at the record's TOP LEVEL (the")
     print("  fixture's 'm1'/'r1'/'th1' stubs), so it is NOT a vectorless record:")
-    print("  growth over it understates the vector's own cost. The +228 B in the")
+    print("  growth over it understates the vector's own cost. The +202 B in the")
     print("  decomposition is the POINT-payload copies the stamp inserts, where")
-    print("  production writes them — #5004's three identity keys plus, since")
-    print("  #11821, the `embedding_width` marker — not a second charge for the")
-    print("  baseline keys.")
+    print("  production writes them — not a second charge for the baseline keys.")
+    print("  (The LIVE seam adds a 26 B fourth key, `embedding_width`, since")
+    print("  #11821, so the POST-change decomposition charges 228 B; this block is")
+    print("  the pre-change 8,606 B split and keeps its 202 B.)")
     print()
 
     with tempfile.TemporaryDirectory() as tmp:
