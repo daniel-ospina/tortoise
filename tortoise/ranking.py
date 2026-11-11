@@ -37,6 +37,7 @@ from .search_engine import (  # noqa: E402, RUF100
     EP_STATE_ABSENT,  # #11702: the absent belief state has a NAME and no value
     EP_STATE_BASELINE,
     EP_STATE_MEASURED,
+    belief_value,  # #11702: the ONE Python belief VALUE reader
     ep_has_belief_cypher,  # #11702: presence-to-persisted-belief predicate
     ep_measured_cypher,  # #3276: has_ep == EP measured (baseline prior != measured)
     ep_state_cypher,  # #11702: the present-state NAME on the wire
@@ -344,6 +345,28 @@ def _query_touches_conflict(query: str, counter_claims: list[str]) -> bool:
     return False
 
 
+def _contested_claim_key(claim: dict) -> tuple:
+    """The ONE ordering for contested-counter-claim candidates (#11702).
+
+    ``mean is None`` is the FIRST element, so an ungraded counter-claim sorts
+    after EVERY measured one — it is a tier, not a value. The old key compared
+    a coalesce-default 0.5 numerically, so an unmeasured conflict could
+    outrank a measured 0.4 and win the ``W4_MAX_CONFLICTS`` relevance budget.
+
+    ``claim_id`` is NOT unique (see ``live.EPISTEMIC_ID_KEYS``), so the
+    internal node id is the tiebreak — without it the budgeted subset, and
+    therefore the boost, was decided by Cypher row order (measured: the same
+    three-claim tie group boosted forward and did not boost reversed).
+    ``str()`` on the claim id too: a mixed-type pair (an int id beside a
+    string one) makes a raw comparison raise inside the caller's handler,
+    which would return ``{}`` for the whole read — measured on a graph with
+    both."""
+    mean = claim["mean"]
+    return (mean is None,
+            0 if (mean or 0.0) >= 0.6 else 1,
+            str(claim["claim_id"]), claim["nid"])
+
+
 def resolve_contested_relevance(
     projection,
     contested_ids: list[str],
@@ -451,21 +474,47 @@ def resolve_contested_relevance(
             # exactly the labels this widening added.
             "  coalesce(src.content, src.name, src.title, c.label, "
             "           c.content, c.name, c.title, ''), "
-            "  coalesce(src.posterior_alpha, src.ep_alpha, c.posterior_alpha, c.ep_alpha, 1.0), "
-            "  coalesce(src.posterior_beta, src.ep_beta, c.posterior_beta, c.ep_beta, 1.0)",
+            # #11702: the counter-claim's RAW belief columns (the direct
+            # node's, then the NAND operator's) — NOT `coalesce(…, 1.0)`. The
+            # 1.0 default supplied a missing operand, so an ABSENT counter-claim
+            # scored the neutral 0.5, took the MEDIUM tier, and competed for
+            # this budget by id: measured, it displaced a measured-0.4
+            # counter-claim and the boost then fired on its text — while
+            # `why._assemble_conflicts` (the same tiering, on the same claim)
+            # had already put it last. Two rankers disagreeing about one claim
+            # is the defect; this reads it through the shared reader.
+            "  src.confidence, src.posterior_alpha, src.posterior_beta, "
+            "  src.ep_alpha, src.ep_beta, "
+            "  c.confidence, c.posterior_alpha, c.posterior_beta, "
+            "  c.ep_alpha, c.ep_beta",
             {"ids": contested_ids},
         )
         # Severity-then-id selection mirrors why.py's _assemble_conflicts:
         # a NANDer with persisted EP mean >= 0.6 is a high-severity dispute
-        # and ranks above medium ones; ids break the tie deterministically
-        # (Cypher row order never decides the budgeted subset).
+        # and ranks above medium ones; an ABSENT belief is its own LAST tier;
+        # ids break the tie deterministically (Cypher row order never decides
+        # the budgeted subset).
         pending: dict[str, dict[int, dict]] = {}
-        for pid, claim_id, claim_nid, content, a, b in rows:
+        for row in rows:
+            if len(row) >= 14:
+                (pid, claim_id, claim_nid, content,
+                 sc, spa, spb, sea, seb, cc, cpa, cpb, cea, ceb) = row[:14]
+            else:
+                # Pre-#11702 DOUBLE shape (6 cols, coalesced a/b and nothing
+                # else). A fixture that predates the raw columns asserts the
+                # numeric contract, so its pair is present by construction —
+                # it simply cannot express an absent counter-claim.
+                pid, claim_id, claim_nid, content, spa, spb = row[:6]
+                sc = sea = seb = cc = cpa = cpb = cea = ceb = None
             if not pid or not claim_id:
                 continue
-            a_f, b_f = float(a), float(b)
-            s = a_f + b_f
-            mean = (a_f / s) if s > 0 else 0.5
+            mean = belief_value(confidence=sc, posterior_alpha=spa,
+                                posterior_beta=spb, ep_alpha=sea, ep_beta=seb)
+            if mean is None:
+                # The NANDer's own belief, when the direct node carries none.
+                mean = belief_value(confidence=cc, posterior_alpha=cpa,
+                                    posterior_beta=cpb, ep_alpha=cea,
+                                    ep_beta=ceb)
             # Keyed on the INTERNAL node id, so two distinct counter-claims that
             # coalesce to one identity do not overwrite each other.
             # COMMUTATIVE and TOTAL, not last-wins. Two rows can share one
@@ -515,8 +564,7 @@ def resolve_contested_relevance(
                 # id beside a string one) makes a raw comparison raise inside
                 # the handler below, which would return ``{}`` for the whole
                 # read — measured on a graph with both.
-                key=lambda c: (0 if c["mean"] >= 0.6 else 1,
-                               str(c["claim_id"]), c["nid"]))
+                key=_contested_claim_key)
             texts = [c["content"] for c in chosen[:_claim_budget]]
             if _query_touches_conflict(query, texts):
                 boosts[pid] = W4_CONTESTED_BOOST

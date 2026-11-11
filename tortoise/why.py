@@ -462,6 +462,21 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
                      else EP_STATE_BASELINE)
         state = ep_state_resolve(state, measured=measured)
         mirror = row[10] if len(row) > 10 else None
+        # #11702: the VARIANCE is only a posterior statistic when the PAIR is
+        # stored. `_EP_CYPHER` coalesces α/β to `1.0`, so a row storing only
+        # `posterior_alpha` (accepted by `update_point`) got `b = 1.0`, a
+        # variance of the MAXIMUM 1/12, and therefore `contested: true` on a
+        # block that reports `ep_state: "absent"` and `confidence_mean: null` —
+        # "there is no belief here, and it is a maximum-entropy one". The
+        # volunteer then emitted "read the counterargument" for a claim with
+        # ZERO counterarguments, and the why-suite's false-positive arm counts
+        # `ep.contested` as inventing a contradiction. Half a pair has no
+        # width, exactly as it has no mean.
+        pair_stored = (len(row) <= 12
+                       or ((row[8] is not None or row[9] is not None)
+                           and (row[11] is not None or row[12] is not None)))
+        if not pair_stored:
+            variance = 0.0
         by_id[pid]["ep"] = {
             # #11702: `None` when nothing is persisted — never the Beta(1,1)
             # mean. This is the block a caller reads to decide whether to
@@ -483,7 +498,12 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
                 else round(_mean(a, b), 4)),
             "ep_state": state,
             "variance": round(variance, 6),
-            "contested": measured and variance > CONTESTED_VARIANCE_THRESHOLD,
+            # #11702: an ABSENT state is never contested — there is no
+            # posterior width to be wide (see the `pair_stored` guard above;
+            # this is the belt to that brace, so a future row shape cannot
+            # reintroduce "no belief, but maximally uncertain").
+            "contested": (measured and state != EP_STATE_ABSENT
+                          and variance > CONTESTED_VARIANCE_THRESHOLD),
             "has_ep": measured,
             "measured": measured,
             "baseline": baseline_set and not measured and not terminal,

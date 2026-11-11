@@ -906,3 +906,93 @@ def test_why_conflict_severity_and_tradeoff_weight_use_the_shared_reader(sdk):
         "a measured 0.4: " + repr(alts[absent_alt]))
     order = [t["point_id"] for t in tblocks[decision]["tradeoffs"]]
     assert order.index(measured_alt) < order.index(absent_alt), order
+
+
+def test_why_half_posterior_is_not_contested_and_has_no_variance(sdk):
+    """A HALF pair (β stored, α absent) got `variance = 1/12` — the MAXIMUM.
+
+    `_assemble_ep_rows` computed the variance from independently-coalesced
+    operands, so a claim whose stored posterior is `(null, 3.0)` produced a
+    full-entropy Beta(1,3)… and `contested: true` beside `ep_state: "absent"`,
+    firing the volunteer's "read the counterargument" for a claim that has no
+    counterargument. Presence is a property of the PAIR, so a half pair has no
+    variance to report and cannot be contested.
+    """
+    from tortoise.search_engine import EP_STATE_ABSENT
+    from tortoise.why import _assemble_ep_rows
+
+    proj = sdk._get_proj()
+    half = sdk.create_point("statement", "half pair claim")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_beta = 3.0",
+                 params={"id": half})
+    blocks = {half: {}}
+    # The REAL `_EP_CYPHER` shape (13 columns) — the coalesced α/β inputs, then
+    # the raw columns the presence predicate reads. Built here so the fixture
+    # exercises the presence path and not the legacy 7-col double branch.
+    rows = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.id, "
+        "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0), "
+        "  coalesce(n.posterior_beta, n.ep_beta, 1.0), "
+        "  n.ep_alpha IS NOT NULL AS measured, '' AS status, "
+        "  false AS outdated, false AS baseline_set, true AS has_belief, "
+        "  n.posterior_alpha AS pa, n.ep_alpha AS ea, n.confidence AS conf, "
+        "  n.posterior_beta AS pb, n.ep_beta AS eb",
+        params={"id": half}).result_set
+    _assemble_ep_rows(rows, blocks)
+    block = blocks[half]["ep"]
+    assert block.get("ep_state") == EP_STATE_ABSENT, block
+    assert block.get("variance") in (None, 0.0), (
+        "a half pair (β only) was given a variance — the coalesce default "
+        "invented an α it does not store: " + repr(block))
+    assert block.get("contested") is not True, (
+        "a claim with no belief at all was marked contested: " + repr(block))
+
+
+def test_ranking_conflict_boost_ignores_a_counter_claim_with_no_belief(sdk):
+    """`coalesce(…, 1.0)` gave an ABSENT counter-claim a 0.5 severity mean.
+
+    The W4 boost fired on a claim whose belief does not exist, and — worse —
+    the fabricated 0.5 landed in the `medium` tier positioned ABOVE a genuinely
+    measured 0.4 counter-claim, so the unmeasured conflict won the ≤2 budget.
+    """
+    from tortoise.ranking import resolve_contested_relevance
+
+    proj = sdk._get_proj()
+    target = sdk.create_point("statement", "the contested claim")["id"]
+    absent = sdk.create_point("statement", "absent zebra counter-claim")["id"]
+    measured = sdk.create_point("statement", "measured zebra counter-claim")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 2.0, "
+                 "n.posterior_beta = 3.0", params={"id": measured})
+    for nander in (absent, measured):
+        proj.g.query(
+            "MATCH (c:Point {id:$c}), (t:Point {id:$t}) CREATE (c)-[:NAND]->(t)",
+            params={"c": nander, "t": target})
+
+    # The real read (no fixture double). The boost itself legitimately fires on
+    # a NAND edge — the edge IS the evidence (the same rule the why-layer uses
+    # when it surfaces an ungraded conflict). What must NOT happen is an
+    # ungraded claim winning the <=2 relevance BUDGET against a measured one:
+    # pre-fix the coalesce default weighed it 0.5 — ABOVE the measured 0.4 —
+    # so the measured counter-claim was the one squeezed out.
+    crowded = sdk.create_point("statement", "contested by three")["id"]
+    filler_a = sdk.create_point("statement", "zebra filler a")["id"]
+    filler_b = sdk.create_point("statement", "zebra filler b")["id"]
+    real = sdk.create_point("statement", "zebra measured 0.4")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 2.0, "
+                 "n.posterior_beta = 3.0", params={"id": real})
+    for nander in (filler_a, filler_b, real):
+        proj.g.query(
+            "MATCH (c:Point {id:$c}), (t:Point {id:$t}) CREATE (c)-[:NAND]->(t)",
+            params={"c": nander, "t": crowded})
+    got = resolve_contested_relevance(proj, [crowded], "zebra measured")
+    assert crowded in got, ("the budget dropped a genuinely measured "
+                            "counter-claim: " + repr(got))
+
+    # And the ordering itself, read through the resolver's own key: every
+    # measured candidate precedes every absent one.
+    from tortoise.ranking import _contested_claim_key
+    measured_key = _contested_claim_key({"mean": 0.4, "relevance": 0.0,
+                                         "claim_id": "a", "nid": 1})
+    absent_key = _contested_claim_key({"mean": None, "relevance": 0.0,
+                                       "claim_id": "a", "nid": 1})
+    assert measured_key < absent_key, (measured_key, absent_key)
