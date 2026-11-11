@@ -104,7 +104,7 @@ touches** — and it is enforced, not asserted (§8, rule R4).
 | **C2** | **#11085** | **SF4**, **SF5**, **SF6** | adds the register leaf, moves the authority out of the probe, proves the import boundary |
 | **C3** | **#11086** | **SF1**, **SF2**, **SF3** | sets the flag in each shipped config, measures the write-rate delta, pins both directions |
 | **C4** | **#11087** | **SF7**, **SF8**, **SF9**, **SF10** | retains the served set, reports the pair, keeps the warning and the fail-open |
-| **C5** | **#11088** | **SF11**, **SF13** | adds the read-only census; carries the surface-approval request for the removal |
+| **C5** | **#11088** | **SF11**, **SF13** | adds the read-only census; carried the surface-approval request for the removal — ⚠️ **answered KEEP 2026-11-10 for `:Object`/`:Subject` only (`#11395` comment `6781921075`), so nothing is removed and no approval is owed for those two. ⚠️ That ruling names no other label, so it is not an approval for a `:Event`/`:Source` removal either — the 2026-09-24 direction covers them and authorises none, so nothing is removed for them on that ground (`S3-VECTOR-CENSUS.md` §7)** |
 | **C6** | **#11089** | **SF12**, **SF14**, **SF15** | walks **every** surface in this table through its assigned layer, against a running system |
 
 ---
@@ -123,7 +123,7 @@ Completeness check in the other direction: **every seam the plan names has a row
 | §6.1 | `_record_vector_index_inventory` behaviour change, signature unchanged | **SF10**, **SF8** | logging moves *warn-on-gap* → *report the pair at INFO; warn on gap* |
 | §6.2 | the register's contract; **no MCP/SDK surface** | **SF4**, **SF13** | `class` never `bypass`; an unclassified writer is a refusal at export |
 | §6.3 | versioning / error responses (register raises on duplicates, census exits non-zero) | **SF4**, **SF11** | no API version change, no new error codes |
-| §6.4 | the surface statement — S3's removal is the one thing that could change it | **SF13** | carries the approval request; **SF13 is the row a capstone must not skip** |
+| §6.4 | the surface statement — S3's removal is the one thing that could change it | **SF13** | carried the approval request — ⚠️ **answered KEEP on 2026-11-10 for `:Object`/`:Subject` and the ruling names no other label (`#11395` comment `6781921075`), so the surface does not change for those two; no `:Event`/`:Source` removal is authorised either, on the 2026-09-24 direction**; **SF13 is the row a capstone must not skip** |
 | §7 | D1–D13, each already naming its layer | **SF1**, **SF2**, **SF3**, **SF4**, **SF6**, **SF8**, **SF9**, **SF10**, **SF11**, **SF12**, **SF15** | D1/D2→SF1–SF3 · D3/D4→SF4+SF6 · D5–D8→SF10/SF9/SF8 · D9–D11→SF11 · D12→SF15 · D13→SF12 (=`scan_fallback` pin). The cell lists the surfaces rather than saying "distributed": R5 now refuses a crosswalk row whose surface cell names nothing (the `R5 <label>: names no surface` violation), because a prose-only linkage is the one thing the gate cannot check — this row was the live false RED that arm was debugged against, and `§7` is now in `PLAN_SEAMS` so deleting the row is refused too |
 
 ---
