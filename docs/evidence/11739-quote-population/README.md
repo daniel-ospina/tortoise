@@ -40,14 +40,18 @@ scope     = every NON-OPERATOR :Point the walk saw (15,868) — the read path ap
 artifact  = census.json, carrying its own `provenance` (measured_at, probe_sha256,
             endpoint, head_sha) — `tests/test_11739_quote_population_probe.py` recomputes
             the digest from the committed probe and reds if the artifact outlives its code.
-            `head_sha` names the COMMIT the run executed against, and the bundle is measured
-            in that order on purpose: the probe is committed first, then the census is produced
-            on a CLEAN tree, then the artifact is committed — so `git show <head_sha>:<probe>`
-            digests to `probe_sha256` and the artifact provably names the commit whose probe
-            made it. That relation is the pin (a test checks it), which is why the README states
-            no positional claim like `HEAD~1`: a later merge or rebase moves how far back the
-            run sits without changing what the pin checks. Measuring on a DIRTY tree breaks it,
-            because then no commit holds that probe.
+            `head_sha` is **informational**: it names the commit the run executed against, and
+            the bundle is measured in that order on purpose — probe committed first, census
+            produced on a CLEAN tree, artifact committed after — so `git show <head_sha>:<probe>`
+            digests to `probe_sha256` while that commit is reachable. It is not always
+            reachable, and that is normal rather than a defect: `.mergify.yml` **squashes**, so
+            a branch commit never becomes an ancestor of `main` while `census.json` does land,
+            and CI checks out `fetch-depth: 1`. **The ENFORCED binding is therefore
+            `probe_sha256`** — a test recomputes it from the committed probe in EVERY checkout,
+            so an artifact that outlives its code reds. The relational check (the named commit's
+            probe is the probe that made the artifact) runs where the history allows it and
+            skips where it does not, which is why the README states no positional claim like
+            `HEAD~1`.
 ```
 
 ## The number (`census.json`)

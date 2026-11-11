@@ -793,8 +793,18 @@ def test_the_artifact_names_a_commit_whose_probe_is_the_probe_that_made_it():
     census_path = qp.pathlib.Path(qp.__file__).with_suffix("").parent.parent / "census.json"
     artifact = json.loads(census_path.read_text())
     head = artifact["provenance"]["head_sha"]
+    # ⛔ `head_sha` is INFORMATIONAL — the ENFORCED binding is `probe_sha256`, which
+    # `test_the_committed_census_was_produced_by_this_probe` recomputes from the committed
+    # probe in EVERY checkout. This test checks the relation only where the history can
+    # carry it, and never fails on its absence, because absence is the NORMAL post-merge
+    # state: `.mergify.yml` squashes, so a branch commit never becomes an ancestor of `main`
+    # while `census.json` does land — a full clone of `main` (and CI, which checks out
+    # `fetch-depth: 1`) can resolve neither. Failing there would red the required `test` job
+    # permanently on a correct artifact (review F1); skipping on a value the artifact
+    # declares about itself would let one word disable the pin (review F5). So the skip is
+    # keyed off what THIS checkout can see, read from git rather than from the artifact.
     if head == "unknown":
-        pytest.skip("recorded from a copy with no git")
+        pytest.skip("the artifact records no commit — measured from a copy with no git")
     try:
         shown = subprocess.run(
             ["git", "show",
@@ -803,21 +813,14 @@ def test_the_artifact_names_a_commit_whose_probe_is_the_probe_that_made_it():
     except FileNotFoundError:  # no `git` on this host at all
         pytest.skip("`git` is not installed here, so no commit can be read")
     if shown.returncode != 0:
-        # ⛔ CI CHECKS OUT `fetch-depth: 1` (`python-ci.yml`), which CANNOT contain an
-        # ancestor: skipping there is honest, because the premise is UNCHECKED, not
-        # disproved. A FULL clone that cannot read the sha is a different fact — the recorded
-        # `head_sha` is WRONG — and a skip would let a bad provenance value hide forever.
-        # Licensed by `git rev-parse --is-shallow-repository` itself, the repo's own
-        # precedent for exactly this checkout (`tests/test_7949_capstone_measure.py`).
         shallow = subprocess.run(
             ["git", "rev-parse", "--is-shallow-repository"],
             cwd=REPO, capture_output=True, text=True).stdout.strip()
-        if shallow == "true":
-            pytest.skip(f"{head[:9]} is not in this clone's history — a shallow checkout "
-                        "cannot contain an ancestor, so the provenance relation is UNCHECKED "
-                        "here, not disproved (`git fetch --unshallow`).")
-        pytest.fail(f"{head[:9]} is unreadable in a FULL clone, so the recorded `head_sha` is "
-                    f"WRONG rather than merely unreachable: {shown.stderr.strip()}")
+        pytest.skip(f"{head[:9]} is not in this checkout's history "
+                    f"(shallow={shallow}) — a squash-merge does not carry a branch commit "
+                    "into `main`, so the relation is UNCHECKED here, not disproved; the "
+                    "enforced binding is `probe_sha256`. Re-derive it on the branch: "
+                    "`git fetch origin feat/11739-quote-population`.")
     assert hashlib.sha256(shown.stdout.encode()).hexdigest() == \
         artifact["provenance"]["probe_sha256"]
 
@@ -889,7 +892,12 @@ def test_main_writes_the_artifact_and_records_its_cost(monkeypatch, tmp_path):
     assert payload["duration_s"] >= 0
 
 
-@pytest.mark.parametrize("endpoint", ["api.premiselabs.co", "", "/mcp/", "premiselabs.co:443/mcp/"])
+# The shapes below REACH the guard: `Request` rejects each with `ValueError: unknown url
+# type` before any socket is opened. `premiselabs.co:443/mcp/` was dropped from this list —
+# `urllib` accepts it (it parses as scheme `premiselabs.co`), so it exits 3 through the
+# generic transport arm and never touches the `BAD-ENDPOINT` handler its docstring claimed
+# to exercise (review F3).
+@pytest.mark.parametrize("endpoint", ["api.premiselabs.co", "", "/mcp/"])
 def test_an_endpoint_without_a_scheme_exits_three(monkeypatch, endpoint):
     """FAILS IF `Request` is constructed outside a guard: it parses the URL, so an endpoint
     short by its scheme raised `ValueError` out of `main` and exited 1 — outside the documented
