@@ -152,6 +152,20 @@ RETRACTED_IN_SIBLINGS: dict[str, str] = {
     "the `:Document` reader is cited as live": (
         "**read** (`ingest.py:188/266/307/412`"
     ),
+    # The 2026-10-08 reading is a SECOND reading of a graph this document has not
+    # separated from the one §12.1b measured (§7's open naming conflict). Grading the
+    # 2026-09-24 count a "population error" asserts a reconciliation that no named-graph
+    # census has made — and §7 states the opposite rule: a zero `Object` count on any ONE
+    # graph is contextual, not a finding, and no measurement here implies an entity tier
+    # is empty. Both phrasings were live at `a9f458b`; the retirement of the arithmetic
+    # rests on the $0.00 billing ruling and the KEEP ruling, neither of which needs
+    # either count to be wrong.
+    "the 2026-09-24 unindexed count is graded a population error": (
+        "is not a stale count but a **population error**"
+    ),
+    "the 2026-10-08 reading is stated as refuting the 2026-09-24 count": (
+        "used as if it were the count of all embeddings"
+    ),
     "`quota.py` is cited as metering `:Document`": (
         "**quota-metered** (`quota.py:524`, `#1726`)"
     ),
@@ -289,6 +303,28 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[
         STORAGE,
         "STORAGE's §14.3 V3 row states that the `#11642` migration header cannot be corrected in place",
         "`supabase/migrations/` is append-only, so that file cannot be corrected in place",
+        "14.3",
+    ),
+    (
+        # The 2026-10-08 reading has to stay in the row that retires the arithmetic —
+        # deleting it silently returns the doc to presenting `12,657 ≈ 19.4 MB` as the
+        # magnitude of the removable payload with nothing beside it. Pinned as the
+        # MEASUREMENT, not as the conclusion drawn from it: the row's own text scopes it
+        # to "the graph it measured", because §7 records that the graph naming is
+        # unsettled and that a zero `Object` count on one graph is contextual.
+        STORAGE,
+        "STORAGE's §14.3 V3 row carries the 2026-10-08 measured population BESIDE the retired arithmetic, and does not grade the 2026-09-24 count with it",
+        "so the reconciliation is a `--census` run on a NAMED graph, not an inference from one reading",
+        "14.3",
+    ),
+    (
+        # Deletion guard for the MEASUREMENT itself, separate from the census clause
+        # above: deleting the population sentence leaves the census clause (and its
+        # §13/V1 copies) intact, so one needle would stay green on a lost measurement —
+        # the P3 class this file already records for a pin that stopped at one clause.
+        STORAGE,
+        "STORAGE's §14.3 V3 row carries the 2026-10-08 measured population itself, not only the census pointer",
+        "3,742 embeddings in total (3,741 `Point` + exactly 1 `:Event`",
         "14.3",
     ),
     (
