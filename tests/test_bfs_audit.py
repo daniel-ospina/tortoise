@@ -245,8 +245,8 @@ def test_no_propagate_shock_callers():
     # (`string_refs == []`) — and it is the reason the structural follow-up above is the
     # right long-term arm. Stated so the next reader does not infer a prose exemption this
     # textual test does not have. The SAME over-block exists on the NON-Python side, for the
-    # same reason: `tortoise/` ships 9 tracked `.md` files, so "no docstrings there" is false —
-    # a bare-word mention in any of them reds. Pinned by `prose.md` below; it is fail-closed (a
+    # same reason: `tortoise/` ships 9 tracked `.md` files, so "this half carries no prose" is
+    # false — a bare-word mention in any of them reds. Pinned by `prose.md` below; it is fail-closed (a
     # false red, never a false pass), latent (none of the 9 names the symbol), and the
     # structural fix is the one #11918 tracks for the Python side.
     #
