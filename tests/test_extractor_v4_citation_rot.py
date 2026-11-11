@@ -152,6 +152,20 @@ RETRACTED_IN_SIBLINGS: dict[str, str] = {
     "the `:Document` reader is cited as live": (
         "**read** (`ingest.py:188/266/307/412`"
     ),
+    # The 2026-10-08 reading is a SECOND reading of a graph this document has not
+    # separated from the one §12.1b measured (§7's open naming conflict). Grading the
+    # 2026-09-24 count a "population error" asserts a reconciliation that no named-graph
+    # census has made — and §7 states the opposite rule: a zero `Object` count on any ONE
+    # graph is contextual, not a finding, and no measurement here implies an entity tier
+    # is empty. Both phrasings were live at `a9f458b`; the retirement of the arithmetic
+    # rests on the $0.00 billing ruling and the KEEP ruling, neither of which needs
+    # either count to be wrong.
+    "the 2026-09-24 unindexed count is graded a population error": (
+        "is not a stale count but a **population error**"
+    ),
+    "the 2026-10-08 reading is stated as refuting the 2026-09-24 count": (
+        "used as if it were the count of all embeddings"
+    ),
     "`quota.py` is cited as metering `:Document`": (
         "**quota-metered** (`quota.py:524`, `#1726`)"
     ),
@@ -261,8 +275,69 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[
     ),
     (
         STORAGE,
-        "STORAGE attributes the vector-LOCATION ruling to V1/§12.1c and the embeddings question to V3",
-        "settles where the vector index LIVES (Postgres, 2026-11-07), and it does not settle whether these two labels carry embeddings — that is §14.3 **V3**'s question",
+        "STORAGE §12.2c scopes the 2026-11-10 KEEP ruling to the two labels it names and does not extend it to `:Event`",
+        "it names `:Object` and `:Subject` — never `:Event`",
+        "12.2c",
+    ),
+    (
+        # The P3 advisory on this PR: the pin above used to stop at the label
+        # pair and silently dropped the sentence's second fact — that what is
+        # LEFT of V3 for the ruled pair is the INDEX question. Deleting that
+        # clause would have stayed green. Pinned separately, so each fact reds
+        # on its own deletion.
+        STORAGE,
+        "STORAGE §12.2c leaves V3's remainder, for the ruled pair, the INDEX question",
+        "what remains of §14.3 V3 is whether they are INDEXED",
+        "12.2c",
+    ),
+    (
+        # ISSUE 1 of the review at `d9f3042`: §12.1b's paragraph is about the
+        # labels the query side advertises and the index side never created, and
+        # it attached the 2026-11-10 ruling to ALL of them. The ruling names two.
+        STORAGE,
+        "STORAGE §12.1b states the 2026-11-10 ruling's label scope rather than generalising it",
+        "The 2026-11-10 ruling covers two of these labels and no others — `:Object` and `:Subject`",
+        "12.1b",
+    ),
+    (
+        STORAGE,
+        "STORAGE's §14.3 V3 row states that the `#11642` migration header cannot be corrected in place",
+        "`supabase/migrations/` is append-only, so that file cannot be corrected in place",
+        "14.3",
+    ),
+    (
+        # The 2026-10-08 reading has to stay in the row that retires the arithmetic —
+        # deleting it silently returns the doc to presenting `12,657 ≈ 19.4 MB` as the
+        # magnitude of the removable payload with nothing beside it. Pinned as the
+        # MEASUREMENT, not as the conclusion drawn from it: the row's own text scopes it
+        # to "the graph it measured", because §7 records that the graph naming is
+        # unsettled and that a zero `Object` count on one graph is contextual.
+        STORAGE,
+        "STORAGE's §14.3 V3 row carries the 2026-10-08 measured population BESIDE the retired arithmetic, and does not grade the 2026-09-24 count with it",
+        "so the reconciliation is a `--census` run on a NAMED graph, not an inference from one reading",
+        "14.3",
+    ),
+    (
+        # Deletion guard for the MEASUREMENT itself, separate from the census clause
+        # above: deleting the population sentence leaves the census clause (and its
+        # §13/V1 copies) intact, so one needle would stay green on a lost measurement —
+        # the P3 class this file already records for a pin that stopped at one clause.
+        STORAGE,
+        "STORAGE's §14.3 V3 row carries the 2026-10-08 measured population itself, not only the census pointer",
+        "3,742 embeddings in total (5.48 MiB / 5.75 MB) — a TOTAL, not a per-label split",
+        "14.3",
+    ),
+    (
+        # The negative fact §12.2c states and the old pin used to defend: the V1
+        # ruling settles the LOCATION and explicitly NOT whether the labels carry
+        # embeddings. Re-anchored on the sentence as §12.2c now words it — the
+        # replacement pins cover the label breadth and the INDEX remainder, so
+        # without this one an edit attributing the CARRY decision to V1 would
+        # leave every row green.
+        STORAGE,
+        "STORAGE §12.2c keeps the CARRY question out of the V1 ruling",
+        "and not whether either pair carries embeddings",
+        "12.2c",
     ),
     (
         ONTOLOGY,
@@ -1281,12 +1356,16 @@ def _changelog_entry(needle: str) -> str:
     return matches[0]
 
 
-#: ⛔ The label may be NUMERIC (`9.1`) or a LETTER+digit phase label (`P6`) — the
-#: eval spec's sections are `### P6 — …`, so a numeric-only pattern made
-#: ``_section_body(EVAL_SPEC, "P6")`` raise "carries no §P6" and forced every
-#: eval-spec pin to stay document-wide, i.e. a name that says P6 while the
-#: assertion cannot see P6.
-_SECTION_HEADING = re.compile(r"(?m)^(#{2,4}) (\d+(?:\.\d+)*|P\d+)[.\s]")
+#: ⛔ The label may be NUMERIC (`9.1`), carry a lowercase PHASE SUFFIX (`12.2c`,
+#: `12.1b` — how `STORAGE-ARCHITECTURE.md` labels its sub-decisions), or be a
+#: LETTER+digit phase label (`P6`) — the eval spec's sections are `### P6 — …`,
+#: so a numeric-only pattern made ``_section_body(EVAL_SPEC, "P6")`` raise
+#: "carries no §P6" and forced every eval-spec pin to stay document-wide, i.e. a
+#: name that says P6 while the assertion cannot see P6. The same held for the
+#: phase-suffixed sections: `("… §12.2c …", "12.2c")` raised "§12.2c does not
+#: exist" even though `### 12.2c ⭐ …` was there, because `[.\s]` after `12.2`
+#: met the `c`. A name that cannot be resolved is not a citation.
+_SECTION_HEADING = re.compile(r"(?m)^(#{2,4}) (\d+(?:\.\d+)*[a-z]?|P\d+)[.\s]")
 
 
 def _section_body(path: Path, number: str) -> str:
