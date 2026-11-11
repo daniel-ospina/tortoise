@@ -1775,14 +1775,19 @@ def test_replay_log_reports_the_absence_arm_it_observed(tmp_path, caplog,
     this file GREEN (34 passed), so the single operator-visible signal on the
     journal-only path can be silenced by an edit nothing notices.
 
-    REACHABLE: `_replay_log` really runs over a real journal, `_capture_pack_selection`
-    really returns the marker, and only the restore `MERGE` is dropped — the
-    read-back then runs against a graph that truly has no marker, which is the
-    observed absence the arm's wording is allowed to describe.
+    REACHABLE: `_replay_log` really runs over a real journal and the read-back
+    really queries the graph; the ONLY thing `_NoMarkerRestore` drops is the
+    restore `MERGE`, so the read runs against a graph that truly has no marker —
+    the observed absence this arm's wording is allowed to describe. The captured
+    marker is INJECTED through the capture seam rather than configured into the
+    graph (this path has no sidecar to reconcile against); the real capture is
+    the sibling test's concern, which asserts `pack_selection_expected == 1`.
 
-    MUTATION: silencing the arm (`logger.debug`) or removing the `else:` reds
-    this test; the "no success wording" assertion also pins that the run does
-    not claim the marker survived.
+    MUTATION: silencing the arm (`logger.debug`), DEMOTING it
+    (`logger.error` → `logger.warning` — the wording survives, the severity is
+    what tells an operator this is a loss), or removing the `else:` reds this
+    test; the "no success wording" assertion also pins that the run does not
+    claim the marker survived.
     """
     from tortoise import projection as pr
     from tortoise.log import EventLog
@@ -1796,11 +1801,16 @@ def test_replay_log_reports_the_absence_arm_it_observed(tmp_path, caplog,
     proj = _proj(sdk)
     monkeypatch.setattr(proj, "g", _NoMarkerRestore(proj.g))
 
-    with caplog.at_level(logging.INFO, logger="tortoise.projection"):
+    with caplog.at_level(logging.ERROR, logger="tortoise.projection"):
         proj._replay_log(EventLog(str(events / "events.jsonl")),
                          confirm_destructive=True)
 
-    msgs = [r.getMessage() for r in caplog.records]
+    # LEVEL-FILTERED, like the rebuild sibling: the severity is part of the
+    # report — an ABSENT marker is an ERROR, and matching only the wording
+    # leaves ERROR→WARNING demotion invisible (measured: 36 passed before this
+    # filter existed).
+    msgs = [r.getMessage() for r in caplog.records
+            if r.levelno >= logging.ERROR]
     assert any("ABSENT" in m and "UNCONFIGURED" in m for m in msgs), (
         "the replay path must report the absence it observed, and say what it "
         f"means for the approved set: {msgs}")
