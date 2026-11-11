@@ -593,28 +593,32 @@ def check_verdict_tally(text: str) -> list[str]:
 
     attributed = following if _consistent(following) else before
 
-    # ⛔ AND EVERY ADJACENT MENTION MUST AGREE. Both maps above hold ONE verdict per
-    # letter, so the LAST (or first) mention silently wins: measured, the sentence
+    # ⛔ AND A REPEATED MENTION MUST AGREE WITH THE ONE THE MAP KEPT. Both maps above
+    # hold ONE verdict per letter, so the LAST (or first) mention silently wins: measured, the sentence
     # `… **(e)** is **DRIFTED**, and **(e)** is **ADOPTED** …` returned `[]` (clean)
     # while it contradicted itself and the table, and only the reverse order red — the
     # outcome depended on which mention a half-applied edit left second.
     #
     # A mention is read here by ADJACENCY, which is what keeps BOTH legal orderings
     # working:
-    #   * a VERDICT token claims the nearest LETTER before it when only a copula or an
+    #   * a VERDICT token claims the nearest LETTER before it when a copula or an
     #     adverb sits between (`(l) are **DRIFTED**`, `(c) is also **DRIFTED**`).
-    #     A copula-ONLY rule was the first attempt and it opened a false pass:
-    #     `is also`/`was`/`remains` matched nothing, so the duplicate went unread
-    #     (measured);
+    #     The CONNECTOR must carry one of those words: a rule that let them be
+    #     optional accepted a bare `, ` too, so class-first groups joined by a comma
+    #     red as a swap they do not make (measured) — and that is the shape a hard
+    #     wrap produces. A copula-ONLY rule was the first attempt and it opened a
+    #     false pass instead (`is also`/`was`/`remains` matched nothing);
     #   * a VERDICT token claims the LETTER right after it when only a colon sits
     #     between (`**ADOPTED**: **(e)**`) — the class-first form.
-    # A `;` between a letter and the token means the letter belongs to the PREVIOUS
-    # class-first group and is NOT claimed: without that guard a correct class-first
-    # page reds as a swap it never made (measured — the first attempt held SETS in
-    # the maps above and did exactly that).
+    # ⚠️ What this does NOT reconcile is stated rather than implied: a contradicting
+    # repeat whose connector is outside the copula/adverb list (`(d) has become
+    # **ADOPTED**`, `(d) should be read as **ADOPTED**`) still passes CLEAN. The
+    # connector set is the boundary of the arm, not an incidental detail.
     COPULA_OR_ADVERB = re.compile(
-        r"[\s,]*(?:is|are|was|were|remains|stays|reads|stood)?[\s,]*"
-        r"(?:also|still)?[\s,]*"
+        r"[\s,]*(?:"
+        r"(?:is|are|was|were|remains|stays|reads|stood)(?:[\s,]+(?:also|still))?"
+        r"|(?:also|still)"
+        r")[\s,]*"
     )
     COLON_ONLY = re.compile(r"[\s:]*")
     # ⛔ Tokenise the two kinds SEPARATELY rather than pairing the bold markers: the
@@ -631,14 +635,7 @@ def check_verdict_tally(text: str) -> list[str]:
         before = [lt for lt in letters if lt.end() <= token.start()]
         if before:
             nearest = before[-1]
-            # `… are **SUPERSEDED-BY-FIX**, **ADOPTED**: …` — a verdict token BETWEEN
-            # the letter and this one means the letter was already claimed by that
-            # token, so it is not this token's claim.
-            claimed_between = any(
-                other is not token and nearest.end() <= other.start() < token.start()
-                for other in tokens
-            )
-            if not claimed_between and COPULA_OR_ADVERB.fullmatch(
+            if COPULA_OR_ADVERB.fullmatch(
                 non_still_sentence[nearest.end() : token.start()]
             ):
                 mentions.setdefault(nearest.group(1), set()).add(token.group(1))
