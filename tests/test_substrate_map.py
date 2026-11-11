@@ -2074,12 +2074,12 @@ def test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names() -> Non
     """Fails if a `` `SYMBOL` (`file:line`) `` citation in §5 points elsewhere.
 
     Reachable — and it WAS the shipped state: §5's D10 evidence cited
-    `projection/entities.py:1584` as `_DOC_RETIRED_KEYS`, whose declaration was at
-    2006 when this pin was written and 2245 at the head that re-measured it (it was
-    1584 when the map was cut; that module has grown since). The
-    citation therefore sent a reader re-examining the retirement mechanism to a
-    comment about `_ingestedAtStored` — the exact class of stale evidence pointer
-    the `:Document` pin next door closes for one file, still open for the rest.
+    `projection/entities.py:1584` as `_DOC_RETIRED_KEYS`, whose declaration sat at
+    1974 when this pin was written and 2245 at this head (it was 1584 when the map
+    was cut; that module has grown since). The citation therefore sent a reader
+    re-examining the retirement mechanism to a comment about `_ingestedAtStored` —
+    the exact class of stale evidence pointer the `:Document` pin next door closes
+    for one file, still open for the rest.
 
     The rule is the one the document states: a pointer introduced by a symbol must
     land on a line that carries that symbol. Symbols rather than line numbers are
