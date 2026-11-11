@@ -304,8 +304,9 @@ class SearchScores:
 # TERMINAL decayed posterior). So deriving the state from the flags invents an
 # absence for a belief that exists — the exact failure #11702 removes. In the
 # other direction `(has_ep=True, baseline=False)` covers both a readable
-# ``measured`` belief and an ``absent`` shape, where operands are stored but no
-# mean exists: either operand missing after the per-operand coalesce (an α with no β, or a β with no α), a pair summing to ≤ 0, a negative operand, or an operand this process cannot read.
+# ``measured`` belief and an ``absent`` shape — operands stored but no mean, with
+# no readable `n.confidence` mirror either (a mirror in [0, 1] IS a belief, which
+# is the `baseline` case above): an α with no β, a β with no α, a pair summing to ≤ 0, a negative operand, or an operand this process cannot read.
 #
 # The terminal 0.5 and the mirror are not a measurement; the neutral Beta(1,1)
 # mean this used to answer for a truly absent claim is indistinguishable from a
@@ -369,9 +370,12 @@ def ep_measurement_state(*, posterior_alpha, ep_alpha,
 # A read/rank surface needs a different, blunter answer: *is there a READABLE
 # belief here at all?* — because for a claim that has none there is no number
 # to report, and inventing one is the defect #11702 names. The two questions
-# diverge on stored operands that yield no mean (either operand missing after the per-operand coalesce (α with no β, or β with no α), a sum ≤ 0, a negative operand, or an unreadable operand): such a row is
-# 'measured' as a PREDICATE (when it carries a non-baseline α) and `absent` as a
-# STATE; a BETA-ONLY row is `absent` in both.
+# diverge on shapes with no readable `n.confidence` mirror and stored operands
+# that yield no mean (an α with no β, a β with no α, a sum ≤ 0, a negative or
+# unreadable operand): such a row is 'measured' as a PREDICATE (when it carries
+# a non-baseline α) and `absent` as a STATE; a BETA-ONLY row is `absent` in both;
+# and a row with a READABLE mirror beside unusable operands is `baseline` with
+# the mirror's value, because the mirror term is the first disjunct.
 # The recorded rule is
 # `docs/architecture/SEARCH-ARCHITECTURE.md` §6.3: **absent state is `null`
 # with `ep_state: "absent"`, never 0.5 — a value the ranker refuses to order
@@ -1435,13 +1439,17 @@ class EpBreakdown:
     # `update_point(posterior_alpha=…)` satisfies it with no EP pass anywhere,
     # so this flag is not an EP receipt.
     #
-    # The two questions DO diverge. On a pair that yields no mean an α may still
-    # be persisted — an α-only half pair, a 0/0 pair, a pair summing to ≤ 0, a
-    # negative or unreadable operand — so `measured` stays True while `ep_state`
-    # is `absent` and the mean is `None`. A BETA-ONLY pair diverges the other
-    # way: no α is persisted, so `measured` is False while the row still stores
-    # an operand and its state is `absent` (never `baseline` — there is no mean
-    # for a prior to be). Neither flag pair can be inverted into the state.
+    # The two questions DO diverge. On a shape with no readable mirror AND
+    # operands that yield no mean — an α with no β, a β with no α, a sum ≤ 0, a
+    # negative or unreadable operand — an α may still be persisted, so
+    # `measured` stays True while `ep_state` is `absent` and the mean is `None`.
+    # A BETA-ONLY pair diverges the other way: no α is persisted, so `measured`
+    # is False while the row still stores an operand and its state is `absent`
+    # (never `baseline` — there is no mean for a prior to be). And a shape with a
+    # READABLE mirror beside unusable operands is neither: the mirror answers,
+    # so the state is `baseline` with the mirror's value (measured: an α-only
+    # half pair + mirror 0.9 → `baseline` / 0.9). Neither flag pair can be
+    # inverted into the state.
     #
     # A consumer deciding whether a stored posterior can be reasoned from reads
     # `measured`; one deciding whether to show/number a belief reads

@@ -110,9 +110,7 @@ response_fields:
     the value is `null` if and only if the state is "absent", so a consumer never has to infer the state from the
     number. It is emitted from the same `EpBreakdown` the `ep` block is serialised from, with the SAME mirror-first
     precedence as every other surface (the `n.confidence` mirror leads, then posterior_alpha/beta, then ep_alpha/beta)
-    and the SAME absence rule (either operand missing after the per-operand coalesce (α with no β, or β with no α), a sum ≤ 0, a negative operand, or an unreadable operand, carries no
-    belief). The three tokens are shared
-    and the SAME absence rule (either operand missing after the per-operand coalesce (α with no β, or β with no α), a sum ≤ 0, a negative operand, or an unreadable operand, carries no belief). The three tokens are shared
+    and the SAME absence rule (a belief exists iff a readable `n.confidence` mirror is present OR both coalesced operands are present, non-negative and summing > 0; it is absent when there is NO readable mirror (none stored, or one outside [0, 1]) AND either operand is missing after the per-operand coalesce (α with no β, or β with no α), the pair sums ≤ 0, or an operand is negative or unreadable). The three tokens are shared
     with recall_ranking.ep_state, gaps_ranking.ep_state, graph_ranking.ep_state and the SubgraphExpander node
     payload, so all of them join on one vocabulary. #11702.'
   unchanged_when_off: 'NO — additive key on an existing `ep` block, so the key set grows by one on every Point hit
