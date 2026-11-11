@@ -19,7 +19,7 @@ same committed 29-type corpus (`supabase/tests/fixtures/record_projection_journa
 **8,414 B → 4,689 B** (21.9 → 12.2 chars/float, **1.79×**), and the record itself
 **9,176 B → 5,423 B** (**1.69×**), with the values' **float32 bits unchanged**
 (`test_every_element_keeps_its_float32_bits`) and the journal line decoding **bit-identically
-to the payload the writer held** (`json.loads(line) == payload["embedding"]`) — see
+to the payload the writer held** (`json.loads(line)["embedding"] == payload["embedding"]`) — see
 *Why the VALUE is quantised*.
 
 ⚠️ **It is NOT “the same float64 numbers”.** The old writer wrote the float32 WIDENED to
@@ -127,8 +127,8 @@ would put different numbers in the record's `embedding` jsonb.
 
 Quantising the value at the seam keeps the invariant **exact**: the stored float is the
 float64 whose `repr` *is* the shortest float32 round trip, so
-`json.loads(journal_text) == payload["embedding"]` bit for bit, and the float32 bits are
-the embedder's own (`struct`-verified per element by
+`json.loads(journal_text)["embedding"] == payload["embedding"]` bit for bit, and the float32
+bits are the embedder's own (`struct`-verified per element by
 `tests/test_11821_journal_vector_width.py`).
 
 ## The promise this does NOT touch
