@@ -383,20 +383,21 @@ def test_with_a_baseline_the_belief_moves_and_the_flip_moves_it_back(sdk):
     assert j_unmet < 0.2, f"the new judgement carries no negative belief ({j_unmet})"
     assert g_unmet < g_met, (
         f"the goal did not fall after the flip: {g_met} -> {g_unmet} "
-        "(a symmetric prior would RAISE it — measured 0.650 -> 0.692)"
+        "(a symmetric prior transmits NOTHING — measured 0.650 -> 0.650)"
     )
-    assert round(g_unmet, 3) == pytest.approx(0.308, abs=0.02)
+    assert round(g_unmet, 3) == pytest.approx(0.350, abs=0.02)
 
 
 def test_a_symmetric_prior_is_the_wrong_sign_and_is_pinned(sdk):
     """The negative control for the SECOND trap.
 
     A judgement whose prior means "confidence in the state word" — 0.9 for both
-    `met` and `unmet` — is a loop that argues the opposite of its own
-    measurement: measured 0.650 -> 0.692 on a flip to `unmet`. `prior_for` is the
-    only place that mapping lives, so this test pins it directly rather than
-    rebuilding the wrong wiring (which would leave a second, wrong way to write a
-    judgement in the suite).
+    `met` and `unmet` — is a loop that DISCARDS the direction of its own
+    measurement: measured, a flip to `unmet` left the goal at 0.650 -> 0.650, i.e.
+    the reading that broke the goal reached it as exactly as much support as the
+    reading that satisfied it. `prior_for` is the only place that mapping lives,
+    so this test pins it directly rather than rebuilding the wrong wiring (which
+    would leave a second, wrong way to write a judgement in the suite).
     """
     assert goal_support("met") > 0.5 > goal_support("unmet")
     assert goal_support("unknown") == pytest.approx(0.5)
@@ -417,18 +418,33 @@ def goal_support(state, strength=None):
 
 def test_goal_state_alone_never_moves_a_judgement(sdk):
     """The judgement is a function of (readings, target, previous judgement) and
-    NOTHING else. Writing `goalState` by hand changes neither the decision nor
-    the belief signal — it is a display cache, which is the inversion #11822
-    removes."""
+    NOTHING else. Writing `goalState` by hand changes neither the decision nor the
+    previous state — it is a display cache, which is the inversion #11822 removes.
+
+    ⚠️ This pin must be able to FAIL. An earlier version called `judge()` WITHOUT
+    `goal_id`, so the goal's cache was unreachable by construction and the
+    assertion held for any implementation — including one that reads it. Here the
+    goal_id IS passed, the claim says `met`, a human overrides the cache to
+    `unmet`, and the next judgement must still see `met` (the claim), not `unmet`
+    (the cache).
+    """
     indicator, target_node, goal = _world(sdk)
     target = Target.from_node(target_node)
-    _reading(sdk, indicator, 12.0, at="2026-11-11T10:00:00Z")
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    first = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                            target=target)
+    assert first["judged"]["state"] == "met"
+    assert sdk.get_entity(goal["id"])["goalState"] == "met"
 
-    # a human (or a script) claims the goal is met; the reading says otherwise
-    sdk.update_entity(goal["id"], goalState="met")
-    judged = judge(sdk, indicator_id=indicator["id"], target=target)
-    assert judged.state == "unmet"
-    assert judged.previous_state == "unknown"  # goalState was NOT consulted
+    # a human (or a script) overrides the CACHE
+    sdk.update_entity(goal["id"], goalState="unmet")
+
+    judged = judge(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                   target=target)
+    assert judged.previous_state == "met", (
+        "the cache was read as the previous state — goalState became a belief input"
+    )
+    assert judged.state == "met"  # the reading still says met
 
 
 def test_unknown_writes_no_cache_over_a_humans_word(sdk):
@@ -540,3 +556,188 @@ def test_two_goals_sharing_one_indicator_do_not_share_a_dwell_baseline(sdk):
     judged_a = judge(sdk, goal_id=goal_a["id"], indicator_id=indicator["id"],
                      target=target)
     assert judged_a.previous_state == "met"
+
+
+# ── 6. review round 1 — the findings, each pinned ─────────────────────────
+
+def _operators_of(sdk, point_id):
+    """The operator Points whose INPUT source is `point_id` (source→op, per
+    `create_operator`: `(source)-[:INPUT]->(op)`)."""
+    return sdk._get_proj().g.query(
+        "MATCH (p:Point {id:$i})-[:INPUT]->(op) RETURN op.id",
+        params={"i": point_id}).result_set
+
+
+def test_a_flip_does_not_accumulate_operators(sdk):
+    """A flip must not mint a SECOND IMPL arrow for the same evidence.
+
+    `supersede_point` transfers the predecessor's operator onto the successor
+    (#6180), so creating one on the successor as well gives the live judgement two
+    operators over one piece of evidence — and the transfer MERGEs edges, not
+    operators, so nothing collapses them. MEASURED on this exact five-pass
+    sequence (met, unmet, met, unmet, met; identical evidence bar the reading),
+    goal belief per pass PRE-FIX: 0.6502 → 0.3080 → 0.7197 → 0.2600 → 0.7556 — a
+    flapping metric HARDENED the goal instead of tracking it (two operators after
+    the first flip, three after the second, …). The same sequence POST-FIX reads
+    0.6502 → 0.3498 → 0.6502 → 0.3498 → 0.6502: the belief returns to exactly its
+    first value every time.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    beliefs = []
+    for i, value in enumerate([9.0, 12.0, 9.0, 12.0, 9.0]):
+        _reading(sdk, indicator, value, at=f"2026-11-11T1{i}:00:00Z")
+        res = judge_and_record(sdk, goal_id=goal["id"],
+                              indicator_id=indicator["id"], target=target)
+        ops = _operators_of(sdk, res["point_id"])
+        assert len(ops) == 1, (
+            f"the live judgement carries {len(ops)} operators after flip {i} — "
+            "one piece of evidence, counted once"
+        )
+        beliefs.append(round(
+            sdk.compute_confidence()["confidences"][goal["id"]]["mean"], 4))
+    assert beliefs[0] == beliefs[2] == beliefs[4], (
+        f"same evidence, different belief by flip count: {beliefs}"
+    )
+    assert beliefs[1] == beliefs[3]
+    assert beliefs[4] > beliefs[3]  # met > unmet
+
+
+def test_a_refused_strength_writes_nothing_and_the_next_call_works(sdk):
+    """A public parameter that can be refused must not leave a half-written
+    judgement behind.
+
+    MEASURED before the fix: `strength=0.5` raised AFTER `create_point`, leaving a
+    live `claimClass: 'derived'` Point with `judgementState`/`goalId` and no prior.
+    Three consequences, all reproduced: `latest_judgement` returned the orphan as
+    the current state, the unchanged arm answered `written: False` forever, and
+    `compute_confidence()` raised `CalibrationError` for the WHOLE graph.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+
+    with pytest.raises(ValueError):
+        judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                         target=target, strength=0.5)
+
+    assert _judgement_points(sdk, goal["id"]) == [], (
+        "a refused strength left a judgement point behind"
+    )
+    retry = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                            target=target)
+    assert retry["written"] is True
+    assert sdk.compute_confidence()["converged"] is True  # no uncalibrated orphan
+
+
+def test_a_target_without_an_id_is_refused_by_the_writer(sdk):
+    """Two targets on one goal+indicator must not supersede each other.
+
+    Without `targetId` the supersession lookup is scoped by goal+indicator only,
+    so each target's pass retires the other's live claim and the goal can hold
+    exactly one judgement no matter how many targets D4 allows (measured before
+    the fix: A → written, B → superseded A, A again → superseded B …). The pure
+    `compare()` still takes a bare Target — it writes nothing; only the WRITER
+    demands the name.
+    """
+    indicator, target_node, goal = _world(sdk)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    bare = Target(comparator="<=", threshold=10.0)
+    assert bare.target_id is None
+    with pytest.raises(ValueError) as exc:
+        judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                         target=bare)
+    assert "target_id" in str(exc.value)
+
+    # two NAMED targets on the same goal+indicator keep one live claim each
+    a = Target.from_node(target_node)
+    b_node = sdk.create_object("CI >= 30m", objectKind="target",
+                               comparator=">=", threshold=30.0, dwell=1)
+    b = Target.from_node(b_node)
+    ra = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                          target=a)
+    rb = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                          target=b)
+    assert rb["superseded_id"] is None, "target B superseded target A's judgement"
+    live_a = latest_judgement(sdk, goal_id=goal["id"], target_id=a.target_id)
+    live_b = latest_judgement(sdk, goal_id=goal["id"], target_id=b.target_id)
+    assert live_a["id"] == ra["point_id"] and live_a["status"] == "live"
+    assert live_b["id"] == rb["point_id"]
+    assert live_a["judgementState"] == "met" and live_b["judgementState"] == "unmet"
+
+
+def test_from_node_honours_a_declared_zero_dwell_by_refusing_it(sdk):
+    """`dwell: 0` must raise, not silently become 1.
+
+    The earlier `int(node.get("dwell") or 1)` mapped a declared `0` (and `""` and
+    `False`) to 1 — the target's author set a bar and got "flip on the first
+    disagreeing reading", the flapping the field exists to suppress, with no error.
+    """
+    _, target_node, _ = _world(sdk, dwell=1)
+    target_node = dict(target_node, dwell=0)
+    with pytest.raises(ValueError):
+        Target.from_node(target_node)
+    assert Target.from_node({"comparator": "<=", "threshold": 10.0}).dwell == 1
+
+
+def test_a_dwell_above_the_default_read_page_can_still_be_satisfied(sdk):
+    """`dwell` is a count of READINGS, so the read window has to scale with it.
+
+    With the page pinned at 100, a `dwell` of 101 could NEVER be satisfied:
+    `_dwell_satisfied` would return False on every pass, every state change would
+    score `dwell-holding`, and the goal would never flip — silently.
+    """
+    indicator, target_node, goal = _world(sdk, dwell=101)
+    target = Target.from_node(target_node)
+    for i in range(101):
+        _reading(sdk, indicator, 12.0,
+                 at=f"2026-11-11T{10 + i // 60:02d}:{i % 60:02d}:00Z")
+    judged = judge(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                   target=target)
+    assert judged.dwell_satisfied is True, "the read window never reached the dwell"
+    assert judged.state == "unmet"
+
+
+def test_the_unchanged_arm_still_reowns_the_cache(sdk):
+    """An unchanged state mints nothing — but the cache is still the judgement's.
+
+    Without this, a hand-edited `goalState` contradicts the live claim FOREVER: the
+    state never changes again, so no later pass would ever fix it (measured:
+    claim `unmet`, human sets `blocked`, every subsequent pass reported
+    `written: False, goalState: None` while the graph said `blocked`).
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 12.0, at="2026-11-11T10:00:00Z")
+    first = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                            target=target)
+    assert first["goalState"] == "unmet"
+
+    sdk.update_entity(goal["id"], goalState="blocked")  # a human's word
+    again = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                            target=target)
+    assert again["written"] is False            # no new claim
+    assert again["goalState"] == "unmet"        # but the cache is re-owned
+    assert sdk.get_entity(goal["id"])["goalState"] == "unmet"
+
+
+def test_a_point_that_lost_its_arrow_is_rewired_on_the_next_pass(sdk):
+    """The self-healing arm: a write that failed after its Point landed leaves a
+    live judgement with no IMPL arrow, and the unchanged arm must repair it —
+    otherwise the goal is never wired again."""
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    res = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                          target=target)
+    # simulate the failure: remove the arrow
+    sdk._get_proj().g.query(
+        "MATCH (p:Point {id:$i})-[:INPUT]->(op) DETACH DELETE op",
+        params={"i": res["point_id"]})
+    assert _operators_of(sdk, res["point_id"]) == []
+
+    again = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                            target=target)
+    assert again["written"] is False
+    assert again["operator_id"], "the unchanged arm did not repair the arrow"
+    assert len(_operators_of(sdk, again["point_id"])) == 1

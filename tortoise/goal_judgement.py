@@ -37,7 +37,7 @@ own shape, embedded lane, 2026-11-11::
 
     confidence=0.95 only   -> judgement 0.500, goal 0.500, converged True, iters 1
     set_point_baseline(9,1) -> judgement 0.900, goal 0.650, converged True, iters 1
-    ... after a flip to Beta(1,9) -> judgement 0.100, goal 0.308
+    ... after a flip to Beta(1,9) -> judgement 0.100, goal 0.350
 
 The first line is the defect #11822 exists to remove: a graph that *looks*
 wired, reports ``converged: True``, and moves nothing. :func:`record_judgement`
@@ -50,16 +50,19 @@ one — so a later "simplification" of this writer cannot quietly restore it.
 A baseline alone is not enough: the NUMBER has to mean the right thing. EP's
 ``IMPL`` reads the SOURCE's belief as the degree of support it lends the TARGET,
 so a prior that means *"confidence in the state word"* — 0.9 for BOTH ``met``
-and ``unmet`` — transmits the wrong sign. Measured on this module's own shape
+and ``unmet`` — carries no direction at all. Measured on this module's own shape
 (embedded lane, 2026-11-11)::
 
-    symmetric prior  Beta(9,1) -> Beta(9,1) :  goal 0.650 -> 0.692  (+0.042)  ⛔
-    support prior    Beta(9,1) -> Beta(1,9) :  goal 0.650 -> 0.308  (-0.342)  ✅
+    symmetric prior  Beta(9,1) -> Beta(9,1) :  goal 0.650 -> 0.650  (no change)  ⛔
+    support prior    Beta(9,1) -> Beta(1,9) :  goal 0.650 -> 0.350  (-0.300)     ✅
 
-The left line is a graph that argues the OPPOSITE of what it measured: the goal
-went UP on the reading that broke it. :func:`prior_for` therefore derives both
-directions from ONE strength number (``met`` → support ``s``, ``unmet`` →
-``1 - s``, ``unknown`` → no information), so the two can never drift.
+The left line is a graph that discards the direction of what it measured: the
+reading that BROKE the goal reaches it as exactly as much support as the reading
+that satisfied it. (With other evidence wired into the same goal the 0.9 would
+pull it toward "met" — an inference from the same arithmetic, not a separate
+measurement.) :func:`prior_for` therefore derives both directions from ONE
+strength number (``met`` → support ``s``, ``unmet`` → ``1 - s``, ``unknown`` → no
+information), so the two can never drift.
 
 `goalState` IS A CACHE, NEVER AN INPUT TO BELIEF.
 EP does not read ``goalState`` and must not learn to: it is a plain field on a
@@ -185,11 +188,11 @@ def prior_for(state: str, strength: float = DEFAULT_STRENGTH) -> tuple[float, fl
 
     MEASURED on the symmetric alternative ("confidence in the state word": 0.9
     for BOTH ``met`` and ``unmet``), embedded lane, 2026-11-11: a flip to
-    ``unmet`` moved the goal **0.650 → 0.692 — the WRONG WAY**, because an
-    `unmet` judgement believed 0.9 supports the goal at 0.9. With this mapping
-    the same flip moves it 0.650 → 0.308. A judgement point whose belief means
-    "confidence in the word" is a graph that looks wired and argues the
-    opposite of what it measured.
+    ``unmet`` left the goal at **0.650 → 0.650 — no transmission at all**,
+    because an `unmet` judgement believed 0.9 supports the goal at 0.9, exactly
+    as a `met` one does. With this mapping the same flip moves it 0.650 → 0.350.
+    A judgement point whose belief means "confidence in the word" is a graph
+    that looks wired and discards the direction of what it measured.
     """
     if state not in JUDGEMENT_STATES:
         raise ValueError(
@@ -336,7 +339,13 @@ class Target:
         return cls(
             comparator=node["comparator"],
             threshold=node["threshold"],
-            dwell=int(node.get("dwell") or 1),
+            # ⛔ Do NOT coalesce a declared value with `or 1`: `dwell: 0` (or
+            # `""`, or `False`) would silently become 1 — the target's author
+            # tried to set a bar and got "flip on the first disagreeing reading"
+            # with no error and no record. Absence is the ONLY default; anything
+            # declared is handed to `__post_init__`, which refuses what it cannot
+            # honour.
+            dwell=1 if node.get("dwell") is None else int(node["dwell"]),
             target_id=node.get("id"),
         )
 
@@ -617,8 +626,13 @@ def judge(
     makes an indicator's targets 0..n and lets two goals share one indicator, so
     a lookup keyed on the indicator alone would let goal A's last state become
     goal B's dwell baseline. Omit it only where the indicator has one goal.
+
+    The read window scales with the target: ``dwell`` is a count of consecutive
+    READINGS, so a dwell above the default page would never be satisfiable (every
+    pass would report ``dwell-holding`` and the goal would never flip).
     """
-    readings = latest_readings(sdk, indicator_id, event_kind=event_kind)
+    readings = latest_readings(sdk, indicator_id, event_kind=event_kind,
+                              limit=max(100, target.dwell))
     previous = latest_judgement(sdk, goal_id=goal_id, indicator_id=indicator_id,
                                target_id=target.target_id)
     previous_state = (previous or {}).get("judgementState") or "unknown"
@@ -671,6 +685,52 @@ def _subject_for(sdk: Any, indicator_id: str | None, goal_id: str) -> str:
     return indicator_id or goal_id
 
 
+def _write_goal_state_cache(sdk: Any, goal_id: str, state: str) -> str | None:
+    """Write the goal's ``goalState`` CACHE from the judgement, or nothing.
+
+    ``unknown`` writes NOTHING (:data:`GOAL_STATE_CACHE`) rather than putting
+    ``active`` over a human's ``blocked``/``guideline``: a judgement that reaches
+    no state cannot improve the cache, and the closed vocabulary has no word for
+    "not decided". The write is unconditional (rather than "only if it differs")
+    because checking would mean READING ``goalState`` in this module — the one
+    thing the module exists not to do.
+    """
+    cached = GOAL_STATE_CACHE[state]
+    if cached is not None:
+        sdk.update_entity(goal_id, goalState=cached)
+    return cached
+
+
+def _ensure_judgement_edge(sdk: Any, point_id: str, goal_id: str) -> str | None:
+    """Make sure ``point_id`` has exactly the IMPL arrow into ``goal_id``.
+
+    IDEMPOTENT ON PURPOSE. Two facts drive it:
+      * ``supersede_point`` TRANSFERS the predecessor's operator edges onto the
+        successor (#6180) — so after a flip the successor already carries the
+        arrow and creating another would give the live judgement TWO operators
+        for the same evidence. MEASURED on the five-pass sequence met, unmet,
+        met, unmet, met (identical evidence bar the reading), goal belief per
+        pass PRE-FIX: ``0.6502 -> 0.3080 -> 0.7197 -> 0.2600 -> 0.7556`` — a
+        flapping metric HARDENED the goal it was supposed to be tracking, and the
+        graph grew an operator Point + two edges per flip, never pruned. The same
+        sequence POST-FIX reads ``0.6502 -> 0.3498 -> 0.6502 -> 0.3498 ->
+        0.6502``.
+      * a write that failed after its Point landed leaves a live judgement with
+        no arrow at all, which the unchanged arm would then never repair.
+
+    So the edge is (re)created only when the point has none, and the result names
+    the operator the goal's belief actually flows through.
+    """
+    rows = sdk._get_proj().g.query(
+        "MATCH (p:Point {id:$i})-[:INPUT]->(op) RETURN op.id LIMIT 5",
+        params={"i": point_id},
+    ).result_set
+    if rows:
+        return rows[0][0]
+    operator = sdk.create_operator("IMPL", point_id, [goal_id], direction="->")
+    return (operator or {}).get("id")
+
+
 def record_judgement(
     sdk: Any,
     *,
@@ -711,6 +771,30 @@ def record_judgement(
     ``written``, ``goalState``, ``judgement`` (the state + reason), and the prior
     actually written.
     """
+    # ⛔ VALIDATE AND DERIVE THE PRIOR BEFORE ANY WRITE. Both of these can
+    # refuse, and a refusal that lands AFTER `create_point` leaves a live
+    # `claimClass: 'derived'` Point carrying `judgementState`/`goalId` with no
+    # prior and no IMPL arrow — measured: `latest_judgement` then returns the
+    # orphan as the current state, the unchanged arm answers `written: False`
+    # forever, and `compute_confidence()` raises `CalibrationError` for the whole
+    # graph because the orphan is uncalibrated. A refused parameter must not be
+    # able to brick the judgement (or the EP run that reads it).
+    alpha, beta = prior_for(judgement.state, strength)
+
+    # ⛔ The target must be NAMED. `targetId` is what scopes the supersession
+    # chain: with it absent, two targets on the same goal+indicator (D4 allows
+    # n targets) both look up "the last judgement for this goal+indicator" and
+    # supersede EACH OTHER's live claim, so the goal can hold only one live
+    # judgement no matter how many targets it has.
+    if target.target_id is None:
+        raise ValueError(
+            "record_judgement needs a Target carrying `target_id` (build it with "
+            "Target.from_node(<target Object>)). Without it the supersession "
+            "chain is scoped by goal+indicator only, so a second target on the "
+            "same pair would supersede this target's live judgement and the goal "
+            "could never hold one judgement per target."
+        )
+
     if previous_point_id is None:
         prior_point = latest_judgement(sdk, goal_id=goal_id,
                                        indicator_id=indicator_id,
@@ -720,13 +804,26 @@ def record_judgement(
     if (previous_point_id is not None
             and judgement.state == judgement.previous_state
             and not judgement.flipped):
+        # An UNCHANGED state mints nothing (re-asserting "still met" every pass
+        # would churn a supersession chain that says nothing), but it still owns
+        # the cache and the wiring. Two things are therefore done on this arm:
+        #   * `goalState` is refreshed — otherwise a hand-edited cache word
+        #     contradicts the live claim FOREVER (no later pass would fix it,
+        #     because the state never changes again);
+        #   * the IMPL arrow is re-asserted when it is missing, which is the
+        #     self-healing arm for a write that failed after its point landed.
+        cached = _write_goal_state_cache(sdk, goal_id, judgement.state)
+        wired = _ensure_judgement_edge(sdk, previous_point_id, goal_id)
         return {
             "written": False,
             "point_id": previous_point_id,
+            "operator_id": wired,
             "superseded_id": None,
-            "goalState": None,
+            "goalState": cached,
             "judgement": {"state": judgement.state, "reason": judgement.reason},
-            "prior": None,
+            "prior": {"alpha": alpha, "beta": beta,
+                      "source": JUDGEMENT_BASELINE_SOURCE,
+                      "support": alpha / (alpha + beta)},
         }
 
     text = _judgement_content(subject or _subject_for(sdk, indicator_id, goal_id),
@@ -754,16 +851,28 @@ def record_judgement(
     )
     point_id = point["id"]
 
-    # ⛔ THE TRAP: the prior is what makes EP move at all. Written BEFORE the
-    # edge so a refused baseline cannot leave an operator wired to a point that
-    # carries no belief — the "looks wired, computes nothing" graph.
-    alpha, beta = prior_for(judgement.state, strength)
-    sdk.set_point_baseline(
-        point_id, alpha, beta, source=JUDGEMENT_BASELINE_SOURCE,
-    )
+    # ⛔ THE TRAP: the prior is what makes EP move at all, and it is written
+    # BEFORE any edge so a refused baseline cannot leave an operator wired to a
+    # point that carries no belief — the "looks wired, computes nothing" graph.
+    # If it is refused anyway, the point is REMOVED rather than left behind:
+    # nothing has been superseded at this step, so the deletion cannot orphan a
+    # state.
+    try:
+        sdk.set_point_baseline(
+            point_id, alpha, beta, source=JUDGEMENT_BASELINE_SOURCE,
+        )
+    except Exception:
+        sdk.delete_point(point_id)
+        raise
 
-    operator = sdk.create_operator("IMPL", point_id, [goal_id], direction="->")
-
+    # The supersession TRANSFERS the predecessor's operator edges onto this
+    # point (#6180), so creating one here too would give the live judgement TWO
+    # operators for the same evidence — and the transfer MERGEs edges, not
+    # operators, so it does not collapse them. MEASURED on the five-pass
+    # sequence met, unmet, met, unmet, met, goal belief per pass PRE-FIX:
+    # 0.6502 -> 0.3080 -> 0.7197 -> 0.2600 -> 0.7556 — a flapping metric HARDENED
+    # the goal instead of tracking it (see this function's docstring for the
+    # POST-FIX series). So the edge is created only when nothing was inherited.
     superseded_id = None
     window_from = "successor"
     if previous_point_id:
@@ -787,14 +896,14 @@ def record_judgement(
             sdk.supersede_point(previous_point_id, point_id)
             superseded_id = previous_point_id
 
-    cached = GOAL_STATE_CACHE[judgement.state]
-    if cached is not None:
-        sdk.update_entity(goal_id, goalState=cached)
+    operator_id = _ensure_judgement_edge(sdk, point_id, goal_id)
+
+    cached = _write_goal_state_cache(sdk, goal_id, judgement.state)
 
     return {
         "written": True,
         "point_id": point_id,
-        "operator_id": (operator or {}).get("id"),
+        "operator_id": operator_id,
         "superseded_id": superseded_id,
         "windowFrom": window_from,
         "goalState": cached,
