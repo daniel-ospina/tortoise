@@ -38,31 +38,43 @@ WHAT IT ASSERTS, in BOTH directions:
 `_SHIPPED_FRAGMENT` is the single string both arms bind to, so the two cannot be
 corrected in opposite directions without this file noticing.
 
-⛔ BOTH ARMS MATCH ON `_normalised()` — WHITESPACE AND CASE ARE NOT THE CLAIM
-(r9 P2, blocking; r9 P3). Two successive form-exactness rounds shipped here: r7
-matched `("…")` only (a re-emphasis walked through), and r8's bare-words fix was
-still whitespace- and case-exact. That second gap is not theoretical — this
-record is HARD-WRAPPED (line 315 is 95 columns) and reflows quotes mid-phrase, so
-a re-added universal that happens to wrap inside the 40-character phrase read
-GREEN. Measured on the r8 guard: a newline inside the phrase, a double space, or
-an initial capital each reported `2 passed`. `_normalised()` collapses whitespace
-runs and case on BOTH sides before matching, which closes the whole bounded class
-(reflow, re-emphasis, capitalisation, markdown delimiters) on both arms at once —
-including the r8 P3, where the presence leg false-RED the same correct quote
-written as `*"…"*`. A PARAPHRASE is still out of reach of any string guard; that
-residual is documented, and it is the one the message-side guards carry too.
+⛔ BOTH ARMS MATCH ON `_normalised()` — ONLY THE WORDS ARE THE CLAIM. Three
+successive rounds shipped a form-exactness hole here, each one level deeper: r7
+matched `("…")` only (a re-emphasis walked through); r8's bare-words fix was
+still whitespace- and case-exact (a hard wrap inside the phrase walked through —
+this record is hard-wrapped, line 315 is 95 columns); r9 stripped whitespace and
+case but not PUNCTUATION, so a delimiter INSIDE the phrase walked through. Every
+one of these is the same words and the same claim.
+
+So `_normalised()` reduces text to its word sequence — anything that is not a
+letter or digit becomes a separator, and case is folded. That is what makes the
+class closed rather than enumerated: reflow, tab/`\r\n`/nbsp, zero-width space,
+case, hyphenation, and markdown emphasis anywhere in the phrase (whole-phrase
+`*"…"*`, or in-phrase `**cloud agent VM**`, `` `cloud agent VM` ``,
+`*cloud*`, `~~…~~`, `_…_`) all normalise to the same words. Measured RED on the
+absence arm, and the same change cures the presence arm's mirror defect — it
+used to false-RED a CORRECT quote whose `hosted` qualifier was emphasised.
+
+WHAT IT STILL DOES NOT CATCH, stated so the docstring is not the next over-claim:
+a PARAPHRASE, a synonym, or a re-worded sentence (`A Cursor cloud agent runs no
+Tortoise hook at all`) is beyond any string guard. `test_capture_install.py`
+carries an enumerated list for that, and marks it as enumerated — that is the
+honest shape for prose, and #11812 holds the structural form.
 
 MUTATION (each verified RED at this head, restoring byte-identical):
   * restore the unscoped quote at `platform-seams.md:315`      → (1) RED
-  * re-add the unscoped words with OTHER delimiters (`*"…"*`)  → (1) RED (r8)
-  * re-add with a LINE BREAK inside the phrase                 → (1) RED (r9)
-  * re-add with a double space / initial capital               → (1) RED (r9)
+  * re-add with OTHER delimiters, whole-phrase (`*"…"*`)      → (1) RED (r8)
+  * re-add with a LINE BREAK / double space / capital           → (1) RED (r8)
+  * re-add with in-phrase `**`, `` ` ``, `*`, `~~`, `_`         → (1) RED (r9)
+  * re-add with a zero-width space or a hyphen                 → (1) RED (r9)
+  * correct quote with `**hosted**` emphasised → now PASSES    → was RED (P3)
   * drop `hosted` from `tortoise/__main__.py`'s message         → (2) RED
   * delete the record's quoted sentence                         → (1) RED
 """
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -78,14 +90,22 @@ _PY = sys.executable
 
 
 def _normalised(text: str) -> str:
-    """Whitespace- and case-insensitive form of `text`, for BOTH arms.
+    """The WORDS of `text`, for BOTH arms — punctuation, delimiters and case gone.
 
-    None of reflow, re-emphasis, capitalisation or markdown delimiters changes
-    the CLAIM, so none of them may change this guard's verdict. Keeping the
-    normalisation in one function means the two arms cannot drift apart — the
-    failure this file exists to catch, one level up.
+    Everything that is not a letter or digit becomes a separator, and case is
+    folded, so the two sides are compared as word sequences. That is what makes
+    reflow, tab/`\\r\\n`/nbsp, zero-width space, hyphenation and markdown
+    emphasis INDISTINGUISHABLE from the plain words — including a delimiter in the
+    MIDDLE of the phrase, which a whitespace-only collapse still let through.
+
+    It deliberately does NOT strip accents or fold synonyms: a paraphrase is out
+    of reach of any string guard, and pretending otherwise would be the same
+    over-claim in a new place.
+
+    One function for both arms, so they cannot drift apart — the failure this
+    file exists to catch, one level up.
     """
-    return " ".join(text.split()).lower()
+    return re.sub(r"[\W_]+", " ", text.lower()).strip()
 
 
 def _install_cursor_stdout(tmp_path) -> str:
@@ -126,14 +146,16 @@ def test_the_record_quotes_the_HOSTED_scoped_fragment():
     normalised_doc = _normalised(doc)
     assert _normalised(_SHIPPED_FRAGMENT) in normalised_doc, (
         "the platform-seams record must quote the HOSTED-scoped message")
-    # …and the unscoped WORDS may not reappear at all, in ANY form. Two rounds
+    # …and the unscoped WORDS may not reappear at all, in ANY form. Three rounds
     # shipped a form-exact leg here and each false-passed the mutation it exists to
-    # catch — r7 a re-emphasis (`*"…"*`), r8 a hard wrap inside the phrase on this
-    # 95-column-wrapped record. Normalising closes the bounded input class; the
-    # assertion is still over-broad in the SAFE direction only (it also bans a
-    # hypothetical accurate sentence carrying those exact words), and it cannot
-    # false-RED on the correct quote — the unscoped phrase is not a substring of
-    # the hosted one, before or after normalisation.
+    # catch — r7 a whole-phrase re-emphasis (`*"…"*`), r8 a hard wrap inside the
+    # phrase on this 95-column-wrapped record, r9 a delimiter in the MIDDLE of the
+    # phrase (`**cloud agent VM**`, `` `cloud agent VM` ``, `*cloud*`, `~~…~~`,
+    # `_…_`, a zero-width space, a hyphen). Matching on the word sequence closes the
+    # class instead of enumerating it. The assertion stays over-broad in the SAFE
+    # direction only (it also bans a hypothetical accurate sentence carrying these
+    # words), and it cannot false-RED the correct quote — the unscoped word sequence
+    # is not a substring of the hosted one.
     assert _normalised(_UNSCOPED_FRAGMENT) not in normalised_doc, (
         "the record quotes the unscoped universal as though it were the message")
 
