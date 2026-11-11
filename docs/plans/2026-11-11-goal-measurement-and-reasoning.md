@@ -75,7 +75,7 @@ Measured at `32c0f39d4b` (with the two `search_engine.py` citations re-anchored 
 | 4 | **compare the current reading to the target → a state** | decide | ⛔ | no goal-scoped comparator or threshold exists. The word appears in 7 lines under `tortoise/` — all unrelated commentary, on no goal or target (`rg -c '\bcomparator\b' tortoise/*.py tortoise/pi-hooks/*.ts`): tolerance policy `reconciliation.py:75`, search ordering `search_engine.py:4388`, NaN ordering `:5095`, provider AST `model_adapters.py:596`, stored-form drift `stored_form.py:19` and `:42`, and one test comment `tortoise/pi-hooks/tortoise-capture.test.ts:1827`. The nearest neighbour is `battery/report/classify.py:61-69` with `battery/config/thresholds.yaml` (`classification-delta`, `surfaced-rate`), which does compare a measured value against a declared bar — though for an eval cell, not a goal — and `tools/capstone_preregistration_check.py:419`'s `COMPARATORS` operator set, which reads a preregistration cell's threshold. **None exists in the graph or in `tortoise/`**; the one *working* comparator in the system is hardcoded outside both — `~/.pi/agent/scripts/objective.py:3527` (`crit_max > GUIDELINE_CI_MIN`) and `:3543` (`waiting < TARGET_PRS`) — which is the shape this design is meant to replace, and which #7860 names as such |
 | 5 | a state is a claim with a confidence **and** a validity window | replace + weigh | ✅ | `supersede_point`: contiguous `validFrom`/`validTo`, `expiredAt`, `CORRECTS` |
 | 6 | when the state changes the old one **stops counting everywhere** | replace | ⛔ | search omits `Event` from `_STATUS_FILTERED_LABELS`; an Object supersede leaves operators attached and EP silently drops the factor (**#11825**, **#11826**) |
-| 7 | the current state is what belief reads | weigh | ✅ | measured `0.347 → 0.639` on an IMPL (the #7860 D12 ruling) |
+| 7 | the current state is what belief reads | weigh | ✅ | measured `0.347 → 0.639` on a goal **Object** with no stored confidence of its own, because the claim feeding it changed (the #7860 D12 ruling) |
 | 8 | revising the **target** re-derives the state and retires the old | detect + decide | ⛔ | no invalidation path |
 | 9 | changing the **definition** makes older readings non-comparable | detect | ⛔ | two readings under different definitions look like a trend |
 | 10 | one indicator, several targets; some with none | decide | 🟡 | decided (D4), no code |
@@ -90,10 +90,11 @@ recorded position is three unhealthy (#11081's wave-6 entry for this document): 
 `detect` is **partial** — its gaps are rows 8 and 9, which is why it cannot be called healthy — and
 `replace` is the largest source of inconsistency in the codebase (`replace`: 11
 terminal-vocabulary declarations, 5 fold implementations, 2 replay engines behind 4 entrypoints, and 621
-test functions across 167 files pinning the asymmetry — all four are #11824's figures, and #11824's own
-verification comment **re-measured and corrected** them: 11 reproduces exactly, 5 as 5 semantic models /
-6 functions, 4 engines as **2 engines / 4 entrypoints**, `632 / 166` as **621 / 167**. Quote the
-verification comment, not the issue body, which still carries the superseded numbers). That is why this
+test functions across 167 files pinning the asymmetry — #11824's body states these as 11 / 5 / 4 replay
+engines / 632 tests in 166 files, and its own verification comment **re-measured and corrected** them: 11
+reproduces exactly, 5 as 5 semantic models / 6 functions, 4 engines as **2 engines / 4 entrypoints**, and
+`632 / 166` as **621 / 167**. The corrected set is used here; quote the verification comment, not the
+issue body, which still carries the superseded numbers). That is why this
 question has repeatedly collapsed into "how does EP get triggered" — EP is the only part that already
 works.
 
@@ -113,8 +114,10 @@ what the whole loop depends on.
   **contiguous Graphiti (Zep) window intent: the old fact stops being true when the new one starts being
   true*** (`ONTOLOGY.md` §4.7, quoted verbatim). Note what that section itself pins: exact contiguity
   needs a **dated** successor (`validFrom`), an undated one makes the windows **overlap**, and which
-  reading of the closed interval is canonical is an **open decision it tracks** (#7818) — so this is the
-  window's intent, not a claim that every supersede lands on a shared instant.
+  reading of the closed interval is canonical is an open decision `ONTOLOGY.md` §4.7 still anchors at
+  **#7818** — although #7818 is **CLOSED** with no live tracker, a false attribution #11824 records — so
+  the closed-vs-half-open question remains undecided. That is therefore the window's **intent**, not a
+  claim that every supersede lands on a shared instant.
 
 Two independent bodies of practice draw the same line:
 
@@ -262,7 +265,7 @@ sitting on it — #2782 is the money-typed instance of that ruling, not an alter
 | id | question | recommendation |
 |---|---|---|
 | Q1 | the graph is the decision record, but writes are refused — `Team points limit reached (25000)` | raise the cap or prune (owner call) |
-| Q2 | does this sequencing (0 → 1 → 2 → 3) hold? | yes: step 0 is a prerequisite, not a side quest |
+| Q2 | does this sequencing (0 → 5) hold? | yes: step 0 is a prerequisite, not a side quest |
 | — | D12 (confidence on non-claims) | **ruled: no** — recorded on #7860 |
 | — | D13 (what triggers the loop?) | **recommended on #7860 — NOT yet ruled**, and it sits under that issue's *"OPEN — the owner has two questions outstanding"*: *the judgement write is the trigger* (per D11), the only option where the trigger and the answer are the same write. **#11822's scope waits on the owner ruling this**, so the gate is still closed: #11822 must not be dispatched as if the trigger were settled. Marking that write does **not** make a deeper cascade converge (#11823) — this is the trigger, not the convergence fix |
 | — | where does the **effect** rule live? | **decided here: §5** (declared decision table; engine-owned effect; no general rule engine) — a design decision of this doc, relayed to #7860 |
