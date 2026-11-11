@@ -3403,9 +3403,12 @@ def test_the_e2b_floor_refuses_six_surviving_planted_units_and_matches_thirty():
     floor, the SAME run, two counts, two statuses.
 
     ⚠️ This is the boundary, NOT the operand pin. `prereg_binding`'s comparison is
-    unchanged by #10989, so this test passes on the pre-fix tree too: the mutant
-    that reverts the fix is the CALL SITE (which population the probe hands the
-    binding), and a test that never executes it cannot redden on it. The operand
+    unchanged by #10989, so this test stays GREEN under BOTH reverts of the fix
+    (the `_E2B_FLOOR_POPULATION` constant and the call site): the mutant that
+    reverts the fix is the CALL SITE (which population the probe hands the
+    binding), and a test that never executes it cannot redden on it. On the
+    merge-base tree it does not "pass" either — it does not RUN, because the
+    `surviving_units_basis=` keyword does not exist before this PR. The operand
     is pinned by
     `test_the_e2b_floor_is_FED_the_planted_population_and_the_line_says_so` — which
     reads the call site out of the tree — and naming this one for the operand would
