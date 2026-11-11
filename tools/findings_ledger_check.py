@@ -264,8 +264,14 @@ COMMAND_RE = re.compile(
     r"^`(?:\.venv/bin/|python3?\b|gh\b|git\b|ls\b|bash\b|npm\b|npx\b|uv\b|grep\b|rg\b)"
 )
 
-#: A backticked issue/PR reference.
-ISSUE_REF_RE = re.compile(r"`#\d+`")
+#: A backticked issue/PR reference. `owner/repo#N` MUST count: §8 calls that spelling
+#: "the form this repo writes everywhere", §1 accepts "an issue" without prescribing a
+#: spelling — and the bare-`#N` pattern refused the repo's own dominant form as an
+#: evidence cell with nothing openable behind it (measured: an issue-ref evidence cell
+#: red `names no path:line, issue, command or §N` while the identical ref in prose was
+#: accepted). An issue ref is not a citation, so this is deliberately NOT routed through
+#: the citation arms.
+ISSUE_REF_RE = re.compile(r"`(?:(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+))?#\d+`")
 
 CORRECTION_ROW_RE = re.compile(r"^\|\s*\*\*([a-z])\*\*\s*\|")
 
@@ -475,11 +481,23 @@ def _has_evidence(cell: str, sections: set[int]) -> bool:
         return True
     for match in re.finditer(r"`[^`\n]+`", cell):
         body = match.group(0)
-        if (
-            CITATION_RE.fullmatch(body)
-            or CITATION_SHAPE_RE.match(body[1:-1])
-            or COMMAND_RE.match(body)
-        ):
+        # `CITATION_RE`'s path group is OPTIONAL, so `fullmatch` alone accepted the
+        # marker-less `word:digits` spelling — measured: replacing an evidence cell with
+        # `username:1234` (or `see row (c):3115`) left every gate green, i.e. the
+        # evidence column could be filled with English. The marker test is the same one
+        # `check_citations` applies, so the two cannot disagree about what a citation is.
+        citation = CITATION_RE.fullmatch(body)
+        if citation and _has_path_marker(citation.group("path") or ""):
+            return True
+        if COMMAND_RE.match(body):
+            return True
+        # `CITATION_SHAPE_RE` alone accepted ANY marker-less `word:digits` as a
+        # `path:line` — measured, all twelve §3 evidence cells replaced with
+        # `username:1234` left `--check` at rc 0, so the whole evidence column could be
+        # made unopenable while §1 and §8 promise every cell names something a reader
+        # can open. `check_citations` already requires the same marker on this shapes
+        # family; this is the same test, applied to the evidence floor.
+        if CITATION_SHAPE_RE.match(body[1:-1]) and _has_path_marker(body[1:-1]):
             return True
     return False
 
