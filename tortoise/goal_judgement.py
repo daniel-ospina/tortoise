@@ -95,6 +95,7 @@ approved decision.
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -234,6 +235,52 @@ _ROW_FLIP = "state-flipped"
 _ROW_DWELL = "dwell-holding"
 
 
+def _declared_dwell(raw: Any) -> Any:
+    """A declared ``dwell``, handed on unchanged unless it is an exact integer.
+
+    ``None`` (absent) means 1. Anything DECLARED is passed through so
+    ``Target.__post_init__`` can refuse what it cannot honour: ``1.9`` must raise,
+    not be truncated to 1 — a target whose author declared a 1.9-reading window
+    would otherwise be judged against a SMALLER bar than it states (measured:
+    ``from_node({..., 'dwell': 1.9})`` returned 1 while
+    ``Target(dwell=1.9)`` refused). The string spellings are still tolerated
+    (``"2"`` → 2), because a YAML/props round-trip can hand one over.
+    """
+    if raw is None:
+        return 1
+    number = _num(raw)
+    if number is not None and float(number).is_integer():
+        return int(number)
+    return raw
+
+
+def _assert_supersession_scope(
+    sdk: Any, previous_point_id: str, goal_id: str,
+    indicator_id: str | None, target_id: str | None,
+) -> None:
+    """Refuse to supersede a claim that belongs to another chain.
+
+    ``previous_point_id`` is the one value that decides WHAT gets retired, and the
+    supersession TRANSFERS its operator edges onto the successor (#6180). A
+    predecessor from another goal would therefore be retired (leaving that goal
+    with NO live judgement) while its arrow was re-pointed onto this chain, so a
+    claim scoped to goal B ends up driving goal A's belief. MEASURED through the
+    seam: goal A ended with zero live judgements and its belief still moving.
+    """
+    node = sdk.get_entity(previous_point_id) or {}
+    for key, want in (("goalId", goal_id), ("indicatorId", indicator_id),
+                      ("targetId", target_id)):
+        have = node.get(key)
+        if want is not None and have is not None and have != want:
+            raise ValueError(
+                f"refusing to supersede {previous_point_id!r}: its {key} is "
+                f"{have!r} but this judgement is scoped to {want!r}. A "
+                "supersession transfers the predecessor's operator edges, so a "
+                "cross-scope predecessor would leave its own chain with no live "
+                "judgement while driving this one's belief."
+            )
+
+
 def _num(value: Any) -> float | None:
     """``value`` as a float, or ``None`` when it is not a real number.
 
@@ -243,14 +290,29 @@ def _num(value: Any) -> float | None:
     """
     if isinstance(value, bool) or value is None:
         return None
+    out: float | None
     if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
+        out = float(value)
+    elif isinstance(value, str):
         try:
-            return float(value.strip())
+            out = float(value.strip())
         except (TypeError, ValueError):
             return None
-    return None
+    else:
+        return None
+    # ⛔ `nan`/`±inf` are NOT readings. `nan` arrives easily — a metric backend
+    # emits a gap as NaN, and its string form is storable — and it breaks two
+    # things at once, MEASURED: (a) `nan <= 10` is False, so the "could not tell"
+    # case was judged `unmet` at Beta(1,9), i.e. the gap PUSHED BELIEF DOWN,
+    # contradicting this module's own rule that an unreadable value is `unknown`;
+    # (b) `record_judgement` then wrote `readingValue=nan`, which the store's
+    # numeric-domain guard refuses, so EVERY later pass for that indicator raised
+    # and no judgement could ever be minted again. The repo's numeric domain
+    # refuses both, so this is the only place in the chain that could disagree
+    # with it — and now it does not.
+    if not math.isfinite(out):
+        return None
+    return out
 
 
 def canonical_comparator(comparator: str) -> str:
@@ -349,7 +411,7 @@ class Target:
             # with no error and no record. Absence is the ONLY default; anything
             # declared is handed to `__post_init__`, which refuses what it cannot
             # honour.
-            dwell=1 if node.get("dwell") is None else int(node["dwell"]),
+            dwell=_declared_dwell(node.get("dwell")),
             target_id=node.get("id"),
         )
 
@@ -710,7 +772,15 @@ def _write_goal_state_cache(sdk: Any, goal_id: str, state: str) -> str | None:
 
 
 def _ensure_judgement_edge(sdk: Any, point_id: str, goal_id: str) -> str | None:
-    """Make sure ``point_id`` has exactly the IMPL arrow into ``goal_id``.
+    """Make sure ``point_id`` has AT LEAST ONE IMPL arrow into ``goal_id``.
+
+    ⚠️ "At least one", not "exactly one": there is no operator-delete API, so an
+    arrow another writer left (or a transferred one, #6180) cannot be removed
+    here. What this guarantees is that the arrow EXISTS — the belief path is
+    never missing — and it returns the first one found. A point that already
+    carries several is reported through ``extraOperators`` in the write result
+    rather than silently presented as healthy: the evidence is being counted more
+    than once, and only the caller can decide whether to repair the graph.
 
     IDEMPOTENT ON PURPOSE. Two facts drive it:
       * ``supersede_point`` TRANSFERS the predecessor's operator edges onto the
@@ -743,6 +813,21 @@ def _ensure_judgement_edge(sdk: Any, point_id: str, goal_id: str) -> str | None:
         return rows[0][0]
     operator = sdk.create_operator("IMPL", point_id, [goal_id], direction="->")
     return (operator or {}).get("id")
+
+
+def _extra_operators(
+    sdk: Any, point_id: str, goal_id: str, chosen: str | None
+) -> list[str]:
+    """The other IMPL operators this judgement has into ``goal_id``, if any."""
+    rows = sdk._get_proj().g.query(
+        "MATCH (p:Point {id:$i})-[:INPUT]->(op:Point)-[:IMPL]->(g) "
+        "WHERE g.id = $goal RETURN op.id",
+        params={"i": point_id, "goal": goal_id},
+    ).result_set
+    ids = [r[0] for r in rows]
+    if chosen in ids:
+        ids.remove(chosen)
+    return ids
 
 
 def record_judgement(
@@ -821,9 +906,12 @@ def record_judgement(
         # the one place a telemetry gap moves belief.
         return {
             "written": False,
-            "point_id": previous_point_id
-            or (latest_judgement(sdk, goal_id=goal_id, indicator_id=indicator_id,
-                                 target_id=target.target_id) or {}).get("id"),
+            # ONLY the live read: a caller-supplied `previous_point_id` may name a
+            # claim that is already terminal, and echoing it as "the judgement's
+            # point" would report a dead claim as the current state.
+            "point_id": (latest_judgement(sdk, goal_id=goal_id,
+                                          indicator_id=indicator_id,
+                                          target_id=target.target_id) or {}).get("id"),
             "operator_id": None,
             "superseded_id": None,
             "goalState": None,
@@ -831,15 +919,31 @@ def record_judgement(
             "prior": None,
         }
 
+    # ⛔ THE STORED CLAIM IS THE AUTHORITY, not the Judgement's self-report.
+    # `judgement.previous_state` is the caller's word; the claim it is about to
+    # re-own is fetched anyway, so the unchanged arm is taken only when the LIVE
+    # claim already asserts this state. Taking the caller's word (measured) left a
+    # live claim saying `unmet` while the call reported `written: False` for
+    # `met` and overwrote the cache to contradict it — a state change that never
+    # got recorded, reachable through the seam and a plain TOCTOU under
+    # concurrency.
+    prior_point = latest_judgement(sdk, goal_id=goal_id,
+                                   indicator_id=indicator_id,
+                                   target_id=target.target_id)
     if previous_point_id is None:
-        prior_point = latest_judgement(sdk, goal_id=goal_id,
-                                       indicator_id=indicator_id,
-                                       target_id=target.target_id)
         previous_point_id = (prior_point or {}).get("id")
+    else:
+        # The seam decides WHAT gets superseded, so its scope is asserted rather
+        # than trusted: a predecessor from another goal/indicator/target would be
+        # retired while its belief arrow was transferred onto this chain, leaving
+        # the other goal with NO live judgement and a claim scoped elsewhere
+        # driving its belief (measured).
+        _assert_supersession_scope(sdk, previous_point_id, goal_id,
+                                   indicator_id, target.target_id)
 
     if (previous_point_id is not None
-            and judgement.state == judgement.previous_state
-            and not judgement.flipped):
+            and (prior_point or {}).get("id") == previous_point_id
+            and (prior_point or {}).get("judgementState") == judgement.state):
         # An UNCHANGED state mints nothing (re-asserting "still met" every pass
         # would churn a supersession chain that says nothing), but it still owns
         # the cache and the wiring. Two things are therefore done on this arm:
@@ -854,6 +958,12 @@ def record_judgement(
             "written": False,
             "point_id": previous_point_id,
             "operator_id": wired,
+            # Reported on THIS arm too: it is the arm that re-asserts the arrow,
+            # so it is the one that meets a graph another writer left with two of
+            # them, and a double-count collapsed to an empty list here would read
+            # as healthy.
+            "extraOperators": _extra_operators(sdk, previous_point_id, goal_id,
+                                              wired),
             "superseded_id": None,
             "goalState": cached,
             "judgement": {"state": judgement.state, "reason": judgement.reason},
@@ -862,6 +972,16 @@ def record_judgement(
             # records a number the graph does not hold.
             "prior": None,
         }
+
+    # ⛔ The goal is validated HERE because the only step that would otherwise
+    # refuse it is `create_operator`, which runs AFTER the point and its baseline
+    # have landed — leaving a live `derived` claim with `goalId` pointing at
+    # nothing and no arrow (measured with a stale/typo'd id).
+    if not (sdk.get_entity(goal_id) or {}):
+        raise ValueError(
+            f"goal {goal_id!r} does not exist — refusing to mint a judgement for "
+            "a goal that cannot receive its belief arrow."
+        )
 
     text = _judgement_content(subject or _subject_for(sdk, indicator_id, goal_id),
                               judgement, target)
@@ -963,6 +1083,7 @@ def record_judgement(
             raise
 
     operator_id = _ensure_judgement_edge(sdk, point_id, goal_id)
+    extra_operators = _extra_operators(sdk, point_id, goal_id, operator_id)
 
     cached = _write_goal_state_cache(sdk, goal_id, judgement.state)
 
@@ -970,6 +1091,11 @@ def record_judgement(
         "written": True,
         "point_id": point_id,
         "operator_id": operator_id,
+        # ⚠️ More than one IMPL into this goal means the evidence is counted more
+        # than once (another writer, a restored graph, a transferred arrow). It
+        # cannot be repaired here — there is no operator-delete API — so it is
+        # REPORTED instead of being presented as a healthy single arrow.
+        "extraOperators": extra_operators,
         "superseded_id": superseded_id,
         "windowFrom": window_from,
         "goalState": cached,

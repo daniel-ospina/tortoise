@@ -34,6 +34,8 @@ from tortoise.goal_judgement import (
     Judgement,
     Reading,
     Target,
+    _ensure_judgement_edge,
+    _extra_operators,
     compare,
     compare_values,
     judge,
@@ -920,13 +922,13 @@ def test_an_out_of_order_reading_drops_the_window_instant_not_the_supersession(s
     assert sdk.get_entity(late["point_id"])["status"] == "live"
 
 
-def test_the_edge_is_scoped_to_the_goal_it_was_recorded_for(sdk, monkeypatch):
-    """"Has an operator" is not the question — "has an operator INTO THIS GOAL" is.
+def test_the_edge_is_scoped_to_the_goal_it_was_recorded_for(sdk):
+    """"Has an operator" is not the question — "has one INTO THIS GOAL" is.
 
-    Measured before the fix: a point already wired into goal A, re-recorded for
-    goal B, was reported `written: False` with goal A's `operator_id`, while
-    `MATCH (op)-[:IMPL]->(B)` was empty — B's belief never moved and the result
-    said it was wired.
+    Measured on the goal-blind version: a point already wired into goal A,
+    recorded for goal B, reported `written: False` with goal A's `operator_id`
+    while `MATCH (op)-[:IMPL]->(B)` was empty — B's belief never moved and the
+    result said it was wired.
     """
     indicator, target_node, goal_a = _world(sdk, tag="a")
     _, _, goal_b = _world(sdk, tag="b")
@@ -934,21 +936,50 @@ def test_the_edge_is_scoped_to_the_goal_it_was_recorded_for(sdk, monkeypatch):
     _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
     a = judge_and_record(sdk, goal_id=goal_a["id"], indicator_id=indicator["id"],
                         target=target)
-    # goal B shares the indicator+target but has never been judged; scope the
-    # lookup onto A's live claim deliberately (the `previous_point_id` seam)
+    assert _impl_into(sdk, a["point_id"], goal_b["id"]) == 0
+
+    # the module's own edge helper must wire goal B as well, not reuse A's arrow
+    op_b = _ensure_judgement_edge(sdk, a["point_id"], goal_b["id"])
+    assert op_b, "no arrow was created for goal B"
+    assert _impl_into(sdk, a["point_id"], goal_b["id"]) == 1
+    assert _impl_into(sdk, a["point_id"], goal_a["id"]) == 1
+    # and it is idempotent: a second call reuses, never doubles
+    assert _ensure_judgement_edge(sdk, a["point_id"], goal_b["id"]) == op_b
+    assert _impl_into(sdk, a["point_id"], goal_b["id"]) == 1
+
+
+def test_a_cross_goal_predecessor_is_refused(sdk):
+    """`previous_point_id` decides WHAT gets retired, so its scope is asserted.
+
+    A supersession TRANSFERS the predecessor's operator edges (#6180): retiring
+    goal A's claim while re-pointing its arrow onto goal B's chain leaves goal A
+    with NO live judgement and a claim scoped to B driving A's belief — measured
+    through this exact seam before the assertion existed.
+    """
+    indicator, target_node, goal_a = _world(sdk, tag="a")
+    _, _, goal_b = _world(sdk, tag="b")
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    a = judge_and_record(sdk, goal_id=goal_a["id"], indicator_id=indicator["id"],
+                        target=target)
     same = judge(sdk, goal_id=goal_b["id"], indicator_id=indicator["id"],
                  target=target)
-    b = record_judgement(sdk, goal_id=goal_b["id"], judgement=same, target=target,
-                        indicator_id=indicator["id"],
-                        previous_point_id=a["point_id"])
-    unwired = sdk._get_proj().g.query(
-        "MATCH (p:Point)-[:INPUT]->(op:Point)-[:IMPL]->(g) WHERE g.id = $g "
-        "RETURN count(op)",
-        params={"g": goal_b["id"]}).result_set
-    assert unwired[0][0] >= 1, "goal B was never wired"
-    assert b["operator_id"], b
-    mean_b = sdk.compute_confidence()["confidences"][goal_b["id"]]["mean"]
-    assert mean_b > 0.5, f"goal B's belief did not move: {mean_b}"
+    with pytest.raises(ValueError) as exc:
+        record_judgement(sdk, goal_id=goal_b["id"], judgement=same, target=target,
+                         indicator_id=indicator["id"],
+                         previous_point_id=a["point_id"])
+    assert "refusing to supersede" in str(exc.value)
+    # goal A's claim is untouched and still live; goal B has no judgement
+    assert sdk.get_entity(a["point_id"])["status"] == "live"
+    assert latest_judgement(sdk, goal_id=goal_b["id"]) is None
+
+
+def _impl_into(sdk, point_id, goal_id):
+    rows = sdk._get_proj().g.query(
+        "MATCH (p:Point {id:$i})-[:INPUT]->(op:Point)-[:IMPL]->(g) "
+        "WHERE g.id = $g RETURN count(op)",
+        params={"i": point_id, "g": goal_id}).result_set
+    return rows[0][0] if rows else 0
 
 
 def test_the_unchanged_arm_does_not_claim_a_prior_it_never_wrote(sdk):
@@ -964,3 +995,313 @@ def test_the_unchanged_arm_does_not_claim_a_prior_it_never_wrote(sdk):
     assert again["prior"] is None, (
         "the unchanged arm reported a prior it did not write"
     )
+
+
+# ── 8. round 3: the pins round 3 measured as MISSING (five surviving
+#      mutations + the AST pin's own blind spot) ─────────────────────────
+
+def test_dwell_reads_the_NEWEST_window_not_the_oldest(sdk):
+    """`_dwell_satisfied` must look at the newest `dwell` readings.
+
+    Every earlier dwell test used a list no longer than `dwell`, so newest-vs-oldest
+    was indistinguishable and flipping the slice to `readings[-dwell:]` survived the
+    whole suite. Here the page is LONGER than the dwell: an old consistent run and a
+    recent run that disagrees, which only the newest-first reading finds.
+    """
+    target = Target(comparator="<=", threshold=10.0, dwell=2)
+    # newest first: 12, 11 (disagree) then an older 9, 9 run (agree)
+    readings = [_r(12.0), _r(11.0), _r(9.0), _r(9.0)]
+    j = compare(readings, target, previous_state="met")
+    assert j.dwell_satisfied is True   # the two NEWEST agree on "unmet"
+    assert j.state == "unmet"
+    # the mirror: recent agreement, older disagreement
+    readings2 = [_r(9.0), _r(9.5), _r(12.0), _r(12.0)]
+    j2 = compare(readings2, target, previous_state="unmet")
+    assert j2.dwell_satisfied is True
+    assert j2.state == "met"
+
+
+def test_judge_scopes_the_previous_state_by_target(sdk):
+    """One target's state must not become another target's dwell baseline.
+
+    Mutation that survived before: dropping `target_id` from `judge`'s
+    `latest_judgement` call. Only the goal scoping was pinned.
+    """
+    indicator, target_node, goal = _world(sdk)
+    a = Target.from_node(target_node)
+    b_node = sdk.create_object("CI >= 30m", objectKind="target",
+                               comparator=">=", threshold=30.0, dwell=1)
+    b = Target.from_node(b_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    ra = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                          target=a)
+    assert ra["judged"]["state"] == "met"
+    # target B has never been judged; A's `met` must NOT be its previous state
+    judged_b = judge(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                     target=b)
+    assert judged_b.previous_state == "unknown"
+    judged_a = judge(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                     target=a)
+    assert judged_a.previous_state == "met"
+
+
+def test_an_invalidated_judgement_is_not_the_current_state(sdk):
+    """`invalidate_point` sets `outdated=true` and does NOT touch `status`.
+
+    So the vocabularies alone are not enough — the legacy flag is the second dead
+    marker (`live._terminal_excluded` ANDs it for exactly this reason). Mutation
+    that survived before: dropping the `coalesce(p.outdated, false) = false`
+    conjunct. No test ever set `outdated`.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    met = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                           target=target)
+    correction = sdk.create_point("statement", "correction", claim_class="derived")
+    sdk.invalidate_point(met["point_id"], corrected_by_id=correction["id"])
+    node = sdk.get_entity(met["point_id"])
+    assert node.get("outdated") is True and node.get("status") == "live", (
+        "this pin depends on invalidate_point leaving `status` alone"
+    )
+    assert latest_judgement(sdk, goal_id=goal["id"]) is None
+
+
+def test_the_minted_claim_records_the_bar_and_the_reading_it_was_judged_on(sdk):
+    """The claim has to say WHAT it was judged against and ON WHAT.
+
+    A superseded judgement is read by a human asking "why did the goal flip?";
+    dropping `readingId`/`readingValue` or `comparator`/`threshold`/`dwell` from
+    the minted point survived the whole suite before this pin.
+    """
+    indicator, target_node, goal = _world(sdk, comparator="<=", threshold=10.0,
+                                          dwell=2)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    reading = _reading(sdk, indicator, 9.5, at="2026-11-11T11:00:00Z")
+    res = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                           target=target, subject="CI is fast")
+    assert res["written"] is True and res["judged"]["state"] == "met"
+    node = sdk.get_entity(res["point_id"])
+    assert node["comparator"] == "<="
+    assert node["threshold"] == 10.0
+    assert node["dwell"] == 2
+    assert node["readingId"] == reading["id"]
+    assert node["readingValue"] == 9.5
+    assert node["goalId"] == goal["id"]
+    assert node["indicatorId"] == indicator["id"]
+    assert node["targetId"] == target_node["id"]
+    assert node["judgementState"] == "met"
+    assert node["evaluatedAt"]
+
+
+def test_the_minted_claim_honours_an_explicit_evaluation_instant(sdk):
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    res = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                           target=target)
+    explicit = record_judgement(
+        sdk, goal_id=goal["id"],
+        judgement=Judgement(state="unmet", reason="state-flipped", target=target,
+                            reading=Reading(12.0, 12.0, "r-explicit",
+                                            started_at="2026-11-11T11:00:00Z"),
+                            comparison=False, dwell_satisfied=True, flipped=True,
+                            previous_state="met"),
+        target=target, indicator_id=indicator["id"],
+        previous_point_id=res["point_id"],
+        evaluated_at="2030-01-01T00:00:00+00:00",
+    )
+    assert sdk.get_entity(explicit["point_id"])["evaluatedAt"] == \
+        "2030-01-01T00:00:00+00:00"
+
+
+def test_a_non_finite_value_is_unknown_and_never_bricks_the_writer(sdk):
+    """`nan`/`inf` are not readings.
+
+    MEASURED before the fix: `nan <= 10` is False, so a telemetry gap was judged
+    `unmet` at Beta(1,9) — the gap PUSHED BELIEF DOWN, contradicting this module's
+    own "could not tell is not a failure" rule — and `record_judgement` then wrote
+    `readingValue=nan`, which the store's numeric-domain guard refuses, so EVERY
+    later pass for that indicator raised and no judgement could ever be minted
+    again.
+    """
+    target = Target(comparator="<=", threshold=10.0)
+    for bad in ("nan", float("nan"), "inf", float("-inf"), "Infinity"):
+        assert compare([Reading(None, bad)][:1], target).state == "unknown"
+
+    indicator, target_node, goal = _world(sdk)
+    real = Target.from_node(target_node)
+    sdk.create_event("CI run (nan)", "measurement", value="nan", unit="minutes",
+                     startedAt="2026-11-11T10:00:00Z", aboutObject=indicator["id"])
+    res = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                           target=real)
+    assert res["written"] is False
+    assert res["judged"]["state"] == "unknown"
+    # and a real reading afterwards still works (the writer is not bricked)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T11:00:00Z")
+    ok = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                          target=real)
+    assert ok["written"] is True and ok["judged"]["state"] == "met"
+
+
+def test_from_node_refuses_a_fractional_dwell_instead_of_truncating_it(sdk):
+    """`int(1.9)` is 1 — a declared 1.9-reading window judged against a smaller bar.
+
+    The same "declared value silently coalesced" failure round 1 fixed for `0`,
+    arriving through the truncating branch. A string spelling still round-trips.
+    """
+    base = {"comparator": "<=", "threshold": 10.0}
+    with pytest.raises(ValueError):
+        Target.from_node(dict(base, dwell=1.9))
+    assert Target.from_node(dict(base, dwell="2")).dwell == 2
+    assert Target.from_node(dict(base, dwell=2.0)).dwell == 2
+
+
+def test_a_missing_goal_is_refused_before_anything_is_written(sdk):
+    """A stale/typo'd `goal_id` must not leave a live derived claim behind.
+
+    MEASURED before the fix: the only step that refused it was `create_operator`,
+    which runs after the point and its baseline — leaving a live
+    `claimClass: 'derived'` Point whose `goalId` names nothing, with no arrow.
+    """
+    indicator, target_node, _goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    with pytest.raises(ValueError) as exc:
+        judge_and_record(sdk, goal_id="goal-does-not-exist",
+                         indicator_id=indicator["id"], target=target)
+    assert "does not exist" in str(exc.value)
+    assert _judgement_points(sdk, "goal-does-not-exist") == []
+
+
+def test_the_unchanged_arm_believes_the_stored_claim_not_the_caller(sdk):
+    """The stored claim is the authority on what the current state is.
+
+    MEASURED before the fix: a live claim saying `unmet` + a Judgement whose
+    `previous_state` said `met` returned `written: False` and overwrote the cache
+    to `met` — a state change that was never recorded, and the live claim kept
+    asserting the opposite.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 12.0, at="2026-11-11T10:00:00Z")
+    unmet = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                             target=target)
+    assert unmet["judged"]["state"] == "unmet"
+    lying = Judgement(state="met", reason="state-flipped", target=target,
+                      reading=Reading(6.0, 6.0, "r-lie",
+                                      started_at="2026-11-11T11:00:00Z"),
+                      comparison=True, dwell_satisfied=True, flipped=False,
+                      previous_state="met")   # the caller's word is wrong
+    res = record_judgement(sdk, goal_id=goal["id"], judgement=lying, target=target,
+                           indicator_id=indicator["id"],
+                           previous_point_id=unmet["point_id"])
+    assert res["written"] is True, (
+        "an unchanged arm was taken on the caller's word while the stored claim "
+        "asserted the opposite"
+    )
+    assert sdk.get_entity(unmet["point_id"])["status"] == "superseded"
+    assert latest_judgement(sdk, goal_id=goal["id"])["judgementState"] == "met"
+
+
+def test_the_ast_pin_also_sees_a_constant_indirection():
+    """The `goalState` read pin must not be defeated by a module constant.
+
+    `_CACHE_KEY = "goalState"; node.get(_CACHE_KEY)` was invisible to a
+    literal-only walk. This asserts the pin's own coverage: no module-level string
+    constant may equal "goalState", and the module's Cypher must not mention it.
+    """
+    import ast
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent / "tortoise"
+           / "goal_judgement.py")
+    tree = ast.parse(src.read_text())
+    constants = set()
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            constants.add(node.value.value)
+        if (isinstance(node, ast.AnnAssign)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            constants.add(node.value.value)
+    assert "goalState" not in constants, (
+        "a module-level constant aliases goalState — the AST read pin can be "
+        "defeated through it"
+    )
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and "goalState" in node.value and "MATCH" in node.value):
+            raise AssertionError("a Cypher statement mentions goalState")
+
+
+def test_the_unknown_arm_never_echoes_a_superseded_predecessor(sdk):
+    """`written: False` must not hand back a DEAD claim's id as "the judgement".
+
+    A caller-supplied `previous_point_id` is unvalidated input; on the `unknown`
+    arm it must not be echoed, or a caller reading `point_id` (the documented
+    "the judgement's point") gets a superseded reference that looks current.
+    Mutation this pin exists for: restoring `previous_point_id or (...)` at the
+    `unknown` return left all 62 tests green.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    met = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                          target=target)
+    _reading(sdk, indicator, 12.0, at="2026-11-11T11:00:00Z")
+    unmet = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                             target=target)
+    assert unmet["superseded_id"] == met["point_id"]
+    assert sdk.get_entity(met["point_id"])["status"] == "superseded"
+
+    unknown = Judgement(state="unknown", reason="reading-unavailable",
+                        target=target, previous_state="unmet")
+    res = record_judgement(sdk, goal_id=goal["id"], judgement=unknown,
+                           target=target, indicator_id=indicator["id"],
+                           previous_point_id=met["point_id"])   # a DEAD claim
+    assert res["written"] is False
+    assert res["point_id"] != met["point_id"], (
+        "the unknown arm echoed a superseded predecessor as the current point"
+    )
+    assert res["point_id"] == unmet["point_id"]
+
+
+def test_a_double_counted_arrow_is_reported_not_hidden(sdk):
+    """`extraOperators` in the write result must reflect reality.
+
+    `_ensure_judgement_edge` can only ensure "at least one" arrow (there is no
+    operator-delete API), so a second IMPL into the same goal — from another
+    writer, a restored graph, or a transferred arrow — has to be VISIBLE rather
+    than collapsed to a healthy-looking empty list. Mutation this pin exists for:
+    `"extraOperators": []` left all 62 tests green, and `extraOperators` was
+    asserted nowhere.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    res = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                           target=target)
+    assert res["extraOperators"] == []
+
+    # another writer adds a second arrow into the same goal
+    dupe = sdk.create_operator("IMPL", res["point_id"], [goal["id"]],
+                               direction="->")
+    assert _extra_operators(sdk, res["point_id"], goal["id"],
+                            res["operator_id"]) == [dupe["id"]]
+    # and the helper still reuses rather than doubling again
+    assert _ensure_judgement_edge(sdk, res["point_id"], goal["id"]) == \
+        res["operator_id"]
+    assert _impl_into(sdk, res["point_id"], goal["id"]) == 2
+
+    # the UNCHANGED arm is the one that meets such a graph, so IT must report the
+    # double-count too (mutation: `"extraOperators": []` survived while only the
+    # written arm was pinned)
+    again = judge_and_record(sdk, goal_id=goal["id"],
+                             indicator_id=indicator["id"], target=target)
+    assert again["written"] is False
+    assert set([again["operator_id"], *again["extraOperators"]]) == {
+        res["operator_id"], dupe["id"]}
+    assert again["extraOperators"], "a double-count was collapsed to []"
