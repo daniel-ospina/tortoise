@@ -31,7 +31,7 @@ covering more than it does). PINNED here: the vocabulary (`ep_state`,
 `navigation.confidenceMin`, `sdk.approve`'s `confidence_delta`, and the
 journal records both belief-clearing writers emit. Each is pinned for the
 whole rule, not one shape: absent / half pair / zero-total pair / mirror-only /
-unreadable-spelling / measured.
+unreadable-operand / out-of-band-mirror / measured.
 
 Deliberately OUT of this file's scope: `battery/arms/a4_tortoise.py` (an eval
 arm, not a product surface) and `sdk.get_confidence` /
@@ -602,9 +602,10 @@ def test_a_mirror_outside_the_probability_band_is_not_a_belief(sdk):
     """Cycle 24 P1: the mirror's BAND was unenforced, so a legacy string the two
     coercions disagree about ranked FIRST.
 
-    `toFloat` parses the hex-float spelling (`"0x1p4"` → 16.0) and Python's pinned
-    grammar refuses it, so `ep_has_belief_cypher` said present while every Python
-    presence surface said absent — for ONE row. Measured at `929e18c512`, the
+    `toFloat` parses the hex-float spelling (`"0x1p4"` → 16.0); at the head this
+    test was written for, the Python grammar refused it, so
+    `ep_has_belief_cypher` said present while every Python presence surface said
+    absent — for ONE row. Measured at `929e18c512`, the
     graph tier served `confidence: 16.0 / ep_state: "baseline"`,
     `graph_boost = 0.5·16 + 0.5·0 = 8.0` (outside the module's own documented
     `[0, 1]` boost invariant), and ranked the claim FIRST — above a genuinely
@@ -1000,11 +1001,23 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
 
     Both rules are now the shared predicate, so the agreement is structural —
     but "structural" is a claim, and this is the assertion that keeps it true
-    across all SEVEN stored shapes if either side is edited again. The seventh
-    (`unreadable spelling`) is cycle 24's: a hex-float mirror is a belief to the
-    store and no number to this process, so the VALUE is null while the state is
-    true, and `confidence_source` names that — a null is never collapsed to
-    "absent" beside a non-absent state.
+    across all EIGHT stored shapes if either side is edited again.
+
+    Two of the eight are the readability boundary, and they are DIFFERENT
+    shapes with different honest answers:
+
+    * an OPERAND written as a hex-float literal (`posterior_alpha = '0x1p4'`) was
+      the `"unreadable"` shape until cycle 26 taught the Python twin to read the
+      same spelling (`float.fromhex`) — the two coercions now agree (16.0) and
+      the row reads `measured / 16/17` with `confidence_source: "posterior"` on
+      every surface, which is what this test now asserts;
+    * a MIRROR written the same way (`n.confidence = '0x1p4'`) is not a
+      probability, so the served-belief band rejects it on BOTH twins and the
+      row is `absent`/`absent`.
+
+    Collapsing those two into one shape is how the token lost its only test
+    when the band landed (cycle 25 review): the fixture stayed the mirror, so it
+    asserted `absent` and nothing exercised `"unreadable"` any more.
     """
     proj = sdk._get_proj()
 
@@ -1023,15 +1036,22 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
     measured = _symmetric_point(sdk)  # α = β = 2.0, a real measured 0.5
     baseline = _point("a declared baseline")
     sdk.set_point_baseline(baseline, 18.0, 2.0)
-    # The seventh shape, and the one that used to contradict itself: FalkorDB's
-    # `toFloatOrNull` reads a hex-float literal (16.0) so the SHARED PRESENCE
-    # PREDICATE says a belief exists, while the pinned Python grammar
-    # (`_FLOAT_LITERAL`) refuses it, so no VALUE is available. Presence is
-    # `ep_has_belief_cypher`, hence `ep_state: "baseline"`; the value is null.
-    unreadable = _point("a hex-float mirror", "n.confidence = '0x1p4'")
+    # The readability boundary, split into its TWO shapes (they are not the
+    # same row and they do not have the same answer — see the docstring):
+    #
+    # (a) OPERAND: `toFloatOrNull('0x1p4')` is 16.0, so the Cypher presence
+    #     predicate calls this claim measured — and since cycle 26 Python reads
+    #     the same literal with `float.fromhex`, so its value agrees instead of
+    #     being `"unreadable"`. Asserted as agreement below.
+    hex_operand = _point("a hex-float operand",
+                        "n.posterior_alpha = '0x1p4', n.posterior_beta = '1'")
+    # (b) MIRROR: 16.0 is not a probability, so the served-belief band rejects
+    #     it on both twins — the row is ABSENT, not "unreadable".
+    out_of_band_mirror = _point("a hex-float mirror",
+                                "n.confidence = '0x1p4'")
 
     ids = [absent, half_pair, zero_total, mirror_only, measured, baseline,
-           unreadable]
+           hex_operand, out_of_band_mirror]
     recs = {r["id"]: r["recall_ranking"] for r in
             StateRanker(projection=proj).rerank(
                 [{"id": p, "scores": {"rrf": 1.0}} for p in ids])}
@@ -1081,26 +1101,35 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
         assert recs[pid]["ep_state"] == EP_STATE_BASELINE, recs[pid]
         assert recs[pid]["confidence_source"] != EP_STATE_ABSENT, recs[pid]
 
-    # The seventh shape, named so it cannot be dropped again: the store reads
-    # the mirror (`toFloatOrNull` → 16.0, i.e. PRESENT) and this process does
-    # not (`numeric_operand` → None, the pinned grammar). Assert BOTH halves,
-    # so the fixture cannot pass by failing to be the shape it claims — a
-    # fixture that stopped being unreadable would otherwise assert agreement
-    # between two identical absent rows.
-    # ⛔ The seventh shape is the BAND, not an unreadable spelling: cycle 26 made
-    # Python read hex floats too (`float.fromhex`), so the two coercions agree on
-    # the value (16.0) and the only reason this row is not a belief is that 16.0
-    # is outside `[0, 1]`. (Before that, the same row read `baseline` in Cypher
-    # and `absent` in Python, which is why `UNREADABLE_CONFIDENCE_SOURCE` still
-    # exists as a defensive label — from STORED data it is now unreachable.)
+    # (a) The OPERAND shape: a hex-float pair. This USED to be the reachable
+    # "unreadable" shape — the store reads `toFloatOrNull('0x1p4')` (16.0) and the
+    # pinned Python grammar refused hex, so the `ep` block said `absent` beside the
+    # rankers' `measured / 0.94`, and `analyze` printed and RANKED the claim. Cycle
+    # 26 closed it at the source (`float.fromhex` is the same parser for the same
+    # spelling), so the fixture now asserts AGREEMENT on both halves: the two
+    # coercions read the literal, and every surface reports one state and one
+    # value. `UNREADABLE_CONFIDENCE_SOURCE` therefore names a shape stored data can
+    # no longer produce; it stays as a defensive label, and this assertion is what
+    # says so out loud.
     assert _se.numeric_operand("0x1p4") == 16.0, (
-        "the Python grammar stopped reading hex floats — this fixture is no "
-        "longer the shape it claims")
+        "the Python grammar stopped reading a spelling the store reads — the "
+        "twins split again, and presence is then decided by whichever side is "
+        "asked")
     assert proj.g.query(
         "RETURN toFloatOrNull('0x1p4') AS v").result_set == [[16.0]], (
-        "the store no longer reads the hex-float spelling — the fixture is no "
-        "longer the unreadable shape")
-    # ⛔ Cycle 24's BAND resolves the seventh shape rather than reporting it: a
+        "the store no longer reads the hex-float spelling — this fixture is no "
+        "longer the shape it claims")
+    for name, row in (("recall_ranking", recs[hex_operand]),
+                      ("gaps_ranking", gaps[hex_operand])):
+        assert row["ep_state"] == EP_STATE_MEASURED, (name, row)
+        assert row["confidence"] == pytest.approx(16.0 / 17.0, abs=1e-5), (
+            name, row)
+        assert row["confidence_source"] == "posterior", (name, row)
+    eps = annotate_ep_batch(proj.g, [hex_operand])[hex_operand]
+    assert eps.ep_state == EP_STATE_MEASURED, eps
+    assert eps.confidence_mean == pytest.approx(16.0 / 17.0, abs=1e-4), eps
+
+    # (b) The MIRROR shape: the band resolves it rather than reporting it. A
     # served belief is a probability, so `16.0` is not a belief on EITHER twin —
     # `belief_mirror_cypher` answers null and `ep_has_belief_cypher` is false,
     # which is what the Python side always said. (Before the band this row was
@@ -1111,12 +1140,13 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
     assert _se.belief_mirror("0x1p4") is None, (
         "the band admits the hex-float spelling — the fixture is no longer the "
         "out-of-band shape")
-    for name, row in (("recall_ranking", recs[unreadable]),
-                      ("gaps_ranking", gaps[unreadable])):
+    for name, row in (("recall_ranking", recs[out_of_band_mirror]),
+                      ("gaps_ranking", gaps[out_of_band_mirror])):
         assert row["ep_state"] == EP_STATE_ABSENT, (name, row)
         assert row["confidence"] is None, (name, row)
         assert row["confidence_source"] == EP_STATE_ABSENT, (name, row)
-    assert recs[unreadable]["belief_informed_order"] is False, recs[unreadable]
+    assert recs[out_of_band_mirror]["belief_informed_order"] is False, (
+        recs[out_of_band_mirror])
 
 
 def test_a_draft_withholds_its_belief_without_denying_it(sdk):
@@ -3198,7 +3228,9 @@ def test_the_twins_parse_the_same_string_language(sdk):
     * ``toFloat("Infinity")`` is ``inf`` → `graph_ranking` read maximum
       certainty 1.0 for a claim with no readable belief (`0.0` on
       `recall_ranking`, `absent` in the `ep` block — three answers);
-    * ``toFloat("0x1p4")`` is 16.0 while Python rejects hex floats;
+    * ``toFloat("0x1p4")`` is 16.0 while Python rejected hex floats (closed in
+      cycle 26 — `float.fromhex` is the same parser for the same spelling, so
+      both twins read it and this bullet is history, not a live divergence);
     * ``float("0.7 ")`` is 0.7 while ``toFloat("0.7 ")`` is null — so a value
       with a trailing space was `measured / 0.7` in the `ep` block and `absent`
       in every ranker beside it.
