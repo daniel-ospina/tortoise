@@ -1141,7 +1141,9 @@ def test_run_evaluation_forwards_the_arm_and_cap_to_the_fingerprint():
     # ``_fingerprint_diffs`` sees no diff) while this test still passes. Pin
     # the VALUES: each keyword must carry the run's resolved knob, and the
     # window/cap must be gated on the arm so an arm-OFF fingerprint stays
-    # byte-identical to the pre-feature one.
+    # identical to one written after the always-present arm bool but before
+    # this key (the arm bool itself is what refuses a pre-feature checkpoint,
+    # in the safe direction).
     assert len(calls) == 1, (
         f"run_evaluation builds {len(calls)} fingerprints — this test pins "
         f"the value forwarded by the one that stamps the run's resolved "

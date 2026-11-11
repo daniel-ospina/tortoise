@@ -1941,9 +1941,13 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # one-shot reader's assembly budget (forwarded to
                        # `retrieve_for_question` as `max_context_tokens`) and
                        # every run records it in `r1_knobs["context_token_cap"]`.
-                       # Absent is what keeps an arm-OFF fingerprint
-                       # byte-identical to the pre-feature one (#2570 review
-                       # round 7, finding 1).
+                       # Absent keeps an arm-OFF fingerprint identical to one
+                       # written after the always-present arm bool above but
+                       # BEFORE this key existed. It is NOT what makes a
+                       # pre-feature checkpoint resumable: the arm bool is
+                       # always present, so a pre-feature checkpoint refuses
+                       # on resume (the safe direction). (#2570 review round 7
+                       # finding 1, round 8 finding 1.)
                        window_reconciliation_max_context_tokens: int | None = (
                            None),
                        # C5 (#2521, #2513): the aggregative-intent coverage-
