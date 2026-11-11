@@ -216,7 +216,15 @@ CITATION_UNCOLONED_SHAPE_RE = re.compile(
     # colon, and it must be refused: without the optional range this arm left
     # `tortoise/nope_module.py 16-18` CLEAN while the previous head refused it — a
     # regression from red to green in the one class the arm exists for (measured).
-    r"\s+(?P<num>\d{1,7})(?:\s*[-–]\s*\d{1,7})?(?![\w.>&|/]|-\w)"
+    #
+    # The DELIMITER is whitespace OR a stray `|`. `|` was refused before the narrowing
+    # and was the one delimiter the narrowing neither kept nor named in §8 — so
+    # `path|999999` went from refused to CLEAN while §8's list presented itself as
+    # complete (found by review, measured). It is safe to refuse on the same terms and
+    # was measured for it: every code span in the 1144 tracked files under `docs/` plus
+    # the 144 other tracked `*.md` carries ZERO `path|LINE` spans, so no prose here can
+    # red on it (the single apparent match was a PNG read as text).
+    r"(?:\s+|\s*\|\s*)(?P<num>\d{1,7})(?:\s*[-–]\s*\d{1,7})?(?![\w.>&|/]|-\w)"
 )
 
 #: `path#L16` — the **GitHub permalink** spelling, and the ONE delimiter the sweep
@@ -847,7 +855,16 @@ def check_citation_shapes(text: str) -> list[str]:
         # The GitHub permalink spelling FIRST: it is the likeliest real-world form and
         # the one shape nothing else in this module could see (measured, #11952 P1).
         permalink = CITATION_HASH_LINE_RE.search(body)
-        if permalink and not COMMAND_RE.match(match.group(0)):
+        if (
+            permalink
+            and not COMMAND_RE.match(match.group(0))
+            # A `~`-rooted path is §8's remaining carve-out: the resolver recognises it
+            # and COUNTS it (`exempted`) rather than resolving it, because it is a dated
+            # reading of something outside this repository. Refusing its permalink
+            # spelling red the required `docs` job over a citation §8 declares exempt
+            # (found by review, measured) — so the carve-out covers both spellings.
+            and not permalink.group("path").startswith("~")
+        ):
             problems.append(
                 f"`{match.group(0)[1:-1]}` is not a recognised citation — it carries "
                 f"{permalink.group(0)!r}, the GitHub permalink spelling, which the "

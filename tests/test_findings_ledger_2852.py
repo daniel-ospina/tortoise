@@ -1122,7 +1122,8 @@ def test_the_s8_citation_carve_outs_stay_skippable(tmp_path, monkeypatch):
     guard on the boundary in BOTH directions: the carve-outs stay skippable, and the two
     spellings the arm DOES measure (`path N` and `path START-END`) are refused.
     """
-    refused = ("tortoise/nope_module.py 16-18", "tortoise/nope_module.py 16")
+    refused = ("tortoise/nope_module.py 16-18", "tortoise/nope_module.py 16",
+               "tortoise/nope_module.py|16")
     for spelling in refused:
         with monkeypatch.context() as patch:
             _mutated(
@@ -1146,6 +1147,11 @@ def test_the_s8_citation_carve_outs_stay_skippable(tmp_path, monkeypatch):
         "Makefile 12",
         "daniel-ospina/tortoise#9363",
         "index.html 200",
+        # A `~`-rooted path is §8's remaining carve-out and it covers BOTH spellings —
+        # the resolver counts `~`-rooted `path:line` readings as exempt, and the
+        # permalink arm defers to it. Refusing the permalink form reded the required
+        # `docs` job over a §5 citation §8 declares exempt (measured, found by review).
+        "~/.swarm/x.md#L999999",
     ):
         with monkeypatch.context() as patch:
             _mutated(
