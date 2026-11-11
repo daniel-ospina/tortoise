@@ -10,6 +10,7 @@ import math
 import os
 import re
 import struct
+from decimal import Decimal
 from fractions import Fraction
 import threading
 import time
@@ -581,23 +582,38 @@ _EXACT_FRACTION_MAX_EXP = 4096
 def _exact_literal_fraction(raw: str):
     """The literal's EXACT value as a `Fraction`, or None (#11702).
 
-    `Fraction("1.0000000596046448")` reads a DECIMAL literal exactly, which is
-    what the midpoint rule needs. `Fraction` cannot read a HEX float, though —
-    it raises `ValueError` — so a hex literal used to fall through to the
-    DOUBLE's rounding, which is the SAME double rounding this module removes one
-    layer up. `float.fromhex` keeps 53 bits, so a hex literal whose exact value
-    has more rounds ONTO the float32 midpoint and the tie-break then followed
-    the wrong side: measured, `"0x1.0000010000000001p0"` is 1 + 2⁻²⁴ + 2⁻⁶⁴, the
-    store serves `1.000000119…` (outside the [0, 1] band ⇒ ABSENT) while Python
-    read `1.0` (present at MAXIMUM certainty) — a presence split at the band
-    edge, from a shape stored data can hold.
+    `Fraction(Decimal("1.0000000596046448"))` reads a DECIMAL literal exactly,
+    which is what the midpoint rule needs — and it does so for a literal of ANY
+    length: `Fraction("<4301 digits>")` raises `ValueError` because CPython caps
+    int↔str conversion (`sys.get_int_max_str_digits`), while `Decimal` parses the
+    digits and `as_integer_ratio` never converts them back to a string. That
+    limit is reachable from a stored operand (a `repr()` padded with trailing
+    fractional zeros keeps its value and its spelling), and the old fallback then
+    DISCARDED the literal and answered from the double — the rounding this
+    function exists to remove, in both directions (measured: the 1 + 2⁻²⁴
+    midpoint spelled with 4,400 trailing zeros served `1.0`, maximum certainty,
+    beside the store's `absent`).
+
+    Hex literals are reconstructed through `int(digits, 16)`, which is EXEMPT
+    from that cap (it applies to non-power-of-two bases only), and bounded by
+    `_EXACT_FRACTION_MAX_EXP` so no literal can ask for `Fraction(2) ** 10**9`.
+
+    `Fraction` cannot read a HEX float at all — it raises `ValueError` — so a hex
+    literal used to fall through to the DOUBLE's rounding, which is the SAME
+    double rounding this module removes one layer up. `float.fromhex` keeps 53
+    bits, so a hex literal whose exact value has more rounds ONTO the float32
+    midpoint and the tie-break then followed the wrong side: measured,
+    `"0x1.0000010000000001p0"` is 1 + 2⁻²⁴ + 2⁻⁶⁴, the store serves
+    `1.000000119…` (outside the [0, 1] band ⇒ ABSENT) while Python read `1.0`
+    (present at MAXIMUM certainty) — a presence split at the band edge, from a
+    shape stored data can hold.
     """
     text = raw.strip()
     match = _HEX_LITERAL_PARTS.match(text)
     if match is None:
         try:
-            return Fraction(text)
-        except (ValueError, ZeroDivisionError):
+            return Fraction(Decimal(text))
+        except (ValueError, ZeroDivisionError, ArithmeticError):
             return None
     digits = (match.group("int") or "") + (match.group("frac") or "")
     if not digits:
@@ -654,8 +670,14 @@ def _f32_from_literal(raw: str, val: float):
         if not math.isfinite(val) or abs(val) > _FLOAT32_OVERFLOW_CEILING:
             return None
         exact = _exact_literal_fraction(raw)
-        if exact is None:                   # pragma: no cover — see the guard
-            return rounded
+        if exact is None:                   # pragma: no cover — see the docstring
+            # Unreachable for an admitted literal: the decimal path is length-
+            # unlimited (`Decimal`) and the hex path is bounded but only returns
+            # None for an exponent whose double is 0 or inf — and neither can be
+            # in the overflow band this branch guards. A fail-safe, not a live
+            # branch: the old answer was `rounded` (the double's rounding),
+            # which is what the literal is consulted to avoid.
+            return None
         if abs(exact) < _FLOAT32_OVERFLOW_MIDPOINT:
             return -_FLOAT32_MAX if exact < 0 else _FLOAT32_MAX
         return None
@@ -666,8 +688,11 @@ def _f32_from_literal(raw: str, val: float):
     if abs(val - rounded) != abs(neighbour - val):
         return rounded                      # not a midpoint: already correct
     exact = _exact_literal_fraction(raw)
-    if exact is None:                       # pragma: no cover — grammar-pinned
-        return rounded
+    if exact is None:                       # pragma: no cover — see the docstring
+        # Same fail-safe as above, and for the same reason: an unreconstructable
+        # literal must not be answered from the double, which is the rounding
+        # this branch exists to correct.
+        return None
     # Halfway exactly → the LITERAL decides, and the SIDE is not a detail: the
     # two candidates are `rounded` and its neighbour on the side `val` lies, and
     # `_float32`'s tie-break can put `rounded` on EITHER one. A literal that is
@@ -766,14 +791,16 @@ def _string_operand(raw: str, val: float):
     # only way to tell an EXACT subnormal (`'0x1p-149'`) from a `repr()` of one.
     if val != 0.0 and abs(val) < _FLOAT32_MIN_NORMAL * 2:
         exact = _exact_literal_fraction(raw)
-        if exact is None:                       # pragma: no cover — grammar-pinned
-            # A spelling the exact parse cannot reconstruct: fall back to the
-            # FLOOR on the double. Deliberately not `abs(val) < min_normal`,
-            # which would refuse the whole read band this function exists to
-            # serve — the mirrored split. Unreachable for both grammars today
-            # (measured: 0/16,000 guard-zone literals), so this is a fail-safe
+        if exact is None:                       # pragma: no cover — see the docstring
+            # A spelling the exact parse cannot reconstruct. Refused, not
+            # answered from the double: `abs(val) < _FLOAT32_MIN_NORMAL` would
+            # refuse the whole read band this function exists to serve (the
+            # mirrored split), and `rounded` would serve one the store may null.
+            # Unreachable for both grammars — the decimal path is length-unlimited
+            # and the hex path's only None is an exponent whose double is 0/inf,
+            # which `val != 0.0` above already excluded — so this is a fail-safe
             # for a future widening, not a live branch.
-            return None if abs(val) < _F32_UNDERFLOW_READ_FLOOR else rounded
+            return None
         if (abs(exact) < _F32_UNDERFLOW_READ_FLOOR
                 and Fraction(rounded) != exact):
             # INEXACT below the store's read floor (`strtof` sets ERANGE, so the
