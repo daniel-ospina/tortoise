@@ -542,6 +542,62 @@ def test_unverifiable_post_restore_read_is_a_gap_not_a_success(
         f"intact, not observed gone) rather than shown a success: {msgs}")
 
 
+def test_a_different_live_marker_is_reported_as_a_conflict(
+        tmp_path, caplog, monkeypatch):
+    """A live marker that DIFFERS is a CONFLICT — never an asserted loss.
+
+    FAILING VALUE: `pack_selection_missing` is true for both "no marker" and "a
+    DIFFERENT marker", so a single absence message claims the graph "reads as
+    UNCONFIGURED, its `revision` is 0, a pack the admin REMOVED is back" and
+    tells the operator to RE-PIN — over a graph that IS configured and whose
+    marker may be NEWER than the captured one. Re-pinning on that advice
+    overwrites a decision the capture never saw. The conflict arm exists to say
+    so, and nothing pinned it: deleting it leaves the suite green and restores
+    the absence wording.
+
+    REACHABLE: `set_graph_packs` serialises only per worker, so a concurrent
+    write can land between the wipe and the restore; the `MERGE` then matches
+    ITS node and our `$props` are skipped — emulated here by pointing the
+    restore leg at different props, which is exactly what that race leaves
+    behind.
+    """
+    sdk, events = _mk_sdk(tmp_path)
+    _write_journal(events)
+    _configure(sdk, [{"namespace": "dev", "status": "active"}])
+    proj = _proj(sdk)
+    real_restore = proj._restore_write
+
+    def _restore_a_different_marker(cypher, *, params=None, reason):
+        # The concurrent writer's marker: same label, DIFFERENT properties.
+        # Scoped to THIS leg — the other legs share `_restore_write` and must
+        # keep their own props (substituting them breaks the config restore and
+        # makes an unrelated #2814 "TRUE POSITIVE" the thing under test).
+        if "PackSelection" in cypher:
+            params = {"props": {"revision": 99, "updated_by": "concurrent"}}
+        return real_restore(cypher, params=params, reason=reason)
+
+    monkeypatch.setattr(proj, "_restore_write", _restore_a_different_marker)
+
+    with caplog.at_level(logging.ERROR, logger="tortoise.projection"):
+        counts = proj.rebuild_all(str(events), confirm_destructive=True)
+
+    assert counts["pack_selection_conflict"] is True, (
+        "the conflict shape must be machine-visible, not inferred from "
+        f"`expected and not restored`: {counts}")
+    assert counts["pack_selection_restored"] == 0, counts
+    assert counts["pack_selection_gap"] == 1, counts
+    assert counts["pack_selection_verified"] is True, (
+        "the read SUCCEEDED — this is a mismatch, not an unverified read: "
+        f"{counts}")
+
+    msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("reported CONFLICT, not a loss" in m for m in msgs), (
+        f"a DIFFERENT live marker must be reported as a conflict: {msgs}")
+    assert not any("TRUE POSITIVE" in m and ":PackSelection" in m for m in msgs), (
+        "the absence consequence must NOT be asserted over a graph that HAS a "
+        f"marker: {msgs}")
+
+
 def test_pack_selection_section_and_validator_are_wired():
     """The section cannot silently fall out of the sidecar plumbing.
 

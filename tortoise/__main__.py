@@ -266,6 +266,22 @@ def _cmd_rebuild(args):
                 "approved pack set before trusting it (#9752).",
                 file=sys.stderr,
             )
+        elif counts.get("pack_selection_conflict"):
+            # A DIFFERENT marker is present: the graph IS configured and its
+            # marker may be NEWER than the captured one, so the absence wording
+            # below (and its "Re-set the graph's packs deliberately" remedy)
+            # would assert a loss nobody observed and overwrite that newer
+            # decision (review round 3, the same collapse the rebuild's own
+            # ERROR log now separates).
+            print(
+                "PackSelection: a DIFFERENT pack-set marker is present in the "
+                "rebuilt graph — the captured marker was NOT applied, because "
+                "a concurrent pack-set write landed between the wipe and the "
+                "restore. This is a reported CONFLICT, not a loss: the graph "
+                "IS configured and may hold a NEWER pack set. Check which set "
+                "is intended before re-pinning anything (#9752).",
+                file=sys.stderr,
+            )
         elif pack_selection_expected and not counts.get(
                 "pack_selection_restored"):
             print(

@@ -89,6 +89,41 @@ def _count_source_events(source_db: str) -> int:
     return count if count is not None else 0
 
 
+def _pack_selection_shape(counts: dict) -> tuple[str, str]:
+    """Name WHICH `:PackSelection` shape a non-zero gap is, and what it means.
+
+    A non-zero `pack_selection_gap` is reported for four different states, and
+    only ONE of them is an observed loss. Reporting them all as "reads as
+    UNCONFIGURED, a removed pack is re-admitted" asserts a loss nobody
+    observed — and on the CONFLICT shape carries a re-pin remedy that would
+    overwrite a NEWER live decision (review round 2 fixed that inside the
+    rebuild's own ERROR log; round 3 found the same collapse here and in
+    `__main__`). Order matters: UNKNOWN (a sidecar that cannot say), then
+    UNVERIFIED (the read never produced a result), then CONFLICT (a DIFFERENT
+    marker is live), then the true restore gap.
+
+    Returns ``(label, consequence)`` for the caller's message.
+    """
+    counts = counts or {}
+    if counts.get("pack_selection_state_unknown"):
+        return ("pre-preservation/UNKNOWN",
+                "the pre-wipe sidecar cannot say whether the marker existed, so "
+                "the graph may read as UNCONFIGURED — this is not an observed "
+                "loss")
+    if counts.get("pack_selection_verified") is False:
+        return ("UNVERIFIED — the post-restore verification COULD NOT RUN",
+                "the marker is not confirmed intact and NOT observed gone, so "
+                "the graph is not reported as having lost it")
+    if counts.get("pack_selection_conflict"):
+        return ("reported CONFLICT, not a loss",
+                "a DIFFERENT marker is present, so the graph IS configured and "
+                "may hold a NEWER pack set — do not re-pin over it without "
+                "checking which is intended")
+    return ("restore gap",
+            "the graph reads as UNCONFIGURED, so a pack an admin REMOVED can be "
+            "re-admitted with its revision reset")
+
+
 def migrate(force: bool = False) -> dict:
     """Run the migration; returns result dict. Raises on abort conditions."""
     tortoise_dir = _tortoise_dir()
@@ -238,15 +273,11 @@ def migrate(force: bool = False) -> dict:
             # distinguish that from a graph that was never configured; only
             # the gap/UNKNOWN pair does.
             if rebuild_counts.get("pack_selection_gap"):
+                _label, _consequence = _pack_selection_shape(rebuild_counts)
                 logger.warning(
                     "rebuild: the migrated graph's :PackSelection pack-set "
-                    "marker is NOT confirmed intact (%s) — the migrated graph "
-                    "reads as UNCONFIGURED, so a pack an admin REMOVED can be "
-                    "re-admitted with its revision reset; see the rebuild "
-                    "ERROR log (#9752)",
-                    "pre-preservation/UNKNOWN"
-                    if rebuild_counts.get("pack_selection_state_unknown")
-                    else "restore gap")
+                    "marker is NOT confirmed intact (%s) — %s; see the rebuild "
+                    "ERROR log (#9752)", _label, _consequence)
             # #5612: the journal read is a SALVAGE read, so a damaged mid-file
             # line no longer raises out of the rebuild — it is skipped and
             # counted. This route then writes the migration MARKER, i.e. it is
@@ -294,7 +325,16 @@ def migrate(force: bool = False) -> dict:
                 # destroyed).
                 "pack_selection_state_unknown": bool(
                     (rebuild_counts or {}).get(
-                        "pack_selection_state_unknown"))}
+                        "pack_selection_state_unknown")),
+                # The other two shape discriminators, carried for the same
+                # reason: without them a caller cannot tell a CONFLICT (the
+                # graph IS configured, possibly with a newer set) or an
+                # UNVERIFIED read from an observed loss — it would print the
+                # absence remedy over a graph that holds a decision.
+                "pack_selection_verified": (
+                    (rebuild_counts or {}).get("pack_selection_verified")),
+                "pack_selection_conflict": bool(
+                    (rebuild_counts or {}).get("pack_selection_conflict"))}
     finally:
         lock.release()
 
@@ -335,15 +375,11 @@ def main(argv: list[str] | None = None) -> int:
             # `rebuild` CLI prints the shapes separately: "could not confirm"
             # must never be reported as an observed loss.
             if result.get("pack_selection_gap"):
+                _label, _consequence = _pack_selection_shape(result)
                 logger.warning(
                     "migrated graph's :PackSelection pack-set marker is NOT "
-                    "confirmed intact (%s) — the graph reads as UNCONFIGURED "
-                    "and a pack an admin REMOVED can be re-admitted with its "
-                    "revision reset. Re-set the graph's packs deliberately "
-                    "(#9752)",
-                    "pre-preservation/UNKNOWN"
-                    if result.get("pack_selection_state_unknown")
-                    else "restore gap")
+                    "confirmed intact (%s) — %s (#9752).",
+                    _label, _consequence)
         elif result.get("status") == "already-migrated":
             logger.warning("already migrated (marker present, %s nodes) — skip",
                            result.get("nodes"))
