@@ -323,6 +323,33 @@ def test_a_declared_kind_absent_from_the_graph_is_LISTED_and_the_verdict_is_not_
     assert other["undeclared"] == {"gadget": 1}
 
 
+def test_an_EXPECTED_set_is_the_corpus_fact_the_census_may_not_infer():
+    """FAILS IF the "a declared kind absent" leg is either invented or unproducible.
+
+    A4's second failing leg is *"a declared kind the graph should produce is absent"* — and WHICH
+    kinds a layer should produce is a CORPUS fact, not a graph fact. So it arrives as an INPUT
+    (`expected`) and the census never derives it: without one, `expected_absent` is `UNMEASURED` (so
+    "nothing was expected of this layer" is distinguishable from "everything expected of it was
+    present"), and with one it names exactly the expected kinds the graph does not show.
+    """
+    probe = _probe()
+    no_expectation = probe.label_coverage(
+        {"project": 2}, frozenset({"project", "problem"}), layer="things")
+    assert str(no_expectation["expected_absent"]).startswith("UNMEASURED("), (
+        "with no corpus expectation the absence list is reported and this leg decides nothing")
+    expected = probe.label_coverage(
+        {"project": 2}, frozenset({"project", "problem"}),
+        layer="things", expected=frozenset({"project", "problem"}))
+    assert expected["expected_absent"] == ["problem"], (
+        "an expected kind with zero population IS the failing leg")
+    satisfied = probe.label_coverage(
+        {"project": 2}, frozenset({"project", "problem"}),
+        layer="things", expected=frozenset({"project"}))
+    assert satisfied["expected_absent"] == [], (
+        "a kind nobody expected is not a finding — `declared_absent` still lists it, `expected_absent` "
+        "does not")
+
+
 # ── 5. the diagnostics survive, as diagnostics ───────────────────────────
 
 

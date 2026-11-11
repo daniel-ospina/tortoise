@@ -3039,7 +3039,8 @@ def _a4_counts(rows) -> dict[str, int]:
 
 
 def label_coverage(counts: dict[str, int], declared: frozenset[str],
-                   *, layer: str) -> dict:
+                   *, layer: str,
+                   expected: frozenset[str] | None = None) -> dict:
     """One layer's label coverage from its kind histogram — PURE, offline, CI-testable.
 
     This is the CI contract half of A4 (#10988): the Tier-E run cannot gate a merge, so the
@@ -3053,9 +3054,13 @@ def label_coverage(counts: dict[str, int], declared: frozenset[str],
       why it is reported separately and NOT counted as coverage.
     * `declared_present` / `declared_absent` — **a declared kind absent** is the other failing leg.
       ⛔ The census reports the WHOLE absence list and does not decide which of them *should* have
-      appeared: that is a corpus fact (`expected`), and a census that assumed it would red every
-      graph for the ~30 kinds it never writes. `expected` is the caller's declared expectation set;
-      when it is `None` the absence list is reported and the verdict leg is `UNMEASURED`.
+      appeared: that is a corpus fact, not a graph fact, and a census that assumed it would red every
+      graph for the ~30 kinds it never writes. `expected` is that corpus fact as an INPUT — the
+      caller's declared expectation set (a shape declaration, the `sh:targetClass` + `minCount`
+      analogue), and `expected_absent` carries the kinds it names that the graph does NOT show.
+      When `expected` is `None` the absence list is still reported and `expected_absent` is
+      `UNMEASURED(...)`, so a caller can tell "nothing was expected of this layer" from "everything
+      expected of it was present".
     * `coverage` — **reported, never chased**. `None` at a zero population, because 100 % of 0 is
       not coverage: that is A4's `n > 0` non-vacuity floor, and it is why `non_vacuity` is a
       separate boolean rather than a comparison of this rate.
@@ -3104,6 +3109,14 @@ def label_coverage(counts: dict[str, int], declared: frozenset[str],
         "declared_present": declared_present,
         "declared_absent": sorted(
             k for k in declared if _cmp(k) not in {_cmp(x) for x in seen}),
+        # ⛔ `expected` is an INPUT (a corpus declaration), never a graph inference: the kinds it
+        # names with ZERO population are this layer's concrete "a declared kind absent" leg.
+        "expected_absent": (unmeasured(
+            "a declared expectation set for this layer — which declared kinds the corpus "
+            "REQUIRES. A census cannot derive it from the graph without reddening every layer for "
+            "the ~30 declared kinds no graph writes")
+            if expected is None else sorted(
+                k for k in expected if _cmp(k) not in {_cmp(x) for x in seen})),
         # Reported, never chased: there is no `>= X %` bar on this row.
         "coverage": (labelled / population) if population else None,
         # A4's `a4_labelled_nodes` non-vacuity floor: **at least one thing or event carrying a
@@ -3123,8 +3136,8 @@ def _a4_empty_coverage(layer: str) -> dict:
     return {"layer": layer, "population": 0, "labelled": 0, "unlabelled": 0,
             "unlabelled_null": 0, "unlabelled_undeclared": 0,
             "labelled_by_declared_kind": {}, "undeclared": {}, "by_kind": {},
-            "declared_present": [], "declared_absent": [], "coverage": None,
-            "non_vacuity": False}
+            "declared_present": [], "declared_absent": [], "expected_absent": [],
+            "coverage": None, "non_vacuity": False}
 
 
 def _a4_layer_counts(projection, label: str, kind_prop: str) -> dict[str, int]:
@@ -3516,12 +3529,14 @@ def a_row_census_lines(census_a: dict | None) -> list[str]:
             f"coverage={block.get('coverage')} non_vacuity={block.get('non_vacuity')} "
             f"declared_present={block.get('declared_present') or '[]'} "
             f"declared_absent={block.get('declared_absent') or '[]'} "
+            f"expected_absent={block.get('expected_absent')} "
             f"undeclared={block.get('undeclared') or '{}'} "
             f"labelled_by_declared_kind={block.get('labelled_by_declared_kind') or '{}'}")
     add("a4 bar: appears + labelled, PER LAYER, percentage REPORTED not chased — there is no "
         "`>= X %` bar on this row (owner ruling 2026-11-09, home #4432 comment 6751932659; "
         "plan §4.1 AM7). `declared_absent` lists the whole absent set and decides nothing: which "
-        "of them SHOULD appear is a corpus expectation (`expected`), not a graph fact.")
+        "of them SHOULD appear is a corpus expectation — the `expected` INPUT to "
+        "`label_coverage` — not a graph fact.")
     writer = a4.get("per_writer") or {}
     add(f"a4 diagnostics claim_points={a4['claim_points']} "
         f"excluded_capture_rows={a4['excluded_capture_rows']} "
