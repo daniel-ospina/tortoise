@@ -205,7 +205,7 @@ VOCAB_ROW_RE = re.compile(r"^\|\s*\*\*(?P<token>[A-Z][A-Z-]*)\*\*\s*\|")
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-MIN_SELF_TEST_MUTATIONS = 24
+MIN_SELF_TEST_MUTATIONS = 25
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -553,15 +553,45 @@ def check_verdict_tally(text: str) -> list[str]:
     # re-derive it" vs "treat the new behaviour as the norm" vs "do not assert it
     # either way"), so the sentence sent the reader to the wrong action.
     attributed: dict[str, str] = {}
+    before: dict[str, str] = {}
+    following: dict[str, str] = {}
     previous = 0
-    for token in re.finditer(r"\*\*([A-Z][A-Z-]+)\*\*", non_still_sentence):
-        if token.group(1) not in VERDICTS:
-            continue
+    tokens = [
+        tok
+        for tok in re.finditer(r"\*\*([A-Z][A-Z-]+)\*\*", non_still_sentence)
+        if tok.group(1) in VERDICTS
+    ]
+    for pos, token in enumerate(tokens):
         for label in re.findall(
             r"\*\*\(([a-z])\)\*\*", non_still_sentence[previous : token.start()]
         ):
-            attributed[label] = token.group(1)
+            before[label] = token.group(1)
         previous = token.start()
+        stop = tokens[pos + 1].start() if pos + 1 < len(tokens) else len(non_still_sentence)
+        for label in re.findall(
+            r"\*\*\(([a-z])\)\*\*", non_still_sentence[token.end() : stop]
+        ):
+            following.setdefault(label, token.group(1))
+
+    # ⛔ TWO LEGAL ORDERINGS, and the arm must accept BOTH without going blind.
+    # Letters-first (`(c), (d) and (g) are **SUPERSEDED-BY-FIX**`) is the shipped
+    # form, read by "letters preceding the class token". Class-first
+    # (`**SUPERSEDED-BY-FIX**: (c), (d) and (g)`) is the identical assignment
+    # written the other way round; reading only "letters before" RED the REQUIRED
+    # `docs` job with a message ACCUSING the page of a swap it had not made
+    # (measured) — the false-accusation class one arm over.
+    #
+    # The choice is FULL-COVERAGE consistency, not a per-label preference: the
+    # class-first reading is adopted only when it assigns EVERY non-STILL-TRUE row
+    # AND agrees with the table. A genuine swap still reds, because its class-first
+    # reading covers only the few letters that happen to follow a class token, so it
+    # is never adopted and the letters-first map is reported.
+    def _consistent(mapping: dict[str, str]) -> bool:
+        return set(non_still) <= set(mapping) and all(
+            mapping.get(label) == verdicts.get(label) for label in non_still
+        )
+
+    attributed = following if _consistent(following) else before
     misattributed = {
         label: (attributed.get(label), verdicts.get(label))
         for label in non_still
@@ -938,6 +968,38 @@ def check_survivor_arithmetic(text: str) -> list[str]:
     return problems
 
 
+def check_table_population(text: str) -> list[str]:
+    """§3 and §6 must each carry exactly ONE table, or the pins measure a subset.
+
+    `_table_rows()` reads the section's FIRST table and stops at the first
+    non-`|` line, so a SECOND table in either section was never enumerated: no
+    verdict check, no evidence floor, no population pin, no arithmetic. Measured
+    before this arm existed — a thirteenth correction row appended in a fresh table
+    left `--check` at rc=0, `--self-test` at PASS and the whole suite green, while
+    §8 states the §3 population is pinned to twelve. Refusing the SHAPE is the
+    honest option: the page only ever needs one table per section, so this is
+    actionable drift (rc=1), not an unanswerable UNVERIFIED.
+    """
+    problems: list[str] = []
+    for start, end, name in (("## 3.", "## 4.", "§3"), ("## 6.", "## 7.", "§6")):
+        try:
+            section = _region(text, start, end)
+        except Unverifiable:
+            continue  # the section-boundary arm reports the absence itself
+        # One separator per table — a second table brings its own header and separator.
+        tables = sum(
+            1 for line in section.splitlines() if TABLE_SEPARATOR_RE.match(line.strip())
+        )
+        if tables > 1:
+            problems.append(
+                f"{name} carries {tables} tables — only the first is enumerated by "
+                "the population pin, the verdict check and the arithmetic, so a row "
+                "added to a second table is silently unchecked; keep exactly one "
+                "table per section"
+            )
+    return problems
+
+
 def check_measured_commit(text: str, root: Path = REPO) -> list[str]:
     """`measured_at_commit` must be an ancestor of HEAD; exit 2 when git cannot say."""
     match = re.search(r"^measured_at_commit:\s*(\S+)\s*$", text, re.MULTILINE)
@@ -1007,6 +1069,7 @@ def check_document(text: str, root: Path = REPO) -> list[str]:
     problems.extend(check_registration(root))
     problems.extend(check_state_arithmetic(text))
     problems.extend(check_survivor_arithmetic(text))
+    problems.extend(check_table_population(text))
     return problems
 
 
@@ -1247,6 +1310,18 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
             1,
         ).replace("- **`#2730` was dropped", "- dropped", 1),
         "none of them names a CLOSED issue",
+    ),
+    (
+        "a second table in a pinned section",
+        lambda t: t.replace(
+            "## 4. The artefact index",
+            "| # | claim | correction | verdict | evidence |\n"
+            "|---|---|---|---|---|\n"
+            "| **m** | an undeclared claim | **False.** | **STILL-TRUE** | nothing |\n"
+            "\n## 4. The artefact index",
+            1,
+        ),
+        "carries 2 tables",
     ),
 )
 
