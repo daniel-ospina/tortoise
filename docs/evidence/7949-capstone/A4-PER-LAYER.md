@@ -153,12 +153,15 @@ kinds, not a residue of the rule classifier and not v2-lane drift.**
 different populations and the numbers are not interchangeable: the 109 comes from the 2026-11-04 reading
 of the hosted `live-v4` graph (`00-align.md` · `00-plan.md` — a *lane-brief reading with no committed
 artifact*, `01-align.md` of epic `#5087`) — `statement 15,534 · NULL 3,658 · typed 109`, decomposed by
-`#10982` as `constraint` 88 + `preference` 21. ⛔ **Neither kind is present on this graph today, and this
-artifact states the non-reconciliation rather than a cause for it:** §3.1's table is an UNFILTERED scan
-of every non-episodic, non-operator `Point`, so a `constraint`/`preference` Point on this graph would be
-listed there and none is — while the 11-04 reading had `NULL` 3,658 of ~19,301 Point kinds against
-**0 of 15,868** today. The populations do not line up, the two readings are not composable, and what
-happened to those 109 Points between them is the `#10982` corpus question this census cannot answer.
+`#10982` as `constraint` 88 + `preference` 21. ⛔ **Neither kind appears on this graph in §3.1's typed
+cell, which is where a labelled kind would show:** the hosted `list_pointkinds` histogram enumerates every
+`pointKind` carried by a non-operator `Point` (`n.pointKind IS NOT NULL` plus the non-operator predicate —
+`is_operator` absent-or-false AND `op_type IS NULL`), and §3.1 lists seven kinds, neither of them
+`constraint` nor `preference`. The two readings do not otherwise line up either — the 11-04 one counts
+`NULL` 3,658 of ~19,301 Point kinds where §3.1 reports **0 of 15,868** — and each `NULL` figure is quoted
+as the record that published it states it, never as a measurement of a change between two reads whose
+predicates are not the same. What happened to those 109 Points, and whether they were relabelled or were
+never on this graph, is the `#10982` corpus question this census cannot answer.
 Neither kind is in the product's declared point vocabulary at this head either (the CI twin pins exactly
 that at `tests/test_10988_a4_label_coverage.py`, the `constraint`/`preference` undeclared arm). So the
 fleet graph's typed minority is caller-supplied (130 of 135); the provenance of the 109 is a `#10982`
