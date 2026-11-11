@@ -670,17 +670,31 @@ def _reconcile_failing_question(
     ``variant_*`` keys, so the official ``recall_all@k`` (derived from the
     one-shot ``session_recall@k``) and the official accuracy cannot be
     moved by this arm. Returns the per-outcome marker dict.
+
+    ⛔ TOTAL: it never raises. Every failure inside this MEASUREMENT-only
+    pass is caught, stamped on the marker (``error``, ``skip_reason``) and
+    returned. It runs inside the per-question ``try`` whose handler drops
+    the outcome on an exception, and the one-shot outcome is only built
+    AFTER this returns — so an uncaught error here would discard an
+    already-measured question from the official population, mislabel
+    ``_stage`` as ``judge``, and (under ``revalidate``) trip the
+    first-failure abort. The optional variant must never decide the
+    question's fate. The exceptions that MUST still escape are re-raised
+    unchanged: the run-level abort/persist classes, and a fatal provider
+    error (a dead key must abort the run, not be absorbed by a variant).
     """
     stats: dict[str, Any] = {
         "fired": False,
         "admitted": False,
         "reason": None,
         "skip_reason": None,
+        "error": None,
         "cap": int(cap),
         "raised": dict(raised),
         "marginal_bound": 0,
         "marginal_tokens": None,
         "cap_exceeded": False,
+        "bound_exceeded": False,
         "reader_surface_before": None,
         "reader_surface_after": None,
         "session_recall_before": None,
@@ -689,12 +703,58 @@ def _reconcile_failing_question(
         "variant_hypothesis": None,
         "variant_latency_ms": None,
     }
+    try:
+        _reconcile_failing_question_pass(
+            stats=stats, sdk=sdk, reader=reader, judge=judge,
+            question=question, qid=qid, ret=ret, label=label,
+            hypothesis=hypothesis, ks=ks,
+            retrieval_kwargs=retrieval_kwargs, raised=raised, cap=cap,
+            max_retries=max_retries, k=k)
+    except (WatchdogAbortError, CheckpointPersistError, ArmConflictError,
+            spend_guard.SpendGuardError):
+        # The run-level abort classes: the caller's handler re-raises these
+        # on the success path, so swallowing them here would turn a watchdog
+        # abort into "the arm failed" while the run continued.
+        raise
+    except Exception as e:  # noqa: BLE001, RUF100
+        if is_fatal(e):
+            raise
+        stats["error"] = f"{type(e).__name__}: {e}"
+        if stats["skip_reason"] is None:
+            stats["skip_reason"] = "error"
+    return stats
+
+
+def _reconcile_failing_question_pass(
+    *,
+    stats: dict[str, Any],
+    sdk: Any,
+    reader: Any,
+    judge: Any,
+    question: dict,
+    qid: str,
+    ret: dict,
+    label: bool | None,
+    hypothesis: str | None,
+    ks: tuple[int, ...],
+    retrieval_kwargs: dict[str, Any],
+    raised: dict[str, int],
+    cap: int,
+    max_retries: int,
+    k: int | str = 5,
+) -> None:
+    """The body of :func:`_reconcile_failing_question`, mutating ``stats``.
+
+    Split out ONLY so the wrapper above can be total: this half is allowed
+    to raise, and the wrapper turns anything non-fatal into a recorded
+    ``error`` instead of a lost question.
+    """
     reason = window_recon.failing_class_reason(
         question_id=qid, question_type=question.get("question_type"),
         label=label, hypothesis=hypothesis,
         reader_surface=ret.get("reader_surface@k"), k=k)
     if reason is None:
-        return stats
+        return
     stats["fired"] = True
     stats["reason"] = reason
     stats["reader_surface_before"] = window_recon.reader_surface_value(
@@ -703,13 +763,18 @@ def _reconcile_failing_question(
                                      or {}).get(str(k))
     collector = lme_usage.get_collector()
     before = collector.peek_question(qid)
-    bound = window_recon.marginal_bound(before)
+    # The bound is denominated on the RAISED WINDOW the re-run may fill, not
+    # on what this question's one-shot reader happened to spend: an
+    # under-filled one-shot context does not cap the raised pass.
+    bound = window_recon.marginal_bound(
+        before,
+        raised_max_context_tokens=raised["max_context_tokens"])
     stats["marginal_bound"] = bound
     if not window_recon.admit_reconciliation(bound=bound, cap=cap):
-        # The cap is a real gate on the extra generation: a question whose
-        # own one-shot shape cannot fit the bound is never re-run.
+        # The cap is a real gate on the extra generation: a raised window
+        # whose upper bound cannot fit the cap is never re-run.
         stats["skip_reason"] = "token_cap"
-        return stats
+        return
     stats["admitted"] = True
     raised_kwargs = dict(retrieval_kwargs)
     raised_kwargs["context_item_cap"] = raised["context_item_cap"]
@@ -743,7 +808,10 @@ def _reconcile_failing_question(
     stats["marginal_tokens"] = window_recon.envelope_delta(
         before, collector.peek_question(qid))
     stats["cap_exceeded"] = stats["marginal_tokens"] > stats["cap"]
-    return stats
+    # The bound is an ASSUMPTION (two pinned headrooms); this row is the
+    # live test of it. An arm-ON run that raises it is evidence the bound is
+    # too small — published rather than asserted.
+    stats["bound_exceeded"] = stats["marginal_tokens"] > stats["marginal_bound"]
 
 
 # R3 (#1542): the embedder pinned for the eval pre-flight — now derived from

@@ -32,7 +32,6 @@ from tools.longmem_eval import usage as lme_usage
 from tools.longmem_eval import w7_publish
 from tools.longmem_eval import window_reconciliation as wr
 
-
 # ── the failing-class predicate (one-shot outcome fields only) ──────────
 
 def _reason(**over):
@@ -163,7 +162,36 @@ def test_marginal_bound_excludes_the_ingest_burn():
     burn must not make the arm un-admittable (it would otherwise never fire
     on a real run)."""
     env = _envelope(ingest=(500_000, 500_000))
-    assert wr.marginal_bound(env) == 2 * 110 + 22
+    assert wr.marginal_bound(env, raised_max_context_tokens=16000) == (
+        16000
+        + wr.DEFAULT_RECONCILIATION_PROMPT_HEADROOM
+        + wr.DEFAULT_RECONCILIATION_COMPLETION_HEADROOM
+        + 22)
+
+
+def test_marginal_bound_is_denominated_on_the_raised_window():
+    """⛔ #2570 review finding 3: the bound must be derived from the RAISED
+    WINDOW, never from what the one-shot reader happened to spend.
+
+    An under-filled one-shot context (400 prompt + 50 completion — a short
+    preference question) does NOT cap the raised pass: the re-ask may legally
+    consume the whole raised budget. A bound of ``2 x observed`` (≈900) would
+    admit a pass that then spends ≈16 000, ~17x the number the cap was checked
+    against.
+    """
+    cheap = _envelope(reader=(400, 50), judge=(20, 2))
+    expensive = _envelope(reader=(8000, 300), judge=(20, 2))
+    assert wr.marginal_bound(cheap, raised_max_context_tokens=16000) == \
+        wr.marginal_bound(expensive, raised_max_context_tokens=16000)
+    # …and the number is on the scale of the raised window, not of the spend.
+    assert wr.marginal_bound(cheap,
+                             raised_max_context_tokens=16000) >= 16000
+
+
+def test_marginal_bound_requires_the_raised_window():
+    """No caller may quietly fall back to the one-shot shape."""
+    with pytest.raises(TypeError):
+        wr.marginal_bound(_envelope())  # type: ignore[call-arg]
 
 
 def test_envelope_delta_is_the_reader_plus_judge_growth_never_negative():
@@ -182,8 +210,33 @@ def test_default_token_cap_fits_a_raised_full_window_re_ask():
     """Sanity pin on the default's sizing rationale: a raised (2×) re-ask of
     a full 8000-token reader context plus a judge pass fits the cap."""
     one_shot = _envelope(reader=(8000, 300), judge=(400, 10), ingest=(0, 0))
-    assert wr.marginal_bound(one_shot) <= \
+    raised = wr.raised_window(top_k=20, context_item_cap=40,
+                              max_context_tokens=8000)
+    assert wr.marginal_bound(
+        one_shot,
+        raised_max_context_tokens=raised["max_context_tokens"]) <= \
         wr.DEFAULT_RECONCILIATION_TOKEN_CAP
+
+
+def test_a_raised_window_that_cannot_fit_the_cap_is_refused():
+    """The other half of finding 3: because the bound is now on the raised
+    window's scale, a base budget large enough to push the raised window past
+    the cap is REFUSED BEFORE any spend instead of overshooting post-hoc.
+
+    Default cap 24 000, defaults for the two headrooms, a 400-token judge
+    pass: a base ``max_context_tokens`` of 12 000 raises to 24 000, and
+    24 000 + headrooms + judge cannot fit — so admission is False. At the
+    default 8 000 it is True (the sizing pin above).
+    """
+    one_shot = _envelope(reader=(8000, 300), judge=(400, 10), ingest=(0, 0))
+    big = wr.raised_window(top_k=20, context_item_cap=40,
+                           max_context_tokens=12000)
+    assert big["max_context_tokens"] == 24000
+    bound = wr.marginal_bound(
+        one_shot, raised_max_context_tokens=big["max_context_tokens"])
+    assert bound > wr.DEFAULT_RECONCILIATION_TOKEN_CAP
+    assert wr.admit_reconciliation(
+        bound=bound, cap=wr.DEFAULT_RECONCILIATION_TOKEN_CAP) is False
 
 
 # ── the collector snapshot the arm prices itself from ───────────────────
@@ -381,13 +434,129 @@ def test_wiring_cap_skips_the_pass_when_the_bound_does_not_fit(monkeypatch):
 
 def test_wiring_cap_exceeded_is_disclosed(monkeypatch):
     """An admitted pass whose ACTUAL marginal spend exceeded the cap is
-    recorded, flagged — never hidden (the census is honest about overshoot)."""
+    recorded, flagged — never hidden (the census is honest about overshoot).
+
+    With the corrected bound the cap can only be overshot when the bound was
+    itself too small, so admission here is granted on cap=20 000 (> the
+    19 000 bound) and the pass then spends ~40 000 — the exact shape
+    ``bound_exceeded`` exists to publish."""
     stats = _recon(monkeypatch, ret=_one_shot_ret(0.2), label=False,
-                   hypothesis="two", reader=_FakeReader(extra_tokens=5000),
-                   cap=100)
+                   hypothesis="two", reader=_FakeReader(extra_tokens=40000),
+                   cap=20000)
     assert stats["admitted"] is True
-    assert stats["marginal_tokens"] == 5005
+    assert stats["marginal_tokens"] == 40005
     assert stats["cap_exceeded"] is True
+    assert stats["bound_exceeded"] is True
+
+
+def test_wiring_bound_derives_from_the_raised_window(monkeypatch):
+    """⛔ #2570 review finding 3, at the wiring: the bound the arm records is
+    on the RAISED WINDOW's scale — a cheap one-shot reader does not shrink it.
+
+    ``raised.max_context_tokens`` (16 000 here) + the two declared headrooms +
+    the one-shot judge tokens. The judge contributes 0 in this harness (the
+    one-shot judge call is not part of the unit under test), so the expected
+    value is the window + headrooms exactly."""
+    stats = _recon(monkeypatch, ret=_one_shot_ret(0.2), label=False,
+                   hypothesis="two")
+    assert stats["admitted"] is True
+    assert stats["marginal_bound"] == (
+        16000
+        + wr.DEFAULT_RECONCILIATION_PROMPT_HEADROOM
+        + wr.DEFAULT_RECONCILIATION_COMPLETION_HEADROOM)
+    assert stats["bound_exceeded"] is False
+
+
+def test_wiring_bound_exceeded_is_disclosed(monkeypatch):
+    """A pass that spends past the declared bound is a census row, not
+    silence — that row is what would falsify the bound on a live run."""
+    stats = _recon(monkeypatch, ret=_one_shot_ret(0.2), label=False,
+                   hypothesis="two",
+                   reader=_FakeReader(extra_tokens=40000), cap=1_000_000)
+    assert stats["admitted"] is True
+    assert stats["bound_exceeded"] is True
+    assert stats["cap_exceeded"] is False
+
+
+# ── containment: the optional pass may never decide the question's fate ──
+
+def test_wiring_a_failing_variant_pass_is_recorded_not_raised(monkeypatch):
+    """⛔ #2570 review finding 2.
+
+    The pass runs inside the per-question ``try`` whose handler DROPS the
+    outcome on an exception, and the one-shot outcome is built only after it
+    returns — so an uncaught error here would discard an already-measured
+    question from the official population, mislabel ``_stage``, and (under
+    ``revalidate``) abort the run. It must return a marker instead.
+    """
+    def _boom(*a, **k):
+        raise RuntimeError("provider wobble")
+
+    monkeypatch.setattr(runner, "retrieve_for_question", _boom)
+    collector = lme_usage.get_collector()
+    collector.reset()
+    lme_usage.set_question_key("q_msr_1")
+    try:
+        stats = runner._reconcile_failing_question(
+            sdk=object(), reader=_FakeReader(), judge=_FakeJudge(),
+            question=QUESTION, qid="q_msr_1", ret=_one_shot_ret(0.2),
+            label=False, hypothesis="two", ks=(5,),
+            retrieval_kwargs={"retriever": "hybrid"},
+            raised={"top_k": 40, "context_item_cap": 80,
+                    "max_context_tokens": 16000},
+            cap=24000, max_retries=0)
+    finally:
+        lme_usage.clear_question_key()
+        collector.reset()
+    assert stats["fired"] is True      # it WAS in the failing class
+    assert stats["admitted"] is True   # …and it was attempted
+    assert stats["skip_reason"] == "error"
+    assert "RuntimeError: provider wobble" in stats["error"]
+    assert stats["variant_label"] is None  # no fabricated verdict
+
+
+def test_wiring_a_failing_reader_in_the_pass_still_returns(monkeypatch):
+    """The reader/judge legs are contained too, not only retrieval."""
+    class _ExplodingReader(_FakeReader):
+        def answer(self, **kwargs):
+            raise ValueError("reader exploded")
+
+    stats = _recon(monkeypatch, ret=_one_shot_ret(0.2), label=False,
+                   hypothesis="two", reader=_ExplodingReader())
+    assert stats["skip_reason"] == "error"
+    assert "ValueError: reader exploded" in stats["error"]
+    assert stats["variant_label"] is None
+
+
+def test_wiring_a_fatal_provider_error_still_aborts(monkeypatch):
+    """Containment must NOT swallow the run-level abort classes: a dead key
+    would otherwise be absorbed by a measurement-only variant while the run
+    kept producing garbage (M2 / #1523)."""
+    class _Fatal(Exception):
+        pass
+
+    monkeypatch.setattr(runner, "is_fatal", lambda e: True)
+
+    def _boom(*a, **k):
+        raise _Fatal("billing cap hit")
+
+    monkeypatch.setattr(runner, "retrieve_for_question", _boom)
+    collector = lme_usage.get_collector()
+    collector.reset()
+    lme_usage.set_question_key("q_msr_1")
+    try:
+        with pytest.raises(_Fatal):
+            runner._reconcile_failing_question(
+                sdk=object(), reader=_FakeReader(), judge=_FakeJudge(),
+                question=QUESTION, qid="q_msr_1", ret=_one_shot_ret(0.2),
+                label=False, hypothesis="two", ks=(5,),
+                retrieval_kwargs={"retriever": "hybrid"},
+                raised={"top_k": 40, "context_item_cap": 80,
+                        "max_context_tokens": 16000},
+                cap=24000, max_retries=0)
+    finally:
+        lme_usage.clear_question_key()
+        collector.reset()
 
 
 # ── the labeled-variant block (never the official number) ───────────────
@@ -449,11 +618,26 @@ def test_variant_rows_count_the_cap_census_and_surface_delta():
     assert rows["n_admitted"] == 2
     assert rows["n_skipped_token_cap"] == 1
     assert rows["cap_exceeded_n"] == 1
+    assert rows["n_errored"] == 0
     assert rows["token_cap"] == 24000
     assert rows["marginal_tokens_total"] == 100 + 99_000  # admitted only
     assert rows["reader_surface@5"]["before"] == pytest.approx(0.5)
     assert rows["reader_surface@5"]["after"] == pytest.approx(1.0)
     assert rows["reader_surface@5"]["n"] == 2
+
+
+def test_variant_rows_counts_an_errored_pass_and_a_bound_overshoot():
+    """A failed optional pass and a bound overshoot are both CENSUS rows —
+    the containment counter and the falsifier of the bound, never silence."""
+    errored = _variant_outcome("q1", one_shot=False, variant=None)
+    errored["window_reconciliation_stats"]["error"] = "RuntimeError: x"
+    over = _variant_outcome("q2", one_shot=False, variant=True)
+    over["window_reconciliation_stats"]["bound_exceeded"] = True
+    rows = wr.reconciliation_variant_rows([errored, over], k=5)
+    assert rows["n_fired"] == 2
+    assert rows["n_errored"] == 1
+    assert rows["n_graded"] == 1     # the errored pass contributes no verdict
+    assert rows["bound_exceeded_n"] == 1
 
 
 def test_variant_rows_pool_drift_is_surfaced():

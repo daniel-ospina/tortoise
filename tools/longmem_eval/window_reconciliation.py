@@ -59,15 +59,23 @@ is a WINDOW change, which is exactly the variable P3 measures.
 
 The cap bounds the re-run's OWN marginal spend (raw tokens; priced at
 report time — ``costing.py`` is deliberately report-time-only, so no USD
-ever enters the runner). Admission is pre-computed from the one-shot
-envelope via :func:`marginal_bound` — ``factor ×`` the one-shot reader
-tokens + the judge tokens, a conservative upper bound on the re-ask —
-and the actual marginal spend is measured after the pass via
-:func:`envelope_delta`. A pass admitted under the bound whose ACTUAL
-spend exceeded the cap is still recorded, flagged ``cap_exceeded``: the
-census is honest about overshoot instead of hiding it, and the bound is
-what a future tightening tunes. Admission never reads the ingest burn —
-the cap is a re-run budget, not a per-question whole-run budget.
+ever enters the runner). Admission is pre-computed from the RAISED
+WINDOW via :func:`marginal_bound`: the raised reader context budget plus
+the two declared headroom constants (prompt scaffolding, completion) plus
+the question's one-shot judge tokens. ⛔ The bound is denominated on the
+window the re-run is ALLOWED to fill, never on what the one-shot reader
+happened to spend — an under-filled one-shot context does not cap the
+raised pass, so a bound derived from observed spend is not a bound at
+all (a re-ask of a 400-token one-shot context may legally consume the
+whole 16 000-token raised budget).
+
+The actual marginal spend is measured after the pass via
+:func:`envelope_delta`, and BOTH honesty flags ride the outcome: a pass
+whose ACTUAL spend exceeded the cap is recorded as ``cap_exceeded``, and
+one that exceeded the bound is recorded as ``bound_exceeded`` — the
+latter is what would falsify the bound on a live run instead of leaving
+it an assertion. Admission never reads the ingest burn — the cap is a
+re-run budget, not a per-question whole-run budget.
 """
 from __future__ import annotations
 
@@ -93,6 +101,15 @@ DEFAULT_WINDOW_RAISE_FACTOR = 2
 #: (2×) re-ask of a full 8000-token reader context — ≈16k prompt tokens
 #: plus completion — plus the judge pass fits with headroom.
 DEFAULT_RECONCILIATION_TOKEN_CAP = 24000
+
+#: The bound's two declared headrooms, on top of the raised reader-context
+#: budget. They are CONSTANTS rather than measurements on purpose: the
+#: raised pass's own prompt scaffolding and completion are not knowable
+#: before it runs, so the bound states what it assumes instead of silently
+#: borrowing the one-shot's shape. ``bound_exceeded`` on any outcome is the
+#: live signal that the assumption was too small.
+DEFAULT_RECONCILIATION_PROMPT_HEADROOM = 1000
+DEFAULT_RECONCILIATION_COMPLETION_HEADROOM = 2000
 
 #: The max number of chunks the reader window may hold after the raise.
 #: A window beyond this is not a measurement of the same mechanism any
@@ -223,14 +240,36 @@ def stage_tokens(envelope: dict | None, *stages: str) -> int:
     return total
 
 
-def marginal_bound(envelope: dict | None,
-                   factor: int = DEFAULT_WINDOW_RAISE_FACTOR) -> int:
-    """A conservative upper bound on a re-run's marginal LLM tokens,
-    estimated from the one-shot question's own envelope: the raised
-    reader sees at most ``factor ×`` what the reader saw, plus one more
-    judge pass. Ingest/extractor stages are excluded (the re-run does not
-    ingest — the cap is a re-run budget, not a whole-run budget)."""
-    return (factor * stage_tokens(envelope, "reader")
+def marginal_bound(envelope: dict | None, *,
+                   raised_max_context_tokens: int,
+                   prompt_headroom: int = (
+                       DEFAULT_RECONCILIATION_PROMPT_HEADROOM),
+                   completion_headroom: int = (
+                       DEFAULT_RECONCILIATION_COMPLETION_HEADROOM)) -> int:
+    """An upper bound on a re-run's marginal LLM tokens, denominated on
+    the RAISED WINDOW rather than on what the one-shot reader spent.
+
+    ``raised_max_context_tokens`` (the window the re-run may fill) + the
+    two declared headrooms (prompt scaffolding, completion) + the
+    question's one-shot judge tokens. The judge term is the one part that
+    IS read from the envelope: the re-run's judge call has the same shape
+    as the one-shot's, so its one-shot cost is a fair estimator.
+
+    ⛔ Deliberately NOT ``factor × observed_reader_tokens``: the raise
+    applies to the CAP, not to observed spend, so an under-filled
+    one-shot context (a short preference question: ~450 tokens) admits a
+    pass that may then consume the whole ~16 000-token raised budget —
+    ≈13× the "bound". Derived from observed spend, the quantity is not an
+    upper bound and the cap does not bound anything.
+
+    ``raised_max_context_tokens`` is required (keyword-only) so no caller
+    can quietly fall back to the one-shot shape. Ingest/extractor stages
+    are excluded (the re-run does not ingest — the cap is a re-run budget,
+    not a whole-run budget).
+    """
+    return (max(0, int(raised_max_context_tokens))
+            + max(0, int(prompt_headroom))
+            + max(0, int(completion_headroom))
             + stage_tokens(envelope, "judge"))
 
 
@@ -242,8 +281,9 @@ def envelope_delta(before: dict | None, after: dict | None) -> int:
 
 
 def admit_reconciliation(*, bound: int, cap: int) -> bool:
-    """The pre-pass admission rule: fire the re-run ONLY when the
-    conservative bound on its marginal spend fits the per-question cap."""
+    """The pre-pass admission rule: fire the re-run ONLY when the bound on
+    its marginal spend fits the per-question cap. A raised window that
+    cannot fit the cap is refused BEFORE any spend."""
     return int(bound) <= int(cap)
 
 
@@ -353,6 +393,12 @@ def reconciliation_variant_rows(outcomes: list[dict], *,
         "net_flips": recovered - lost,
         "cap_exceeded_n": sum(
             1 for o in admitted if _stats(o).get("cap_exceeded") is True),
+        # A pass that raised above the declared bound, or that FAILED: both
+        # are census rows, never silent. ``n_errored`` is the containment
+        # counter — a failed optional pass must be visible, not vanish.
+        "bound_exceeded_n": sum(
+            1 for o in admitted if _stats(o).get("bound_exceeded") is True),
+        "n_errored": sum(1 for o in fired if _stats(o).get("error")),
         "token_cap": caps[0] if caps else None,
         "marginal_tokens_total": (sum(marginal) if marginal else 0),
         f"reader_surface@{k}": {
