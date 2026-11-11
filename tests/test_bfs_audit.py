@@ -2,7 +2,7 @@
 Issue #6902 — Audit: confirm no production code depends on BFS propagate_shock output.
 
 This test file encodes the audit findings as assertions. It does NOT run against
-a live FalkorDB instance — it's a grep-based documentation of the audit results.
+a live FalkorDB instance — it's a grep-plus-AST documentation of the audit results.
 Run with: python3 -m pytest tests/test_bfs_audit.py -v
 """
 
@@ -14,31 +14,58 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def _propagate_shock_call_sites() -> dict[str, set[int]]:
-    """`{absolute path: {line numbers}}` where `tortoise/` code CALLS `propagate_shock`.
+def _propagate_shock_reference_sites() -> dict[str, set[int]]:
+    """`{absolute path: {line numbers}}` where `tortoise/` code REFERS to `propagate_shock`.
 
     ⛔ The grep below cannot tell a CALL from PROSE that names the function, and this
-    audit's claim is about CALLERS. `#11702` (`e7394a9ad7`) added a docstring note in
+    audit's claim is about callers. `#11702` (`e7394a9ad7`) added a docstring note in
     `tortoise/projection/propagation.py:70,73` ("`propagate_shock` PERSISTS the blend …",
     "`propagate_shock` is never invoked") and the classifier's only comment exemption
     keyed on the word "replaces", so both lines were bucketed as PRODUCTION CALLERS —
     `test (c)` of run 43070177052 was RED at `d0347aaa` over a tree that calls nothing
     (reproduced on `origin/main` `372f926cd9`, which touches neither file).
 
-    So the AST decides what is a call and the grep keeps documenting the references:
-    the callee must be a `Name`/`Attribute` `propagate_shock`, which covers
-    `propagate_shock(…)`, `self.propagate_shock(…)` and an aliased import alike, while
-    text inside a docstring, a comment or a Cypher string is not a `Call` node at all.
+    So the AST decides what is a reference and the grep keeps documenting the matches.
+    This walks REFERENCES, not just `Call` nodes: a `Call`-only test names the callee
+    syntactically, so it cannot see an indirection, and an indirection is exactly the
+    shape a lane "restoring" this path would use (`#11702`'s note at
+    `tortoise/projection/propagation.py` says the fabrication risk is at the WRITE,
+    where no read-side guard can see it). Every shape below is one reference:
+
+      * `propagate_shock(…)`, `self.propagate_shock(…)`, `obj.propagate_shock`
+        — a `Name`/`Attribute` whose id/attr is `propagate_shock`;
+      * `from … import propagate_shock as _shock; _shock(…)` — the module's import
+        aliases are resolved FIRST, so the alias' use is a reference too;
+      * `HANDLERS = {"shock": propagate_shock}` — a bare `Name` in a dict/argument,
+        which a `Call`-only test classified as "reference only".
+
+    Excluded by construction: the deprecated ``def propagate_shock`` (a `FunctionDef`
+    name, not a reference), an `import` binding (an `ast.alias`, not a `Name`), and all
+    prose — a docstring is a `Constant` node and a comment is not parsed at all.
+
+    ⚠️ STATED BOUND — indirection through a STRING (`getattr(x, "propagate_shock")`,
+    a Cypher building the name) is not a `Name`/`Attribute` and is not seen here. That
+    is a bound, not a claim of completeness: the shapes above are the ones a restoring
+    lane actually writes, and `test_no_propagate_shock_callers` asserts on THIS set
+    rather than on grep lines, so a reference on a line that never spells the name
+    (the aliased call) can no longer pass.
     """
     sites: dict[str, set[int]] = {}
     for path in sorted((ROOT / "tortoise").rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        aliases: set[str] = {"propagate_shock"}
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            callee = node.func
-            name = callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", "")
-            if name == "propagate_shock":
+            if isinstance(node, ast.ImportFrom):
+                aliases.update(a.asname or a.name for a in node.names
+                               if a.name == "propagate_shock")
+            elif isinstance(node, ast.Import):
+                aliases.update(
+                    a.asname or a.name.split(".")[0] for a in node.names
+                    if a.name.split(".")[-1] == "propagation")
+        for node in ast.walk(tree):
+            is_shock_attr = isinstance(node, ast.Attribute) and node.attr == "propagate_shock"
+            is_alias_name = isinstance(node, ast.Name) and node.id in aliases
+            if is_shock_attr or is_alias_name:
                 sites.setdefault(str(path), set()).add(node.lineno)
     return sites
 
@@ -66,9 +93,11 @@ def test_no_propagate_shock_callers():
         l for l in all_refs  # noqa: E741
         if "__pycache__" not in l and "test_bfs_audit.py" not in l and "test_e2e_extraction_ep.py" not in l
     ]
-    # `{path: {lineno}}` of real calls — the ONLY evidence of a production caller.
-    # See `_propagate_shock_call_sites` for the false RED this replaced.
-    calls = _propagate_shock_call_sites()
+    # `{path: {lineno}}` of real references — the ONLY evidence of a production caller.
+    # See `_propagate_shock_reference_sites` for the false RED this replaced and for
+    # why it walks references rather than `Call` nodes only (an aliased call spells
+    # `_shock`, so no grep line would ever reach the bucket below).
+    refs = _propagate_shock_reference_sites()
 
     callers: dict[str, list[str]] = {
         "definition (deprecated)": [],
@@ -94,15 +123,25 @@ def test_no_propagate_shock_callers():
         elif "/graph-scripts/" in path_part:
             callers["test_files"].append(line)  # test_6707_shock.py
         elif "/tortoise/" in path_part:
-            # A CALL, not a mention: the AST is the judge (a docstring that names the
-            # function is documentation of its deprecation, not a caller of it).
+            # A REFERENCE, not a mention: the AST is the judge (a docstring that names
+            # the function is documentation of its deprecation, not a caller of it).
             lineno = line.split(":")[1]
-            if lineno.isdigit() and int(lineno) in calls.get(path_part, set()):
+            if lineno.isdigit() and int(lineno) in refs.get(path_part, set()):
                 callers["production_code"].append(line)
             else:
                 callers["comment/reference only"].append(line)
 
-    # The only "production" reference is a comment: no actual call
+    # ⛔ ASSERTED OVER THE AST SET, not over the grep lines: an indirection spells a
+    # different word (`from … import propagate_shock as _shock; _shock(g, x)`), so the
+    # line carrying the call is never a grep match and could never reach the bucket
+    # above. This is the assertion that makes the alias visible.
+    unseen = {p: sorted(lines) for p, lines in refs.items() if lines}
+    assert not unseen, (
+        "PRODUCTION CODE REFERENCES propagate_shock (AST reference sites):\n"
+        + "\n".join(f"{p}:{','.join(map(str, ls))}" for p, ls in sorted(unseen.items()))
+    )
+
+    # The only remaining "production" reference is prose: no call, no wiring.
     assert len(callers["production_code"]) == 0, (
         f"PRODUCTION CODE CALLS propagate_shock:\n" + "\n".join(callers["production_code"])  # noqa: F541
     )

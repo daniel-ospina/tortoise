@@ -297,19 +297,27 @@ _RESTATEMENT_SITES: tuple[str, ...] = (
     _ITEM_NOT_ABSOLUTE,    # "scopes the exclusion to the hosted VM"
 )
 
-#: The `_RESTATEMENTS` rows (1-based, index-aligned with the tuple above) whose SITE
-#: phrase IS their own needle. For those the label guard's SECOND assert cannot vary:
-#: `_record_site_block` returns a block only when some item line already carries the
-#: site's word sequence, so for row 2 — `_ITEM_NEITHER_HOOK` naming the very heading it
-#: restates — a passing `assert block` has already proved the sentence is "in" the
-#: block (`review r30 P3 #1`, measured: for every other row a moved sentence or a
-#: re-pointed label reds the second assert, and for row 2 NO mutation can red it while
-#: the first passes). Such a row is not dead weight — the FIRST assert is its whole
-#: job, and it reds the moment that heading is re-worded or the item deleted — but the
-#: second assert would be an assertion whose value cannot vary, which is the dead weight
-#: this file's own review rounds remove (`:791–802`, r19 P2). It is skipped BY DERIVATION
-#: below and the derived set is asserted, so a NEW circular row cannot inherit the dead
-#: leg silently, and a row that STOPS being circular cannot lose its content check.
+#: The `_RESTATEMENTS` rows (1-based, index-aligned with the tuple above) whose
+#: restatement needle is ALREADY CONTAINED in their own site phrase. For those the label
+#: guard's SECOND assert cannot vary: `_record_site_block` returns a block only when
+#: some item line already carries the site's word sequence, so for row 2 —
+#: `_ITEM_NEITHER_HOOK` naming the very heading it restates — a passing `assert block`
+#: has already proved the sentence is "in" the block (`review r30 P3 #1`, measured: for
+#: every other row a moved sentence or a re-pointed label reds the second assert, and
+#: for row 2 NO mutation can red it while the first passes). The predicate is CONTAINMENT
+#: (`needle ⊆ site`), not equality: an equal phrase is the case that occurs today, but a
+#: needle that is a proper part of its site is entailed just the same, and an equality
+#: test would let such a new row inherit the dead leg silently — precisely the guarantee
+#: this derivation exists to give. Such a row is not dead weight — the FIRST assert is
+#: its whole job, and it reds the moment that heading is re-worded or the item deleted —
+#: but the second assert would be an assertion whose value cannot vary, which is the dead
+#: weight this file's own review rounds remove (r19 P2: the second assert removed beside
+#: `test_no_single_tag_strip_can_hide_the_unscoped_phrase`, which was unfalsifiable by
+#: construction — named by CONSTRUCT, not by line: a line number here went stale the
+#: next time this file grew, the rule `tests/test_markers.py` states for its own table).
+#: It is skipped BY DERIVATION below and the derived set is asserted, so a NEW circular
+#: row cannot inherit the dead leg silently, and a row that STOPS being circular cannot
+#: lose its content check.
 _CIRCULAR_SITE_ROWS = frozenset({2})
 
 #: (4) — the customer promise THIS PR RETRACTED, and the correction that replaced it.
@@ -698,8 +706,9 @@ def test_every_restatement_site_label_names_the_item_that_states_it():
     restatement needle (`Hosted cloud agents get NEITHER hook`), so locating the block by
     that phrase already proves the phrase is in it — its second assert can never vary,
     and is skipped by derivation (`_CIRCULAR_SITE_ROWS`), with the DERIVED set asserted so
-    a new circular row cannot inherit the same dead leg (review r30 P3 #1). Row 2 keeps
-    its whole job: a re-worded heading reds the first assert.
+    a new row whose needle is contained in its site cannot inherit the same dead leg
+    (review r30 P3 #1). Row 2 keeps its whole job: a re-worded heading reds the first
+    assert.
 
     Mutation (measured): move any restatement's sentence into the sibling item →
     the second assert REDs naming that needle and the site; re-word either heading
@@ -715,12 +724,13 @@ def test_every_restatement_site_label_names_the_item_that_states_it():
     circular = frozenset(
         row for row, ((scoped, _unscoped), site) in enumerate(
             zip(_RESTATEMENTS, _RESTATEMENT_SITES, strict=True), start=1)
-        if _normalised(scoped) == _normalised(site))
+        if _normalised(scoped) in _normalised(site))
     assert circular == _CIRCULAR_SITE_ROWS, (
-        f"the rows whose site IS their needle are {sorted(circular)}, not "
-        f"{sorted(_CIRCULAR_SITE_ROWS)} — a row that became circular just lost its "
-        f"independent content check, and a row that stopped being circular needs that "
-        f"check back; re-derive `_CIRCULAR_SITE_ROWS` from the two tuples")
+        f"the rows whose restatement needle is already contained in their site are "
+        f"{sorted(circular)}, not {sorted(_CIRCULAR_SITE_ROWS)} — a row that became "
+        f"circular just lost its independent content check, and a row that stopped "
+        f"being circular needs that check back; re-derive `_CIRCULAR_SITE_ROWS` from "
+        f"the two tuples")
     for row, ((scoped, _unscoped), site) in enumerate(
             zip(_RESTATEMENTS, _RESTATEMENT_SITES, strict=True), start=1):
         block = _record_site_block(doc, site)
