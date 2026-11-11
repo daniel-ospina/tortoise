@@ -39,6 +39,7 @@ DB-free: the pipeline runs with a scripted model, ``sdk=None``, no network.
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util as _ilu
 import json
@@ -52,6 +53,13 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PROBE_PATH = (_REPO_ROOT / "docs" / "evidence" / "7949-capstone" / "probes"
                / "e1_e2_probe.py")
+#: The two SIBLING readers of `denominator_floors.e2b_surviving_units`. Both are
+#: read here to prove they score the same population the binding does — and both
+#: are read as an AST, never as text (see `_call_keyword_values`).
+_MEASURE_PATH = (_REPO_ROOT / "docs" / "evidence" / "7949-capstone" / "probes"
+                 / "capstone_measure.py")
+_SCORES_PATH = (_REPO_ROOT / "docs" / "evidence" / "7949-capstone" / "probes"
+                / "e1_e2_scores.py")
 _CORPUS_DIR = _REPO_ROOT / "docs" / "evidence" / "7949-capstone" / "corpus"
 _CORPUS = _CORPUS_DIR / "e1e2_corpus.json"
 #: #9507's committed record — the artifact a REAL `--prereg` is handed. Read from
@@ -3279,6 +3287,65 @@ def _prereg_for_e2b_floor(floor: int = 30) -> dict:
                                    "e2b_surviving_units": floor}}
 
 
+def _calls(path, func_name: str) -> list:
+    """Every `func_name(...)` call node in `path`, as an AST.
+
+    ⛔ THE POINT OF PARSING RATHER THAN GREPPING. A whole-file `assert "<expr>" in
+    source` is satisfied by that expression sitting ANYWHERE in the file — a
+    comment, a docstring, a sibling branch, or a *different* call that happens to
+    be spelled the same. Meant "the production operand is X", it actually means
+    "the file contains the characters X", so a revert can leave it green (#11833
+    review P2-1). An AST node cannot be faked by prose, and it is scoped to the
+    call it names.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return [node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == func_name]
+
+
+def _call_keyword_values(path, func_name: str, keyword: str) -> list:
+    """Every value node passed as `keyword=` to ANY `func_name(...)` in `path`.
+
+    Plural on purpose: a row builder calls its constructor once per criterion, so
+    "the E2b operand" is one of a dozen. The caller must then say WHICH it is by
+    shape — see the `e1[...]` subscript test — rather than by position, because a
+    positional pick would silently follow an unrelated row that moved.
+    """
+    return [kw.value for node in _calls(path, func_name)
+            for kw in node.keywords if kw.arg == keyword]
+
+
+def _subscript(node):
+    """`(name, key)` for the node `name["key"]`, else None."""
+    if (isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and isinstance(node.slice, ast.Constant)):
+        return (node.value.id, node.slice.value)
+    return None
+
+
+def _dict_name_compares(path):
+    """`{(key, (left_name, right_name))}` for every `{"key": left < right}` entry.
+
+    A dict literal is where a record's decision is written down; the pair it names
+    is the OPERAND. Read structurally, so a comment that quotes the same
+    expression cannot answer for it.
+    """
+    out = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key, value in zip(node.keys, node.values):
+            if not (isinstance(key, ast.Constant) and isinstance(value, ast.Compare)):
+                continue
+            left, right = value.left, value.comparators[0]
+            if isinstance(left, ast.Name) and isinstance(right, ast.Name):
+                out.add((key.value, (left.id, right.id)))
+    return out
+
+
 def test_the_e2b_floor_refuses_six_surviving_planted_units_and_matches_thirty():
     """The E2b floor's BOUNDARY, at the arithmetic the binding actually does.
 
@@ -3302,7 +3369,8 @@ def test_the_e2b_floor_refuses_six_surviving_planted_units_and_matches_thirty():
 
     planted = probe.prereg_binding(
         prereg, corpus, "e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b",
-        25, before_share=0.6, surviving_units=6)
+        25, before_share=0.6, surviving_units=6,
+        surviving_units_basis="real_facts")
     assert planted["status"] == "BELOW_FLOOR", planted
     assert planted["reasons"] == ["below-floor"], planted
     assert planted["surviving_units"] == 6, planted
@@ -3311,7 +3379,8 @@ def test_the_e2b_floor_refuses_six_surviving_planted_units_and_matches_thirty():
     # refusal above is about the count and not about a bar that can never bind.
     met = probe.prereg_binding(
         prereg, corpus, "e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b",
-        25, before_share=0.6, surviving_units=30)
+        25, before_share=0.6, surviving_units=30,
+        surviving_units_basis="real_facts")
     assert met["status"] == "MATCHED", met
 
 
@@ -3326,41 +3395,110 @@ def test_the_e2b_floor_is_FED_the_planted_population_and_the_line_says_so():
     one a future reader can re-point silently).
     """
     source = _PROBE_PATH.read_text(encoding="utf-8")
-    call = re.search(r"surviving_units=after_c\[(\"[^\"]+\")\]", source)
-    assert call is not None, (
-        "the probe no longer passes `surviving_units=after_c[...]` to "
-        "`prereg_binding` — re-derive the operand before trusting the floor")
-    assert call.group(1) == '"real_facts"', (
+    basis_const = re.search(r'^_E2B_FLOOR_POPULATION = "([^"]+)"', source,
+                            re.MULTILINE)
+    assert basis_const is not None, (
+        "the probe no longer names E2b's floor population in "
+        "`_E2B_FLOOR_POPULATION` — re-derive the operand before trusting the "
+        "floor")
+    assert basis_const.group(1) == "real_facts", (
         "the E2b population floor is fed "
-        f"{call.group(1)}; the record's §3.1 row is written over the surviving "
-        "PLANTED units (`real_facts`). `atomic_points` counts non-planted rows "
-        "too, which is the fail-open #10989 closes")
+        f"{basis_const.group(1)!r}; the record's §3.1 row is written over the "
+        "surviving PLANTED units (`real_facts`). `atomic_points` counts "
+        "non-planted rows too, which is the fail-open #10989 closes")
+    # ONE name for the operand AND the disclosure: both `surviving_units=` and
+    # `surviving_units_basis=` have to be spelled with the constant, so the
+    # population the floor is scored over and the population the line claims
+    # cannot be edited apart (#11833 review P2-2).
+    assert "surviving_units=after_c[_E2B_FLOOR_POPULATION]" in source, (
+        "the probe's `surviving_units=` operand no longer derives from "
+        "`_E2B_FLOOR_POPULATION` — the binding could be fed one population "
+        "while the log names another")
+    assert "surviving_units_basis=_E2B_FLOOR_POPULATION" in source, (
+        "the probe's `surviving_units_basis=` disclosure no longer derives from "
+        "`_E2B_FLOOR_POPULATION` — the log would name a population that is not "
+        "the one the binding was handed")
     # ⛔ Pinned on the EMITTED line, never as a grep of the whole file. The same
     # literal also appears in `e2b_note`'s prose, which is emitted on a DIFFERENT
     # log line (`prereg_e2_floor=`) — so `in source` was satisfied by a sentence
     # in another code path, and deleting the emitter's own token left this test
     # (and the whole suite) green. Measured mutant, #11833 review P2-1.
     corpus = _REPO_ROOT / _CORPUS_REL
-    emitted = probe.binding_line(probe.prereg_binding(
-        _prereg_for_e2b_floor(30), corpus,
-        "e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b",
-        25, before_share=0.6, surviving_units=30))
+
+    def _emitted(basis: str) -> str:
+        return probe.binding_line(probe.prereg_binding(
+            _prereg_for_e2b_floor(30), corpus,
+            "e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b",
+            25, before_share=0.6, surviving_units=30,
+            surviving_units_basis=basis))
+
+    emitted = _emitted("real_facts")
     assert "surviving_units_basis=real_facts" in emitted, (
         "the binding line must state which population its measured side is, so "
         f"the gate is auditable from the log alone — emitted: {emitted}")
+    # NON-VACUITY: the token TRACKS the basis it was handed. A hardcoded literal in
+    # the emitter satisfies the assertion above unconditionally, which is what made
+    # the disclosure a docstring printed into the log (#11833 review P2-2).
+    other = _emitted("atomic_points")
+    assert "surviving_units_basis=atomic_points" in other, (
+        "the emitted `surviving_units_basis=` token does not follow the basis it "
+        "was handed — it is a constant, so the log's disclosure cannot disagree "
+        f"with the operand even when it should — emitted: {other}")
+    # A basis no log could carry is refused, never printed: the binding line is
+    # `key=value` pairs, so a name carrying a space would break every reader.
+    with pytest.raises(ValueError):
+        probe.prereg_binding(
+            _prereg_for_e2b_floor(30), corpus,
+            "e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b",
+            25, before_share=0.6, surviving_units=30,
+            surviving_units_basis="real facts")
     # One key, one denominator: the two sibling readers of the same frozen key
     # test the same population, so a `MATCHED` binding cannot be a population the
     # E2b row refuses.
-    measure = (_REPO_ROOT / "docs" / "evidence" / "7949-capstone" / "probes"
-               / "capstone_measure.py").read_text(encoding="utf-8")
-    assert 'below_floor=e1["real_facts"] < e2b_floor' in measure, (
+    #
+    # ⛔ READ FROM THE AST, not from the file's text (#11833 review P2-1). The
+    # previous pins here were `assert '<expr>' in source`, which a comment, a
+    # docstring, or a sibling call spelled the same satisfies — the very vacuity
+    # the emitted-line pin above was just fixed for. A revert to `atomic_points`
+    # reds here even if prose still quotes the correct expression.
+    operand = None
+    for candidate in _call_keyword_values(_MEASURE_PATH, "outcome", "below_floor"):
+        assert isinstance(candidate, (ast.Compare, ast.Constant, ast.BoolOp)), (
+            "capstone_measure.py's `below_floor=` grew a shape this pin cannot "
+            f"read — re-derive it: {ast.dump(candidate)}")
+        if (isinstance(candidate, ast.Compare)
+                and _subscript(candidate.left) is not None
+                and _subscript(candidate.left)[0] == "e1"):
+            assert operand is None, (
+                "capstone_measure.py compares `e1[...]` against a floor at more "
+                "than one `below_floor=` — the E2b decision is no longer "
+                f"singular; found {ast.dump(candidate)} beside "
+                f"{ast.dump(operand)}")
+            operand = candidate
+    assert operand is not None, (
+        "capstone_measure.py has no `below_floor=e1[...] < <floor>` decision — "
+        "re-derive this pin before trusting the operand")
+    assert _subscript(operand.left) == ("e1", "real_facts"), (
         "capstone_measure.py's E2b floor reads another population than the "
-        "binding — one frozen key, one denominator")
-    scores = (_REPO_ROOT / "docs" / "evidence" / "7949-capstone" / "probes"
-              / "e1_e2_scores.py").read_text(encoding="utf-8")
-    assert 'e2b_population = after["surviving_units"]' in scores, (
-        "e1_e2_scores.py's E2b floor reads another population than the binding")
-    assert '"below_floor": e2b_population < e2b_floor' in scores, (
+        f"binding — one frozen key, one denominator: {ast.dump(operand.left)}")
+    assert any(isinstance(node, ast.Name) and node.id == "e2b_floor"
+               for node in ast.walk(operand)), (
+        "capstone_measure.py's E2b `below_floor=` no longer compares against "
+        f"`e2b_floor`: {ast.dump(operand)}")
+
+    declared = [node.value for node in ast.walk(
+        ast.parse(_SCORES_PATH.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "e2b_population"
+                for target in node.targets)]
+    assert len(declared) == 1, (
+        "e1_e2_scores.py must assign `e2b_population` exactly once; found "
+        f"{len(declared)} — re-derive this pin before trusting the operand")
+    assert _subscript(declared[0]) == ("after", "surviving_units"), (
+        "e1_e2_scores.py's E2b floor reads another population than the binding: "
+        f"{ast.dump(declared[0])}")
+    assert ("below_floor", ("e2b_population", "e2b_floor")) in \
+        _dict_name_compares(_SCORES_PATH), (
         "e1_e2_scores.py computes `below_floor` from something other than the "
         "population it just declared")
 

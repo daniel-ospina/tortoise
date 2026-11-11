@@ -178,6 +178,11 @@ BEFORE_ARM = "before"
 #: `floors_owned=…,e2b_surviving_units`).
 _ABSENT = object()
 
+#: A population BASIS name is one whitespace-free token: it is printed on the
+#: binding line (`surviving_units_basis=<token>`), whose grammar is `key=value`
+#: pairs, so a name carrying a space or `=` would break every reader of the log.
+_BASIS_RE = re.compile(r"[A-Za-z0-9_.:-]+")
+
 #: The E1 numerator, restated from the architecture document (§1:85): a
 #: definite description is an Object whose name begins with `the `. The
 #: denominator is every Object admitted in that arm. The production figure
@@ -787,9 +792,36 @@ def _declared_metric_floor(
     return (raw, raw)
 
 
+#: The census field E2b's population floor is scored over. ONE name, and both the
+#: operand and the printed disclosure are derived from it, so the log cannot name
+#: a population the binding was never handed (#11833 review P2-2: the token used to
+#: be a literal inside the f-string, which made "auditable from the log" a
+#: constant). `tools/e1_e2_census_check.py` V15 refuses any other basis by name.
+_E2B_FLOOR_POPULATION = "real_facts"
+
+
+def _basis_token(basis: object) -> str:
+    """A basis name as ONE whitespace-free log token, or refuse it.
+
+    The basis is code-supplied, never read from the artifact, so this is not a
+    hostile-payload escape like :func:`_floor_number` — it is a fail-closed guard
+    against a future caller interpolating a string that would break the binding
+    line's `key=value` grammar or smuggle one of its own vocabulary words into it.
+    A basis the log cannot carry is refused, never printed.
+    """
+    if not isinstance(basis, str) or not basis:
+        raise TypeError(
+            f"`surviving_units_basis` is {basis!r}, not a non-empty string")
+    if not _BASIS_RE.fullmatch(basis):
+        raise ValueError(
+            f"`surviving_units_basis` is {basis!r} — a basis name is one "
+            "whitespace-free token")
+    return basis
+
+
 def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
                    objects: int, *, before_share: float | None,
-                   surviving_units: int) -> dict:
+                   surviving_units: int, surviving_units_basis: str) -> dict:
     """Does the frozen bar actually cover THIS run? (#9076, §4.4 fail-closed)
 
     A pre-registration binds a THRESHOLD to a POPULATION. A probe that reads the
@@ -987,6 +1019,10 @@ def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
                 f"{type(floors_declared).__name__}, not an object"),
             "surviving_floor_error": metric_errors.get("e2b_surviving_units"),
             "surviving_units": surviving_units,
+            #: WHICH population `surviving_units` is. Carried on the binding and
+            #: rendered by :func:`binding_line`, so the line states an OPERAND of
+            #: this call rather than a constant in the emitter (#11833 P2-2).
+            "surviving_units_basis": _basis_token(surviving_units_basis),
             "corpus": corpus_path.name, "corpus_sha256": corpus_sha256,
             "objects": objects}
 
@@ -1041,7 +1077,11 @@ def binding_line(bind: dict) -> str:
             # the gate reads have to be checkable against each other, and a gate
             # whose population is only in a docstring is one a future reader can
             # re-point silently (#10989).
-            f"surviving_units_basis=real_facts "
+            # ⛔ READ OFF THE BINDING, never a literal. A hardcoded token cannot
+            # disagree with the operand it describes, so the disclosure would be
+            # a docstring emitted into the log — always readable, never
+            # checkable (#11833 review P2-2).
+            f"surviving_units_basis={bind['surviving_units_basis']} "
             f"reason={','.join(bind['reasons']) or 'n/a'}")
 
 
@@ -1298,7 +1338,11 @@ def _run(argv: list[str] | None = None) -> int:
                                   # surviving PLANTED units (#10989, measured: 25
                                   # non-planted + 6 planted cleared a floor of 30
                                   # with 84 of 90 planted units lost).
-                                  surviving_units=after_c["real_facts"])
+                                  # …and the disclosure derives from the SAME
+                                  # name, so the operand and the printed basis
+                                  # cannot diverge (see _E2B_FLOOR_POPULATION).
+                                  surviving_units=after_c[_E2B_FLOOR_POPULATION],
+                                  surviving_units_basis=_E2B_FLOOR_POPULATION)
             declared_line = f"prereg_declared={args.prereg}"
             bind_line = binding_line(bind)
             try:
@@ -1372,10 +1416,15 @@ def _run(argv: list[str] | None = None) -> int:
         e2b_note = ("E2b's population floor is separate and the pre-registration "
                     "this run bound to declares none, so there is none to check")
     else:
+        # ⛔ The basis name is interpolated from the ONE constant, not spelled
+        # again here: a second literal is a second thing that can drift, and this
+        # sentence is emitted on a DIFFERENT line (`prereg_e2_floor=`), which is
+        # exactly how a copy of the token made the emitter's own disclosure pin
+        # vacuous (#11833 review P2-1/P2-2).
         e2b_note = ("E2b's population floor is separate and IS checked against the "
                     "scored arm's surviving PLANTED units (`real_facts`) on the "
                     "binding line (declared_surviving_floor= / surviving_units= "
-                    "surviving_units_basis=real_facts) — not against "
+                    f"surviving_units_basis={_E2B_FLOOR_POPULATION}) — not against "
                     "`atomic_points`, which counts non-planted rows too (#10989)")
     lines.append(
         "prereg_e2_floor=not-consumed note=the E2 criteria state no threshold to "

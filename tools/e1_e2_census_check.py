@@ -1155,14 +1155,25 @@ def check(text: str) -> tuple[list[str], dict]:
             # basis (#10989), so a log that still prints it is a finding.
             #
             # ⛔ THE EMPTY STRING IS TOLERATED ON PURPOSE — it is not a fail-open.
-            # This token does not exist before #10989, and the probe prints it on
-            # every binding it emits (`surviving_units_basis=real_facts`), so an
-            # ABSENT token can only be a log written by an older probe; refusing it
-            # would refuse the historical artifacts this checker is run over. What
-            # this row closes is a binding that NAMES another basis —
-            # `atomic_points` above all — so PRESENCE is what is graded. Narrowing
-            # this tuple to ("n/a", "real_facts") is a corpus-wide decision about
-            # older logs, deliberately not taken here.
+            # This token does not exist before #10989, and the probe now prints it
+            # on every binding it emits, so an ABSENT token can only be a log
+            # written by an older probe. What this row closes is a binding that
+            # NAMES another basis — `atomic_points` above all — so PRESENCE is what
+            # is graded, and `n/a` is graded with the empty string because a basis
+            # the probe could not read is not a basis it named.
+            #
+            # ⚠️ THE TOLERANCE IS NARROW, and worth stating exactly rather than
+            # as "the historical artifacts": a legacy binding is only reached
+            # here when its `surviving_units` already EQUALS the scored arm's own
+            # `metric=real_facts` count — the count branch above refuses every
+            # legacy log whose count disagrees. So the shape this protects is a
+            # well-formed pre-#10989 log on the right population, whose only sin
+            # is not saying so. Narrowing this tuple to ("n/a", "real_facts") is a
+            # corpus-wide decision about older logs, deliberately not taken here.
+            # (#11833 review P2-3 corrected this comment: it claimed refusing the
+            # absent token would refuse the historical artifacts, but the count
+            # branch three lines above already refuses every one whose count does
+            # not match.)
             basis = bind.get("surviving_units_basis", "")
             if basis not in ("", "n/a", "real_facts"):
                 findings.append(
