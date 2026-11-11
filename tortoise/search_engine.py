@@ -1382,8 +1382,9 @@ class EpBreakdown:
     #: ``baseline`` (a persisted prior EP has not measured — a #2199 declared
     #: baseline, a legacy mirror, or a terminal decayed posterior; a half pair
     #: reaches it only when a readable mirror survives beside it) / ``absent`` (nothing that yields a mean — no persisted
-    #: belief, a HALF pair, a 0/0 pair, or an operand this process cannot read
-    #: ⇒ the value is ``None``). Derives from :func:`ep_state`, the single
+    #: belief, a `0/0` pair, an operand this process cannot read, or a half pair
+    #: whose β exists in NEITHER column ⇒ the value is ``None``). Derives from
+    #: :func:`ep_state`, the single
     #: mapping of the #11702 vocabulary; ``has_ep``/``measured`` keep their
     #: narrower #2490 / #3276 meanings and are NOT this field's source.
     ep_state: str = EP_STATE_ABSENT
