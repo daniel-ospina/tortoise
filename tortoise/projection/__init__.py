@@ -12375,11 +12375,11 @@ class FalkorProjection(
         """Run recover_from_log, fail loud if it did not recover.
 
         A completed recovery with an onboarding gap — or a `:TeamMeta`
-        first-org marker gap (#5353), the same producer-signal shape — is NOT a
-        reason to refuse to open the store (it is usable, and refusing would be
-        strictly worse) — but neither must pass unmentioned, since this is the
-        caller for the unresponsive-graph path where no other surface reports
-        it (#4641/#5353).
+        first-org marker gap (#5353) or a `:PackSelection` pack-set marker gap
+        (#9752), the same producer-signal shape — is NOT a reason to refuse to
+        open the store (it is usable; refusing would be worse) — but neither
+        must pass unmentioned: this is the caller for the unresponsive-graph
+        path, where no other surface reports it (#4641/#5353/#9752).
 
         #7929: a DECLINED recovery that had already replayed is rolled back to
         the empty state this call found (see `recover_from_log`'s ATOMICITY

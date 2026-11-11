@@ -1072,3 +1072,26 @@ def test_recover_from_log_documents_the_pack_selection_keys():
     assert "pack_selection_gap" in doc
     assert "pack_selection_state_unknown" in doc
     assert "#9752" in doc
+
+
+def test_recover_or_raise_documents_the_pack_selection_leg():
+    """The third gap leg must be named where the method's contract is (#9752).
+
+    FAILING VALUE: `_recover_or_raise`'s docstring answered "which classes does
+    this caller report?" with the onboarding gap and the `:TeamMeta` leg
+    (#5353), and stopped there while the method grew its `:PackSelection`
+    consumer. That is the same prose/code disagreement the round-1 finding on
+    THIS PR was made of — a class the caller reports, described by nothing —
+    and it is pinned here rather than left to the next reader, exactly as
+    `recover_from_log`'s own contract is pinned above.
+
+    The sibling assertions are not decoration: an "add the new one" edit that
+    REPLACED the list would pass the `:PackSelection` assertions while dropping
+    a class the method still reports.
+    """
+    from tortoise.projection import FalkorProjection
+
+    doc = FalkorProjection._recover_or_raise.__doc__ or ""
+    assert ":PackSelection" in doc and "#9752" in doc
+    assert ":TeamMeta" in doc and "#5353" in doc
+    assert "#4641" in doc
