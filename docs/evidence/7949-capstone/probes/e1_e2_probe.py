@@ -1419,13 +1419,15 @@ def _run(argv: list[str] | None = None) -> int:
         e2b_note = ("E2b's population floor is separate and the pre-registration "
                     "this run bound to declares none, so there is none to check")
     else:
-        # ⛔ The basis name is interpolated from the ONE constant, not spelled
-        # again here: a second literal is a second thing that can drift, and this
-        # sentence is emitted on a DIFFERENT line (`prereg_e2_floor=`), which is
-        # exactly how a copy of the token made the emitter's own disclosure pin
-        # vacuous (#11833 review P2-1/P2-2).
+        # ⛔ The basis name is interpolated from the ONE constant — here AND in the
+        # parenthetical below, which used to spell `real_facts` a second time: a
+        # prose copy can drift from the operand while the interpolated token cannot,
+        # and this sentence is emitted on a DIFFERENT line (`prereg_e2_floor=`),
+        # which is exactly how a copy of the token made the emitter's own disclosure
+        # pin vacuous (#11833 review P2-1/P2-2, r1 P2-3).
         e2b_note = ("E2b's population floor is separate and IS checked against the "
-                    "scored arm's surviving PLANTED units (`real_facts`) on the "
+                    "scored arm's surviving PLANTED units "
+                    f"(`{_E2B_FLOOR_POPULATION}`) on the "
                     "binding line (declared_surviving_floor= / surviving_units= "
                     f"surviving_units_basis={_E2B_FLOOR_POPULATION}) — not against "
                     "`atomic_points`, which counts non-planted rows too (#10989)")

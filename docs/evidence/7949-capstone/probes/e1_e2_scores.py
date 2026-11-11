@@ -2022,8 +2022,10 @@ def score(repo: Path = _ROOT) -> dict:
     # close: the floor is the one guard that says "there was a population here to
     # score", so it may not be satisfied by rows the criterion was not written
     # over. The SHARE stays the atomicity control's proxy over all Points and is
-    # disclosed as one (`share_population` below) until an artifact carries the
-    # frozen 14-unit denominator (#10360).
+    # disclosed as one (`share_population` below); re-scoring it over E2b's OWN
+    # registered denominator — "the planted units that survived (floor ≥ 30)", not
+    # E2a's frozen 14 value-bearing units — is #10360's remaining work (#11833
+    # review r1 P2-1: this sentence used to justify the deferral with E2a's 14).
     e2b_population = after["surviving_units"]
     e2["e2b"] = {
         "fused": after["fused"],

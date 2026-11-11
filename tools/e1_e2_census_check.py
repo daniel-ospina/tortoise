@@ -295,12 +295,13 @@ def check(text: str) -> tuple[list[str], dict]:
     #: (#10989).
     planted_pts: dict[str, int] = {}
     #: The E2 ATOMICITY CONTROL's population (`atomic_points`), which is NOT E2b's
-    #: floor population. Published as `state["atomic_points"]` so the atomicity count
-    #: stays available to callers; nothing in this module reads it back — V5/V6/V7 go
-    #: through `arm_metric()` straight off the log, and V7 words an ABSENT arm line
-    #: itself (`arm_metric` returns `{}`, so its row reads "prints no atomic_points").
-    #: The V3 parse guard above is what keeps this dict to real counts and what
-    #: reports a non-count token; V15's anchor is `planted_pts`, not this (#10989).
+    #: floor population. Accumulated only because the V3 parse guard below is what
+    #: refuses an unparseable `atomic=` token — V5/V6/V7 go through `arm_metric()`
+    #: straight off the log, and V7 words an ABSENT arm line itself (`arm_metric`
+    #: returns `{}`, so its row reads "prints no atomic_points"). V15's anchor is
+    #: `planted_pts`, not this (#10989). ⛔ Not published into `state`: it was, and
+    #: nothing read it — a publish with no caller is dead code, not a surface
+    #: (#11833 review r1 P2-2).
     atomic_pts: dict[str, int] = {}
     pre_shas: dict[str, str] = {}
     for arm in arms:
@@ -360,8 +361,6 @@ def check(text: str) -> tuple[list[str], dict]:
                 findings.append(
                     f"[V3] arm {arm}: metric=real_facts count={rf!r} is not a "
                     f"count — E2b's population cannot be reconciled")
-    state["atomic_points"] = atomic_pts
-    state["planted_points"] = planted_pts
     state["shares"] = shares
 
     # ── V3 (cont.): the `e1` line reconciles with the arm lines ───────────
