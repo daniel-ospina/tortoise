@@ -285,9 +285,9 @@ That ruling stands and nothing here reverses it.
 boundary, so recomputing EP for it is **exact**, not approximate. Residency and the EP carve-out
 therefore point the same way — and no schema change is needed.
 
-**A claim with no persisted belief must not answer the neutral Beta(1,1) mean 0.5.** Answering it would
-make an absent claim indistinguishable from a computed one at the point where ordering happens. The rule
-is **absent state is `null` with `ep_state: "absent"`, never 0.5**, and it holds
+**Why the rule exists.** A claim with no persisted belief must not answer the neutral Beta(1,1) mean 0.5.
+Answering it would make an absent claim indistinguishable from a computed one at the point where ordering
+happens. The rule is **absent state is `null` with `ep_state: "absent"`, never 0.5**, and it holds
 on every read/rank surface: `annotate_ep_batch`, the canonical `why` `ep` block (`tortoise/why.py`),
 `GraphRanker`, `StateRanker`/`recall_ranking`, `GapsRanker`/`gaps_ranking`, `SubgraphExpander`, and the
 event/object aggregate reads; the `analyze` templates refuse an absent claim rather than admitting it at a
