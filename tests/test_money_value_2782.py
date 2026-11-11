@@ -1755,10 +1755,13 @@ class TestThePayloadWalkFailsClosedAtItsDepthBound:
         payload was ``MAX - 2``, i.e. zero levels at a bound of 2 — while its
         sibling ``test_a_cyclic_sequence_is_cut_by_identity_not_by_the_depth_bound``
         red there on its fixed 3-level fixture. So the class was not uniformly
-        blind; this test alone was, which is what this literal fixes. 10 is far
-        below the bound's own stated headroom (no journal payload nests past
-        ~4) and far above it once the bound is tightened, which is what makes
-        it a guard.
+        blind: this test alone DEGENERATED — its payload collapsed to zero
+        levels at a bound of 2 — while the constant-derived siblings still
+        exercise a refusal below and above whatever bound they see (they just
+        cannot detect a TIGHTENING, which is a separate pin this change does
+        not claim to fix). The literal is what makes this test a guard. 10 is
+        far below the bound's own stated headroom (no journal payload nests
+        past ~4) and far above it once the bound is tightened.
         """
         import tempfile
         from pathlib import Path
