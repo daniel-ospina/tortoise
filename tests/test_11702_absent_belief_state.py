@@ -626,6 +626,19 @@ def test_a_mirror_outside_the_probability_band_is_not_a_belief(sdk):
     assert belief_mirror(16.0) is None
     assert belief_mirror(2.5) is None
     assert belief_mirror(0.9) == pytest.approx(0.9)
+    # ⛔ The BAND EDGE is decided by the value the STORE serves, which for a string
+    # property is its float32 rounding: `"1.00000001"` rounds to exactly 1.0 and
+    # READS on both twins, `"1.00000006"` is past the midpoint and is absent on
+    # both. Comparing the exact double let Cypher say present-at-1.0 while Python
+    # said absent — one claim, two `ep_state`s, inside a 6e-8 window (measured:
+    # `'1.00000001'` was served `1.0 / baseline` on the graph tier and ranked
+    # above a measured 0.9 while the `ep` block said `absent`).
+    assert belief_mirror("1.00000001") == pytest.approx(1.0), (
+        "the band must be applied to the float32 the store serves")
+    assert belief_mirror("1.00000006") is None
+    # …and the store's own answer is asserted, so the fixture cannot drift.
+    assert proj.g.query(
+        "RETURN toFloatOrNull('1.00000001') AS v").result_set == [[1.0]]
 
     for raw in ("'0x1p4'", "2.5", "-0.5"):
         pid = sdk.create_point("statement", f"ZQBAND mirror {raw}")["id"]
@@ -3136,11 +3149,15 @@ def test_the_twins_parse_the_same_string_language(sdk):
     is a readable belief (not the maximum-certainty fabrication the finiteness
     guard closes).
 
-    SECOND RECORDED RESIDUAL: a PRESENT string operand agrees on presence and
-    on magnitude, but Cypher serves the float32 rounding (`0.699999988…`) while
-    Python serves the double (`0.7`) — hence `approx` on both sides below. The
-    divergence is bounded by the literal and cannot change `ep_state`, which is
-    what this table exists to protect.
+    SECOND RESIDUAL — for OPERANDS only: `numeric_operand` returns the double
+    (`0.7`) where the store serves the float32 rounding (`0.699999988…`), hence
+    `approx` on both sides below. It cannot change `ep_state`, because presence
+    and magnitude are pinned separately: `_string_operand` decides presence from
+    the float32, and a MIRROR is additionally rounded by `belief_mirror` before
+    its band is applied, so the mirror twins agree on both presence AND
+    magnitude (`"0.6"` → 0.6000000238 on each). The operand half is bounded by
+    the literal and cannot cross a state boundary — that is what this table
+    protects, and it is why `ep_state` never depends on the residual.
     """
     from tortoise.search_engine import numeric_operand, numeric_operand_cypher
 

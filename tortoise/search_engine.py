@@ -466,6 +466,22 @@ def numeric_operand_cypher(operand: str) -> str:
             f"THEN {coerced} ELSE null END")
 
 
+def _float32(val: float):
+    """The float32 a STRING operand becomes in the store, or None.
+
+    `strtof` — what `toFloat`/`toFloatOrNull` use on a string — rounds to a
+    float32, so THIS is the value the store serves for a string property, and it
+    is the value every band/compare on such a property must be decided on.
+    Returns None when the rounding overflows (past float32's rounding boundary)
+    or is not finite.
+    """
+    try:
+        rounded = struct.unpack("<f", struct.pack("<f", val))[0]
+    except (OverflowError, ValueError):
+        return None
+    return rounded if math.isfinite(rounded) else None
+
+
 def _string_operand(val: float):
     """The float `toFloat` reads for a decimal string, or None (#11702).
 
@@ -489,12 +505,8 @@ def _string_operand(val: float):
     `test_the_twins_parse_the_same_string_language`. PRESENCE is what must
     agree, because presence is the `absent` / `measured` state itself.
     """
-    try:
-        rounded = struct.unpack("<f", struct.pack("<f", val))[0]
-    except (OverflowError, ValueError):
-        # A double beyond float32 range: `toFloat` answers null, not inf.
-        return None
-    if not math.isfinite(rounded):      # `nan`/`inf` never survive the pack
+    rounded = _float32(val)
+    if rounded is None:
         return None
     if abs(rounded) > _FLOAT32_MAX:     # belt and braces; pack guarantees it
         return None
@@ -574,8 +586,12 @@ def numeric_operand(raw):
 #: consumer already assumes it: `ranking.py`'s graph_boost is documented as a
 #: `[0, 1]` combination, `analyze` compares against thresholds in `[0, 1]`, and
 #: the manifest row promises "the value is `null` if and only if the state is
-#: `absent`". Nothing enforced it, so a STRING mirror the Cypher coercion reads
-#: and Python's grammar refuses — `"0x1p4"` is 16.0 to `toFloat` and unreadable
+#: `absent`". The band is applied to the value the STORE serves — for a STRING
+#: property that is its float32 rounding (`belief_mirror` rounds with `_float32`
+#: before comparing), so the two twins cannot split at the band edge either
+#: (`"1.00000001"` rounds to exactly 1.0 and reads on both; `"1.00000006"` is past
+#: the midpoint and is absent on both). Nothing enforced it before, so a STRING
+#: mirror the Cypher coercion reads and Python's grammar refuses — `"0x1p4"` is 16.0 to `toFloat` and unreadable
 #: to `_FLOAT_LITERAL` — was a belief on the Cypher surfaces and absent on the
 #: Python ones: measured, one legacy `n.confidence="0x1p4"` row read
 #: `graph_ranking confidence 16.0 / baseline` with `graph_boost 8.0` and ranked
@@ -595,7 +611,21 @@ def belief_mirror(raw):
     the α/β OPERANDS, which are pseudo-counts and legitimately larger than 1.
     """
     val = numeric_operand(raw)
-    if val is None or not (BELIEF_VALUE_MIN <= val <= BELIEF_VALUE_MAX):
+    if val is None:
+        return None
+    if isinstance(raw, str):
+        # ⛔ A string property is served as a FLOAT32 (see `_float32`), so the band
+        # must be applied to the value the store actually holds — otherwise the
+        # twins split at the band edge: `"1.00000001"` rounds to exactly 1.0 in
+        # the store (inside the band, max certainty) while the exact double is
+        # outside it, so Cypher said present and Python said absent — a shape
+        # measured ranking a claim above a genuinely measured 0.9. Returning the
+        # ROUNDED value also closes the in-range precision divergence for a
+        # mirror (`"0.6"` → 0.6000000238, exactly what the store serves).
+        val = _float32(val)
+        if val is None:
+            return None
+    if not (BELIEF_VALUE_MIN <= val <= BELIEF_VALUE_MAX):
         return None
     return val
 
