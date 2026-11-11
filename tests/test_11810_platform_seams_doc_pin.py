@@ -577,10 +577,14 @@ _ITEM_START = re.compile(r"^(?:\*\*)?\(?\d+[.)](?:\*\*)?\s")
 #:
 #: ⚠️ `_BLOCK_END` is only the INDENT-0 case. The rule is completed in
 #: `_record_site_block`, which also ends the block at the first non-blank line indented
-#: LESS than the located marker's width (W+N: `2. ` → 3) — the CommonMark rule, and what
-#: closes r38 P3 #1: a sentence de-indented to 1–2 spaces renders OUTSIDE the item, so
-#: counting it as content was a fail-OPEN the column-0 test could not see (measured: it
-#: stays in the block before, excluded now).
+#: less than the located marker's own width — but ONLY when a BLANK LINE separates it.
+#: That qualifier is CommonMark's LAZINESS rule (§5.2 rule #5), and getting it wrong cost
+#: a P2 in both directions: r38 P3 #1 measured a blank-separated de-indent swallowed into
+#: the block (a real fail-OPEN), and r39 P2 #1 then measured that terminating on ANY
+#: less-indented line FALSE-REDs correct content — a lazy 1-/2-space or tab-indented
+#: continuation, and even a renumber (`2. ` → `10. ` grows the width), all of which
+#: `markdown_it` renders INSIDE the item. Both directions are measured; the blank-line
+#: gate is the discriminator between them.
 #:
 #: ⚠️ It also fixes the FALSE RED that the indented-marker alternative caused (review
 #: r36 P2 #2): the content lines of these items are 3-space indented, so terminating on
@@ -592,8 +596,8 @@ _ITEM_START = re.compile(r"^(?:\*\*)?\(?\d+[.)](?:\*\*)?\s")
 #: the labelled sentence, so a correct record edited that way REDs with a message that
 #: says the sentence moved when it did not (measured). A lazy line AFTER the sentence
 #: truncates the block's tail without reddening (r38 P3 #2). It fails CLOSED, and no edit
-#: of this record has produced one; the alternative — tolerating less-indented prose
-#: inside an item — would re-open the fail-OPEN this rule closes.
+#: of this record has produced one; the alternative — treating a column-0 lazy line as
+#: item content — would re-open the fail-OPEN this rule closes.
 #:
 #: ⚠️ The LOCATOR (`_ITEM_START`) stays narrow and different on purpose: an item is
 #: found by its BOLD HEADING's words, so locating on "any column-0 line" would invent
@@ -607,19 +611,30 @@ _BLOCK_END = re.compile(r"^(?![ \t]*$)[^ \t]")
 def _record_site_block(doc: str, site: str) -> str:
     """The record text `site` names — the contracts-table row, or one numbered item.
 
-    An item runs from its own first line (`2. **Heading …**`) to the first non-blank
-    line indented LESS than the item's own marker width (W+N: `2. ` → 3, so column 0 is
-    the indent-0 case of the same rule); `_BLOCK_END` is that case and the width test
-    completes it. An item is located by its BOLD HEADING's words, not by
-    its NUMBER — a renumbering therefore cannot make a label point at a neighbour.
-    ⚠️ Recorded bound: a LAZY continuation line written at column 0 BEFORE the labelled
-    sentence ends the block there and REDs a correct record, with a message that says the
-    sentence "moved" when nothing moved (measured); a lazy line AFTER the sentence
-    truncates the block's tail without reddening. It fails CLOSED.
+    An item runs from its own first line (`2. **Heading …**`) through its indented
+    continuation lines, and ends at the first line that is either at column 0
+    (`_BLOCK_END`) or BLANK-LINE-SEPARATED and indented less than the item's own marker
+    width. That gate is CommonMark's LAZINESS rule (§5.2 rule #5): a paragraph
+    CONTINUATION line keeps the item's content even with its indentation partly or fully
+    deleted, so only a blank-separated less-indented line is a new block (measured with
+    `markdown_it`: 1-space, 2-space, tab and RENUMBERED continuations all render inside
+    the `<li>`; the blank-separated one does not). An item is located by its BOLD
+    HEADING's words, not by its NUMBER — a renumbering therefore cannot make a label
+    point at a neighbour, and the blank-line gate is what keeps that true now that the
+    boundary reads the marker's width.
+    ⚠️ Recorded bounds: (a) the width is the marker's LITERAL width, `\s` consuming one
+    space — W+1, not W+N, so an item spelled with 2–4 spaces after the marker would end
+    its block at a line at W+1 (unreachable today: every item here is `N. `, width 3)
+    and a `**3.** ` pseudo-item measures 7 although that shape is not a list item at all
+    (it renders as a paragraph, so its block shrinking is fail-CLOSED); (b) a LAZY line
+    written at column 0 BEFORE the labelled sentence ends the block there and REDs a
+    correct record, with a message that says the sentence "moved" when nothing moved
+    (measured); one AFTER the sentence truncates the tail without reddening. Both fail
+    CLOSED.
     (Read the boundary off the code, never off this sentence: a terminator described
-    more narrowly than the code stops at is how review r34 P3 #1, r35 P3 #1 and r38 P3 #1
-    each shipped a fail-open, and r35 P3 #2 was this very line naming the pre-r34
-    terminator.)
+    more narrowly, or more widely, than the code stops at is how review r34 P3 #1, r35
+    P3 #1, r38 P3 #1 and r39 P2 #1 each shipped a defect, and r35 P3 #2 was this very
+    line naming the pre-r34 terminator.)
 
     Returns "" when the site cannot be located, so a re-worded heading REDs the
     label guard. Returning the whole document instead would make every label pass
@@ -651,12 +666,27 @@ def _record_site_block(doc: str, site: str) -> str:
     # The item's own content indent is its marker's width (`2. ` -> 3), which is the
     # CommonMark rule: a following line indented LESS than that is outside the item.
     marker_width = len(_ITEM_START.match(lines[start]).group(0))
+    # ⛔ `prev_blank` is the whole of CommonMark's LAZINESS rule (§5.2 rule #5):
+    # deleting SOME OR ALL of the indentation from a PARAGRAPH-CONTINUATION line keeps
+    # it INSIDE the item, so a less-indented line only ends the block when a BLANK LINE
+    # separates it (then it is a new block, rendered outside). Measured with
+    # `markdown_it` (commonmark preset): 1-space, 2-space, tab-indented and renumbered
+    # continuations all render inside the `<li>`; only the blank-separated one does not.
+    # Without the gate this terminates on correct content — including on a RENUMBER
+    # (`2. ` -> `10. ` grows the width to 4), which this file promises cannot move a
+    # label (review r39 P2 #1, measured both directions).
+    prev_blank = False
     while end < len(lines):
         line = lines[end]
         if _BLOCK_END.match(line):
             break
-        if line.strip() and len(line) - len(line.lstrip(" ")) < marker_width:
-            break
+        if line.strip():
+            expanded = line.expandtabs(4)   # §2.2: a tab is spaces to a 4-col stop
+            if prev_blank and len(expanded) - len(expanded.lstrip(" ")) < marker_width:
+                break
+            prev_blank = False
+        else:
+            prev_blank = True
         end += 1
     return "\n".join(lines[start:end])
 
