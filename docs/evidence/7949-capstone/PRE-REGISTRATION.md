@@ -2259,10 +2259,16 @@ to answer.
 
 ### 10.23 — the §11 cite block re-derived at the `#11654` forward merge, and the in-place re-pointings reverted (2026-11-10, `#11653`)
 
-> ⛔ **Superseded for the merged tree by §10.24** — the numbers below are a faithful record of
-> the head this entry names; §10.24 carries the live values for this tree. That includes the last
-> sentence of the note below ("it is the newest entry and its numbers are this tree's"): true when
-> this entry was written, not true of this tree.
+> ⛔ **Superseded for the merged tree by §10.24** — the §11 cite-block numbers below are a faithful
+> record of the head this entry names, and §10.24 carries the live values for those cites in this
+> tree. That includes the last sentence of the note below ("it is the newest entry and its numbers
+> are this tree's"): true when this entry was written, not true of this tree.
+>
+> **One number below is still live, and it is not §10.24's.** This entry's last bullet re-derives the
+> `#10360` switch's read-back to `extractor_v2.py:10508`; `#11239`'s `+17` inserts sit at
+> `extractor_v2.py:12112-12157`, **below** that assignment, so it did not move. That is why §10.20's
+> pointer still names THIS entry for the `:10508` value, and why `preregistration.json`'s `read_back`
+> prose carries it: §10.24 re-derived the block's lower cites and never restates `:10508`.
 >
 > ⛔ **Renumbered from §10.21 to §10.23 in the `#11654` forward merge**, by the rule §10.22 states for
 > `#11673`'s collision: this section and `#11673`'s both claimed §10.21 on 2026-11-10, the later one
