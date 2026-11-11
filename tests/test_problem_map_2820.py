@@ -92,7 +92,7 @@ def _decoy_and_ours() -> tuple[str, str]:
     subtracts one from OPEN, so an OPEN of 0 would emit `**N fixed · -1 open · …**`,
     which `_INDEX_COUNTS` does not match — the control would then red with "states
     no headline" rather than "the two disagree". That is a loud false red on a
-    future document (never a silent pass), and §8 records five rows still open.
+    future document (never a silent pass), and §8 records four rows still open.
     """
     text = DOC.read_text(encoding="utf-8")
     counts = pmc.parse_summary(text)
