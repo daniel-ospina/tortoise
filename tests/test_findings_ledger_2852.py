@@ -190,7 +190,7 @@ def test_mutation_population_is_pinned():
     assert len(flc.MUTATIONS) >= flc.MIN_SELF_TEST_MUTATIONS, (
         "the registered population must meet the floor it declares"
     )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 24, (
+    assert flc.MIN_SELF_TEST_MUTATIONS == 25, (
         "this line RECORDS the population (24 arms); removing one means editing the "
         "floor here too, which is the second place a shrink has to touch"
     )
@@ -706,6 +706,73 @@ def test_a_verdict_moved_between_classes_is_rejected(tmp_path, monkeypatch):
         assert any("assigns a different verdict" in p for p in problems), (old, problems)
 
 
+def test_a_class_first_tally_is_accepted(tmp_path, monkeypatch):
+    """FAILS if the SAME assignment written class-first reds as a swap.
+
+    The arm read only "letters preceding a class token", so
+    `**SUPERSEDED-BY-FIX**: (c), (d) and (g)` — the identical assignment, reworded —
+    returned *"assigns a different verdict … (c) stated ADOPTED, table says
+    SUPERSEDED-BY-FIX"*: a false accusation printed at the REQUIRED `docs` job over
+    prose that is exactly right, which is the failure mode the shallow arm one
+    function over exists to prevent on the other side.
+
+    Accepting it must not go blind — the second half keeps a real swap RED, because
+    the class-first reading is adopted only when it covers EVERY non-STILL-TRUE row
+    and agrees with the table.
+    """
+    original = (
+        "**(c)**, **(d)** and **(g)** are **SUPERSEDED-BY-FIX**, **(e)** is\n"
+        "**ADOPTED**, and **(b)**, **(k)** and **(l)** are **DRIFTED**."
+    )
+    class_first = (
+        "**SUPERSEDED-BY-FIX**: **(c)**, **(d)** and **(g)**; **ADOPTED**: **(e)**; "
+        "**DRIFTED**: **(b)**, **(k)** and **(l)**."
+    )
+    swapped = (
+        "**ADOPTED**: **(c)**, **(d)** and **(g)**; **SUPERSEDED-BY-FIX**: **(e)**; "
+        "**DRIFTED**: **(b)**, **(k)** and **(l)**."
+    )
+    assert original in DOC.read_text(encoding="utf-8"), (
+        "the tally sentence moved — re-point this pair at its new wording"
+    )
+
+    # NOT `== []`: the copy lives at a tmp path, so the registration arm legitimately
+    # reports that no `docs/00_index.md` row names it. What must not appear is the
+    # false accusation about the sentence.
+    _mutated(tmp_path, monkeypatch, lambda t: t.replace(original, class_first, 1))
+    assert not any(
+        "assigns a different verdict" in p for p in _doc_problems()
+    ), "a legitimate class-first reword red the guard"
+
+    _mutated(tmp_path, monkeypatch, lambda t: t.replace(original, swapped, 1))
+    assert any(
+        "assigns a different verdict" in p for p in _doc_problems()
+    ), "accepting class-first must not accept an actual swap"
+
+
+def test_a_second_table_is_rejected(tmp_path, monkeypatch):
+    """FAILS if a row added to a SECOND table in §3 or §6 stays invisible.
+
+    `_table_rows()` reads the section's first table and stops at the first
+    non-`|` line, so a thirteenth correction row — or a fifth §6 bucket — appended in
+    a fresh table was never enumerated: no verdict check, no evidence floor, no
+    population pin. Measured before this arm existed: `--check` rc=0, `--self-test`
+    PASS and the whole suite green over a page carrying thirteen rows while §8
+    advertises the population pinned to twelve.
+    """
+    extra = (
+        "| # | claim | correction | verdict | evidence |\n"
+        "|---|---|---|---|---|\n"
+        "| **m** | an undeclared claim | **False.** | **STILL-TRUE** | nothing |\n"
+        "\n"
+    )
+    for anchor in ("## 4. The artefact index", "## 7. What this changes"):
+        _mutated(tmp_path, monkeypatch, lambda t, a=anchor: t.replace(a, extra + a, 1))
+        assert any(
+            "carries 2 tables" in p for p in _doc_problems()
+        ), (anchor, _doc_problems())
+
+
 # ── citations resolve ──────────────────────────────────────────────────────
 
 
@@ -756,7 +823,7 @@ def test_out_of_tree_citation_is_reported(tmp_path, monkeypatch):
     """
     def add_escaping_citation(text: str) -> str:
         return text.replace(
-            "It resolves on no machine in the fleet (§5).",
+            "It resolves on none of the machines measured (§5) — a",
             "`../../../../../../etc/hostname:1`",
             1,
         )
