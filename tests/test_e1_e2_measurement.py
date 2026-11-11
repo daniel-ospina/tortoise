@@ -1998,7 +1998,8 @@ def test_an_owned_floor_the_run_is_under_is_refused_not_scored(
     The artifact's own rule is `below_floor: REFUSED, which is neither a pass nor a
     fail`, and it is now enforced on the two quantities the old blanket refusal
     cited but never read. `before_share=0.600000` under a 0.7 share floor is a
-    corpus that cannot measure E1; `surviving_units=114` is under a 500 floor. Both
+    corpus that cannot measure E1; `surviving_units=90` (the surviving PLANTED
+    units, `real_facts` — #10989) is under a 500 floor. Both
     exit 3 with `below-floor`, and NEITHER may carry a verdict — a refused run that
     reports RED is the defect one polarity over.
     """
