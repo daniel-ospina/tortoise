@@ -26,7 +26,10 @@ What this file pins, in the order the decisions were made:
    vector-bearing producer) declares its own width — the one stamp whose
    absence no other pin could see;
 8. the declaration is IDEMPOTENT: a second application of the single declared
-   seam does not flip `f32` to `f64` over values it did not change.
+   seam does not flip `f32` to `f64` over values it did not change;
+9. …and that idempotence NEVER trusts the marker on its own: a vector replaced
+   after the stamp (`EventAPI.add_point`'s `p.update(fields)`) re-decides the
+   width from the text actually in the payload.
 """
 from __future__ import annotations
 
@@ -41,6 +44,7 @@ from tortoise.embeddings import (
     JOURNAL_VECTOR_WIDTH_F32,
     JOURNAL_VECTOR_WIDTH_F64,
     JOURNAL_VECTOR_WIDTH_KEY,
+    _is_shortest_f32_text,
     shortest_float32_vector,
     stamp_journal_embedding,
 )
@@ -154,6 +158,115 @@ def test_a_preserved_vector_still_declares_f64_even_beside_a_stale_f32():
 
     assert stamped[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64, (
         "a preserved vector declared f32 — the guard ran before the verbatim arm")
+
+
+def test_a_stale_f32_marker_never_survives_a_vector_replaced_after_the_stamp():
+    """#11835 review (P0): the guard must VERIFY the text, never trust the marker.
+
+    `EventAPI.add_point` is a home where the vector is replaced AFTER the stamp:
+    `_point` stamps its own (narrowed, `f32`) vector, `p.update(fields)` swaps
+    in the caller's, and the re-stamp returned on the `f32` marker alone. The
+    caller's off-grid text was therefore declared `f32` — the one thing the
+    marker exists to prevent (*"a caller-set value would describe a width the
+    payload's text does not have"*).
+
+    The seam-level reproduction of that home: stamp our own vector, replace the
+    values with a caller's, stamp again. Written to RED if the arm goes back to
+    returning on the marker without asking the text (measured: it does).
+    """
+    stamped = stamp_journal_embedding(_payload(_vector()), creating=True)
+    assert stamped[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F32, (
+        "premise: the seam declared our own vector f32")
+    caller = [0.1234567890123, 2.718281828459045, 3.141592653589793,
+              float(np.float32(0.5))]
+
+    stamped["embedding"] = list(caller)          # a writer replacing the vector
+    again = stamp_journal_embedding(stamped, creating=False)
+
+    assert again[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64, (
+        "an off-grid caller vector kept the `f32` stamp written for the SERVER "
+        "vector it replaced — a payload declaring a width its text does not "
+        "have")
+    assert again["embedding"] == caller, (
+        "a replaced vector belongs to its caller: leave it exactly as written, "
+        "never narrowed into a claim about the embedder")
+
+
+def test_a_stale_f32_marker_still_stands_when_the_text_really_is_f32():
+    """…and the verification does not re-open the idempotence bug it guards.
+
+    The arm exists because a second stamp over its OWN output must not flip
+    `f32` -> `f64`. Verifying the text must therefore still accept that output —
+    asserted here on the exact values a first stamp produces, so a future
+    tightening of the predicate cannot silently restore the flip.
+    """
+    once = stamp_journal_embedding(_payload(_vector()), creating=True)
+    assert once[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F32
+
+    # The predicate is asked directly, so this pins the VERIFICATION and not
+    # only the arm's observable outcome.
+    assert _is_shortest_f32_text(once["embedding"]), (
+        "the seam's own narrowed output failed its own f32-text test — the "
+        "idempotence arm would flip it back to f64")
+    assert not _is_shortest_f32_text(_vector()), (
+        "a WIDENED float32 vector passed the shortest-text test — the test is "
+        "not discriminating between the seam's output and its input")
+
+
+def test_the_idempotence_holds_at_the_top_of_the_float32_range():
+    """#11835 review (P2): the range gate must ask "is this a float32?", not
+    "is this ≤ the float32 maximum?".
+
+    The largest float32's SHORTEST DECIMAL is `3.4028235e38`, and as a float64
+    that is **greater** than `finfo(float32).max` (`3.4028234663852886e38`). A
+    gate written against the binary maximum therefore rejects this seam's own
+    output for that one value, falls through to the quantiser — which refuses it
+    in turn — and re-declares `f64` over byte-identical values: exactly the
+    flip the idempotence arm exists to prevent, reachable only at the top of the
+    range (measured: no other float32 in the top 20,000 trips it).
+    """
+    top = float(np.finfo(np.float32).max)
+    once = stamp_journal_embedding(_payload([top]), creating=True)
+
+    assert once[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F32, (
+        "the seam narrowed the largest float32 but did not declare it f32")
+    assert once["embedding"] == [float(str(np.float32(top)))]
+    assert once["embedding"][0] > top, (
+        "premise: the shortest DECIMAL of float32 max is greater than float32 "
+        "max as a float64 — that is what makes a binary-max gate wrong")
+
+    twice = stamp_journal_embedding(dict(once), creating=False)
+
+    assert twice[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F32, (
+        "a second stamp flipped float32 max's own text back to f64 — the "
+        "range gate is comparing against the binary maximum instead of asking "
+        "whether the value is a float32 at all")
+    assert twice["embedding"] == once["embedding"]
+
+
+def test_the_f32_text_test_fails_closed_on_what_the_seam_cannot_have_written():
+    """`False` for every shape the narrowing never produces (#11835 review, P3).
+
+    Not reachable through `stamp_journal_embedding` — it normalises the payload
+    first — but the predicate is the thing `f32` is now verified BY, so it must
+    never answer `True` in the PERMISSIVE direction on an input it cannot read:
+    `bytes` is an iterable of INTS, so `b"\\x01\\x02"` would otherwise count as
+    the on-grid vector `[1.0, 2.0]`, and `float(10**400)` raises `OverflowError`
+    rather than the `ValueError` this used to catch.
+    """
+    assert not _is_shortest_f32_text(b"\x01\x02"), (
+        "bytes were read as numbers — two ints counted as an on-grid vector")
+    assert not _is_shortest_f32_text("0.5")
+    assert not _is_shortest_f32_text({"a": 1.0})
+    assert _is_shortest_f32_text([10 ** 400]) is False, (
+        "an int beyond float range must answer False, not raise OverflowError")
+    assert not _is_shortest_f32_text([float("nan")])
+    assert not _is_shortest_f32_text([float("inf")])
+    assert not _is_shortest_f32_text([1e300])
+    # …and the on-grid answer still holds for genuine numbers, so the refusals
+    # above are not the predicate simply saying no to everything.
+    assert _is_shortest_f32_text([0.5, 0.25, 1.0, -0.0])
+    assert _is_shortest_f32_text([])
 
 
 def test_the_quantiser_is_the_shortest_float32_round_trip_not_a_fixed_width():
@@ -687,6 +800,17 @@ def test_add_point_does_not_keep_the_servers_width_over_a_caller_vector(tmp_path
             api = EventAPI(log, initiated_by="extractor",
                            projection=sdk._get_proj())
             caller = [0.1, 1 / 3, 2.718281828459045]
+            # THE PREMISE, asserted rather than described (#11835 review, P2):
+            # `_point` is called exactly as `add_point` calls it. If it stamped
+            # no `f32` — an unavailable embedder, a width `_degrade_to_width`
+            # drops — there is no stale marker for the door to carry forward
+            # and every assertion below would hold WITHOUT exercising the
+            # defect: a regression guard that silently stops guarding.
+            served = api._point("caller vector probe",
+                                provenance("src:1", [0, 4], "q"))
+            assert served[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F32, (
+                "premise: `_point` did not stamp the SERVER vector f32 — this "
+                "pin would pass without exercising the defect")
             api.add_point("caller vector probe", provenance("src:1", [0, 4], "q"),
                           embedding=list(caller))
         finally:
