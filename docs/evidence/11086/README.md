@@ -116,6 +116,6 @@ EMBEDDING, and this corpus does not contain one, which is stated rather than glo
   real rows is `#4997`/the capstone's, and no committed artifact carries one for these two gates.
 - **No reap.** A row that already holds a vector keeps it (the write clauses PRESERVE on a null
   incoming vector). The gate stops the *next* vector being paid for; reclaiming what is already
-  stored is `#4997` and needs a surface approval.
+  stored is `#4997` — ⚠️ **and for `:Object`/`:Subject` reclaiming it is REFUSED outright by the 2026-11-10 ruling (`#11395` comment `6781921075`), so no surface approval is a route to that removal.**
 - **No vector index for any label.** That is V1 (`STORAGE-ARCHITECTURE.md` §14.3), DECIDED by
   PR #11481 and owned by `#4333`. Nothing here re-opens it.

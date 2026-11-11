@@ -19,7 +19,7 @@ different trees and must not be conflated: the census fields this document descr
 the base, so a reader who re-runs §6 against `af864a42a6` reads a tree that never held the instrument
 (see `tools/finding_provenance.py`).
 
-**What this document is:** the evidence for the surface-approval request `#11088` carries. It records
+**What this document is:** the evidence for the surface-approval request `#11088` carries — ⚠️ **and that request is answered for TWO of the four labels it names: the disposition was ruled KEEP on 2026-11-10 (`#11395` comment `6781921075`) for `:Object`/`:Subject`, so no removal is proposed for those two and §7 carries the answered state; the measurement below is kept as the record.** ⚠️ **The ruling names those two labels and NO others** — it does not reach `:Event` or `:Source`, which §7 states: for them the 2026-09-24 direction (*"keep the vectors, make them searchable"*) is the record, and it authorises no removal either. So no removal is proposed for any of the four, but **on two different grounds**, and never by widening the ruling's two labels to the request's four. It records
 the census instrument's contract, the population it was measured on, the numbers, and the exact
 `entity_type` values whose query results would change if the unindexed vectors were removed. It does
 **not** decide anything: the removal is an **MCP/SDK surface change** and is
@@ -386,7 +386,7 @@ directions), `test_the_census_states_the_consequence_of_removing_each_label` (pe
 union), `test_a_tool_whose_SDK_method_fixes_entity_type_is_named` (the fixed-type entrants and the
 default they run), and the live test's assertions on a real engine — output in §4.
 
-**Row 4 — `#10976` and `#7879` carry the "pending V1" qualification.** By comment on each issue, so a
+**Row 4 — `#10976` and `#7879` carried the "pending V1" qualification** (re-pointed 2026-11-10 — see the SUPERSEDED note below). By comment on each issue, so a
 lane holding either issue's body is not collided with:
 
 - `#10976` → [comment](https://github.com/daniel-ospina/tortoise/issues/10976#issuecomment-6695675706):
@@ -399,8 +399,10 @@ lane holding either issue's body is not collided with:
 
 ⚠️ **SUPERSEDED 2026-11-07.** §12.1c now reads *"✅ DECIDED 2026-11-07 — the vector index does NOT live in
 FalkorDB"* (`docs/architecture/SEARCH-ARCHITECTURE.md`), so the *"pending V1"* premise of the two comments
-above no longer holds: the location is decided (Postgres). **Neither comment has been re-pointed — that
-reconciliation is still OWED** (`05-decompose.md`'s "also in this child" item). The wording they should carry is
+above no longer holds: the location is decided (Postgres). ✅ **Both comments WERE re-pointed on 2026-11-10** — `#10976` →
+[`6779662659`](https://github.com/daniel-ospina/tortoise/issues/10976#issuecomment-6779662659),
+`#7879` → [`6779663836`](https://github.com/daniel-ospina/tortoise/issues/7879#issuecomment-6779663836) — so the
+reconciliation `05-decompose.md` carried as OWED is discharged. The wording they now carry is
 "the vector layer — its census and surface request; its location is decided and the WORK is #4051's", not
 "pending V1". The sentence below is the state those comments were qualified against, kept
 as the record of it and **not** as current text:
@@ -411,6 +413,15 @@ as the record of it and **not** as current text:
 ---
 
 ## 7. The request this evidence supports — and everything it does not do
+
+> ✅ **ANSWERED 2026-11-10 — this section is the RECORD of the request, not a live ask.** The owner ruled
+> **KEEP**: the `:Object`/`:Subject` embeddings stay, no pass may remove them or stop writing them, and
+> because **nothing contracts** no surface approval follows (`#11395` comment `6781921075`, mirrored into
+> `STORAGE-ARCHITECTURE.md` §14.3 V3). ⚠️ **The ruling names those two labels and no others**, so the
+> request below for `:Event` and `:Source` is **not** answered by it — the 2026-09-24 direction (*"keep the
+> vectors, make them searchable"*) is the record that covers them, and it authorises no removal either.
+> ⚠️ **The census itself is a dated measurement and is deliberately NOT
+> edited to match** — what follows is what was requested before the ruling existed.
 
 **Requested:** the owner's decision on whether to **remove** the `embedding` property from the
 unindexed labels (`:Event`, `:Object`, `:Source`, `:Subject`). The affected surface is the **four tools

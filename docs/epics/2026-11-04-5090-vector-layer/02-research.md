@@ -150,8 +150,13 @@ comparables now say what that measurement will probably show, and how to run it:
 > ⚠️ **SUPERSEDED 2026-11-07 — read this before acting on any "V1" line below.** V1 is decided: the vector
 > index and the embedding payload move to Postgres (`docs/architecture/SEARCH-ARCHITECTURE.md`, `#4051`). Every
 > "parked with V1" / "when V1 is decided" below is the state this pass was written against, kept as the record
-> and **not** as current text. What stays open is the DIFFERENT question of §14.3 **V3: whether
-> `:Object`/`:Event` carry — and index — embeddings.**
+> and **not** as current text. Of §14.3 **V3**'s two halves, the **carry** half is **✅ answered KEEP on 2026-11-10**
+> (owner, `#11395` comment [`6781921075`](https://github.com/daniel-ospina/tortoise/issues/11395#issuecomment-6781921075):
+> *"`:Object` and `:Subject` keep their stored embedding … **No pass may remove those embeddings, and no pass
+> may stop writing them**"*, and it names **`:Object` and `:Subject` and no others**; for `:Event`, `:Source` and
+> `:Document` the 2026-09-24 direction stands (`STORAGE-ARCHITECTURE.md` §12.2c), so this pass's four-label /
+> five-`entity_type` census is never read as covered by that prohibition. What stays open is the DIFFERENT question of whether those
+> labels are **indexed**; the measurements below are the record of the pass, not current text.
 
 | date | source-tag | finding |
 |---|---|---|

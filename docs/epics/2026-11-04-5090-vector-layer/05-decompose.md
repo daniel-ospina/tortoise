@@ -133,17 +133,22 @@ claim and not an assertion:
   reports no per-label vector count for them at all, so what they hold is what `--census` measures, never
   something inferred from the inventory (`S3-VECTOR-CENSUS.md` §5). Removing the vectors removes that answer —
   an MCP/SDK surface change, which `AGENTS.md` requires **Daniel's approval for before implementation**.
-  The census is the evidence for that request; acting on it is not a lane's.
+  The census is the evidence for that request; acting on it is not a lane's. **✅ ANSWERED 2026-11-10 (owner) for the two labels the ruling names — KEEP** — the `:Object`/`:Subject` embeddings are kept, no pass may remove them or stop writing them, and because **nothing contracts** for any label, the surface approval named above is not needed. ⚠️ **It does not name `:Event`, `:Source` or `:Document`** — the rest of the census's request — so those stand on the 2026-09-24 direction and no removal of them is authorised either. Recorded at `#11395` comment `6781921075` and mirrored into `STORAGE-ARCHITECTURE.md` §14.3 V3.
 - ⚠️ **Contradiction test, recorded:** **no recorded decision authorises** this removal. The 2026-09-24
   direction is *"keep the vectors, make them searchable"* — for the unindexed labels that means adding
   indexes, i.e. more RAM and a surface change. The later **2026-10-08 billing ruling** removes the COST
   argument rather than granting one: retained bytes are revenue, so removing bytes moves the bill by
-  **$0.00**. So the census is filed, the removal is the owner's decision, and the surface rule gates it.
-- ⚠️ **Also in this child — the TARGET is superseded, the reconciliation is still OWED (2026-11-07):** the
-  two comments this item asked for are posted and still read *"pending V1"* (`#10976` comment `6695675706`,
-  `#7879` comment `6695676215`). §12.1c now says the location is DECIDED (Postgres, `#4997`), so what remains
-  is to re-point those two comments at the ruled wording in `S3-VECTOR-CENSUS.md` §6 —
-  *"location decided; the work is `#4051`'s"* — never to *"pending V1"*.
+  **$0.00**. So the census is filed, the removal **was** the owner's decision — ✅ **answered KEEP on 2026-11-10 (`#11395` comment `6781921075`)**, so nothing is removed and the surface rule gates nothing — and the surviving work is the **index**, not a removal.
+- ✅ **Also in this child — the reconciliation is DONE (re-pointed 2026-11-10), and this bullet previously said OWED:**
+  both comments were re-pointed off *"pending V1"* — `#10976` →
+  [comment `6779662659`](https://github.com/daniel-ospina/tortoise/issues/10976#issuecomment-6779662659),
+  `#7879` → [comment `6779663836`](https://github.com/daniel-ospina/tortoise/issues/7879#issuecomment-6779663836) —
+  to *"location decided (Postgres, `pgvector`, 2026-11-07); the work is `#4051`'s"*, each carrying the two
+  caveats the old wording could not: **decided is not in force** (`TORTOISE_RECORD_VECTOR_LEG` defaults off)
+  and **V1 did not decide V3**. ⚠️ **Corrected while closing out `#11395`:** a lane that cites `#4051`
+  comment `6713312036` as the ruling inherits a **withdrawn** scope — its v1 *"search AND traversal in
+  Postgres"* was withdrawn by `#4051` comment `6713838871` — and the live ruling is `SEARCH-ARCHITECTURE.md`
+  items 1–4, with the text index staying in FalkorDB behind a measurement.
 
 ### C6 — **#11089** `capstone: clickthrough verification for the vector layer`
 
@@ -163,15 +168,14 @@ claim and not an assertion:
   C4  report the contract        (independent, smallest)
 
   C2  exemption register ──▶ C3  arm the gate
-  C5  census (+ surface request)  (independent; census half starts now)
+  C5  census (removal REFUSED for :Object/:Subject, 2026-11-10)  (independent; starts now)
 ```
 
 **Dispatch order:** **C4** and **C1** first (independent, and C1 unblocks C6); **C2** then **C3** (a real
 ordering — arming before the register exists would let three undeclared writers bypass); **C5** in parallel
 with C2/C3. **C6 last.**
 
-**Nothing here is blocked on an owner decision.** C5's *removal* half is blocked on the surface approval it
-requests; its census half is not.
+**Nothing here is blocked on an owner decision.** C5's *removal* half is answered — the ruling refuses it for `:Object`/`:Subject` and no surface approval is sought (:136) — and its census half is not blocked either.
 
 ---
 
@@ -224,4 +228,4 @@ proves a decision, not an implementation, so `MET` is unreachable for this row b
 **V1 itself was answered on 2026-11-07**, so what its remainder names is the WORK — the
 `jsonb` → `vector(384)` migration, the index build and the backfill, which are **`#4051`'s** for as long as it
 is open. **An epic may close with a row whose remainder names a live OWNER — it may not close with a row naming nothing.**
-§14.3 **V3** (whether the four labels carry embeddings) is a separate open question and is not what row 4 names.
+§14.3 **V3**'s removal half is **settled KEEP for the two labels the ruling names — `:Object` and `:Subject`, 2026-11-10 (`#11395` comment `6781921075`)** — while `:Event`, `:Source` and `:Document` are **not covered by it** (the 2026-09-24 direction stands for them); what stays open for the ruled pair is only whether they are INDEXED, and neither is what row 4 names.
