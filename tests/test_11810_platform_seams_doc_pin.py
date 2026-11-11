@@ -53,7 +53,7 @@ WHAT IT ASSERTS, in BOTH directions:
       repository"* — does not come back, AND the record keeps the reason it is
       false (the scripts register by absolute path and read `$HOME`). Pinned in
       both directions because r19 measured it pinned in NEITHER: re-instating the
-      sentence kept all five tests GREEN.
+      sentence left the whole file GREEN.
 
 `_SHIPPED_FRAGMENT` is the single string both arms bind to, so the two cannot be
 corrected in opposite directions without this file noticing.
@@ -116,6 +116,11 @@ WHAT IT STILL DOES NOT CATCH, stated so the docstring is not the next over-claim
     the matrix row or of §3.2/§3.3 — even one that KEEPS the hosted scoping — REDs.
     That is the same trade arms (1)/(2) already take (the claim IS the words):
     reword such a sentence only together with its `_RESTATEMENTS` row, in one edit.
+  * (4)'s PRESENCE needles are that SAME word-sequence trade: re-wording any of
+    the four — even into a STRONGER sentence ("can never point at") — REDs, and
+    the failure message reports it as "the record dropped WHY …", which
+    mis-describes a re-word as a deletion. Reword it together with
+    `_RETRACTION_CAUSE`, in one edit.
 
 MUTATION (each verified RED at this head, restoring byte-identical):
   * restore the unscoped quote at `platform-seams.md:315`      → (1) RED
@@ -161,6 +166,8 @@ MUTATION (each verified RED at this head, restoring byte-identical):
     `.cursor/hooks.json` into their repository"        → (4) RED   (r19 P2)
   * delete the record's "repo-committed `hooks.json` cannot …" clause
                                                       → (4) RED   (r19 P2)
+  * keep that bare "cannot" but delete the EVIDENCE clause it rests
+    on (absolute path / `$HOME` / does not resolve)   → (4) RED   (r20 P2)
 """
 from __future__ import annotations
 
@@ -225,7 +232,7 @@ _RESTATEMENTS: tuple[tuple[str, "str | None"], ...] = (
 #: shipped a seam that never fires (the unshipped-seam claim #2122 forbids).
 #:
 #: Pinned in BOTH directions, because r19 measured the record pinned in NEITHER:
-#: restoring that exact sentence left all five tests GREEN — the absence arms banned
+#: restoring that exact sentence left the whole file GREEN — the absence arms banned
 #: only `_UNSCOPED_FRAGMENT` and the four `_RESTATEMENTS` sequences, and
 #: `test_capture_install.py` reads the message's stdout, never the record. That is
 #: item 4 of this PR one claim over: a retraction with no absence guard.
@@ -234,10 +241,19 @@ _RESTATEMENTS: tuple[tuple[str, "str | None"], ...] = (
 #: wording verbatim REDs. Reword such an entry instead of reproducing the phrase.
 _RETRACTED_PROMISE = "get both seams by checking a project level"
 
-#: …and the record must keep SAYING why the promise is false. Without the reason the
-#: retraction reads as an arbitrary exclusion and the next lane re-adds the promise
-#: as an attractive route — the drift this file exists to stop.
-_RETRACTION_CAUSE = "repo committed hooks json cannot"
+#: …and the record must keep SAYING why the promise is false — ALL FOUR parts, not
+#: just the "cannot". A single needle that stops at `cannot` was measured GREEN on a
+#: record reduced to "a repo-committed `hooks.json` cannot simply point at this
+#: install's scripts." with the whole evidence clause deleted (review r20 P2): the
+#: arm then pins a bare assertion with no ground, which is exactly the drift the
+#: comment above names. Without the reason the retraction reads as an arbitrary
+#: exclusion and the next lane re-adds the promise as an attractive route.
+_RETRACTION_CAUSE: tuple[str, ...] = (
+    "repo committed hooks json cannot",   # the claim itself
+    "register by absolute path",          # hook_install.py absolute_command=True
+    "read their state from home",         # session-start.sh ${HOME}/.tortoise/…
+    "would not resolve on a worker",      # …so the command does not resolve there
+)
 
 #: A tag's attributes AS MARKUP — `name=value`, quoted or bare. NOT `[^<>\n]*`:
 #: a bare word list is PROSE, and `if a<b and c>d then …` is an ordinary sentence,
@@ -479,16 +495,17 @@ def test_the_retracted_project_level_promise_cannot_come_back():
 
     Review r19 P2 measured this record pinned in NEITHER direction: re-instating
     #11806's sentence — *"an Enterprise self-hosted-pool user can get BOTH seams by
-    checking a PROJECT-level `.cursor/hooks.json` into their repository"* — kept all
-    five tests GREEN. The absence arms cover `_UNSCOPED_FRAGMENT` and the four
+    checking a PROJECT-level `.cursor/hooks.json` into their repository"* — left the
+    whole file GREEN. The absence arms cover `_UNSCOPED_FRAGMENT` and the
     `_RESTATEMENTS` word sequences; none of them matches this claim, and the
     message arm reads stdout rather than the record. So the one statement in this
     PR that was **wrong about the code** had no guard at all, which is precisely
     the defect item 4 of this PR fixes one surface over.
 
     Mutation: restore the retracted sentence anywhere in the record → the ABSENCE
-    leg REDs (measured at this head). Delete the "repo-committed `hooks.json`
-    cannot …" clause → the PRESENCE leg REDs (measured)."""
+    leg REDs (measured at this head). Drop ANY one of the four
+    `_RETRACTION_CAUSE` needles — including deleting the whole evidence clause
+    while keeping the bare "cannot" → the PRESENCE leg REDs (measured)."""
     doc = _PLATFORM_SEAMS_DOC.read_text(encoding="utf-8")
     assert _absent(_RETRACTED_PROMISE, doc), (
         "the record promises the seams again via a repo-committed PROJECT-level "
@@ -496,10 +513,13 @@ def test_the_retracted_project_level_promise_cannot_come_back():
         "~/.cursor/hooks/ and read their state from $HOME, so that command does not "
         "resolve on a worker and Cursor hooks fail OPEN: the user would believe "
         "they shipped a seam that never fires")
-    assert _normalised(_RETRACTION_CAUSE) in _normalised(doc), (
-        "the record dropped WHY a repo-committed hooks.json cannot reach these "
-        "seams — without the reason the retraction reads as an arbitrary "
-        "exclusion, and the next lane re-adds the promise")
+    normalised_doc = _normalised(doc)
+    for needle in _RETRACTION_CAUSE:
+        assert _normalised(needle) in normalised_doc, (
+            f"the record dropped WHY a repo-committed hooks.json cannot reach "
+            f"these seams ({needle!r} is gone) — a bare 'cannot' with no ground "
+            f"reads as an arbitrary exclusion, and the next lane re-adds the "
+            f"promise as an attractive route")
 
 
 def test_a_stray_angle_bracket_cannot_swallow_the_quoted_sentence():
