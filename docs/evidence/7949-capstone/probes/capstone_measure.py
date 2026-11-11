@@ -3010,7 +3010,8 @@ def _a4_declared_kinds(kind_prop: str) -> frozenset[str]:
     ⛔ It is NOT "the predicate the write validator runs" for every bucket: `hosted_api.py::valid_kind`
     runs `known_kinds("pointKind")` only (a point request-model validator — ⛔ qualified by FILE,
     because `selfhost_api.py::valid_kind` is a same-named validator over `known_kinds()` with no
-    bucket, i.e. all of them), the event layer's write
+    bucket: the FLAT legacy registry, NOT the union of the buckets — measured, it refuses a
+    bucket-only kind such as `Project` or `AgentSession`), the event layer's write
     gate is the commit door's `compile_vocab().event_kinds` (exact, per-graph —
     `tortoise/commit_schema.py`), and `entities[].kind` has **no vocabulary membership test**
     (#5202) — the door's `#5475` leg refuses only an unapproved pack NAMESPACE, pre-write, and
