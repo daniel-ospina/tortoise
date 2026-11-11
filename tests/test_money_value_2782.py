@@ -1750,10 +1750,15 @@ class TestThePayloadWalkFailsClosedAtItsDepthBound:
 
         ⛔ The depth is a FIXED literal, never ``_MONEY_PAYLOAD_MAX_DEPTH - n``:
         a payload derived from the constant TRACKS the bound, so tightening the
-        bound could never red this test — measured on the merged head, where the
-        whole class stayed green with the bound set to 2. 10 is far below the
-        bound's own stated headroom (no journal payload nests past ~4) and far
-        above it once the bound is tightened, which is what makes it a guard.
+        bound could never red this test. Measured on the MERGED head (before
+        this change), with the bound set to 2: THIS test still passed — its
+        payload was ``MAX - 2``, i.e. zero levels at a bound of 2 — while its
+        sibling ``test_a_cyclic_sequence_is_cut_by_identity_not_by_the_depth_bound``
+        red there on its fixed 3-level fixture. So the class was not uniformly
+        blind; this test alone was, which is what this literal fixes. 10 is far
+        below the bound's own stated headroom (no journal payload nests past
+        ~4) and far above it once the bound is tightened, which is what makes
+        it a guard.
         """
         import tempfile
         from pathlib import Path
