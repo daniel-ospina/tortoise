@@ -657,6 +657,21 @@ STRUCTURAL_WRITE_PREDICATES = frozenset(
 )
 
 
+# The predicates the union above admits that NEITHER strict mint accepts — i.e.
+# exactly what `TortoiseSDK.ingest`'s relation arm adds on its own
+# (`extractedFrom`, which it routes to `_link_source` rather than to
+# `create_edge`). DERIVED, so the ingest gate (#11484) reads this instead of
+# re-spelling the literal, and a predicate moved between the mints moves it.
+# It is a singleton today; the derivation is what keeps that a fact rather than
+# an assumption (`write_vocabulary.core_predicates` assigns the `ingest` verb
+# from membership here, and `tests/test_11484_derived_write_vocabulary.py` pins
+# both).
+INGEST_ONLY_EDGE_PREDICATES = frozenset(
+    STRUCTURAL_WRITE_PREDICATES - _VALID_EDGE_PREDICATES
+    - _VALID_ABOUT_EDGE_PREDICATES
+)
+
+
 #: Every predicate the §17.1 STRUCTURAL-EDGE lane (#9195) can WRITE — the union
 #: of the two declared mints' allow-lists (`create_edge` →
 #: `_VALID_EDGE_PREDICATES`, `create_about_edge` → `_VALID_ABOUT_EDGE_PREDICATES`).
@@ -2908,9 +2923,33 @@ class _EdgeHandlers:
         edge is emitted one level up, by the SDK door, which resolves the
         endpoints and writes ``DirectEdgeCreated`` (#9553, R5 class 4).
         """
-        valid_predicates = _VALID_EDGE_PREDICATES
-        if predicate not in valid_predicates:
-            raise ValueError(f"Unknown predicate: {predicate}")
+        # #11484 (S5/C10) — the ENFORCED vocabulary is DERIVED, per graph:
+        # `core ∪ the packs installed on THIS graph` (owner ruling 2026-11-05).
+        # A pack-declared object relation (`funds`, `dependsOn`) is admitted on a
+        # graph that installed its pack and refused on one that did not, so the
+        # structural object layer is expandable by a declaration instead of only
+        # by a code change. The core half answers from a memo (no graph read);
+        # the per-graph resolver runs only for a name the core does not carry.
+        # The SAME function answers `relation_write_paths`, so the writer's
+        # acceptance and the verdict's `writable` cannot disagree (`#8285` P1).
+        from tortoise.write_vocabulary import predicate_facts
+
+        facts = predicate_facts(predicate, self.g)
+        if facts is None:
+            raise ValueError(
+                f"Unknown predicate: {predicate} — not admitted by the core "
+                f"ontology (§3.9) nor by a pack installed on this graph "
+                f"(`allowed_predicates(graph)`; #11484)")
+        if facts.verb != "create_edge":
+            # The union derivation admits predicates another WRITER owns; this
+            # verb is the generic mint and must not silently take them over (a
+            # `create_edge("aboutPoint", …)` here would write an edge the
+            # about mint's target contract never saw). The old literal refused
+            # them by omission; now the refusal is NAMED.
+            raise ValueError(
+                f"Unknown predicate: {predicate} — admitted structurally, but "
+                f"by `{facts.verb}`, not by `create_edge` (contract I10's "
+                f"`verb`; #11484)")
         # Resolve endpoints via index-backed labeled lookups (issue #327).
         # Source OR-set: id | eventId | url ; target OR-set: id | eventId —
         # matching the legacy predicates exactly (a url-only stub Source is
