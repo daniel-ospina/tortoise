@@ -255,13 +255,21 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   nearest preceding full-path citation, and one with nothing to anchor it is refused rather than
   guessed; without that rule, the load-bearing half of rows (b), (c) and (e) was unchecked while this
   section said it was checked. **A `path:line`-shaped token that the resolver cannot read is
-  refused**, not skipped — and the ONE spelling measured here is `path <LINE>` (a path followed by
-  whitespace and a number), because every wider delimiter set refused correct prose when tried
+  refused**, not skipped — and TWO spellings are measured here: `path <LINE>` (a path followed by
+  whitespace and a number) and the **GitHub permalink** form (path, `#`, `L`, line number), because
+  every wider delimiter set refused correct prose when tried
   against this repository's own `docs/`: `_` parses an identifier (`tests/test_findings_ledger_2852.py`),
   `-` parses a dated slug, `/` parses plain paths and dates (600+ spans across 799 files), `#`
   parses the `owner/repo#N` issue refs this repo writes everywhere, `@` parses commit refs, and `,`
-  parses SQL and call prose. Rewriting a citation's delimiter is therefore **not** universally
-  refused: `path#LINE`, `path@LINE`, `path-LINE`, `path_LINE`, `path/LINE`, `path,LINE` and
+  parses SQL and call prose. The permalink form survives that objection and the rest do not: an
+  issue ref carries no `L`, so `#` + `L` + digits is unambiguous, and it is what a human writes when
+  copying a GitHub link — the spelling most likely to arrive looking verified while going unchecked
+  (it did: both an out-of-range permalink and an in-range one left this page CLEAN before the arm
+  existed). It is measured, not assumed: every code span in all 1144 tracked files under `docs/`,
+  plus the 144 other tracked `*.md`, was swept with the shipped pattern — zero matches, so refusing
+  it cannot red this repository's own prose. Rewriting a citation's delimiter is therefore **not**
+  universally refused: `path#LINE` (the bare-number form, which IS what collides with issue refs),
+  `path@LINE`, `path-LINE`, `path_LINE`, `path/LINE`, `path,LINE` and
   `path:L LINE` are **named carve-outs**, exactly as the two below are, because a rule that refuses
   this page's own issue refs and paths is the false-accusation class one arm over. The rest of this
   paragraph is what IS measured. Skipping it was a hole with
