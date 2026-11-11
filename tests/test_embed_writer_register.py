@@ -926,9 +926,15 @@ LABEL_EVIDENCE: dict[str, tuple[str, str, str, frozenset[str]]] = {
     "tortoise.projection::_rebuild_all_replay": (
         "tortoise/projection/__init__.py", "_rebuild_all_replay",
         '"MATCH (n:Point {id:$pid}) " + restore_guard', frozenset({"Point"})),
+    # The needle names the per-label LOOP, not the loop's variable: `#11836`
+    # renamed the unused binding `prop` -> `_prop` and the name-sensitive
+    # `"for label, prop in …"` form redded on unchanged store evidence. What the
+    # declaration is derived FROM is the iteration over the canonical constant
+    # (the `SET n += $p` map-merge inside it is the store), so the variable is
+    # not part of the claim and a rename is not a store move.
     "tortoise.sdk::_update_entity": (
         "tortoise/sdk.py", "_update_entity",
-        "for label, prop in _CANONICAL_ENTITY_ID_PROPS:",
+        "in _CANONICAL_ENTITY_ID_PROPS:",
         frozenset({"Point", "Subject", "Object", "Source", "Event"})),
     # `#11641`: the two writers whose label used to be decided at RUNTIME, so row 2 could not
     # compare them to the served set. Each now OWNS the label at its own seam, and the needle is
