@@ -2150,7 +2150,7 @@ def test_the_real_machine_record_agrees_with_the_pins():
     # `subject_binding.py:189`, `extractor_v2.py:10508` and the probe cite
     # `probes/capstone_measure.py:527` — so three other-file cites remain UNPINNED by this
     # arm. Measured, scoped so the query cannot match its own prose —
-    # `grep -rnE 'sparse\.py:226|entities\.py:1239|subject_binding\.py:189' tests/ --include='*.py'`
+    # `grep -rnE 'sparse\.py:226|entities\.py:1478|subject_binding\.py:189' tests/ --include='*.py'`
     # returns exactly six hits: four are the sentences around this one, and the other two
     # are PROSE COMMENTS in `tests/test_7949_c2_door.py:96-97` — no `assert`, so no pin.
     # (An earlier cut of this comment said a bare `grep -rn '226\|1208\|189'` over this file
