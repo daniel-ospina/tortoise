@@ -85,7 +85,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > and a graph write that bypassed the journal before this run cannot be seen by the new baseline — so an
 > operator who suspects an out-of-band mutation must establish it by other means rather than by comparing
 > across this run. Same consequence and same remedy as v1 → v2 (`tags`), v2 → v3 (the `(label, id)` re-key)
-> and v3 → v4 (identifier aliases), all argued at `consistency.py:1056-1119`.
+> and v3 → v4 (identifier aliases), all argued at `consistency.py:1142-1205`.
 >
 > **⛔ `ONTOLOGY.md` is deliberately UNMODIFIED, and this is the second ruling on the question.** Two later
 > reviewers disagreed about this file, so both judgments are recorded here rather than left for the next lane
@@ -1256,7 +1256,7 @@ moved here.
 | §10.5 direction-aware EP note | "(today's shipped code reads the semantics on the operator write path … `create_direct_edge` and the ingest path still resolve by `op_type`. See the *Transition state* note — it covers the v3.25 **storage** transition; the direction-*sourcing* gap is separate and tracked as `#7852` (`#7813` is CLOSED `COMPLETED`).)" |
 | §4.2 Subject `validFrom` / `validTo` | "; not yet written by `_upsert_subject`" — the *"declared §4.7, #3642"* lead-in stays in the model. |
 | §4.3 Object `validFrom` / `validTo` | "; not yet written by `_upsert_object`" — the *"declared §4.7, #3642"* lead-in stays in the model. |
-| §3.6 edge table, `participatesIn` row | "⚠️ spec-only — no producer yet, tracked in issue #7884" — a producer exists: the event write path auto-creates the edge from the event's `participants`, falling back to the event's `subject` when no explicit list is given (`projection/entities.py:4491`, the `#212` auto-create, CLOSED `COMPLETED`). The cited `#7884` is a merged PR about hosted lifespan warm-up, not this predicate. |
+| §3.6 edge table, `participatesIn` row | "⚠️ spec-only — no producer yet, tracked in issue #7884" — a producer exists: the event write path auto-creates the edge from the event's `participants`, falling back to the event's `subject` when no explicit list is given (`projection/entities.py:6319`, the `#212` auto-create, CLOSED `COMPLETED`). The cited `#7884` is a merged PR about hosted lifespan warm-up, not this predicate. |
 | §3.2 Session/aboutObject note, closing sentence | "`aboutSubject` has no producer here: … the capture entity model mints Objects, not Subjects." — the capture spine routes §5 Subject kinds to the `:Subject` label and binds Points with `bind_point_subjects` (`#4934`, CLOSED `COMPLETED`), which `tortoise/subject_binding.py` declares the only confidence-gated `aboutSubject` producer. |
 
 The table lists the status-notes taken out of the model body, not every line the
