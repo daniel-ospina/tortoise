@@ -191,8 +191,8 @@ Re-read per issue on 2026-11-12 — 42 rows, and they reconcile:
 | CLOSED other | 5 | `#2748` (`NOT_PLANNED`, fixed in effect) · `#2820` · `#2826` (`NOT_PLANNED`) · `#2296` · `#2790` |
 | MERGED (both were PRs) | 2 | PR `#2747` · `#2697` — both are PRs, not issues; see correction **(i)** |
 
-**⚠️ of the four survivors, two are already re-measured elsewhere and must not be re-derived — and
-one CLOSED issue must not be read as fixed:**
+**⚠️ of the four survivors, the two bullets below are already re-measured elsewhere and must not be
+re-derived — and one CLOSED issue must not be read as fixed:**
 
 - **`#2728`** was re-measured **out** of the problem map's survivor set — its Settings home and
   modal merged 2026-10-18 in `08a6b0288`, with the add-list read from the on-disk pack registry so
