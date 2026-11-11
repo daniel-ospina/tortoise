@@ -345,6 +345,22 @@ def test_each_layer_QUERIES_its_own_node_label_and_only_claims_carries_the_exclu
             assert "is_episodic" not in query and "is_operator" not in query, (
                 f"the {layer} layer carries an exclusion it must not — a `:{label}` is not a "
                 f"claim: {query}")
+    # ⛔ AND THE CALL HOP, which the loop above cannot see: it drives `_a4_layer_counts`
+    # DIRECTLY, while the census reaches it through `_a4_label_coverage`. Passing a fixed label
+    # THERE (`_a4_layer_counts(projection, "Point", kind_prop)`) measures the claim population
+    # under all three layer keys and left every arm GREEN — 16/16, measured (#11837 review, and
+    # the P2 that kept `d9584002` un-mergeable). The wiring is pinned only by reading the queries
+    # the WHOLE census emitted.
+    census = _FakeProjection()
+    probe._a4_label_coverage(census)
+    labels = set()
+    for emitted in census.g.queries:
+        marker = "MATCH (n:"
+        if marker in emitted:
+            labels.add(emitted.split(marker, 1)[1].split(")", 1)[0])
+    assert {"Point", "Object", "Event"} <= labels, (
+        f"the census must query all three node labels, not one label under three keys — it "
+        f"queried {sorted(labels)}")
 
 
 def test_object_kinds_are_compared_CASE_INSENSITIVELY_because_the_ontology_mixes_case():
