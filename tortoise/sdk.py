@@ -168,6 +168,7 @@ from .projection.entities import (  # #3998: the declared :Source surface
 # was: the SDK doors flattened, the shared projection writer did not, so
 # `EventAPI.add_point` stored NOTHING.
 from .projection.entities import (
+    encode_json_record_props as _encode_json_record_props,
     flatten_search_keys_prop as _flatten_search_keys_prop,
     revise_identifier_aliases as _revise_identifier_aliases,
 )
@@ -13416,6 +13417,44 @@ class TortoiseSDK:
         props = _sanitize_props(props)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
+        # #11239 (DM1's home): `mentions` is a list of RECORD dicts and no path
+        # stores an array of maps (the projection denies it; a raw `SET n += $p`
+        # gets it degraded to `null` by the driver, #7369), so the payload form is
+        # encoded to
+        # ONE compact JSON scalar here. ⛔ THIS call is the LOAD-BEARING one, and
+        # that is measured rather than assumed (review P2, PR #11795):
+        # commenting it out leaves `p.mentions` UNSET. ⛔ The replay door's call
+        # (`_upsert_point_props`) is NOT free either — do not delete it: for a
+        # journal this door wrote it is a no-op (canonical STRING, and the helper
+        # no-ops for a `str`), but it is LOAD-BEARING for `EventAPI.add_point`,
+        # a live door that journals the payload's LIST spelling and calls no
+        # encoder of its own (neutering it leaves that live write storing
+        # NOTHING), and it is the only arm that normalises a NON-canonical
+        # record. Both are pinned behaviourally, by
+        # `tests/test_mention_write_11239.py::test_the_event_api_door_carries_a_mention_to_the_point`
+        # and `…::test_the_replay_door_normalises_a_non_canonical_record`.
+        # Without it the live CREATE would hand the engine a list of maps and
+        # the value would be SILENTLY DROPPED (`_persist_extra_props` skips it)
+        # or degraded to `null` by the driver — neither is a refusal, and neither
+        # stores anything: the silent-drop class #11239 exists to end. Encoding here
+        # ALSO precedes the dedup fold's `self.update_point(pid, **props)`, so
+        # that fold forwards the encoded value rather than a list.
+        _encode_json_record_props(props)
+        # #11239 (review R2 on PR #11795): a CREATE that did not restate the
+        # record must not DELETE one. `update_point(mentions=None)` is the
+        # documented clear — an addressed edit of an existing claim — but THIS
+        # verb is "create": an explicit `mentions=None` reaches the dedup
+        # fold's `self.update_point(pid, **props)` below, where a `None` in a
+        # generic prop REMOVES the property. That is a silent deletion
+        # triggered by a call that only asked to create, and it was measured:
+        # `create → create_point(dedup=True, mentions=None)` left
+        # `p.mentions` UNSET (the DM1 constraint "no held item silently
+        # dropped", breached by the ordinary re-commit path). First-writer is
+        # the rule every other prop here follows and the encoder already POPs
+        # an empty list for exactly this reason, so a `None` is dropped rather
+        # than forwarded.
+        if props.get("mentions") is None:
+            props.pop("mentions", None)
         # #10122: a `name` the index does not hold is a stored-but-unfindable
         # identifier — advise here, at the door that accepted it (after the
         # flatten, so the coverage check sees the stored `search_keys` form).
@@ -16889,6 +16928,17 @@ class TortoiseSDK:
                 # writer was forked).
                 props = {k: v for k, v in pt.items()
                          if k in _CAPTURE_PASSTHROUGH_PROPS}
+                # #11239 (DM1's home): the claim's MENTION records are carried
+                # to the node too — and deliberately NOT by widening
+                # `_CAPTURE_PASSTHROUGH_PROPS`, which is the public capture
+                # RESPONSE surface (#2949 response parity, and `validFrom`'s
+                # standing note below: "stored, never advertised"). It rides
+                # the CREATE branch exactly like `validFrom`/`money`, so a
+                # dedup hit still writes nothing (first-writer) and the
+                # response shape is unchanged. Read off the payload point HERE,
+                # beside the other read, so the two halves cannot disagree
+                # about which point they describe.
+                _mention_records = pt.get("mentions")
                 # #2949 (re-review P2): normalize PRESENCE to what the write
                 # will actually store, so the response never advertises a
                 # field the node does not hold. Two cases, both verified:
@@ -16954,8 +17004,15 @@ class TortoiseSDK:
                     # deliberately EXCLUDES `validFrom`, so it can never arrive
                     # here to be clobbered.
                     create_props = props
+                    # #11239: the mention records ride the create only (see the
+                    # read above). Merged BEFORE the `validFrom` fold, and from
+                    # `create_props` rather than `props`, so the two carriers
+                    # compose instead of one clobbering the other.
+                    if _mention_records:
+                        create_props = {
+                            **create_props, "mentions": _mention_records}
                     if props.get("when"):
-                        create_props = {**props, "validFrom": props["when"]}
+                        create_props = {**create_props, "validFrom": props["when"]}
                     # #2817: the value derived at the top of this loop rides
                     # the CREATE only — a dedup hit writes no props at all
                     # (first-writer), and its abstention has already been
@@ -18585,6 +18642,11 @@ class TortoiseSDK:
                                 reject_claim_class=True)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
+        # #11239: same rule at the UPDATE door. Idempotent — a value already in
+        # the canonical scalar form is left untouched, which is what lets
+        # `create_point`'s dedup fold hand these props straight through
+        # (`self.update_point(pid, **props)`) without re-encoding or refusing.
+        _encode_json_record_props(props)
         # E4 (#5007): same rule as `create_point` / the `Point` model — an
         # update may not leave a half span, an inverted pair or an
         # out-of-range offset on the node. The pair is all-or-nothing, so an
@@ -43750,6 +43812,11 @@ class TortoiseSDK:
         # carries the annotator dims, not `search_keys` — so a replay does not
         # restore it. That is pre-existing (#4094) and unchanged here.
         _flatten_search_keys_prop(props)
+        # #11239: and the same list→JSON-scalar encode as the two Point doors,
+        # so a caller-supplied `mentions` cannot reach the engine as an array of
+        # maps (see `projection.entities.encode_json_record_props`). Idempotent
+        # for an already-canonical string.
+        _encode_json_record_props(props)
         # E4 (#5007, re-review P2): the span invariant has to hold HERE too.
         # This is the generic tenant surface (`tortoise_update_entity`) and
         # its Point branch below writes caller props straight through
@@ -43885,14 +43952,38 @@ class TortoiseSDK:
         # ``_revise_point``/``_apply_one`` fold, so presence-conditional replay
         # restores exactly what the live write set.
         #
-        # SCOPE: only the annotator dims. Every other prop this generic surface
-        # writes live is still unfolded on replay — the pre-existing
-        # PointRevised-extras class tracked by #2946/#2795/#4094, deliberately
-        # NOT widened here: folding ``content`` would need the live
+        # SCOPE: the annotator dims and (#11239) ``mentions``. Every other prop
+        # this generic surface writes live is still unfolded on replay — the
+        # pre-existing PointRevised-extras class tracked by #2946/#2795/#4094,
+        # deliberately NOT widened here: folding ``content`` would need the live
         # content_hash/embedding recompute (#1904) or it would introduce a NEW
         # live/replay divergence in the same breath.
+        #
+        # ⛔ ``mentions`` is NOT an instance of that pre-existing class (review
+        # R1, PR #11795). The #4094 exemption is declared for props that
+        # ALREADY reached the node live without a record; #11239 is what made
+        # ``mentions`` persistable on this surface AT ALL, and before the
+        # encode in this same body (`_encode_json_record_props(props)`, beside
+        # `_flatten_search_keys_prop`, ABOVE this note) the same call was a SILENT
+        # no-store rather than a write — `SET n
+        # += $p` with an array of maps succeeds and the driver degrades the value
+        # to ``null`` before dispatch (measured on this head; the same degrade the
+        # tree already documents for ``tags``, #7369), so the property simply
+        # never landed. (On the PROJECTION path the sibling denial is explicit:
+        # ``_persist_extra_props`` refuses an array containing a dict by
+        # ``_is_persistable_prop_value``.) Neither path was a refusal, and neither
+        # journalled a store. Both replay folds carry the key
+        # already (``_revise_point`` / ``_apply_one``), so leaving it
+        # unjournalled here would ship a NEW divergence: a stored-live,
+        # unreplayable record, which ``check_consistency`` then reds on a
+        # faithful graph with the one piece of advice that DELETES it. Journalled
+        # on the same record as the dims, presence-conditional like the live
+        # ``SET n += $p`` (a ``None`` is the documented clear and folds as one).
         annotator_updates = {
             k: v for k, v in props.items() if k in _ANNOTATOR_PROP_NAMES}
+        journaled_updates = dict(annotator_updates)
+        if "mentions" in props:
+            journaled_updates["mentions"] = props["mentions"]
         # #3860 one-table rule: consume the SAME label→id-property table the
         # replay fold and `_delete_entity` use, so the MUTATION/DELETE producer
         # and the fold cannot drift. (Byte-equivalent to the tuple this
@@ -44203,10 +44294,10 @@ class TortoiseSDK:
                     # Post-apply, per matched label — the `_delete_entity`
                     # emitter's ordering contract (a failed/no-op write never
                     # leaves a phantom record).
-                    if (annotator_updates and res.result_set
+                    if (journaled_updates and res.result_set
                             and res.result_set[0][0]):
                         self._emit_event("PointRevised", id=id_val,
-                                         **annotator_updates)
+                                         **journaled_updates)
                 else:
                     # C1 (#3312 statuses, #3377 rename): this branch used to apply
                     # caller props with a live `SET n += $p` and emit NOTHING — so
