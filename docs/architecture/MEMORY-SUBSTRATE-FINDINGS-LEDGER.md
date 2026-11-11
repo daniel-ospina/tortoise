@@ -193,7 +193,7 @@ Re-read per issue on 2026-11-12 — 42 rows, and they reconcile:
 
 | State (`stateReason`) | Count | Which |
 |---|---|---|
-| **OPEN** | **4** | `#2696` (an epic, not a defect) · `#2728` (per-graph pack selection) · `#2684` (value-span slice) · `#2811` (answer normalizer) |
+| **OPEN** | **4** | `#2696` (an epic, not a defect) · `#2728` (per-graph pack selection) · `#2684` (value-span slice) · `#2811` (answer normalizer — ⚠️ it has **no row in `MEMORY-SUBSTRATE-PROBLEM-MAP.md`**, so the redirect below cannot answer for it) |
 | CLOSED COMPLETED | 32 | incl. `#2714`, `#2725`, `#2726`, `#2727`, `#2729`, `#2730`, `#2766`, `#2767`, `#2781`, `#2782`, `#2783`, `#2786`, `#2788`, `#2792`, `#2795`, `#2813`, `#2814`, `#2817`, `#2818`, `#2749`, `#2734`, `#2742`, `#2083`, `#2105`, `#1695`, `#1370`, `#1418`, `#1535`, `#2313`, `#2296`, `#2820`, `#2790` |
 | CLOSED other | 4 | `#2748` (`NOT_PLANNED`, fixed in effect) · `#2826` (`NOT_PLANNED`) · `#1509` (`NOT_PLANNED`) · `#2787` (`NOT_PLANNED`) |
 | MERGED (both were PRs) | 2 | PR `#2747` · `#2697` — both are PRs, not issues; see correction **(i)** |
@@ -228,7 +228,8 @@ that its own proposed `E ──► A,B ──► C ──► D` dependency order
 1. **Do not re-derive corrections (c), (d), (e), (g), (k).** They are answers, and the first four
    are answers the *code now embodies*. A "the Point fold drops props" finding is a false positive
    against the current tree.
-2. **Do not trust a `~/.swarm/…` citation.** It resolves on no machine in the fleet (§5).
+2. **Do not trust a `~/.swarm/…` citation.** It resolves on none of the machines measured (§5) — a
+   one-host reading, stated as one, not a fleet-wide census.
 3. **Do not read the ledger's §4 state labels.** 36 of 40 have moved; two of the four survivors are
    already re-measured.
 4. **Do carry forward the one thing that is still entirely true:** the review's §10 verification
@@ -336,8 +337,8 @@ skips in a depth-1 checkout is inert everywhere; the live ancestry claim is prov
 a stubbed-`git` case that needs no history. Two mechanisms, stated separately, because "the other job
 covers it" was true of the tool and false of the test.
 
-The same stubbed-`git` case pins the **grafted/shallow counterpart**, which is the arm's only false-red
-direction: in a deepened shallow clone the pinned commit's object IS present (`rev-parse --verify`
+A **second** stubbed-`git` case pins the **grafted/shallow counterpart**, which is the arm's only
+false-red direction: in a deepened shallow clone the pinned commit's object IS present (`rev-parse --verify`
 succeeds) while the graft boundary cuts the walk, so `merge-base --is-ancestor` exits **1** for a real
 ancestor — the same status an unrelated tree produces, and reading it as drift accuses a correct page of
 a cut it did not make (#10356). So **only** a `rev-parse --is-shallow-repository` of `false` may certify
@@ -352,14 +353,15 @@ dated and its command is recorded.* The command for §6 is `gh issue view <N> --
 was run per issue, not sampled.
 
 ⚠️ **Two more are unguarded, and neither is out-of-repo — they are simply not armed yet (#11902).**
-§4's row population and §0's brief-count sentence are derivable from **this page alone**, so the
-ruling above does not reach them and a guard for them could not pass by not looking. Both numbers
+§4's row population and the unnumbered opening's brief-count sentence are derivable from **this page
+alone**, so the ruling above does not reach them and a guard for them could not pass by not looking. Both numbers
 come straight out of §4's own table: count its rows (14) and its `**No copy of its content in-repo**`
 cells among the `research/` rows (3) — the same way the §6 arithmetic is already re-derived from its
 own table rather than trusted. Until an arm is added they are **hand-derived and unmeasured**, and
 that was measured: deleting the `<corpus>/2026-09-09-ontology-evidence.md` row — after which §4 has
 13 rows and covers 14 of the 15 artefacts `#2852` §3 lists — and reverting
-§0 to *"six of the eight"* both leave `--check` at exit 0 and the test file fully green. Re-derive
+the opening to *"six of the eight"* both leave `--check` at exit 0 and the test file fully green.
+Re-derive
 both from §4's table before quoting them; `#2852` §3 is the population source, not the derivation.
 
 ---
