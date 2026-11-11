@@ -483,6 +483,17 @@ def test_outcomes_to_report_golden_shape():
         # checkpoints render; the golden outcome ran with the arm OFF).
         "coverage_loop": None,
         "coverage_loop_stats": None,
+        # C3-4 (#2570, #2519 P3): the window-reconciliation arm marker +
+        # per-outcome labeled-variant census — o.get-based projection, None
+        # on golden outcomes (absent until the outcome carries them; the
+        # golden outcome ran with the arm OFF). Registered HERE because the
+        # projection is UNCONDITIONAL by design (run.py's allow-list comment:
+        # "the projection is a fixed-shape payload"), so a downstream
+        # consumer can read the key on every report — and this exhaustive
+        # literal is the pin that notices when a new unconditional key is
+        # added without updating the published shape.
+        "window_reconciliation": None,
+        "window_reconciliation_stats": None,
         # C4 (#2517/#2568, #2513): the source-session re-injection arm
         # marker + per-outcome census — o.get-based projection, None on
         # golden outcomes (absent until the outcome carries them;

@@ -517,9 +517,28 @@ def reconciliation_variant_rows(outcomes: list[dict], *,
         differs from the one-shot value. The raise is a WINDOW change
         (the pool depth is unchanged), so any drift is re-execution
         variance and is surfaced rather than silently blended.
+      ``n_errored`` — every outcome carrying a recorded error, WHETHER OR
+        NOT it reached ``fired`` (see the census comment below: a
+        pre-fire predicate error is a dead arm, not an absent class), and
+        ``n_errored_pre_fire`` — the subset that never reached the pass.
     """
     fired = [o for o in outcomes if _stats(o).get("fired") is True]
     admitted = [o for o in fired if _stats(o).get("admitted") is True]
+    # ⛔ THE ERROR CENSUS IS NOT GATED ON ``fired`` (#11830 review P2). The
+    # total wrapper in ``run.py`` records any non-fatal exception on the
+    # pass, and ``failing_class_reason`` runs BEFORE ``fired`` is set — so a
+    # predicate that throws (it lazily imports ``tortoise.reader``'s private
+    # ``_looks_abstained``) leaves ``fired=False, error="ImportError: ..."``.
+    # Counting errors only among ``fired`` published ``n_errored: 0`` — which
+    # reads as "the failing class never occurred on this run" over an arm
+    # that failed on EVERY question just because the product renamed a
+    # private symbol. The counter is incremented at ATTEMPT time, not on
+    # completion (the rule Prometheus instrumentation states for a failure
+    # counter: a failure that prevents the later stage from running is still
+    # a failure, and it is counted).
+    errored = [o for o in outcomes if _stats(o).get("error")]
+    errored_pre_fire = [o for o in errored
+                        if _stats(o).get("fired") is not True]
     graded = [o for o in admitted if _variant_label(o) is not None]
     pairs = [(o, _outcome_label(o), _variant_label(o))
              for o in graded if _outcome_label(o) is not None]
@@ -589,10 +608,18 @@ def reconciliation_variant_rows(outcomes: list[dict], *,
             1 for o in admitted if _stats(o).get("cap_exceeded") is True),
         # A pass that raised above the declared bound, or that FAILED: both
         # are census rows, never silent. ``n_errored`` is the containment
-        # counter — a failed optional pass must be visible, not vanish.
+        # counter — a failed optional pass must be visible, not vanish — and
+        # it counts an outcome carrying ``error`` whether or not the pass
+        # reached ``fired`` (a pre-fire error is still a dead arm).
         "bound_exceeded_n": sum(
             1 for o in admitted if _stats(o).get("bound_exceeded") is True),
-        "n_errored": sum(1 for o in fired if _stats(o).get("error")),
+        "n_errored": len(errored),
+        # The subset that never reached the pass at all (the predicate or the
+        # pre-admission prologue threw). A NON-ZERO value here means the
+        # arm's POPULATION is unknown rather than empty — the difference
+        # between "no failing class on this run" and "the arm could not
+        # decide", which ``n_fired`` alone cannot express.
+        "n_errored_pre_fire": len(errored_pre_fire),
         # A pass admitted on an envelope that reported a call with no usage
         # block spends an UNMEASURED amount: its lower bound is not evidence
         # of staying under the cap, so it is excluded from the total and
@@ -639,6 +666,7 @@ def reconciliation_variant_rows(outcomes: list[dict], *,
         # leg, which is why the condition is not "healthy leg" but the
         # narrower "no global stop was reached".
         "population_invariant_residual": (
+<<<<<<< HEAD
             "the re-run is coupled to two run-global budgets: the vector "
             "circuit breaker (a raised pass can trip or heal it, changing "
             "which LATER questions drop as dropped.breaker_open) and the "
@@ -646,4 +674,17 @@ def reconciliation_variant_rows(outcomes: list[dict], *,
             "question and aborts spend_hard_stop). The one-shot result is "
             "never mutated; population identity across arms holds only "
             "while neither global stop is reached."),
+=======
+            "the re-run shares TWO run-global budgets with the arm-OFF twin, "
+            "so population identity across arms holds only on a healthy run: "
+            "(1) the vector circuit breaker — on a DEGRADED vector leg an "
+            "arm-ON run can drop or un-drop later one-shot questions (see "
+            "the report's dropped.breaker_open); (2) the spend ceiling — the "
+            "arm's extra reader/judge rows go through usage.record -> "
+            "spend_guard.observe, so under --hard-stop-usd the raised passes "
+            "consume the ceiling faster and an arm-ON run can abort EARLIER "
+            "than its arm-OFF twin, publishing a smaller population. "
+            "Disclosure only: the one-shot result is never mutated and no "
+            "measured number is adjusted."),
+>>>>>>> 45711fa38f6f (fix(2570): close the #11830 review — golden-shape pin, pre-fire error census)
     }

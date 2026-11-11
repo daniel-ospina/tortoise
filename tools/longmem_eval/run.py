@@ -781,8 +781,13 @@ def _reconcile_failing_question_pass(
         raised_max_context_tokens=raised["max_context_tokens"])
     stats["marginal_bound"] = bound
     if not window_recon.admit_reconciliation(bound=bound, cap=cap):
-        # The cap is a real gate on the extra generation: a raised window
-        # whose upper bound cannot fit the cap is never re-run.
+        # ⛔ The cap gates a BOUND, not spend (module docstring of
+        # window_reconciliation states this): a raised window whose UPPER
+        # bound cannot fit the cap is refused, so the admission decision is
+        # made on the worst case the raise can cost. It does not cap the
+        # pass's actual spend — an admitted pass can still overshoot its
+        # bound, which is why ``cap_exceeded``/``bound_exceeded`` are
+        # disclosed census rows rather than silent.
         stats["skip_reason"] = "token_cap"
         return
     stats["admitted"] = True

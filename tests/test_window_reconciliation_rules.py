@@ -392,9 +392,23 @@ def test_peek_question_is_non_destructive_and_drain_still_works():
         second = collector.peek_question("q_peek")
         assert first == second
         assert first["total"]["prompt_tokens"] == 7
+        # ⛔ #11830 review residual 1: the SNAPSHOT must not be a live view.
+        # The deep-copy claim in the docstring was unpinned — a reintroduced
+        # aliasing peek (or a live re-read) stayed green because nothing
+        # recorded between the two reads. ``first`` is what priced the arm's
+        # marginal bound; it must still say 7 after the pass's own spend
+        # lands, and the NEXT peek is what sees the growth.
+        collector.record(stage="judge", provider="openrouter",
+                         model_id="m", usage={"prompt_tokens": 5},
+                         usage_present=True)
+        assert first["total"]["prompt_tokens"] == 7      # did not move
+        assert first["total"]["calls"] == 1              # …still one call
+        after = collector.peek_question("q_peek")
+        assert after["total"]["prompt_tokens"] == 12     # the new snapshot does
+        assert after["total"]["calls"] == 2
         # the cumulative envelope the outcome carries is still complete
         drained = collector.drain_question("q_peek")
-        assert drained["total"]["prompt_tokens"] == 7
+        assert drained["total"]["prompt_tokens"] == 12
         assert collector.peek_question("q_peek") is None
     finally:
         lme_usage.clear_question_key()
@@ -759,6 +773,40 @@ def test_wiring_a_failing_reader_in_the_pass_still_returns(monkeypatch):
     assert stats["variant_label"] is None
 
 
+def test_wiring_a_pre_fire_predicate_error_reaches_the_census(monkeypatch):
+    """⛔ #11830 review P2, END TO END: a predicate that throws BEFORE
+    ``fired`` is set must still land in the published census.
+
+    ``failing_class_reason`` lazily imports the PRIVATE
+    ``tortoise.reader._looks_abstained``, so a rename raises ``ImportError``
+    on every question. ``is_fatal`` classifies that UNKNOWN (not fatal), the
+    wrapper records it and leaves ``fired=False`` — and the pre-fix census
+    summed ``n_errored`` over ``fired`` only, so the published block read
+    ``n_fired: 0, n_errored: 0``: "the failing class never occurred" over an
+    arm that failed on 100% of questions. This row is the one the review's
+    mutation table could not redden.
+    """
+    def _boom(**kwargs):
+        raise ImportError(
+            "cannot import name '_looks_abstained' from 'tortoise.reader'")
+
+    monkeypatch.setattr(wr, "failing_class_reason", _boom)
+    stats = _recon(monkeypatch, ret=_one_shot_ret(0.2), label=False,
+                   hypothesis="two")
+    # The pass never reached its first stage…
+    assert stats["fired"] is False
+    assert stats["skip_reason"] == "error"
+    assert "ImportError" in stats["error"]
+    # …and the census an operator reads still sees the dead arm.
+    outcome = {"question_id": "q_msr_1", "label": False,
+               "window_reconciliation": True,
+               "window_reconciliation_stats": stats}
+    rows = wr.reconciliation_variant_rows([outcome], k=5)
+    assert rows["n_fired"] == 0
+    assert rows["n_errored"] == 1          # pre-fix: 0
+    assert rows["n_errored_pre_fire"] == 1
+
+
 def test_wiring_a_fatal_provider_error_still_aborts(monkeypatch):
     """Containment must NOT swallow the run-level abort classes: a dead key
     would otherwise be absorbed by a measurement-only variant while the run
@@ -871,8 +919,51 @@ def test_variant_rows_counts_an_errored_pass_and_a_bound_overshoot():
     rows = wr.reconciliation_variant_rows([errored, over], k=5)
     assert rows["n_fired"] == 2
     assert rows["n_errored"] == 1
+    # This one DID reach the pass, so it is not the pre-fire class.
+    assert rows["n_errored_pre_fire"] == 0
     assert rows["n_graded"] == 1     # the errored pass contributes no verdict
     assert rows["bound_exceeded_n"] == 1
+
+
+def test_variant_rows_count_a_pre_fire_predicate_error():
+    """⛔ #11830 review P2, the row that was impossible before the fix.
+
+    ``failing_class_reason`` runs BEFORE ``fired`` is set, and the total
+    wrapper in ``run.py`` records any non-fatal exception — so a predicate
+    that throws (it lazily imports ``tortoise.reader._looks_abstained``, a
+    PRIVATE product symbol: a rename raises ``ImportError`` on every
+    question) leaves ``fired=False, error="ImportError: ..."``.
+
+    Counting errors only among ``fired`` published ``n_errored: 0`` over an
+    arm that failed on 100% of questions — indistinguishable from "the
+    failing class never occurred", which is exactly what the docstring above
+    the counter promises cannot happen. This asserts the containment counter
+    sees an error recorded before the pass fired.
+    """
+    broken = {"question_id": "q1", "label": False,
+              "window_reconciliation": True,
+              "window_reconciliation_stats": {
+                  "fired": False, "admitted": False, "cap": 24000,
+                  "skip_reason": "error",
+                  "error": "ImportError: cannot import name "
+                           "'_looks_abstained'"}}
+    rows = wr.reconciliation_variant_rows([broken], k=5)
+    assert rows["n_fired"] == 0
+    # The pre-fix counter returned 0 here — the dead-arm-reads-as-clean-zero.
+    assert rows["n_errored"] == 1
+    # …and the subset counter says the POPULATION is unknown, not empty.
+    assert rows["n_errored_pre_fire"] == 1
+
+
+def test_variant_rows_ignore_an_error_free_arm_off_outcome():
+    """The negative control: the widened counter must not read an arm-OFF
+    outcome as an error just because it carries no stats block at all."""
+    off = {"question_id": "q1", "label": True, "session_recall@k": {"5": 1.0}}
+    rows = wr.reconciliation_variant_rows([off], k=5)
+    assert rows["n_fired"] == 0
+    assert rows["n_errored"] == 0
+    assert rows["n_errored_pre_fire"] == 0
+    assert rows["token_cap"] is None
 
 
 def test_variant_rows_count_an_unmetered_pass_separately():
