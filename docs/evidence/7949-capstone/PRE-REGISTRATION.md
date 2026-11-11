@@ -2319,37 +2319,34 @@ to answer.
   so its cites are re-derived individually rather than by a constant.
 - **Three further files moved in the same pass**, and they are named here rather than folded into
   "nothing else", because a reader auditing this hash-pinned artefact has to be able to tell which
-  files moved and by how much. Each offset below is stated **at the cite this entry re-points**, and
-  never as a file total — `#11795` is not one flat insert in any of these files, so a total would
-  mis-derive every cite sitting above that file's next hunk:
-  - `tortoise/projection/entities.py` — `#11795`'s first hunk is `@@ -1150,6 +1150,245 @@` (**+239**
-    above `:1150`), which is what moved the alias gate `1239` → `1478`; so `§1.6.2`'s cite and
-    `preregistration.json`'s live `read_back` prose (`:1239` → `:1478`) follow the SAME commit as
-    everything else here. ⚠️ An earlier revision of this bullet called that correction
-    "pre-existing staleness" — it had measured the base `b50e3293`, which already CONTAINED
-    `#11795`, so the test was circular. Three later hunks (`+10` at `:2228`, `+13` at `:2485`, `+2`
-    at `:2504`) add the rest, so the three deep cites carry `+264` (`2634`→`:2898`, `2772`→`:3036`,
-    `4733`→`:4997`). The bands are worth stating in OLD coordinates, since that is the side a
-    re-derivation works from: `+239` from old `:1155` to `:2227`, then `+249` to `:2484`, then `+262`
-    to `:2503`, then `+264` below. (The `2467` in that hunk header is the hunk's NEW start, not a
-    boundary of the `+239` band.) This file's total movement happens to also be `+264`.
-  - `tortoise/projection/__init__.py` — `#11795` makes thirteen hunks here and the file goes
-    `21840`→`21973` (`+133` overall), so the one cite this entry re-points, `13738-13740` →
-    `:13804-13806`, carries **`+66`** because it sits above the fourth hunk
-    (`@@ -14549,6 +14615,8 @@ class FalkorProjection(`, where `+66` is that hunk's START offset and
-    `8` is its line count). ⛔ `+66` is that cite's offset, NOT the file's movement: below `:14615`
-    a cite carries between `+68` and `+133` depending on how many of the nine later hunks sit above
-    it, and the region past the last of them (`@@ -21149,6 +21251,37 @@`) carries the full `+133`
-    (`21251` → `21973` is where `#11239`'s own mention fold now lives). So re-deriving from `+66`
-    anywhere else lands early — by up to 67 lines — and re-deriving from `+102` (that last hunk's
-    start offset) still lands 31 early in the tail.
-  - `tortoise/hosted_api.py` — the `LIFETIME_MEMORY_QUERY` pivot was re-measured `23249` → `23466`
-    with `tools/hosted_api_cite_census.py --refresh` (which also re-stated that note's above/below
-    split, `14`/`441` → `12`/`443`). Two commits make that `+217`, and only the second is this
-    pass's: `#11814` moved the pivot `+173` (`23249` → `23422`) and **`#11795` a further `+44`**
-    (its four `hosted_api.py` hunks at `:21428`, `:21437`, `:21451`, `:21605` all sit above the
-    pivot); `#11805` does not touch the file at all. So the `23249` anchor predates `#11795` even
-    though part of its movement does not.
+  files moved. What is given is each file's TOTAL movement (a line-count delta — stable, and
+  checkable with `wc -l`) plus, for each cite this entry actually re-points, that cite's own measured
+  `was`/`now`. ⛔ **No per-band offset table is published here, deliberately, and no number below
+  may be used to derive a cite you have not opened.** `#11795` inserts at several points in each of
+  these files, and inside a hunk the last few pre-image lines still carry the PREVIOUS offset — so a
+  table of "from line N it is +K" is wrong by 1-13 at every boundary it names, which manufactures
+  exactly the stale cite this record exists to prevent. A cite is re-derived by opening it in the
+  tree; that is how every number under *New value* was obtained. (Earlier revisions of this bullet
+  did publish such tables, and were corrected for it four times.)
+  - `tortoise/projection/entities.py` — `#11795` alone: `7091` → `7355` (`+264`). The cite this pass
+    re-points, `§1.6.2`'s alias gate, is `1239` → `1478` — `+239`, from that commit's first hunk
+    (`@@ -1150,6 +1150,245 @@`), NOT `+264`, because three later hunks sit below it. ⚠️ An earlier
+    revision called that correction "pre-existing staleness": it had measured the base `b50e3293`,
+    which already CONTAINED `#11795`, so the test was circular. The same `:1239` → `:1478` re-point
+    is carried into `preregistration.json`'s live `read_back` prose.
+  - `tortoise/projection/__init__.py` — `#11795` alone: `21840` → `21973` (`+133`) in thirteen
+    hunks. The cite this pass re-points, `13738-13740` → `:13804-13806`, carries `+66` because it
+    sits above the fourth hunk (`@@ -14549,6 +14615,8 @@` — `+66` is that hunk's START offset and
+    `8` its line count). So this cite's offset is half the file's, which is precisely why the two
+    must not be interchanged — and why `+66` must not be turned into "the next band is `+68`" either:
+    the two lines inserted inside that hunk still carry `+66`, so the next offset begins after them,
+    not at new `:14615`.
+  - `tortoise/hosted_api.py` — `+217` overall (`23249` → `23466`), and it takes TWO commits:
+    `#11814` (`69cc13a565`) `+173` (`23249` → `23422`), then `#11795` a further `+44` (`48310` →
+    `48354`; its four hunks at `:21428`/`:21437`/`:21451`/`:21605` all sit above the pivot).
+    `#11805` does not touch the file. The pivot was re-measured with
+    `tools/hosted_api_cite_census.py --refresh`, which also re-stated that note's above/below split,
+    `14`/`441` → `12`/`443`.
   The `read_back` re-point is disclosed the same way §10.22 and §10.23 disclose theirs.
 - **New value — measured at this head:** the two `if items:` gates at `:14222`/`:14375` (the S2
   pass and the post-S4 pass), the two fail-open `except` arms at `:14235`/`:14386`, the two result
@@ -2362,20 +2359,14 @@ to answer.
   `17296`/`17308`/`17309`) and `_TURN_WRITE_CYPHER` at `:2530` (was `2528`). That last `+2` IS from
   the two commits named here and is not a mystery insert: `#11795` adds one import line
   (`@@ -168,6 +168,7 @@`, which `git show 3794677ee3 -- tortoise/sdk.py` prints) and `#11805` one
-  blank line (`@@ -368,6 +368,7 @@`, which `git show 0bdb08dbdb -- tortoise/sdk.py` prints — note
-  each header is quoted from ITS OWN commit's diff, because the combined diff renumbers the
-  second), and nothing else in `sdk.py` sits above that constant — so `_TURN_WRITE_CYPHER` does carry
-  the full `+2`. ⛔ But `:168`-`:2528` is NOT uniformly `+2`, and this is the same trap as the file
-  totals above: those two inserts sit at `:168` and `:368`, so old `:168`-`:173` carry `0`,
-  `:174`-`:370` carry `+1`, and the full `+2` begins only at old `:371` (measured at this head:
-  `out[key] = stored` `368`→`369`, `return out` `369`→`370`, and the `# baseline_source token
-  family` comment `371`→`373`). So cite nothing else in that window from a flat `+2`. Below
-  `_extract_session_v2` the offsets are not flat either:
-  measured on `git diff 0bdb08dbdb^..b50e3293a167 -- tortoise/sdk.py`, the running offset reaches
-  `+115` at `:16789`, `+133` at `:18485`, then `+138` at `:18966` and keeps climbing below that
-  (`+166` by `:43622`, `+171` by `:43757`, `+195` by `:44075`) — so `+133` describes citations up to
-  `:18485` only. Every number in this entry is opened rather than offset for exactly that reason:
-  the offsets are not uniform across these files, or even within one of them.
+  blank line (`@@ -368,6 +368,7 @@`, which `git show 0bdb08dbdb -- tortoise/sdk.py` prints — each
+  header is quoted from ITS OWN commit's diff, because the combined diff renumbers the second) —
+  so `_TURN_WRITE_CYPHER` carries exactly `+2`. That `+2` is NEITHER the file's movement (`sdk.py`
+  grows `49122` → `49213`, `+91`, across `#11795` alone) NOR a band value: because the two inserts
+  sit at `:168` and `:368`, a cite anywhere in `:168`-`:2528` carries `0`, `+1` or `+2` depending on
+  which side of those two lines it sits. Offsets stated in this entry are the offsets AT the cite
+  named; applying one to a different line is the error the note above forbids, because they are not
+  uniform across these files nor even within a single hunk.
 - **Verified by content, not by arithmetic.** Each line was opened at this head:
   `:14222`/`:14375` are the two `if items:` gates; `:14235`/`:14386` are the two fail-open
   `except` arms whose warnings name `classify(S2) failed` / `classify(union) failed`; `:14586`
