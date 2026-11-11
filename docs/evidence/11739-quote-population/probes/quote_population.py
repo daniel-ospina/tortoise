@@ -12,8 +12,9 @@ side issue.
 It reports the **share of live NON-OPERATOR `:Point` nodes carrying a non-empty `quote`** (the
 read path's canonical operator-scope clause, `sdk._operator_scope_clauses`, excludes operator
 Points — they are not in this population), sliced by
-`pointKind`, by capture month, and restricted to the points that actually carry a vector
-(`embedding` present) — because the composed text only ever replaces an embedding input,
+`pointKind`, by capture month, and ALSO reported restricted to the points that actually
+carry a vector (`embedding` present) — because the composed text only ever replaces an
+embedding input,
 so an unembedded point's empty `quote` is not a defect, it is a point that was never
 embedded. A single headline ratio over the whole graph would therefore overstate the gap:
 this graph carries live Points with no vector at all, and its hand-authored kinds
@@ -128,7 +129,7 @@ class _Client:
         try:
             req = urllib.request.Request(self.endpoint, data=body, headers=self.headers)
         except ValueError as e:
-            sys.stderr.write(f"GRAPH-UNREACHABLE(BAD-ENDPOINT {self.endpoint!r}): {e}\n")
+            _say(f"GRAPH-UNREACHABLE(BAD-ENDPOINT {self.endpoint!r}): {e}\n")
             raise SystemExit(3) from None
         try:
             with urllib.request.urlopen(req, timeout=timeout) as f:
@@ -138,10 +139,10 @@ class _Client:
                 detail = e.read().decode("utf-8", "replace")[:400]
             except Exception:
                 detail = "<unreadable error body>"
-            sys.stderr.write(f"GRAPH-UNREACHABLE(HTTP {e.code}): {detail}\n")
+            _say(f"GRAPH-UNREACHABLE(HTTP {e.code}): {detail}\n")
             raise SystemExit(3) from None
         except Exception as e:  # any transport failure is one verdict
-            sys.stderr.write(f"GRAPH-UNREACHABLE({type(e).__name__}): {str(e)[:300]}\n")
+            _say(f"GRAPH-UNREACHABLE({type(e).__name__}): {str(e)[:300]}\n")
             raise SystemExit(3) from None
         # streamable-http answers as SSE frames; take the frame for THIS call id.
         frames = []
@@ -161,7 +162,7 @@ class _Client:
         try:
             return json.loads(raw)
         except Exception:  # any unparseable body is one verdict
-            sys.stderr.write("GRAPH-UNPARSEABLE: 2xx with no JSON reply and no SSE frame: "
+            _say("GRAPH-UNPARSEABLE: 2xx with no JSON reply and no SSE frame: "
                              f"{raw[:200]!r}\n")
             raise SystemExit(3) from None
 
@@ -186,11 +187,11 @@ class _Client:
             # contract, so a caller keying on 3/4 reads an unrecognised verdict (review
             # cycle 14, reproduced in-process with `[]`, `"notice"` and `7`).
             if not isinstance(reply, dict):
-                sys.stderr.write(f"GRAPH-SHAPE({name}): reply is not a JSON-RPC object "
+                _say(f"GRAPH-SHAPE({name}): reply is not a JSON-RPC object "
                                  f"({type(reply).__name__})\n")
                 raise SystemExit(3)
             if "error" in reply:
-                sys.stderr.write(f"GRAPH-TOOL-ERROR({name}): "
+                _say(f"GRAPH-TOOL-ERROR({name}): "
                                  f"{json.dumps(reply['error'])[:400]}\n")
                 raise SystemExit(3)
             result = reply.get("result") or {}
@@ -199,12 +200,12 @@ class _Client:
             # AttributeError on `.get` and exits 1 exactly the same way (review cycle 15,
             # reproduced in-process).
             if not isinstance(result, dict):
-                sys.stderr.write(f"GRAPH-SHAPE({name}): `result` is not an object "
+                _say(f"GRAPH-SHAPE({name}): `result` is not an object "
                                  f"({type(result).__name__})\n")
                 raise SystemExit(3)
             content = result.get("content") or []
             if not isinstance(content, list) or not all(isinstance(c, dict) for c in content):
-                sys.stderr.write(f"GRAPH-SHAPE({name}): `result.content` is not a list of "
+                _say(f"GRAPH-SHAPE({name}): `result.content` is not a list of "
                                  f"blocks\n")
                 raise SystemExit(3)
             texts = [c.get("text", "") for c in content if c.get("type") == "text"]
@@ -213,7 +214,7 @@ class _Client:
             # `_is_wait_budget`, exiting 1 (review cycle 16 — the third cycle of this class,
             # so the guard is on the value, not only on the container).
             if not all(isinstance(t, str) for t in texts):
-                sys.stderr.write(f"GRAPH-SHAPE({name}): a text block's `text` is not a "
+                _say(f"GRAPH-SHAPE({name}): a text block's `text` is not a "
                                  f"string\n")
                 raise SystemExit(3)
             # The live tool emits its JSON payload first; a RETIRED-TOOL notice can follow
@@ -227,14 +228,14 @@ class _Client:
                     continue
             if _is_wait_budget(texts):
                 if attempt == 1:
-                    sys.stderr.write(f"GRAPH-WAIT-BUDGET({name}): retrying this page once\n")
+                    _say(f"GRAPH-WAIT-BUDGET({name}): retrying this page once\n")
                     continue
                 # TWO misses at this size: the caller decides, because only it knows a
                 # smaller page is a legal substitute for the same rows (walk does; nothing
                 # else can). Logged here so the reason is never silent.
-                sys.stderr.write(f"GRAPH-WAIT-BUDGET({name}): missed twice\n")
+                _say(f"GRAPH-WAIT-BUDGET({name}): missed twice\n")
                 return None
-            sys.stderr.write(f"GRAPH-EMPTY-RESULT({name}): no JSON payload in "
+            _say(f"GRAPH-EMPTY-RESULT({name}): no JSON payload in "
                              f"{[t[:120] for t in texts]}\n")
             raise SystemExit(3)
         raise SystemExit(3)  # unreachable: the loop either returns or exits
@@ -294,9 +295,10 @@ def _raw_length(quote: object) -> int:
     in place that "the operands are not interchangeable". Both are 200 today, which is exactly
     why the probe's copy is pinned to `_MAX_QUOTE` by a test rather than trusted — so `at_cap`
     must count on THIS length: measuring
-    the collapsed text instead silently dropped 359 of 2,260 clamp hits, i.e. every quote
-    whose raw span carried a run of whitespace the composer normalises away (measured while
-    fixing this). The raw slice is also what makes "the clamp cuts mid-token" true rather
+    the collapsed text instead silently dropped 359 of 2,260 clamp hits — the rows where
+    `raw >= 200` AND `collapsed < 200`, i.e. every quote whose whitespace run pushed its
+    collapsed length BELOW the cap (a quote that normalises to >= 200 stays at cap; measured
+    while fixing this). The raw slice is also what makes "the clamp cuts mid-token" true rather
     than rhetorical.
     """
     if isinstance(quote, str):
@@ -412,11 +414,11 @@ def _page(client: _Client, offset: int, limit: int, include_retracted: bool,
         page = client.tool("tortoise_query", {"limit": attempt, "offset": offset,
                                               "include_retracted": include_retracted})
         if page is None:
-            sys.stderr.write(f"PROBE-WAIT-BUDGET: page {page_no} at offset {offset} missed "
+            _say(f"PROBE-WAIT-BUDGET: page {page_no} at offset {offset} missed "
                              f"at limit {attempt}\n")
             continue
         if not isinstance(page, dict) or not isinstance(page.get("results"), list):
-            sys.stderr.write(f"PROBE-SHAPE: page {page_no} is not a paginated reply, "
+            _say(f"PROBE-SHAPE: page {page_no} is not a paginated reply, "
                              f"got {type(page).__name__}\n")
             raise SystemExit(4)
         if not all(isinstance(row, dict) for row in page["results"]):
@@ -424,7 +426,7 @@ def _page(client: _Client, offset: int, limit: int, include_retracted: bool,
             # reply we cannot read as rows, and `walk` would raise AttributeError on
             # `row.get("id")` and exit 1 (review cycle 14, reproduced with
             # `{"results": ["row"], ...}`).
-            sys.stderr.write(f"PROBE-SHAPE: page {page_no} has a non-row element in "
+            _say(f"PROBE-SHAPE: page {page_no} has a non-row element in "
                              f"`results` (offset {offset})\n")
             raise SystemExit(4)
         ids = [row.get("id") for row in page["results"]] if page["results"] else []
@@ -432,17 +434,17 @@ def _page(client: _Client, offset: int, limit: int, include_retracted: bool,
             # `walk` dedups ids in a SET, so a dict/list id raises `unhashable type` and exits
             # 1 (review cycle 17, reproduced in-process). The page arrived and looks like a
             # page — it just cannot be read as identifiable rows, so exit 4.
-            sys.stderr.write(f"PROBE-SHAPE: page {page_no} carries an unhashable row id "
+            _say(f"PROBE-SHAPE: page {page_no} carries an unhashable row id "
                              f"(offset {offset})\n")
             raise SystemExit(4)
         if page_no == 1 and not {"results", "total", "hasMore"} <= set(page):
             # EVERY key the paginated arm contractually returns, not just `results`: a reply
             # missing `total` used to raise `KeyError` and exit 1 (review finding 2).
-            sys.stderr.write("PROBE-SHAPE: a paginated read must return "
+            _say("PROBE-SHAPE: a paginated read must return "
                              f"{{results,total,hasMore}}, got {sorted(page)}\n")
             raise SystemExit(4)
         return page, attempt
-    sys.stderr.write(f"GRAPH-UNAVAILABLE: page {page_no} at offset {offset} could not be "
+    _say(f"GRAPH-UNAVAILABLE: page {page_no} at offset {offset} could not be "
                      f"read at any rung ({_ladder(limit)}; the graph is not serving this "
                      "query)\n")
     raise SystemExit(3)
@@ -472,7 +474,7 @@ def walk(client: _Client, include_retracted: bool = True) -> tuple[dict, int, in
         # walk and exits 1 (review cycle 16).
         # A PRESENT but non-numeric `total` used to raise out of the walk and exit 1 — the same
         # class as the missing-key arm above, half-closed (review cycle 2, finding 4).
-        sys.stderr.write("PROBE-SHAPE: `total` is not an integer: "
+        _say("PROBE-SHAPE: `total` is not an integer: "
                          f"{first.get('total')!r}\n")
         raise SystemExit(4) from None
     rows = list(first["results"])
@@ -484,7 +486,7 @@ def walk(client: _Client, include_retracted: bool = True) -> tuple[dict, int, in
     # against the limit the page was ACTUALLY fetched at, so a shrunk page is not mistaken
     # for a short one.
     if has_more and len(rows) < limit:
-        sys.stderr.write(f"PROBE-INCOMPLETE: page 1 returned {len(rows)} rows at limit "
+        _say(f"PROBE-INCOMPLETE: page 1 returned {len(rows)} rows at limit "
                          f"{limit} with hasMore=true\n")
         raise SystemExit(4)
     while has_more:
@@ -493,7 +495,7 @@ def walk(client: _Client, include_retracted: bool = True) -> tuple[dict, int, in
         if page.get("hasMore") and len(got) < limit:
             # A short page with more to come means the walk is not a partition of the
             # order (the #5346 loss class) — refuse to publish a count from it.
-            sys.stderr.write(f"PROBE-INCOMPLETE: page {pages + 1} returned {len(got)} rows "
+            _say(f"PROBE-INCOMPLETE: page {pages + 1} returned {len(got)} rows "
                              f"at limit {limit} with hasMore=true\n")
             raise SystemExit(4)
         rows.extend(got)
@@ -503,7 +505,7 @@ def walk(client: _Client, include_retracted: bool = True) -> tuple[dict, int, in
             break
     ids = {r.get("id") for r in rows}
     if len(rows) != total or len(ids) != len(rows):
-        sys.stderr.write(f"PROBE-INCOMPLETE: walked {len(rows)} rows ({len(ids)} distinct "
+        _say(f"PROBE-INCOMPLETE: walked {len(rows)} rows ({len(ids)} distinct "
                          f"ids) against a reported total of {total}\n")
         raise SystemExit(4)
     return {"rows": rows, "pages": pages, "final_page_size": limit}, total, len(ids)
@@ -694,6 +696,25 @@ def census(client: _Client, endpoint: str = "") -> dict:
     }
 
 
+
+def _say(text: str) -> None:
+    """Write a diagnostic to stderr, tolerating a MISSING stream.
+
+    `2>&-` at exec closes fd 2 and CPython sets `sys.stderr = None`, so a bare
+    `sys.stderr.write(...)` raises `AttributeError` and turns a documented exit into an
+    uncaught 1 — the code is the contract, the message is best-effort (review, landing
+    round 2, measured with `--out /tmp/y.json 2>&-`: exit 1 where the contract says 3).
+    """
+    stream = sys.stderr
+    if stream is None:
+        return
+    try:
+        stream.write(text)
+        stream.flush()
+    except (OSError, ValueError):
+        pass
+
+
 def _mcp_endpoint(raw: str) -> str:
     """Normalise to the MCP JSON-RPC route.
 
@@ -715,7 +736,7 @@ def main(argv: list[str]) -> int:
 
     key = os.environ.get("TORTOISE_MCP_API_KEY") or os.environ.get("TORTOISE_API_KEY")
     if not key:
-        sys.stderr.write("GRAPH-UNREACHABLE(NO-KEY): TORTOISE_MCP_API_KEY is not set. "
+        _say("GRAPH-UNREACHABLE(NO-KEY): TORTOISE_MCP_API_KEY is not set. "
                          "A missing key is never an empty graph — do not read it as 0%.\n")
         return 3
 
@@ -728,6 +749,12 @@ def main(argv: list[str]) -> int:
     report["duration_s"] = round(time.monotonic() - started, 1)
     text = json.dumps(report, indent=2, sort_keys=False) + "\n"
     if args.out == "-":
+        if sys.stdout is None:
+            # `>&-` at exec closes fd 1 and CPython sets `sys.stdout = None`, so the write
+            # below raised `AttributeError` — an exit 1 outside the documented contract, in
+            # the very arm the comment calls "full/closed" (review, landing round 2).
+            _say("PROBE-WRITE(<stdout>): stdout is closed\n")
+            return 2
         try:
             sys.stdout.write(text)
             # ⛔ The WRITE is not the I/O: stdout is a buffered text stream (8 KiB), and this
@@ -739,8 +766,8 @@ def main(argv: list[str]) -> int:
             # pipe buffer, the write succeeds, and a reader that discards a published artifact
             # is not a lost write — measured.)
             sys.stdout.flush()
-        except OSError as e:  # a full/closed stdout (`> /dev/full`)
-            sys.stderr.write(f"PROBE-WRITE(<stdout>): {e}\n")
+        except (OSError, ValueError) as e:  # full disk, or a stream closed under us
+            _say(f"PROBE-WRITE(<stdout>): {e}\n")
             # ⛔ RETURNING 2 IS NOT ENOUGH: the buffer that just failed is still DIRTY, so
             # interpreter shutdown flushes it AGAIN and THAT failure sets exit 120 over our 2
             # (measured on the real process, `--out - > /dev/full`). The real stdout's buffer
@@ -759,9 +786,9 @@ def main(argv: list[str]) -> int:
         # unwritable `--out` raised out of `main` and exited 1, discarding a measured result
         # and landing OUTSIDE the documented 0/2/3/4 contract (review, attestation round).
         # `2` is usage — the graph was read fine, the destination was not writable.
-        sys.stderr.write(f"PROBE-WRITE({args.out}): {e}\n")
+        _say(f"PROBE-WRITE({args.out}): {e}\n")
         return 2
-    sys.stderr.write(f"wrote {args.out}\n")
+    _say(f"wrote {args.out}\n")
     return 0
 
 

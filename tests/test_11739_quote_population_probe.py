@@ -182,9 +182,11 @@ def test_the_walk_counts_one_page_per_page_of_the_partition(monkeypatch):
     `census()` publishes as `pages_walked`, which the README tells a reader to quote instead
     of a runtime range. The arithmetic was unpinned (a filed follow-up): `pages` is
     initialised to 1 for page one and incremented once per page read, so at a CONSTANT page
-    size `pages == ceil(rows / page_size)` exactly. Mutants: a `pages += 1` that runs before
-    the extend, a counter starting at 0, or a counter that only ticks when a page is FULL
-    (each reds the equality here on the 2/2/1 split below)."""
+    size `pages == ceil(rows / page_size)` exactly. Mutants that red the equality here on the
+    2/2/1 split below: a counter starting at 0, a counter that only ticks when a page is FULL,
+    or one that stops after a fixed number of pages. ⚠️ Moving `pages += 1` above the
+    `extend` does NOT red it (the total is insensitive to the increment's position — verified
+    by mutation), which is why it is not claimed here."""
     import math
 
     monkeypatch.setattr(qp, "PAGE", 2)
@@ -971,6 +973,35 @@ def test_an_unwritable_stdout_returns_two(monkeypatch):
     # a devnull handle and the original stream is no longer the one the interpreter owns.
     assert qp.sys.stdout is not stdout
     assert qp.sys.stdout.name == os.devnull
+
+
+def test_a_closed_stdout_returns_two(monkeypatch, capsys):
+    """FAILS IF `--out -` with fd 1 CLOSED exits 1.
+
+    `>&-` at exec closes fd 1 and CPython sets `sys.stdout = None`, so `.write` raises
+    `AttributeError` — which `except OSError` cannot catch, so the run exited 1 on an arm the
+    guard's own comment called "full/closed". The contract (README and this probe's
+    `--help`) says a destination the probe cannot write is `2` (review, landing round 2;
+    measured: `--out - >&-` → exit 1 with a traceback).
+    """
+    _stub_main(monkeypatch)
+    monkeypatch.setattr(qp.sys, "stdout", None)
+    assert qp.main(["quote_population", "--out", "-"]) == 2
+    assert "PROBE-WRITE(<stdout>)" in capsys.readouterr().err
+
+
+def test_a_closed_stderr_does_not_change_the_exit_code(monkeypatch):
+    """FAILS IF a missing stderr turns a documented exit into an uncaught 1.
+
+    `2>&-` sets `sys.stderr = None`, and every exit arm writes a diagnostic there — so
+    `sys.stderr.write` raised `AttributeError` inside the arm and the process left the
+    contract at 1 (measured: no key + `2>&-` → 1, where the contract says 3). The exit code
+    is the contract; the message is best-effort.
+    """
+    monkeypatch.delenv("TORTOISE_MCP_API_KEY", raising=False)
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+    monkeypatch.setattr(qp.sys, "stderr", None)
+    assert qp.main(["quote_population", "--out", "/tmp/unused-by-this-test.json"]) == 3
 
 
 def test_page_one_without_a_total_exits_four():
