@@ -5613,12 +5613,11 @@ _BELIEF_PROSE = (
     "tortoise/ranking.py",
 )
 
-#: A sentence terminator followed by whitespace. The qualifier must sit in the
-#: SAME sentence as its claim. A fixed character window does not implement that
-#: rule and errs in both directions: it admits a qualifier parked in the NEXT
-#: sentence (a period does not end a character count) and rejects a legitimate
-#: long aside inside the same one.
-_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+#: A sentence terminator followed by whitespace, EXCLUDING the abbreviations the
+#: corpus writes (`e.g.` / `i.e.` / `cf.`): splitting on those tears a correct
+#: sentence in two and reports its claim fragment as a defect — a false positive
+#: that steers the next fixer to "correct" correct prose.
+_SENTENCE_END = re.compile(r"(?<!\be\.g)(?<!\bi\.e)(?<!\bc\.f)(?<=[.!?])\s+")
 
 #: Sentences that ASSERT the value of a prior-only claim's mean. The verb is
 #: what distinguishes a CLAIM from a factual mention of a number ("Beta(3,1),
@@ -5629,12 +5628,14 @@ _PRIOR_MEAN_CLAIM_PATTERNS = (
     re.compile(r"reads its PRIOR mean", re.IGNORECASE),
 )
 
-#: The class-2 claim: the "prior mean … else None" prediction, whatever the
-#: connective or the quote style. It is FALSE whenever a readable mirror exists,
-#: so a reader branching on it predicts `absent` for a mirror-only Point.
+#: The class-2 claim: the "prior mean … else None" prediction. The SENTENCE is
+#: the unit, so the intra-sentence clause bound is unnecessary and harmful — a
+#: literal punctuation anchor (`(ep_alpha/beta)`) plus a `{0,80}` clause missed
+#: every ordinary rewording (`of \`ep_alpha/beta\``, `(ep_alpha, ep_beta)`, a
+#: longer aside). It is FALSE whenever a readable mirror exists, so a reader
+#: branching on it predicts `absent` for a mirror-only Point.
 _ABSENT_CLAIM = re.compile(
-    r"prior mean \(ep_alpha/beta\)[^.]{0,80}?\b(?:else|otherwise)\b"
-    r"[^.]{0,30}?[`\"]*(?:None|null)",
+    r"prior mean\b.*?\b(?:else|otherwise)\b.*?[`\"]*(?:None|null)",
     re.IGNORECASE)
 
 #: The class-3 claim: a gloss that reads `has_ep` / `ep_measured_cypher` as
@@ -5651,10 +5652,17 @@ _EP_PASS_CLAIM = re.compile(
     r"[`\"]*(?P<pass>EP has MEASURED|EP measured this|EP MEASURED)",
     re.IGNORECASE)
 
-#: Negators of the gloss ITSELF. `no` and `never` are deliberately excluded:
-#: "no mere flag" is a determiner, not a negation of the claim, and admitting
-#: them exempted a live gloss in a sentence that carried an earlier `no`.
-_NEGATED = re.compile(r"\bnot\b|\bisn't\b|⛔", re.IGNORECASE)
+#: Negators of the gloss ITSELF, tested only where they can negate the VERB
+#: (see `_ep_pass_claims`). `no` is excluded on purpose: "no mere flag" is a
+#: determiner, not a negation of the claim.
+_NEGATED = re.compile(r"\b(?:not|never)\b|\bisn't\b|⛔", re.IGNORECASE)
+
+#: A negator immediately before the verb, i.e. one that negates THIS claim:
+#: "is NOT ``EP has MEASURED this claim``". A `not` earlier in the clause is a
+#: different predicate ("is not a mere flag — it is EP MEASURED"), and admitting
+#: it exempted a live gloss.
+_NEGATES_VERB = re.compile(r"(?:\b(?:not|never)\b|\bisn't\b|⛔)\s*[`\"\s]*$",
+                          re.IGNORECASE)
 
 
 def _belief_prose(rel: str) -> str:
@@ -5692,14 +5700,15 @@ def _unqualified_claims(patterns) -> list[str]:
 def _ep_pass_claims(text: str) -> list[str]:
     """Matches that READ the flag as an EP receipt.
 
-    A negator BETWEEN the flag and the verb means the sentence DENIES the gloss
-    ("three things it is NOT: … not ``EP has MEASURED this claim``"), so only
-    that span is searched for one. Scanning the whole match would let a `not`
-    elsewhere in the span exempt a different, unnegated claim.
+    A negator IMMEDIATELY BEFORE the verb means the sentence DENIES the gloss
+    ("three things it is NOT: … not ``EP has MEASURED this claim``"), so the
+    test is anchored at the END of the link segment. Searching the whole span
+    let a `not` belonging to a different predicate exempt a live claim —
+    "`has_ep` is not a mere flag — it is EP MEASURED" passed.
     """
     suspects = []
     for match in _EP_PASS_CLAIM.finditer(text):
-        if _NEGATED.search(match.group("pre") + " " + match.group("link")):
+        if _NEGATES_VERB.search(match.group("link")):
             continue
         suspects.append(match.group(0))
     return suspects
@@ -5719,20 +5728,29 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
     assert any(p.search("reads its PRIOR mean, so it clears the mean floor.")
                for p in _PRIOR_MEAN_CLAIM_PATTERNS), \
         "the prior-mean guard misses the `reads its PRIOR mean` spelling"
-    assert _ABSENT_CLAIM.search(
-        "prior mean (ep_alpha/beta), else ``None`` (#11702)"), \
-        "the absent-claim guard is INERT"
-    assert _ABSENT_CLAIM.search(
-        "prior mean (ep_alpha/beta), else `null`"), \
-        "the absent-claim guard misses the single-backtick / `null` spelling"
-    # …and the EP-pass guard fires both on a quoted gloss and beside an
-    # unrelated determiner, while a NEGATED gloss is a denial, not a claim.
+    # The absent-claim guard must survive the REWORDINGS of the same false
+    # prediction, not just the one that shipped it.
+    for spelling in (
+            "prior mean (ep_alpha/beta), else ``None`` (#11702)",
+            "prior mean of `ep_alpha/beta`, else ``None``",
+            "prior mean (ep_alpha, ep_beta), else ``None``",
+            "prior mean (ep_alpha / ep_beta), otherwise null",
+            "prior mean (ep_alpha/beta), i.e. the coalesce, else ``None``",
+            "prior mean (ep_alpha/beta)" + " x" * 60 + ", else ``None``"):
+        assert _ABSENT_CLAIM.search("the " + spelling), (
+            f"the absent-claim guard misses a rewording: {spelling!r}")
+    # …and the EP-pass guard fires on a quoted gloss and beside an unrelated
+    # `not`/`no`, while a gloss the negator actually negates is a denial.
     assert _ep_pass_claims('``has_ep`` must mean "EP has MEASURED this claim"'), \
         "the EP-pass guard is INERT"
     assert _ep_pass_claims('`has_ep` is no mere flag: `has_ep` is EP MEASURED this'), \
         "a bare `no` must not exempt the gloss"
+    assert _ep_pass_claims('`has_ep` is not a mere flag — it is EP MEASURED'), \
+        "a `not` belonging to a different predicate must not exempt the gloss"
     assert not _ep_pass_claims('`has_ep` is NOT "EP has MEASURED this claim"'), \
         "a negated gloss is the correct wording, not a finding"
+    assert not _ep_pass_claims('`has_ep` is never "EP has MEASURED this claim"'), \
+        "`never` negates the gloss too"
 
 
 def test_a_prior_mean_claim_in_the_belief_prose_names_the_mirror():

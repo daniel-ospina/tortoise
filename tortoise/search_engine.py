@@ -1460,8 +1460,11 @@ class EpBreakdown:
     # (it LEADS), else the belief mean α/(α+β) of the PERSISTED posterior when
     # EP has run on the claim (posterior_alpha/beta), else the persisted prior
     # mean (ep_alpha/beta).
-    # It matches the number TortoiseEP.compute_confidence / sdk.get_confidence
-    # return for the same point WHENEVER one is persisted — with ONE stated
+    # For a claim with NO readable `n.confidence` mirror it matches the number
+    # TortoiseEP.compute_confidence / sdk.get_confidence return for the same
+    # point WHENEVER one is persisted — THOSE TWO READ α/β ONLY, so a readable
+    # mirror is the second stated divergence (they answer the pair mean where
+    # this field answers the mirror's value) — and with ONE further stated
     # exception, ``None`` here: those two still answer the Beta(1,1) prior mean
     # (0.5) for a claim with no persisted belief at all, because they are the
     # EP read under an explicit `require_calibration=False`, not a read/rank
