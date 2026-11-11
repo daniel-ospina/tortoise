@@ -166,9 +166,14 @@ def test_mutation_population_is_pinned():
     bullets; a total that contradicts the OPEN row) — the exact defect the page
     shipped green — and the review of #11902 added four more (an unclassifiable §3
     row, an emptied evidence column, an unclassifiable §6 row, a citation shape the
-    resolver declines), so the population is 12 and the floor is pinned with it.
+    resolver declines), plus the DECOY arm, which is the only pin on
+    `check_survivor_arithmetic`'s `len(matches) > 1` branch: deleting that branch left
+    every other arm, every test and `--check` green (measured). Population 13, floor
+    pinned with it.
     """
-    assert len(flc.MUTATIONS) == 14
+    # 14 before the §11902 cycle merged the survival-decoy arm (their 13) with the
+    # four fail-open arms and two shapes added here; the floor is pinned WITH it.
+    assert len(flc.MUTATIONS) == 15
     assert flc.MIN_SELF_TEST_MUTATIONS == 14
 
 
@@ -724,8 +729,17 @@ def test_survivor_sentence_is_derived_from_its_own_bullets():
     values, so a future `correction` in either direction reds here.
     """
     text = flc.read_doc(REPO)
-    assert flc.check_survivor_arithmetic(text) == []
+    # ⛔ BEFORE the `check_survivor_arithmetic(text) == []` assert, deliberately: that assert also
+    # reds on a two-sentence §6, so it would SHADOW this one and this pin would never be the row
+    # that reports (#11902 review, P3). Ordered first, it is the assertion that fails when §6 grows
+    # a second matching sentence — and it names the reason. It is still not the pin for the CODE
+    # branch; the `a second survivor sentence that could take the match` arm is.
     section = flc._region(text, "## 6. The issue index", "## 7. What this changes")
+    assert len(flc.SURVIVOR_RE.findall(section)) == 1, (
+        "§6 must carry exactly one sentence matching SURVIVOR_RE — a second one takes the match "
+        "and the guard cannot tell which sentence a lane reads"
+    )
+    assert flc.check_survivor_arithmetic(text) == []
     open_row = next(
         ln for ln in section.splitlines()
         if flc.STATE_ROW_RE.match(ln) and flc.STATE_ROW_RE.match(ln).group("label") == "OPEN"
@@ -741,15 +755,6 @@ def test_survivor_sentence_is_derived_from_its_own_bullets():
     assert len(bullets) == 3
     assert len([i for i in bullets if i in open_ids]) == 2
     assert flc.NUMBER_WORDS[match.group("count")] == 2
-    # ⛔ The guard locates its subject BY PATTERN, so §6 must carry EXACTLY ONE sentence that fits
-    # (#11902 review, P2). With one more, `search()` silently takes the earlier sentence and the
-    # sentence a lane reads goes unchecked: measured, a decoy plus the shipped `three` defect left
-    # `--check` at rc=0 and `--self-test` at PASS. Asserted here (rather than from prose) because
-    # the decoy also absorbs the self-test's mutation, so the self-test cannot be the pin.
-    assert len(flc.SURVIVOR_RE.findall(section)) == 1, (
-        "§6 must carry exactly one sentence matching SURVIVOR_RE — a second one takes the match "
-        "and the guard reports OK over the sentence a lane actually reads"
-    )
 
 
 def test_survivor_count_not_matching_the_bullets_is_rejected(tmp_path, monkeypatch):

@@ -211,10 +211,13 @@ NUMBER_WORDS: dict[str, int] = {
 
 #: The guidance sentence under §6's table spells BOTH of its numbers as words
 #: ("of the four survivors, two are already re-measured elsewhere", and later
-#: "of the four survivors, the two bullets below are already re-measured"), so the
-#: count is matched as a NUMBER WORD anywhere between the total and the verb —
-#: not at a fixed offset, because the page legitimately qualifies it ("the two
-#: bullets below") and a rigid pattern would refuse a correct sentence. Both
+#: ("of the four survivors, the two survivor bullets below are already re-measured
+#: elsewhere"), so the count is matched as a NUMBER WORD anywhere between the total
+#: and the verb — not at a fixed offset, because the page legitimately qualifies it
+#: ("the two survivor bullets below") and a rigid pattern would refuse a correct
+#: sentence. ⛔ It is matched ANYWHERE in §6, which is why `check_survivor_arithmetic`
+#: requires exactly one match: with a second matching sentence the guard would
+#: otherwise derive its numbers from whichever came first. Both
 #: numbers are *derived* claims and neither was checkable before: the unguarded
 #: version shipped `three` over a bullet list naming two survivors plus one
 #: CLOSED issue while §7 still said `two` — two reviewers then disagreed about
@@ -947,19 +950,33 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
     (
         # The EXACT shipped defect, re-injected: the pre-fix page said `three`
         # above two survivor bullets plus one CLOSED issue. ⛔ The target is the
-        # LEAD-IN, not a phrase from the sentence's tail (#11902 review): the
-        # previous target quoted `survivors, the two bullets below`, so rewording
-        # the sentence left the arm's replace dead, `self_test` said so
-        # ("did not change the document — the arm is dead"), and the defect could
-        # have shipped with an apparently-green self-test. A lead-in on the
-        # sentence's FIRST line keeps the arm alive across any rewording that
-        # keeps the pattern matching.
+        # LEAD-IN, not a phrase from the sentence's tail, so the arm survives a
+        # rewording of the tail — which is what happened: `eabfbed95` rewrote
+        # `the two bullets below` to `the two survivor bullets below`, and a
+        # tail-quoting target goes dead on that edit. A dead arm is caught LOUDLY by
+        # `self_test` ("did not change the document — the arm is dead", FAIL), so the
+        # hazard is maintenance, not a silent false PASS — stated precisely, because
+        # the opposite claim would be a false one about this gate (#11902 review).
         "a survivor count that does not match the bullets beneath it",
         lambda t: t.replace("survivors, the two survivor bullets below",
-                            "survivors, the three survivor bullets below", 1)
-                   .replace("survivors, two are already",
-                            "survivors, three are already", 1),
+                            "survivors, the three survivor bullets below", 1),
         "says 3 of them are already re-measured, but 2 of its 3 bullet(s) name an OPEN issue",
+    ),
+    (
+        # ⛔ THIS ARM IS THE PIN FOR THE `len(matches) > 1` BRANCH, and nothing else is
+        # (#11902 review, P2): the branch is invisible to a test of the real page (which
+        # has exactly one match), so deleting it left `--check`, `--self-test` and every
+        # test green — measured. A second sentence is what a future edit would plausibly
+        # add, and before the branch existed it took the match while the guard reported
+        # OK over the sentence a lane actually reads.
+        "a second survivor sentence that could take the match",
+        lambda t: t.replace(
+            "**⚠️ of the four survivors",
+            "Note first: of the four survivors, two are already re-measured elsewhere.\n\n"
+            "**⚠️ of the four survivors",
+            1,
+        ),
+        "carries 2 sentences matching the survivor pattern",
     ),
     (
         "a survivor total that does not match the OPEN row",

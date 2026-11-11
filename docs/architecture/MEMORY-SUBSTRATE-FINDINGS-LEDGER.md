@@ -26,8 +26,8 @@ measured_at: 2026-11-12
 > the very fixes they motivated, three by a number or a tracker state that moved —
 > so a lane that trusted §7 today would believe the Point fold still
 > drops props (#2795 closed that), and would go looking for a defect that is gone.
-> Meanwhile **three of the seven research briefs §3.1 indexes have no copy in this repo at
-> all**, and the out-of-repo tree they lived on no longer exists (§5).
+> Meanwhile **three of the seven research briefs §3 indexes have no in-repo mirror at
+> all**, and the machine they lived on no longer carries them (§5).
 >
 > **What this page does NOT do.** It does not re-open a defect, propose a fix, or
 > schedule anything. It does not restate the 26-entry status table — read the
@@ -137,7 +137,7 @@ code while the brief itself never did.
 | `design/2026-09-10-decision-briefs-workstream-C.md` (167 l) | Near-full comment on #2826 | #2826 is CLOSED `NOT_PLANNED` — still readable, no longer a queue |
 | `design/2026-09-10-a1-a2-comment.md` (103 l) | Near-full comment on #2826 (A1/A2 briefs) | Same |
 | `design/2026-09-10-a1-a2-decision-briefs.md` (71 l) | **Gone** — never posted, superseded by the A1 comment by design | Nothing; flagged local-only when written |
-| `<corpus>/2026-09-09-ontology-evidence.md` (431 l) | Condensed comment on #2725 only (“Corpus-grounding verification”, 8,099 B) | **No copy of its content in-repo** — its only `docs/` hit is this page's own row |
+| `<corpus>/2026-09-09-ontology-evidence.md` (431 l) | **MIRRORED (condensed)** — comment on #2725 | The corpus-grounding dossier: all 8 meeting docs read and grepped against the proposed 10-kind pack, verdict **8/10 kinds STRONG**, `milestone` WEAK, several lifecycle states design extrapolations. This is the **only** corpus artefact with a surviving mirror — the payload it was derived from does not survive (§6.3) |
 | `<corpus>/README.md` + 8 `.docx` + 8 `plaintext/*.txt` (~976 KB) | **Gone from this machine** — and **must never** enter this public repo (#2852 §6.3) | Nothing reachable; originals were also in `~/Downloads`, unverified |
 | `~/.swarm/issue-triage-2026-09-09.md` (~5 KB) | **Gone** — local-only by design | Nothing; its outcome (33 closures + a 10-item shortlist) is in the tracker, the reasoning is not |
 
@@ -270,9 +270,10 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   OPEN row's own count, and its "already re-measured" count must equal the number of **bullets naming
   an OPEN issue** — the `#2730` bullet is CLOSED and is printed because *issue closure is not evidence
   of a fix*, not because it survives. §6 must also carry **exactly one** sentence matching that
-  pattern: the check finds its subject by pattern, so a second one earlier in §6 takes the match and the
-  guard reports OK over the sentence a lane actually reads — measured, one added decoy sentence was
-  enough. Unguarded, this sentence carried a false `three` over two
+  pattern: the check finds its subject by pattern, so a second one **anywhere** in §6 makes it report
+  that §6 carries two and check neither rather than picking one — keep exactly one. Before that was
+  guarded it took the first match and reported OK over the other, and one added decoy sentence was
+  enough (measured). Unguarded, this sentence also carried a false `three` over two
   survivor bullets while §7 said `two`, and the guard reported OK over it: the page's own *declared ≠
   stored* defect, inside the correction that exists to stop it — and the reason two reviewers could
   each "prove" the other side was the stale one.
@@ -296,12 +297,21 @@ skips in a depth-1 checkout is inert everywhere; the live ancestry claim is prov
 a stubbed-`git` case that needs no history. Two mechanisms, stated separately, because "the other job
 covers it" was true of the tool and false of the test.
 
-**Deliberately not checked:** the issue states in §6, the durability column in §4, and every
-`~/.swarm` claim in §5. They are **dated readings of things outside this repository**, and a guard
-that asserted them would either fail on someone else's tracker or, worse, pass by not looking. This
-follows `SUBSTRATE-REBUILD-MAP.md`'s ruling: *the tracker half is deliberately not guarded — it is
-dated and its command is recorded.* The command for §6 is `gh issue view <N> --json state`, and it
-was run per issue, not sampled.
+**Deliberately not checked:** the issue states in §6, the durability column in §4, every
+`~/.swarm` claim in §5, **§4's row population** and **§0's brief counts**. They are **dated
+readings of things outside this repository**, and a guard that asserted them would either fail on
+someone else's tracker or, worse, pass by not looking. This follows `SUBSTRATE-REBUILD-MAP.md`'s
+ruling: *the tracker half is deliberately not guarded — it is dated and its command is recorded.*
+The command for §6 is `gh issue view <N> --json state`, and it was run per issue, not sampled.
+
+⚠️ **The last two are named because they were repaired by hand, and a guard would not have caught
+them (#11902).** §4's `14 rows ⇒ 15 artefacts` arithmetic and §0's `three of the seven research
+briefs` are derived from `#2852` §3 exactly as §6 is from the tracker, and the criterion above
+(*self-contained and therefore checkable*) applies to them equally — but as of this cut they are
+**not** machine-checked, and the arms were measured: deleting the `<corpus>/2026-09-09-
+ontology-evidence.md` row (so *"indexed 15 artefacts"* is false again) and reverting §0 to *"six of
+the eight"* both leave `--check` at exit 0 and the test file fully green. Read both as dated
+readings, and re-derive them from the issue before quoting them.
 
 ---
 
