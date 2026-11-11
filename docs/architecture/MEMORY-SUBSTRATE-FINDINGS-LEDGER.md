@@ -274,13 +274,18 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   plus the 144 other tracked `*.md`, was swept with the shipped pattern — zero matches, so refusing
   it cannot red this repository's own prose. Rewriting a citation's delimiter is therefore **not**
   universally refused: `path#LINE` (the bare-number form, which IS what collides with issue refs),
-  `path@LINE`, `path-LINE`, `path_LINE`, `path/LINE`, `path,LINE` and
-  `path:L LINE` and `path:L16` (the `#L16` sibling of a permalink) are **named carve-outs**, exactly as the two below are, because a rule that refuses
+  `path@LINE`, `path-LINE`, `path_LINE`, `path/LINE`, `path,LINE`,
+  `path:L LINE` and `path:L16` (the `#L16` sibling of a permalink) are **named carve-outs**, exactly as the rest are, because a rule that refuses
   this page's own issue refs and paths is the false-accusation class one arm over — and so are
   **`path N --flag`** (a numeric ARGUMENT rather than a line, indistinguishable from a command that
-  does not start with a recognised program name) and an **HTTP-status line** (a page name followed by
-  a status code, or an HTTP status in error text — the literals are unspanned on purpose, because
-  this scan refuses them). The rest of this paragraph is what IS measured. Skipping it was a hole with
+  does not start with a recognised program name) and an **HTTP-status line** in the two forms the
+  code measures — a `.html`/`.htm` page name followed by a 3-digit status, or a status inside error
+  text — because the literals are unspanned on purpose (this scan refuses them). It is NOT a
+  carve-out for every `METHOD /path <status>` line: the method-and-path form is refused,
+  because a path like `/api/orders` followed by a status code is indistinguishable from a path
+  and a line to this arm — the literals are unspanned on purpose — so an HTTP example on
+  this page belongs in a form the resolver can read or outside a code span. The rest of this
+  paragraph is what IS measured. Skipping it was a hole with
   three doors — a `.txt` path, an extension-less path, and a leading-dot path like
   `.github/workflows/ci.yml:892` matched nothing, so reformatting a citation was enough to defuse a
   real red — and there was a fourth: **one inserted space**, in the form “tortoise/pipeline .py:16”
