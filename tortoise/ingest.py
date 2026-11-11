@@ -224,13 +224,15 @@ def _run_ep_propagation(proj, api=None, *, label: str = "EP"):
         ).result_set
         evidence = {}
         uncalibrated = 0
+        # #11702 cycle 24: `float()` + `confidence_to_prior` CLAMPED an
+        # out-of-band mirror to maximum certainty (2.5 → 1.0), i.e. a malformed
+        # value became the strongest possible evidence for the EP pass. The
+        # mirror is read through the band instead, so anything that is not a
+        # probability counts as uncalibrated — exactly as a non-numeric one does.
+        from tortoise.search_engine import belief_mirror as _belief_mirror
         for cid, conf_raw in claim_rows:
-            if conf_raw is None:
-                uncalibrated += 1
-                continue
-            try:
-                conf = float(conf_raw)
-            except (TypeError, ValueError):
+            conf = _belief_mirror(conf_raw)
+            if conf is None:
                 uncalibrated += 1
                 continue
             evidence[cid] = TortoiseEP.confidence_to_prior(conf)

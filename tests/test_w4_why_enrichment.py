@@ -834,9 +834,25 @@ def test_e2e1_conflict_surfacing_rate(w4_flag):
             assert claim_hit is not None, f"decision {pid} not retrieved"
             tradeoffs = claim_hit.get("tradeoffs") or []
             assert len(tradeoffs) >= 2, f"decision {pid} must surface ≥ 2 alternatives"
+            # #11702: the tiered order — every numeric weight precedes a
+            # `None` one, so the <=5 cap cannot be filled by unmeasured
+            # alternatives while a measured one is dropped.
+            seen_absent = False
             for t in tradeoffs:
-                assert isinstance(t.get("ep_weight"), (int, float)), \
-                    f"alternative {t} missing ep_weight"
+                if t.get("ep_weight") is None:
+                    seen_absent = True
+                else:
+                    assert not seen_absent, (
+                        "a measured alternative sorted after an absent one: "
+                        + repr([x.get("ep_weight") for x in tradeoffs]))
+            for t in tradeoffs:
+                # #11702: `None` is legal — an alternative with no persisted
+                # belief (the assembler tiers it last). A present value must
+                # still be numeric.
+                assert t.get("ep_weight") is None or isinstance(
+                    t.get("ep_weight"), (int, float)), \
+                    f"alternative {t} carries a non-numeric ep_weight"
+                assert "ep_weight" in t, f"alternative {t} missing ep_weight"
                 assert t.get("mitigation"), f"alternative {t} missing mitigation"
             # tradeoff pointer present (decision-point precedence) and its
             # label is the deterministic registry phrase (UXD 4 — the label
@@ -1209,8 +1225,13 @@ def test_assemble_why_blocks_canonical_shape(w4_flag):
         assert isinstance(block["support_chain"], list)
         # #3276: measured/baseline are the additive explicit measurement state
         # (has_ep == measured; baseline marks a prior-only declared baseline).
+        # #11702: `ep_state` joins the block — the state name a consumer needs
+        # to tell a MEASURED 0.5 from an ABSENT belief (which is `null`, not
+        # 0.5). The set is asserted exactly, so the key cannot be dropped or
+        # silently renamed on this wire surface.
         assert set(block["ep"]) == {"confidence_mean", "variance", "contested",
-                                    "has_ep", "measured", "baseline"}
+                                    "has_ep", "measured", "baseline",
+                                    "ep_state"}
         assert block["ep"]["contested"] is True
         assert set(block["supersession"]) == {"status", "superseded_by",
                                               "supersedes", "successor_label"}

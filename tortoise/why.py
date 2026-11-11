@@ -60,9 +60,26 @@ from .live import (
 )
 from .search_engine import (  # type: ignore[import-not-found]
     CONTESTED_VARIANCE_THRESHOLD,
+    # #11702: the ONE presence vocabulary. The canonical ``ep`` block is the
+    # block `/v1/context`, the volunteer reflex and the pushed webhook all
+    # serve, so it must report the same state as `annotate_ep_batch` and the
+    # rankers — otherwise the fabricated 0.5 survives on the largest
+    # agent-facing read surface while search reports null for the same claim.
+    EP_STATE_ABSENT,
+    EP_STATE_BASELINE,
+    EP_STATE_MEASURED,
+    _beta_mean,  # #11702: the ONE Beta mean (replaces this module's local copy)
+    _beta_variance,  # #11702: the ONE Beta width (replaces this module's local copy)
     _exclude_status_clause,
+    belief_mirror,
+    belief_value,  # #11702: the ONE Python belief VALUE reader
+    ep_has_belief_cypher,
     ep_measured_cypher,  # #3276: has_ep == EP measured (baseline prior != measured)
+    ep_pair_stored,  # #11702: a variance needs BOTH α/β operands stored
+    ep_state,
+    ep_state_resolve,
     fetch_point_epistemic_state,
+    numeric_operand,  # #11702: the ONE total numeric coercion (bool != number)
 )
 
 logger = logging.getLogger(__name__)
@@ -110,19 +127,17 @@ def w4_enrichment_enabled() -> bool:
 # surfaces that feed the items).
 
 
-def _beta_variance(alpha: float, beta: float) -> float:
-    """Beta(α, β) posterior variance: αβ/((α+β)²(α+β+1)) — same formula as
-    search_engine._beta_variance / TortoiseEP (kept local to avoid a second
-    import surface; the threshold constant is imported from search_engine)."""
-    s = alpha + beta
-    if s <= 0:
-        return 0.0
-    return (alpha * beta) / (s * s * (s + 1))
-
-
-def _mean(alpha: float, beta: float) -> float:
-    s = alpha + beta
-    return (alpha / s) if s > 0 else 0.5
+# ⛔ #11702 cycle 12: this module used to carry its OWN `_beta_variance` and
+# `_mean` ("kept local to avoid a second import surface"). That second spelling
+# of the arithmetic is the defect class this issue removes, and by cycle 11 it
+# had drifted: the local `_beta_variance` had no finiteness or sign guard, so
+# the CANONICAL why block (`/v1/context`, the volunteer reflex, webhooks) was
+# the one surface still emitting a negative `variance` (-0.25), a `NaN` onto the
+# JSON wire (Starlette renders with `allow_nan=False`, so that is a 500), a 0.0
+# confidence at max-disbelief for an overflowing pair, and a ZeroDivisionError
+# for a subnormal one — which discarded the WHOLE batch's enrichment, not just
+# the offending point (#8504's failure shape). The one definition lives in
+# `search_engine`; both names are imported at the top of this module.
 
 
 def _snippet(text: str) -> str:
@@ -174,18 +189,23 @@ def _assemble_supports(rows: list, by_id: dict[str, dict], *,
     rank: dict[tuple[str, str], tuple[str, str]] = {}
     for row in rows:
         if operator_leg:
-            (pid, sup_id, content, a, b,
+            (pid, sup_id, content, sup_conf, pa, pb, ea, eb,
              op_id, op_type, op_label, mitigation, mit_id) = row
         else:
-            pid, sup_id, content, a, b = row
+            pid, sup_id, content, sup_conf, pa, pb, ea, eb = row
             op_id = op_type = op_label = mitigation = mit_id = None
         if not pid or not sup_id:
             continue
+        # #11702: `weight` is the supporter's PERSISTED belief, or None when it
+        # has none -- never the 0.5 the `coalesce(…, 1.0)` default produced.
+        weight = belief_value(confidence=sup_conf, posterior_alpha=pa,
+                              posterior_beta=pb, ep_alpha=ea, ep_beta=eb,
+                              round_to=4)
         entry = {
             "point_id": sup_id,
             "content_snippet": _snippet(content),
             "edge": "IMPL",
-            "weight": round(_mean(float(a), float(b)), 4),
+            "weight": weight,
             # #3990 — the WHY layer's operator leg. ``operator_label`` is
             # the Layer-3 predicate (ONTOLOGY §8); ``operator_type`` is the
             # epistemic mechanism. It is ``IMPL`` on every entry today
@@ -228,8 +248,14 @@ def _assemble_supports(rows: list, by_id: dict[str, dict], *,
             pending[pid][sup_id] = entry
             rank[(pid, sup_id)] = key
     for pid, chain_map in pending.items():
+        # #11702: absent-supporter TIER -- `weight` is None for a supporter
+        # with no persisted belief, and it sorts after EVERY weighted one so
+        # the ≤3 cap cannot be filled by fabricated 0.5s (measured: two absent
+        # supporters crowded a real 0.4 reading out of the chain).
         chain = sorted(chain_map.values(),
-                       key=lambda s: (-s["weight"], s["point_id"]))
+                       key=lambda s: (s["weight"] is None,
+                                      -(s["weight"] or 0.0),
+                                      s["point_id"]))
         if merge and by_id[pid].get("support_chain"):
             # Union with the first leg's already-selected candidates, then
             # re-sort + re-cap across BOTH legs (deterministic strongest ≤3).
@@ -240,7 +266,9 @@ def _assemble_supports(rows: list, by_id: dict[str, dict], *,
             for s in chain:
                 by_sup.setdefault(s["point_id"], s)
             chain = sorted(by_sup.values(),
-                           key=lambda s: (-s["weight"], s["point_id"]))
+                           key=lambda s: (s["weight"] is None,
+                                          -(s["weight"] or 0.0),
+                                          s["point_id"]))
         by_id[pid]["support_chain"] = chain[:W4_MAX_SUPPORT]
 
 
@@ -259,15 +287,29 @@ def _assemble_conflicts(rows: list, by_id: dict[str, dict]) -> None:
         nid = row[1]
         if nid not in pending.setdefault(pid, {}):
             text = row[2]
+            # #11702: the counter-claim's PERSISTED belief -- a direct Point's
+            # own columns, else the NAND operator's. `None` when neither has
+            # one, and that is a TIER of its own below every measured severity
+            # (an absent belief used to weigh 0.5 and take a real tier, so the
+            # ≤2 cap could be filled by a claim nothing measured).
+            weight = belief_value(
+                confidence=row[3], posterior_alpha=row[4],
+                posterior_beta=row[5], ep_alpha=row[6], ep_beta=row[7])
+            if weight is None:
+                weight = belief_value(
+                    confidence=row[8], posterior_alpha=row[9],
+                    posterior_beta=row[10], ep_alpha=row[11], ep_beta=row[12])
             pending[pid][nid] = {
                 "point_id": nid,
                 "content_snippet": _snippet(text),
-                "severity": _severity(_mean(float(row[3]), float(row[4]))),
+                "severity": None if weight is None else _severity(weight),
             }
     for pid, nand_map in pending.items():
         nands = sorted(
             nand_map.values(),
-            key=lambda n: (0 if n["severity"] == "high" else 1, n["point_id"]))
+            key=lambda n: (n["severity"] is None,
+                           0 if n["severity"] == "high" else 1,
+                           n["point_id"]))
         by_id[pid]["nands"] = nands[:W4_MAX_CONFLICTS]
 
 
@@ -298,7 +340,12 @@ def _assemble_tradeoffs(rows: list, by_id: dict[str, dict]) -> None:
                 # own explanation needs it. Same additive-shape rule as the
                 # support leg: present, ``None`` when the edge carries none.
                 "operator_id": row[5] or None,
-                "ep_weight": round(_mean(float(row[7]), float(row[8])), 4),
+                # #11702: `None` for an alternative with no persisted belief
+                # (never the 0.5 the `coalesce(…, 1.0)` default produced).
+                "ep_weight": belief_value(
+                    confidence=row[7], posterior_alpha=row[8],
+                    posterior_beta=row[9], ep_alpha=row[10], ep_beta=row[11],
+                    round_to=4),
                 "mitigation": _mitigation_text(row[6]),
             }
     for pid, alts in pending.items():
@@ -324,7 +371,9 @@ def _assemble_tradeoffs(rows: list, by_id: dict[str, dict]) -> None:
                 {k: v for k, v in a.items() if k != "kind"}
                 for a in alt_list
             ],
-            key=lambda t: (-t["ep_weight"], t["point_id"]))[:W4_MAX_TRADEOFFS]
+            key=lambda t: (t["ep_weight"] is None,
+                           -(t["ep_weight"] or 0.0),
+                           t["point_id"]))[:W4_MAX_TRADEOFFS]
 
 
 def _assemble_supersession(by_id: dict[str, dict],
@@ -365,10 +414,19 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
     """Fold the dedicated persisted α/β read into the canonical ``ep``
     sub-block (flag-first pairing for agents — variance/contested ride the
     block; same formula as annotate_ep_batch / TortoiseEP). Every row is an
-    EXISTING :Point node (the query is the existence anchor). Unmeasured
-    points coalesce to the Beta(1,1) uniform prior: mean 0.5, variance
-    1/12, has_ep False — absence of measurement is NOT low support (repo
-    neutral-0.5 convention).
+    EXISTING :Point node (the query is the existence anchor). A point with NO
+    persisted belief in any form carries ``confidence_mean: None`` and
+    ``ep_state: "absent"`` (#11702) — never the Beta(1,1) mean 0.5, which
+    admitted a never-measured claim through any floor at or under 0.5 as if it
+    carried neutral evidence. ``variance`` is ``0.0`` unless BOTH operands of
+    the α/β pair are stored (`search_engine.ep_pair_stored`, the same rule
+    `annotate_ep_batch` and all three rankers apply): the `coalesce(…, 1.0)`
+    inputs otherwise answer the Beta(1,1) MAXIMUM 1/12, i.e. "there is no
+    belief here, and it is maximally uncertain", and an α-only half pair
+    turned `contested` on so the volunteer surfaced "read the
+    counterargument" for a claim with zero counterarguments. ``has_ep``/
+    ``measured`` are unchanged by #11702. "Absence of measurement is not low
+    support" still holds — the belief term simply does not participate.
 
     #2490: the gate is a PROJECTION-side has_ep OVERRIDE, NOT a WHERE
     insertion — why() explicitly serves terminal ids in the supersession
@@ -381,7 +439,13 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
         if not row or not row[0]:
             continue
         pid = row[0]
-        a, b = float(row[1]), float(row[2])
+        # #11702 cycle 16: TOTAL coercion on both operands and the MIRROR. A
+        # stored non-numeric value raised here and the caller's guard dropped
+        # the whole block map (`{}`), so `why` disappeared for every id in the
+        # batch — measured: `W4 ep read failed: could not convert string to
+        # float` and no `ep` block at all, on the surface every agent read
+        # goes through.
+        a, b = numeric_operand(row[1]) or 0.0, numeric_operand(row[2]) or 0.0
         has_ep = bool(row[3])
         # #2490: terminal rows never surface a decayed posterior as measured
         # EP — has_ep=False + contested=False (projection-side override).
@@ -396,13 +460,84 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
         baseline_set = bool(row[6]) if len(row) > 6 else False
         measured = bool(has_ep)
         variance = _beta_variance(a, b)
+        # #11702: the state, resolved through the SAME vocabulary every other
+        # surface uses (presence from the raw columns, then the #2490 fold).
+        # Index map for `_EP_CYPHER`: 0 id, 1 alpha, 2 beta, 3 measured,
+        # 4 status, 5 outdated, 6 baseline_set, 7 has_belief, 8 posterior_alpha,
+        # 9 ep_alpha, 10 confidence, 11 posterior_beta, 12 ep_beta. The len
+        # guard covers the pre-#11702 7-col contract doubles, which carry a
+        # belief by construction.
+        if len(row) > 12:
+            state = ep_state(posterior_alpha=row[8], ep_alpha=row[9],
+                             confidence=row[10], posterior_beta=row[11],
+                             ep_beta=row[12], baseline_set=baseline_set)
+        else:
+            state = (EP_STATE_MEASURED if measured
+                     else EP_STATE_BASELINE)
+        state = ep_state_resolve(state, measured=measured)
+        mirror = row[10] if len(row) > 10 else None
+        # #11702: the VARIANCE is only a posterior statistic when the PAIR is
+        # stored. `_EP_CYPHER` coalesces α/β to `1.0`, so a row storing only
+        # `posterior_alpha` (accepted by `update_point`) got `b = 1.0`, a
+        # variance of the MAXIMUM 1/12, and therefore `contested: true` on a
+        # block that reports `ep_state: "absent"` and `confidence_mean: null` —
+        # "there is no belief here, and it is a maximum-entropy one". The
+        # volunteer then emitted "read the counterargument" for a claim with
+        # ZERO counterarguments, and the why-suite's false-positive arm counts
+        # `ep.contested` as inventing a contradiction. Half a pair has no
+        # width, exactly as it has no mean.
+        # #11702 cycle 9: the rule is `search_engine.ep_pair_stored`, the same
+        # one all three rankers and `annotate_ep_batch` now apply — a second
+        # spelling here is how the surfaces drifted apart in the first place
+        # (this guard existed only in `why`, so the rankers kept reporting a
+        # fabricated 1/12 for every absent claim).
+        pair_stored = (len(row) <= 12
+                       or ep_pair_stored(posterior_alpha=row[8],
+                                         ep_alpha=row[9],
+                                         posterior_beta=row[11],
+                                         ep_beta=row[12]))
+        if not pair_stored:
+            variance = 0.0
         by_id[pid]["ep"] = {
-            "confidence_mean": round(_mean(a, b), 4),
+            # #11702: `None` when nothing is persisted — never the Beta(1,1)
+            # mean. This is the block a caller reads to decide whether to
+            # surface/notify, so a fabricated 0.5 here admitted a
+            # never-measured claim through every `min_confidence <= 0.5`
+            # floor (volunteer.py, why_snapshot.py) as if it carried neutral
+            # evidence.
+            #
+            # The VALUE follows the same precedence every other read uses —
+            # the `n.confidence` mirror first (index 10, the served belief),
+            # the coerced α/β mean as the fallback for a node the flush never
+            # reached. α/β-only here made a mirror-only node (what
+            # `compute_confidence` / `dream` write, and what a pre-#852 node
+            # carries) report 0.5 on this one surface while annotate, all
+            # three rankers and the subgraph read its real 0.95.
+            "confidence_mean": (
+                None if state == EP_STATE_ABSENT
+                else round(belief_mirror(mirror), 4)
+                if belief_mirror(mirror) is not None
+                else round(_beta_mean(a, b), 4)),
+            "ep_state": state,
             "variance": round(variance, 6),
-            "contested": measured and variance > CONTESTED_VARIANCE_THRESHOLD,
+            # #11702: an ABSENT state is never contested — there is no
+            # posterior width to be wide (see the `pair_stored` guard above;
+            # this is the belt to that brace, so a future row shape cannot
+            # reintroduce "no belief, but maximally uncertain").
+            "contested": (measured and state != EP_STATE_ABSENT
+                          and variance > CONTESTED_VARIANCE_THRESHOLD),
             "has_ep": measured,
             "measured": measured,
-            "baseline": baseline_set and not measured and not terminal,
+            # #11702 cycle 30: the flag follows the RESOLVED state, not
+            # `baseline_set` alone — the same rule `annotate_ep_batch` applies.
+            # A DECLARED but DEGENERATE prior (`set_point_baseline(claim, 0, 0)`)
+            # has no mean (0/0) and reads `absent` here, so claiming prior-only
+            # would contradict `ep_state` beside it AND disagree with the `ep`
+            # block for the same claim. `baseline` is documented as
+            # "confidence_mean IS the declared prior mean"; a consumer branching
+            # on that got `None`.
+            "baseline": (baseline_set and not measured and not terminal
+                         and state == EP_STATE_BASELINE),
         }
 
 
@@ -519,8 +654,12 @@ _SUPPORT_OP_CYPHER = (
     "OPTIONAL MATCH (op)-[:mitigated_by]->(mit:Point) "
     f"WHERE {_live_only('mit.status')} "
     "RETURN n.id, sup.id, sup.content, "
-    "  coalesce(sup.posterior_alpha, sup.ep_alpha, 1.0), "
-    "  coalesce(sup.posterior_beta, sup.ep_beta, 1.0), "
+    # #11702: the RAW belief columns, not `coalesce(…, 1.0)` -- the default
+    # supplied a missing operand and made an ABSENT supporter weigh 0.5 (and a
+    # β-only one 0.25), which then ordered the ≤3 cap. `belief_value` is the
+    # ONE Python reader, so this leg cannot re-decide presence.
+    "  sup.confidence, sup.posterior_alpha, sup.posterior_beta, "
+    "  sup.ep_alpha, sup.ep_beta, "
     # mit.id rides the same traversal so an operator mitigated MORE THAN ONCE
     # resolves deterministically (lowest mitigation id) instead of to whichever
     # row the storage layer returned first — the sibling of the operator
@@ -534,8 +673,8 @@ _SUPPORT_DIRECT_CYPHER = (
     f"WHERE sup.id <> n.id "
     f"AND (sup.is_operator = false OR sup.is_operator IS NULL) AND {_exclude_status_clause('sup')} "
     "RETURN n.id, sup.id, sup.content, "
-    "  coalesce(sup.posterior_alpha, sup.ep_alpha, 1.0), "
-    "  coalesce(sup.posterior_beta, sup.ep_beta, 1.0)"
+    "  sup.confidence, sup.posterior_alpha, sup.posterior_beta, "
+    "  sup.ep_alpha, sup.ep_beta"
 )
 # Conflicts (NANDer-only; the target ep read is the dedicated _EP_CYPHER).
 # The NANDer is either a direct statement (operator-less NAND edge) or a NAND
@@ -556,8 +695,13 @@ _CONFLICTS_CYPHER = (
     f"AND {_exclude_status_clause('c')} "
     "RETURN n.id, coalesce(src.id, c.id), "
     "  coalesce(src.content, c.label, c.content, ''), "
-    "  coalesce(src.posterior_alpha, src.ep_alpha, c.posterior_alpha, c.ep_alpha, 1.0), "
-    "  coalesce(src.posterior_beta, src.ep_beta, c.posterior_beta, c.ep_beta, 1.0)"
+    # #11702: the RAW belief columns of the counter-claim (mirror first, then
+    # its own posterior/prior pair), NOT `coalesce(…, 1.0)` -- the 1.0 default
+    # supplied a missing operand, so an ABSENT nander weighed the neutral 0.5
+    # and then took a real severity TIER on it.
+    "  src.confidence, src.posterior_alpha, src.posterior_beta, "
+    "  src.ep_alpha, src.ep_beta, "
+    "  c.confidence, c.posterior_alpha, c.posterior_beta, c.ep_alpha, c.ep_beta"
 )
 # Dedicated persisted ep read for every requested Point (single-node α/β —
 # never full propagation). Runs unconditionally so the canonical ``ep`` block
@@ -578,9 +722,18 @@ _EP_CYPHER = (
     # terminal ids in the supersession block — the exclusion is NOT a WHERE
     # insertion here).
     "  n.status, coalesce(n.outdated, false), "
-    # #3276: baseline_set rides LAST (index 6) so the pre-#3276 6-col row
+    # #3276: baseline_set rides LAST-3 (index 6) so the pre-#3276 6-col row
     # shape keeps its index mapping under the len guard.
-    "  coalesce(n.baseline_set, false)"
+    "  coalesce(n.baseline_set, false), "
+    # #11702: PRESENCE + the RAW presence columns (7/8/9). Without these the
+    # block answers `_mean(coalesce(…, 1.0), …)` = 0.5 for a claim with no
+    # belief at all — the defect this issue removes, one level above the
+    # coalesce that was fixed in `annotate_ep_batch`.
+    f"  {ep_has_belief_cypher('n')}, "
+    # #11702 cycle 3: the β columns ride so `ep_state()` can apply the same
+    # α+β <= 0 rule the predicate does — a stored (0, 0) pair is no belief.
+    "  n.posterior_alpha, n.ep_alpha, n.confidence, "
+    "  n.posterior_beta, n.ep_beta"
 )
 # Tradeoffs (decision points): the point is the operator SOURCE (INPUT idx 0)
 # and the alternatives are the operator's IMPL TARGETS at idx > 0 (the
@@ -605,8 +758,11 @@ _TRADEOFFS_CYPHER = (
     "OPTIONAL MATCH (op)-[:mitigated_by]->(m:Point) "
     f"WHERE {_live_only('m.status')} "
     "RETURN n.id, n.pointKind, alt.id, alt.content, alt.pointKind, op.id, m.content, "
-    "  coalesce(alt.posterior_alpha, alt.ep_alpha, 1.0), "
-    "  coalesce(alt.posterior_beta, alt.ep_beta, 1.0)"
+    # #11702: raw columns (see `_CONFLICTS_CYPHER`) -- `coalesce(…, 1.0)` gave
+    # an absent alternative `ep_weight` 0.5, which then SORTED it above a
+    # measured 0.4 one (the same inversion the support chain just had fixed).
+    "  alt.confidence, alt.posterior_alpha, alt.posterior_beta, "
+    "  alt.ep_alpha, alt.ep_beta"
 )
 
 
@@ -876,10 +1032,16 @@ def item_to_why_entry(item: dict) -> dict | None:
     }
     ep = item.get("ep")
     if isinstance(ep, dict):
+        # #11702: `None` passes through as `None` — the `0.0` defaults read as
+        # "maximum disbelief" for a claim nothing measured, and they are the
+        # same coercion this change removed from `why_snapshot`. The state NAME
+        # rides along too: without it a consumer cannot tell a `None` value
+        # from an absent belief (the §6.3 contract is value + state, always).
         entry["ep"] = {
-            "confidence_mean": ep.get("confidence_mean", 0.0),
-            "variance": ep.get("variance", 0.0),
+            "confidence_mean": ep.get("confidence_mean"),
+            "variance": ep.get("variance"),
             "contested": bool(ep.get("contested", False)),
+            "ep_state": ep.get("ep_state"),
             "has_ep": bool(ep.get("has_ep", False)),
             # #3276: carry the explicit measurement state through the
             # projection (a pre-#3276 item with only has_ep stays honest:

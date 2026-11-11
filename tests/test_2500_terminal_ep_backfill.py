@@ -226,7 +226,12 @@ def test_prior_only_terminal_claim_is_swept_so_the_prior_stops_ranking(sdk):
 
     assert read(pid) == pytest.approx(10.0 / 11.0), (
         "the PRIOR is what the reader reads when no posterior was computed")
-    assert read(degenerate) == pytest.approx(0.25)
+    # #11702: `degenerate` carries only posterior_beta — no alpha, no prior,
+    # no mirror — so there is NO belief to read. It used to answer 0.25 off a
+    # fabricated alpha of 1.0 (`coalesce(posterior_alpha, …, 1.0)`), which is
+    # the same "invent a plausible number" defect on a third path.
+    assert read(degenerate) is None, (
+        "a beta-only row has no belief; the alpha default must not invent one")
 
     report = sweep.backfill_terminal_ep_vacuity(sdk._get_proj())
     assert report["found"] == 2 and report["swept"] == 2

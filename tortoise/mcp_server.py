@@ -4152,9 +4152,23 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
         if isinstance(results, list) and results:
             return [{"id": r["id"], "name": r.get("content", ""),
                      "kind": r.get("point_kind", ""),
+                     # #11702 cycle 17: stated exactly, because `.get(k, 0.0)`
+                     # and `(… or 0.0)` are the SAME for every reachable value
+                     # — this line is not a behaviour change and must not be
+                     # read as one. An absent belief contributes `0.0` to an
+                     # ADDITIVE score, which is the additive identity: the
+                     # score is then the similarity half alone, the same choice
+                     # `GraphRanker` makes when it drops the belief term. (The
+                     # MULTIPLICATIVE gate is where the identity is 1.0 and
+                     # absence must sort last — see `_claim_rank`.) The `or`
+                     # form is kept so a `None` can never reach `round()`; the
+                     # hit's own ``ep.ep_state`` says why, and a caller that
+                     # needs that disclosure reads it from `tortoise_search`
+                     # (this tool's response contract is {id,name,kind,confidence}
+                     # and does not carry the state).
                      "confidence": round(
                          0.5 * r.get("scores", {}).get("rrf", 0.0) +
-                         0.5 * r.get("ep", {}).get("confidence_mean", 0.0), 4)}
+                         0.5 * (r.get("ep", {}).get("confidence_mean") or 0.0), 4)}
                     for r in results]
     except Exception:
         pass
@@ -4181,10 +4195,15 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
 
     Point results annotated with EP breakdown. confidence_mean is THE point's
     confidence (belief mean α/(α+β): persisted posterior when EP has run,
-    else persisted prior mean, else neutral 0.5) — agrees with
-    tortoise_get_confidence / recall for the same point. contention is the
-    structural edge-ratio family (a different quantity). min_confidence
-    filters on confidence_mean (belief); defaults to 0.0 (no filter).
+    else persisted prior mean) — and ``null`` with ``ep.ep_state: "absent"``
+    when NOTHING is persisted, because there is then no belief to report.
+    Never the neutral Beta(1,1) 0.5, which made "no evidence" and "a measured
+    symmetric coin flip" the same number (#11702); ``tortoise_get_confidence``
+    remains the EP prior read and still answers 0.5 for that case. contention
+    is the structural edge-ratio family (a different quantity). min_confidence
+    filters on confidence_mean (belief); defaults to 0.0 (no filter, and an
+    absent claim is kept — any floor ABOVE 0.0 excludes it, since it has no
+    number to clear it with).
 
     relationship_filter: 'predicate:target_id' — only return points connected to
         target_id via an operator with label=predicate
