@@ -287,7 +287,15 @@ def check(text: str) -> tuple[list[str], dict]:
     totals: dict[str, int] = {}
     #: E2b's population per arm — the ANCHOR for the binding's `surviving_units=`,
     #: and the same quantity `capstone_measure`/`e1_e2_scores` compare that floor
-    #: against (one frozen key, one denominator — #11689 review).
+    #: against (one frozen key, one denominator — #11689 review). ⛔ It is the
+    #: surviving PLANTED units (`real_facts`), never `atomic_points`: the record's
+    #: §3.1 E2b row is written over "the planted units that survived (floor ≥ 30)",
+    #: while `atomic_points` counts every payload point — so 25 non-planted rows
+    #: plus 6 planted ones cleared a floor of 30 with 84 of 90 planted units lost
+    #: (#10989).
+    planted_pts: dict[str, int] = {}
+    #: The E2 ATOMICITY CONTROL's population (`atomic_points`), which is NOT E2b's —
+    #: kept for V7's reconciliation of the `e2-atomic` criterion line.
     atomic_pts: dict[str, int] = {}
     pre_shas: dict[str, str] = {}
     for arm in arms:
@@ -333,8 +341,22 @@ def check(text: str) -> tuple[list[str], dict]:
             else:
                 findings.append(
                     f"[V3] arm {arm}: metric=atomic_points atomic={ap!r} is "
-                    f"not a count — E2b's denominator cannot be reconciled")
+                    f"not a count — the atomicity control cannot be reconciled")
+        # The binding's `surviving_units=` anchor: the SAME population the E2b row's
+        # floor is written over — the surviving PLANTED units, which the probe prints
+        # on `metric=real_facts count=`. Read from the arm's OWN line, first match,
+        # for the reason stated above: an appended duplicate must not re-anchor it.
+        rf_line = next((ln for ln in log.find(f"arm={arm} metric=real_facts ")), None)
+        if rf_line is not None:
+            rf = log.kv(rf_line).get("count", "")
+            if rf.isdigit():
+                planted_pts[arm] = int(rf)
+            else:
+                findings.append(
+                    f"[V3] arm {arm}: metric=real_facts count={rf!r} is not a "
+                    f"count — E2b's population cannot be reconciled")
     state["atomic_points"] = atomic_pts
+    state["planted_points"] = planted_pts
     state["shares"] = shares
 
     # ── V3 (cont.): the `e1` line reconciles with the arm lines ───────────
@@ -1109,18 +1131,30 @@ def check(text: str) -> tuple[list[str], dict]:
                     f"[V15] the binding states surviving_units="
                     f"{bind.get('surviving_units')!r}, not a count — a population "
                     f"the gate cannot read is refused, not skipped")
-            elif scored not in atomic_pts:
+            elif scored not in planted_pts:
                 findings.append(
                     "[V15] the binding states surviving_units= but the scored arm "
-                    "prints no metric=atomic_points line — the measured side "
+                    "prints no metric=real_facts line — the measured side "
                     "of E2b's floor is anchored to nothing, so a hand-edited "
                     "binding could satisfy it on its own word")
-            elif int(bind["surviving_units"]) != atomic_pts[scored]:
+            elif int(bind["surviving_units"]) != planted_pts[scored]:
                 findings.append(
                     f"[V15] the binding checks surviving_units="
                     f"{bind['surviving_units']} but the scored arm {scored} "
-                    f"measured {atomic_pts[scored]} atomic Points — the floor was "
+                    f"measured {planted_pts[scored]} surviving planted units "
+                    f"(`real_facts`) — the floor was "
                     f"checked against a population this run did not produce")
+            # The population the floor reads is printed ON the line, so a binding
+            # that states a count while naming another basis is refused rather than
+            # read as the count it happens to carry. `atomic_points` was that wrong
+            # basis (#10989), so an older log that still prints it is a finding.
+            basis = bind.get("surviving_units_basis", "")
+            if basis not in ("", "n/a", "real_facts"):
+                findings.append(
+                    f"[V15] the binding states surviving_units_basis={basis!r} — "
+                    f"the E2b floor's population is the surviving PLANTED units "
+                    f"(`real_facts`); a floor checked against another population "
+                    f"is the fail-open #10989 closes")
         # A floor that was COMPARED is an owned floor: `declared_*` carries a number
         # only when the probe read that floor, so a binding that prints one without
         # claiming the key is a comparison it then denies making.
