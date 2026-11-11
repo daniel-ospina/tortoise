@@ -1589,12 +1589,15 @@ mechanisms:
     code:
       - tortoise/commit_schema.py
       - tortoise/projection/entities.py
+      - tortoise/projection/__init__.py
       - tortoise/sdk.py
       - tortoise/hosted_api.py
+      - tortoise/api.py
       - tortoise/consistency.py
     tests:
       - tests/test_referentiality_11021.py
       - tests/test_mention_write_11239.py
+      - tests/test_commit_endpoint.py
     symbols:
       - Mention
       - encode_json_record_props

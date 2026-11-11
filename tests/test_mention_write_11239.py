@@ -755,3 +755,4 @@ def test_a_revision_stating_the_payload_spelling_folds_to_the_writers_bytes(env)
     assert report["ok"] is True, (
         "the two replay engines now agree, so the checker must not red: "
         + str(report.get("divergent_points")))
+

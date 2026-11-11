@@ -21279,6 +21279,21 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # re-write status (update_point refuses non-promoting transitions;
             # a live re-capture would 500 — review fix, PR #953). The node
             # already exists at the payload id, so the resolution is identity.
+            # ⛔ THIS LEG DOES NOT RESTATE PROPS — `mentions` included (review P2
+            # on PR #11795, measured). `commit_schema.reconcile_payload` picks
+            # `merge` for SAME id + SAME content, i.e. the ordinary re-commit of
+            # an existing claim, and this leg writes no prop and journals nothing
+            # (it is a bump, not a write), so a payload that DOES state a mention
+            # record over an existing claim is discarded — while the same
+            # situation one leg over (an existing claim reached by
+            # `create_point(dedup=True, …)`) forwards it into `update_point`.
+            # First-writer for every other prop on this leg too, so this is the
+            # DECLARED shape rather than a new one — the user-visible
+            # consequence is that a cue-ON re-capture over a claim first captured
+            # cue-OFF records nothing here. Tracked as #11811 (behaviour, needs a
+            # journalled write and the metering decision, so it is not a doc
+            # fix), and pinned by
+            # `tests/test_mention_write_11239.py::test_the_merge_leg_is_a_bump_and_does_not_restate_the_record`.
             proj.g.query(
                 "MATCH (p:Point {id:$pid}) SET p.updatedAt=$now",
                 params={"pid": pid, "now": now},

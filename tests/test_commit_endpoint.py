@@ -5653,3 +5653,37 @@ def test_the_supersede_leg_carries_its_mentions_to_the_superseding_point(client)
     records = json.loads(rows[0][1])
     assert records[0]["surface"] == "it", records
     assert records[0]["kind_guess"] == "pronoun", records
+
+
+def test_the_merge_leg_drops_a_stated_record_and_that_is_declared(client):
+    """The MERGE leg of `_execute_commit_writes` drops a stated record (#11811).
+
+    Review P2 on PR #11795, measured. `reconcile_payload` picks `merge` for SAME
+    id + SAME content — the ordinary re-commit of an existing claim — and that
+    leg is a zero-budget bump (`SET p.updatedAt`): it writes no prop and journals
+    nothing. So a payload that DOES state `mentions` over an existing claim is
+    discarded, while the plain-create leg forwards the record for the same
+    semantic situation.
+
+    This row does not endorse the behaviour — it makes the drop DECLARED instead
+    of silent. `#11811` tracks the behaviour (a journalled write on the bump leg
+    needs the metering ruling); when that lands this row must FLIP, which is
+    exactly why it exists.
+    """
+    pid = "pt_11239_merge_leg"
+    content = "the claim is re-committed with identical content"
+    first = _raw_payload(0, session_id="s11239-merge-1",
+                         points=[_point(0, id=pid, content=content)])
+    assert _commit(client, first).status_code == 200
+    assert _point_mentions(pid) is None
+
+    # SAME id, SAME content, and THIS time the payload states a record.
+    second = _raw_payload(0, session_id="s11239-merge-2",
+                          points=[_point(0, id=pid, content=content,
+                                         mentions=[dict(_MENTION_RECORD)])])
+    r = _commit(client, second)
+    assert r.status_code == 200, r.text[:400]
+
+    assert _point_mentions(pid) is None, (
+        "the merge leg STORED the record: #11811's declared behaviour changed "
+        "— flip this row (and the comment on the leg) with it")

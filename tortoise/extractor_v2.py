@@ -12138,7 +12138,8 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     (``#2949``'s public response surface). The node stores ONE compact JSON
     scalar (``projection.entities.encode_json_record_props``); the payload keeps
     the record shape. ``stats["mentions_recorded"]`` counts the records this
-    producer BUILT — ``len(_records)`` at the return below. It is not a store
+    producer BUILT — ``len(_records)`` where ``execute_embed`` assembles that
+    dict (~line 11776; NOT in this function). It is not a store
     counter, and there is no counter of DOOR-side loss beside it: the keys that
     DO sit beside it measure the producer (``mentions_attached`` /
     ``mentions_unresolved``), and a record a door or an EVENT-only carrier does

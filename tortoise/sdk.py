@@ -13408,9 +13408,10 @@ class TortoiseSDK:
         # record. Both are pinned behaviourally, by
         # `tests/test_mention_write_11239.py::test_the_event_api_door_carries_a_mention_to_the_point`
         # and `…::test_the_replay_door_normalises_a_non_canonical_record`.
-        # Without it the live CREATE would hand
-        # the engine a list of maps and the write would be refused or silently
-        # reshaped — the silent-drop class #11239 exists to end. Encoding here
+        # Without it the live CREATE would hand the engine a list of maps and
+        # the value would be SILENTLY DROPPED (`_persist_extra_props` skips it)
+        # or degraded to `null` by the driver — neither is a refusal, and neither
+        # stores anything: the silent-drop class #11239 exists to end. Encoding here
         # ALSO precedes the dedup fold's `self.update_point(pid, **props)`, so
         # that fold forwards the encoded value rather than a list.
         _encode_json_record_props(props)
