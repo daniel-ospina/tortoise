@@ -268,58 +268,104 @@ class SearchScores:
     rrf: float = 0.0
 
 
-# ── #3276: honest EP measurement state ─────────────────────────────────
-# ``has_ep`` means "a NON-BASELINE α is persisted for this claim". Three things
-# it is NOT:
+# ── #3276: honest EP measurement state ──────────────────────────────────
+# ``has_ep`` means "a NON-BASELINE α is persisted for this claim" — R3's
+# predicate, on the STORED columns. Three things that is NOT:
 #   * not "a persisted prior exists" — a #2199 declared baseline DOES persist
 #     `ep_alpha` (Beta(3,1), prior mean 0.75) and must NOT set this, which is
 #     the whole distinction #3276 exists to draw;
-#   * not "EP ran" — a direct `update_point(posterior_alpha=…)` stamps it with
-#     no EP pass anywhere;
-#   * not "an α is stored" — that reading would reinstate the #3276 false
-#     positive for every auto-baselined decide part.
+#   * ⛔ not "EP has MEASURED this claim" — a direct
+#     `update_point(posterior_alpha=…)` stamps it with NO EP pass anywhere, and
+#     the legacy `ep_alpha` arm is written by a prior stamp; the flag must not
+#     overclaim a measurement;
+#   * not the claim's STATE — read :attr:`ep_state` for that (R2).
+# The two came apart when #2199 began stamping a kind-derived
+# baseline (ep_alpha/ep_beta, baseline_set=true, baseline_source=
+# 'system-default') on decide parts at CREATE: every never-measured decision
+# then read has_ep=True at the prior mean (0.75), so the #2206 relevance gate
+# could not tell "we decided this" from "nobody measured this".
 #
-# The predicate: `posterior_alpha IS NOT NULL` (EP flushed one, or a direct
-# write) `OR (ep_alpha IS NOT NULL AND NOT baseline_set)` (a legacy EP-prior
-# back-compat value that no #2199 baseline stamped).
+# A claim carries a persisted α when EP flushed one (`posterior_alpha` — which
+# a direct `update_point(posterior_alpha=…)` ALSO writes, so this is not
+# evidence of an EP pass), or when it carries a persisted ep_alpha that is NOT a
+# #2199 baseline (legacy EP-prior back-compat).
+# PRIOR-ONLY (has_ep=False, baseline=True): a declared baseline whose RESOLVED
+# state is ``baseline`` — its value is the declared prior mean when no mirror
+# leads R1, and the MIRROR's value when one does; explicitly NOT a measured
+# confidence. Neither `baseline` nor `has_ep` is a
+# STATE: the same two flags are also False for a mirror-only claim and for a
+# terminal claim, and a declared baseline can be False on both while the state
+# is `absent`. Read :attr:`ep_state`; the contract is the three rules below,
+# NOT a list of shapes (every list of shapes this comment has ever carried was
+# later falsified by a shape beside the one it named).
 #
-# ⛔ AND the predicate is NOT the served flag either: `has_ep` is #2490-gated.
-#       has_ep  ==  ep_measured_cypher(n)  AND NOT terminal(n)
-# A TERMINAL claim reads `has_ep=False` while its non-baseline posterior α is
-# still persisted, because that posterior decayed to vacuity at the
-# terminalising write — a stored value, not a live measurement. So:
+# ── THE CONTRACT: three rules ────────────────────────────────────────────────
+# R1 VALUE (``confidence_mean`` / :func:`belief_value`) — the `n.confidence`
+#    MIRROR when it is a readable probability; else α/(α+β) when BOTH operands
+#    are readable, non-negative and sum to > 0; else ``None``. The mirror LEADS,
+#    so every shape with a READABLE mirror has a value (`16.0`, `-1.0`, `"abc"`
+#    and `true` are NOT readable — see :func:`belief_mirror`).
+# R2 STATE (:attr:`ep_state` / :func:`ep_state`) — ``absent`` if and only if R1
+#    answers ``None``; otherwise ``measured`` when :func:`ep_measured_cypher` is
+#    true, else ``baseline``. ⛔ The predicate, spelled out because a paraphrase
+#    of it has been wrong more than once: `posterior_alpha IS NOT NULL OR
+#    (ep_alpha IS NOT NULL AND NOT baseline_set)` — `baseline_set` gates the
+#    `ep_alpha` ARM only, so a claim with BOTH a declared baseline and a
+#    persisted `posterior_alpha` is ``measured``. THEN the #2490 fold,
+#    :func:`ep_state_resolve` — see below, it is applied AFTER the persisted
+#    columns are read.
+# R3 FLAGS — ``has_ep``/``measured`` = :func:`ep_measured_cypher` on the stored
+#    columns, forced False for a terminal claim (#2490). ``baseline`` (the
+#    :class:`EpBreakdown` FIELD, not :func:`ep_baseline_cypher`) =
+#    ``baseline_set`` AND NOT measured AND NOT terminal AND the RESOLVED state
+#    is ``baseline``. That formula IS the contract — read it, and do not
+#    paraphrase it into a claim about one cause: it folds in the α predicate
+#    (`NOT measured`), the #2490 gate (`NOT terminal`) and R1's presence rule
+#    (the resolved state), so the flag is False beside ``absent``, False for a
+#    declared baseline made degenerate (0/0), and False for a declared baseline
+#    that is terminal or whose stored α makes the state ``measured``.
 #
-#   superseded claim, posterior_alpha=1.0  →  ep_measured_cypher True,
-#                                             has_ep False, state baseline, 0.5
+# ⛔ The #2490 FOLD is a step, not a column: a ``measured`` state on a claim the
+# caller did not measure (terminal) becomes ``baseline``, because the decayed
+# posterior IS a stored value; ``absent`` and ``baseline`` pass through
+# unchanged — a BORN-terminal claim (created terminal, never had a belief) stays
+# ``absent``, and a terminalising WRITE stamps the decayed 0.5/1.0/1.0 so that
+# row is ``baseline`` with 0.5.
 #
-# Every surface applies that gate separately (:func:`ep_state_resolve` and the
-# `terminal` plumbing in `annotate_ep_batch` / the three rankers); a new surface
-# that spells `has_ep == ep_measured_cypher` omits it and reports a terminal
-# claim as measured at the decayed 0.5.
+# Worked examples of the corner shapes, derived from R1–R3 (NOT additional
+# rules). `has_ep`/`baseline` are the two :class:`EpBreakdown` flags — computed
+# by :func:`annotate_ep_batch`, so the store-level tests are what pin those two
+# columns, while the unit-level table test pins predicate/state/mean.
+# ``tests/test_11702_absent_belief_state.py`` pins every row; if this table and
+# that file ever disagree, the file is right:
 #
-# ⛔ **THE FLAGS ARE NOT A STATE DERIVATION — read :attr:`ep_state` for the
-# state.** The pair `(has_ep=False, baseline=False)` covers BOTH "nothing
-# persisted" (state absent, value None) AND "a readable prior nobody measured"
-# (state BASELINE, value 0.95 from a legacy `n.confidence` mirror, or 0.5 from a
-# TERMINAL decayed posterior). So deriving the state from the flags invents an
-# absence for a belief that exists — the exact failure #11702 removes. In the
-# other direction `(has_ep=True, baseline=False)` covers both a readable
-# ``measured`` belief and an ``absent`` shape — operands stored but no mean, with
-# no readable `n.confidence` mirror either (a mirror in [0, 1] IS a belief, and
-# its state is `measured` when a non-baseline α is persisted and the claim is not
-# terminal, else `baseline` — the mirror supplies the VALUE, not the state): an α
-# with no β, a β with no α, a pair summing to ≤ 0, a negative operand, or an
-# operand this process cannot read.
-#
-# The terminal 0.5 and the mirror are not a measurement; the neutral Beta(1,1)
-# mean this used to answer for a truly absent claim is indistinguishable from a
-# measured symmetric coin flip (SEARCH-ARCHITECTURE.md §6.3).
+#   shape (stored columns / caller)     has_ep  baseline  ep_state   mean
+#   nothing persisted                   False   False     absent     None
+#   mirror only (0.95)                  False   False     baseline   0.95
+#   β column only                       False   False     absent     None
+#   β column only + mirror 0.95         False   False     baseline   0.95
+#   half pair (α=0.5)                   True    False     absent     None
+#   half pair + mirror 0.95             True    False     measured   0.95
+#   (0, 0) stored pair                  True    False     absent     None
+#   (0, 0) stored pair + mirror 0.95    True    False     measured   0.95
+#   negative pair (-1, 3)               True    False     absent     None
+#   unreadable α ("abc")                True    False     absent     None
+#   unreadable α ("abc") + mirror 0.95  True    False     measured   0.95
+#   declared baseline (2, 1)            False   True      baseline   0.6667
+#   declared baseline (2, 1) + mirror   False   True      baseline   0.95
+#   declared 0/0 (degenerate)           False   False     absent     None
+#   declared 0/0 + mirror 0.95          False   True      baseline   0.95
+#   terminal, HAD a posterior (3, 1)    False   False     baseline   0.5
+#   born-terminal, never had a belief   False   False     absent     None
+#   measured pair (α=3, β=1)            True    False     measured   0.75
 
 def ep_measured_cypher(alias: str) -> str:
-    """Cypher boolean: a NON-BASELINE α is persisted on the :Point at ``alias`` (#3276).
+    """Cypher boolean: a NON-BASELINE α is persisted on the :Point at ``alias``
+    (#3276) — R3's predicate, read off the STORED columns.
 
-    Not an EP receipt: `posterior_alpha` is also written by a direct
-    `update_point`, and the legacy `ep_alpha` arm is written by a prior stamp.
+    ⛔ NOT an EP receipt, and not "did EP measure this?": `posterior_alpha` is
+    also written by a direct `update_point`, and the legacy `ep_alpha` arm is
+    written by a prior stamp.
     """
     return (f"({alias}.posterior_alpha IS NOT NULL "
             f"OR ({alias}.ep_alpha IS NOT NULL "
@@ -337,14 +383,17 @@ def ep_prior_only_cypher(alias: str) -> str:
 
     The third predicate of the three-state vocabulary: a declared #2199
     baseline with NO EP measurement. NOT the same as "unmeasured" — an
-    unmeasured claim carries no persisted prior at all; with NO readable
-    ``n.confidence`` mirror it reads ``absent``, and with one it reads
-    ``baseline`` at the mirror's value (which is why the mirror-only row is
-    ``unmeasured`` internally and ``baseline`` in the read STATE vocabulary —
-    this helper answers false for it, since ``baseline_set`` is unset and it
-    never reads the mirror). Without one, and since #11702, its
-    confidence_mean is `None` + `ep_state: "absent"`, not a neutral 0.5.
-    A prior-only claim's confidence_mean IS the declared PRIOR mean.
+    unmeasured claim carries no persisted prior at all. With NO readable
+    ``n.confidence`` mirror it reads ``absent`` with a `None` confidence_mean
+    (since #11702 — not a neutral 0.5); with one it reads ``baseline`` at the
+    mirror's value, which is why the mirror-only row is ``unmeasured``
+    internally and ``baseline`` in the read STATE vocabulary. This helper
+    answers false for that row either way, since ``baseline_set`` is unset and
+    it never reads the mirror. A prior-only claim's confidence_mean IS the
+    declared PRIOR mean — or the mirror's value when the claim also carries a
+    readable ``n.confidence``, because R1 leads (stated above
+    `ep_measured_cypher`). The predicate above is about the STORED columns; it
+    never promises which number wins.
 
     Kept textually in step with the Python twin: for every combination of
     (posterior_alpha, ep_alpha, baseline_set) this helper is true iff
@@ -378,14 +427,8 @@ def ep_measurement_state(*, posterior_alpha, ep_alpha,
 # A read/rank surface needs a different, blunter answer: *is there a READABLE
 # belief here at all?* — because for a claim that has none there is no number
 # to report, and inventing one is the defect #11702 names. The two questions
-# diverge on shapes with no readable `n.confidence` mirror and stored operands
-# that yield no mean (an α with no β, a β with no α, a sum ≤ 0, a negative or
-# unreadable operand): such a row is 'measured' as a PREDICATE (when it carries
-# a non-baseline α) and `absent` as a STATE; a BETA-ONLY row is `absent` in both;
-# and a row with a READABLE mirror beside unusable operands is a BELIEF whose
-# VALUE is the mirror's. The mirror term does not by itself decide the STATE:
-# it is `measured` when a non-baseline α is persisted and the claim is not
-# terminal, else `baseline`.
+# diverge on a persisted α that yields no mean (a half pair, a 0/0 pair): that
+# row is 'measured' as a PREDICATE and `absent` as a STATE.
 # The recorded rule is
 # `docs/architecture/SEARCH-ARCHITECTURE.md` §6.3: **absent state is `null`
 # with `ep_state: "absent"`, never 0.5 — a value the ranker refuses to order
@@ -395,7 +438,8 @@ def ep_measurement_state(*, posterior_alpha, ep_alpha,
 # so they are NOT inter-translatable: a legacy `n.confidence` mirror alone is
 # `unmeasured` internally yet `baseline` here (value 0.95), and an α-ONLY half
 # pair is `measured` internally yet `absent` here (no mean) — the β-only half
-# pair is `absent` in both, because the predicate reads a non-baseline α. The
+# pair is `unmeasured` internally and `absent` here, because the predicate reads
+# a non-baseline α. The
 # two spellings meet in exactly one place — :func:`ep_state` — which is why they
 # cannot drift into two vocabularies; it is not because they name the same
 # state.
@@ -660,20 +704,29 @@ def _exact_literal_fraction(raw: str):
     beside the store's `absent`).
 
     Hex literals are reconstructed through `int(digits, 16)`, which is EXEMPT
-    from that cap (it applies to non-power-of-two bases only) — but the MANTISSA
-    only, and what `_EXACT_FRACTION_MAX_EXP` bounds is the reconstructed value's
-    MAGNITUDE, which is what the cost follows, not the exponent as written
-    (#11897: a 4,000-bit mantissa cancels a `p-4100` back to 1 + 2⁻²⁴, and
-    bounding the spelling refused a value the store serves). The `p` EXPONENT is
-    base 10, so it IS subject to that cap: an exponent padded to 4,300+
-    characters (a zero-padded `p-000…149`, which is the spelling a `repr()`
-    grown by padding produces) raised `ValueError` inside `int(...)` BEFORE any
-    bound saw it, and `annotate_ep_batch`'s blanket handler turned that single
-    row into `{}` for the WHOLE batch — every claim, measured or not, reading
-    `absent` (#11899). Its leading zeros are stripped before the conversion
-    (they cannot change the exponent), and a token still past the cap names an
-    exponent of ~10**4300 that no mantissa can cancel back into the bound, so it
-    answers `None` instead of raising.
+    from that cap (it applies to non-power-of-two bases only), and bounded by
+    `_EXACT_FRACTION_MAX_EXP` — on the value's MAGNITUDE, which is what bounds
+    the cost, not on the exponent as written (#11897: a 4,000-bit mantissa
+    cancels a `p-4100` back to 1 + 2⁻²⁴, and bounding the spelling refused a
+    value the store serves).
+    ⛔ The `p` EXPONENT is DECIMAL and is NOT exempt from that cap: an exponent
+    zero-padded to 4,300+ characters — the same cheap padding any stored operand
+    can carry — raised `ValueError` inside `int(...)`, and
+    `annotate_ep_batch`'s blanket handler turned that single row into `{}` for
+    the WHOLE batch, so every claim in the response read `absent`, measured ones
+    included. Its leading zeros are therefore stripped before the conversion
+    (which cannot change the exponent's value), and the conversion itself is
+    guarded so that a token still past the cap after stripping answers `None`
+    rather than raising. The two guards are independent on purpose: the strip and
+    the guard make the CONVERSION safe, the magnitude bound makes the
+    RECONSTRUCTION cheap, and #11897 and #11702 each needed one.
+    ⛔ Do NOT replace the guard with a DIGIT-LENGTH short-circuit
+    (``len(exp_digits) > len(str(_EXACT_FRACTION_MAX_EXP))``): a length bound is
+    grammar-shaped, not value-shaped, so it refuses an in-bounds value whose
+    exponent merely has five digits — ``"0x0." + "0"*1476 + "1p10000"`` is a
+    magnitude the store serves, and the length form answered `None` for it. That
+    is the same measured-vs-absent split #11897 closed, reintroduced from the
+    other side.
 
     `Fraction` cannot read a HEX float at all — it raises `ValueError` — so a hex
     literal used to fall through to the DOUBLE's rounding, which is the SAME
@@ -717,11 +770,16 @@ def _exact_literal_fraction(raw: str):
             frac = frac.rstrip("0")
             mantissa = whole + ("." + frac if frac else "")
         if dot and written_frac and not written_frac.strip("0") \
-                and not mantissa.strip("+-"):
+                and whole in ("", "+", "-"):
             # `.0`, `+.00`, `-.0e5`, `.000E-7`: stripping the zeros empties the
             # integer part, so the canonicalisation above would hand `Decimal`
             # the string `""`/`"+"`, which RAISES — returning None where the
-            # literal's exact value is 0. Not reachable through
+            # literal's exact value is 0. The test reads ``whole`` (the parsed
+            # integer part), not ``mantissa`` (the rebuilt string): `"++.0"`
+            # partitions to ``whole="++"``, whose ``strip("+-")`` is empty too,
+            # so a mantissa-based test answered 0 for a spelling that is not a
+            # number at all — `Decimal("++")` raises, so the contract says None.
+            # Not reachable through
             # `numeric_operand` (which short-circuits `val == 0.0` before the
             # string path), but this helper's contract is "the literal's EXACT
             # value, or None", and 0 is a value.
@@ -738,28 +796,23 @@ def _exact_literal_fraction(raw: str):
     significant = digits.lstrip("0")
     if not significant:                     # "0x000…" — zero, whatever the exponent
         return Fraction(0)
-    # ⛔ #11899: strip the exponent's leading zeros BEFORE converting it. The
-    # mantissa above is hex and exempt from CPython's int↔str cap; the `p`
-    # exponent is DECIMAL and is not, so a zero-padded one (4,300+ characters —
-    # the same padding that is cheap for a stored operand everywhere else) raised
-    # inside `int()` and the caller's blanket handler turned it into "no EP on any
-    # claim in the batch". Leading zeros cannot change the exponent, so a padded
-    # spelling reads exactly like its short one.
+    # ⛔ Strip the exponent's leading zeros BEFORE converting. The mantissa is
+    # hex and exempt from CPython's int↔str cap; the exponent is DECIMAL and is
+    # not, so a zero-padded one (4,300+ characters — the same padding that is
+    # cheap for a stored operand everywhere else) raised inside `int()` and the
+    # caller's blanket handler turned it into "no EP on any claim in the batch".
     exp_text = match.group("exp") or "0"
     exp_digits = exp_text.lstrip("+-").lstrip("0") or "0"
     try:
         exponent = int(("-" if exp_text.startswith("-") else "") + exp_digits)
     except ValueError:              # still past the int↔str cap after stripping
-        # The exponent is ~10**4300. Cancelling that back into the bound below
-        # would take a mantissa of ~10**4300 characters, so `None` is the answer
-        # and a raise out of the read path is not.
         return None
     # The value is `int(digits, 16) * 2 ** (exponent - 4 * frac_digits)`, so the
     # cost of reconstructing it is set by its MAGNITUDE in bits — and that is
     # `4 * significant + exponent - 4 * frac_digits`, not `abs(exponent)`. A
     # 4,000-bit mantissa with `p-4100` is a value near 1 and costs nothing to
     # build; a short mantissa with `p-999999999` is the shape this guard exists
-    # for (`Fraction(2) ** 10**9`), and its magnitude is what trips it.
+    # for (`Fraction(2) ** 10**9`), and its magnitude is what trips it. (#11897)
     magnitude_bits = 4 * len(significant) + exponent - 4 * frac_digits
     if not -_EXACT_FRACTION_MAX_EXP <= magnitude_bits <= _EXACT_FRACTION_MAX_EXP:
         return None
@@ -1143,16 +1196,16 @@ def ep_has_belief_cypher(alias: str) -> str:
     pair is absent too} — nothing is known either way, and every surface now
     says so through this ONE predicate.
 
-    **A HALF pair is no belief ON ITS OWN**: the operand term (below) requires
-    both coalesced values, so a half pair with no mirror answers ``absent`` —
-    but a readable mirror beside it IS a belief, whose value is the mirror's
-    (see the mirror term in the predicate).
+    **A HALF pair is no belief ON ITS OWN**: the operand term of the predicate
+    requires both coalesced values, so a half pair with no mirror answers
+    ``absent`` — but a readable mirror beside it IS a belief, whose value is
+    the mirror's (see the mirror term, the other disjunct).
     A row carrying only `posterior_beta = 3.0` (no α, no prior, no mirror) has
     no mean; read as present it invented one from the `coalesce(…, 1.0)`
     default — `1/4 = 0.25`, a number nothing measured. The same rule, stated as:
-    the OPERAND term of the predicate is true only when the expression that
-    computes the mean has both operands (the mirror term is the other disjunct,
-    so this is a statement about that term, not about the whole predicate).
+    the OPERAND term is true only when the expression that computes the mean
+    has both operands (the mirror term is the other disjunct, and it alone is
+    enough).
     """
     # #11702 cycle 16: COERCED, not compared raw. A stored numeric STRING
     # ("0.7") is non-null but not comparable to `0` (the comparison is NULL, the
@@ -1189,27 +1242,32 @@ def ep_state_cypher(alias: str) -> str:
     belief are both 0.5 on the old coalesce and must never be again.
 
     ⚠️ The ``measured`` ARM is ``ep_has_belief_cypher AND ep_measured_cypher``,
-    so the PREDICATE (a non-baseline α is persisted) is necessary but not
-    sufficient: a shape that persists an α but yields no mean passes the
-    predicate, and WITHOUT a readable mirror it takes the ``absent`` arm (with
-    one, the mirror's value is the belief and the state follows the measured
-    arm, as above). `ep_has_belief_cypher` is the
-    exhaustive rule, and it is a DISJUNCTION: a belief exists iff a readable
-    ``n.confidence`` mirror is present (``belief_mirror_cypher`` — in [0, 1])
-    OR both coalesced operands are present, non-negative, and sum > 0. So a
-    belief is absent iff there is NO readable mirror AND either nothing is
-    persisted at all, or one of: an α with no β,
-    a β with no α, a pair summing to ≤ 0, a negative operand, or an operand this
-    process cannot read. Do not read this docstring as "a persisted α answers
-    measured"; run the two arms.
+    so the PREDICATE (a NON-BASELINE α is persisted — R3's formula, since
+    `baseline_set` gates the `ep_alpha` arm) is necessary but not sufficient:
+    an α that yields no mean (an α with no β, a 0/0 pair, a negative or
+    unreadable operand) WITH NO ``n.confidence`` MIRROR passes the predicate and
+    takes the ``absent`` arm, because there is no mean to read. With a mirror
+    that row is ``measured`` — ``ep_has_belief_cypher`` is true through its
+    mirror arm. Do not read this docstring as "a persisted α answers measured";
+    run the two arms.
 
-    A **terminal** claim (#2490) carries the decayed
-    ``0.5 / 1.0 / 1.0`` that ``live.VACUITY_BELIEF`` stamps on every
-    terminalising write: that is a persisted VALUE (so the state is never
-    ``absent``) but nothing measured it in that form, so a caller reporting
-    measurement must fold ``terminal`` in and land on ``baseline``. See
-    :func:`ep_state_resolve`, which is the ONE place that fold happens, and
-    the callers in :func:`annotate_ep_batch` / ``ranking.py`` that use it.
+    ⛔ A HALF pair has TWO halves and they are not symmetric here: a β-only row
+    (no α, no prior) FAILS the predicate, so it is ``absent`` with no mirror and
+    ``baseline`` at the mirror's value with one — never ``measured``. Both rows
+    are in the table above :func:`ep_measured_cypher`; R2 decides, not the word
+    "half".
+
+    A **terminal** claim that WENT THROUGH a terminalising write (#2490) carries
+    the decayed ``0.5 / 1.0 / 1.0`` that ``live.VACUITY_BELIEF`` stamps: that is
+    a persisted VALUE (so the state is never ``absent`` for that row) but nothing
+    measured it in that form, so a caller reporting measurement must fold
+    ``terminal`` in and land on ``baseline``. ⛔ A BORN-terminal claim (created
+    with a terminal status, no belief ever written) has no decayed posterior at
+    all — it stays ``absent``; the fold in :func:`ep_state_resolve` cannot
+    invent one, which is why it maps ``measured`` → ``baseline`` and leaves
+    ``absent`` alone. See :func:`ep_state_resolve`, which is the ONE place that
+    fold happens, and the callers in :func:`annotate_ep_batch` / ``ranking.py``
+    that use it.
     """
     # #11702 cycle 15: the absent arm is `coalesce(<predicate>, false) = false`,
     # NOT `NOT <predicate>`. An UNKNOWN predicate is NULL, `NOT NULL` is NULL,
@@ -1232,30 +1290,36 @@ def ep_state(*, posterior_alpha, ep_alpha, confidence=None,
              baseline_set: bool = False) -> str:
     """Python twin of :func:`ep_state_cypher` — 'measured' | 'baseline' | 'absent'.
 
-    ``absent`` means nothing that YIELDS A MEAN — the read must carry ``None``,
-    never a fabricated Beta(1,1) mean. That covers nothing persisted, a HALF
-    pair (α with no β), a 0/0 pair, a negative operand, and an operand this
-    process cannot read, so "absent" is not the same as "nothing is stored".
-    ``baseline`` is a persisted prior EP has not measured (a #2199
-    declared baseline, or a legacy EP-flush mirror) — still a value, just not a
-    measurement. A half pair is ``absent``, not ``baseline``, UNLESS a readable
-    mirror survives beside it: `ep_alpha` with no β + `baseline_set` + a legacy
-    `n.confidence` mirror reads ``baseline`` with the mirror's value, because
-    `baseline_set` disqualifies the measured arm and the mirror is what remains
-    readable. (Measured on that exact shape — 0.9.)
+    THE SAME THREE RULES as the Cypher twin, and they are RULES, not a list of
+    shapes (the list is in the module note above :func:`ep_measured_cypher`, as
+    worked examples only — every hand-written list of shapes here has been
+    falsified by a shape beside the one it named):
+
+    * **R1** decides whether there is a VALUE at all — the ``n.confidence``
+      mirror when readable, else ``α/(α+β)`` when both operands are readable,
+      non-negative and sum to > 0, else ``None``.
+    * **R2** (this function) is ``absent`` if and only if R1 answers ``None``;
+      otherwise ``measured`` when :func:`ep_measured_cypher` is true, else
+      ``baseline``. So "absent" is NOT "nothing is stored" — a stored pair that
+      yields no mean is absent — and a claim whose only belief is the mirror is
+      never absent, because the mirror leads R1.
+    * **R3** is the flags, and neither is this function's output.
+
+    ``measured`` is NOT proof of an EP pass: a plain
+    ``update_point(posterior_alpha=…)`` sets the predicate too.
+
+    That if-and-only-if is what makes the mirror-only row ``baseline`` rather
+    than ``absent``, including beside a half pair whose `baseline_set`
+    disqualifies the measured arm (observed at 0.9 on that exact shape).
 
     A stored ``α + β <= 0`` pair is ``absent``: Beta(0, 0) is not a
     distribution, so the pair carries no belief. Same rule as
     :func:`ep_has_belief_cypher`, which spells it in Cypher — the two must not
     drift, or a surface reads a state the `ep` block denies for one claim.
-    The half-pair exception above is GENERAL, not a half-pair special case: a
-    readable ``n.confidence`` mirror beside a ``0/0`` pair (or a negative
-    operand, or an operand this process cannot read) keeps the row readable, so
-    the state follows the measured/baseline arm and the value is the mirror's —
-    measured: ``(0.0, 0.0)`` + mirror ``0.9`` reads ``measured``/``0.9``, and
-    the same pair with no mirror reads ``absent``/``None``.
-    Pass the β columns too, or a stored zero pair reads as ``present`` here
-    while Cypher calls it absent.
+    Pass the β columns too: presence is decided on BOTH operands (``present``
+    below), the same rule :func:`ep_has_belief_cypher` spells in Cypher — so an
+    α-only call answers ``absent`` here rather than ``present``, and a ``(0, 0)``
+    pair is ``absent`` on both sides instead of ``present`` on one.
     """
     # α and β are each coalesced INDEPENDENTLY, posterior first, then the ep_*
     # prior — the same precedence `ep_has_belief_cypher` spells in Cypher (both
@@ -1363,11 +1427,15 @@ def ep_state_resolve(state: str, *, measured: bool) -> str:
     #2490-gated field (``has_ep`` after the terminal check), while ``state``
     comes from the raw persisted columns.
 
-    * ``absent`` stays ``absent`` — nothing that yields a mean either way.
+    * ``absent`` stays ``absent`` — nothing that yields a mean either way. In
+      particular a BORN-terminal claim (created terminal, never had a belief)
+      has no decayed posterior, so it remains ``absent``; this fold must never
+      turn "no belief" into a number-bearing state.
     * ``measured`` **downgrades to ``baseline``** when the claim is terminal or
       otherwise not measured: a decayed posterior is a stored value, not a
       measurement, and reporting it as ``measured`` would name a measurement EP
-      did not make — only a terminalising write did.
+      did not make (a terminalising write, or a plain ``update_point`` after it,
+      wrote the value that is there — not an EP pass).
     * ``baseline`` stays ``baseline``.
 
     Not folded: a live claim whose stored posterior *is* the measurement —
@@ -1404,32 +1472,31 @@ class EpBreakdown:
     # quantity anymore — a claim EP converged at 0.88 with no incoming IMPL
     # edges reads 0.88 here, and 0.0 only for a genuinely impossible store.
     #
-    # #11702: ``None`` when nothing YIELDS a mean AND no readable
-    # ``n.confidence`` mirror supplies one — no persisted belief, a half
-    # pair, a 0/0 pair, a negative operand, or an unreadable operand (the
-    # third state of the #2206 contract). A readable mirror beside any of
-    # those shapes is the value.
-    # It used to be reported as the neutral Beta(1,1)
-    # mean 0.5 and was therefore indistinguishable from a computed coin flip
-    # at every threshold and every order. Read :attr:`ep_state` beside it: a
-    # number here is a belief that exists, and ``None`` means none does.
+    # #11702: ``None`` when R1 finds NOTHING READABLE — see the three rules above
+    # `ep_measured_cypher`. Stated as the rule, not as a list of shapes: no
+    # readable `n.confidence` mirror AND no α/β pair this process can read as a
+    # belief (both operands present, numeric, non-negative, summing to > 0).
+    # This is the third state of the #2206 contract, which used to be reported as
+    # the neutral Beta(1,1) mean 0.5 and was therefore indistinguishable from a
+    # computed coin flip at every threshold and every order. ⛔ It is NOT
+    # "``None`` iff nothing is persisted": a half pair IS persisted and reads
+    # ``None``. Read :attr:`ep_state` beside it — the two agree at this block
+    # (``annotate_ep_batch`` sets ``None`` exactly on the ``absent`` state); a
+    # row-level surface may still withhold a value it HOLDS (#2598 drafts), so
+    # ``ep_state`` stays the authority on presence.
     confidence_mean: float | None = None
-    #: #11702 — the STATE NAME for :attr:`confidence_mean`, one of
-    #: ``measured`` (a READABLE belief from a persisted posterior OR a
-    #: non-baseline legacy ``ep_alpha`` prior — the name is not proof of an EP
-    #: pass: a direct `update_point` writes one too) /
-    #: ``baseline`` (a persisted prior EP has not measured — a #2199 declared
-    #: baseline, a legacy mirror, or a terminal decayed posterior; a half pair
-    #: reaches it only when a readable mirror survives beside it) / ``absent``
-    #: (nothing yields a mean AND no readable ``n.confidence`` mirror survives —
-    #: no persisted belief, or operands that yield none: either operand missing
-    #: after the per-operand coalesce (α with no β, or β with no α), a sum ≤ 0, a
-    #: negative operand, or an unreadable operand ⇒ the value is ``None``). A
-    #: readable mirror beside ANY of those shapes keeps the row readable, so it
-    #: lands on ``measured``/``baseline`` with the mirror's value instead —
-    #: measured: α with no β + mirror 0.9 reads ``measured``/0.9, a ``(0, 0)``
-    #: pair + mirror 0.9 reads ``measured``/0.9, and the same shapes with no
-    #: mirror read ``absent``/``None``. Derives from :func:`ep_state`, the single
+    #: #11702 — the STATE NAME for :attr:`confidence_mean`: exactly the tokens
+    #: R2 produces (``absent`` iff the value is ``None``; else ``measured`` when
+    #: :func:`ep_measured_cypher` is true — `posterior_alpha IS NOT NULL OR
+    #: (ep_alpha IS NOT NULL AND NOT baseline_set)`, so `baseline_set` gates the
+    #: `ep_alpha` ARM only; else ``baseline``), after the #2490 fold. The
+    #: three rules are stated once above
+    #: :func:`ep_measured_cypher`; the token meanings in one line each:
+    #: ``measured`` = a readable belief this claim MEASURED (not proof of an EP
+    #: pass — a direct `update_point` writes one too) / ``baseline`` = a readable
+    #: belief EP did not measure (a declared baseline's prior, a mirror-supplied
+    #: belief, or a terminal claim's decayed posterior) / ``absent`` = no readable
+    #: belief, so the value is ``None``. Derives from :func:`ep_state`, the single
     #: mapping of the #11702 vocabulary; ``has_ep``/``measured`` keep their
     #: narrower #2490 / #3276 meanings and are NOT this field's source.
     ep_state: str = EP_STATE_ABSENT
@@ -1449,22 +1516,24 @@ class EpBreakdown:
     # as a first-class flag so agents treat the claim as disputed, not merely
     # high/low probability.
     contested: bool = False
-    # #3276: whether a NON-BASELINE α is persisted for this point — True iff a real
-    # EP flush persisted a posterior (or a non-baseline legacy ep_alpha prior).
-    # ⛔ Not an EP receipt: a direct `update_point(posterior_alpha=…)` sets it
+    # #3276: whether an α column is PERSISTED for this point — True iff a
+    # NON-BASELINE α is stored (a posterior α, or a non-baseline legacy ep_alpha
+    # prior). ⛔ Not an EP receipt, so NOT "a real EP flush persisted it": a
+    # direct `update_point(posterior_alpha=…)` sets it
     # with no EP pass anywhere (see the #11702 note further down). A
     # #2199 baseline prior alone does NOT set it: a never-measured decision
     # with the kind-derived system-default baseline reads has_ep=False here
     # (it used to read True at the 0.75 prior mean — the #3276 leak).
-    # False = no α persisted (or a #2490 terminal gate); ``confidence_mean`` is
-    # then the prior mean when ``baseline`` is True, else reading it from these
-    # two flags is WRONG — a mirror-only prior reads (False, False) with a real
-    # 0.95, an α-only half pair reads (True, False) with ``None`` when no
-    # readable mirror survives beside it (with one, the value is the mirror's),
-    # and a β-only row reads (False, False) with ``None`` and state ``absent``
-    # when no readable mirror survives beside it (with one, ``baseline`` at the
-    # mirror's value). Read :attr:`ep_state`. Neither flag is a signal of
-    # contestation.
+    # False = not measured — and that is NOT a statement about the value: the
+    # mean beside it is decided by R1 alone (the mirror leads), so `has_ep` False
+    # appears beside ``None``, beside a mirror's value, and beside a declared
+    # prior mean. Read ``ep_state`` (R2) for the state, and this flag only for
+    # "is an alpha column persisted". What the pre-#11702 code answered instead
+    # is #11702, and it was never one number: the neutral Beta(1,1) 0.5 where both
+    # operands were MISSING, a `coalesce(…, 1.0)`-supplied 0.3333 for a half pair,
+    # and — for an unreadable operand — a raise that the batch's blanket handler
+    # turned into an EMPTY breakdown for every id in the batch.
+    # Neither flag is a signal of contestation.
     # #2490 has_ep overload: TERMINAL claims (terminal vocab status OR the
     # legacy outdated=true flag) are also gated to False — their posterior
     # decays to vacuity at the terminalizing write, so a terminal claim's
@@ -1472,59 +1541,44 @@ class EpBreakdown:
     # include-terminal surfaces". Consumers (topic disputed-pair gate,
     # volunteer, mcp) must not read terminal=unmeasured.
     #
-    # ⛔ `has_ep`/`measured` answer "is there a LIVE persisted belief operand";
-    # `ep_state` and `confidence_mean` answer "is a belief READABLE". The
-    # predicate is `ep_measured_cypher`: `posterior_alpha IS NOT NULL OR
-    # (ep_alpha IS NOT NULL AND NOT baseline_set)` — a NON-BASELINE α is
-    # persisted — AND the #2490 terminal gate, which forces False on a
-    # terminalised claim whose α still exists (see the overload note above).
-    # It is NOT the same claim as "EP wrote it": a plain
-    # `update_point(posterior_alpha=…)` satisfies it with no EP pass anywhere,
-    # so this flag is not an EP receipt.
+    # ⛔ `has_ep`/`measured` answer "is an alpha COLUMN persisted" (the predicate
+    # `ep_measured_cypher`: `posterior_alpha IS NOT NULL OR (ep_alpha IS NOT NULL
+    # AND NOT baseline_set)`), while `ep_state`/`confidence_mean` answer "is a
+    # belief READABLE" (R1/R2). R3 is the whole reason these are different
+    # questions: the flags are a predicate over the STORED columns plus a
+    # terminal gate — never a state. The worked-examples table above
+    # `ep_measured_cypher` lists the shapes where they disagree; do NOT restate
+    # that list here, because a hand-written shape list in this docstring has
+    # been falsified four times by a shape beside the one it named.
     #
-    # The two questions DO diverge. On a shape with no readable mirror AND
-    # operands that yield no mean — an α with no β, a β with no α, a sum ≤ 0, a
-    # negative or unreadable operand — an α may still be persisted, so
-    # `measured` stays True while `ep_state` is `absent` and the mean is `None`.
-    # A BETA-ONLY pair diverges the other way: no α is persisted, so `measured`
-    # is False while the row still stores an operand and its state is `absent`
-    # (never `baseline` — there is no mean for a prior to be). And a shape with a
-    # READABLE mirror beside unusable operands is a belief whose VALUE is the
-    # mirror's; its STATE is `measured` when a non-baseline α is persisted and
-    # the claim is not terminal (measured: `posterior_alpha=0.5` + mirror 0.9 →
-    # `measured` 0.9), else `baseline` (measured: `ep_alpha=0.5` +
-    # `baseline_set` + mirror 0.9 → `baseline` 0.9). Neither flag pair can be
-    # inverted into the state.
+    # It is also NOT the same claim as "EP wrote it": a plain
+    # `update_point(posterior_alpha=…)` satisfies the predicate with no EP pass
+    # anywhere, so this flag is not an EP receipt.
     #
     # A consumer deciding whether a stored posterior can be reasoned from reads
     # `measured`; one deciding whether to show/number a belief reads
-    # `ep_state`/`confidence_mean`. Do not infer
-    # either from the other: `measured=True` does NOT imply a non-null mean, and
-    # it does NOT prove EP ran — so a caller that needs an EP measurement still
-    # has to ask for one rather than reading this flag as its receipt.
+    # `ep_state`/`confidence_mean`. Do not infer either from the other:
+    # `measured=True` does NOT imply a non-null mean, and it does NOT prove EP
+    # ran — so a caller that needs an EP measurement still has to ask for one
+    # rather than reading this flag as its receipt.
     has_ep: bool = False
-    # #3276 aliases of the same measurement state, explicit and unambiguous:
-    #   measured=True                     → a non-baseline α persisted (has_ep
-    #                                      True) — see the `has_ep` note above:
-    #                                      this promises NEITHER a readable
-    #                                      belief (a pair with no mean: an
-    #                                      operand missing after the coalesce,
-    #                                      a sum ≤ 0, a negative or unreadable
-    #                                      operand ⇒ ep_state "absent") NOR an
-    #                                      EP pass
-    #   measured=False, baseline=True     → prior-only (declared baseline)
-    #   measured=False, baseline=False    → ⛔ NOT necessarily absent: this
-    #                                       triple is ALSO what a legacy
-    #                                       `n.confidence` mirror (0.95) and a
-    #                                       terminal decayed posterior (0.5)
-    #                                       read, and both are `baseline` with
-    #                                       a real number. Only a claim that
-    #                                       actually has nothing is absent —
-    #                                       read `ep_state` for which
-    # A TERMINAL claim (#2490 gate) reads measured=False, baseline=False even
-    # when it was measured-and-baseline'd pre-terminalization: its 0.5 is the
-    # decayed vacuity posterior, not the prior, so it is neither prior-only
-    # nor a live measurement (the per-row terminal flag owns that state).
+    # #3276 aliases of the same measurement state — R3's flags, NOT a state
+    # table (read `ep_state` for the state):
+    #   measured=True   → an α column is persisted (has_ep True). Promises
+    #                     NEITHER a readable belief NOR an EP pass.
+    #   baseline=True   → the RESOLVED state is `baseline` with `baseline_set`: a
+    #                     prior-only claim, carrying the declared prior mean —
+    #                     UNLESS a readable mirror leads R1, in which case the
+    #                     mean is the mirror's while this flag stays True.
+    #   both False      → NOT a state, and NOT "no α column": the same pair is
+    #                     False for a claim with no α at all, for a terminal
+    #                     claim whose α the #2490 gate ignores, and for a declared
+    #                     baseline made degenerate. Read `ep_state`, the only
+    #                     authority here, and the table above `ep_measured_cypher`
+    #                     for the worked examples.
+    # A TERMINAL claim (#2490 gate) clears BOTH flags even when it was measured
+    # pre-terminalisation: the per-row terminal flag owns that state, and the
+    # #2490 fold decides the state NAME.
     measured: bool = False
     baseline: bool = False
 
@@ -5357,9 +5411,10 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
     confidence and agrees with ``get_confidence``/``recall`` for the same
     point: it is the belief mean α/(α+β) of the persisted posterior
     (posterior_alpha/beta) when EP has run on the claim, else the persisted
-    prior mean (ep_alpha/beta), else ``None`` (#11702 — the third state of
-    that contract, named by ``ep_state``; it used to be the neutral Beta(1,1)
-    mean 0.5). It is
+    prior mean (ep_alpha/beta) — or the readable ``n.confidence`` MIRROR's
+    value when there is one, since R1 leads both — else ``None`` (#11702 — the
+    third state of that contract, named by ``ep_state``; it used to be the
+    neutral Beta(1,1) mean 0.5). It is
     NOT the structural edge-ratio impl/(impl+nand) that this field used to
     carry — that quantity lives on in ``evidence`` (impl_count/nand_count/
     total) and ``contention`` (the NAND fraction), which are legitimately
@@ -5432,9 +5487,9 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             "  END AS contention, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
             # #3276: has_ep == a NON-BASELINE α persisted (not merely "a prior
-            # exists", and not proof of an EP pass — a direct write sets it),
-            # less the #2490 terminal gate applied above.
-            # baseline_set plumbs the prior-only distinction to Python.
+            # exists") — and not proof of an EP pass, since a direct
+            # `update_point` sets it too. baseline_set plumbs the prior-only
+            # distinction to Python.
             f"  {ep_measured_cypher('n')} AS has_ep, "
             "  n.status, coalesce(n.outdated, false), "
             f"  {ep_baseline_cypher('n')} AS baseline_set, "
@@ -5538,12 +5593,12 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                         if (pair_stored and alpha_num is not None
                             and beta_num is not None) else 0.0)
             breakdowns[pid] = EpBreakdown(
-                # #11702: `None` when nothing YIELDS a mean AND no readable
-                # `n.confidence` mirror supplies one (nothing persisted,
-                # an operand missing after the coalesce, a sum ≤ 0, a negative
-                # or unreadable operand) — never the
-                # neutral 0.5, which is what made "no evidence" and "a measured
-                # coin flip" the same number here.
+                # #11702: `None` exactly when R1 yields no value — no READABLE
+                # mirror, and no α/β pair this process can read as a belief (both
+                # operands present, numeric, non-negative, summing to > 0). State
+                # the RULE rather than a list of shapes: the list is what kept
+                # going stale here. Never the neutral 0.5, which is what made
+                # "no evidence" and "a measured coin flip" the same number.
                 confidence_mean=value,
                 ep_state=state,
                 evidence=EpEvidence(impl_count=impl, nand_count=nand, total=total),
@@ -5565,17 +5620,20 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                 has_ep=measured,
                 measured=measured,
                 # prior-only: a declared #2199 baseline on a LIVE claim with
-                # no EP measurement — confidence_mean is the PRIOR mean, never
-                # a measured one. A TERMINAL claim is neither measured nor
-                # prior-only (its 0.5 is the #2490 decayed posterior), so the
-                # terminal gate above also clears `baseline` — see the
+                # no EP measurement. A TERMINAL claim is neither measured nor
+                # prior-only: a terminalising write leaves the #2490 decayed
+                # posterior, and a BORN-terminal claim never had one (it reads
+                # `absent` with no value), so the terminal gate above also
+                # clears `baseline` — see the
                 # EpBreakdown three-state note. And the flag follows the
                 # RESOLVED state rather than `baseline_set` alone: a DECLARED but
-                # DEGENERATE prior (`set_point_baseline(claim, 0, 0)`, which every
-                # surface reads as `absent` because 0/0 has no mean — #11702
-                # cycle 30) must not claim prior-only beside `ep_state: "absent"`,
-                # because `baseline` is documented as "confidence_mean IS the
-                # declared prior mean" and a consumer reading it that way got None.
+                # DEGENERATE prior (`set_point_baseline(claim, 0, 0)`) reads
+                # `absent` when nothing readable supplies a mean (0/0 has no mean
+                # — #11702 cycle 30), and beside `absent` the flag must not claim
+                # prior-only. ⛔ `baseline` does NOT promise the prior MEAN: R1
+                # leads with the `n.confidence` mirror, so a declared baseline
+                # that also carries one reads `baseline` with the MIRROR's value
+                # (see R1/R3 above `ep_measured_cypher`).
                 baseline=(baseline_set and not measured and not terminal
                           and state == EP_STATE_BASELINE),
             )
@@ -6241,8 +6299,10 @@ def get_relationships_bounded(
                         # `baseline_set=bool(has_ep)` (the obvious-looking
                         # shortcut, which this did until #11702 review cycle
                         # 12) INVERTS it: `has_ep` is `ep_measured_cypher`'s
-                        # "a non-baseline α is persisted", the exact opposite of a declared
-                        # baseline. Measured on the legacy-EP-prior shape
+                        # "a non-baseline α is persisted", which is the opposite
+                        # of the derived `baseline` FLAG (that flag requires NOT
+                        # measured) — not of `baseline_set`, which a measured
+                        # claim can carry too. Measured on the legacy-EP-prior shape
                         # (`ep_alpha`/`ep_beta` set, no posterior, no mirror —
                         # what ep.py's evidence pre-write leaves on a
                         # non-baseline claim it clears): `annotate_ep_batch`,
