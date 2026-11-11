@@ -450,6 +450,145 @@ def test_a_hex_exponent_past_the_bound_its_mantissa_cancels_is_still_read(sdk):
         assert sig["confidence"] != pytest.approx(0.5, abs=1e-9), (name, sig)
 
 
+def test_a_cancelling_hex_exponent_reads_at_both_band_edges(sdk):
+    """#11897, the OTHER two call sites — clock the fix at the edges of the band.
+
+    The headline case above is the MIDPOINT site (`_f32_from_literal`'s
+    tie-break). The same refusal lived in the other two call sites, and each is
+    a separate live split, not a duplicate:
+
+    * the OVERFLOW site: `_FLOAT32_MAX` spelled with a `p` exponent past the
+      bound is refused there, so Python answered ABSENT for the value every
+      Cypher surface serves as max — the mirror of the headline case.
+    * the UNDERFLOW site (`_string_operand`): a float32 subnormal named EXACTLY
+      by a cancelling spelling was refused, so a claim the store reads at
+      `1.4e-45` read absent here — and that `# pragma: no cover` comment said
+      "a fail-safe for a future widening only", which is the same kind of
+      reachability claim this PR exists to correct.
+
+    Both spellings below are >1000 chars, exactly-valued, and past the bound as
+    WRITTEN (`|exponent| > _EXACT_FRACTION_MAX_EXP`) while their magnitudes are
+    ~128 bits — so `_exact_literal_fraction` refused them before #11897 and
+    reconstructs them after. The float32 MIDPOINT spelled the same way stays
+    NULL: loosening the bound must not turn a null into a value either.
+    """
+    from fractions import Fraction
+
+    from tortoise.search_engine import (
+        _exact_literal_fraction,
+        numeric_operand,
+        numeric_operand_cypher,
+    )
+
+    max32 = Fraction(2**128 - 2**104)          # _FLOAT32_MAX, exactly
+    shift = 4204                               # bits the mantissa cancels
+    max_hex = "0x" + format(max32.numerator << shift, "x") + f"p-{shift}"
+    sub_hex = "0x1" + "0" * 1025 + "p-4249"    # 2**-149, the min subnormal
+    mid_hex = ("0x" + format((2**128 - 2**103) << shift, "x") + f"p-{shift}")
+    for raw in (max_hex, sub_hex, mid_hex):
+        assert len(raw) > 1000, (len(raw), raw[:24])
+
+    assert float.fromhex(max_hex) == 3.4028234663852886e38
+    assert _exact_literal_fraction(max_hex) == max32, (
+        "the exact parse refused max, spelled with an exponent its mantissa "
+        "cancels — the overflow site answers None for a value the store serves")
+    assert numeric_operand(max_hex) == 3.4028234663852886e38, (   # was None
+        numeric_operand(max_hex))
+
+    assert float.fromhex(sub_hex) == 2.0**-149
+    assert _exact_literal_fraction(sub_hex) == Fraction(1, 2**149)
+    assert numeric_operand(sub_hex) == float.fromhex("0x1p-149"), (  # was None
+        "the underflow site refused an EXACT subnormal whose spelling names "
+        "it exactly — that is the twin split it exists to prevent")
+
+    # The nulls stay null: the exact midpoint above `_FLOAT32_MAX` overflows to
+    # `2**128`, which is not a float32.
+    assert _exact_literal_fraction(mid_hex) == Fraction(2**128 - 2**103)
+    assert numeric_operand(mid_hex) is None, numeric_operand(mid_hex)
+
+    # …and the STORE agrees, on both twins, for the two that read.
+    proj = sdk._get_proj()
+    pid = sdk.create_point("statement", "ZQHEXEDGE cancelling edge")["id"]
+    for raw, expected in ((max_hex, 3.4028234663852886e38),
+                          (sub_hex, float.fromhex("0x1p-149"))):
+        proj.g.query(
+            "MATCH (n:Point {id:$id}) SET n.posterior_alpha = $a, "
+            "n.posterior_beta = '1'", params={"id": pid, "a": raw})
+        cypher = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN "
+            + numeric_operand_cypher("n.posterior_alpha"),
+            params={"id": pid}).result_set[0][0]
+        py = numeric_operand(raw)
+        assert py is not None and cypher is not None, (raw[:24], py, cypher)
+        assert _store_f32(py) == _store_f32(expected) == _store_f32(cypher), (
+            py, cypher, expected)
+
+
+def test_the_hex_bound_is_a_magnitude_and_zero_is_zero():
+    """#11897: what the loosened bound must still REFUSE, and the zero case.
+
+    Loosening a cost guard is the half that can only break silently, so the
+    surviving half is pinned here rather than inferred from the value rows: the
+    shape the guard exists for (`Fraction(2) ** 10**9`) is still refused, the
+    boundary is the MAGNITUDE rather than the exponent as written, and a zero
+    mantissa is EXACTLY zero at any exponent instead of "unreadable".
+    """
+    from fractions import Fraction
+
+    from tortoise.search_engine import _exact_literal_fraction
+
+    # 1 + 0 hex digits of magnitude slack: `4 * significant + exponent`, so the
+    # boundary sits at 4092/4093 positive and -4100/-4101 negative.
+    assert _exact_literal_fraction("0x1p4092") == Fraction(2) ** 4092
+    assert _exact_literal_fraction("0x1p4093") is None
+    assert _exact_literal_fraction("0x1p-4100") == Fraction(1, 2**4100)
+    assert _exact_literal_fraction("0x1p-4101") is None
+
+    # Zero mantissa: the value is 0 whatever the exponent says. Before #11897
+    # the exponent bound refused all of these.
+    for raw in ("0x" + "0" * 16 + "p-999999999", "0x0.000p1000000",
+                "-0x0p-999999999", "0x0000", "-0x.0p4097"):
+        assert _exact_literal_fraction(raw) == Fraction(0), raw
+
+
+def test_a_hex_magnitude_past_the_bound_is_refused_before_it_is_built(
+        monkeypatch):
+    """#11897: the bound still bounds the COST, not just the answer.
+
+    The DoS rows in the twin-grammar table are DECIMAL (`1e10000000`), and they
+    are excluded by `_FLOAT32_OVERFLOW_CEILING` before the exact parse is ever
+    entered — so nothing pinned the HEX bound this PR rewrote. A formula whose
+    guard stops tripping (or trips in the wrong direction) would ship green
+    while `Fraction(2) ** 10**9` became reachable from a stored operand.
+
+    Pinned by MECHANISM, not by a timing assertion: the refusal must happen
+    before any `Fraction` is constructed. A timing test would be flaky; a test
+    that merely asserts `None` would pass on a guard that builds the value first
+    and discards it — which is the cost, not the answer.
+    """
+    import tortoise.search_engine as se
+
+    built: list[tuple] = []
+
+    def _spy(*args, **_kwargs):
+        built.append(args)
+        raise AssertionError(
+            "the guard did not trip before the value was BUILT — that is the "
+            "unbounded-cost path `_EXACT_FRACTION_MAX_EXP` exists to prevent")
+
+    monkeypatch.setattr(se, "Fraction", _spy)
+    for raw in ("0x1p1000000", "0x1p-999999999", "-0x1p999999999",
+                "0x" + "f" * 2000 + "p1000000", "0x1.8p4093"):
+        assert se._exact_literal_fraction(raw) is None, raw
+    assert built == [], built
+
+    # The spy IS reachable — an in-band literal reaches the construction — so
+    # `built == []` above is the guard tripping, not a dead spy.
+    with pytest.raises(AssertionError, match="did not trip"):
+        se._exact_literal_fraction("0x1p0")
+    assert built, "the spy never fired — the refusals above prove nothing"
+
+
 # ── The property: an absent claim is not ORDERED as a 0.5 ──────────────────
 
 def test_absent_and_measured_symmetric_do_not_share_an_ordering_input(sdk):

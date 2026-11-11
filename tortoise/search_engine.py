@@ -449,8 +449,11 @@ _FLOAT32_OVERFLOW_MIDPOINT = 2 ** 128 - 2 ** 103
 #: exponent: `numeric_operand("1e10000000")` — a stored string operand, which is
 #: exactly the population this coercion exists for — took 7.5 s (measured) and
 #: `"1e100000000"` grew superlinearly, while the store answers `null` for both and
-#: the pre-overflow-branch code answered `None` in microseconds. The hex path has
-#: the same bound as `_EXACT_FRACTION_MAX_EXP`; this is the decimal one.
+#: the pre-overflow-branch code answered `None` in microseconds. This is the
+#: DECIMAL cheap bound; the hex path has its own inside
+#: `_exact_literal_fraction`, and it bounds the value's MAGNITUDE rather than the
+#: exponent as written (#11897 — `4 * significant + exponent - 4 * fraction`, the
+#: cost of the reconstruction, so a cancelling spelling is not refused).
 _FLOAT32_OVERFLOW_CEILING = 2.0 ** 128
 #: The LOWEST literal magnitude the store still READS although it is not a
 #: float32: one quarter of a subnormal ULP (2**-149) below min-normal. The read
@@ -821,8 +824,14 @@ def _string_operand(raw: str, val: float):
             # refuse the whole read band this function exists to serve (the
             # mirrored split), and `rounded` would serve one the store may null.
             # ⛔ NOT "an exponent whose double is 0/inf" — that justification was
-            # false (#11897): a long mantissa cancels a large exponent into the
-            # band and reconstructs now. A fail-safe for a future widening only.
+            # false (#11897), and it WAS a live branch: a float32 subnormal named
+            # exactly by a cancelling spelling (`0x1` + 1025 zeros + `p-4249`, i.e.
+            # 2⁻¹⁴⁹) has `|exponent| > _EXACT_FRACTION_MAX_EXP` and a double in
+            # this band, so it answered ABSENT here while every Cypher surface
+            # served `1.4e-45`. It is a fail-safe NOW because the bound measures
+            # the value's MAGNITUDE — the reachable shape is pinned in
+            # `test_a_cancelling_hex_exponent_reads_at_both_band_edges`, not
+            # assumed unreachable here.
             return None
         if (abs(exact) < _F32_UNDERFLOW_READ_FLOOR
                 and Fraction(rounded) != exact):
