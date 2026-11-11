@@ -176,11 +176,17 @@ def test_mutation_population_is_pinned():
     front of a bad shorthand defused its red (measured green). The population and the
     floor move together.
     """
-    assert len(flc.MUTATIONS) >= flc.MIN_SELF_TEST_MUTATIONS, (
-        "the registered population must meet the floor it declares"
+    # ⛔ EQUALITY, not `>=` (#11902 review P2). A floor cannot see a one-arm shrink:
+    # at this head two merges of two 25-arm populations produced 26 arms while the
+    # floor stayed 25, so deleting an arm left `--self-test` at PASS (rc 0) and every
+    # population test green — the anti-shrink guard permitting the exact shrink it
+    # exists to refuse. Equality makes the pair drift-proof in both directions.
+    assert len(flc.MUTATIONS) == flc.MIN_SELF_TEST_MUTATIONS, (
+        "the registered population must EQUAL the floor it declares — a `>=` floor "
+        "cannot see a one-arm shrink"
     )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 25, (
-        "this line RECORDS the population (25 arms); removing one means editing the "
+    assert flc.MIN_SELF_TEST_MUTATIONS == 26, (
+        "this line RECORDS the population (26 arms); removing one means editing the "
         "floor here too, which is the second place a shrink has to touch"
     )
 
