@@ -34,9 +34,8 @@ def _production_ast_references(
     for src in sorted((base / "tortoise").rglob("*.py")):
         tree = ast.parse(src.read_text(encoding="utf-8"), filename=str(src))
         for node in ast.walk(tree):
-            if isinstance(node, ast.Name) and node.id == symbol:
-                refs.append((str(src.relative_to(base)), node.lineno))
-            elif isinstance(node, ast.Attribute) and node.attr == symbol:
+            if (isinstance(node, ast.Name) and node.id == symbol) or (
+                    isinstance(node, ast.Attribute) and node.attr == symbol):
                 refs.append((str(src.relative_to(base)), node.lineno))
             elif isinstance(node, ast.alias) and node.name.rsplit(".", 1)[-1] == symbol:
                 # `from x import propagate_shock` and `… import propagate_shock as _s`:
@@ -140,7 +139,7 @@ def test_no_propagate_shock_callers():
         "PRODUCTION CODE CALLS propagate_shock:\n"
         + "\n".join(f"{path}:{lineno}" for path, lineno in ast_refs)
         + "\n\n(word-grep context, which cannot tell a call from a mention:)\n"
-        + "\n".join(callers["production_code"])  # noqa: F541
+        + "\n".join(callers["production_code"])
     )
     assert len(callers["definition (deprecated)"]) == 1, (
         "Expected exactly 1 deprecated definition in projection.py"
