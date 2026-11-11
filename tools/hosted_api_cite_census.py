@@ -79,8 +79,17 @@ CITE_RE = r"hosted_api\.py:[0-9]+"
 #: which is exactly why it must be re-derived whenever an edit above the site
 #: moves it (#10226 forward-merge moved it 23128 -> 23131; #11795 moved it
 #: 23131 -> 23466, where it had sat stale while the notes it is a fallback for
-#: had already been re-derived by hand).
-DEFAULT_PIVOT = 23466
+#: had already been re-derived by hand; #11891's rebase moved it 23466 -> 23477).
+#: ⛔ THAT THIRD MOVE IS THE PATTERN REPEATING, so read it before you re-derive:
+#: `--check` and `--refresh` both derive the pivot from the tree and pass it
+#: EXPLICITLY, so neither can see this constant — a re-derivation sweep that
+#: updates the two notes and stops leaves this fallback behind, and every caller
+#: that omits the pivot then splits the census at a line the notes no longer
+#: name (`above_pivot` 13 / `at_pivot` 0 instead of 12 / 1). Bump it in the SAME
+#: edit as the notes, by hand, and confirm with
+#: `pivot_is_the_lifetime_site()` on its DEFAULT argument — `--check` staying
+#: green does not mean this line moved.
+DEFAULT_PIVOT = 23477
 
 _SCORECARD = "tortoise/activation_scorecard.py"
 _HOSTED = "tortoise/hosted_api.py"
