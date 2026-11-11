@@ -178,16 +178,44 @@ def test_the_quantiser_leaves_process_wide_warning_state_alone():
     of the process, muting the numeric warnings that surface a bad vector.
 
     The range refusal is done in plain Python BEFORE any numpyd cast precisely
-    so that no suppression is needed at all.
+    so that no suppression is needed at all — and THAT is the observable this
+    pins: with the cast reached, numpy emits `RuntimeWarning: overflow
+    encountered in cast`. Asserting only on `warnings.filters` could not see it
+    (a `catch_warnings` block restores the filters on `__exit__`, so the leak
+    this test names is invisible to a before/after comparison — measured: the
+    removed defect restored, 20 passed).
     """
     import warnings
 
     before = list(warnings.filters)
-    shortest_float32_vector([1e300, 0.5])      # out of range: used to warn
-    shortest_float32_vector([0.1, 0.2])        # the normal path
-    shortest_float32_vector([1e-50])           # underflowing to zero
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")     # make the defect's warning VISIBLE
+        # out of range: the case that warned before the plain-Python refusal
+        assert shortest_float32_vector([1e300, 0.5]) is None
+        # underflowing to zero: the other cast-collision shape
+        assert shortest_float32_vector([1e-50, 0.5]) is None
+        # the on-grid path must still narrow (so the assertions above cannot be
+        # satisfied by a function that refuses everything)
+        assert shortest_float32_vector([float(np.float32(0.1)), 0.5]) == [0.1, 0.5]
+    numeric = [str(w.message) for w in caught
+               if issubclass(w.category, RuntimeWarning)]
+    assert not numeric, (
+        "the range refusal must run BEFORE the numpyd cast — a RuntimeWarning "
+        f"means the cast was reached and a warning fired: {numeric}")
     assert warnings.filters == before, (
         "the quantiser changed the process's warning filters")
+
+
+def test_a_decimal_literal_off_the_grid_is_refused_and_its_widening_is_not():
+    """The ownership boundary, both sides, stated once.
+
+    `0.1` as a float64 is NOT a float32 widening (`np.float32(0.1)` widened is
+    `0.10000000149011612`), so it is somebody's value, not a widening to undo,
+    and it is refused — the docstring's rule. `float(np.float32(0.1))` IS the
+    embedder's grid and narrows back to the short text `0.1`.
+    """
+    assert shortest_float32_vector([0.1, 0.2]) is None
+    assert shortest_float32_vector([float(np.float32(0.1)), 0.5]) == [0.1, 0.5]
 
 
 def test_a_vector_that_UNDERFLOWS_float32_is_left_alone():
