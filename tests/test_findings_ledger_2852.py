@@ -2,8 +2,9 @@
 
 The findings ledger (`docs/architecture/MEMORY-SUBSTRATE-FINDINGS-LEDGER.md`) is
 the durable half of #2852 — the corrections log of the 2026-09-09/10
-memory-substrate review, re-measured. Re-measuring it found **five of its twelve
-corrections already overtaken by the fixes they motivated**, which is precisely
+memory-substrate review, re-measured. Re-measuring it found **seven of its twelve
+rows no longer read as written** (four of them overtaken by the fixes they
+motivated), which is precisely
 why it needs a guard: the page's job is to tell a reader *which of its own rows
 are still live*, and every checkable property it has can decay silently.
 
@@ -167,11 +168,18 @@ def test_mutation_population_is_pinned():
     row, an emptied evidence column, an unclassifiable §6 row, a citation shape the
     resolver declines), plus the DECOY arm, which is the only pin on
     `check_survivor_arithmetic`'s `len(matches) > 1` branch: deleting that branch left
-    every other arm, every test and `--check` green (measured). Population 13, floor
-    pinned with it.
+    every other arm, every test and `--check` green (measured).
+
+    The population is 18 after the #11902 review cycles: the §6 survivor-sentence arms,
+    the four fail-open arms (unclassifiable §3 row, emptied evidence column,
+    unclassifiable §6 row, declined citation shape), the §3 tally arm, the three
+    citation-shape arms (space in the path, trailing space, trailing space on a
+    shorthand) and the verdict-attribution arm. The floor is pinned WITH it — a
+    floor below the population is the "shrunk population proves nothing" shape it
+    exists to catch. Re-derive by counting `caught` lines in `--self-test`.
     """
-    assert len(flc.MUTATIONS) == 13
-    assert flc.MIN_SELF_TEST_MUTATIONS == 13
+    assert len(flc.MUTATIONS) == 18
+    assert flc.MIN_SELF_TEST_MUTATIONS == 18
 
 
 def test_self_test_floor_catches_a_shrunk_population(monkeypatch):
@@ -416,6 +424,159 @@ def test_a_non_python_extension_citation_is_measured_not_skipped(tmp_path, monke
     )
     problems = _doc_problems()
     assert any("does not exist in the tree" in p for p in problems), problems
+
+
+def test_a_citation_with_a_space_in_its_path_is_refused(tmp_path, monkeypatch):
+    """FAILS if one inserted space makes a citation invisible instead of refused.
+
+    This is the one-keystroke bypass: with a whitespace-excluding token class the
+    mangled token matched neither the resolver nor the refusal, so `--check`
+    exited 0 over a citation nobody was checking — including §2's own, because the
+    scan had been scoped to §3/§5.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace("`tortoise/pipeline.py:16`", "`tortoise/pipeline .py:16`", 1),
+    )
+    problems = _doc_problems()
+    assert any("not a recognised citation" in p for p in problems), problems
+
+
+def test_a_citation_with_a_space_after_the_colon_is_refused(tmp_path, monkeypatch):
+    """FAILS if `path: 16962` is silently skipped — the second space shape."""
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace("`tortoise/sdk.py:16962`", "`tortoise/sdk.py: 16962`", 1),
+    )
+    problems = _doc_problems()
+    assert any("not a recognised citation" in p for p in problems), problems
+
+
+def test_a_yaml_key_value_is_not_a_citation():
+    """FAILS if the whole-page scan treats `key: value` as a citation.
+
+    A false red here would red the REQUIRED `docs` job on correct prose — the
+    shipped page contains `fetch-depth: 0` inside a code span. The population is
+    "has a path marker or the `:LINE` shorthand", not "contains a colon".
+    """
+    text = flc.read_doc(REPO)
+    assert "`fetch-depth: 0`" in text
+    assert flc.check_citation_shapes(text) == []
+
+
+def test_a_host_and_port_in_prose_is_not_resolved_as_a_path(tmp_path, monkeypatch):
+    """FAILS if a `word:digits` token with no path marker is resolved as a file.
+
+    Measured before the fix: a `localhost:6379` example reported "localhost does not
+    exist in the tree" and red the required, path-filter-free `docs` job — the
+    fail-closed friction that teaches a lane to route around a guard.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace("`tortoise/pipeline.py:16`", "`localhost:6379`", 1),
+    )
+    problems = _doc_problems()
+    assert not any("citation" in p for p in problems), problems
+
+
+def test_a_citation_with_a_trailing_character_is_refused(tmp_path, monkeypatch):
+    """FAILS if a trailing space or full stop makes a citation invisible.
+
+    The one-keystroke bypass again, one character further out: a trailing space on
+    row (e)'s anchor, on the self-test's own `:792` target, and a period after an
+    out-of-range number all matched neither the resolver nor the refusal, so
+    `--check` exited 0 while a whole row's evidence became unverified (its `:27` /
+    `:66` shorthands then re-anchored to the previous row's path and resolved).
+    CommonMark strips a space on both sides of a code span, so the mangled form
+    does not even look mangled to a reader.
+    """
+    for old, new in (
+        ("`tortoise/sdk.py:36042-36046`", "`tortoise/sdk.py:36042-36046 `"),
+        ("`tortoise/pipeline.py:16`", "`tortoise/pipeline.py:16 `"),
+    ):
+        _mutated(tmp_path, monkeypatch, lambda t, o=old, n=new: t.replace(o, n, 1))
+        problems = _doc_problems()
+        assert any("not a recognised citation" in p for p in problems), (old, problems)
+
+
+def test_a_shorthand_with_a_trailing_character_is_refused(tmp_path, monkeypatch):
+    """FAILS if a trailing space or period after a `:LINE` shorthand is skipped."""
+    for old, new in (("`:792`", "`:792 `"), ("`:3115`", "`:999999.`")):
+        _mutated(tmp_path, monkeypatch, lambda t, o=old, n=new: t.replace(o, n, 1))
+        problems = _doc_problems()
+        assert any("not a recognised citation" in p for p in problems), (old, problems)
+
+
+# ── the headline tally is derived, not asserted ────────────────────────────
+
+
+def test_the_shipped_tally_matches_the_verdict_cells():
+    """FAILS if the page's "N of twelve" sentence stops agreeing with the table."""
+    text = flc.read_doc(REPO)
+    assert flc.check_verdict_tally(text) == []
+    verdicts = flc._verdicts_by_label(text)
+    non_still = [lbl for lbl, v in verdicts.items() if v != "STILL-TRUE"]
+    assert len(non_still) == 7, verdicts
+    overtaken = [lbl for lbl, v in verdicts.items() if v in ("SUPERSEDED-BY-FIX", "ADOPTED")]
+    assert len(overtaken) == 4, verdicts
+
+
+def test_a_flipped_verdict_that_leaves_the_tally_stale_is_rejected(tmp_path, monkeypatch):
+    """FAILS if a verdict cell can be flipped without the tally sentence reddening.
+
+    Reachable by any ordinary re-measure that upgrades one row: the prose keeps its
+    old count and letter list, and every reader who quotes the summary (including
+    `ci.yml`, `config/ci-surfaces.yml` and `docs/00_index.md`, which repeat it) is
+    told a number the table beside it contradicts. Measured before the fix: rc 0.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace(
+            "| **DRIFTED** — `Entity` 3", "| **STILL-TRUE** — `Entity` 3", 1
+        ),
+    )
+    problems = _doc_problems()
+    assert any("the paragraph does not say" in p for p in problems), problems
+    assert any("'six of the twelve" in p or "six of the twelve" in p for p in problems), problems
+
+
+def test_a_tally_that_names_the_wrong_letters_is_rejected(tmp_path, monkeypatch):
+    """FAILS if the letter list can drift from the cells it summarises."""
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace("**(l)** are **DRIFTED**", "are **DRIFTED**", 1),
+    )
+    problems = _doc_problems()
+    assert any("letter list that disagrees" in p for p in problems), problems
+
+
+def test_a_verdict_moved_between_classes_is_rejected(tmp_path, monkeypatch):
+    """FAILS if two verdict classes can be swapped without the sentence reddening.
+
+    Comparing the letters as a SET and the overtaken rows as a COUNT let a cell move
+    between classes with the quoted sentence unchanged — measured: (c)
+    SUPERSEDED-BY-FIX -> ADOPTED, (e) ADOPTED -> SUPERSEDED-BY-FIX and (k) DRIFTED ->
+    MOOT-BY-LOSS all left rc 0. §1 gives those classes different handling rules ("do
+    not re-derive it" vs "treat the new behaviour as the norm" vs "do not assert it
+    either way"), so a swapped class sends the reader to the wrong action.
+    """
+    cases = (
+        ("| **SUPERSEDED-BY-FIX** — the Point fold now persists",
+         "| **ADOPTED** — the Point fold now persists"),
+        ("| **ADOPTED** — both axes are shipped",
+         "| **SUPERSEDED-BY-FIX** — both axes are shipped"),
+        ("| **DRIFTED** — the count is now a closed-book",
+         "| **MOOT-BY-LOSS** — the count is now a closed-book"),
+    )
+    for old, new in cases:
+        _mutated(tmp_path, monkeypatch, lambda t, o=old, n=new: t.replace(o, n, 1))
+        problems = _doc_problems()
+        assert any("assigns a different verdict" in p for p in problems), (old, problems)
 
 
 # ── citations resolve ──────────────────────────────────────────────────────
