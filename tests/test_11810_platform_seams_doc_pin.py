@@ -38,21 +38,25 @@ WHAT IT ASSERTS, in BOTH directions:
 `_SHIPPED_FRAGMENT` is the single string both arms bind to, so the two cannot be
 corrected in opposite directions without this file noticing.
 
-⛔ WHY (1) READS THE BARE WORDS AND NOT A DELIMITED QUOTE (r8 P2, blocking). It
-shipped form-exact — `f'("{_UNSCOPED_FRAGMENT}")' not in doc` — and that
-false-passed in the ONE direction the pin exists for: re-adding the retracted
-universal with different delimiters. Review r8 reproduced it GREEN by appending
-`As the message says: *"a session running in a cloud agent VM"*.` beside the
-correct line 315. Matching one literal form is the fail-open direction, and it is
-exactly the policy `test_capture_install.py`'s guard comment rejects one arm over.
-The bare form costs nothing: the unscoped string is NOT a substring of the hosted
-one (verified), so it cannot false-RED on a correct quote, and it is over-broad in
-only the safe direction — like those sibling guards, it also bans a hypothetical
-accurate sentence carrying those exact words.
+⛔ BOTH ARMS MATCH ON `_normalised()` — WHITESPACE AND CASE ARE NOT THE CLAIM
+(r9 P2, blocking; r9 P3). Two successive form-exactness rounds shipped here: r7
+matched `("…")` only (a re-emphasis walked through), and r8's bare-words fix was
+still whitespace- and case-exact. That second gap is not theoretical — this
+record is HARD-WRAPPED (line 315 is 95 columns) and reflows quotes mid-phrase, so
+a re-added universal that happens to wrap inside the 40-character phrase read
+GREEN. Measured on the r8 guard: a newline inside the phrase, a double space, or
+an initial capital each reported `2 passed`. `_normalised()` collapses whitespace
+runs and case on BOTH sides before matching, which closes the whole bounded class
+(reflow, re-emphasis, capitalisation, markdown delimiters) on both arms at once —
+including the r8 P3, where the presence leg false-RED the same correct quote
+written as `*"…"*`. A PARAPHRASE is still out of reach of any string guard; that
+residual is documented, and it is the one the message-side guards carry too.
 
 MUTATION (each verified RED at this head, restoring byte-identical):
   * restore the unscoped quote at `platform-seams.md:315`      → (1) RED
   * re-add the unscoped words with OTHER delimiters (`*"…"*`)  → (1) RED (r8)
+  * re-add with a LINE BREAK inside the phrase                 → (1) RED (r9)
+  * re-add with a double space / initial capital               → (1) RED (r9)
   * drop `hosted` from `tortoise/__main__.py`'s message         → (2) RED
   * delete the record's quoted sentence                         → (1) RED
 """
@@ -71,6 +75,17 @@ _PLATFORM_SEAMS_DOC = (_REPO_ROOT / "docs" / "research"
 _SHIPPED_FRAGMENT = "a session running in a hosted cloud agent VM"
 _UNSCOPED_FRAGMENT = "a session running in a cloud agent VM"
 _PY = sys.executable
+
+
+def _normalised(text: str) -> str:
+    """Whitespace- and case-insensitive form of `text`, for BOTH arms.
+
+    None of reflow, re-emphasis, capitalisation or markdown delimiters changes
+    the CLAIM, so none of them may change this guard's verdict. Keeping the
+    normalisation in one function means the two arms cannot drift apart — the
+    failure this file exists to catch, one level up.
+    """
+    return " ".join(text.split()).lower()
 
 
 def _install_cursor_stdout(tmp_path) -> str:
@@ -108,15 +123,18 @@ def test_the_record_quotes_the_HOSTED_scoped_fragment():
     Mutation: drop `hosted` from the quoted fragment (the r6 drift), or restore
     the unscoped quote beside it — both RED here."""
     doc = _PLATFORM_SEAMS_DOC.read_text(encoding="utf-8")
-    assert f'("{_SHIPPED_FRAGMENT}")' in doc, (
+    normalised_doc = _normalised(doc)
+    assert _normalised(_SHIPPED_FRAGMENT) in normalised_doc, (
         "the platform-seams record must quote the HOSTED-scoped message")
-    # …and the unscoped WORDS may not reappear at all, in ANY form. This leg was
-    # form-exact at r7 (`("…")`) and false-passed the one mutation it exists to
-    # catch: r8 appended `*"a session running in a cloud agent VM"*` and got GREEN.
-    # Bare words cannot false-RED on the correct quote (the unscoped string is not
-    # a substring of the hosted one), so the only cost is over-breadth in the safe
-    # direction — the same deliberate trade the sibling guards make.
-    assert _UNSCOPED_FRAGMENT not in doc, (
+    # …and the unscoped WORDS may not reappear at all, in ANY form. Two rounds
+    # shipped a form-exact leg here and each false-passed the mutation it exists to
+    # catch — r7 a re-emphasis (`*"…"*`), r8 a hard wrap inside the phrase on this
+    # 95-column-wrapped record. Normalising closes the bounded input class; the
+    # assertion is still over-broad in the SAFE direction only (it also bans a
+    # hypothetical accurate sentence carrying those exact words), and it cannot
+    # false-RED on the correct quote — the unscoped phrase is not a substring of
+    # the hosted one, before or after normalisation.
+    assert _normalised(_UNSCOPED_FRAGMENT) not in normalised_doc, (
         "the record quotes the unscoped universal as though it were the message")
 
 
@@ -126,4 +144,4 @@ def test_the_shipped_message_carries_the_fragment_the_record_quotes(tmp_path):
     Mutation: drop `hosted` from `tortoise/__main__.py`'s install message — the
     record's quoted fragment is then no longer produced, and this REDs."""
     stdout = _install_cursor_stdout(tmp_path)
-    assert _SHIPPED_FRAGMENT in stdout, stdout
+    assert _normalised(_SHIPPED_FRAGMENT) in _normalised(stdout), stdout
