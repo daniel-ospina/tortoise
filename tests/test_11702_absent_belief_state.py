@@ -2121,6 +2121,40 @@ def test_the_subgraph_display_agrees_with_every_other_surface(sdk):
                                                   abs=1e-3), (node, ann)
 
 
+def _decorate(proj, pid):
+    """Decorate ``pid`` through a REAL operator neighbourhood (cycle 19).
+
+    The contested arm (Q2-crit) is the only place the peer variance is
+    evaluated, and it is gated on `if op_ids:` — the operators the requested
+    points belong to. A bare point has none, so with no operator beside it the
+    variance expression is never evaluated and the query cannot raise. The
+    cycle-17 pin built exactly that fixture, so it passed on the PRE-FIX code:
+    measured with `tortoise/search_engine.py` reverted to `3bd1ba47c1`, the old
+    pin was green while the real call answered
+    `decoration_error='ResponseError: Type mismatch: …'` with 0 entries.
+
+    The peer is the point ITSELF on purpose: Q2-crit matches
+    `(op)-[r2]-(other:Point)`, so the requested point is one of its own
+    operator's `other` rows — the unreadable operands reach the variance
+    expression through the shape under test, not through a bystander.
+
+    `decoration_error` is read as the ATTRIBUTE it is. `str(out)` is the plain
+    dict repr and never carries it (measured: `"Type mismatch" in str(out)` is
+    False even with the error set), so a stringified assertion cannot see the
+    one channel the property is about — the old pin's second vacuity.
+    """
+    from tortoise.search_engine import get_relationships_bounded
+
+    out = get_relationships_bounded(proj.g, [pid])
+    # `decoration_error` is a class attribute default, so an empty answer is
+    # readable unconditionally (a plain dict from a stand-in answers "").
+    error = getattr(out, "decoration_error", "")
+    assert not error, (
+        "the relationship scan raised on an operand the store cannot read as "
+        f"a number: {error}")
+    return out
+
+
 def test_the_relationship_scan_survives_an_unreadable_operand(sdk):
     """Cycle 17 P1: the contested arm's inline variance RAISED on the whole query.
 
@@ -2128,12 +2162,15 @@ def test_the_relationship_scan_survives_an_unreadable_operand(sdk):
     expected Integer, Float, or Null but was String"), and the raise is not
     per-row: `get_relationships_bounded` returned its fail-open seed with
     `decoration_error` set, so EVERY requested point lost its relationships.
-    Three shapes this PR declares must read as ABSENT destroyed the decoration
+    Three shapes this PR declares must read ABSENT destroyed the decoration
     instead — the opposite of the totality contract. The arm now calls the
     shared `beta_variance_cypher`.
-    """
-    from tortoise.search_engine import get_relationships_bounded
 
+    Cycle 19: the fixture now carries the operator that makes the arm run, and
+    an all-readable CONTROL. Without the operator the arm is never evaluated
+    (so the pin could not fail); without the control a guard that made the
+    query raise unconditionally would satisfy the three bad shapes on its own.
+    """
     proj = sdk._get_proj()
     shapes = {
         "numeric_string_pair": ('SET n.posterior_alpha = "0.7", '
@@ -2141,17 +2178,31 @@ def test_the_relationship_scan_survives_an_unreadable_operand(sdk):
         "boolean_pair": ("SET n.posterior_alpha = true, n.posterior_beta = 2.0"),
         "nonnumeric_string": ('SET n.posterior_alpha = "abc", '
                               'n.posterior_beta = 1.0'),
+        "all_numeric_control": ("SET n.posterior_alpha = 0.7, "
+                                "n.posterior_beta = 0.3"),
     }
+    support = sdk.create_point("statement", "ZQDECOR one supported claim")["id"]
+    pids = {}
     for label, setter in shapes.items():
         pid = sdk.create_point("statement", f"ZQDECOR {label}")["id"]
+        # The operator is what lets Q2-crit evaluate the peer variance at all.
+        sdk.create_operator("IMPL", pid, [support])
         proj.g.query(f"MATCH (n:Point {{id:$id}}) {setter}", params={"id": pid})
-        out = get_relationships_bounded(proj.g, [pid])
-        blob = str(out)
-        assert "Type mismatch" not in blob and "decoration_error" not in blob, (
-            f"{label}: the relationship scan raised on an operand the store "
-            f"cannot read as a number: {blob[:400]}")
-        assert pid in out, (label, out)
+        pids[label] = pid
 
+    for label, pid in pids.items():
+        out = _decorate(proj, pid)
+        assert pid in out, (label, out)
+        assert out[pid], (
+            f"{label}: the requested point came back with NO relationships — "
+            "the scan could not read its own operator neighbourhood")
+
+    # The all-readable control keeps its decoration through the same path, so
+    # the three bad shapes are not passing because everything comes back empty.
+    control = pids["all_numeric_control"]
+    assert _decorate(proj, control)[control], (
+        "the control lost its relationships — the scan is empty for every "
+        "shape, so the three orderings above prove nothing")
 
 def test_the_trends_answer_survives_a_numeric_string_operand(sdk):
     """Cycle 17 P2: `_format_timeline` raised on the raw operands.
