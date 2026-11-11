@@ -313,6 +313,14 @@ skips in a depth-1 checkout is inert everywhere; the live ancestry claim is prov
 a stubbed-`git` case that needs no history. Two mechanisms, stated separately, because "the other job
 covers it" was true of the tool and false of the test.
 
+The same stubbed-`git` case pins the **grafted/shallow counterpart**, which is the arm's only false-red
+direction: in a deepened shallow clone the pinned commit's object IS present (`rev-parse --verify`
+succeeds) while the graft boundary cuts the walk, so `merge-base --is-ancestor` exits **1** for a real
+ancestor — the same status an unrelated tree produces, and reading it as drift accuses a correct page of
+a cut it did not make (#10356). So **only** a `rev-parse --is-shallow-repository` of `false` may certify
+drift; `true` *and* an unanswerable probe both take **exit 2 UNVERIFIED**, never a verdict. That is
+`tools/substrate_map_check.py`'s rule, copied rather than invented.
+
 **Deliberately not checked:** the issue states in §6, the durability column in §4, and every
 `~/.swarm` claim in §5. They are **dated readings of things outside this repository**, and a guard
 that asserted them would either fail on someone else's tracker or, worse, pass by not looking. This
