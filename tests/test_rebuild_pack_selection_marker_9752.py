@@ -1477,6 +1477,60 @@ def test_migrate_db_caller_distinguishes_the_unknown_shape(
         "an UNKNOWN rescue file was described as an observed restore gap")
 
 
+def test_migrate_route_names_the_capture_source_when_it_observed_nothing(
+        tmp_path, caplog, monkeypatch):
+    """UNKNOWN shape (a): the fresh `target` captured nothing (#11866).
+
+    `pack_selection_state_unknown` reaches this route's warning from TWO places,
+    and they differ in whether the rebuild wrote an ERROR the operator can go
+    and read. (a) is THIS route's own override, when the fresh `target`
+    captured nothing — `rebuild_all` logs no ERROR for it, so the tail that
+    pointed at "the rebuild ERROR log" sent the operator to an empty line.
+    Pinned with its sibling below so neither cause can absorb the other.
+    """
+    counts = {"nodes": 0, "edges": 0, "events": 0,
+              "pack_selection_expected": 0, "pack_selection_verified": True,
+              "pack_selection_restored": 0,
+              "pack_selection_gap": 0, "pack_selection_state_unknown": False,
+              "pack_selection_conflict": False}
+    with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
+        _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
+    msg = next(m for m in (r.getMessage() for r in caplog.records)
+               if ":PackSelection" in m)
+    assert "NOT OBSERVED, not observed gone" in msg, (
+        f"the capture-source cause must be named on this shape: {msg}")
+    assert "see the rebuild ERROR log" not in msg, (
+        "the rebuild wrote no ERROR on this shape, so that pointer is dead: "
+        f"{msg}")
+
+
+def test_migrate_route_keeps_the_error_pointer_for_a_rescue_file(
+        tmp_path, caplog, monkeypatch):
+    """UNKNOWN shape (b): an inherited leftover rescue file DID log an ERROR.
+
+    A fix for shape (a) that also rewrote shape (b) shipped once and was caught
+    by review: it told a retrying operator "this is the known #11866
+    capture-source limitation" while the one artifact that can say a marker was
+    destroyed — the rescue file beside the target — went unnamed, and the
+    pointer that was correct for this shape was deleted. Pinned so a future
+    fix for (a) cannot silently absorb (b) again.
+    """
+    counts = {"nodes": 0, "edges": 0, "events": 0,
+              "pack_selection_expected": 0, "pack_selection_verified": True,
+              "pack_selection_restored": 0,
+              "pack_selection_gap": 1, "pack_selection_state_unknown": True,
+              "pack_selection_conflict": False}
+    with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
+        _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
+    msg = next(m for m in (r.getMessage() for r in caplog.records)
+               if ":PackSelection" in m)
+    assert "see the rebuild ERROR log" in msg, (
+        "this shape's ERROR really is written by the rebuild, so that pointer "
+        f"is the correct one: {msg}")
+    assert "NOT OBSERVED, not observed gone" not in msg, (
+        f"the capture-source cause is false on the rescue-file shape: {msg}")
+
+
 def test_migrate_cli_reports_the_pack_selection_gap(caplog, monkeypatch):
     """The operator surface of `tortoise migrate-db` must name the class.
 

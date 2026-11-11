@@ -223,8 +223,11 @@ property). It gets its own declared sidecar sections instead:
   empty registry — data leg only — until the packs are re-pinned, and the engine
   logs that at WARNING. `tortoise migrate-db` preserves neither this class nor
   `:TeamMeta`, because it replays a legacy journal into a freshly created target
-  and the sections are captured from the graph about to be wiped; it reports
-  `state_unknown` rather than a verified success (#11866). It is ONE node
+  and the sections are captured from the graph about to be wiped. The two are
+  **not** reported alike on that route: this class is elevated to `state_unknown`
+  rather than a verified success (#11866), while `:TeamMeta` stays **silent**
+  there — its `team_meta_gap` is `0` on a fresh target, so neither the warning
+  nor the migrate result dict carries it. It is ONE node
   per graph with **no identity property at all** (`pack_state` MERGEs
   `(s:PackSelection)` — the graph is the isolation boundary, so no id is
   needed), so it fits neither the config registry above (a row keyed on one

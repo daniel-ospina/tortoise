@@ -260,6 +260,17 @@ def migrate(force: bool = False) -> dict:
             # leaving its `verified: True` in place would still tell a caller that
             # reads that field (rather than `gap`) that the migrated graph's marker
             # was confirmed — the same false PASS, one field over.
+            #
+            # `pack_selection_state_unknown` has TWO producers, and the warning
+            # below must not name one cause for both. (a) THIS route's own
+            # override, a few lines down, when the fresh `target` captured
+            # nothing — `rebuild_all` logs no ERROR for that shape. (b) a
+            # leftover rescue file beside the target that cannot say (pre-v7, or
+            # no `pack_selection` section) — `rebuild_all` DOES log an ERROR
+            # naming that file. Snapshot the flag BEFORE the override so the
+            # warning can still tell the two apart.
+            _pack_unknown_inherited = bool(
+                rebuild_counts.get("pack_selection_state_unknown"))
             if not rebuild_counts.get("pack_selection_expected"):
                 rebuild_counts = dict(rebuild_counts)
                 rebuild_counts["pack_selection_verified"] = False
@@ -316,16 +327,17 @@ def migrate(force: bool = False) -> dict:
             # the gap/UNKNOWN pair does.
             if rebuild_counts.get("pack_selection_gap"):
                 _label, _consequence = _pack_selection_shape(rebuild_counts)
-                if rebuild_counts.get("pack_selection_state_unknown"):
-                    # #11866: on THIS route the cause is the CAPTURE SOURCE, not
-                    # a stale sidecar. `rebuild_all` captures each preservation
-                    # section from the graph it is about to wipe, which here is
-                    # the fresh `target`, so the capture is empty by
-                    # construction. Nothing was expected, nothing was restored
-                    # and no verification failed — so the rebuild logged no
-                    # ERROR at all, and the tail this route used to print
-                    # ("see the rebuild ERROR log") sent the operator to an
-                    # empty line while naming the sidecar as the suspect. An
+                if (rebuild_counts.get("pack_selection_state_unknown")
+                        and not _pack_unknown_inherited):
+                    # #11866 — shape (a) ONLY: the cause is the CAPTURE SOURCE,
+                    # not a stale sidecar. `rebuild_all` captures each
+                    # preservation section from the graph it is about to wipe,
+                    # which here is the fresh `target`, so the capture is empty
+                    # by construction. Nothing was expected, nothing was
+                    # restored and no verification failed — so the rebuild
+                    # logged no ERROR at all, and the tail this route used to
+                    # print ("see the rebuild ERROR log") sent the operator to
+                    # an empty line while naming the sidecar as the suspect. An
                     # operator who goes looking for a stale rescue file beside
                     # the target finds nothing, because that is not the failure
                     # and not the fix.
