@@ -35,7 +35,9 @@ That makes four things load-bearing in a way that is invisible to a reader:
    which made a thirteenth correction row (or a fifth §6 bucket) free: measured,
    appending one returned CLEAN with the pin still reading `abcdefghijkl`. So §3
    and §6 now refuse any table row whose label cell they cannot classify, and every
-   backticked `token:LINE` the citation pattern declines is refused too. The
+   backticked `token:LINE` the citation pattern declines is refused too — apart from
+   the spellings §8 names as carve-outs, which are skipped BY DECLARATION and listed
+   there rather than left to be discovered. The
    evidence column is held to §1's own rule for the same reason: with no floor on
    it, blanking every §3 evidence cell left the page green while each row went on
    asserting a verdict with nothing behind it.
@@ -167,7 +169,9 @@ SPAN_TRAILING_RE = re.compile(r"[\s.,;:)\]]+$")
 #: reformatting defused the red the resolver would otherwise have raised. That one
 #: spelling (and its `path 16-18` range form) is what this arm refuses; the wider
 #: delimiter sets are the carve-outs named immediately below, WITH the measurement
-#: that removed each.
+#: that removed each. The one `#` case that is NOT a carve-out is the GitHub permalink
+#: (`CITATION_HASH_LINE_RE`, `#` + `L` + digits): an `owner/repo#N` issue ref carries
+#: no `L`, so that spelling is refused rather than skipped.
 #:
 #: ⚠️ THE CARVE-OUTS ARE MEASURED, AND THEY ARE NOT NARROW. An earlier version keyed
 #: on an extension allow-list and claimed the carve-out was "exactly as wide as it
@@ -229,7 +233,7 @@ CITATION_UNCOLONED_SHAPE_RE = re.compile(
 #: refusing it cannot red this repository's own prose. The bare-number form
 #: (`path#16`) stays a declared carve-out: it is the one that collides with issue refs.
 CITATION_HASH_LINE_RE = re.compile(
-    r"(?P<path>[\w~.][\w./+@-]*?)\s*#\s*L(?P<num>\d{1,7})(?![\w.>])"
+    r"(?P<path>[\w~.][\w./+@-]*?)\s*#\s*L\s*(?P<num>\d{1,7})(?![\w.>])"
 )
 
 #: A `path:line` occurring ANYWHERE inside a backticked span. The span-level
