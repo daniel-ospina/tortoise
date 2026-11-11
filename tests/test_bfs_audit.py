@@ -14,22 +14,36 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def _production_ast_references(symbol: str = "propagate_shock") -> list[tuple[str, int]]:
-    """Every AST reference to `symbol` under `tortoise/`, as (path, lineno).
+def _production_ast_references(
+    root: Path | None = None, symbol: str = "propagate_shock"
+) -> list[tuple[str, int]]:
+    """Every AST reference to `symbol` under `<root>/tortoise`, as (path, lineno).
 
-    A `Name`/`Attribute` node is a USE of the symbol — a call, an alias, a reference —
-    regardless of whitespace, line continuations, or how it is later invoked. The
-    `def` name and any docstring mention are NOT nodes of either kind, which is what
-    makes this the right primitive for "does production code depend on it".
+    A `Name`, an `Attribute`, or an `alias` node is a USE of the symbol — a call, an
+    alias, an import, a reference — regardless of whitespace, line continuations, or how
+    it is later invoked. The `def` name and any docstring/comment mention are not nodes
+    of those kinds (prose is a string constant), which is what makes this the right
+    primitive for "does production code depend on it".
+
+    `root` is injectable so the form set below is itself pinned by
+    `test_the_reference_scan_catches_every_static_form` — a scan nobody tests is how the
+    two earlier versions of this guard each passed their own bug.
     """
+    base = ROOT if root is None else Path(root)
     refs: list[tuple[str, int]] = []
-    for src in sorted((ROOT / "tortoise").rglob("*.py")):
+    for src in sorted((base / "tortoise").rglob("*.py")):
         tree = ast.parse(src.read_text(encoding="utf-8"), filename=str(src))
         for node in ast.walk(tree):
             if isinstance(node, ast.Name) and node.id == symbol:
-                refs.append((str(src.relative_to(ROOT)), node.lineno))
+                refs.append((str(src.relative_to(base)), node.lineno))
             elif isinstance(node, ast.Attribute) and node.attr == symbol:
-                refs.append((str(src.relative_to(ROOT)), node.lineno))
+                refs.append((str(src.relative_to(base)), node.lineno))
+            elif isinstance(node, ast.alias) and node.name.rsplit(".", 1)[-1] == symbol:
+                # `from x import propagate_shock` and `… import propagate_shock as _s`:
+                # the later call spells `_s(...)`, so no Name/Attribute node ever carries
+                # the symbol — the import is the only static trace of the dependency, and
+                # main's word-grep caught it before this AST leg replaced that grep.
+                refs.append((str(src.relative_to(base)), node.lineno))
     return refs
 
 
@@ -100,11 +114,19 @@ def test_no_propagate_shock_callers():
     # gating.
     #
     # So the verdict comes from the AST, which answers the question the test is actually
-    # asked: a `Name`/`Attribute` node is the SYMBOL BEING USED; a docstring mention is a
-    # string constant and cannot produce one, and whitespace/continuations/aliases all
-    # still resolve to a reference. Residual, named rather than hidden: a reference whose
-    # name is computed at runtime (`getattr(mod, "propagate_shock")`) is a string to the
-    # parser and invisible here — as it is to any static check.
+    # asked: a `Name`/`Attribute`/`alias` node is the SYMBOL BEING USED; a docstring
+    # mention is a string constant and cannot produce one, and whitespace, continuations,
+    # invocations and import-aliases all still resolve to a reference.
+    #
+    # ⛔ THIS SCAN HAS BEEN WRONG TWICE (a substring match, then an AST walk that skipped
+    # `ast.alias`), and each version passed its own bug — the forms were reasoned about
+    # rather than pinned. `test_the_reference_scan_catches_every_static_form` now parses a
+    # fixture tree containing every static form, positive and negative, so the next
+    # iteration breaks a test instead of quietly narrowing the gate again.
+    #
+    # Residual, named rather than hidden: a reference whose name is computed at runtime
+    # (`getattr(mod, "propagate_shock")`) is a string to the parser and invisible here —
+    # as it is to any static check. Everything STATIC is pinned below.
     ast_refs = _production_ast_references()
 
     # The only "production" reference is a comment: no actual call
@@ -124,6 +146,51 @@ def test_no_propagate_shock_callers():
     print(f"  Fixup scripts: {len(callers['fixup_scripts (historical)'])}")
     print(f"  PRODUCTION: {len(callers['production_code'])}  ← key metric")
     print("  ✅ No production code calls propagate_shock")
+
+
+def test_the_reference_scan_catches_every_static_form(tmp_path):
+    """The scan above is itself pinned — both of its earlier versions passed their own bug.
+
+    `propagate_shock` must be reported for EVERY static form a dependency can take, and
+    must NOT be reported for prose or for lookalike names. This is a test of the detector,
+    not of the tree, so it builds its own fixtures: the previous two failures were reasoned
+    about in prose and never exercised.
+    """
+    (tmp_path / "tortoise").mkdir()
+
+    must_be_caught = {
+        "call.py": "propagate_shock(graph, n)\n",
+        "space.py": "propagate_shock (graph, n)\n",                       # space before (
+        "continuation.py": "propagate_shock \\\n    (graph, n)\n",         # backslash
+        "name_at_eol.py": "x = (\n    propagate_shock\n    (graph, n)\n)\n",  # name at EOL
+        "assign_alias.py": "f = propagate_shock\nf(graph, n)\n",          # bound, then called
+        "attribute.py": "self.propagate_shock(graph, n)\n",
+        "import_plain.py": "from tortoise.projection.propagation import propagate_shock\n",
+        "import_aliased.py": "from tortoise.projection.propagation import propagate_shock as _s\n_s(x)\n",
+        "import_dotted.py": "import tortoise.projection.propagate_shock\n",
+    }
+    must_stay_green = {
+        "definition.py": "def propagate_shock(self, graph, n):\n    return 1\n",
+        "docstring.py": 'def f():\n    """`propagate_shock` is never invoked."""\n    return 1\n',
+        "comment.py": "# propagate_shock is never invoked\nx = 1\n",
+        "unrelated.py": "propagate_shock_v2(graph, n)\n",
+    }
+    for name, body in {**must_be_caught, **must_stay_green}.items():
+        (tmp_path / "tortoise" / name).write_text(body, encoding="utf-8")
+
+    found = {Path(p).name for p, _ in _production_ast_references(root=tmp_path)}
+
+    missed = sorted(set(must_be_caught) - found)
+    assert not missed, (
+        "the reference scan MISSES a static form, so a real caller would read as no"
+        f" dependency at all: {missed}. Every one of these names the symbol:"
+        + "".join(f"\n  {n}: {must_be_caught[n]!r}" for n in missed)
+    )
+    false_positives = sorted(found & set(must_stay_green))
+    assert not false_positives, (
+        "the reference scan flags prose or a lookalike as a dependency — this is the"
+        f" #11907 failure (a docstring mention reddened the gate): {false_positives}"
+    )
 
 
 # ── 2. n.confidence readers ───────────────────────────────────────
