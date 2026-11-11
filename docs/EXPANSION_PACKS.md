@@ -608,10 +608,13 @@ customer-facing territory that owns per-graph permissions.
 > replays the legacy graph's journal into a freshly created target, and the
 > preservation sections are captured from the graph that is about to be wiped —
 > the empty target — so it drops the marker (and the `:PackInstall` rows with it)
-> and the migrated graph reads as the catalog union. That route now reports
-> `pre-preservation/UNKNOWN` on `pack_selection_gap` instead of a verified
-> success, and re-checking the approved set after a migration is the safe habit
-> until **#11866** gives the route a capture source that is not the target. The
+> and the migrated graph reads as the catalog union. That route now reports an
+> UNKNOWN state on `pack_selection_gap` instead of a verified success — and the
+> label it prints names the right cause: the CAPTURE SOURCE (this route's own
+> empty capture), never `pre-preservation/UNKNOWN`, which is reserved for a pre-v7
+> rescue file beside the SOURCE's event log. Re-checking the approved set after a
+> migration is the safe habit until **#11866** gives the route a capture source
+> that is not the target. The
 > scope is deliberate: the RECORD-sourced `rebuild_from_record` still DROPS the
 > class (it reads no cache — *"the cache is a destination, never an input"*),
 > and that drop is named rather than silent in `tortoise/cache_projection.py`
