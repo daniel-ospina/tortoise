@@ -67,7 +67,7 @@ artifact  = census.json, carrying its own `provenance` (measured_at, probe_sha25
 | `quote_chars_all` | min **8** · median **137** · max **200** · n 15,027 (composed length) |
 | `at_cap` | **2,260** — stored length ≥ 200: **15.04% of quoted Points**, **14.27% of all live Points** |
 | `quote_shapes` | `str` **15,051** (of which **24** are empty/whitespace-only) · `absent_or_null` **791** · `list` **0** · `other` **0** |
-| `excluded_by_outdated_flag` | **`{}`** — no row carries the legacy `outdated` flag, so the live subset is the same under either conjunct of the read path's predicate |
+| `excluded_by_outdated_flag` | **`{}`** — no NON-TERMINAL row carries the legacy `outdated` flag, so the live subset is the same under either conjunct of the read path's predicate (a terminal row is bucketed by its status before the flag is read, so this field says nothing about those 26) |
 
 By `pointKind`:
 
@@ -126,7 +126,9 @@ population the composed text targets: **98.93% of embedded statements**.
    (`by_status_terminal`), not by `quote_shapes`; a list-valued quote among them would show up there as
    a quoted value, not as a `list` shape.
 5. **The names half has no property input at all.** `points_with_any_about_property` = **0** across all
-   15,842 live Points: not one `about*` string property exists on this graph. That is consistent with
+   15,842 live Points: not one `about*` string property exists on a **live** Point (the scan runs over
+   the live rows; the 26 terminal rows are status-bucketed and are not scanned for `about*`, so this
+   is not a statement about them). That is consistent with
    #11805's review finding (the create door stores `about*` values as properties; capture writes none)
    and it strengthens the reason the names half ships unwired — but it is **not** a measurement of
    resolved `about*` EDGES, which is what the composer needs.

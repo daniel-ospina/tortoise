@@ -873,12 +873,20 @@ def test_the_readme_documents_every_reason_the_probe_exits_two():
     assert "PROBE-WRITE" in doc.group(0), (
         "the probe's `--help` exit contract does not name the write arm: `2` reads as usage "
         "only, which sends the operator back to the arguments")
-    # …and it must be filed UNDER `2`, not merely mentioned: the same polarity the README half
-    # asserts. Without this, moving the arm into the `3` clause ("the graph was unreachable")
-    # left the pin green — a misfiled arm is the same misdiagnosis one code over (round 6).
-    arms = doc.group(0).split("·")
-    assert any(a.strip().startswith("2 ") and "PROBE-WRITE" in a for a in arms), (
-        "the `2` arm of the --help contract must name PROBE-WRITE, not merely mention it")
+    # …and it must be filed UNDER `2` and NOWHERE ELSE. A positive-only match left both
+    # misfilings green — moving the arm into the `3` clause ("the graph was unreachable") in the
+    # docstring (round 6), and the same move in the README (round 7) — which tells an operator
+    # with a discarded measurement that the graph was unreachable, the same misdiagnosis one code
+    # over. So both halves assert ATTRIBUTION, not presence.
+    def _attributed(arms: list[str]) -> bool:
+        def _is_two(arm: str) -> bool:
+            return arm.strip().startswith(("2 ", "`2`"))
+
+        return (any(_is_two(a) and "PROBE-WRITE" in a for a in arms)
+                and not any("PROBE-WRITE" in a for a in arms if not _is_two(a)))
+
+    assert _attributed(doc.group(0).split("·")), (
+        "the probe's `Exit codes:` block must name PROBE-WRITE under `2` and under no other code")
     readme = (REPO / "docs" / "evidence" / "11739-quote-population" / "README.md").read_text(
         encoding="utf-8")
     contract = re.search(r"Exit codes are the measurement's own guard rails.*?(?=\n\n)",
@@ -889,8 +897,10 @@ def test_the_readme_documents_every_reason_the_probe_exits_two():
         "the README's exit contract does not name the `--out` arm: `2` reads as usage only")
     # …and it must say which code the arm shares and WHERE the loss is, because "usage" sends
     # the operator back to the arguments, which are not the problem.
-    assert re.search(r"`2`.*PROBE-WRITE", text, re.S), (
-        "PROBE-WRITE must be documented under `2`, not merely mentioned")
+    assert _attributed(text.split("·")), (
+        "PROBE-WRITE must be documented under `2` in the README too, and not under another code — "
+        "a misfiled arm tells the operator the graph was unreachable when the measurement was "
+        "merely discarded by the destination")
     assert "not writable" in text
 
 
