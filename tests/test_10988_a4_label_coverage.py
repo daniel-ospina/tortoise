@@ -111,7 +111,7 @@ def test_null_and_blank_are_ONE_absent_state_reported_as_its_own_share():
     """FAILS IF a blank kind is folded into a declared kind, or `NULL` is folded into `statement`.
 
     Both folds manufacture a typing/coverage win nobody made: `''` is what the `#548` rebuild
-    SNAPSHOT synthesis writes for a kindless operator (`projection/__init__.py:13738-13740`), and
+    SNAPSHOT synthesis writes for a kindless operator (`projection/__init__.py:13804-13806`), and
     `NULL` is the absent property. They are ONE state (absent) and neither is a label.
     """
     probe = _probe()
@@ -150,7 +150,7 @@ def test_unlabelled_is_EXACTLY_the_null_plus_undeclared_share_and_nothing_escape
 
 
 #: The five point kinds `tortoise.sdk` registers through `domain_loader.register_kind` at IMPORT time
-#: (`sdk.py:217-227`). No `packs/*/manifest.yaml` declares them and none is in
+#: (`sdk.py:218-228`). No `packs/*/manifest.yaml` declares them and none is in
 #: `CANONICAL_POINT_KINDS`, so the SDK import is the ONLY path that makes them declared.
 _SDK_REGISTERED_KINDS = ("diary", "checkpoint-item", "option", "evidence", "criterion")
 
@@ -252,7 +252,7 @@ def test_the_three_layers_are_reported_SEPARATELY_and_never_blended():
 def test_the_claim_layer_keeps_its_EXCLUSION_predicate_so_capture_rows_are_not_claims():
     """FAILS IF the per-layer rewrite drops the `is_episodic`/`is_operator` filter.
 
-    Turn rows are written `pointKind='event'` (`sdk.py:2528` `_TURN_WRITE_CYPHER`) and operator
+    Turn rows are written `pointKind='event'` (`sdk.py:2530` `_TURN_WRITE_CYPHER`) and operator
     Points are operators, not claims. On the committed corpus 159 of 354 Points are turn rows, so
     counting them read ~45 % "typed" against the owner's 0.6 % reading (`#10982` review, finding 4).
     ⛔ Asserted on the QUERY TEXT: the fake answers the same rows with the clause deleted, so this
