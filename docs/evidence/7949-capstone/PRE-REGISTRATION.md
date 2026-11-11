@@ -2411,8 +2411,12 @@ to answer.
   `if "pointKind" not in clean:` and `14227` is `clean["pointKind"] = ""`, the same three-line
   window §10.24 re-pointed to at its own head.
 - **The offset is the cite's, never the file's.** At this cite the movement is `+421`
-  (`13804` → `14225`). `#9752` moves the file by `+748`/`-27` (net `+721`) across 38 hunks, and the
-  hunks BELOW this anchor carry the rest — so `+721` applied here would land 300 lines late. This is
+  (`13804` → `14225`). `#9752` moves the file by `+760`/`-27` (net `+733`) across 38 hunks —
+  measured at the head the closing bullet below names, both sides of the range being
+  `git diff --numstat ea714fca1c 9ba2da35 -- tortoise/projection/__init__.py` (a total taken from
+  an intermediate commit of this branch reads `+748`/`-27`, which is where an earlier draft of this
+  line got it — hunk count right, total from a different head) — and the hunks BELOW this anchor
+  carry the rest, so `+733` applied here would land 312 lines late. This is
   §10.24's own rule applied to a third file, and the reason every number in this entry is a
   before/after at a line that was opened rather than a file total.
 - **Only this cite moved.** `#9752` touches `tortoise/projection/__init__.py` and no other file
