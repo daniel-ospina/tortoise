@@ -12,10 +12,11 @@ aboutObjects: SEARCH-ARCHITECTURE.md, absent belief state, search design revisio
 
 # Search Architecture — Changelog
 
-> **What this is.** The record of *how the search design got where it is* — the work each section drove and
-> the provenance of its rulings. It is change history; it is **not** a section→issue index (this document has
-> never carried one — its review record lives on `#4051`, and `SEARCH-ARCHITECTURE.md` §10 says where the
-> corrections that changed the decision are stated).
+> **What this is.** The record of *how the search design got where it is* — the work this document drove and
+> the provenance of its rulings. It is the counterpart of `STORAGE-ARCHITECTURE-CHANGELOG.md`, whose §13 issue
+> map is the sibling shape; `SEARCH-ARCHITECTURE.md` has never carried a section→issue index, so there is no
+> map to move yet, and its review record lives on `#4051` (§10 says where the corrections that changed the
+> decision are stated).
 >
 > **What `SEARCH-ARCHITECTURE.md` is.** The design. It states where the vector index lives, what the graph
 > engine keeps, and the evidence behind each ruling; it does not narrate its own revisions or track the
@@ -23,8 +24,8 @@ aboutObjects: SEARCH-ARCHITECTURE.md, absent belief state, search design revisio
 >
 > **Why the narration moved here.** The documents the narration guard polices (`DESIGN_DOCS` in
 > `tests/test_extractor_v4_citation_rot.py`: `ONTOLOGY.md`, `EXTRACTOR-V4-ARCHITECTURE.md`,
-> `STORAGE-ARCHITECTURE.md` and this one) each carried the opposite of their own header, and the guard that
-> pins the class is
+> `STORAGE-ARCHITECTURE.md`, `SEARCH-ARCHITECTURE.md`) each carried the opposite of their own header, and the
+> guard that pins the class is
 > `tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_or_change_narration`.
 > `ONTOLOGY.md`'s move is `#8745`; this document's is `#11907`, with the same convention as the two
 > siblings that predate it (`STORAGE-ARCHITECTURE-CHANGELOG.md`,
@@ -50,11 +51,13 @@ ONCE (`search_engine.EP_STATE_*` + `ep_has_belief_cypher`/`ep_state_cypher`/`ep_
 and `tests/test_11702_absent_belief_state.py` pins the property across every one of those surfaces, in both
 directions (a *measured* 0.5 keeps its 0.5).
 
-**Why it was red on `main` rather than caught at merge time.** `#11803` merged without a `test (g)` run that
-red this nodeid. *Why* that shard did not gate the merge is **unresolved** — `#11907` records it as
-*apparently* a shard-population effect and marks it worth a separate look — so this record states the
-observation and not a mechanism. `test (g)` is a required shard, so the violation made every PR on the
-repository unmergeable.
+**Why it was red on `main` rather than caught at merge time.** `#11803` merged at **15:29:11Z**; its own
+`pull_request` run (`43047153399`, head `2fa7d2fe…`) carried a `test (g)` check-run that **started at
+17:16:57Z** and red this nodeid at **17:30:08Z** — so the guard *was* in that shard's population, and the
+shard had simply not started when the merge landed. Nothing had concluded against it; the merge gate did not
+wait. **Why a required shard can be 40+ minutes behind its merge is unresolved** — `#11907` carries the
+follow-up, and its "shard population" reading is that issue's hypothesis, not this record's. `test (g)` is a
+required shard, so the violation made every PR on the repository unmergeable.
 
 **What moved out of the design document on 2026-11-11**, and what stayed:
 
