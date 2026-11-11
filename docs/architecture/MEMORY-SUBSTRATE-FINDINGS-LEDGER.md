@@ -26,7 +26,7 @@ measured_at: 2026-11-12
 > the very fixes they motivated, three by a number or a tracker state that moved —
 > so a lane that trusted §7 today would believe the Point fold still
 > drops props (#2795 closed that), and would go looking for a defect that is gone.
-> Meanwhile **six of the eight research briefs §3 indexes have no in-repo mirror at
+> Meanwhile **three of the seven research briefs §3 indexes have no in-repo mirror at
 > all**, and the machine they lived on no longer carries them (§5).
 >
 > **What this page does NOT do.** It does not re-open a defect, propose a fix, or
@@ -137,6 +137,7 @@ code while the brief itself never did.
 | `design/2026-09-10-decision-briefs-workstream-C.md` (167 l) | Near-full comment on #2826 | #2826 is CLOSED `NOT_PLANNED` — still readable, no longer a queue |
 | `design/2026-09-10-a1-a2-comment.md` (103 l) | Near-full comment on #2826 (A1/A2 briefs) | Same |
 | `design/2026-09-10-a1-a2-decision-briefs.md` (71 l) | **Gone** — never posted, superseded by the A1 comment by design | Nothing; flagged local-only when written |
+| `<corpus>/2026-09-09-ontology-evidence.md` (431 l) | **MIRRORED (condensed)** — comment on #2725 | The corpus-grounding dossier: all 8 meeting docs read and grepped against the proposed 10-kind pack, verdict **8/10 kinds STRONG**, `milestone` WEAK, several lifecycle states design extrapolations. This is the **only** corpus artefact with a surviving mirror — the payload it was derived from does not survive (§6.3) |
 | `<corpus>/README.md` + 8 `.docx` + 8 `plaintext/*.txt` (~976 KB) | **Gone from this machine** — and **must never** enter this public repo (#2852 §6.3) | Nothing reachable; originals were also in `~/Downloads`, unverified |
 | `~/.swarm/issue-triage-2026-09-09.md` (~5 KB) | **Gone** — local-only by design | Nothing; its outcome (33 closures + a 10-item shortlist) is in the tracker, the reasoning is not |
 
