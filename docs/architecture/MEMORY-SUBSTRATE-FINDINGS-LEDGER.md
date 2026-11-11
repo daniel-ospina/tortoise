@@ -255,13 +255,18 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   nearest preceding full-path citation, and one with nothing to anchor it is refused rather than
   guessed; without that rule, the load-bearing half of rows (b), (c) and (e) was unchecked while this
   section said it was checked. **A `path:line`-shaped token that the resolver cannot read is
-  refused**, not skipped — and TWO spellings are measured here: `path <LINE>` (a path followed by
-  whitespace and a number) and the **GitHub permalink** form (path, `#`, `L`, line number), because
+  refused**, not skipped — and THREE spellings are measured here: `path <LINE>` (a path followed by
+  whitespace and a number), `path|LINE` (the same, with a stray pipe), and the **GitHub permalink**
+  form (path, `#`, `L`, line number), because
   every wider delimiter set refused correct prose when tried
   against this repository's own `docs/`: `_` parses an identifier (`tests/test_findings_ledger_2852.py`),
   `-` parses a dated slug, `/` parses plain paths and dates (600+ spans across 799 files), `#`
   parses the `owner/repo#N` issue refs this repo writes everywhere, `@` parses commit refs, and `,`
-  parses SQL and call prose. The permalink form survives that objection and the rest do not: an
+  parses SQL and call prose. The pipe is refused because it was refused before the narrowing and
+  dropping it silently was a red-to-green the carve-out list did not admit: no code span in the 1144
+  tracked files under `docs/` (nor the 144 other tracked `*.md`) carries a `path|LINE` form, so
+  refusing it cannot red this repository's prose. The permalink form survives that objection and the
+  rest do not: an
   issue ref carries no `L`, so `#` + `L` + digits is unambiguous, and it is what a human writes when
   copying a GitHub link — the spelling most likely to arrive looking verified while going unchecked
   (it did: both an out-of-range permalink and an in-range one left this page CLEAN before the arm
@@ -305,7 +310,10 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   word inside the backticks defused a legitimate out-of-range red (the example is unspanned for the
   same reason as the others above). The one
   remaining carve-out is a `~`-rooted path (a dated reading of something outside this repo, §5): it is
-  recognised and COUNTED, and the guard raises UNVERIFIED rather than reporting clean when nothing but
+  recognised and COUNTED in BOTH spellings — `path:line` and the permalink form — and the permalink
+  arm defers to it rather than reding a citation this paragraph exempts (measured: refusing
+  `~`-rooted permalinks reded over a §5 reading that §8 declares exempt) — and the guard raises
+  UNVERIFIED rather than reporting clean when nothing but
   exempt citations remain, so a page cannot be re-pointed wholesale onto them;
 - the **§3 headline tally** is derived too. The "N of the twelve rows no longer read as written"
   count, the letter list beside it, and the four-of-the-seven "overtaken" figure are all recomputed
