@@ -398,6 +398,13 @@ def test_the_marker_is_declared_in_every_home_so_it_cannot_become_node_state():
     Each one is a place where an undeclared payload key would LEAK: onto a node
     (`_POINT_HANDLED` / `_META_KEYS` / `_SERVER_MANAGED_PROPS`), into the
     record's `props` jsonb tail (`_RECORD_ONLY_KEYS`), or into a caller's reach.
+
+    Six are asserted here. The SEVENTH — `api.EventAPI._point`'s forged-key
+    refusal — is pinned where it can actually redden: that set is a
+    function-local literal, so no test can assert its membership; the refusal
+    is driven through the door instead, by
+    `test_journal_embedding_5004.py::test_eventapi_rejects_the_server_managed_journal_markers`
+    (#11835 review P2 — the omission left deleting the `api.py` entry GREEN).
     """
     from tortoise import record_projection as rp
     from tortoise.consistency import _EXCLUSION_REASONS

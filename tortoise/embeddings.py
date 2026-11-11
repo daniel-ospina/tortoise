@@ -331,7 +331,7 @@ def ensure_embed_threads() -> None:
 #: ``embedding_revision`` / ``embedding_text_hash`` / ``embedding_preserved``:
 #: never a node property, never a record column, and refused from callers in
 #: every one of the homes those two live in (`projection.entities._META_KEYS`,
-#: `record_projection`'s record-meta set, `consistency._META_KEYS`,
+#: `record_projection`'s record-meta set, `consistency._EXCLUSION_REASONS`,
 #: `mcp_server._SERVER_MANAGED_PROPS`, `sdk._sanitize_props`,
 #: `api.EventAPI._point`'s forged-key refusal, and
 #: `record_projection.TURNS_SNAPSHOT_OPTIONAL_KEYS` for the carrier).
