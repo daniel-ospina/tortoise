@@ -43,6 +43,26 @@ Exit codes
 ``2``  could not verify — the doc is unreadable, the population cannot be parsed,
        or `git` cannot answer the ancestry question (a shallow/grafted clone).
        ``2`` is never "clean": a guard that cannot run must not report OK.
+
+Which arms need history, and why that split exists
+--------------------------------------------------
+Exactly ONE arm needs `git` history: `measured_at_commit` ancestry. Everything
+else — the verdict vocabulary, the citations, the registration row, §6's
+arithmetic — reads this checkout's tree and nothing more.
+
+The split is load-bearing, not tidiness. The `docs` job (the REQUIRED gate, and
+the only one that runs `--check`) checks out at `fetch-depth: 0`. The `test`
+jobs check out at the default depth 1, and `tests/test_findings_ledger_2852.py`
+is in the `core` surface, so it runs THERE. A depth-1 clone cannot resolve
+`measured_at_commit` at all — measured: `git rev-parse --verify f70d884b7^{commit}`
+prints nothing and exits 1, and `rev-parse --is-shallow-repository` says `true` —
+so an arm that folded ancestry into every check would make every doc-level
+assertion in that file unavailable in the job that actually runs it, or worse,
+red it. `check_document()` is therefore the history-free half (and what
+`--self-test` drives), and `check_all()` adds the one arm that needs a full
+clone. Copy the sibling precedent rather than inventing one: `tools/problem_map_check.py`
+reports ancestry as UNVERIFIED in a shallow clone, and `tests/test_substrate_map.py`
+skips only its ancestry assertion for the same reason (#10406).
 """
 
 from __future__ import annotations
@@ -272,13 +292,31 @@ def check_measured_commit(text: str, root: Path = REPO) -> list[str]:
     return []
 
 
-def check_all(root: Path = REPO) -> list[str]:
-    text = read_doc(root)
+def check_document(text: str, root: Path = REPO) -> list[str]:
+    """Every arm that reads this checkout's TREE — no `git` history required.
+
+    This is the half that survives a depth-1 clone (the `test` jobs, and the
+    `core` surface `tests/test_findings_ledger_2852.py` runs in). It is not a
+    weakened check: it is everything the page claims about the tree. The one
+    claim it cannot answer — that `measured_at_commit` is on HEAD's history —
+    lives in `check_all()`, because answering it needs the whole clone.
+    """
     problems: list[str] = []
     problems.extend(check_verdicts(text))
     problems.extend(check_citations(text, root))
     problems.extend(check_registration(root))
     problems.extend(check_state_arithmetic(text))
+    return problems
+
+
+def check_all(root: Path = REPO) -> list[str]:
+    """`check_document()` plus the one claim that needs history.
+
+    Kept as the `--check` entry point so the REQUIRED `docs` job (fetch-depth 0)
+    still refuses to certify an ancestry claim it never proved.
+    """
+    text = read_doc(root)
+    problems = check_document(text, root)
     problems.extend(check_measured_commit(text, root))
     return problems
 
@@ -286,6 +324,15 @@ def check_all(root: Path = REPO) -> list[str]:
 # ── self-test ──────────────────────────────────────────────────────────────
 # Each arm injects one mutation into a COPY of the real document and asserts the
 # checker reports it. A guard whose mutations are not proven to fire is decoration.
+#
+# The arms drive `check_document()`, not `check_all()`: every mutation below
+# targets a doc-level rule, so dragging ancestry in would make `--self-test`
+# unrunnable in a depth-1 clone while proving nothing extra — no arm here mutates
+# `measured_at_commit`. That arm is covered where it CAN be answered: the
+# `--check` invocation in the REQUIRED `docs` job (fetch-depth 0), which exits 2
+# rather than 0 when it cannot resolve the commit, and
+# `tests/test_findings_ledger_2852.py::test_measured_commit_must_be_an_ancestor_of_head`
+# (which needs no history — an absent sha is absent in every clone).
 
 MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
     (
@@ -322,7 +369,7 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
 
 def self_test(root: Path = REPO) -> int:
     original = read_doc(root)
-    base = check_all(root)
+    base = check_document(original, root)
     if base:
         print("self-test: the UNMUTATED document already reports problems:")
         for problem in base:
@@ -372,13 +419,7 @@ def self_test(root: Path = REPO) -> int:
 
 
 def _check_mutated(text: str, root: Path) -> list[str]:
-    problems: list[str] = []
-    problems.extend(check_verdicts(text))
-    problems.extend(check_citations(text, root))
-    problems.extend(check_registration(root))
-    problems.extend(check_state_arithmetic(text))
-    problems.extend(check_measured_commit(text, root))
-    return problems
+    return check_document(text, root)
 
 
 def main(argv: list[str] | None = None) -> int:
