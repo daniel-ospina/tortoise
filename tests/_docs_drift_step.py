@@ -50,6 +50,21 @@ DOCS_DRIFT_STEP_COMMANDS = (
     # while this branch was de-duplicating the pin, so it is carried here rather
     # than dropped by that refactor.
     "python3 tools/test_design_map_check.py --self-test",
+    # #2852: the findings ledger's doc↔tree guard. Same reason as its #5086/#2820
+    # siblings — a docs-only edit of the ledger selects NO surface — plus one of
+    # its own: the page's §3 is a CORRECTIONS log, and re-measuring it found five
+    # of its twelve rows already overtaken by the fixes they motivated. A verdict
+    # outside the closed vocabulary, or a `path:line` that stopped resolving,
+    # reads exactly like evidence to the next lane. It needs HISTORY for the
+    # `measured_at_commit` ancestry claim, which the depth-1 `test` job cannot
+    # answer at all.
+    "python3 tools/findings_ledger_check.py --check",
+    # #2852: the same guard's second arm. `--self-test` proves it still catches
+    # its own mutations (invented verdict, dangling citation, out-of-range line,
+    # deleted correction row, a §6 count that disagrees with its own list) and
+    # that a cosmetic edit leaves the verdict unchanged. An arm nothing runs is
+    # not a guard.
+    "python3 tools/findings_ledger_check.py --self-test",
 )
 
 # The step's `run:` block, as `_code()`-filtered text, must equal this exactly.
