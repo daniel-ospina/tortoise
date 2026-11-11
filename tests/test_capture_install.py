@@ -3046,6 +3046,49 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_cloud_agent_limit
     assert "hooks are IDE-ONLY" not in listing.stdout, listing.stdout
 
 
+_PLATFORM_SEAMS_DOC = (_REPO_ROOT / "docs" / "research"
+                       / "2026-09-01-gbrain-learnings" / "platform-seams.md")
+
+
+def test_platform_seams_record_quotes_the_shipped_install_message(tmp_path):
+    """#11810 r6: `platform-seams.md` §3 cites the install message as the evidence
+    that the exclusion is HOSTED-scoped, and §3 is what a future lane cites for
+    #11807 — so the fragment it quotes must be a substring of the message it
+    claims to quote.
+
+    The r6 review measured the drift: the record quoted "a session running in a
+    cloud agent VM" (the UNSCOPED universal this PR removes) while the shipped
+    message says "in a HOSTED cloud agent VM". A fragment in double quotes that
+    is not in its source reads as evidence FOR the over-assertion, and the claim
+    around it ("both … scope it there") then rests on nothing.
+
+    Mutation: drop `hosted` from the quoted fragment — or from the message — and
+    this REDs, which is the point: the two cannot drift apart in either
+    direction."""
+    quoted = "a session running in a hosted cloud agent VM"
+    doc = _PLATFORM_SEAMS_DOC.read_text(encoding="utf-8")
+    assert f'("{quoted}")' in doc, (
+        "the platform-seams record must quote the HOSTED-scoped message")
+    # …and the unscoped shape may not reappear as a QUOTED fragment: that is the
+    # absolute #11806 removed and this PR's title says it scoped.
+    assert '("a session running in a cloud agent VM")' not in doc, (
+        "the record quotes the unscoped universal as though it were the message")
+
+    root = tmp_path / "proj"
+    home = tmp_path / "home"
+    root.mkdir()
+    home.mkdir()
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "TORTOISE_DB_URI": "",
+        "TORTOISE_SECRET_PEPPER": "test-static-pepper",
+    }
+    r = _run(("install", "cursor", "--dir", str(root)), env, root)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert quoted in r.stdout, r.stdout
+
+
 def test_cli_install_cursor_uninstall_says_the_seam_remains(tmp_path):
     """`tortoise install cursor --uninstall` must NOT route to the read-hook
     surface (which exits 1 with "has no shell-hook read seam") while the

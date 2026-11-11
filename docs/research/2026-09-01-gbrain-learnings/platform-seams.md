@@ -312,10 +312,12 @@ holds, one is new and was undisclosed:
    (`~/.cursor/hooks.json`) are not available in cloud agents"*. The same scoping applies to the
    exclusion itself: it is settled for the **hosted VM** (*"Cloud agent VMs don't have access to
    your local home directory configuration"*), not for a self-hosted worker, so both the message
-   ("a session running in a cloud agent VM") and this row ("a hosted cloud agent") scope it there. Whether a user-level registration loads on a Self-Hosted Machines
-   worker is **unverified** (the page names project, team and enterprise-managed hooks there),
-   which is exactly why the disclosure states the load path instead of an absolute. Consequence
-   for a customer: the two **events** do fire there, but reaching them needs a **project-level**
+   ("a session running in a hosted cloud agent VM") and this row ("a hosted cloud agent") scope
+   it there. Whether a user-level registration loads on a Self-Hosted Machines worker is
+   **unverified** (the page names project, team and enterprise-managed hooks there), which is
+   exactly why the disclosure states the load path it writes, and scopes the exclusion to the
+   hosted VM, instead of asserting a universal. Consequence for a customer: the two **events**
+   do fire there, but reaching them needs a **project-level**
    registration (plus team and enterprise-managed hooks on Enterprise — the page's own gate)
    that this installer does not write — and a repo-committed `hooks.json` cannot simply
    point at this install's scripts, which register by **absolute** path under `~/.cursor/hooks/`
