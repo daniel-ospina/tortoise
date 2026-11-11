@@ -56,13 +56,24 @@ one of these is the same words and the same claim.
 
 So `_normalised()` reduces text to its word sequence — HTML tags are stripped,
 HTML entities are decoded, anything else that is not a letter or digit becomes a
-separator, and case is folded. That closes every SEPARATOR-VALUED and
-ENTITY/TAG-VALUED spelling of the same words: reflow, tab/`\r\n`, literal nbsp,
-zero-width space, case, hyphenation, markdown emphasis anywhere in the phrase
+separator, and case is folded. That closes the SEPARATOR-VALUED and
+ENTITY/TAG-VALUED spellings of the same words **where the separator or the markup
+falls BETWEEN words** (or wraps the phrase): reflow, tab/`\r\n`, literal nbsp,
+zero-width space, case, hyphenation, markdown emphasis around or between words
 (whole-phrase `*"…"*`, or in-phrase `**cloud agent VM**`, `` `cloud agent VM` ``,
 `*cloud*`, `~~…~~`, `_…_`), and `&nbsp;` / `&#32;` / `&mdash;` / `<span>` / `<b>`
 — the entity and tag forms render as the identical sentence, so a pin that only
 blocked the literal characters would call the rendered artifact safe.
+⚠️ "Between words" is load-bearing, not a hedge: a separator or tag INSIDE a word
+(`clou<ZWSP>d`, `clou-`+`d`, `cl<b>ou</b>d`) does not respell the phrase, it
+SPLITS it, so it is missed — the residual bullet below states this accurately and
+this paragraph defers to it (review r12 P3 #3, which measured the unconditional
+reading as the over-claim).
+
+The PRESENCE arms read that ONE rendering. The ABSENCE arm reads `_renderings()`
+— a union over every strip — because no single tag strip is complete and a single
+one can be made to HIDE the banned phrase (both directions measured; see
+`_renderings`).
 
 WHAT IT STILL DOES NOT CATCH, stated so the docstring is not the next over-claim:
 
@@ -95,6 +106,12 @@ MUTATION (each verified RED at this head, restoring byte-identical):
   * delete the record's quoted sentence                         → (1) RED
   * widen the tag strip back to `<[^>]+>` and inject one
     "a hook count of < 5 is suspect" before §3's quote          → new tag test RED
+  * `_renderings` → `[_normalised(text)]` (the `_TAG` reading only)
+    → the bare-attribute sample REDs               (r12 P3 #1)
+  * `_renderings` → the bare-attribute reading only
+    → the prose-forgery sample REDs                (r12 P3 #1)
+  * revert `_TAG` to the permissive `_TAG_WITH_BARE_ATTRS` form
+    → the forged-tag PRESENCE assert REDs          (r12 P3 #1)
 """
 from __future__ import annotations
 
@@ -114,31 +131,55 @@ _SHIPPED_FRAGMENT = "a session running in a hosted cloud agent VM"
 _UNSCOPED_FRAGMENT = "a session running in a cloud agent VM"
 _PY = sys.executable
 
-#: A TAG-SHAPED strip, deliberately not `<[^>]+>`. The loose form spans any `<` …
-#: `>` anywhere in a 50 KB document, so one ordinary sentence — "a hook count of
-#: < 5 is suspect" — swallows everything up to the next `>`. Measured on THIS
-#: record with that sentence injected IMMEDIATELY BEFORE §3's quote (line 315):
-#: the loose form matches a single 2,481-byte span that CONTAINS the quoted
+#: A tag's attributes AS MARKUP — `name=value`, quoted or bare. NOT `[^<>\n]*`:
+#: a bare word list is PROSE, and `if a<b and c>d then …` is an ordinary sentence,
+#: so a permissive attribute group forges a "tag" out of it and deletes
+#: everything between the two comparison signs. The ABSENCE leg survives that either
+#: way (it unions three strips, so no single one can hide a phrase), but the
+#: PRESENCE legs read ONE strip, and with the permissive form a record whose quote
+#: sits between a prose `<` and `>` false-REDs — a correct record failing the pin.
+#: Measured both ways; pinned by
+#: `test_a_stray_angle_bracket_cannot_swallow_the_quoted_sentence`.
+_TAG_ATTRS_ASSIGNED = (r"(?:\s+[A-Za-z_:][-A-Za-z0-9_:.]*\s*=\s*"
+                       r"(?:\"[^\"]*\"|'[^']*'|[^\s\"'=<>`]+))*")
+
+#: …and a TAG-SHAPED strip, deliberately not `<[^>]+>`. The fully loose form spans
+#: any `<` … `>` anywhere in a 50 KB document, so one ordinary sentence — "a hook
+#: count of < 5 is suspect" — swallows everything up to the next `>`. Measured on
+#: THIS record with that sentence injected IMMEDIATELY BEFORE §3's quote (line
+#: 315): the loose form matches a single 2,481-byte span that CONTAINS the quoted
 #: words, so it deletes them and false-REDs the presence arm on a record that
-#: states the right thing; this form matches nothing there.
-#: ⚠️ The measured reason this form is preferable is NOT that it keeps prose
+#: states the right thing; `_TAG` matches nothing there.
+#: ⚠️ The measured reason `_TAG` is preferable is NOT that it keeps prose
 #: angle-brackets — it does not. `<harness>` and `<ws>` are tag-SHAPED, so BOTH
-#: forms strip them. Over this record the loose form strips 314 bytes (28 spans)
-#: and this form 179 (23 spans), and the whole 135-byte difference is five
-#: spans that are not tags: `<state.db>`, `<session_id>`, `<lookup_key>`,
-#: `<message shown to user when blocked>` and `<CustomMessage, "customType"|…>`.
-#: This form cannot cross a `<` or a `>`; its attribute part consumes at most
-#: ONE whitespace character — which MAY be a newline, and only immediately after
-#: the tag name (`\s` matches `\n`) — so a match is bounded by a tag shape, not
-#: by the line. That bound, not prose preservation, is the property it buys.
-#: (Measured: `re.fullmatch(_TAG, "<a\nb>")` matches, so one LF after the tag
-#: name CAN be crossed; `<a\r\nb>` does not. To forbid the newline entirely,
-#: narrow `\s` to `[ \t]` — a behaviour change, deliberately not made here.)
-_TAG = r"</?[A-Za-z][A-Za-z0-9-]*(\s[^<>\n]*)?/?>"
+#: forms strip them. Over this record `<[^>]+>` strips 314 bytes (28 spans) and
+#: `_TAG` 179 (23 spans), and the whole 135-byte difference is five spans that
+#: are not tags: `<state.db>`, `<session_id>`, `<lookup_key>`, `<message shown to
+#: user when blocked>` and `<CustomMessage, "customType"|…>`.
+#: `_TAG` cannot cross a `<`, a `>`, or a NEWLINE at all (measured:
+#: `re.fullmatch(_TAG, "<a\nb>")` and `"<a\r\nb>"` are both non-matches, since an
+#: attribute must be an ASSIGNMENT). That bound, not prose preservation, is the
+#: property it buys.
+_TAG = rf"</?[A-Za-z][A-Za-z0-9-]*{_TAG_ATTRS_ASSIGNED}\s*/?>"
+#: A strip that ADMITS bare (boolean) attributes, e.g. `<span hidden>`. Kept as a
+#: second absence rendering, never as the only one — see `_renderings`.
+#: ⚠️ Its bound is NOT `_TAG`'s (r13, measured): it cannot cross a `<` or a `>`, and
+#: its attribute part consumes at most ONE whitespace character, which MAY be a
+#: newline and only immediately after the tag name — `re.fullmatch` matches
+#: `"<a\nb>"`, does not match `"<a\r\nb>"`, and
+#: `"<b\nhere is a session running in a hosted cloud agent VM >"` matches with the
+#: quoted words INSIDE the match. So it is tag-shaped, not line-bounded, and it can
+#: swallow a line. That is tolerable only because the absence leg unions it with
+#: `_TAG` and a no-strip reading: this form can never be the sole judge. To forbid
+#: the newline here too, narrow `\s` to `[ \t]` — a behaviour change, deliberately
+#: not made, and no longer load-bearing for the absence leg.
+_TAG_WITH_BARE_ATTRS = r"</?[A-Za-z][A-Za-z0-9-]*(\s[^<>\n]*)?/?>"
 
 
-def _normalised(text: str) -> str:
+def _normalised(text: str, tag_pattern: str | None = _TAG) -> str:
     """The WORDS of `text`, for BOTH arms — markup, punctuation and case gone.
+
+    `tag_pattern=None` strips NO markup (the third absence rendering).
 
     HTML tags are removed and HTML entities decoded BEFORE the word collapse, so
     `&nbsp;`, `&#32;`, `&mdash;`, `<span>` and `<b>` — which RENDER as the same
@@ -154,11 +195,45 @@ def _normalised(text: str) -> str:
     `\\u0441loud` renders as `cloud` but needs a confusables table, which is out of
     proportion here and is a recorded residual.
 
-    One function for both arms, so they cannot drift apart — the failure this
-    file exists to catch, one level up.
+    One function for every arm, so they cannot drift apart — the failure this
+    file exists to catch, one level up. The PRESENCE arms read it once; the
+    ABSENCE arm reads it through `_renderings`, which applies it to each of three
+    tag strips and takes the union.
     """
-    text = re.sub(_TAG, " ", text)
+    if tag_pattern is not None:
+        text = re.sub(tag_pattern, " ", text)
     return re.sub(r"[\W_]+", " ", html.unescape(text).lower()).strip()
+
+
+def _renderings(text: str) -> list[str]:
+    """Every render-identical reading of `text` — the ABSENCE leg judges ALL of them.
+
+    ⚠️ No single tag strip is complete, and each one is fail-OPEN in the opposite
+    direction from the other (both measured, review r12 P3 #1):
+
+      * a strip admitting BARE attributes reads prose as a tag — `if a<b and … c>d`
+        loses everything between the comparison signs, banned phrase included;
+      * `_TAG`, whose attributes must be ASSIGNED, keeps that prose but leaves a
+        bare-attribute tag's words INTERPOSED, so
+        `A <span hidden>session running in a cloud agent VM` is never adjacent to
+        the words that make it the banned phrase.
+
+    The UNION closes both: a phrase counts as present if ANY reading shows it, so
+    no single strip can hide it. The third reading strips nothing at all, which
+    covers prose that forges a tag no pattern anticipates (a cost of 3
+    normalisations over a 50 KB record — the pin runs 3 tests).
+    """
+    return [_normalised(text, p) for p in (_TAG, _TAG_WITH_BARE_ATTRS, None)]
+
+
+def _absent(fragment: str, text: str) -> bool:
+    """True only if `fragment` survives in NO rendering — the fail-closed question.
+
+    `any`, not `all`: the absence leg must RED if any reading reveals the words,
+    which is why over-stripping one rendering can no longer manufacture a PASS.
+    """
+    needle = _normalised(fragment)
+    return not any(needle in rendering for rendering in _renderings(text))
 
 
 def _install_cursor_stdout(tmp_path) -> str:
@@ -208,8 +283,9 @@ def test_the_record_quotes_the_HOSTED_scoped_fragment():
     # (`&nbsp;`, `&#32;`, `&mdash;`, `<span>`, `<b>`). Matching on the word sequence
     # closes the spelling class instead of enumerating it; the docstring's residual
     # list names what it still cannot see (paraphrase, homoglyph) and the two places
-    # it is deliberately over-broad.
-    assert _normalised(_UNSCOPED_FRAGMENT) not in normalised_doc, (
+    # it is deliberately over-broad. The assert goes through `_absent`, not a single
+    # rendering, so a tag strip that swallows prose cannot hide the words either.
+    assert _absent(_UNSCOPED_FRAGMENT, doc), (
         "the record quotes the unscoped universal as though it were the message")
 
 
@@ -228,7 +304,54 @@ def test_a_stray_angle_bracket_cannot_swallow_the_quoted_sentence():
               '"a session running in a hosted cloud agent VM" and <b>bold</b>.')
     assert _normalised(_SHIPPED_FRAGMENT) in _normalised(sample), (
         "a stray `<` in ordinary prose must not eat the quoted sentence")
-    assert _normalised(_UNSCOPED_FRAGMENT) not in _normalised(sample)
+    # …and the banned words must be SEEN when they sit inside the region a forged
+    # tag would delete. Before review r12 P3 #2 this assert ran on a sample holding
+    # only the hosted variant, so it could not fail under any mutant; placing the
+    # unscoped phrase between the `<` and the `>` gives it the tooth the loose
+    # strips (`<[^>]+>` and this file's own permissive form) actually bite on.
+    prose_forgery = ('a hook count of < 5 is suspect — "a session running in a cloud agent VM" '
+                     'would be banned. §3 quotes '
+                     '"a session running in a hosted cloud agent VM" and <b>bold</b>.')
+    assert not _absent(_UNSCOPED_FRAGMENT, prose_forgery), (
+        "a forged tag must not swallow the banned phrase out of the absence leg")
+    # …and the PRESENCE leg reads ONE strip (`_TAG`), so the same forgery must not
+    # delete the quote there either. This is what makes `_TAG`'s ASSIGNED-attribute
+    # narrowing load-bearing rather than decorative: the absence union survives the
+    # permissive form, this assert does not.
+    forged_around_the_quote = ('if a<b and §3 says "a session running in a hosted cloud agent VM" '
+                               'c>d, the quote must survive.')
+    assert _normalised(_SHIPPED_FRAGMENT) in _normalised(forged_around_the_quote), (
+        "a prose `a<b … c>d` must not be read as a tag and eat the quote")
+
+
+def test_no_single_tag_strip_can_hide_the_unscoped_phrase():
+    """Review r12 P3 #1 — the attribute group, in BOTH fail-open directions.
+
+    The absence leg takes the union (`_renderings`) precisely because each single
+    strip hides the banned phrase in the case the other catches. Both samples are
+    measured fail-opens of a single strip, and each is the other's mutant:
+
+      * PROSE FORGERY — `if a<b and … c>d` is an ordinary sentence, but a strip
+        admitting bare attributes reads `<b and … c>` as a tag and deletes the
+        banned phrase between the comparison signs → false PASS;
+      * BARE ATTRIBUTE — `A <span hidden>session running in a cloud agent VM`
+        renders as the banned sentence, and `_TAG` alone leaves `<span hidden>`
+        interposed, so the words are never adjacent → false PASS.
+
+    Mutation: make `_renderings` return `[_normalised(text)]` (the `_TAG` reading
+    only) → the bare-attribute sample REDs; return only the bare-attribute reading
+    → the prose sample REDs. Dropping the no-strip reading too REDs the prose arm
+    of the stray-`<` test above."""
+    prose_forgery = ('if a<b and the record says "a session running in a cloud agent VM" c>d, '
+                     'the pin false-PASSes.')
+    bare_attribute = ('A <span hidden>session running in a cloud agent VM</span> is still the '
+                      'unscoped universal, rendered.')
+    tag_wrapped = 'A <span class="x">session</span> running in a cloud agent VM, split by markup.'
+    for name, sample in (("prose-forgery", prose_forgery),
+                         ("bare-attribute", bare_attribute),
+                         ("tag-wrapped", tag_wrapped)):
+        assert not _absent(_UNSCOPED_FRAGMENT, sample), (
+            f"the absence leg must see the unscoped phrase in the {name} sample")
 
 
 def test_the_shipped_message_carries_the_fragment_the_record_quotes(tmp_path):
