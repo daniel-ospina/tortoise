@@ -842,6 +842,16 @@ class TestTheUpdateArmOfThePredicate:
             refuse_malformed_money({field: None}, on_update=True)
 
 
+#: The event type each ``EventAPI`` door journals — the seam test below asserts
+#: the door's OWN record is absent. (Before #11836 this string was hardcoded to
+#: ``ObjectRegistered`` for every door, so it was vacuous on the other two.)
+_SEAM_DOOR_EVENT = {
+    "add_object": "ObjectRegistered",
+    "add_event": "EventRecorded",
+    "add_point": "PointAdded",
+}
+
+
 class TestNonSanitizedSeams:
     """#2782 review Findings 2 and 3 — the two LIVE props writers that bypass
     ``_sanitize_props``, so the SDK intake's gate did not cover them.
@@ -852,9 +862,15 @@ class TestNonSanitizedSeams:
     ``docs_miner``, ``mining`` and the CLI all write through. Finding 3
     (``create_source``) reported ``ok`` while the closed ``:Source`` surface
     dropped the amount — and journalled it anyway.
+
+    #11836 review Finding 1: gating this seam at the ``_emit`` ENVELOPE covered
+    only the doors that splat their props at the top level (``add_object``,
+    ``add_event``). The Point door — the one the extractor writes through —
+    passes its RECORD under ``point=``, so the envelope gate could not see the
+    money keys and ``add_point(..., amountMinor=…)`` landed.
     """
 
-    @pytest.mark.parametrize("door", ["add_object", "add_event"])
+    @pytest.mark.parametrize("door", ["add_object", "add_event", "add_point"])
     def test_the_pipeline_seam_cannot_land_a_malformed_money_value(
             self, journaled_sdk, tmp_path, door):
         from tortoise.api import EventAPI
@@ -865,18 +881,80 @@ class TestNonSanitizedSeams:
         api = EventAPI(EventLog(str(api_log)), initiated_by="extractor",
                        projection=sdk._get_proj())
         writer = getattr(api, door)
-        payload = (("Tranche api", "venture:tranche")
-                   if door == "add_object" else ("evt-1", "venture:tranche"))
+        # `add_point` takes (content, provenance, **fields) — its money bag
+        # lands on the RECORD it nests under `point=`, not on the envelope.
+        payload = {
+            "add_object": ("Tranche api", "venture:tranche"),
+            "add_event": ("evt-1", "venture:tranche"),
+            "add_point": ("Tranche api point", {"run_id": "run-api"}),
+        }[door]
         with pytest.raises(ValueError, match="write boundary"):
             writer(*payload, amountMinor=COMMITTED_MINOR)  # no currency
+        # ⚠️ whole-graph count, safe only because `journaled_sdk` mints a fresh
+        # DB per test — a session-scoped fixture would make this order-dependent.
         rows = sdk._get_proj().g.query(
             "MATCH (n) WHERE n.amountMinor IS NOT NULL RETURN count(n)"
         ).result_set
         assert rows[0][0] == 0, "the seam landed a malformed money value"
         # the refusal runs BEFORE the append (the seam's commit point), so a
         # refused write leaves no record for a replay to fold
-        assert not api_log.exists() or "ObjectRegistered" not in \
+        assert not api_log.exists() or _SEAM_DOOR_EVENT[door] not in \
             api_log.read_text()
+
+    def test_the_point_records_own_money_bag_is_gated(self, journaled_sdk,
+                                                     tmp_path):
+        """#11836 Finding 1, the discriminating row: the same malformed shape
+        that the top-level doors refuse must be refused through ``add_point``,
+        and the refusal must name the money field (not just any ValueError)."""
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+
+        sdk, _events = journaled_sdk
+        api = EventAPI(EventLog(str(tmp_path / "api-events-point.jsonl")),
+                       initiated_by="extractor", projection=sdk._get_proj())
+        with pytest.raises(ValueError) as exc:
+            api.add_point("Tranche point record", {"run_id": "run-1"},
+                          amountMinor=COMMITTED_MINOR)  # no currency
+        assert "write boundary" in str(exc.value), str(exc.value)
+        assert CURRENCY in str(exc.value), str(exc.value)
+        assert sdk._get_proj().g.query(
+            "MATCH (n) WHERE n.amountMinor IS NOT NULL RETURN count(n)"
+        ).result_set[0][0] == 0
+
+    def test_a_wellformed_value_on_the_point_record_still_lands(
+            self, journaled_sdk, tmp_path):
+        """The walk widened WHERE the gate looks, never WHAT it refuses: the
+        extractor's real money producer (a whole value on the Point record)
+        still lands and still sums."""
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+
+        sdk, _events = journaled_sdk
+        api = EventAPI(EventLog(str(tmp_path / "api-events-ok.jsonl")),
+                       initiated_by="extractor", projection=sdk._get_proj())
+        api.add_point("Tranche point paid", {"run_id": "run-2"},
+                      **money_props(COMMITTED_MINOR, "BRL",
+                                    minor_unit_exponent=2))
+        p = _point_row(sdk, "Tranche point paid")
+        assert p[AMOUNT_MINOR] == COMMITTED_MINOR
+        assert p[CURRENCY] == "BRL"
+        assert _whole_sum(sdk) == {"BRL": COMMITTED_MINOR}
+
+    def test_a_lone_exponent_is_still_a_no_op_through_the_seam(
+            self, journaled_sdk, tmp_path):
+        """The seam is a CREATE-shaped door, so the lone-sibling no-op the SDK
+        create doors keep (`TestWriteBoundary::
+        test_a_non_money_prop_is_not_collateral_damage`) holds here too — the
+        walk did not widen the gate's ENGAGEMENT rule."""
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+
+        sdk, _events = journaled_sdk
+        api = EventAPI(EventLog(str(tmp_path / "api-events-sibling.jsonl")),
+                       initiated_by="extractor", projection=sdk._get_proj())
+        api.add_point("Bare exponent point", {"run_id": "run-3"},
+                      minorUnitExponent=2)
+        assert _whole_sum(sdk) == {}  # no amount, no currency → not money
 
     def test_the_pipeline_seam_still_takes_a_wellformed_value(self,
                                                               journaled_sdk,

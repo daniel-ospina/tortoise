@@ -49,8 +49,11 @@ stale — #4282 closed without it):
     props intake (``_sanitize_props``: every create/update props door, with
     the update doors widening it to a lone exponent and an explicit null) and
     from the pipeline seam that bypasses that intake
-    (``api.EventAPI._emit``), so a value the reader would refuse cannot
-    become durable state through either live write path. Two bounds are
+    (``api.EventAPI._emit``, through :func:`refuse_malformed_money_in_payload`
+    — that seam journals a RECORD, so the gate walks the payload rather than
+    reading one flat bag; ``add_point`` nests its money under ``point=``), so a
+    value the reader would refuse cannot become durable state through either
+    live write path. Two bounds are
     deliberately NOT covered and are stated rather than implied away: a
     ``:Source`` cannot carry money at all (its closed property surface,
     #3998, drops it — so ``create_source`` refuses a *malformed* money bag
@@ -85,6 +88,7 @@ __all__ = [
     "ratio_meets",
     "read_money_value",
     "refuse_malformed_money",
+    "refuse_malformed_money_in_payload",
     "total_minor",
 ]
 
@@ -103,6 +107,11 @@ MONEY_VALUE_FIELDS: tuple[str, ...] = (
 #: siblings that carry no amount, so they never engage the write gate on their
 #: own (a bare ``asOf`` belongs to ordinary dated metadata).
 _MONEY_GROUP: tuple[str, ...] = (AMOUNT_MINOR, CURRENCY, MINOR_UNIT_EXPONENT)
+
+#: Depth bound for :func:`refuse_malformed_money_in_payload`. Journal payloads
+#: nest two or three levels (``PointAdded.point``, ``EventRecorded.uses[]``);
+#: the bound only stops a self-referential structure from walking forever.
+_MONEY_PAYLOAD_MAX_DEPTH = 8
 
 #: ISO 4217 permits 0, 1, 2, 3 and (CLF/UYW) 4 minor-unit digits.
 _MIN_EXPONENT = 0
@@ -377,6 +386,65 @@ def refuse_malformed_money(props: Mapping[str, Any], *,
             "A value the reader refuses must not become durable state "
             "(#2782, design OD2/OD4)."
         ) from exc
+
+
+def refuse_malformed_money_in_payload(payload, *, door: str = "") -> None:
+    """Refuse a malformed money value ANYWHERE in a journal RECORD (#2782).
+
+    The journal-first seam (``api.EventAPI._emit``) does not hand its props in
+    one flat bag the way the SDK doors do: it passes the RECORD it is about to
+    journal, and WHERE the money keys sit depends on the door —
+    ``ObjectRegistered`` / ``EventRecorded`` splat them at the top level, but
+    ``PointAdded`` nests the whole record under ``point=`` (``add_point`` builds
+    ``p`` and emits ``point=p``); ``EventRecorded`` also carries ``uses[]``
+    items. A gate that read only the top level was measured INERT on the Point
+    door — the door ``extractor`` / ``ingest`` / ``docs_miner`` / ``mining`` /
+    the CLI all write through — so ``add_point(..., amountMinor=…)`` landed
+    ``{amountMinor: 25_000_000, currency: None}`` and made :func:`total_minor`
+    refuse every well-formed amount beside it (#11836 review Finding 1).
+
+    The walk is the same shape as ``pack_state.kind_spellings_in_payload``, and
+    for the same reason the sibling kind gate states: a top-level-only gate
+    re-opens its hole one nesting level down.
+
+    ⚠️ WHAT IT DOES **NOT** WIDEN — the ENGAGEMENT rule. Each mapping the walk
+    reaches is judged by :func:`refuse_malformed_money` (and so by
+    :func:`read_money_value`, the reader's own rule), so a nested mapping is
+    gated only if it carries an ``amountMinor``/``currency`` at all, and it is
+    judged with ``on_update=False``: every record this seam journals is a full
+    snapshot (a create-shaped write), so a lone ``minorUnitExponent`` on a
+    record stays the no-op it is on the SDK create doors. Widening engagement
+    here would refuse legitimate writes — that is what the review's
+    "presence-based" candidate was withdrawn for.
+
+    ⚠️ FAILURE DIRECTION — REFUSE, not admit, for the family it matches: a
+    nested mapping that carries a non-null ``amountMinor``/``currency`` for a
+    non-money purpose would be refused too, because the bag alone cannot say
+    which it is. That is the correct direction for a write gate — the
+    alternative (an allowlist of which nesting carries a real value) is a
+    second copy of the fold's knowledge that goes stale silently, and a stale
+    ALLOWLIST fails OPEN. The refusal names the field and the door, so a writer
+    that hits it can act on it.
+    """
+    seen: set[int] = set()
+    stack: list[tuple[object, int]] = [(payload, 0)]
+    while stack:
+        node, depth = stack.pop()
+        if depth > _MONEY_PAYLOAD_MAX_DEPTH:
+            continue
+        if isinstance(node, Mapping):
+            if id(node) in seen:  # a self-referential payload cannot loop us
+                continue
+            seen.add(id(node))
+            if any(key in node for key in _MONEY_GROUP):
+                refuse_malformed_money(node, door=door)
+            stack.extend(
+                (value, depth + 1) for value in node.values()
+                if isinstance(value, (Mapping, list, tuple)))
+        elif isinstance(node, (list, tuple)):
+            stack.extend(
+                (item, depth + 1) for item in node
+                if isinstance(item, (Mapping, list, tuple)))
 
 
 def total_minor(records: Iterable[Mapping[str, Any]]) -> dict[str, int]:

@@ -21,7 +21,7 @@ from .kind_fallbacks import named_kind
 
 # #2782: the money value's WRITE gate, at the one seam that bypasses
 # `_sanitize_props`. `money` imports only `numeric_domain` (no cycle).
-from .money import refuse_malformed_money
+from .money import refuse_malformed_money_in_payload
 
 # #7951 §17.1: the live-write scope the journal-first doors open around the fold.
 from .projection import _live_write_scope, fold
@@ -238,7 +238,21 @@ class EventAPI:
         # directly and stays ungated, because the journal is the RECONSTRUCTION
         # SOURCE — refusing at replay would make an already-committed record
         # unfoldable, which is strictly worse than reproducing it.
-        refuse_malformed_money(event, door=f"EventAPI.{type_}")
+        #
+        # #11836 review Finding 1 (measured, fail-open): a gate over the ENVELOPE
+        # only was INERT on the Point door. Two of the seam's doors do not splat
+        # their props at the top level — `add_point` builds `p` and emits
+        # `point=p`, `add_operator` nests its record the same way — so
+        # `add_point(..., amountMinor=25_000_000)` was ACCEPTED and wrote
+        # `{amountMinor: 25000000, currency: None}` durably, which is the exact
+        # shape this gate exists to refuse. The sibling kind gate two calls up
+        # (`_refuse_unapproved_kinds` → `kind_spellings_in_payload`) already
+        # states the rule: a gate that reads only the top level re-opens the
+        # hole one nesting level down, so it WALKS the payload. This does the
+        # same over the money group — which is why the seam's "gates the doors
+        # it has today AND a door added tomorrow" argument now holds for the
+        # record-shaped doors too.
+        refuse_malformed_money_in_payload(event, door=f"EventAPI.{type_}")
         # #9190: the append REPORTS the record's journal position, and that
         # number is the record's `journal_event.seq`. Dropping it here is what
         # kept layer 1 empty on live writes (the row was deferred with a
