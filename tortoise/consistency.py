@@ -380,6 +380,16 @@ _UNCARRIED_TAGS_UNWRITABLE = (
     "string, null inside an array, map/bytes/set) and an int outside INT64 is "
     "clamped or refused (`_store_holds_prop_value`)"
 )
+# #11239: the same predicate for the JSON-RECORD props, with the reason naming
+# the right prop — the `tags` text would tell a reader the wrong thing about a
+# `mentions` loss. Judged on the writer's OUTPUT (the encoded scalar), which is
+# what the store actually receives.
+_UNCARRIED_JSON_RECORD_UNWRITABLE = (
+    "a `mentions` record the store cannot hold as stated — the `#7369` "
+    "transport gate nulls what `_value_ok` refuses (a NUL/surrogate string, a "
+    "null inside an array), so the encoded scalar never lands even though the "
+    "payload states the record (`_store_holds_prop_value`)"
+)
 # ⚠️ BOUND, stated rather than implied, on the `tags` branch that reads the
 # reason above (#8317 review round 4):
 #   * an `_uncarried` key is skipped on BOTH sides (journal AND graph) and left
@@ -766,9 +776,24 @@ def _uncarried(journal_by_id: dict) -> dict[str, dict[str, str]]:
                     # testing the SHAPE alone reports such a value as carried
                     # while nothing reaches the node (review P1 on PR #11795).
                     if not _store_holds_prop_value(v):
-                        found[k] = _UNCARRIED_TAGS_UNWRITABLE
+                        found[k] = _UNCARRIED_JSON_RECORD_UNWRITABLE
                     continue
                 if isinstance(v, (list, tuple)):
+                    # The LIST spelling must be judged on the writer's OUTPUT,
+                    # not on the payload type: the store holds
+                    # `encode_json_record_props(v)`, so a record whose encoded
+                    # scalar the store cannot carry (a lone surrogate in a
+                    # `surface`) is exactly as uncarried as its `str` spelling —
+                    # measured: the fold classifies it `"null"` while this arm
+                    # called it carried, and the comparison then redded a
+                    # one-sided divergence whose advice reproduced it (review S1
+                    # on PR #11795). Same predicate, both spellings.
+                    _view = {k: v}
+                    encode_json_record_props(_view)
+                    _encoded = _view.get(k)
+                    if _encoded is not None and not _store_holds_prop_value(
+                            _encoded):
+                        found[k] = _UNCARRIED_JSON_RECORD_UNWRITABLE
                     continue
                 found[k] = _UNCARRIED_NON_PERSISTABLE
                 continue
