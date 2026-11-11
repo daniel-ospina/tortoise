@@ -3883,6 +3883,11 @@ def recover_from_log(events_dir: str, projection) -> dict:
         pack_selection_gap = int(counts.get("pack_selection_gap") or 0)
         if pack_selection_gap:
             result["pack_selection_gap"] = pack_selection_gap
+            # The shape discriminator travels with the count, so no consumer has
+            # to re-infer it from `expected and not restored` (which cannot tell
+            # an absence from a DIFFERENT live marker).
+            if counts.get("pack_selection_conflict"):
+                result["pack_selection_conflict"] = True
             if counts.get("pack_selection_verified") is False:
                 result["reason"] += (
                     "; WARNING: the :PackSelection post-restore verification "
@@ -3890,6 +3895,20 @@ def recover_from_log(events_dir: str, projection) -> dict:
                     "UNVERIFIED (not confirmed intact, and not observed "
                     "gone) — the graph may now read as UNCONFIGURED and "
                     "re-admit a pack an admin removed — see #9752")
+            elif counts.get("pack_selection_conflict"):
+                # A DIFFERENT marker is present: the graph IS configured, and its
+                # marker may be NEWER than the captured one, so this is a
+                # reported CONFLICT rather than an observed loss — and the
+                # "re-pin" remedy of the arm below would overwrite that newer
+                # decision (the projection's own ERROR log says the same).
+                result["reason"] += (
+                    "; WARNING: a DIFFERENT :PackSelection marker is present in "
+                    "the rebuilt graph — the captured marker was NOT applied "
+                    "(a concurrent pack-set write landed between the wipe and "
+                    "the restore). This is a reported CONFLICT, not a loss: the "
+                    "graph IS configured and may hold a NEWER pack set, so do "
+                    "not re-pin over it without checking which is intended — "
+                    "see the rebuild ERROR log (#9752)")
             elif (counts.get("pack_selection_expected")
                   and not counts.get("pack_selection_restored")):
                 result["reason"] += (

@@ -18950,6 +18950,17 @@ class FalkorProjection(
                 "pack_selection_restore_failures":
                     pack_selection_restore_failures,
                 "pack_selection_gap": pack_selection_gap,
+                # The shape discriminator (review round 3): `pack_selection_gap`
+                # is non-zero for a true absence, a DIFFERENT live marker and an
+                # unverified read alike. A consumer that asserts the absence
+                # consequence (`reads as UNCONFIGURED`, `revision is 0`, `a
+                # removed pack is back`) on the CONFLICT shape is claiming a
+                # loss nobody observed over a graph that IS configured and may
+                # hold a NEWER decision — so the conflict is reported as its own
+                # flag rather than being inferred from `expected and not
+                # restored` downstream.
+                "pack_selection_conflict": bool(
+                    pack_selection_missing and live_markers),
                 "pack_selection_state_unknown": pack_selection_unknown}
 
     def rebuild_from_record(self, view, *, confirm_destructive: bool = False,
