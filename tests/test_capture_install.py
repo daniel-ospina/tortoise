@@ -3019,8 +3019,18 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_cloud_agent_limit
     # such as "the MCP pull seam reaches a cloud agent" (the message recommends
     # that surface). That is friction on correct prose — one reword — and it is
     # kept on purpose, because the narrower guard (matching only this
-    # installer's seam names) would let a RE-WORDED universal through, and that
-    # is the fail-open direction: it would ship the over-claim this PR removes.
+    # installer's seam names) would let a re-worded universal through.
+    # ⛔ BUT THE LIST IS ENUMERATED, SO IT IS NOT COMPLETE — this comment used to
+    # imply breadth solved re-wording, and review r9 measured that it does not:
+    # appending "A Cursor cloud agent runs no Tortoise hook at all." to the
+    # message stayed GREEN. "runs no Tortoise hook" is now listed because it is
+    # the wording the RECORD itself uses (platform-seams.md: "a hosted Cursor
+    # cloud agent runs no Tortoise hook at all"), so it is the phrasing a lane
+    # would actually reuse — NOT because the list became complete. Any other
+    # unlisted re-wording is still a residual, and the structural form of this
+    # guard (every remaining `cloud agent` mention in the rendered message must
+    # carry a hosted/self-hosted qualifier) is #11812's, deliberately not added
+    # here: a structural leg that reds on accurate prose is the friction above.
     # ⛔ The residual is recorded, not silently trusted: #11807 carries it, and
     # review rounds 6/7 both declined to hold the merge for it. Measured at r8:
     # injecting "The MCP pull seam reaches a cloud agent." REDs, and re-appending
@@ -3036,6 +3046,9 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_cloud_agent_limit
     assert "seam reaches a cloud agent" not in r.stdout, r.stdout
     assert "gets a Tortoise hook" not in r.stdout, r.stdout
     assert "no cloud agent session" not in r.stdout, r.stdout
+    # review r9 (P3): the record's own phrasing, and therefore the one a lane
+    # would reuse. Measured GREEN before this line existed.
+    assert "runs no Tortoise hook" not in r.stdout, r.stdout
     # …and the SECOND surface that states this claim -- `install --list` -- was
     # pinned by nothing at all, so a revert there was silent.
     listing = _run(("install", "--list"), env, root)
