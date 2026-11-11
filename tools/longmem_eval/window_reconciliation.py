@@ -52,8 +52,16 @@ to ``assemble_context``), ``context_item_cap`` (C1's item cap) and
 ``max_context_tokens`` (the 8000-token assembly budget). All three are
 fingerprinted/recorded by the caller, so the raised window a variant was
 produced under is reconstructable. Note the raise does NOT deepen the
-retrieval pool (``DEFAULT_POOL_SIZE`` = 120 > any raised ``top_k``): it
-is a WINDOW change, which is exactly the variable P3 measures.
+retrieval pool: it is a WINDOW change, which is exactly the variable P3
+measures. ⛔ That holds at the shipped defaults (base ``top_k`` 20 → 40,
+pool 120) but NOT for every configuration — the reader window is
+``pool[:effective_top_k]``, so the effective raise is
+``min(raised_top_k, pool_depth)`` and it saturates once ``2 × base_top_k``
+exceeds ``DEFAULT_POOL_SIZE`` (120, i.e. above a base of 60) or when
+``TORTOISE_LME_POOL_SIZE`` is lowered. The recorded triple is the REQUESTED
+window; above that boundary the pool, not the raise, is the binding
+constraint — read a null ``reader_surface@k`` delta there as "this dimension
+was clipped", not as "the window is not the cause".
 
 ## The per-question budget cap
 
