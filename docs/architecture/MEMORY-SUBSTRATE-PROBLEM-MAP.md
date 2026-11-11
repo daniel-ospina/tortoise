@@ -67,7 +67,7 @@ what this map trusts.
 
 The other direction is not a tracker error and is deliberately NOT in that table:
 `#2684` is **OPEN** in the tracker and **OPEN** here, and that verdict is right
-in both cases — what an OPEN does not tell you is how much landed. `#2684`'s
+in both places — what an OPEN does not tell you is how much landed. `#2684`'s
 mechanism landed (`#8659`'s stamp, `#8966`'s address, pinned by
 `tests/test_extractor_v2.py::TestValueVerbSpan2684`) while the slice its title
 names has not run. So an OPEN is a claim that needs its own anchor+pin, exactly
@@ -488,8 +488,13 @@ rounding:**
   the abstract and the `docs/00_index.md` headline moved with it (21/5 → 22/4).
   The other four survivors were re-measured in the same pass and are
   **unchanged**: `#2787` (`grep -n 'bucket' tortoise/pack_registry.py` still
-  returns no relation arm, and no commit since 2026-11-06 mentions it), `#2730`
-  (no commit since 2026-11-06 touches entity attachment), and `#2684` / `#2696`
+  returns no relation arm; aside from this map's own re-cut, no commit since
+  2026-11-06 mentions it), `#2730` (the tracker says CLOSED **COMPLETED** and
+  this page keeps it OPEN because the mechanism is unbuilt — §1's table; nothing
+  since 2026-11-06 changes that: the honorific/suffix folding §8 records as
+  missing is still absent (`grep -ci honorific tortoise/extractor_v2.py` → 0), and
+  the S3 disambiguation work that landed (`397a2d34b4`, `556e581ceb`) changes how
+  an unresolved identity is *held*), and `#2684` / `#2696`
   OPEN in the tracker.
 
   ⛔ **The guard cannot see this class of drift at all**, and that is why it is

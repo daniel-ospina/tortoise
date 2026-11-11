@@ -191,7 +191,7 @@ _WS_COUNT = re.compile(
     r"^\|\s*(WS-[A-Z])\b[^|]*\|[^|]*\*\*(\d+) of (\d+) (?:rows )?fixed\*\*",
     re.MULTILINE,
 )
-#: The page's opening abstract: "**21 fixed and 5 open**". It lives in the body's
+#: The page's opening abstract: "**22 fixed and 4 open**". It lives in the body's
 #: opening blockquote, NOT in the frontmatter (whose keys are `title`,
 #: `measured_at_commit`/`measured_at` and their siblings — it carries no
 #: headline), so it is read from the text BEFORE `## 1.` — and an abstract that
@@ -633,12 +633,12 @@ def check_workstreams(text: str, rows: list[Row]) -> list[str]:
         criterion this guard cannot evaluate — it refuses to read the tracker,
         which is what that census is about;
       * the issue numbers NARRATED inside §2's cells (`(#2787 OPEN: …)`,
-        `**#2730, #2782 and #2684 remain open**`, `**#2696 (epic) remains open**`)
+        `**#2730 and #2684 remain open**`, `**#2696 (epic) remains open**`)
         — deciding "which rows does this sentence call open" means reading prose,
         and a guard that parsed those sentences would be a spelling trap: measured
         at the post-merge head, flipping `#2684` and correcting the counts it DOES
         read leaves that cell stale and every check green;
-      * §8's sentence ("Five rows, and four of them are defects") and §10's
+      * §8's sentence ("Four rows, and three of them are defects") and §10's
         census prose, whose second clause additionally needs to know which row is
         an epic — the tracker half this guard refuses to read.
 
