@@ -244,11 +244,20 @@ def migrate(force: bool = False) -> dict:
             # leftover pre-wipe sidecar beside the target (a previous partial
             # migration into the same file) can say `state_unknown` on its own,
             # and that answer is not overridden — it is the same verdict.
-            if rebuild_counts.get("pack_selection_verified") and not (
-                rebuild_counts.get("pack_selection_gap")
-                or rebuild_counts.get("pack_selection_state_unknown")
-                or rebuild_counts.get("pack_selection_conflict")
-            ):
+            #
+            # `not pack_selection_expected` makes this the EXACT empty-capture
+            # signature, so the override retires itself: the day #11866 gives
+            # this route a capture source that is not `self.g`, `expected`
+            # becomes non-zero and a genuinely verified carry is reported as one,
+            # instead of being relabelled UNKNOWN by a rule that only ever
+            # described an empty target.
+            if (rebuild_counts.get("pack_selection_verified")
+                    and not rebuild_counts.get("pack_selection_expected")
+                    and not (
+                        rebuild_counts.get("pack_selection_gap")
+                        or rebuild_counts.get("pack_selection_state_unknown")
+                        or rebuild_counts.get("pack_selection_conflict")
+                    )):
                 rebuild_counts = dict(rebuild_counts)
                 rebuild_counts["pack_selection_state_unknown"] = True
                 rebuild_counts["pack_selection_verified"] = False

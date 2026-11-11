@@ -17492,11 +17492,22 @@ class FalkorProjection(
                 )
             except Exception as e:
                 pack_selection_restore_failures += 1
+                # ⛔ This is an ATTEMPT report, so it states only what the attempt
+                # observed: the write raised. It must NOT assert the absence
+                # consequence here — a raise can happen AFTER the write landed
+                # (that shape is handled below as "treated as transient, not as
+                # loss"), and two contradictory claims on one run is exactly the
+                # class the `_replay_log` leg above was corrected for. The
+                # CONSIDERED verdict belongs to the post-restore verification,
+                # which reads the marker back; the absence branch there states the
+                # consequence, and only when it observed the absence.
                 logger.warning(
-                    "rebuild: :PackSelection marker restore failed (%s: %s) — "
-                    "the pre-wipe marker was NOT restored, so the graph's "
-                    "packs read as UNCONFIGURED (the self-heal and the "
-                    "records/union arms become live again) and a pack an "
+                    "rebuild: :PackSelection marker restore attempt raised "
+                    "(%s: %s) — the write did not complete, so the pre-wipe "
+                    "marker is not confirmed restored. The post-restore "
+                    "verification below decides the outcome; if the marker is "
+                    "absent the graph reads as UNCONFIGURED (the self-heal and "
+                    "the records/union arms become live again) and a pack an "
                     "admin had REMOVED can be re-admitted with its `revision` "
                     "reset (#9752)",
                     type(e).__name__, e,

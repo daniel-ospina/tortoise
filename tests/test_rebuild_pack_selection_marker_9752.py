@@ -1373,6 +1373,36 @@ def test_migrate_route_does_not_override_a_stronger_rebuild_report(
     assert any("restore gap" in m for m in msgs), msgs
 
 
+def test_migrate_route_does_not_override_a_verified_non_empty_capture(
+        tmp_path, caplog, monkeypatch):
+    """The UNKNOWN rule RETIRES itself once the route can capture (#11866).
+
+    The override exists for one signature: an EMPTY capture reported as a clean
+    verification. The moment the capture source is fixed (#11866) `expected` is
+    non-zero and a real carry is verified — and a rule written for the empty
+    target must not relabel that success as `pre-preservation/UNKNOWN` with a
+    gap, which would print "the graph may read as UNCONFIGURED" over a marker
+    that was just restored.
+    """
+    counts = {"nodes": 1, "edges": 0, "events": 1,
+              "pack_selection_expected": 1, "pack_selection_restored": 1,
+              "pack_selection_verified": True,
+              "pack_selection_restore_failures": 0,
+              "pack_selection_gap": 0, "pack_selection_state_unknown": False,
+              "pack_selection_conflict": False}
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
+        result = _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
+
+    assert result["pack_selection_verified"] is True, (
+        "a verified, non-empty capture was relabelled UNKNOWN by a rule that "
+        "only ever described an empty target (#11866)")
+    assert result["pack_selection_state_unknown"] is False
+    assert result["pack_selection_gap"] == 0
+    msgs = [r.getMessage() for r in caplog.records]
+    assert not any(":PackSelection" in m for m in msgs), msgs
+
+
 def test_migrate_db_caller_distinguishes_the_unknown_shape(
         tmp_path, caplog, monkeypatch):
     """UNKNOWN must not be reported as an observed loss (#4641 round 5, #9752).
