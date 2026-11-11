@@ -386,6 +386,41 @@ def test_a_literal_past_the_int_str_digit_cap_reads_like_its_short_spelling():
                 short, numeric_operand(long), expected)
 
 
+def test_a_padded_hex_exponent_cannot_empty_the_batch():
+    """Cycle 30 P2: the padding axis this cycle bounded had a CRASHING sibling.
+
+    The mantissa of a hex literal is reconstructed with `int(digits, 16)`, which
+    CPython's int↔str cap exempts — but the `p` exponent is base 10 and is NOT
+    exempt. A zero-padded exponent (`p-000…149`, the same cheap padding that
+    makes any stored operand arbitrarily long) raised `ValueError` inside
+    `int()`, and `annotate_ep_batch`'s blanket handler answered `{}` for the
+    whole batch: ONE legacy row made every claim in the response read
+    `ep_state: "absent"`, `confidence_mean: null`, `measured: false` — including
+    claims genuinely measured — and any belief floor then returned nothing.
+
+    Pinned on the HELPER (the batch surface needs a live graph and the helper is
+    where the raise was), and on the shape that matters: the value must be the
+    literal's, not a discarded `None`.
+    """
+    from fractions import Fraction
+
+    from tortoise.search_engine import _exact_literal_fraction
+
+    # A padded exponent is the SAME exponent: value must be unchanged, not None.
+    assert _exact_literal_fraction("0x1p-149") == Fraction(1, 2 ** 149)
+    padded = "0x1p-" + "0" * 4400 + "149"
+    assert len(padded) > 4300, len(padded)
+    assert _exact_literal_fraction(padded) == Fraction(1, 2 ** 149), (
+        f"a {len(padded)}-character exponent of the SAME value read "
+        f"{_exact_literal_fraction(padded)!r} instead of 2**-149 — the literal "
+        "was discarded, and one such row empties the whole batch")
+    assert _exact_literal_fraction("0x1p+1") == 2
+    assert _exact_literal_fraction("0x1p+" + "0" * 4400 + "1") == 2
+    # …and a genuinely out-of-bound exponent still declines, without raising.
+    assert _exact_literal_fraction("0x1p+9999") is None
+    assert _exact_literal_fraction("0x1p+" + "9" * 4400) is None
+
+
 # ── A hex exponent the mantissa CANCELS is not an unreadable literal ──────
 
 def test_a_hex_exponent_past_the_bound_its_mantissa_cancels_is_still_read(sdk):
@@ -621,6 +656,29 @@ def test_a_hex_magnitude_past_the_bound_is_refused_before_it_is_built(
     with pytest.raises(AssertionError, match="did not trip"):
         se._exact_literal_fraction("0x1p0")
     assert built, "the spy never fired — the refusals above prove nothing"
+
+
+def test_a_zero_literal_with_an_empty_integer_part_is_still_zero():
+    """Cycle 30 P3: the trailing-zero canonicalisation can EMPTY the integer
+    part, and `Decimal("")` raises — so `.0`, `+.00`, `-.0e5` returned `None`
+    where the literal's exact value is 0.
+
+    Latent rather than live — `numeric_operand` short-circuits `val == 0.0`
+    before the string path, so no served value changed — but this helper's
+    contract is "the literal's EXACT value, or None", and 0 is a value. A later
+    caller that reaches the helper directly would otherwise read "absent" for a
+    literal that is exactly zero.
+    """
+    from fractions import Fraction
+
+    from tortoise.search_engine import _exact_literal_fraction
+
+    for spelling in (".0", ".00", "+.0", "-.0", ".0e5", ".000E-7", "+.00e+0"):
+        assert _exact_literal_fraction(spelling) == Fraction(0), (
+            f"{spelling!r} read {_exact_literal_fraction(spelling)!r} — the "
+            "canonicalisation emptied the integer part and `Decimal` raised")
+    # A dot with no digits at all is not a number, and must still decline.
+    assert _exact_literal_fraction(".") is None
 
 
 # ── The property: an absent claim is not ORDERED as a 0.5 ──────────────────
@@ -4293,6 +4351,57 @@ def test_an_overflowing_literal_is_decided_without_an_exact_parse(monkeypatch):
     for literal in ("1e10000000", "1e999999999", "-1e10000000", "1e309", "1e39"):
         assert se.numeric_operand(literal) is None, literal
     assert parsed == [], parsed
+
+
+def test_a_half_pair_reports_measured_but_absent_by_design(sdk):
+    """The documented divergence: `measured` answers "is an α column persisted",
+    `ep_state` answers "is a belief readable" (#11702 cycle 30).
+
+    A HALF pair (`posterior_alpha` with no beta — accepted by `update_point`) and
+    a `(0, 0)` pair both carry a persisted α while no belief is readable: 0.5
+    against nothing has no mean, and 0/0 has none either. The state fold names
+    both `absent` and the mean is `None`; `measured`/`has_ep` stay True because
+    they answer the OTHER question.
+
+    ⛔ **`measured` is NOT an EP receipt.** The rows below are written by a raw
+    `SET`, i.e. by a direct write with no EP pass anywhere — and they come back
+    `measured=True`. That is the point: the predicate is
+    `posterior_alpha IS NOT NULL OR (ep_alpha IS NOT NULL AND NOT
+    baseline_set)`, which asks whether an α is PERSISTED, not who wrote it. So a
+    caller that needs an EP measurement still has to ask for one; it must never
+    read this flag as proof one happened. (An earlier round of this docstring
+    said "did EP run" and "deciding whether to RE-RUN EP reads `measured`" — a
+    rule that would skip the one action able to produce a belief on exactly
+    these rows. Corrected here so the pin cannot teach it back.)
+
+    This is pinned rather than fixed so neither can be silently repurposed: a
+    consumer deciding whether a stored posterior can be reasoned from reads
+    `measured`; one deciding whether to show or order a belief reads
+    `ep_state`/`confidence_mean`. Collapsing them would either claim a belief
+    that does not exist or make EP re-run over a measurement it already holds.
+    """
+    from tortoise.why import assemble_why_blocks
+
+    proj = sdk._get_proj()
+    for label, assignment in (
+            ("half pair", "n.posterior_alpha = 0.5"),
+            ("zero pair", "n.posterior_alpha = 0.0, n.posterior_beta = 0.0")):
+        pid = sdk.create_point("statement", f"ZQMEAS {label}")["id"]
+        proj.g.query(f"MATCH (n:Point {{id:$id}}) SET {assignment}",
+                     params={"id": pid})
+
+        ep = annotate_ep_batch(proj.g, [pid])[pid]
+        why_ep = assemble_why_blocks(proj, [pid])[pid].get("ep") or {}
+        for surface, state, mean, measured in (
+                ("ep", ep.ep_state, ep.confidence_mean, ep.measured),
+                ("why", why_ep.get("ep_state"), why_ep.get("confidence_mean"),
+                 why_ep.get("measured"))):
+            assert state == EP_STATE_ABSENT, (label, surface, state)
+            assert mean is None, (label, surface, mean)
+            assert measured is True, (
+                f"{label}: {surface} dropped the documented `measured` meaning — "
+                "an α column IS persisted on this row (by a direct write, no EP "
+                "pass); only the belief is unreadable")
 
 
 def test_a_legacy_list_operand_is_absent_without_blanking_the_batch(sdk):
