@@ -490,6 +490,20 @@ def test_census_reports_chars_cap_shapes_month_and_about_presence():
     assert about["keys_seen"] == ["aboutSubjects"]
 
 
+def test_an_about_scan_collects_EVERY_key_on_a_row_not_just_the_first():
+    """FAILS IF the scan `break`s after the first `about*` key: `keys_seen` exists to say
+    WHICH keys the graph carries, and a per-row `break` published only the first one (review,
+    attestation round 3 — measured with a three-key row)."""
+    rows = [{"id": "a", "pointKind": "statement", "quote": "text", "embedding": None,
+             "createdAt": "2026-11-01T00:00:00Z",
+             "aboutSubjects": ["the kettle"], "aboutObjects": ["the pot"],
+             "aboutConcepts": []}]        # an EMPTY value is not a key the scan should claim
+    client = _Page({(True, 0): _page(rows, total=1, has_more=False)})
+    about = qp.census(client)["about_property_presence"]
+    assert about["points_with_any_about_property"] == 1
+    assert about["keys_seen"] == ["aboutObjects", "aboutSubjects"]
+
+
 def test_census_counts_an_about_property_and_says_what_it_is_not():
     """The POSITIVE arm of the `about*` scan (review finding 6): FAILS IF the scan breaks
     (a typo in the prefix, or the whole block deleted) — the negative control alone could
@@ -781,11 +795,31 @@ def test_the_artifact_names_a_commit_whose_probe_is_the_probe_that_made_it():
     head = artifact["provenance"]["head_sha"]
     if head == "unknown":
         pytest.skip("recorded from a copy with no git")
-    blob = subprocess.run(
-        ["git", "show",
-         f"{head}:docs/evidence/11739-quote-population/probes/quote_population.py"],
-        capture_output=True).stdout
-    assert hashlib.sha256(blob).hexdigest() == artifact["provenance"]["probe_sha256"]
+    try:
+        shown = subprocess.run(
+            ["git", "show",
+             f"{head}:docs/evidence/11739-quote-population/probes/quote_population.py"],
+            cwd=REPO, capture_output=True, text=True)
+    except FileNotFoundError:  # no `git` on this host at all
+        pytest.skip("`git` is not installed here, so no commit can be read")
+    if shown.returncode != 0:
+        # ⛔ CI CHECKS OUT `fetch-depth: 1` (`python-ci.yml`), which CANNOT contain an
+        # ancestor: skipping there is honest, because the premise is UNCHECKED, not
+        # disproved. A FULL clone that cannot read the sha is a different fact — the recorded
+        # `head_sha` is WRONG — and a skip would let a bad provenance value hide forever.
+        # Licensed by `git rev-parse --is-shallow-repository` itself, the repo's own
+        # precedent for exactly this checkout (`tests/test_7949_capstone_measure.py`).
+        shallow = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=REPO, capture_output=True, text=True).stdout.strip()
+        if shallow == "true":
+            pytest.skip(f"{head[:9]} is not in this clone's history — a shallow checkout "
+                        "cannot contain an ancestor, so the provenance relation is UNCHECKED "
+                        "here, not disproved (`git fetch --unshallow`).")
+        pytest.fail(f"{head[:9]} is unreadable in a FULL clone, so the recorded `head_sha` is "
+                    f"WRONG rather than merely unreachable: {shown.stderr.strip()}")
+    assert hashlib.sha256(shown.stdout.encode()).hexdigest() == \
+        artifact["provenance"]["probe_sha256"]
 
 
 def _stub_main(monkeypatch):
@@ -866,6 +900,23 @@ def test_an_endpoint_without_a_scheme_exits_three(monkeypatch, endpoint):
     with pytest.raises(SystemExit) as exc:
         client.tool("tortoise_query", {"limit": 1})
     assert exc.value.code == 3
+
+
+def test_an_unwritable_stdout_returns_two(monkeypatch):
+    """FAILS IF the `--out -` branch is unguarded: `> /dev/full` or `| head -1` raised
+    `OSError` out of `main` and exited 1 — outside the documented contract, in the same class
+    the file branch is already guarded for (review, attestation round 3)."""
+    _stub_main(monkeypatch)
+
+    class _Full:
+        def write(self, _text: str) -> int:
+            raise OSError(28, "No space left on device")
+
+        def flush(self) -> None:
+            return None
+
+    monkeypatch.setattr(qp.sys, "stdout", _Full())
+    assert qp.main(["quote_population", "--out", "-"]) == 2
 
 
 def test_page_one_without_a_total_exits_four():

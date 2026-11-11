@@ -107,8 +107,9 @@ population the composed text targets: **98.93% of embedded statements**.
    character is whitespace ends at a word boundary. **The split between those two is not measured by
    this census** (it carries min/median/max/n/at_cap, not a boundary classification; a spot check during
    authoring showed one cut point ending `…— a d`, and that spot check is not a committed artifact). The
-   flag is OFF; this is recorded so the 0.89 duplicate-similarity gate knows it will be reading text of
-   exactly 200 chars for about one Point in seven.
+   flag is OFF; this is recorded so the 0.89 duplicate-similarity gate knows it will be reading UP TO 200 chars (the
+   STORED basis — a composed text can be shorter, which is why §4 keeps the two bases apart) for
+   about one Point in seven.
 4. **Zero list-valued quotes among the 15,842 live Points.** `quote` is a declared flatten-list
    property, so a census that treated a list as empty would under-report the population — here
    `quote_shapes` publishes every class over the live population, including the zeros: `str` 15,051 (24

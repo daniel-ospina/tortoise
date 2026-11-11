@@ -585,11 +585,14 @@ def census(client: _Client, endpoint: str = "") -> dict:
         embedded_non_empty += bool(has_vector and non_empty)
         if non_empty:
             chars_all.append(length)
-        for key, value in row.items():
-            if key.startswith("about") and value not in (None, "", []):
-                about_prop += 1
-                about_keys.add(key)
-                break
+        keys_here = [k for k, v in row.items()
+                     if k.startswith("about") and v not in (None, "", [])]
+        if keys_here:
+            # Count the POINT once, but collect EVERY key: the field exists to say WHICH
+            # `about*` keys the graph carries, and a `break` kept only the first one per row
+            # (review, attestation round 3 — measured with a three-key row).
+            about_prop += 1
+            about_keys.update(keys_here)
         _bump(by_kind, str(row.get("pointKind") or "unknown"), non_empty, length, has_vector)
     # `by_month` covers EVERY row the walk read, terminal ones included — it is the only
     # place the capture dates of the excluded rows are visible, and a month census over half
@@ -723,7 +726,11 @@ def main(argv: list[str]) -> int:
     report["duration_s"] = round(time.monotonic() - started, 1)
     text = json.dumps(report, indent=2, sort_keys=False) + "\n"
     if args.out == "-":
-        sys.stdout.write(text)
+        try:
+            sys.stdout.write(text)
+        except OSError as e:  # a full/closed stdout (`> /dev/full`, `| head -1`)
+            sys.stderr.write(f"PROBE-WRITE(<stdout>): {e}\n")
+            return 2
         return 0
     try:
         with open(args.out, "w", encoding="utf-8") as f:
