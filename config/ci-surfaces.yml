@@ -7186,7 +7186,7 @@ surfaces:
   # in a surface or `ci_selection.py --integrity` lists it as drift, and a
   # `tools/`-only diff that changes the checker selects no surface either. Its own
   # reason is what the page IS: §3 is a corrections log, and re-measuring it found
-  # five of its twelve rows already overtaken by the fixes they motivated — a
+  # seven of its twelve rows no longer read as written — a
   # verdict outside the closed vocabulary or a dangling `path:line` reads exactly
   # like evidence. ⛔ And because this row lands in a surface selection the
   # depth-1 `test` jobs run, the test module must stay HISTORY-FREE for every arm
