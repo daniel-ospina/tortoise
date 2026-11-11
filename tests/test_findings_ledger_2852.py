@@ -1109,6 +1109,56 @@ def test_a_still_list_may_spell_its_own_complement(tmp_path, monkeypatch):
     )
 
 
+def test_the_s8_citation_carve_outs_stay_skippable(tmp_path, monkeypatch):
+    """FAILS if a delimiter §8 names as a carve-out starts being refused, or vice versa.
+
+    §8 lists the shapes the refusal does NOT measure — `path#LINE`, `path@LINE`,
+    `path-LINE`, `path_LINE`, `path/LINE`, `path,LINE`, `path:L LINE`, `path N --flag`,
+    and an HTTP-status line — because every one of them refused correct prose from this
+    repository's own `docs/` when it was measured (799 files). Nothing pinned that list,
+    so it could drift from the code with every test green; that is how the whitespace
+    RANGE form (`path 16-18`) and `path N --flag` went unnoticed. This test is the
+    guard on the boundary in BOTH directions: the carve-outs stay skippable, and the two
+    spellings the arm DOES measure (`path N` and `path START-END`) are refused.
+    """
+    refused = ("tortoise/nope_module.py 16-18", "tortoise/nope_module.py 16")
+    for spelling in refused:
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, _s=spelling: t.replace(
+                    "`tortoise/pipeline.py:16`", f"`{_s}`", 1
+                ),
+            )
+            assert any(
+                "not a recognised citation" in p for p in _doc_problems()
+            ), f"{spelling!r} is the spelling the arm measures, and it passed"
+    for carve_out in (
+        "path.py#16",
+        "path.py@16",
+        "path.py-16",
+        "path.py_16",
+        "path.py/16",
+        "path.py,16",
+        "path.py:L16",
+        "Makefile 12",
+        "daniel-ospina/tortoise#9363",
+        "index.html 200",
+    ):
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, _s=carve_out: t.replace(
+                    "`tortoise/pipeline.py:16`", f"`{_s}`", 1
+                ),
+            )
+            assert not any(
+                "not a recognised citation" in p for p in _doc_problems()
+            ), f"{carve_out!r} is a §8 carve-out and must stay skippable"
+
+
 def test_citation_to_missing_file_is_rejected(tmp_path, monkeypatch):
     """FAILS when a `path:line` names a file that is not in the tree.
 
