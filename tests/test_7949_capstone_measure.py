@@ -4305,6 +4305,14 @@ _BUNDLE_RULES = (
      ("contains", '"vet": {"enabled"')),
     ("the extractor entry point", "extractor_v2",
      ("extract_session_v2",), ("def extract_session_v2(",), "def", None),
+    # #10988: A4's per-layer census attributes the typed claim population partly by
+    # ELIMINATION — `extractor_v2`'s write gate repairs every point kind not in the
+    # master vocabulary to `statement`, so no typed claim came from that lane. The cite
+    # names the repair, so a refactor that moves it reds here instead of silently
+    # widening the claim.
+    ("the v2 write gate's statement repair (A4's attribution)", "extractor_v2",
+     ("write gate repairs every point kind",),
+     ('pkind = str(p.get("pointKind", "")).strip() or "statement"',), "line", None),
     # The S2.1 FINDING in `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`: the
     # call that hands extraction the raw alongside the story. A RANGE, because
     # the claim is the ARGUMENTS — `edus=edus` sits one line below the call and

@@ -4994,6 +4994,19 @@ surfaces:
   # `execute_embed` driven directly with a two-entity emission and `apply_vet`
   # driven with an explicit verdict map — no model, no graph, no network.
   - test_10999_batch_story_relations.py
+  # #10988: A4's CI CONTRACT TWIN — per-layer label coverage (things / events /
+  # claims), with `NULL` kept as its own reported share. A4's own measurement is
+  # Tier E (a read-only census over the fleet graph), and the epic's rule is that
+  # a Tier-E case WITHOUT its CI contract twin is not done, so this file pins the
+  # SHAPE the Tier-E consumer reads: the three layers reported separately, each
+  # judged against ITS OWN declared vocabulary, `0 of 0` refused as coverage, and
+  # the typed/`statement`/`NULL` + per-writer diagnostics surviving beside the
+  # criterion. Its subject is `docs/evidence/7949-capstone/probes/
+  # capstone_measure.py`, which maps to no `SOURCE_PATTERNS` row and so falls
+  # through to `core` — registered here or `--integrity` reports drift.
+  # Hermetic: a pure function over a hand-built histogram plus a fake projection;
+  # no graph, no model, no network, no `gh`, no subprocess.
+  - test_10988_a4_label_coverage.py
   # #10997: §4.4 I1's MINT half — an unresolved identity is HELD, never minted,
   # and never dropped (I2). The gate it pins lives in `execute_embed`'s
   # mint-before-wire pre-pass and in `tortoise/identity_hold.py`, so it belongs
@@ -11839,6 +11852,16 @@ durations:
   # the file; a marker on the comment lines above would outlive its own truth
   # (#9110 review P2, the #8254/#2876 stale-basis class).
   test_e1_e2_measurement.py: 26.4  # #9076: flat default until a CI sweep measures this file — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.0 — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 25.0
+  test_10988_a4_label_coverage.py: 0.5  # new in #10988 — a file a PR ADDS can never
+  # carry a CI junit reading (the refresher samples push-to-main runs only), so it takes the
+  # header's flat `DEFAULT_FAST_WEIGHT` until the first post-merge sweep replaces it (#3400/
+  # #4348). The row must EXIST, not merely default: the `core` registration above puts it in
+  # `fast_pool()`, and `--integrity`'s coverage floor is measured against that pool's own size.
+  # MEASURED LOCALLY as context, deliberately NOT as the weight (a local reading is forbidden
+  # as a SHARD-LAYOUT input, #2818/#3419): 13 cases, 3.3 s wall for the whole file. What the
+  # weight covers: one pure function over a hand-built histogram, a fake graph/projection, and
+  # ONE product-vocabulary import (`domain_loader.known_kinds`) that loads the pack registry —
+  # no DB, no model, no network, no subprocess, no `gh`.
   test_capstone_a_rows_10982.py: 0.9  # #10982: file-scan + unit arms only (JSON/YAML/markdown parse, one git-free `check.run`, a fake projection); the same rule every neighbouring "new in #NNNN" row states. ⚠️ MEASURED LOCALLY as context, NOT as the weight: ~6 s for this file alone, so the flat 2.0 OVERSTATED it until this push-to-main sweep replaced it from junit — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.0
   test_capstone_preregistration_9075.py: 20.9  # Do NOT substitute a local timing: what the weight covers is a markdown table scan, a YAML pins parse, a JSON record cross-check and a `tests/eval/write_path` fixtures_hash re-derivation (7 sessions of fixtures + gold, no DB, no network, no graph fixture) — a local wall reading is dominated by interpreter and session cost rather than this file's weight, and the map is a SHARD-LAYOUT input. Refresh from the first post-merge sweep — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 9.2
   # The #9109 pin is a file ADDED BY A PR, so it has no CI junit measurement (the
