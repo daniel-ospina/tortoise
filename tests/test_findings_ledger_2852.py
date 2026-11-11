@@ -160,9 +160,15 @@ def test_mutation_population_is_pinned():
     exit 0 — keeping the REQUIRED `docs` job and
     `test_checker_self_test_passes` green while proving nothing. The floor is
     pinned here as well as in the tool so neither can be lowered alone.
+
+    #2852's P3 added the two survivor-sentence arms (a `three` over two survivor
+    bullets; a total that contradicts the OPEN row) — the exact defect the page
+    shipped green — and the review of #11902 added four more (an unclassifiable §3
+    row, an emptied evidence column, an unclassifiable §6 row, a citation shape the
+    resolver declines), so the population is 12 and the floor is pinned with it.
     """
-    assert len(flc.MUTATIONS) == 10
-    assert flc.MIN_SELF_TEST_MUTATIONS == 10
+    assert len(flc.MUTATIONS) == 12
+    assert flc.MIN_SELF_TEST_MUTATIONS == 12
 
 
 def test_self_test_floor_catches_a_shrunk_population(monkeypatch):
@@ -615,6 +621,80 @@ def test_arithmetic_is_derived_from_the_table_not_trusted():
         if (m := flc.STATE_ROW_RE.match(line))
     }
     assert sum(counts.values()) == flc.PINNED_INDEXED_ROWS == 42
+
+
+def test_survivor_sentence_is_derived_from_its_own_bullets():
+    """FAILS if §6's survivor sentence stops reconciling with the table and bullets.
+
+    The sentence's two numbers are DERIVED: `four` is the OPEN row's own count and
+    `two` is the number of bullets naming an OPEN issue (the third bullet names
+    `#2730`, which the same table puts in `CLOSED COMPLETED`; it is printed
+    because *issue closure is not evidence of a fix*, not because it survives).
+
+    Reachable — and reached, in the shipped page: the sentence read `three` over
+    two survivor bullets plus one CLOSED issue while §7 said `two`. Two reviewers
+    then disagreed about which side was stale, and the fix one of them proposed
+    would have swapped a true `two` for a false `three`. This asserts the derived
+    values, so a future `correction` in either direction reds here.
+    """
+    text = flc.read_doc(REPO)
+    assert flc.check_survivor_arithmetic(text) == []
+    section = flc._region(text, "## 6. The issue index", "## 7. What this changes")
+    open_row = next(
+        ln for ln in section.splitlines()
+        if flc.STATE_ROW_RE.match(ln) and flc.STATE_ROW_RE.match(ln).group("label") == "OPEN"
+    )
+    open_ids = set(flc.ISSUE_ID_RE.findall(flc.STATE_ROW_RE.match(open_row).group("which")))
+    match = flc.SURVIVOR_RE.search(section)
+    assert match is not None, "the survivor sentence is gone — the guard's subject is missing"
+    assert flc.NUMBER_WORDS[match.group("total")] == len(open_ids), (
+        "the sentence's survivor total must be the OPEN row's own count"
+    )
+    bullets = flc.SURVIVOR_BULLET_RE.findall(section[match.end():])
+    # Measured on the shipped page: three bullets, of which exactly two are OPEN.
+    assert len(bullets) == 3
+    assert len([i for i in bullets if i in open_ids]) == 2
+    assert flc.NUMBER_WORDS[match.group("count")] == 2
+
+
+def test_survivor_count_not_matching_the_bullets_is_rejected(tmp_path, monkeypatch):
+    """FAILS when the sentence's count disagrees with the bullets beneath it.
+
+    This re-injects the EXACT shipped defect: `three` over two survivor bullets
+    plus one CLOSED issue. It is the reachable case, not a hypothetical — the
+    page carried it, and the guard reported OK over it, which is why the wrong
+    side looked authoritative enough for a reviewer to propose `two` -> `three`
+    on §7 to match it.
+    """
+    def to_three(t: str) -> str:
+        return (
+            t.replace("survivors, two are already", "survivors, three are already", 1)
+            .replace(
+                "survivors, the two bullets below are already",
+                "survivors, the three bullets below are already",
+                1,
+            )
+        )
+
+    _mutated(tmp_path, monkeypatch, to_three)
+    problems = _doc_problems()
+    assert any("says 3 of them are already re-measured" in p for p in problems), problems
+
+
+def test_survivor_total_not_matching_the_open_row_is_rejected(tmp_path, monkeypatch):
+    """FAILS when the sentence's survivor TOTAL drifts from the OPEN row.
+
+    Reachable by moving an issue between states without re-reading the sentence
+    above the table, which leaves the page telling a lane there are five
+    survivors when its own OPEN row names four.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace("of the four survivors", "of the five survivors", 1),
+    )
+    problems = _doc_problems()
+    assert any("says there are 5 survivors" in p for p in problems), problems
 
 
 # ── registration ───────────────────────────────────────────────────────────

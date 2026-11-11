@@ -47,8 +47,9 @@ in §5 are **dated readings of things outside this repository**. A guard over th
 would either red on someone else's tracker closing an issue, or pass by not
 looking — and the second is worse. This follows `SUBSTRATE-REBUILD-MAP.md`'s
 ruling that the tracker half is dated and carries its command instead of a pin.
-The one exception is §6's *arithmetic* (counts must reconcile with the population
-and with each row's own list), which is self-contained and therefore checkable.
+The one exception is §6's *arithmetic* (counts must reconcile with the population,
+with each row's own list, and — for the survivor sentence — with the bullets
+printed beneath it), which is self-contained and therefore checkable.
 
 Exit codes
 ----------
@@ -177,7 +178,7 @@ TABLE_SEPARATOR_RE = re.compile(r"^\|[\s:|-]+\|$")
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-MIN_SELF_TEST_MUTATIONS = 10
+MIN_SELF_TEST_MUTATIONS = 12
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -186,6 +187,40 @@ STATE_ROW_RE = re.compile(
     r"^\|\s*\**\s*(?P<label>" + "|".join(re.escape(s) for s in STATE_ROWS) + r")\b"
     r"[^|]*\|\s*\**\s*(?P<count>\d+)\s*\**\s*\|\s*(?P<which>[^|]*)\|"
 )
+
+#: The words the survivor sentence may spell its two counts with.
+NUMBER_WORDS: dict[str, int] = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+}
+
+#: The guidance sentence under §6's table spells BOTH of its numbers as words
+#: ("of the four survivors, two are already re-measured elsewhere", and later
+#: "of the four survivors, the two bullets below are already re-measured"), so the
+#: count is matched as a NUMBER WORD anywhere between the total and the verb —
+#: not at a fixed offset, because the page legitimately qualifies it ("the two
+#: bullets below") and a rigid pattern would refuse a correct sentence. Both
+#: numbers are *derived* claims and neither was checkable before: the unguarded
+#: version shipped `three` over a bullet list naming two survivors plus one
+#: CLOSED issue while §7 still said `two` — two reviewers then disagreed about
+#: which side was stale, and the "correction" one proposed (`two` -> `three` on
+#: §7) would have written the false number into the page.
+SURVIVOR_RE = re.compile(
+    r"of the (?P<total>[a-z]+) survivors,[^.]*?\b(?P<count>"
+    + "|".join(NUMBER_WORDS)
+    + r")\b[^.]*?are already re-measured"
+)
+
+#: A bullet beneath that sentence: ``- **`#2728`** was re-measured …``. MULTILINE,
+#: because `^` must anchor at a LINE start: without it the pattern only ever tried
+#: the document's first byte and reported "no bullets" on a page that has three.
+SURVIVOR_BULLET_RE = re.compile(r"^-\s+\*\*`#(?P<issue>\d+)`\*\*", re.MULTILINE)
+ISSUE_ID_RE = re.compile(r"`#(\d+)`")
 
 
 class Unverifiable(Exception):
@@ -518,6 +553,68 @@ def check_state_arithmetic(text: str) -> list[str]:
     return problems
 
 
+def check_survivor_arithmetic(text: str) -> list[str]:
+    """§6: the survivor sentence's counts must be DERIVED from the table it sits under.
+
+    The sentence and its three bullets are the page's guidance on what a lane must
+    not re-derive, so both of its numbers are derived claims: `four` must be the
+    OPEN row's own count, and `two` must be the number of BULLETS that name an
+    OPEN issue (the third bullet, `#2730`, is CLOSED and says so — it is there
+    because *issue closure is not evidence of a fix*, not because it survives).
+
+    Checked here rather than left to prose because the unguarded sentence was
+    FALSE in the shipped page and the guard reported OK over it — a gate that
+    passes by not looking, on the one page whose declared defect pattern is
+    *declared ≠ stored*. Measured: `three` sat above two survivor bullets plus
+    one CLOSED issue while §7 said `two`; two reviewers then disagreed about
+    which side was stale, and the fix one of them proposed would have replaced a
+    true `two` with a false `three`.
+    """
+    problems: list[str] = []
+    section = _region(text, "## 6. The issue index", "## 7. What this changes")
+    match = SURVIVOR_RE.search(section)
+    if not match:
+        raise Unverifiable(
+            "§6: the survivor sentence is absent — its arithmetic cannot be derived"
+        )
+    total = NUMBER_WORDS.get(match.group("total"))
+    count = NUMBER_WORDS.get(match.group("count"))
+    if total is None or count is None:
+        return [
+            "§6 survivor sentence: a count is not a spelled number this guard can "
+            f"derive ({match.group('total')!r} / {match.group('count')!r})"
+        ]
+
+    open_ids: set[str] = set()
+    for line in section.splitlines():
+        row = STATE_ROW_RE.match(line)
+        if row and row.group("label") == "OPEN":
+            open_ids = set(ISSUE_ID_RE.findall(row.group("which")))
+            break
+    if not open_ids:
+        raise Unverifiable("§6: the OPEN row names no issues — the survivor count cannot be derived")
+
+    bullets = SURVIVOR_BULLET_RE.findall(section[match.end():])
+    if not bullets:
+        raise Unverifiable("§6: the survivor sentence has no bullets — their count cannot be derived")
+
+    if total != len(open_ids):
+        problems.append(
+            f"§6 survivor sentence: says there are {total} survivors, but the OPEN row "
+            f"names {len(open_ids)} issue(s) ({', '.join('#' + i for i in sorted(open_ids))}) "
+            "— the total is not derived from the table it sits under"
+        )
+    survivors = [issue for issue in bullets if issue in open_ids]
+    if len(survivors) != count:
+        problems.append(
+            f"§6 survivor sentence: says {count} of them are already re-measured, but "
+            f"{len(survivors)} of its {len(bullets)} bullet(s) name an OPEN issue "
+            f"({', '.join('#' + i for i in survivors) or 'none'}) — the count is not "
+            "derived from the bullets beside it"
+        )
+    return problems
+
+
 def check_measured_commit(text: str, root: Path = REPO) -> list[str]:
     """`measured_at_commit` must be an ancestor of HEAD; exit 2 when git cannot say."""
     match = re.search(r"^measured_at_commit:\s*(\S+)\s*$", text, re.MULTILINE)
@@ -564,6 +661,7 @@ def check_document(text: str, root: Path = REPO) -> list[str]:
     problems.extend(check_citation_shapes(text))
     problems.extend(check_registration(root))
     problems.extend(check_state_arithmetic(text))
+    problems.extend(check_survivor_arithmetic(text))
     return problems
 
 
@@ -682,6 +780,21 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
             1,
         ),
         "not a recognised citation",
+    ),
+    (
+        # The EXACT shipped defect, re-injected: the pre-fix page said `three`
+        # above two survivor bullets plus one CLOSED issue.
+        "a survivor count that does not match the bullets beneath it",
+        lambda t: t.replace("survivors, two are already",
+                            "survivors, three are already", 1)
+                   .replace("survivors, the two bullets below are already",
+                            "survivors, the three bullets below are already", 1),
+        "says 3 of them are already re-measured, but 2 of its 3 bullet(s) name an OPEN issue",
+    ),
+    (
+        "a survivor total that does not match the OPEN row",
+        lambda t: t.replace("of the four survivors", "of the five survivors", 1),
+        "says there are 5 survivors, but the OPEN row names 4 issue(s)",
     ),
 )
 

@@ -197,8 +197,8 @@ Re-read per issue on 2026-11-12 — 42 rows, and they reconcile:
 | CLOSED other | 4 | `#2748` (`NOT_PLANNED`, fixed in effect) · `#2826` (`NOT_PLANNED`) · `#1509` (`NOT_PLANNED`) · `#2787` (`NOT_PLANNED`) |
 | MERGED (both were PRs) | 2 | PR `#2747` · `#2697` — both are PRs, not issues; see correction **(i)** |
 
-**⚠️ of the four survivors, two are already re-measured elsewhere and must not be re-derived — and
-one CLOSED issue must not be read as fixed:**
+**⚠️ of the four survivors, the two bullets below are already re-measured elsewhere and must not be
+re-derived — and one CLOSED issue must not be read as fixed:**
 
 - **`#2728`** was re-measured **out** of the problem map's survivor set — its Settings home and
   modal merged 2026-10-18 in `08a6b0288`, with the add-list read from the on-disk pack registry so
@@ -253,16 +253,23 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   the indexed population) is re-derived from the table rather than trusted — deleting a row and every
   mention of it otherwise passes every referential check. Because a pin selects rows *by shape*, an
   **unrecognised row shape is refused** on both tables: a thirteenth correction row, or a fifth §6
-  state bucket, used to be silently invisible (measured — appending one left the guard CLEAN).
+  state bucket, used to be silently invisible (measured — appending one left the guard CLEAN);
+- the **§6 survivor sentence's two numbers** are derived as well: its survivor TOTAL must equal the
+  OPEN row's own count, and its "already re-measured" count must equal the number of **bullets naming
+  an OPEN issue** — the `#2730` bullet is CLOSED and is printed because *issue closure is not evidence
+  of a fix*, not because it survives. Unguarded, this sentence carried a false `three` over two
+  survivor bullets while §7 said `two`, and the guard reported OK over it: the page's own *declared ≠
+  stored* defect, inside the correction that exists to stop it — and the reason two reviewers could
+  each "prove" the other side was the stale one.
 
 The self-test that proves those rules still fire has its own **population floor**
 (`MIN_SELF_TEST_MUTATIONS`). An emptied arm set used to print `PASS (0 failing arm(s))` and exit 0 —
 a gate reporting OK when it cannot run — so a shrunk population now reds instead.
 
 Exactly one arm needs `git` **history**: the frontmatter's `measured_at_commit` must be an ancestor of
-`HEAD`. The other arms read this checkout's tree and nothing else, and the tool keeps that split
+`HEAD`. The other seven read this checkout's tree and nothing else, and the tool keeps that split
 (`check_document()` / `check_all()`) because the two jobs that run it differ: the REQUIRED `docs` job
-checks out at `fetch-depth: 0` and runs `--check` (all five arms), while the `test` jobs check out at
+checks out at `fetch-depth: 0` and runs `--check` (all eight arms), while the `test` jobs check out at
 the default depth 1, cannot resolve `f70d884b7` at all, and are where this page's own test module runs.
 In a depth-1 clone `--check` therefore reports **exit 2 UNVERIFIED** — never `0`, and never a verdict
 against the document it could not read — and `--self-test`, which drives only the tree-only arms,
