@@ -54,6 +54,17 @@ logger = logging.getLogger(__name__)
 #: `sdk._sanitize_props`. `embeddingText` is NOT in this set: it is the enriched
 #: TEXT (a payload field, not a marker), and `add_point` refuses it with its own
 #: reason.
+#:
+#: ⛔ AND THE RULE IS ONE NESTING LEVEL DEEP (#11835 review round 4, F1). The
+#: two gates below read the ENVELOPE, which is safe only while a record-shaped
+#: payload is DOOR-BUILT — `add_point`/`add_operator` hand `_emit` `point=p`
+#: after stamping it themselves (with `creating=True`, so the origin attestation
+#: rides a creating record's own basis). A CALLER that builds one bypasses both
+#: gates, and the funnel must not "just stamp it" to close that: `creating=False`
+#: DROPS `embedding_model`/`embedding_revision`/`embedding_text_hash`, which would
+#: strip the attestation off every ordinary `PointAdded` (R1). So the nested
+#: shape is refused AT THE DOORS THAT LET A CALLER NAME IT, via
+#: `_NESTED_RECORD_KEYS` below.
 _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
     "embedding_width",
     "embedding_verbatim",
@@ -62,6 +73,41 @@ _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
     "embedding_revision",
     "embedding_text_hash",
 })
+
+#: The envelope's RECORD-SHAPED payload keys — a payload a record door BUILDS.
+#: `add_point` and `add_operator` each hand `_emit` one as `point=p`, after
+#: stamping it themselves; see `_SERVER_MANAGED_EMBEDDING_KEYS` for why the
+#: funnel must not re-stamp it.
+#:
+#: ⛔ So the two doors that splat a CALLER's keys onto the envelope — `add_event`
+#: and `emit_belief` — refuse these keys outright. Neither has a record to
+#: build, so a caller-named one is a caller-built record the replay folds with
+#: NEITHER half of the vector rule applied. Measured at `545a2fcaf2`:
+#: `emit_belief("PointAdded", point={"id": "p", "embedding": [<off-grid
+#: float64>], "embedding_width": "f32"})` journalled the marker as a lie over
+#: values it did not describe, and the same call without the marker journalled a
+#: NEW record in the state `JOURNAL_VECTOR_WIDTH_KEY` reserves for PRE-CHANGE /
+#: FOREIGN records. No in-tree caller passes one (`grep` over `tortoise/`,
+#: `graph-scripts/`, `tools/` → 0), so refusing costs nothing and closes the
+#: enumeration one level down.
+_NESTED_RECORD_KEYS = frozenset({"point"})
+
+
+def _refuse_caller_named_record_keys(keys, door: str) -> None:
+    """Refuse a caller-supplied record-shaped payload at a passthrough door.
+
+    Shared by `add_event` and `emit_belief` so the two cannot drift, and called
+    BEFORE any write: a refusal here leaves nothing to replay, which is the same
+    ordering argument `_emit`'s own gates make.
+    """
+    named = sorted(set(keys) & _NESTED_RECORD_KEYS)
+    if named:
+        raise ValueError(
+            f"{named} is a RECORD-SHAPED journal payload `{door}` does not "
+            "build, and a caller-built one is folded by the replay without the "
+            "vector rule the record doors apply (width declared, caller marker "
+            "refused). Use the door that owns that record (`add_point`, "
+            "`add_operator`) instead of naming it here.")
 
 
 def provenance(source_id, span, quote, *, speaker=None, extracted_by="mock@0"):
@@ -371,7 +417,16 @@ class EventAPI:
         ``OSError``/``ENOSPC`` must never propagate out of ``ep.run()`` and
         crash the public ingest CLI. Mirrors
         ``TortoiseSDK._emit_event``'s best-effort JSONL branch.
+
+        ⛔ The best-effort arm covers I/O, not a malformed payload: a caller
+        that names a RECORD-SHAPED key here (`point=`) is refused with
+        ``ValueError`` BEFORE this door touches the log, because a caller-built
+        record is folded by the replay without the vector rule the record doors
+        apply (`_NESTED_RECORD_KEYS`). Refusing is the honest report; silently
+        journalling a record whose `embedding_width` marker lies would be the
+        false-FACT shape this module's keys exist to prevent.
         """
+        _refuse_caller_named_record_keys(payload, "emit_belief")
         try:
             self._emit(type_, **payload)
         except Exception as exc:  # noqa: BLE001, RUF100
@@ -968,7 +1023,16 @@ class EventAPI:
         The event id is passed as ``id`` (not ``eventId``) to match the
         projection's ``_upsert_event`` lookup (``inner.get("id") or
         inner.get("eventId")``).
+
+        ``**extra`` is a passthrough straight onto the ENVELOPE, so a caller can
+        put a top-level ``embedding`` on the record here. It does not have to
+        police that itself: ``_emit`` refuses a caller-set marker and stamps
+        every vector that reaches it, so the rule lives in one place. It must
+        NOT accept a record-shaped payload (`point=`) though — a caller-built
+        record reaches the replay's fold chain untested by that rule — so that
+        is refused here (`_NESTED_RECORD_KEYS`).
         """
+        _refuse_caller_named_record_keys(extra, "add_event")
         self._emit("EventRecorded",
                    id=event_id,
                    eventKind=event_kind,

@@ -485,8 +485,21 @@ def test_no_vector_means_no_width_marker():
 
 
 def test_an_unusable_vector_drops_its_marker_with_the_vector():
+    """An OWNED `None` must not sit beside a marker that outlived its vector.
+
+    ⛔ The fixture SEEDS the marker on purpose (#11835 review round 4, F2). It
+    used not to, so the `pop` this row exists to pin was a no-op for its own
+    payload and the assertion was vacuous: measured, replacing
+    `_drop_journalled_embedding`'s `payload.pop(JOURNAL_VECTOR_WIDTH_KEY, None)`
+    with `pass` left the whole file at `35 passed`. A row whose named mutation
+    does not red it is not a pin. The shape it now covers is the reachable one
+    — a payload that ALREADY declares a width (an `id=`-branch re-emit over a
+    marked record) whose vector then turns out unusable.
+    """
     stamped = stamp_journal_embedding(
-        _payload([float("nan"), 0.5]), creating=False)
+        _payload([float("nan"), 0.5],
+                 **{JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32}),
+        creating=False)
     assert stamped["embedding"] is None
     assert JOURNAL_VECTOR_WIDTH_KEY not in stamped, (
         "a marker beside an owned None describes a payload that has nothing to "
@@ -960,6 +973,67 @@ def test_the_eventapi_emit_door_declares_f64_for_a_vector_it_cannot_narrow(
 
     assert record["embedding"] == source, "the values must be left ALONE"
     assert record[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64
+
+
+def test_a_caller_cannot_name_a_record_shaped_payload_at_the_funnel_doors(
+        tmp_path):
+    """The vector rule is ONE NESTING LEVEL DEEP, so the nested shape is refused.
+
+    #11835 review round 4 (F1), measured at `545a2fcaf2`: `_emit`'s two gates read
+    the ENVELOPE, and `add_event`/`emit_belief` splat a caller's keys onto it — so
+    `emit_belief("PointAdded", point={...})` journalled a record the replay
+    folds, with neither half applied:
+
+        PointAdded | p-nested-1 | marker: 'f32' | values: [0.1234567890123, 0.3333...]
+        PointAdded | p-nested-2 | marker: None  | values: [0.001230153379945, 0.2987...]
+
+    The first is the marker LIE (#5004 round-7's must-never-narrow population,
+    declared `f32` over 17-digit values); the second is a NEW record in the state
+    `JOURNAL_VECTOR_WIDTH_KEY` reserves for PRE-CHANGE / FOREIGN records.
+
+    The funnel must NOT fix this by stamping the nested payload instead: that
+    stamp is `creating=False`, which DROPS `embedding_model` /
+    `embedding_revision` / `embedding_text_hash` — it would strip the origin
+    attestation off every ordinary `PointAdded` (R1). So the doors that let a
+    CALLER name a record-shaped key refuse it, and the doors that BUILD one
+    (`add_point`, `add_operator`) are untouched.
+    """
+    from tortoise.api import EventAPI, provenance
+    from tortoise.log import EventLog
+
+    events = tmp_path / "nested"
+    events.mkdir(parents=True)
+    api = EventAPI(EventLog(events / "events.jsonl"),
+                   initiated_by="extractor", projection=None)
+    nested = {"id": "p-nested", "content": "c",
+              "embedding": [0.1234567890123, 1 / 3],
+              JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32}
+
+    # `emit_belief` refuses BEFORE its best-effort `try`: a malformed payload is
+    # not the I/O failure that arm exists to swallow, and the raise is the only
+    # signal the caller gets (nothing was journalled).
+    with pytest.raises(ValueError, match="RECORD-SHAPED"):
+        api.emit_belief("PointAdded", point=dict(nested))
+    with pytest.raises(ValueError, match="RECORD-SHAPED"):
+        api.add_event("evt-nested", "AgentSession", point=dict(nested))
+
+    # Nothing reached the journal — a refusal after the append would leave a
+    # record the replay folds (`_emit`'s own ordering argument).
+    assert not (events / "events.jsonl").exists() or not (
+        events / "events.jsonl").read_text().strip(), (
+        "a refused payload must leave NOTHING to replay")
+
+    # And the doors that BUILD the record still work, nested shape and all.
+    api.add_point("a real point", provenance("src:1", [0, 4], "q"))
+    records = [json.loads(ln) for ln in
+               (events / "events.jsonl").read_text().splitlines() if ln.strip()]
+    added = [r for r in records if r.get("type") == "PointAdded"]
+    assert len(added) == 1, "`add_point` must keep journalling its nested payload"
+    assert added[0]["point"]["content"] == "a real point", (
+        "the record door's own nested payload must reach the journal intact")
+    # ⚠️ NOT asserting the marker here: whether `_point` had a server vector to
+    # stamp depends on the embedder being installed, and this suite runs both
+    # ways. The width rule itself is pinned by the rows above.
 
 
 def test_the_eventapi_emit_door_refuses_a_caller_named_marker(tmp_path):
