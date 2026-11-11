@@ -337,9 +337,12 @@ def ep_prior_only_cypher(alias: str) -> str:
 
     The third predicate of the three-state vocabulary: a declared #2199
     baseline with NO EP measurement. NOT the same as "unmeasured" — an
-    unmeasured claim carries no persisted prior at all (and since #11702 its
-    confidence_mean is `None` + `ep_state: "absent"`, not a neutral 0.5),
-    while a prior-only claim's confidence_mean IS the declared PRIOR mean.
+    unmeasured claim carries no persisted prior at all AND no readable
+    ``n.confidence`` mirror (with such a mirror it still reads ``baseline`` at
+    the mirror's value, which is why the mirror-only row is `unmeasured`
+    internally and `baseline` here). Without one, and since #11702, its
+    confidence_mean is `None` + `ep_state: "absent"`, not a neutral 0.5.
+    A prior-only claim's confidence_mean IS the declared PRIOR mean.
 
     Kept textually in step with the Python twin: for every combination of
     (posterior_alpha, ep_alpha, baseline_set) this helper is true iff
@@ -1455,7 +1458,9 @@ class EpBreakdown:
     # 0.95, an α-only half pair reads (True, False) with ``None`` when no
     # readable mirror survives beside it (with one, the value is the mirror's),
     # and a
-    # β-only row reads (False, False) with ``None`` and state ``absent``. Read
+    # β-only row reads (False, False) with ``None`` and state ``absent`` when no
+    # readable mirror survives beside it (with one, ``baseline`` at the
+    # mirror's value). Read
     # :attr:`ep_state`. Neither flag is a signal of contestation.
     # #2490 has_ep overload: TERMINAL claims (terminal vocab status OR the
     # legacy outdated=true flag) are also gated to False — their posterior
