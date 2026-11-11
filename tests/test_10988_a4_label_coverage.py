@@ -152,7 +152,7 @@ def test_unlabelled_is_EXACTLY_the_null_plus_undeclared_share_and_nothing_escape
 #: The five point kinds `tortoise.sdk` registers through `domain_loader.register_kind` at IMPORT time
 #: (`sdk.py:217-227`). No `packs/*/manifest.yaml` declares them and none is in
 #: `CANONICAL_POINT_KINDS`, so the SDK import is the ONLY path that makes them declared.
-_SDK_REGISTERED_KINDS = ("diary", "option", "evidence", "criterion")
+_SDK_REGISTERED_KINDS = ("diary", "checkpoint-item", "option", "evidence", "criterion")
 
 
 def test_the_declared_vocabulary_includes_the_kinds_the_SDK_itself_registers():
@@ -183,16 +183,20 @@ def test_the_declared_vocabulary_includes_the_kinds_the_SDK_itself_registers():
         "spec = importlib.util.spec_from_file_location('cm_10988', sys.argv[1])\n"
         "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
         "declared = sorted(want & set(m._a4_declared_kinds('pointKind')))\n"
+        # the OTHER direction: the probe must not ADD anything the product does not declare
+        "extra = sorted(set(m._a4_declared_kinds('pointKind')) - set(known_kinds('pointKind')))\n"
         "print(bare)\n"
         "print(declared)\n"
+        "print(extra)\n"
     )
     out = subprocess.run(
         [sys.executable, "-c", code, str(PROBE)],
         cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=300)
     assert out.returncode == 0, (out.returncode, out.stdout[-800:], out.stderr[-1500:])
     lines = out.stdout.strip().splitlines()
-    assert len(lines) == 2, out.stdout
-    bare, declared = eval(lines[0]), eval(lines[1])  # noqa: S307 — two sorted str lists we printed
+    assert len(lines) == 3, out.stdout
+    # noqa: S307 — three sorted str lists this test's own child printed
+    bare, declared, extra = eval(lines[0]), eval(lines[1]), eval(lines[2])
     assert bare == [], (
         f"the product's BARE vocabulary already declares {bare} without the SDK import, so this arm "
         f"would be vacuous — find the real registration path before trusting the assertion below")
@@ -200,6 +204,12 @@ def test_the_declared_vocabulary_includes_the_kinds_the_SDK_itself_registers():
         f"`_a4_declared_kinds` must re-supply the SDK-registered kinds (got {declared}) — without "
         f"its in-function `import tortoise.sdk` a standalone census reports the fleet's own declared "
         f"typed kinds as inventions")
+    # ⛔ THE OTHER DIRECTION, which a round-2 rewrite of this arm lost (#11837 review round 3):
+    # `_a4_declared_kinds` must return the product's vocabulary and NOTHING MORE. Without this, a
+    # `| {"finding", "totallyMadeUpKind"}` on the return passes every other case in this file.
+    assert extra == [], (
+        f"`_a4_declared_kinds` declares kinds the product does not: {extra} — a census may not "
+        f"widen the vocabulary it measures against, or an invention reads as coverage")
 
 
 def test_the_three_layers_are_reported_SEPARATELY_and_never_blended():
