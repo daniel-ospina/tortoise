@@ -239,7 +239,7 @@ _MEASUREMENT_RUN_KEYS = (
     "errors",
     "corpus_sha256",
     # #10982: the A-row census is written INTO the run block by the emitter
-    # (`capstone_measure.py:4067`), beside `e3_census`/`e4_receipt`. Omitting it
+    # (`capstone_measure.py:4336`), beside `e3_census`/`e4_receipt`. Omitting it
     # here reopened the exact construction #10601 review round 2 closed: a
     # `REFUSED` table with every other key nulled and a CLOSED blocker named was
     # EXEMPTED from V12 while `a_row_census` still held produced numbers
@@ -264,7 +264,7 @@ _MEASUREMENT_RUN_KEYS = (
 #: one counted cell, ``door.captures`` (``door_witness()``'s ``entered``/``bypassed``),
 #: is a ROUTING witness and NO RECORD CAN VARY IT: ``main`` calls
 #: ``require_door_entered(runs)`` BEFORE it reaches ``render_log``
-#: (``capstone_measure.py:4212`` vs ``:4347``), and that function raises on any bypass,
+#: (``capstone_measure.py:4481`` vs ``:4616``), and that function raises on any bypass,
 #: so ``bypassed`` is always ``[]`` and ``entered`` is always ``sessions`` re-counted.
 #: A constant carries no number of its own — ⛔ and NOT for the reason a witness like
 #: ``steps_observed`` would give: that key is itself a MEASUREMENT member of the set
