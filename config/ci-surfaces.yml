@@ -4369,15 +4369,20 @@ surfaces:
   # session fixture unless `TORTOISE_TEST_CARVE_OUT=1`.
   - test_3817_tags_rebuild_durability.py
   # #11239 (DM1's home, #11021): does a mention RECORD reach the claim Point and
-  # SURVIVE a rebuild? Every row is behavioural — a real SDK/door write, a real
-  # `rebuild_all` over a real JSONL journal, a node read-back — and the rows that
-  # exist to pin a REPLAY arm (`..._the_replay_door_normalises_a_non_canonical_
-  # record`, `..._a_second_creation_saying_nothing...`, `..._a_revision_stating_
-  # the_payload_spelling...`, `..._a_creation_after_a_revision...`,
-  # `..._the_first_creation_folds...`) rewrite the journaled record BY HAND instead,
-  # because no in-tree producer emits those shapes: they are behavioural about
-  # the FOLD, not about a door. Several rows also assert `check_consistency` is
-  # clean, so both replay engines are pinned, not just the node's bytes. It exists because the source-text pins in
+  # SURVIVE a rebuild? Every row is behavioural: each drives a node read-back of
+  # the claim Point. FIFTEEN of the seventeen do it through a real `rebuild_all`
+  # over a real JSONL journal (a real SDK/door write first); the other two
+  # (`..._the_first_creation_folds_the_writers_bytes...`,
+  # `..._an_unwritable_record_on_a_first_creation...`) fold the journal entry
+  # in-process instead and compare that view with the node, because what they pin
+  # is the pure fold's half of the arm. FOUR rows — `..._the_replay_door_normalises_
+  # a_non_canonical_record`, `..._a_second_creation_saying_nothing...`,
+  # `..._a_revision_stating_the_payload_spelling...`, `..._a_creation_after_a_
+  # revision...` — rewrite the journaled record BY HAND, because the shapes they
+  # need (a non-canonical spelling, a second creation with no restatement) are
+  # not emitted by any in-tree producer. Several rows also assert
+  # `check_consistency` is clean, so both replay engines are pinned, not just the
+  # node's bytes. It exists because the source-text pins in
   # `test_referentiality_11021.py` cannot see a live-only write (an `if False:`
   # neutering mutant leaves them green), which is exactly the review P1 this
   # file was added for: the first cut extended three write doors and neither

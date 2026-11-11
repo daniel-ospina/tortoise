@@ -7,8 +7,13 @@ capture held the claim and no mention on it. Persisting it is only half the
 repair — a record that is written LIVE and dropped by every replay is the same
 loss one step later, and it is invisible, because nothing reads the node.
 
-So every row here is BEHAVIOURAL: write through a real door, `rebuild_all` from
-a real JSONL journal, then compare the node's bytes. A source-text assertion
+So every row here is BEHAVIOURAL: each one reads the claim Point back off the
+graph. Most write through a real door and then `rebuild_all` from a real JSONL
+journal before comparing the node's bytes; the two FIRST-CREATION rows
+(`..._the_first_creation_folds_the_writers_bytes...`,
+`..._an_unwritable_record_on_a_first_creation...`) fold the journal entry
+in-process instead, because what they pin is the pure fold's half of that arm.
+A source-text assertion
 cannot see a live-only write (an `inspect.getsource` check stays green under a
 `if False:` neutering mutant), which is why the source pins in
 `tests/test_referentiality_11021.py` are not enough on their own.
@@ -85,7 +90,9 @@ import pytest
 
 # ⛔ NOT `pytest.importorskip("tortoise.sdk")` (review P3 on PR #11795): that
 # turns an unimportable SDK into SEVENTEEN skips, and this file is the only
-# behavioural pin the mention record has. Its declared sibling
+# behavioural pin of the SDK write doors and both replay folds (the hosted commit
+# door's rows live in `tests/test_commit_endpoint.py`, which owns the TestClient).
+# Its declared sibling
 # (`test_3817_tags_rebuild_durability.py`) imports directly and fails loudly.
 from tortoise.api import EventAPI, provenance
 from tortoise.log import EventLog
