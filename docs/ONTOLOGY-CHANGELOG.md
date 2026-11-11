@@ -33,6 +33,54 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
+> **Changelog v3.33 (2026-11-11 — issue #11824 — a core Object kind gets a declared lifecycle vocabulary, and one stale tracker flag is recorded):**
+>
+> **Approval** is the owner's decision `D2 — A` on #11824 (2026-11-11): core Object types get their own
+> lifecycle vocabulary, validated per kind. This entry lands that decision comment's **proposed §4.3
+> sentence verbatim** — it is that comment's own text, not a re-draft of it. This entry records the
+> change; **v3.32 → v3.33** because a model statement moves. The **build** of the vocabulary guard is not
+> part of this change — this is the model.
+>
+> **§4.3 gains a declared write vocabulary for CORE object kinds** — `draft` / `live` / `superseded` /
+> `deprecated` / `archived` / `in_progress` / `completed`. The load-bearing parts are: `superseded`
+> requires the successor in the same write (a removal with no successor is `archived` — the D7 two-arm
+> rule the extractor architecture already states), and `outdated` / `retracted` are **not** Object
+> lifecycle words. The reason `outdated` must be refused rather than tolerated is measured: it is
+> terminal to belief propagation (`ep.py`, via `TERMINAL_EXCLUDED_STATUSES`) while being **current** to
+> all four Object retrieval legs (`search_engine._STATUS_FILTERED_LABELS` / `OBJECT_TERMINAL_STATUSES`),
+> so the same word means two opposite things (#11826). Validation stays **per kind**: a pack-declared
+> kind keeps validating against its own `statuses` (declared per kind in the pack manifest, `kindDefs[].statuses`, and
+> enforced by `status_folds.py`), which is why this is a core-kind default and
+> not the shared closed set `EXTRACTOR-V4-ARCHITECTURE.md:1076`/`:1084` forecloses.
+>
+> **A consequence worth stating here rather than leaving to be rediscovered:** §4.3's own `status` row
+> calls the property a *performance cache of lifecycle events*, so the write this vocabulary guards is a
+> cache write. Under `docs/ax/ax-principles.md` (#10183) every refusal it produces must carry **three
+> parts** — that it refused, exactly what failed, and exactly what to do — and where the caller's meaning
+> is ambiguous the refusal must **name the choice** rather than pick one (`status='outdated'` therefore
+> refuses pointing at both `archived` and `superseded`). The refusal wording itself is AX behaviour and
+> lives at the decision site, not in this file (§4's placement rules).
+>
+> **One stale tracker flag is recorded here, and one proposed "correction" is withdrawn — neither is a
+> model change.** (1) §4.7 named **#7818** as the tracker of the closed-vs-half-open boundary decision;
+> #7818 is CLOSED (`COMPLETED` 2026-10-18, as "already delivered" by PR #8956) while `_covers` is still
+> closed-interval, so that open decision has **no** live tracker. The flag is recorded **here** and not in
+> `ONTOLOGY.md`, because an issue's open/closed state and the narrative of what changed are the build
+> record, not the model (§4's placement rules — the rule `tests/test_extractor_v4_citation_rot.py`
+> enforces); the ontology keeps the `tracked at **#7818**` anchor its pin requires and states nothing
+> about its state. (2) An earlier draft of this entry also recorded §4.5's *"answered no in #2725"*
+> attribution as measured FALSE, resting on #11825's finding that #2725 "contains **no reference to
+> Events**". **That finding is wrong, so the correction is withdrawn before landing:** #2725 carries a
+> comment (`#issuecomment-5619843002`) whose `### A.2 KEY QUESTION — can an Event carry current state, or
+> only a dated fact?` is answered *"Only a dated fact. Unambiguously, and this is enforced at three
+> independent layers"* — the ruling's own home, and exactly what §4.5 attributes to it. The absence was
+> measured against the issue **body**, which holds no occurrence of "Event", while the issue's comments
+> hold 35. §4.5 therefore keeps its attribution — it was never stale. What *is* stale is the state the
+> ruling leaves behind (write accepted, belief honours it, every retrieval leg ignores it), which is
+> tracked at **#11825**.
+
+---
+
 > **Changelog v3.32 (2026-11-08 — issue #11083 — `ownedBy`'s range opens, and `produces` becomes a Layer-2 meaning):**
 >
 > **Owner approval of the exact changes** is on record on #11083 (comment 6667121779, 2026-11-05, "Approval
