@@ -755,17 +755,24 @@ def test_pack_selection_section_and_validator_are_wired():
     assert "pack_selection" in _SNAPSHOT_SECTIONS
     assert _SNAPSHOT_ENTRY_CHECK["pack_selection"] is \
         _validate_pack_selection_entry
-    # ⛔ EXACT, in the NEWEST section's own test — this is the one pin that ties
-    # `_PREWIPE_SNAPSHOT_VERSION` to the SECTION SET. The two older sections'
-    # pins are `>=` on purpose (a later bump must not red a test about another
-    # class), but the sum of three `>=` pins would be that NO test sees the
-    # constant: a future section landing without a bump would leave every pin
-    # green, and the version gate is exactly what makes an older build REFUSE a
-    # snapshot it would otherwise accept and wipe on. So the newest section owns
-    # the current value, and a bump moves it with the section that caused it.
+    # ⛔ EXACT, in the NEWEST section's own test, and the pin claims only what
+    # it delivers. The two older sections' pins are `>=` on purpose (a later
+    # bump must not red a test about another class), but the sum of three `>=`
+    # pins would be that NO test ever SEES the constant — so the newest section
+    # owns the current value, and a bump must move it with the section that
+    # caused it. ⛔ What this pin does NOT do, measured: land a fully-wired
+    # section without bumping and it stays GREEN (it compares a constant to a
+    # literal, and nothing maps section → version). Do not read it as that
+    # tripwire. The reader-side protection against an un-bumped section is
+    # separate and already there twice: `_validate_prewipe_snapshot` REFUSES an
+    # unknown section, and the readable-versions check refuses an unreadable
+    # version — either one makes an older build refuse the file rather than
+    # accept it and wipe on it.
     assert _PREWIPE_SNAPSHOT_VERSION == 7, (
-        "`:PackSelection` landed at v7 — if you bumped the version, move THIS "
-        "pin with the section you added; a LOWER read/write version lets a "
+        "`:PackSelection` landed at v7 — if you bumped the version for a NEW "
+        "section, move THIS pin with the section you added (this pin cannot "
+        "detect a section landed without a bump; the unknown-section refusal "
+        "is what protects the reader). A LOWER read/write version lets a "
         "pre-#9752 build accept the file and ignore the section")
     assert set(_PREWIPE_SNAPSHOT_READABLE_VERSIONS) >= {1, 2, 3, 4, 5, 6, 7}
     # The union's return literal is hand-written per section, so pin its key set
