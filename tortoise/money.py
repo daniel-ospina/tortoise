@@ -46,12 +46,13 @@ stale — #4282 closed without it):
     commit ``Point`` stays ``extra="forbid"`` and takes NO money field (§7.1
     S3, the owner's 2026-10-07 decision — the value is server-written);
   * **refusal** is :func:`refuse_malformed_money`, called from the SDK's one
-    props intake (``_sanitize_props``: every create/update props door, with
-    the update doors widening it to a lone exponent and an explicit null) and
-    from the pipeline seam that bypasses that intake
-    (``api.EventAPI._emit``, through :func:`refuse_malformed_money_in_payload`
-    — that seam journals a RECORD, so the gate walks the payload rather than
-    reading one flat bag; ``add_point`` nests its money under ``point=``), so a
+    props intake (``_sanitize_props``: every create/update props door — on a
+    CREATE the caller's bag IS the state, on an UPDATE it is the state the
+    write LEAVES, :func:`money_view_after_update`) and from the pipeline seam
+    that bypasses that intake (``api.EventAPI._emit``, through
+    :func:`refuse_malformed_money_in_payload` — that seam journals a RECORD, so
+    the gate walks the payload rather than reading one flat bag; ``add_point``
+    nests its money under ``point=``), so a
     value the reader would refuse cannot become durable state through either
     live write path. Two bounds are
     deliberately NOT covered and are stated rather than implied away: a
@@ -291,56 +292,70 @@ def read_money_value(record: Mapping[str, Any]) -> tuple[str, int, int] | None:
     return currency, amount, exponent
 
 
+def money_view_after_update(stored: Mapping[str, Any],
+                            props: Mapping[str, Any]) -> dict[str, Any]:
+    """The money view an UPDATE leaves on the node: ``stored`` ∪ ``props``.
+
+    A props value of ``None`` DELETES the stored property, because the writers
+    persist props with ``SET n += $props`` and a null value removes the key —
+    the contract ``_sanitize_props``'s ``reject_claim_class`` paragraph states
+    ("passing ``None`` REMOVES the property outright").
+    So a one-sided update must be graded on what will actually BE on the node:
+    graded on the bag alone, ``update_entity(id, currency=None)`` looks like
+    "no money here" and is admitted while it REMOVES the currency from a
+    well-formed value — the exact poisoning this gate exists to prevent —
+    while a harmless ``update_entity(id, amountMinor=…)`` is refused for want
+    of a currency it never needed to restate. Both directions are measured in
+    ``tests/test_money_value_2782.py``.
+
+    Only the declared money members are carried, so a caller's unrelated props
+    never appear in the view (and can never be read as money).
+    """
+    view = {key: stored[key] for key in MONEY_VALUE_FIELDS if key in stored}
+    for key in MONEY_VALUE_FIELDS:
+        if key not in props:
+            continue
+        if props[key] is None:
+            view.pop(key, None)
+        else:
+            view[key] = props[key]
+    return view
+
+
+def _validate_present_optional_fields(view: Mapping[str, Any]) -> None:
+    """Grade the two OPTIONAL money members when the value carries money.
+
+    ``verbatim`` and ``asOf`` are declared money members with their own
+    validators, but :func:`read_money_value` never applied them — so an int
+    ``verbatim`` or a garbage ``asOf`` was durable state that ``money_props``
+    would have refused. They are graded HERE, at the write door, and NOT in
+    the reader: the read side stays lenient for rows written before this rule,
+    so pre-existing data keeps reading instead of making a sum unanswerable
+    twice over.
+    """
+    if view.get(VERBATIM) is not None:
+        _validate_verbatim(view[VERBATIM])
+    if view.get(AS_OF) is not None:
+        _validate_as_of(view[AS_OF])
+
+
 def refuse_malformed_money(props: Mapping[str, Any], *,
-                           door: str = "",
-                           on_update: bool = False) -> None:
+                           door: str = "") -> None:
     """Refuse, at the WRITE boundary, a money value the READER would refuse.
 
-    Returns ``None`` when ``props`` carries no money at all — it inherits
+    ``props`` is the money view to grade: for a CREATE that is the caller's
+    bag, and for an UPDATE it is what the node will hold afterwards — build it
+    with :func:`money_view_after_update`, never from the bag alone.
+
+    Returns ``None`` when the view carries no money at all — it inherits
     :func:`read_money_value`'s engagement rule (neither ``amountMinor`` nor
     ``currency`` present), so a non-money prop bag, and a bare ``verbatim`` /
     ``asOf`` / ``minorUnitExponent`` that belongs to something else, are all
     untouched. When money IS present it applies exactly the reader's checks:
     an int minor-unit amount (never a float, never a bool), an active ISO 4217
     currency, and an explicit ``minorUnitExponent`` the pinned table agrees
-    with.
-
-    ``on_update`` — WHY THE UPDATE DOORS NEED MORE THAN THE READER'S RULE
-    (measured, #2782 review): the reader judges ONE bag, but an update is a
-    MERGE onto a node that already carries the rest of the value, so two
-    shapes reach a state the reader refuses while satisfying it:
-
-      * ``{"minorUnitExponent": None}``. ``read_money_value`` engages on
-        ``amountMinor``/``currency``, so a bag carrying only a sibling reads
-        as "no money" and the gate no-ops. But the update door writes with a
-        bare ``SET n += $props``, where a key present with ``None`` DELETES
-        the property (the same Cypher fact ``update_point``'s own
-        ``claim_class`` note relies on) — so the write removes the exponent
-        from a well-formed node and leaves ``{amountMinor, currency}``, the
-        very half-value this gate exists to refuse. Deleting a money field is
-        not an update; the caller may only REPLACE the value.
-      * ``{"minorUnitExponent": 0}`` (or any lone exponent). A lone exponent
-        cannot be scale-checked here: the check is a ``(currency, exponent)``
-        pair and the stored currency is not visible at this boundary, so
-        ``0`` on a ``BRL`` node is a 100x mis-scale that looks exactly like a
-        legitimate ``JPY`` write. Refusing the lone exponent on an UPDATE is
-        the fail-closed answer; the caller writes the full bag, which is the
-        shape ``money_props`` always produces.
-
-    ⛔ The refusal is scoped to ``on_update`` ON PURPOSE, so the gate stays a
-    no-op for the shapes that are genuinely harmless: a lone sibling on a
-    CREATE is a stray property on a non-money record (``MONEY_VALUE_FIELDS``
-    is a group, not five reserved names), and an explicit ``None`` on a CREATE
-    does not delete anything — the fold's extra-props passthrough drops
-    ``None`` values (``projection/entities.py::_persist_extra_props``).
-    Refusing those would be collateral damage on a legitimate write, and
-    ``tests/test_money_value_2782.py`` pins both.
-
-    ⚠️ STATED BOUND, not a claim of closure: the create doors MERGE by name
-    (``_create_entity``'s ON MATCH arm reaches an EXISTING node), so a
-    re-create carrying a lone exponent still lands one — the discriminating
-    fact is the TARGET, which a bag-shaped predicate cannot see. Measured and
-    recorded as a #2782 follow-up (``TestKnownResidualCreateDoorOnMatch``).
+    with — plus, at this boundary only, the two optional members' own
+    validators (:func:`_validate_present_optional_fields`).
 
     WHY A WRITE GATE, given the read side already refuses (measured, #2782):
     before this, all six malformed shapes were ACCEPTED by every props door and
@@ -360,25 +375,8 @@ def refuse_malformed_money(props: Mapping[str, Any], *,
     coercion — the same "never guess" posture as ``money_props`` itself.
     """
     try:
-        if on_update:
-            deleted = sorted(k for k in _MONEY_GROUP
-                             if k in props and props[k] is None)
-            if deleted:
-                raise MoneyValueError(
-                    f"an explicit null for {', '.join(deleted)} deletes the "
-                    f"property on an update (``SET n += $props``), and "
-                    f"deleting a money field is not an update — the fields "
-                    f"left behind no longer read as a value. Send the whole "
-                    f"value, or leave the key out")
-        if props.get(AMOUNT_MINOR) is not None or props.get(CURRENCY) is not None:
-            read_money_value(props)
-        elif on_update and MINOR_UNIT_EXPONENT in props:
-            raise MoneyValueError(
-                f"{MINOR_UNIT_EXPONENT} cannot be validated on an update "
-                f"without its {CURRENCY} in the same write — the stored "
-                f"currency is not visible at this boundary, so a lone "
-                f"exponent could be a mis-scale. Send the whole value "
-                f"(amountMinor + currency + minorUnitExponent)")
+        if read_money_value(props) is not None:
+            _validate_present_optional_fields(props)
     except MoneyValueError as exc:
         where = f" ({door})" if door else ""
         raise MoneyValueError(
@@ -410,12 +408,14 @@ def refuse_malformed_money_in_payload(payload, *, door: str = "") -> None:
     ⚠️ WHAT IT DOES **NOT** WIDEN — the ENGAGEMENT rule. Each mapping the walk
     reaches is judged by :func:`refuse_malformed_money` (and so by
     :func:`read_money_value`, the reader's own rule), so a nested mapping is
-    gated only if it carries an ``amountMinor``/``currency`` at all, and it is
-    judged with ``on_update=False``: every record this seam journals is a full
-    snapshot (a create-shaped write), so a lone ``minorUnitExponent`` on a
-    record stays the no-op it is on the SDK create doors. Widening engagement
-    here would refuse legitimate writes — that is what the review's
-    "presence-based" candidate was withdrawn for.
+    gated only if it carries an ``amountMinor``/``currency`` at all, and the bag
+    it judges is treated as the STATE — which it is here: every record this
+    seam journals is a full snapshot (a create-shaped write), so a lone
+    ``minorUnitExponent`` on a record stays the no-op it is on the SDK create
+    doors. (The UPDATE doors are the ones that merge onto a stored value, and
+    they grade the merged state instead — see :func:`money_view_after_update`.)
+    Widening engagement here would refuse legitimate writes — that is what the
+    review's "presence-based" candidate was withdrawn for.
 
     ⚠️ FAILURE DIRECTION — REFUSE, not admit, for the family it matches: a
     nested mapping that carries a non-null ``amountMinor``/``currency`` for a
