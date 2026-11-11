@@ -1160,7 +1160,8 @@ def test_update_entity_point_branch_is_a_declared_exemption(tmp_path):
     """`_update_entity`'s Point branch journals NO embedding record at all.
 
     Round-7 P1 (filed on the pre-existing **#4094**): that branch applies caller
-    props with a live `SET n += $p` and emits only the annotator dims — a
+    props with a live `SET n += $p` and emits the annotator dims and (since
+    #11239) the claim's ``mentions`` record — and no embedding record — a
     deliberate, code-recorded scope cut. So a caller-supplied `embedding`
     reaches the node with no journal record for it anywhere, and the rebuild
     falls back to the creation vector. #5004 does not cover this path: widening

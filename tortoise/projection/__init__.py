@@ -7096,10 +7096,13 @@ from tortoise.projection.entities import (  # noqa: E402, I001
     _EntityHandlers,
     _is_persistable_prop_value,
     _PERSISTABLE_MAX_DEPTH,
+    _POINT_JSON_RECORD_PROPS,
     _stated_tags,
     _storable_bound,
     _store_holds_prop_value,
     _usable_instant,
+    encode_json_record_props,
+    stated_json_record_prop,
     gated_promote_payload,
     identifier_tokens_enabled,
     promote_status_applies,
@@ -9709,6 +9712,47 @@ def _apply_one(points: dict[str, dict], ev: dict,
                 if _carried or _dropped:
                     p = {**{_k: _v for _k, _v in p.items() if _k not in _dropped},
                          **_carried}
+        # #11239: DM1's mention record — the one `_POINT_JSON_RECORD_PROPS` key,
+        # whose writer is the open-set passthrough AFTER
+        # `encode_json_record_props`. The DISPOSITION is folded for EVERY
+        # creation, including the FIRST one for an id: it used to sit inside the
+        # carry-forward block above, which only runs when `_prev` exists, so a
+        # fresh claim's payload reached `points[p["id"]] = p` VERBATIM — a list
+        # spelling in the journal view against the compact scalar the node
+        # holds (review P2 on PR #11795, measured). The visible consequence is
+        # the #5048/#5256 unclearable red: `EventAPI.add_point(mentions="a\x00b")`
+        # journals the raw string, the #7369 transport gate dispatches a null so
+        # the node holds NO property, and `consistency._uncarried` classes a
+        # `str` as canonically carried — so the checker compared the journal's
+        # raw value against an absent property on a FAITHFUL graph, with the
+        # advice ("replay the journal") that reproduces it.
+        #
+        # Only the `"skip"` arm needs `_prev`, and only a NON-re-creation may
+        # carry: pass 1a wipes the record on a re-create (`n.mentions = NULL`),
+        # so inheriting a dead incarnation's value would be the opposite bug.
+        _prev_mentions = None if journal_recreate else points.get(p["id"])
+        for _jk in _POINT_JSON_RECORD_PROPS:
+            _jstate, _jvalue = stated_json_record_prop(p, _jk)
+            if _jstate == "set":
+                # The WRITER's bytes (the encoded scalar), so a list-shaped
+                # journal record folds to the same value the node holds.
+                if _jvalue != p.get(_jk):
+                    p = {**p, _jk: _jvalue}
+            elif _jstate == "null":
+                # The writer dispatches a null (#7369), which REMOVES the
+                # property — folding the raw value instead would keep a value
+                # the node does not hold.
+                p = {**{_k: _v for _k, _v in p.items() if _k != _jk}}
+            elif isinstance(_prev_mentions, dict) and _jk in _prev_mentions:
+                # The graph MERGEs and the passthrough writes only a stated
+                # key, so a second creation that says nothing about the record
+                # KEEPS the stored one; replacing the entry outright would drop
+                # it from the journal view only. ⛔ NOT "a value
+                # `_is_persistable_prop_value` refuses": that filter refutes the
+                # payload's OWN list spelling, which the encoder turns into a
+                # storable scalar, so the ENCODER is the arbiter for this key
+                # (`stated_json_record_prop`, review P1 on PR #11795).
+                p = {**p, _jk: _prev_mentions[_jk]}
         points[p["id"]] = p
         # Flatten speaker from point's provenance into node data
         # #331: non-dict provenance (null/string) must not crash flattening.
@@ -9771,6 +9815,28 @@ def _apply_one(points: dict[str, dict], ev: dict,
             # `_canonical_point_fields` drops on BOTH sides.
             if "tags" in ev:
                 p["tags"] = ev["tags"]
+            # #11239 (DM1's home): fold a revised MENTION record — parity with
+            # ``_revise_point`` (the graph fold) and with the live
+            # ``update_point(mentions=…)``. Without it a rebuild — and this
+            # fold, which is `check_consistency`'s reference view — drops a
+            # record the live write stored, the #5048/#2897 class the clauses
+            # above exist for. The value is normalised through the SAME encoder
+            # the writer used (`stated_json_record_prop`), so a list-shaped
+            # record and the writer's compact scalar reach this fold as one
+            # value, and a record the writer cannot store EXACTLY (a value the
+            # #7369 transport gate nulls — a NUL/lone-surrogate string, which
+            # `_revise_point` clears via `n.mentions = NULL`) folds as ABSENT,
+            # never as the raw value the node does not hold. Measured before this
+            # gate: `update_point(mentions="a\x00b")` left the node with no
+            # property and `check_consistency` redded a FAITHFUL graph on
+            # `fields: ['mentions']` with the unclearable "replay the journal"
+            # advice.
+            if "mentions" in ev:
+                _mstate, _mvalue = stated_json_record_prop(ev, "mentions")
+                if _mstate == "set":
+                    p["mentions"] = _mvalue
+                else:
+                    p.pop("mentions", None)
             # #2350 (E-prec): fold the per-end validity-precision EDIT — the
             # same class as `tags` above, and it must ride the SAME pure-fold
             # arm the graph fold uses, or the two replay engines disagree.
@@ -14549,6 +14615,8 @@ class FalkorProjection(
         # #2897: the same class as `last_ms_write_by_source`, for `tags` — the
         # last creation whose own clause actually WROTE the tag list.
         last_tags_write_by_source: dict[tuple[tuple[str, str], int], int] = {}
+        # #11239: the same anchor for a mention EDIT (see `last_tags_write_by_source`).
+        last_mentions_write_by_source: dict[tuple[tuple[str, str], int], int] = {}
         # #2350 (E-prec): the same open-set conditional-write class again, one
         # anchor per end (a creation that wrote only ONE of the two props did
         # not clear the other live, so a single shared anchor would
@@ -14837,6 +14905,22 @@ class FalkorProjection(
                     # `tests/test_source_version_extractedfrom_5038.py::
                     # test_consistency_gate_compares_the_folded_set` pins it on
                     # both halves.
+                    # #11239: DM1's mention record is the same class again, and
+                    # it is THIS change that puts it in it. `mentions` reaches
+                    # the node ONLY through the open-set passthrough
+                    # (`_POINT_DECLARED_PROPS`, deliberately in neither
+                    # `_POINT_HANDLED` nor `_POINT_DENY`), so
+                    # `_persist_extra_props` writes it only when the payload
+                    # states one — and the pass-1a MERGE would otherwise keep a
+                    # DELETED incarnation's encoded record on the re-created
+                    # node. Both consequences are the ones the list above exists
+                    # for: the rebuilt node holds a property live does not (the
+                    # #330 parity break), and `check_consistency` reds a
+                    # FAITHFUL rebuild on `fields: ['mentions']` with the advice
+                    # "replay the journal", which reproduces exactly that graph
+                    # — the #5048/#5256 unclearable-red class. The mirror of
+                    # DM1's integrity constraint ("no held item silently
+                    # dropped") is that a dropped item must not silently RETURN.
                     self.g.query(
                         "MATCH (n:Point {id:$id}) "
                         "SET n.embedding = NULL, n.content_hash = NULL, "
@@ -14844,6 +14928,7 @@ class FalkorProjection(
                         "    n.sourceVersionTransit = NULL, "
                         "    n.extractedFromAll = NULL, "
                         "    n.tags = NULL, "
+                        "    n.mentions = NULL, "
                         "    n.eventId = NULL, n.source_session = NULL, "
                         "    n.source_harness = NULL, n.ingested_at = NULL",
                         params={"id": p["id"]})
@@ -14911,6 +14996,12 @@ class FalkorProjection(
                     # for a tag EDIT.
                     if "tags" in persisted_extras:
                         last_tags_write_by_source[key] = seq
+                    # #11239: `mentions` rides the same reported set — the
+                    # passthrough writes it only when the creation payload
+                    # carried a non-empty record list (the encoder POPS an empty
+                    # one), so this is the pass-1b boundary for a mention EDIT.
+                    if "mentions" in persisted_extras:
+                        last_mentions_write_by_source[key] = seq
                     # #2350 (E-prec): the two per-end precision props ride the
                     # same reported set — the passthrough writes each only when
                     # the creation payload carries a non-None value, so the
@@ -15406,6 +15497,7 @@ class FalkorProjection(
                 skip_hash = False
                 skip_mitigation_strength = False
                 skip_tags = False
+                skip_mentions = False
                 skip_valid_from_precision = False
                 skip_valid_to_precision = False
                 skip_provenance: frozenset[str] = frozenset()
@@ -15434,12 +15526,13 @@ class FalkorProjection(
                         # and diverge from the ``apply()`` oracle. The recreate
                         # leg suppresses the REVISION half of a
                         # delete→recreate. It does NOT clear a stale value: the
-                        # pass-1a recreate wipe above covers only
+                        # pass-1a recreate wipe above clears
                         # embedding/content_hash/embedding_verbatim/
-                        # sourceVersionTransit, so an open-set prop the
-                        # re-creation omits survives from the dead incarnation
-                        # (pre-existing, general to every open-set prop — see
-                        # the residual note on the PR; not a #5048 regression).
+                        # sourceVersionTransit/extractedFromAll/tags/mentions/
+                        # eventId/source_session/source_harness/ingested_at, and
+                        # every OTHER open-set prop a re-creation omits still
+                        # survives from the dead incarnation (pre-existing,
+                        # general — not a #5048 regression).
                         skip_mitigation_strength = (
                             last_recreate_seq_by_source.get(key, -1) > seq
                             or last_ms_write_by_source.get(key, -1) > seq)
@@ -15452,6 +15545,13 @@ class FalkorProjection(
                         skip_tags = (
                             last_recreate_seq_by_source.get(key, -1) > seq
                             or last_tags_write_by_source.get(key, -1) > seq)
+                        # #11239: `mentions` is the same open-set conditional-
+                        # write class as `tags` — its own anchor, so a creation
+                        # that did not restate the record does not suppress the
+                        # revision's value (which it never cleared live).
+                        skip_mentions = (
+                            last_recreate_seq_by_source.get(key, -1) > seq
+                            or last_mentions_write_by_source.get(key, -1) > seq)
                         # #2350 (E-prec): each per-end precision prop is the
                         # same open-set conditional-write class — its own
                         # anchor, so a creation that restated only ONE end
@@ -15489,6 +15589,7 @@ class FalkorProjection(
                     skip_hash=skip_hash,
                     skip_mitigation_strength=skip_mitigation_strength,
                     skip_tags=skip_tags,
+                    skip_mentions=skip_mentions,
                     skip_valid_from_precision=skip_valid_from_precision,
                     skip_valid_to_precision=skip_valid_to_precision,
                     skip_provenance=skip_provenance)
@@ -20928,6 +21029,7 @@ class FalkorProjection(
                       skip_hash: bool = False,
                       skip_mitigation_strength: bool = False,
                       skip_tags: bool = False,
+                      skip_mentions: bool = False,
                       skip_valid_from_precision: bool = False,
                       skip_valid_to_precision: bool = False,
                       skip_provenance: frozenset[str] = frozenset()
@@ -21148,6 +21250,37 @@ class FalkorProjection(
                 set_clauses.append("n.tags = $tags")
                 params["tags"] = ev["tags"]
                 wrote_tags = True
+
+        # #11239 (DM1's home): fold a revised MENTION record. The write doors
+        # encode it on the way in (`sdk.update_point(mentions=…)` → one compact
+        # JSON scalar) and emit it in the `PointRevised` payload, so the LIVE
+        # node holds it — but this fold built its clauses only from
+        # content/embedding/hash/annotator/belief/`mitigation_strength`/`tags`/
+        # precision, so a rebuild dropped it. That is the #5048 class verbatim,
+        # and its consequence is the one this property exists to prevent: the
+        # record exists live and dies on the next `rebuild_all`, and
+        # `check_consistency` (this fold is its reference view) reds a faithful
+        # graph with advice that cannot clear it.
+        # Presence-conditional, mirroring the live `SET n += $props` — an
+        # explicit `None` is the documented clear and removes the property here
+        # too — and gated by `_store_holds_prop_value`, the same store-exactness
+        # bar the `tags` clause above uses, so a corrupt record DROPS instead of
+        # stranding the recovery. A record that reaches here as a LIST (a
+        # hand-written journal, never a door) is normalised through the writer's
+        # OWN encoder, so both spellings land as one value.
+        if not skip_mentions and "mentions" in ev:
+            _mention_value = ev["mentions"]
+            if _mention_value is not None \
+                    and not isinstance(_mention_value, str):
+                _mention_view = {"mentions": _mention_value}
+                encode_json_record_props(_mention_view)
+                _mention_value = _mention_view.get("mentions")
+            if _mention_value is None \
+                    or not _store_holds_prop_value(_mention_value):
+                set_clauses.append("n.mentions = NULL")
+            else:
+                set_clauses.append("n.mentions = $mentions")
+                params["mentions"] = _mention_value
 
         # #2350 (E-prec): fold a per-end validity-precision EDIT. The
         # PointRevised payload carries it (`update_point(id,
