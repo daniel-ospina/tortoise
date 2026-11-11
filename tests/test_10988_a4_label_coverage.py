@@ -159,9 +159,14 @@ def test_the_declared_vocabulary_includes_the_kinds_the_SDK_itself_registers():
     """FAILS IF `_a4_declared_kinds` imports only `domain_loader` and misses the SDK's own kinds.
 
     ⛔ MEASURED ON THE LIVE GRAPH 2026-11-11, which is why this arm exists: with only
-    `domain_loader` imported, `evidence` (121 nodes) and `option` (2) read UNDECLARED — FOUR of
-    the fleet's six declared typed kinds, since `tortoise.sdk` registers them through
-    `register_kind` at import time. That is a FALSE failing run, and a refusal that names a false
+    `domain_loader` imported, `evidence` (121 nodes), `option` (2) and `diary` (2) read
+    UNDECLARED — THREE of the fleet's six declared typed kinds on that graph, since
+    `tortoise.sdk` registers them through `register_kind` at import time.
+    `decision`/`jobToBeDone`/`useCase` are in `_BASE_KINDS` and stay declared, so they are not
+    among the movers. ⛔ `finding` is NOT a fourth *declared* kind — it is declared by no
+    vocabulary at all, i.e. the fourth undeclared *reading* and the one genuine gap, while the
+    three above are the import artefact (#11837 round-6 P3-7). That is a FALSE failing run, and
+    a refusal that names a false
     reason is the one failure mode a refusal must not have (`tools/ax_write_eval.py` records the
     same defect as `#9695` review P1).
 
