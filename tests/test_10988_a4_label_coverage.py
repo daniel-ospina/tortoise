@@ -541,7 +541,11 @@ def test_the_claims_histogram_is_read_ONCE_and_both_published_numbers_share_it()
     see: on the live fleet graph a write landing between the two reads publishes one layer's
     population twice — `a4 claims population=<X>` beside `a4 diagnostics claim_points=<Y>` — with
     every rendering, fold and vocabulary arm still GREEN (`#11837` review; the guards are the
-    `counts=` parameter at `capstone_measure.py:3287` and its `if counts is None` default).
+    `counts=` parameter of `_a4_claim_diagnostics` and its `if counts is None` default). ⛔ THOSE
+    GUARDS ARE NAMED BY SYMBOL, NOT BY LINE: this docstring used to quote
+    `capstone_measure.py:3287`, and a two-line insertion above it re-staled the number onto a
+    comment in the same PR — the rot the bundle's own rule ("the symbol is authoritative and the
+    number is a convenience") exists to stop.
 
     Pinned as QUERY TEXT, the way the predicate and the node label are: `_FakeGraph` records every
     cypher it answers, and the claims histogram is uniquely identifiable by its `RETURN`.
