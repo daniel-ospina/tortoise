@@ -62,7 +62,7 @@ artifact  = census.json, carrying its own `provenance` (measured_at, probe_sha25
 | `pages_walked` / `page_size_*` | **from the artifact, never from this row** — the walk's cost varies with server load, and a `page_size_final` below `page_size_start` means the wait-budget ladder fired and the run served more pages. The probe counts pages, NOT requests: a shrunk page costs extra requests the artifact does not count |
 | `live_points` | **15,842** (15,868 walked − **26** terminal) |
 | `quote_non_empty` | **15,027** → **94.86%** of live Points |
-| `points_with_vector` | **15,295** (96.5% of the live graph is embedded) |
+| `points_with_vector` | **15,295** (96.55% of the live graph is embedded — 15,295 / 15,842) |
 | `points_with_vector_and_quote` | **15,008** → **98.12%** of embedded Points |
 | `quote_chars_all` | min **8** · median **137** · max **200** · n 15,027 (composed length) |
 | `at_cap` | **2,260** — stored length ≥ 200: **15.04% of quoted Points**, **14.27% of all live Points** |
@@ -111,16 +111,14 @@ population the composed text targets: **98.93% of embedded statements**.
    rule is narrower than "cut at 200": if the cap lands inside a token, the span moves back to the
    previous whitespace **only when the split token's kept prefix carries a decimal digit AND the
    discarded remainder carries an alphanumeric character** (a value straddles the cut); otherwise the
-   hard 200-char cut stands, and a quote whose 200th character is whitespace ends at a word boundary.
-   The helper's own docstring records the cap landing **inside a token** on a `_MAX_QUOTE` cut
-   (`wp04_aurora_perf/raw`, a 201-char quote ending `blew up the p95.`) — where the discarded remainder
-   was punctuation only, so the token was KEPT, not moved; its summary line reads "on the `_MAX_QUOTE`
-   it is the pre-existing cut". The move arm is nevertheless reachable at this cap, because it is not
-   cap-specific (`_write_span` branches on the characters at the cut, never on `cap`) and reproduced
-   directly at `cap=200` it backs the span off to the previous whitespace. **Which of those two happened
-   at the cut is not measured by this census** (it carries min/median/max/n/at_cap, not a boundary
-   classification; a spot check during
-   authoring showed one cut point ending `…— a d`, and that spot check is not a committed artifact). The
+   span is exactly `text[:200]` (which is NOT `_write_span_is_hard_cut`, the single-token fallback that
+   also skips the #10360 judgment), and a quote whose 200th character is whitespace ends at a word
+   boundary. The drop arm is cap-agnostic — `_write_span` never reads which cap it was given — and
+   `tests/test_state_value_verbatim_10360.py` exercises it at `_MAX_QUOTE`, so it is reachable on this
+   population rather than excluded. **Whether any at-cap quote here has a value straddling its cut is
+   not measured by this census** (it carries min/median/max/n/at_cap, not a boundary classification; a
+   spot check during authoring showed one cut point ending `…— a d`, and that spot check is not a
+   committed artifact). The
    flag is OFF; this is recorded so the 0.89 duplicate-similarity gate knows it will be reading UP TO 200 chars (the
    STORED basis, which the artifact's `quote_chars_all.at_cap_basis` field names — a composed text
    can be shorter, so it is not the length this 2,260 counts) for about one Point in seven.

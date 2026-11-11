@@ -16,6 +16,7 @@ this file is safe in the docker lane and in CI.
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import sys
 from pathlib import Path
@@ -937,15 +938,20 @@ def test_an_endpoint_without_a_scheme_exits_three(monkeypatch, endpoint):
 
 
 def test_an_unwritable_stdout_returns_two(monkeypatch):
-    """FAILS IF the `--out -` branch is unguarded: `> /dev/full` or `| head -1` raised
-    `OSError` out of `main` and exited 1 — outside the documented contract, in the same class
-    the file branch is already guarded for (review, attestation round 3).
+    """FAILS IF the `--out -` branch is unguarded: `> /dev/full` raised `OSError` out of
+    `main` and exited 1 — outside the documented contract, in the same class the file branch
+    is already guarded for (review, attestation round 3).
 
     ⛔ The stream must be BUFFERED, like the real one: a stub whose `.write` raises tests an
-    unbuffered stdout, which is not what `> /dev/full` or a pipe is. With the real shape
+    unbuffered stdout, which is not what `> /dev/full` is. With the real shape
     (`TextIOWrapper` over a buffer) `.write` succeeds and `.flush` raises — so this test reds
-    on a write-only guard (review F6: the artifact is 5,325 B, under the 8 KiB buffer, and the
+    on a write-only guard (review F6: the artifact is under the 8 KiB buffer, and the
     unflushed arm exited 0 with a truncated artifact).
+
+    ⛔ AND RETURNING 2 FROM `main` IS NOT THE SAME AS EXITING 2: the failed buffer stays dirty,
+    so interpreter shutdown flushes it again and that failure sets **120** over the returned 2
+    (measured on the real process). The arm therefore re-points `sys.stdout` at devnull before
+    returning — a guard without that is green here and still exits 120 in production.
     """
     _stub_main(monkeypatch)
 
@@ -958,8 +964,13 @@ def test_an_unwritable_stdout_returns_two(monkeypatch):
         def write(self, _b) -> int:
             raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(qp.sys, "stdout", io.TextIOWrapper(io.BufferedWriter(_FullRaw())))
+    stdout = io.TextIOWrapper(io.BufferedWriter(_FullRaw()))
+    monkeypatch.setattr(qp.sys, "stdout", stdout)
     assert qp.main(["quote_population", "--out", "-"]) == 2
+    # the dirty buffer was abandoned, not left for shutdown to re-flush: `sys.stdout` is now
+    # a devnull handle and the original stream is no longer the one the interpreter owns.
+    assert qp.sys.stdout is not stdout
+    assert qp.sys.stdout.name == os.devnull
 
 
 def test_page_one_without_a_total_exits_four():
@@ -1178,11 +1189,16 @@ def test_the_cap_note_matches_the_write_helper_at_the_quote_cap():
     case where the move did NOT fire — punctuation-only remainder, token kept — and its summary line
     reads "on the `_MAX_QUOTE` it is the pre-existing cut". A reader following the citation therefore
     read the opposite of the claim. Reverting the sentence to that mis-citation left the whole file
-    green (`75 passed`, review at `1156c1097e`, P3-2), which is what the citation asserts below close.
+    green (`75 passed`, review at `1156c1097e`, P3-2), which is what the asserts below close.
 
     The three arms are asserted against the MODULE rather than against prose, so the rule the note
     states cannot drift out from under it — and the second `cap` is there because the note's
     reachability argument is precisely that the arm never consults `cap`.
+
+    The note now cites `tests/test_state_value_verbatim_10360.py` instead of the docstring, and that
+    citation is RESOLVED here rather than trusted: the cited file must exist and must carry a
+    `_write_span(…, _MAX_QUOTE)` case whose expected span is the backed-off one (the drop arm), which
+    is what a rename, a deletion or a re-cut would otherwise leave dangling in published prose.
     """
     from tortoise.extractor_v2 import _MAX_QUOTE, _write_span
 
@@ -1209,15 +1225,29 @@ def test_the_cap_note_matches_the_write_helper_at_the_quote_cap():
 
     readme = (REPO / "docs" / "evidence" / "11739-quote-population" / "README.md").read_text(
         encoding="utf-8")
-    note = re.search(r"The helper's own docstring records.*?(?=\*\*Which of those two)", readme, re.S)
-    assert note, "the cap note's docstring-citation sentence moved — repoint this pin"
+    note = re.search(r"The stored value goes through.*?(?=\*\*Whether any at-cap quote)",
+                     readme, re.S)
+    assert note, "the cap note's reachability paragraph moved — repoint this pin"
     sentence = " ".join(note.group(0).split())
-    assert "blew up the p95." in sentence, (
-        "the cap note must cite the precedent the docstring actually records — the punctuation-only "
-        "remainder at `wp04_aurora_perf/raw`, where the token was KEPT")
     assert "records that arm firing" not in sentence, (
-        "the docstring records that arm NOT firing at `_MAX_QUOTE`; a sentence claiming it fires "
-        "sends a reader to evidence that says the opposite")
+        "the helper's docstring records that arm NOT firing at `_MAX_QUOTE` (its only such precedent "
+        "is the punctuation-only remainder at `wp04_aurora_perf/raw`, where the token was KEPT); a "
+        "sentence claiming it fires sends a reader to evidence that says the opposite")
+
+    cited = re.search(r"`(tests/[A-Za-z0-9_.]+\.py)` exercises it at `_MAX_QUOTE`", sentence)
+    assert cited, (
+        "the cap note must name the test that exercises the drop arm at `_MAX_QUOTE` — that "
+        "citation is what replaced the docstring precedent it used to mis-state")
+    cited_path = REPO / cited.group(1)
+    assert cited_path.is_file(), f"the cap note cites {cited.group(1)}, which does not exist"
+    cited_src = cited_path.read_text(encoding="utf-8")
+    # the citation has to resolve to the ARM, not merely to the file: a `_write_span(…, _MAX_QUOTE)
+    # case whose expected value is the backed-off span is a drop-arm exercise; every other shape
+    # there (the kept-token pins) would leave the note's claim unsupported.
+    drop_arm = re.search(r"_write_span\([^)\n]*_MAX_QUOTE\)\s*==\s*\"[^\"]*\"\s*$", cited_src, re.M)
+    assert drop_arm, (
+        f"{cited.group(1)} no longer pins a `_write_span(…, _MAX_QUOTE)` span by its VALUE, so it "
+        "no longer shows the drop arm firing at the quote cap")
 
 
 def test_the_help_premise_about_hand_authored_points_matches_the_artifact():
