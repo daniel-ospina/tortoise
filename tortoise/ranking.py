@@ -841,7 +841,8 @@ class GraphRanker:
 
         #11702 — an ABSENT belief contributes NO term. When the read answered
         ``confidence: None`` (nothing that yields a mean — nothing persisted, a
-        half pair, a 0/0 pair, an unreadable operand) the belief term is dropped
+        half pair, a 0/0 pair, an unreadable operand — and no readable mirror
+        supplying one) the belief term is dropped
         and the remaining term keeps ITS OWN weight, rather than a fabricated
         0.5 standing in for it. Substituting 0.5 was not neutral: it gave a
         never-measured claim exactly the boost of a measured coin flip, so the
@@ -1552,7 +1553,8 @@ class StateRanker:
         midpoint, and the exponent BOUND whose cancelling mantissa was in band),
         so that arm is DEFENSIVE. There are therefore two nulls —
         ``absent`` (nothing YIELDS a mean: nothing persisted, a half pair, a
-        0/0 pair, or an unreadable operand) and ``unreadable`` (a belief exists) —
+        0/0 pair, or an unreadable operand -- and no readable mirror supplying
+        one) and ``unreadable`` (a belief exists) —
         and they are not the same fact.
         """
         if "confidence" in signals:

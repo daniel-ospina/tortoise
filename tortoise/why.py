@@ -499,7 +499,8 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
         if not pair_stored:
             variance = 0.0
         by_id[pid]["ep"] = {
-            # #11702: `None` when nothing YIELDS a mean (nothing persisted, a
+            # #11702: `None` when nothing YIELDS a mean AND no readable
+            # mirror supplies one (nothing persisted, a
             # half pair, a 0/0 pair, an unreadable operand) — never the Beta(1,1)
             # mean. This is the block a caller reads to decide whether to
             # surface/notify, so a fabricated 0.5 here admitted a

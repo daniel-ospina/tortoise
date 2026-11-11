@@ -1192,7 +1192,8 @@ def ep_state_cypher(alias: str) -> str:
     exhaustive rule, and it is a DISJUNCTION: a belief exists iff a readable
     ``n.confidence`` mirror is present (``belief_mirror_cypher`` — in [0, 1])
     OR both coalesced operands are present, non-negative, and sum > 0. So a
-    belief is absent iff there is NO readable mirror AND one of: an α with no β,
+    belief is absent iff there is NO readable mirror AND either nothing is
+    persisted at all, or one of: an α with no β,
     a β with no α, a pair summing to ≤ 0, a negative operand, or an operand this
     process cannot read. Do not read this docstring as "a persisted α answers
     measured"; run the two arms.
@@ -1397,9 +1398,11 @@ class EpBreakdown:
     # quantity anymore — a claim EP converged at 0.88 with no incoming IMPL
     # edges reads 0.88 here, and 0.0 only for a genuinely impossible store.
     #
-    # #11702: ``None`` when nothing YIELDS a mean — no persisted belief, a half
+    # #11702: ``None`` when nothing YIELDS a mean AND no readable
+    # ``n.confidence`` mirror supplies one — no persisted belief, a half
     # pair, a 0/0 pair, or an unreadable operand (the third state of the #2206
-    # contract). It used to be reported as the neutral Beta(1,1)
+    # contract). A readable mirror beside any of those shapes is the value.
+    # It used to be reported as the neutral Beta(1,1)
     # mean 0.5 and was therefore indistinguishable from a computed coin flip
     # at every threshold and every order. Read :attr:`ep_state` beside it: a
     # number here is a belief that exists, and ``None`` means none does.
@@ -1449,7 +1452,9 @@ class EpBreakdown:
     # False = no α persisted (or a #2490 terminal gate); ``confidence_mean`` is
     # then the prior mean when ``baseline`` is True, else reading it from these
     # two flags is WRONG — a mirror-only prior reads (False, False) with a real
-    # 0.95, an α-only half pair reads (True, False) with ``None``, and a
+    # 0.95, an α-only half pair reads (True, False) with ``None`` when no
+    # readable mirror survives beside it (with one, the value is the mirror's),
+    # and a
     # β-only row reads (False, False) with ``None`` and state ``absent``. Read
     # :attr:`ep_state`. Neither flag is a signal of contestation.
     # #2490 has_ep overload: TERMINAL claims (terminal vocab status OR the
@@ -5525,7 +5530,8 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                         if (pair_stored and alpha_num is not None
                             and beta_num is not None) else 0.0)
             breakdowns[pid] = EpBreakdown(
-                # #11702: `None` when nothing YIELDS a mean (nothing persisted,
+                # #11702: `None` when nothing YIELDS a mean AND no readable
+                # `n.confidence` mirror supplies one (nothing persisted,
                 # an operand missing after the coalesce, a sum ≤ 0, a negative
                 # or unreadable operand) — never the
                 # neutral 0.5, which is what made "no evidence" and "a measured

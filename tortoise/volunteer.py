@@ -390,7 +390,8 @@ def _eligible(block: dict, *, min_confidence: float,
     path's ep.confidence_mean, which reads the same coalesce of
     posterior_alpha/ep_alpha).
     UNMEASURED points (nothing that yields a mean — no persisted belief, a half
-    pair, a 0/0 pair, an unreadable operand) carry NO mean —
+    pair, a 0/0 pair, an unreadable operand — and no readable mirror supplying
+    one) carry NO mean —
     ``confidence_mean: None`` with ``ep_state: "absent"`` — so they fail every
     floor and are never fired (the outcome the old Beta(1,1) 0.5 produced by
     sitting below the 0.7 default; the reason no longer is). #3415 correction: that

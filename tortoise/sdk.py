@@ -37941,7 +37941,8 @@ class TortoiseSDK:
         Point results annotated with EP breakdown. confidence_mean is THE
         point's confidence (issue #2206 contract): the belief mean α/(α+β) of
         the persisted posterior when EP has run, else the persisted prior
-        mean — and ``null`` + ``ep_state: "absent"`` when nothing YIELDS a mean:
+        mean — and ``null`` + ``ep_state: "absent"`` when nothing YIELDS a mean
+        and no readable ``n.confidence`` mirror supplies one:
         nothing persisted, a half pair, a 0/0 pair, or an operand this process
         cannot read (#11702: there is then no belief
         to report; the neutral Beta(1,1) 0.5 was indistinguishable from a
@@ -41166,7 +41167,8 @@ class TortoiseSDK:
         - Most important arguments (operators, by annotator_precision) and
           high-contention NANDs / mitigations attached to top results.
         - Uncalibrated points (nothing that YIELDS a mean: no persisted
-          belief, a half pair, a 0/0 pair, or an unreadable operand) carry
+          belief, a half pair, a 0/0 pair, or an unreadable operand — with no
+          readable mirror supplying one) carry
           ``confidence: null`` + ``ep_state: "absent"`` and are ordered AFTER
           every row that has a belief (#11702). This replaces the documented
           neutral-0.5 fallback: absence is still not scored as LOW support —
