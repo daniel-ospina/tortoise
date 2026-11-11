@@ -14,6 +14,37 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def _ast_sources(package: Path) -> list[Path]:
+    """Every Python-PARSABLE source under `package`: `.py` modules and `.pyi` stubs.
+
+    `.pyi` is in the set because `main`'s word grep had no suffix filter — it would have seen
+    a stub that imports the symbol — and that matters: a stub import is a dependency for the
+    type checker the repo runs (`mypy tortoise/` in `.github/workflows/ci.yml`), while
+    `ast.parse` reads a stub unchanged, so leaving them out was a narrowing with no
+    mechanism behind it. (Measured: the repo currently ships zero stubs, so this restores
+    coverage rather than fixing a live miss.)
+    """
+    return sorted({*package.rglob("*.py"), *package.rglob("*.pyi")})
+
+
+def _package_files(package: Path) -> list[Path]:
+    """Every FILE under `package`, of ANY suffix, with `__pycache__` excluded.
+
+    ⛔ NOT a `*.py` filter. `main`'s word grep scanned every file type under this package,
+    and a `*.py`-only walk is a BLINDER rather than a stricter gate: measured GREEN on a
+    tree whose only reference was `tortoise/hermes-plugin/plugin.yaml` carrying
+    `entry: "propagate_shock"`, where `origin/main` red. A plugin manifest, a registry
+    JSON or a config is exactly where a re-export gets registered.
+
+    Undecodable files are READ with `errors="replace"` rather than skipped for the same
+    reason: a guard that skips them reopens the hole for any file not written in UTF-8.
+    """
+    return sorted(
+        p for p in package.rglob("*")
+        if p.is_file() and "__pycache__" not in p.parts
+    )
+
+
 def _production_ast_references(
     root: Path | None = None, symbol: str = "propagate_shock"
 ) -> list[tuple[str, int]]:
@@ -31,7 +62,7 @@ def _production_ast_references(
     """
     base = ROOT if root is None else Path(root)
     refs: list[tuple[str, int]] = []
-    for src in sorted((base / "tortoise").rglob("*.py")):
+    for src in _ast_sources(base / "tortoise"):
         tree = ast.parse(src.read_text(encoding="utf-8"), filename=str(src))
         for node in ast.walk(tree):
             if (isinstance(node, ast.Name) and node.id == symbol) or (
@@ -49,7 +80,24 @@ def _production_ast_references(
 def _production_string_references(
     root: Path | None = None, symbol: str = "propagate_shock"
 ) -> list[tuple[str, int]]:
-    """Every QUOTED mention of `symbol` under `<root>/tortoise`, as (path, lineno).
+    """Every reference to `symbol` under `<root>/tortoise`, as (path, lineno).
+
+    Traversal is EVERY file of EVERY suffix (`_package_files`), because this arm exists to
+    hold the coverage `main`'s `grep -rn` had and a `grep` has no suffix filter. The
+    narrowing that made it `*.py` was measured GREEN on a non-Python reference, so it is
+    pinned by `test_the_string_literal_arm_catches_what_no_ast_can`.
+
+    The PREDICATE depends on the file, and both halves are parity with `main` rather than a
+    new policy:
+
+    - **Python** (`.py`/`.pyi`): the line must QUOTE the symbol with matching straight
+      quotes. This is where #11903's false positive lives — a docstring naming the symbol —
+      so the bare word is not enough here. Node-shaped references are the AST arm's job.
+    - **Any other file** (manifest, config, registry, `.env`): the BARE WORD, which is what
+      `main`'s grep matched there. There are no docstrings in those files, so the #11903
+      false positive does not exist in this half, and requiring quotes WAS a narrowing:
+      `entry: propagate_shock`, a TOML key or `ENTRY=propagate_shock` all create the
+      dependency and all were RED on `main`. Pinned by `manifest_unquoted.yaml`.
 
     The AST leg above is blind to this shape by construction: `getattr(mod,
     "propagate_shock")`, `globals()["propagate_shock"]`, `__all__ = ["propagate_shock"]`
@@ -61,11 +109,16 @@ def _production_string_references(
     (`test_the_string_literal_arm_catches_what_no_ast_can`).
     """
     base = ROOT if root is None else Path(root)
-    forms = (f'"{symbol}"', f"'{symbol}'")
+    quoted = (f'"{symbol}"', f"'{symbol}'")
     refs: list[tuple[str, int]] = []
-    for src in sorted((base / "tortoise").rglob("*.py")):
-        for lineno, line in enumerate(src.read_text(encoding="utf-8").splitlines(), 1):
-            if any(form in line for form in forms):
+    for src in _package_files(base / "tortoise"):
+        text = src.read_text(encoding="utf-8", errors="replace")
+        # Per the docstring: Python keeps the quoted-only rule (that is where #11903's
+        # docstring false positive lives), and every other file type keeps `main`'s
+        # bare-word rule, because a manifest/config/registry carries no prose.
+        needles = quoted if src.suffix in (".py", ".pyi") else (symbol,)
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if any(n in line for n in needles):
                 refs.append((str(src.relative_to(base)), lineno))
     return refs
 
@@ -173,12 +226,29 @@ def test_no_propagate_shock_callers():
     # parts, docstring nodes skipped — closes this case with no prose false positive, and is
     # filed as a follow-up (#11918) rather than smuggled into a cite repair.
     #
-    # ⚠️ The matching-quote rule cuts BOTH ways: straight-quoted PROSE (`# "propagate_shock" was
-    # removed`, `"""Do not call "propagate_shock" here."""`) IS flagged by this arm. That is a
-    # latent over-block, not a live one — the repo convention for naming a symbol in prose is
-    # backticks, and the real tree measures empty (`string_refs == []`) — and it is the reason
-    # the structural follow-up above is the right long-term arm. Stated so the next reader does
-    # not infer a prose exemption this textual test does not have.
+    # ⚠️ The matching-quote rule cuts BOTH ways in PYTHON: straight-quoted PROSE
+    # (`# "propagate_shock" was removed`, `"""Do not call "propagate_shock" here."""`) IS
+    # flagged by this arm. That is a latent over-block, not a live one — the repo convention
+    # for naming a symbol in prose is backticks, and the real tree measures empty
+    # (`string_refs == []`) — and it is the reason the structural follow-up above is the
+    # right long-term arm. Stated so the next reader does not infer a prose exemption this
+    # textual test does not have. Non-Python files do not have docstrings, which is why the
+    # bare-word rule is safe there and is NOT extended to Python.
+    #
+    # TRAVERSAL, stated so the next reader can CHECK it rather than infer it. Depth is
+    # unbounded (`rglob`); file type is unbounded for the textual arm (every file under
+    # `tortoise/`, `__pycache__` excluded) and `.py`/`.pyi` for the AST arm (only Python
+    # parses). Both were `*.py`-only for one round, and that walk was measured GREEN on a
+    # tree whose sole reference was `tortoise/hermes-plugin/plugin.yaml` where `origin/main`
+    # red — so the file-type filter is gone and pinned by fixtures in both detector tests.
+    # DIRECTORY scope is the shipped package `tortoise/`, which is ALSO the scope `main`'s
+    # assertion had: `origin/main` bucketed a line into `production_code` only when
+    # `"/tortoise/" in path_part`, so `graph-scripts/`, `validation/` and `tests/` never
+    # reached it there either. They stay in the word-grep `callers` map above as reported
+    # CONTEXT. What this repair changes is the PREDICATE — word match becomes
+    # node/straight-quoted for Python and bare-word for every other file type — not the
+    # directory surface, which is stated here so no reader infers a narrowing that did not
+    # happen.
     #
     # Every node-shaped reference is pinned below, traversal is pinned for BOTH arms, and each
     # arm's positive and negative form sets are pinned by its own fixtures.
@@ -235,6 +305,9 @@ def test_the_reference_scan_catches_every_static_form(tmp_path):
         "import_plain.py": "from tortoise.projection.propagation import propagate_shock\n",
         "import_aliased.py": "from tortoise.projection.propagation import propagate_shock as _s\n_s(x)\n",
         "import_dotted.py": "import tortoise.projection.propagate_shock\n",
+        # A stub is Python-parsable and `main`'s word grep saw it; excluding `.pyi` from the
+        # walk was a narrowing with no mechanism behind it, so it is pinned here.
+        "import_in_stub.pyi": "from tortoise.projection.propagation import propagate_shock\n",
     }
     must_stay_green = {
         "definition.py": "def propagate_shock(self, graph, n):\n    return 1\n",
@@ -253,7 +326,6 @@ def test_the_reference_scan_catches_every_static_form(tmp_path):
     nested = tmp_path / "tortoise" / "projection"
     nested.mkdir(parents=True, exist_ok=True)
     (nested / "nested_call.py").write_text("propagate_shock(graph, n)\n", encoding="utf-8")
-
     refs = _production_ast_references(root=tmp_path)
     found = {Path(p).name for p, _ in refs}
 
@@ -298,10 +370,18 @@ def test_the_string_literal_arm_catches_what_no_ast_can(tmp_path):
         "getattr_string.py": 'getattr(mod, "propagate_shock")(g, n)\n',
         "registry_key.py": '_HOOKS = {"shock": "propagate_shock"}\n',
         "single_quoted.py": "HOOK = 'propagate_shock'\n",
+        # Non-Python files keep `main`'s BARE-WORD rule: a manifest/config carries no prose,
+        # so the #11903 docstring false positive cannot arise there, and requiring quotes
+        # would miss `entry: propagate_shock` — which `origin/main` red on.
+        "manifest_unquoted.yaml": "entry: propagate_shock\n",
     }
     must_stay_green = {
         "backticked_prose.py": 'def f():\n    """`propagate_shock` is never invoked."""\n    return 1\n',
         "lookalike.py": 'NAME = "propagate_shock_v2"\n',
+        # The other side of the split: PYTHON keeps the quoted-only rule, so a docstring
+        # naming the symbol in bare form stays green — that mention is #11903's false
+        # positive, and widening Python to a bare word is the wrong fix for it.
+        "bare_prose.py": 'def f():\n    """propagate_shock is never invoked."""\n    return 1\n',
         # Residual (b), pinned deliberately: a quoted literal that CONTAINS the symbol is not
         # matched, because a word-substring match would re-import the #11903 false positive.
         # Pinning it green makes any future widening a decision that breaks this test.
@@ -318,6 +398,15 @@ def test_the_string_literal_arm_catches_what_no_ast_can(tmp_path):
         '__all__ = ["propagate_shock"]\n', encoding="utf-8"
     )
 
+    # ⛔ TRAVERSAL IS ALSO FILE TYPE. A reference does not have to live in a Python file:
+    # a plugin manifest or a registry JSON is where a re-export actually gets registered,
+    # and `main`'s word grep had no suffix filter. Measured at the head that walked only
+    # `*.py`: a tree whose sole reference was `tortoise/hermes-plugin/plugin.yaml` returned
+    # `[]` while `origin/main` red — a false PASS, this file's core failure class.
+    plugin_dir = tmp_path / "tortoise" / "hermes-plugin"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "plugin.yaml").write_text('entry: "propagate_shock"\n', encoding="utf-8")
+
     refs = _production_string_references(root=tmp_path)
     found = {Path(p).name for p, _ in refs}
 
@@ -325,6 +414,11 @@ def test_the_string_literal_arm_catches_what_no_ast_can(tmp_path):
         "the string-literal arm does not descend into subpackages, so a re-export registered"
         " in `tortoise/projection/` — where the deprecated definition lives — would read as no"
         f" dependency at all. Paths seen: {sorted({p for p, _ in refs})}"
+    )
+    assert any(p.endswith("hermes-plugin/plugin.yaml") for p, _ in refs), (
+        "the string-literal arm does not read non-Python files, so a reference carried in a"
+        " manifest/config/registry reads as no dependency at all — the coverage `main`'s word"
+        f" grep provided. Paths seen: {sorted({p for p, _ in refs})}"
     )
 
     missed = sorted(set(must_be_caught) - found)
