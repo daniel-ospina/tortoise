@@ -6066,7 +6066,7 @@ def _install_capture_seam(args, install_capture) -> int:
             "Cursor's docs say 'Cloud agents have no editor-lifetime session "
             "boundary. sessionEnd is tied to the IDE session, not a cloud "
             "agent chat', that 'sessionStart' is not available in cloud "
-            "agents', and that 'User-level hooks (~/.cursor/hooks.json) are "
+            "agents, and that 'User-level hooks (~/.cursor/hooks.json) are "
             "not available in cloud agents'. LOCAL desktop-editor sessions "
             "are the surface this install serves; for cloud-agent sessions "
             "use the MCP pull surface (`tortoise_search` / "

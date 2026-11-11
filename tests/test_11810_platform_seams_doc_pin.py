@@ -127,8 +127,13 @@ _PY = sys.executable
 #: and this form 179 (23 spans), and the whole 135-byte difference is five
 #: spans that are not tags: `<state.db>`, `<session_id>`, `<lookup_key>`,
 #: `<message shown to user when blocked>` and `<CustomMessage, "customType"|…>`.
-#: This form cannot cross a `<`, a `>`, or a line break — that bound, not prose
-#: preservation, is the property it buys.
+#: This form cannot cross a `<` or a `>`; its attribute part consumes at most
+#: ONE whitespace character — which MAY be a newline, and only immediately after
+#: the tag name (`\s` matches `\n`) — so a match is bounded by a tag shape, not
+#: by the line. That bound, not prose preservation, is the property it buys.
+#: (Measured: `re.fullmatch(_TAG, "<a\nb>")` matches, so one LF after the tag
+#: name CAN be crossed; `<a\r\nb>` does not. To forbid the newline entirely,
+#: narrow `\s` to `[ \t]` — a behaviour change, deliberately not made here.)
 _TAG = r"</?[A-Za-z][A-Za-z0-9-]*(\s[^<>\n]*)?/?>"
 
 
