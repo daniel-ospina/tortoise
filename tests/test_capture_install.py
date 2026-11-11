@@ -3058,14 +3058,25 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_cloud_agent_limit
     # stale the moment this PR added comment lines above it; name the predicate,
     # not the line.)
     assert "hosted cloud agent VM is NOT captured" in r.stdout, r.stdout
-    assert "neither the capture seam" not in r.stdout, r.stdout
-    assert "hook reaches a cloud agent" not in r.stdout, r.stdout
-    assert "seam reaches a cloud agent" not in r.stdout, r.stdout
-    assert "gets a Tortoise hook" not in r.stdout, r.stdout
-    assert "no cloud agent session" not in r.stdout, r.stdout
+    # ⛔ CASE-INSENSITIVE TOO (#11810 review r25 P1), and for the SAME reason as
+    # the `hooks are ide-only` guard two asserts up: an ENUMERATION is only as
+    # good as its casing, and this one was case-exact. Measured against the real
+    # `install cursor` stdout at `d5b23c02a`: re-appending the round-1 universal
+    # as "No cloud agent session is captured or injected." (a sentence-initial
+    # capital) stayed GREEN through `"no cloud agent session"`, and the
+    # product-name casing this CLI itself prints ("tortoise …") stayed GREEN
+    # through `"gets a Tortoise hook"`. Lowering only the haystack does not fix
+    # the second one — the NEEDLES carry the capital too — so both sides are
+    # lowered. The claim is the words, never their casing.
+    lowered = r.stdout.lower()
+    assert "neither the capture seam" not in lowered, r.stdout
+    assert "hook reaches a cloud agent" not in lowered, r.stdout
+    assert "seam reaches a cloud agent" not in lowered, r.stdout
+    assert "gets a tortoise hook" not in lowered, r.stdout
+    assert "no cloud agent session" not in lowered, r.stdout
     # review r9 (P3): the record's own phrasing, and therefore the one a lane
     # would reuse. Measured GREEN before this line existed.
-    assert "runs no Tortoise hook" not in r.stdout, r.stdout
+    assert "runs no tortoise hook" not in lowered, r.stdout
     # …and the SECOND surface that states this claim -- `install --list` -- was
     # pinned by nothing at all, so a revert there was silent.
     listing = _run(("install", "--list"), env, root)
