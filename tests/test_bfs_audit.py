@@ -123,7 +123,11 @@ def _production_string_references(
         text = src.read_text(encoding="utf-8", errors="replace")
         # Per the docstring: Python keeps the quoted-only rule (that is where #11903's
         # docstring false positive lives), and every other file type keeps `main`'s
-        # bare-word rule, because a manifest/config/registry carries no prose.
+        # bare-word rule, because requiring quotes there was a NARROWING that missed
+        # `entry: propagate_shock`, a TOML key or `ENTRY=propagate_shock` — all of which
+        # create the dependency and all of which were RED on `main`. ⛔ NOT because this
+        # half carries no prose: it does, `.md` is walked and a bare-word mention there
+        # reds (see the residual above and `prose.md` below).
         needles = quoted if src.suffix in (".py", ".pyi") else (symbol,)
         for lineno, line in enumerate(text.splitlines(), 1):
             if any(n in line for n in needles):
