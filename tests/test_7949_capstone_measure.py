@@ -4301,9 +4301,16 @@ _BUNDLE_RULES = (
     # master vocabulary to `statement`, so no typed claim came from that lane. The cite
     # names the repair, so a refactor that moves it reds here instead of silently
     # widening the claim.
+    # ⛔ A RANGE (`10419-10422`), so the rule is `span` WITH an end spec: on `line`
+    # `_bundle_missing` reads `source_lines[start - 1]` and never touches `end`, which
+    # is the same unchecked-end defect that function's own comment names for `span`
+    # ("A RANGE's end is a claim too"). The end here is the REPAIR ITSELF — the branch's
+    # `pkind = _POINT_FALLBACK["kind"]`, one of two byte-identical lines in this gate,
+    # so the anchor is the `elif` and the end token is what closes the block.
     ("the v2 write gate's statement repair (A4's attribution)", "extractor_v2",
      ("write gate repairs every point kind",),
-     ('elif pkind.lower() not in {k.lower() for k in master["points"]}:',), "line", None),
+     ('elif pkind.lower() not in {k.lower() for k in master["points"]}:',), "span",
+     ("contains", 'pkind = _POINT_FALLBACK["kind"]')),
     # The S2.1 FINDING in `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`: the
     # call that hands extraction the raw alongside the story. A RANGE, because
     # the claim is the ARGUMENTS — `edus=edus` sits one line below the call and
@@ -4655,6 +4662,15 @@ def test_the_bare_continuation_cites_name_what_they_say():
         ("docs/00_index.md", "fail-open `except` at", (
             ("14235", "except Exception as e:  # never block capture (P1)"),
             ("14386", "except Exception as e:  # never block capture (P1)"),
+        )),
+        # ⛔ #10988's `:10413` (A4's attribution). The cite is a BARE continuation —
+        # `extractor_v2.py:10419-10422`; `:10413` is the EMPTY-kind default only — so
+        # `_BUNDLE_CITE`, which requires a cite to NAME ITS FILE, cannot see it. Without
+        # this row the sentence's `:10413` half has no reader at all, and the claim it
+        # makes (that an empty `pointKind` — not the vocabulary repair — is what the
+        # `or "statement"` default serves) is exactly the half a re-derivation would move.
+        ("probes/capstone_measure.py", "`:10413` is the", (
+            ("10413", 'pkind = str(p.get("pointKind", "")).strip() or "statement"'),
         )),
         # `_IDLE_CITES["vet"]`: the early return and the surface it emits
         ("probes/capstone_measure.py", "its vet surface", (
