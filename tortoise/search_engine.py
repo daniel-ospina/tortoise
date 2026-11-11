@@ -1235,7 +1235,8 @@ def ep_state(*, posterior_alpha, ep_alpha, confidence=None,
     ``absent`` means nothing that YIELDS A MEAN — the read must carry ``None``,
     never a fabricated Beta(1,1) mean. That covers nothing persisted, a HALF
     pair (α with no β), a 0/0 pair, a negative operand, and an operand this
-    process cannot read, so "absent" is not the same as "nothing is stored". ``baseline`` is a persisted prior EP has not measured (a #2199
+    process cannot read, so "absent" is not the same as "nothing is stored".
+    ``baseline`` is a persisted prior EP has not measured (a #2199
     declared baseline, or a legacy EP-flush mirror) — still a value, just not a
     measurement. A half pair is ``absent``, not ``baseline``, UNLESS a readable
     mirror survives beside it: `ep_alpha` with no β + `baseline_set` + a legacy
