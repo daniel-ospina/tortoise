@@ -10,6 +10,7 @@ import math
 import os
 import re
 import struct
+from fractions import Fraction
 import threading
 import time
 from collections import Counter
@@ -422,6 +423,18 @@ _FLOAT32_MAX = 3.4028234663852886e38
 #: A literal whose MANTISSA is all zeros — the only kind that reads as a zero
 #: NUMBER. `"1e-400"` is not one: `float()` makes it zero because it underflowed,
 #: and `toFloat` answers null for it.
+#: A HEX float, the other spelling the store parses (`toFloat("0x1p4")` is 16.0,
+#: measured) and the one `float.fromhex` shares with it — including the `0x`
+#: prefix, which is what keeps `"abc"` (a valid hex DIGIT string, 2748.0 to
+#: `fromhex`) out: the store answers null for it, so Python must too. Trailing
+#: whitespace is refused by both (`"0x1p4 "` is null there).
+_HEX_FLOAT_LITERAL = re.compile(
+    r"[ \t]*[+-]?0[xX][0-9a-fA-F]*(?:\.[0-9a-fA-F]*)?(?:[pP][+-]?[0-9]+)?\Z",
+    re.ASCII)
+#: A hex literal whose MANTISSA is all zeros — the only kind that reads as a zero
+#: number (`"0x1p-9999"` underflows to zero in Python and is null to the store).
+_ZERO_HEX_LITERAL = re.compile(
+    r"[ \t]*[+-]?0[xX]0*(?:\.[0]*)?(?:[pP][+-]?[0-9]+)?\Z", re.ASCII)
 _ZERO_LITERAL = re.compile(r"\s*[+-]?0*(?:\.0*)?(?:[eE][+-]?[0-9]+)?\Z",
                            re.ASCII)
 #: `re.ASCII` is load-bearing on both patterns: without it `\s` matches Unicode
@@ -482,14 +495,54 @@ def _float32(val: float):
     return rounded if math.isfinite(rounded) else None
 
 
-def _string_operand(val: float):
-    """The float `toFloat` reads for a decimal string, or None (#11702).
+def _f32_neighbour(value: float, step: int) -> float:
+    """The float32 one ULP above (``step=+1``) or below (``-1``) ``value``."""
+    bits = struct.unpack("<I", struct.pack("<f", value))[0]
+    return struct.unpack("<f", struct.pack("<I", bits + step))[0]
 
-    ``val`` is Python's DOUBLE for the literal (the grammar is already pinned by
-    `_FLOAT_LITERAL`); this is the RANGE half of the same agreement. Before it,
-    `"1e309"` was `absent` in every Cypher surface and `measured / inf` in
-    Python — `annotate_ep_batch` served `inf`, the rankers sorted it FIRST, and
-    `json.dumps(..., allow_nan=False)` turned the hosted read into a 500.
+
+def _f32_from_decimal(raw: str, val: float):
+    """Correctly-rounded decimal → float32, the way `strtof` rounds (#11702).
+
+    ⛔ **This is not the same as rounding the DOUBLE.** `float(raw)` is a
+    correctly-rounded decimal → *float64*, and rounding THAT to float32 is a
+    DOUBLE rounding: at a literal that lands exactly on a float32 midpoint the
+    two disagree, and they disagree in opposite directions
+    (`"1.0000000596046448"` is 1 + 2⁻²⁴ exactly; `strtof` rounds it UP to
+    1.00000012 while round-half-to-even on the double sends it DOWN to 1.0). At
+    the band edge that flipped PRESENCE: the store said "outside [0, 1], absent"
+    while Python said "present at 1.0", so one claim reported `1.0 / baseline`
+    on the `ep` block and `absent` on every ranker — measured, with the claim
+    clearing a 1.0 belief floor.
+
+    So the double is used as the fast path, and ONLY when it sits exactly on a
+    float32 midpoint is the direction decided from the literal itself, with
+    `Fraction` arithmetic on the decimal (exact, no second rounding).
+    """
+    rounded = _float32(val)
+    if rounded is None or rounded == val:
+        return rounded
+    step = 1 if val > rounded else -1
+    neighbour = _f32_neighbour(rounded, step)
+    if abs(val - rounded) != abs(neighbour - val):
+        return rounded                      # not a midpoint: already correct
+    try:
+        exact = Fraction(raw.strip())
+    except (ValueError, ZeroDivisionError):  # pragma: no cover — grammar-pinned
+        return rounded
+    # Halfway exactly → the DECIMAL decides. (A tie at the midpoint itself is
+    # impossible for a value that is a midpoint of two floats and also equal to
+    # their average, so this is never a coin flip.)
+    return neighbour if abs(exact) > abs(Fraction(rounded) + (
+        Fraction(neighbour) - Fraction(rounded)) / 2) else rounded
+
+
+def _string_operand(raw: str, val: float):
+    """The float `toFloat` serves for a string operand, or None (#11702).
+
+    ``val`` is Python's DOUBLE for the literal; the VALUE RETURNED is the
+    float32 the store serves, so the twins agree on the value as well as on
+    presence (`"0.6"` → 0.6000000238418579 on both).
 
     The overflow edge is decided by the ROUNDED float32, because that is what
     `strtof` decides: a literal just above float32 max but below its rounding
@@ -498,14 +551,8 @@ def _string_operand(val: float):
     edge is decided by the EXACT magnitude, for the mirror reason: a literal
     just below min-normal rounds UP to it and yet is null there
     (`"1.1754943e-38"`, measured).
-
-    The VALUE returned is the double, not the float32 `toFloat` would serve
-    (`0.7` vs `0.699999988079071`): that value divergence is pre-existing,
-    bounded by the same literal, and pinned with `approx` in
-    `test_the_twins_parse_the_same_string_language`. PRESENCE is what must
-    agree, because presence is the `absent` / `measured` state itself.
     """
-    rounded = _float32(val)
+    rounded = _f32_from_decimal(raw, val)
     if rounded is None:
         return None
     if abs(rounded) > _FLOAT32_MAX:     # belt and braces; pack guarantees it
@@ -513,7 +560,7 @@ def _string_operand(val: float):
     if val != 0.0 and abs(val) < _FLOAT32_MIN_NORMAL:
         # Subnormal / underflow: `strtof` sets ERANGE, so the engine nulls it.
         return None
-    return val
+    return rounded
 
 
 def numeric_operand(raw):
@@ -563,7 +610,25 @@ def numeric_operand(raw):
         # Python tolerates and Cypher does not) is exactly the twin split this
         # coercion exists to prevent, so the STRICTER of the two languages wins.
         if not _FLOAT_LITERAL.match(raw):
-            return None
+            # ⛔ A HEX float is a spelling the STORE reads (`toFloat("0x1p4")` is
+            # 16.0, measured). Refusing it here did not make the shape
+            # unreachable — it made PYTHON blind to it, so presence (decided in
+            # Cypher) and value/state (decided in Python) split: a legacy
+            # `posterior_alpha="0x1p4"` pair read `absent` in the `ep` block and
+            # `measured / 0.94` in the rankers and in `analyze`, which then
+            # RANKED it first in `most_uncertain`. `float.fromhex` is the same
+            # parser the store uses for the same spelling, so the twins read it
+            # identically.
+            if not _HEX_FLOAT_LITERAL.match(raw):
+                return None
+            try:
+                hexval = float.fromhex(raw.strip())
+            except (ValueError, SyntaxError, OverflowError):
+                return None
+            if hexval == 0.0 and not _ZERO_HEX_LITERAL.match(raw):
+                # Underflowed to zero (`"0x1p-9999"`): the store answers null.
+                return None
+            return _string_operand(raw, hexval)
         val = float(raw)
         if val == 0.0:
             # An exact-zero literal (`"0"`, `"0e400"`, `"-0.0"`) reads as a
@@ -574,7 +639,7 @@ def numeric_operand(raw):
             # `_string_operand` cannot either (it receives the float), so the
             # literal's own MANTISSA decides.
             return val if _ZERO_LITERAL.match(raw) else None
-        return _string_operand(val)
+        return _string_operand(raw, val)
     try:
         val = float(raw)
     except (TypeError, ValueError):

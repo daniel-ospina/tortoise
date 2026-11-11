@@ -418,11 +418,12 @@ response_fields:
     all is `uncomputed` + "absent" too. So read `ep_state` for absent-vs-present and `confidence_source` for
     why the value is missing — never infer the state from the number. The same three tokens are emitted by the `ep` block of a
     search hit, by gaps_ranking.ep_state, by graph_ranking.ep_state and by the SubgraphExpander node payload, so
-    all of them join on one vocabulary — with ONE tracked residual: a legacy belief OPERAND stored as a hex-float
-    literal (`posterior_alpha = "0x1p4"`) is readable to the store (the Cypher presence predicate the rankers read
-    reports "measured") and not to this process (the Python twin behind the `ep` block reports "absent"), because
-    the pinned Python grammar refuses the literal; the ranker rows carry `confidence: null` + `confidence_source:
-    "unreadable"` so the disagreement is visible on the wire. #11841 closes it — the grammar is not widened by #11702'
+    all of them join on one vocabulary — with NO tracked residual: the one that existed, a legacy belief OPERAND
+    stored as a hex-float literal (`posterior_alpha = "0x1p4"`) readable to the store (the Cypher presence predicate
+    the rankers read reported "measured") and not to this process (the Python twin behind the `ep` block reported
+    "absent"), is CLOSED — the Python coercion reads the same spelling with `float.fromhex`, so both twins report
+    `measured` and the same value, and `confidence_source: "unreadable"` is now a defensive label no stored shape
+    reaches'
   unchanged_when_off: NO — additive key on an existing payload, so the key set grows by one on every row (the values
     are the contract change; the field itself is additive). Not flag-gated
 - response: tortoise_recall
@@ -497,10 +498,10 @@ response_fields:
     of "neutral", so a consumer can tell "no belief was computed for this staged row" from "a live row nobody measured"
     without knowing the status vocabulary. A live row whose belief EXISTS but whose stored spelling this process cannot
     decode (ep_state "baseline"/"measured", value null) reads "unreadable" — never "absent", which would deny the
-    state beside it. The reachable shape is a belief OPERAND written as a hex-float literal (`posterior_alpha =
-    "0x1p4"`) — the store reads it (`toFloatOrNull` gives 16.0), the pinned Python grammar refuses it. A hex-float MIRROR
-    (`n.confidence = "0x1p4"`) is NOT this shape — the served-belief band rejects 16.0 on both twins, so that row reads
-    "absent" (#11841 is the residual's home)
+    state beside it. No stored shape reaches it today — the one that did, a belief OPERAND written as a hex-float
+    literal (`posterior_alpha = "0x1p4"`) — is closed, because the Python coercion reads that spelling too
+    (`float.fromhex`, 16.0 as the store does). A hex-float MIRROR (`n.confidence = "0x1p4"`) never reached it — the
+    served-belief band rejects 16.0 on both twins, so that row reads "absent"
   unchanged_when_off: NO for an unmeasured draft, yes for everything else — the same scoping as recall_ranking.confidence;
     every live row keeps its "posterior"/"neutral" verdict EXCEPT an uncalibrated one, which now reads "absent" (#11702 —
     see recall_ranking.confidence above) and an unreadable-spelling one, which reads "unreadable"
@@ -533,8 +534,9 @@ response_fields:
     "neutral", so a consumer can tell "no belief was computed for this staged row" from "a live gap nobody measured"
     without knowing the status vocabulary. A live gap whose belief EXISTS but whose stored spelling this process cannot
     decode (ep_state "baseline"/"measured", value null) reads "unreadable", exactly as recall_ranking.confidence_source
-    states — never "absent" beside a non-absent state. The shape is the same one — a belief OPERAND stored as a hex-float
-    literal; a hex-float MIRROR is out of band and reads "absent" on both twins
+    states — never "absent" beside a non-absent state. The shape that used to reach it — a belief OPERAND stored as a
+    hex-float literal — no longer does (the Python coercion reads hex now); a hex-float MIRROR is out of band and reads
+    "absent" on both twins
   unchanged_when_off: NO for an unmeasured draft, yes for everything else — the same scoping as gaps_ranking.confidence;
     every live gap keeps its "posterior"/"neutral" verdict EXCEPT an uncalibrated one, which now reads "absent" (#11702)
     and an unreadable-spelling one, which reads "unreadable"

@@ -602,9 +602,10 @@ def test_a_mirror_outside_the_probability_band_is_not_a_belief(sdk):
     """Cycle 24 P1: the mirror's BAND was unenforced, so a legacy string the two
     coercions disagree about ranked FIRST.
 
-    `toFloat` parses the hex-float spelling (`"0x1p4"` → 16.0) and Python's pinned
-    grammar refuses it, so `ep_has_belief_cypher` said present while every Python
-    presence surface said absent — for ONE row. Measured at `929e18c512`, the
+    `toFloat` parses the hex-float spelling (`"0x1p4"` → 16.0); at the head this
+    test was written for, the Python grammar refused it, so
+    `ep_has_belief_cypher` said present while every Python presence surface said
+    absent — for ONE row. Measured at `929e18c512`, the
     graph tier served `confidence: 16.0 / ep_state: "baseline"`,
     `graph_boost = 0.5·16 + 0.5·0 = 8.0` (outside the module's own documented
     `[0, 1]` boost invariant), and ranked the claim FIRST — above a genuinely
@@ -636,6 +637,15 @@ def test_a_mirror_outside_the_probability_band_is_not_a_belief(sdk):
     assert belief_mirror("1.00000001") == pytest.approx(1.0), (
         "the band must be applied to the float32 the store serves")
     assert belief_mirror("1.00000006") is None
+    # ⛔ the double-rounding edge: this literal IS 1 + 2⁻²⁴, the float32 midpoint.
+    # `strtof` rounds the DECIMAL up (1.0000001…, outside the band) while rounding
+    # the double is round-half-to-even and sends it DOWN to 1.0 (inside it) — the
+    # one shape where the twins disagreed about PRESENCE at the band edge.
+    assert belief_mirror("1.0000000596046448") is None, (
+        "the midpoint must be decided from the DECIMAL, as strtof does")
+    assert proj.g.query(
+        "RETURN toFloatOrNull('1.0000000596046448') AS v"
+    ).result_set[0][0] == pytest.approx(1.0000001192092896)
     # …and the store's own answer is asserted, so the fixture cannot drift.
     assert proj.g.query(
         "RETURN toFloatOrNull('1.00000001') AS v").result_set == [[1.0]]
@@ -695,6 +705,65 @@ def test_a_mirror_outside_the_probability_band_is_not_a_belief(sdk):
     graph = GraphRanker(projection=proj)._fetch_signals([hexed, measured], "point")
     assert graph[hexed]["confidence"] is None, graph[hexed]
     assert graph[measured]["confidence"] == pytest.approx(0.9, abs=1e-6)
+
+
+def test_a_hex_operand_reads_the_same_on_every_surface(sdk):
+    """Cycle 26 P2: refusing a spelling the STORE reads split presence between
+    the twins.
+
+    `toFloat("0x1p4")` is 16.0, and the pinned Python grammar refused hex floats,
+    so a legacy `posterior_alpha="0x1p4", posterior_beta=1.0` pair — pre-write-guard
+    data, or raw Cypher — answered FOUR things for one claim, measured: `absent /
+    null` on the canonical `ep` block, `measured / 0.94` on `recall_ranking`
+    (`confidence_source: "unreadable"`), `0.94` on `analyze`'s `_belief` — which
+    then printed and RANKED it first in `most_uncertain` — and the `why` block
+    self-contradictory (`measured: True` beside `ep_state: "absent"`).
+
+    `float.fromhex` is the same parser the store uses for the same spelling, so
+    both twins now read the literal; presence then follows the ONE rule, and every
+    surface returns the same state and the same value.
+    """
+    from tortoise.analyze import _belief
+    from tortoise.ranking import GapsRanker, GraphRanker, StateRanker, SubgraphExpander
+    from tortoise.search_engine import numeric_operand
+    from tortoise.why import assemble_why_blocks
+
+    proj = sdk._get_proj()
+    assert numeric_operand("0x1p4") == 16.0, (
+        "the Python grammar refuses a spelling the store reads — the twins "
+        "split, and presence is decided by the Cypher side")
+    pid = sdk.create_point("statement", "ZQHEXOP a hex operand pair")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = '0x1p4', "
+                 "n.posterior_beta = 1.0", params={"id": pid})
+
+    ann = annotate_ep_batch(proj.g, [pid])[pid]
+    ep = assemble_why_blocks(proj, [pid])[pid].get("ep") or {}
+    node = next(n for n in SubgraphExpander(projection=proj).expand(
+        [pid], depth=1)["nodes"] if n.get("id") == pid)
+    state = StateRanker(projection=proj)._fetch_point_signals([pid])[pid]
+    graph = GraphRanker(projection=proj)._fetch_signals([pid], "point")[pid]
+    gaps = GapsRanker(projection=proj)._fetch_confidence_signals(
+        [pid], labels=["Point"])[pid]
+    belief = proj.g.query("MATCH (c:Point {id:$id}) RETURN " + _belief("c"),
+                          params={"id": pid}).result_set[0][0]
+
+    # 16 / 17 — every surface names the SAME state and the SAME value.
+    for name, got in (("ep block", ann.confidence_mean),
+                      ("why ep", ep.get("confidence_mean")),
+                      ("subgraph", node.get("confidence")),
+                      ("recall_ranking", state.get("confidence")),
+                      ("graph_ranking", graph.get("confidence")),
+                      ("gaps_ranking", gaps.get("confidence")),
+                      ("analyze", belief)):
+        # `annotate`/`why` round to 4 places by contract; the readers do not.
+        assert got == pytest.approx(16.0 / 17.0, abs=1e-4), (name, got)
+    for name, got in (("ep block", ann.ep_state),
+                      ("why ep", ep.get("ep_state")),
+                      ("subgraph", node.get("ep_state")),
+                      ("recall_ranking", state.get("ep_state"))):
+        assert got == EP_STATE_MEASURED, (name, got)
+    # The self-contradiction is gone too: `measured` cannot ride an `absent` row.
+    assert ep.get("measured") is True, ep
 
 
 def test_the_object_aggregate_reports_absent_without_a_mean_over_nothing(sdk):
@@ -937,10 +1006,11 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
     Two of the eight are the readability boundary, and they are DIFFERENT
     shapes with different honest answers:
 
-    * an OPERAND written as a hex-float literal (`posterior_alpha = '0x1p4'`) is
-      READABLE to the store (16.0) and not to this process — the state stays
-      `measured` and `confidence_source` says `"unreadable"`, so the null is
-      named rather than denied;
+    * an OPERAND written as a hex-float literal (`posterior_alpha = '0x1p4'`) was
+      the `"unreadable"` shape until cycle 26 taught the Python twin to read the
+      same spelling (`float.fromhex`) — the two coercions now agree (16.0) and
+      the row reads `measured / 16/17` with `confidence_source: "posterior"` on
+      every surface, which is what this test now asserts;
     * a MIRROR written the same way (`n.confidence = '0x1p4'`) is not a
       probability, so the served-belief band rejects it on BOTH twins and the
       row is `absent`/`absent`.
@@ -970,10 +1040,10 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
     # same row and they do not have the same answer — see the docstring):
     #
     # (a) OPERAND: `toFloatOrNull('0x1p4')` is 16.0, so the Cypher presence
-    #     predicate calls this claim measured, while the pinned Python grammar
-    #     refuses the literal, so the Python twin has no VALUE. That is the
-    #     `"unreadable"` shape.
-    unreadable = _point("a hex-float operand",
+    #     predicate calls this claim measured — and since cycle 26 Python reads
+    #     the same literal with `float.fromhex`, so its value agrees instead of
+    #     being `"unreadable"`. Asserted as agreement below.
+    hex_operand = _point("a hex-float operand",
                         "n.posterior_alpha = '0x1p4', n.posterior_beta = '1'")
     # (b) MIRROR: 16.0 is not a probability, so the served-belief band rejects
     #     it on both twins — the row is ABSENT, not "unreadable".
@@ -981,7 +1051,7 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
                                 "n.confidence = '0x1p4'")
 
     ids = [absent, half_pair, zero_total, mirror_only, measured, baseline,
-           unreadable, out_of_band_mirror]
+           hex_operand, out_of_band_mirror]
     recs = {r["id"]: r["recall_ranking"] for r in
             StateRanker(projection=proj).rerank(
                 [{"id": p, "scores": {"rrf": 1.0}} for p in ids])}
@@ -1031,38 +1101,33 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
         assert recs[pid]["ep_state"] == EP_STATE_BASELINE, recs[pid]
         assert recs[pid]["confidence_source"] != EP_STATE_ABSENT, recs[pid]
 
-    # (a) The OPERAND shape, named so it cannot be dropped again: the store
-    # reads it (`toFloatOrNull` → 16.0, i.e. PRESENT) and this process does not
-    # (`numeric_operand` → None, the pinned grammar). Assert BOTH halves, so the
-    # fixture cannot pass by failing to be the shape it claims — a fixture that
-    # stopped being unreadable would otherwise assert agreement between two
-    # identical absent rows.
-    assert _se.numeric_operand("0x1p4") is None, (
-        "the pinned Python grammar now reads hex floats — the fixture is no "
-        "longer the unreadable shape")
+    # (a) The OPERAND shape: a hex-float pair. This USED to be the reachable
+    # "unreadable" shape — the store reads `toFloatOrNull('0x1p4')` (16.0) and the
+    # pinned Python grammar refused hex, so the `ep` block said `absent` beside the
+    # rankers' `measured / 0.94`, and `analyze` printed and RANKED the claim. Cycle
+    # 26 closed it at the source (`float.fromhex` is the same parser for the same
+    # spelling), so the fixture now asserts AGREEMENT on both halves: the two
+    # coercions read the literal, and every surface reports one state and one
+    # value. `UNREADABLE_CONFIDENCE_SOURCE` therefore names a shape stored data can
+    # no longer produce; it stays as a defensive label, and this assertion is what
+    # says so out loud.
+    assert _se.numeric_operand("0x1p4") == 16.0, (
+        "the Python grammar stopped reading a spelling the store reads — the "
+        "twins split again, and presence is then decided by whichever side is "
+        "asked")
     assert proj.g.query(
         "RETURN toFloatOrNull('0x1p4') AS v").result_set == [[16.0]], (
-        "the store no longer reads the hex-float spelling — the fixture is no "
-        "longer the unreadable shape")
-    for name, row in (("recall_ranking", recs[unreadable]),
-                      ("gaps_ranking", gaps[unreadable])):
+        "the store no longer reads the hex-float spelling — this fixture is no "
+        "longer the shape it claims")
+    for name, row in (("recall_ranking", recs[hex_operand]),
+                      ("gaps_ranking", gaps[hex_operand])):
         assert row["ep_state"] == EP_STATE_MEASURED, (name, row)
-        assert row["confidence"] is None, (name, row)
-        assert row["confidence_source"] == UNREADABLE_CONFIDENCE_SOURCE, (
-            f"{name} denies a belief it has: source={row['confidence_source']!r}"
-            f" beside ep_state={row['ep_state']!r}")
-    assert recs[unreadable]["belief_informed_order"] is False, recs[unreadable]
-    # …and the `ep` block still disagrees with the rankers about this one row:
-    # its state comes from the PYTHON twin, which cannot read the operand, so it
-    # says "absent" beside the rankers' "measured". That is #11841's residual
-    # (the grammar is not widened by #11702) and it is asserted HERE so a fix
-    # cannot land silently: whoever closes #11841 must update this assertion, the
-    # `ep` block, and the `recall_ranking.ep_state` manifest row together.
-    eps = annotate_ep_batch(proj.g, [unreadable])[unreadable]
-    assert eps.ep_state == EP_STATE_ABSENT, (
-        "the operand twin split is fixed upstream (#11841) — update this pin, "
-        f"the `ep` block and the manifest row together; got {eps.ep_state!r}")
-    assert eps.confidence_mean is None, eps
+        assert row["confidence"] == pytest.approx(16.0 / 17.0, abs=1e-5), (
+            name, row)
+        assert row["confidence_source"] == "posterior", (name, row)
+    eps = annotate_ep_batch(proj.g, [hex_operand])[hex_operand]
+    assert eps.ep_state == EP_STATE_MEASURED, eps
+    assert eps.confidence_mean == pytest.approx(16.0 / 17.0, abs=1e-4), eps
 
     # (b) The MIRROR shape: the band resolves it rather than reporting it. A
     # served belief is a probability, so `16.0` is not a belief on EITHER twin —
@@ -3163,7 +3228,9 @@ def test_the_twins_parse_the_same_string_language(sdk):
     * ``toFloat("Infinity")`` is ``inf`` → `graph_ranking` read maximum
       certainty 1.0 for a claim with no readable belief (`0.0` on
       `recall_ranking`, `absent` in the `ep` block — three answers);
-    * ``toFloat("0x1p4")`` is 16.0 while Python rejects hex floats;
+    * ``toFloat("0x1p4")`` is 16.0 while Python rejected hex floats (closed in
+      cycle 26 — `float.fromhex` is the same parser for the same spelling, so
+      both twins read it and this bullet is history, not a live divergence);
     * ``float("0.7 ")`` is 0.7 while ``toFloat("0.7 ")`` is null — so a value
       with a trailing space was `measured / 0.7` in the `ep` block and `absent`
       in every ranker beside it.
@@ -3180,23 +3247,25 @@ def test_the_twins_parse_the_same_string_language(sdk):
     `'1e39'`/`'1e308'`/`'1e-40'` had the same split at magnitudes the table
     below now covers. A string outside the range is ABSENT on both twins.
 
-    RECORDED RESIDUAL: `toFloat("0x1p4")` is 16.0 and the pinned Python grammar
-    rejects hex floats, so a LEGACY hex-float operand answers `16.0` in Cypher
-    and `None` in Python. It is out of the agreement table on purpose rather
-    than silently tolerated: `_sanitize_props` now refuses a string belief at
-    the write, so this shape can only pre-date that guard, and its consequence
-    is a readable belief (not the maximum-certainty fabrication the finiteness
-    guard closes).
+    NO RESIDUAL LEFT (cycle 26). Three rounds of "bounded divergence" turned out
+    to be three splits in which one twin could not read what the other could, and
+    each one moved `ep_state` somewhere:
 
-    SECOND RESIDUAL — for OPERANDS only: `numeric_operand` returns the double
-    (`0.7`) where the store serves the float32 rounding (`0.699999988…`), hence
-    `approx` on both sides below. It cannot change `ep_state`, because presence
-    and magnitude are pinned separately: `_string_operand` decides presence from
-    the float32, and a MIRROR is additionally rounded by `belief_mirror` before
-    its band is applied, so the mirror twins agree on both presence AND
-    magnitude (`"0.6"` → 0.6000000238 on each). The operand half is bounded by
-    the literal and cannot cross a state boundary — that is what this table
-    protects, and it is why `ep_state` never depends on the residual.
+    * the value: `numeric_operand` used to return the DOUBLE (`0.7`) where the
+      store serves the float32 (`0.699999988…`), so a `> 0.6` threshold could
+      disagree between the twins — it now returns the store's float32;
+    * the SPELLING: a hex float (`"0x1p4"` = 16.0 to `toFloat`) was refused here,
+      so a legacy hex operand pair read `absent` in the `ep` block and
+      `measured / 0.94` in the rankers and in `analyze` — `float.fromhex` is the
+      same parser for the same spelling, so both twins read it;
+    * the ROUNDING: `strtof` rounds the DECIMAL to float32 directly, while
+      rounding the double to float32 is a DOUBLE rounding that disagrees at a
+      float32 midpoint (`"1.0000000596046448"` = 1 + 2⁻²⁴: up in the store, down
+      in Python). `_f32_from_decimal` resolves ONLY that case, from the literal,
+      with exact `Fraction` arithmetic.
+
+    So the table below asserts agreement on presence AND on value, and every
+    "bounded residual" sentence this file used to carry is gone.
     """
     from tortoise.search_engine import numeric_operand, numeric_operand_cypher
 
@@ -3218,6 +3287,15 @@ def test_the_twins_parse_the_same_string_language(sdk):
         "1e3": 1000.0,
         "+.5": 0.5,
         "0.": 0.0,
+        # The store reads hex floats (`float.fromhex` is the same parser), so
+        # Python must too — refusing them split presence between twins.
+        "0x1p4": 16.0,
+        "0X1P4": 16.0,
+        "-0x1p4": -16.0,
+        # A float32 MIDPOINT literal: `strtof` rounds the decimal up, and the
+        # double rounds down to 1.0 — the band edge, where the flip changed
+        # `ep_state`. `_f32_from_decimal` decides it from the literal.
+        "1.0000000596046448": 1.0000001192092896,
         # The RANGE half (`toFloat` is a float32 parser — measured). Every one of
         # these matched the pinned grammar, and every one of them was a twin
         # split before the range bound: the first two made Python return `inf`
