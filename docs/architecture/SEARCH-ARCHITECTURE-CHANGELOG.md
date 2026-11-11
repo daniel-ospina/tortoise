@@ -14,9 +14,9 @@ aboutObjects: SEARCH-ARCHITECTURE.md, absent belief state, search design revisio
 
 > **What this is.** The record of *how the search design got where it is* — the work `SEARCH-ARCHITECTURE.md`
 > drove and the provenance of its rulings. It is the counterpart of `STORAGE-ARCHITECTURE-CHANGELOG.md`, whose
-> §13 issue map is the sibling shape; `SEARCH-ARCHITECTURE.md` has never carried a section→issue index, so
-> there is no map to move yet, and its review record lives on `#4051` (§10 says where the corrections that
-> changed the decision are stated).
+> issue map (moved from `STORAGE-ARCHITECTURE.md` §13) is the sibling shape; `SEARCH-ARCHITECTURE.md` has never
+> carried a section→issue index, so there is no map to move yet, and its review record lives on `#4051` (§10
+> says where the corrections that changed the decision are stated).
 >
 > **What `SEARCH-ARCHITECTURE.md` is.** The design. It states where the vector index lives, what the graph
 > engine keeps, and the evidence behind each ruling; it does not narrate its own revisions or track the
