@@ -49,7 +49,11 @@ its `NULL` denominator.
 `plan`/`goal`/`strategy`/`target` are point AND object kinds; `decision` is a point AND event kind), so a
 single shared set would credit a mislabelled thing as coverage — the exact failure A4 exists to catch.
 Object kinds are compared case-insensitively (`§5` mixes `Project`/`WorkItem`/`tag`); point and event
-kinds stay exact, which is what the hosted write validator does.
+kinds stay exact. ⛔ That exactness matches the hosted WRITE path for `pointKind` only:
+`hosted_api.py::valid_kind` checks it against `known_kinds("pointKind")`, and **no** write validator
+consults `known_kinds("eventKind")` (`grep -n known_kinds tortoise/hosted_api.py` → the write check at
+`valid_kind` and the `list_points` read filter, nothing else). The event layer's exact compare is the
+census's own choice, mirroring the extractor's — not a validator's.
 
 ## 3 · The measurement — fleet graph, read-only, 2026-11-11T03:11Z
 
@@ -126,9 +130,19 @@ lands in the first bucket, which is why the bucket is named for what is observab
 
 **What this means, stated plainly.** 130 of 135 typed claims carry a label the rule classifier does **not**
 derive from their own text — they are agent/fleet writes that supplied a kind (a `MEASURED …` note
-labelled `evidence`, an option labelled `option`). 4 are what the rule lane would produce. That is the
-answer to *"what are the 109"* the issue's Scope stage asked: **they are deliberate caller-supplied kinds,
-not a residue of the rule classifier and not v2-lane drift.**
+labelled `evidence`, an option labelled `option`). 4 are what the rule lane would produce. That answers
+the issue's Scope question for **this** population: the typed minority is **deliberate caller-supplied
+kinds, not a residue of the rule classifier and not v2-lane drift.**
+
+⛔ **It does not answer *"what are the 109"*, and this run does not re-measure it.** Those are two
+different populations and the numbers are not interchangeable: the 109 is the align/plan reading of an
+EARLIER corpus (`00-align.md` · `00-plan.md`: `statement 15,534 · NULL 3,658 · typed 109`), decomposed by
+`#10982` as `constraint` 88 + `preference` 21 — and **neither kind is in this graph's typed set at all**
+(§3.1: `evidence`/`decision`/`diary`/`option`/`finding`/`jobToBeDone`/`useCase`), nor in the product's
+declared point vocabulary at this head (the CI twin pins exactly that at
+`tests/test_10988_a4_label_coverage.py`, the `constraint`/`preference` undeclared arm). So: the fleet
+graph's typed minority is caller-supplied (130 of 135); the provenance of the 109 is a `#10982` corpus
+question this census cannot see.
 
 ## 4 · The CI contract twin
 
@@ -170,6 +184,14 @@ VACUOUS rather than passing for the wrong reason.
   still carries the RETIRED `floor: a4_typed_statements` with `blocked_by: #10988` (the whole-row rewrite
   `04-plan.md` §4.1 assigns to C1, `#10982`, which closed without it). That is a record defect of its own,
   named here rather than silently edited by this lane.
+- **The offending nodes are not NAMED.** A4's failing-run definition does not stop at a count: *"Either
+  is `RED` for that layer, reported **with the offending nodes named**"* (`02-scope.md`, the
+  *"a **failing run** is concrete and checkable"* clause; restated `04-plan.md` §7 E2E-8). Both legs are
+  measured as **counts** — `_a4_layer_counts()` issues `RETURN coalesce(n.<kindProp>, 'NULL') AS k,
+  count(*) AS n`, and `label_coverage()` takes that histogram alone — so an unlabelled node is countable
+  and **not nameable**: no node id exists anywhere in the A4 path. The counts are the bar and they are
+  delivered; the identity is not, and satisfying it needs an id-returning query the census does not
+  issue. This is a gap against the plan's own wording, not a decision against it.
 - The **`expected=` half** of A4's *"a declared kind absent"* leg reads `UNMEASURED` on every real run:
   `_a4_label_coverage` calls `label_coverage(...)` with no `expected=` set, so `expected_absent` carries
   the `UNMEASURED(...)` reason rather than a list of kinds. The information is not lost — `declared_absent`
