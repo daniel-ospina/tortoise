@@ -1,0 +1,52 @@
+-- ============================================================================
+-- Migration 20261110000001: retire `public.point.as_of` (#11827)
+-- ----------------------------------------------------------------------------
+-- `asOf` was a SECOND spelling of the entity's valid-time start. Measured on an
+-- embedded graph, one sentence:
+--
+--     "as of 2026-03-31, the tranche stood at EUR 800 committed"
+--     → [when, validFrom, asOf] = ['2026-03-31', '2026-03-31', '2026-03-31']
+--
+-- and the damaging direction, `when=None, asOf='2026-03-31'`: the node's ONLY
+-- date was invisible to `get_historical_knowledge`, so a value asserted on
+-- 2026-03-31 read as TRUE AT 2020-01-01 (an absent `validFrom` is an open
+-- start). `docs/ONTOLOGY.md` §4.7 rules one canonical name per slot and never
+-- inferring a temporal slot from a field's spelling; `asOf` appeared zero
+-- times in the ontology, was written by nothing that read it back (no
+-- production reader in `read_money_value`/`total_minor`/`ratio_bp`, and no
+-- in-tree reader of this column), and the S5 derivation that fed it now feeds
+-- `validFrom` instead (`value_normalizer.asserted_date`). The owner's ruling of
+-- 2026-11-11 ("keep existing approved ontology unless there's a good reason to
+-- expand") is the decision; this is the retirement.
+--
+-- THE DATA IS NOT LOST, and that is why a DROP is safe here rather than a
+-- deprecation cycle. The journal is the system of record (`STORAGE-
+-- ARCHITECTURE.md` §2.0), and every `PointAdded` record carries the value as
+-- `point.asOf` — so re-adding the column and replaying restores it exactly.
+-- That is the same recovery shape the placement table's PRIMARY rows rest on:
+-- the record can be poorer than the graph only where the carrier holds the
+-- value, and here the carrier does.
+--
+-- ⛔ APPEND-ONLY: this is a NEW file. `20261018000001_record_point_money_value_
+-- 2782.sql` is landed history and the `check-migration-append-only` gate
+-- refuses an edit to it, which is why the five-column ADD lives there and the
+-- retirement lives here.
+--
+-- WHAT A LEGACY NODE KEEPS: the graph property. `rebuild_all` replays
+-- `PointAdded.point.asOf` verbatim (replay is deliberately ungated), so the
+-- prop survives on the node as inert legacy data — declared in
+-- `projection.entities._POINT_DECLARED_PROPS` precisely so the replay does not
+-- log a false "not declared" drift warning — and nothing reads it.
+--
+-- ⛔ `props` IS DELIBERATELY NOT TOLD TO REFUSE THE NAME. Adding `asOf` to
+-- `chk_point_props_no_derived` would look tidy and would be wrong twice: the
+-- projection drops refused names BY NAME before writing the tail, so every
+-- replayed legacy point would silently lose its recorded date at the record
+-- layer while the graph kept it, and the CHECK would then refuse exactly the
+-- rows the projection had just written. A retired name is not a derived name.
+--
+-- `IF EXISTS` keeps the statement idempotent on re-apply.
+-- ============================================================================
+
+ALTER TABLE public.point
+    DROP COLUMN IF EXISTS as_of;

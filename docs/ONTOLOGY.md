@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.32"
+title: "Tortoise — Canonical Ontology v3.33"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-11-08
+updated: 2026-11-11
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.32
+# Tortoise — Canonical Ontology v3.33
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -413,6 +413,10 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `speaker` | string | — | — | Role tag on episodic turn Points (user/assistant/…) — written by the ONE shared turn store (`tortoise/sdk.py::_TURN_WRITE_CYPHER`, #3086), so hosted capture (`POST /v1/sessions`) writes it, and so does the SDK — `TortoiseSDK.capture_session` until **#4282 retired that public name**, and `TortoiseSDK._capture_session` (private) since, which is the same body and the same shared primitive, so BOTH lanes still write it. The earlier claim that the SDK writes it alone was false (#3554) |
 | `is_episodic` | bool | — | — | Quota exemption discriminator — true on episodic turn Points from the regex capture path (the `points` branch counts non-episodic only, #909 §4.3 #13/§4.4; legacy nodes lack the flag — one-query backfill migration ships with #947) |
 | `goalState` | string | — | — | A goal's **achievement** state — a CLOSED vocabulary (`met`, `active`, `blocked`, `unmet`, `superseded`, `abandoned`, `guideline`), validated at the SDK write boundary (`GOAL_STATE_VALUES`, #7856). **Separate from `status`** (the draft/live lifecycle): `status` says whether a goal is promoted for use, `goalState` says whether it is met. `None` clears. Only meaningful on `goal`/`target`/`strategy`/`plan` points (§5) |
+
+**Values.** A *value* is a number plus a reference, kept as flat sibling properties on the entity that carries it (WS-C §2.1; realised in `tortoise/money.py`). It carries no confidence, no embedding and no numeric index — it is found by its entity, not by similarity. The reference's standard decides the fields: for **money**, ISO 4217 — `amountMinor` (integer minor units, never a float), `currency` (alpha-3, per amount, never a graph default), `minorUnitExponent` (checked against the pinned table), plus `verbatim` (the source text, required only where the value was derived from prose). Percent, ratio, duration and quantity are declared value shapes with no storing implementation yet (`tortoise/pack_values.py`); **a date is not a value shape** — it is the valid-time slot (§4.7). A value's raw detail may live outside the graph, addressed by `:Source`; the graph records the observation and the crossing, never the series.
+
+> ⚠️ **Status note on the clause above (2026-11-11, same change).** The sentence *"Percent, ratio, duration and quantity are declared value shapes with no storing implementation yet"* was written at approval and is now half-superseded by the change that carried it: **percent has a storing shape** since #11915 (`tortoise/percent.py` — `basisPoints` int 0–10000, plus `verbatim` only where the value came from prose, validated at the SDK's one props intake and at the journal-payload seam exactly as `money` is). Read that clause as naming **ratio, duration and quantity** as the shapes still without one. The approved sentence is left as approved and corrected here rather than rewritten — a dated status note is the record; rewriting an owner-approved clause is a new decision.
 
 ### §4.2 Subject
 
@@ -833,6 +837,8 @@ authoritative for the temporal slots. Event's transaction-time start is
 | occurrence date | `when` (→ `validFrom`, §4.7) | — | — | — | — |
 | is_episodic | ❌ | — | — | ❌ | ❌ |
 | passes_frequency_gate | — | — | ❌ | — | — |
+
+**A value carries no temporal slot of its own.** A stored number's instant is the carrier's valid-time start — `when`/`validFrom` on a `Point`, `startedAt` on an `Event` — never a field of the value. Where a value names no instant, the carrier's absent-start rule applies (§4.7 above) and the write path reports it rather than inventing one; `asOf` was retired for exactly this (#11827).
 
 ---
 
