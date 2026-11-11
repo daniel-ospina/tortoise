@@ -312,9 +312,9 @@ Four rows, and three of them are defects:
 4. **#2730** — entity attachment. **The research is done and the mechanism is
    not built** (#8639 completed the brief's alias-resolution rung and states the
    surviving defects: the alias surface form is lost, so a re-ingest re-MERGEs
-   into a second node — that duplicate arm now fails closed, `#11693` HOLDs an
-   unresolved identity instead of minting it — and nothing folds suffixes or
-   honorifics). The pin on this
+   into a second node; what HAS closed is the mint of an *unresolved* identity
+   (`#11693` HOLDs it instead of minting it) — the surface-form arm above is
+   still open — and nothing folds suffixes or honorifics). The pin on this
    row asserts the BRIEF's wording, not the behaviour — this row is OPEN for
    exactly that reason, and a reviewer caught it claiming otherwise.
 
@@ -490,8 +490,8 @@ rounding:**
   status**: `#2787` (`grep -n 'bucket' tortoise/pack_registry.py` still returns
   no relation arm; aside from this map's own re-cut, no commit since 2026-11-06
   mentions it), `#2730` (the tracker says CLOSED **COMPLETED** and this page keeps
-  it OPEN because the mechanism is unbuilt — §1's table; §8's duplicate-node arm
-  now fails closed, measured at this head: `556e581ceb`'s
+  it OPEN because the mechanism is unbuilt — §1's table; the arm §8 records as
+  closed is the *unresolved-identity* one, measured at this head: `556e581ceb`'s
   `test_the_graph_node_count_does_not_increase` passes, so an unresolved identity
   is HELD rather than minted, and what stays unbuilt is surface-form retention
   plus the honorific folding (`grep -ci honorific tortoise/extractor_v2.py` → 0)),
