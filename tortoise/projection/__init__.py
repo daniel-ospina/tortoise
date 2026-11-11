@@ -13795,10 +13795,30 @@ class FalkorProjection(
                     )
                 else:
                     if any(live == selection_marker for live in live_markers):
+                        # ⛔ The MARKER is what this engine restores, so the claim
+                        # is bounded to the fields the marker carries.
+                        # `_replay_log` captures `_capture_pack_selection`
+                        # (`:13499`) and nothing else: `_capture_config_snapshot`
+                        # — the `:PackInstall` registry a resolved pack set is
+                        # drawn from — is `rebuild_all`'s (its `_rebuild_all_replay`
+                        # leg), never this path's. Names, not line numbers, on
+                        # purpose: this block sits ABOVE those constructs, so any
+                        # edit here would shift a line cite below it — the exact
+                        # drift this PR has re-fixed repeatedly.
+                        # With the marker present, `resolved_pack_set_for_graph`
+                        # drops its `namespaces=None` union fallback and resolves
+                        # the DATA leg over an empty registry, so the approved set
+                        # reads configured-but-EMPTY until the graph is re-pinned.
+                        # Saying "the pack set survived" would assert the rows
+                        # came back (#9752 review P2).
                         logger.info(
                             "rebuild: restored the :PackSelection pack-set "
-                            "marker — the graph's approved pack set and "
-                            "`revision` survive the wipe (#9752)")
+                            "marker — its `configured` and `revision` values "
+                            "survive the wipe. The `:PackInstall` rows are "
+                            "restored only by `rebuild_all`, so on this path "
+                            "the approved set resolves over an empty registry "
+                            "(data leg only) until it is re-pinned deliberately "
+                            "(#9752)")
                     elif live_markers:
                         logger.warning(
                             "rebuild: a DIFFERENT :PackSelection marker is "
