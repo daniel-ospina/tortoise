@@ -1017,9 +1017,24 @@ def test_a_caller_cannot_name_a_record_shaped_payload_at_the_funnel_doors(
     The funnel must NOT fix this by stamping the nested payload instead: that
     stamp is `creating=False`, which DROPS `embedding_model` /
     `embedding_revision` / `embedding_text_hash` — it would strip the origin
-    attestation off every ordinary `PointAdded` (R1). So the doors that let a
-    CALLER name a record-shaped key refuse it, and the doors that BUILD one
-    (`add_point`, `add_operator`) are untouched.
+    attestation off every ordinary `PointAdded` (R1).
+
+    ⛔ ROUND 5 (`6aea53bb6`): the first fix refused it at TWO doors and CALLED
+    THAT THE ENUMERATION. It was not — there are FOUR doors that reach `_emit`
+    with caller keys, and the two it missed were worse than the two it closed:
+
+        add_object("n", "thing", point={...})   -> the fold DISPATCHED on the
+            caller's nested record and folded it (id `p-hijack`) with the marker
+            lie, discarding the Object it was asked to register
+        add_point("real", prov, point={...})    -> journalled the caller's
+            record NESTED inside the door's own, and returned the id of a point
+            that never folds
+
+    So the gate moved into `_emit` itself and the record payload moved to a
+    POSITIONAL channel (`*record`), which no `(**kwargs)` splat can bind. This
+    test therefore drives ALL FOUR doors and, separately, the record channel
+    directly: a caller that reaches `point` any other way is refused whatever
+    name it arrives under.
     """
     from tortoise.api import EventAPI, provenance
     from tortoise.log import EventLog
@@ -1039,12 +1054,30 @@ def test_a_caller_cannot_name_a_record_shaped_payload_at_the_funnel_doors(
         api.emit_belief("PointAdded", point=dict(nested))
     with pytest.raises(ValueError, match="RECORD-SHAPED"):
         api.add_event("evt-nested", "AgentSession", point=dict(nested))
+    # …and the two doors the round-4 fix MISSED, which is what round 5 added.
+    with pytest.raises(ValueError, match="RECORD-SHAPED"):
+        api.add_object("hijack", "thing", point=dict(nested))
+    with pytest.raises(ValueError, match="RECORD-SHAPED"):
+        api.add_point("a real point", provenance("src:9", [0, 4], "q"),
+                      point=dict(nested))
 
     # Nothing reached the journal — a refusal after the append would leave a
-    # record the replay folds (`_emit`'s own ordering argument).
+    # record the replay folds (`_emit`'s own ordering argument). This is what
+    # makes the `add_object` case a REFUSAL rather than a hijack: the caller's
+    # point never becomes a foldable `ObjectRegistered`.
     assert not (events / "events.jsonl").exists() or not (
         events / "events.jsonl").read_text().strip(), (
         "a refused payload must leave NOTHING to replay")
+
+    # The record CHANNEL itself: `point` reaches `_emit` positionally only, so a
+    # keyword one is refused even at the funnel, and a second record is a
+    # programming error rather than a silently-ignored extra.
+    with pytest.raises(ValueError, match="RECORD-SHAPED"):
+        api._emit("PointAdded", point=dict(nested))
+    with pytest.raises(TypeError, match="at most ONE record payload"):
+        api._emit("PointAdded", dict(nested), dict(nested))
+    assert not (events / "events.jsonl").exists() or not (
+        events / "events.jsonl").read_text().strip()
 
     # And the doors that BUILD the record still work, nested shape and all.
     api.add_point("a real point", provenance("src:1", [0, 4], "q"))
@@ -1054,6 +1087,8 @@ def test_a_caller_cannot_name_a_record_shaped_payload_at_the_funnel_doors(
     assert len(added) == 1, "`add_point` must keep journalling its nested payload"
     assert added[0]["point"]["content"] == "a real point", (
         "the record door's own nested payload must reach the journal intact")
+    assert "point" not in added[0]["point"], (
+        "the record door's payload must not carry a nested record")
     # ⚠️ NOT asserting the marker here: whether `_point` had a server vector to
     # stamp depends on the embedder being installed, and this suite runs both
     # ways. The width rule itself is pinned by the rows above.

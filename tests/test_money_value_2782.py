@@ -1476,7 +1476,8 @@ class TestNonSanitizedSeams:
     def test_the_pipeline_seam_cannot_land_a_malformed_money_value(
             self, journaled_sdk, tmp_path, door):
         """All THREE prop-carrying doors, including the one that NESTS its
-        payload (`add_point` → `_emit("PointAdded", point=p, …)`).
+        payload (`add_point` → `_emit("PointAdded", p, …)`, rendered onto the
+        record as `point`).
 
         #11836 review P1 (measured): the gate graded the flat record, so
         `add_point(content, provenance, amountMinor=25_000_000)` was ACCEPTED

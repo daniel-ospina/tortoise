@@ -57,14 +57,15 @@ logger = logging.getLogger(__name__)
 #:
 #: ⛔ AND THE RULE IS ONE NESTING LEVEL DEEP (#11835 review round 4, F1). The
 #: two gates below read the ENVELOPE, which is safe only while a record-shaped
-#: payload is DOOR-BUILT — `add_point`/`add_operator` hand `_emit` `point=p`
-#: after stamping it themselves (with `creating=True`, so the origin attestation
-#: rides a creating record's own basis). A CALLER that builds one bypasses both
-#: gates, and the funnel must not "just stamp it" to close that: `creating=False`
+#: payload is DOOR-BUILT — `add_point`/`add_operator` hand `_emit` their record
+#: POSITIONALLY (rendered onto the envelope as `point`) after stamping it
+#: themselves (with `creating=True`, so the origin attestation rides a creating
+#: record's own basis). A CALLER that builds one bypasses both gates, and the
+#: funnel must not "just stamp it" to close that: `creating=False`
 #: DROPS `embedding_model`/`embedding_revision`/`embedding_text_hash`, which would
 #: strip the attestation off every ordinary `PointAdded` (R1). So the nested
-#: shape is refused AT THE DOORS THAT LET A CALLER NAME IT, via
-#: `_NESTED_RECORD_KEYS` below.
+#: shape is REFUSED, at `_emit` itself, via `_NESTED_RECORD_KEYS` below — a gate
+#: at the individual doors was tried first and was measurably incomplete.
 _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
     "embedding_width",
     "embedding_verbatim",
@@ -74,36 +75,53 @@ _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
     "embedding_text_hash",
 })
 
-#: The envelope's RECORD-SHAPED payload keys — a payload a record door BUILDS.
-#: `add_point` and `add_operator` each hand `_emit` one as `point=p`, after
-#: stamping it themselves; see `_SERVER_MANAGED_EMBEDDING_KEYS` for why the
-#: funnel must not re-stamp it.
+#: The envelope's RECORD-SHAPED payload keys — the shape a record door BUILDS
+#: (`add_point` / `add_operator`), which is why a KEY of this name may never
+#: arrive from a caller.
 #:
-#: ⛔ So the two doors that splat a CALLER's keys onto the envelope — `add_event`
-#: and `emit_belief` — refuse these keys outright. Neither has a record to
-#: build, so a caller-named one is a caller-built record the replay folds with
-#: NEITHER half of the vector rule applied. Measured at `545a2fcaf2`:
-#: `emit_belief("PointAdded", point={"id": "p", "embedding": [<off-grid
-#: float64>], "embedding_width": "f32"})` journalled the marker as a lie over
-#: values it did not describe, and the same call without the marker journalled a
-#: NEW record in the state `JOURNAL_VECTOR_WIDTH_KEY` reserves for PRE-CHANGE /
-#: FOREIGN records. No in-tree caller passes one (`grep` over `tortoise/`,
-#: `graph-scripts/`, `tools/` → 0), so refusing costs nothing and closes the
-#: enumeration one level down.
+#: ⛔ `_emit` therefore carries the record payload on a POSITIONAL channel
+#: (`*record`, rendered onto the envelope as `point`), and refuses this key in
+#: its keyword payload. That is a security property, not style — an earlier
+#: attempt refused it at the doors that splat a caller's kwargs instead, and
+#: asserted the enumeration was complete. It was not: FOUR doors reach `_emit`
+#: with caller keys — `add_event(**extra)` and `emit_belief(**payload)` splat
+#: onto the envelope, `add_object(**props)` does the same, and
+#: `add_point(**fields)` splats INSIDE the record payload. Measured at
+#: `6aea53bb6`, where the first two were refused and the last two were not:
+#:
+#:     add_object("name", "thing", point={...off-grid f64, "f32" marker})
+#:       -> journalled `ObjectRegistered` whose `point` the fold DISPATCHES ON,
+#:          folding the caller's PointAdded (id `p-hijack`) with the marker lie
+#:     add_point("real", prov, point={...})
+#:       -> journalled `PointAdded` carrying the caller's record NESTED inside
+#:          its own, and returned the id of a point that never folds
+#:
+#: ``(**kwargs)`` cannot be enumerated safely — a door added tomorrow re-opens
+#: it. Moving the same hole one name over does not help either: a `record=` kwarg
+#: (measured) cannot bind `*record`, so it merely lands on the envelope as an
+#: inert key — the channel itself stays empty, which is the property being
+#: bought. A positional argument cannot be reached by a kwargs splat at all, so
+#: the gate below is total: whatever a caller names,
+#: `point` in the keyword payload is refused, and `point` inside the positional
+#: one is refused. `add_event` / `emit_belief` still refuse it at their own
+#: doors, for a message that names the door the caller actually called.
 _NESTED_RECORD_KEYS = frozenset({"point"})
 
 
 def _refuse_caller_named_record_keys(keys, door: str) -> None:
-    """Refuse a caller-supplied record-shaped payload at a passthrough door.
+    """Refuse a caller-supplied record-shaped payload on a channel that is not
+    `_emit`'s positional record argument.
 
-    Shared by `add_event` and `emit_belief` so the two cannot drift, and called
-    BEFORE any write: a refusal here leaves nothing to replay, which is the same
-    ordering argument `_emit`'s own gates make.
+    Called by `_emit` itself (once over the keyword payload, once over the
+    positional record) and by `add_event` / `emit_belief`, so the rule has one
+    predicate and none of the call sites can drift. Always BEFORE any write: a
+    refusal here leaves nothing to replay, which is the same ordering argument
+    `_emit`'s own gates make.
     """
     named = sorted(set(keys) & _NESTED_RECORD_KEYS)
     if named:
         raise ValueError(
-            f"{named} is a RECORD-SHAPED journal payload `{door}` does not "
+            f"{named} is a RECORD-SHAPED journal payload that {door} does not "
             "build, and a caller-built one is folded by the replay without the "
             "vector rule the record doors apply (width declared, caller marker "
             "refused). Use the door that owns that record (`add_point`, "
@@ -263,8 +281,22 @@ class EventAPI:
         refuse_unapproved_kinds_in_payload(
             payload, graph_approval_namespaces(g), spells=spells)
 
-    def _emit(self, type_: str, *, corrects=None, actor: str | None = None,
-              **payload) -> dict:
+    def _emit(self, type_: str, *record: dict, corrects=None,
+              actor: str | None = None, **payload) -> dict:
+        # ⛔ THE RECORD PAYLOAD IS POSITIONAL (`*record`), and only
+        # `add_point` / `add_operator` pass one. See `_NESTED_RECORD_KEYS` for
+        # why: a kwargs splat cannot bind a positional slot, so this is the one
+        # channel a caller cannot reach from ANY door. Both refusals run before
+        # the append below (the commit point) and therefore leave nothing to
+        # replay.
+        _refuse_caller_named_record_keys(payload, f"the `{type_}` envelope")
+        if record:
+            if len(record) > 1:
+                raise TypeError(
+                    f"_emit takes at most ONE record payload, got {len(record)}")
+            _refuse_caller_named_record_keys(
+                record[0], f"the `{type_}` record door")
+            payload["point"] = record[0]
         # #7951 — THE JOURNAL ORDERING CONTRACT: **journal first, then
         # project.** The full contract (and the failure-mode argument) lives at
         # the top of `tortoise/sdk.py`; read it before adding a writer. It is
@@ -311,8 +343,9 @@ class EventAPI:
                 f"{type_}'s payload")
         # ⛔ THE STAMP covers the vector THIS door carries — top-level
         # `embedding` only. The record-shaped doors nest their payload
-        # (`add_point` emits `point=p`, `add_operator` the same), so their
-        # vector is stamped by the door that built it and is not touched here.
+        # (`add_point` / `add_operator` pass their record positionally, rendered
+        # onto the envelope as `point`), so their vector is stamped by the door
+        # that built it and is not touched here.
         # `creating=False` because this door computed no vector from content
         # riding with it: the seam still decides every arm from the values —
         # ours narrows and declares `f32`, an off-grid / unrepresentable / a
@@ -361,8 +394,9 @@ class EventAPI:
         #
         # #11836 review Finding 1 (measured, fail-open): a gate over the ENVELOPE
         # only was INERT on the Point door. Two of the seam's doors do not splat
-        # their props at the top level — `add_point` builds `p` and emits
-        # `point=p`, `add_operator` nests its record the same way — so
+        # their props at the top level — `add_point` builds `p` and hands it to
+        # `_emit` as the record payload (rendered onto the envelope as `point`),
+        # `add_operator` nests its record the same way — so
         # `add_point(..., amountMinor=25_000_000)` was ACCEPTED and left
         # `amountMinor` durable with no currency beside it (the reader spells
         # that `currency: None`; the store holds no null key), which is the exact
@@ -424,9 +458,11 @@ class EventAPI:
         record is folded by the replay without the vector rule the record doors
         apply (`_NESTED_RECORD_KEYS`). Refusing is the honest report; silently
         journalling a record whose `embedding_width` marker lies would be the
-        false-FACT shape this module's keys exist to prevent.
+        false-FACT shape this module's keys exist to prevent. (`_emit` refuses
+        the same payload again, which is what makes the rule total; the call
+        here exists so the raise is not swallowed by the arm below.)
         """
-        _refuse_caller_named_record_keys(payload, "emit_belief")
+        _refuse_caller_named_record_keys(payload, "`emit_belief`")
         try:
             self._emit(type_, **payload)
         except Exception as exc:  # noqa: BLE001, RUF100
@@ -679,7 +715,7 @@ class EventAPI:
                     p["sourceVersionTransit"] = _sv
         # P1 #49: mark events with projection_version=2 so the projection gate
         # (Task 1.6) knows to strip context from v2 events.
-        self._emit("PointAdded", point=p, corrects=corrects, projection_version=2)
+        self._emit("PointAdded", p, corrects=corrects, projection_version=2)
         # Auto-compute grounding when a resolution event seeds the a-vector (#6704).
         # P1 #49: check pointKind, not context (context is deprecated).
         # ponytail: duck-typed; add a proper protocol if more backends gain grounding.
@@ -723,7 +759,7 @@ class EventAPI:
         label = content or f"{op_type}({', '.join(_inputs)})"
         p = self._point(label, provenance,
                         operator={"op_type": op_type, "inputs": _inputs})
-        self._emit("OperatorAdded", point=p, corrects=corrects, projection_version=2)
+        self._emit("OperatorAdded", p, corrects=corrects, projection_version=2)
 
         # Gate 4: incrementally update SVBP on the new operator
         # ponytail: only FalkorProjection supports SVBP; InMemoryProjection doesn't.
@@ -1028,11 +1064,12 @@ class EventAPI:
         put a top-level ``embedding`` on the record here. It does not have to
         police that itself: ``_emit`` refuses a caller-set marker and stamps
         every vector that reaches it, so the rule lives in one place. It must
-        NOT accept a record-shaped payload (`point=`) though — a caller-built
-        record reaches the replay's fold chain untested by that rule — so that
-        is refused here (`_NESTED_RECORD_KEYS`).
+        NOT accept a record-shaped payload (`point=`) either — a caller-built
+        record reaches the replay's fold chain untested by that rule — so it is
+        refused here for a message that names THIS door, and again at `_emit`
+        (`_NESTED_RECORD_KEYS`), which is where the refusal is total.
         """
-        _refuse_caller_named_record_keys(extra, "add_event")
+        _refuse_caller_named_record_keys(extra, "`add_event`")
         self._emit("EventRecorded",
                    id=event_id,
                    eventKind=event_kind,
