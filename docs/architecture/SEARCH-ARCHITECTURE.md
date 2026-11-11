@@ -97,8 +97,8 @@ quality change. **Live before private-beta:**
 3. the **rebuild headroom** measured and reserved (§7) — the #1 production risk;
 4. the **shortfall assertion** on the vector leg (§6.1), without which a beta customer can silently receive
    fewer results than exist;
-5. the **`null`-not-0.5 rule** for absent belief state (§6.3) — **landed** (#11702, implementing the §6.3
-   decision of PR #11481); what remains of it is the per-surface sweep named in §6.3, not the rule itself;
+5. the **`null`-not-0.5 rule** for absent belief state (§6.3): absent state is `null` with
+   `ep_state: "absent"`, never 0.5. The per-surface sweep named in §6.3 is part of this item;
 6. the **two truncation reason strings** (§7) — `degraded: "insufficient_graph"` / `degraded:
    "truncated_boundary"` — because item 1 only makes an incomplete answer *labelled*, not *labelled with a
    reason a caller can branch on*.
@@ -280,10 +280,10 @@ That ruling stands and nothing here reverses it.
 boundary, so recomputing EP for it is **exact**, not approximate. Residency and the EP carve-out
 therefore point the same way — and no schema change is needed.
 
-**✅ FIXED (#11702) — kept here as the reason the rule exists, with the citations re-pointed.** A claim
+**Why the rule exists.** A claim
 with **no persisted belief** used to answer the neutral Beta(1,1) mean 0.5, and the ranker coalesced the
 value to it. It was indistinguishable from a computed one at the point where ordering happens. The rule
-that replaced it — **absent state is `null` with `ep_state: "absent"`, never 0.5** — is now implemented
+that settles it — **absent state is `null` with `ep_state: "absent"`, never 0.5** — applies
 on every read/rank surface: `annotate_ep_batch`, the canonical `why` `ep` block (`tortoise/why.py`),
 `GraphRanker`, `StateRanker`/`recall_ranking`, `GapsRanker`/`gaps_ranking`, `SubgraphExpander`, and the
 event/object aggregate reads; the `analyze` templates refuse an absent claim rather than admitting it at a
