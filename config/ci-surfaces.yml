@@ -11858,7 +11858,9 @@ durations:
   # #4348). The row must EXIST, not merely default: the `core` registration above puts it in
   # `fast_pool()`, and `--integrity`'s coverage floor is measured against that pool's own size.
   # MEASURED LOCALLY as context, deliberately NOT as the weight (a local reading is forbidden
-  # as a SHARD-LAYOUT input, #2818/#3419): 13 cases, 3.3 s wall for the whole file. What the
+  # as a SHARD-LAYOUT input, #2818/#3419): 15 cases, 3.6 s wall for the whole file (re-measured
+  # after the SDK-registration and `expected` arms were added; the earlier note said 13 and went
+  # stale the moment a case landed — re-measure, do not trust this line). What the
   # weight covers: one pure function over a hand-built histogram, a fake graph/projection, and
   # ONE product-vocabulary import (`domain_loader.known_kinds`) that loads the pack registry —
   # no DB, no model, no network, no subprocess, no `gh`.
