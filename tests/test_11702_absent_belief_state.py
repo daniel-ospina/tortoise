@@ -292,13 +292,28 @@ def test_absent_never_outranks_a_strongly_measured_claim(sdk):
         "SET n.posterior_alpha = 19.0, n.posterior_beta = 1.0",
         params={"id": strong},
     )
+    # The DISCRIMINATING comparison is against a measured claim worth exactly
+    # what absence used to be fabricated as: 0.5. Pre-fix both rows carried the
+    # same number and the same (absent) tier, so the order was decided by row
+    # position and this assertion could not fail — which is why the twin at
+    # 0.95 is not the pin. Here the tier must separate them.
+    symmetric = _symmetric_point(sdk)
     rows = [{"id": absent, "scores": {"rrf": 1.0}},
-            {"id": strong, "scores": {"rrf": 1.0}}]
+            {"id": strong, "scores": {"rrf": 1.0}},
+            {"id": symmetric, "scores": {"rrf": 1.0}}]
+    ranked = {r["id"]: r["recall_ranking"]
+              for r in StateRanker(projection=sdk._get_proj()).rerank(rows)}
     order = [r["id"] for r in StateRanker(projection=sdk._get_proj()).rerank(rows)]
     assert order[0] == strong, (
         "an absent belief outranked a claim measured at 0.95 — the identity "
         "factor made 'nothing measured this' the strongest evidence")
-    assert order[1] == absent
+    assert ranked[absent]["belief_informed_order"] is False
+    assert ranked[symmetric]["belief_informed_order"] is True, ranked[symmetric]
+    assert ranked[absent]["ep_state"] == "absent", ranked[absent]
+    assert ranked[symmetric]["ep_state"] == "measured", ranked[symmetric]
+    assert ranked[absent]["confidence"] is None, (
+        "the absent row still carries a fabricated confidence: "
+        + repr(ranked[absent]))
 
 
 def test_absent_belief_contributes_no_factor_to_the_recall_gate(sdk):
@@ -779,6 +794,15 @@ def test_analyze_reports_no_belief_for_a_half_pair(sdk):
             "       (b)<-[:IMPL {idx:0}]-(o)-[:IMPL {idx:2}]->(t)")
     answer = analyze("show me the evidence chain for the AI strategy",
                      proj=proj, use_llm=False)["answer"]
+    # NOTE ON DISCRIMINATING POWER (cycle-8 review): this test also passes on
+    # the PRE-#11702 tree, because that tree coalesced BOTH rows to 0.5 and the
+    # incidental `ORDER BY conf DESC` tie order happened to match. It therefore
+    # guards the INTERMEDIATE `ep_has_belief_cypher` shape (which admitted a
+    # half pair) rather than being a before/after pin — `grading`-style honesty
+    # beats a docstring that claims more than the assertion earns. The
+    # before/after pin for the half pair is
+    # `test_why_half_posterior_is_not_contested_and_has_no_variance`, which is
+    # red pre-fix (a β-only row got variance 1/12 and `contested: true`).
     assert "half pair support" in answer and "measured low support" in answer, answer
     assert "0.25" not in answer, (
         "a β-only row was scored 0.25 — the half-pair fabrication: " + answer)
@@ -892,6 +916,13 @@ def test_most_uncertain_does_not_rank_a_mirror_only_claim_first(sdk):
     claim, whose `coalesce(…, 1.0)` defaults produced the MAXIMUM variance
     1/12 — first place on a "how uncertain are we" answer, for a claim with no
     stored operands at all.
+
+    NOTE ON DISCRIMINATING POWER (cycle-8 review): this assertion also holds on
+    the PRE-#11702 tree, whose gate was already `posterior_alpha IS NOT NULL OR
+    ep_alpha IS NOT NULL` — it pins the INTERMEDIATE `ep_has_belief_cypher`
+    shape (which would admit a mirror-only row), not the original defect. Kept
+    because that intermediate shape is one edit away from coming back; the
+    original-defect pin is `test_analyze_reports_no_belief_for_a_half_pair`.
     """
     from tests._embedded import _wipe_or as wipe
     from tortoise.analyze import analyze
@@ -1136,3 +1167,85 @@ def test_ranking_conflict_boost_ignores_a_counter_claim_with_no_belief(sdk):
     absent_key = _contested_claim_key({"mean": None, "relevance": 0.0,
                                        "claim_id": "a", "nid": 1})
     assert measured_key < absent_key, (measured_key, absent_key)
+
+
+def test_conflict_dedupe_ranks_a_nullable_mean_without_raising(sdk):
+    """Two rows for ONE counter-claim, one answering a float and one `None`.
+
+    The dedupe compared `(mean, content)` tuples directly, so the moment #11702
+    made `mean` nullable a float/None pair raised `TypeError` inside the read's
+    outer handler — which returns `{}` for the WHOLE read, dropping the boost
+    for every point in it, not only the offending one. Pre-#11702 the comparison
+    was unreachable (the mean was always a float), so this is a regression the
+    change itself introduced.
+
+    The shape that produces it: claim `X` has NO belief and NANDs the target
+    directly, while ALSO being the idx-0 source of a NAND operator `O` that
+    carries a belief and NANDs the same target. Both rows share
+    `coalesce(id(src), id(c)) == id(X)`; one resolves a float from `O`, the
+    other `None` from `X`.
+    """
+    from tortoise.ranking import _claim_rank, resolve_contested_relevance
+
+    # The pure key is total over the pair that used to raise.
+    assert _claim_rank({"mean": 0.75, "content": "x"})[0] is True
+    assert _claim_rank({"mean": None, "content": "x"})[0] is False
+    assert (_claim_rank({"mean": 0.75, "content": "x"})
+            > _claim_rank({"mean": None, "content": "x"})), (
+        "a measured claim must rank above an absent one in the dedupe")
+
+    proj = sdk._get_proj()
+    target = sdk.create_point("statement", "dedupe target")["id"]
+    bare = sdk.create_point("statement", "zebra bare counter-claim")["id"]
+    # The NAND operator: is_operator + op_type, carrying the belief.
+    op = sdk.create_point("statement", "zebra operator counter")["id"]
+    proj.g.query(
+        "MATCH (o:Point {id:$o}) SET o.is_operator = true, "
+        "o.op_type = 'NAND', o.posterior_alpha = 3.0, o.posterior_beta = 1.0",
+        params={"o": op})
+    proj.g.query(
+        "MATCH (b:Point {id:$b}), (t:Point {id:$t}) CREATE (b)-[:NAND]->(t)",
+        params={"b": bare, "t": target})
+    # `r.idx > 0` is part of the read's WHERE: the operator's own NAND must be
+    # indexed, or the row is NULL-filtered and the two paths never collide.
+    proj.g.query(
+        "MATCH (o:Point {id:$o}), (t:Point {id:$t}) "
+        "CREATE (o)-[:NAND {idx:1}]->(t)",
+        params={"o": op, "t": target})
+    proj.g.query(
+        "MATCH (o:Point {id:$o}), (b:Point {id:$b}) "
+        "CREATE (b)-[:INPUT {idx:0}]->(o)", params={"o": op, "b": bare})
+
+    got = resolve_contested_relevance(proj, [target], "zebra counter-claim")
+    assert target in got, (
+        "the read returned nothing for a contested claim — a TypeError in the "
+        "null/float dedupe is swallowed by the outer handler and drops EVERY "
+        "point's boost: " + repr(got))
+
+
+def test_write_verb_ep_updated_reads_the_shared_presence_predicate(sdk):
+    """`ep_updated` used a local `α IS NOT NULL OR ep_α IS NOT NULL` spelling.
+
+    So a MIRROR-only claim — a genuinely served belief, e.g. 0.95 — and a
+    β-only half pair both reported `ep_updated: false` on the write verb, while
+    every read surface called the mirror-only one measured. Same defect class
+    (a second presence spelling), different surface.
+    """
+    from tortoise.search_engine import ep_has_belief_cypher
+
+    proj = sdk._get_proj()
+    mirror_only = sdk.create_point("statement", "mirror-only write-verb")["id"]
+    beta_only = sdk.create_point("statement", "beta-only write-verb")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.confidence = 0.95",
+                 params={"id": mirror_only})
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_beta = 3.0",
+                 params={"id": beta_only})
+    rows = proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
+        f"{ep_has_belief_cypher('n')}",
+        params={"ids": [mirror_only, beta_only]}).result_set
+    got = {r[0]: bool(r[1]) for r in rows}
+    assert got[mirror_only] is True, (
+        "a mirror-only claim (a real served belief) read as 'no belief': "
+        + repr(got))
+    assert got[beta_only] is False, got

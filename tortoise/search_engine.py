@@ -4953,19 +4953,18 @@ def get_relationships_bounded(
                             # raw division here raised ZeroDivisionError
                             # mid-assembly — discarding every point assembled
                             # before it (#330's guard, missed at this site).
-                            # `_beta_mean` carries that guard, and its uniform
-                            # fallback (0.5) is the SAME value the sibling
-                            # signal surface reports for the pair
-                            # (StateRanker._fetch_point_signals,
-                            # ranking.py's degenerate-pair 0.5: measured on
-                            # the write-path shape, which mirrors
-                            # `confidence`; the GraphRanker sibling has no
-                            # guard and is untouched by this read. #11702: this
-                            # is NOT the neutral-absence constant (that one is
-                            # deleted) — it is the exact mean of a pair whose
-                            # α+β is non-positive, a genuinely degenerate pair,
-                            # and `variance` is 0.0 beside it so it never reads
-                            # as a fabricated Beta(1,1) posterior).
+                            # `_beta_mean` carries that guard. #11702: this
+                            # 0.5 is NOT a neutral-absence constant (that one
+                            # is deleted) and it is NOT a value any sibling
+                            # still reports — the rankers and `why` answer
+                            # `None` + `ep_state: "absent"` for this pair,
+                            # because a stored (0,0) is ABSENT under the
+                            # presence rule (`α+β > 0` fails). This read is
+                            # reached only when `has_ep` is true on a shape
+                            # whose α+β is non-positive, so the fallback is
+                            # the arithmetic mean of a degenerate pair inside a
+                            # block that also reports `variance: 0.0` — never
+                            # a fabricated Beta(1,1) posterior.
                             # It is not the fabricated posterior above: for this
                             # pair `_beta_variance`'s own s <= 0 guard yields
                             # variance 0.0, so contested stays False and nothing

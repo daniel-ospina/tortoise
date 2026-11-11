@@ -19701,6 +19701,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         build_write_verb,
         surfaced_marker,
     )
+
+    from .search_engine import ep_has_belief_cypher
     skipped = 0
     facts: dict = {}
     if extracted:
@@ -19712,7 +19714,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
                 "coalesce(n.pointKind, 'statement'), "
                 "coalesce(n.status, 'live'), "
-                "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL)",
+                # #11702: the SHARED presence predicate (see sdk.py's twin)
+                # — a local spelling here called a mirror-only claim and a
+                # β-only half pair `ep_updated: false`.
+                f"{ep_has_belief_cypher('n')}",
                 params={"ids": [p["id"] for p in extracted]},
             ).result_set
             facts = {r[0]: (r[1] or "statement", r[2] or "live", bool(r[3]))

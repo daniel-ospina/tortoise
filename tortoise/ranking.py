@@ -345,6 +345,17 @@ def _query_touches_conflict(query: str, counter_claims: list[str]) -> bool:
     return False
 
 
+def _claim_rank(claim: dict) -> tuple:
+    """Dedupe rank for two rows describing the SAME counter-claim (#11702).
+
+    Higher wins; an ABSENT mean is the lowest, never a `TypeError`. Written as
+    a total tuple because the previous `(mean, content)` comparison raised on a
+    `None`/float pair and the raise was swallowed by the read's outer handler,
+    silently dropping the boost for every point in the read."""
+    mean = claim["mean"]
+    return (mean is not None, mean or 0.0, claim["content"])
+
+
 def _contested_claim_key(claim: dict) -> tuple:
     """The ONE ordering for contested-counter-claim candidates (#11702).
 
@@ -544,8 +555,14 @@ def resolve_contested_relevance(
             if previous is None:
                 slot[claim_nid] = candidate
             else:
-                cand_rank = (candidate["mean"], candidate["content"])
-                prev_rank = (previous["mean"], previous["content"])
+                # TOTAL rank tuple: a raw `(mean, content)` comparison raises
+                # `TypeError` the moment ONE side is absent and the other is
+                # measured — and that raise lands in the outer handler below,
+                # which returns `{}` for the WHOLE read (every point's boost,
+                # not just this one). Pre-#11702 it was unreachable because the
+                # mean was always a float; #11702 made it nullable.
+                cand_rank = _claim_rank(candidate)
+                prev_rank = _claim_rank(previous)
                 if cand_rank > prev_rank or (
                         cand_rank == prev_rank
                         and str(candidate["claim_id"])
@@ -1451,10 +1468,12 @@ class StateRanker:
             # read as ABSENT just because its α/β columns are missing).
             f"  {ep_has_belief_cypher('n')} AS has_prior, "
             # #11702: the mirror rides the tail (index 8), the RAW posterior
-            # columns after it (9/10) so the VALUE can follow the same
-            # precedence GraphRanker uses — persisted posterior first, mirror
-            # only for a legacy node that has none. Preferring the mirror made
-            # this ranker order on a superseded mean after a baseline write.
+            # columns after it (9/10) so the VALUE can follow the ONE
+            # precedence every surface uses — the `n.confidence` MIRROR first
+            # (the #2206 served belief), α/β as the fallback for a node the
+            # flush never reached. Preferring α/β (the earlier text here) made
+            # a mirror-only node report a different value on this one surface
+            # than annotate, `why` and the other two rankers.
             "  n.confidence, n.posterior_alpha, n.ep_alpha"
         )
         rows = epistemic_sweep(

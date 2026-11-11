@@ -16168,6 +16168,8 @@ class TortoiseSDK:
             build_write_verb,
             surfaced_marker,
         )
+
+        from .search_engine import ep_has_belief_cypher
         skipped = 0
         facts: dict = {}
         if extracted:
@@ -16176,7 +16178,12 @@ class TortoiseSDK:
                     "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
                     "coalesce(n.pointKind, 'statement'), "
                     "coalesce(n.status, 'live'), "
-                    "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL)",
+                    # #11702: the SHARED presence predicate, not a local
+                    # `α IS NOT NULL OR ep_α IS NOT NULL` spelling — that one
+                    # calls a MIRROR-only claim (a real served belief, e.g.
+                    # 0.95) and a β-only half pair "not ep_updated". One
+                    # vocabulary, one owner (`search_engine`).
+                    f"{ep_has_belief_cypher('n')}",
                     params={"ids": [p["id"] for p in extracted]},
                 ).result_set
                 facts = {r[0]: (r[1] or "statement", r[2] or "live", bool(r[3]))
