@@ -14,8 +14,16 @@ Two things are pinned here, and they are different contracts:
   * the KEY — ``relation_write`` on the hosted receipt, **absent (never
     zeroed)** when the extractor stated no relations, exactly as the SDK
     receipt documents it (#11237);
-  * the ADVISORY — one line when the session named ≥2 entities and wrote no
-    connection between them. A nudge, never a refusal
+  * the ADVISORY — one line when the session named ≥2 entities and no
+    connection between them was written. It states the observation and refuses
+    the attribution, because no observable here separates "the agent stated no
+    relation" from "the extractor produced none".
+
+⚠️ NOT PINNED, declared: this file pins the HOSTED half only. Nothing pins that
+the SDK receipt (`sdk.py:16093-16094`) still carries the key, or that the two
+lanes agree — `grep -rn relation_write tests/*.py` finds no SDK-side case. A
+future change that renames or zero-fills the key on the SDK lane would leave
+three "byte-parity with the SDK receipt" comments false with CI green. A nudge, never a refusal
     (``product/2026-08-11-tooling-surface-consolidation.md:22``).
 
 Class-B doctrine — each test states the value/state that makes it fail, and
@@ -116,7 +124,9 @@ def test_the_advisory_never_claims_silence_when_the_link_did_not_report():
 def test_the_counts_never_raise_at_receipt_assembly():
     """FAILS if a count is coerced with a bare ``int()``: the advisory is
     appended AFTER the capture committed, so an unexpected shape must degrade
-    to silence, not 500 a write that already landed."""
+    to a COUNT of 0, not 500 a write that already landed. For ``written`` that
+    makes the line FIRE (and report 0) rather than fall silent — the honest
+    reading of a count this receipt could not interpret."""
     assert ha._capture_int([1, 2]) == 0
     assert ha._capture_int("not-a-number") == 0
     assert ha._capture_int(None) == 0
@@ -189,7 +199,7 @@ def test_the_hosted_receipt_carries_the_relation_accounting(
     assert receipt.get("relation_write") == rw, (
         "the hosted receipt dropped the relation accounting the SDK receipt "
         f"carries — a caller cannot see its connections: {sorted(receipt)}")
-    assert any("named 3 entities and wrote no connection" in w
+    assert any("named 3 entities and no connection between them was written" in w
                for w in receipt["warnings"]), receipt["warnings"]
 
 

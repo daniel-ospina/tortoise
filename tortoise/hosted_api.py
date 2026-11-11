@@ -17980,8 +17980,11 @@ def _capture_int(value) -> int:
     """A non-negative int from anything a receipt count could be, never raising.
 
     The advisory is appended AFTER the capture has committed, so a surprising
-    shape must degrade to 0 (the suppressing value) rather than 500 a write
-    that already landed.
+    shape must degrade to 0 rather than 500 a write that already landed. What
+    0 then MEANS is the caller's business: for ``entities`` it suppresses the
+    line (nothing was named), while for ``written`` it makes the line fire and
+    report the count as 0 — the honest reading of a count this receipt could
+    not interpret, and strictly safer than raising on a committed capture.
     """
     try:
         return max(0, int(value or 0))
@@ -18072,6 +18075,13 @@ def _capture_connection_warning(relation_write: dict | None,
     ordinary claims-only capture silent, which is the behaviour the nudge
     exists to surface.
 
+    No observable on this receipt separates "the agent stated no relation" from
+    "the extractor produced none" — so the line states the observation and
+    explicitly refuses the attribution ("this reports what the receipt saw, not
+    who omitted it"). That is what keeps the ⛔ constraint true in substance
+    rather than only in intent: during a producer outage every multi-entity
+    capture carries this line, and none of them is accused of the omission.
+
     It is a NUDGE, never a refusal (``product/2026-08-11-tooling-surface-
     consolidation.md:22``, *"nudge, don't enforce"*): the capture succeeded and
     the receipt's outcome is untouched. It also does NOT duplicate the
@@ -18098,9 +18108,10 @@ def _capture_connection_warning(relation_write: dict | None,
                   f"link reported no outcome for them")
     else:
         detail = "no relation was stated"
-    return (f"this session named {entities} entities and wrote no connection "
-            f"between them ({detail}) — the claims are stored, but retrieval "
-            f"can only use the relationships that were written (#11808)")
+    return (f"this session named {entities} entities and no connection between "
+            f"them was written ({detail}) — the claims are stored; retrieval "
+            f"uses only the relationships that were written. This reports what "
+            f"the receipt saw, not who omitted it (#11808)")
 
 
 @counts_capture_ops_async  # #3359: count graph ops for the whole capture
