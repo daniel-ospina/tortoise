@@ -5668,13 +5668,21 @@ def _qualified(window: str, claim_at: int = 0) -> bool:
         after = sentence[verb.end():verb.end() + 16]
         if _QUALIFIER_OBJECT_NEGATIONS.search(after):
             continue
-        # The verb's OBJECT must be the mean/belief this claim is about. Without
-        # this a mirror+verb pair that qualifies a DIFFERENT noun satisfies the
-        # claim: "…IS the declared PRIOR mean; a readable mirror leads the EVENT
+        # The verb's OBJECT must be a MEAN/VALUE REFERENCE. Without this a
+        # mirror+verb pair that qualifies a DIFFERENT noun satisfies the claim:
+        # "…IS the declared PRIOR mean; a readable mirror leads the EVENT
         # ordering." and "…the n.confidence mirror supplies the RANKING weight."
         # both passed (measured) — a false PASS in the one gate whose job is to
         # refuse this class. `it`/`both`/`one` cover the shipped wordings
         # ("LEADS it", "LEADS both", "supplies one").
+        # ⚠️ ACCEPTED RESIDUAL, stated so no one reads this as airtight: these
+        # are REFERENTIAL alternatives, so a wrong object that reuses one of
+        # them still passes — measured, "…a readable mirror supplies one extra
+        # weight for the ranker." and "…supplies the value that the RANKING
+        # orders on." are both accepted. Closing that needs the object to be
+        # terminal to its clause, which is a rewriter's job, not a tripwire's;
+        # this guard is a regression net over the shipped wordings, not a
+        # grammar proof.
         if not _QUALIFIER_OBJECT.search(sentence[verb.end():verb.end() + 60]):
             continue
         # A RESTRICTION clause demotes the mirror to a fallback, which is the
