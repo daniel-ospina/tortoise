@@ -107,10 +107,13 @@ The probe separates them by construction. The vector rows above are dominated by
 float32 change; the ~8 % on the rows that carry **no vector at all** (`PointRevised`,
 `EntityLinked`, and every other
 1.07–1.10× row in `measurement.txt`) is the **compact separators** alone — `", "` /
-`": "` cost one byte per separator, measured at 435 B of a 9,176 B record and 383 B of
-its 5,072 B vector (the tool's spaced attribution; the same separator benefit on the
-on-disk compact vector is 5,072 − 4,689 = 383 B, which is why the two figures agree here
-and diverge nowhere else).
+`": "` cost one byte per separator — **435 B on the pre-change record** (9,176 B spaced,
+8,741 B written compact) and **437 B on the post-change one** (5,860 B spaced, 5,423 B on
+disk) — and the saving on the vector alone is **383 B under either ruler** (8,414 → 8,031
+spaced, 5,072 → 4,689 compact), which is why the two figures agree here and diverge nowhere
+else. ⚠️ Both records are named because the possessive is where this bundle has been wrong
+before: the 9,176 B record's own vector is **8,414 B**, and **5,072 B is the POST-change
+vector** (spaced; 4,689 B compact) — not a size the 9,176 B record ever had.
 
 ## Why the VALUE is quantised, not just the text
 
