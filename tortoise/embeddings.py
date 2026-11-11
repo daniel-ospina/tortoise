@@ -401,8 +401,9 @@ def shortest_float32_vector(vector: list[float]) -> list[float] | None:
     ⛔ THE GRID CHECK IS THE OWNERSHIP TEST, and that is why it is primary. A
     vector a caller supplied reaches this seam WITHOUT `embedding_verbatim` on at
     least one path — `EventAPI.add_point(fields=…)` refuses that marker as a
-    forged key, because the door mints it — so "the marker is absent" is not
-    evidence that the vector is ours. "Off the embedder's float32 grid" is:
+    forged key and never mints it (the only marker that door mints is the WIDTH)
+    — so "the marker is absent" is not evidence that the vector is ours. "Off the
+    embedder's float32 grid" is:
     `encode_batch_for_store` returns ``vec.tolist()`` of a float32 array, so
     nothing our embedder emits can be off it.
     """

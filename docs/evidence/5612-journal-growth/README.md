@@ -57,9 +57,13 @@ writer is compact since that change, so `line_bytes` sits 437 B above what
 ## The measurement
 
 > ⚠️ **RE-MEASURED 2026-11-11 (`#11821` P0) — this block is the pre-P0 baseline, kept as
-> the dated historical record.** The probe calls the **live** writer seam
-> (`stamp_journal_embedding`) and the live `EventLog.append`, so it follows the writer by
-> design — and P0 changed both: the vector is now stored at the embedder's float32 as the
+> the dated historical record.** The probe follows the writer on the **vector** half — it
+> calls the live seam (`stamp_journal_embedding`) and the pinned embedder, so the reprs and
+> the identity keys are production code — and deliberately does NOT follow it on the
+> **line-encoding** half: `line_bytes` re-encodes with `json.dumps`'s DEFAULT separators,
+> which is the pre-P0 shape, because this block is the baseline. That deliberate
+> divergence is the 437 B offset (5,860 − 5,423), not a stale number. P0 changed both
+> halves: the vector is now stored at the embedder's float32 as the
 > shortest round-trip text, and the journal line is written with compact separators. At
 > this head the same probe reports **`PointAdded` 5,860 B** (as committed 570 B),
 > **vector `5,072 B` at 13.2 chars/float**, whole corpus **34,766 B** and embedding share

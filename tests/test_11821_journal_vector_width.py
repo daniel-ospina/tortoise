@@ -306,8 +306,9 @@ def test_a_vector_off_the_float32_grid_is_not_ours_to_narrow():
     """THE OWNERSHIP TEST, and the one the marker cannot make for us.
 
     `EventAPI.add_point(fields=…)` hands a CALLER's vector to this seam with no
-    `embedding_verbatim` (that door refuses the marker as forged, because it
-    mints it), so "the marker is absent" is not evidence that the vector is
+    `embedding_verbatim` (that door refuses the marker as forged, and never mints
+    it — the only marker it mints is the WIDTH), so "the marker is absent" is not
+    evidence that the vector is
     ours. "Off the embedder's float32 grid" is: `encode_batch_for_store` returns
     `vec.tolist()` of a float32 array, so nothing it emits can be off it.
 

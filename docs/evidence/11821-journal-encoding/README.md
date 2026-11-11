@@ -143,15 +143,21 @@ must not take"* — and the flag picks the storage form in
 `TortoiseSDK.create_point`'s `_create_map["embedding_verbatim"]`). The width marker rides the payload from this change — not from P2 — so that
 population is **named** from the first PR rather than narrowed silently by a later one.
 `tests/test_11821_journal_vector_width.py::test_a_verbatim_vector_is_never_narrowed` reds
-if it is ever narrowed, and its fixture is deliberately off the float32 grid so the
-assertion cannot pass vacuously.
+if it is ever narrowed, and its **grid-exact** fixture is what keeps the assertion from
+passing vacuously: that vector IS on the grid, so the grid rule does not refuse it and only
+the `is_verbatim` arm stands between it and a narrowed rewrite — measured, the row REDS
+with that arm removed (and was GREEN, i.e. a pin that could not fail, before the
+grid-exact fixture was added). The off-grid sibling beside it is the *value-level* half,
+which the grid rule already refuses on its own; it is not the guard this sentence is
+about.
 
 **And the marker is not the only test, on purpose.** A vector is narrowed only when every
 element is **exactly what a float32 widens to** (`float(np.float32(v)) == v`, checked
 vectorised). Nothing the embedder emits can be off that grid, so an off-grid element is
 somebody else's value — and at least one path hands one over with **no marker at all**
-(`EventAPI.add_point(fields=…)` refuses `embedding_verbatim` as a forged key, because it
-mints it). The grid check makes that population `f64`/untouched by construction, and it
+(`EventAPI.add_point(fields=…)` refuses `embedding_verbatim` as a forged key, and never
+mints it — the only marker that door mints is the WIDTH). The grid check makes that
+population `f64`/untouched by construction, and it
 is what catches in-range-but-off-grid values (`16777217.0`, `1e-50`) that a
 narrow-both-sides-and-compare guard would silently rewrite.
 
