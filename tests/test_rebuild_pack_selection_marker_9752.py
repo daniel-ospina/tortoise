@@ -568,7 +568,9 @@ def test_auto_health_recover_warns_on_the_pack_selection_gap(
     review: "NO ROW REDDENS").
 
     REACHABLE: the real `_auto_health_recover` on the probe-OK lost-graph path,
-    with the discovery seam pointed at the test's events dir.
+    with the discovery seam pointed at the test's events dir and the embedded
+    reading the branch is gated on forced on (see the `_is_embedded` note
+    below — without it this pin is unreachable on the docker lane).
     """
     sdk, events = _mk_sdk(tmp_path)
     _write_journal(events)
@@ -578,6 +580,19 @@ def test_auto_health_recover_warns_on_the_pack_selection_gap(
     monkeypatch.setattr(type(proj), "_find_local_jsonl_dir",
                         lambda self: str(events))
     monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    # The lost-graph branch is gated on `self._is_embedded and not is_prod`. On
+    # the suite's DOCKER lane `TORTOISE_DB_URI` arms the redirect, so the SDK
+    # builds host-mode, `_path` is None and `_is_embedded` reads False (the
+    # reading tests/test_tripwire.py:253 pins) — which makes the whole branch,
+    # and this consumer with it, UNREACHABLE, so the pin could never fire. A
+    # test that only passes on the embedded carve-out lane is a test the fast
+    # shard never exercises: it shipped unmeasured exactly that way (#11839).
+    # Force the reading the branch is written for, the lane-independent seam
+    # `test_turn_embedding_write_path_4194.py` already uses (#4280).
+    monkeypatch.setattr(proj, "_is_embedded", True)
+    assert proj._is_embedded is True, (
+        "the seam must land, or this test silently reverts to asserting a "
+        "branch it never entered")
 
     with caplog.at_level(logging.WARNING, logger="tortoise.projection"):
         proj._auto_health_recover()
