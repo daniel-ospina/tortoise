@@ -149,6 +149,12 @@ def test_unlabelled_is_EXACTLY_the_null_plus_undeclared_share_and_nothing_escape
 # ── 2. per layer, never blended ──────────────────────────────────────────
 
 
+#: The five point kinds `tortoise.sdk` registers through `domain_loader.register_kind` at IMPORT time
+#: (`sdk.py:217-227`). No `packs/*/manifest.yaml` declares them and none is in
+#: `CANONICAL_POINT_KINDS`, so the SDK import is the ONLY path that makes them declared.
+_SDK_REGISTERED_KINDS = ("diary", "option", "evidence", "criterion")
+
+
 def test_the_declared_vocabulary_includes_the_kinds_the_SDK_itself_registers():
     """FAILS IF `_a4_declared_kinds` imports only `domain_loader` and misses the SDK's own kinds.
 
@@ -158,16 +164,42 @@ def test_the_declared_vocabulary_includes_the_kinds_the_SDK_itself_registers():
     `register_kind` at import time. That is a FALSE failing run, and a refusal that names a false
     reason is the one failure mode a refusal must not have (`tools/ax_write_eval.py` records the
     same defect as `#9695` review P1).
+
+    ⛔ IN ITS OWN INTERPRETER, and that is not ceremony: `tests/conftest.py:594` imports
+    `tortoise.sdk` at module level, so by the time ANY test body runs in this process the SDK's
+    `register_kind` calls have already happened and the vocabulary is complete. Deleting the
+    in-function `import tortoise.sdk` — the exact mutation this arm names — therefore left an
+    IN-PROCESS assertion green: a pin that cannot see its own mutant is a false PASS (#11837 review
+    round 1, P1). The child reads the product's bare vocabulary FIRST (no SDK import) and only then
+    calls the probe, so both halves are measured in one run with no shared state.
     """
-    probe = _probe()
-    declared = probe._a4_declared_kinds("pointKind")
-    for kind in ("evidence", "option", "criterion"):
-        assert kind in declared, (
-            f"{kind!r} is registered by `tortoise.sdk` at import time and must count as declared "
-            f"— a census that misses it reports the fleet's own writes as inventions")
-    # …and the arm is not vacuous: a kind nothing registers stays undeclared, which is what makes
-    # the live graph's single `finding` Point a real finding rather than an artefact of the import.
-    assert "finding" not in declared
+    import subprocess
+
+    code = (
+        "import sys, importlib.util\n"
+        "from tortoise.domain_loader import known_kinds\n"
+        f"want = set({_SDK_REGISTERED_KINDS!r})\n"
+        "bare = sorted(want & set(known_kinds('pointKind')))\n"
+        "spec = importlib.util.spec_from_file_location('cm_10988', sys.argv[1])\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "declared = sorted(want & set(m._a4_declared_kinds('pointKind')))\n"
+        "print(bare)\n"
+        "print(declared)\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code, str(PROBE)],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=300)
+    assert out.returncode == 0, (out.returncode, out.stdout[-800:], out.stderr[-1500:])
+    lines = out.stdout.strip().splitlines()
+    assert len(lines) == 2, out.stdout
+    bare, declared = eval(lines[0]), eval(lines[1])  # noqa: S307 — two sorted str lists we printed
+    assert bare == [], (
+        f"the product's BARE vocabulary already declares {bare} without the SDK import, so this arm "
+        f"would be vacuous — find the real registration path before trusting the assertion below")
+    assert declared == sorted(_SDK_REGISTERED_KINDS), (
+        f"`_a4_declared_kinds` must re-supply the SDK-registered kinds (got {declared}) — without "
+        f"its in-function `import tortoise.sdk` a standalone census reports the fleet's own declared "
+        f"typed kinds as inventions")
 
 
 def test_the_three_layers_are_reported_SEPARATELY_and_never_blended():

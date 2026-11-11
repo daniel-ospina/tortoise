@@ -137,9 +137,18 @@ reds it: `NULL` and the blank kind are one absent share; `unlabelled` decomposes
 are never blended; a layer is judged against its own vocabulary (a point kind on a thing is not coverage);
 object kinds compare case-insensitively; the declared vocabulary includes the SDK's own registered kinds;
 `0 of 0` is not coverage and one labelled node clears the floor; `declared_absent` is reported and decides
-nothing while `expected_absent` names only the kinds a CORPUS expectation requires; the diagnostics survive; a broken layer query renders a NAMED gap rather than `population=0`.
+nothing while `expected_absent` names only the kinds a CORPUS expectation requires; the diagnostics
+survive; a broken layer query renders a NAMED gap rather than `population=0`.
 
 ⛔ The retired framing is **not** in the pin set: nothing there compares a typed share to a bar.
+
+⛔ **The SDK-registration arm runs in its own interpreter, and that is load-bearing.** `tests/conftest.py`
+imports `tortoise.sdk` at module level, so by the time any in-process test body runs the vocabulary is
+already complete — the mutation that deletes the in-function import would leave an in-process assertion
+GREEN, i.e. a pin that cannot see its own mutant (`#11837` review round 1, P1). The child reads the
+product's bare vocabulary first (no SDK import) and only then calls the probe, so both halves are measured
+in one run, and the ordering is asserted: if the bare vocabulary ever declares those kinds, the arm reds as
+VACUOUS rather than passing for the wrong reason.
 
 ## 5 · What is NOT delivered
 
