@@ -340,11 +340,9 @@ a box with no database the default conftest refuses the run outright
 (`default pytest requires TORTOISE_DB_URI (epic #1647 P4)` — one refusal per
 collected test, 58 at this head), which reads as the guard being broken rather
 than the target being absent. That number is a property of the RUN, not of the
-document, and nothing reads it (see the residuals below) — and in particular it
-is NOT a fact about `measured_at_commit`: this test file does not exist at
-`23d227c53` (`git cat-file -e 23d227c53:tests/test_problem_map_2820.py` exits
-128), so the count is re-derived with `--collect-only` rather than read off the
-commit the page is anchored to.
+document and not of any commit, and nothing reads it (see the residuals below):
+it is re-derived with `--collect-only` rather than read off the page's
+`measured_at_commit`.
 
 The checker re-measures, offline and without network access:
 
@@ -462,9 +460,9 @@ rounding:**
   regressions for them are in `tests/test_projection.py`, not in the A10 suite the
   row pointed at). Every fact those two corrections rest on is present at
   `23d227c53` — `git cat-file -e 23d227c53:website/apps/dashboard/src/packs.js`,
-  and `#2795`'s own regression tests in `tests/test_projection.py` — so the page's
-  `measured_at_commit` did not move; that is the point of an OPEN being a claim
-  with evidence behind it too.
+  and `#2795`'s own regression tests in `tests/test_projection.py` — so that pass
+  did not move the page's `measured_at_commit`; that is the point of an OPEN being
+  a claim with evidence behind it too.
 - The three WS design documents this re-cut assumes are already committed:
   `docs/plans/2026-09-10-write-contract-five-doors.md`,
   `docs/plans/2026-09-10-ws-b-pack-property-declaration.md`,
