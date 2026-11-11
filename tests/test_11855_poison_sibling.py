@@ -1,10 +1,11 @@
 """#11855 — one unreadable belief operand must not take the batch with it.
 
 The defect, as filed: `update_point` stored a belief operand verbatim, so a
-pre-guard node can carry a value FalkorDB refuses to *inspect* — `[1, 2]`,
-`"abc"`, a Boolean. `toString`/`toFloat` RAISE on a `List` ("Type mismatch:
-… but was List"), and a raise in the projection happens at the QUERY, not the
-row: one such node blanked every healthy claim in the same response.
+pre-guard node can carry a value the store cannot read as a NUMBER — `[1, 2]`
+makes the raising spellings RAISE (`toString`/`toFloat`: "Type mismatch: … but was
+List"), while `"abc"` and a Boolean coerce to NULL. All three are classes the
+write guard (#11803) refuses. A raise in the projection happens at the QUERY, not
+the row: one such node blanked every healthy claim in the same response.
 
 The write half was closed in #11803 (`_sanitize_props` refuses a non-real-number
 belief operand). **This file pins the READ half, which is the property the issue
