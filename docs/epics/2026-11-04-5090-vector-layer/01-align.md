@@ -49,7 +49,7 @@ Recorded first, because the scope is wrong if they are taken on trust. Each was 
 | epic body says | at `641e5f1b37` | how verified |
 |---|---|---|
 | 141 MB graph, 45 MB indices, 25k nodes | **195 MB, 93 MB indices (48 %), 68,526 nodes** | `#10976` body, measured 2026-11-04 on graph `live-v4`; same figures as the lane brief |
-| ≈50 MB of stored vector properties | **19.4 MB removable** (12,657 × 1,536 B = 19,441,152 B) — the ≈50 MB is the whole vector class, including the `Point` leg that *is* indexed; the unindexed `Object`+`Event` subset is what removal can reclaim | the epic's own 2026-10-08 comment (a scope correction over the 2026-09-24 measurement, not a new reading) |
+| ≈50 MB of stored vector properties | **19.4 MB removable** (12,657 × 1,536 B = 19,441,152 B) — the ≈50 MB is the whole vector class, including the `Point` leg that *is* indexed; the unindexed `Object`+`Event` subset is the payload a removal would have targeted — ⚠️ **REFUSED for `:Object`/`:Subject` on 2026-11-10 (`#11395` comment `6781921075`), and for `:Event` the 2026-09-24 direction stands** | the epic's own 2026-10-08 comment (a scope correction over the 2026-09-24 measurement, not a new reading) |
 | "no rule says what earns an embedding" | **the rule exists**; it is off by default | `embed_gate.RULE_SET is value_gate.RULES` → `True`; `embed_gate_enabled()` reads `TORTOISE_EMBED_GATE`, unset in the **4** shipped config surfaces that exist (the instrument walks 6; `docker-compose.yaml` and `Dockerfile` are *absent* from this tree) |
 | "12,657 embeddings stored and unindexed" | **still true in substance** — index creation covers `Point` only | `_ensure_vector_index_api` in `projection/__init__.py` — the `CALL db.idx.vector.createNodeIndex('Point', 'embedding', …)` procedure literal and its Cypher fallback `CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding)`; no other label's vector DDL in `tortoise/`, `graph-scripts/`, `tools/`. (the `create_cypher()` renderer in `graph_key_restore.py` **replays** a dumped catalogue; it never decides.) |
 | a fallback query reports the fallback | **MET** | `#4999` / PR #5159 added `mechanism: index \| scan \| scan_fallback` |
@@ -138,7 +138,7 @@ is the finding**, not because the chain is the justification.
 
 | quantity | value | basis |
 |---|---|---|
-| removable vector payload today | **19.4 MB** | 12,657 × 1,536 B (the epic's own 2026-10-08 correction) |
+| removable vector payload today — ⚠️ **REFUSED for `:Object`/`:Subject` (2026-11-10); this is the pre-ruling figure, not a licence** | **19.4 MB** | 12,657 × 1,536 B (the epic's own 2026-10-08 correction) |
 | ⇒ rent avoided | **$0.00** | the bill is **provisioned** RAM, so neither the payload nor the index changes it (§16.1, HIGH) |
 | at 10 tenants of this size | **still $0.00** | the tier is a machine size, not a data size |
 | to reach **$1,000/month** | **≈ 14 GB** removable | ~730× today's payload |
@@ -277,7 +277,7 @@ re-scoping upward (inventing children the neighbours already own).
 
 1. The embedding rule is operative on the shipped default, with the measured rate recorded (scope S1).
 2. The exemption register has a production home, and DoD rows 1–2 are re-scored as a recorded decision (S2).
-3. **The unretrievable vectors are censused, and their disposition is RULED — the removal is REFUSED** (owner, 2026-11-10, `#11395` comment `6781921075`), so **no surface-approval request follows** and none is demanded above; and `#10976`/`#7879` are **reconciled** to the ruled wording at `S3-VECTOR-CENSUS.md` §6 — **that reconciliation is DONE, not owed** (both comments re-pointed 2026-11-10: `6779662659`, `6779663836`) — because **V1 was answered
+3. **The unretrievable vectors are censused, and the disposition of the two labels the ruling names is settled — `:Object`/`:Subject` removal is REFUSED** (owner, 2026-11-10, `#11395` comment `6781921075`), so **no surface-approval request follows for them**; ⚠️ **the refusals do NOT extend to `:Event`/`:Source`/`:Document` (3 of the 5 `entity_type` values in S3's population): the ruling names two labels and no others, and for the rest no recorded decision authorises a removal either, so S3's `MET` rests on the explicit per-label coverage, never on an inference that one ruling reaches five values**; and `#10976`/`#7879` are **reconciled** to the ruled wording at `S3-VECTOR-CENSUS.md` §6 — **that reconciliation is DONE, not owed** (both comments re-pointed 2026-11-10: `6779662659`, `6779663836`) — because **V1 was answered
 2026-11-07** (the index moves to Postgres), so the target is the wording S3 §6 already carries — location decided, the work is `#4051`'s — not
 "pending V1" (S3). **V1 itself is §14.3's and is NOT this epic's acceptance.**
 4. The store reports its vector contract positively, not only when deficient (S4).
@@ -330,8 +330,7 @@ declared exemption in the product.
    way ("keep the vectors, make them searchable"), and the 2026-10-08 billing ruling removes the cost
    argument rather than granting one (retained bytes are revenue; removing bytes moves the bill by $0.00).
    ⚠️ This is a **contradiction-test result**, not an assumption — see scope §1: the census is filed, the
-   decision **was** the owner's and has been given (**REFUSED**, 2026-11-10, `#11395` comment `6781921075`), so
-   nothing is removed and the surface rule gates nothing.
+   decision **was** the owner's and has been given for the two labels it names (**REFUSED**, 2026-11-10, `#11395` comment `6781921075`), so those are not removed and the surface rule gates nothing for them; for `:Event`/`:Source`/`:Document` no recorded decision authorises a removal either, and the 2026-09-24 direction stands.
 4. **The epic has never had its two mandated workflow artifacts.**
 
 **Decision unchanged: REPOINT.** The repointed acceptance is in §7.1, with S3 re-scoped per the above.
@@ -345,6 +344,6 @@ the served set is `{Event, Object, Point, Source, Subject}` and only `Point` is 
 - `docs/architecture/STORAGE-ARCHITECTURE.md` **§14.3 V1 row** — *"≈50 MB of stored vectors + a 45 MB
   index total, on 141 MB"* → **a 93 MB index total on a 195 MB graph** (measured 2026-11-04, graph
   `live-v4`, `#10976`) **+ the payload axis as the 2026-09-24 measurement it belongs to: 33,580
-  embeddings ≈ 51.6 MB, of which the unindexed `Object`+`Event` 12,657 ≈ 19.4 MB is the removable
+  embeddings ≈ 51.6 MB, of which the unindexed `Object`+`Event` 12,657 ≈ 19.4 MB was the removable
   subset.** The ≈50 MB was carried as a current figure long after it was dated, and this epic's own
-  2026-10-08 comment had already narrowed what removal can claim to the 19.4 MB.
+  2026-10-08 comment had already narrowed what removal could claim to the 19.4 MB — ⚠️ **and the 2026-11-10 ruling then refused removal for `:Object`/`:Subject` entirely, so the figure is history, not a licence.**

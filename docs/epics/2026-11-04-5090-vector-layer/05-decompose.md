@@ -168,15 +168,14 @@ claim and not an assertion:
   C4  report the contract        (independent, smallest)
 
   C2  exemption register ──▶ C3  arm the gate
-  C5  census (+ surface request)  (independent; census half starts now)
+  C5  census (removal REFUSED for :Object/:Subject, 2026-11-10)  (independent; starts now)
 ```
 
 **Dispatch order:** **C4** and **C1** first (independent, and C1 unblocks C6); **C2** then **C3** (a real
 ordering — arming before the register exists would let three undeclared writers bypass); **C5** in parallel
 with C2/C3. **C6 last.**
 
-**Nothing here is blocked on an owner decision.** C5's *removal* half is blocked on the surface approval it
-requests; its census half is not.
+**Nothing here is blocked on an owner decision.** C5's *removal* half is answered — the ruling refuses it for `:Object`/`:Subject` and no surface approval is sought (:136) — and its census half is not blocked either.
 
 ---
 

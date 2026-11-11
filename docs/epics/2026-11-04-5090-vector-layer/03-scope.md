@@ -227,7 +227,7 @@ Ontology low · Accessibility low · Library-deps none.
 
 | # | previous | now | why |
 |---|---|---|---|
-| 1 | S3 = "decide V1: keep vs move, and implement" | **S3 = census the unretrievable vectors; the removal it would have carried was RULED KEEP on 2026-11-10 (so no approval request follows)** | V1's home is §14.3 and its architecture owner is `#4333`; the changelog records `#5090` as a **consumer**, and corrects a wrong owner. |
+| 1 | S3 = "decide V1: keep vs move, and implement" | **S3 = census the unretrievable vectors; the removal it would have carried was RULED REFUSED for `:Object`/`:Subject` on 2026-11-10 (so no approval request follows for those two; the other three labels rest on the 2026-09-24 direction)** | V1's home is §14.3 and its architecture owner is `#4333`; the changelog records `#5090` as a **consumer**, and corrects a wrong owner. |
 | 2 | **E1** = filtered-ANN recall measurement | **removed** — it moves to `#4051`, it is not parked | It is evidence *for a move*. The location is decided (2026-11-07) and the implementation is not — so the measurement leaves this epic's scope, but it is **not** consumer-less: its consumer is `SEARCH-ARCHITECTURE.md` §9 **M1** (*"whether the move ships"*), read with §6.1's shortfall assertion, which gates private-beta. |
 | 3 | Architecture **high on branch 2** | **low** | The branch is gone from scope. Flagged explicitly so `low` is not misread. |
 | 4 | Profit chain: "removable bytes ⇒ $1.32/tenant/month" | **deleted** | **Wrong model twice**: retained bytes are revenue (billing ruling), and the bill is provisioned RAM (§16.1). |
