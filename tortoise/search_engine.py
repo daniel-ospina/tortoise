@@ -383,6 +383,12 @@ NUMERIC_OPERAND_CYPHER_TEMPLATE = (
 #: `Infinity`/`nan` spellings parse there too; the first stays a recorded
 #: residual (see `numeric_operand`), the second is nulled by the finiteness
 #: guard in `numeric_operand_cypher`.
+# The float32 NORMAL range — the window `strtof` parses without `ERANGE`, which
+# is what FalkorDB's `toFloat` does with a STRING (measured, see
+# `numeric_operand`). Subnormals are refused by the store, so they are refused
+# here: `toFloat("1e-38")` is null, `toFloat("1.2e-38")` is 1.1999999781e-38.
+_FLOAT32_MIN_NORMAL = 1.1754943508222875e-38
+_FLOAT32_MAX = 3.4028234663852886e38
 _FLOAT_LITERAL = re.compile(r"\s*[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)"
                             r"(?:[eE][+-]?[0-9]+)?\Z")
 
@@ -431,6 +437,31 @@ def numeric_operand(raw):
 
     NaN/inf are also None: `json.dumps` emits them as bare tokens, and neither
     is a belief (see `belief_value`).
+
+    ⛔ **A string operand must also land where the store can READ it** — and the
+    store parses a string with ``strtof``, i.e. into a **float32**, setting
+    ``ERANGE`` (and answering ``null``) for anything outside float32's NORMAL
+    range. Measured against the live engine:
+
+    ==================  ==================  ====================
+    literal             ``toFloat``        floats the store
+    ==================  ==================  ====================
+    ``'0.6'``           ``0.60000002384``   reads (as float32)
+    ``'1e38'``          ``9.9999996803e37`` reads
+    ``'1e-38'``         ``null``            refuses (subnormal)
+    ``'1e-320'``        ``null``            refuses (underflow)
+    ``'1e308'``         ``null``            refuses (overflow)
+    ``'1e400'``         ``null``            refuses (overflow)
+    ==================  ==================  ====================
+
+    So the branch used to answer a NUMBER (**``inf``** for ``'1e400'``, ``0.0``
+    for ``'1e-400'``) for a literal the engine calls ABSENT — and ``inf`` then
+    propagated into ``EpBreakdown.confidence_mean``, which ``asdict`` +
+    ``json.dumps(allow_nan=False)`` (Starlette's ``JSONResponse``) turns into a
+    500 on the agent-facing surfaces. The window below is the float32 normal
+    range plus any zero; inside it the DOUBLE is returned, deliberately — the
+    float32 narrowing of an in-range literal (``0.6`` → ``0.6000000238``) is a
+    recorded residual (#11841), not a twin split to close here.
     """
     if raw is None or isinstance(raw, bool):
         return None
@@ -441,7 +472,16 @@ def numeric_operand(raw):
         # coercion exists to prevent, so the STRICTER of the two languages wins.
         if not _FLOAT_LITERAL.match(raw):
             return None
-        return float(raw)
+        val = float(raw)
+        # ONE window, not two: a non-finite value is outside it too (`nan`
+        # fails the chained comparison, `inf` exceeds the maximum), so an
+        # explicit `isfinite` line would be a second spelling of this rule.
+        if val != 0.0 and not (
+                _FLOAT32_MIN_NORMAL <= abs(val) <= _FLOAT32_MAX):
+            # strtof ERANGE: out of float32's normal range → the store answers
+            # null, so a number here would be one only Python can see.
+            return None
+        return val
     try:
         val = float(raw)
     except (TypeError, ValueError):

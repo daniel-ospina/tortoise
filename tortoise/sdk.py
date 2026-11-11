@@ -33,7 +33,6 @@ import contextvars
 import hashlib
 import json as _json
 import logging
-import numbers
 import os
 import re
 import stat
@@ -50,6 +49,7 @@ from .domain_loader import known_kinds, register_kind
 from .kind_fallbacks import named_kind
 from .numeric_domain import (  # #7174: the numeric domain lives in ONE place
     reject_unrepresentable_number as _reject_unrepresentable_number,
+    numeric_alteration_reason,
 )
 from .cross_lens import DEFAULT_THRESHOLD
 # #3301: the canonical OBJECT terminal vocabulary — the SAME set the four
@@ -6458,6 +6458,28 @@ _NARRATIVE_LABELS: frozenset = frozenset({"Event", "Source", "Document"})
 
 
 
+# #11702: the three props that ARE a belief. Named once so the write guard and
+# the #4647 representability loop cannot drift apart on which keys they cover.
+_BELIEF_PROPS = ("confidence", "posterior_alpha", "posterior_beta")
+
+
+def _is_real_number(value) -> bool:
+    """A value the store can hold as a REAL number — `float()` accepts it.
+
+    Deliberately wider than ``isinstance(value, (int, float))`` (`Decimal`,
+    `np.float32` are numbers) and narrower than ``numbers.Number`` (`complex`
+    is one, and the store nulls it). A Boolean is ``1.0`` and a string is a
+    parse, so neither is a number here.
+    """
+    if isinstance(value, (bool, str, bytes)):
+        return False
+    try:
+        float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return True
+
+
 def _sanitize_props(props: dict, *, reject_id: bool = False,
                     reject_belief_props: bool = False,
                     reject_claim_class: bool = False) -> dict:
@@ -6555,7 +6577,13 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
             "(reserved `_emit_event` name)", _emit_name)
     # #4647: a value the store cannot hold without altering it must fail here,
     # not be silently clamped/rounded by FalkorDB on the way in.
+    # The three BELIEF keys are excluded here and validated by the loop further
+    # down instead: their domain refusal needs different advice (see there), and
+    # the domain's default advice — "store it as a string" — would send the
+    # caller straight into the belief guard's own refusal (#11702 cycle 22).
     for _key, _value in props.items():
+        if _key in _BELIEF_PROPS:
+            continue
         _reject_unrepresentable_number(_key, _value)
     for key in ("sourcePath", "source_path"):
         if key in props:
@@ -6823,7 +6851,7 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # not the same language Python parses ("0.7 " and "0x1p4" are numbers to one
     # twin and not the other) — the readers stay total for data already stored
     # that way, and #11841 owns the wider audit of every belief writer.
-    for _belief_key in ("confidence", "posterior_alpha", "posterior_beta"):
+    for _belief_key in _BELIEF_PROPS:
         if _belief_key in props:
             _belief_val = props[_belief_key]
             if _belief_val is None:
@@ -6838,8 +6866,14 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
             # type holds EXACTLY (the domain function certifies them), and
             # diagnosed them as "malformed" — a regression against the pre-PR
             # tree, where both were stored faithfully.
-            if isinstance(_belief_val, bool) or not isinstance(
-                    _belief_val, numbers.Number):
+            # ⛔ `numbers.Number` was one notch too wide: it admits `complex`,
+            # which `numeric_alteration_reason` has no arm for (its last arm
+            # returns None), so `update_point(confidence=1j)` was ACCEPTED and
+            # the store's own degraded-value path (#7369) wrote null — the
+            # caller told the write succeeded while nothing was stored. A real
+            # number is what `float()` accepts, minus the shapes that convert
+            # but are not numbers (a Boolean is 1.0, a string is a parse).
+            if not _is_real_number(_belief_val):
                 raise ValueError(
                     f"{_belief_key!r} must be a number (not a "
                     f"{type(_belief_val).__name__}): FalkorDB cannot coerce a "
@@ -6849,6 +6883,15 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
                 )
             # …and a number it cannot hold exactly is the DOMAIN's refusal, with
             # its own reason (a precision loss is not "malformed").
+            _belief_reason = numeric_alteration_reason(
+                _belief_key, _belief_val)
+            if _belief_reason:
+                raise ValueError(
+                    f"{_belief_reason} (For a belief column that advice does "
+                    "not apply: a STRING belief is refused, and the store "
+                    "answers `absent` for it — #11702, #11841. Pass a float, "
+                    "or None to clear it.)"
+                )
     _baseline_props = [k for k in
                        ("ep_alpha", "ep_beta", "baseline_set",
                         "baseline_source")
@@ -33793,7 +33836,7 @@ class TortoiseSDK:
         # claim against the source-inheritance recompute that would have given it
         # a belief. Refused here, like the cycle-20 guard on the generic door.
         for _name, _val in (("alpha", alpha), ("beta", beta)):
-            if isinstance(_val, bool) or not isinstance(_val, numbers.Number):
+            if not _is_real_number(_val):
                 raise ValueError(
                     f"Beta {_name} must be a number, not a "
                     f"{type(_val).__name__}: a Boolean/collection/string "
