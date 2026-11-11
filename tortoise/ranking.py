@@ -43,7 +43,7 @@ from .search_engine import (  # noqa: E402, RUF100
     belief_mean_cypher,  # #11702: the ONE Cypher belief-mean expression
     belief_value,  # #11702: the ONE Python belief VALUE reader
     ep_has_belief_cypher,  # #11702: presence-to-persisted-belief predicate
-    ep_measured_cypher,  # #3276: has_ep == a non-baseline α is persisted (NOT "EP ran")
+    ep_measured_cypher,  # #3276: has_ep == a non-baseline α persisted AND NOT #2490-terminal
     ep_pair_stored,  # #11702: a variance needs BOTH α/β operands stored
     ep_state_cypher,  # #11702: the present-state NAME on the wire
     ep_state_resolve,  # #11702: the ONE #2490 terminal fold for the state name
@@ -1010,7 +1010,7 @@ class GraphRanker:
             "  coalesce(n.posterior_alpha, n.ep_alpha) AS alpha, coalesce(n.posterior_beta, n.ep_beta) AS beta, "
             # #2490: aligned with StateRanker/GapsRanker — has_ep rides the
             # status/outdated columns for the Python-side terminal gate.
-            # #3276: has_ep == a non-baseline α is persisted (ep_measured_cypher) — a #2199
+            # #3276: has_ep == a non-baseline α persisted, less the #2490 terminal gate — a #2199
             # baseline prior alone is prior-only, NOT measured.
             f"  {ep_measured_cypher('n')} AS has_ep, "
             "  n.status, coalesce(n.outdated, false), "
@@ -1022,7 +1022,7 @@ class GraphRanker:
             # "StateRanker's is α/β only" note described a divergence that no
             # longer exists, and a second copy of the predicate is how the two
             # rankers would drift apart again. `has_ep` remains #3276's
-            # narrower "a non-baseline α is persisted" (not "EP ran"); a #2199 prior is
+            # narrower "a non-baseline α persisted" (not "EP ran"); a #2199 prior is
             # prior-only but IS a belief value the score multiplies in.
             f"  {ep_has_belief_cypher('n')} AS has_prior, "
             # #11702: the RAW pair rides the TAIL (10..13) so the VARIANCE is
@@ -1509,7 +1509,8 @@ class StateRanker:
     # ── Signal computation ────────────────────────────────────────────
 
     def _has_ep(self, result: dict, signals: dict) -> bool:
-        """Whether a NON-BASELINE α is persisted for this claim (#3276 semantics).
+        """Whether a NON-BASELINE α is persisted for this claim (#3276), less the
+        #2490 terminal gate — a terminalised claim reads False with its α intact.
 
         The graph signal (``has_ep``) wins when the batch read returned the id;
         the embedded ``state_has_ep`` is the projection=None unit-path fallback.
@@ -1530,13 +1531,16 @@ class StateRanker:
         measurement is NOT low support" is kept where it belongs: the
         absent term does not participate at all (see ``base`` in :meth:`rerank`),
         so an unmeasured claim is neither buried nor given a fabricated
-        confidence. Source is ``"posterior"`` when ``has_ep`` is true — i.e. a
-        non-baseline α is persisted — and ``"neutral"`` when a PERSISTED prior
+        confidence. Source is ``"posterior"`` when ``has_ep`` is true — a
+        non-baseline α persisted, less the #2490 terminal gate — and
+        ``"neutral"`` when a PERSISTED prior
         (not a measurement) answered — those two are real values.
 
         ⛔ The token follows the FLAG, not the column the number was read from.
-        The value prefers the ``n.confidence`` mirror (the coalesce's first
-        choice), so a row with a pair AND a mirror is served the MIRROR's value
+        The value prefers the ``n.confidence`` mirror — a Python branch in
+        :meth:`_fetch_point_signals`, the mirror read first, the pair after; the
+        coalesce that spelled this in Cypher is GraphRanker's — so a row with a
+        pair AND a mirror is served the MIRROR's value
         under the ``"posterior"`` token. Read the token as "a persisting
         measurement-class belief exists for this row", never as "this number IS
         the posterior mean". A non-absent state with no
@@ -2076,7 +2080,8 @@ class GapsRanker:
     # ── Signal computation ────────────────────────────────────────────
 
     def _has_ep(self, result: dict, signals: dict) -> bool:
-        """Whether a NON-BASELINE α is persisted for this claim (#3276 semantics).
+        """Whether a NON-BASELINE α is persisted for this claim (#3276), less the
+        #2490 terminal gate — a terminalised claim reads False with its α intact.
 
         The graph signal (``has_ep``) wins when the batch read returned the id;
         the embedded ``gaps_has_ep`` is the projection=None unit-path fallback.
