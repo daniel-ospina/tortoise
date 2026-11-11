@@ -21428,6 +21428,21 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     for pr in reconcile.points:
         pid = pr.point.id
         resolved_pid = pid
+        # #11239 (DM1's home): the phrases this claim POINTED with but did not
+        # NAME ride the Point write, so a reader of the GRAPH — not only of the
+        # capture response — can see what the sentence meant without an
+        # `:Object` having been minted for a pronoun. Built ONCE per point and
+        # as PLAIN DICTS: the payload is journalled (`PointAdded`) and a
+        # pydantic model is not JSON-serialisable, so the model boundary is
+        # crossed here rather than in the writer.
+        # ⛔ NOT added to `sdk._CAPTURE_PASSTHROUGH_PROPS`: that set is the
+        # public capture RESPONSE surface (#2949/#3945's stated reason, see
+        # `sdk._CAPTURE_PASSTHROUGH_ORDER`), and this field is stored, never
+        # advertised — the same shape as `validFrom` on the capture seam.
+        _mention_props = [
+            m if isinstance(m, dict) else m.model_dump()
+            for m in (getattr(pr.point, "mentions", None) or [])
+        ]
         # #1370 fail-closed: stays ``None`` unless a create actually ran and
         # returned a usable id, so the map below can never hold a
         # requested-but-unconfirmed id.
@@ -21437,6 +21452,21 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # re-write status (update_point refuses non-promoting transitions;
             # a live re-capture would 500 — review fix, PR #953). The node
             # already exists at the payload id, so the resolution is identity.
+            # ⛔ THIS LEG DOES NOT RESTATE PROPS — `mentions` included (review P2
+            # on PR #11795, measured). `commit_schema.reconcile_payload` picks
+            # `merge` for SAME id + SAME content, i.e. the ordinary re-commit of
+            # an existing claim, and this leg writes no prop and journals nothing
+            # (it is a bump, not a write), so a payload that DOES state a mention
+            # record over an existing claim is discarded — while the same
+            # situation one leg over (an existing claim reached by
+            # `create_point(dedup=True, …)`) forwards it into `update_point`.
+            # First-writer for every other prop on this leg too, so this is the
+            # DECLARED shape rather than a new one — the user-visible
+            # consequence is that a cue-ON re-capture over a claim first captured
+            # cue-OFF records nothing here. Tracked as #11811 (behaviour, needs a
+            # journalled write and the metering decision, so it is not a doc
+            # fix), and pinned by
+            # `tests/test_commit_endpoint.py::test_the_merge_leg_drops_a_stated_record_and_that_is_declared`.
             proj.g.query(
                 "MATCH (p:Point {id:$pid}) SET p.updatedAt=$now",
                 params={"pid": pid, "now": now},
@@ -21451,6 +21481,16 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             if pr.point.when:
                 point_props["when"] = pr.point.when
                 point_props["validFrom"] = pr.point.when
+            # #11239: DM1's mention record rides the write ONLY when it carries
+            # one. ⛔ NOT `mentions=<recs> or None` on the call: a re-commit of a
+            # claim with no mentions would then fold `mentions=None` onto the
+            # dedup target, and a `None` in a generic prop REMOVES the property
+            # (`SET n += $props`, measured) — deleting a stored record on the
+            # ordinary re-commit path, in the direction that loses memory.
+            # Absent means "this payload did not speak about mentions", which
+            # is first-writer, the same rule every other prop here follows.
+            if _mention_props:
+                point_props["mentions"] = _mention_props
             # #5363 (B) / #7000 review P2: validate THIS window here — after
             # every EARLIER point of this commit has been written, so the
             # successor this write will actually dedup onto is already visible
@@ -21605,6 +21645,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             if pr.point.when:
                 point_props["when"] = pr.point.when
                 point_props["validFrom"] = pr.point.when
+            # #11239: only when the payload carries a record — see the
+            # supersede leg's note above (an explicit None would CLEAR it).
+            if _mention_props:
+                point_props["mentions"] = _mention_props
             _written = sdk.create_point(
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,

@@ -103,6 +103,7 @@ from .projection.entities import (
     _usable_instant,
     _writable_journalled_vector,
     append_identifier_aliases,
+    encode_json_record_props,
     flatten_search_keys_prop,
     is_non_operator_payload,
     promote_status_applies,
@@ -139,6 +140,14 @@ _POINT_DENY: frozenset = _EntityHandlers._POINT_DENY
 # call such a value "the projection cannot hold this" when it now carries it,
 # and the canonical view must compare the WRITER'S form, not the payload's.
 _POINT_FLATTEN_LIST_PROPS: frozenset = entities._POINT_FLATTEN_LIST_PROPS
+# #11239: the props the SAME writer encodes from a payload LIST OF RECORDS into
+# one compact JSON SCALAR (`encode_json_record_props`). Read from the writer's
+# own declaration for the same reason as the set above — `_uncarried` must not
+# call `mentions` "the projection cannot hold this" now that it carries it, and
+# the canonical view must compare the WRITER'S bytes rather than the payload's
+# record shape (a list of dicts vs a JSON string would otherwise be a FALSE
+# content divergence on every faithfully replayed claim that made a mention).
+_POINT_JSON_RECORD_PROPS: frozenset = entities._POINT_JSON_RECORD_PROPS
 
 
 # ── #5011: the projection's declared content schema ───────────────────────
@@ -371,6 +380,25 @@ _UNCARRIED_TAGS_UNWRITABLE = (
     "string, null inside an array, map/bytes/set) and an int outside INT64 is "
     "clamped or refused (`_store_holds_prop_value`)"
 )
+# #11239: the same predicate for the JSON-RECORD props, with the reason naming
+# the right prop — the `tags` text would tell a reader the wrong thing about a
+# `mentions` loss. Judged on the writer's OUTPUT (the encoded scalar), which is
+# what the store actually receives.
+#: A shape the encoder POPS rather than stores. Distinct from
+#: `_UNCARRIED_NON_PERSISTABLE`, whose text blames `_is_persistable_prop_value` —
+#: measured, `5`/`True`/`2.5` PASS that filter and are dropped by the encoder's
+#: own `pop` arm, so reusing that reason misdirects the diagnosis.
+_UNCARRIED_JSON_RECORD_POPPED = (
+    "a `mentions` value the encoder POPS — a shape that is neither a `str` nor "
+    "a `list`/`tuple` is dropped before the SET rather than refused by "
+    "`_is_persistable_prop_value` (`encode_json_record_props`)"
+)
+_UNCARRIED_JSON_RECORD_UNWRITABLE = (
+    "a `mentions` record the store cannot hold as stated — the `#7369` "
+    "transport gate nulls what `_value_ok` refuses (a NUL/surrogate string, a "
+    "null inside an array), so the encoded scalar never lands even though the "
+    "payload states the record (`_store_holds_prop_value`)"
+)
 # ⚠️ BOUND, stated rather than implied, on the `tags` branch that reads the
 # reason above (#8317 review round 4):
 #   * an `_uncarried` key is skipped on BOTH sides (journal AND graph) and left
@@ -602,6 +630,11 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset(),
     # declared ``search_keys`` uncarried for this point, so the normalisation
     # cannot re-add a key the uncarried classification deliberately excluded.
     flatten_search_keys_prop(out)
+    # #11239: the writer's OTHER payload normalization, applied identically on
+    # both sides — a payload list of mention RECORDS and the node's compact
+    # JSON scalar are the same value in the graph's canonical form. No-op for a
+    # view that already carries the string.
+    encode_json_record_props(out)
     # #8933 Stage 2, #10203 review round 6 (measured P0): the derived IDENTIFIER
     # ALIASES come OUT of the comparison, on BOTH sides. The alias is a pure
     # function of the view's own `content`/`search_keys`, so it is not
@@ -734,6 +767,59 @@ def _uncarried(journal_by_id: dict) -> dict[str, dict[str, str]]:
             elif k in _POINT_FLATTEN_LIST_PROPS:
                 # Carried in canonical form — not uncarried, whatever its
                 # payload type (a list flattens, a str is already canonical).
+                continue
+            elif k in _POINT_JSON_RECORD_PROPS:
+                # #11239: carried in canonical form too — the payload's list of
+                # mention records is encoded to one JSON scalar by the same
+                # writer (`encode_json_record_props`), so this is not a loss.
+                # ⚠️ Only for the shapes that writer ACCEPTS: it pops a value
+                # that is neither a `str` nor a `list`/`tuple` (the `pop` arm in
+                # `entities.py`), so a journal carrying `mentions: 5` is a real
+                # drop and must be NAMED — exactly the value-dependent carriage
+                # the `tags` branch above exists for (review P3 on PR #11795).
+                #
+                # ⛔ BOUND, stated rather than implied (review on PR #11795): on
+                # the `PointAdded`/`PointRevised` path the fold applies the same
+                # predicate FIRST (`stated_json_record_prop` → `_apply_one`), so
+                # a store-refusing value is removed upstream and never arrives
+                # here. It DOES arrive on the PROMOTION arms — `_fold_journal`
+                # merges a `PointPromoted`'s snapshot verbatim (`merged.update(p)`
+                # / `merged | p`) with no disposition pass — which is reachable
+                # from `check_consistency` and is where these tests earn their
+                # keep (a foreign or older-emitter snapshot, and a promotion that
+                # copies the node's own scalar). On the ordinary path what the
+                # branch still decides is (i) the EMPTY list, which must not be
+                # reported as an `_UNCARRIED_LIST` loss, and (ii) the
+                # non-str/non-list shapes the fold's `skip` arm leaves in the
+                # view. Pinned by
+                # `tests/test_mention_write_11239.py::test_the_uncarried_branch_names_what_the_encoder_pops`
+                # and `…::test_a_promotion_carrying_a_store_refusing_scalar_is_named_uncarried`.
+                if isinstance(v, str):
+                    # A canonical string is carried only when the STORE can hold
+                    # it EXACTLY: `#7369` degrades a NUL / lone-surrogate string
+                    # to null before dispatch, so the property never lands. Same
+                    # predicate as the `tags` branch above.
+                    if not _store_holds_prop_value(v):
+                        found[k] = _UNCARRIED_JSON_RECORD_UNWRITABLE
+                    continue
+                if isinstance(v, (list, tuple)):
+                    # Judged on the writer's OUTPUT, not on the payload type: the
+                    # store receives `encode_json_record_props(v)`, so a record
+                    # whose encoded scalar it cannot carry (a lone surrogate in a
+                    # `surface`) is as uncarried as its `str` spelling. Same
+                    # predicate, both spellings — defence for the hand-built
+                    # case above.
+                    _view = {k: v}
+                    encode_json_record_props(_view)
+                    _encoded = _view.get(k)
+                    if _encoded is not None and not _store_holds_prop_value(
+                            _encoded):
+                        found[k] = _UNCARRIED_JSON_RECORD_UNWRITABLE
+                    continue
+                # A shape neither carried nor encoded: `encode_json_record_props`
+                # POPS it, so `_is_persistable_prop_value` is not the reason it
+                # is missing (measured: `_is_persistable_prop_value(5)` is True).
+                found[k] = _UNCARRIED_JSON_RECORD_POPPED
                 continue
             elif isinstance(v, list) and k not in _POINT_LIST_PROPS:
                 found[k] = _UNCARRIED_CONTENT_PROPS.get(k, _UNCARRIED_LIST)
