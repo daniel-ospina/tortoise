@@ -619,7 +619,7 @@ customer-facing territory that owns per-graph permissions.
 > class (it reads no cache — *"the cache is a destination, never an input"*),
 > and that drop is named rather than silent in `tortoise/cache_projection.py`
 > and `docs/epics/2026-10-10-7879-postgres-record/06-cache-projection.md` §0.5,
-> where `:PackSelection` is the seventh graph-only class. The SHAPE of that fix matters:
+> where `:PackSelection` is the eighth graph-only class. The SHAPE of that fix matters:
 > `:PackSelection` is ONE node per graph with no identity property, so it is a
 > SECTION like `:TeamMeta`, NOT a `_config_classes()` row (the registry keys on
 > a single string identity property and `_capture_config_snapshot` silently

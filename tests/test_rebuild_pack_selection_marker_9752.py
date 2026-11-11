@@ -321,8 +321,15 @@ def test_rebuild_all_carries_the_marker_in_the_prewipe_sidecar(
 
     sdk, events = _mk_sdk(tmp_path)
     _write_journal(events)
-    _configure(sdk, [{"namespace": "dev", "status": "active"}])
+    # ⛔ `[]`, not a live pack: `set_graph_packs` on a fresh graph writes the
+    # marker and creates NO `:PackInstall` row, so the `pack_selection` section
+    # is the ONLY pending one. With a live pack the `:PackInstall` row is a
+    # declared config class, `config_snapshot` is already non-empty, and the
+    # sidecar would be written with the section deleted — the shape this pin
+    # claims to exercise would not be the shape under test (#9752 review r8).
+    _configure(sdk, [])
     captured = _markers(sdk)
+    assert captured, "the marker must exist for this pin to mean anything"
 
     _proj(sdk).rebuild_all(str(events), confirm_destructive=True)
 
@@ -682,6 +689,77 @@ def test_the_restore_merges_onto_a_concurrent_marker_instead_of_overwriting_it(
     assert counts["pack_selection_restored"] == 0, (
         f"nothing of ours was restored into the graph: {counts}")
     assert counts["pack_selection_gap"] == 1, counts
+
+
+def test_the_journal_only_restore_also_merges_onto_a_concurrent_marker(
+        tmp_path, monkeypatch):
+    """The SECOND `ON CREATE SET` site — `_replay_log`'s — is pinned here (#11839 r8).
+
+    FAILING VALUE: the sibling pin above says "both restore sites write
+    `MERGE (s:PackSelection) ON CREATE SET s += $props`" and covers only the
+    `rebuild_all` one. MEASURED at this head: reverting `ON CREATE SET` to an
+    unconditional `SET` at the `_replay_log` site ALONE leaves all three tests
+    that reach that engine GREEN (`journal_only_engine_keeps_the_marker`, and
+    the two `replay_log_reports_*` arms) — so the claim was half-pinned, and the
+    invert it protects against was reachable: a concurrent `set_graph_packs`
+    landing between the wipe and the tail replay makes the MERGE match ITS node,
+    an unconditional `SET` overwrites a possibly-NEWER admin decision, the
+    read-back then reports a marker "restored", and the log line says the marker
+    came back over the state it just destroyed.
+
+    REACHABLE: this engine writes through a bare `self.g.query` (`:13747-13751`),
+    so the competing write is issued by proxying the graph handle and landing it
+    immediately before the product's own MERGE — the leg under test stays the
+    product's.
+
+    ⛔ Scope: `rebuild()` is the in-memory journal-events engine; the durability
+    argument lives with `rebuild_all`. What is asserted here is the WRITE
+    KEYWORD's fail-safe, which is the same one-word edit either way.
+    """
+    from tortoise.log import EventLog
+    from tortoise.projection import _PACK_SELECTION_LABEL
+
+    sdk, events = _mk_sdk(tmp_path)
+    _write_journal(events)
+    _configure(sdk, [{"namespace": "dev", "status": "active"}])
+    proj = _proj(sdk)
+    real_g = proj.g
+    planted = {"n": 0}
+
+    class _CompetingAdminFirst:
+        """Plant a NEWER marker just before the product's own restore MERGE."""
+
+        def query(self, cypher, *a, **kw):
+            if f"MERGE (s:{_PACK_SELECTION_LABEL})" in cypher and not planted["n"]:
+                planted["n"] += 1
+                real_g.query(
+                    f"MERGE (s:{_PACK_SELECTION_LABEL}) SET s += $props",
+                    params={"props": {"revision": 99,
+                                       "updated_by": "concurrent-admin",
+                                       "configured_at": "2099-01-01T00:00:00Z"}},
+                )
+            return real_g.query(cypher, *a, **kw)
+
+        def __getattr__(self, name):
+            return getattr(real_g, name)
+
+    monkeypatch.setattr(proj, "g", _CompetingAdminFirst())
+
+    proj.rebuild(
+        EventLog(str(events / "events.jsonl")), confirm_destructive=True)
+
+    assert planted["n"] == 1, (
+        "the competing write never landed, so this pin would pass on an empty "
+        "marker set and assert nothing")
+    live = _markers(sdk)
+    assert len(live) == 1, f"the restore must MERGE one marker: {live}"
+    props = live[0]
+    assert props.get("revision") == 99, (
+        "the admin's NEWER decision was overwritten by the recovered one — an "
+        "unconditional `SET s += $props` does exactly that, and this engine has "
+        f"no sidecar to recover the decision from afterwards: {props}")
+    assert props.get("updated_by") == "concurrent-admin", (
+        f"the surviving marker is not the admin's: {props}")
 
 
 def test_recover_from_log_reports_a_conflict_not_a_loss(tmp_path, monkeypatch):
