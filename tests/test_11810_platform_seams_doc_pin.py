@@ -54,6 +54,12 @@ WHAT IT ASSERTS, in BOTH directions:
       false (the scripts register by absolute path and read `$HOME`). Pinned in
       both directions because r19 measured it pinned in NEITHER: re-instating the
       sentence left the whole file GREEN.
+  (2b) the record's TWO restatements of the **three hook sources** — project,
+      team and enterprise-managed — each still name all three. Item 2 of this PR
+      exists because #11806 named only the PROJECT-level source and that reads as
+      exclusive; r21 measured BOTH sites revertible to the one-source reading
+      with the whole file GREEN, and found the PR body already claiming a
+      `_HOOK_SOURCE_RESTATEMENTS` arm that did not exist. This is that arm.
 
 `_SHIPPED_FRAGMENT` is the single string both arms bind to, so the two cannot be
 corrected in opposite directions without this file noticing.
@@ -121,6 +127,12 @@ WHAT IT STILL DOES NOT CATCH, stated so the docstring is not the next over-claim
     the failure message reports it as "the record dropped WHY …", which
     mis-describes a re-word as a deletion. Reword it together with
     `_RETRACTION_CAUSE`, in one edit.
+  * (2b) is the same trade again: each needle is the WHOLE three-source clause, so
+    re-ordering it or swapping "managed" for a synonym REDs even when all three
+    sources survive. That is deliberate — the one-source reading it guards against
+    ("PROJECT-level" alone) is exactly a shortening of this sequence — and the
+    remedy is the same: reword the record together with its
+    `_HOOK_SOURCE_RESTATEMENTS` row.
 
 MUTATION (each verified RED at this head, restoring byte-identical):
   * restore the unscoped quote at `platform-seams.md:315`      → (1) RED
@@ -168,6 +180,10 @@ MUTATION (each verified RED at this head, restoring byte-identical):
                                                       → (4) RED   (r19 P2)
   * keep that bare "cannot" but delete the EVIDENCE clause it rests
     on (absolute path / `$HOME` / does not resolve)   → (4) RED   (r20 P2)
+  * delete `plus team and enterprise-managed hooks on Enterprise` from the
+    `#2122` matrix row                                 → (2b) RED  (r21 P2)
+  * delete `(plus team and enterprise-managed hooks on Enterprise — the page's
+    own gate)` from §3                               → (2b) RED  (r21 P2)
 """
 from __future__ import annotations
 
@@ -253,6 +269,20 @@ _RETRACTION_CAUSE: tuple[str, ...] = (
     "register by absolute path",          # hook_install.py absolute_command=True
     "read their state from home",         # session-start.sh ${HOME}/.tortoise/…
     "would not resolve on a worker",      # …so the command does not resolve there
+)
+
+#: (2b) — the THREE hook sources, at both places the record restates them.
+#:
+#: Item 2 of this PR exists because #11806's correction named only the
+#: PROJECT-level source, and naming one of three reads as EXCLUSIVE. Both sites —
+#: the `#2122` matrix row and §3's consequence sentence — were unpinned: measured
+#: at r21, deleting the "plus team and enterprise-managed hooks on Enterprise"
+#: clause from EITHER one left the whole file GREEN, and the PR body meanwhile
+#: claimed this very arm existed. Site-unique needles, so a revert at one site
+#: cannot be masked by the other still naming all three.
+_HOOK_SOURCE_RESTATEMENTS: tuple[str, ...] = (
+    "project hooks plus team and enterprise managed hooks on enterprise",    # matrix row
+    "registration plus team and enterprise managed hooks on enterprise",     # §3 sentence
 )
 
 #: A tag's attributes AS MARKUP — `name=value`, quoted or bare. NOT `[^<>\n]*`:
@@ -520,6 +550,31 @@ def test_the_retracted_project_level_promise_cannot_come_back():
             f"these seams ({needle!r} is gone) — a bare 'cannot' with no ground "
             f"reads as an arbitrary exclusion, and the next lane re-adds the "
             f"promise as an attractive route")
+
+
+def test_both_hook_source_restatements_name_all_three_sources():
+    """(2b) — item 2 of this PR, pinned at the two places the record restates it.
+
+    #11806's correction named only the PROJECT-level source, and naming one of
+    three reads as EXCLUSIVE — which is the defect item 2 of this PR fixes, in the
+    message and in the record. Review r21 measured both record sites unpinned:
+    deleting the "plus team and enterprise-managed hooks on Enterprise" clause from
+    EITHER the `#2122` matrix row or §3's consequence sentence left the whole file
+    GREEN, while the PR body already claimed a `_HOOK_SOURCE_RESTATEMENTS` arm that
+    did not exist at this head. An over-claim of coverage in the body is the exact
+    thing this PR removes from the record, so it is fixed here rather than trimmed.
+
+    Site-UNIQUE needles: a shared one would let a revert at one site hide behind the
+    other still naming all three.
+
+    Mutation: delete the three-source clause at either site → this REDs (measured at
+    this head, one site at a time)."""
+    normalised_doc = _normalised(_PLATFORM_SEAMS_DOC.read_text(encoding="utf-8"))
+    for needle in _HOOK_SOURCE_RESTATEMENTS:
+        assert _normalised(needle) in normalised_doc, (
+            f"a restatement of the three hook sources no longer names all three: "
+            f"{needle!r} is gone — naming only the PROJECT-level source reads as "
+            f"exclusive, which is the defect item 2 of this PR fixes")
 
 
 def test_a_stray_angle_bracket_cannot_swallow_the_quoted_sentence():
