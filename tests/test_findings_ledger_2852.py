@@ -26,6 +26,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -61,20 +62,112 @@ def _mutated(tmp_path: Path, monkeypatch, transform) -> Path:
     return target
 
 
+def _doc_problems() -> list[str]:
+    """The history-free arms over the (possibly swapped) document.
+
+    Used by every mutation arm and by the shipped-tree assertion, so they mean
+    the same thing in a depth-1 clone as in a full checkout.
+    """
+    return flc.check_document(flc.read_doc(REPO), REPO)
+
+
+def _history_available(root: Path = REPO) -> bool:
+    """Can this clone answer a `measured_at_commit` ancestry claim?
+
+    Asked of `git` directly — never via the tool under test — so a bug in the
+    tool cannot accredit its own checkout. `rev-parse --is-shallow-repository`
+    must answer exactly `false`: a DEEPENED shallow clone holds the objects but
+    still carries the graft, and a grafted graph can report a real ancestor as
+    "not an ancestor" (#10356). Bounded and retry-free: a `git` that cannot
+    answer leaves the ancestry assertions skipped, not red.
+    """
+    try:
+        shallow = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--is-shallow-repository"],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        if shallow.returncode != 0 or shallow.stdout.strip() != "false":
+            return False
+        match = re.search(
+            r"^measured_at_commit:\s*(\S+)\s*$", DOC.read_text(encoding="utf-8"), re.MULTILINE
+        )
+        if not match:
+            return False
+        probe = subprocess.run(
+            ["git", "-C", str(root), "cat-file", "-e", f"{match.group(1)}^{{commit}}"],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        return probe.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 # ── the shipped tree is clean ──────────────────────────────────────────────
 
 
 def test_shipped_document_is_clean():
-    """FAILS if the tree and the ledger disagree: a citation that stopped
-    resolving, a verdict outside the vocabulary, a deleted correction row, or a
-    §6 count that no longer reconciles. Reachable by any ordinary refactor —
-    moving a function, closing an issue, or editing the table."""
-    assert flc.check_all(REPO) == []
+    """FAILS if the tree and the ledger disagree on anything the page claims
+    ABOUT THE TREE: a citation that stopped resolving, a verdict outside the
+    vocabulary, a deleted correction row, a §6 count that no longer reconciles,
+    or a registration row that went missing. Reachable by any ordinary
+    refactor — moving a function, closing an issue, or editing the table.
+
+    History-free on purpose: this is the assertion that has to hold in the
+    depth-1 `test` jobs, so it drives `check_document()`. The ancestry claim is
+    asserted separately by `test_shipped_document_passes_the_full_check`.
+    """
+    assert _doc_problems() == []
+
+
+def test_shipped_document_passes_the_full_check():
+    """FAILS if `check_all()` — the `--check` entry point, ancestry included —
+    reports anything on the shipped document.
+
+    Reachable by the page naming a commit that is not on this branch's history
+    (a rebase, a force-push, or a cut taken on another branch). Needs the whole
+    clone, so it SKIPS with a stated reason in the depth-1 `test` jobs instead of
+    redding them: the REQUIRED `docs` job (fetch-depth 0) is where this arm
+    actually runs, and `test_shipped_document_is_clean` above keeps every
+    tree-only claim asserted in both.
+    """
+    if not _history_available():
+        pytest.skip(
+            "this clone cannot answer the `measured_at_commit` ancestry claim "
+            "(depth-1 checkout, or the commit is absent). The REQUIRED `docs` "
+            "job runs `--check` at fetch-depth: 0 — #10406, and the tool's "
+            "check_document()/check_all() split"
+        )
+    assert _doc_problems() == []
 
 
 def test_checker_self_test_passes():
     """FAILS if any mutation arm stops firing, or if the negative control starts
-    changing the verdict. Reachable by weakening a rule in the tool."""
+    changing the verdict. Reachable by weakening a rule in the tool.
+
+    History-free: the arms drive `check_document()`, so this proof runs in the
+    depth-1 `test` jobs too — a self-test that could only run on a full clone
+    would be unproved in every job that selects this file. See
+    `test_doc_level_arms_make_no_git_call` for the assertion that keeps it so.
+    """
+    assert flc.self_test(REPO) == 0
+
+
+def test_doc_level_arms_make_no_git_call(monkeypatch):
+    """FAILS if the tree-only arms (and hence `--self-test`) reach for `git`.
+
+    Reachable, and it is the defect this file was fixed for: when `self_test()`
+    drove `check_all()`, every arm inherited the `measured_at_commit` ancestry
+    probe, so in a depth-1 clone (the CI `test` jobs' checkout, where
+    `f70d884b7` is not in the object store) the mutation proofs could not run at
+    all — measured 14 of 24 tests failing there. `subprocess` is replaced on the
+    TOOL's module, so this proves the tool's own call graph rather than the
+    test's.
+    """
+    def _boom(*args, **kwargs):
+        raise AssertionError("a tree-only arm shelled out to git")
+
+    monkeypatch.setattr(flc, "subprocess", SimpleNamespace(run=_boom))
+    assert flc.check_document(flc.read_doc(REPO), REPO) == []
     assert flc.self_test(REPO) == 0
 
 
@@ -82,7 +175,7 @@ def test_checker_self_test_passes():
 
 
 def test_invented_verdict_is_rejected(tmp_path, monkeypatch):
-    """FAILS on a verdict cell beginning with a token outside TERDICTS.
+    """FAILS on a verdict cell beginning with a token outside VERDICTS.
 
     Reachable by a lane writing a *plausible* verdict that the page's own §1 has
     no handling rule for — `PROBABLY-TRUE`, `FIXED`, `LIKELY`. That is the exact
@@ -97,7 +190,7 @@ def test_invented_verdict_is_rejected(tmp_path, monkeypatch):
             1,
         ),
     )
-    problems = flc.check_all(REPO)
+    problems = _doc_problems()
     assert any("closed vocabulary" in p for p in problems), problems
 
 
@@ -116,7 +209,7 @@ def test_missing_verdict_is_rejected(tmp_path, monkeypatch):
             1,
         ),
     )
-    problems = flc.check_all(REPO)
+    problems = _doc_problems()
     assert any("no bolded verdict" in p for p in problems), problems
 
 
@@ -148,7 +241,7 @@ def test_citation_to_missing_file_is_rejected(tmp_path, monkeypatch):
         monkeypatch,
         lambda t: t.replace("`tortoise/pipeline.py:16`", "`tortoise/no_such_module.py:16`", 1),
     )
-    problems = flc.check_all(REPO)
+    problems = _doc_problems()
     assert any("does not exist in the tree" in p for p in problems), problems
 
 
@@ -163,7 +256,7 @@ def test_citation_past_end_of_file_is_rejected(tmp_path, monkeypatch):
         monkeypatch,
         lambda t: t.replace("`tortoise/pipeline.py:16`", "`tortoise/pipeline.py:999999`", 1),
     )
-    problems = flc.check_all(REPO)
+    problems = _doc_problems()
     assert any("out of range" in p for p in problems), problems
 
 
@@ -176,7 +269,7 @@ def test_document_with_no_citations_is_unverifiable(tmp_path, monkeypatch):
     """
     _mutated(tmp_path, monkeypatch, lambda t: flc.CITATION_RE.sub("`evidence`", t))
     with pytest.raises(flc.Unverifiable):
-        flc.check_all(REPO)
+        _doc_problems()
 
 
 # ── the population is pinned ───────────────────────────────────────────────
@@ -194,7 +287,7 @@ def test_deleted_correction_row_is_rejected(tmp_path, monkeypatch):
         monkeypatch,
         lambda t: "\n".join(ln for ln in t.splitlines() if not ln.startswith("| **l** |")),
     )
-    problems = flc.check_all(REPO)
+    problems = _doc_problems()
     assert any("population drift" in p for p in problems), problems
 
 
@@ -212,7 +305,7 @@ def test_reordered_correction_row_is_rejected(tmp_path, monkeypatch):
         return "\n".join(lines)
 
     _mutated(tmp_path, monkeypatch, swap)
-    problems = flc.check_all(REPO)
+    problems = _doc_problems()
     assert any("population drift" in p for p in problems), problems
 
 
@@ -241,7 +334,7 @@ def test_state_count_not_matching_its_own_list_is_rejected(tmp_path, monkeypatch
         monkeypatch,
         lambda t: t.replace("| **OPEN** | **4** |", "| **OPEN** | **5** |", 1),
     )
-    problems = flc.check_all(REPO)
+    problems = _doc_problems()
     assert any("declares 5 but its own list names 4" in p for p in problems), problems
 
 
@@ -257,7 +350,7 @@ def test_state_rows_not_summing_to_population_is_rejected(tmp_path, monkeypatch)
         monkeypatch,
         lambda t: t.replace("| CLOSED other | 5 |", "| CLOSED other | 4 |", 1),
     )
-    problems = flc.check_all(REPO)
+    problems = _doc_problems()
     assert any("sum to 41" in p and "pinned indexed population is 42" in p for p in problems), problems
 
 
@@ -290,7 +383,7 @@ def test_unregistered_document_is_rejected(tmp_path, monkeypatch):
     empty_index = tmp_path / "00_index.md"
     empty_index.write_text("# index with no mention\n", encoding="utf-8")
     monkeypatch.setattr(flc, "INDEX", str(empty_index))
-    problems = flc.check_all(REPO)
+    problems = _doc_problems()
     assert any("carries no row naming" in p for p in problems), problems
 
 
@@ -320,7 +413,9 @@ def test_measured_commit_must_be_an_ancestor_of_head(tmp_path, monkeypatch):
     )
     with pytest.raises(flc.Unverifiable):
         # An unresolvable sha is UNVERIFIED (exit 2), never a pass and never a
-        # false accusation — a grafted clone cannot answer the question.
+        # false accusation — a grafted clone cannot answer the question. This is
+        # the ONE arm that needs no history to be meaningful: an absent sha is
+        # absent in every clone.
         flc.check_all(REPO)
 
 
@@ -331,7 +426,7 @@ def test_unreadable_document_is_unverifiable(monkeypatch):
     """
     monkeypatch.setattr(flc, "DOC", "/nonexistent/ledger.md")
     with pytest.raises(flc.Unverifiable):
-        flc.check_all(REPO)
+        _doc_problems()
 
 
 def test_missing_section_is_unverifiable(tmp_path, monkeypatch):
@@ -342,32 +437,65 @@ def test_missing_section_is_unverifiable(tmp_path, monkeypatch):
     """
     _mutated(tmp_path, monkeypatch, lambda t: t.replace("## 3. The corrections log", "## 3. Corrections"))
     with pytest.raises(flc.Unverifiable):
-        flc.check_all(REPO)
+        _doc_problems()
 
 
 # ── exit-code contract ─────────────────────────────────────────────────────
 
 
 def test_main_exit_zero_on_the_shipped_document(capsys):
-    """FAILS if `--check` stops reporting ok on the shipped, clean document."""
+    """FAILS if `--check` stops reporting ok on the shipped, clean document.
+
+    Needs the whole clone for the ancestry arm, so it SKIPS with a stated
+    reason in a depth-1 checkout rather than redding the `test` jobs that
+    cannot answer that claim (#10406). `--self-test` is asserted separately and
+    runs everywhere.
+    """
+    if not _history_available():
+        pytest.skip(
+            "`--check` includes the `measured_at_commit` ancestry arm, which a "
+            "depth-1 checkout cannot answer; the REQUIRED `docs` job runs it at "
+            "fetch-depth: 0"
+        )
     assert flc.main(["--check", "--root", str(REPO)]) == 0
     assert "agrees with the tree" in capsys.readouterr().out
 
 
-def test_main_exit_one_on_drift_and_exit_two_on_unreadable(tmp_path, monkeypatch, capsys):
-    """FAILS if drift and cannot-verify collapse into one exit code.
+def test_main_exit_zero_on_self_test(capsys):
+    """FAILS if `--self-test` stops reporting PASS on the shipped document.
+
+    Reachable by any dead mutation arm. History-free, so it holds in every job.
+    """
+    assert flc.main(["--self-test", "--root", str(REPO)]) == 0
+    assert "self-test: PASS" in capsys.readouterr().out
+
+
+def test_main_exit_one_on_drift(tmp_path, monkeypatch, capsys):
+    """FAILS if drift reports anything but exit 1.
 
     Reachable by a caller (the `docs` job) that treats any non-zero as "red":
     `1` names a false claim about the tree, `2` says the checker could not look.
-    Conflating them is how a shallow clone gets blamed on the document.
+    The ancestry arm is stubbed out here because this test is about the
+    exit-code CONTRACT, not about history availability — otherwise a depth-1
+    checkout would report 2 and the assertion would pass for the wrong reason.
     """
     _mutated(
         tmp_path,
         monkeypatch,
         lambda t: t.replace("`tortoise/pipeline.py:16`", "`tortoise/no_such_module.py:16`", 1),
     )
+    monkeypatch.setattr(flc, "check_measured_commit", lambda *a, **k: [])
     assert flc.main(["--check", "--root", str(REPO)]) == 1
+    assert "does not exist in the tree" in capsys.readouterr().out
 
+
+def test_main_exit_two_on_unreadable(monkeypatch, capsys):
+    """FAILS if a guard that could not look reports `1` or `0`.
+
+    Reachable by deleting the document (or a shallow clone that cannot resolve
+    the recorded commit): the caller must see `2`, never a drift verdict about a
+    document it never read.
+    """
     monkeypatch.setattr(flc, "DOC", "/nonexistent/ledger.md")
     assert flc.main(["--check", "--root", str(REPO)]) == 2
     assert "UNVERIFIED" in capsys.readouterr().err
@@ -402,14 +530,17 @@ def test_test_file_is_registered_in_ci_surfaces():
 def test_tool_is_stdlib_only():
     """FAILS if the checker grows a third-party import.
 
-    Reachable by a convenient `import yaml`; the `docs` job runs it before/without
-    relying on the package install, and a stdlib-only guard cannot be broken by a
-    dependency bump.
+    Reachable by a convenient `import yaml`; the `docs` job runs it without
+    relying on a package install, and a stdlib-only guard cannot be broken by a
+    dependency bump. `--self-test` is the probe, not `--check`: it exercises the
+    same imports and the same document parsing while needing no history, so this
+    stays a real assertion in a depth-1 checkout instead of reading the `2` a
+    shallow clone returns for `--check`.
     """
     source = (REPO / "tools" / "findings_ledger_check.py").read_text(encoding="utf-8")
     for banned in ("import yaml", "import requests", "import pytest", "import httpx"):
         assert banned not in source
     assert subprocess.run(
-        [sys.executable, str(REPO / "tools" / "findings_ledger_check.py"), "--check"],
+        [sys.executable, str(REPO / "tools" / "findings_ledger_check.py"), "--self-test"],
         cwd=REPO, capture_output=True, check=False,
     ).returncode == 0
