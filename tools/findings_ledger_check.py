@@ -168,12 +168,41 @@ SPAN_TRAILING_RE = re.compile(r"[\s.,;:)\]]+$")
 #: those left the page CLEAN — including over an out-of-range line and over a path
 #: that does not exist — so one character of reformatting defused the red that the
 #: resolver would otherwise have raised.
-#: The path must carry a known extension: the resolver's scope is `token:LINE`, and an
-#: extensionless token followed by a number (`localhost 6379`, `fetch-depth 0`) is
-#: prose. Requiring the extension keeps that carve-out exactly as wide as it was.
+#:
+#: ⚠️ THE CARVE-OUTS ARE MEASURED, AND THEY ARE NOT NARROW. An earlier version keyed
+#: on an extension allow-list and claimed the carve-out was "exactly as wide as it
+#: was"; both were wrong. An allow-list re-opens the skip door for `.gitignore 16`,
+#: `docs/x.sql 16` and `README.MD 16`, and the bare `path.ext <digits>` shape also
+#: matches a backticked COMMAND whose last argument is a number:
+#: `uv run python tools/collision_preflight.py 2852 --repo .` is a legal §1 evidence
+#: form, and refusing it red the required `docs` job over 7 legitimate spans in
+#: `docs/**`. So the shape must be a PATH (a `/` or a dot-extension, dotfiles
+#: included), the number must look like a line rather than an argument (a following
+#: `--flag` disqualifies it), a span that matches `COMMAND_RE` is a command and not a
+#: citation, and prose with no path marker (`localhost 6379`, `fetch-depth 0`) stays
+#: out of scope exactly as the `key: value` carve-out above does.
+#: THE DELIMITER IS WHITESPACE ONLY, and every wider version was measured against a
+#: false accusation over `docs/**` before it was dropped:
+#:   * `_` parsed the identifier `tests/test_findings_ledger_2852.py` as `path _ 2852`;
+#:   * `-` collided with a dated slug (`2026-10-15-7879-postgres-…`) and a commit ref;
+#:   * `/` parsed plain paths as citations — `docs/evidence/11083/README.md`,
+#:     `2024/03/01` — 600+ spans across 799 files;
+#:   * `#` parsed issue refs (`daniel-ospina/tortoise#9363`, the form used everywhere
+#:     in this repo) as `path # LINE`;
+#:   * `@` parsed commit refs (`origin/main@3ac6b1636`), and `,` parsed SQL and
+#:     function-call prose (`coalesce(n.version, 0)+1`) as citations.
+#: The residue after those exclusions was 30 spans, still mostly prose. So this arm
+#: measures ONE spelling — `path <LINE>` — and §8 names `path#LINE`, `path@LINE`,
+#: `path-LINE`, `path_LINE`, `path/LINE`, `path,LINE` and `path:L LINE` as shapes it
+#: does NOT refuse. A rule that refuses a page's own plain paths and issue refs is the
+#: false-accusation class one arm over, so the goal is an honest boundary, not breadth.
 CITATION_UNCOLONED_SHAPE_RE = re.compile(
-    r"[\w~/.+-][\w./+@-]*?\.(?:py|pyi|md|ya?ml|json|jsonl|sh|toml|cfg|ini|txt|ts|js|env|lock)"
-    r"(?:\s*(?:#|@|\||-|_|/|,|:\s?L)|\s+)\s*\d{1,7}(?!\d|\.\d)"
+    r"(?P<path>"
+    r"\.[A-Za-z][\w.-]*"
+    r"|[\w~][\w./+@-]*/[\w./+@-]+"
+    r"|[\w~][\w./+@-]*\.[A-Za-z]\w*"
+    r")"
+    r"\s+(?P<num>\d{1,7})(?![\w.>&|/-])"
 )
 
 #: A `path:line` occurring ANYWHERE inside a backticked span. The span-level
@@ -220,7 +249,7 @@ VOCAB_ROW_RE = re.compile(r"^\|\s*\*\*(?P<token>[A-Z][A-Z-]*)\*\*\s*\|")
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-MIN_SELF_TEST_MUTATIONS = 27
+MIN_SELF_TEST_MUTATIONS = 28
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -630,8 +659,9 @@ def check_verdict_tally(text: str) -> list[str]:
     # group it belongs to passes CLEAN when its connector is outside the copula/adverb
     # list (`**(d)** has become **ADOPTED**, **(c)**, **(d)** … are
     # **SUPERSEDED-BY-FIX** …`), because the maps above keep one verdict per letter and
-    # the last assignment is the group's. The same connector AFTER the group reds. Both
-    # are measured; widening the word list alone closes neither.
+    # the last assignment is the group's. The same connector reds when the repeat sits
+    # AFTER the group IN THE SAME SENTENCE (a later sentence is not reconciled either,
+    # measured). Widening the word list alone closes none of this.
     COPULA_OR_ADVERB = re.compile(
         r"[\s,]*(?:"
         r"(?:is|are|was|were|remains|stays|reads|stood)(?:[\s,]+(?:also|still))?"
@@ -660,7 +690,19 @@ def check_verdict_tally(text: str) -> list[str]:
         before = [lt for lt in letters if lt.end() <= token.start()]
         if before:
             nearest = before[-1]
-            if COPULA_OR_ADVERB.fullmatch(paragraph[nearest.end() : token.start()]):
+            # A DATED reading is not a statement of the row's current verdict, and this
+            # page's idiom is exactly that: "**(d)** was **STILL-TRUE** as written on
+            # 2026-09-10." Measured: appending it red the arm with "(d) stated
+            # STILL-TRUE+SUPERSEDED-BY-FIX" over a page whose table is untouched — a
+            # false accusation on correct prose, which is the class this arm must not
+            # create. The date marker is what distinguishes the two.
+            dated = re.match(
+                r"\s+(?:as written\s+)?on\s+\d{4}-\d{2}-\d{2}",
+                paragraph[token.end() :],
+            )
+            if not dated and COPULA_OR_ADVERB.fullmatch(
+                paragraph[nearest.end() : token.start()]
+            ):
                 mentions.setdefault(nearest.group(1), set()).add(token.group(1))
         after = [lt for lt in letters if lt.start() >= token.end()]
         if after:
@@ -690,7 +732,24 @@ def check_verdict_tally(text: str) -> list[str]:
             "class is not a cosmetic error"
         )
     still_true = sorted(lbl for lbl, v in verdicts.items() if v == "STILL-TRUE")
-    named_still = set(re.findall(r"\*\*\(([a-z])\)\*\*", still_sentence))
+    # The sentence may spell the COMPLEMENT too ("**(h)**, **(i)** and **(j)** still read
+    # as written — **(c)**, **(d)**, **(e)** and **(g)** do not"), and reading past its
+    # own negation accused correct prose of a wrong STILL-TRUE list (measured). Only the
+    # letters BEFORE the negation are the still-list.
+    negation = re.search(r"\b(?:do|does|did) not\b|\bno longer\b", still_sentence)
+    still_clause = still_sentence[: negation.start()] if negation else still_sentence
+    # Drop the letters the negation CLAUSE governs, which sit just BEFORE the verb they
+    # negate: "**(h)**, **(i)** and **(j)** still read as written — **(c)**, **(d)**,
+    # **(e)** and **(g)** do not". Slicing at the verb alone keeps `(c)…(g)` (measured),
+    # so the governed group is stripped from the end, separator and dash included.
+    while True:
+        governed = re.search(
+            r"(?:\s*(?:,|and|—|–|-)\s*)?\*\*\([a-z]\)\*\*\s*$", still_clause
+        )
+        if not governed:
+            break
+        still_clause = still_clause[: governed.start()]
+    named_still = set(re.findall(r"\*\*\(([a-z])\)\*\*", still_clause))
     if named_still != set(still_true):
         problems.append(
             f"§3 tally: the paragraph's STILL-TRUE list names "
@@ -737,13 +796,26 @@ def check_citation_shapes(text: str) -> list[str]:
         # mangled to a reader either.
         body = SPAN_TRAILING_RE.sub("", match.group(0)[1:-1])
         uncoloned = CITATION_UNCOLONED_SHAPE_RE.search(body)
-        if (
-            uncoloned
-            and not CITATION_RE.fullmatch(match.group(0))
-            and not INNER_CITATION_RE.search(body)
+        if uncoloned and (
+            not CITATION_RE.fullmatch(match.group(0))
+            # A span that carries a REAL `path:line` is the resolver's business, and a
+            # marker-less `word:digits` beside it (`a host:6379 note`) must not buy the
+            # whole span an exemption — measured: that left an out-of-range
+            # `tortoise/pipeline.py 999999` unchecked.
+            and not any(
+                _has_path_marker(tok.group("path"))
+                for tok in INNER_CITATION_RE.finditer(body)
+            )
+            # A backticked COMMAND is a legal §1 evidence form, and its trailing
+            # number is an argument: `uv run python tools/collision_preflight.py 2852
+            # --repo .`. Measured over `docs/**` — 7 legitimate spans, all commands.
+            and not COMMAND_RE.match(match.group(0))
+            # `path.py 2852 --repo .` — a number followed by a FLAG is an argument
+            # even without a recognised command prefix.
+            and not re.match(r"\s+--", body[uncoloned.end("num") :])
         ):
             problems.append(
-                f"`{body}` is not a recognised citation — it carries "
+                f"`{match.group(0)[1:-1]}` is not a recognised citation — it carries "
                 f"{uncoloned.group(0)!r}, which uses a delimiter the resolver does not "
                 "read; §8 claims every `path:line` here is checked, so an unreadable "
                 "shape must be refused rather than skipped"
@@ -1293,6 +1365,11 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
                             "| **PROBABLY-TRUE** | `tortoise/sdk.py:16962`", 1)
                   .replace("**STILL-TRUE**", "**PROBABLY-TRUE**", 1),
         "closed vocabulary",
+    ),
+    (
+        "a citation separated from its line by a space",
+        lambda t: t.replace("`tortoise/pipeline.py:16`", "`tortoise/pipeline.py 16`", 1),
+        "not a recognised citation",
     ),
     (
         "a citation pointing at a file that does not exist",
