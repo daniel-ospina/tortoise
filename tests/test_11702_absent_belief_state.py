@@ -5504,15 +5504,17 @@ _QUALIFIER_NEGATIONS = re.compile(
     re.IGNORECASE,
 )
 
-#: A negation that does NOT invert — stripped before the test above, so the TRUE
-#: "not only does a readable mirror lead it, but the pair does too" is not
-#: reported as an unqualified claim (measured: it was).
-#: ⚠️ THIS ALONE WAS NOT ENOUGH, and the note above said it was (measured):
-#: `_MIRROR_RESTRICTIONS`'s bare `\bonly\b` vetoed every "not only" sentence
-#: unconditionally, so both placements of that TRUE form were still reported.
-#: `_MIRROR_RESTRICTIONS` now exempts the `not only` spelling, which is what
-#: makes this line's claim true. Residual, fail-closed: only the single-space
-#: "not only" is exempt, so "not  only"/"not-any-only" still reports.
+#: A negation that does NOT invert — stripped before the negation test above,
+#: so a "not only … but … too" clause is not read as negating the qualifier.
+#: ⚠️ THIS DOES NOT MAKE THE "not only" SENTENCE ACCEPTED — an earlier revision
+#: of this note said it did, and that was false. `_MIRROR_RESTRICTIONS`'s bare
+#: `\bonly\b` vetoes the spelling anyway, so both placements are still REPORTED.
+#: That is deliberate and fail-CLOSED: exempting a spelling from a veto makes the
+#: veto weaker, and the exemption cannot tell an affirmation from a demotion —
+#: measured, "The mirror supplies the value not only when the pair is absent;
+#: the pair always leads otherwise, so <claim>" was CERTIFIED once the veto
+#: spared it, which is the inverse of the shipped precedence. A true "not only"
+#: sentence is therefore a false BLOCK a human reads, never a false pass.
 _QUALIFIER_NEGATION_OK = re.compile(r"\bnot only\b", re.IGNORECASE)
 
 #: Negated OBJECTS that follow a qualifier verb ("the mirror supplies nothing
@@ -5539,13 +5541,13 @@ _QUALIFIER_OBJECT_NEGATIONS = re.compile(
 #: whenever a pair exists, supplies the value"), which a post-verb window cannot
 #: see (measured — three such inversions were certified qualified).
 _MIRROR_RESTRICTIONS = re.compile(
-    # `(?<!-)only` spares "mirror-ONLY Point" (the canonical TRUE wording);
-    # `(?<!not )only` spares "NOT ONLY does a readable mirror lead it, but the
-    # pair does too", which AFFIRMS the precedence rather than demoting the
-    # mirror — and which `_QUALIFIER_NEGATION_OK` exists to keep passing. Without
-    # this second lookbehind that note was false: every "not only" sentence was
-    # vetoed here, so the form it promises to accept was always reported.
-    r"(?<!-)(?<!not )\bonly\b"
+    # `(?<!-)only` is load-bearing: a bare `\bonly\b` matches "mirror-ONLY Point",
+    # which is the canonical TRUE wording. It is the ONLY exemption: a
+    # `(?<!not )` for "not only" was tried and REMOVED — it certified a demotion
+    # ("the mirror supplies the value not only when the pair is absent; the pair
+    # always leads otherwise", measured), because a spelling exemption cannot
+    # tell an affirmation from an inversion. See `_QUALIFIER_NEGATION_OK`.
+    r"(?<!-)\bonly\b"
     r"|\bfallback\b"
     r"|\bnothing else\b"
     r"|\bwhen no\b"
@@ -5657,14 +5659,66 @@ def _claim_sentence(window: str, claim_at: int = 0) -> str:
     NEXT bullet qualified a FALSE claim (measured: all four passed).
 
     Erring toward a SHORTER window is the safe direction: it drops a qualifier
-    and reds a correct edit, which a human then reads. The cost is a possible
-    false block when an abbreviation ("e.g. the …") ends the cut early — a red
-    on a true sentence, never a pass on a false one.
+    and reds a correct edit, which a human then reads. **An abbreviation is NOT a
+    sentence break** — see `_real_break`; treating "e.g." as one CREDITED a
+    restriction that sat before it (measured false PASS), so the safe direction
+    is now enforced by the boundary test instead of assumed.
     """
-    break_at = re.compile(r"(?<=[.!?])\s+(?=\S)")
-    tail = break_at.split(window[claim_at:], maxsplit=1)[0]
-    head = break_at.split(window[:claim_at])[-1]
-    return head + tail
+    return _claim_sentence_with_offset(window, claim_at)[0]
+
+
+#: A `.` that ends an ABBREVIATION, not a sentence. Without this, "e.g." is a
+#: sentence boundary — which cuts the claim's own sentence SHORT (so a
+#: restriction placed before it vanishes from the text the guard inspects) and
+#: also satisfies the head-edge probe (so the back-edge check stays silent).
+#: Both measured, and both a FALSE PASS:
+#:   "The n.confidence mirror, ignored e.g. whenever a pair exists, so <claim>,
+#:    and a readable mirror leads it"                                   CERTIFIED
+#:   the `head_truncated` counterexample in `_qualified` with an `e.g.`
+#:   inserted inside the lookbehind                                    CERTIFIED
+#: `e.g.` is common in exactly this prose (`volunteer.py`:88 and
+#: `search_engine.py`:1487 both carry "e.g. the decide-part system default").
+_ABBREVIATED = re.compile(
+    r"(?:\be\.g|\bi\.e|\bcf|\bvs|\betc|\bal|\bapprox|\bresp|\bFig|\bEq)\.$",
+    re.IGNORECASE)
+
+
+def _real_break(prose: str, at: int) -> bool:
+    """Whether `prose[at]` ends a SENTENCE — punctuation, space, then a non-space.
+
+    `at` must be the punctuation itself. An ABBREVIATION is punctuation followed
+    by a space and a word, which is exactly the shape a naive boundary test
+    reads as a sentence end — so it is named here rather than assumed.
+    """
+    if at + 1 >= len(prose) or prose[at] not in ".!?":
+        return False
+    if not prose[at + 1].isspace():
+        return False
+    k = at + 1
+    while k < len(prose) and prose[k].isspace():
+        k += 1
+    if k >= len(prose):
+        return True
+    return _ABBREVIATED.search(prose[:at + 1]) is None
+
+
+def _last_break_before(prose: str, at: int) -> int:
+    """Index just past the last REAL sentence break before `at` (0 if none)."""
+    for j in range(at - 1, -1, -1):
+        if _real_break(prose, j):
+            k = j + 1
+            while k < at and prose[k].isspace():
+                k += 1
+            return k
+    return 0
+
+
+def _first_break_at_or_after(prose: str, at: int) -> int:
+    """Index OF the first REAL sentence break at/after `at` (`len` if none)."""
+    for j in range(at, len(prose)):
+        if _real_break(prose, j):
+            return j
+    return len(prose)
 
 
 def _claim_sentence_with_offset(window: str, claim_at: int = 0) -> tuple[str, int]:
@@ -5674,11 +5728,13 @@ def _claim_sentence_with_offset(window: str, claim_at: int = 0) -> tuple[str, in
     sentence: a negation BEFORE the claim ("Nothing persisted means no mean; a
     readable mirror leads it, so confidence_mean IS the declared PRIOR mean") is
     about the opposite shape and flagged a TRUE sentence (measured).
+
+    Both edges go through `_real_break`, so an abbreviation is not a sentence
+    end on either side — the two directions share one boundary test on purpose.
     """
-    break_at = re.compile(r"(?<=[.!?])\s+(?=\S)")
-    tail = break_at.split(window[claim_at:], maxsplit=1)[0]
-    head = break_at.split(window[:claim_at])[-1]
-    return head + tail, len(head)
+    start = _last_break_before(window, claim_at)
+    end = _first_break_at_or_after(window, claim_at) + 1
+    return window[start:end], claim_at - start
 
 
 def _qualified(window: str, claim_at: int = 0, *, truncated: bool = False,
@@ -5774,13 +5830,16 @@ def _unqualified_claims(patterns) -> list[str]:
                 start = max(0, match.start() - _QUALIFIER_LOOKBEHIND)
                 window = prose[start:match.start() + _QUALIFIER_WINDOW]
                 truncated = (match.start() + _QUALIFIER_WINDOW) < len(prose)
-                # …and the BACK edge is a slice too. `start > 0` means the window
-                # began at the lookbehind rather than at a sentence break; with no
-                # punctuation between, the claim's own sentence started BEFORE the
-                # slice, so its head is missing and a restriction there is
-                # invisible. Measured false PASS, named in `_qualified`.
-                head_truncated = start > 0 and not re.search(
-                    r"[.!?]\s", window[:match.start() - start])
+                # …and the BACK edge is a slice too. The head is missing iff the
+                # claim's own sentence START lies before the window — computed in
+                # PROSE coordinates, not the window's: a window that happens to
+                # begin just after a real break is NOT a truncated head, and asking
+                # the window instead reported every such site (a false block).
+                # `_real_break` keeps an abbreviation from counting as a break here,
+                # which is what let an `e.g.` inside the lookbehind silence this
+                # check (measured false PASS).
+                head_truncated = (start > 0
+                                  and _last_break_before(prose, match.start()) < start)
                 if _qualified(window, match.start() - start,
                               truncated=truncated,
                               head_truncated=head_truncated):
@@ -5914,33 +5973,58 @@ def test_the_prior_mean_guard_refuses_a_fragment_at_the_window_head(monkeypatch)
         "the guard certified a claim whose sentence TAIL was cut off by "
         "`_QUALIFIER_WINDOW`")
 
+    # (e) ABBREVIATIONS are not sentence ends. Both directions measured as a
+    # FALSE PASS before `_real_break`: as a boundary it hides a restriction
+    # inside the claim's own sentence (i), and as a "break" it silenced the head
+    # check above (ii) — the second defeats (a) with the same trick it refuses.
+    assert scan("The ``n.confidence`` mirror, ignored e.g. whenever a pair exists, so "
+                + claim + ", and a readable mirror leads it.\n"), (
+        "`e.g.` was read as a sentence break, cutting a restriction out of the "
+        "claim's own sentence — a false PASS")
+    assert scan(sentence(_QUALIFIER_LOOKBEHIND).replace(
+                "x" * 200, "x" * 190 + " e.g. " + "x" * 10, 1)), (
+        "an `e.g.` inside the lookbehind silenced the head-edge check — a false "
+        "PASS on the very counterexample this test pins")
 
-def test_the_not_only_wording_the_guard_documents_is_the_one_it_accepts():
-    """The `_QUALIFIER_NEGATION_OK` note promises a form the guard accepts.
 
-    "not only does a readable mirror lead it, but the pair does too" AFFIRMS the
-    precedence, so `_QUALIFIER_NEGATION_OK` strips it before the negation test.
-    That alone was not enough — `_MIRROR_RESTRICTIONS`'s bare `\bonly\b` vetoed
-    every "not only" sentence unconditionally, so the promised form was always
-    reported and the note was false (measured, both placements). A note that
-    states an outcome the code does not produce is the exact class this module
-    exists to close.
+def test_the_not_only_wording_flips_from_a_false_pass_to_a_false_block():
+    """`_QUALIFIER_NEGATION_OK` alone did NOT make "not only" accepted — and it must not.
+
+    Two rounds of measurement, recorded so neither is rediscovered:
+
+    1. The `_QUALIFIER_NEGATION_OK` note claimed the TRUE "not only does a
+       readable mirror lead it, but the pair does too" was accepted. It was not:
+       `_MIRROR_RESTRICTIONS`'s bare `\bonly\b` vetoed every such sentence, so
+       the note was false.
+    2. Sparing the `not only` SPELLING fixed that and opened a FALSE PASS: a
+       spelling exemption cannot tell an affirmation from a demotion, so
+       "The mirror supplies the value not only when the pair is absent; the pair
+       always leads otherwise" — the inverse of the shipped precedence — was
+       CERTIFIED (measured).
+
+    So the veto is restored and the result is fail-CLOSED: both placements of the
+    affirming wording, and the demotion, are REPORTED. That is a false BLOCK a
+    human reads, which is the direction this guard is allowed to err in.
     """
     claim = "a prior-only claim's ``confidence_mean`` IS the declared PRIOR mean"
-    both_placements = (
+    reported = (
         "Not only does a readable mirror lead it, but the pair does too: "
         + claim + ".",
         claim + "; not only does a readable mirror lead it, but the pair does too.",
+        "The n.confidence mirror supplies the value not only when the pair is "
+        "absent; the pair always leads otherwise, so " + claim + ".",
     )
-    for sentence in both_placements:
-        assert _qualified(sentence, sentence.index("confidence_mean")), (
-            "`not only … but … too` affirms the mirror's precedence, so the "
-            "guard's own `_QUALIFIER_NEGATION_OK` note says it is accepted; it "
-            "was reported instead. Sentence: " + sentence)
-    # …while a REAL restriction still vetoes, so the exemption above is narrow.
-    demoted = ("The mirror is consulted not only last but after the pair, so " + claim + ".")
-    assert not _qualified(demoted, demoted.index("confidence_mean")), (
-        "a genuine restriction must still be refused")
+    for sentence in reported:
+        assert not _qualified(sentence, sentence.index("confidence_mean")), (
+            "a `not only` clause cannot be told from a demotion by spelling, so "
+            "the restriction veto must refuse it (fail-closed). Sentence: " + sentence)
+    # …and the control: the mirror-ONLY canonical wording is NOT refused, so the
+    # veto above cannot pass by refusing everything that says "only".
+    canonical = ("A mirror-only Point carries no persisted pair, so "
+                 + claim.replace("a prior-only claim's", "its")
+                 + ", and the readable ``n.confidence`` mirror LEADS it.")
+    assert _qualified(canonical, canonical.index("confidence_mean")), (
+        "the guard must not refuse the canonical `mirror-only` wording")
 
 
 #: The credibility word's own result, stated as a mean. ANY sentence that makes
