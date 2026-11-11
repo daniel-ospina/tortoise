@@ -46,7 +46,8 @@ WHAT IT ASSERTS, in BOTH directions:
       and §3.2/§3.3, which state the claim in words that are NOT the quoted
       fragment — are each still HOSTED-scoped. Without this arm every one of
       them could be reverted to #11806's universal with the whole file GREEN
-      (measured at r18, all four).
+      (measured at r18 for four of them, and at r19 for the three §3.2
+      methodology sentences r18 missed).
 
 `_SHIPPED_FRAGMENT` is the single string both arms bind to, so the two cannot be
 corrected in opposite directions without this file noticing.
@@ -105,7 +106,7 @@ WHAT IT STILL DOES NOT CATCH, stated so the docstring is not the next over-claim
     see line 309 — REDs. Reword such an entry instead of reproducing the phrase
     verbatim. Likewise the presence arm answers "are these words in this file",
     not "is this an actual quote", so it cannot tell a quote from prose.
-  * (3) pins the four restatements as WORD SEQUENCES, so a legitimate RE-WORDING of
+  * (3) pins the seven restatements as WORD SEQUENCES, so a legitimate RE-WORDING of
     the matrix row or of §3.2/§3.3 — even one that KEEPS the hosted scoping — REDs.
     That is the same trade arms (1)/(2) already take (the claim IS the words):
     reword such a sentence only together with its `_RESTATEMENTS` row, in one edit.
@@ -144,6 +145,12 @@ MUTATION (each verified RED at this head, restoring byte-identical):
     runs no Tortoise hook at all"                     → (3) RED   (r18 P2)
   * drop `Hosted-` from §3.3's "Hosted-cloud-agent users'"
                                                       → (3) RED   (r18 P2)
+  * `it is settled for the **hosted VM**` → `**cloud agents**`
+                                                      → (3) RED   (r19 P2)
+  * `this row ("a hosted cloud agent")` → `("a cloud agent")`
+                                                      → (3) RED   (r19 P2)
+  * `scopes the exclusion to the` / `hosted VM` → `cloud agents`
+                                                      → (3) RED   (r19 P2)
 """
 from __future__ import annotations
 
@@ -163,23 +170,36 @@ _SHIPPED_FRAGMENT = "a session running in a hosted cloud agent VM"
 _UNSCOPED_FRAGMENT = "a session running in a cloud agent VM"
 _PY = sys.executable
 
-#: (3) — the record RESTATES the scoping in its own words, four times, and THIS PR
+#: (3) — the record RESTATES the scoping in its own words SEVEN times, and THIS PR
 #: scoped each of them. None of those words is `_SHIPPED_FRAGMENT`, so none was
 #: covered until r18: deleting the single word that scopes any one of them restored
-#: the pre-PR universal with the whole file GREEN (each of the four measured).
+#: the pre-PR universal with the whole file GREEN (measured: four at r18, and the
+#: three §3.2 methodology sentences the first arm missed, each at r19).
 #:
-#: PRESENCE for all four, plus an ABSENCE leg on the matrix row's claim only. An
-#: absence leg is sound only where the unscoped form is NOT a word subsequence of
-#: the scoped one: `a cloud agent runs neither` breaks the sequence at
-#: `a _ cloud`, whereas `a hosted cursor cloud agent runs no tortoise hook`
-#: CONTAINS `cursor cloud agent runs no tortoise hook`, so banning the latter
-#: would RED the CORRECT text — the precise false-RED this file's own review
-#: rounds are about. Hence `None` there rather than a guess.
+#:   1. `#2122` matrix row            A hosted cloud agent runs neither
+#:   2. §3.2 heading                  Hosted cloud agents get NEITHER hook
+#:   3. §3.2 result                   a **hosted** Cursor cloud agent runs no …
+#:   4. §3.2 what the source settles  it is settled for the **hosted VM**
+#:   5. §3.2 the row it cites         this row ("a hosted cloud agent")
+#:   6. §3.2 what the disclosure does scopes the exclusion to the hosted VM
+#:   7. §3.3 consequence              Hosted-cloud-agent users' … pull only
+#:
+#: Rows 1/4/5/6 carry an ABSENCE leg as well; 2/3/7 do not. An absence leg is sound
+#: only where the unscoped form is NOT a word subsequence of the scoped one —
+#: `a cloud agent runs neither` breaks the sequence at `a _ cloud`, whereas
+#: `a hosted cursor cloud agent runs no tortoise hook` CONTAINS `cursor cloud agent
+#: runs no tortoise hook`, so banning the latter would RED the CORRECT text — the
+#: precise false-RED this file's own review rounds are about. Hence `None` there
+#: rather than a guess. Each verdict below was measured with `_normalised()` over
+#: the pair before it was written, not assumed from the words.
 _RESTATEMENTS: tuple[tuple[str, "str | None"], ...] = (
     ("a hosted cloud agent runs neither", "a cloud agent runs neither"),
     ("hosted cloud agents get neither hook", None),
     ("a hosted cursor cloud agent runs no tortoise hook", None),
     ("hosted cloud agent users volunteering memory is therefore pull only", None),
+    ("it is settled for the hosted vm", "it is settled for cloud agents"),
+    ('this row ("a hosted cloud agent")', 'this row ("a cloud agent")'),
+    ("scopes the exclusion to the hosted vm", "scopes the exclusion to cloud agents"),
 )
 
 #: A tag's attributes AS MARKUP — `name=value`, quoted or bare. NOT `[^<>\n]*`:
@@ -304,7 +324,9 @@ def _renderings(text: str) -> list[str]:
     covers prose that forges a tag no pattern anticipates AND a phrase carried in
     an ATTRIBUTE VALUE — `<b title="…">` — which both tag strips legitimately
     remove (measured; pinned by the `attribute-value` sample, r13 P3). A cost of 3
-    normalisations over a 50 KB record — the module runs 4 tests.
+    normalisations over a 50 KB record, paid once per phrase checked — deliberately
+    NOT stated as a number of tests, because a hand-written count re-stales on the
+    next case this file adds (review r19 P3, and this repo's own recorded lesson).
     """
     return [_normalised(text, p) for p in (_TAG, _TAG_WITH_BARE_ATTRS, None)]
 
@@ -383,7 +405,7 @@ def test_the_record_quotes_the_HOSTED_scoped_fragment():
 
 
 def test_every_restatement_of_the_scoping_in_the_record_is_HOSTED_scoped():
-    """(3) — the record states the claim four times, not only where it quotes the message.
+    """(3) — the record states the claim SEVEN times, not only where it quotes the message.
 
     The `#2122` matrix row and §3.2/§3.3 put the same scoping in their own words, and
     THIS PR edited every one of them:
@@ -392,14 +414,18 @@ def test_every_restatement_of_the_scoping_in_the_record_is_HOSTED_scoped():
       `Cloud agents get NEITHER hook`         → `Hosted cloud agents get NEITHER hook`
       `a Cursor cloud agent runs no …`        → `a **hosted** Cursor cloud agent runs no …`
       `Cloud-agent users' …`                  → `Hosted-cloud-agent users' …`
+      `it is settled for **cloud agents**`    → `it is settled for the **hosted VM**`
+      `this row ("a cloud agent")`            → `this row ("a hosted cloud agent")`
+      `scopes the exclusion to cloud agents`  → `scopes the exclusion to the hosted VM`
 
-    Unpinned, any one of those four reverts #11806's over-assertion inside the
+    Unpinned, any one of those seven reverts #11806's over-assertion inside the
     record — the very artifact a future lane cites for #11807 — while this file
     stays GREEN. That is the same false-PASS class as the message's missing
-    absence leg, one surface over (review r18 P2, measured on all four).
+    absence leg, one surface over (review r18 P2 measured the first four; review
+    r19 P2 measured the last three, which r18's arm did not reach).
 
-    Mutation: drop the scoping word from any of the four — each REDs here, and the
-    matrix row's unscoped form REDs both its presence and its absence leg."""
+    Mutation: drop the scoping word from any of the seven — each REDs here, and
+    rows 1/4/5/6 RED both their presence and their absence leg."""
     doc = _PLATFORM_SEAMS_DOC.read_text(encoding="utf-8")
     normalised_doc = _normalised(doc)
     for scoped, unscoped in _RESTATEMENTS:
