@@ -239,15 +239,22 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
 - the **§3 population is pinned** to twelve rows, and the **§6 arithmetic** (open + closed + merged =
   the indexed population) is re-derived from the table rather than trusted — deleting a row and every
   mention of it otherwise passes every referential check.
+- the **§6 survivor sentence's two numbers** are derived as well: its survivor TOTAL must equal the
+  OPEN row's own count, and its "already re-measured" count must equal the number of **bullets naming
+  an OPEN issue** — the `#2730` bullet is CLOSED and is printed because *issue closure is not evidence
+  of a fix*, not because it survives. Unguarded, this sentence carried a false `three` over two
+  survivor bullets while §7 said `two`, and the guard reported OK over it: the page's own *declared ≠
+  stored* defect, inside the correction that exists to stop it — and the reason two reviewers could
+  each "prove" the other side was the stale one.
 
 The self-test that proves those rules still fire has its own **population floor**
 (`MIN_SELF_TEST_MUTATIONS`). An emptied arm set used to print `PASS (0 failing arm(s))` and exit 0 —
 a gate reporting OK when it cannot run — so a shrunk population now reds instead.
 
 Exactly one arm needs `git` **history**: the frontmatter's `measured_at_commit` must be an ancestor of
-`HEAD`. The other four read this checkout's tree and nothing else, and the tool keeps that split
+`HEAD`. The other five read this checkout's tree and nothing else, and the tool keeps that split
 (`check_document()` / `check_all()`) because the two jobs that run it differ: the REQUIRED `docs` job
-checks out at `fetch-depth: 0` and runs `--check` (all five arms), while the `test` jobs check out at
+checks out at `fetch-depth: 0` and runs `--check` (all six arms), while the `test` jobs check out at
 the default depth 1, cannot resolve `f70d884b7` at all, and are where this page's own test module runs.
 In a depth-1 clone `--check` therefore reports **exit 2 UNVERIFIED** — never `0`, and never a verdict
 against the document it could not read — and `--self-test`, which drives only the tree-only arms,
