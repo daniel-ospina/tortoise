@@ -389,7 +389,9 @@ def _eligible(block: dict, *, min_confidence: float,
     why-block's dedicated ep read — post-#2206 identical to the search
     path's ep.confidence_mean, which reads the same coalesce of
     posterior_alpha/ep_alpha).
-    UNMEASURED points (no persisted belief at all) carry NO mean —
+    UNMEASURED points (nothing that yields a mean — no persisted belief, a half
+    pair, a 0/0 pair, a negative operand, an unreadable operand — and no
+    readable mirror supplying one) carry NO mean —
     ``confidence_mean: None`` with ``ep_state: "absent"`` — so they fail every
     floor and are never fired (the outcome the old Beta(1,1) 0.5 produced by
     sitting below the 0.7 default; the reason no longer is). #3415 correction: that
@@ -399,9 +401,19 @@ def _eligible(block: dict, *, min_confidence: float,
     prior-only yet reads its PRIOR mean, so it clears the mean floor. That is
     deliberate: #2199 treats a baseline as the author's stated starting
     belief ("set-by-author") and the mean floor is a NOTABILITY gate, not a
-    measurement claim. The why-block discloses the state honestly — every
-    entry carries ``ep.measured`` / ``ep.baseline`` — so a prior-only
-    candidate rides a block that says it was never measured.
+    measurement claim. The why-block discloses the state honestly: every entry
+    carries ``ep.ep_state`` — the field that ANSWERS the question — plus
+    ``confidence_mean`` (None iff the state is absent).
+
+    ⛔ Do NOT branch on ``ep.measured`` / ``ep.baseline``: they are not a state
+    derivation, and the FALLBACK entry (`why_entry`'s default for a point with
+    no ``ep`` sub-block) does not even carry them — only ``confidence_mean``,
+    ``variance``, ``contested``, ``has_ep`` and ``ep_state``. A legacy
+    ``n.confidence`` mirror and a terminal decayed posterior both read
+    ``measured=False, baseline=False`` while their state is ``baseline`` with a
+    real number, so a consumer filtering on the flags drops a live prior as "no
+    belief" — and one indexing ``ep["measured"]`` raises ``KeyError`` on the
+    fallback entry.
 
     Contentiousness participates: a CONTESTED state (persisted variance >
     threshold) whose dispute the window actually touches may cross the floor
