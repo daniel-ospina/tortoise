@@ -1149,6 +1149,63 @@ def test_quote_cap_mirrors_the_point_write_paths_own_constant():
     assert qp.QUOTE_CAP == _MAX_QUOTE
 
 
+def test_terminal_statuses_mirror_the_read_paths_RENDERED_predicate():
+    """FAILS IF the vocabulary the probe divides by is only a subset of what the read path
+    renders, or if the read path stops rendering the `outdated` conjunct at all.
+
+    `test_terminal_statuses_mirror_the_products_own_constant` above compares the probe's set
+    to `live.TERMINAL_EXCLUDED_STATUSES` — but the README's headline claim is not "the status
+    set matches"; it is "**exactly** the population the default read serves". That claim rests
+    on the PREDICATE the read path actually composes, and a vocabulary constant is not the
+    predicate: an extra `<> 'x'` added to the composition (or `include_outdated_flag` turned
+    off for the Point path) moves the population while the constant stays byte-identical, so
+    the census would publish 94.86% over a denominator the read no longer uses, with every
+    existing pin green. Read the RENDERED clause instead of the constant.
+    """
+    import re
+
+    from tortoise.live import _terminal_excluded
+
+    rendered = _terminal_excluded("n.status")
+
+    # Conjunct 1 — the status half excludes EXACTLY the probe's vocabulary. Set equality in
+    # both directions: a status the read excludes and the probe does not counts a dead row as
+    # live (`offender` -> the headline falls); one the probe excludes and the read does not
+    # drops a live row from the denominator it claims to measure.
+    assert set(re.findall(r"n\.status <> '([a-z_]+)'", rendered)) == qp.TERMINAL_STATUSES
+
+    # Conjunct 2 — the legacy flag half, which is the one the artifact reports separately
+    # (`excluded_by_outdated_flag`). It is measured EMPTY on this graph, which is precisely
+    # why its absence from the composition would be invisible in the published numbers.
+    assert "coalesce(n.outdated, false) = false" in rendered
+    assert _terminal_excluded("n.status", include_outdated_flag=True) == rendered, (
+        "the Point read path must keep the flag conjunct ON — the OBJECT surfaces are the "
+        "callers that pass include_outdated_flag=False (#3301)")
+
+
+def test_the_population_scope_mirrors_the_read_paths_operator_clause():
+    """FAILS IF the operator-scope clause the README quotes as the reason 15,842 is
+    "` :Point` minus operators" stops being the clause the read path applies.
+
+    The census cannot apply this conjunct itself — the probe sees rows the hosted
+    `tortoise_query` already scoped, so the non-operator population is a property of the
+    READ path, not of the probe. Nothing else in this file reads it, so without this pin the
+    published scope is prose: #7108's shape (a bare `n.is_operator = false`, which drops the
+    Points carrying NO `is_operator` property and leaks legacy operators carrying `op_type`)
+    would restore itself and the census's denominator would silently be a different
+    population than every sentence in the README names.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    clauses = TortoiseSDK._operator_scope_clauses(TortoiseSDK.__new__(TortoiseSDK), None)
+    assert clauses == [
+        "(n.is_operator IS NULL OR n.is_operator = false) AND n.op_type IS NULL"
+    ], clauses
+    # The bare form is the regression, not a simplification: `= false` is NULL-propagating.
+    assert "n.is_operator = false" not in clauses[0].split(" OR ")[0], (
+        "the clause must keep its `n.is_operator IS NULL` half (#2205/#7108)")
+
+
 # ------------------------------------------ cycle-2 findings: attribution and shapes
 
 def test_quote_shapes_publishes_a_zero_for_every_class():
