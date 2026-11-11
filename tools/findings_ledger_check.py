@@ -152,7 +152,17 @@ CITATION_RE = re.compile(
 #: ERROR instead of silence. Widening one regex was otherwise the only thing
 #: standing between a real citation and a green run, and a shape the resolver
 #: declines is indistinguishable from a shape the page does not contain.
-CITATION_SHAPE_RE = re.compile(r"^[^\s`]+:\d+(?:-\d+)?$")
+#:
+#: The class is `[^`]`, NOT `[^\s`]`. Excluding whitespace was a fail-open with a
+#: one-keystroke exploit: inserting a space into a citation (`tortoise/pipeline
+#: .py:16`) made it match NEITHER the resolver NOR this refusal, so it was
+#: silently unchecked while §8 said no citation shape was exempt — measured, rc 0
+#: clean. The token may not contain a backtick, and that is the only exclusion.
+CITATION_SHAPE_RE = re.compile(r"^[^`]+:\d+(?:-\d+)?$")
+
+#: `path: 16962` — a space AFTER the colon. Same class, same measurement: it is
+#: not a resolvable citation, so it must be refused rather than skipped.
+CITATION_SPACED_SHAPE_RE = re.compile(r"^[^`]+:\s+\d+(?:-\d+)?$")
 
 #: An in-page section reference (`§6`) — §1 accepts it in place of a citation for
 #: a row whose evidence IS the section below it (row (l)).
@@ -178,7 +188,7 @@ TABLE_SEPARATOR_RE = re.compile(r"^\|[\s:|-]+\|$")
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-MIN_SELF_TEST_MUTATIONS = 12
+MIN_SELF_TEST_MUTATIONS = 14
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -401,31 +411,153 @@ def check_evidence_cells(text: str) -> list[str]:
     return problems
 
 
-def check_citation_shapes(text: str) -> list[str]:
-    """§3/§5: a backticked `token:LINE` the resolver declines is an ERROR, not silence.
+#: Frontmatter/paragraph numbers are spelled out in the page's prose.
+COUNT_WORDS: tuple[str, ...] = (
+    "zero", "one", "two", "three", "four", "five", "six",
+    "seven", "eight", "nine", "ten", "eleven", "twelve",
+)
 
-    §8 tells the reader every `path:line` in these two sections is checked. That
-    claim is only true if an unrecognised shape is refused, because a shape the
-    pattern does not match is indistinguishable from a shape the page does not
-    contain.
+#: The paragraph whose tally the page states in words.
+TAKEAWAY_MARKER = "The one thing to take away"
+
+
+def _verdicts_by_label(text: str) -> dict[str, str]:
+    """label -> first bolded verdict token, for every §3 row (empty on no token)."""
+    section = _region(text, "## 3. The corrections log", "## 4. The artefact index")
+    out: dict[str, str] = {}
+    for _offset, line in _table_rows(section):
+        match = CORRECTION_ROW_RE.match(line)
+        if match is None:
+            continue
+        cells = _split_row_cells(line)
+        verdict_cell = cells[4] if len(cells) > 4 else ""
+        tokens = BOLD_TOKEN_RE.findall(verdict_cell)
+        out[match.group(1)] = tokens[0] if tokens else ""
+    return out
+
+
+def check_verdict_tally(text: str) -> list[str]:
+    """§3's headline tally must be DERIVED from the verdict cells it summarises.
+
+    The paragraph is a summary of the table beside it, and a summary is the one
+    thing a reader quotes without re-counting. Unguarded it is also the cheapest
+    thing to make false: flipping a single verdict cell to `STILL-TRUE` left the
+    page asserting "seven of the twelve … **(b)**, **(k)** and **(l)** are
+    **DRIFTED**" with **rc 0 CLEAN** (measured). The same number is repeated in
+    the tool's docstring, `ci.yml`, `config/ci-surfaces.yml`, `docs/00_index.md`
+    and two test docstrings, so a wrong one propagates well beyond the page.
+
+    This is the sibling precedent, not a new idea: `tools/problem_map_check.py`
+    already checks its own summary against its own table.
     """
     problems: list[str] = []
-    for name, start, end in (
-        ("§3", "## 3. The corrections log", "## 4. The artefact index"),
-        ("§5", "## 5. The at-risk inventory", "## 6. The issue index"),
-    ):
-        section = _region(text, start, end)
-        for match in re.finditer(r"`[^`\n]+`", section):
-            body = match.group(0)[1:-1]
-            if not CITATION_SHAPE_RE.match(body):
-                continue
-            if CITATION_RE.fullmatch(match.group(0)):
-                continue
-            problems.append(
-                f"{name}: `{body}` ends in a line number but is not a recognised "
-                "citation — widen `CITATION_RE` or reword it, because §8 claims "
-                "every `path:line` here is checked"
-            )
+    verdicts = _verdicts_by_label(text)
+    if not verdicts:
+        return ["§3: no correction rows — the tally has nothing to be derived from"]
+
+    non_still = sorted(lbl for lbl, v in verdicts.items() if v != "STILL-TRUE")
+    overtaken = sorted(
+        lbl for lbl, v in verdicts.items() if v in ("SUPERSEDED-BY-FIX", "ADOPTED")
+    )
+
+    idx = text.find(TAKEAWAY_MARKER)
+    if idx < 0:
+        return [
+            f"§3: the {TAKEAWAY_MARKER!r} paragraph is missing — the one summary a "
+            "reader quotes must exist for its counts to be checked"
+        ]
+    end = text.find("\n\n", idx)
+    paragraph = text[idx : end if end > 0 else len(text)]
+    # The page is hard-wrapped, so a phrase can straddle a newline. Normalise
+    # whitespace before matching phrases, or the arm reds on correct prose —
+    # measured: `seven of the twelve rows no longer read as\nwritten`.
+    paragraph = re.sub(r"\s+", " ", paragraph)
+
+    total = len(verdicts)
+    total_word = COUNT_WORDS[total] if total < len(COUNT_WORDS) else str(total)
+    expected = f"{COUNT_WORDS[len(non_still)]} of the {total_word} rows no longer read as written"
+    if expected not in paragraph:
+        problems.append(
+            f"§3 tally: the paragraph does not say {expected!r} — the table has "
+            f"{len(non_still)} row(s) whose verdict is not STILL-TRUE "
+            f"({', '.join(non_still)}), so the stated count is not derived from it"
+        )
+
+    # Split into sentences: the non-STILL-TRUE letters live in the "no longer read
+    # as written" sentence, its complement in the "still read as written" one.
+    # Partitioning on the phrase instead does not work — "Only **(a)** … **(j)** "
+    # sits BEFORE the words it introduces, so the head swallowed the complement and
+    # the arm named all twelve (measured).
+    sentences = re.split(r"(?<=\.)\s+", paragraph)
+    non_still_sentence = " ".join(
+        s for s in sentences if "no longer read as written" in s
+    )
+    still_sentence = " ".join(
+        s for s in sentences if "still read as written" in s and "no longer" not in s
+    )
+    named = set(re.findall(r"\*\*\(([a-z])\)\*\*", non_still_sentence))
+    if named != set(non_still):
+        problems.append(
+            f"§3 tally: the paragraph names {sorted(named) or '(none)'} as no longer "
+            f"reading as written, but the table's verdicts name {non_still} — a "
+            "letter list that disagrees with the cells beside it is a reader trap"
+        )
+    still_true = sorted(lbl for lbl, v in verdicts.items() if v == "STILL-TRUE")
+    named_still = set(re.findall(r"\*\*\(([a-z])\)\*\*", still_sentence))
+    if named_still != set(still_true):
+        problems.append(
+            f"§3 tally: the paragraph's STILL-TRUE list names "
+            f"{sorted(named_still) or '(none)'}, but the table's STILL-TRUE rows are "
+            f"{still_true}"
+        )
+
+    expected_overtaken = (
+        f"{COUNT_WORDS[len(overtaken)].capitalize()} of the "
+        f"{COUNT_WORDS[len(non_still)]} were"
+    )
+    if expected_overtaken not in paragraph:
+        problems.append(
+            f"§3 tally: the paragraph does not say {expected_overtaken!r}, though "
+            f"{len(overtaken)} row(s) are SUPERSEDED-BY-FIX/ADOPTED "
+            f"({', '.join(overtaken)})"
+        )
+    return problems
+
+
+def check_citation_shapes(text: str) -> list[str]:
+    """A backticked `token:LINE` the resolver declines is an ERROR, not silence.
+
+    §8 tells the reader every `path:line` on this page is checked. That claim is
+    only true if an unrecognised shape is refused, because a shape the pattern
+    does not match is indistinguishable from a shape the page does not contain.
+
+    The scan is the WHOLE document, not just §3/§5. Restricting it to the two
+    sections §8 names left the same hole one section up: §2's own
+    `tortoise/pipeline.py:16` could be mangled into `tortoise/pipeline .py:16` …
+    which matches neither the resolver nor a §3/§5-scoped refusal, so it went
+    unchecked and the page reported CLEAN (measured).
+    """
+    problems: list[str] = []
+    for match in re.finditer(r"`[^`\n]+`", text):
+        body = match.group(0)[1:-1]
+        if "/" not in body and "." not in body and not body.startswith(":"):
+            # A `key: value` token is not a citation: `fetch-depth: 0`, `timeout:
+            # 15`. Requiring a path marker (`/`, `.`) or the `:LINE` shorthand's
+            # own leading colon is what keeps the page's YAML and prose out of
+            # the population — measured: without it the whole-document scan
+            # refused `fetch-depth: 0` and the shipped page went red.
+            continue
+        if not (
+            CITATION_SHAPE_RE.match(body) or CITATION_SPACED_SHAPE_RE.match(body)
+        ):
+            continue
+        if CITATION_RE.fullmatch(match.group(0)):
+            continue
+        problems.append(
+            f"`{body}` ends in a line number but is not a recognised citation — "
+            "widen `CITATION_RE` or reword it, because §8 claims every "
+            "`path:line` here is checked"
+        )
     return problems
 
 
@@ -672,6 +804,7 @@ def check_document(text: str, root: Path = REPO) -> list[str]:
     """
     problems: list[str] = []
     problems.extend(check_verdicts(text))
+    problems.extend(check_verdict_tally(text))
     problems.extend(check_evidence_cells(text))
     problems.extend(check_citations(text, root))
     problems.extend(check_citation_shapes(text))
@@ -796,6 +929,20 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
             1,
         ),
         "not a recognised citation",
+    ),
+    (
+        "a citation with a space inserted into its path",
+        lambda t: t.replace(
+            "`tortoise/pipeline.py:16`", "`tortoise/pipeline .py:16`", 1
+        ),
+        "not a recognised citation",
+    ),
+    (
+        "a §3 headline tally that no longer matches the verdict cells",
+        lambda t: t.replace(
+            "| **DRIFTED** — `Entity` 3", "| **STILL-TRUE** — `Entity` 3", 1
+        ),
+        "the paragraph does not say",
     ),
     (
         # The EXACT shipped defect, re-injected: the pre-fix page said `three`

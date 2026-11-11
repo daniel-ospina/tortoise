@@ -26,8 +26,8 @@ measured_at: 2026-11-12
 > the very fixes they motivated, three by a number or a tracker state that moved —
 > so a lane that trusted §7 today would believe the Point fold still
 > drops props (#2795 closed that), and would go looking for a defect that is gone.
-> Meanwhile **six of the eight research briefs §3 indexes have no in-repo mirror at
-> all**, and the machine they lived on no longer carries them (§5).
+> Meanwhile **three of the seven research briefs §3.1 indexes have no copy in this repo at
+> all**, and the out-of-repo tree they lived on no longer exists (§5).
 >
 > **What this page does NOT do.** It does not re-open a defect, propose a fix, or
 > schedule anything. It does not restate the 26-entry status table — read the
@@ -137,6 +137,7 @@ code while the brief itself never did.
 | `design/2026-09-10-decision-briefs-workstream-C.md` (167 l) | Near-full comment on #2826 | #2826 is CLOSED `NOT_PLANNED` — still readable, no longer a queue |
 | `design/2026-09-10-a1-a2-comment.md` (103 l) | Near-full comment on #2826 (A1/A2 briefs) | Same |
 | `design/2026-09-10-a1-a2-decision-briefs.md` (71 l) | **Gone** — never posted, superseded by the A1 comment by design | Nothing; flagged local-only when written |
+| `<corpus>/2026-09-09-ontology-evidence.md` (431 l) | Condensed comment on #2725 only (“Corpus-grounding verification”, 8,099 B) | **No copy of its content in-repo** — its only `docs/` hit is this page's own row |
 | `<corpus>/README.md` + 8 `.docx` + 8 `plaintext/*.txt` (~976 KB) | **Gone from this machine** — and **must never** enter this public repo (#2852 §6.3) | Nothing reachable; originals were also in `~/Downloads`, unverified |
 | `~/.swarm/issue-triage-2026-09-09.md` (~5 KB) | **Gone** — local-only by design | Nothing; its outcome (33 closures + a 10-item shortlist) is in the tracker, the reasoning is not |
 
@@ -245,7 +246,18 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   number but is not a recognised `path:line` is **refused**, not skipped. Skipping it was a hole with
   three doors — a `.txt` path, an extension-less path, and a leading-dot path like
   `.github/workflows/ci.yml:892` matched nothing, so reformatting a citation was enough to defuse a
-  real red;
+  real red — and there was a fourth: **one inserted space**, in the form “tortoise/pipeline .py:16”
+  or “sdk.py: 16962”, matched neither the resolver nor a refusal whose token class excluded
+  whitespace, so it went entirely unchecked (measured, `--check` exited 0). The scan is the **whole
+  page**, not just §3/§5: scoping it to the two sections named above left §2's own citation free to be
+  mangled — those two strings are deliberately NOT in code spans, because the scan would (correctly)
+  refuse them;
+- the **§3 headline tally** is derived too. The "N of the twelve rows no longer read as written"
+  count, the letter list beside it, and the four-of-the-seven "overtaken" figure are all recomputed
+  from the verdict cells and compared with the sentence a reader actually quotes. Unguarded, flipping
+  one verdict cell to `STILL-TRUE` left the page asserting a superseded count with `--check` at
+  **rc 0** — and that number is repeated in this repo's `ci.yml`, `config/ci-surfaces.yml`,
+  `docs/00_index.md` and two test docstrings, so a wrong one propagates well past this page;
 - every **§3 evidence cell** names a `path:line`, an issue, a command or a §N (§1's own rule). Without
   this, the whole evidence column can be **emptied** while every verdict still passes — a red defused
   by deleting what it pointed at, which is the one move this page exists to make impossible;
@@ -270,9 +282,9 @@ The self-test that proves those rules still fire has its own **population floor*
 a gate reporting OK when it cannot run — so a shrunk population now reds instead.
 
 Exactly one arm needs `git` **history**: the frontmatter's `measured_at_commit` must be an ancestor of
-`HEAD`. The other seven read this checkout's tree and nothing else, and the tool keeps that split
+`HEAD`. The other eight read this checkout's tree and nothing else, and the tool keeps that split
 (`check_document()` / `check_all()`) because the two jobs that run it differ: the REQUIRED `docs` job
-checks out at `fetch-depth: 0` and runs `--check` (all eight arms), while the `test` jobs check out at
+checks out at `fetch-depth: 0` and runs `--check` (all nine arms), while the `test` jobs check out at
 the default depth 1, cannot resolve `f70d884b7` at all, and are where this page's own test module runs.
 In a depth-1 clone `--check` therefore reports **exit 2 UNVERIFIED** — never `0`, and never a verdict
 against the document it could not read — and `--self-test`, which drives only the tree-only arms,

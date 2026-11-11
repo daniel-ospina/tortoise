@@ -2,8 +2,9 @@
 
 The findings ledger (`docs/architecture/MEMORY-SUBSTRATE-FINDINGS-LEDGER.md`) is
 the durable half of #2852 — the corrections log of the 2026-09-09/10
-memory-substrate review, re-measured. Re-measuring it found **five of its twelve
-corrections already overtaken by the fixes they motivated**, which is precisely
+memory-substrate review, re-measured. Re-measuring it found **seven of its twelve
+rows no longer read as written** (four of them overtaken by the fixes they
+motivated), which is precisely
 why it needs a guard: the page's job is to tell a reader *which of its own rows
 are still live*, and every checkable property it has can decay silently.
 
@@ -167,8 +168,8 @@ def test_mutation_population_is_pinned():
     row, an emptied evidence column, an unclassifiable §6 row, a citation shape the
     resolver declines), so the population is 12 and the floor is pinned with it.
     """
-    assert len(flc.MUTATIONS) == 12
-    assert flc.MIN_SELF_TEST_MUTATIONS == 12
+    assert len(flc.MUTATIONS) == 14
+    assert flc.MIN_SELF_TEST_MUTATIONS == 14
 
 
 def test_self_test_floor_catches_a_shrunk_population(monkeypatch):
@@ -413,6 +414,91 @@ def test_a_non_python_extension_citation_is_measured_not_skipped(tmp_path, monke
     )
     problems = _doc_problems()
     assert any("does not exist in the tree" in p for p in problems), problems
+
+
+def test_a_citation_with_a_space_in_its_path_is_refused(tmp_path, monkeypatch):
+    """FAILS if one inserted space makes a citation invisible instead of refused.
+
+    This is the one-keystroke bypass: with a whitespace-excluding token class the
+    mangled token matched neither the resolver nor the refusal, so `--check`
+    exited 0 over a citation nobody was checking — including §2's own, because the
+    scan had been scoped to §3/§5.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace("`tortoise/pipeline.py:16`", "`tortoise/pipeline .py:16`", 1),
+    )
+    problems = _doc_problems()
+    assert any("not a recognised citation" in p for p in problems), problems
+
+
+def test_a_citation_with_a_space_after_the_colon_is_refused(tmp_path, monkeypatch):
+    """FAILS if `path: 16962` is silently skipped — the second space shape."""
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace("`tortoise/sdk.py:16962`", "`tortoise/sdk.py: 16962`", 1),
+    )
+    problems = _doc_problems()
+    assert any("not a recognised citation" in p for p in problems), problems
+
+
+def test_a_yaml_key_value_is_not_a_citation():
+    """FAILS if the whole-page scan treats `key: value` as a citation.
+
+    A false red here would red the REQUIRED `docs` job on correct prose — the
+    shipped page contains `fetch-depth: 0` inside a code span. The population is
+    "has a path marker or the `:LINE` shorthand", not "contains a colon".
+    """
+    text = flc.read_doc(REPO)
+    assert "`fetch-depth: 0`" in text
+    assert flc.check_citation_shapes(text) == []
+
+
+# ── the headline tally is derived, not asserted ────────────────────────────
+
+
+def test_the_shipped_tally_matches_the_verdict_cells():
+    """FAILS if the page's "N of twelve" sentence stops agreeing with the table."""
+    text = flc.read_doc(REPO)
+    assert flc.check_verdict_tally(text) == []
+    verdicts = flc._verdicts_by_label(text)
+    non_still = [lbl for lbl, v in verdicts.items() if v != "STILL-TRUE"]
+    assert len(non_still) == 7, verdicts
+    overtaken = [lbl for lbl, v in verdicts.items() if v in ("SUPERSEDED-BY-FIX", "ADOPTED")]
+    assert len(overtaken) == 4, verdicts
+
+
+def test_a_flipped_verdict_that_leaves_the_tally_stale_is_rejected(tmp_path, monkeypatch):
+    """FAILS if a verdict cell can be flipped without the tally sentence reddening.
+
+    Reachable by any ordinary re-measure that upgrades one row: the prose keeps its
+    old count and letter list, and every reader who quotes the summary (including
+    `ci.yml`, `config/ci-surfaces.yml` and `docs/00_index.md`, which repeat it) is
+    told a number the table beside it contradicts. Measured before the fix: rc 0.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace(
+            "| **DRIFTED** — `Entity` 3", "| **STILL-TRUE** — `Entity` 3", 1
+        ),
+    )
+    problems = _doc_problems()
+    assert any("the paragraph does not say" in p for p in problems), problems
+    assert any("'six of the twelve" in p or "six of the twelve" in p for p in problems), problems
+
+
+def test_a_tally_that_names_the_wrong_letters_is_rejected(tmp_path, monkeypatch):
+    """FAILS if the letter list can drift from the cells it summarises."""
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace("**(l)** are **DRIFTED**", "are **DRIFTED**", 1),
+    )
+    problems = _doc_problems()
+    assert any("letter list that disagrees" in p for p in problems), problems
 
 
 # ── citations resolve ──────────────────────────────────────────────────────
