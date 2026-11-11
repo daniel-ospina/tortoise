@@ -3061,9 +3061,9 @@ def label_coverage(counts: dict[str, int], declared: frozenset[str],
       When `expected` is `None` the absence list is still reported and `expected_absent` is
       `UNMEASURED(...)`, so a caller can tell "nothing was expected of this layer" from "everything
       expected of it was present".
-    * `coverage` — **reported, never chased**. `None` at a zero population, because 100 % of 0 is
-      not coverage: that is A4's `n > 0` non-vacuity floor, and it is why `non_vacuity` is a
-      separate boolean rather than a comparison of this rate.
+    * `coverage` — **reported, never chased**. `None` at a ZERO POPULATION, because 100 % of 0 is
+      not coverage. ⛔ That is the POPULATION arm (`n > 0`), NOT A4's non-vacuity floor — the floor
+      is `a4_labelled_nodes: 1` (≥1 carrying a DECLARED label), and `non_vacuity` carries THAT.
     * `undeclared` — kinds present that THIS layer's vocabulary does not declare (the `#9695`
       distinction — "a kind nothing declares" vs "a kind this layer does not declare" — is the
       vocabulary's own answer, and `declared_present`/`declared_absent` carry the other side of
@@ -3110,8 +3110,8 @@ def label_coverage(counts: dict[str, int], declared: frozenset[str],
         "declared_present": declared_present,
         "declared_absent": sorted(
             k for k in declared if _cmp(k) not in {_cmp(x) for x in seen}),
-        # ⛔ `expected` is an INPUT (a corpus declaration), never a graph inference: the kinds it
-        # names with ZERO population are this layer's concrete "a declared kind absent" leg.
+        # ⛔ `expected` is an INPUT (a corpus declaration): its ZERO-population kinds are the
+        # "a declared kind absent" leg — but THIS census passes none, so it reads UNMEASURED.
         "expected_absent": (unmeasured(
             "a declared expectation set for this layer — which declared kinds the corpus "
             "REQUIRES. A census cannot derive it from the graph without reddening every layer for "
@@ -3152,7 +3152,7 @@ def _a4_layer_counts(projection, label: str, kind_prop: str) -> dict[str, int]:
     ⛔ TRUTHINESS, not `IS NULL`: `create_point(is_episodic=False)` really writes the property
     (`projection/entities.py:3036`), so an explicit `false` is a CLAIM — `IS NULL` dropped it from
     the denominator while the capture count reported it as a turn row it is not. The same predicate
-    the file's own `POINT_COMPOSITION_CYPHER` uses; ⛔ NOT `tortoise/quota.py:1133`, which tests
+    the file's own `POINT_COMPOSITION_CYPHER` uses; ⛔ NOT `tortoise/quota.py:1138`, which tests
     `is_episodic` ALONE and would count an operator Point as a claim (#10982 review round 2).
     """
     where = ""

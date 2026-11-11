@@ -163,3 +163,9 @@ VACUOUS rather than passing for the wrong reason.
   still carries the RETIRED `floor: a4_typed_statements` with `blocked_by: #10988` (the whole-row rewrite
   `04-plan.md` §4.1 assigns to C1, `#10982`, which closed without it). That is a record defect of its own,
   named here rather than silently edited by this lane.
+- The **`expected=` half** of A4's *"a declared kind absent"* leg reads `UNMEASURED` on every real run:
+  `_a4_label_coverage` calls `label_coverage(...)` with no `expected=` set, so `expected_absent` carries
+  the `UNMEASURED(...)` reason rather than a list of kinds. The information is not lost — `declared_absent`
+  reports every declared kind the layer does not show — but turning *"not shown"* into *"absent against
+  an expectation"* needs a corpus declaration, which is a corpus fact (`04-plan.md` §3.1) and not
+  something a graph census can derive (`#11837` review, P2).
