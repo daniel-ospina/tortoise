@@ -4204,7 +4204,11 @@ surfaces:
   # #11821 P0: the journal's vector WIDTH (`tortoise/embeddings.py::
   # stamp_journal_embedding` / `shortest_float32_vector`), the compact-separator
   # write in `tortoise/log.py::EventLog.append`, and the #11821 P0 stamp at the
-  # `EventRecorded` door (`tortoise/sdk.py::_journal_event_raw_write`). It landed
+  # `EventRecorded` door — carried by `tortoise/sdk.py::_emit_event`'s
+  # `id=`/`**extra` branch, which is the ONE stamp for that door since #11835
+  # review finding 2 removed the dead second one from
+  # `_journal_event_raw_write` (the row below still drives that door end to
+  # end). It landed
   # with NO row here, so `tools/ci_selection.py --integrity` redded (`manifest
   # drift: ['test_11821_journal_vector_width.py']`) and `manifest-integrity` —
   # which IS in `python-ci-gate.needs` — held the merge red while the pins ran in
@@ -4219,7 +4223,8 @@ surfaces:
   # `manifest-integrity` stayed green (the file IS classified; that gate answers
   # a different question). Exactly the #1349/#3332/#3616 silent-drop class, and
   # the same remedy its sibling `test_journal_embedding_5004.py` already uses.
-  # Hermetic — `numpy` and `tmp_path` only, no DB, no graph, no network — so it is
+  # Hermetic in the sense that matters here — `numpy` and `tmp_path` only, no
+  # external DB, no live graph service, no network — so it is
   # deliberately NOT carve_out-registered: the pins are fail-closed format claims
   # that must run on every lane. The single most load-bearing one is
   # `test_a_verbatim_vector_is_never_narrowed` (the #5004 round-7 promise that a
@@ -8400,7 +8405,7 @@ surfaces:
   # `SOURCE_PATTERNS["eval"]` entry. A named-surface match REPLACES the `core`
   # fallback (#2938), so without this arm an `embeddings.py`-only PR — P2's
   # base64 float32 payload lands there next — selects `['eval']` and runs NONE
-  # of the twenty-six width pins while `manifest-integrity` stays green.
+  # of the thirty-five width pins while `manifest-integrity` stays green.
   - test_journal_embedding_5004.py
   - test_11821_journal_vector_width.py
   # #11835 review (P2): the SIBLING defect, measured in the same selection run —
