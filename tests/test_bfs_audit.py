@@ -28,15 +28,25 @@ def _grep(pattern: str, *dirs: str) -> list[str]:
 
 # ── 1. propagate_shock callers ────────────────────────────────────
 
-def test_no_propagate_shock_callers():
-    """Assert: propagate_shock.calls only in deprecated definition + tests + scripts."""
-    # All references to propagate_shock (the word)
-    all_refs = _grep("propagate_shock", "tortoise/", "graph-scripts/", "validation/", "tests/")
-    filtered = [
-        l for l in all_refs  # noqa: E741
-        if "__pycache__" not in l and "test_bfs_audit.py" not in l and "test_e2e_extraction_ep.py" not in l
-    ]
+def _classify_propagate_shock_refs(lines: list[str]) -> dict[str, list[str]]:
+    """Bucket `grep` hits for `propagate_shock` by what each hit actually is.
 
+    The audit's question is whether PRODUCTION code **calls** the deprecated
+    path, so a bare mention is a reference, not a call — docstring prose and
+    comments name the symbol without invoking it. The earlier rule recognised a
+    comment only when the line carried BOTH `#` and `replaces` (exactly one line
+    in the tree did, `ingest.py:1361`), so every later prose mention was bucketed
+    as `production_code` and reddened the audit. #11803's #11702 note in
+    `projection/propagation.py` is that case: docstring lines stating the path is
+    UNREACHABLE were reported as "PRODUCTION CODE CALLS propagate_shock". The
+    call shape is the honest discriminator — a call site must read
+    `propagate_shock(` — and
+    `test_the_audit_discriminates_a_call_from_a_mention` pins both directions.
+
+    Deliberate boundary: prose that spells a call (`propagate_shock(x)` inside a
+    docstring) still counts as production code. That direction fails CLOSED — it
+    reds an audit a human then reads.
+    """
     callers: dict[str, list[str]] = {
         "definition (deprecated)": [],
         "comment/reference only": [],
@@ -45,9 +55,8 @@ def test_no_propagate_shock_callers():
         "production_code": [],
     }
 
-    for line in filtered:
+    for line in lines:
         path_part = line.split(":")[0]
-        full_path = ROOT / path_part  # noqa: F841
 
         # #378: projection.py was split into the projection/ package — the
         # deprecated definition now lives in projection/propagation.py.
@@ -60,12 +69,50 @@ def test_no_propagate_shock_callers():
             callers["fixup_scripts (historical)"].append(line)
         elif "/graph-scripts/" in path_part:
             callers["test_files"].append(line)  # test_6707_shock.py
-        elif "/tortoise/" in path_part and "#" in line and "replaces" in line.lower():
+        elif "/tortoise/" in path_part and "propagate_shock(" not in line:
             callers["comment/reference only"].append(line)
         elif "/tortoise/" in path_part:
             callers["production_code"].append(line)
 
-    # The only "production" reference is a comment: no actual call
+    return callers
+
+
+def test_the_audit_discriminates_a_call_from_a_mention():
+    """Non-vacuity, both directions, for `_classify_propagate_shock_refs`.
+
+    Pre-fix a docstring line that merely NAMES the symbol landed in
+    `production_code` (it carries neither `#` nor `replaces`), which is the
+    false positive that reddened `test_no_propagate_shock_callers` on #11803's
+    note — so `comment/reference only == [prose]` below reds on the pre-fix
+    classifier. Emptying the bucket would "fix" that red and kill the audit, so
+    the CALL direction is pinned as well: a real call site must still be
+    reported.
+    """
+    prose = f"{ROOT}/tortoise/projection/propagation.py:71:        `propagate_shock` PERSISTS the blend"
+    call = f"{ROOT}/tortoise/api.py:999:            self.propagate_shock(epicenter_id)"
+    callers = _classify_propagate_shock_refs([prose, call])
+
+    assert callers["comment/reference only"] == [prose], (
+        "a line that only NAMES propagate_shock is a reference, not a call; "
+        f"bucketed as: {callers['comment/reference only']}")
+    assert callers["production_code"] == [call], (
+        "a real CALL site must still be reported as production code; "
+        f"bucketed as: {callers['production_code']}")
+
+
+def test_no_propagate_shock_callers():
+    """Assert: propagate_shock.calls only in deprecated definition + tests + scripts."""
+    # All references to propagate_shock (the word)
+    all_refs = _grep("propagate_shock", "tortoise/", "graph-scripts/", "validation/", "tests/")
+    filtered = [
+        l for l in all_refs  # noqa: E741
+        if "__pycache__" not in l and "test_bfs_audit.py" not in l and "test_e2e_extraction_ep.py" not in l
+    ]
+
+    callers = _classify_propagate_shock_refs(filtered)
+
+    # No production mention is a call: the deprecated definition, docstring prose
+    # that names the symbol, and one historical comment.
     assert len(callers["production_code"]) == 0, (
         f"PRODUCTION CODE CALLS propagate_shock:\n" + "\n".join(callers["production_code"])  # noqa: F541
     )
