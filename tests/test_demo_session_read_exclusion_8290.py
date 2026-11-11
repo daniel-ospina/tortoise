@@ -749,9 +749,12 @@ def test_the_hosted_api_cite_notes_state_one_measurement_and_the_pivot():
     # thing that can red.
     assert DEFAULT_PIVOT == lifetime_query_sites()[0], (
         f"the census tool's fallback pivot {DEFAULT_PIVOT} is not the site "
-        f"{lifetime_query_sites()} — nothing shipped reads it, but the module's "
-        "documented `--pivot` example and the keyword defaults do; re-derive it "
-        "in the same commit that moves the site")
+        f"{lifetime_query_sites()} — nothing shipped reads it, but `census()` and "
+        "`pivot_is_the_lifetime_site()` default to it; re-derive it in the same "
+        "commit that moves the site. ⚠ The module docstring's `--pivot <line>` "
+        "EXAMPLE is hand-written and NOT covered by this pin (measured: mutating "
+        "it to `--pivot 99999` leaves `--check` at exit 0) — move it too, or the "
+        "documented command reports `site: False` over a correct tree")
 
     # the census command is the notes' stated remedy, so it must work and must not
     # collapse to nothing (that, and only that, about the population is pinned here)
