@@ -355,14 +355,26 @@ EP_STATE_ABSENT = "absent"
 #: the API accepts — would break every belief read on the batch. `CASE` is
 #: evaluated EAGERLY in FalkorDB (measured: `CASE WHEN toString(x) IN ['true',
 #: 'false'] THEN null ELSE toFloat(x) END` still raises on a bool), so the
-#: guard has to sit INSIDE the `toFloat` argument: the inner `CASE` maps a
+#: guard has to sit INSIDE the coercion's argument: the inner `CASE` maps a
 #: Boolean to null and everything else to itself, and `toFloat(null)` is null.
 #: The `toString` test is the only type discriminator available (a numeric
 #: comparison against a Boolean is NULL, and against a numeric STRING also
 #: NULL, so comparison cannot tell them apart — but `toFloat` works on the
 #: string and raises on the bool).
+#:
+#: ⛔ `toFloat` and `toString` are the RAISING spellings, and a stored LIST is
+#: the second type they refuse ("Type mismatch: expected String, Integer,
+#: Float, or Null but was List", measured). A pre-guard node carrying
+#: `[0.7]` therefore took the presence predicate down — and because every
+#: belief expression in this module goes through THIS template, one such row
+#: blanked a whole batch: measured at `be229efdb7df`, a healthy `(3, 1)` claim
+#: beside it read `absent` on `StateRanker` (`StateRanker signal fetch failed
+#: (point): Type mismatch: …`), which is the batch-scope conflation #11702
+#: removes. The `*OrNull` twins answer NULL for every type these two refuse
+#: (measured: `toFloatOrNull(<List>)` → null, `toStringOrNull(<List>)` → null)
+#: and are identical for every type they accept, so the coercion is TOTAL.
 NUMERIC_OPERAND_CYPHER_TEMPLATE = (
-    "toFloat(CASE WHEN toString({operand}) IN ['true', 'false'] "
+    "toFloatOrNull(CASE WHEN toStringOrNull({operand}) IN ['true', 'false'] "
     "THEN null ELSE {operand} END)")
 
 #: The decimal grammar BOTH twins accept for a STRING operand. Python's
@@ -378,31 +390,47 @@ NUMERIC_OPERAND_CYPHER_TEMPLATE = (
 #:   `recall_ranking`, beside `absent` in the `ep` block: three answers.
 #:
 #: So the string spelling is pinned to a plain decimal literal, the intersection
-#: of the two languages. A string outside it is ABSENT on both twins.
+#: of the two GRAMMARS — and, in `numeric_operand`, of the two RANGES.
+#: `toFloat` parses a string into a **float32** (measured 4.20.6:
+#: `toFloat("0.7")` is `0.699999988079071`) and answers null outside the normal
+#: float32 range, so magnitude is part of the same pin: `"1e308"` and `"1e39"`
+#: are null there, and `"1e-40"` is null there too. A string outside either is
+#: ABSENT on both twins.
 #: Measured `toFloat` grammar: leading whitespace is skipped, trailing is not
 #: (`" 0.7"` parses, `"0.7 "` does not). Hex floats (`"0x1p4"` → 16.0) and the
 #: `Infinity`/`nan` spellings parse there too; the first stays a recorded
 #: residual (see `numeric_operand`), the second is nulled by the finiteness
 #: guard in `numeric_operand_cypher`.
-# float32's smallest NORMAL value. `strtof` — what FalkorDB's `toFloat` uses on
-# a STRING — sets `ERANGE` (and answers null) for a result that is subnormal OR
-# overflows. Measured: `toFloat("1.2e-38")` reads, `toFloat("1e-38")` is null,
-# `toFloat("3.4028235e38")` READS (it rounds to max) and `toFloat("3.5e38")` is
-# null — so the boundary is float32's ROUNDING boundary, not its max/min value.
-# `numeric_operand` therefore asks `struct` to round instead of comparing against
-# a constant: `struct.pack("f", x)` is exactly round-half-to-even into float32
-# and raises `OverflowError` past the top, so neither a hand-computed endpoint
-# nor an off-by-an-ulp refusal of a literal the store reads can creep back in.
+#: The float32 NORMAL range a STRING operand must land in to be readable in
+#: Cypher: `toFloat`/`toFloatOrNull` parse a string as a float32 and answer null
+#: rather than a number when the correctly-rounded result would not be a normal
+#: float32 — that is what `strtof` does, and `ERANGE` is what makes it null.
+#: Measured on 4.20.6, both twins side by side:
+#:
+#: * over range → null: `"3.4028236e38"`, `"1e39"`, `"1e308"`, `"1e309"`,
+#:   `"1e400"`;
+#: * in range → value: `"3.4028235e38"` (max), and `"3.40282355e38"`, which
+#:   ROUNDS DOWN to max — hence `struct` packing in `_string_operand` rather
+#:   than a plain double comparison, which would call that literal absent here
+#:   and readable there;
+#: * under range → null: `"1e-38"`, `"1e-40"`, `"1e-320"`, `"1.4e-45"`, and
+#:   `"1.1754943e-38"` — below min-normal even though it rounds UP to it, so
+#:   the exact magnitude is tested, not the rounded one;
+#: * in range → value: `"1.1754944e-38"` (min normal), `"1.2e-38"`, `"1e-37"`.
 _FLOAT32_MIN_NORMAL = 1.1754943508222875e-38
-# `re.ASCII` is load-bearing: without it `\s` matches Unicode spaces that
-# `float()` skips and `strtof` does not — `"\u00a00.7"` was 0.7 in Python and
-# null to the store, the same twin split this grammar exists to prevent.
-_FLOAT_LITERAL = re.compile(r"\s*[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)"
-                            r"(?:[eE][+-]?[0-9]+)?\Z", re.ASCII)
-# A literal whose MANTISSA is all zeros — the only kind that reads as a zero
-# number. `"1e-400"` is not one: it is zero to `float()` because it underflowed.
+_FLOAT32_MAX = 3.4028234663852886e38
+#: A literal whose MANTISSA is all zeros — the only kind that reads as a zero
+#: NUMBER. `"1e-400"` is not one: `float()` makes it zero because it underflowed,
+#: and `toFloat` answers null for it.
 _ZERO_LITERAL = re.compile(r"\s*[+-]?0*(?:\.0*)?(?:[eE][+-]?[0-9]+)?\Z",
                            re.ASCII)
+#: `re.ASCII` is load-bearing on both patterns: without it `\s` matches Unicode
+#: spaces that `float()` skips and `strtof` does not — `"\u00a00.7"` (a value
+#: pasted out of a spreadsheet) was 0.7 in Python and null to the store, the same
+#: twin split this grammar exists to prevent — and `[0-9]`/`\d` stay Latin,
+#: which is what the store parses.
+_FLOAT_LITERAL = re.compile(r"\s*[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)"
+                            r"(?:[eE][+-]?[0-9]+)?\Z", re.ASCII)
 
 
 def numeric_operand_cypher(operand: str) -> str:
@@ -410,15 +438,17 @@ def numeric_operand_cypher(operand: str) -> str:
 
     #11702 cycle 16. `ep_has_belief_cypher` compared the raw coalesced operand
     to `0` while `belief_mean_cypher` coerced with `toFloat`, so a
-    NUMERIC-STRING operand — `update_point(posterior_alpha="0.7",
-    posterior_beta="0.3")` is accepted and stored verbatim — made the presence
-    conjunction NULL and the claim read `absent` in Cypher, `measured` in
-    Python, in the same query that computed a mean of 0.7 and a variance of
-    0.105. One claim, two states, the vocabulary contradicting itself.
+    NUMERIC-STRING operand made the presence conjunction NULL and the claim read
+    `absent` in Cypher, `measured` in Python, in the same query that computed a
+    mean of 0.7 and a variance of 0.105. One claim, two states, the vocabulary
+    contradicting itself. (The shape PRE-DATES the cycle-20 write guard, which
+    refuses a string belief at `_sanitize_props` — it arrives now only from rows
+    written before that guard, or by raw Cypher. It is still the population this
+    coercion exists for.)
 
-    Non-numeric text (`"abc"`), a stored Boolean, `null` and the empty string
-    all answer NULL, which the presence rule turns into ABSENT — matching
-    :func:`numeric_operand`, the Python twin.
+    Non-numeric text (`"abc"`), a stored Boolean, a stored LIST, `null` and the
+    empty string all answer NULL, which the presence rule turns into ABSENT —
+    matching :func:`numeric_operand`, the Python twin.
     """
     coerced = NUMERIC_OPERAND_CYPHER_TEMPLATE.format(operand=operand)
     # …and it must be FINITE. `toFloat` accepts spellings Python does not —
@@ -434,6 +464,44 @@ def numeric_operand_cypher(operand: str) -> str:
     return (f"CASE WHEN {coerced} <= 1.7976931348623157e308 "
             f"AND {coerced} >= -1.7976931348623157e308 "
             f"THEN {coerced} ELSE null END")
+
+
+def _string_operand(val: float):
+    """The float `toFloat` reads for a decimal string, or None (#11702).
+
+    ``val`` is Python's DOUBLE for the literal (the grammar is already pinned by
+    `_FLOAT_LITERAL`); this is the RANGE half of the same agreement. Before it,
+    `"1e309"` was `absent` in every Cypher surface and `measured / inf` in
+    Python — `annotate_ep_batch` served `inf`, the rankers sorted it FIRST, and
+    `json.dumps(..., allow_nan=False)` turned the hosted read into a 500.
+
+    The overflow edge is decided by the ROUNDED float32, because that is what
+    `strtof` decides: a literal just above float32 max but below its rounding
+    midpoint lands on max and READS (`"3.40282355e38"`, measured). A plain
+    `abs(val) <= _FLOAT32_MAX` would call that absent only here. The underflow
+    edge is decided by the EXACT magnitude, for the mirror reason: a literal
+    just below min-normal rounds UP to it and yet is null there
+    (`"1.1754943e-38"`, measured).
+
+    The VALUE returned is the double, not the float32 `toFloat` would serve
+    (`0.7` vs `0.699999988079071`): that value divergence is pre-existing,
+    bounded by the same literal, and pinned with `approx` in
+    `test_the_twins_parse_the_same_string_language`. PRESENCE is what must
+    agree, because presence is the `absent` / `measured` state itself.
+    """
+    try:
+        rounded = struct.unpack("<f", struct.pack("<f", val))[0]
+    except (OverflowError, ValueError):
+        # A double beyond float32 range: `toFloat` answers null, not inf.
+        return None
+    if not math.isfinite(rounded):      # `nan`/`inf` never survive the pack
+        return None
+    if abs(rounded) > _FLOAT32_MAX:     # belt and braces; pack guarantees it
+        return None
+    if val != 0.0 and abs(val) < _FLOAT32_MIN_NORMAL:
+        # Subnormal / underflow: `strtof` sets ERANGE, so the engine nulls it.
+        return None
+    return val
 
 
 def numeric_operand(raw):
@@ -470,10 +538,10 @@ def numeric_operand(raw):
     for ``'1e-400'``) for a literal the engine calls ABSENT — and ``inf`` then
     propagated into ``EpBreakdown.confidence_mean``, which ``asdict`` +
     ``json.dumps(allow_nan=False)`` (Starlette's ``JSONResponse``) turns into a
-    500 on the agent-facing surfaces. The window below is the float32 normal
-    range plus any zero; inside it the DOUBLE is returned, deliberately — the
-    float32 narrowing of an in-range literal (``0.6`` → ``0.6000000238``) is a
-    recorded residual (#11841), not a twin split to close here.
+    500 on the agent-facing surfaces. The window is the one `_string_operand`
+    applies; inside it the DOUBLE is returned, deliberately — the float32
+    narrowing of an in-range literal (``0.6`` → ``0.6000000238``) is a recorded
+    residual (#11841), not a twin split to close here.
     """
     if raw is None or isinstance(raw, bool):
         return None
@@ -487,22 +555,14 @@ def numeric_operand(raw):
         val = float(raw)
         if val == 0.0:
             # An exact-zero literal (`"0"`, `"0e400"`, `"-0.0"`) reads as a
-            # number; one that UNDERFLOWED the double (`"1e-400"`, `"1e-350"`)
-            # is null to the store. `float()` cannot tell them apart — both are
-            # zero — so the literal's own digits do. Answering 0.0 for the
-            # underflowed one was maximum disbelief for a claim with no readable
-            # belief, the very defect this issue removes.
+            # number; one that underflowed the DOUBLE to zero does not —
+            # `"1e-350"`/`"1e-400"` are null to `toFloat`, and answering 0.0 for
+            # them is maximum disbelief for a claim with no readable belief.
+            # `float()` cannot tell the two apart (both are zero) and
+            # `_string_operand` cannot either (it receives the float), so the
+            # literal's own MANTISSA decides.
             return val if _ZERO_LITERAL.match(raw) else None
-        # Round EXACTLY as the store does (`struct` is round-half-to-even into
-        # float32 and saturates to INF rather than raising), then apply
-        # `strtof`'s ERANGE rule: a result that is infinite, subnormal, or
-        # underflowed to zero is null.
-        narrowed = struct.unpack("f", struct.pack("f", val))[0]
-        if not math.isfinite(narrowed):
-            return None                      # overflow: `"3.5e38"`, `"1e308"`
-        if abs(narrowed) < _FLOAT32_MIN_NORMAL:
-            return None                      # subnormal / underflow: `"1e-320"`
-        return val
+        return _string_operand(val)
     try:
         val = float(raw)
     except (TypeError, ValueError):
@@ -4738,8 +4798,9 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
 
         breakdowns: dict[str, EpBreakdown] = {}
         # #11702 cycle 16: ONE total coercion (`numeric_operand`), applied to the
-        # MIRROR as well. Cycle 15 coerced the α/β columns only, so a stored
-        # `update_point(confidence="abc")` still raised here — and the blanket
+        # MIRROR as well. Cycle 15 coerced the α/β columns only, so a LEGACY row
+        # stored with a non-numeric mirror (a pre-guard `confidence="abc"`, or a
+        # raw-Cypher write) still raised here — and the blanket
         # `except` below discarded the WHOLE BATCH, which reads as
         # "ep_state: absent" for every claim in the response, including measured
         # ones, and makes any belief floor (`min_confidence`) return nothing

@@ -427,11 +427,11 @@ def test_a_legacy_string_operand_outside_float32_is_absent_on_every_surface(sdk)
     # `'1e-320'` is a perfectly finite double that the store's float32 parse
     # underflows to null (caught only by the range guard). A test that used just
     # the first stayed green when the second guard was disabled — measured.
-    # Four literals, four rules, each proved by mutation: `'1e400'` overflows the
-    # DOUBLE; `'1e-320'` is a finite double the store's float32 parse
-    # underflows; `'1e-350'` / `'1e-400'` are ALREADY zero as a double, so only
-    # the literal's own mantissa distinguishes them from an exact `'0'` (they
-    # answered `0.0` — maximum disbelief — until cycle 23).
+    # FOUR literals, four rules, each proved by mutation: `'1e400'` overflows the
+    # DOUBLE; `'1e-320'` is a finite double the store's float32 parse underflows;
+    # `'1e-350'`/`'1e-400'` are ALREADY zero as a double, so only the literal's
+    # own mantissa distinguishes them from an exact `'0'` (they answered `0.0` —
+    # maximum disbelief — until cycle 23).
     for literal in ("1e400", "1e-320", "1e-350", "1e-400"):
         assert numeric_operand(literal) is None, (
             f"the Python twin still answers {numeric_operand(literal)!r} for "
@@ -483,17 +483,16 @@ def _assert_absent_everywhere(proj, pid):
 
 
 def test_a_literal_at_the_stores_rounding_boundary_is_read_not_refused(sdk):
-    """Cycle 23 P2: the string window's ENDPOINTS were float32's min/max values,
-    but `strtof` sets ERANGE on the ROUNDED result.
+    """Cycle 23 P2: a readable literal must not fall through to the OPERANDS.
 
-    `"3.4028235e38"` is above `float32`'s maximum (3.40282346638529e38) yet
-    rounds to it, so the store READS it — and the hand-computed `<= max` bound
-    refused it. The consequence was not a value difference: with the mirror
-    refused, the rankers fell through to their operands, which the query spelled
-    `coalesce(n.posterior_alpha, n.ep_alpha, 1.0)` — an IMPUTED Beta(1, 1) —
-    and answered `0.5` labelled `belief_informed_order: True`. Three answers for
-    one claim: absent / 3.4e38 / 0.5, the last of them the exact neutral score
-    this issue removes, in an order-moving tier.
+    `"3.4028235e38"` is above float32's maximum yet rounds to it, so the store
+    READS it. A window written as `<= max` refused it — and the consequence was
+    not a value difference: with the mirror refused, the rankers fell through to
+    their operand columns, which read
+    `coalesce(n.posterior_alpha, n.ep_alpha, 1.0)` — an IMPUTED Beta(1,1) — and
+    answered `0.5` labelled `belief_informed_order: True`. Three answers for one
+    claim (absent / 3.4e38 / 0.5), the last being the neutral score this issue
+    removes, in the tier that decides order.
     """
     from tortoise.ranking import GapsRanker, GraphRanker, StateRanker
     from tortoise.search_engine import numeric_operand
@@ -501,10 +500,13 @@ def test_a_literal_at_the_stores_rounding_boundary_is_read_not_refused(sdk):
     proj = sdk._get_proj()
     assert numeric_operand("3.4028235e38") is not None, (
         "a literal that rounds to float32's maximum is read by the store")
-    assert numeric_operand("1.1754944e-38") is not None  # min normal, reads
+    assert numeric_operand("3.40282355e38") is not None, (
+        "a literal that rounds DOWN to float32's maximum is read")
+    assert numeric_operand("1.1754944e-38") is not None   # min normal, reads
     # …and the rules stay exact one notch out, in both directions.
-    assert numeric_operand("3.4028236e38") is None       # rounds to inf
-    assert numeric_operand("1e-38") is None              # subnormal
+    assert numeric_operand("3.4028236e38") is None        # rounds to inf
+    assert numeric_operand("1.1754943e-38") is None       # rounds up, still null
+    assert numeric_operand("1e-38") is None               # subnormal
 
     pid = sdk.create_point("statement", "ZQROUND a boundary mirror")["id"]
     proj.g.query("MATCH (n:Point {id:$id}) SET n.confidence = '3.4028235e38'",
@@ -548,8 +550,7 @@ def test_an_unreadable_mirror_is_not_replaced_by_an_imputed_pair(sdk):
     for name, sig in (("state", state), ("gaps", gaps)):
         assert sig.get("confidence") is None, (
             f"{name} imputed a belief for a mirror it cannot read: {sig}")
-        assert "belief_informed_order" not in sig or not sig[
-            "belief_informed_order"], (name, sig)
+        assert not sig.get("belief_informed_order"), (name, sig)
     # A claim WITH stored operands still reads normally — the fix is about the
     # default, not the pair.
     ok = sdk.create_point("statement", "ZQIMPUTE a measured claim")["id"]
@@ -564,13 +565,12 @@ def test_an_unreadable_mirror_is_not_replaced_by_an_imputed_pair(sdk):
 def test_a_numpy_boolean_is_not_a_belief_count(sdk):
     """Cycle 23 P2: `np.bool_` slipped the cycle-22 predicate.
 
-    It is not a `bool` subclass and `float(np.bool_(True))` is `1.0`, so
-    `_is_real_number` admitted it — and both belief writers then stored a
-    Boolean: `update_point(confidence=np.bool_(True))` (every reader reports the
-    claim ABSENT, because a Boolean is not a number) and
-    `set_point_baseline(claim, np.bool_(True), 0.5)`, which ALSO set
-    `baseline_set` + `baseline_source="set-by-author"`, freezing the claim
-    against the source-inheritance recompute that would have given it a belief.
+    It is not a `bool` subclass — and in numpy 2 its `__name__` is `"bool"`, not
+    `"bool_"` — while `float(np.bool_(True))` is `1.0`, so `_is_real_number`
+    admitted it: `update_point(confidence=np.bool_(True))` stored a Boolean every
+    reader reports absent, and `set_point_baseline(claim, np.bool_(True), 0.5)`
+    stored `ep_alpha=true` AND set `baseline_set` + `baseline_source`, freezing
+    the claim against the source-inheritance recompute.
     """
     import numpy as np
 
@@ -2744,9 +2744,11 @@ def test_the_trends_answer_survives_a_numeric_string_operand(sdk):
 def test_a_numeric_string_operand_is_measured_on_both_twins(sdk):
     """Cycle 16: the presence predicate compared RAW, the formula coerced.
 
-    `update_point(posterior_alpha="0.7", posterior_beta="0.3")` is accepted and
-    stored verbatim (JSON- and LLM-sourced values arrive like this). The
-    presence rule then evaluated `"0.7" >= 0`, which is NULL in Cypher, so the
+    `update_point(posterior_alpha="0.7", posterior_beta="0.3")` was accepted
+    and stored verbatim (JSON- and LLM-sourced values arrive like this) — since
+    the cycle-20 write guard the shape is reachable only from a row written
+    BEFORE it, or by raw Cypher, which is what this fixture does. The presence
+    rule then evaluated `"0.7" >= 0`, which is NULL in Cypher, so the
     conjunction was NULL and the claim read `absent` — in the SAME query that
     computed `mean 0.7, variance 0.105` — while Python's `float()` said
     `measured`. One claim, two states, and a belief floor
@@ -2805,7 +2807,9 @@ def test_a_numeric_string_operand_is_measured_on_both_twins(sdk):
 def test_one_malformed_mirror_does_not_discard_the_batch(sdk):
     """Cycle 16 P1: cycle 15 coerced the α/β columns and left the MIRROR raw.
 
-    `update_point(confidence="abc")` is accepted. `float(mirror)` then raised
+    A LEGACY row stores `confidence="abc"` (the cycle-20 write guard refuses
+    that at `update_point` now; this shape pre-dates it, or is written by raw
+    Cypher, which is what this fixture does). `float(mirror)` then raised
     inside `annotate_ep_batch`, whose blanket `except` returned `{}` — so EVERY
     claim in the response read `ep_state: "absent"`, measured ones included, and
     `min_confidence=0.5` returned nothing at all. The same shape emptied `why`
@@ -2872,8 +2876,11 @@ def test_a_belief_value_the_store_cannot_read_is_refused_at_the_write(sdk):
     `tortoise_analyze` answered "Query error: …", `recall_subgraph` raised, and
     the belief signal map for the whole recall batch came back empty — so every
     result read `absent`, the exact conflation this issue removes, at batch
-    scope. A reader cannot be total over a value the engine will not look at,
-    so the failure is closed at the write, where it belongs.
+    scope. The belief READS were made total separately (the `*OrNull` coercion —
+    see `test_a_legacy_list_operand_is_absent_without_blanking_the_batch`), so
+    the remaining pre-guard rows degrade to `absent` instead of blanking a
+    batch; the refusal stays HERE because a List/Boolean/string belief is a
+    writer defect that no reader should have to absorb.
     """
     proj = sdk._get_proj()
     pid = sdk.create_point("statement", "ZQWRITE guard probe")["id"]
@@ -2967,6 +2974,15 @@ def test_the_twins_parse_the_same_string_language(sdk):
     The string spelling is now pinned to the intersection (a plain decimal
     literal) and the Cypher coercion additionally requires a FINITE result.
 
+    Cycle 22 settled the other half of that intersection, by measurement rather
+    than by reading `toFloat`'s name: it parses a string as a **float32**
+    (`toFloat('0.7')` → `0.699999988079071`) and answers NULL outside the normal
+    float32 range. So the RANGE is part of the pin too, and it is the half that
+    was missing: `'1e309'` matched the grammar, Python returned `inf` (a
+    maximum-certainty belief) while every Cypher surface said `absent`, and
+    `'1e39'`/`'1e308'`/`'1e-40'` had the same split at magnitudes the table
+    below now covers. A string outside the range is ABSENT on both twins.
+
     RECORDED RESIDUAL: `toFloat("0x1p4")` is 16.0 and the pinned Python grammar
     rejects hex floats, so a LEGACY hex-float operand answers `16.0` in Cypher
     and `None` in Python. It is out of the agreement table on purpose rather
@@ -2974,6 +2990,12 @@ def test_the_twins_parse_the_same_string_language(sdk):
     the write, so this shape can only pre-date that guard, and its consequence
     is a readable belief (not the maximum-certainty fabrication the finiteness
     guard closes).
+
+    SECOND RECORDED RESIDUAL: a PRESENT string operand agrees on presence and
+    on magnitude, but Cypher serves the float32 rounding (`0.699999988…`) while
+    Python serves the double (`0.7`) — hence `approx` on both sides below. The
+    divergence is bounded by the literal and cannot change `ep_state`, which is
+    what this table exists to protect.
     """
     from tortoise.search_engine import numeric_operand, numeric_operand_cypher
 
@@ -2995,6 +3017,21 @@ def test_the_twins_parse_the_same_string_language(sdk):
         "1e3": 1000.0,
         "+.5": 0.5,
         "0.": 0.0,
+        # The RANGE half (`toFloat` is a float32 parser — measured). Every one of
+        # these matched the pinned grammar, and every one of them was a twin
+        # split before the range bound: the first two made Python return `inf`
+        # (ranked first, `json.dumps(allow_nan=False)` → a 500 on the hosted
+        # read), the rest made Cypher `absent` beside a Python number.
+        "1e309": None,
+        "-1e309": None,
+        "1e308": None,
+        "1e39": None,
+        "1e-40": None,
+        "3.4028236e38": None,          # just over float32 MAX → null
+        "1.1754943e-38": None,         # below float32 MIN-NORMAL → null
+        "3.4028235e38": 3.4028235e38,  # float32 MAX itself is readable
+        "1.1754944e-38": 1.1754944e-38,  # min normal is readable
+        "1e-37": 1e-37,
         # Cycle 22 P1: the store parses a string with `strtof`, so the window
         # is float32's NORMAL range and everything outside it answers null.
         # Before this, Python answered inf/0.0 for these and the `ep` block
@@ -3004,17 +3041,22 @@ def test_the_twins_parse_the_same_string_language(sdk):
         "1.2e-38": 1.2e-38,
         "1e-38": None,
         "1e-320": None,
-        "1e308": None,
         "1e400": None,
         "-1e400": None,
-        "0e400": 0.0,
-        "-0.0": -0.0,
-        # Cycle 23 P3: `\s` under an ASCII flag — `float()` skips a NBSP and
-        # `strtof` does not, so without `re.ASCII` a value pasted out of a
-        # spreadsheet was 0.7 to Python and null to the store.
+        # Cycle 23 P3: `\s` is Unicode without `re.ASCII`, and `float()` skips a
+        # NBSP while `strtof` does not — a value pasted out of a spreadsheet was
+        # 0.7 to Python and null to the store.
         "\u00a00.7": None,
         "\u20070.7": None,
         "\u0667.7": None,
+        "0e400": 0.0,
+        "-0.0": -0.0,
+        # The rounding edges the two rules decide DIFFERENTLY, and they are the
+        # reason `_string_operand` packs to float32 rather than comparing to the
+        # max outright: `'3.40282355e38'` is above float32 max but rounds DOWN
+        # to it, and the store reads it — while `'1.1754943e-38'` is below
+        # min-normal, rounds UP to it, and the store nulls it.
+        "3.40282355e38": 3.40282355e38,
     }
     for raw, expected in shapes.items():
         proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = $a, "
@@ -3032,6 +3074,65 @@ def test_the_twins_parse_the_same_string_language(sdk):
         else:
             assert py == pytest.approx(expected), (raw, py)
             assert cypher == pytest.approx(expected, rel=1e-6), (raw, cypher)
+
+
+def test_a_legacy_list_operand_is_absent_without_blanking_the_batch(sdk):
+    """Cycle 22: the coercion is TOTAL — `toFloat`/`toString` are the RAISERS.
+
+    `toString(<List>)` and `toFloat(<List>)` answer "Type mismatch: expected
+    String, Integer, Float, or Null but was List" and take the whole QUERY
+    down. The cycle-20 write guard refuses a list belief at `_sanitize_props`,
+    so the remaining population is pre-guard rows and raw-Cypher writes — but
+    the whole reason the readers are kept total is that population. Measured at
+    `be229efdb7df`: one node storing `[0.7]` made `_fetch_point_signals` raise
+    and `_fetch_signals` return None, so a healthy `(3, 1)` claim BESIDE it read
+    `ep_state: absent, confidence: null` on `recall_ranking` — the batch-scope
+    conflation #11702 removes, reached through the presence predicate's own
+    coercion. `toFloatOrNull`/`toStringOrNull` answer null for the types the
+    plain spellings refuse (and are identical for every type they accept), so
+    the list reads ABSENT and its neighbours keep their belief.
+    """
+    from tortoise.ranking import StateRanker
+    from tortoise.search_engine import (
+        annotate_ep_batch,
+        ep_state_cypher,
+        numeric_operand,
+        numeric_operand_cypher,
+    )
+
+    proj = sdk._get_proj()
+    bad = sdk.create_point("statement", "ZQLIST legacy list operand")["id"]
+    good = sdk.create_point("statement", "ZQLIST healthy neighbour")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = [0.7], "
+                 "n.posterior_beta = 0.3", params={"id": bad})
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 3.0, "
+                 "n.posterior_beta = 1.0", params={"id": good})
+
+    # The coercion answers NULL rather than raising. (It used to raise here —
+    # the assertion is what a Cypher exception cannot satisfy.)
+    assert numeric_operand([0.7]) is None
+    row = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN "
+        + numeric_operand_cypher("n.posterior_alpha") + ", "
+        + ep_state_cypher("n"), params={"id": bad}).result_set[0]
+    assert row[0] is None, row
+    assert row[1] == EP_STATE_ABSENT, row
+
+    ann = annotate_ep_batch(proj.g, [bad, good])
+    assert ann[bad].ep_state == EP_STATE_ABSENT, ann[bad]
+    assert ann[bad].confidence_mean is None, ann[bad]
+    assert ann[good].ep_state == EP_STATE_MEASURED, ann[good]
+
+    # …and the batch-wide blanking is closed on the ranker too.
+    recs = {r["id"]: r["recall_ranking"] for r in
+            StateRanker(projection=proj).rerank(
+                [{"id": bad, "scores": {"rrf": 1.0}},
+                 {"id": good, "scores": {"rrf": 1.0}}])}
+    assert set(recs) == {bad, good}, recs
+    assert recs[bad]["ep_state"] == EP_STATE_ABSENT, recs[bad]
+    assert recs[bad]["confidence"] is None, recs[bad]
+    assert recs[good]["ep_state"] == EP_STATE_MEASURED, recs[good]
+    assert recs[good]["confidence"] == pytest.approx(0.75, abs=1e-4), recs[good]
 
 
 def test_the_third_ranker_reads_an_unreadable_mirror_like_the_other_two(sdk):
