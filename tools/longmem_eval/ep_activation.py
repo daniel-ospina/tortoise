@@ -88,6 +88,7 @@ import time
 from tortoise.live import epistemic_disjunction
 from tortoise.search_engine import (  # #11702: ONE coercion
     belief_mirror,
+    numeric_operand,
 )
 
 logger = logging.getLogger(__name__)
@@ -539,10 +540,26 @@ def read_confidence(p) -> float | None:
         beta = p.get("ep_beta")
     if alpha is None or beta is None:
         return None
+    def _operand(raw):
+        """A number operand — a STRING read as the float32 the store serves.
+
+        #11702 cycle 26: `float("0.7")` is the DOUBLE (0.7) while every product
+        surface serves the store's float32 (0.699999988079071), so the rendered
+        artifact disagreed with them by 1 ulp on every legacy string operand.
+        `numeric_operand` rounds the same way the store does; a numeric value is
+        passed through `float()` so a NON-FINITE posterior still arrives as
+        `nan` (the #10210 cell this reader deliberately keeps non-total for).
+        """
+        if isinstance(raw, str):
+            return numeric_operand(raw)
+        return float(raw)
+
     try:
-        a = float(alpha)
-        b = float(beta)
+        a = _operand(alpha)
+        b = _operand(beta)
     except (TypeError, ValueError):
+        return None
+    if a is None or b is None:
         return None
     # #11702 cycle 12: NON-NEGATIVE too — α and β are pseudo-counts, and the
     # product surfaces call a negative pair ABSENT (`belief_value`,
