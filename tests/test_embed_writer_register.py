@@ -939,9 +939,16 @@ LABEL_EVIDENCE: dict[str, tuple[str, str, str, frozenset[str]]] = {
     # (`#11836`, VGATE round 13). So a guard that reds on the rename is measuring
     # the rename, not the store — and its message ("the store moved") is a wrong
     # diagnosis of a declaration that is still true.
+    #
+    # ⛔ THE NEEDLE IS THE `for` HEADER, not the binding-free substring
+    # (`in _CANONICAL_ENTITY_ID_PROPS:`). Both are true of the body, but only the header
+    # makes `_needle_present` reachable for this row: the helper normalises a header's
+    # SECOND binding, and a needle with no header in it is compared verbatim, so the
+    # binding-position discrimination documented at `_needle_present` (`for _prop, label
+    # in …` is RED) was never consulted for this declaration (review r34 P3 #3).
     "tortoise.sdk::_update_entity": (
         "tortoise/sdk.py", "_update_entity",
-        "in _CANONICAL_ENTITY_ID_PROPS:",
+        "for label, prop in _CANONICAL_ENTITY_ID_PROPS:",
         frozenset({"Point", "Subject", "Object", "Source", "Event"})),
     # `#11641`: the two writers whose label used to be decided at RUNTIME, so row 2 could not
     # compare them to the served set. Each now OWNS the label at its own seam, and the needle is

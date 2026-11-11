@@ -304,7 +304,11 @@ _RESTATEMENT_SITES: tuple[str, ...] = (
 #: `_ITEM_NEITHER_HOOK` naming the very heading it restates — a passing `assert block`
 #: has already proved the sentence is "in" the block (`review r30 P3 #1`, measured: for
 #: every other row a moved sentence or a re-pointed label reds the second assert, and
-#: for row 2 NO mutation can red it while the first passes). The predicate is CONTAINMENT
+#: for row 2 NO mutation can red it while the first passes). ⛔ `site != _MATRIX_ROW` there
+#: is load-bearing, not decoration: the `_MATRIX_ROW` block is located by its TABLE PREFIX
+#: (`| #2122`), never by the site's words, so the entailment this paragraph relies on does
+#: not hold for row 1 — deriving its membership from containment would silently drop that
+#: row's independent content check (review r34 P3 #2). The predicate is CONTAINMENT
 #: (`needle ⊆ site`), not equality: an equal phrase is the case that occurs today, but a
 #: needle that is a proper part of its site is entailed just the same, and an equality
 #: test would let such a new row inherit the dead leg silently — precisely the guarantee
@@ -541,15 +545,32 @@ def _absent(fragment: str, text: str) -> bool:
     return not any(needle in rendering for rendering in _renderings(text))
 
 
-#: The RECORD's item markers, matched once and used by BOTH the locator and the block
-#: terminator — two independent patterns could disagree, and a boundary that is
-#: narrower than the locator is a fail-OPEN: the block bleeds into the next item, so
-#: a sentence that MOVED there still reads as "in" the labelled item and the guard
-#: reports GREEN over the defect it exists to catch. Measured by review r28 P3 #1:
-#: a bold-numbered `**3.** …` pseudo-item inserted before the real item 3 left
-#: `8 passed` while row 3's sentence sat in the wrong item. Hence `\d+[.]` AND
-#: `\d+)` AND a `**`-wrapped number, plus any heading level as a terminator.
+#: The RECORD's item markers, matched once and used by the LOCATOR. Every shape the
+#: record can spell an item as must be here, because a boundary that is narrower than
+#: the locator is a fail-OPEN: the block bleeds into the next item, so a sentence that
+#: MOVED there still reads as "in" the labelled item and the guard reports GREEN over
+#: the defect it exists to catch. Measured by review r28 P3 #1: a bold-numbered
+#: `**3.** …` pseudo-item inserted before the real item 3 left `8 passed` while row 3's
+#: sentence sat in the wrong item. Hence `\d+[.]` AND `\d+)` AND a `**`-wrapped number.
 _ITEM_START = re.compile(r"^(?:\*\*)?\(?\d+[.)](?:\*\*)?\s")
+
+#: Where a located item ENDS. A SUPERSET of `_ITEM_START`: every heading, any column-0
+#: bullet, and any alphanumeric sub-item (`3a. …`).
+#:
+#: ⛔ The two patterns are deliberately NOT the same one. The LOCATOR must stay narrow —
+#: an item is found by its BOLD HEADING's words, and a bullet or a sub-item carries no
+#: heading, so locating on this set would invent sites out of list furniture. The
+#: BOUNDARY must cover every shape the record uses, because a boundary narrower than the
+#: record's own vocabulary is the same fail-OPEN one shape later: review r34 P3 #1
+#: measured it — the record already spells list items as column-0 `*` bullets
+#: (`platform-seams.md:430`, `:433`, `:468`), so a sentence moved out of a numbered item
+#: into such a bullet stayed INSIDE the labelled block and all three restatement arms
+#: reported GREEN over exactly the defect this guard exists for.
+_BLOCK_END = re.compile(
+    r"^(?:\*\*)?\(?\d+[.)](?:\*\*)?\s"   # 3. / 3) / **3.**  (the item markers)
+    r"|^\d+[a-z][.)]\s"                     # 3a. / 3a)        (alphanumeric sub-item)
+    r"|^[-*+]\s"                             # column-0 bullet
+    r"|^#{1,6}\s")                           # any heading
 
 
 def _record_site_block(doc: str, site: str) -> str:
@@ -579,8 +600,7 @@ def _record_site_block(doc: str, site: str) -> str:
     if start is None:
         return ""
     end = start + 1
-    while end < len(lines) and not (_ITEM_START.match(lines[end])
-                                   or re.match(r"#{1,6}\s", lines[end])):
+    while end < len(lines) and not _BLOCK_END.match(lines[end]):
         end += 1
     return "\n".join(lines[start:end])
 
@@ -715,8 +735,12 @@ def test_every_restatement_site_label_names_the_item_that_states_it():
     → the first assert REDs naming the site; move a sentence into a **BOLD-NUMBERED**
     pseudo-item (`**3.** …`) inserted before the real item → RED here, and GREEN if
     the block terminator is narrowed back to `^\d+\.\s` — the fail-open review r28
-    P3 #1 measured, and the reason `_ITEM_START` is one pattern shared by the locator
-    and the boundary rather than two that can disagree."""
+    P3 #1 measured, and the reason `_ITEM_START` covers every shape the record can
+    spell an item as. Move a sentence into a COLUMN-0 BULLET placed at the end of the
+    item → RED here; with the boundary narrowed back to `_ITEM_START` + headings the
+    same bullet is swallowed INTO the labelled block (measured: `MOVED SENTENCE` in
+    the block → True pre-fix, False now), which is review r34 P3 #1's fail-open and
+    the reason the boundary is `_BLOCK_END`, a superset of the locator."""
     doc = _PLATFORM_SEAMS_DOC.read_text(encoding="utf-8")
     assert len(_RESTATEMENT_SITES) == len(_RESTATEMENTS), (
         "every `_RESTATEMENTS` row needs a site label — the legend's map is one "
@@ -724,7 +748,7 @@ def test_every_restatement_site_label_names_the_item_that_states_it():
     circular = frozenset(
         row for row, ((scoped, _unscoped), site) in enumerate(
             zip(_RESTATEMENTS, _RESTATEMENT_SITES, strict=True), start=1)
-        if _normalised(scoped) in _normalised(site))
+        if _normalised(scoped) in _normalised(site) and site != _MATRIX_ROW)
     assert circular == _CIRCULAR_SITE_ROWS, (
         f"the rows whose restatement needle is already contained in their site are "
         f"{sorted(circular)}, not {sorted(_CIRCULAR_SITE_ROWS)} — a row that became "
