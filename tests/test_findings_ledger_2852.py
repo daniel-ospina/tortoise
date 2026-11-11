@@ -909,6 +909,35 @@ def test_a_class_first_group_with_a_later_mention_is_not_a_swap(tmp_path, monkey
     ), "a legitimate class-first tally with a later mention red the guard"
 
 
+def test_a_class_first_tally_joined_by_commas_is_not_a_swap(tmp_path, monkeypatch):
+    """FAILS if a comma-joined class-first tally reds as a swap it never made.
+
+    Reachable, and measured: the connector between a letter and the next class token
+    is `, ` when class-first groups are comma-joined — and that is also the shape a
+    hard wrap produces, because the checker collapses whitespace before matching. A
+    rule whose copula and adverb were BOTH optional accepted a bare `, `, so
+    `**SUPERSEDED-BY-FIX**: **(c)**, **(d)** and **(g)**, **ADOPTED**: **(e)**, …`
+    red `(e) stated ADOPTED+SUPERSEDED-BY-FIX` on the one ordering the rule was added
+    to support (parent commit: clean). The connector must therefore CARRY a copula or
+    an adverb; a bare separator claims nothing.
+    """
+    original = (
+        "**(c)**, **(d)** and **(g)** are **SUPERSEDED-BY-FIX**, **(e)** is\n"
+        "**ADOPTED**, and **(b)**, **(k)** and **(l)** are **DRIFTED**."
+    )
+    for separator in (", ", ",\n", ", and ", "; "):
+        legit = (
+            f"**SUPERSEDED-BY-FIX**: **(c)**, **(d)** and **(g)**{separator}"
+            f"**ADOPTED**: **(e)**{separator}"
+            f"**DRIFTED**: **(b)**, **(k)** and **(l)**."
+        )
+        with monkeypatch.context() as patch:
+            _mutated(tmp_path, patch, lambda t, _l=legit: t.replace(original, _l, 1))
+            assert not any(
+                "assigns a different verdict" in p for p in _doc_problems()
+            ), f"a comma-joined class-first tally red the guard at separator {separator!r}"
+
+
 def test_a_contradicting_mention_before_the_group_is_rejected(tmp_path, monkeypatch):
     """FAILS if a contradicting mention outside the adopted map is dropped.
 
@@ -1539,10 +1568,13 @@ def _third_party_imports(source: str) -> tuple[list[str], list[str]]:
     an alias (`from importlib import import_module as im; im("yaml")`), a bound method
     (`im = importlib.import_module; im("yaml")`), `getattr(importlib,
     "import_module")("yaml")`, `importlib.__dict__["import_module"]("yaml")`, and
-    `__builtins__["__import__"]("yaml")`. Each is a plain Name/Attribute/Subscript/
-    Call node the walk already visits — it simply does not classify them, and closing
-    them needs a call graph rather than an AST walk. They are listed so the next
-    reader can tell a measured limit from an unseen one.
+    `__builtins__["__import__"]("yaml")`, and a target handed to `eval`/`exec`
+    (`eval("__import__('yaml')")`). Each is a plain Name/Attribute/Subscript/Call
+    node the walk already visits — it simply does not classify them, and closing
+    them needs a call graph (or, for `eval`, a parser of program text carried in a
+    string) rather than an AST walk. They are listed so the next reader can tell a
+    measured limit from an unseen one; the list is the boundary of the scan, not a
+    claim that everything outside it is covered.
     """
     imported: set[str] = set()
     unverifiable: list[str] = []
@@ -1628,9 +1660,9 @@ def test_tool_is_stdlib_only():
     # import statements AND a `__import__`/`import_module` call with a LITERAL target,
     # and reports a non-literal target as unverifiable instead of clearing it.
     # ⚠️ The reaches it still misses are enumerated in that helper's docstring: an
-    # aliased module, a bound method, a subscripted `__dict__`, `getattr`, and
-    # `__builtins__[…]`. They ARE reachable — they are simply not classified — so they
-    # are named rather than implied away, and the `--self-test` leg below is a smoke
+    # aliased module, a bound method, a subscripted `__dict__`, `getattr`,
+    # `__builtins__[…]`, and a target handed to `eval`/`exec`. They ARE reachable —
+    # they are simply not classified — so they are named rather than implied away, and the `--self-test` leg below is a smoke
     # probe, not a second opinion.
     third_party, unverifiable = _third_party_imports(source)
     assert third_party == [], (
