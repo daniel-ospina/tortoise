@@ -112,6 +112,12 @@ MUTATION (each verified RED at this head, restoring byte-identical):
     → the prose-forgery sample REDs                (r12 P3 #1)
   * `_renderings` → both tag strips, no-strip reading dropped
     → the attribute-value sample REDs              (r13 P3)
+  * strip the `PYTHONPATH` line out of `_install_cursor_stdout`'s env
+    → direction 2 grades the installed package: RED on a worktree
+    lane, false-PASS wherever the ambient tree carries the fragment
+                                                   (r15 P1)
+  * restore the orphan `'` after `agents` in `tortoise/__main__.py`
+    → direction 2's raw-stdout punctuation assert REDs  (r15 P3 #7)
   * revert `_TAG` to the permissive `_TAG_WITH_BARE_ATTRS` form
     → the forged-tag PRESENCE assert REDs          (r12 P3 #1)
 """
@@ -158,10 +164,32 @@ _TAG_ATTRS_ASSIGNED = (r"(?:\s+[A-Za-z_:][-A-Za-z0-9_:.]*\s*=\s*"
 #: `_TAG` 179 (23 spans), and the whole 135-byte difference is five spans that
 #: are not tags: `<state.db>`, `<session_id>`, `<lookup_key>`, `<message shown to
 #: user when blocked>` and `<CustomMessage, "customType"|…>`.
-#: `_TAG` cannot cross a `<`, a `>`, or a NEWLINE at all (measured:
-#: `re.fullmatch(_TAG, "<a\nb>")` and `"<a\r\nb>"` are both non-matches, since an
-#: attribute must be an ASSIGNMENT). That bound, not prose preservation, is the
-#: property it buys.
+#: `_TAG`'s bound is TAG-SHAPED — not bracket-free and not line-bounded. Its
+#: quoted attribute values are OPAQUE (`"[^"]*"` / `'[^']*'`), so a `<`, a `>` and
+#: a newline are all admissible INSIDE one. Measured at this head (review r15 P2,
+#: corrected by this round's VGATE — the first draft of THIS comment repeated
+#: r13's error in a new form):
+#:   * inside a quoted value: `"<a b=\"x > y\">"`, `"<a b=\"x < y\">"` and
+#:     `"<a b=\"line1\nline2\">"` ALL match — so "cannot cross a `<` or a `>`" is
+#:     false as an absolute;
+#:   * between attributes: a newline is crossable only where the next token is an
+#:     attribute ASSIGNMENT (`\s+` precedes the name, and `\s` includes LF), so
+#:     `"<a\nb=\"1\">"` matches while `"<a\nb>"` and `"<a\r\nb>"` do not;
+#:   * …and the tag TAIL also admits whitespace (`\s*/?>`), so `"<a\n>"` and
+#:     `"<a b=\"1\"\n/>"` match too — a newline before the closing `>` is
+#:     crossable with no assignment. Both of these are whitespace INSIDE markup;
+#:     neither is a span across prose, which is the property below.
+#:   * it can never run from a `<` in ordinary PROSE to a later `>`: the name must
+#:     start with a LETTER and every attribute must be an assignment, so in
+#:     `a hook count of < 5 is suspect and <b>bold</b>` the matches are `<b>` and
+#:     `</b>` and nothing spans from the `< 5` (measured; `re.match(_TAG, "< 5 …")`
+#:     is None). That is the whole reason this strip cannot eat a quoted sentence.
+#: The third property — not line-boundedness, and not bracket-freedom — is the
+#: bound it buys; `test_a_stray_angle_bracket_cannot_swallow_the_quoted_sentence`
+#: is where it is pinned. (r13's commit message also quoted
+#: `_TAG_WITH_BARE_ATTRS`'s `(\s[^<>\n]*)?` group as if it were `_TAG`'s — the two
+#: forms do not share an attribute grammar, and that conflation is where the
+#: original over-claim came from.)
 _TAG = rf"</?[A-Za-z][A-Za-z0-9-]*{_TAG_ATTRS_ASSIGNED}\s*/?>"
 #: A strip that ADMITS bare (boolean) attributes, e.g. `<span hidden>`. Kept as a
 #: second absence rendering, never as the only one — see `_renderings`.
@@ -259,6 +287,16 @@ def _install_cursor_stdout(tmp_path) -> str:
         "TORTOISE_DB_URI": "",
         "TORTOISE_SECRET_PEPPER": "test-static-pepper",
     }
+    # ⛔ THE TREE UNDER TEST MUST BE WHAT `-m tortoise` IMPORTS (review r15 P1).
+    # `cwd` is `tmp_path`, so `-m tortoise` resolves from `sys.path`; without this
+    # the subprocess grades whatever `tortoise` sits in the interpreter's
+    # environment. In CI that is the checkout — right, but by ACCIDENT — while in a
+    # worktree lane it is the HUB checkout, so this arm returned a verdict about a
+    # tree nobody had reviewed (measured: RED here against a real defect, and a
+    # silent false-PASS whenever the ambient tree happened to carry the fragment).
+    # Prepended, not replaced, so an outer PYTHONPATH's support paths still resolve.
+    env["PYTHONPATH"] = str(_REPO_ROOT) + (
+        os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     r = subprocess.run(
         [_PY, "-m", "tortoise", "install", "cursor", "--dir", str(root)],
         env=env,
@@ -311,10 +349,12 @@ def test_a_stray_angle_bracket_cannot_swallow_the_quoted_sentence():
     assert _normalised(_SHIPPED_FRAGMENT) in _normalised(sample), (
         "a stray `<` in ordinary prose must not eat the quoted sentence")
     # …and the banned words must be SEEN when they sit inside the region a forged
-    # tag would delete. Before review r12 P3 #2 this assert ran on a sample holding
-    # only the hosted variant, so it could not fail under any mutant; placing the
-    # unscoped phrase between the `<` and the `>` gives it the tooth the loose
-    # strips (`<[^>]+>` and this file's own permissive form) actually bite on.
+    # tag would delete. The mutant that bites here is the loose `<[^>]+>` (and the
+    # r10 permissive form whose attribute group was `<[^>]+>`-shaped): it runs from
+    # the `<` in `< 5` to the next `>`, so it eats the phrase. ⚠️ `_TAG_WITH_BARE_ATTRS`
+    # does NOT bite on this sample — measured (r15 P3 #5): its tag name must start
+    # with a LETTER, so `< 5` cannot open a match, and naming it as a biter here was
+    # itself an over-claim (an assert credited to a mutant that cannot redden it).
     prose_forgery = ('a hook count of < 5 is suspect — "a session running in a cloud agent VM" '
                      'would be banned. §3 quotes '
                      '"a session running in a hosted cloud agent VM" and <b>bold</b>.')
@@ -331,11 +371,12 @@ def test_a_stray_angle_bracket_cannot_swallow_the_quoted_sentence():
 
 
 def test_no_single_tag_strip_can_hide_the_unscoped_phrase():
-    """Review r12 P3 #1 — the attribute group, in BOTH fail-open directions.
+    """Review r12 P3 #1 — the attribute group, in EVERY fail-open direction.
 
     The absence leg takes the union (`_renderings`) precisely because each single
-    strip hides the banned phrase in the case the other catches. Each sample below
-    is a measured fail-open of at least one strip:
+    reading hides the banned phrase in a case another catches. Each sample below is
+    a measured fail-open of exactly ONE reading, and each names the mutant that
+    reddens it:
 
       * PROSE FORGERY — `if a<b and … c>d` is an ordinary sentence, but a strip
         admitting bare attributes reads `<b and … c>` as a tag and deletes the
@@ -349,22 +390,31 @@ def test_no_single_tag_strip_can_hide_the_unscoped_phrase():
         sees the words. This is the sample that makes the THIRD reading
         load-bearing; neither sample above reddens without it.
 
-    Mutation: make `_renderings` return `[_normalised(text)]` (the `_TAG` reading
-    only) → the bare-attribute sample REDs; return only the bare-attribute reading
-    → the prose sample REDs; drop the no-strip reading (both tag strips only) →
-    the attribute-value sample REDs. (Review r13 P3 measured the PREVIOUS wording
-    here FALSE — it claimed that last mutant reddened the prose arm of the
-    stray-`<` test above, which stays GREEN because `_TAG` alone sees that phrase.)"""
+    Mutation, one per sample, so the loop demonstrates its own coverage:
+
+      * `_renderings` → `[_normalised(text)]` (the `_TAG` reading only)
+        → the bare-attribute sample REDs;
+      * `_renderings` → the bare-attribute reading only
+        → the prose-forgery sample REDs;
+      * `_renderings` → both tag strips, no-strip reading dropped
+        → the attribute-value sample REDs.
+
+    Two corrections shaped this paragraph. Review r13 P3 measured the PREVIOUS
+    wording FALSE — it claimed the no-strip mutant reddened the prose arm of the
+    stray-`<` test above, which stays GREEN because `_TAG` alone sees that phrase;
+    the attribute-value sample is what gives the third reading a sample it actually
+    carries. Review r15 P3 #6 then measured the former `tag-wrapped` sample as
+    coverage this file cannot demonstrate — EVERY rendering, strips included,
+    already sees it, so no single-reading mutant could ever redden it — and it is
+    REMOVED rather than left in the loop. What remains is one sample per mutant."""
     prose_forgery = ('if a<b and the record says "a session running in a cloud agent VM" c>d, '
                      'the pin false-PASSes.')
     bare_attribute = ('A <span hidden>session running in a cloud agent VM</span> is still the '
                       'unscoped universal, rendered.')
-    tag_wrapped = 'A <span class="x">session</span> running in a cloud agent VM, split by markup.'
     attribute_value = ('A badge: <b title="a session running in a cloud agent VM">x</b> is the '
                        'unscoped universal carried in an attribute value.')
     for name, sample in (("prose-forgery", prose_forgery),
                          ("bare-attribute", bare_attribute),
-                         ("tag-wrapped", tag_wrapped),
                          ("attribute-value", attribute_value)):
         assert not _absent(_UNSCOPED_FRAGMENT, sample), (
             f"the absence leg must see the unscoped phrase in the {name} sample")
@@ -374,6 +424,18 @@ def test_the_shipped_message_carries_the_fragment_the_record_quotes(tmp_path):
     """Direction 2 — the message the record cites.
 
     Mutation: drop `hosted` from `tortoise/__main__.py`'s install message — the
-    record's quoted fragment is then no longer produced, and this REDs."""
+    record's quoted fragment is then no longer produced, and this REDs.
+
+    ⛔ AND THE r13 PUNCTUATION FIX IS PINNED HERE (review r15 P3 #7). This PR's
+    copy once read `…in cloud agents', and that 'User-level hooks…` — three
+    apostrophes, so the `'` after `agents` closed a quotation that was never
+    opened. Nothing pinned it: `test_capture_install.py` asserts
+    `"that 'sessionStart' is not available in cloud agents"`, which is a substring
+    of BOTH the broken and the balanced text, and the arms above strip punctuation.
+    A revert therefore merged green. These two asserts read RAW `stdout` —
+    punctuation IS the claim here, so `_normalised` is the wrong lens.
+    """
     stdout = _install_cursor_stdout(tmp_path)
     assert _normalised(_SHIPPED_FRAGMENT) in _normalised(stdout), stdout
+    assert "agents, and that 'User-level hooks" in stdout, stdout
+    assert "agents', and that 'User-level hooks" not in stdout, stdout
