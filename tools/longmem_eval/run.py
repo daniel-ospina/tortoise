@@ -693,6 +693,13 @@ def _reconcile_failing_question(
         "reason": None,
         "skip_reason": None,
         "error": None,
+        # ⛔ The HORIZON the arm evaluated this question at, stamped so it
+        # can TRAVEL with the datum: ``reconciliation_variant_rows`` publishes
+        # ``pool_drift_k`` from here (its own ``k`` parameter is the caller's
+        # default — the receipt CLI passes none). Without the stamp the
+        # pooled-drift control claims k=5 on a ``--k 10,20`` run (#11830
+        # review round 6, finding 2).
+        "k": k,
         "cap": int(cap),
         "raised": dict(raised),
         "marginal_bound": 0,

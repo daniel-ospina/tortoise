@@ -483,7 +483,7 @@ def _one_shot_ret(surface: float | None, recalled: bool = False) -> dict:
 
 
 def _recon(monkeypatch, *, ret, label, hypothesis, reader=None, judge=None,
-           cap=24000, raised=None, retrieval_calls=None, qid="q_msr_1"):
+           cap=24000, raised=None, retrieval_calls=None, qid="q_msr_1", k=5):
     calls = retrieval_calls if retrieval_calls is not None else []
 
     def _fake_retrieve(sdk, question, *, ks, top_k, **kwargs):
@@ -499,6 +499,7 @@ def _recon(monkeypatch, *, ret, label, hypothesis, reader=None, judge=None,
             sdk=object(), reader=reader or _FakeReader(),
             judge=judge or _FakeJudge(), question=QUESTION, qid=qid,
             ret=ret, label=label, hypothesis=hypothesis, ks=(5,),
+            k=k,
             retrieval_kwargs={"retriever": "hybrid",
                               "evidence_boost": False,
                               "coverage_loop": False},
@@ -759,6 +760,36 @@ def test_wiring_a_failing_reader_in_the_pass_still_returns(monkeypatch):
     assert stats["variant_label"] is None
 
 
+def test_wiring_an_errored_admitted_pass_is_never_certified(monkeypatch):
+    """⛔ #11830 review round 6, finding 3: the FAIL-CLOSED DEFAULTS.
+
+    ``marginal_unmetered: True`` / ``cap_exceeded: None`` / ``bound_exceeded:
+    None`` are read ONLY on the path that errors AFTER admission (the success
+    path overwrites all three), so reverting them to ``False/False/False``
+    left every other row green — and published "measured, and it fit" for a
+    pass that spent and was never priced. This row drives that exact path.
+    """
+    class _ExplodingReader(_FakeReader):
+        def answer(self, **kwargs):
+            raise ValueError("reader exploded")
+
+    stats = _recon(monkeypatch, ret=_one_shot_ret(0.2), label=False,
+                   hypothesis="two", reader=_ExplodingReader(),
+                   cap=1_000_000)
+    assert stats["admitted"] is True          # it WAS attempted (and spent)
+    assert stats["marginal_tokens"] is None   # …and is unmeasured
+    assert stats["marginal_unmetered"] is True  # fail-CLOSED default
+    # ⛔ None, not False: False is the claim "we measured it and it fit".
+    assert stats["cap_exceeded"] is None
+    assert stats["bound_exceeded"] is None
+    # the census must not price it into the measured total either
+    landed = _variant_outcome("q_msr_1", one_shot=False, variant=None)
+    landed["window_reconciliation_stats"] = stats
+    rows = wr.reconciliation_variant_rows([landed], k=5)
+    assert rows["n_unmetered"] == 1
+    assert rows["marginal_tokens_total"] is None
+
+
 def test_wiring_a_fatal_provider_error_still_aborts(monkeypatch):
     """Containment must NOT swallow the run-level abort classes: a dead key
     would otherwise be absorbed by a measurement-only variant while the run
@@ -800,7 +831,8 @@ def _variant_outcome(qid: str, one_shot: bool, variant: bool | None = None,
                      recall_after: float = 0.5,
                      cap_exceeded: bool = False,
                      marginal: int = 100,
-                     skip_reason: str | None = None) -> dict:
+                     skip_reason: str | None = None,
+                     k: int | None = None) -> dict:
     out: dict = {
         "question_id": qid,
         "question_type": "multi-session",
@@ -818,6 +850,8 @@ def _variant_outcome(qid: str, one_shot: bool, variant: bool | None = None,
         stats["variant_label"] = variant
     if skip_reason is not None:
         stats["skip_reason"] = skip_reason
+    if k is not None:
+        stats["k"] = k
     out["window_reconciliation"] = True
     out["window_reconciliation_stats"] = stats
     return out
@@ -873,6 +907,30 @@ def test_variant_rows_counts_an_errored_pass_and_a_bound_overshoot():
     assert rows["n_errored"] == 1
     assert rows["n_graded"] == 1     # the errored pass contributes no verdict
     assert rows["bound_exceeded_n"] == 1
+
+
+def test_variant_rows_see_an_arm_that_errored_before_it_fired():
+    """⛔ #11830 review round 6, finding 1: ``n_errored`` counted only FIRED
+    outcomes, and ``fired`` is stamped only after the predicate returns a
+    reason — so a predicate that raised on every question (a moved private
+    symbol: ``failing_class_reason`` lazily imports
+    ``tortoise.reader._looks_abstained``) published a block byte-identical
+    to "the failing class never occurred": ``n_fired: 0, n_errored: 0``.
+    A dead instrument must not report the cohort as absent."""
+    # The reachable shape: admitted=False, fired=False, error set — the
+    # pre-fix key (``fired``) excludes it from the counter entirely.
+    pre_fire = _variant_outcome("q1", one_shot=False, variant=None,
+                                fired=False, admitted=False)
+    pre_fire["window_reconciliation_stats"]["error"] = \
+        "ImportError: cannot import name '_looks_abstained'"
+    pre_fire["window_reconciliation_stats"]["skip_reason"] = "error"
+    post_fire = _variant_outcome("q2", one_shot=False, variant=None)
+    post_fire["window_reconciliation_stats"]["error"] = "RuntimeError: x"
+    rows = wr.reconciliation_variant_rows([pre_fire, post_fire], k=5)
+    assert rows["n_fired"] == 1          # only the post-fire one fired
+    assert rows["n_errored"] == 2        # BOTH errors are visible
+    assert rows["n_errored_pre_fire"] == 1
+    assert rows["n_graded"] == 0
 
 
 def test_variant_rows_count_an_unmetered_pass_separately():
@@ -941,6 +999,48 @@ def test_pool_drift_is_read_at_the_runs_k_not_a_hard_coded_five():
     rows = wr.reconciliation_variant_rows([unpairable], k=5)
     assert rows["pool_drift_n"] == 0
     assert rows["n_pool_drift_pairs"] == 0
+
+
+def test_pool_drift_k_is_the_runs_k_on_the_receipt_path():
+    """⛔ #11830 review round 6, finding 2: ``pool_drift_k`` published the
+    RENDERER's ``k`` parameter, and the only production caller
+    (``w7_publish``'s receipt CLI, ``rows = variant_rows(outcomes)``) passes
+    none — so every artifact claimed ``pool_drift_k: 5`` while the drift was
+    read at the run's primary k (``run.py``'s ``k=ks[0]``). On a ``--k 10,20``
+    run that is a false provenance claim about the horizon of a control.
+
+    The horizon now travels on the outcome, so the receipt path renders what
+    the run actually computed."""
+    drifted = _variant_outcome("q1", one_shot=False, variant=True,
+                               recall_before=0.5, recall_after=1.0, k=10)
+    # 1. the pure renderer: the datum beats the parameter
+    rows = wr.reconciliation_variant_rows([drifted], k=5)
+    assert rows["pool_drift_k"] == 10
+    assert rows["pool_drift_n"] == 1
+    # 2. the RECEIPT path: no k passed at all (the production caller)
+    receipt = w7_publish.variant_rows([dict(drifted)])
+    assert receipt["window_reconciliation"]["pool_drift_k"] == 10
+    # 3. a checkpoint with no stamp (written before the field existed) still
+    #    renders — the parameter is the fallback, never a crash.
+    legacy = _variant_outcome("q2", one_shot=False, variant=True,
+                              recall_before=0.5, recall_after=1.0)
+    assert wr.reconciliation_variant_rows([legacy], k=5)["pool_drift_k"] == 5
+    assert wr.reconciliation_variant_rows([legacy], k=20)["pool_drift_k"] == 20
+
+
+def test_wiring_stamps_the_runs_k_onto_the_outcome(monkeypatch):
+    """The stamp the row above reads — pinned through the WIRING, because a
+    renderer that reads a key nothing writes silently falls back to the
+    parameter (the pre-fix behaviour, unchanged)."""
+    stats = _recon(monkeypatch, ret=_one_shot_ret(0.2), label=False,
+                   hypothesis="two", cap=1_000_000, k=10)
+    assert stats["fired"] is True
+    assert stats["k"] == 10
+    landed = _variant_outcome("q_msr_1", one_shot=False, variant=True,
+                              recall_before=0.5, recall_after=1.0)
+    landed["window_reconciliation_stats"] = stats
+    rows = wr.reconciliation_variant_rows([landed], k=5)
+    assert rows["pool_drift_k"] == 10
 
 
 def test_variant_rows_pool_drift_is_surfaced():

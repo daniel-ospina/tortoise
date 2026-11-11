@@ -520,6 +520,16 @@ def reconciliation_variant_rows(outcomes: list[dict], *,
     """
     fired = [o for o in outcomes if _stats(o).get("fired") is True]
     admitted = [o for o in fired if _stats(o).get("admitted") is True]
+    # ⛔ The containment counter counts EVERY outcome carrying an error, not
+    # only the ones that got as far as firing (#11830 review round 6,
+    # finding 1). ``fired`` is stamped only AFTER the predicate returns a
+    # reason, and the containment wrapper records an error WITHOUT setting
+    # it — so a predicate that raised on every question (a moved private
+    # symbol: ``failing_class_reason`` lazily imports
+    # ``tortoise.reader._looks_abstained``) produced a block byte-identical
+    # to "the failing class never occurred", i.e. a dead instrument
+    # reporting the cohort as absent. ``n_errored`` must see it.
+    errored = [o for o in outcomes if _stats(o).get("error")]
     graded = [o for o in admitted if _variant_label(o) is not None]
     pairs = [(o, _outcome_label(o), _variant_label(o))
              for o in graded if _outcome_label(o) is not None]
@@ -559,6 +569,20 @@ def reconciliation_variant_rows(outcomes: list[dict], *,
             if float(a) != float(b):
                 drift += 1
 
+    # ⛔ The HORIZON TRAVELS WITH THE DATUM (#11830 review round 6, finding
+    # 2). The drift above is read at the RUN's primary k, and ``run.py``
+    # stamps that k onto each outcome; this renderer's ``k`` parameter is
+    # only the CALLER's default — ``w7_publish``'s receipt CLI calls
+    # ``variant_rows(outcomes)`` with no ``k`` at all, so publishing the
+    # parameter claimed ``pool_drift_k: 5`` on a ``--k 10,20`` run. Read it
+    # from the data; fall back to the parameter only when no outcome carries
+    # one (a pre-feature checkpoint written before the stamp existed).
+    drift_ks = {s.get("k") for s in (_stats(o) for o in outcomes)
+                if isinstance(s.get("k"), int)
+                and not isinstance(s.get("k"), bool)}
+    pool_drift_k: int | str = (next(iter(drift_ks))
+                               if len(drift_ks) == 1 else k)
+
     caps = [s.get("cap") for s in (_stats(o) for o in fired)
             if isinstance(s.get("cap"), int)]
     marginal = [s.get("marginal_tokens") for s in (_stats(o) for o in admitted)
@@ -592,7 +616,13 @@ def reconciliation_variant_rows(outcomes: list[dict], *,
         # counter — a failed optional pass must be visible, not vanish.
         "bound_exceeded_n": sum(
             1 for o in admitted if _stats(o).get("bound_exceeded") is True),
-        "n_errored": sum(1 for o in fired if _stats(o).get("error")),
+        "n_errored": len(errored),
+        # …and how many of those never fired: a PRE-fire error is the arm
+        # failing to MEASURE (the cohort is unread), a post-fire one is a
+        # pass that failed. Both are visible; the split is what keeps a
+        # whole-arm failure distinguishable from a handful of wobbles.
+        "n_errored_pre_fire": sum(
+            1 for o in errored if _stats(o).get("fired") is not True),
         # A pass admitted on an envelope that reported a call with no usage
         # block spends an UNMEASURED amount: its lower bound is not evidence
         # of staying under the cap, so it is excluded from the total and
@@ -614,7 +644,7 @@ def reconciliation_variant_rows(outcomes: list[dict], *,
         # count could be a control taken at a different horizon than the
         # number it appears to certify. Self-describing, like the sibling
         # `reader_surface@k` row.
-        "pool_drift_k": k,
+        "pool_drift_k": pool_drift_k,
         # The population the drift count was taken over. ``0`` drift out
         # of 0 pairs is an UNREAD census, not a measured "no drift" —
         # without this an empty population is indistinguishable from a
