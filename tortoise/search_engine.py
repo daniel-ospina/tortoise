@@ -421,10 +421,14 @@ NUMERIC_OPERAND_CYPHER_TEMPLATE = (
 #:   ROUNDS DOWN to max — hence `struct` packing in `_string_operand` rather
 #:   than a plain double comparison, which would call that literal absent here
 #:   and readable there;
-#: * under range → null: `"1e-38"`, `"1e-40"`, `"1e-320"`, `"1.4e-45"`, and
-#:   `"1.1754943e-38"` — below min-normal even though it rounds UP to it, so
-#:   the exact magnitude is tested, not the rounded one;
-#: * in range → value: `"1.1754944e-38"` (min normal), `"1.2e-38"`, `"1e-37"`.
+#: * under range → null: `"1e-38"`, `"1e-40"`, `"1e-320"`, `"1.4e-45"`, and a
+#:   SUBNORMAL's 16-digit `repr()` (`"1.401298464324817e-45"`) — the edge is the
+#:   LITERAL's exactness, not the magnitude: that same value written out to all
+#:   149 digits READS, because then the text names 2**-149 exactly. See
+#:   `_string_operand` and `_F32_UNDERFLOW_READ_FLOOR`;
+#: * in range → value: `"1.1754944e-38"` (min normal), `"1.2e-38"`, `"1e-37"`,
+#:   and — measured — `"1.175494316e-38"`, which is BELOW min-normal and still
+#:   reads; the read band ends a quarter of a subnormal ULP below min-normal.
 _FLOAT32_MIN_NORMAL = 1.1754943508222875e-38
 _FLOAT32_MAX = 3.4028234663852886e38
 #: The LOWEST literal magnitude the store still READS although it is not a
@@ -5979,7 +5983,14 @@ def get_relationships_bounded(
                             # pair `_beta_variance`'s own s <= 0 guard yields
                             # variance 0.0, so contested stays False and nothing
                             # above the threshold is claimed.
-                            "confidence": value,
+                            # #11702 cycle 27: ROUNDED like every sibling
+                            # key in this payload (`variance` is 6 dp two lines
+                            # down) and like the rankers. Unrounded, the same
+                            # claim read `0.3333333333333333` here and `0.3333`
+                            # in the `ep` block, so a consumer comparing two
+                            # surfaces for one claim got two numbers.
+                            "confidence": (None if value is None
+                                           else round(value, 6)),
                             # `None` when nothing is claimed at all — the same
                             # `None` a mitigation / CORRECTS peer emits, so the
                             # value can never be read as a Beta(1,1) width.

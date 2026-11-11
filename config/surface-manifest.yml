@@ -427,8 +427,10 @@ response_fields:
     readable to the store — the Cypher presence predicate the rankers read reported "measured" — and not to this
     process, whose `ep` block reported "absent"), and cycles 27 and 28 then found two more INSIDE it: an exact
     float32 subnormal (`0x1p-127`) refused by a decimal-shaped underflow rule, and a hex literal past a float32
-    midpoint (`0x1.0000010000000001p0`) that the 53-bit double rounded ONTO the midpoint. All three now agree on state
-    AND value, and `confidence_source: "unreadable"` remains as a DEFENSIVE label for a future undecodable spelling'
+    midpoint (`0x1.0000010000000001p0`) that the 53-bit double rounded ONTO the midpoint. A NEGATIVE exact midpoint
+    (`-1.0000000596046448`) was a fourth: the ULP step read the sign-magnitude bit pattern as an integer, so its
+    neighbour sat on the wrong side and the branch answered "not a midpoint". They all agree on state AND value now,
+    and `confidence_source: "unreadable"` remains as a DEFENSIVE label for a future undecodable spelling'
   unchanged_when_off: NO — additive key on an existing payload, so the key set grows by one on every row (the values
     are the contract change; the field itself is additive). Not flag-gated
 - response: tortoise_recall

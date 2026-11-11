@@ -30141,13 +30141,18 @@ class TortoiseSDK:
         claim whose belief did not exist on either side of the run (#11702: a
         delta against a fabricated 0.5 baseline reported movement that never
         happened).
-        """        # #11702: lazy import (the `_created_sort_key` convention in this file) —
-        # `annotate_ep_batch` is the ONE belief read the rankers use, and importing
-        # it at module scope would pull `search_engine` into every `sdk` import.
+        """
+        # #11702: lazy import (the `_created_sort_key` convention in this file).
+        # ⛔ NOT because a module-scope import would pull `search_engine` in —
+        # `sdk.py` already imports `belief_value` from it at module scope, so
+        # that ship has sailed and saying otherwise is a claim a reader cannot
+        # check. The reason is only the convention: a helper used by one method
+        # is imported by that method.
         # ⛔ BELOW the docstring on purpose: a statement above it makes the string
         # an unused expression and `__doc__` becomes None, so the `confidence_delta`
         # contract documented here would be invisible to `help()` and to the
-        # generated docs.
+        # generated docs. Cycle 27 found this comment GLUED to the closing `"""`,
+        # which also hid that paragraph from `help()`.
         from datetime import datetime, timezone
 
         from .search_engine import annotate_ep_batch

@@ -60,7 +60,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tests.test_hosted_api import client as client  # noqa: E402, RUF100, F401
 from tortoise import ranking as _ranking  # noqa: E402, RUF100
 from tortoise import search_engine as _se  # noqa: E402, RUF100
-from tortoise.ranking import (  # noqa: E402, RUF100  # noqa: E402, RUF100
+from tortoise.ranking import (  # noqa: E402, RUF100
     UNCOMPUTED_CONFIDENCE_SOURCE,
     GapsRanker,
     GraphRanker,
@@ -2642,6 +2642,215 @@ def test_relationship_peer_block_agrees_on_ep_state_for_every_stored_shape(sdk):
         assert (eps[pid].confidence_mean is None) == (expected == "absent"), (
             f"{name}: ep confidence_mean {eps[pid].confidence_mean!r} beside "
             f"state {eps[pid].ep_state!r}")
+
+
+def test_the_twins_read_the_same_window_at_the_store_float_edges(sdk):
+    """Cycle 27 (P2 + P3): the FLOOR of the store's parse window was not FLT_MIN,
+    and the hex arm inherited a decimal-only rule.
+
+    Two measured splits, both of which put presence on the Cypher side and
+    nothing on the Python side — the shape this whole issue removes:
+
+    * a HEX operand that is an exact float32 subnormal. `toFloatOrNull` reads
+      `"0x1p-149"` (1.40129846432482e-45) while `numeric_operand` refused it,
+      because the underflow guard (`|val| < FLT_MIN`) was justified by `strtof`'s
+      ERANGE — a DECIMAL behaviour. Measured on one row
+      (`posterior_alpha="0x1p-149", posterior_beta="1"`): the `ep` block said
+      `absent`, the rankers said `measured` with `confidence_source:
+      "unreadable"`, and `analyze` printed `0.00` — three answers.
+    * a DECIMAL literal just BELOW min-normal that the store still reads.
+      Scanning `1.1754943XXe-38` one digit at a time, `toFloatOrNull` flips
+      between `1.175494315e-38` (null) and `1.175494316e-38`
+      (1.17549435082229e-38 = FLT_MIN). Guarding at FLT_MIN refused the whole
+      accepting band.
+
+    So this test is a MEASURED table, not a rule restated: every literal below is
+    answered by the engine and by the twin, and the two must agree on presence
+    AND on the value. `"0x1.8p-149"` (inexact below the floor) and the exact
+    decimal subnormal `"1.401298464324817e-45"` are the shapes that stay NULL —
+    the store nulls both, so the twin must too, and a blanket "accept subnormals"
+    fix would fail them.
+
+    The last two rows are a RENDER facts, not a value split: the driver prints a
+    float with ~15 significant digits, so a >2**53 float32 comes back as
+    `9007199254740990.0` while its value IS `2**53` (proved in the assertion).
+    That is why the twin is compared to the store's VALUE in the loop below and
+    those two rows are checked separately.
+    """
+    from decimal import Decimal, localcontext
+
+    from tortoise import search_engine as _se
+
+    g = sdk._get_proj().g
+    agreeing = [
+        # the hex window: exact float32 subnormals the store READS
+        "0x1p-149", "0x1p-148", "0x1p-140", "0x0.8p-148", "0x0.000002p-126",
+        "0x1p-127", "0x1p-126",
+        # …and the hex shapes it nulls
+        "0x1.8p-149", "0x1.000002p-149", "0x1p-150", "0x1.fffffffp-149",
+        "0x1.fffffep-127", "0x1p-1030",
+        # the decimal floor band, both sides of the measured flip
+        "1.175494315e-38", "1.175494316e-38", "1.17549435e-38",
+        "1.1754944e-38", "1.1754943e-38", "1.1754942e-38",
+        # the DECIMAL arm has NO exactness exemption (measured: this literal is
+        # 2**-149 exactly and the store still answers null)
+        "1.401298464324817e-45", "2.802596928649634e-45", "1e-45", "1e-40",
+        # ordinary values, and the NEGATIVE midpoint (`_f32_neighbour` used to
+        # step the raw sign-magnitude bits the wrong way below zero)
+        "0.6", "0x1p4", "0x1.0000001p4", "1.0000000596046448",
+        "-1.0000000596046448", "-1.0", "-1.00000006",
+    ]
+    for lit in agreeing:
+        stored = g.query("RETURN toFloatOrNull($v)", params={"v": lit}).result_set[0][0]
+        twin = _se.numeric_operand(lit)
+        if stored is None:
+            assert twin is None, (
+                f"{lit!r}: the store answers null, the twin answers {twin!r} — "
+                "presence is then decided by whichever side is asked")
+            continue
+        assert twin is not None, (
+            f"{lit!r}: the store reads {stored!r}, the twin refuses it — the "
+            "rankers then order on a belief they cannot read")
+        # Compare at FLOAT32 resolution, exactly: the driver renders a float
+        # with ~15 significant digits, so a raw `==` is too strict for a normal
+        # value and a 1e-6 relative tolerance is too loose — it would accept the
+        # one-ulp error this test exists to catch (the negative-midpoint row).
+        assert _se._float32(twin) == _se._float32(stored), (
+            f"{lit!r}: the store serves {stored!r} ({_se._float32(stored)!r} as "
+            f"float32), the twin answers {twin!r}")
+
+    # The read floor is the MEASURED one, and it sits BELOW min-normal.
+    assert _se._F32_UNDERFLOW_READ_FLOOR < _se._FLOAT32_MIN_NORMAL
+    assert _se._F32_UNDERFLOW_READ_FLOOR == (
+        _se._FLOAT32_MIN_NORMAL - 2.0 ** -151)
+
+    # ⛔ The rule is the LITERAL's exactness, NOT an arm-wide band: a DECIMAL
+    # literal that names 2**-149 to all 149 of its digits is READ by the store
+    # (measured), so a floor-only rule would refuse a spelling the store serves
+    # — the same split, mirrored. Its 16-digit `repr()` is null.
+    with localcontext() as ctx:
+        ctx.prec = 200                     # 2**-149 has 149 decimals
+        exact_subnormal = format(Decimal(2) ** -149, "f")
+    assert len(exact_subnormal.split(".")[1]) == 149, exact_subnormal
+    assert g.query("RETURN toFloatOrNull($v)", params={
+        "v": exact_subnormal}).result_set[0][0] == pytest.approx(
+            1.401298464324817e-45, rel=1e-6), (
+        "the store stopped reading the exact decimal expansion of 2**-149 — "
+        "re-measure before trusting the text-exactness rule")
+    assert _se.numeric_operand(exact_subnormal) is not None
+    assert _se.numeric_operand("1.401298464324817e-45") is None
+
+    # The render artifact, stated instead of implied: the VALUE agrees, the
+    # driver's ~15-digit render does not.
+    assert g.query(
+        "RETURN toFloatOrNull('9007199254740993') = 9007199254740992.0"
+    ).result_set == [[True]], "the store's value for this literal changed"
+    assert _se.numeric_operand("9007199254740993") == 9007199254740992.0
+
+
+def test_a_hex_subnormal_operand_is_a_belief_on_every_surface(sdk):
+    """Cycle 27 (P2) end to end: one row, four surfaces, one answer.
+
+    `posterior_alpha="0x1p-149", posterior_beta="1"` is a real belief to the
+    store (alpha 1.4e-45, beta 1). Before the fix the `ep` block and `why` said
+    `absent` while both rankers said `measured` and could not read the value, and
+    `SubgraphExpander` served a confidence of 0.0 — maximum disbelief — for it.
+    The mean is 1.4e-45, which ROUNDS to 0.0 at 4 and 6 dp, so the test compares
+    what the surfaces serve to each other rather than to a constant.
+
+    Discriminating power: with the decimal-only underflow guard restored, the
+    `ep` block below answers `absent`.
+    """
+    from tortoise import search_engine as _se
+    from tortoise.ranking import GapsRanker, StateRanker, SubgraphExpander
+    from tortoise.search_engine import (
+        EP_STATE_MEASURED,
+        annotate_ep_batch,
+        belief_value,
+    )
+
+    proj = sdk._get_proj()
+    pid = sdk.create_point("statement", "a hex subnormal operand")["id"]
+    proj.g.query(
+        "MATCH (n:Point {id:$id}) "
+        "SET n.posterior_alpha = '0x1p-149', n.posterior_beta = '1'",
+        params={"id": pid})
+
+    # The fixture is the shape it claims: the store reads it, and so does the twin.
+    assert proj.g.query(
+        "RETURN toFloatOrNull('0x1p-149') AS v").result_set[0][0] ==         pytest.approx(1.401298464324817e-45, rel=1e-6)
+    assert _se.numeric_operand("0x1p-149") == pytest.approx(
+        1.401298464324817e-45, rel=1e-6)
+
+    eps = annotate_ep_batch(proj.g, [pid])[pid]
+    assert eps.ep_state == EP_STATE_MEASURED, eps
+    assert eps.confidence_mean is not None, (
+        "the ep block calls a belief it can read absent")
+
+    rec = StateRanker(projection=proj).rerank(
+        [{"id": pid, "scores": {"rrf": 1.0}}])[0]["recall_ranking"]
+    gap = GapsRanker(projection=proj).rerank(
+        [{"id": pid, "scores": {"rrf": 1.0}}])[0]["gaps_ranking"]
+    for name, row in (("recall_ranking", rec), ("gaps_ranking", gap)):
+        assert row["ep_state"] == EP_STATE_MEASURED, (name, row)
+        assert row["confidence"] is not None, (name, row)
+        assert row["confidence_source"] == "posterior", (name, row)
+        assert row["confidence"] == pytest.approx(
+            eps.confidence_mean, abs=1e-4), (name, row, eps)
+
+    # …and the shared value reader agrees with both, which is the invariant the
+    # four surfaces are supposed to share.
+    assert belief_value(posterior_alpha="0x1p-149", posterior_beta="1") is not None
+
+    node = next(n for n in SubgraphExpander(projection=proj).expand(
+        [pid], depth=1)["nodes"] if n.get("id") == pid)
+    assert node["ep_state"] == EP_STATE_MEASURED, node
+    assert node["confidence"] is not None, (
+        f"the subgraph served {node['confidence']!r} for a belief it can read "
+        "— 0.0 is maximum disbelief, not absence")
+
+
+def test_the_peer_block_serves_a_rounded_belief_like_every_sibling(sdk):
+    """Cycle 27 (P3): the peer block was the ONE surface serving a raw double.
+
+    Same claim, α=1 β=2: `ep` block `0.3333`, rankers `0.333333`, peer block
+    `0.3333333333333333`. A consumer comparing two surfaces for one claim got two
+    numbers, and the peer payload's own `variance` key two lines below was
+    already rounded to 6.
+    """
+    from tortoise.search_engine import annotate_ep_batch, get_relationships_bounded
+
+    proj = sdk._get_proj()
+    target = sdk.create_point("statement", "the rounded-peer target")["id"]
+    peer = sdk.create_point("statement", "the rounded-peer claim")["id"]
+    proj.g.query(
+        "MATCH (n:Point {id:$id}) "
+        "SET n.posterior_alpha = 1.0, n.posterior_beta = 2.0",
+        params={"id": peer})
+    op = sdk.create_point("statement", "the rounded-peer operator")["id"]
+    proj.g.query(
+        "MATCH (o:Point {id:$o}) SET o.is_operator = true, o.op_type = 'IMPL'",
+        params={"o": op})
+    proj.g.query(
+        "MATCH (p:Point {id:$p}), (o:Point {id:$o}) "
+        "CREATE (p)-[:IMPL {idx:1}]->(o)",
+        params={"p": peer, "o": op})
+    proj.g.query(
+        "MATCH (o:Point {id:$o}), (t:Point {id:$t}) CREATE (o)-[:IMPL]->(t)",
+        params={"o": op, "t": target})
+
+    out = get_relationships_bounded(proj.g, [target])
+    assert out.decoration_error == "", out.decoration_error
+    peers = {e["related_id"]: e["peer"] for e in out[target]}
+    assert peer in peers, "the peer was dropped from the block"
+    value = peers[peer]["confidence"]
+    assert value is not None, peers[peer]
+    assert value == round(value, 6), (
+        f"the peer block serves an unrounded belief ({value!r}) while every "
+        "sibling key and surface rounds")
+    # …and it is the SAME belief the other surfaces serve, to their precision.
+    assert round(value, 4) == round(
+        annotate_ep_batch(proj.g, [peer])[peer].confidence_mean, 4)
 
 
 def test_negative_beta_operands_are_not_a_belief(sdk):

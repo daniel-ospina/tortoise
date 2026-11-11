@@ -2480,6 +2480,17 @@ class TortoiseEP:
             rows.extend(self.g.query(
                 f"MATCH (n:{_label}) "
                 "WHERE " + " AND ".join(conds) + " "
+                # ⛔ #11702 cycle 27: the 1.0 defaults are why a claim with NO
+                # operands at all can be listed at the Beta(1,1) MAXIMUM width
+                # 1/12 — that listing is the #169 decision and is deliberate —
+                # but the ROW than carries `alpha: 1.0, beta: 1.0` as if they
+                # were STORED. They are not: they are the uniform prior the
+                # claim is measured AGAINST, never `variance: 0.083333` beside
+                # `annotate_ep_batch`'s `absent / mean None / variance 0.0` for
+                # the same node. So read the returned `alpha`/`beta` as the
+                # prior this scan compares to, never as a persisted pair — the
+                # two surfaces agree about the claims that HAVE a width, and
+                # this arm is the recorded exception (see the note below).
                 "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
                 "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
                 # #11702 cycle 11: `toFloat` on every operand. FalkorDB's

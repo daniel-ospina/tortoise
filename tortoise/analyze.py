@@ -1229,14 +1229,20 @@ def grounding_snapshot(proj=None) -> dict:
     rows = proj.g.query(
         "MATCH (p:Point) "
         f"WHERE p.is_operator = false AND {_live_only('p.status')} "
-        "RETURN p.id, coalesce(p.confidence, 0.5)"
+        # #11702 cycle 27: NO `coalesce(p.confidence, 0.5)`. The 0.5 default is
+        # applied BELOW, where it belongs — it is the documented DE2E-4 drift
+        # sample, not a served belief — but doing it in Cypher made an absent
+        # mirror and a stored `0.5` indistinguishable at the store read, before
+        # `belief_mirror` could apply the band. Reading the column raw also stops
+        # the idiom this whole issue exists to delete from appearing here.
+        "RETURN p.id, p.confidence"
     ).result_set
     # #11702 cycle 16: total coercion — see `mean_grounding`. The 0.5 default
     # is the documented DE2E-4 extension (a confidence-less Point degrades the
     # mean rather than being dropped), not the #11702 fabricated belief: this is
     # a drift SAMPLE over a batch, not a claim's served confidence.
-    points = {r[0]: (belief_mirror(r[1]) if belief_mirror(r[1]) is not None
-                     else 0.5) for r in rows}
+    _mirrors = {r[0]: belief_mirror(r[1]) for r in rows}      # ONE coercion
+    points = {k: (0.5 if v is None else v) for k, v in _mirrors.items()}
     mean = sum(points.values()) / len(points) if points else 0.0
     from datetime import datetime, timezone
     return {
