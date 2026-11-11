@@ -421,6 +421,243 @@ def test_a_padded_hex_exponent_cannot_empty_the_batch():
     assert _exact_literal_fraction("0x1p+" + "9" * 4400) is None
 
 
+# ── A hex exponent the mantissa CANCELS is not an unreadable literal ──────
+
+def test_a_hex_exponent_past_the_bound_its_mantissa_cancels_is_still_read(sdk):
+    """#11897: the digit-cap bound refused a value the STORE serves.
+
+    `_exact_literal_fraction` RETURNED `None` when `abs(exponent) >
+    _EXACT_FRACTION_MAX_EXP`, and the three call sites answered that `None` with
+    `return None` — ABSENT — on the stated ground that the branch was
+    unreachable for an admitted literal. It was reachable: a long mantissa
+    CANCELS a large exponent, leaving a finite, in-band, non-zero value.
+
+    Measured on FalkorDB 4.20.6, the literal below is exactly `1 + 2⁻²⁴`:
+
+        store          toFloat(<literal>)         -> 1.0   (non-null; served)
+        adb5d47cf8^    numeric_operand(<literal>) -> 1.0   (the `rounded` fallback)
+        on `main`      numeric_operand(<literal>) -> None  (ABSENT — the regression)
+        at this fix    numeric_operand(<literal>) -> 1.0   (asserted below)
+
+    `adb5d47cf8` is the commit that replaced the three call sites' `return
+    rounded` fallbacks with `return None`; APPLYING only that payload restores
+    the regression, which is why the row is named by SHA rather than by "before"
+    (measured: the parent tree answers 1.0 for this literal).
+
+    Stored as the α operand with `β = 3`, the claim read DIFFERENTLY on the two
+    sides of the read path — and the split is exactly the Python/Cypher line,
+    because the refusal lived only in the Python parse:
+
+        Python side     `ep` block (None, 'absent'), `why` (None, 'absent', False),
+                        StateRanker (None, 'measured'), gaps_ranking (None, 'measured')
+        Cypher side     GraphRanker 0.25, recall_subgraph
+                        {"ep_state": "measured", "confidence": 0.25}
+
+    ⚠️ Not 0.5: the neutral-Beta(1,1) fallback was already gone (that is what
+    #11702 removed), so nothing answered 0.5 here. What the refusal produced was
+    the other half of the same defect — a store-reading surface reporting a
+    measured 0.25 while the `ep` block in the SAME response said there is no
+    belief. Correcting that claim changes no assertion below; the `!= 0.5` guard
+    is kept as a tripwire against a fallback ever coming back.
+    """
+    from fractions import Fraction
+
+    from tortoise.ranking import GapsRanker, GraphRanker, StateRanker
+    from tortoise.search_engine import _exact_literal_fraction, numeric_operand
+
+    # 1 + 2⁻²⁴ — the float32 MIDPOINT above 1.0, spelled so the exponent is
+    # past the bound and the mantissa cancels it back into band.
+    long_hex = "0x" + format((2**24 + 1) * 2**4076, "x") + "p-4100"
+    assert len(long_hex) > 1000
+    assert float.fromhex(long_hex) == 1.0 + 2.0**-24
+
+    # The reconstruction, and then the value: a midpoint settles to even, so
+    # both spellings answer 1.0 — the same float32 the store serves.
+    assert _exact_literal_fraction(long_hex) == Fraction(2**24 + 1, 2**24), (
+        "the exact parse refused a literal whose exponent its mantissa cancels")
+    assert numeric_operand(long_hex) == numeric_operand("0x1.000001p0") == 1.0, (
+        numeric_operand(long_hex), numeric_operand("0x1.000001p0"))
+
+    # …and every surface agrees once it is STORED. `β = 3` keeps the mean off
+    # 0.5, so an imputed Beta(1,1) cannot pass this test by coincidence.
+    proj = sdk._get_proj()
+    pid = sdk.create_point("statement", "ZQHEXBOUND a cancelled exponent")["id"]
+    proj.g.query(
+        "MATCH (n:Point {id:$id}) SET n.posterior_alpha = $a, "
+        "n.posterior_beta = '3'",
+        params={"id": pid, "a": long_hex})
+    ann = annotate_ep_batch(proj.g, [pid])[pid]
+    assert ann.ep_state == EP_STATE_MEASURED, (
+        f"the store serves this operand, the reader called it {ann.ep_state!r}")
+    assert ann.confidence_mean == pytest.approx(0.25, abs=1e-6), ann
+    state = StateRanker(projection=proj)._fetch_point_signals([pid])[pid]
+    graph = GraphRanker(projection=proj)._fetch_signals([pid], "point")[pid]
+    gaps = GapsRanker(projection=proj)._fetch_confidence_signals(
+        [pid], labels=["Point"])[pid]
+    for name, sig in (("state", state), ("graph", graph), ("gaps", gaps)):
+        assert sig.get("confidence") == pytest.approx(0.25, abs=1e-6), (
+            f"{name} disagreed with the `ep` block for one stored claim: {sig}")
+        assert sig["confidence"] != pytest.approx(0.5, abs=1e-9), (name, sig)
+
+
+def test_a_cancelling_hex_exponent_reads_at_both_band_edges(sdk):
+    """#11897, the OTHER two call sites — clock the fix at the edges of the band.
+
+    The headline case above is the MIDPOINT site (`_f32_from_literal`'s
+    tie-break). The same refusal lived in the other two call sites, and each is
+    a separate live split, not a duplicate:
+
+    * the OVERFLOW site: `_FLOAT32_MAX` spelled with a `p` exponent past the
+      bound is refused there, so Python answered ABSENT for the value every
+      Cypher surface serves as max — the mirror of the headline case.
+    * the UNDERFLOW site (`_string_operand`): a float32 subnormal named EXACTLY
+      by a cancelling spelling was refused, so a claim the store reads at
+      `1.4e-45` read absent here — and that `# pragma: no cover` comment said
+      "a fail-safe for a future widening only", which is the same kind of
+      reachability claim this PR exists to correct.
+
+    Both spellings below are >1000 chars, exactly-valued, and past the bound as
+    WRITTEN (`|exponent| > _EXACT_FRACTION_MAX_EXP`) while their MAGNITUDES sit at
+    OPPOSITE ends of the band — the MAX witness at `magnitude_bits` = +128, the
+    subnormal witness at -145, both far inside the ±4096 bound — so
+    `_exact_literal_fraction` refused them before #11897 and reconstructs them
+    after. One witness near MAX would leave the negative half of the bound
+    unpinned; this test does not. The float32 MIDPOINT spelled the same way stays
+    NULL: loosening the bound must not turn a null into a value either.
+    """
+    from fractions import Fraction
+
+    from tortoise.search_engine import (
+        _exact_literal_fraction,
+        numeric_operand,
+        numeric_operand_cypher,
+    )
+
+    max32 = Fraction(2**128 - 2**104)          # _FLOAT32_MAX, exactly
+    shift = 4204                               # bits the mantissa cancels
+    max_hex = "0x" + format(max32.numerator << shift, "x") + f"p-{shift}"
+    sub_hex = "0x1" + "0" * 1025 + "p-4249"    # 2**-149, the min subnormal
+    mid_hex = ("0x" + format((2**128 - 2**103) << shift, "x") + f"p-{shift}")
+    for raw in (max_hex, sub_hex, mid_hex):
+        assert len(raw) > 1000, (len(raw), raw[:24])
+
+    assert float.fromhex(max_hex) == 3.4028234663852886e38
+    assert _exact_literal_fraction(max_hex) == max32, (
+        "the exact parse refused max, spelled with an exponent its mantissa "
+        "cancels — the overflow site answers None for a value the store serves")
+    assert numeric_operand(max_hex) == 3.4028234663852886e38, (   # was None
+        numeric_operand(max_hex))
+
+    assert float.fromhex(sub_hex) == 2.0**-149
+    assert _exact_literal_fraction(sub_hex) == Fraction(1, 2**149)
+    assert numeric_operand(sub_hex) == float.fromhex("0x1p-149"), (  # was None
+        "the underflow site refused an EXACT subnormal whose spelling names "
+        "it exactly — that is the twin split it exists to prevent")
+
+    # The nulls stay null: the exact midpoint above `_FLOAT32_MAX` overflows to
+    # `2**128`, which is not a float32.
+    assert _exact_literal_fraction(mid_hex) == Fraction(2**128 - 2**103)
+    assert numeric_operand(mid_hex) is None, numeric_operand(mid_hex)
+
+    # …and the STORE agrees, on both twins, for the two that read.
+    proj = sdk._get_proj()
+    pid = sdk.create_point("statement", "ZQHEXEDGE cancelling edge")["id"]
+    for raw, expected in ((max_hex, 3.4028234663852886e38),
+                          (sub_hex, float.fromhex("0x1p-149"))):
+        proj.g.query(
+            "MATCH (n:Point {id:$id}) SET n.posterior_alpha = $a, "
+            "n.posterior_beta = '1'", params={"id": pid, "a": raw})
+        cypher = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN "
+            + numeric_operand_cypher("n.posterior_alpha"),
+            params={"id": pid}).result_set[0][0]
+        py = numeric_operand(raw)
+        assert py is not None and cypher is not None, (raw[:24], py, cypher)
+        assert _store_f32(py) == _store_f32(expected) == _store_f32(cypher), (
+            py, cypher, expected)
+
+
+def test_the_hex_bound_is_a_magnitude_and_zero_is_zero():
+    """#11897: what the loosened bound must still REFUSE, and the zero case.
+
+    Loosening a cost guard is the half that can only break silently, so the
+    surviving half is pinned here rather than inferred from the value rows: the
+    shape the guard exists for (`Fraction(2) ** 10**9`) is still refused, the
+    boundary is the MAGNITUDE rather than the exponent as written, and a zero
+    mantissa is EXACTLY zero at any exponent instead of "unreadable".
+    """
+    from fractions import Fraction
+
+    from tortoise.search_engine import _exact_literal_fraction
+
+    # 1 + 0 hex digits of magnitude slack: `4 * significant + exponent`, so the
+    # boundary sits at 4092/4093 positive and -4100/-4101 negative.
+    assert _exact_literal_fraction("0x1p4092") == Fraction(2) ** 4092
+    assert _exact_literal_fraction("0x1p4093") is None
+    assert _exact_literal_fraction("0x1p-4100") == Fraction(1, 2**4100)
+    assert _exact_literal_fraction("0x1p-4101") is None
+
+    # Zero mantissa: the value is 0 whatever the exponent says. Four of these
+    # were REFUSED before #11897 (their exponent is past the old bound); the
+    # fifth, `0x0000`, has no `p` exponent at all, so it was never refused and
+    # it asserted nothing about the zero-mantissa return — it is here as the
+    # no-exponent control, not as a fifth failure.
+    for raw in ("0x" + "0" * 16 + "p-999999999", "0x0.000p1000000",
+                "-0x0p-999999999", "0x0000", "-0x.0p4097"):
+        assert _exact_literal_fraction(raw) == Fraction(0), raw
+
+    # The bound measures SIGNIFICANT digits, so a LEFT-padded mantissa is still
+    # a small value: only `digits.lstrip("0")` keeps this in band (the leading
+    # zeros would otherwise contribute 4 bits each and put it 13,000+ bits over
+    # the bound). Leading zeros are ordinary hex digits — C99's `strtod` grammar
+    # (and so the store's `toFloat`) accepts them and they do not change the
+    # value — and this literal is SERVED, not hypothetical: measured on
+    # FalkorDB 4.20.6, `toFloat` answers `1.0` and `_exact_literal_fraction`
+    # answers `Fraction(1)`, the same answer `main` gives (its bound was on the
+    # EXPONENT, and `p0` is far inside it). So bounding the padded SPELLING
+    # instead of the value refuses a served literal: the same defect class this
+    # PR exists to remove, re-entered from the other side (#11898 review).
+    assert _exact_literal_fraction("0x" + "0" * 4400 + "1p0") == Fraction(1)
+
+
+def test_a_hex_magnitude_past_the_bound_is_refused_before_it_is_built(
+        monkeypatch):
+    """#11897: the bound still bounds the COST, not just the answer.
+
+    The DoS rows in the twin-grammar table are DECIMAL (`1e10000000`), and they
+    are excluded by `_FLOAT32_OVERFLOW_CEILING` before the exact parse is ever
+    entered — so nothing pinned the HEX bound this PR rewrote. A formula whose
+    guard stops tripping (or trips in the wrong direction) would ship green
+    while `Fraction(2) ** 10**9` became reachable from a stored operand.
+
+    Pinned by MECHANISM, not by a timing assertion: the refusal must happen
+    before any `Fraction` is constructed. A timing test would be flaky; a test
+    that merely asserts `None` would pass on a guard that builds the value first
+    and discards it — which is the cost, not the answer.
+    """
+    import tortoise.search_engine as se
+
+    built: list[tuple] = []
+
+    def _spy(*args, **_kwargs):
+        built.append(args)
+        raise AssertionError(
+            "the guard did not trip before the value was BUILT — that is the "
+            "unbounded-cost path `_EXACT_FRACTION_MAX_EXP` exists to prevent")
+
+    monkeypatch.setattr(se, "Fraction", _spy)
+    for raw in ("0x1p1000000", "0x1p-999999999", "-0x1p999999999",
+                "0x" + "f" * 2000 + "p1000000", "0x1.8p4093"):
+        assert se._exact_literal_fraction(raw) is None, raw
+    assert built == [], built
+
+    # The spy IS reachable — an in-band literal reaches the construction — so
+    # `built == []` above is the guard tripping, not a dead spy.
+    with pytest.raises(AssertionError, match="did not trip"):
+        se._exact_literal_fraction("0x1p0")
+    assert built, "the spy never fired — the refusals above prove nothing"
+
+
 def test_a_zero_literal_with_an_empty_integer_part_is_still_zero():
     """Cycle 30 P3: the trailing-zero canonicalisation can EMPTY the integer
     part, and `Decimal("")` raises — so `.0`, `+.00`, `-.0e5` returned `None`
@@ -1204,9 +1441,9 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
 
     Both rules are now the shared predicate, so the agreement is structural —
     but "structural" is a claim, and this is the assertion that keeps it true
-    across all TEN stored shapes if either side is edited again.
+    across all ELEVEN stored shapes if either side is edited again.
 
-    Four of the ten are the readability boundary, and they are DIFFERENT
+    Five of the eleven are the readability boundary, and they are DIFFERENT
     shapes with different honest answers:
 
     * an OPERAND written as a hex-float literal (`posterior_alpha = '0x1p4'`) was
@@ -1222,7 +1459,14 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
     * a MIRROR at the band edge whose literal the DOUBLE cannot hold exactly
       (`0x1.0000010000000001p0`, cycle 28) rounds past 1.0 in the store and to
       `1.0` in Python if the midpoint is decided from the double: `absent` /
-      `present at maximum certainty`, one claim, two answers.
+      `present at maximum certainty`, one claim, two answers;
+    * an OPERAND whose `p` EXPONENT the old bound refused while its mantissa
+      cancelled that exponent back into band (#11897): the literal above is
+      exactly 1 + 2⁻²⁴, so the store serves it and the reader called it absent —
+      `measured / 0.25` on the Cypher-reading surfaces, `absent` on the Python
+      ones, in the SAME response (not `0.5`: the neutral fallback was already
+      gone, see the headline test). The bound now measures the value's MAGNITUDE,
+      not the exponent as written.
 
     Collapsing those two into one shape is how the token lost its only test
     when the band landed (cycle 25 review): the fixture stayed the mirror, so it
@@ -1272,9 +1516,21 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
     #     1.000000119… and calls the row ABSENT. Measured as a presence split.
     band_edge_mirror = _point("a band-edge hex mirror",
                               "n.confidence = '0x1.0000010000000001p0'")
+    # (e) The EXPONENT BOUND (#11897): a 4,000-bit mantissa CANCELS a `p-4100`,
+    #     so this literal is exactly 1 + 2⁻²⁴ — in band, served by the store —
+    #     while the old bound refused it for having `|exponent| > 4096`. The
+    #     Python-reading surfaces then said `absent` (this ranker's `confidence`
+    #     was `None`) while the Cypher-reading ones reported the real 0.25. β = 3
+    #     keeps the mean off 0.5, so a re-introduced neutral fallback would fail
+    #     the `== 0.25` assertion rather than pass it by coincidence.
+    hex_cancelling = _point(
+        "a cancelling hex exponent",
+        "n.posterior_alpha = $a, n.posterior_beta = '3'",
+        {"a": "0x" + format((2**24 + 1) * 2**4076, "x") + "p-4100"})
 
     ids = [absent, half_pair, zero_total, mirror_only, measured, baseline,
-           hex_operand, out_of_band_mirror, hex_subnormal, band_edge_mirror]
+           hex_operand, out_of_band_mirror, hex_subnormal, band_edge_mirror,
+           hex_cancelling]
     recs = {r["id"]: r["recall_ranking"] for r in
             StateRanker(projection=proj).rerank(
                 [{"id": p, "scores": {"rrf": 1.0}} for p in ids])}
@@ -1323,6 +1579,19 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
     for pid in (mirror_only, baseline):
         assert recs[pid]["ep_state"] == EP_STATE_BASELINE, recs[pid]
         assert recs[pid]["confidence_source"] != EP_STATE_ABSENT, recs[pid]
+
+    # (e) The EXPONENT-BOUND shape: a served value must be RANKED on. This row is
+    #     the #11897 regression — `recall_ranking`/`gaps_ranking` answered
+    #     `confidence: None` (Python refused the operand) while `GraphRanker`
+    #     reported the store's 0.25 in the same response, so one claim carried no
+    #     belief on one surface and a measured one on another. The `!= 0.5` clause
+    #     below is a TRIPWIRE against the pre-#11702 neutral fallback returning;
+    #     it is not what this shape produced (nothing answered 0.5).
+    for name, row in (("recall_ranking", recs[hex_cancelling]),
+                      ("gaps_ranking", gaps[hex_cancelling])):
+        assert row["ep_state"] == EP_STATE_MEASURED, (name, row)
+        assert row["confidence"] == pytest.approx(0.25, abs=1e-6), (name, row)
+        assert row["confidence_source"] == "posterior", (name, row)
 
     # (a) The OPERAND shape: a hex-float pair. This USED to be the reachable
     # "unreadable" shape — the store reads `toFloatOrNull('0x1p4')` (16.0) and the
