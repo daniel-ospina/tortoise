@@ -722,11 +722,16 @@ def _exact_literal_fraction(raw: str):
     RECONSTRUCTION cheap, and #11897 and #11702 each needed one.
     ⛔ Do NOT replace the guard with a DIGIT-LENGTH short-circuit
     (``len(exp_digits) > len(str(_EXACT_FRACTION_MAX_EXP))``): a length bound is
-    grammar-shaped, not value-shaped, so it refuses an in-bounds value whose
-    exponent merely has five digits — ``"0x0." + "0"*1476 + "1p10000"`` is a
-    magnitude the store serves, and the length form answered `None` for it. That
-    is the same measured-vs-absent split #11897 closed, reintroduced from the
-    other side.
+    grammar-shaped, not value-shaped, so it refuses a literal by the SPELLING of
+    its exponent even when the value's magnitude is inside the bound — a
+    five-digit exponent cancelled by a long mantissa.
+    ``"0x0." + "0"*1476 + "1p10000"`` is such a literal: its magnitude_bits is
+    exactly 4096, the bound itself (the value is ``2**4092``), and the length form
+    answered `None`. ⛔ It is a HELPER-contract witness only, never a store
+    witness: `2**4092` overflows a double, so `numeric_operand` answers `None` and
+    no measured-vs-absent split turns on it. The store-visible witness for
+    bounding MAGNITUDE is #11897's cancelling spelling, pinned in
+    `test_a_cancelling_hex_exponent_reads_at_both_band_edges`.
 
     `Fraction` cannot read a HEX float at all — it raises `ValueError` — so a hex
     literal used to fall through to the DOUBLE's rounding, which is the SAME

@@ -622,12 +622,20 @@ def test_the_hex_exponent_guard_is_value_shaped_not_length_shaped():
     A 4,300-character padded exponent has to be refused without being converted,
     and the tempting way to do that is
     ``len(exp_digits) > len(str(_EXACT_FRACTION_MAX_EXP))``. That bound is
-    GRAMMAR-shaped: it refuses a five-digit exponent outright, including one whose
-    VALUE is far inside the bound, because a long mantissa's fractional zeros
-    cancel it. `"0x0." + "0"*1476 + "1p10000"` has magnitude_bits
-    ``4*1 + 10000 - 4*1477 == 4096`` — exactly the bound, a value the store
-    serves — and the length form answered `None` for it, i.e. it re-opened the
-    measured-vs-absent split #11897 closed, from the other side.
+    GRAMMAR-shaped, not VALUE-shaped: it refuses a five-digit exponent by its
+    SPELLING even when the value's magnitude is inside the bound, because a long
+    mantissa's fractional zeros cancel it. `"0x0." + "0"*1476 + "1p10000"` has
+    magnitude_bits ``4*1 + 10000 - 4*1477 == 4096`` — exactly
+    `_EXACT_FRACTION_MAX_EXP` — so this helper's contract ("the literal's EXACT
+    value, or None") requires `2**4092`, and the length form answered `None`.
+
+    ⛔ That literal is NOT a measured-vs-absent witness and must not be quoted as
+    one: `2**4092` overflows a double, so `numeric_operand` answers `None` for it
+    and the store reads `absent` either way. The STORE-visible witness for
+    bounding MAGNITUDE is the cancelling spelling from #11897 — a float32 MAX
+    mantissa closed with `p-4204` — which an `abs(exponent)` bound refused while
+    every Cypher surface served it; pinned in
+    `test_a_cancelling_hex_exponent_reads_at_both_band_edges`.
 
     The guard is therefore a `try: int(...) except ValueError`, so it refuses only
     the conversion the int↔str cap would actually raise on.
@@ -5660,9 +5668,12 @@ _ABSENT_CLAIM = re.compile(
 #: a PROXIMITY bound, never a grammar proof — the clause-scoped denial check in
 #: `_ep_pass_claims` is what separates a denial from an assertion, and the
 #: control test mutates the shipped denial in place to prove this guard reddens.
-#: The pre-verb segments are CAPTURED so that check can be scoped to them.
+#: The LINK segment — the span between the verb and the phrase — is CAPTURED
+#: because the denial check is scoped to it (`_negates_its_verb` reads
+#: `group("link")` and nothing else; the span in FRONT of the verb is matched
+#: without capture, and no code reads it).
 _EP_PASS_CLAIM = re.compile(
-    r"(?:has_ep|ep_measured_cypher)(?P<pre>.{0,300}?)"
+    r"(?:has_ep|ep_measured_cypher).{0,300}?"
     r"(?:==|\bis\b|\bmeans?\b)(?P<link>.{0,300}?)"
     r"[`\"]*(?P<pass>EP has MEASURED|EP measured this|EP MEASURED)",
     re.IGNORECASE | re.DOTALL)
