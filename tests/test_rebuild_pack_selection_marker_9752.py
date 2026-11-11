@@ -1590,8 +1590,9 @@ def test_migrate_route_names_the_capture_source_when_it_observed_nothing(
     # back to naming a sidecar this shape does not have — and, before this
     # assertion, the whole file stayed green through exactly that mutation
     # (measured at the head that then collected 39 tests: the whole file went
-    # green under that mutation; the file collects 41 today, so a count quoted
-    # here would be this file's state at the wrong head).
+    # green under that mutation. The count has moved since — 41 when this
+    # paragraph was written, 42 once a further test landed — so re-measure with
+    # `--collect-only -q` rather than trusting a number from here).
     assert result["pack_selection_state_unknown_inherited"] is False, (
         "this route's own empty-capture override must report itself as NOT "
         f"inherited, or the CLI prints the sidecar cause again: {result}")
@@ -2051,9 +2052,10 @@ def test_rebuild_all_reports_the_true_absence_it_observed(tmp_path, caplog,
     admin had REMOVED is back in the approved set") — was pinned by NO test.
     Measured at the head that wrote this: rewriting it to `elif False:` left
     the whole file GREEN — 94 passed across the four rebuild suites, 39 in this
-    one. ⚠️ Counts are NOT carried: this file collects 41 today
-    (`--collect-only -q`), so the 39 above is a reading of the head that made
-    it, not of this one, and a baseline quoted from another head is exactly the
+    one. ⚠️ Counts are NOT carried: this file collected 41 when this paragraph
+    was written, and 42 once a further test landed (`--collect-only -q`), so the
+    39 above is a reading of the head that made it, not of this one, and a
+    baseline quoted from another head is exactly the
     "count carried instead of re-derived" class this PR keeps removing. A report
     that can be deleted without reddening anything is not a report; it is dead
     code with a log line, which is the class this PR exists to remove.
@@ -2110,10 +2112,10 @@ def test_replay_log_reports_the_absence_arm_it_observed(tmp_path, caplog,
     FAILING VALUE: the `else:` under the read-back — the journal-replay path's
     only statement that a lost marker reads as UNCONFIGURED — is unpinned.
     Measured at the head that wrote this: `logger.error(` → `logger.debug(` on
-    that arm left this file GREEN (39 passed then; the file collects 41 today,
-    so re-measure rather than trusting the number), which means the single
-    operator-visible signal on the journal-only path can be silenced by an edit
-    nothing notices.
+    that arm left this file GREEN (39 passed then; 41 when this paragraph was
+    written, 42 once a further test landed, so re-measure rather than trusting
+    the number), which means the single operator-visible signal on the
+    journal-only path can be silenced by an edit nothing notices.
 
     REACHABLE: `_replay_log` really runs over a real journal and the read-back
     really queries the graph; the ONLY thing `_NoMarkerRestore` drops is the
