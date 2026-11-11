@@ -34,6 +34,11 @@ import yaml
 from .live import ACCEPTED_DIRECTION_VALUES as _ACCEPTED_DIRECTION_VALUES
 from .live import canonical_direction, is_default_direction
 from .source_credibility import SOURCE_KIND_DEFAULTS
+# #11484 — the ONE derived write-vocabulary resolver. Imported at module level
+# because `write_vocabulary` is stdlib-only at import time (its projection/pack
+# imports are lazy), so it costs this module nothing; the sentinel has to be a
+# real object here because a default argument is evaluated at import.
+from .write_vocabulary import UNSET as _UNSET_SET
 from .status_folds import (
     StatusFoldIndex,
     bare_lifecycle_kind_collisions,
@@ -606,7 +611,10 @@ SEMANTICS_TRANSITION: dict[str, str] = {
 CORE_OPERATOR_LABELS = CORE_PREDICATES | SEMANTICS_VALUES
 
 
-def declared_relation_predicates() -> frozenset[str] | None:
+def declared_relation_predicates(*, graph: object | None = None,
+                                 installed: frozenset[str] | None | object
+                                 = _UNSET_SET
+                                 ) -> frozenset[str] | None:
     """The declared relation-predicate vocabulary, in ONE home.
 
     ``CORE_OPERATOR_LABELS`` (§3.9's mechanism pair plus §8's closed semantics
@@ -619,21 +627,29 @@ def declared_relation_predicates() -> frozenset[str] | None:
     vocabulary independently, and an edge no surface constrained was the only
     one that got through."*
 
+    ⛔ PER GRAPH SINCE #11484, and it is the SAME resolver the structural half
+    reads (``write_vocabulary.allowed_predicates``). Before this, the pack leg
+    was the CATALOG union while the structural leg was a static literal: the two
+    halves of one ontology answered different questions, and neither was the
+    ruling's ``core ∪ installed_packs(graph)``. ``installed=frozenset()`` is a
+    graph a user deliberately emptied (#2728) and yields core alone; no
+    argument at all keeps the catalog union the catalog-facing callers read.
+
     ``None`` means the union could not be read (registry unreadable). A caller
     must fail OPEN on it — keep its item and warn — because the destructive
     direction is dropping data this module could not judge. Never raises.
-
-    Lazy import: ``domain_loader`` imports this module, so a module-level
-    import would be a cycle.
     """
     try:
-        from .domain_loader import _get_registry
+        from .write_vocabulary import UNSET, pack_predicates, resolve_installed
 
         declared: set[str] = set(CORE_OPERATOR_LABELS)
-        reg = _get_registry()
-        if reg is not None:
-            declared |= {r.get("predicate") for r in reg.list_relations()
-                         if isinstance(r, dict) and r.get("predicate")}
+        if installed is not _UNSET_SET:
+            resolved = installed          # a caller-supplied set, or None
+        elif graph is None:
+            resolved = UNSET              # the catalog union (no graph asked)
+        else:
+            resolved = resolve_installed(graph)
+        declared |= set(pack_predicates(resolved).keys())
         return frozenset(declared)
     except Exception:  # noqa: BLE001, RUF100 — never raise into a caller's gate
         return None
@@ -698,47 +714,61 @@ RELATION_WRITE_VERDICTS = (
 )
 
 
-def relation_write_paths(rel: dict) -> tuple[str, ...]:
+def relation_write_paths(rel: dict, *,
+                         graph: object | None = None,
+                         installed: frozenset[str] | None | object = _UNSET_SET,
+                         registry: object = None) -> tuple[str, ...]:
     """Name the DECLARED write paths a relation's declaration makes usable.
 
     The paths are the two surfaces a caller can reach with the relation AS
     DECLARED (see the block above): ``operator`` is gated on the declared
     ``mechanism`` — the declaration's own op_type — and ``structural`` reads
-    the writer's own structural vocabulary (``STRUCTURAL_WRITE_PREDICATES``,
-    the union of every writers' set). Empty means the declaration binds no
-    path.
+    the DERIVED structural vocabulary (``write_vocabulary.allowed_predicates``,
+    #11484: core §3.9 ∪ the packs installed on the graph). Empty means the
+    declaration binds no path.
+
+    ⛔ ``structural`` IS PER-GRAPH NOW, and that is the ruling, not a widening.
+    The owner fixed the model on 2026-11-05: *"the ontology core+packs is the
+    canonical source … the enforced write vocabulary needs to be matched to the
+    others automatically"*, and *"the packs can be toggled on/off per graph"*.
+    So a predicate a pack declares is structurally writable **on a graph that
+    installed it** and not on one that did not — and a caller that supplies
+    neither ``graph`` nor ``installed`` gets the CATALOG UNION, which is what
+    this function answered before the derivation existed (`tortoise pack
+    validate`, pack load and the census tool read the catalog, not a graph).
 
     ⛔ Empty is NOT "the runtime refuses it": ``create_operator`` accepts any
     label (warn-not-block, #1934), and what is missing is a declared mechanism
     — i.e. what a caller would pass as ``op_type``. See the block above and
     the load warning.
     """
-    # Lazy: the pack registry is imported by the extraction path and must not
-    # drag the whole projection package in behind it (measured ~60 ms). The
-    # write vocabulary stays defined in ONE place — the writer — and is read
-    # here. It is the UNION of the writers' structural sets (#8285 review P1):
-    # `_VALID_EDGE_PREDICATES` alone excludes `aboutPoint` (create_about_edge)
-    # and `extractedFrom` (ingest), both of which the runtime demonstrably
-    # writes.
-    from .projection.edges import STRUCTURAL_WRITE_PREDICATES
+    from .write_vocabulary import predicate_facts
 
     predicate = rel.get("predicate") or ""
     paths: list[str] = []
     if rel.get("mechanism") in CORE_PREDICATES:
         paths.append("operator")
-    if predicate in STRUCTURAL_WRITE_PREDICATES:
+    # ONE derivation, shared with the WRITER (`create_edge` asks the same
+    # function), so `writable` and the writer's acceptance cannot disagree —
+    # the #8285 P1 defect class this seam was already fixed for once.
+    if predicate_facts(predicate, graph, installed=installed,
+                       registry=registry) is not None:
         paths.append("structural")
     return tuple(paths)
 
 
-def relation_write_verdict(rel: dict) -> tuple[str, tuple[str, ...]]:
+def relation_write_verdict(rel: dict, **kwargs
+                           ) -> tuple[str, tuple[str, ...]]:
     """``(verdict, paths)`` for one declared relation — the single source of truth.
 
     Called by pack load (warn), ``tortoise pack validate`` (report) and
     ``list_relations()`` (the discoverable API), so all three answer from the
     same computation instead of each deriving its own contract (#2766).
+
+    ``graph`` / ``installed`` / ``registry`` are passed straight through to
+    :func:`relation_write_paths` (#11484).
     """
-    paths = relation_write_paths(rel)
+    paths = relation_write_paths(rel, **kwargs)
     if paths:
         return RELATION_WRITABLE, paths
     if rel.get("declarationOnly") is True:
