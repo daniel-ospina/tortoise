@@ -349,6 +349,46 @@ def spend_is_unknown(envelope: dict | None, *stages: str) -> bool:
     return False
 
 
+def envelope_calls(envelope: dict | None) -> int:
+    """How many metered calls the envelope's ``total`` block reports (0 when
+    the envelope is absent — the collector returns ``None`` for a qid with no
+    rows yet)."""
+    if not isinstance(envelope, dict):
+        return 0
+    total = envelope.get("total")
+    if not isinstance(total, dict):
+        return 0
+    calls = total.get("calls")
+    if isinstance(calls, bool) or not isinstance(calls, int):
+        return 0
+    return max(0, calls)
+
+
+def pass_spend_is_unmetered(before: dict | None,
+                            after: dict | None) -> bool:
+    """Whether an ADMITTED re-run's marginal spend was never measured.
+
+    Two distinct shapes, both of which must refuse to certify "within
+    budget":
+
+    1. **No metering rows at all.** ``spend_is_unknown(None)`` is False by
+       design (nothing is *known* to be unknown), so an adapter carrying no
+       sink — the collector holds no row for the qid — would otherwise price
+       the pass at 0. An admitted pass performs at least one reader and one
+       judge call, so an absent or zero-call ``after`` envelope PROVES the
+       pass was unwatched.
+    2. **Rows that report no usage block** (``usage_present`` False, or
+       ``calls_without_usage`` > 0), which make any token sum a lower bound.
+
+    Checked on BOTH envelopes: the delta subtracts ``before`` from ``after``,
+    so an unmeasured *one-shot* side corrupts the difference just as much.
+    """
+    if envelope_calls(after) <= 0:
+        return True
+    return (spend_is_unknown(before, "reader", "judge")
+            or spend_is_unknown(after, "reader", "judge"))
+
+
 def admit_reconciliation(*, bound: int, cap: int) -> bool:
     """The pre-pass admission rule: fire the re-run ONLY when the bound on
     its marginal spend fits the per-question cap. A raised window that
@@ -488,7 +528,7 @@ def reconciliation_variant_rows(outcomes: list[dict], *,
             1 for o in admitted
             if _stats(o).get("marginal_unmetered") is True),
         "token_cap": caps[0] if caps else None,
-        "marginal_tokens_total": (sum(marginal) if marginal else 0),
+        "marginal_tokens_total": (sum(marginal) if marginal else None),
         f"reader_surface@{k}": {
             "before": _mean(surfaces_before),
             "after": _mean(surfaces_after),
@@ -501,17 +541,23 @@ def reconciliation_variant_rows(outcomes: list[dict], *,
             "retrieval result, so no official number can be derived from "
             "this block"),
         # ⛔ The RESULT is never mutated; the ENVIRONMENT is not fully
-        # isolated. The re-run's extra retrieval runs through the same
-        # run-global vector circuit breaker as the one-shot path
-        # (tortoise.search_engine._BREAKERS), so a raised pass can trip or
-        # heal it and thereby change which LATER questions are dropped as
-        # `dropped.breaker_open`. Stated here rather than left to the
-        # reader: the invariance is unconditional on the RESULT and
-        # conditional on a healthy vector leg for the POPULATION.
+        # isolated, and TWO run-global couplings make that so — not the
+        # breaker alone. (a) The re-run's extra retrieval runs through the
+        # same vector circuit breaker (tortoise.search_engine._BREAKERS), so
+        # a raised pass can trip or heal it and change which LATER questions
+        # are dropped as `dropped.breaker_open`. (b) The re-run's spend is
+        # observed by the run-global hard stop (`spend_guard`, armed by
+        # default at HARD_STOP_USD), so an arm-ON run reaches the ceiling at
+        # a DIFFERENT question than an identical arm-OFF run and aborts
+        # `spend_hard_stop` there. (b) happens on a perfectly HEALTHY vector
+        # leg, which is why the condition is not "healthy leg" but the
+        # narrower "no global stop was reached".
         "population_invariant_residual": (
-            "the re-run shares the run-global vector circuit breaker, so "
-            "on a DEGRADED vector leg an arm-ON run can drop or un-drop "
-            "later one-shot questions (see the report's "
-            "dropped.breaker_open). The one-shot result is never mutated; "
-            "population identity across arms holds on a healthy leg."),
+            "the re-run is coupled to two run-global budgets: the vector "
+            "circuit breaker (a raised pass can trip or heal it, changing "
+            "which LATER questions drop as dropped.breaker_open) and the "
+            "spend hard stop (arm-ON reaches the ceiling at a different "
+            "question and aborts spend_hard_stop). The one-shot result is "
+            "never mutated; population identity across arms holds only "
+            "while neither global stop is reached."),
     }

@@ -264,6 +264,51 @@ def test_a_raised_window_that_cannot_fit_the_cap_is_refused():
         bound=bound, cap=wr.DEFAULT_RECONCILIATION_TOKEN_CAP) is False
 
 
+def test_pass_spend_is_unmetered_covers_the_no_rows_shape():
+    """⛔ #11830 round-2 P1: ``spend_is_unknown(None)`` is False by design,
+    so WITHOUT this rule an admitted pass whose adapters carry no sink
+    publishes 0 tokens and "within budget". An admitted pass makes at least
+    one reader and one judge call, so an absent/zero-call AFTER envelope
+    proves it was never watched."""
+    known = _envelope()
+    assert wr.envelope_calls(None) == 0
+    assert wr.envelope_calls(known) == 0        # this fixture has no total
+    with_total = dict(known)
+    with_total["total"] = {"prompt_tokens": 1, "completion_tokens": 1,
+                           "calls": 2}
+    assert wr.envelope_calls(with_total) == 2
+
+    # No rows at all -> unmetered, even though neither flag says "unknown".
+    assert wr.pass_spend_is_unmetered(None, None) is True
+    assert wr.spend_is_unknown(None, "reader", "judge") is False  # by design
+    # Rows exist and every call was priced -> a real measurement.
+    assert wr.pass_spend_is_unmetered(with_total, with_total) is False
+    # Rows exist but a call reported no usage block -> a lower bound.
+    unknown = {**with_total, "by_stage": {
+        "judge": {"openrouter": {"m": {"prompt_tokens": 5,
+                                       "usage_present": False}}}}}
+    assert wr.pass_spend_is_unmetered(with_total, unknown) is True
+
+
+def test_variant_rows_total_is_null_when_nothing_was_metered():
+    """⛔ #11830 round-2 P2: ``0`` reads as "measured zero spend" and is
+    indistinguishable from "no admitted rows" / "every admitted row
+    unmetered". The per-row fix already refuses `False` there; the aggregate
+    must refuse `0` for the same reason."""
+    a = _variant_outcome("q1", one_shot=False, variant=True, marginal=0)
+    a["window_reconciliation_stats"]["marginal_unmetered"] = True
+    b = _variant_outcome("q2", one_shot=False, variant=True, marginal=0)
+    b["window_reconciliation_stats"]["marginal_unmetered"] = True
+    rows = wr.reconciliation_variant_rows([a, b], k=5)
+    assert rows["n_admitted"] == 2
+    assert rows["n_unmetered"] == 2
+    assert rows["marginal_tokens_total"] is None   # NOT 0
+    # A genuinely measured zero still reports 0, so the two stay distinct.
+    z = _variant_outcome("q3", one_shot=False, variant=True, marginal=0)
+    assert wr.reconciliation_variant_rows([z], k=5)[
+        "marginal_tokens_total"] == 0
+
+
 def test_spend_is_unknown_reads_the_usage_present_flags():
     """⛔ #11830 review P1: a bucket whose provider returned NO usage block
     makes ``stage_tokens`` a LOWER BOUND. ``usage.py`` already keeps
@@ -366,6 +411,21 @@ class _FakeJudge:
                 usage={"prompt_tokens": 5},
                 usage_present=self._usage_present)
         return self._verdict
+
+
+class _SilentReader:
+    """A reader whose adapter carries NO usage sink — it never records a
+    row, which is the shape that made an admitted pass look free."""
+
+    def answer(self, *, context_hits, question, question_date,
+               question_type):
+        return "42"
+
+
+class _SilentJudge:
+    def judge(self, *, question_type, question, answer, hypothesis,
+              abstention):
+        return True
 
 
 QUESTION = {
@@ -563,6 +623,21 @@ def test_wiring_unmetered_spend_is_not_certified_as_within_budget(
     assert stats["admitted"] is True
     assert stats["marginal_unmetered"] is True
     # ⛔ None, not False: False is the claim "we measured it and it fit".
+    assert stats["cap_exceeded"] is None
+    assert stats["bound_exceeded"] is None
+
+
+def test_wiring_a_pass_with_no_metering_rows_is_not_certified(
+        monkeypatch):
+    """⛔ #11830 round-2 P1: the THIRD path into the same false PASS — an
+    admitted pass whose adapters carry no sink at all. The collector has no
+    row for the qid, so `spend_is_unknown` sees nothing to flag; the pass
+    must still be reported as unmeasured."""
+    stats = _recon(monkeypatch, ret=_one_shot_ret(0.2), label=False,
+                   hypothesis="two", reader=_SilentReader(),
+                   judge=_SilentJudge(), cap=1_000_000)
+    assert stats["admitted"] is True
+    assert stats["marginal_unmetered"] is True
     assert stats["cap_exceeded"] is None
     assert stats["bound_exceeded"] is None
 

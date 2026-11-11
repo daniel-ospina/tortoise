@@ -814,9 +814,8 @@ def _reconcile_failing_question_pass(
     # cap/bound comparison cannot be certified from it: the flags below go
     # NULL ("not measured"), not False ("within budget"), and the census
     # reports the row as unmetered instead of counting it as a cheap pass.
-    stats["marginal_unmetered"] = (
-        window_recon.spend_is_unknown(before, "reader", "judge")
-        or window_recon.spend_is_unknown(after, "reader", "judge"))
+    stats["marginal_unmetered"] = window_recon.pass_spend_is_unmetered(
+        before, after)
     stats["marginal_tokens"] = window_recon.envelope_delta(before, after)
     stats["cap_exceeded"] = (None if stats["marginal_unmetered"]
                              else stats["marginal_tokens"] > stats["cap"])
