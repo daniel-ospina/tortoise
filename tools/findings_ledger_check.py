@@ -205,7 +205,7 @@ VOCAB_ROW_RE = re.compile(r"^\|\s*\*\*(?P<token>[A-Z][A-Z-]*)\*\*\s*\|")
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-MIN_SELF_TEST_MUTATIONS = 26
+MIN_SELF_TEST_MUTATIONS = 27
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -1052,6 +1052,57 @@ def check_table_population(text: str) -> list[str]:
     return problems
 
 
+def _stray_table_lines(section: str) -> list[tuple[int, str]]:
+    """Every `|`-line in the section that is NOT part of its FIRST table.
+
+    `_table_rows()` stops at the first non-`|` line, and `check_table_population()`
+    counts SEPARATORS, so a second table is caught only when it brings its own
+    header and separator. A bare `|` row appended after a blank line — no
+    separator, still a row a reader sees as data and Markdown renders as a table
+    fragment where the header allows — is counted by neither: measured on the
+    previous head, appending
+    `| **Z** | second | <citation> | **FIXED-IT** | <citation> |` under §3 left
+    `check_document()` at `[]`, i.e. an invented verdict the closed vocabulary in
+    §1 has no handling rule for. Counting the SHAPE rather than the separators
+    closes it: a section's population is the rows of its one table, and any other
+    `|` line is a shape this guard does not classify, so it is refused.
+    """
+    counted = {offset for offset, _line in _table_rows(section)}
+    header_and_separator: list[int] = []
+    for offset, line in enumerate(section.splitlines(), start=1):
+        if line.strip().startswith("|"):
+            header_and_separator.append(offset)
+            if len(header_and_separator) == 2:
+                break
+    counted |= set(header_and_separator)
+    return [
+        (offset, line)
+        for offset, line in enumerate(section.splitlines(), start=1)
+        if line.strip().startswith("|") and offset not in counted
+    ]
+
+
+def check_stray_table_lines(text: str) -> list[str]:
+    """§3 and §6 must not carry a `|` row outside their single table.
+
+    The separator-counting arm refuses a second TABLE; this refuses a stray ROW,
+    which is the shape that carries no separator and therefore had no arm at all.
+    """
+    problems: list[str] = []
+    for start, end, name in (("## 3.", "## 4.", "§3"), ("## 6.", "## 7.", "§6")):
+        try:
+            section = _region(text, start, end)
+        except Unverifiable:
+            continue  # the section-boundary arm reports the absence itself
+        for offset, line in _stray_table_lines(section):
+            problems.append(
+                f"{name} carries a `|` row outside its single table (offset "
+                f"{offset}) — rows are read from ONE table per section, so this row "
+                f"is neither counted nor classified: {line.strip()[:80]}"
+            )
+    return problems
+
+
 def check_measured_commit(text: str, root: Path = REPO) -> list[str]:
     """`measured_at_commit` must be an ancestor of HEAD; exit 2 when git cannot say."""
     match = re.search(r"^measured_at_commit:\s*(\S+)\s*$", text, re.MULTILINE)
@@ -1122,6 +1173,7 @@ def check_document(text: str, root: Path = REPO) -> list[str]:
     problems.extend(check_state_arithmetic(text))
     problems.extend(check_survivor_arithmetic(text))
     problems.extend(check_table_population(text))
+    problems.extend(check_stray_table_lines(text))
     return problems
 
 
@@ -1191,6 +1243,19 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         "a citation line past the end of its file",
         lambda t: t.replace("`tortoise/pipeline.py:16`", "`tortoise/pipeline.py:999999`", 1),
         "out of range",
+    ),
+    (
+        "a stray `|` row under §3 carrying no separator",
+        # `check_table_population()` counts separators, so a lone row appended after
+        # a blank line was counted by NOTHING: measured, it left `check_document()`
+        # at `[]` with the invented verdict `FIXED-IT` in the page.
+        lambda t: t.replace(
+            "\n## 4. The artefact index",
+            "\n| **Z** | A stray row | `tortoise/sdk.py:16962` | **FIXED-IT** | "
+            "`tortoise/sdk.py:16962` |\n\n## 4. The artefact index",
+            1,
+        ),
+        "outside its single table",
     ),
     (
         "a deleted correction row",

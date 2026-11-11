@@ -3120,10 +3120,14 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `tools/findings_ledger_check.py`-only diff came back `changed == []`
              # and took the docs-only early return, which emits tier-1 only.
              # MEASURED before this entry (`select()` in-process, at the PR head):
-             # `select(["tools/findings_ledger_check.py"])` -> surfaces=[],
-             # 87 test files, the guard's pin ABSENT — so the tool that re-measures
-             # the ledger could be weakened without its own negative controls
-             # running once. After: surfaces=['core'], pin present. The DOC half
+             # `select(["tools/findings_ledger_check.py"])` -> surfaces=[], 87 test
+             # files, the guard's pin ABSENT — the shape this entry closed.
+             # ⚠️ RE-MEASURED after the `tier1` row this same PR adds, because the
+             # entry is no longer the LIVENESS mechanism and an earlier revision of
+             # this comment said it was: without the entry -> surfaces=[], 88 files,
+             # pin PRESENT (`tier1` selects it); with the entry -> surfaces=['core'],
+             # 813 files. The entry's job is WIDTH — a `tools/`-only diff runs the
+             # core surface rather than tier-1 smoke. The DOC half
              # (`docs/architecture/MEMORY-SUBSTRATE-FINDINGS-LEDGER.md`) stays
              # unclaimed here for the sibling reason (a docs-only diff must stay on
              # the tier-1 path, which is why the file is dual-registered in
