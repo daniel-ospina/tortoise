@@ -2329,14 +2329,20 @@ to answer.
     "pre-existing staleness" — it had measured the base `b50e3293`, which already CONTAINED
     `#11795`, so the test was circular. Three later hunks (`+10` at `:2228`, `+13` at `:2485`, `+2`
     at `:2504`) add the rest, so the three deep cites carry `+264` (`2634`→`:2898`, `2772`→`:3036`,
-    `4733`→`:4997`) while a cite in the `~1394-2467` band would carry `+239`. This file's total
-    movement happens to also be `+264`.
+    `4733`→`:4997`). The bands are worth stating in OLD coordinates, since that is the side a
+    re-derivation works from: `+239` from old `:1155` to `:2227`, then `+249` to `:2484`, then `+262`
+    to `:2503`, then `+264` below. (The `2467` in that hunk header is the hunk's NEW start, not a
+    boundary of the `+239` band.) This file's total movement happens to also be `+264`.
   - `tortoise/projection/__init__.py` — `#11795` makes thirteen hunks here and the file goes
     `21840`→`21973` (`+133` overall), so the one cite this entry re-points, `13738-13740` →
     `:13804-13806`, carries **`+66`** because it sits above the fourth hunk
-    (`@@ -14549,6 +14615,66 @@`). ⛔ `+66` is that cite's offset, NOT the file's movement: a cite
-    below `:14615` carries more (up to `+102` in the deepest hunk), so re-deriving from `+66`
-    anywhere else lands early.
+    (`@@ -14549,6 +14615,8 @@ class FalkorProjection(`, where `+66` is that hunk's START offset and
+    `8` is its line count). ⛔ `+66` is that cite's offset, NOT the file's movement: below `:14615`
+    a cite carries between `+68` and `+133` depending on how many of the nine later hunks sit above
+    it, and the region past the last of them (`@@ -21149,6 +21251,37 @@`) carries the full `+133`
+    (`21251` → `21973` is where `#11239`'s own mention fold now lives). So re-deriving from `+66`
+    anywhere else lands early — by up to 67 lines — and re-deriving from `+102` (that last hunk's
+    start offset) still lands 31 early in the tail.
   - `tortoise/hosted_api.py` — the `LIFETIME_MEMORY_QUERY` pivot was re-measured `23249` → `23466`
     with `tools/hosted_api_cite_census.py --refresh` (which also re-stated that note's above/below
     split, `14`/`441` → `12`/`443`). Two commits make that `+217`, and only the second is this
