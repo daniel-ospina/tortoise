@@ -19,16 +19,27 @@ agrees with the document. The negative controls therefore mutate a COPY of the
 real document rather than asserting only that the shipped tree is clean.
 
 Registered in `config/ci-surfaces.yml` — `core` is the classification
-`manifest-integrity` requires, and `tier1` is the row that ACTUALLY selects this
-module on a docs-only or `tools/`-only diff (both prefixes are dropped by
-`_keep_changed()`, so `select()` takes its docs-only early return, which emits
-`tier1` only). Both rows are asserted by
+`manifest-integrity` requires — plus TWO selection mechanisms, which do different
+jobs and were easy to conflate (an earlier revision of this paragraph did):
+
+- the `tier1` row is what selects this module on a **docs-only** diff. Both
+  `docs/` and `tools/` are dropped by `_keep_changed()`, so `select()` takes its
+  docs-only early return and emits `tier1` only: measured `surfaces: []`, 88 test
+  files, this module present;
+- the `CORE_ALSO` entry in `tools/ci_selection.py` is what a **`tools/`-only**
+  diff resolves to the full `core` surface instead of that same tier-1 smoke:
+  measured `surfaces: ['core']`, 813 test files. It is not what keeps this module
+  selected there — the `tier1` row already does, at 88 files (measured with the
+  entry removed: `surfaces: []`, 88 files, module present).
+
+Both the classification row and the selection arms are asserted by
 `test_test_file_is_registered_in_ci_surfaces` /
 `test_test_file_is_selected_on_the_diffs_it_guards`.
 """
 from __future__ import annotations
 
 import ast
+import inspect
 import re
 import subprocess
 import sys
@@ -185,8 +196,8 @@ def test_mutation_population_is_pinned():
         "the registered population must EQUAL the floor it declares — a `>=` floor "
         "cannot see a one-arm shrink"
     )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 26, (
-        "this line RECORDS the population (26 arms); removing one means editing the "
+    assert flc.MIN_SELF_TEST_MUTATIONS == 27, (
+        "this line RECORDS the population (27 arms); removing one means editing the "
         "floor here too, which is the second place a shrink has to touch"
     )
 
@@ -766,6 +777,60 @@ def test_a_second_table_is_rejected(tmp_path, monkeypatch):
         assert any(
             "carries 2 tables" in p for p in _doc_problems()
         ), (anchor, _doc_problems())
+
+
+def test_s8_states_the_arm_counts_the_code_actually_has():
+    """FAILS when §8's "other N … all M arms" drifts from the code.
+
+    Nothing pinned this pair, so it drifted twice: at `454c40583c` nine tree-only
+    arms made "the other nine" / "all ten arms" exactly right, then two arms were
+    added to `check_document()` in later cycles and the sentence kept reading nine
+    and ten (measured: eleven tree-only arms, twelve in `check_all()`). A page that
+    misstates how much of it is machine-checked is the "declared ≠ stored" defect
+    this document exists to catch, so the count is derived here, not trusted.
+    """
+    words = {
+        "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+        "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+        "thirteen": 13, "fourteen": 14,
+    }
+    doc = flc.read_doc(REPO)
+    tree_only = inspect.getsource(flc.check_document).count("problems.extend(")
+    total = tree_only + inspect.getsource(flc.check_all).count("problems.extend(")
+
+    other = re.search(r"[Tt]he other (\w+) read this checkout", doc)
+    all_arms = re.search(r"`--check` \(all (\w+) arms\)", doc)
+    assert other, "§8 no longer states the tree-only arm count — re-derive this test"
+    assert all_arms, "§8 no longer states the `--check` arm count — re-derive this test"
+    assert words[other.group(1).lower()] == tree_only, (
+        f"§8 says 'the other {other.group(1)}' but check_document() wires {tree_only} arms"
+    )
+    assert words[all_arms.group(1).lower()] == total, (
+        f"§8 says 'all {all_arms.group(1)} arms' but check_all() runs {total}"
+    )
+
+
+def test_a_stray_table_row_with_no_separator_is_rejected(tmp_path, monkeypatch):
+    """FAILS if a lone `|` row under §3/§6 stays invisible.
+
+    `check_table_population()` counts SEPARATORS, so the test above covers a
+    second TABLE — but a bare row appended after a blank line brings no separator
+    and was counted by nothing: measured, it carried the invented verdict
+    `FIXED-IT` under §3 and `check_document()` returned `[]`, i.e. a claim class
+    §1's closed vocabulary has no handling rule for.
+    """
+    stray = (
+        "| **Z** | a stray row | `tortoise/sdk.py:16962` | **FIXED-IT** |"
+        " `tortoise/sdk.py:16962` |\n\n"
+    )
+    for anchor_heading in ("## 4. The artefact index", "## 7. What this changes"):
+        _mutated(
+            tmp_path, monkeypatch, lambda t, a=anchor_heading: t.replace(a, stray + a, 1)
+        )
+        assert any("outside its single table" in p for p in _doc_problems()), (
+            anchor_heading,
+            _doc_problems(),
+        )
 
 
 # ── citations resolve ──────────────────────────────────────────────────────
