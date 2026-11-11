@@ -18065,6 +18065,13 @@ def _capture_connection_warning(relation_write: dict | None,
        and the leg's own warning rides the same receipt;
     4. genuine silence -> ``stats["relations"] == 0``.
 
+    ⚠️ The SILENT arm (shape 4) is deliberate and is an amendment to #11808's
+    registered criteria, recorded on the issue (comment `6783698717`): the
+    registered condition — "stated and nothing landed" — fires only where the
+    link already emits a warning per dropped relation, so it would leave every
+    ordinary claims-only capture silent, which is the behaviour the nudge
+    exists to surface.
+
     It is a NUDGE, never a refusal (``product/2026-08-11-tooling-surface-
     consolidation.md:22``, *"nudge, don't enforce"*): the capture succeeded and
     the receipt's outcome is untouched. It also does NOT duplicate the
