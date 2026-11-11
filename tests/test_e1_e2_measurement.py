@@ -3341,6 +3341,38 @@ def _is_population_operand(node) -> bool:
             and node.slice.id == "_E2B_FLOOR_POPULATION")
 
 
+def _module_string_constant_from_source(source: str, name: str):
+    """The string a module-level `name = "…"` assignment in `source` binds.
+
+    Structural on purpose. `re.search(r'^NAME = "([^"]+)"', source, re.M)` is
+    satisfied by the FIRST column-0 line of that shape ANYWHERE in the file —
+    including one quoted inside the module docstring — so a wrong value plus one
+    docstring mask line satisfies it (#11833 review r2 P2; same root as #11847,
+    the text-regex-pin class this file already condemns for the emitted line).
+    An assignment is a STATEMENT, not a line: a docstring is one `Expr`, so
+    nothing quoted inside it is reachable from here.
+
+    Returns `None` when there is no module-level assignment of that name, when
+    there is more than one (the constant is ONE decision; a second assignment
+    means a reader cannot say which value an import would see — refuse rather
+    than silently take the last), or when the value is not a string literal.
+    """
+    values = []
+    for statement in ast.parse(source).body:
+        if isinstance(statement, ast.Assign):
+            targets, value = statement.targets, statement.value
+        elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+            targets, value = [statement.target], statement.value
+        else:
+            continue
+        if any(isinstance(target, ast.Name) and target.id == name
+               for target in targets):
+            values.append(value)
+    if len(values) != 1 or not isinstance(values[0], ast.Constant):
+        return None
+    return values[0].value if isinstance(values[0].value, str) else None
+
+
 def _dict_name_compares(path):
     """`{(key, (left_name, right_name))}` for every `{"key": left < right}` entry.
 
@@ -3399,6 +3431,43 @@ def test_the_e2b_floor_refuses_six_surviving_planted_units_and_matches_thirty():
     assert met["status"] == "MATCHED", met
 
 
+def test_a_docstring_mask_cannot_answer_for_the_e2b_population_constant():
+    """The value pin reads the ASSIGNMENT, never `a line of that shape`.
+
+    The pre-fix pin was `re.search(r'^_E2B_FLOOR_POPULATION = "([^"]+)"',
+    source, re.MULTILINE)`, which the FIRST column-0 line of that shape satisfies
+    — a line quoted inside the module docstring included. Measured at
+    `7b859d4f6` (#11833 review r2 P2): the constant set to `"atomic_points"`
+    **plus one docstring mask line** left the pin green while the operand was
+    wrong, so the pin could not do its stated job. Same root as #11847 (a
+    text-regex pin that prose satisfies).
+
+    The input below IS that mask — the docstring carries the RIGHT text, the
+    assignment carries the WRONG one — so the assertion is red on the regex and
+    green only when the value is read structurally.
+    """
+    masked = (
+        '"""Probe.\n'
+        "\n"
+        '_E2B_FLOOR_POPULATION = "real_facts"\n'
+        '\"\"\"\n'
+        "\n"
+        '_E2B_FLOOR_POPULATION = "atomic_points"\n')
+    assert _module_string_constant_from_source(
+        masked, "_E2B_FLOOR_POPULATION") == "atomic_points", (
+        "the E2b population pin answered from a docstring QUOTE of the "
+        "assignment instead of from the assignment — a wrong value plus one "
+        "mask line satisfies it (#11833 review r2 P2, #11847)")
+    # Two module-level assignments is not "whichever came first": a reader cannot
+    # say which value an import would see, so this refuses rather than picks.
+    assert _module_string_constant_from_source(
+        'X = "a"\nX = "b"\n', "X") is None
+    # …and the real probe still binds the population the record's row is over.
+    assert _module_string_constant_from_source(
+        _PROBE_PATH.read_text(encoding="utf-8"),
+        "_E2B_FLOOR_POPULATION") == "real_facts"
+
+
 def test_the_e2b_floor_is_FED_the_planted_population_and_the_line_says_so():
     """The wiring: the binding is handed `real_facts`, and the line names it.
 
@@ -3409,16 +3478,21 @@ def test_the_e2b_floor_is_FED_the_planted_population_and_the_line_says_so():
     is required to agree (a gate whose population lives only in a docstring is
     one a future reader can re-point silently).
     """
-    source = _PROBE_PATH.read_text(encoding="utf-8")
-    basis_const = re.search(r'^_E2B_FLOOR_POPULATION = "([^"]+)"', source,
-                            re.MULTILINE)
+    # ⛔ The constant's VALUE is read off its module-level ASSIGNMENT, never as
+    # `^_E2B_FLOOR_POPULATION = …` on the file's text: that regex is satisfied by
+    # the first column-0 line of that shape anywhere, including one quoted inside
+    # the module docstring, so a wrong value plus one mask line left this pin
+    # green (#11833 review r2 P2, #11847). `_module_string_constant_from_source`
+    # reads the statement, and the test below feeds it exactly that mask.
+    basis_const = _module_string_constant_from_source(
+        _PROBE_PATH.read_text(encoding="utf-8"), "_E2B_FLOOR_POPULATION")
     assert basis_const is not None, (
-        "the probe no longer names E2b's floor population in "
-        "`_E2B_FLOOR_POPULATION` — re-derive the operand before trusting the "
-        "floor")
-    assert basis_const.group(1) == "real_facts", (
+        "the probe no longer names E2b's floor population in ONE module-level "
+        "`_E2B_FLOOR_POPULATION = \"…\"` assignment — re-derive the operand "
+        "before trusting the floor")
+    assert basis_const == "real_facts", (
         "the E2b population floor is fed "
-        f"{basis_const.group(1)!r}; the record's §3.1 row is written over the "
+        f"{basis_const!r}; the record's §3.1 row is written over the "
         "surviving PLANTED units (`real_facts`). `atomic_points` counts "
         "non-planted rows too, which is the fail-open #10989 closes")
     # ONE name for the operand AND the disclosure: both `surviving_units=` and
