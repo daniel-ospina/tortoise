@@ -1236,8 +1236,11 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         # The state word BEFORE a parenthesised `#NNN` — the shape #11803 left in
         # `SEARCH-ARCHITECTURE.md` (§2 item 5 and §6.3) while every arm above
         # passed: the arms were exercised on `#NNN`-first and copula forms, and no
-        # existing `must_flag` row carried this order. Verbatim, pre-fix.
-        "**✅ FIXED (#11702) — kept here as the reason the rule exists.**",
+        # existing `must_flag` row carried this order. Row A is the pre-fix line
+        # as it stood (minus the trailing sentence, which the span below does not
+        # reach); row B is an exact prefix of §2 item 5's.
+        "**✅ FIXED (#11702) — kept here as the reason the rule exists, with the "
+        "citations re-pointed.** A claim",
         "5. the **`null`-not-0.5 rule** for absent belief state (§6.3) — **landed** (#11702, implementing",
         "*An earlier draft said* the opposite of this paragraph.",
         "**CORRECTED 2026-09-24** \u2014 this passage was repaired.",
