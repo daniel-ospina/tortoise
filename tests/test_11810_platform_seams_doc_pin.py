@@ -565,16 +565,22 @@ _ITEM_START = re.compile(r"^(?:\*\*)?\(?\d+[.)](?:\*\*)?\s")
 #: marker list, no heading list.
 #:
 #: ⛔ The boundary is the record's own INDENTATION, not an enumeration of marker shapes,
-#: and three review rounds are the evidence for why the enumeration kept losing. An
-#: item starts at column 0 (`3. **…**`) and every continuation line is indented, so a
-#: column-0 line IS the next block, whatever it is spelled as. Enumerating shapes is a
-#: race the record wins: r34 P3 #1 measured column-0 bullets (`* …`) swallowed into the
-#: labelled block (`platform-seams.md:430`, `:433`, `:468`); r35 P3 #1 added indented
-#: bullets and table rows (`:348`, `:408`) and r36 P2 #1 still measured blockquotes
-#: (`^> `, `:106-111`, `:369-377`), fenced code (`:20-25`, `:523-539`), setext rules and
-#: plain unnumbered paragraphs passing GREEN with the sentence moved out of the item.
-#: A single indentation rule covers all of them, and cannot fall behind a shape nobody
-#: enumerated.
+#: and four review rounds are the evidence for why the enumeration kept losing. An item
+#: starts at column 0 (`3. **…**`) and every continuation line is indented by at least
+#: the marker's own width, so a less-indented line IS the next block, whatever it is
+#: spelled as. Enumerating shapes is a race the record wins: r34 P3 #1 measured column-0
+#: bullets (`* …`) swallowed into the labelled block (`platform-seams.md:430`, `:433`,
+#: `:468`); r35 P3 #1 added indented bullets and table rows (`:348`, `:408`) and r36
+#: P2 #1 still measured blockquotes (`^> `, `:106-111`, `:369-377`), fenced code
+#: (`:20-25`, `:523-539`), setext rules and plain unnumbered paragraphs passing GREEN
+#: with the sentence moved out of the item.
+#:
+#: ⚠️ `_BLOCK_END` is only the INDENT-0 case. The rule is completed in
+#: `_record_site_block`, which also ends the block at the first non-blank line indented
+#: LESS than the located marker's width (W+N: `2. ` → 3) — the CommonMark rule, and what
+#: closes r38 P3 #1: a sentence de-indented to 1–2 spaces renders OUTSIDE the item, so
+#: counting it as content was a fail-OPEN the column-0 test could not see (measured: it
+#: stays in the block before, excluded now).
 #:
 #: ⚠️ It also fixes the FALSE RED that the indented-marker alternative caused (review
 #: r36 P2 #2): the content lines of these items are 3-space indented, so terminating on
@@ -582,11 +588,12 @@ _ITEM_START = re.compile(r"^(?:\*\*)?\(?\d+[.)](?:\*\*)?\s")
 #: correct record reddening, the direction this guard must not have.
 #:
 #: ⚠️ RECORDED BOUND — a LAZY continuation line (a paragraph line written at column 0,
-#: which CommonMark renders as part of the item) also ENDS the block here, so a correct
-#: record edited that way REDs with a message that says the sentence moved when it did
-#: not (measured, review r37 P3 #1). It fails CLOSED, and no edit of this record has
-#: produced one; the alternative — tolerating column-0 prose inside an item — would make
-#: "a column-0 line is the next block" false and re-open the fail-OPEN this rule closes.
+#: which CommonMark renders as part of the item) ends the block here when it precedes
+#: the labelled sentence, so a correct record edited that way REDs with a message that
+#: says the sentence moved when it did not (measured). A lazy line AFTER the sentence
+#: truncates the block's tail without reddening (r38 P3 #2). It fails CLOSED, and no edit
+#: of this record has produced one; the alternative — tolerating less-indented prose
+#: inside an item — would re-open the fail-OPEN this rule closes.
 #:
 #: ⚠️ The LOCATOR (`_ITEM_START`) stays narrow and different on purpose: an item is
 #: found by its BOLD HEADING's words, so locating on "any column-0 line" would invent
@@ -601,16 +608,17 @@ def _record_site_block(doc: str, site: str) -> str:
     """The record text `site` names — the contracts-table row, or one numbered item.
 
     An item runs from its own first line (`2. **Heading …**`) to the first non-blank
-    line at column 0 (`_BLOCK_END` — the record's own indentation: a continuation line
-    is always indented, so a column-0 line is the next block whatever it is spelled as),
-    ⚠️ with one recorded bound: a LAZY continuation line written at column 0 also ends the
-    block though CommonMark renders it inside the item, so that edit REDs a correct record
-    and the message says "moved" when nothing moved (measured, review r37 P3 #1). It fails
-    CLOSED. The item is located by its BOLD HEADING's words, not by
+    line indented LESS than the item's own marker width (W+N: `2. ` → 3, so column 0 is
+    the indent-0 case of the same rule); `_BLOCK_END` is that case and the width test
+    completes it. An item is located by its BOLD HEADING's words, not by
     its NUMBER — a renumbering therefore cannot make a label point at a neighbour.
-    (Read the boundary off `_BLOCK_END`, never off this sentence: a terminator described
-    more narrowly than the set the code stops on is how review r34 P3 #1 and r35 P3 #1
-    both shipped a fail-open, and r35 P3 #2 was this very line, still naming the pre-r34
+    ⚠️ Recorded bound: a LAZY continuation line written at column 0 BEFORE the labelled
+    sentence ends the block there and REDs a correct record, with a message that says the
+    sentence "moved" when nothing moved (measured); a lazy line AFTER the sentence
+    truncates the block's tail without reddening. It fails CLOSED.
+    (Read the boundary off the code, never off this sentence: a terminator described
+    more narrowly than the code stops at is how review r34 P3 #1, r35 P3 #1 and r38 P3 #1
+    each shipped a fail-open, and r35 P3 #2 was this very line naming the pre-r34
     terminator.)
 
     Returns "" when the site cannot be located, so a re-worded heading REDs the
@@ -640,7 +648,15 @@ def _record_site_block(doc: str, site: str) -> str:
     if start is None:
         return ""
     end = start + 1
-    while end < len(lines) and not _BLOCK_END.match(lines[end]):
+    # The item's own content indent is its marker's width (`2. ` -> 3), which is the
+    # CommonMark rule: a following line indented LESS than that is outside the item.
+    marker_width = len(_ITEM_START.match(lines[start]).group(0))
+    while end < len(lines):
+        line = lines[end]
+        if _BLOCK_END.match(line):
+            break
+        if line.strip() and len(line) - len(line.lstrip(" ")) < marker_width:
+            break
         end += 1
     return "\n".join(lines[start:end])
 
