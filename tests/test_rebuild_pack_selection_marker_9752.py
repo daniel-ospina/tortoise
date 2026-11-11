@@ -480,6 +480,68 @@ def test_rebuild_all_reports_a_marker_collapse(tmp_path, caplog):
     assert counts["pack_selection_restored"] == 1, counts
 
 
+def test_unverifiable_post_restore_read_is_a_gap_not_a_success(
+        tmp_path, caplog, monkeypatch):
+    """A verification read that RAISES must not return a success-shaped result.
+
+    FAILING VALUE: `pack_selection_verified` is set and consumed but exercised
+    by no test on the FALSE rung — every injection passes `True`
+    (`tests/test_rebuild_pack_selection_marker_9752.py`, the migrate/recover
+    consumer tests). If the `except` that sets it left the flag `True` on a
+    failed read, `pack_selection_missing` also stays `False`, and the run
+    returns `pack_selection_restored == 1, pack_selection_gap == 0` — a FALSE
+    PASS on the one signal that means "not confirmed intact". A post-restore
+    read is exactly the thing that can fail after the wipe, so this is the
+    rung that decides whether "could not confirm" is reported or swallowed.
+
+    REACHABLE: `rebuild_all` really runs, and only the SECOND
+    `MATCH (s:PackSelection) RETURN properties(s)` — the post-restore verify;
+    the first is the pre-wipe capture — is made to raise, so the capture path
+    is unaffected and the failure lands where the product would see it.
+    """
+    sdk, events = _mk_sdk(tmp_path)
+    _write_journal(events)
+    _configure(sdk, [{"namespace": "dev", "status": "active"}])
+    proj = _proj(sdk)
+    real_g = proj.g
+    reads = {"n": 0}
+
+    class _FailingVerifyRead:
+        """Passes the capture read through; fails the post-restore one."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def query(self, q, *a, **kw):
+            if "PackSelection" in q and "RETURN properties" in q:
+                reads["n"] += 1
+                if reads["n"] >= 2:      # 1 = pre-wipe capture, 2 = verify
+                    raise RuntimeError("post-restore read failed")
+            return self._inner.query(q, *a, **kw)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    monkeypatch.setattr(proj, "g", _FailingVerifyRead(real_g))
+
+    with caplog.at_level(logging.ERROR, logger="tortoise.projection"):
+        counts = proj.rebuild_all(str(events), confirm_destructive=True)
+
+    assert reads["n"] >= 2, (
+        "the post-restore verification read must actually be attempted")
+    assert counts["pack_selection_verified"] is False, (
+        f"an unconfirmable read must not report as verified: {counts}")
+    assert counts["pack_selection_restored"] == 0, (
+        "an UNCONFIRMED marker must never be counted as restored — that is "
+        f"the false PASS this rung exists to prevent: {counts}")
+    assert counts["pack_selection_gap"] == 1, (
+        f"the gap must be reported when confirmation could not run: {counts}")
+    msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("UNVERIFIED" in m and ":PackSelection" in m for m in msgs), (
+        "the operator must be told the marker is UNVERIFIED (not confirmed "
+        f"intact, not observed gone) rather than shown a success: {msgs}")
+
+
 def test_pack_selection_section_and_validator_are_wired():
     """The section cannot silently fall out of the sidecar plumbing.
 

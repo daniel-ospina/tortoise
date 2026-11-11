@@ -589,7 +589,7 @@ def _assert_every_leg_declares_itself(seen, *, context: str):
         f"shared reason makes two legs interchangeable: {shared!r}")
     # The TABLE-INDEPENDENT half: a capture-restore statement is recognized by
     # its SHAPE, so a leg that is not in `_LEGS` — the residual `#9210` names,
-    # since the funnel is voluntary and a twelfth restore can be written as a
+    # since the funnel is voluntary and a thirteenth restore can be written as a
     # bare `self.g.query(...)` — is still judged instead of silently absent from
     # `observed`. Without this, `set(observed) == set(_LEGS)` above is satisfied
     # by every KNOWN leg running while an unknown one rides `"replay"`.
@@ -696,7 +696,7 @@ def test_a_bare_restore_write_in_the_map_shape_is_caught(tmp_path,
     VOLUNTARY: nothing makes `_rebuild_all_replay` route a restore statement
     through `_restore_write`, so "the next restore has to declare itself" is a
     convention while `_LEGS` — a table of the twelve statements that EXIST —
-    reads green on a twelfth that does not. The surviving half of the pin is
+    reads green on a thirteenth that does not. The surviving half of the pin is
     the SHAPE rule in `_shape_violations`.
 
     What it does: runs the engine with the funnel BYPASSED — `_restore_write`

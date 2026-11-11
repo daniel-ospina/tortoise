@@ -17317,6 +17317,12 @@ class FalkorProjection(
         pack_selection_restore_failures = 0
         pack_selection_verified = True
         pack_selection_missing = False
+        # The post-restore read, hoisted so the report below can tell TWO
+        # different failures apart: NO marker at all (a loss) versus a
+        # DIFFERENT marker (a conflict). Both set `pack_selection_missing`, but
+        # asserting the absence consequence for the second is a claim about a
+        # graph that is configured and holds a perhaps-NEWER `revision`.
+        live_markers: list[dict] = []
         for props in pack_selection_snapshot:
             try:
                 self._restore_write(
@@ -17383,6 +17389,28 @@ class FalkorProjection(
                 "observed gone. Check it before trusting the graph's approved "
                 "pack set (#9752).",
                 pack_selection_restore_failures,
+            )
+        elif pack_selection_missing and live_markers:
+            # The marker EXISTS but is not the captured one: a concurrent
+            # `set_graph_packs` between the wipe and the restore made the
+            # `MERGE` match ITS node and skip our `$props` (the shape the
+            # comment above names). Reporting this with the absence wording
+            # below would assert a loss nobody observed — the graph IS
+            # configured — and its re-pin remedy would overwrite a decision that
+            # may be NEWER than the one in our sidecar.
+            logger.error(
+                "rebuild: a DIFFERENT :PackSelection marker is present in the "
+                "rebuilt graph (live revision %r, captured revision %r) after "
+                "%d restore attempt(s), %d of which raised — the captured "
+                "marker was NOT applied, because a concurrent pack-set write "
+                "landed between the wipe and the restore. This is a reported "
+                "CONFLICT, not a loss: the graph IS configured (do NOT assume "
+                "it reads as UNCONFIGURED, and do NOT re-pin over the live "
+                "decision without checking which set is the intended one) "
+                "(#9752)",
+                live_markers[0].get("revision"),
+                (pack_selection_marker or {}).get("revision"),
+                len(pack_selection_snapshot), pack_selection_restore_failures,
             )
         elif pack_selection_missing:
             logger.error(

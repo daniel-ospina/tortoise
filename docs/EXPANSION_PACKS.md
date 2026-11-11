@@ -597,8 +597,13 @@ customer-facing territory that owns per-graph permissions.
 > catalog union while the resolved set is that one removed namespace; the same
 > marker loss silently RE-ADMITTED a pack an admin removed and reset `revision`.
 > **Fixed by #9752** — the marker now rides a `pack_selection` sidecar SECTION
-> (`projection`, snapshot v7), so a rebuild preserves `configured` and
-> `revision` and cannot re-admit a removed pack; the SHAPE of that fix matters:
+> (`projection`, snapshot v7), so the JOURNAL rebuild (`rebuild_all` / `rebuild`)
+> preserves `configured` and `revision` and cannot re-admit a removed pack. The
+> scope is deliberate: the RECORD-sourced `rebuild_from_record` still DROPS the
+> class (it reads no cache — *"the cache is a destination, never an input"*),
+> and that drop is named rather than silent in `tortoise/cache_projection.py`
+> and `docs/epics/2026-10-10-7879-postgres-record/06-cache-projection.md` §0.5,
+> where `:PackSelection` is the seventh graph-only class. The SHAPE of that fix matters:
 > `:PackSelection` is ONE node per graph with no identity property, so it is a
 > SECTION like `:TeamMeta`, NOT a `_config_classes()` row (the registry keys on
 > a single string identity property and `_capture_config_snapshot` silently
