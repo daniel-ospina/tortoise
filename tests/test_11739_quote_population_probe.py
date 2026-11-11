@@ -1161,7 +1161,8 @@ def test_terminal_statuses_mirror_the_read_paths_RENDERED_predicate():
     Measured in review: a mutation of the SHIM's default to False left a pin that only called
     `_terminal_excluded` green — the exact "turned off for the Point path" mutation its text
     named. So this test pins what it can actually see, and
-    `test_the_read_paths_composed_predicate_...` / `test_the_sdk_query_where_...` pin the two
+    `test_the_read_paths_composed_predicate_carries_both_conjuncts` /
+    `test_every_read_arm_that_serves_points_carries_both_conjuncts` pin the two
     call-site links.
     """
     import re
