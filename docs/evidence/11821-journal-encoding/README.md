@@ -17,8 +17,17 @@ same committed 29-type corpus (`supabase/tests/fixtures/record_projection_journa
 
 **What this proves.** The change and its size: a creating record's vector payload goes
 **8,414 B → 4,689 B** (21.9 → 12.2 chars/float, **1.79×**), and the record itself
-**9,176 B → 5,423 B** (**1.69×**), with the decoded values unchanged at float32 (and, in
-fact, bit-identical in float64 — see *Why the VALUE is quantised*).
+**9,176 B → 5,423 B** (**1.69×**), with the values' **float32 bits unchanged**
+(`test_every_element_keeps_its_float32_bits`) and the journal line decoding **bit-identically
+to the payload the writer held** (`json.loads(line) == payload["embedding"]`) — see
+*Why the VALUE is quantised*.
+
+⚠️ **It is NOT “the same float64 numbers”.** The old writer wrote the float32 WIDENED to
+float64 (`float(np.float32(0.1))` → `0.10000000149011612`); the writer now emits the
+shortest decimal of the same float32 (`0.1`). Both cast to the same float32 bits — the bits
+are what is preserved, and the float64 inflation is exactly what this change stops. The
+bit-identity this bundle can claim is between the journal TEXT and the payload, never
+between the new and the old float64 values.
 
 ⚠️ **Two figures for the vector, and each names its instrument.** `4,689 B` (and its
 `12.2 chars/float`) is the **on-disk span** of the `embedding` value in the compact
@@ -146,11 +155,29 @@ narrow-both-sides-and-compare guard would silently rewrite.
 A journal written **before** this change carries no marker and 17-digit values; it reads
 and replays exactly as it always did (`test_a_journal_written_before_this_change_still_reads_and_replays`).
 
-## Cost, measured
+## Cost — an author-side spot check, NOT a bundle artifact
 
-The quantiser is **1.68 ms** per 384-d vector (`float(str(np.float32(x)))` per element,
-plus the two vectorised grid checks) — measured on this corpus — against **14 µs** for
-the `float(x)` loop it replaces. It runs once per journalled vector on the write path;
-the surrounding write (graph + record + embed) is ms-scale. Stated rather than hidden:
-this is a write-path cost traded for a 44 % smaller vector payload on the one cost line
-with no revenue attached.
+⛔ **These two numbers are machine-dependent and are deliberately NOT in `measurement.txt`**:
+the probe is deterministic by design (every other figure in this bundle reproduces
+byte-for-byte), so a wall-clock reading inside it would make the file un-diffable. Stated
+with its ruler instead, and reproducible by this command on any box:
+
+```console
+$ env -u TORTOISE_DB_URI uv run python - <<'EOF'
+import timeit, numpy as np
+from tortoise.embeddings import shortest_float32_vector
+vec = [float(x) for x in np.random.default_rng(5612).standard_normal(384).astype(np.float32)]
+for label, fn in (("before float(np.float32(x)) loop", lambda: [float(np.float32(x)) for x in vec]),
+                  ("after  shortest_float32_vector ", lambda: shortest_float32_vector(vec))):
+    print(f"{label}: {timeit.timeit(fn, number=200) / 200 * 1e6:.1f} us per 384-d vector")
+EOF
+before float(np.float32(x)) loop: 129.0 us per 384-d vector
+after  shortest_float32_vector : 482.4 us per 384-d vector
+```
+
+The **ratio** (≈3.7× here) is the transferable part; the absolute numbers are this box's
+(8-core Linux cell, `n=200`). It runs once per journalled vector on the write path, and the
+surrounding write (graph + record + embed) is ms-scale. Stated rather than hidden: a
+write-path cost traded for a 44 % smaller vector payload on the one cost line with no
+revenue attached. ⚠️ This replaces an earlier `1.68 ms` / `14 µs` pair that carried no
+command and does not reproduce — a 384-element cast loop does not run in 14 µs.
