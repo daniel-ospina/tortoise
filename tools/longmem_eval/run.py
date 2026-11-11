@@ -1935,8 +1935,15 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # 12000 (same fingerprint), and the resumed segment
                        # would either blend two windows into one published
                        # variant block or silently take ``token_cap`` on
-                       # every question. Conditional presence, like the cap:
-                       # None while the arm is OFF (the knob is inert there).
+                       # every question. Conditional presence (None while the
+                       # arm is OFF) — on COMPATIBILITY grounds, NOT
+                       # inertness: the knob is not inert arm-OFF, it is the
+                       # one-shot reader's assembly budget (forwarded to
+                       # `retrieve_for_question` as `max_context_tokens`) and
+                       # every run records it in `r1_knobs["context_token_cap"]`.
+                       # Absent is what keeps an arm-OFF fingerprint
+                       # byte-identical to the pre-feature one (#2570 review
+                       # round 7, finding 1).
                        window_reconciliation_max_context_tokens: int | None = (
                            None),
                        # C5 (#2521, #2513): the aggregative-intent coverage-

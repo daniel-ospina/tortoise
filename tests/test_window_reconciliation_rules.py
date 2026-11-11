@@ -1116,8 +1116,9 @@ def test_run_evaluation_forwards_the_arm_and_cap_to_the_fingerprint():
 
     Parsed from the source rather than executed: ``run_evaluation`` needs a
     graph, an SDK and a provider to reach this call, and the property under
-    test is precisely *which keywords are on the call*, which the AST states
-    exactly.
+    test is precisely *which keywords are on the call and what they carry*,
+    which the AST states exactly. Round 7 finding 2 fixed the second half of
+    that: the values are pinned too, not just the keyword names.
     """
     import ast
     from pathlib import Path
@@ -1132,14 +1133,42 @@ def test_run_evaluation_forwards_the_arm_and_cap_to_the_fingerprint():
              and isinstance(n.func, ast.Name)
              and n.func.id == "_build_fingerprint"]
     assert calls, "run_evaluation no longer builds a fingerprint"
-    forwarded = {kw.arg for call in calls for kw in call.keywords}
-    for required in ("window_reconciliation",
-                     "window_reconciliation_token_cap",
-                     "window_reconciliation_max_context_tokens"):
+    # ⛔ #2570 review round 7, finding 2: PRESENCE is not enough. The first
+    # version of this test only asserted that the three keywords were on the
+    # call, and a mutant that hard-coded the window (``8000``) on the forward
+    # kept the whole rules file green (63 passed) — the resume gate then
+    # protects nothing (both budgets stamp the constant, so
+    # ``_fingerprint_diffs`` sees no diff) while this test still passes. Pin
+    # the VALUES: each keyword must carry the run's resolved knob, and the
+    # window/cap must be gated on the arm so an arm-OFF fingerprint stays
+    # byte-identical to the pre-feature one.
+    assert len(calls) == 1, (
+        f"run_evaluation builds {len(calls)} fingerprints — this test pins "
+        f"the value forwarded by the one that stamps the run's resolved "
+        f"window, so a second call site needs an explicit decision here")
+    forwarded = {kw.arg: kw.value for kw in calls[0].keywords}
+    for required, expected in (
+        ("window_reconciliation", "bool(window_reconciliation)"),
+        ("window_reconciliation_token_cap",
+         "window_reconciliation_token_cap"),
+        ("window_reconciliation_max_context_tokens",
+         "max_context_tokens if window_reconciliation else None"),
+    ):
         assert required in forwarded, (
             f"run_evaluation does not forward {required}= to "
             f"_build_fingerprint — a checkpoint stamped with a different "
             f"{required} could then be resumed")
+        actual = ast.unparse(forwarded[required])
+        assert actual == expected, (
+            f"run_evaluation forwards {required}={actual} to "
+            f"_build_fingerprint; expected {expected} — a constant or an "
+            f"unresolved value here re-opens the resume hole this key exists "
+            f"to close, and a presence-only assertion cannot see it. If the "
+            f"forward was deliberately rewritten (a renamed local, or an "
+            f"equivalent form such as `bool(window_reconciliation)`), update "
+            f"`expected` — the EXACT-expression pin is deliberate: it is what "
+            f"catches a hard-coded constant, which a truthiness-equivalent "
+            f"comparison would not.")
 
 
 def _fingerprint(**over):
