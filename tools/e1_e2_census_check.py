@@ -1160,9 +1160,12 @@ def check(text: str) -> tuple[list[str], dict]:
             # This token does not exist before #10989, and the probe now prints it
             # on every binding it emits, so an ABSENT token can only be a log
             # written by an older probe. What this row closes is a binding that
-            # NAMES another basis — `atomic_points` above all — so PRESENCE is what
-            # is graded, and `n/a` is graded with the empty string because a basis
-            # the probe could not read is not a basis it named.
+            # NAMES another basis — `atomic_points` above all — so a NAMED basis
+            # is what is graded: absent and `n/a` are both tolerated, because a
+            # basis the probe could not read never named a population.
+            # (#11833 review r7 P3: this sentence said "PRESENCE is what is
+            # graded", which is the opposite of the tuple below and of the
+            # paragraph above — an ABSENT token is tolerated, not graded.)
             #
             # ⚠️ THE TOLERANCE IS NARROW, and worth stating exactly rather than
             # as "the historical artifacts": a legacy binding is only reached
