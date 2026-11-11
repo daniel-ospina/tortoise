@@ -2264,8 +2264,8 @@ to answer.
 > tree. That includes the last sentence of the note below ("it is the newest entry and its numbers
 > are this tree's"): true when this entry was written, not true of this tree.
 >
-> **One number below is still live, and it is not §10.24's.** This entry's last bullet re-derives the
-> `#10360` switch's read-back to `extractor_v2.py:10508`; `#11239`'s `+17` inserts sit at
+> **One number below is still live, and it is not §10.24's.** This entry's `#10360` read-back bullet
+> re-derives that switch's read-back to `extractor_v2.py:10508`; `#11239`'s `+17` inserts sit at
 > `extractor_v2.py:12112-12157`, **below** that assignment, so it did not move. That is why §10.20's
 > pointer still names THIS entry for the `:10508` value, and why `preregistration.json`'s `read_back`
 > prose carries it: §10.24 re-derived the block's lower cites and never restates `:10508`.
