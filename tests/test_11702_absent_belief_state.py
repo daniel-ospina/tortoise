@@ -386,6 +386,70 @@ def test_a_literal_past_the_int_str_digit_cap_reads_like_its_short_spelling():
                 short, numeric_operand(long), expected)
 
 
+# ── A hex exponent the mantissa CANCELS is not an unreadable literal ──────
+
+def test_a_hex_exponent_past_the_bound_its_mantissa_cancels_is_still_read(sdk):
+    """#11897: the digit-cap bound refused a value the STORE serves.
+
+    `_exact_literal_fraction` RETURNED `None` when `abs(exponent) >
+    _EXACT_FRACTION_MAX_EXP`, and the three call sites answered that `None` with
+    `return None` — ABSENT — on the stated ground that the branch was
+    unreachable for an admitted literal. It was reachable: a long mantissa
+    CANCELS a large exponent, leaving a finite, in-band, non-zero value.
+
+    Measured on FalkorDB 4.20.6, the literal below is exactly `1 + 2⁻²⁴`:
+
+        store   toFloat(<literal>)        -> 1.0            (non-null)
+        Python  numeric_operand(<literal>) -> None          (absent)
+        before  numeric_operand(<literal>) -> 1.0
+
+    Stored as the α operand with `β = 3`, one claim then read FOUR ways —
+    `ep` block `(None, 'absent')`, `why` `(None, 'absent', False)`, GraphRanker
+    `0.5`, `recall_subgraph` `{"ep_state": "measured", "confidence": 0.5}`,
+    `gaps_ranking` `(None, 'measured')` — with the rankers falling through to
+    their imputed Beta(1,1). That is the two-answers defect #11702 removes,
+    re-entering through a bound that was supposed to bound COST, not SPELLING.
+    """
+    from fractions import Fraction
+
+    from tortoise.ranking import GapsRanker, GraphRanker, StateRanker
+    from tortoise.search_engine import _exact_literal_fraction, numeric_operand
+
+    # 1 + 2⁻²⁴ — the float32 MIDPOINT above 1.0, spelled so the exponent is
+    # past the bound and the mantissa cancels it back into band.
+    long_hex = "0x" + format((2**24 + 1) * 2**4076, "x") + "p-4100"
+    assert len(long_hex) > 1000
+    assert float.fromhex(long_hex) == 1.0 + 2.0**-24
+
+    # The reconstruction, and then the value: a midpoint settles to even, so
+    # both spellings answer 1.0 — the same float32 the store serves.
+    assert _exact_literal_fraction(long_hex) == Fraction(2**24 + 1, 2**24), (
+        "the exact parse refused a literal whose exponent its mantissa cancels")
+    assert numeric_operand(long_hex) == numeric_operand("0x1.000001p0") == 1.0, (
+        numeric_operand(long_hex), numeric_operand("0x1.000001p0"))
+
+    # …and every surface agrees once it is STORED. `β = 3` keeps the mean off
+    # 0.5, so an imputed Beta(1,1) cannot pass this test by coincidence.
+    proj = sdk._get_proj()
+    pid = sdk.create_point("statement", "ZQHEXBOUND a cancelled exponent")["id"]
+    proj.g.query(
+        "MATCH (n:Point {id:$id}) SET n.posterior_alpha = $a, "
+        "n.posterior_beta = '3'",
+        params={"id": pid, "a": long_hex})
+    ann = annotate_ep_batch(proj.g, [pid])[pid]
+    assert ann.ep_state == EP_STATE_MEASURED, (
+        f"the store serves this operand, the reader called it {ann.ep_state!r}")
+    assert ann.confidence_mean == pytest.approx(0.25, abs=1e-6), ann
+    state = StateRanker(projection=proj)._fetch_point_signals([pid])[pid]
+    graph = GraphRanker(projection=proj)._fetch_signals([pid], "point")[pid]
+    gaps = GapsRanker(projection=proj)._fetch_confidence_signals(
+        [pid], labels=["Point"])[pid]
+    for name, sig in (("state", state), ("graph", graph), ("gaps", gaps)):
+        assert sig.get("confidence") == pytest.approx(0.25, abs=1e-6), (
+            f"{name} disagreed with the `ep` block for one stored claim: {sig}")
+        assert sig["confidence"] != pytest.approx(0.5, abs=1e-9), (name, sig)
+
+
 # ── The property: an absent claim is not ORDERED as a 0.5 ──────────────────
 
 def test_absent_and_measured_symmetric_do_not_share_an_ordering_input(sdk):
@@ -1146,9 +1210,9 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
 
     Both rules are now the shared predicate, so the agreement is structural —
     but "structural" is a claim, and this is the assertion that keeps it true
-    across all TEN stored shapes if either side is edited again.
+    across all ELEVEN stored shapes if either side is edited again.
 
-    Four of the ten are the readability boundary, and they are DIFFERENT
+    Five of the eleven are the readability boundary, and they are DIFFERENT
     shapes with different honest answers:
 
     * an OPERAND written as a hex-float literal (`posterior_alpha = '0x1p4'`) was
@@ -1164,7 +1228,13 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
     * a MIRROR at the band edge whose literal the DOUBLE cannot hold exactly
       (`0x1.0000010000000001p0`, cycle 28) rounds past 1.0 in the store and to
       `1.0` in Python if the midpoint is decided from the double: `absent` /
-      `present at maximum certainty`, one claim, two answers.
+      `present at maximum certainty`, one claim, two answers;
+    * an OPERAND whose `p` EXPONENT the old bound refused while its mantissa
+      cancelled that exponent back into band (#11897): the literal above is
+      exactly 1 + 2⁻²⁴, so the store serves it and the reader called it absent —
+      `measured / 0.25` on one surface, `absent` beside a ranker's imputed
+      Beta(1,1) `0.5` on another. The bound now measures the value's MAGNITUDE,
+      not the exponent as written.
 
     Collapsing those two into one shape is how the token lost its only test
     when the band landed (cycle 25 review): the fixture stayed the mirror, so it
@@ -1214,9 +1284,19 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
     #     1.000000119… and calls the row ABSENT. Measured as a presence split.
     band_edge_mirror = _point("a band-edge hex mirror",
                               "n.confidence = '0x1.0000010000000001p0'")
+    # (e) The EXPONENT BOUND (#11897): a 4,000-bit mantissa CANCELS a `p-4100`,
+    #     so this literal is exactly 1 + 2⁻²⁴ — in band, served by the store —
+    #     while the old bound refused it for having `|exponent| > 4096` and the
+    #     rankers fell through to their imputed Beta(1,1) at 0.5. β = 3 keeps
+    #     the mean at 0.25, so a fallback cannot pass this row by coincidence.
+    hex_cancelling = _point(
+        "a cancelling hex exponent",
+        "n.posterior_alpha = $a, n.posterior_beta = '3'",
+        {"a": "0x" + format((2**24 + 1) * 2**4076, "x") + "p-4100"})
 
     ids = [absent, half_pair, zero_total, mirror_only, measured, baseline,
-           hex_operand, out_of_band_mirror, hex_subnormal, band_edge_mirror]
+           hex_operand, out_of_band_mirror, hex_subnormal, band_edge_mirror,
+           hex_cancelling]
     recs = {r["id"]: r["recall_ranking"] for r in
             StateRanker(projection=proj).rerank(
                 [{"id": p, "scores": {"rrf": 1.0}} for p in ids])}
@@ -1265,6 +1345,17 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
     for pid in (mirror_only, baseline):
         assert recs[pid]["ep_state"] == EP_STATE_BASELINE, recs[pid]
         assert recs[pid]["confidence_source"] != EP_STATE_ABSENT, recs[pid]
+
+    # (e) The EXPONENT-BOUND shape: a served value must be RANKED on, not
+    #     replaced by the imputed Beta(1,1) (0.5). This row is the #11897
+    #     regression: the `ep` block said `absent` while the rankers answered
+    #     0.5 from the fallback, so the claim carried no belief on one surface
+    #     and a neutral one on another.
+    for name, row in (("recall_ranking", recs[hex_cancelling]),
+                      ("gaps_ranking", gaps[hex_cancelling])):
+        assert row["ep_state"] == EP_STATE_MEASURED, (name, row)
+        assert row["confidence"] == pytest.approx(0.25, abs=1e-6), (name, row)
+        assert row["confidence_source"] == "posterior", (name, row)
 
     # (a) The OPERAND shape: a hex-float pair. This USED to be the reachable
     # "unreadable" shape — the store reads `toFloatOrNull('0x1p4')` (16.0) and the

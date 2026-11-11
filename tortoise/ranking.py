@@ -81,8 +81,8 @@ UNCOMPUTED_CONFIDENCE_SOURCE = "uncomputed"
 #: has a belief we could not decode.
 #: NO STORED SHAPE THIS REPO HAS MEASURED REACHES IT — and the qualifier is
 #: load-bearing, because the unconditional version of this sentence was wrong
-#: TWICE. The class is "a spelling the store reads and this process does not",
-#: and it was declared closed at cycle 26 for one shape:
+#: THREE TIMES. The class is "a spelling the store reads and this process does
+#: not", and it was declared closed at cycle 26 for one shape:
 #:
 #: * the OPERAND spelling (``posterior_alpha = "0x1p4"``), which FalkorDB's
 #:   ``toFloatOrNull`` reads as ``16.0`` while the pinned Python grammar refused
@@ -93,6 +93,12 @@ UNCOMPUTED_CONFIDENCE_SOURCE = "uncomputed"
 #:   hex literal with more precision lands on a float32 midpoint and the
 #:   tie-break followed the double — ``n.confidence = "0x1.0000010000000001p0"``
 #:   read ``present at 1.0`` here and ABSENT in the store.
+#: * #11897 (found while attesting #11803) found the exponent BOUND: a 4,000-bit
+#:   mantissa CANCELS a ``p-4100``, so
+#:   ``"0x" + format((2**24+1) * 2**4076, "x") + "p-4100"`` is exactly 1 + 2⁻²⁴ —
+#:   in band, served by the store — while the bound refused it for having
+#:   ``|exponent| > 4096``. The predicate measured the SPELLING; it now measures
+#:   the value's MAGNITUDE, which is what bounds the cost anyway.
 #:
 #: Each fix is a MEASUREMENT over the spellings pinned in
 #: ``tests/test_11702_absent_belief_state.py``, not a proof; the MIRROR spelling
@@ -1403,14 +1409,14 @@ class StateRanker:
             # `_confidence_of` and must not deny the state beside it (the
             # reviewed head emitted `"absent"` beside `"measured"`).
             # `test_confidence_source_never_contradicts_the_ep_state_beside_it`
-            # pins the agreement for all ten stored shapes — and no stored shape
-            # this repo has MEASURED produces the null beside a non-absent state
-            # (cycles 26–28 each closed one: the hex OPERAND spelling, the exact
-            # SUBnormal, and the hex MIDPOINT rounding), so the arm below is
-            # DEFENSIVE. "Measured" is the whole claim — the unconditional
-            # version of it was falsified twice — so a future undecodable
-            # spelling reports `"unreadable"` instead of denying a belief the
-            # row is known to have.
+            # pins the agreement for all eleven stored shapes — and no stored
+            # shape this repo has MEASURED produces the null beside a non-absent
+            # state (cycles 26–28 and #11897 each closed one: the hex OPERAND
+            # spelling, the exact SUBnormal, the hex MIDPOINT rounding, and the
+            # hex EXPONENT BOUND), so the arm below is DEFENSIVE. "Measured" is
+            # the whole claim — the unconditional version of it was falsified
+            # THREE times — so a future undecodable spelling reports
+            # `"unreadable"` instead of denying a belief the row is known to have.
             ep_state = sig.get("ep_state")
             if ep_state is None:
                 ep_state = (EP_STATE_ABSENT if confidence is None
