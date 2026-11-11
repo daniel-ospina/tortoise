@@ -347,8 +347,11 @@ def ep_prior_only_cypher(alias: str) -> str:
     A prior-only claim's confidence_mean IS the declared PRIOR mean — EXCEPT
     that a readable ``n.confidence`` mirror LEADS it, so a declared Beta(3,1)
     beside a stored 0.9 reads 0.9, not the prior mean 0.75. A DEGENERATE
-    declared prior (0/0, or a negative operand) has NO mean at all: it reads
-    ``None`` + ``ep_state: "absent"``.
+    declared prior (0/0, or a negative operand) has NO mean of its own, so with
+    no readable ``n.confidence`` mirror beside it the row reads ``None`` +
+    ``ep_state: "absent"`` — with one it serves the mirror's value (``baseline``,
+    or ``measured`` when a posterior pair is stored), because the mirror LEADS
+    even a 0/0 pair (see :func:`ep_state`).
 
     Kept textually in step with the Python twin: for every combination of
     (posterior_alpha, ep_alpha, baseline_set) this helper is true iff

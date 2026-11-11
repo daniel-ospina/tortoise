@@ -457,8 +457,9 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
         # EP measurement): its confidence_mean is the PRIOR mean (a readable
         # `n.confidence` mirror, if present, LEADS it), never a measured one —
         # and a DEGENERATE declared prior (0/0, or a negative operand) has no
-        # mean at all, reading ``None`` + ``ep_state: "absent"`` (see the
-        # `baseline` note below).
+        # mean of its own, so with no readable `n.confidence` mirror beside it
+        # the row reads ``None`` + ``ep_state: "absent"`` — with one it serves
+        # the mirror's value (see the `baseline` note below).
         # A TERMINAL row is neither measured nor prior-only (its 0.5 is the
         # #2490 decayed posterior) — the terminal gate also clears `baseline`.
         baseline_set = bool(row[6]) if len(row) > 6 else False
