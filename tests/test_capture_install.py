@@ -3026,7 +3026,10 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_cloud_agent_limit
     # injecting "The MCP pull seam reaches a cloud agent." REDs, and re-appending
     # the round-1 universal REDs on BOTH this arm and "neither the capture".
     # (An earlier version of this comment claimed the guards were "not
-    # verb+object" — false of :3024 — which is the drift r6 flagged.)
+    # verb+object" — false of the `seam reaches a cloud agent` assert below. It
+    # named that assert by LINE NUMBER instead, which is why the pointer went
+    # stale the moment this PR added comment lines above it; name the predicate,
+    # not the line.)
     assert "hosted cloud agent VM is NOT captured" in r.stdout, r.stdout
     assert "neither the capture seam" not in r.stdout, r.stdout
     assert "hook reaches a cloud agent" not in r.stdout, r.stdout
