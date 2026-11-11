@@ -17,8 +17,13 @@ reached is a test that cannot fail — it proves the code ran, not that the tree
 agrees with the document. The negative controls therefore mutate a COPY of the
 real document rather than asserting only that the shipped tree is clean.
 
-Registered in `config/ci-surfaces.yml` (`manifest-integrity` fails on an
-unregistered test file).
+Registered in `config/ci-surfaces.yml` — `core` is the classification
+`manifest-integrity` requires, and `tier1` is the row that ACTUALLY selects this
+module on a docs-only or `tools/`-only diff (both prefixes are dropped by
+`_keep_changed()`, so `select()` takes its docs-only early return, which emits
+`tier1` only). Both rows are asserted by
+`test_test_file_is_registered_in_ci_surfaces` /
+`test_test_file_is_selected_on_the_diffs_it_guards`.
 """
 from __future__ import annotations
 
@@ -125,10 +130,17 @@ def test_shipped_document_passes_the_full_check():
 
     Reachable by the page naming a commit that is not on this branch's history
     (a rebase, a force-push, or a cut taken on another branch). Needs the whole
-    clone, so it SKIPS with a stated reason in the depth-1 `test` jobs instead of
-    redding them: the REQUIRED `docs` job (fetch-depth 0) is where this arm
-    actually runs, and `test_shipped_document_is_clean` above keeps every
-    tree-only claim asserted in both.
+    clone, so it SKIPS with a stated reason in the depth-1 `test` jobs.
+
+    ⛔ Do not read that skip as "covered elsewhere by a test": the REQUIRED `docs`
+    job runs NO pytest, so this assertion is inert there and skipped in every job
+    that runs pytest. What the docs job DOES prove is the same claim through the
+    tool itself (`--check` IS `check_all`), and the not-ancestor BRANCH is pinned
+    in every pytest job by
+    `test_measured_commit_not_ancestor_of_head_is_rejected`, which stubs `git`
+    and therefore needs no history. This test is the real-document half of that
+    pair; calling `check_document()` here (the pre-fix shape) asserted nothing
+    the ancestry skip was about.
     """
     if not _history_available():
         pytest.skip(
@@ -137,7 +149,31 @@ def test_shipped_document_passes_the_full_check():
             "job runs `--check` at fetch-depth: 0 — #10406, and the tool's "
             "check_document()/check_all() split"
         )
-    assert _doc_problems() == []
+    assert flc.check_all(REPO) == []
+
+
+def test_mutation_population_is_pinned():
+    """FAILS if the self-test arm population is shrunk, or the floor with it.
+
+    Reachable by the shape a weakening edit takes: `MUTATIONS = ()` is a
+    ONE-place edit, and it used to print `self-test: PASS (0 failing arm(s))` and
+    exit 0 — keeping the REQUIRED `docs` job and
+    `test_checker_self_test_passes` green while proving nothing. The floor is
+    pinned here as well as in the tool so neither can be lowered alone.
+    """
+    assert len(flc.MUTATIONS) == 6
+    assert flc.MIN_SELF_TEST_MUTATIONS == 6
+
+
+def test_self_test_floor_catches_a_shrunk_population(monkeypatch):
+    """FAILS if an emptied mutation population still reports PASS (exit 0).
+
+    Reachable by the `MUTATIONS = ()` edit above; this drives the real
+    `self_test()` with it doctored, so the assertion is on the behaviour rather
+    than on the constant. Pre-fix this returned 0 and printed PASS.
+    """
+    monkeypatch.setattr(flc, "MUTATIONS", ())
+    assert flc.self_test(REPO) == 1
 
 
 def test_checker_self_test_passes():
@@ -159,7 +195,7 @@ def test_doc_level_arms_make_no_git_call(monkeypatch):
     drove `check_all()`, every arm inherited the `measured_at_commit` ancestry
     probe, so in a depth-1 clone (the CI `test` jobs' checkout, where
     `f70d884b7` is not in the object store) the mutation proofs could not run at
-    all — measured 14 of 24 tests failing there. `subprocess` is replaced on the
+    all — measured 14 failing tests in a depth-1 clone. `subprocess` is replaced on the
     TOOL's module, so this proves the tool's own call graph rather than the
     test's.
     """
@@ -270,6 +306,70 @@ def test_document_with_no_citations_is_unverifiable(tmp_path, monkeypatch):
     _mutated(tmp_path, monkeypatch, lambda t: flc.CITATION_RE.sub("`evidence`", t))
     with pytest.raises(flc.Unverifiable):
         _doc_problems()
+
+
+def test_shipped_shorthand_citations_are_matched_not_skipped():
+    """FAILS if a bare `:LINE` shorthand stops being matched at all.
+
+    Reachable, and it is the pre-fix shape: `CITATION_RE` required `<path>.<ext>`
+    before `:LINE`, so row (b)'s `:792` / `:1002` / `:429-438` (its only
+    commitments about `tortoise/commit_schema.py` beyond `:395`), row (c)'s
+    `:3115` and row (e)'s `:66` were skipped entirely while §8 told the reader
+    every `path:line` in §3/§5 is checked. Skipped evidence presents as checked
+    evidence, which is the defect this page is about.
+    """
+    matched = {m.group(0) for m in flc.CITATION_RE.finditer(flc.read_doc(REPO))}
+    for shorthand in ("`:792`", "`:1002`", "`:429-438`", "`:3115`", "`:66`"):
+        assert shorthand in matched, f"{shorthand} is not matched, so it is not checked"
+
+
+def test_shorthand_citation_out_of_range_is_rejected(tmp_path, monkeypatch):
+    """FAILS when a shorthand `:LINE` points past the end of its ANCHOR's file.
+
+    Reachable by any edit that shifts the cited classes down the file (inserting
+    lines above them), or by a shorthand copied from a different file. It asserts
+    the anchor too: the message must name `tortoise/commit_schema.py` (the cell's
+    own preceding full-path citation), not whatever file was cited last.
+    """
+    _mutated(tmp_path, monkeypatch, lambda t: t.replace("`:792`", "`:999999`", 1))
+    problems = _doc_problems()
+    assert any(
+        "out of range" in p and "tortoise/commit_schema.py" in p for p in problems
+    ), problems
+
+
+def test_shorthand_without_a_preceding_full_path_is_rejected():
+    """FAILS if a shorthand is silently accepted when nothing anchors it.
+
+    Reachable by writing `:66` as the first citation in the page: the guard can
+    then only guess, and a guess is how a citation that points at nothing passes
+    as evidence. It must refuse to resolve instead.
+    """
+    problems = flc.check_citations("a claim with only a shorthand `:66` in it", REPO)
+    assert any("shorthand with no preceding" in p for p in problems), problems
+
+
+def test_escaped_pipe_inside_a_cell_does_not_shift_the_verdict_column(tmp_path, monkeypatch):
+    """FAILS (as a false red) if a legal `\\|` inside a §3 cell breaks the row split.
+
+    Reachable by any row whose claim legitimately contains a literal pipe. A
+    plain `line.split("|")` splits there too, shifts the verdict column and
+    reports a correct row as "no bolded verdict" — a false red the reader cannot
+    act on, which is how a guard gets routed around. Asserted on that arm only:
+    the mutated copy lives outside the tree, so `check_registration` is expected
+    to complain about it either way.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace(
+            "| **False.** Extraction writes through the SDK doors",
+            "| **False.** a \\| b Extraction writes through the SDK doors",
+            1,
+        ),
+    )
+    problems = _doc_problems()
+    assert not any("no bolded verdict" in p for p in problems), problems
 
 
 # ── the population is pinned ───────────────────────────────────────────────
@@ -419,6 +519,38 @@ def test_measured_commit_must_be_an_ancestor_of_head(tmp_path, monkeypatch):
         flc.check_all(REPO)
 
 
+def test_measured_commit_not_ancestor_of_head_is_rejected(monkeypatch):
+    """FAILS when `measured_at_commit` resolves but is NOT on HEAD's history.
+
+    Reachable by pasting a sha from a branch that was force-pushed away, or by a
+    cut taken on another branch — the page then claims a cut it did not make, and
+    every citation in it was measured somewhere else.
+
+    `git` is stubbed rather than producing a real off-history commit: a shallow
+    pytest checkout cannot make one, which is exactly why this branch was
+    unpinned before (`0000000` dies earlier, at `rev-parse --verify`, and takes
+    the UNVERIFIED path instead). The stub records the calls so the assertion is
+    that the real `merge-base --is-ancestor` arm ran, not that a helper was
+    bypassed.
+    """
+    class _Result:
+        def __init__(self, returncode: int, stdout: str = "") -> None:
+            self.returncode, self.stdout, self.stderr = returncode, stdout, ""
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        if "rev-parse" in cmd:
+            return _Result(0, "f70d884b7f51\n")
+        return _Result(1)  # merge-base --is-ancestor: exit 1 == NOT an ancestor
+
+    monkeypatch.setattr(flc, "subprocess", SimpleNamespace(run=fake_run))
+    problems = flc.check_measured_commit(flc.read_doc(REPO), REPO)
+    assert any("NOT an ancestor of HEAD" in p for p in problems), problems
+    assert any("--is-ancestor" in cmd for cmd in calls), calls
+
+
 def test_unreadable_document_is_unverifiable(monkeypatch):
     """FAILS (exit 2) when the document cannot be read.
 
@@ -522,9 +654,44 @@ def test_test_file_is_registered_in_ci_surfaces():
     """FAILS if this file is not registered in `config/ci-surfaces.yml`.
 
     Reachable by adding a test without the registration; `manifest-integrity`
-    then fails unconditionally, and the file is never selected on a source diff.
+    then fails unconditionally. Classification only — it says nothing about
+    whether a DIFF selects the file, which is what the test below pins.
     """
     assert "test_findings_ledger_2852.py" in SURFACES.read_text(encoding="utf-8")
+
+
+def test_test_file_is_selected_on_the_diffs_it_guards():
+    """FAILS if the guard is not SELECTED on the two change classes it guards.
+
+    Reachable, and measured: with only the `core` row,
+    `select(["docs/architecture/MEMORY-SUBSTRATE-FINDINGS-LEDGER.md"])` returned
+    `surfaces: []` with this module ABSENT (a docs-only diff takes `select()`'s
+    early return, which emits `tier1` only), and the same for
+    `tools/findings_ledger_check.py` (`tools/` is a flat `NON_PYTHON_PREFIXES`
+    entry with no `SOURCE_PATTERNS` match, so `changed == []`). A `core`-only row
+    is classification, not selection — the page's own guard ran ZERO times on an
+    edit to the page. The `tools/` arm is closed by `CORE_ALSO` in
+    `tools/ci_selection.py`, the `docs/` arm by `tier1`.
+    """
+    sys.path.insert(0, str(REPO))
+    from tools.ci_selection import load_manifest, select
+
+    manifest = load_manifest()
+    docs = select(
+        ["docs/architecture/MEMORY-SUBSTRATE-FINDINGS-LEDGER.md"], "pull_request", manifest
+    )
+    assert docs["surfaces"] == [], docs["surfaces"]
+    assert "test_findings_ledger_2852.py" in docs["test_files"], (
+        "a docs-only edit of the ledger must run the guard that re-measures it — "
+        "that is the change class that can falsify the page's citations"
+    )
+
+    tool = select(["tools/findings_ledger_check.py"], "pull_request", manifest)
+    assert tool["surfaces"] == ["core"], tool["surfaces"]
+    assert "test_findings_ledger_2852.py" in tool["test_files"], (
+        "a tools-only edit must run the guard's own negative controls — without the "
+        "CORE_ALSO entry `tools/` falls through to the docs-only early return"
+    )
 
 
 def test_tool_is_stdlib_only():
