@@ -429,10 +429,14 @@ def test_11810_platform_seams_doc_pin_runs_on_a_docs_only_diff_and_on_the_messag
     early return. Measured at the r7 head before the fix:
     `_sel([<the doc>])['surfaces'] == []`, 85 tier1 files, pin absent.
 
-    The second arm is why `api` is registered too: the message is a
-    `tortoise/__main__.py` string, and that path is an exact SOURCE_PATTERNS
-    entry, so a named-surface match REPLACES the `core` fallback — measured
-    `surfaces == ['api']` with `core` absent.
+    The second arm is the `__main__.py` diff the message half guards. It is
+    registered `api` too, and that path does resolve to `['api']` ALONE
+    (measured; it replaces the `core` fallback) — but ⚠️ review r10 (P3)
+    measured that the `api` row is NOT what carries either arm: `select()`
+    unions `tier1` into every PR selection, so the `tier1` row alone selects the
+    pin on BOTH diffs and the `api`/`core` rows add no coverage (they are kept
+    belt-and-braces, and as the durable home if a `tier1` edit drops it — that
+    is the state this test's `tier1` sibling exists to catch).
 
     The manifest assertion in :func:`test_docs_scanning_gates_stay_in_tier1`
     catches a DELETED row; this catches a row that is present but no longer
@@ -450,9 +454,32 @@ def test_11810_platform_seams_doc_pin_runs_on_a_docs_only_diff_and_on_the_messag
     m = _sel(["tortoise/__main__.py"])
     assert m["surfaces"] == ["api"], m["surfaces"]
     assert "test_11810_platform_seams_doc_pin.py" in m["test_files"], (
-        "a `__main__.py` diff must run the message arm of the pin — that path "
-        "resolves to `api` ALONE (it replaces the `core` fallback), so the "
-        "`core` row alone would leave it asleep"
+        "a `__main__.py` diff must run the message arm of the pin — without "
+        "ANY row that reaches it, dropping `hosted` from the shipped message "
+        "would merge green"
+    )
+
+    # #11810 review r10 (P3): MEASURE the claim the three manifest comments and
+    # the pin's own docstring make, instead of asserting it in prose. `select()`
+    # unions `tier1` into every PR selection, so the pin is selected on both arms
+    # with BOTH surface rows removed — `tier1` is what carries them, and the
+    # `api`/`core` rows are the durable belt-and-braces. Before this was measured
+    # the comments said the opposite ("without this row the pin would sleep on
+    # the only diff that can break it"), which stayed green because nothing read
+    # the selection that way.
+    pin = "test_11810_platform_seams_doc_pin.py"
+    no_surface_rows = copy.deepcopy(load_manifest())
+    for surface in ("api", "core"):
+        no_surface_rows["surfaces"][surface] = [
+            t for t in no_surface_rows["surfaces"][surface] if t != pin]
+    assert pin not in no_surface_rows["surfaces"]["api"]
+    assert pin in select([doc], "pull_request", no_surface_rows)["test_files"], (
+        "the `tier1` row is what selects the pin on a docs-only diff"
+    )
+    assert pin in select(["tortoise/__main__.py"], "pull_request",
+                         no_surface_rows)["test_files"], (
+        "`tier1` is unioned into every PR selection, so it also carries the "
+        "`__main__.py` arm — the `api` row is not what selects it"
     )
 
 

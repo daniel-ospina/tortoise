@@ -1795,12 +1795,21 @@ surfaces:
   # the mechanism half.
   - test_capture_install.py
   # #11810 review r7 (P2): the `platform-seams.md` ↔ install-message pin was
-  # MOVED here from test_capture_install.py. `tortoise install cursor`'s message
-  # is a `__main__.py` string, and `__main__.py` is an exact `api`
-  # SOURCE_PATTERNS entry — a named-surface match REPLACES the `core` fallback
-  # (measured: `--changed-files tortoise/__main__.py` -> `surfaces: ['api']`),
-  # so without this row the pin would sleep on the only diff that can break it.
-  # The `tier1` row is the other half: a docs-only edit selects `tier1` ONLY.
+  # MOVED here from test_capture_install.py, and it does guard this surface's
+  # diff: `tortoise install cursor`'s message is a `__main__.py` string, an
+  # exact `api` SOURCE_PATTERNS entry (measured: `--changed-files
+  # tortoise/__main__.py` -> `surfaces: ['api']`).
+  # ⚠️ HONEST SCOPE — corrected by review r10 (P3), which measured the opposite of
+  # what this comment used to claim: this row is NOT what makes the pin run.
+  # `select()` unions `tier1` into EVERY PR selection (`files = set(tier1)`, then
+  # the surface's members), so the `tier1` row ALONE selects the pin on both the
+  # docs-only and the `__main__.py` diff. This row and the `core` row add no
+  # selection coverage; they are kept belt-and-braces as the durable home, because
+  # `tier1` is a curated smoke list one edit from dropping the pin silently.
+  # Measured: with this row AND `core` deleted -> pin still selected on both
+  # diffs; with `tier1` also deleted -> selected on neither. Pinned by
+  # tests/test_ci_selection.py::
+  # test_11810_platform_seams_doc_pin_runs_on_a_docs_only_diff_and_on_the_message_diff
   - test_11810_platform_seams_doc_pin.py
   # #2119: the Pi per-turn READ seam is that same #3808/#3575/#3795 shape — the
   # artifact (`tortoise/pi-hooks/tortoise-volunteer.ts`) classifies `core`, but
@@ -4610,9 +4619,11 @@ surfaces:
   - test_codex_capture_hook.py
   # #11810 review r7 (P2): `platform-seams.md` §3 must quote the SHIPPED
   # hosted-scoped message, and the message must still contain the fragment it
-  # quotes. `core` is the mechanism half; `tier1` is the half that runs on the
-  # docs-only diff which breaks the RECORD, and `api` the half that runs on the
-  # `__main__.py` diff which breaks the MESSAGE — see both rows.
+  # quotes. ⚠️ Belt-and-braces, per review r10 (P3): the `tier1` row is the one
+  # that carries BOTH diffs today (`select()` unions tier1 into every PR
+  # selection, measured); this row and the `api` row add no selection coverage.
+  # They are kept as the durable home so a `tier1` edit cannot silently drop the
+  # pin — not because either row is load-bearing.
   - test_11810_platform_seams_doc_pin.py
   # #3819: the Cursor sessionEnd capture hook — the shipped artifact, its
   # detach/argv behavior, the agent-transcript parser, and the CLI install
@@ -8580,7 +8591,7 @@ tier1:
 - test_9399_search_path_claim_scope.py  # #9399: §13's `aboutObject` headline claim vs the scope of the grep it quotes (hermetic doc↔code pin, and the claim's own file list is what a docs-only edit falsifies fastest) — dual-registered with `core`
 - test_10191_record_move_doc_pin.py  # #10191/#10244: the record applies a 2b `DirectEdgeRepoint` as a MOVE — docs/ONTOLOGY.md §3.1 + the docs/INGEST_CONTRACT.md supersede row vs `_structural_repoint_statements` (hermetic doc↔code pin; a docs-only INGEST edit selects no surface and runs tier1 ONLY) — dual-registered with `core`
 - test_10000_cache_projection_doc_pin.py  # #10852 review (P2): the epic artifact `06-cache-projection.md` must not re-arm the retracted "re-capture heals a pre-#10000 node" premise (it names the mint-gate mechanism, the three routes that DO clear the pair, and the #10965 legs it claims to pin; every cited `test_*` must resolve). The guarded document is under `docs/`, so a docs-only diff runs `tier1` ONLY — that is the change class that re-arms the claim, which is why this row is the LOAD-BEARING one. Hermetic: two file reads, no fixture, no DB, no network — dual-registered with `core`.
-- test_11810_platform_seams_doc_pin.py  # #11810 review r7 (P2): `docs/research/2026-09-01-gbrain-learnings/platform-seams.md` §3 must quote the SHIPPED hosted-scoped install message, and the message must still carry the fragment it quotes. The guarded document is under `docs/`, so a docs-only edit of §3 — #11807's doc half, or any re-edit — selects NO surface and runs `tier1` ONLY; the pin originally lived in `test_capture_install.py` (`api` + `core`), where it ran ZERO times on exactly that diff (measured: `--changed-files docs/research/2026-09-01-gbrain-learnings/platform-seams.md` -> `surfaces: []`, 85 tier1 files, pin absent). Registered `api` + `core` + `tier1`: `api` because the message is a `__main__.py` string and that path resolves to `['api']` ALONE (it replaces the `core` fallback), `tier1` because a docs-only diff takes the early return. Hermetic on the doc side (two file reads); the message side runs the REAL `tortoise install cursor` against an isolated `HOME` with `TORTOISE_DB_URI=""` — no graph, no docker, no network, no model.
+- test_11810_platform_seams_doc_pin.py  # #11810 review r7 (P2): `docs/research/2026-09-01-gbrain-learnings/platform-seams.md` §3 must quote the SHIPPED hosted-scoped install message, and the message must still carry the fragment it quotes. The guarded document is under `docs/`, so a docs-only edit of §3 — #11807's doc half, or any re-edit — selects NO surface and runs `tier1` ONLY; the pin originally lived in `test_capture_install.py` (`api` + `core`), where it ran ZERO times on exactly that diff (measured: `--changed-files docs/research/2026-09-01-gbrain-learnings/platform-seams.md` -> `surfaces: []`, 85 tier1 files, pin absent). Registered `api` + `core` + `tier1`; ⚠️ review r10 (P3) measured that THIS row is the load-bearing one — `select()` unions tier1 into EVERY PR selection, so it alone selects the pin on both the docs-only and the `__main__.py` diff, and the `api`/`core` rows add no coverage (kept as belt-and-braces, and as the durable home if a `tier1` edit ever drops it). Hermetic on the doc side (two file reads); the message side runs the REAL `tortoise install cursor` against an isolated `HOME` with `TORTOISE_DB_URI=""` — no graph, no docker, no network, no model.
 - test_substrate_map.py  # #5086: the substrate map's drift guard — a docs-only edit of `docs/architecture/SUBSTRATE-REBUILD-MAP.md` selects NO surface and runs tier1 ONLY, so this is the arm that catches the map going stale a fourth time. Dual-registered with `core` (#5086 review P1-2: without this row the guard ran on `tortoise/` diffs only). ⚠️ Narrower than it is tempting to write: the OTHER file the guard reads, `docs/00_index.md`, is in `CORE_ALSO` (`tools/ci_selection.py`), so an INDEX-only edit is measured `surfaces=['core']` and reaches the pin through the `core` row — it does not need this one (#5086 review P3, cycle 6: this row's comment claimed otherwise, in three places)
 
 - test_problem_map_2820.py  # #2820: the memory-substrate problem map's status
