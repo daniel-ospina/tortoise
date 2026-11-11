@@ -1049,6 +1049,15 @@ class EmbeddingModel:
             texts, batch_size=batch_size, show_progress_bar=show_progress_bar)
 
 
+#: The ONE word budget every write-side embedder composes within
+#: (:func:`compute_embedding` / :func:`compute_embeddings` default to it, and
+#: ``embed_compose.EMBED_WORD_BUDGET`` imports it rather than restating 512).
+#: #11739 review round 4: a second literal let the composition budget drift above
+#: the encode cap, which would have made the head-kept cut silently discard a
+#: names line the composition had carefully reserved room for.
+EMBED_WORD_BUDGET = 512
+
+
 def _truncate_for_embedding(content: str, max_tokens: int) -> str:
     """The ONE stored-text composition used by every write-side embedder.
 
@@ -1061,7 +1070,7 @@ def _truncate_for_embedding(content: str, max_tokens: int) -> str:
 
 
 def compute_embeddings(
-    texts: list[str], max_tokens: int = 512,
+    texts: list[str], max_tokens: int = EMBED_WORD_BUDGET,
 ) -> list[list[float] | None]:
     """Batched form of :func:`compute_embedding` — SAME embedder, per text.
 
@@ -1297,7 +1306,7 @@ def encode_batch_for_store(
     return _degrade_to_width(vecs, expected_dim)
 
 
-def compute_embedding(content: str, max_tokens: int = 512) -> list[float] | None:
+def compute_embedding(content: str, max_tokens: int = EMBED_WORD_BUDGET) -> list[float] | None:
     """Compute embedding for a single text. Returns the model's vector or None.
 
     Truncates to max_tokens before encoding to prevent OOM.

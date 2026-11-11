@@ -88,8 +88,10 @@ import json
 
 import pytest
 
-# ⛔ NOT `pytest.importorskip("tortoise.sdk")` (review P3 on PR #11795): that
-# turns an unimportable SDK into SEVENTEEN skips, and this file is the only
+# ⛔ NOT `pytest.importorskip("tortoise.sdk")` (review P3 on PR #11795): a
+# module-level `importorskip` on an unimportable SDK reports ONE skipped module —
+# measured, `1 skipped`, NOT one per row — so the whole file would leave the run
+# as a single skip instead of a loud failure, and this file is the only
 # behavioural pin of the SDK write doors and both replay folds (the hosted commit
 # door's rows live in `tests/test_commit_endpoint.py`, which owns the TestClient).
 # Its declared sibling
