@@ -51,11 +51,13 @@ def _propagate_shock_reference_sites() -> dict[str, set[int]]:
     (the aliased call) can no longer pass.
 
     ⚠️ SECOND STATED BOUND — only `.py` files under `tortoise/` are PARSED, because a
-    non-Python file has no AST. A name in one of the shipped hook/plugin files
-    (`tortoise/cursor-hooks/*.sh`, `codex-hooks/*.sh`, `claude-hooks/*.sh`,
-    `openclaw-plugin/index.mjs`) can therefore be judged only by the grep line, so the
-    caller treats it as a PRODUCTION reference rather than demoting it to prose
-    (review r36 P3 #2).
+    non-Python file has no AST, so a name in ANY non-`.py` file under `tortoise/` is judged
+    by its grep line alone and treated as a PRODUCTION reference rather than demoted to
+    prose (review r36 P3 #2 / r37 P3 #2). That is wider than the shipped hook/plugin
+    sources it was written for — `tortoise/` also carries `.md`, `.json`, `.yaml` — so a
+    DOC edit that mentions the function REDs here. It fails closed, which is the right
+    direction for a deprecated name; narrowing it to an extension allow-list would make
+    the demotion set a thing nobody maintains.
     """
     sites: dict[str, set[int]] = {}
     for path in sorted((ROOT / "tortoise").rglob("*.py")):

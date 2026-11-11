@@ -581,6 +581,13 @@ _ITEM_START = re.compile(r"^(?:\*\*)?\(?\d+[.)](?:\*\*)?\s")
 #: `^[ \t]+[-*+]` cut the block on an HONEST sub-bullet added inside the item — a
 #: correct record reddening, the direction this guard must not have.
 #:
+#: ⚠️ RECORDED BOUND — a LAZY continuation line (a paragraph line written at column 0,
+#: which CommonMark renders as part of the item) also ENDS the block here, so a correct
+#: record edited that way REDs with a message that says the sentence moved when it did
+#: not (measured, review r37 P3 #1). It fails CLOSED, and no edit of this record has
+#: produced one; the alternative — tolerating column-0 prose inside an item — would make
+#: "a column-0 line is the next block" false and re-open the fail-OPEN this rule closes.
+#:
 #: ⚠️ The LOCATOR (`_ITEM_START`) stays narrow and different on purpose: an item is
 #: found by its BOLD HEADING's words, so locating on "any column-0 line" would invent
 #: sites out of headings, rules and prose.
@@ -596,7 +603,10 @@ def _record_site_block(doc: str, site: str) -> str:
     An item runs from its own first line (`2. **Heading …**`) to the first non-blank
     line at column 0 (`_BLOCK_END` — the record's own indentation: a continuation line
     is always indented, so a column-0 line is the next block whatever it is spelled as),
-    and is located by its BOLD HEADING's words, not by
+    ⚠️ with one recorded bound: a LAZY continuation line written at column 0 also ends the
+    block though CommonMark renders it inside the item, so that edit REDs a correct record
+    and the message says "moved" when nothing moved (measured, review r37 P3 #1). It fails
+    CLOSED. The item is located by its BOLD HEADING's words, not by
     its NUMBER — a renumbering therefore cannot make a label point at a neighbour.
     (Read the boundary off `_BLOCK_END`, never off this sentence: a terminator described
     more narrowly than the set the code stops on is how review r34 P3 #1 and r35 P3 #1
