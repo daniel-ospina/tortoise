@@ -243,7 +243,10 @@ that its own proposed `E ──► A,B ──► C ──► D` dependency order
 siblings, and pinned by `tests/test_findings_ledger_2852.py`):
 
 - every **verdict** in §3 is a member of the closed vocabulary in §1 — an invented verdict is a
-  claim class with no defined handling, which is how a superseded correction gets read as live;
+  claim class with no defined handling, which is how a superseded correction gets read as live. §1's
+  table IS the authority, so its five rows must equal the enforced tuple — in order, which is why a
+  pure reordering reds too and names both sequences; deleting one was measured to
+  leave every arm green while §3 still used the verdict;
 - every **`path:line` citation** in §3 and §5 resolves in the tree, and the line number is in range —
   a citation that points at nothing is the doc's own "declared ≠ stored" defect, and it looks exactly
   like evidence. That includes the **shorthand `:LINE`** form used inside a cell — in row (b),
@@ -268,6 +271,13 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   prose must not red this
   required context — and a row's tally class is its **leading** bold token, which is why row (j)'s
   `MOOT-BY-LOSS as an object` half does not move the count;
+  A citation whose path **resolves outside the repository** (a `..` escape) is refused for the same
+  reason: an existence check alone certified a `..`-escaping citation to a real file the repo does
+  not contain — the "looks exactly like evidence" class this page exists to catch (that literal is
+  left out of a code span on purpose: this very scan refuses it, which is the proof). A `~`- or
+  `/`-rooted path is the one deliberate exemption (a dated reading of something outside this repo,
+  §5); it is recognised and counted rather than silently skipped, so a typo'd *relative* path cannot
+  hide there;
 - the **§3 headline tally** is derived too. The "N of the twelve rows no longer read as written"
   count, the letter list beside it, and the four-of-the-seven "overtaken" figure are all recomputed
   from the verdict cells and compared with the sentence a reader actually quotes. Unguarded, flipping
@@ -299,9 +309,9 @@ The self-test that proves those rules still fire has its own **population floor*
 a gate reporting OK when it cannot run — so a shrunk population now reds instead.
 
 Exactly one arm needs `git` **history**: the frontmatter's `measured_at_commit` must be an ancestor of
-`HEAD`. The other eight read this checkout's tree and nothing else, and the tool keeps that split
+`HEAD`. The other nine read this checkout's tree and nothing else, and the tool keeps that split
 (`check_document()` / `check_all()`) because the two jobs that run it differ: the REQUIRED `docs` job
-checks out at `fetch-depth: 0` and runs `--check` (all nine arms), while the `test` jobs check out at
+checks out at `fetch-depth: 0` and runs `--check` (all ten arms), while the `test` jobs check out at
 the default depth 1, cannot resolve `f70d884b7` at all, and are where this page's own test module runs.
 In a depth-1 clone `--check` therefore reports **exit 2 UNVERIFIED** — never `0`, and never a verdict
 against the document it could not read — and `--self-test`, which drives only the tree-only arms,
