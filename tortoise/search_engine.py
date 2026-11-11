@@ -551,14 +551,42 @@ def _string_operand(raw: str, val: float):
     edge is decided by the EXACT magnitude, for the mirror reason: a literal
     just below min-normal rounds UP to it and yet is null there
     (`"1.1754943e-38"`, measured).
+
+    ⛔ **The underflow edge is about INEXACTNESS, not about subnormal-ness** —
+    which only becomes visible once hex literals are read (`numeric_operand`'s
+    hex branch calls this function too). A SUBNORMAL result that the literal
+    names EXACTLY is not an error to `strtof` and READS; a subnormal result the
+    literal cannot represent is ERANGE and answers null. Measured on FalkorDB
+    4.20.6, both twins for each row:
+
+    ===================  =================  ============
+    literal              exact in float32?  ``toFloat``
+    ===================  =================  ============
+    ``'0x1p-149'``       yes (min subnormal) reads
+    ``'0x1p-127'``       yes (subnormal)    reads
+    ``'0x1.fffffcp-127'`` yes (max subnormal) reads
+    ``'0x1.8p-149'``     no                 null
+    ``'0x1.fffffep-127'`` no (rounds to min normal) null
+    ``'1e-38'``          no                 null
+    ``'1.1754943e-38'``  no                 null
+    ===================  =================  ============
+
+    Refusing every subnormal (the rule before this) split the twins across the
+    whole exact-subnormal window — 23 exponents wide — on a value the store
+    serves: the `ep` block answered `absent` while every ranker answered
+    `measured` with the number, and that number moved the ORDER.
     """
     rounded = _f32_from_decimal(raw, val)
     if rounded is None:
         return None
     if abs(rounded) > _FLOAT32_MAX:     # belt and braces; pack guarantees it
         return None
-    if val != 0.0 and abs(val) < _FLOAT32_MIN_NORMAL:
-        # Subnormal / underflow: `strtof` sets ERANGE, so the engine nulls it.
+    if (val != 0.0 and abs(val) < _FLOAT32_MIN_NORMAL
+            and rounded != val):
+        # INEXACT subnormal (`strtof` sets ERANGE, so the engine nulls it) — not
+        # every subnormal: one the literal names exactly READS. See the table in
+        # this function's docstring; refusing all of them was a 23-exponent twin
+        # split on hex operands.
         return None
     return rounded
 

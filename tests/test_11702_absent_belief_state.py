@@ -1049,9 +1049,16 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
     #     it on both twins — the row is ABSENT, not "unreadable".
     out_of_band_mirror = _point("a hex-float mirror",
                                 "n.confidence = '0x1p4'")
+    # (c) SUBNORMAL operand: the underflow edge is INEXACTNESS, not subnormal-ness
+    #     (cycle 27). `0x1p-127` is a float32 subnormal the literal names exactly,
+    #     so the store serves it; the rule used to refuse every subnormal, which
+    #     made the `ep` block say `absent` beside every ranker's `measured / 5.9e-39`.
+    hex_subnormal = _point("a hex-subnormal operand",
+                           "n.posterior_alpha = '0x1p-127', "
+                           "n.posterior_beta = '1'")
 
     ids = [absent, half_pair, zero_total, mirror_only, measured, baseline,
-           hex_operand, out_of_band_mirror]
+           hex_operand, out_of_band_mirror, hex_subnormal]
     recs = {r["id"]: r["recall_ranking"] for r in
             StateRanker(projection=proj).rerank(
                 [{"id": p, "scores": {"rrf": 1.0}} for p in ids])}
@@ -1147,6 +1154,41 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
         assert row["confidence_source"] == EP_STATE_ABSENT, (name, row)
     assert recs[out_of_band_mirror]["belief_informed_order"] is False, (
         recs[out_of_band_mirror])
+
+    # (c) The SUBNORMAL operand, pinned on both halves (cycle 27 P2). `strtof`
+    # sets ERANGE for an INEXACT subnormal only, so a literal naming one exactly
+    # READS. The rule refused all subnormals, which put `absent` in the `ep`
+    # block beside `measured / 5.877e-39` in every ranker — the same two-keys-of-
+    # one-response split, 23 exponents wide. Both directions are asserted so a
+    # fix cannot trade this split for its mirror image: the exact subnormal
+    # reads on BOTH twins and every surface agrees on state AND value, while
+    # `0x1.fffffep-127` (the subnormal/normal midpoint, inexact) is null on both
+    # (it is in `test_the_twins_parse_the_same_string_language`'s table).
+    sub = float.fromhex("0x1p-127")
+    assert _se.numeric_operand("0x1p-127") == sub, (
+        "the exact-subnormal window is refused here again — the twins split on "
+        "a value the store serves")
+    assert proj.g.query(
+        "RETURN toFloatOrNull('0x1p-127') AS v").result_set[0][0] == (
+            pytest.approx(sub, rel=1e-6)), (
+        "the store stopped reading an exactly-representable subnormal — this "
+        "fixture is no longer the shape it claims")
+    sub_mean = sub / (1.0 + sub)
+    for name, row in (("recall_ranking", recs[hex_subnormal]),
+                      ("gaps_ranking", gaps[hex_subnormal])):
+        # ⚠️ The rankers ROUND the mean to 6 dp (`round(_beta_mean(...), 6)`), so a
+        # 5.9e-39 belief is served as 0.0 — pre-existing, unchanged by #11702, and
+        # why this asserts the rounded value. The STATE is what must agree, and
+        # `confidence_source: "posterior"` is what says the 0.0 is a rounded real
+        # number rather than the old "nothing measured" 0.0 (that is the whole
+        # point of §6.3). The `ep` block below serves the unrounded mean.
+        assert row["ep_state"] == EP_STATE_MEASURED, (name, row)
+        assert row["confidence"] == pytest.approx(round(sub_mean, 6)), (
+            name, row)
+        assert row["confidence_source"] == "posterior", (name, row)
+    sub_eps = annotate_ep_batch(proj.g, [hex_subnormal])[hex_subnormal]
+    assert sub_eps.ep_state == EP_STATE_MEASURED, sub_eps
+    assert sub_eps.confidence_mean == pytest.approx(sub_mean, rel=1e-6), sub_eps
 
 
 def test_a_draft_withholds_its_belief_without_denying_it(sdk):
@@ -3336,6 +3378,17 @@ def test_the_twins_parse_the_same_string_language(sdk):
         # to it, and the store reads it — while `'1.1754943e-38'` is below
         # min-normal, rounds UP to it, and the store nulls it.
         "3.40282355e38": 3.40282355e38,
+        # The UNDERFLOW edge is INEXACTNESS, not subnormal-ness (cycle 27): the
+        # rule refused every subnormal, so a hex literal naming a float32
+        # subnormal EXACTLY — which `strtof` accepts — was `absent` here and
+        # `measured / 5.87e-39` in every Cypher surface, and that number moved
+        # the order. Both halves are pinned: the exact ones READ, the inexact
+        # ones are null on both twins (see the table in `_string_operand`).
+        "0x1p-149": float.fromhex("0x1p-149"),      # min subnormal, exact
+        "0x1p-127": float.fromhex("0x1p-127"),      # subnormal, exact
+        "0x1.fffffcp-127": float.fromhex("0x1.fffffcp-127"),  # max subnormal
+        "0x1.8p-149": None,                        # not representable
+        "0x1.fffffep-127": None,                   # rounds to min normal → inexact
     }
     for raw, expected in shapes.items():
         proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = $a, "
