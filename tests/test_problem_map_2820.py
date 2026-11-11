@@ -509,12 +509,11 @@ def test_a_decoy_summary_ROW_outside_section_2_cannot_satisfy_the_check(tmp_path
 def test_an_index_entry_whose_counts_disagree_is_drift(tmp_path):
     """Fails when `docs/00_index.md` states counts the map's §2 does not have.
 
-    Reachable, and MEASURED on this page's first landing: the index row said
-    `22 fixed · 4 open` for eight of the thirteen minutes between the doc being
-    written and the verification gate reading it, and `--check` was CLEAN —
-    because registration was a filename match. The index is the artifact most
-    readers meet first, so a disagreeing count there is the same defect as a
-    disagreeing §2.
+    Reachable, and the reason this is a check rather than a convention: an index
+    row whose counts disagree with the map's §2 was invisible to `--check`, because
+    registration was a filename match and nothing compared the two headlines. The
+    index is the artifact most readers meet first, so a disagreeing count there is
+    the same defect as a disagreeing §2.
     """
     repo = tmp_path / "repo"
     (repo / "docs").mkdir(parents=True)
