@@ -3859,7 +3859,7 @@ def test_every_MEASUREMENT_key_the_emitter_writes_is_in_the_exemption_set():
 #: (P2-1): the three `capstone_measure.py:<n>`
 #: cites were correct at the PR's merge-base, and the PR's own commit message claimed to have
 #: re-derived them while they had landed on unrelated code (an `e3_census` rule line, a comment
-#: inside `measured_arm()`, and prose inside an f-string) — the exact "a claim nothing re-checks
+#: in `main()` above the `with measured_arm()` block, and prose inside an f-string) — the exact "a claim nothing re-checks
 #: can rot silently" defect this bundle exists to catch, in the gate's own source. ⛔ The cites
 #: therefore STAY (deleting them reds `_CROSS_FILE_PROBE_CITES`; a pin forbidding them was round
 #: 4's P1-B). What this pin adds is the half that pin cannot do — it keeps the SYMBOLS honest and

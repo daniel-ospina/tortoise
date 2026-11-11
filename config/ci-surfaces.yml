@@ -5004,8 +5004,10 @@ surfaces:
   # criterion. Its subject is `docs/evidence/7949-capstone/probes/
   # capstone_measure.py`, which maps to no `SOURCE_PATTERNS` row and so falls
   # through to `core` — registered here or `--integrity` reports drift.
-  # Hermetic: a pure function over a hand-built histogram plus a fake projection;
-  # no graph, no model, no network, no `gh`, no subprocess.
+  # Hermetic in the sense that matters for selection: a pure function over a hand-built
+  # histogram plus a fake projection — no graph, no model, no network, no `gh`. (It does spawn
+  # ONE child interpreter for the SDK-registration arm, which needs a vocabulary built without
+  # `tortoise.sdk` already imported — see `test_the_declared_vocabulary_...`.)
   - test_10988_a4_label_coverage.py
   # #10997: §4.4 I1's MINT half — an unresolved identity is HELD, never minted,
   # and never dropped (I2). The gate it pins lives in `execute_embed`'s
