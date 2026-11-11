@@ -1013,13 +1013,22 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
         "RETURN toFloatOrNull('0x1p4') AS v").result_set == [[16.0]], (
         "the store no longer reads the hex-float spelling — the fixture is no "
         "longer the unreadable shape")
+    # ⛔ Cycle 24's BAND resolves the seventh shape rather than reporting it: a
+    # served belief is a probability, so `16.0` is not a belief on EITHER twin —
+    # `belief_mirror_cypher` answers null and `ep_has_belief_cypher` is false,
+    # which is what the Python side always said. (Before the band this row was
+    # `ep_state: "baseline"` with a null value and `confidence_source:
+    # "unreadable"`; the reviewer measured that state ranking the claim FIRST
+    # with `graph_boost 8.0` above a measured 0.9 — so the honest answer is
+    # absent, not "unreadable".)
+    assert _se.belief_mirror("0x1p4") is None, (
+        "the band admits the hex-float spelling — the fixture is no longer the "
+        "out-of-band shape")
     for name, row in (("recall_ranking", recs[unreadable]),
                       ("gaps_ranking", gaps[unreadable])):
-        assert row["ep_state"] == EP_STATE_BASELINE, (name, row)
+        assert row["ep_state"] == EP_STATE_ABSENT, (name, row)
         assert row["confidence"] is None, (name, row)
-        assert row["confidence_source"] == UNREADABLE_CONFIDENCE_SOURCE, (
-            f"{name} denies a belief it has: source={row['confidence_source']!r}"
-            f" beside ep_state={row['ep_state']!r}")
+        assert row["confidence_source"] == EP_STATE_ABSENT, (name, row)
     assert recs[unreadable]["belief_informed_order"] is False, recs[unreadable]
 
 
