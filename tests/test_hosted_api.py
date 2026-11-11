@@ -282,14 +282,18 @@ def _pin_db_path(db_path: str) -> str | None:
     ``_anchor_usable()`` False is the #1607/#1950 failure exactly: the
     process-lifetime anchor is evicted, closed and recreated on every registry
     access, so the guarantee it exists for ("writes through it are visible to
-    later calls") is void — and the seed the fixture wrote is not the DB the
-    anchor serves.
+    later calls") is void. The anchor is on the SAME DB as the fixture's seed
+    (the patch forces the anchor too) — what is wrong is the usability CHECK,
+    which compares it against the ambient pin.
 
     Returns the PREVIOUS value so the caller can restore it. A bare ``pop``
-    (what the #1950 precedent did) destroys a dev shell's export, and in the
-    embedded lane it destroys the conftest guard (``tests/conftest.py:511``)
-    for the rest of the session; snapshot-restore is the shape
-    ``tests/_http_fixtures.py`` documents as the P3-correct one.
+    (what the #1950 precedent did) deletes a dev shell's export and, for the
+    remainder of THAT test, the conftest guard — conftest's autouse
+    ``_isolate_process_env`` (``tests/conftest.py``, ``TORTOISE_`` prefix)
+    repairs the key after every test, so the leak is capped at one test rather
+    than the session (this file's ``client`` comment says the same).
+    Snapshot-restore is still the better shape — nothing leaks at all, and it is
+    what ``tests/_http_fixtures.py`` documents as the P3-correct one.
     """
     prev = os.environ.get("TORTOISE_DB_PATH")
     os.environ["TORTOISE_DB_PATH"] = db_path
@@ -5393,13 +5397,25 @@ def _assert_fixture_pins_anchor_db_path(fixture_name: str) -> None:
 
     anchor = ha._registry_anchor()
     anchor_path = getattr(getattr(anchor, "_proj", None), "_path", None)
+    # ⛔ THESE TWO ARE POST-CONDITIONS, NOT DETECTORS (review P2, this head).
+    # `_registry_anchor()` evicts an unusable anchor and rebuilds it from
+    # `_resolve_embedded_db_path()`, i.e. from the pin — so an anchor bound to
+    # the wrong DB is REPAIRED here instead of reported, and both arms pass by
+    # construction once the pin is right (planting a drifted anchor in
+    # `_FALLBACK_KEEPALIVE` leaves this guard green). The discriminating
+    # assertion is `pin == forced` above (pin wrong → 3 failed; pin removed →
+    # 3 failed). What these establish is that the policy is CONSISTENT after
+    # the pin: the anchor addresses the pinned DB, and it is the cached handle
+    # on the next access (no rebuild).
     assert ha._anchor_usable(anchor, pin), (
         f"{fixture_name}'s registry anchor is bound to a different DB than "
-        f"its TORTOISE_DB_PATH pin ({anchor_path!r} != {pin!r}) — so it is "
-        "evicted + closed on every registry access (#2273/#1950)")
+        f"its TORTOISE_DB_PATH pin ({anchor_path!r} != {pin!r}) — "
+        "`_registry_anchor()` would normally repair that, so this failing "
+        "means the pin itself is wrong (see `pin == forced` above)")
     assert ha._registry_anchor() is anchor, (
-        "the registry anchor must survive across accesses (#1607): a "
-        "rebuilt anchor means the previous one was evicted and closed")
+        "the registry anchor must be the CACHED handle on the next access "
+        "(#1607) — a rebuild here means it was evicted, which after a correct "
+        "pin can only come from a dead daemon")
 
 
 # ⛔ `embedded_only` IS LOAD-BEARING, NOT DECORATION (#2273 review finding 1).
