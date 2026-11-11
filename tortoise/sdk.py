@@ -10099,8 +10099,13 @@ def _money_views_for_update(g, props: dict, *, node_id: str,
     ).result_set
     if not rows:
         return [money_view_after_update({}, props)]
+    # `strict=True`: the projection above lists exactly `MONEY_VALUE_FIELDS` in
+    # order, so a length mismatch can only mean the two drifted apart — and a
+    # silently mis-mapped row would grade `currency` as `amountMinor`. Fail
+    # closed on the drift rather than shift the value into the wrong member.
     return [money_view_after_update(
-                {key: value for key, value in zip(MONEY_VALUE_FIELDS, row)
+                {key: value for key, value in zip(MONEY_VALUE_FIELDS, row,
+                                                 strict=True)
                  if value is not None},
                 props)
             for row in rows]
