@@ -49,7 +49,8 @@ Usage
         --out docs/evidence/11739-quote-population/census.json
 
 Exit codes: 0 measured · 2 usage, OR the --out destination was not writable (PROBE-WRITE — the graph WAS read and the walk succeeded: fix the PATH, not the arguments) · 3 graph unreachable / not configured / the query could not
-be read at any page size (never a silent zero) · 4 a page walk that cannot be proven complete
+be read at any page size / an EMPTY population (PROBE-EMPTY: `total` = 0, which a key
+resolving to a different org or tenant answers exactly) (never a silent zero) · 4 a page walk that cannot be proven complete
 (a short page with `hasMore` true, a row repeated across pages, a count that disagrees with
 the walk's own total, or a reply shape that is not a paginated page).
 
@@ -298,8 +299,13 @@ def _raw_length(quote: object) -> int:
     the collapsed text instead silently dropped 359 of 2,260 clamp hits — the rows where
     `raw >= 200` AND `collapsed < 200`, i.e. every quote whose whitespace run pushed its
     collapsed length BELOW the cap (a quote that normalises to >= 200 stays at cap; measured
-    while fixing this). The raw slice is also what makes "the clamp cuts mid-token" true rather
-    than rhetorical.
+    while fixing this). Counting on the RAW length is what keeps a clamp hit whose whitespace
+    collapses below the cap from being dropped (those 359 of 2,260). What this does NOT
+    establish is where the cut landed: the artifact carries min/median/max/n/at_cap, not a
+    boundary classification, and `at_cap` counts a stored length `>= 200` — which is equally
+    what an uncut 200-character source produces. So "whether any at-cap quote has a value
+    straddling its cut" is NOT measured here (the README says so in §3), and this docstring
+    must not imply otherwise: it is also the tool's `--help`.
     """
     if isinstance(quote, str):
         return len(quote)
@@ -477,6 +483,28 @@ def walk(client: _Client, include_retracted: bool = True) -> tuple[dict, int, in
         _say("PROBE-SHAPE: `total` is not an integer: "
                          f"{first.get('total')!r}\n")
         raise SystemExit(4) from None
+    # ⛔ A WELL-FORMED EMPTY REPLY IS THE ONE SHAPE THE ARM BELOW CANNOT SEE, and it is the
+    # fail-open direction this whole contract exists to prevent. `len(rows) != total` is
+    # `0 == 0` for `{"results": [], "total": 0, "hasMore": false}`, so before this guard the
+    # walk returned zero rows, `census()` published `rows_walked: 0` with every percentage
+    # `null`, `main()` exited 0 and WROTE the artifact — a census that reports an empty graph
+    # in the shape of a successful run (found by review at the landing head; reproduced with a
+    # stubbed client before this arm). Every OTHER malformed reply already refuses: an empty
+    # `results` with `total: 5` trips the partition check (4), a non-object block and a
+    # jsonrpc `error` envelope exit 3.
+    #
+    # NOT exit 4. A zero-row walk IS a partition of a zero-row order, so this is not the #5346
+    # incompleteness class — it is a read that produced no population, which is the `3` family's
+    # own subject (`never read as 0%`). The two causes are indistinguishable from the reply: a
+    # graph that genuinely holds no live Points, and a key resolving to a different org/tenant
+    # (`sdk.py` cites exactly this wrong-empty class at #6146). Neither is a measurement, so
+    # the probe refuses to publish rather than picking one.
+    if total == 0:
+        _say("PROBE-EMPTY: the read returned 0 rows (total=0) — refusing to publish an empty "
+                         "census. A key resolving to a different org/tenant answers exactly this "
+                         "shape; check --endpoint and the key before reading it as an empty "
+                         "graph.\n")
+        raise SystemExit(3)
     rows = list(first["results"])
     has_more = bool(first.get("hasMore"))
     pages = 1

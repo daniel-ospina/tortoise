@@ -564,6 +564,72 @@ def test_census_buckets_the_terminal_rows_by_status_from_the_same_walk():
 
 # --------------------------- the reply shapes must exit 3/4, never 1 (finding 2)
 
+def test_an_empty_population_exits_three_and_writes_nothing(monkeypatch, tmp_path):
+    """FAILS IF the empty-population guard is deleted — the arm the README's exit contract
+    says cannot exist ("a census that silently reports zero is worse than no census").
+
+    The defect it pins, reproduced at the landing head before the guard: `{"results": [],
+    "total": 0, "hasMore": false}` is a WELL-FORMED page, and the partition check is
+    `len(rows) != total`, i.e. `0 == 0` — so `walk()` returned zero rows happily, `census()`
+    published `rows_walked: 0` with every percentage `null`, and `main()` exited **0** and
+    wrote the file. That is the fail-OPEN direction: a key resolving to a different org or
+    tenant (the wrong-empty class `sdk.py` cites at #6146) answers exactly this shape, and the
+    run would have reported an empty graph in the shape of a success.
+
+    Exit 3, not 4: a zero-row walk IS a partition of a zero-row order, so it is not the #5346
+    incompleteness class — it belongs to `3`'s own subject, "a read that could not be
+    performed" (never read as 0%). Both halves are asserted: the code, and that nothing was
+    published.
+    """
+    client = _Page({(True, 0): _page([], total=0, has_more=False)})
+    with pytest.raises(SystemExit) as exc:
+        qp.walk(client)
+    assert exc.value.code == 3
+
+    # …and the reason a `walk`-level pin is not enough on its own: through `main()` the
+    # failure used to be a PUBLISHED artifact, not a refusal. The walk arms RAISE
+    # `SystemExit` (only `main()`'s own arms return a code), so the propagation is what
+    # carries the exit status — assert the code AND that nothing was written.
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "test-key")
+    monkeypatch.setattr(qp, "_Client", lambda *a, **k: client)
+    out = tmp_path / "census.json"
+    with pytest.raises(SystemExit) as exc_main:
+        qp.main(["quote_population", "--out", str(out)])
+    assert exc_main.value.code == 3
+    assert not out.exists(), "an empty read must not publish a census"
+
+
+def test_the_probe_and_the_readme_name_the_empty_population_arm_under_three():
+    """FAILS IF the new arm ships without the published contract describing it, or files it
+    under the wrong code. `PROBE-EMPTY` in the `4` clause would tell an operator their page
+    walk was incomplete (re-run at a smaller page) when the truth is that the read produced no
+    population at all (a key/tenant problem) — the same misfiling one code over that the
+    `PROBE-WRITE` pin above exists to prevent."""
+    doc = re.search(r"Exit codes:.*?(?=\n\nWait budget)", qp.__doc__, re.S)
+    assert doc, "the probe's `Exit codes:` block moved — repoint this pin"
+
+    def _under_three(arms: list[str]) -> bool:
+        three = [a for a in arms if a.strip().startswith(("3 ", "`3`", "3\n"))]
+        return any("PROBE-EMPTY" in a for a in three) and not any(
+            "PROBE-EMPTY" in a for a in arms if a not in three)
+
+    assert "PROBE-EMPTY" in doc.group(0), (
+        "the probe's `--help` does not name the empty-population arm")
+    assert _under_three(doc.group(0).split("·")), (
+        "PROBE-EMPTY must be documented under `3` in the probe's own contract")
+    readme = (REPO / "docs" / "evidence" / "11739-quote-population" / "README.md").read_text(
+        encoding="utf-8")
+    contract = re.search(r"Exit codes are the measurement's own guard rails.*?(?=\n\n)",
+                         readme, re.S)
+    assert contract, "the exit-code contract paragraph moved — repoint this pin"
+    text = contract.group(0)
+    assert "PROBE-EMPTY" in text, (
+        "the README's exit contract does not name the empty-population arm — `3` still reads as "
+        "unreachable-graph only")
+    assert _under_three(text.split("·")), (
+        "PROBE-EMPTY must be documented under `3` in the README too, and not under another code")
+
+
 def test_a_missing_key_exits_three_and_never_reports_zero(monkeypatch, capsys):
     """FAILS IF `main()`'s no-key guard is deleted or weakened - the arm the README and
     `docs/00_index.md` quote verbatim: a missing key is NEVER an empty graph, so it exits 3
@@ -1314,12 +1380,16 @@ def test_the_population_scope_mirrors_the_read_paths_operator_clause():
     from tortoise.sdk import TortoiseSDK
 
     clauses = TortoiseSDK._operator_scope_clauses(TortoiseSDK.__new__(TortoiseSDK), None)
+    # This equality IS the pin for both halves — the `IS NULL` half and the `= false` half. A
+    # separate substring assertion here ("`n.is_operator = false` is not in the first OR-arm")
+    # used to sit below this line and was DELETED as dead: `clauses[0].split(" OR ")[0]` is
+    # `"(n.is_operator IS NULL"`, so it could never fail unless this equality had already red.
+    # The regression it was commented for (a bare `= false`, which is NULL-propagating,
+    # #2205/#7108) is caught by this line — measured by mutating `_operator_scope_clauses` to
+    # the bare form and watching this test red.
     assert clauses == [
         "(n.is_operator IS NULL OR n.is_operator = false) AND n.op_type IS NULL"
     ], clauses
-    # The bare form is the regression, not a simplification: `= false` is NULL-propagating.
-    assert "n.is_operator = false" not in clauses[0].split(" OR ")[0], (
-        "the clause must keep its `n.is_operator IS NULL` half (#2205/#7108)")
 
 
 # ------------------------------------------ cycle-2 findings: attribution and shapes

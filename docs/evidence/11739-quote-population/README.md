@@ -195,7 +195,11 @@ worse than no census: `0` measured · `2` **usage, or the `--out` destination wa
 the same event: a `PROBE-WRITE` means the graph WAS read and the walk succeeded, and the measurement
 was discarded by the destination, so nothing was published and re-running with the same arguments to
 the same path fails the same way. Fix the PATH, not the arguments · `3` graph unreachable / no key /
-a scheme-less endpoint / the query could not be read at any page size / a reply that parses but is
+a scheme-less endpoint / the query could not be read at any page size / an **empty population**
+(`PROBE-EMPTY`: `total = 0`, which a key resolving to a different org or tenant answers exactly — the
+wrong-empty class `sdk.py` cites at #6146; a zero-row walk is a partition of a zero-row order, so it
+is NOT the `4` incompleteness class, and the probe refuses to publish rather than calling an empty
+graph a measurement) / a reply that parses but is
 not a JSON-RPC object (**never** read as 0%) · `4` the page walk could not be proven complete (a short
 page with `hasMore=true`, a repeated id, a `results` list holding something that is not a row, or a
 walked count that disagrees with the reported `total`). The walk refuses to publish a count it cannot
