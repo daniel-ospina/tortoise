@@ -456,7 +456,8 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
         # (index 6) marks a LIVE prior-only claim (declared #2199 baseline, no
         # EP measurement): its confidence_mean is the PRIOR mean (a readable
         # `n.confidence` mirror, if present, LEADS it), never a measured one —
-        # and a DEGENERATE declared prior (0/0, or a negative operand) has no
+        # and a declared prior that yields NO mean (a 0/0 pair, a half pair, a
+        # negative operand, or an operand this process cannot read) has no
         # mean of its own, so with no readable `n.confidence` mirror beside it
         # the row reads ``None`` + ``ep_state: "absent"`` — with one it serves
         # the mirror's value (see the `baseline` note below).

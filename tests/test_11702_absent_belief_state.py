@@ -5391,10 +5391,18 @@ _BELIEF_PROSE = (
 #:     works alone, which is why both changed together.)
 #: So the bound now EXCEEDS the longest real claim sentence (796 characters
 #: measured, in `sdk.py`), and `_qualified` additionally REFUSES any
-#: sentence whose slice stopped at the window edge without punctuation — a
+#: sentence whose slice stopped at EITHER window edge without punctuation — a
 #: sentence too long to read is reported, never certified. The remaining
 #: direction is a false BLOCK on prose no one has written yet, which a human
 #: reading the evidence can act on; a false pass cannot happen.
+#: ⚠️ BOTH EDGES — this paragraph said "the window edge" and the code checked
+#: only the FORWARD one, which was itself a false pass. A restriction placed
+#: past `_QUALIFIER_LOOKBEHIND` in the claim's own sentence was cut off while a
+#: post-claim mirror carried the qualifier: measured, `"Only when nothing else
+#: exists " + "x"*700 + " the n.confidence mirror leads it, so <claim>"` was
+#: CERTIFIED, i.e. the INVERSE of the shipped precedence passed the one gate
+#: built to refuse it. A sentence whose HEAD is cut is as much a prefix as one
+#: whose tail is, so both are refused now.
 _QUALIFIER_WINDOW = 2000
 
 #: Sentences that ASSERT the value of a prior-only claim's mean. The verb is
@@ -5499,6 +5507,12 @@ _QUALIFIER_NEGATIONS = re.compile(
 #: A negation that does NOT invert — stripped before the test above, so the TRUE
 #: "not only does a readable mirror lead it, but the pair does too" is not
 #: reported as an unqualified claim (measured: it was).
+#: ⚠️ THIS ALONE WAS NOT ENOUGH, and the note above said it was (measured):
+#: `_MIRROR_RESTRICTIONS`'s bare `\bonly\b` vetoed every "not only" sentence
+#: unconditionally, so both placements of that TRUE form were still reported.
+#: `_MIRROR_RESTRICTIONS` now exempts the `not only` spelling, which is what
+#: makes this line's claim true. Residual, fail-closed: only the single-space
+#: "not only" is exempt, so "not  only"/"not-any-only" still reports.
 _QUALIFIER_NEGATION_OK = re.compile(r"\bnot only\b", re.IGNORECASE)
 
 #: Negated OBJECTS that follow a qualifier verb ("the mirror supplies nothing
@@ -5525,7 +5539,13 @@ _QUALIFIER_OBJECT_NEGATIONS = re.compile(
 #: whenever a pair exists, supplies the value"), which a post-verb window cannot
 #: see (measured — three such inversions were certified qualified).
 _MIRROR_RESTRICTIONS = re.compile(
-    r"(?<!-)\bonly\b"
+    # `(?<!-)only` spares "mirror-ONLY Point" (the canonical TRUE wording);
+    # `(?<!not )only` spares "NOT ONLY does a readable mirror lead it, but the
+    # pair does too", which AFFIRMS the precedence rather than demoting the
+    # mirror — and which `_QUALIFIER_NEGATION_OK` exists to keep passing. Without
+    # this second lookbehind that note was false: every "not only" sentence was
+    # vetoed here, so the form it promises to accept was always reported.
+    r"(?<!-)(?<!not )\bonly\b"
     r"|\bfallback\b"
     r"|\bnothing else\b"
     r"|\bwhen no\b"
@@ -5661,22 +5681,40 @@ def _claim_sentence_with_offset(window: str, claim_at: int = 0) -> tuple[str, in
     return head + tail, len(head)
 
 
-def _qualified(window: str, claim_at: int = 0, *, truncated: bool = False) -> bool:
+def _qualified(window: str, claim_at: int = 0, *, truncated: bool = False,
+               head_truncated: bool = False) -> bool:
     """Whether the claim's own sentence carries an AFFIRMATIVE qualifier.
 
     Requires all three: the MIRROR noun, a qualifying verb after it, and no
     negation across the whole claim→verb span (bar an allowed "not only").
 
-    ⛔ FAIL CLOSED ON A TRUNCATED SENTENCE. `window` is a SLICE; when it stopped
-    at `_QUALIFIER_WINDOW`/`_QUALIFIER_LOOKBEHIND` rather than at real punctuation,
-    the sentence inside it is only a PREFIX, and a restriction ("…only when
-    nothing else does") or an inversion ("…the mirror never leads it") placed past
-    the cut is INVISIBLE — measured: a 353-character sentence passed at a 300
-    window and blocked at 10**7. Certifying from a prefix is a false PASS, so a
-    truncated sentence is never certified; it is reported unqualified instead,
-    which is the direction a human can act on.
+    ⛔ FAIL CLOSED ON A TRUNCATED SENTENCE — AT EITHER EDGE. `window` is a
+    SLICE, and a partial sentence is not the sentence: a restriction ("…only
+    when nothing else does") or an inversion ("…the mirror never leads it")
+    placed past the cut is INVISIBLE, so the claim is certified on what survives.
+    Both edges are live and they fail differently:
+
+    * `truncated` — the slice stopped at `_QUALIFIER_WINDOW`. Measured: a
+      353-character sentence passed at a 300 window and blocked at 10**7. The
+      constructed sentence still ENDS in punctuation, so the end test below
+      catches it.
+    * `head_truncated` — the slice started at `_QUALIFIER_LOOKBEHIND`, not at a
+      sentence break, so the claim's own sentence began before the slice and its
+      HEAD is missing. Measured: with the restriction "only when nothing else
+      exists" pushed past the window and a post-claim mirror carrying the
+      qualifier, `"Only when nothing else exists " + "x"*700 + " the
+      n.confidence mirror leads it, so <claim>"` was CERTIFIED — the inverse of
+      the shipped precedence passing the one gate built to refuse it. It is
+      reported now, and deleting this check makes that assertion fail (measured
+      by mutation). The end test cannot see it (the sentence still ends in a
+      period), which is why it needs its own signal.
+
+    Certifying from a prefix is a false PASS; a fragment is reported unqualified
+    instead, which is the direction a human can act on.
     """
     sentence, claim_pos = _claim_sentence_with_offset(window, claim_at)
+    if head_truncated:
+        return False
     if truncated and not re.search(r"[.!?]\s*$", sentence):
         return False
     # Fail-closed on an outright inversion ANYWHERE in the sentence, however
@@ -5736,7 +5774,16 @@ def _unqualified_claims(patterns) -> list[str]:
                 start = max(0, match.start() - _QUALIFIER_LOOKBEHIND)
                 window = prose[start:match.start() + _QUALIFIER_WINDOW]
                 truncated = (match.start() + _QUALIFIER_WINDOW) < len(prose)
-                if _qualified(window, match.start() - start, truncated=truncated):
+                # …and the BACK edge is a slice too. `start > 0` means the window
+                # began at the lookbehind rather than at a sentence break; with no
+                # punctuation between, the claim's own sentence started BEFORE the
+                # slice, so its head is missing and a restriction there is
+                # invisible. Measured false PASS, named in `_qualified`.
+                head_truncated = start > 0 and not re.search(
+                    r"[.!?]\s", window[:match.start() - start])
+                if _qualified(window, match.start() - start,
+                              truncated=truncated,
+                              head_truncated=head_truncated):
                     continue
                 problems.append(f"{rel}: …{prose[match.start():match.start() + 180]}…")
     return problems
@@ -5801,6 +5848,99 @@ def test_an_absent_claim_that_says_none_names_the_mirror():
         "the belief prose says `else None` for a row that has no persisted "
         "belief WITHOUT naming the readable mirror that supplies a value:\n  "
         + "\n  ".join(problems))
+
+
+def test_the_prior_mean_guard_refuses_a_fragment_at_the_window_head(monkeypatch):
+    """A window is a SLICE: a claim certified on a fragment is a FALSE PASS.
+
+    `_QUALIFIER_LOOKBEHIND` cuts the HEAD off the claim's own sentence, so a
+    restriction sitting there is invisible while the sentence still ends in a
+    period — the FORWARD edge's end test cannot see it, which is why the head
+    needs its own signal. Measured counterexample, run through
+    `_unqualified_claims` itself (`_belief_prose` patched, so the real scan path
+    runs), the restriction "only when nothing else exists" sitting outside the
+    600-character window and a post-claim mirror carrying the qualifier:
+
+    * with `if head_truncated: return False` in place  -> REPORTED
+    * with that line deleted (= the pre-fix guard)     -> CERTIFIED, i.e. the
+      inverse of the shipped precedence passed the one gate built to refuse it
+
+    ⚠️ The first version of this test was NON-DISCRIMINATING and survived
+    deletion of the fix (measured): its sentence also cut the MIRROR noun out of
+    the window, so it was reported by the no-mirror path and never reached the
+    truncation test at all. The controls below exist to keep that from recurring:
+    (b) is reported only because the restriction is VISIBLE, and (c) is certified
+    only because there is no restriction — so (a) cannot pass for either of those
+    reasons.
+    """
+    import sys as _sys
+
+    module = _sys.modules[__name__]
+    claim = "a prior-only claim's ``confidence_mean`` IS the declared PRIOR mean"
+    restriction = "Only when nothing else exists "
+    real = {rel: "" for rel in _BELIEF_PROSE}
+
+    def scan(prose: str) -> list[str]:
+        real[_BELIEF_PROSE[0]] = prose
+        monkeypatch.setattr(module, "_belief_prose", lambda rel: real[rel])
+        return _unqualified_claims(_PRIOR_MEAN_CLAIM_PATTERNS)
+
+    def sentence(gap: int) -> str:
+        """The restriction `gap` characters before the qualifier's claim."""
+        return restriction + "x" * gap + " the n.confidence mirror leads it, so " + claim + ".\n"
+
+    # (a) THE FIX: the restriction is pushed past `_QUALIFIER_LOOKBEHIND`, so the
+    # claim is certified on the sentence's tail unless the head edge is checked.
+    assert scan(sentence(_QUALIFIER_LOOKBEHIND + 100)), (
+        "the guard certified a claim whose sentence HEAD was cut off by "
+        "`_QUALIFIER_LOOKBEHIND` — the restriction in the missing part is "
+        "invisible, which is a false PASS")
+
+    # (b) CONTROL — same sentence, restriction INSIDE the window: reported by the
+    # restriction itself, so (a) is not measuring "this sentence is always bad".
+    assert scan(sentence(10)), "a visible restriction must be reported"
+
+    # (c) CONTROL — no restriction at all: certified, so (a) and (b) cannot both
+    # pass by the guard reporting everything.
+    assert not scan("A readable ``n.confidence`` mirror LEADS it, so " + claim + ".\n"), (
+        "a correctly qualified sentence must NOT be reported")
+
+    # (d) FORWARD edge (the pre-existing end test, not this fix): a qualifier past
+    # `_QUALIFIER_WINDOW` leaves the slice ending mid-sentence, which must be
+    # refused rather than certified on its prefix.
+    tail_cut = ("A readable ``n.confidence`` mirror is what the row serves, "
+                + "x" * _QUALIFIER_WINDOW + " so " + claim + ".\n")
+    assert scan(tail_cut), (
+        "the guard certified a claim whose sentence TAIL was cut off by "
+        "`_QUALIFIER_WINDOW`")
+
+
+def test_the_not_only_wording_the_guard_documents_is_the_one_it_accepts():
+    """The `_QUALIFIER_NEGATION_OK` note promises a form the guard accepts.
+
+    "not only does a readable mirror lead it, but the pair does too" AFFIRMS the
+    precedence, so `_QUALIFIER_NEGATION_OK` strips it before the negation test.
+    That alone was not enough — `_MIRROR_RESTRICTIONS`'s bare `\bonly\b` vetoed
+    every "not only" sentence unconditionally, so the promised form was always
+    reported and the note was false (measured, both placements). A note that
+    states an outcome the code does not produce is the exact class this module
+    exists to close.
+    """
+    claim = "a prior-only claim's ``confidence_mean`` IS the declared PRIOR mean"
+    both_placements = (
+        "Not only does a readable mirror lead it, but the pair does too: "
+        + claim + ".",
+        claim + "; not only does a readable mirror lead it, but the pair does too.",
+    )
+    for sentence in both_placements:
+        assert _qualified(sentence, sentence.index("confidence_mean")), (
+            "`not only … but … too` affirms the mirror's precedence, so the "
+            "guard's own `_QUALIFIER_NEGATION_OK` note says it is accepted; it "
+            "was reported instead. Sentence: " + sentence)
+    # …while a REAL restriction still vetoes, so the exemption above is narrow.
+    demoted = ("The mirror is consulted not only last but after the pair, so " + claim + ".")
+    assert not _qualified(demoted, demoted.index("confidence_mean")), (
+        "a genuine restriction must still be refused")
 
 
 #: The credibility word's own result, stated as a mean. ANY sentence that makes

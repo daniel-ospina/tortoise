@@ -93,14 +93,17 @@ BLOCK_MAX_BYTES = 8 * 1024
 #     word therefore supplies a prior when the baseline is the #2199 default or
 #     absent, and loses to a pair the author declared explicitly — pinned by
 #     ``test_the_credibility_word_adds_to_the_default_but_loses_to_a_pair``.
-#   * a DECLARED but DEGENERATE prior (a 0/0 pair, e.g.
-#     ``set_point_baseline(claim, 0, 0)``; a negative operand is refused by that
-#     writer, though a legacy row can still carry one) yields no mean at all and reads
-#     ``absent`` / ``None`` even with ``baseline_set`` — but ONLY when no
+#   * a DECLARED prior that yields NO mean (a 0/0 pair, e.g.
+#     ``set_point_baseline(claim, 0, 0)``; a half pair; a negative operand, which
+#     that writer refuses though a legacy row can still carry one; or an operand
+#     this process cannot read) reads ``absent`` / ``None`` even with
+#     ``baseline_set`` — but ONLY when no
 #     readable ``n.confidence`` mirror sits beside it: a stored 0.9 on that same
 #     0/0 row reads ``baseline`` at 0.9 (measured), because the mirror LEADS and
 #     ``ep_state`` returns absent only when the mirror is unreadable too. With
-#     no mirror it is the first shape, not this one, and
+#     no mirror it is the first shape, not this one. (This bullet used to end
+#     "…not this one, and" — the clause it introduced was moved into the
+#     first bullet and the conjunction was left dangling.)
 #   * a mirror-only claim is also unmeasured yet reads the mirror's value.
 # Substituting a Beta(1,1) mean for the first shape is the defect that issue
 # removes; calling the first shape "the unmeasured case" is the defect this
