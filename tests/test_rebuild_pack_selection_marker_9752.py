@@ -124,7 +124,7 @@ def _sidecar_payload(**overrides) -> dict:
 # ── the defect, and its removal ─────────────────────────────────────────────
 
 
-def test_rebuild_all_preserves_the_pack_selection_marker(tmp_path):
+def test_rebuild_all_preserves_the_pack_selection_marker(tmp_path, caplog):
     """A configured graph stays configured, with the same revision and set.
 
     FAILING VALUE: before #9752's fix the marker is gone after the rebuild, so
@@ -135,6 +135,16 @@ def test_rebuild_all_preserves_the_pack_selection_marker(tmp_path):
     REACHABLE: the marker is written by the real writer (`set_graph_packs`,
     which is the only path that moves the revision), and the rebuild is the real
     `rebuild_all` wipe+replay with an empty journal.
+
+    BOTH SIDES OF THE SIGNAL (review P2): every other gap assertion in this file
+    pins the ``== 1`` shape, so a FALSE POSITIVE on the happy path — a rebuild
+    that preserved the marker perfectly and reported a gap anyway — would leave
+    the suite green. That is the "cries wolf on every old sidecar" failure the
+    producer's own docstring guards against (`tortoise/projection/__init__.py`,
+    the `pack_selection_state_unknown` pre-preservation window), and an operator
+    who learns to ignore the warning reads the real wipe as noise. So this test
+    asserts the counts are CLEAN here and that no `:PackSelection` ERROR was
+    logged.
     """
     sdk, events = _mk_sdk(tmp_path)
     _write_journal(events)
@@ -144,7 +154,8 @@ def test_rebuild_all_preserves_the_pack_selection_marker(tmp_path):
     assert before.configured is True and before.revision == 1
     assert before.namespaces == frozenset({"dev"})
 
-    _proj(sdk).rebuild_all(str(events), confirm_destructive=True)
+    with caplog.at_level(logging.ERROR, logger="tortoise.projection"):
+        counts = _proj(sdk).rebuild_all(str(events), confirm_destructive=True)
 
     after = _resolved(sdk)
     assert after.configured is True, (
@@ -157,6 +168,28 @@ def test_rebuild_all_preserves_the_pack_selection_marker(tmp_path):
     assert _markers(sdk) == before_markers, (
         "the marker must survive byte-identically (the capture is faithful, and "
         "the restore is an idempotent MERGE of the captured property map)")
+
+    # The NEGATIVE side: a preserving rebuild must report NO gap. Asserted on
+    # the counts `rebuild_all` returns (what every recovery consumer reads) and
+    # on the log, so neither half can silently invert.
+    assert counts["pack_selection_expected"] == 1, (
+        f"the pre-wipe capture found no marker to preserve: {counts}")
+    assert counts["pack_selection_restored"] == 1, (
+        f"the marker was captured but not restored: {counts}")
+    assert counts["pack_selection_verified"] is True, (
+        f"the post-restore verification did not confirm the property map: "
+        f"{counts}")
+    assert counts["pack_selection_restore_failures"] == 0, counts
+    assert counts["pack_selection_gap"] == 0, (
+        "a rebuild that preserved the marker reported a gap — a false positive "
+        f"here trains the operator to ignore the warning that means data loss: {counts}")
+    assert counts["pack_selection_state_unknown"] is False, (
+        "this sidecar carries a usable `pack_selection` section, so the state "
+        f"is KNOWN — reporting it unknown is the pre-v7 reading: {counts}")
+    assert not [r for r in caplog.records
+                if r.levelno >= logging.ERROR and ":PackSelection" in r.getMessage()], (
+        "no :PackSelection ERROR is expected on a clean preserving rebuild: "
+        f"{[r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]}")
 
 
 def test_rebuild_all_does_not_readmit_a_removed_pack(tmp_path):
@@ -388,6 +421,63 @@ def test_pack_selection_collapse_tie_break_is_deterministic():
     assert _pack_selection_marker(
         [{"updated_by": "no-revision"}, a]) == a
     assert _pack_selection_marker([]) is None
+
+
+def test_rebuild_all_reports_a_marker_collapse(tmp_path, caplog):
+    """Two `:PackSelection` markers collapse to one — and the rebuild SAYS so.
+
+    FAILING VALUE: the collapse warning in `rebuild_all` (the
+    ``len(pack_selection_snapshot) < pack_selection_entries_merged`` branch) is
+    the ONLY thing that makes the discard non-silent, and nothing pinned it —
+    the collapse is covered at the UNION level only
+    (`test_pack_selection_section_carries_at_most_one_marker`,
+    `test_pack_selection_collapse_tie_break_is_deterministic`), so deleting the
+    warning left every test green. Both the module's own docstring ("A discard
+    is REPORTED (`rebuild_all` warns with both counts), never silent") and
+    `docs/durability-posture.md` state the report as a contract, and a silent
+    collapse is the ambiguity the class exists to make visible.
+
+    REACHABLE: two markers reach `_capture_pack_selection` as two distinct
+    property maps (it reads EVERY `:PackSelection` node faithfully — one per
+    graph is the writer's `MERGE` convention, not a constraint), so the merged
+    count is 2 while the section carries 1.
+    """
+    from tortoise.projection import _PACK_SELECTION_LABEL
+
+    sdk, events = _mk_sdk(tmp_path)
+    _write_journal(events)
+    proj = _proj(sdk)
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    # The invariant `pack_state` maintains is one marker per graph; a graph
+    # holding two is already in violation of it, which is exactly the case the
+    # warning exists to surface to the operator.
+    proj.g.query(
+        f"MERGE (s:{_PACK_SELECTION_LABEL} "
+        f"{{revision: 5, updated_by: 'owner'}})")
+    proj.g.query(
+        f"MERGE (s:{_PACK_SELECTION_LABEL} "
+        f"{{revision: 1, updated_by: 'admin'}})")
+    assert len(_markers(sdk)) == 2, "the fixture must plant two markers"
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.projection"):
+        counts = proj.rebuild_all(str(events), confirm_destructive=True)
+
+    assert any(
+        "2 :PackSelection marker(s) were captured but the" in r.getMessage()
+        and "exactly 1" in r.getMessage()
+        for r in caplog.records), (
+        "the collapse was SILENT — the module docstring and "
+        "docs/durability-posture.md both claim `rebuild_all` reports it with "
+        "both counts: "
+        f"{[r.getMessage()[:140] for r in caplog.records]}")
+
+    markers = _markers(sdk)
+    assert len(markers) == 1, (
+        f"exactly one marker is recreated (highest revision), got {markers}")
+    assert markers[0]["revision"] == 5, (
+        "the HIGHEST revision must be the one restored — restoring the lower "
+        f"one moves the client's concurrency token backwards: {markers[0]}")
+    assert counts["pack_selection_restored"] == 1, counts
 
 
 def test_pack_selection_section_and_validator_are_wired():

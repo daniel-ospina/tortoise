@@ -4912,11 +4912,11 @@ def _prewipe_restore_write_scope(reason: str):
     * **it is VOLUNTARY, so "a future addition has to choose a lane" is a
       convention, not a gate.** `_rebuild_all_replay` is under a method-wide
       `_replay_write_scope()` (`#9213`), and nothing forces it to route a
-      restore statement through `_restore_write`. A twelfth restore added as a
+      restore statement through `_restore_write`. A thirteenth restore added as a
       bare `self.g.query(...)` tomorrow is authorized as `"replay"` — exactly
       the false contract this lane removes — and `_LEGS` cannot see it, because
-      a table of the eleven statements that exist says nothing about a
-      twelfth. Enforced only as far as the pin reaches: the whole-property-map
+      a table of the twelve statements that exist says nothing about a
+      thirteenth. Enforced only as far as the pin reaches: the whole-property-map
       shape every restore leg uses (`… SET <alias> += $props`) is matched by
       SHAPE, table-independently, and reds on its reason; every other restore
       shape (a `SET <alias>.<field> = $param` link, a bare edge `MERGE`) is
@@ -13771,12 +13771,12 @@ class FalkorProjection(
            watermark's `MERGE` by its own fragment and
            `tests/test_9124_declared_live_doors.py` pins the module's opener.
         2. **NOTHING makes `_rebuild_all_replay` call this method.** It is a
-           helper the eleven known restore statements happen to use, not a
+           helper the twelve known restore statements happen to use, not a
            gate they must pass: a restore statement added tomorrow as a bare
            `self.g.query(...)` compiles, runs, and is authorized by the
            enclosing method-wide `_replay_write_scope()` — i.e. it inherits
-           the very false contract this lane removes. `_LEGS` pins the eleven
-           statements that exist, so it cannot see a twelfth. What DOES bite
+           the very false contract this lane removes. `_LEGS` pins the twelve
+           statements that exist, so it cannot see a thirteenth. What DOES bite
            today is the table-independent half of the pin: a bare restore
            written in the whole-property-map shape every restore leg uses
            (`… SET <alias> += $props`) is caught by SHAPE, with no table
@@ -13807,12 +13807,13 @@ class FalkorProjection(
         #9210. The whole-graph wipe and the per-record folds are the cache being
         reconstructed FROM the journal — that is the lane ``_replay_write_scope``
         names (#7951), and it is the declaration §17.1's THIRD door requires
-        before it will let a mutating statement reach ``proj.g``. The eleven
+        before it will let a mutating statement reach ``proj.g``. The twelve
         SNAPSHOT-RESTORE statements in the body are NOT, and they do not ride
         it: they put back state captured from this graph immediately before the
         wipe (``:Batch`` markers, the onboarding machine, ``:TeamMeta``, the
-        ``#2814`` config registry, the derived ``#4305`` properties, the
-        ``:GraphEventMeta`` watermark), so each one shadows this permit with its
+        ``:PackSelection`` pack-set marker, the ``#2814`` config registry, the
+        derived ``#4305`` properties, the ``:GraphEventMeta`` watermark), so each
+        one shadows this permit with its
         own named leg through ``_restore_write`` / ``_prewipe_restore_write_scope``.
         The replay lane's contract ("this content came FROM the record") is
         false for them, and #9210 is what stopped them from claiming it.
@@ -13828,7 +13829,7 @@ class FalkorProjection(
         pass 2's ``_upsert_point_edges``). Journal records keep this permit.
 
         DISCLOSED RESIDUAL of that split, so this docstring does not read as a
-        claim it cannot keep: a twelfth restore written as a bare
+        claim it cannot keep: a thirteenth restore written as a bare
         ``self.g.query(...)`` tomorrow still inherits ``"replay"`` — the
         restore funnel is voluntary until #9124's handle guard is armed. The
         synthetic half selects its lane automatically from the fold's own
