@@ -304,7 +304,8 @@ def _raw_length(quote: object) -> int:
     establish is where the cut landed: the artifact carries min/median/max/n/at_cap, not a
     boundary classification, and `at_cap` counts a stored length `>= 200` — which is equally
     what an uncut 200-character source produces. So "whether any at-cap quote has a value
-    straddling its cut" is NOT measured here (the README says so in §3), and this docstring
+    straddling its cut" is NOT measured here (item 3 of the README's *What this changes
+    for #11739* says so), and this docstring
     must not imply otherwise: it is also the tool's `--help`.
     """
     if isinstance(quote, str):

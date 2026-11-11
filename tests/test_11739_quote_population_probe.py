@@ -1660,3 +1660,41 @@ def test_the_help_premise_about_hand_authored_points_matches_the_artifact():
     assert "no embedding pass touches" not in doc, (
         "the artifact refutes this premise: those kinds DO carry vectors (the census's own "
         "`by_point_kind.with_vector` says so), so it must not come back")
+
+
+def test_the_help_does_not_claim_the_clamp_cut_was_classified():
+    """FAILS IF the `--help` starts asserting a boundary fact this census did not measure.
+
+    Same defect, one sentence over, and the same reason it needs its own pin: the `--raw_length`
+    docstring used to say the raw slice "makes 'the clamp cuts mid-token' true rather than
+    rhetorical", while the artifact carries `min/median/max/n/at_cap` and NO boundary
+    classification — `at_cap` counts a stored length `>= 200`, which is equally what an UNCUT
+    200-character source produces (the README lists the boundary as unmeasured). Reverting that
+    wording reds only the census DIGEST pin, whose message is about provenance ("re-run the "
+    "probe; do not hand-edit the artifact") and which one re-measure that changes no number
+    clears — so the claim is pinned HERE, by content, and the negative is pinned too, because a
+    future pass could "fix" the wording by re-asserting the refuted one.
+    """
+    doc = qp._raw_length.__doc__ or ""
+    assert "boundary classification" in doc, (
+        "`_raw_length` must state what the census does not carry (a boundary classification)")
+    assert "NOT measured" in doc, (
+        "it must say the at-cap cut boundary is NOT measured, not merely allude to it")
+    assert "mid-token" not in doc, (
+        "`mid-token` is the refuted wording: whether a clamp cut landed inside a token is not "
+        "measured by this census, so this docstring must not claim it")
+    # The cross-reference has to RESOLVE: the first version of this correction pointed at
+    # "the README says so in §3" and the README has no numbered sections at all, so the operator
+    # was sent to a place that does not exist (found by review at the next head).
+    readme = (REPO / "docs" / "evidence" / "11739-quote-population" / "README.md").read_text(
+        encoding="utf-8")
+    assert "§" not in doc, (
+        "`_raw_length` cites the README by a section number — the README has none, so reword it "
+        "to name the heading/list item it means")
+    assert "What this changes for #11739" in readme, (
+        "the heading this docstring names moved — repoint it rather than deleting the reference")
+    flat = " ".join(readme.split())
+    assert ("Whether any at-cap quote here has a value straddling its cut is not measured by this "
+            "census") in flat, (
+        "the README no longer carries the unmeasured-boundary statement this docstring defers "
+        "to, so the deferral now points at nothing")
