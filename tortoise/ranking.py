@@ -1491,8 +1491,11 @@ class StateRanker:
         absent term does not participate at all (see ``base`` in :meth:`rerank`),
         so an unmeasured claim is neither buried nor given a fabricated
         confidence. Source is ``"posterior"`` when EP actually measured the
-        claim and ``"neutral"`` when a PERSISTED prior (not a measurement)
-        answered — both are real values; only ``absent`` has none.
+        claim, ``"neutral"`` when a PERSISTED prior (not a measurement)
+        answered, and ``"unreadable"`` when a belief EXISTS but its stored
+        spelling cannot be decoded here (the hex-float residual — see
+        :data:`UNREADABLE_CONFIDENCE_SOURCE`). The first two are real values;
+        ``absent`` and ``unreadable`` have none, and each says why.
         """
         if "confidence" in signals:
             raw = signals["confidence"]
@@ -2009,7 +2012,10 @@ class GapsRanker:
         #11702: ``(None, EP_STATE_ABSENT)`` when no belief is persisted — the
         same convention as StateRanker, so the three rankers cannot disagree
         about what "absent" is. (This method used to report the neutral 0.5,
-        which made a never-measured gap carry a fabricated confidence.) For a
+        which made a never-measured gap carry a fabricated confidence.) A
+        persisted belief whose stored spelling this process cannot decode is
+        ``(None, "unreadable")`` — the StateRanker convention, never
+        ``"absent"`` beside a non-absent state. For a
         DRAFT the caller replaces both with null/``"uncomputed"`` (#2598) —
         this method reports the read, the staging gate lives in
         :meth:`rerank`."""
