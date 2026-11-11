@@ -2342,10 +2342,10 @@ def _pack_selection_order(entry: dict) -> tuple:
     ``(0, -revision, props)`` for a marker carrying an integer `revision` — the
     shape `set_graph_packs` produces — and ``(1, 0, props)`` for a degenerate
     one, so a real marker always beats a property-less hand-plant. The HIGHEST
-    revision wins, and that is the safe direction rather than an arbitrary tie
-    break: `revision` is the optimistic-concurrency token a client holds, so
-    restoring the most-advanced marker never moves the graph BACKWARD past a
-    decision that was actually made. ``props`` (the full property map, repr'd)
+    revision wins, and that is a deliberate choice: `revision` is the optimistic
+    token a client holds, so the HIGHEST published token wins — NOT that the
+    newest DECISION wins (a re-pin restarts it; collapse reported). ``props``
+    (the full property map, repr'd) only breaks a revision tie.
     breaks a revision tie, so the outcome is REPRODUCIBLE even though the
     capture answers in whatever order the graph returns — the same reason
     `_team_meta_order` carries a secondary key.
@@ -3245,12 +3245,12 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
     # to make) and not concatenation (two markers make `_read_selection`'s
     # single-row read ambiguous, so the enforced pack set would depend on row
     # order). Highest-revision is the SAFE direction rather than an arbitrary
-    # preference: `revision` is the optimistic-concurrency token a client
-    # holds, so the merge never lands the graph on an older decision than one
-    # that was actually made. On the ordinary path both legs carry the SAME
-    # marker (a kill between the sidecar write and the `DETACH DELETE`), and on
-    # the sidecar-recovery path the fresh leg is empty — so the rule only
-    # decides the genuinely contested case, which `rebuild_all` reports.
+    # preference: `revision` is the optimistic token a client holds, so the
+    # HIGHEST published token wins — the strongest guarantee against a
+    # concurrent writer. It is NOT "the newest decision wins": a re-pin on a
+    # wiped graph restarts `revision` at 1, so a pre-crash leftover outranks
+    # it — and that case is REPORTED (the collapse warning), never silent. On
+    # the ordinary path both legs carry the SAME marker, or fresh is empty.
     pack_selection_marker = _pack_selection_marker(
         list(leftover.get("pack_selection") or [])
         + list(fresh.get("pack_selection") or []))
