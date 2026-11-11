@@ -73,6 +73,19 @@ logger = logging.getLogger(__name__)
 #: live claim whose posterior is below 0.5 (#2598's repro).
 UNCOMPUTED_CONFIDENCE_SOURCE = "uncomputed"
 
+#: #11702 — the ``confidence_source`` value for a row that DOES persist a belief
+#: (``ep_state`` is ``baseline``/``measured``) whose stored spelling this
+#: process cannot read. There is exactly one shape: a mirror written as a
+#: hex-float literal (``"0x1p4"``), which FalkorDB's ``toFloatOrNull`` reads as
+#: ``16.0`` — so the shared presence predicate says a belief exists — while the
+#: pinned Python grammar (:data:`tortoise.search_engine._FLOAT_LITERAL`) refuses
+#: it, so no value is available. Reporting ``"absent"`` there denies the state
+#: beside it (`"baseline"`), and ``"posterior"``/``"neutral"`` would claim a
+#: measurement that was never read; this token says the one true thing: the row
+#: has a belief we could not decode. Recorded as a residual on #11841 (the wider
+#: belief-writer audit); the grammar is NOT widened here.
+UNREADABLE_CONFIDENCE_SOURCE = "unreadable"
+
 
 def _w4_flag_on() -> bool:
     """Resolve the W4 enrichment flag for the ranking boost (same env seam
@@ -1369,7 +1382,9 @@ class StateRanker:
             # `_confidence_of` and must not deny the state beside it (the
             # reviewed head emitted `"absent"` beside `"measured"`).
             # `test_confidence_source_never_contradicts_the_ep_state_beside_it`
-            # pins the agreement for all six stored shapes.
+            # pins the agreement for all seven stored shapes — including the
+            # unreadable-spelling residual, where the VALUE is null for a
+            # non-absent state and `confidence_source: "unreadable"` names why.
             ep_state = sig.get("ep_state")
             if ep_state is None:
                 ep_state = (EP_STATE_ABSENT if confidence is None
@@ -1486,8 +1501,24 @@ class StateRanker:
         """
         if "confidence" in signals:
             raw = signals["confidence"]
-            if raw is None or signals.get("ep_state") == EP_STATE_ABSENT:
+            # The STATE is the authority, and it answers the source: a `None`
+            # VALUE is collapsed to the absent SOURCE only when the state is
+            # absent. Collapsing on the value alone is a second presence rule
+            # — and it is wrong for the one shape where the store and this
+            # process disagree about readability (a hex-float mirror, which
+            # Cypher reads and the pinned Python grammar refuses): the row
+            # then said `confidence_source: "absent"` beside `ep_state:
+            # "baseline"`, i.e. two keys of one response disagreeing about
+            # whether a belief exists.
+            state = signals.get("ep_state")
+            if state == EP_STATE_ABSENT:
                 return None, EP_STATE_ABSENT
+            if raw is None:
+                # No state to match (an embedded-style signal that carries no
+                # `ep_state`): `absent` is the conservative answer and the
+                # caller's fallback derives the same state from this null.
+                return None, (EP_STATE_ABSENT if state is None
+                              else UNREADABLE_CONFIDENCE_SOURCE)
             conf = float(raw)
             return conf, ("posterior" if self._has_ep(result, signals) else "neutral")
         # Embedded fallback (projection=None unit tests).
@@ -1614,14 +1645,18 @@ class StateRanker:
                     # converted in cycle 13; these two carried their own
                     # division and were missed.
                     conf = round(_beta_mean(alpha, beta), 6)
-                else:  # pragma: no cover — unreachable BY the presence rule
-                    # `has_prior` is now `ep_has_belief_cypher`, which requires a
-                    # NUMERIC mirror OR a usable pair; with neither, reaching
-                    # here would mean the Cypher predicate and this read
-                    # disagree, which the shared vocabulary exists to prevent.
-                    # (Pre-#11702's `IS NOT NULL` predicate DID reach it with a
-                    # stored 0.0/0.0 pair, so this arm was live and reported
-                    # None beside `measured`.)
+                else:
+                    # REACHABLE, by exactly one recorded residual — NOT
+                    # `unreachable`, which is what this arm used to say. The
+                    # presence predicate is Cypher's `toFloatOrNull`, which
+                    # reads a hex-float spelling (`"0x1p4"` → 16.0) that
+                    # `numeric_operand`'s pinned grammar refuses; on that one
+                    # shape the predicate says `has_prior` and this read has
+                    # no number. The state stays true and
+                    # `confidence_source: "unreadable"` names the missing
+                    # value (`_confidence_of` derives it from the state, never
+                    # from this `None`). Pre-#11702's `IS NOT NULL` predicate
+                    # also reached it with a stored 0.0/0.0 pair.
                     conf = None
                 state = (EP_STATE_MEASURED if measured_raw
                          else EP_STATE_BASELINE)
@@ -1920,9 +1955,11 @@ class GapsRanker:
                 # #11702: the state NAME (see StateRanker's recall_ranking).
                 # Taken from the SIGNAL when the graph was queried — the same
                 # field StateRanker reads — and NOT re-derived from the value:
-                # the signal decides presence and value by ONE rule, so a None
-                # value already implies the absent state (a stored
-                # α + β == 0 pair is absent there). Deriving the state here
+                # the signal decides presence itself, so a None value implies
+                # the absent state EXCEPT for the unreadable-spelling residual
+                # (a hex-float mirror), where the state is true and
+                # `confidence_source: "unreadable"` explains the null.
+                # Deriving the state here
                 # instead would be a second presence rule — the defect class
                 # this issue removes — and two rankers inventing a state the
                 # read denies is how one claim came to report `absent` and
@@ -1983,8 +2020,17 @@ class GapsRanker:
         :meth:`rerank`."""
         if "confidence" in signals:
             raw = signals["confidence"]
-            if raw is None or signals.get("ep_state") == EP_STATE_ABSENT:
+            # The STATE answers the source (see StateRanker's `_confidence_of`):
+            # a `None` value is the absent source only when the state is
+            # absent. A non-absent state with no readable value is the
+            # unreadable-spelling residual, and says so — never `"absent"`
+            # beside `ep_state: "baseline"`.
+            state = signals.get("ep_state")
+            if state == EP_STATE_ABSENT:
                 return None, EP_STATE_ABSENT
+            if raw is None:
+                return None, (EP_STATE_ABSENT if state is None
+                              else UNREADABLE_CONFIDENCE_SOURCE)
             conf = float(raw)
             return conf, ("posterior" if self._has_ep(result, signals) else "neutral")
         embedded = result.get("gaps_confidence")
@@ -2173,14 +2219,12 @@ class GapsRanker:
                     # converted in cycle 13; these two carried their own
                     # division and were missed.
                     conf = round(_beta_mean(alpha, beta), 6)
-                else:  # pragma: no cover — unreachable BY the presence rule
-                    # `has_prior` is now `ep_has_belief_cypher`, which requires a
-                    # NUMERIC mirror OR a usable pair; with neither, reaching
-                    # here would mean the Cypher predicate and this read
-                    # disagree, which the shared vocabulary exists to prevent.
-                    # (Pre-#11702's `IS NOT NULL` predicate DID reach it with a
-                    # stored 0.0/0.0 pair, so this arm was live and reported
-                    # None beside `measured`.)
+                else:
+                    # REACHABLE by the one recorded residual (a hex-float
+                    # mirror): the Cypher presence predicate reads it, the
+                    # pinned Python grammar refuses it. See StateRanker's arm —
+                    # the value is null, the state stays true, and the source
+                    # says `"unreadable"`.
                     conf = None
                 state = (EP_STATE_MEASURED if measured_raw
                          else EP_STATE_BASELINE)

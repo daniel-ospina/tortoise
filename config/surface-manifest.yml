@@ -491,10 +491,13 @@ response_fields:
   field: recall_ranking.confidence_source
   emitted_when: the same rows as recall_ranking.confidence becomes null — the source reads "uncomputed" instead
     of "neutral", so a consumer can tell "no belief was computed for this staged row" from "a live row nobody measured"
-    without knowing the status vocabulary
+    without knowing the status vocabulary. A live row whose belief EXISTS but whose stored spelling this process cannot
+    decode (ep_state "baseline"/"measured", value null) reads "unreadable" — never "absent", which would deny the
+    state beside it; the one measured shape is a hex-float mirror (`"0x1p4"`), which the store's `toFloatOrNull` reads
+    and the pinned Python grammar refuses (#11841 is the residual's home)
   unchanged_when_off: NO for an unmeasured draft, yes for everything else — the same scoping as recall_ranking.confidence;
     every live row keeps its "posterior"/"neutral" verdict EXCEPT an uncalibrated one, which now reads "absent" (#11702 —
-    see recall_ranking.confidence above)
+    see recall_ranking.confidence above) and an unreadable-spelling one, which reads "unreadable"
 - response: tortoise_recall
   field: gaps_ranking.draft
   emitted_when: 'mode=gaps ONLY: the row is a Point with status `draft` — present only when true (the #1353 D8 /
@@ -522,9 +525,12 @@ response_fields:
   field: gaps_ranking.confidence_source
   emitted_when: the same rows as gaps_ranking.confidence becomes null — the source reads "uncomputed" instead of
     "neutral", so a consumer can tell "no belief was computed for this staged row" from "a live gap nobody measured"
-    without knowing the status vocabulary
+    without knowing the status vocabulary. A live gap whose belief EXISTS but whose stored spelling this process cannot
+    decode (ep_state "baseline"/"measured", value null) reads "unreadable", exactly as recall_ranking.confidence_source
+    states — never "absent" beside a non-absent state
   unchanged_when_off: NO for an unmeasured draft, yes for everything else — the same scoping as gaps_ranking.confidence;
     every live gap keeps its "posterior"/"neutral" verdict EXCEPT an uncalibrated one, which now reads "absent" (#11702)
+    and an unreadable-spelling one, which reads "unreadable"
 - response: sdk:create_operator
   field: direction_basis
   emitted_when: 'always, on every operator created through the #7852 W1 write path — the basis the recorded direction

@@ -30,8 +30,8 @@ covering more than it does). PINNED here: the vocabulary (`ep_state`,
 `analyze` templates (`evidence_chain`, and the `_BELIEF` gate they share),
 `navigation.confidenceMin`, `sdk.approve`'s `confidence_delta`, and the
 journal records both belief-clearing writers emit. Each is pinned for the
-whole rule, not one shape: absent / half pair / zero-total pair / mirror-only
-/ measured.
+whole rule, not one shape: absent / half pair / zero-total pair / mirror-only /
+unreadable-spelling / measured.
 
 Deliberately OUT of this file's scope: `battery/arms/a4_tortoise.py` (an eval
 arm, not a product surface) and `sdk.get_confidence` /
@@ -52,6 +52,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tortoise import ranking as _ranking  # noqa: E402, RUF100
 from tortoise import search_engine as _se  # noqa: E402, RUF100
 from tortoise.ranking import (  # noqa: E402, RUF100  # noqa: E402, RUF100
     UNCOMPUTED_CONFIDENCE_SOURCE,
@@ -73,6 +74,12 @@ from tortoise.search_engine import (  # noqa: E402, RUF100
 EP_STATE_MEASURED = getattr(_se, "EP_STATE_MEASURED", "measured")
 EP_STATE_BASELINE = getattr(_se, "EP_STATE_BASELINE", "baseline")
 EP_STATE_ABSENT = getattr(_se, "EP_STATE_ABSENT", "absent")
+#: The fourth `confidence_source` token (#11702 cycle 24): the row HAS a belief
+#: (so the state is `baseline`/`measured`) but its stored spelling cannot be
+#: decoded here. `getattr` for the same reason as the states above — this file
+#: must import against a pre-fix tree and RED there, not die at collection.
+UNREADABLE_CONFIDENCE_SOURCE = getattr(
+    _ranking, "UNREADABLE_CONFIDENCE_SOURCE", "unreadable")
 
 
 class _MissingState:
@@ -912,7 +919,11 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
 
     Both rules are now the shared predicate, so the agreement is structural —
     but "structural" is a claim, and this is the assertion that keeps it true
-    across all six stored shapes if either side is edited again.
+    across all SEVEN stored shapes if either side is edited again. The seventh
+    (`unreadable spelling`) is cycle 24's: a hex-float mirror is a belief to the
+    store and no number to this process, so the VALUE is null while the state is
+    true, and `confidence_source` names that — a null is never collapsed to
+    "absent" beside a non-absent state.
     """
     proj = sdk._get_proj()
 
@@ -931,8 +942,15 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
     measured = _symmetric_point(sdk)  # α = β = 2.0, a real measured 0.5
     baseline = _point("a declared baseline")
     sdk.set_point_baseline(baseline, 18.0, 2.0)
+    # The seventh shape, and the one that used to contradict itself: FalkorDB's
+    # `toFloatOrNull` reads a hex-float literal (16.0) so the SHARED PRESENCE
+    # PREDICATE says a belief exists, while the pinned Python grammar
+    # (`_FLOAT_LITERAL`) refuses it, so no VALUE is available. Presence is
+    # `ep_has_belief_cypher`, hence `ep_state: "baseline"`; the value is null.
+    unreadable = _point("a hex-float mirror", "n.confidence = '0x1p4'")
 
-    ids = [absent, half_pair, zero_total, mirror_only, measured, baseline]
+    ids = [absent, half_pair, zero_total, mirror_only, measured, baseline,
+           unreadable]
     recs = {r["id"]: r["recall_ranking"] for r in
             StateRanker(projection=proj).rerank(
                 [{"id": p, "scores": {"rrf": 1.0}} for p in ids])}
@@ -948,17 +966,22 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
                 f"{name} reports confidence_source={source!r} beside "
                 f"ep_state={state!r} — the two keys describe one fact")
             # …and the VALUE follows the same rule, so a row cannot say "no
-            # belief" in the source and carry a number in the value. TWO
-            # causes of a null, and `confidence_source` names which one:
-            # absent, or a #2598 DRAFT row whose belief is withheld from
-            # DISPLAY (source "uncomputed") while its state stays true. Those
-            # rows are exercised by
+            # belief" in the source and carry a number in the value. On a LIVE
+            # row a null has TWO causes and `confidence_source` names which:
+            # `absent` (nothing is persisted) or `unreadable` (a belief exists
+            # and its stored spelling cannot be decoded here). A third cause —
+            # the #2598 DRAFT gate, source `uncomputed` — belongs to
             # `test_a_draft_withholds_its_belief_without_denying_it` below;
-            # every row here is live, so the second clause is not reachable
-            # and the assertion is the strict one.
-            assert (row["confidence"] is None) == (state == EP_STATE_ABSENT), (
-                f"{name} reports confidence={row['confidence']!r} beside "
-                f"ep_state={state!r} (source {source!r})")
+            # every row here is live, so it is not admitted here.
+            if row["confidence"] is None:
+                assert source in (EP_STATE_ABSENT,
+                                  UNREADABLE_CONFIDENCE_SOURCE), (
+                    f"{name} reports a null confidence with no source naming "
+                    f"why: source={source!r}, ep_state={state!r}")
+            else:
+                assert source in ("posterior", "neutral"), (
+                    f"{name} reports confidence={row['confidence']!r} from "
+                    f"source={source!r}")
         # The two rankers must not disagree about the same node either.
         assert recs[pid]["ep_state"] == gaps[pid]["ep_state"], pid
         assert (recs[pid]["confidence_source"] == EP_STATE_ABSENT) == (
@@ -976,6 +999,28 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
     for pid in (mirror_only, baseline):
         assert recs[pid]["ep_state"] == EP_STATE_BASELINE, recs[pid]
         assert recs[pid]["confidence_source"] != EP_STATE_ABSENT, recs[pid]
+
+    # The seventh shape, named so it cannot be dropped again: the store reads
+    # the mirror (`toFloatOrNull` → 16.0, i.e. PRESENT) and this process does
+    # not (`numeric_operand` → None, the pinned grammar). Assert BOTH halves,
+    # so the fixture cannot pass by failing to be the shape it claims — a
+    # fixture that stopped being unreadable would otherwise assert agreement
+    # between two identical absent rows.
+    assert _se.numeric_operand("0x1p4") is None, (
+        "the pinned Python grammar now reads hex floats — the fixture is no "
+        "longer the unreadable shape")
+    assert proj.g.query(
+        "RETURN toFloatOrNull('0x1p4') AS v").result_set == [[16.0]], (
+        "the store no longer reads the hex-float spelling — the fixture is no "
+        "longer the unreadable shape")
+    for name, row in (("recall_ranking", recs[unreadable]),
+                      ("gaps_ranking", gaps[unreadable])):
+        assert row["ep_state"] == EP_STATE_BASELINE, (name, row)
+        assert row["confidence"] is None, (name, row)
+        assert row["confidence_source"] == UNREADABLE_CONFIDENCE_SOURCE, (
+            f"{name} denies a belief it has: source={row['confidence_source']!r}"
+            f" beside ep_state={row['ep_state']!r}")
+    assert recs[unreadable]["belief_informed_order"] is False, recs[unreadable]
 
 
 def test_a_draft_withholds_its_belief_without_denying_it(sdk):
