@@ -465,11 +465,12 @@ def variant_rows(outcomes: list[dict], k: int | str = 5) -> dict[str, Any]:
         # labeled variant — the paired census of the failing class re-run
         # on a raised reader window. NEVER merged into any official row
         # above (the official recall_all@k derives from the one-shot
-        # ``session_recall@k`` alone; the re-run does not mutate it), and
-        # on an arm-OFF run ALWAYS PRESENT as an empty block —
-        # ``reconciliation_variant_rows`` returns a full row whatever it is
-        # given, so ``n_fired: 0`` (with null values) is what identifies the
-        # arm-off run, NOT the absence of the key.
+        # ``session_recall@k`` alone; the re-run does not mutate it).
+        # ⛔ This block CANNOT identify the arm state on its own:
+        # ``reconciliation_variant_rows`` always returns a full row, and
+        # ``n_fired: 0`` is also what an arm-ON run whose cohort never fired
+        # reports. Read ``methodology.window_reconciliation`` for the arm
+        # state — this block only says what the arm observed.
         "window_reconciliation": reconciliation_variant_rows(outcomes, k=k),
     }
     # #2516 (C1): the per-category official rows ride WITH the top-level

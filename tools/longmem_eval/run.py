@@ -612,6 +612,8 @@ def _pool_order_arm_on(coverage_loop: bool, session_reinjection: bool,
     """
     return bool(coverage_loop) or bool(session_reinjection
                                        and session_reinjection_guard)
+
+
 def _resolve_window_reconciliation_cap(arm_on: bool,
                                        explicit: int | None = None,
                                        ) -> int | None:

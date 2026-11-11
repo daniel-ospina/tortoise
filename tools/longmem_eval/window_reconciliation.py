@@ -608,7 +608,14 @@ def reconciliation_variant_rows(outcomes: list[dict], *,
             "n": len(surface_pairs),
         },
         "pool_drift_n": drift,
-        # ⛔ The population the drift count was taken over. ``0`` drift out
+        # ⛔ The HORIZON, not just the population. The drift is read at the
+        # run's primary k, which need not be the official row's k (the
+        # receipt's official number is `official_recall_all@5`), so a bare
+        # count could be a control taken at a different horizon than the
+        # number it appears to certify. Self-describing, like the sibling
+        # `reader_surface@k` row.
+        "pool_drift_k": k,
+        # The population the drift count was taken over. ``0`` drift out
         # of 0 pairs is an UNREAD census, not a measured "no drift" —
         # without this an empty population is indistinguishable from a
         # clean one (the same class the surface delta already guards with

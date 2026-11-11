@@ -1004,6 +1004,44 @@ def test_cap_resolver_clamps_garbage_to_the_default(monkeypatch):
         == 500
 
 
+def test_run_evaluation_forwards_the_arm_and_cap_to_the_fingerprint():
+    """★ #11830 round-5 P2: the FORWARD, not the builder.
+
+    The fingerprint tests call ``_build_fingerprint`` DIRECTLY, so they prove
+    only that the builder handles the keys — they stayed green while a dropped
+    forward would silently stop protecting "a cap-12k checkpoint can never be
+    resumed by a cap-24k run". This repo has that exact failure recorded
+    (``tests/test_session_reinjection_rules.py`` point at
+    ``test_eval_reinjection_cap_resume.py`` for the same reason).
+
+    Parsed from the source rather than executed: ``run_evaluation`` needs a
+    graph, an SDK and a provider to reach this call, and the property under
+    test is precisely *which keywords are on the call*, which the AST states
+    exactly.
+    """
+    import ast
+    from pathlib import Path
+
+    src = Path(runner.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fn = next(n for n in tree.body
+              if isinstance(n, ast.FunctionDef)
+              and n.name == "run_evaluation")
+    calls = [n for n in ast.walk(fn)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name)
+             and n.func.id == "_build_fingerprint"]
+    assert calls, "run_evaluation no longer builds a fingerprint"
+    forwarded = {kw.arg for call in calls for kw in call.keywords}
+    for required in ("window_reconciliation",
+                     "window_reconciliation_token_cap",
+                     "window_reconciliation_max_context_tokens"):
+        assert required in forwarded, (
+            f"run_evaluation does not forward {required}= to "
+            f"_build_fingerprint — a checkpoint stamped with a different "
+            f"{required} could then be resumed")
+
+
 def _fingerprint(**over):
     kwargs = dict(
         reader_model="mock-reader", judge_model="mock-judge", ks=(5,),
