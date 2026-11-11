@@ -470,12 +470,12 @@ _F32_UNDERFLOW_READ_FLOOR = _FLOAT32_MIN_NORMAL - 2.0 ** -151
 #: `fromhex`) out: the store answers null for it, so Python must too. Trailing
 #: whitespace is refused by both (`"0x1p4 "` is null there).
 _HEX_FLOAT_LITERAL = re.compile(
-    r"[ \t]*[+-]?0[xX][0-9a-fA-F]*(?:\.[0-9a-fA-F]*)?(?:[pP][+-]?[0-9]+)?\Z",
+    r"\s*[+-]?0[xX][0-9a-fA-F]*(?:\.[0-9a-fA-F]*)?(?:[pP][+-]?[0-9]+)?\Z",
     re.ASCII)
 #: A hex literal whose MANTISSA is all zeros — the only kind that reads as a zero
 #: number (`"0x1p-9999"` underflows to zero in Python and is null to the store).
 _ZERO_HEX_LITERAL = re.compile(
-    r"[ \t]*[+-]?0[xX]0*(?:\.[0]*)?(?:[pP][+-]?[0-9]+)?\Z", re.ASCII)
+    r"\s*[+-]?0[xX]0*(?:\.[0]*)?(?:[pP][+-]?[0-9]+)?\Z", re.ASCII)
 _ZERO_LITERAL = re.compile(r"\s*[+-]?0*(?:\.0*)?(?:[eE][+-]?[0-9]+)?\Z",
                            re.ASCII)
 #: `re.ASCII` is load-bearing on both patterns: without it `\s` matches Unicode
@@ -6034,12 +6034,16 @@ def get_relationships_bounded(
                             # pair `_beta_variance`'s own s <= 0 guard yields
                             # variance 0.0, so contested stays False and nothing
                             # above the threshold is claimed.
-                            # #11702 cycle 27: ROUNDED like every sibling
-                            # key in this payload (`variance` is 6 dp two lines
-                            # down) and like the rankers. Unrounded, the same
-                            # claim read `0.3333333333333333` here and `0.3333`
-                            # in the `ep` block, so a consumer comparing two
-                            # surfaces for one claim got two numbers.
+                            # #11702 cycle 27: rounded to 6 dp, matching the
+                            # RANKERS and this payload's own `variance` key two
+                            # lines down. It was a raw double, so the same claim
+                            # read `0.3333333333333333` here and `0.333333` on a
+                            # ranker — two numbers for one belief.
+                            # ⚠️ It does NOT make every cross-surface compare
+                            # exact: `annotate_ep_batch` rounds its
+                            # `confidence_mean` to 4 dp, so peer-vs-`ep`-block is
+                            # `0.333333` vs `0.3333` by design. Compare at the
+                            # COARSER precision, or compare peer-to-ranker.
                             "confidence": (None if value is None
                                            else round(value, 6)),
                             # `None` when nothing is claimed at all — the same

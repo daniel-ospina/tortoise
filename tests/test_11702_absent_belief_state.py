@@ -2717,6 +2717,18 @@ def test_the_twins_read_the_same_window_at_the_store_float_edges(sdk):
         # the DECIMAL arm has NO exactness exemption (measured: this literal is
         # 2**-149 exactly and the store still answers null)
         "1.401298464324817e-45", "2.802596928649634e-45", "1e-45", "1e-40",
+        # LEADING WHITESPACE on a hex literal: `toFloat` skips every byte C's
+        # `isspace` accepts, so the store reads `"\n0x1p4"`. The hex patterns
+        # spelled the prefix `[ \t]*` while the decimal ones used `\s*`, so
+        # Python refused five spellings the store reads — one claim reported
+        # `absent` in the `ep` block beside `measured` in both rankers
+        # (measured: 35 splits over a 104-literal sweep). `\xa0` (NBSP) is
+        # NOT in C's isspace, and `re.ASCII` is what keeps `\s` inside that
+        # class — the row below is null on BOTH sides and pins the flag on the
+        # FLOAT pattern (the zero pattern's copy of it is defensive: a prefix
+        # this refuses can never reach it).
+        "\n0x1p4", "\r0x1p4", "\t0x1p4", "  \n\t0x1p4", "\x0b0x1.8p1",
+        "\x0c0x10", "\n0x0p0", "\n0x1p4 ", "\u00a00x1p4", "\u00a00x0p0",
         # ordinary values, and the NEGATIVE midpoint (`_f32_neighbour` used to
         # step the raw sign-magnitude bits the wrong way below zero)
         "0.6", "0x1p4", "0x1.0000001p4", "1.0000000596046448",
