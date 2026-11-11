@@ -1761,9 +1761,13 @@ class TestThePayloadWalkFailsClosedAtItsDepthBound:
         levels at a bound of 2 — while the constant-derived siblings still
         exercise a refusal below and above whatever bound they see (they just
         cannot detect a TIGHTENING, which is a separate pin this change does
-        not claim to fix). The literal is what makes this test a guard. 10 is
-        far below the bound's own stated headroom (no journal payload nests
-        past ~4) and far above it once the bound is tightened.
+        not claim to fix). The literal is what makes this test a guard: 10 is
+        far BELOW the bound itself (``32``) and ABOVE the deepest journal
+        payload the bound's comment says exists (``~4``, ``money.py``'s
+        ``_MONEY_PAYLOAD_MAX_DEPTH``). Measured, not assumed: tightening the
+        bound to 10 or less reds this test (the 10-level payload is refused),
+        while 11..31 leaves it green — a tightening inside that band is the pin
+        this change does not claim.
         """
         import tempfile
         from pathlib import Path
