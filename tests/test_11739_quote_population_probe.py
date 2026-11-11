@@ -176,6 +176,27 @@ def test_a_later_short_page_that_claims_more_exits_four(monkeypatch):
     assert exc.value.code == 4
 
 
+def test_the_walk_counts_one_page_per_page_of_the_partition(monkeypatch):
+    """FAILS IF the walk's page counter drifts from the pages it actually read — the count
+    `census()` publishes as `pages_walked`, which the README tells a reader to quote instead
+    of a runtime range. The arithmetic was unpinned (a filed follow-up): `pages` is
+    initialised to 1 for page one and incremented once per page read, so at a CONSTANT page
+    size `pages == ceil(rows / page_size)` exactly. Mutants: a `pages += 1` that runs before
+    the extend, a counter starting at 0, or a counter that only ticks when a page is FULL
+    (each reds the equality here on the 2/2/1 split below)."""
+    import math
+
+    monkeypatch.setattr(qp, "PAGE", 2)
+    client = _Page({
+        (True, 0): _page([{"id": "a"}, {"id": "b"}], total=5, has_more=True),
+        (True, 2): _page([{"id": "c"}, {"id": "d"}], total=5, has_more=True),
+        (True, 4): _page([{"id": "e"}], total=5, has_more=False),
+    })
+    walked, total, distinct = qp.walk(client)
+    assert total == 5 and distinct == 5
+    assert walked["pages"] == math.ceil(total / walked["final_page_size"]) == 3
+
+
 def test_walk_refuses_a_repeated_row(monkeypatch):
     """FAILS IF the distinct-id check is dropped: the SAME row served twice while `total`
     agrees is exactly how a lossy page walk reports completion (measured 390 of 21,281
@@ -785,6 +806,41 @@ def test_an_unwritable_out_path_returns_two(monkeypatch, tmp_path):
     assert code == 2
 
 
+def test_the_readme_documents_every_reason_the_probe_exits_two():
+    """FAILS IF an exit-`2` arm ships without the published contract describing it.
+
+    This is the defect it pins, measured: the guarded `--out` write added a SECOND meaning to
+    `2` (`PROBE-WRITE` — the graph was read, the destination was not writable, nothing was
+    published) and left the contract saying "usage" only, in both the README and the probe's
+    own docstring. An operator keying on the contract then reads `2` as "I passed bad
+    arguments" and re-runs with the SAME arguments into the SAME unwritable path — a loop,
+    not a diagnosis. The arm is fail-closed (no wrong number can be published), which is why
+    this is a verdict-quality pin rather than a data pin; but a contract that describes a
+    different world than the code is exactly what a reader cannot audit.
+
+    The probe half is asserted too, so this pin cannot rot into documenting a tag the code
+    stopped emitting: if `PROBE-WRITE` disappears from the probe, the README requirement here
+    must be revisited rather than silently satisfied.
+    """
+    probe_src = PROBE.read_text(encoding="utf-8")
+    assert "PROBE-WRITE" in probe_src, (
+        "the probe no longer emits PROBE-WRITE — revisit what `2` means before this pin "
+        "keeps requiring the README to document it")
+    readme = (REPO / "docs" / "evidence" / "11739-quote-population" / "README.md").read_text(
+        encoding="utf-8")
+    contract = re.search(r"Exit codes are the measurement's own guard rails.*?(?=\n\n)",
+                         readme, re.S)
+    assert contract, "the exit-code contract paragraph moved — repoint this pin"
+    text = contract.group(0)
+    assert "PROBE-WRITE" in text, (
+        "the README's exit contract does not name the `--out` arm: `2` reads as usage only")
+    # …and it must say which code the arm shares and WHERE the loss is, because "usage" sends
+    # the operator back to the arguments, which are not the problem.
+    assert re.search(r"`2`.*PROBE-WRITE", text, re.S), (
+        "PROBE-WRITE must be documented under `2`, not merely mentioned")
+    assert "not writable" in text
+
+
 def test_main_writes_the_artifact_and_records_its_cost(monkeypatch, tmp_path):
     """FAILS IF `main()` stops writing `--out`, or stops recording `duration_s` on the success
     path — which no test reached: the no-key case returns before it (review, attestation
@@ -920,6 +976,39 @@ def test_the_committed_census_records_its_own_cost():
     if head == "unknown":
         pytest.skip("recorded from a copy with no git")
     assert re.fullmatch(r"[0-9a-f]{40}", head), head
+
+
+def test_the_committed_census_page_arithmetic_is_consistent():
+    """FAILS IF `pages_walked` is hand-edited (or a walk's counter drifts) away from the rows
+    it reports reading.
+
+    The arithmetic was a filed follow-up — `ceil(rows_walked / page_size_final) ==
+    pages_walked` was stated in the README and unchecked — and it is the one pair a reader can
+    falsify from the artifact alone, because it needs no graph access. At a CONSTANT page size
+    the equality is exact; when the wait-budget ladder SHRANK the page mid-walk (`page_size_final
+    < page_size_start`) the walk read earlier pages at a larger size, so `pages_walked` is at
+    most (never more than) that quotient. Both halves are asserted, so a re-run either way
+    stays green while a tampered count reds.
+    """
+    import json
+    import math
+
+    census_path = qp.pathlib.Path(qp.__file__).with_suffix("").parent.parent / "census.json"
+    artifact = json.loads(census_path.read_text())
+    rows, pages = artifact["rows_walked"], artifact["pages_walked"]
+    final = artifact["page_size_final"]
+    assert isinstance(rows, int) and isinstance(pages, int) and isinstance(final, int)
+    assert final > 0 and rows > 0 and pages > 0
+    quotient = math.ceil(rows / final)
+    if artifact["page_size_start"] == final:
+        assert pages == quotient, (
+            f"{rows} rows at a constant {final}/page is {quotient} pages, artifact says {pages}")
+    else:
+        # A shrunk ladder read the earlier pages at LARGER sizes, so it can never need MORE
+        # pages than the final size implies.
+        assert pages <= quotient, (
+            f"{pages} pages > {quotient}: a shrunk ladder cannot cost more pages than the "
+            "final page size implies")
 
 
 def test_the_committed_census_was_produced_by_this_probe():

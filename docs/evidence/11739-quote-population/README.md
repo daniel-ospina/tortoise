@@ -148,6 +148,15 @@ population the composed text targets: **98.93% of embedded statements**.
   a Cypher-capable read or a per-entity walk. Named here rather than guessed.
 - **Quote presence ≠ quote quality.** Whether a 137-char verbatim span is a *good* embedding input is
   #10360's question (value fidelity 49.4% vs a 54.4% baseline) and is untouched by this census.
+- **The predicate counted is "non-empty AFTER whitespace collapse"** — `" ".join(value.split())`,
+  which is `tortoise/embed_compose.py::quote_text` byte-for-byte, i.e. **the composer's own arm
+  predicate**: `base = quote_text(quote)` then `if not base: base = content`. So 94.86% is exactly
+  "the share of live Points where the composer takes the quote arm rather than the `content`
+  fallback". A quote that is *present but equal to the title or `content`* still counts, and that
+  **stricter** figure ("carries a *useful* quote") is **not recomputable from this artifact**:
+  `census.json` carries no `content`/title field, so measuring it needs a probe change, which reds
+  the digest pin and forces a re-run. Read 94.86% as "carries a quote", never as "carries a useful
+  quote".
 
 ## Reproduce
 
@@ -165,12 +174,16 @@ count), and the per-page time varies with the graph's load. Read the artifact's 
 on the next re-run.
 
 Exit codes are the measurement's own guard rails, because a census that silently reports zero is
-worse than no census: `0` measured · `2` usage · `3` graph unreachable / no key / the query could not
-be read at any page size / a reply that parses but is not a JSON-RPC object (**never** read as 0%) ·
-`4` the page walk could not be proven complete (a short page with `hasMore=true`, a repeated id, a
-`results` list holding something that is not a row, or a walked count that disagrees with the reported
-`total`). The walk refuses to publish a count it cannot show is a partition of the order — the #5346
-loss class.
+worse than no census: `0` measured · `2` **usage, or the `--out` destination was not writable**
+(`PROBE-WRITE`) — the two share a code because both are the operator's own argument, but they are not
+the same event: a `PROBE-WRITE` means the graph WAS read and the walk succeeded, and the measurement
+was discarded by the destination, so nothing was published and re-running with the same arguments to
+the same path fails the same way. Fix the PATH, not the arguments · `3` graph unreachable / no key /
+a scheme-less endpoint / the query could not be read at any page size / a reply that parses but is
+not a JSON-RPC object (**never** read as 0%) · `4` the page walk could not be proven complete (a short
+page with `hasMore=true`, a repeated id, a `results` list holding something that is not a row, or a
+walked count that disagrees with the reported `total`). The walk refuses to publish a count it cannot
+show is a partition of the order — the #5346 loss class.
 
 Two bounded recoveries exist, both for the server's **wait budget** (a 2xx reply whose content is the
 *"wait budget … exceeded"* notice, i.e. the query did not run — it carries no rows, so neither recovery
