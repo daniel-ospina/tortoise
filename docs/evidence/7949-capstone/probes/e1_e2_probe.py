@@ -124,8 +124,10 @@ voided every run, so the floor the refusal existed to protect was never checked)
 ``prereg_binding`` therefore compares the artifact's corpus pin (path and/or
 sha256) and its three owned floors against THIS run — ``e1_objects`` on the scored
 arm's Objects, ``e1_min_before_share`` on the BEFORE arm's share (§3.2's refusal
-boundary) and ``e2b_surviving_units`` on the arm's ``atomic_points`` (the quantity
-both sibling consumers of that key also test) — prints the
+boundary) and ``e2b_surviving_units`` on the arm's ``real_facts`` — the surviving
+PLANTED units, which is the population the record's E2b row is written over
+(§3.1: *"the planted units that survived (floor ≥ 30)"*) and the same quantity
+both sibling consumers of that key test — prints the
 comparison on ``prereg-binding``, and refuses to score when they do not agree or a
 denominator is under its frozen floor (the artifact's own rule: *``below_floor:
 REFUSED, which is neither a pass nor a fail``*). Exit code 3, not RED: an unsound
@@ -175,6 +177,11 @@ BEFORE_ARM = "before"
 #: refused with `declared_surviving_floor=n/a` beside
 #: `floors_owned=…,e2b_surviving_units`).
 _ABSENT = object()
+
+#: A population BASIS name is one whitespace-free token: it is printed on the
+#: binding line (`surviving_units_basis=<token>`), whose grammar is `key=value`
+#: pairs, so a name carrying a space or `=` would break every reader of the log.
+_BASIS_RE = re.compile(r"[A-Za-z0-9_.:-]+")
 
 #: The E1 numerator, restated from the architecture document (§1:85): a
 #: definite description is an Object whose name begins with `the `. The
@@ -785,9 +792,36 @@ def _declared_metric_floor(
     return (raw, raw)
 
 
+#: The census field E2b's population floor is scored over. ONE name, and both the
+#: operand and the printed disclosure are derived from it, so the log cannot name
+#: a population the binding was never handed (#11833 review P2-2: the token used to
+#: be a literal inside the f-string, which made "auditable from the log" a
+#: constant). `tools/e1_e2_census_check.py` V15 refuses any other basis by name.
+_E2B_FLOOR_POPULATION = "real_facts"
+
+
+def _basis_token(basis: object) -> str:
+    """A basis name as ONE whitespace-free log token, or refuse it.
+
+    The basis is code-supplied, never read from the artifact, so this is not a
+    hostile-payload escape like :func:`_floor_number` — it is a fail-closed guard
+    against a future caller interpolating a string that would break the binding
+    line's `key=value` grammar or smuggle one of its own vocabulary words into it.
+    A basis the log cannot carry is refused, never printed.
+    """
+    if not isinstance(basis, str) or not basis:
+        raise TypeError(
+            f"`surviving_units_basis` is {basis!r}, not a non-empty string")
+    if not _BASIS_RE.fullmatch(basis):
+        raise ValueError(
+            f"`surviving_units_basis` is {basis!r} — a basis name is one "
+            "whitespace-free token")
+    return basis
+
+
 def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
                    objects: int, *, before_share: float | None,
-                   surviving_units: int) -> dict:
+                   surviving_units: int, surviving_units_basis: str) -> dict:
     """Does the frozen bar actually cover THIS run? (#9076, §4.4 fail-closed)
 
     A pre-registration binds a THRESHOLD to a POPULATION. A probe that reads the
@@ -807,13 +841,17 @@ def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
     * ``BELOW_FLOOR`` — the corpus agrees but the run's denominator is under one of
       the artifact's own owned floors (``e1_objects``, or — since #11689, and CHECKED
       rather than merely printed — ``e1_min_before_share`` on the control arm and
-      ``e2b_surviving_units`` on the arm's ``atomic_points``). The artifact's rule is
+      ``e2b_surviving_units`` on the arm's surviving PLANTED units, ``real_facts``
+      — #10989). The artifact's rule is
       ``below_floor: REFUSED, which is neither a pass nor a fail``, so a 25-Object
       run under a 30-Object floor may not be reported RED either.
 
-    ``before_share`` and ``surviving_units`` are REQUIRED keyword arguments, not
-    defaults: a caller that forgets one would silently skip a floor this probe owns,
-    which is the fail-open the owned set exists to close (#11689).
+    ``before_share``, ``surviving_units`` and ``surviving_units_basis`` are
+    REQUIRED keyword arguments, not defaults: a caller that forgets one would
+    silently skip a floor this probe owns, which is the fail-open the owned set
+    exists to close (#11689) — and the basis is what makes the printed
+    `surviving_units_basis=` token an OPERAND of this call rather than a constant
+    in the emitter (#11833 review P2-2).
 
     ``status`` is ``MATCHED`` only when a pin exists, it agrees, and no floor is
     violated. Everything else means the artifact and the run are about different
@@ -934,9 +972,13 @@ def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
     if declared_before is not None and (
             before_share is None or before_share < float(declared_before)):
         reasons.append("below-floor")
-    # E2b's population floor, on the SAME quantity the row's floor tests
-    # (`atomic_points`) — a second population for one frozen key would let a run the
-    # E2b row refuses bind here (#11689 review).
+    # E2b's population floor, on the SAME quantity the row's floor tests — the
+    # surviving PLANTED units (`real_facts`). ⛔ NOT `atomic_points`: that counts
+    # every payload point, planted or not, so a corpus of 25 non-planted rows plus
+    # 6 planted ones clears a floor of 30 while 84 of the 90 planted units are gone
+    # (measured, #10989). The record already says which population it means (§3.1:
+    # "the planted units that survived (floor ≥ 30)"); the binding read the
+    # wrong one.
     declared_surviving = metric_floors.get("e2b_surviving_units")
     if declared_surviving is not None and (
             surviving_units < int(declared_surviving)):
@@ -980,6 +1022,10 @@ def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
                 f"{type(floors_declared).__name__}, not an object"),
             "surviving_floor_error": metric_errors.get("e2b_surviving_units"),
             "surviving_units": surviving_units,
+            #: WHICH population `surviving_units` is. Carried on the binding and
+            #: rendered by :func:`binding_line`, so the line states an OPERAND of
+            #: this call rather than a constant in the emitter (#11833 P2-2).
+            "surviving_units_basis": _basis_token(surviving_units_basis),
             "corpus": corpus_path.name, "corpus_sha256": corpus_sha256,
             "objects": objects}
 
@@ -1029,6 +1075,16 @@ def binding_line(bind: dict) -> str:
             f"before_share={_fmt(bind['before_share'])} "
             f"declared_surviving_floor={_floor_number(bind['declared_surviving_floor'])} "
             f"surviving_units={bind['surviving_units']} "
+            # WHICH population the floor's measured side is, printed rather than
+            # left to prose: the key's name ("surviving units") and the quantity
+            # the gate reads have to be checkable against each other, and a gate
+            # whose population is only in a docstring is one a future reader can
+            # re-point silently (#10989).
+            # ⛔ READ OFF THE BINDING, never a literal. A hardcoded token cannot
+            # disagree with the operand it describes, so the disclosure would be
+            # a docstring emitted into the log — always readable, never
+            # checkable (#11833 review P2-2).
+            f"surviving_units_basis={bind['surviving_units_basis']} "
             f"reason={','.join(bind['reasons']) or 'n/a'}")
 
 
@@ -1271,14 +1327,25 @@ def _run(argv: list[str] | None = None) -> int:
                                   # them cannot honour the floor (#11689).
                                   before_share=before_c["share"],
                                   # E2b's POPULATION, and deliberately the quantity
-                                  # the row's own floor already tests: the bundle's
-                                  # sibling consumers (`probes/capstone_measure.py`,
+                                  # the row's own floor tests: the bundle's sibling
+                                  # consumers (`probes/capstone_measure.py`,
                                   # `probes/e1_e2_scores.py`) both compare
                                   # `e2b_surviving_units` against the arm's
-                                  # `atomic_points`. A third population for one frozen
-                                  # key would let a run the E2b row REFUSES bind here
-                                  # (#11689 review) — one key, one denominator.
-                                  surviving_units=after_c["atomic_points"])
+                                  # surviving planted units, `real_facts`. A second
+                                  # population for one frozen key would let a run the
+                                  # E2b row REFUSES bind here — one key, one
+                                  # denominator (#11689 review).
+                                  # ⛔ `atomic_points` was that wrong population: it
+                                  # counts every payload point, so non-planted rows
+                                  # padded a floor the E2b row is written over
+                                  # surviving PLANTED units (#10989, measured: 25
+                                  # non-planted + 6 planted cleared a floor of 30
+                                  # with 84 of 90 planted units lost).
+                                  # …and the disclosure derives from the SAME
+                                  # name, so the operand and the printed basis
+                                  # cannot diverge (see _E2B_FLOOR_POPULATION).
+                                  surviving_units=after_c[_E2B_FLOOR_POPULATION],
+                                  surviving_units_basis=_E2B_FLOOR_POPULATION)
             declared_line = f"prereg_declared={args.prereg}"
             bind_line = binding_line(bind)
             try:
@@ -1314,7 +1381,8 @@ def _run(argv: list[str] | None = None) -> int:
     # threshold the pre-registration states — so no E2 criterion number is consumed,
     # and that is said rather than implied. E2b's POPULATION floor is a different
     # quantity and IS consumed, on the binding line (#11689): it is checked against
-    # the scored arm's atomic Points, so leaving that floor unread while claiming "any
+    # the scored arm's surviving PLANTED units (`real_facts`), so leaving that floor
+    # unread while claiming "any
     # stated floor" is satisfied would be the fail-open the line exists to rule out.
     #
     # The clause is THREE-WAY, because "no E2b floor was checked" has three different
@@ -1351,9 +1419,18 @@ def _run(argv: list[str] | None = None) -> int:
         e2b_note = ("E2b's population floor is separate and the pre-registration "
                     "this run bound to declares none, so there is none to check")
     else:
+        # ⛔ The basis name is interpolated from the ONE constant — here AND in the
+        # parenthetical below, which used to spell `real_facts` a second time: a
+        # prose copy can drift from the operand while the interpolated token cannot,
+        # and this sentence is emitted on a DIFFERENT line (`prereg_e2_floor=`),
+        # which is exactly how a copy of the token made the emitter's own disclosure
+        # pin vacuous (#11833 review P2-1/P2-2, r1 P2-3).
         e2b_note = ("E2b's population floor is separate and IS checked against the "
-                    "scored arm's atomic Points on the binding line "
-                    "(declared_surviving_floor=)")
+                    "scored arm's surviving PLANTED units "
+                    f"(`{_E2B_FLOOR_POPULATION}`) on the "
+                    "binding line (declared_surviving_floor= / surviving_units= "
+                    f"surviving_units_basis={_E2B_FLOOR_POPULATION}) — not against "
+                    "`atomic_points`, which counts non-planted rows too (#10989)")
     lines.append(
         "prereg_e2_floor=not-consumed note=the E2 criteria state no threshold to "
         "score (no-loss: after >= before), which satisfies any stated threshold; "

@@ -70,7 +70,7 @@ first attributed: ``extract_session_v2`` built the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:14586-14592`` and
 ``result["vet"]`` at ``:14596-14600``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
-``_capture_stats_with_step_witness`` (``tortoise/sdk.py:17484``), which copies each
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:17732``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
 this module READS that seam (:func:`_witness_block`) instead of citing the gap. A
 run measured at a stamp BEFORE the seam still reports S2.2/S2.3 unobserved, and
@@ -278,7 +278,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2832-2857``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:17882`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:18130`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -553,7 +553,7 @@ SEAM_LEDGER = (
 
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
-#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2530`` — turn
+#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2539`` — turn
 #: rows carry ``is_episodic=true``, ``is_operator=false`` and are wired only by
 #: ``CONTAINS``), ``is_operator`` by the operator writers, and an
 #: ``extractedFrom`` edge by the extraction projection.
@@ -3302,7 +3302,7 @@ def _a4_pointkind(projection) -> dict:
     `projection/entities.py:2898`, which leaves the property ABSENT instead) is ABSENT, not typed;
     and **capture rows** are
     not claims — turn rows carry `pointKind='event'`: the row dict is written with `"k": "event"`
-    and lands through the capture path's turn writer `_TURN_WRITE_CYPHER` (`tortoise/sdk.py:2530`)
+    and lands through the capture path's turn writer `_TURN_WRITE_CYPHER` (`tortoise/sdk.py:2539`)
     inside `_write_capture_turns` — and 159 of
     the committed run's 354 Points are turn rows (`capstone-measured-9152448d.log:73`), so counting
     them read ~45% "typed" against the owner's 0.6% ceiling. The excluded populations are COUNTED
@@ -4274,7 +4274,12 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         f"bar={e2b_out['bar']}")
     add(f"e2b note: fused={e1['fused']} of atomic={e1['atomic_points']} Points on "
         "the scored arm — the artifact's atomicity control, whose denominator is "
-        "atomic POINTS rather than surviving planted units")
+        "atomic POINTS rather than surviving planted units. The POPULATION FLOOR "
+        f"({bars['floors']['e2b_surviving_units']}) is checked against surviving "
+        "PLANTED units "
+        f"(real_facts={e1['real_facts']}), which is the population the row is "
+        "written over — not against atomic POINTS, which count non-planted rows "
+        "too (#10989)")
     add("")
     add("## E4 — the committed operator receipt, read verbatim")
     add(f"e4 receipt={e4['evidence']} run_id={e4['run_id']} date={e4['date']} "
@@ -4580,11 +4585,17 @@ def main(argv: list[str] | None = None) -> int:
     e2b_floor = bars["floors"]["e2b_surviving_units"]
     e2b_share = ((e1["fused"] / e1["atomic_points"])
                  if e1["atomic_points"] else 1.0)
+    # ⛔ The floor's population is the surviving PLANTED units (`real_facts`),
+    # which is what the record's §3.1 E2b row is written over — never
+    # `atomic_points`, which counts non-planted rows too and so let a run that lost
+    # 84 of 90 planted units clear the floor of 30 (#10989). Read from the SAME
+    # record field `e1_e2_scores.py` tests the key against, so the two readers of
+    # one frozen key agree on its population.
     e2b_result = outcome(measured=True,
-                         below_floor=e1["atomic_points"] < e2b_floor,
+                         below_floor=e1["real_facts"] < e2b_floor,
                          passed=e2b_share <= bars["E2b"]["max_fused_share"],
                          bar=f"fused share <= {bars['E2b']['max_fused_share']} "
-                             f"(floor {e2b_floor} surviving units)",
+                             f"(floor {e2b_floor} surviving planted units)",
                          value=f"fused={e1['fused']}/{e1['atomic_points']} = "
                                f"{e2b_share:.6f}")
     e2_result = e2_outcome(e2a_result=e2a_result, e2b_result=e2b_result,
