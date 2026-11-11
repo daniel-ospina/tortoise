@@ -497,10 +497,9 @@ def refuse_malformed_money_in_payload(payload, *, door: str = "") -> None:
     refusal is about one, so a writer that hits it can act on it.
 
     ⚠️ THE DEPTH REFUSAL IS NOT ABOUT A MONEY VALUE, and its message must not
-    pretend otherwise: the walk refuses a payload it could not finish reading
-    EVEN WHEN that payload carries no money at all (#11836 review P3). It says
-    what it measured (the depth) and what it could not do (see inside), never a
-    member it never found.
+    pretend otherwise: it fires on the SHAPE stated above, so it can refuse a
+    payload that carries no money at all. It says what it measured (the depth)
+    and what it could not do (see inside), never a member it never found.
     """
     seen: set[int] = set()
     stack: list[tuple[object, int]] = [(payload, 0)]

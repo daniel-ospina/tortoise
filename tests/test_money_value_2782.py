@@ -1749,8 +1749,10 @@ class TestThePayloadWalkFailsClosedAtItsDepthBound:
         walk never ran".
 
         ⛔ The depth is a FIXED literal, never ``_MONEY_PAYLOAD_MAX_DEPTH - n``:
-        a payload derived from the constant TRACKS the bound, so tightening the
-        bound could never red this test. Measured on the MERGED head (before
+        a payload derived from the constant TRACKS the bound, so for any bound
+        of 1 or more, tightening the bound could never red this test. (At a
+        bound of 0 the derived payload stops being degenerate — every payload
+        is past it — so the scoping is stated rather than assumed.) Measured on the MERGED head (before
         this change), with the bound set to 2: THIS test still passed — its
         payload was ``MAX - 2``, i.e. zero levels at a bound of 2 — while its
         sibling ``test_a_cyclic_sequence_is_cut_by_identity_not_by_the_depth_bound``
