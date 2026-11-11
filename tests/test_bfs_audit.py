@@ -60,12 +60,13 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
 
     ``None`` means the file could not be read or parsed, and the caller reads it
     as "every line is code" — a degraded read can only make the audit STRICTER.
-    A non-``.py`` path under ``tortoise/`` has no Python identifiers at all, so it
+    A non-Python path under ``tortoise/`` has no Python identifiers at all, so it
     answers the empty set rather than failing to parse: prose in a ``.md`` or
     ``.sql`` file is prose, and reading it as a caller is the false positive this
-    change removes.
+    change removes. ⛔ ``.pyi`` is Python, not prose — a stub is the file whose
+    whole job is declaring and re-exporting names, so it is parsed like ``.py``.
     """
-    if path.suffix != ".py":
+    if path.suffix not in {".py", ".pyi"}:
         return frozenset()
     try:
         src = path.read_text(encoding="utf-8")
@@ -107,6 +108,20 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
             and name in node.value
             and id(node) not in docstrings
         ):
+            _add(node)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            # ⛔ `from m import propagate_shock as _ps` carries the name as an
+            # `ast.alias`, whose `name`/`asname` are plain str fields — it is NOT
+            # an `ast.Name`, `ast.Attribute` or `ast.Constant`, so every arm
+            # above missed it and the import line was filed as PROSE. Once the
+            # name is rebound, the use site is `_ps(...)`, which no arm matches
+            # either, so an aliased import made a real caller read GREEN — a
+            # regression against the text matcher this change replaces, and the
+            # exact line a deprecation shim restoring the path would write.
+            for _a in node.names:
+                if _a.name == name or _a.asname == name:
+                    _add(_a)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)) and name in node.names:
             _add(node)
     return frozenset(lines)
 
@@ -160,6 +175,11 @@ def test_the_code_detector_sees_every_shape_it_claims(tmp_path):
             'value = builtins.getattr(m, "propagate_shock")(1)\n', {1}),
         "string_subscript_dynamic": ('value = globals()["propagate_shock"](1)\n', {1}),
         "string_in_eval": ('value = eval("propagate_shock(1)")\n', {1}),
+        # ── the name as an IMPORT binding: `ast.alias` is an identifier, not an
+        # expr, so it is neither a Name nor an Attribute ──
+        "import_plain": ("from m import propagate_shock\n", {1}),
+        "import_aliased": ("from m import propagate_shock as _ps\n", {1}),
+        "global_statement": ("def f():\n    global propagate_shock\n", {2}),
         # ── multi-line callee: the name is NOT on `node.lineno` ──
         "chained_multiline": (
             "value = (\n    _BASE\n    .strip()\n    .propagate_shock(1)\n)\n", {4}),
@@ -192,12 +212,20 @@ def test_the_code_detector_sees_every_shape_it_claims(tmp_path):
 def test_the_code_detector_ignores_prose_outside_python_files(tmp_path):
     """A `.md`/`.sql` file under `tortoise/` cannot carry a Python identifier, so
     its mention is prose. Reading it as a caller was a declared-shape violation:
-    it never parses, so it fell to the `None` arm and the whole file counted."""
+    it never parses, so it fell to the `None` arm and the whole file counted.
+
+    ⛔ `.pyi` is NOT in that set: a stub declares and re-exports names, so it is
+    parsed like `.py` and a re-export in it is code."""
     for suffix in (".md", ".sql", ".txt", ".yml"):
         path = tmp_path / f"notes{suffix}"
         path.write_text("The deprecated helper propagate_shock is documented here.\n",
                         encoding="utf-8")
         assert _code_lines_naming(path, "propagate_shock") == frozenset(), suffix
+
+    stub = tmp_path / "stub.pyi"
+    stub.write_text("from tortoise.projection.propagation import propagate_shock as _ps\n",
+                    encoding="utf-8")
+    assert _code_lines_naming(stub, "propagate_shock") == frozenset({1}), "stub.pyi"
 
 
 def test_the_code_detector_is_fail_closed(tmp_path):
