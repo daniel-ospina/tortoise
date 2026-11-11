@@ -83,16 +83,23 @@ BLOCK_MAX_BYTES = 8 * 1024
 #     with ``ep_state: "absent"``;
 #   * a #2199 DECLARED baseline is ALSO unmeasured
 #     (``measured = bool(has_ep)``, search_engine.py:5490) yet answers its OWN
-#     declared prior mean — 0.75 for the Beta(3,1) system default, 0.6667 for
-#     an author ``credibility='low'`` prior (``TIER_PRIORS``,
-#     source_credibility.py) — unless a readable ``n.confidence`` mirror
-#     supplies the value, which LEADS it, and
+#     declared prior mean — 0.75 for the Beta(3,1) system default, 0.7561 for
+#     that default plus an author ``credibility='low'`` word, 0.5238 for the
+#     word alone on a claim with no #2199 default — unless a readable
+#     ``n.confidence`` mirror supplies the value, which LEADS it, and
+#   * a DECLARED but DEGENERATE prior (a 0/0 or negative-operand pair, e.g.
+#     ``set_point_baseline(claim, 0, 0)``) yields no mean at all and reads
+#     ``absent`` / ``None`` even with ``baseline_set`` — it is the first shape,
+#     not this one, and
 #   * a mirror-only claim is also unmeasured yet reads the mirror's value.
 # Substituting a Beta(1,1) mean for the first shape is the defect that issue
 # removes; calling the first shape "the unmeasured case" is the defect this
 # note corrects. See ``ranking.py``'s note where its own copy was deleted, and
 # ``_eligible`` below, which states the same rule with its no-mean shapes
-# enumerated.
+# enumerated. ⛔ The ``credibility`` word is a validated LABEL plus ONE weak
+# evidence body (``AUTHOR_ASSERTION_WEAK_PC``, #398 owner ruling 2026-10-12) —
+# it does NOT select a ``TIER_PRIORS`` rung, so ``credibility='low'`` is
+# Beta(3.1,1) on the default, not the T3 ladder prior.
 # This 0.5 only bounds how far below the caller's floor a CONFLICT-RELEVANT
 # claim may sit while still being boosted; it is compared against a real mean.
 NEUTRAL_CONFIDENCE = 0.5

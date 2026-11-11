@@ -5339,7 +5339,7 @@ def test_update_entity_clearing_the_pair_clears_the_mirror(sdk, tmp_path):
 #
 # The check is a PROXIMITY one on normalised prose: a qualifier must follow its
 # claim within the same sentence, so a paragraph that mentions the mirror for a
-# DIFFERENT shape does not satisfy it (that is how `:345` passed every earlier
+# DIFFERENT shape does not satisfy it (that is how `:347` passed every earlier
 # review). It is a regression tripwire on the class, not a grammar proof.
 #
 # Scope: the five modules that carry this contract. The architecture docs are
@@ -5356,8 +5356,10 @@ _BELIEF_PROSE = (
 
 #: How far after a claim its qualifier may sit for the SCAN to find it. This is
 #: not what enforces "same sentence": some sentences in these modules run past
-#: 300 characters once whitespace is collapsed (measured: 331 of 1,485 sentence
-#: splits in `search_engine.py`), so a window alone can span several sentences.
+#: 300 characters once whitespace is collapsed (measured on this head: 390 of
+#: 1,022 `search_engine.py` sentences run past 300 characters under this guard's
+#: own splitter, 333 of 1,486 under a plain ``(?<=[.!?])\s+``), so a window
+#: alone can span several sentences.
 #: `_claim_sentence` cuts at the first sentence boundary; this bound only keeps
 #: the scan cheap.
 _QUALIFIER_WINDOW = 300
@@ -5484,7 +5486,15 @@ _MIRROR_RESTRICTIONS = re.compile(
     r"|\bafter the pair\b"
     r"|\blast\b"
     r"|\bignored\b"
-    r"|\bnot consulted\b",
+    r"|\bnot consulted\b"
+    # DIRECTION-AMBIGUOUS verbs: "takes precedence"/"overrides"/"wins" appear on
+    # `_QUALIFIER_VERB` because they state the TRUE rule when the MIRROR is the
+    # subject — so the same words must be a veto when the PAIR is, or the guard
+    # treats the word as proof of the direction. Measured defeats:
+    # "…supplies the value — but the pair takes precedence" and
+    # "…which the α/β pair then OVERWRITES" both passed before this.
+    r"|(?:pair|posterior|α/β|alpha/beta|mean)\s+"
+    r"(?:then\s+)?(?:takes\s+precedence|overwrites?|overrides|wins|supersedes)",
     re.IGNORECASE,
 )
 
