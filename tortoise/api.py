@@ -239,6 +239,23 @@ class EventAPI:
         # SOURCE — refusing at replay would make an already-committed record
         # unfoldable, which is strictly worse than reproducing it.
         refuse_malformed_money(event, door=f"EventAPI.{type_}")
+        # ⛔ THE FLAT BAG IS NOT THE WHOLE PAYLOAD (review P1, measured).
+        # `add_point` / `add_operator` NEST the caller's props: `p.update(fields)`
+        # then `_emit("PointAdded", point=p, …)`, so a money value arrives under
+        # `point=` and the flat gate above never sees it. Measured before this
+        # line existed: `EventAPI(...).add_point(content, prov,
+        # amountMinor=25_000_000)` was ACCEPTED, wrote
+        # `{amountMinor: 25000000, currency: None, minorUnitExponent: None}`
+        # durably onto the node, and SURVIVED `rebuild_all` — while the same bag
+        # through `add_object` / `add_event` (which splat their props flat) was
+        # refused. Same seam, same ordering, one nesting level over: the gate is
+        # applied to the nested payload here rather than in `add_point`, so a
+        # door added tomorrow that nests its props is covered by the funnel too,
+        # which is the argument this gate exists for.
+        _nested_point = event.get("point")
+        if isinstance(_nested_point, dict):
+            refuse_malformed_money(_nested_point,
+                                   door=f"EventAPI.{type_}(point)")
         # #9190: the append REPORTS the record's journal position, and that
         # number is the record's `journal_event.seq`. Dropping it here is what
         # kept layer 1 empty on live writes (the row was deferred with a

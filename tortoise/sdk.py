@@ -66,7 +66,11 @@ from .ids import ulid
 # (no cycle), and it is already loaded via `value_normalizer` below — importing
 # the predicate here is what lets the one props intake refuse a value the
 # reader would refuse, instead of it becoming durable state.
-from .money import refuse_malformed_money
+from .money import (
+    MONEY_VALUE_FIELDS,
+    money_view_after_update,
+    refuse_malformed_money,
+)
 # #2817: the S5 money derivation (prose → typed value). Module scope because the
 # capture seam's `warn_on` narrowing below is derived from the CLOSED
 # `DROP_REASONS` vocabulary at import time, so a renamed reason fails here
@@ -6464,7 +6468,7 @@ _NARRATIVE_LABELS: frozenset = frozenset({"Event", "Source", "Document"})
 def _sanitize_props(props: dict, *, reject_id: bool = False,
                     reject_belief_props: bool = False,
                     reject_claim_class: bool = False,
-                    update: bool = False) -> dict:
+                    money_views: list[dict] | None = None) -> dict:
     """#329: reject server-managed fields on tenant write surfaces.
 
     ``sourcePath``/``source_path`` are server-filesystem fields consumed by the
@@ -6516,6 +6520,37 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     ``baseline_system_default``/``_stub``. Both spellings are refused, the same
     way ``sourcePath``/``source_path`` are above: one class under a second name
     is how a later reader comes to treat one of them as a third state.
+
+    ``money_views`` (#2782): the MONEY group (``amountMinor``, ``currency``,
+    ``minorUnitExponent``, ``verbatim``, ``asOf`` — ``money.MONEY_VALUE_FIELDS``)
+    is a structural VALUE, not five reserved names, so the money members are NOT
+    refused here — they are GRADED, against the state the write leaves.
+    ``None`` (the default) means the caller's bag IS that state (a CREATE); the
+    two UPDATE doors pass the merge built by ``_money_views_for_update``
+    (``stored`` ∪ ``props``, a ``None`` value deleting), one view per matching
+    node. This kwarg exists because a bag is not a state: grading the bag refused
+    `update_point(id, amountMinor=…)`, which restates nothing it needs, and
+    ADMITTED `update_point(id, currency=None)`, which deletes the currency from
+    a well-formed value — the poisoning the gate exists to prevent (#11836).
+    The two directions are pinned in ``tests/test_money_value_2782.py``.
+
+    What a tenant will therefore MEET (measured on this change, not inferred):
+    a money member that is PRESENT-but-partial is refused only when the merged
+    result is unreadable. `update_entity(id, amountMinor=…)` and
+    `update_entity(id, currency="USD")` on a well-formed carrier are ADMITTED —
+    the result is a complete readable value, so the caller is asking for a new
+    amount, or for the SAME minor units under another code, and re-denominating
+    at the value's own scale is that caller's intent to state. What IS refused
+    is either a state the READER cannot read — a member deleted out of a
+    carried value (half a value), a mis-scaled exponent, a float or
+    out-of-domain amount, an inactive or lowercase code — or, BEYOND the
+    reader's checks, a malformed ``verbatim``/``asOf`` on a value that carries
+    money. That second class is deliberately stricter than the reader, which
+    never looks at those two members (``money._validate_present_optional_fields``
+    states why the read side stays lenient). `currency=None` on a carrier is
+    caught because it LEAVES that half value, not because the bag "looks
+    partial": deleting all five members together leaves no money and is
+    admitted.
     """
     props = dict(props)
     # #2600: reserved actor keys are STRIP-AND-IGNORE (never a 4xx — the
@@ -6577,15 +6612,19 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # dropping it would let the caller believe the amount took (the same reason
     # `cache_tier` below is refused rather than dropped).
     #
-    # `update=` says which DOOR this bag is for, not which verb: an update
-    # MERGEs onto a node that already carries the rest of the value, so the two
-    # shapes that satisfy a bag-shaped reader while breaking the stored value
-    # (an explicit `None`, which `SET n += $props` turns into a DELETE, and a
-    # lone `minorUnitExponent`, which cannot be scale-checked without the
-    # stored currency) are refused there and ONLY there — see
-    # `money.refuse_malformed_money`'s docstring, and the residual it states
-    # for the create doors' own MERGE-ON-MATCH arm.
-    refuse_malformed_money(props, door="props", on_update=update)
+    # WHICH view is graded is the caller's, and it must be the state the write
+    # LEAVES: a CREATE passes nothing and the bag is the state, while an UPDATE
+    # carries `money_views` built by `_money_views_for_update` (stored ∪ props,
+    # a `None` value deleting). Grading an update on the bag alone was measured
+    # both ways at #11836 — it ADMITTED `update_entity(id, currency=None)`,
+    # which removes the currency from a well-formed value and makes
+    # `total_minor` refuse the whole set, and it REFUSED the harmless
+    # `update_entity(id, amountMinor=…)`, which needs no restated currency.
+    if money_views is None:
+        refuse_malformed_money(props, door="props")
+    else:
+        for _view in money_views:
+            refuse_malformed_money(_view, door="props")
     for key in ("sourcePath", "source_path"):
         if key in props:
             raise ValueError(
@@ -9981,6 +10020,64 @@ def _stored_bound(*values: object) -> object:
         if value is not None:
             return value
     return ""
+
+
+def _money_views_for_update(g, props: dict, *, node_id: str,
+                           label: str = "") -> list[dict] | None:
+    """#2782: the money views an UPDATE leaves behind, for ``_sanitize_props``.
+
+    Returns ``None`` when the caller's bag names no money member — the gate is
+    then a no-op and no extra read is spent. Otherwise it returns one merged
+    view per matching node (``stored`` ∪ ``props``, a ``None`` value DELETING,
+    the ``SET n += $props`` contract), so the door grades what the node will
+    actually hold: a half value is refused, a complete edit that restates
+    nothing is admitted, and a deliberate three-key delete leaves no money and
+    is admitted.
+
+    The PREDICATE stays the one home — ``refuse_malformed_money``, the same
+    rule the create doors and the reader use. This helper only decides which
+    STATE it is shown, because a bag is not a state: measured at #11836,
+    grading the bag ADMITTED ``update_entity(id, currency=None)`` (which strips
+    the currency from a well-formed value and makes ``total_minor`` refuse the
+    whole set) while REFUSING ``update_entity(id, amountMinor=…)``, which needs
+    no restated currency.
+
+    EVERY matching node is graded, not just the first: the writers MATCH the id
+    and stamp in one query, so a first-row-only read could pass the gate and
+    still leave a malformed value on a duplicate (the fan-out
+    ``_refuse_inverted_point_window`` loops over). A bag carrying money with no
+    matching node is graded on the bag alone — nothing is stored, so the bag is
+    the state, exactly as the create door treats it.
+
+    ``label`` is the caller's own constant (``":Point"`` from ``update_point``,
+    empty from ``_update_entity``), never caller input, and ``node_id`` is a
+    query PARAMETER. ``_update_entity`` deliberately passes NO label: it is the
+    documented tenant route onto every carrier, and a label here would have to
+    enumerate them (Object/Event/Point/Subject, plus any future carrier) — a
+    wrong guess is a HOLE (money on an unlisted label escapes the gate), while
+    the unlabelled scan is only slower. The scan is paid only by a bag that
+    names a money member.
+
+    STATED RESIDUAL: ``{id:$id}`` is NARROWER than the write's own key
+    discipline. This door reaches a node by its PRIMARY key then its SECONDARY
+    one (``_label_reachable_by``; e.g. ``Event``→``eventId``,
+    ``Source``→``url``), so a carrier reachable ONLY by a secondary key would
+    be graded on the bag alone. Measured clear on this change's tree: every
+    money-bearing creator stamps ``id`` as well (``create_event`` writes both
+    ``id`` and ``eventId``), so the id probe finds the node the write touches.
+    If a future creator mints a money carrier without ``id``, widen this probe
+    with it — do not drop the grading.
+    """
+    if not any(key in props for key in MONEY_VALUE_FIELDS):
+        return None
+    rows = g.query(
+        f"MATCH (n{label} {{id:$id}}) RETURN properties(n)",
+        params={"id": node_id},
+    ).result_set
+    if not rows:
+        return [money_view_after_update({}, props)]
+    return [money_view_after_update(stored or {}, props)
+            for (stored,) in rows]
 
 
 def _refuse_inconsistent_validity_precision(g, props: dict, *,
@@ -18644,10 +18741,17 @@ class TortoiseSDK:
         # away from true, which is the defect #5475 is about.
         self._refuse_unapproved_kinds_in_props(props)
         # #329: id mutation + server-managed fields rejected
+        # #2782: an UPDATE is graded on the money state it LEAVES, not on the
+        # bag — `SET n += $props` DELETES a key whose value is null, so
+        # `update_point(id, currency=None)` would otherwise strip the currency
+        # from a well-formed value and make `total_minor` refuse the whole set
+        # while passing a "carries no money" gate.
         props = _sanitize_props(props, reject_id=True,
                                 reject_belief_props=True,
                                 reject_claim_class=True,
-                                update=True)  # #2782: an UPDATE is a MERGE
+                                money_views=_money_views_for_update(
+                                    proj.g, props, node_id=id,
+                                    label=":Point"))
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
         # #11239: same rule at the UPDATE door. Idempotent — a value already in
@@ -43638,10 +43742,18 @@ class TortoiseSDK:
         # not be pushed into the guard's "undeclared" set — see the subtraction
         # where that set is built below.
         # #329: id + sourcePath/source_path are server-managed — reject
+        # #2782: same rule at this door as at ``update_point`` — the money gate
+        # is shown the STATE the write leaves (stored ∪ props, `None` deleting),
+        # never the bag alone. No label is passed: this is the documented tenant
+        # route onto every carrier, and the probe's own residual (it matches the
+        # primary key only, while this door also reaches a node by its secondary
+        # key) is stated on `_money_views_for_update`.
         props = _sanitize_props(props, reject_id=True,
                                 reject_belief_props=True,
                                 reject_claim_class=True,
-                                update=True)  # #2782: an UPDATE is a MERGE
+                                money_views=_money_views_for_update(
+                                    self._get_proj().g, props,
+                                    node_id=id_val))
         # ── #5475 (residual): the UPDATE door onto every label ──
         # ``update_entity`` is the documented tenant route onto Object /
         # Subject / Event / Document / Source nodes, and each of those carries
