@@ -1158,6 +1158,14 @@ surfaces:
   # is exactly the PR that could silently drop the receipt. Same #2938
   # dual-membership convention as the two entries above.
   - test_capture_secret_redaction_4911.py
+  # #11808: the hosted capture receipt carries the relation link's accounting
+  # (`relation_write`: written/dropped/folded) and one advisory when a session
+  # named >= 2 entities and wrote no connection. DUAL-REGISTERED (also under
+  # `core`, where its primary entry carries the full rationale): the receipt is
+  # assembled in `tortoise/hosted_api.py`, which SELECTS the `api` surface, and
+  # a named-surface match REPLACES the `core` fallback — so a hosted_api.py-only
+  # PR must still run this guard. Same #2938 dual-membership convention.
+  - test_11808_capture_relation_receipt.py
   # #9350: the capture provenance stamp is JOURNALLED before its cache write,
   # and the hosted twin journals + replays the same four fields.
   # DUAL-REGISTERED (also under `core`, where its primary entry carries the
@@ -4070,6 +4078,20 @@ surfaces:
   # `TORTOISE_TEST_CARVE_OUT=1` verified green — NOT carve_out-registered, like
   # `test_source_version_extractedfrom_5038.py` above.
   - test_8501_capture_path_anchor.py
+  # #11808: the hosted capture receipt must carry the relation link's own
+  # accounting (`relation_write`: written/dropped/folded, from
+  # `tortoise/relation_write.py`, returned by `sdk.py:17435-17442` and read by
+  # the SDK receipt at `sdk.py:16093-16094`) — and must NUDGE a session that
+  # named >= 2 entities and connected none. This is the PRIMARY entry: the
+  # subject is the capture WRITE path, and `tortoise/relation_write.py` selects
+  # this surface while `tortoise/sdk.py` is a SHARED_MODULE (full matrix, so it
+  # needs no row of its own). The `api` row above is the dual registration that
+  # makes a `tortoise/hosted_api.py`-only PR run this guard, because a
+  # named-surface match REPLACES the `core` fallback (#2938). Hermetic apart
+  # from the lane container: 11 collected cases (9 functions; one parametrized
+  # x3) — 7 helper-level and 2 that drive the REAL `_capture_session_impl` with
+  # a canned extraction. NOT carve_out-registered.
+  - test_11808_capture_relation_receipt.py
   # #8444 (for epic #7949 E1/E3): the runner's report-only graph census — the
   # `:Object` count and `^the <X>` share E1 names, and the anchored/total counts
   # of the capture's derivation edges E3 names. Registered `core` because the
@@ -11442,6 +11464,7 @@ durations:
   test_capture_graph_ops.py: 5.6  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 3.7
   test_capture_redaction_sinks_5445.py: 0.3  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 0.1
   test_capture_secret_redaction_4911.py: 28.0  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 20.2
+  test_11808_capture_relation_receipt.py: 18.0  # #11808: LOCAL reading, not junit — 11 collected cases, whole-file wall 17.1 s on this box (8.98 s at 8 tests before the review fixes added the drop-wording and coercion cases). The weight covers 11 collected cases (9 functions; one parametrized x3) — 7 helper-level plus two that drive `_capture_session_impl` against a canned extraction on the private lane container; the container start is the `test_lane.py` harness, not this file. ⚠️ Replace from junit once a push-to-main sweep includes it: `tools/ci_timing.py --refresh-durations`.
   test_connection_url_redaction_5326.py: 0.4  # #5326: 23 tests (21 at the first cut; #5326 review added 2 that pin the authority-boundary leak). Local wall is fuzz- and box-dependent (~2.7-8 s), so the numeric value stays the pre-merge estimate; The registration is load-bearing in BOTH halves: the surface entry alone leaves durations coverage below the 90% floor and `tools/ci_selection.py --integrity` reds (#4348 trap — do not drop without re-deriving the floor at that head). The file is CPU-light (one 6,000-case in-process fuzz, no DB), so unlike the #4921 entry above it does NOT move much with box load. Refresh the value from the first post-merge run that includes it — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 0.2
   test_capture_validfrom_3945.py: 1.0  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 0.6
   test_ci_last_failed.py: 3.2  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.8
