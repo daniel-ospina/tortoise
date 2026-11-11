@@ -840,13 +840,14 @@ def test_survivor_count_not_matching_the_bullets_is_rejected(tmp_path, monkeypat
     on §7 to match it.
     """
     def to_three(t: str) -> str:
-        # ⛔ Target the sentence's LEAD-IN, not a phrase from its tail: the previous target quoted
-        # `the two bullets below`, so rewording the sentence made this replace a no-op and the arm
-        # died silently behind `_mutated`'s own "mutation did not change the document" assert
-        # (#11902 review). The lead-in is the same clause `SURVIVOR_RE` keys on.
+        # ⛔ Target the sentence's OPENING clause (`of the four survivors,`) — the clause
+        # `SURVIVOR_RE` keys on — not the qualifier that follows it: a target quoting
+        # `the two survivor bullets below` becomes a no-op as soon as that phrase is
+        # reworded, and the arm then dies behind `_mutated`'s own "mutation did not change
+        # the document" assert (#11902 review; the tool's own arm had this shape).
         return t.replace(
-            "survivors, the two survivor bullets below",
-            "survivors, the three survivor bullets below",
+            "of the four survivors,",
+            "of the four survivors, three are already re-measured, and",
             1,
         )
 
@@ -942,6 +943,11 @@ def test_measured_commit_not_ancestor_of_head_is_rejected(monkeypatch):
 
     def fake_run(cmd, *args, **kwargs):
         calls.append(list(cmd))
+        if "--is-shallow-repository" in cmd:
+            # A FULL clone — the only state in which status 1 certifies drift.
+            # `check_measured_commit` asks this AFTER a status-1 answer, so the
+            # stub has to answer it or the arm under test never completes.
+            return _Result(0, "false\n")
         if "rev-parse" in cmd:
             return _Result(0, "f70d884b7f51\n")
         return _Result(1)  # merge-base --is-ancestor: exit 1 == NOT an ancestor
@@ -950,6 +956,51 @@ def test_measured_commit_not_ancestor_of_head_is_rejected(monkeypatch):
     problems = flc.check_measured_commit(flc.read_doc(REPO), REPO)
     assert any("NOT an ancestor of HEAD" in p for p in problems), problems
     assert any("--is-ancestor" in cmd for cmd in calls), calls
+    assert any("--is-shallow-repository" in cmd for cmd in calls), calls
+
+
+def test_measured_commit_not_ancestor_is_unverifiable_in_a_shallow_clone(monkeypatch):
+    """FAILS when a shallow/grafted checkout's status-1 answer is read as DRIFT.
+
+    Reachable by running in a `--depth 1` clone, or in a DEEPENED shallow clone:
+    the pinned commit's object is present, so `rev-parse --verify` succeeds, but
+    the graft boundary cuts the walk and `merge-base --is-ancestor` exits 1 for a
+    REAL ancestor. That is the same status an unrelated tree produces, so the
+    answer cannot be told apart from a truncated walk — reporting it accuses a
+    correct page of "a cut it did not make", which is the false red
+    `_history_available()` already refuses to accredit the TEST with (#10356).
+
+    The sibling `tools/substrate_map_check.py` states the rule: ⛔ ONLY `False`
+    certifies drift. `git` is stubbed because a shallow pytest checkout cannot
+    manufacture a genuine graft (`--depth 1` produces an ABSENT object instead,
+    which dies earlier at `rev-parse --verify` and takes the same exit-2 path for
+    a different reason), so the stub is the only way to isolate THIS branch.
+    """
+    class _Result:
+        def __init__(self, returncode: int, stdout: str = "") -> None:
+            self.returncode, self.stdout, self.stderr = returncode, stdout, ""
+
+    # SECOND: this checkout is a FULL clone, so the real arm still certifies the
+    # shipped page rather than degrading to UNVERIFIED. Otherwise this fix would
+    # have turned a false red into a permanent `exit 2` on every box, which is its
+    # own kind of gate failure. Gated on history availability because the `test`
+    # jobs checkout at depth 1 — where this arm is inert by design (the same reason
+    # the two other ancestry assertions skip), while the stubbed half above runs
+    # everywhere.
+    if _history_available():
+        assert flc.check_measured_commit(flc.read_doc(REPO), REPO) == []
+
+    for state in ("true\n", ""):  # shallow, and an unanswerable probe
+        def fake_run(cmd, *args, **kwargs):
+            if "--is-shallow-repository" in cmd:
+                return _Result(0, state)
+            if "rev-parse" in cmd:
+                return _Result(0, "f70d884b7f51\n")
+            return _Result(1)  # a real ancestor, cut off by the graft boundary
+
+        monkeypatch.setattr(flc, "subprocess", SimpleNamespace(run=fake_run))
+        with pytest.raises(flc.Unverifiable):
+            flc.check_measured_commit(flc.read_doc(REPO), REPO)
 
 
 def test_unreadable_document_is_unverifiable(monkeypatch):

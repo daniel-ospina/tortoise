@@ -26,7 +26,7 @@ measured_at: 2026-11-12
 > the very fixes they motivated, three by a number or a tracker state that moved —
 > so a lane that trusted §7 today would believe the Point fold still
 > drops props (#2795 closed that), and would go looking for a defect that is gone.
-> Meanwhile **three of the seven research briefs §3 indexes have no in-repo mirror at
+> Meanwhile **three of the seven research briefs §4 indexes have no in-repo mirror at
 > all**, and the machine they lived on no longer carries them (§5).
 >
 > **What this page does NOT do.** It does not re-open a defect, propose a fix, or
@@ -313,21 +313,31 @@ skips in a depth-1 checkout is inert everywhere; the live ancestry claim is prov
 a stubbed-`git` case that needs no history. Two mechanisms, stated separately, because "the other job
 covers it" was true of the tool and false of the test.
 
-**Deliberately not checked:** the issue states in §6, the durability column in §4, every
-`~/.swarm` claim in §5, **§4's row population** and **§0's brief counts**. They are **dated
-readings of things outside this repository**, and a guard that asserted them would either fail on
-someone else's tracker or, worse, pass by not looking. This follows `SUBSTRATE-REBUILD-MAP.md`'s
-ruling: *the tracker half is deliberately not guarded — it is dated and its command is recorded.*
-The command for §6 is `gh issue view <N> --json state`, and it was run per issue, not sampled.
+The same stubbed-`git` case pins the **grafted/shallow counterpart**, which is the arm's only false-red
+direction: in a deepened shallow clone the pinned commit's object IS present (`rev-parse --verify`
+succeeds) while the graft boundary cuts the walk, so `merge-base --is-ancestor` exits **1** for a real
+ancestor — the same status an unrelated tree produces, and reading it as drift accuses a correct page of
+a cut it did not make (#10356). So **only** a `rev-parse --is-shallow-repository` of `false` may certify
+drift; `true` *and* an unanswerable probe both take **exit 2 UNVERIFIED**, never a verdict. That is
+`tools/substrate_map_check.py`'s rule, copied rather than invented.
 
-⚠️ **The last two are named because they were repaired by hand, and a guard would not have caught
-them (#11902).** §4's `14 rows ⇒ 15 artefacts` arithmetic and §0's `three of the seven research
-briefs` are derived from `#2852` §3 exactly as §6 is from the tracker, and the criterion above
-(*self-contained and therefore checkable*) applies to them equally — but as of this cut they are
-**not** machine-checked, and the arms were measured: deleting the `<corpus>/2026-09-09-
-ontology-evidence.md` row (so *"indexed 15 artefacts"* is false again) and reverting §0 to *"six of
-the eight"* both leave `--check` at exit 0 and the test file fully green. Read both as dated
-readings, and re-derive them from the issue before quoting them.
+**Deliberately not checked:** the issue states in §6, the durability column in §4, and every
+`~/.swarm` claim in §5. They are **dated readings of things outside this repository**, and a guard
+that asserted them would either fail on someone else's tracker or, worse, pass by not looking. This
+follows `SUBSTRATE-REBUILD-MAP.md`'s ruling: *the tracker half is deliberately not guarded — it is
+dated and its command is recorded.* The command for §6 is `gh issue view <N> --json state`, and it
+was run per issue, not sampled.
+
+⚠️ **Two more are unguarded, and neither is out-of-repo — they are simply not armed yet (#11902).**
+§4's row population and §0's brief-count sentence are derivable from **this page alone**, so the
+ruling above does not reach them and a guard for them could not pass by not looking. Both numbers
+come straight out of §4's own table: count its rows (14) and its `**No copy of its content in-repo**`
+cells among the `research/` rows (3) — the same way the §6 arithmetic is already re-derived from its
+own table rather than trusted. Until an arm is added they are **hand-derived and unmeasured**, and
+that was measured: deleting the `<corpus>/2026-09-09-ontology-evidence.md` row — leaving §4 covering
+14 of the 15 artefacts `#2852` §3 lists, so the coverage sentence above is false again — and reverting
+§0 to *"six of the eight"* both leave `--check` at exit 0 and the test file fully green. Re-derive
+both from §4's table before quoting them; `#2852` §3 is the population source, not the derivation.
 
 ---
 

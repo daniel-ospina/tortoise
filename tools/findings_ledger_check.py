@@ -837,6 +837,26 @@ def check_measured_commit(text: str, root: Path = REPO) -> list[str]:
         )
     verdict = git("merge-base", "--is-ancestor", resolved.stdout.strip(), "HEAD")
     if verdict.returncode == 1:
+        # ⛔ ONLY `False` CERTIFIES DRIFT — `tools/substrate_map_check.py`'s rule,
+        # which the module docstring above says to copy rather than invent.
+        # `merge-base --is-ancestor` exits 1 BOTH for "an unrelated tree" and for
+        # "the graft boundary cut the walk", so in a shallow/deepened-shallow
+        # checkout a REAL ancestor reads as not-ancestor. Accusing the page of "a
+        # cut it did not make" on that evidence is a false red over a correct
+        # document (the same defect `tests/test_findings_ledger_2852.py`'s
+        # `_history_available()` guards the TEST against, #10356). An
+        # unanswerable probe is UNVERIFIED — exit 2, never a verdict.
+        shallow = git("rev-parse", "--is-shallow-repository")
+        if shallow.returncode != 0 or shallow.stdout.strip() != "false":
+            state = shallow.stdout.strip() or "unanswered"
+            raise Unverifiable(
+                "git answered 'not an ancestor', but this checkout is shallow or "
+                f"grafted (`rev-parse --is-shallow-repository` → {state}), so the "
+                "graft boundary cut the path to it and a truncated walk exits with "
+                "the same status as an unrelated tree — drift cannot be certified "
+                "here (the `docs` job checks out at fetch-depth: 0 for exactly this "
+                "question)"
+            )
         return [f"`measured_at_commit: {sha}` is NOT an ancestor of HEAD — the page claims a cut it did not make"]
     if verdict.returncode != 0:
         raise Unverifiable(f"git merge-base --is-ancestor exited {verdict.returncode}: {verdict.stderr.strip()}")
@@ -1018,15 +1038,16 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
     (
         # The EXACT shipped defect, re-injected: the pre-fix page said `three`
         # above two survivor bullets plus one CLOSED issue. ⛔ The target is the
-        # sentence's OPENING clause (`of the four survivors,`), the same clause
-        # `SURVIVOR_RE` keys on, and NOT the qualifier after it. Measured why: the
-        # earlier target quoted `the two survivor bullets below`, and when
-        # `eabfbed95` rewrote that qualifier the replace became a no-op and the arm
-        # went dead. A dead arm is caught LOUDLY by `self_test` ("did not change the
-        # document — the arm is dead", FAIL) — so the hazard is maintenance, not a
-        # silent false PASS, and the opposite claim would be a false one about this
-        # gate (#11902 review, twice: once for the dead target, once for claiming a
-        # tail-scoped target was tail-proof).
+        # sentence's OPENING clause (`of the four survivors,`) — the clause
+        # `SURVIVOR_RE` keys on — and NOT the qualifier that follows it. Why it
+        # matters, measured: a target that quotes the qualifier
+        # (`the two survivor bullets below`) becomes a no-op the moment that phrase
+        # is reworded, so the mutation stops changing the document and the arm dies;
+        # an earlier revision of this arm had exactly that shape while its comment
+        # claimed the lead-in. `self_test` reports a dead arm LOUDLY ("did not change
+        # the document — the arm is dead", FAIL), so the hazard is maintenance rather
+        # than a silent false PASS — and the opposite claim would be a false one about
+        # this gate (#11902 review).
         "a survivor count that does not match the bullets beneath it",
         lambda t: t.replace("of the four survivors,",
                             "of the four survivors, three are already re-measured, and", 1),
