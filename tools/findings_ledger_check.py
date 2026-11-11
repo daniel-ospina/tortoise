@@ -161,13 +161,13 @@ CITATION_SPACED_SHAPE_RE = re.compile(r"^[^`]*:\s+\d+(?:-\d+)?$")
 #: Trailing characters a code span may carry that are NOT part of the citation.
 SPAN_TRAILING_RE = re.compile(r"[\s.,;:)\]]+$")
 
-#: `path/to/file.py 999999` — a citation whose DELIMITER is not `:`. Same class as
-#: the `path: 999999` form above, and the same reason: §8 promises no citation shape
-#: is exempt, so `… 16`, `…#16`, `…@16`, `…-16`, `…/16`, `…,16` and `…:L16` must be
-#: REFUSED rather than skipped. Measured: rewriting a resolving `path:16` to any of
-#: those left the page CLEAN — including over an out-of-range line and over a path
-#: that does not exist — so one character of reformatting defused the red that the
-#: resolver would otherwise have raised.
+#: `path/to/file.py 999999` — a citation whose DELIMITER is not `:`. Measured:
+#: rewriting a resolving `path:16` to `path 16` left the page CLEAN — including over an
+#: out-of-range line and over a path that does not exist — so one character of
+#: reformatting defused the red the resolver would otherwise have raised. That one
+#: spelling (and its `path 16-18` range form) is what this arm refuses; the wider
+#: delimiter sets are the carve-outs named immediately below, WITH the measurement
+#: that removed each.
 #:
 #: ⚠️ THE CARVE-OUTS ARE MEASURED, AND THEY ARE NOT NARROW. An earlier version keyed
 #: on an extension allow-list and claimed the carve-out was "exactly as wide as it
@@ -175,12 +175,17 @@ SPAN_TRAILING_RE = re.compile(r"[\s.,;:)\]]+$")
 #: `docs/x.sql 16` and `README.MD 16`, and the bare `path.ext <digits>` shape also
 #: matches a backticked COMMAND whose last argument is a number:
 #: `uv run python tools/collision_preflight.py 2852 --repo .` is a legal §1 evidence
-#: form, and refusing it red the required `docs` job over 7 legitimate spans in
-#: `docs/**`. So the shape must be a PATH (a `/` or a dot-extension, dotfiles
-#: included), the number must look like a line rather than an argument (a following
-#: `--flag` disqualifies it), a span that matches `COMMAND_RE` is a command and not a
-#: citation, and prose with no path marker (`localhost 6379`, `fetch-depth 0`) stays
-#: out of scope exactly as the `key: value` carve-out above does.
+#: form. So the shape must be a PATH (a `/` or a dot-extension, dotfiles included), a
+#: span that matches `COMMAND_RE` is a command and not a citation, a number followed by
+#: `--flag` is an argument rather than a line (named in §8 as a carve-out, because it
+#: is indistinguishable from a command without a recognised prefix), and prose with no
+#: path marker (`localhost 6379`, `fetch-depth 0`) stays out of scope exactly as the
+#: `key: value` carve-out above does. The tree-wide sweep is what bounded this: at this
+#: head ONE span is refused across 799 `docs/` files — `collision_preflight.py 10984`,
+#: a bare tool invocation the arm cannot tell from a path because it has no recognised
+#: program prefix (the `uv run`-prefixed form IS excluded). None is on this page, and
+#: the earlier delimiter sets refused 7, then 600+; each figure was re-measured rather
+#: than carried forward, which is why this line states the current one.
 #: THE DELIMITER IS WHITESPACE ONLY, and every wider version was measured against a
 #: false accusation over `docs/**` before it was dropped:
 #:   * `_` parsed the identifier `tests/test_findings_ledger_2852.py` as `path _ 2852`;
@@ -199,11 +204,15 @@ SPAN_TRAILING_RE = re.compile(r"[\s.,;:)\]]+$")
 #: honest boundary, not breadth.
 CITATION_UNCOLONED_SHAPE_RE = re.compile(
     r"(?P<path>"
-    r"\.[A-Za-z][\w.-]*"
+    r"(?<![\w.])\.[A-Za-z][\w.-]*"
     r"|[\w~][\w./+@-]*/[\w./+@-]+"
     r"|[\w~][\w./+@-]*\.[A-Za-z]\w*"
     r")"
-    r"\s+(?P<num>\d{1,7})(?![\w.>&|/-])"
+    # A RANGE is the resolver's own `:START-END` form with a space instead of the
+    # colon, and it must be refused: without the optional range this arm left
+    # `tortoise/nope_module.py 16-18` CLEAN while the previous head refused it — a
+    # regression from red to green in the one class the arm exists for (measured).
+    r"\s+(?P<num>\d{1,7})(?:\s*[-–]\s*\d{1,7})?(?![\w.>&|/]|-\w)"
 )
 
 #: `path#L16` — the **GitHub permalink** spelling, and the ONE delimiter the sweep
@@ -715,7 +724,7 @@ def check_verdict_tally(text: str) -> list[str]:
             # false accusation on correct prose, which is the class this arm must not
             # create. The date marker is what distinguishes the two.
             dated = re.match(
-                r"\s+(?:as written\s+)?on\s+\d{4}-\d{2}-\d{2}",
+                r"\s+(?:as written\s+|as of\s+)?(?:on\s+)?(?:the\s+)?\d{4}-\d{2}-\d{2}",
                 paragraph[token.end() :],
             )
             if not dated and COPULA_OR_ADVERB.fullmatch(
@@ -842,6 +851,15 @@ def check_citation_shapes(text: str) -> list[str]:
             # `path.py 2852 --repo .` — a number followed by a FLAG is an argument
             # even without a recognised command prefix.
             and not re.match(r"\s+--", body[uncoloned.end("num") :])
+            # `index.html 200` is an HTTP status beside a page name, not a citation:
+            # measured in this repo's own docs (`X /index.html 200`, `… 400`) and named
+            # as a carve-out in §8. A three-digit status after a web-page path is the
+            # only shape that qualifies, so `tortoise/pipeline.py 200` is still a line.
+            and not (
+                len(uncoloned.group("num")) == 3
+                and 100 <= int(uncoloned.group("num")) <= 599
+                and uncoloned.group("path").endswith((".html", ".htm"))
+            )
         ):
             problems.append(
                 f"`{match.group(0)[1:-1]}` is not a recognised citation — it carries "
