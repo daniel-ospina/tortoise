@@ -191,10 +191,15 @@ def test_the_poison_row_reads_absent_rather_than_crashing(sdk, operand):
     fabricated mean is the pre-#11702 failure (the neutral 0.5), and this fails
     on it.
 
-    ⛔ Stated exactly, because the stronger claim is wrong: `annotate_ep_batch`
-    ENDS with a fill loop that gives every requested id the absent defaults, so
-    "the row arrived and read absent" and "the row was dropped by the query and
-    defaulted" are indistinguishable HERE. The row-presence property is owned by
+    ⛔ Stated exactly, because the stronger claim is wrong: this asserts the `ep`
+    BLOCK answers no number for the poison row. It does NOT assert that on every
+    surface — the rankers' `confidence` for a poison row is covered by
+    `test_both_rankers_keep_the_healthy_row` only for the HEALTHY row, and no
+    surface-wide no-number guarantee is held here. And within this test,
+    `annotate_ep_batch` ENDS with a fill loop that gives every requested id the
+    absent defaults, so "the row arrived and read absent" and "the row was
+    dropped by the query and defaulted" are indistinguishable HERE; the
+    row-presence property is owned by
     `test_the_batch_survives_one_unreadable_operand`, which asserts the key set
     (and is what reds if the batch-level `except` ever returns `{}`).
     """
@@ -240,10 +245,13 @@ def test_the_fail_open_decoration_does_not_fire(sdk, operand):
     poison, healthy = _seed(sdk, operand, operator_on_poison=True)
     g = sdk._get_proj().g
     decoration = get_relationships_bounded(g, [poison, healthy])
-    assert set(decoration) == {poison, healthy}
-    assert decoration[healthy], (
-        "the healthy row came back with an EMPTY decoration — either the "
-        "peer read failed open, or the operator seed stopped decorating")
+    # The poisoned point must appear as a DECORATED PEER of the healthy row: that
+    # is what the fail-open path destroys, and unlike a key-set comparison it can
+    # actually fail (the seed — success AND fail-open — is built from the
+    # requested ids, so the key set is identical on every path).
+    assert any(e.get("related_id") == poison for e in decoration[healthy]), (
+        "the healthy row lost its decoration of the poison peer "
+        f"(entries: {decoration[healthy]!r})")
     assert not getattr(decoration, "decoration_error", ""), (
         "the decoration took its fail-open path — every requested point's "
         "decoration was reset to empty "
@@ -264,7 +272,10 @@ def test_the_graph_wide_contested_scan_does_not_raise(sdk, operand):
     second cannot fail (an unreadable operand has no admissible variance), so
     a silently-empty scan would have passed both.
     """
-    poison, healthy = _seed(sdk, operand, symmetric=True)
+    # The poison row is seeded but not inspected: this scan's assertion is about
+    # the healthy row it must still list, and the unreadable row's exclusion is
+    # not assertable (no admissible variance) — hence the underscore.
+    _poison, healthy = _seed(sdk, operand, symmetric=True)
     claims = TortoiseEP(sdk._get_proj()).get_contested_claims()
     ids = {c.get("id") for c in claims}
     assert healthy in ids, (
