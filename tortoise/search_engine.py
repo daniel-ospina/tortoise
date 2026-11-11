@@ -690,11 +690,16 @@ def _string_operand(raw: str, val: float):
     float32 the store serves, so the twins agree on the value as well as on
     presence (`"0.6"` → 0.6000000238418579 on both).
 
-    The overflow edge is decided by the ROUNDED float32, because that is what
-    `strtof` decides: a literal just above float32 max but below its rounding
-    midpoint lands on max and READS (`"3.40282355e38"`, measured). A plain
-    `abs(val) <= _FLOAT32_MAX` would call that absent only here. The underflow
-    edge is decided by the EXACT magnitude, for the mirror reason: a literal
+    The overflow edge is decided by the LITERAL, for the same reason the
+    underflow edge is: `strtof` rounds the TEXT, not the double. A literal just
+    above float32 max but strictly below the overflow midpoint lands on max and
+    READS (`"3.40282355e38"`, measured) — and `"3.4028235677973366e38"` does
+    too, even though its nearest DOUBLE sits exactly ON that midpoint and
+    `struct.pack('<f', …)` refuses it, which is why `_f32_from_literal` parses
+    the literal there instead of reading `_float32(val)`. A plain
+    `abs(val) <= _FLOAT32_MAX` would call the band absent only here. A literal
+    at or above the midpoint overflows to `2**128` and is null. The underflow
+    edge is decided by the EXACT magnitude for the mirror reason: a literal
     just below min-normal rounds UP to it and yet is null there
     (`"1.1754943e-38"`, measured).
 
