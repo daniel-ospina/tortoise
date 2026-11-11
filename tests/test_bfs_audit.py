@@ -6,11 +6,41 @@ a live FalkorDB instance — it's a grep-based documentation of the audit result
 Run with: python3 -m pytest tests/test_bfs_audit.py -v
 """
 
+import ast
 import subprocess
 import sys  # noqa: F401
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def _propagate_shock_call_sites() -> dict[str, set[int]]:
+    """`{absolute path: {line numbers}}` where `tortoise/` code CALLS `propagate_shock`.
+
+    ⛔ The grep below cannot tell a CALL from PROSE that names the function, and this
+    audit's claim is about CALLERS. `#11702` (`e7394a9ad7`) added a docstring note in
+    `tortoise/projection/propagation.py:70,73` ("`propagate_shock` PERSISTS the blend …",
+    "`propagate_shock` is never invoked") and the classifier's only comment exemption
+    keyed on the word "replaces", so both lines were bucketed as PRODUCTION CALLERS —
+    `test (c)` of run 43070177052 was RED at `d0347aaa` over a tree that calls nothing
+    (reproduced on `origin/main` `372f926cd9`, which touches neither file).
+
+    So the AST decides what is a call and the grep keeps documenting the references:
+    the callee must be a `Name`/`Attribute` `propagate_shock`, which covers
+    `propagate_shock(…)`, `self.propagate_shock(…)` and an aliased import alike, while
+    text inside a docstring, a comment or a Cypher string is not a `Call` node at all.
+    """
+    sites: dict[str, set[int]] = {}
+    for path in sorted((ROOT / "tortoise").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            callee = node.func
+            name = callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", "")
+            if name == "propagate_shock":
+                sites.setdefault(str(path), set()).add(node.lineno)
+    return sites
 
 
 def _grep(pattern: str, *dirs: str) -> list[str]:
@@ -36,6 +66,9 @@ def test_no_propagate_shock_callers():
         l for l in all_refs  # noqa: E741
         if "__pycache__" not in l and "test_bfs_audit.py" not in l and "test_e2e_extraction_ep.py" not in l
     ]
+    # `{path: {lineno}}` of real calls — the ONLY evidence of a production caller.
+    # See `_propagate_shock_call_sites` for the false RED this replaced.
+    calls = _propagate_shock_call_sites()
 
     callers: dict[str, list[str]] = {
         "definition (deprecated)": [],
@@ -60,10 +93,14 @@ def test_no_propagate_shock_callers():
             callers["fixup_scripts (historical)"].append(line)
         elif "/graph-scripts/" in path_part:
             callers["test_files"].append(line)  # test_6707_shock.py
-        elif "/tortoise/" in path_part and "#" in line and "replaces" in line.lower():
-            callers["comment/reference only"].append(line)
         elif "/tortoise/" in path_part:
-            callers["production_code"].append(line)
+            # A CALL, not a mention: the AST is the judge (a docstring that names the
+            # function is documentation of its deprecation, not a caller of it).
+            lineno = line.split(":")[1]
+            if lineno.isdigit() and int(lineno) in calls.get(path_part, set()):
+                callers["production_code"].append(line)
+            else:
+                callers["comment/reference only"].append(line)
 
     # The only "production" reference is a comment: no actual call
     assert len(callers["production_code"]) == 0, (
