@@ -500,6 +500,20 @@ _UNRESOLVED = {
     # `MATCH (n:<label> {<the label's own key>:$id}) RETURN count(n)` — a read with
     # no SET/CREATE/MERGE/DELETE/REMOVE, appending no record.
     "_label_reachable_by",
+    # #2782: the UPDATE money probe — `probe` is a TEMPLATE whose label and
+    # match property are `{}` placeholders, filled by
+    # `probe.format(label=…, match_prop=…)`, so the resolver reports
+    # '<unresolved>' for the `g.query` call. Checked by hand: the rendered
+    # statement is `MATCH (n:<label> {<match_prop>:$id}) RETURN
+    # n.amountMinor, n.currency, n.minorUnitExponent, n.verbatim, n.asOf` — a
+    # read, with no SET/CREATE/MERGE/DELETE/REMOVE and no write procedure. It
+    # is this function's ONLY handle reach; the view it returns is assembled by
+    # `money_view_after_update`, a pure mapping operation that never sees `g`.
+    # It appends no record either: the helper exists to grade the state the
+    # write is ABOUT to leave, so it runs before the write that its caller — a
+    # censused door — performs inside that door's own declared lane. This row
+    # therefore declares a read and blesses no undeclared write.
+    "_money_views_for_update",
     # #9962: the state view's mitigation read interpolates
     # `live._live_only('m.status')` — the DAMPENER's own predicate
     # (`weights.py`'s `compute_operator_weight`), which is the point of the row:

@@ -353,6 +353,24 @@ class UsageCollector:
             buckets = self._rows.pop(qid, None)
         return self._to_envelope(buckets)
 
+    def peek_question(self, qid: str) -> dict | None:
+        """NON-DESTRUCTIVE snapshot of the qid's CURRENT envelope.
+
+        #2570 (P3 window reconciliation): the re-run arm must read the
+        question's spend-so-far to price its own marginal bound, and the
+        question's outcome still needs the full cumulative envelope at
+        the end of the turn — so it cannot drain. Deep-copies under the
+        lock (a shallow envelope would alias live buckets the sinks keep
+        mutating). Returns None when the qid has no rows yet (the caller
+        treats that as zero spend, never as a metering failure).
+        """
+        with self._lock:
+            buckets = self._rows.get(qid)
+            snapshot = (
+                {key: dict(bucket) for key, bucket in buckets.items()}
+                if buckets else None)
+        return self._to_envelope(snapshot)
+
     def move_failed_qid_to_overhead(self, qid: str) -> bool:
         """Reclassify a terminally-failed question's spend as overhead.
 

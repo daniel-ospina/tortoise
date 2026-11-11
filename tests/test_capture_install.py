@@ -2982,6 +2982,26 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_cloud_agent_limit
     # (#11806 review P1, tracked as #11807).
     assert "USER-level file" in r.stdout, r.stdout
     assert "CLOUD" in r.stdout.upper(), r.stdout
+    # ⛔ BOTH mentions of the scoping are pinned, not one (#11810 review r24 P2).
+    # The message states the HOSTED scope twice — the load-path clause ("which a
+    # hosted Cursor cloud agent VM cannot read") and the consequence clause
+    # ("a session running in a hosted cloud agent VM is NOT captured") — and only
+    # the second was pinned, so dropping `hosted` from the FIRST left the whole
+    # suite GREEN. It is a CLAIM-SHAPED presence leg plus an absence leg on the
+    # unscoped form; the absence needle is provably NOT a substring of the
+    # scoped one (the qualifier sits between "a" and "Cursor"), so it cannot
+    # RED correct text.
+    # ⛔ AND ON A LOWERED COPY (#11810 review r26 P3): this absence leg was the
+    # one guard in the block left case-EXACT after r25 lowered the six below it,
+    # on the stated principle that the claim is the words and never their
+    # casing — and the message's OWN `install --list` line already prints
+    # `A HOSTED CURSOR CLOUD AGENT VM …` in caps, so a re-cased unscoped clause
+    # ("which a CURSOR CLOUD AGENT VM cannot read") stayed GREEN. Verified: the
+    # banned form is not a substring of the scoped one, so lowering cannot RED
+    # correct text.
+    lowered = r.stdout.lower()
+    assert "which a hosted Cursor cloud agent VM cannot read" in r.stdout, r.stdout
+    assert "which a cursor cloud agent vm cannot read" not in lowered, r.stdout
     assert "no editor-lifetime session boundary" in r.stdout, r.stdout
     # #2122: the disclosure must cover the INJECTION hook too, not only
     # capture. Cursor's docs exclude `sessionStart` from cloud agents and say a
@@ -2995,9 +3015,106 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_cloud_agent_limit
     assert "that 'sessionStart' is not available in cloud agents" in r.stdout, r.stdout
     assert "User-level hooks" in r.stdout, r.stdout
     # …and the qualification that keeps the claim true: the third surface where
-    # both events DO fire, which this installer does not write (#11807).
+    # both events DO fire, with the page's own `and on Enterprise` gate kept — a
+    # non-Enterprise self-hosted customer must not read that team/enterprise
+    # hooks reach their workers (review round 3, P2) — none of which this
+    # installer writes (#11807).
     assert "Self-Hosted Machines" in r.stdout, r.stdout
-    assert "does not write" in r.stdout, r.stdout
+    assert "none of which this installer writes" in r.stdout, r.stdout
+    assert ("plus team and enterprise-managed hooks on Enterprise"
+            in r.stdout), r.stdout
+    # ⛔ THE CLAIM, NOT JUST THE TERM. The absence guard below bans the shape
+    # "hooks are IDE-ONLY"; it must NOT ban accurate prose that negates the
+    # term ("these seams are not IDE-only"), which is the phrasing the matrix
+    # row itself uses (review round 3, P2).
+    # ⛔ CASE-INSENSITIVE (#11810 review r24 P3): the guard enumerated two casings,
+    # so a third one — "Both Cursor hooks are IDE-Only." — passed GREEN. The
+    # claim is the absolute, not its casing, so compare on a lowered copy; this
+    # still leaves accurate NEGATED prose alone ("these seams are not IDE-only"
+    # names `seams`, not `hooks`).
+    assert "hooks are ide-only" not in r.stdout.lower(), r.stdout
+    # ⛔ AND THE ROUND-1 UNIVERSAL MAY NOT COME BACK UNPINNED. Review round 3
+    # measured it: re-appending "neither … reaches a cloud agent" left the whole
+    # suite GREEN, because every other assert is a presence pin on prose that
+    # coexists with the absolute. Pin the scoping on THIS surface, not only on
+    # the `install --list` line. The guards are CLAIM-SHAPED — "<X> reaches a
+    # cloud agent" / "gets a Tortoise hook" — and the two subject-less ones are
+    # DELIBERATELY OVER-BROAD: they also ban a hypothetical ACCURATE sentence
+    # such as "the MCP pull seam reaches a cloud agent" (the message recommends
+    # that surface). That is friction on correct prose — one reword — and it is
+    # kept on purpose, because the narrower guard (matching only this
+    # installer's seam names) would let a re-worded universal through.
+    # ⛔ BUT THE LIST IS ENUMERATED, SO IT IS NOT COMPLETE — this comment used to
+    # imply breadth solved re-wording, and review r9 measured that it does not:
+    # appending "A Cursor cloud agent runs no Tortoise hook at all." to the
+    # message stayed GREEN. "runs no Tortoise hook" is now listed because it is
+    # the wording the RECORD itself uses (platform-seams.md: "a hosted Cursor
+    # cloud agent runs no Tortoise hook at all"), so it is the phrasing a lane
+    # would actually reuse — NOT because the list became complete. Any other
+    # unlisted re-wording is still a residual. #11812 owns the DOC-side
+    # structural form (derive the quoted span from the record and assert it is a
+    # substring of the real stdout), which is a DIFFERENT leg from the
+    # message-side per-mention qualifier scan — that scan is a separate residual
+    # this pin does not implement, deliberately not added here because a
+    # structural leg that reds on accurate prose is the friction above.
+    # ⛔ The residual is recorded, not silently trusted: #11807 carries it, and
+    # review rounds 6/7 both declined to hold the merge for it. Measured at r8:
+    # injecting "The MCP pull seam reaches a cloud agent." REDs, and re-appending
+    # the round-1 universal REDs on BOTH this arm and "neither the capture".
+    # (An earlier version of this comment claimed the guards were "not
+    # verb+object" — false of the `seam reaches a cloud agent` assert below. It
+    # named that assert by LINE NUMBER instead, which is why the pointer went
+    # stale the moment this PR added comment lines above it; name the predicate,
+    # not the line.)
+    assert "hosted cloud agent VM is NOT captured" in r.stdout, r.stdout
+    # ⛔ CASE-INSENSITIVE TOO (#11810 review r25 P1), and for the SAME reason as
+    # the `hooks are ide-only` guard two asserts up: an ENUMERATION is only as
+    # good as its casing, and this one was case-exact. Measured against the real
+    # `install cursor` stdout at `d5b23c02a`: re-appending the round-1 universal
+    # as "No cloud agent session is captured or injected." (a sentence-initial
+    # capital) stayed GREEN through `"no cloud agent session"`, and the
+    # product-name casing this CLI itself prints ("tortoise …") stayed GREEN
+    # through `"gets a Tortoise hook"`. Lowering only the haystack does not fix
+    # the second one — the NEEDLES carry the capital too — so both sides are
+    # lowered (in one `lowered` binding, shared with the absence leg above). The
+    # claim is the words, never their casing.
+    assert "neither the capture seam" not in lowered, r.stdout
+    assert "hook reaches a cloud agent" not in lowered, r.stdout
+    assert "seam reaches a cloud agent" not in lowered, r.stdout
+    assert "gets a tortoise hook" not in lowered, r.stdout
+    assert "no cloud agent session" not in lowered, r.stdout
+    # review r9 (P3): the record's own phrasing, and therefore the one a lane
+    # would reuse. Measured GREEN before this line existed.
+    assert "runs no tortoise hook" not in lowered, r.stdout
+    # …and the SECOND surface that states this claim -- `install --list` -- was
+    # pinned by nothing at all, so a revert there was silent.
+    listing = _run(("install", "--list"), env, root)
+    assert listing.returncode == 0, listing.stdout + listing.stderr
+    cursor_lines = [ln for ln in listing.stdout.splitlines()
+                    if "tortoise install cursor" in ln]
+    assert len(cursor_lines) == 1, listing.stdout
+    # ⛔ THE LISTING WAS THE ONE SURFACE LEFT UNSCOPED (r5). It said "A CURSOR
+    # CLOUD AGENT VM gets neither hook" — and then, in the SAME sentence,
+    # "Self-Hosted Machines workers DO fire both". A reader meets the universal
+    # first and the contradiction second, so the universal is what they keep:
+    # exactly the over-assertion this PR removes one surface over. The scope
+    # the message, this PR's own matrix row, and the install surface all use is
+    # HOSTED, so the listing must carry the same qualifier. Claim-shaped, so a
+    # reflow that drops the word REDs instead of passing silently.
+    assert ("A HOSTED CURSOR CLOUD AGENT VM gets neither hook"
+            in cursor_lines[0]), cursor_lines[0]
+    assert "Self-Hosted Machines" in cursor_lines[0], cursor_lines[0]
+    assert "on Enterprise" in cursor_lines[0], cursor_lines[0]
+    assert "hooks are ide-only" not in listing.stdout.lower(), listing.stdout
+
+
+# ⛔ THE DOC↔MESSAGE PIN LIVES IN ITS OWN `tier1`-REGISTERED MODULE
+# (`tests/test_11810_platform_seams_doc_pin.py`, #11810 review r7 P2). It was
+# here first, and that is why it was asleep: `docs/` is in `NON_PYTHON_PREFIXES`,
+# so a docs-only edit of `platform-seams.md` takes the tier1-only early return —
+# and THIS file is registered on `api` + `core`, not `tier1`. The pin ran zero
+# times on exactly the change it exists to catch. Do not move it back: a pin on a
+# doc must live on the surface that tests docs the diff selects.
 
 
 def test_cli_install_cursor_uninstall_says_the_seam_remains(tmp_path):
