@@ -655,6 +655,15 @@ def test_survivor_sentence_is_derived_from_its_own_bullets():
     assert len(bullets) == 3
     assert len([i for i in bullets if i in open_ids]) == 2
     assert flc.NUMBER_WORDS[match.group("count")] == 2
+    # ⛔ The guard locates its subject BY PATTERN, so §6 must carry EXACTLY ONE sentence that fits
+    # (#11902 review, P2). With one more, `search()` silently takes the earlier sentence and the
+    # sentence a lane reads goes unchecked: measured, a decoy plus the shipped `three` defect left
+    # `--check` at rc=0 and `--self-test` at PASS. Asserted here (rather than from prose) because
+    # the decoy also absorbs the self-test's mutation, so the self-test cannot be the pin.
+    assert len(flc.SURVIVOR_RE.findall(section)) == 1, (
+        "§6 must carry exactly one sentence matching SURVIVOR_RE — a second one takes the match "
+        "and the guard reports OK over the sentence a lane actually reads"
+    )
 
 
 def test_survivor_count_not_matching_the_bullets_is_rejected(tmp_path, monkeypatch):
@@ -667,13 +676,14 @@ def test_survivor_count_not_matching_the_bullets_is_rejected(tmp_path, monkeypat
     on §7 to match it.
     """
     def to_three(t: str) -> str:
-        return (
-            t.replace("survivors, two are already", "survivors, three are already", 1)
-            .replace(
-                "survivors, the two bullets below are already",
-                "survivors, the three bullets below are already",
-                1,
-            )
+        # ⛔ Target the sentence's LEAD-IN, not a phrase from its tail: the previous target quoted
+        # `the two bullets below`, so rewording the sentence made this replace a no-op and the arm
+        # died silently behind `_mutated`'s own "mutation did not change the document" assert
+        # (#11902 review). The lead-in is the same clause `SURVIVOR_RE` keys on.
+        return t.replace(
+            "survivors, the two survivor bullets below",
+            "survivors, the three survivor bullets below",
+            1,
         )
 
     _mutated(tmp_path, monkeypatch, to_three)

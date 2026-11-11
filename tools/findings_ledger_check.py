@@ -572,11 +572,27 @@ def check_survivor_arithmetic(text: str) -> list[str]:
     """
     problems: list[str] = []
     section = _region(text, "## 6. The issue index", "## 7. What this changes")
-    match = SURVIVOR_RE.search(section)
-    if not match:
+    # ⛔ EXACTLY ONE MATCH, because the subject is located BY PATTERN (#11902 review, P2). A
+    # `search()` takes the FIRST sentence in §6 that fits, so ANY second sentence written above the
+    # real one silently becomes the guard's subject: measured, adding
+    # `Note first: of the four survivors, two are already re-measured elsewhere.` and falsifying the
+    # ⚠️ sentence to `three bullets below` left `--check` at rc=0 AND `--self-test` at PASS — the
+    # decoy absorbed the self-test's own mutation too, so the arm caught its own edit and never
+    # looked at the sentence a lane reads. More than one match is therefore a page DEFECT (rc=1),
+    # not an Unverifiable: the page can always keep one.
+    matches = list(SURVIVOR_RE.finditer(section))
+    if not matches:
         raise Unverifiable(
             "§6: the survivor sentence is absent — its arithmetic cannot be derived"
         )
+    if len(matches) > 1:
+        return [
+            f"§6 carries {len(matches)} sentences matching the survivor pattern "
+            "('of the N survivors, … are already re-measured') — the guard cannot tell which one "
+            "owns the bullets, and a second sentence takes the match and reports OK over the one a "
+            "lane reads; keep exactly one"
+        ]
+    match = matches[0]
     total = NUMBER_WORDS.get(match.group("total"))
     count = NUMBER_WORDS.get(match.group("count"))
     if total is None or count is None:
@@ -783,12 +799,19 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
     ),
     (
         # The EXACT shipped defect, re-injected: the pre-fix page said `three`
-        # above two survivor bullets plus one CLOSED issue.
+        # above two survivor bullets plus one CLOSED issue. ⛔ The target is the
+        # LEAD-IN, not a phrase from the sentence's tail (#11902 review): the
+        # previous target quoted `survivors, the two bullets below`, so rewording
+        # the sentence left the arm's replace dead, `self_test` said so
+        # ("did not change the document — the arm is dead"), and the defect could
+        # have shipped with an apparently-green self-test. A lead-in on the
+        # sentence's FIRST line keeps the arm alive across any rewording that
+        # keeps the pattern matching.
         "a survivor count that does not match the bullets beneath it",
-        lambda t: t.replace("survivors, two are already",
-                            "survivors, three are already", 1)
-                   .replace("survivors, the two bullets below are already",
-                            "survivors, the three bullets below are already", 1),
+        lambda t: t.replace("survivors, the two survivor bullets below",
+                            "survivors, the three survivor bullets below", 1)
+                   .replace("survivors, two are already",
+                            "survivors, three are already", 1),
         "says 3 of them are already re-measured, but 2 of its 3 bullet(s) name an OPEN issue",
     ),
     (

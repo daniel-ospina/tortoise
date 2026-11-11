@@ -197,8 +197,8 @@ Re-read per issue on 2026-11-12 — 42 rows, and they reconcile:
 | CLOSED other | 4 | `#2748` (`NOT_PLANNED`, fixed in effect) · `#2826` (`NOT_PLANNED`) · `#1509` (`NOT_PLANNED`) · `#2787` (`NOT_PLANNED`) |
 | MERGED (both were PRs) | 2 | PR `#2747` · `#2697` — both are PRs, not issues; see correction **(i)** |
 
-**⚠️ of the four survivors, the two bullets below are already re-measured elsewhere and must not be
-re-derived — and one CLOSED issue must not be read as fixed:**
+**⚠️ of the four survivors, the two survivor bullets below are already re-measured elsewhere and must
+not be re-derived — and one CLOSED issue must not be read as fixed:**
 
 - **`#2728`** was re-measured **out** of the problem map's survivor set — its Settings home and
   modal merged 2026-10-18 in `08a6b0288`, with the add-list read from the on-disk pack registry so
@@ -257,7 +257,10 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
 - the **§6 survivor sentence's two numbers** are derived as well: its survivor TOTAL must equal the
   OPEN row's own count, and its "already re-measured" count must equal the number of **bullets naming
   an OPEN issue** — the `#2730` bullet is CLOSED and is printed because *issue closure is not evidence
-  of a fix*, not because it survives. Unguarded, this sentence carried a false `three` over two
+  of a fix*, not because it survives. §6 must also carry **exactly one** sentence matching that
+  pattern: the check finds its subject by pattern, so a second one earlier in §6 takes the match and the
+  guard reports OK over the sentence a lane actually reads — measured, one added decoy sentence was
+  enough. Unguarded, this sentence carried a false `three` over two
   survivor bullets while §7 said `two`, and the guard reported OK over it: the page's own *declared ≠
   stored* defect, inside the correction that exists to stop it — and the reason two reviewers could
   each "prove" the other side was the stale one.
