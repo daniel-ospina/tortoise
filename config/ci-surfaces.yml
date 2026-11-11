@@ -8407,8 +8407,8 @@ surfaces:
   # base64 float32 payload lands there next — selects `['eval']` and runs NONE
   # of `test_11821_journal_vector_width.py`'s width pins while
   # `manifest-integrity` stays green. (Deliberately NOT an integer: the count
-  # was written as thirty-five, then the next two commits each added pins and
-  # left it stale. Re-derive or don't state it.)
+  # was written as thirty-five, then two later commits added pins and left it
+  # stale. Re-derive or don't state it.)
   - test_journal_embedding_5004.py
   - test_11821_journal_vector_width.py
   # #11835 review (P2): the SIBLING defect, measured in the same selection run —
