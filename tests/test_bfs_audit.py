@@ -75,6 +75,45 @@ def _propagate_shock_reference_sites() -> dict[str, set[int]]:
     return sites
 
 
+def _propagate_shock_prose_sites() -> dict[str, set[int]]:
+    """`{path: {lineno}}` of grep lines the AST POSITIVELY confirms are prose.
+
+    This is the only evidence that may demote a `/tortoise/` grep line to
+    "comment/reference only", and it is deliberately computed WITHOUT consulting
+    `_propagate_shock_reference_sites`: a demotion has to be EARNED by the parser, not
+    assumed because the reference scan came back quiet. Two positions count as prose —
+    a `#` comment, and a line inside a string constant (a docstring documenting the
+    deprecation). Everything else is a reference.
+
+    ⚠️ Why this exists (review r35 P2). Once the demotion was keyed on the reference set
+    instead, `production_code` could only be non-empty when that set was too, so the
+    `== 0` assert below became unreachable, and an EMPTY scan (the helper narrowed to
+    `Call` nodes, or `ROOT / "tortoise"` drifting) demoted every real caller to prose
+    and printed success over it. Measured on a temp root holding
+    `def write(g): propagate_shock(g)`: honest scan -> RED, empty scan -> GREEN.
+    Keyed on this map instead, an empty/broken scan produces an empty demotion set, so
+    every line stays in `production_code` and the assert reds — fail-CLOSED. It also
+    subsumes a non-`.py` production file (`cursor-hooks/*.sh`, `openclaw-plugin/*.mjs`):
+    it has no AST, so it can never be in this map, so it is never demoted.
+    """
+    prose: dict[str, set[int]] = {}
+    for path in sorted((ROOT / "tortoise").rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        found: set[int] = set()
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                    and "propagate_shock" in node.value):
+                end = node.end_lineno or node.lineno
+                found.update(range(node.lineno, end + 1))
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#") and "propagate_shock" in line:
+                found.add(lineno)
+        if found:
+            prose[str(path)] = found
+    return prose
+
+
 def _grep(pattern: str, *dirs: str) -> list[str]:
     """Return non-empty lines from grep -rn in specified dirs (relative to ROOT)."""
     try:
@@ -103,6 +142,7 @@ def test_no_propagate_shock_callers():
     # why it walks references rather than `Call` nodes only (an aliased call spells
     # `_shock`, so no grep line would ever reach the bucket below).
     refs = _propagate_shock_reference_sites()
+    prose = _propagate_shock_prose_sites()
 
     callers: dict[str, list[str]] = {
         "definition (deprecated)": [],
@@ -128,21 +168,20 @@ def test_no_propagate_shock_callers():
         elif "/graph-scripts/" in path_part:
             callers["test_files"].append(line)  # test_6707_shock.py
         elif "/tortoise/" in path_part:
-            # A REFERENCE, not a mention: the AST is the judge for a PARSABLE file (a
-            # docstring that names the function is documentation of its deprecation,
-            # not a caller of it). ⛔ A NON-`.py` production file has no AST to consult,
-            # so it must never be demoted to prose: the record ships hooks and a plugin
-            # under `tortoise/` (`cursor-hooks/*.sh`, `codex-hooks/*.sh`,
-            # `claude-hooks/*.sh`, `openclaw-plugin/index.mjs`), and a name in one of
-            # those IS the strongest evidence available — grep sees it and the AST
-            # cannot (review r36 P3 #2: before this split the class was demoted silently
-            # and the assert below could never see it).
+            # A REFERENCE, not a mention: the AST is the judge. A docstring that names
+            # the function is documentation of its deprecation, not a caller of it, and
+            # a `#` comment is not parsed at all — but the demotion must be EARNED by
+            # the parser (`_propagate_shock_prose_sites`), never assumed because the
+            # reference scan came back quiet: keying it on `refs` made the `== 0`
+            # assert below unreachable and turned an empty scan into a false PASS (see
+            # that helper). Anything the parser does not positively call prose — an
+            # aliased call, a non-`.py` hook/plugin under `tortoise/`, a file the walk
+            # never reached — stays a production reference.
             lineno = line.split(":")[1]
-            if not path_part.endswith(".py") \
-                    or (lineno.isdigit() and int(lineno) in refs.get(path_part, set())):
-                callers["production_code"].append(line)
-            else:
+            if lineno.isdigit() and int(lineno) in prose.get(path_part, set()):
                 callers["comment/reference only"].append(line)
+            else:
+                callers["production_code"].append(line)
 
     # ⛔ ASSERTED OVER THE AST SET, not over the grep lines: an indirection spells a
     # different word (`from … import propagate_shock as _shock; _shock(g, x)`), so the
