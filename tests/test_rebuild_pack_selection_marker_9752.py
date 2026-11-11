@@ -1083,17 +1083,23 @@ def test_rebuild_all_honours_a_carried_pack_selection_unknown_flag(
     earlier wipe may have stripped, which is the silent "reads as never
     configured" outcome #9752 exists to prevent.
 
-    ⚠️ CORRECTION to the round-6 finding that asked for this pin: it claimed
-    deleting the explicit re-ride (`if pack_selection_unknown:
-    payload["pack_selection_unknown"] = True`) leaves every suite green and
-    loses the signal on a third interruption. MEASURED FALSE on this head —
-    with that line removed the spy still sees
-    `{'pack_selection_unknown': True}` in the first payload written, because
-    the leftover payload is copied into the file this run writes. The carry is
-    therefore REDUNDANT (two carriers, not one), which is why no mutation of the
-    single line can red any test, and this pin asserts the OUTCOME — the flag is
-    present in the sidecar written by the retry — rather than pretending to
-    discriminate one of the two redundant carriers.
+    ⚠️ This pin had to be repaired once, and the repair is the whole point.
+    An earlier version asserted `written[0]` — and `written[0]` is this test's
+    OWN `_plant` fixture: `_plant` resolves `_write_prewipe_snapshot` at CALL
+    time (`from tortoise.projection import _write_prewipe_snapshot` inside its
+    body), so once the module attribute is patched the plant itself goes
+    through the spy. The assertion compared a dict to itself and could not
+    fail under ANY mutation — a dead pin, which is worse than no pin because
+    it reads as coverage.
+
+    The carry has ONE carrier, not two: the payload is built fresh from
+    literals plus `merged` (there is no `payload.update` and no `**leftover`
+    splat anywhere in `tortoise/projection/__init__.py`), so the explicit
+    re-ride (`if pack_selection_unknown:
+    payload["pack_selection_unknown"] = True`) is the only thing that puts the
+    flag in this run's file, and deleting it MUST red this test. The
+    assertions below therefore look only at writes THIS run performed:
+    `written` is cleared after the plant.
     """
     from tortoise import projection as pr
     from tortoise.projection import (
@@ -1123,6 +1129,10 @@ def test_rebuild_all_honours_a_carried_pack_selection_unknown_flag(
         "as carrying a foreign section and a second interruption is "
         "unrecoverable")
     _plant(Path(_sidecar_path(events)), payload)
+    # ⛔ The plant above went THROUGH the spy (`_plant` resolves the attribute
+    # at call time), so that entry is this test's own fixture. Drop it: every
+    # assertion below must be about what THIS run writes, or the pin is vacuous.
+    written.clear()
 
     with caplog.at_level(logging.ERROR):
         counts = _proj(sdk).rebuild_all(str(events), confirm_destructive=True)
@@ -1134,10 +1144,10 @@ def test_rebuild_all_honours_a_carried_pack_selection_unknown_flag(
     # ⛔ And it must be present in this run's own sidecar, or a THIRD
     # interruption reads a v7 file whose section is present-but-empty →
     # `pack_selection_unknown` False → no gap → a clean success over a graph the
-    # first wipe may have stripped. The carry is carried by TWO mechanisms (the
-    # copied leftover payload AND the explicit re-ride), so deleting either alone
-    # stays green — asserted here as an OUTCOME, deliberately.
-    assert written, "no pre-wipe sidecar was written — the spy missed"
+    # first wipe may have stripped. `written` was cleared after the plant, so
+    # `written[0]` here is THIS run's pre-wipe payload — the one the explicit
+    # re-ride fills — which is what makes the assertion discriminate.
+    assert written, "this run wrote no pre-wipe sidecar — the spy missed it"
     assert written[0].get("pack_selection_unknown") is True, (
         "the inherited UNKNOWN must travel into the sidecar THIS run writes, "
         "so a second interruption is still honest about the marker's fate: "

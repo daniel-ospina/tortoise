@@ -316,10 +316,30 @@ def migrate(force: bool = False) -> dict:
             # the gap/UNKNOWN pair does.
             if rebuild_counts.get("pack_selection_gap"):
                 _label, _consequence = _pack_selection_shape(rebuild_counts)
-                logger.warning(
-                    "rebuild: the migrated graph's :PackSelection pack-set "
-                    "marker is NOT confirmed intact (%s) — %s; see the rebuild "
-                    "ERROR log (#9752)", _label, _consequence)
+                if rebuild_counts.get("pack_selection_state_unknown"):
+                    # #11866: on THIS route the cause is the CAPTURE SOURCE, not
+                    # a stale sidecar. `rebuild_all` captures each preservation
+                    # section from the graph it is about to wipe, which here is
+                    # the fresh `target`, so the capture is empty by
+                    # construction. Nothing was expected, nothing was restored
+                    # and no verification failed — so the rebuild logged no
+                    # ERROR at all, and the tail this route used to print
+                    # ("see the rebuild ERROR log") sent the operator to an
+                    # empty line while naming the sidecar as the suspect. An
+                    # operator who goes looking for a stale rescue file beside
+                    # the target finds nothing, because that is not the failure
+                    # and not the fix.
+                    logger.warning(
+                        "rebuild: the migrated graph's :PackSelection pack-set "
+                        "marker is NOT confirmed intact (%s) — %s. This route "
+                        "captures from the graph it is about to wipe (the fresh "
+                        "`target`), so the marker was NOT OBSERVED, not "
+                        "observed gone (#9752/#11866)", _label, _consequence)
+                else:
+                    logger.warning(
+                        "rebuild: the migrated graph's :PackSelection pack-set "
+                        "marker is NOT confirmed intact (%s) — %s; see the "
+                        "rebuild ERROR log (#9752)", _label, _consequence)
             # #5612: the journal read is a SALVAGE read, so a damaged mid-file
             # line no longer raises out of the rebuild — it is skipped and
             # counted. This route then writes the migration MARKER, i.e. it is

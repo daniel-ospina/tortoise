@@ -13797,23 +13797,23 @@ class FalkorProjection(
                     if any(live == selection_marker for live in live_markers):
                         # ⛔ The MARKER is what this engine restores, so the claim
                         # is bounded to the fields the marker carries.
-                        # `_replay_log` captures `_capture_pack_selection`
-                        # (`:13499`) and nothing else: `_capture_config_snapshot`
-                        # — the `:PackInstall` registry a resolved pack set is
-                        # drawn from — is `rebuild_all`'s (its `_rebuild_all_replay`
-                        # leg), never this path's. Names, not line numbers, on
-                        # purpose: this block sits ABOVE those constructs, so any
-                        # edit here would shift a line cite below it — the exact
-                        # drift this PR has re-fixed repeatedly.
+                        # This path captures `capture_watermark`, `_capture_team_meta`
+                        # and `_capture_pack_selection` — never `_capture_config_snapshot`:
+                        # the `:PackInstall` registry a resolved pack set draws from
+                        # is `rebuild_all`'s (its `_rebuild_all_replay` leg), never
+                        # this path's. Names, not line numbers, on purpose: this
+                        # block sits BELOW the constructs it names, so an edit
+                        # here moves the cites below it, not theirs.
                         # With the marker present, `resolved_pack_set_for_graph`
-                        # drops its `namespaces=None` union fallback and resolves
-                        # the DATA leg over an empty registry, so the approved set
-                        # reads configured-but-EMPTY until the graph is re-pinned.
-                        # Saying "the pack set survived" would assert the rows
-                        # came back (#9752 review P2).
+                        # still unions unconditionally (`frozenset(recorded) |
+                        # graph_kind_namespaces(g)`), so the approved set is the
+                        # DATA leg — the registry empty, the graph's data
+                        # deciding — and reads empty only when the data names
+                        # nothing, until the packs are re-pinned. Saying "the set
+                        # survived" would assert the rows came back (#9752).
                         logger.warning(
                             "rebuild: restored the :PackSelection pack-set "
-                            "marker (`configured`, `revision`) but NOT the "
+                            "marker (`configured_at`, `revision`) but NOT the "
                             "`:PackInstall` rows — only `rebuild_all` restores "
                             "those — so the approved set resolves over an empty "
                             "registry (data leg only): a write of a previously-"
