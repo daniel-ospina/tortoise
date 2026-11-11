@@ -1463,14 +1463,20 @@ class EpBreakdown:
     # For a claim with NO readable `n.confidence` mirror it matches the number
     # TortoiseEP.compute_confidence / sdk.get_confidence return for the same
     # point WHENEVER one is persisted — THOSE TWO READ α/β ONLY, so a readable
-    # mirror is the second stated divergence (they answer the pair mean where
-    # this field answers the mirror's value) — and with ONE further stated
-    # exception, ``None`` here: those two still answer the Beta(1,1) prior mean
-    # (0.5) for a claim with no persisted belief at all, because they are the
-    # EP read under an explicit `require_calibration=False`, not a read/rank
-    # surface. That divergence is deliberate and recorded in the #11702 decision
-    # comment (issuecomment-6781252637) — it is the one place "no belief" still
-    # answers 0.5, and it is
+    # mirror is the first stated divergence (they answer the pair mean where
+    # this field answers the mirror's value) — EXCEPT where the stored pair is
+    # one R1 rejects: those two read the COALESCED operands with a per-operand
+    # `1.0` default, so a half pair answers 0.3333 there and ``None`` here, a
+    # (0,0) pair answers 0.5 there and ``None`` here, a negative pair answers a
+    # negative "mean" there and ``None`` here, an unreadable operand RAISES
+    # there and is ``None`` here, and a sum that overflows divides bare there
+    # (0.0) where this field uses the stable mean (0.5). Those are the rest of
+    # the second stated divergence. The one case that stays 0.5 is a claim with
+    # NO operands at all, because they are the EP read under an explicit
+    # `require_calibration=False`, not a read/rank surface. That divergence is
+    # deliberate and recorded in the #11702 decision
+    # comment (issuecomment-6781252637) — it is the one place a claim with NO
+    # operands at all still answers 0.5, and it is
     # outside this field's contract rather than a second vocabulary for it.
     # Historically this
     # field was the structural edge-ratio impl/(impl+nand); it is NOT that
@@ -5413,13 +5419,16 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
     Single Cypher query — NOT N+1. Returns EpBreakdown per Point ID.
 
     Issue #2206 contract — ``EpBreakdown.confidence_mean`` is THE point's
-    confidence and agrees with ``get_confidence``/``recall`` for the same
-    point: it is the belief mean α/(α+β) of the persisted posterior
-    (posterior_alpha/beta) when EP has run on the claim, else the persisted
-    prior mean (ep_alpha/beta) — or the readable ``n.confidence`` MIRROR's
-    value when there is one, since R1 leads both — else ``None`` (#11702 — the
-    third state of that contract, named by ``ep_state``; it used to be the
-    neutral Beta(1,1) mean 0.5). It is
+    confidence and agrees with ``recall`` for the same point (both read the same
+    `EpBreakdown`): it is the readable ``n.confidence`` MIRROR's value when
+    there is one (R1 leads), else the belief mean α/(α+β) of the persisted
+    posterior (posterior_alpha/beta) when EP has run on the claim, else the
+    persisted prior mean (ep_alpha/beta), else ``None`` (#11702 — the third
+    state of that contract, named by ``ep_state``; it used to be the neutral
+    Beta(1,1) mean 0.5). ⛔ It does NOT agree with ``get_confidence`` on every
+    shape, and the two divergences are stated on :class:`EpBreakdown`: that
+    reader never reads the mirror, and it reads the COALESCED operands with a
+    per-operand `1.0` default where R1 rejects the stored pair. It is
     NOT the structural edge-ratio impl/(impl+nand) that this field used to
     carry — that quantity lives on in ``evidence`` (impl_count/nand_count/
     total) and ``contention`` (the NAND fraction), which are legitimately

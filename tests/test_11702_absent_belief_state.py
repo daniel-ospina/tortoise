@@ -5617,7 +5617,8 @@ _BELIEF_PROSE = (
 #: corpus writes (`e.g.` / `i.e.` / `cf.`): splitting on those tears a correct
 #: sentence in two and reports its claim fragment as a defect — a false positive
 #: that steers the next fixer to "correct" correct prose.
-_SENTENCE_END = re.compile(r"(?<!\be\.g)(?<!\bi\.e)(?<!\bc\.f)(?<=[.!?])\s+")
+_SENTENCE_END = re.compile(
+    r"(?<!\be\.g\.)(?<!\bi\.e\.)(?<!\bcf\.)(?<=[.!?])\s+")
 
 #: Sentences that ASSERT the value of a prior-only claim's mean. The verb is
 #: what distinguishes a CLAIM from a factual mention of a number ("Beta(3,1),
@@ -5632,10 +5633,14 @@ _PRIOR_MEAN_CLAIM_PATTERNS = (
 #: the unit, so the intra-sentence clause bound is unnecessary and harmful — a
 #: literal punctuation anchor (`(ep_alpha/beta)`) plus a `{0,80}` clause missed
 #: every ordinary rewording (`of \`ep_alpha/beta\``, `(ep_alpha, ep_beta)`, a
-#: longer aside). It is FALSE whenever a readable mirror exists, so a reader
-#: branching on it predicts `absent` for a mirror-only Point.
+#: longer aside) AND the trailing-connective form ("prior mean …, ``None``
+#: otherwise"). The three tokens are therefore matched ORDER-INDEPENDENTLY
+#: inside one sentence. It is FALSE whenever a readable mirror exists, so a
+#: reader branching on it predicts `absent` for a mirror-only Point.
 _ABSENT_CLAIM = re.compile(
-    r"prior mean\b.*?\b(?:else|otherwise)\b.*?[`\"]*(?:None|null)",
+    r"(?=.*\bprior mean\b)"
+    r"(?=.*\b(?:else|otherwise)\b)"
+    r"(?=.*[`\"]*(?:None|null)\b)",
     re.IGNORECASE)
 
 #: The class-3 claim: a gloss that reads `has_ep` / `ep_measured_cypher` as
@@ -5652,17 +5657,18 @@ _EP_PASS_CLAIM = re.compile(
     r"[`\"]*(?P<pass>EP has MEASURED|EP measured this|EP MEASURED)",
     re.IGNORECASE)
 
-#: Negators of the gloss ITSELF, tested only where they can negate the VERB
-#: (see `_ep_pass_claims`). `no` is excluded on purpose: "no mere flag" is a
-#: determiner, not a negation of the claim.
+#: Negators of the gloss itself. `no` is excluded on purpose: "no mere flag" is
+#: a determiner, not a negation of the claim, and admitting it exempted a live
+#: gloss.
 _NEGATED = re.compile(r"\b(?:not|never)\b|\bisn't\b|⛔", re.IGNORECASE)
 
-#: A negator immediately before the verb, i.e. one that negates THIS claim:
-#: "is NOT ``EP has MEASURED this claim``". A `not` earlier in the clause is a
-#: different predicate ("is not a mere flag — it is EP MEASURED"), and admitting
-#: it exempted a live gloss.
-_NEGATES_VERB = re.compile(r"(?:\b(?:not|never)\b|\bisn't\b|⛔)\s*[`\"\s]*$",
-                          re.IGNORECASE)
+#: A clause break inside the link segment: a denial in an EARLIER clause does
+#: not negate the verb ("is not a mere flag — it is EP MEASURED" asserts the
+#: gloss), while a denial in the FINAL clause does ("is no receipt — it does
+#: not prove ``EP MEASURED``"). Splitting on the last break and testing only
+#: its tail is what separates the two; testing the whole span admitted the
+#: first, and end-anchoring rejected the second.
+_CLAUSE_BREAK = re.compile(r"—|–|:|;|\bbut\b|\brather\b", re.IGNORECASE)
 
 
 def _belief_prose(rel: str) -> str:
@@ -5680,6 +5686,15 @@ def _sentences(rel: str) -> list[str]:
     return [s for s in _SENTENCE_END.split(_belief_prose(rel)) if s.strip()]
 
 
+def _unqualified_claims_on(sentence: str, patterns) -> list[str]:
+    """The mirror-guard's predicate on ONE sentence (the reusable core of
+    `_unqualified_claims`, so the control test exercises the real logic rather
+    than a regex object in isolation)."""
+    if "mirror" in sentence.lower():
+        return []
+    return [sentence] if any(p.search(sentence) for p in patterns) else []
+
+
 def _unqualified_claims(patterns) -> list[str]:
     """Sentences matching a claim pattern that never name the mirror.
 
@@ -5690,25 +5705,33 @@ def _unqualified_claims(patterns) -> list[str]:
     problems = []
     for rel in _BELIEF_PROSE:
         for sentence in _sentences(rel):
-            if "mirror" in sentence.lower():
-                continue
-            if any(pattern.search(sentence) for pattern in patterns):
-                problems.append(f"{rel}: …{sentence[:180]}…")
+            problems += [f"{rel}: …{hit[:180]}…"
+                         for hit in _unqualified_claims_on(sentence, patterns)]
     return problems
+
+
+def _negates_its_verb(link: str) -> bool:
+    """True when the denial sits in the clause that carries the VERB.
+
+    Only the FINAL clause counts: a `not` in an earlier clause negates a
+    different predicate and must not exempt a live claim.
+    """
+    return bool(_NEGATED.search(_CLAUSE_BREAK.split(link)[-1]))
 
 
 def _ep_pass_claims(text: str) -> list[str]:
     """Matches that READ the flag as an EP receipt.
 
-    A negator IMMEDIATELY BEFORE the verb means the sentence DENIES the gloss
-    ("three things it is NOT: … not ``EP has MEASURED this claim``"), so the
-    test is anchored at the END of the link segment. Searching the whole span
-    let a `not` belonging to a different predicate exempt a live claim —
-    "`has_ep` is not a mere flag — it is EP MEASURED" passed.
+    A denial IN THE VERB'S OWN CLAUSE means the sentence DENIES the gloss
+    ("three things it is NOT: … not ``EP has MEASURED this claim``", "does not
+    mean (and never has meant) ``EP has MEASURED this claim``"), so that clause
+    is where the negator is looked for. A `not` in an earlier clause belongs to
+    a different predicate — "`has_ep` is not a mere flag — it is EP MEASURED"
+    asserts the gloss, and searching the whole span exempted it.
     """
     suspects = []
     for match in _EP_PASS_CLAIM.finditer(text):
-        if _NEGATES_VERB.search(match.group("link")):
+        if _negates_its_verb(match.group("link")):
             continue
         suspects.append(match.group(0))
     return suspects
@@ -5728,6 +5751,23 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
     assert any(p.search("reads its PRIOR mean, so it clears the mean floor.")
                for p in _PRIOR_MEAN_CLAIM_PATTERNS), \
         "the prior-mean guard misses the `reads its PRIOR mean` spelling"
+    # The SPLITTER is part of the guard: if it tears an abbreviation, a
+    # correctly qualified sentence is reported as a defect, and if it stops
+    # splitting at all then every module is one fragment that contains
+    # "mirror" — which makes BOTH of the mirror-guards vacuous. Assert both.
+    assert _SENTENCE_END.split("One. Two, i.e. three. Four.") == [
+        "One.", "Two, i.e. three.", "Four."], "the splitter tears `i.e.`"
+    assert _SENTENCE_END.split("A claim, e.g. a prior. A second one.") == [
+        "A claim, e.g. a prior.", "A second one."], \
+        "the splitter tears `e.g.`"
+    assert len(_sentences("tortoise/search_engine.py")) > 100, \
+        "the splitter has stopped splitting — the mirror-guards are vacuous"
+    # …and the mirror-guards must FIRE end-to-end on an unqualified sentence,
+    # not merely on a pattern object: one that never reports is not a guard.
+    assert _unqualified_claims_on(
+        "Its confidence_mean is the PRIOR mean, and it clears the floor.",
+        _PRIOR_MEAN_CLAIM_PATTERNS), \
+        "the mirror-guard never reports an unqualified sentence"
     # The absent-claim guard must survive the REWORDINGS of the same false
     # prediction, not just the one that shipped it.
     for spelling in (
@@ -5751,6 +5791,12 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
         "a negated gloss is the correct wording, not a finding"
     assert not _ep_pass_claims('`has_ep` is never "EP has MEASURED this claim"'), \
         "`never` negates the gloss too"
+    assert not _ep_pass_claims(
+        '`has_ep` is no receipt — it does not prove ``EP MEASURED``'), \
+        "a denial verb between the negator and the phrase must still exempt"
+    assert not _ep_pass_claims(
+        '`has_ep` does not mean (and never has meant) ``EP has MEASURED this claim``'), \
+        "a parenthetical aside between the negator and the verb must still exempt"
 
 
 def test_a_prior_mean_claim_in_the_belief_prose_names_the_mirror():
