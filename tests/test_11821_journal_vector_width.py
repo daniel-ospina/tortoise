@@ -533,16 +533,20 @@ def test_the_event_recorded_door_declares_its_width(tmp_path):
     float32 — or a value read back off the node, and this door builds its
     payload from `props` instead of going through `_emit_event`'s stamp. Delete
     the stamp block at `sdk.py::_journal_event_raw_write` and the whole suite
-    stayed green while the door silently journalled an UNDECLARED-width vector:
-    the one producer the seam's contract ("every journalled vector says what
-    width it was written at") would not cover, and the population P2's base64
-    migration would have to guess about.
+    stayed green while the door silently journalled an UNDECLARED-width vector
+    — a vector-bearing producer the seam's contract ("every journalled vector
+    says what width it was written at") would not cover, and the population
+    P2's base64 migration would have to guess about.
 
-    ⚠️ "producer", not "record": `TortoiseSDK.update_point` splats a
-    CALLER-supplied `embedding` onto a `PointRevised` record's TOP level
-    (`_emit_event("PointRevised", id=..., **emit_props)`), which no payload stamp
-    reaches — measured, that record carries `embedding` and no
-    `embedding_width`. It is a residual population, not one this file covers.
+    ⚠️ This door is not the population's EDGE (#11835 review F1). Two other
+    live producers journal a vector through `_emit_event`'s `id=`/`**extra`
+    branch — `_session_event_write` and `_embedding_repair_attempt`, both
+    `EventRecorded` — and `update_point` splats a caller vector onto a
+    `PointRevised` record's TOP level. All three used to carry `embedding` and
+    NO `embedding_width` (measured: 8,455 chars and the marker ABSENT when
+    driven through `_session_event_write`); they are covered now by the stamp on
+    that branch, pinned in
+    `test_the_emit_event_extra_branch_declares_its_width` below.
 
     So both halves are asserted — the DECLARATION and the NARROWING — because a
     marker written without the values it describes would be a lie the next
@@ -574,3 +578,128 @@ def test_the_event_recorded_door_declares_f64_for_a_vector_it_cannot_narrow(
 
     assert record["embedding"] == source, "the values must be left ALONE"
     assert record[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64
+
+
+# ── 8. the producers that reach `_emit_event`'s `extra` branch ───────────────
+#
+# #11835 review F1 (P1). `_emit_event` stamped only its `point=` payload, so the
+# `id=`/`**extra` branch journalled a vector with NO width: `_session_event_write`
+# and `_embedding_repair_attempt` (both `EventRecorded`) measured 8,455 chars and
+# `embedding_width` ABSENT, and `update_point` splats a caller vector onto the
+# same top level for `PointRevised`. "Absent means PRE-CHANGE / FOREIGN record"
+# was therefore false for records written AFTER the change.
+
+
+def _emit_record(tmp_path, **extra):
+    """Drive the REAL `_emit_event` `id=` branch and return the record written.
+
+    `id=` and no `point=` is exactly the shape both live producers use; the
+    journal is a `tmp_path` file, so this stays hermetic (no DB, no graph, no
+    network) like the door helper above.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    journal = tmp_path / "emit.jsonl"
+    sdk = TortoiseSDK(str(tmp_path / "emit.db"), event_log_path=str(journal))
+    try:
+        sdk._emit_event("EventRecorded", id="evt-11821-extra", **extra)
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+    records = [json.loads(ln) for ln in
+               journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(records) == 1, f"expected exactly one record, got {records!r}"
+    assert records[0]["type"] == "EventRecorded"
+    return records[0]
+
+
+def test_the_emit_event_extra_branch_declares_its_width(tmp_path):
+    """A vector that arrives through `extra` must declare its width too.
+
+    This is the branch `_session_event_write` and `_embedding_repair_attempt`
+    journal through. Delete the stamp on that branch and this reds while every
+    other row in this file stays green — the population was open precisely
+    because no pin drove this spelling.
+    """
+    widened = _vector()
+    record = _emit_record(tmp_path, embedding=list(widened),
+                          eventId="evt-11821-extra")
+
+    assert record[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F32, (
+        "the emit_event extra branch journalled a vector with no width declared")
+    assert _f32_bits(record["embedding"]) == _f32_bits(widened)
+    assert len(_text(record["embedding"])) < len(_text(widened)), (
+        "the branch's vector must be stored at the embedder's float32, not the "
+        "widened float64 repr the seam exists to remove")
+
+
+def test_the_emit_event_extra_branch_leaves_a_verbatim_vector_raw(tmp_path):
+    """The seam's own verbatim arm decides here too — not a blanket narrowing.
+
+    `update_point` splats a CALLER-supplied vector onto `PointRevised`'s top
+    level with `embedding_verbatim=true` (#5004 round-7: a caller-owned vector
+    keeps its RAW form). The new stamp must therefore declare `f64` and touch
+    nothing.
+    """
+    caller = [0.1, 1 / 3, 2.718281828459045]
+    record = _emit_record(tmp_path, embedding=list(caller), eventId="evt-verbatim",
+                          embedding_verbatim=True)
+
+    assert record["embedding"] == caller, "a caller-owned vector must stay RAW"
+    assert record.get(JOURNAL_VECTOR_WIDTH_KEY) == JOURNAL_VECTOR_WIDTH_F64, (
+        "a caller-owned vector on the extra branch declared no width at all "
+        "(absent is reserved for pre-change records)")
+
+
+def test_add_point_does_not_keep_the_servers_width_over_a_caller_vector(tmp_path):
+    """#11835 review F2 (P1): the marker must die with the vector it described.
+
+    `EventAPI._point` stamps the SERVER's vector; `add_point` then splats the
+    caller's `fields` over it. Before the fix the second stamp hit
+    `_stamp_journal_vector_width`'s idempotency guard ("already `f32` ⇒ this is
+    mine") and returned early, so the CALLER's off-grid values were journalled
+    as `f32` — the population #5004 round-7 says a later width/base64 migration
+    must not narrow. Measured: remove the `p.pop(...)` in `api.add_point` and
+    this row reds with `'f32' == 'f64'`.
+    """
+    from unittest import mock
+
+    from tortoise.api import EventAPI, provenance
+    from tortoise.embeddings import EMBEDDING_DIM
+    from tortoise.log import EventLog
+
+    events = tmp_path / "events"
+    events.mkdir()
+    log = EventLog(events / "events.jsonl")
+    # An ON-GRID server vector at the store's own width, so `_point`'s stamp
+    # really declares `f32` — the stale marker this pin is about only exists
+    # when the first stamp fires. (`_degrade_to_width` DROPS a width-mismatched
+    # vector, so a short probe vector would make this pin vacuous: no vector,
+    # no first stamp, no stale marker.)
+    server = [0.5] + [0.25] * (EMBEDDING_DIM - 1)
+    with mock.patch("tortoise.embeddings.compute_embedding",
+                    lambda text: list(server)):
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = TortoiseSDK(str(tmp_path / "width-carry.db"))
+        try:
+            api = EventAPI(log, initiated_by="extractor",
+                           projection=sdk._get_proj())
+            caller = [0.1, 1 / 3, 2.718281828459045]
+            api.add_point("caller vector probe", provenance("src:1", [0, 4], "q"),
+                          embedding=list(caller))
+        finally:
+            sdk.close()
+
+    recorded = [json.loads(ln) for ln in
+                (events / "events.jsonl").read_text(encoding="utf-8").splitlines()
+                if ln.strip()]
+    added = [e for e in recorded if e.get("type") == "PointAdded"]
+    assert added, "EventAPI did not journal a PointAdded"
+    point = added[0]["point"]
+    assert point["embedding"] == caller, (
+        "the caller's vector must be journalled exactly as supplied")
+    assert point[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64, (
+        "the server's `f32` marker survived the vector it described — a caller "
+        "vector is now declared narrowed")

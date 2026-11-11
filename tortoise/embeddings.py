@@ -330,11 +330,15 @@ def ensure_embed_threads() -> None:
 #: It is a DESCRIPTION of the payload, exactly like ``embedding_model`` /
 #: ``embedding_revision`` / ``embedding_text_hash`` / ``embedding_preserved``:
 #: never a node property, never a record column, and refused from callers in
-#: every one of the homes those two live in (`projection.entities._META_KEYS`,
-#: `record_projection`'s record-meta set, `consistency._EXCLUSION_REASONS`,
-#: `mcp_server._SERVER_MANAGED_PROPS`, `sdk._sanitize_props`,
-#: `api.EventAPI.add_point`'s forged-key refusal, and
-#: `record_projection.TURNS_SNAPSHOT_OPTIONAL_KEYS` for the carrier).
+#: every one of the homes those declarations live in
+#: (`projection.entities._POINT_HANDLED` — which is where
+#: `embedding_model`/`embedding_revision`/`embedding_text_hash` and
+#: `embedding_preserved` actually sit (`:2375`, `:2390`), NOT `_META_KEYS` —
+#: `projection.entities._META_KEYS`, `record_projection`'s record-meta set,
+#: `consistency._EXCLUSION_REASONS`, `mcp_server._SERVER_MANAGED_PROPS`,
+#: `sdk._sanitize_props`, `api.EventAPI.add_point`'s forged-key refusal, and
+#: `record_projection.TURNS_SNAPSHOT_OPTIONAL_KEYS` for the carrier — eight in
+#: all, each pinned somewhere that can redden).
 JOURNAL_VECTOR_WIDTH_KEY = "embedding_width"
 #: The vector is stored at the embedder's own float32, shortest round-trip text.
 JOURNAL_VECTOR_WIDTH_F32 = "f32"

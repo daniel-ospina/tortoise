@@ -12520,6 +12520,31 @@ class TortoiseSDK:
         if id is not None:
             event["id"] = id
         event.update(extra)
+        # #11835 review F1 (P1): EVERY journalled vector declares its width —
+        # including the ones that arrive through `extra` on this (`id=`) branch,
+        # which the `point=` branch above covers only for ITS payload. Two live
+        # producers journal a vector here (`_session_event_write`,
+        # `_embedding_repair_attempt`, both `EventRecorded`), and
+        # `update_point` splats a caller vector onto the same top level for
+        # `PointRevised`; before this, all three wrote a vector with NO marker,
+        # so `embeddings.py::JOURNAL_VECTOR_WIDTH_KEY`'s "absent means
+        # PRE-CHANGE / FOREIGN record" was false for records written AFTER the
+        # change. `creating=False` because none of these computed a vector from
+        # the content riding with them; the seam still decides every arm
+        # itself: a verbatim/preserved vector keeps its raw form and declares
+        # `f64` (#5004 round-7), an off-grid or unrepresentable vector is left
+        # untouched and declares `f64`, and only a value our own embedder
+        # produced is narrowed and declares `f32`.
+        if "embedding" in event:
+            try:
+                from .embeddings import stamp_journal_embedding
+            except Exception:  # noqa: BLE001, RUF100
+                # Same posture as the `point=` branch above: a write must not
+                # depend on an import succeeding. Nothing is lost but the
+                # normalisation and the width declaration.
+                stamp_journal_embedding = None
+            if stamp_journal_embedding is not None:
+                event = stamp_journal_embedding(event, creating=False)
         # #2600: server-resolved actor as the LAST write on the envelope
         # (after event.update(extra)), matching the graph branch order.
         if _jsonl_actor is not None:
@@ -13197,17 +13222,20 @@ class TortoiseSDK:
             # that carries a vector (a session `:Event`, whose vector is
             # `_session_embedding`'s — our embedder's float32 — or a value read
             # back off the node), and it does not pass through
-            # `_emit_event`'s stamp. Without this the payload would be the ONE
+            # `_emit_event`'s stamp. Without this the payload would be a
             # vector-bearing PRODUCER this seam would otherwise leave with no
             # declared width, while the seam's whole contract is that every
-            # journalled vector it writes says what width it was written at.
-            # ⚠️ NOT "the one record": a CALLER-supplied vector on a
-            # `PointRevised` record rides its TOP level (`update_point`'s
-            # `emit_props`, splatted by
-            # `_emit_event("PointRevised", id=..., **emit_props)`), which no
-            # payload stamp reaches — measured, such a record carries
-            # `embedding` and no `embedding_width`. That population is a known
-            # residual, not something this door claims to cover. `creating=False`
+            # journalled vector says what width it was written at.
+            # ⚠️ NOT "the one producer", and not "the one record" (#11835
+            # review F1). Two other live producers journal a vector through
+            # `_emit_event`'s `id=`/`**extra` branch — `_session_event_write`
+            # and `_embedding_repair_attempt`, both `EventRecorded` — and
+            # `update_point` splats a caller vector onto a `PointRevised`
+            # record's TOP level. All three carried `embedding` and no
+            # `embedding_width` before `_emit_event` stamped its `extra` branch;
+            # they are now covered there (one stamp for every payload that
+            # meets the branch), so this door's stamp is not the population's
+            # edge any more. `creating=False`
             # stamps no identity, and that arm DROPS identity keys the props
             # already carried (measured: `embedding_model`/`embedding_revision`/
             # `embedding_text_hash` are popped) — a caller-supplied one is now

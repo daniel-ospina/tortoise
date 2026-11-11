@@ -646,7 +646,7 @@ def test_probe_pins_its_published_outputs(
     assert "5,072 B (13.2 chars/float)" in out
     assert "25,360 / 34,766 B (72.9%)" in out
     # The NOTE the README pastes states WHERE the baseline's identity keys sit —
-    # the placement the 202 B attribution above depends on.
+    # the placement the 228 B attribution above depends on.
     assert "#5004's identity keys at the record's TOP LEVEL" in out
 
 

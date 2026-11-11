@@ -405,14 +405,26 @@ class EventAPI:
             # so presence holds even when the seam below is unreachable.
             p["embedding"] = fields["embedding"]
             try:
-                from .embeddings import stamp_journal_embedding
+                from .embeddings import JOURNAL_VECTOR_WIDTH_KEY, stamp_journal_embedding
             except Exception:  # noqa: BLE001, RUF100
                 # #5148 review: the same import-at-the-call-site lane as
                 # `_point` — an unimportable seam must not fail a WRITE. Only
                 # the stamp's normalisation safety net is lost; the key is
                 # already present, so PRESENCE IS OWNERSHIP is intact.
+                JOURNAL_VECTOR_WIDTH_KEY = None
                 stamp_journal_embedding = None
             if stamp_journal_embedding is not None:
+                # #11835 review F2 (P1): the width marker describes the vector
+                # that `_point` stamped, and `p.update(fields)` has just
+                # REPLACED that vector with the caller's. It must die with the
+                # value it described: `_stamp_journal_vector_width`'s
+                # idempotency guard reads an existing `f32` as "already this
+                # seam's own output", so it would return early and never
+                # re-decide — leaving a CALLER's off-grid values declared
+                # `f32`, which is precisely the population #5004 round-7 says
+                # a later width/base64 migration must not narrow. Measured:
+                # without this pop the caller's vector is journalled `f32`.
+                p.pop(JOURNAL_VECTOR_WIDTH_KEY, None)
                 stamp_journal_embedding(p, creating=False)
         # #5004 round-7: the journal MARKERS are server-minted, and this is the
         # one producer that does not pass through `_sanitize_props` (an
