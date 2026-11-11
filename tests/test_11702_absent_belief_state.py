@@ -53,6 +53,14 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+#: The interpreter's own ceiling on int()/str conversion, or 0 for "no limit".
+#: The two padded-literal pins below can only FAIL while the ceiling exists: with
+#: `sys.set_int_max_str_digits(0)` the PRE-FIX body converts the same 4,300-digit
+#: token without raising, so every one of their assertions passes on unfixed code.
+#: Read at import (the repo convention — see `tests/test_worker_topology.py`) so
+#: the arms describe THIS box rather than a hard-coded 4300.
+_DIGIT_CONVERSION_LIMIT = sys.get_int_max_str_digits()
+
 # The HOSTED write verb's half of the `ep_updated` pin drives the real
 # `POST /v1/sessions` route, so it reuses `tests/test_hosted_api.py`'s
 # authenticated TestClient fixture — the established repo pattern (see
@@ -169,6 +177,173 @@ def test_ep_state_names_the_three_presence_states():
     # A legacy EP-flush mirror alone is still a persisted belief.
     assert ep_state(posterior_alpha=None, ep_alpha=None,
                     confidence=0.42) == EP_STATE_BASELINE
+
+
+# ── The derivation table is the contract, row by row ───────────────────────
+#
+# `search_engine.py` states the whole state contract as ONE table above
+# `ep_measured_cypher`, because the per-clause prose regressed three times on
+# this branch (#11894): a fix to one clause left its neighbour asserting the
+# opposite. Prose cannot be re-read by a machine, so the table is asserted here
+# row by row — a shape whose state, predicate or mean moves REDS this test, and
+# the table cannot drift away from the code without the code being fixed too.
+#
+# The `predicate` column is `ep_measurement_state` (the Python twin of the
+# `has_ep`/`measured` Cypher boolean): it answers "is an α column persisted",
+# NOT "is a belief readable", and the two diverge exactly where the table says.
+@pytest.mark.parametrize(
+    "shape, columns, predicate, expected_state, expected_mean",
+    [
+        ("nothing persisted", {}, "unmeasured", EP_STATE_ABSENT, None),
+        # ⛔ The mirror alone: NO α column, so has_ep/`measured` are False — and
+        # the state is `baseline`, NOT `absent`. This row is what forbids
+        # deriving the state from the two flags.
+        ("legacy n.confidence mirror only", {"confidence": 0.95},
+         "unmeasured", EP_STATE_BASELINE, 0.95),
+        # ⛔ The half pair, no mirror: an α IS persisted (predicate True) and
+        # there is still no mean — absent, not baseline.
+        ("half pair alpha=0.5, no mirror", {"posterior_alpha": 0.5},
+         "measured", EP_STATE_ABSENT, None),
+        # ⛔ The same half pair WITH a mirror: the mirror supplies the belief, so
+        # the state is `measured` and the mean is the mirror's. The unqualified
+        # "a half pair takes the absent arm" gloss is false here.
+        ("half pair alpha=0.5 + mirror 0.95",
+         {"posterior_alpha": 0.5, "confidence": 0.95},
+         "measured", EP_STATE_MEASURED, 0.95),
+        ("(0, 0) pair, no mirror", {"posterior_alpha": 0.0,
+                                    "posterior_beta": 0.0},
+         "measured", EP_STATE_ABSENT, None),
+        ("(0, 0) pair + mirror 0.95",
+         {"posterior_alpha": 0.0, "posterior_beta": 0.0,
+          "confidence": 0.95},
+         "measured", EP_STATE_MEASURED, 0.95),
+        ("unreadable operand 'abc', no mirror", {"posterior_alpha": "abc"},
+         "measured", EP_STATE_ABSENT, None),
+        ("unreadable operand 'abc' + mirror 0.95",
+         {"posterior_alpha": "abc", "confidence": 0.95},
+         "measured", EP_STATE_MEASURED, 0.95),
+        # A declared #2199 baseline: a VALUE (the prior mean), not a measurement.
+        ("declared baseline (ep_alpha=2, ep_beta=1)",
+         {"ep_alpha": 2.0, "ep_beta": 1.0, "baseline_set": True},
+         "baseline", EP_STATE_BASELINE, 2.0 / 3.0),
+        # ⛔ …but the mirror LEADS R1, so a declared baseline that also carries one
+        # reads `baseline` with the MIRROR's value — not the prior mean.
+        ("declared baseline (2, 1) + mirror 0.95",
+         {"ep_alpha": 2.0, "ep_beta": 1.0, "baseline_set": True,
+          "confidence": 0.95},
+         "baseline", EP_STATE_BASELINE, 0.95),
+        # ⛔ …and a DECLARED but DEGENERATE prior is `absent` WITHOUT a mirror:
+        # `set_point_baseline(c, 0, 0)` sets baseline_set with 0/0 operands, and
+        # 0/0 has no mean. "Declared baseline" is therefore not a synonym for the
+        # baseline token, and it is not "always absent" either — the next row.
+        ("declared but degenerate prior (ep_alpha=0, ep_beta=0)",
+         {"ep_alpha": 0.0, "ep_beta": 0.0, "baseline_set": True},
+         "baseline", EP_STATE_ABSENT, None),
+        ("declared but degenerate prior + mirror 0.95",
+         {"ep_alpha": 0.0, "ep_beta": 0.0, "baseline_set": True,
+          "confidence": 0.95},
+         "baseline", EP_STATE_BASELINE, 0.95),
+        # A β WITHOUT an α: no pair, so no mean — and the α predicate is FALSE, so
+        # the state is `baseline` when a mirror supplies the belief (it is not a
+        # "mirror-ONLY" claim in the literal sense, which is why that phrase was
+        # replaced by R1 in the field docs).
+        ("beta-only (no alpha)", {"posterior_beta": 3.0},
+         "unmeasured", EP_STATE_ABSENT, None),
+        ("beta-only (no alpha) + mirror 0.95",
+         {"posterior_beta": 3.0, "confidence": 0.95},
+         "unmeasured", EP_STATE_BASELINE, 0.95),
+        # A NEGATIVE operand is readable and refused as a belief — a distinct
+        # shape from "an operand this process cannot read".
+        ("negative pair (-1, 3)",
+         {"posterior_alpha": -1.0, "posterior_beta": 3.0},
+         "measured", EP_STATE_ABSENT, None),
+        ("measured pair (3, 1)", {"posterior_alpha": 3.0,
+                                  "posterior_beta": 1.0},
+         "measured", EP_STATE_MEASURED, 0.75),
+    ],
+)
+def test_the_state_derivation_table_is_the_contract(
+        shape, columns, predicate, expected_state, expected_mean):
+    """Every row of the table above ``ep_measured_cypher``, asserted."""
+    kw = {
+        "posterior_alpha": None,
+        "posterior_beta": None,
+        "ep_alpha": None,
+        "ep_beta": None,
+        "confidence": None,
+        "baseline_set": False,
+    }
+    kw.update(columns)
+    assert _se.ep_measurement_state(
+        posterior_alpha=kw["posterior_alpha"], ep_alpha=kw["ep_alpha"],
+        baseline_set=kw["baseline_set"]) == predicate, shape
+    assert ep_state(**kw) == expected_state, shape
+    # `belief_value` reads the same columns but takes no `baseline_set` — a flag
+    # is not a value source (see its docstring): the same reason a declared
+    # baseline's mean is the prior it declares.
+    value_kw = {k: v for k, v in kw.items() if k != "baseline_set"}
+    mean = _se.belief_value(**value_kw)
+    if expected_mean is None:
+        assert mean is None, f"{shape}: expected no belief, got {mean!r}"
+    else:
+        assert mean == pytest.approx(expected_mean), f"{shape}: got {mean!r}"
+    # The value and the state never disagree: `None` exactly on `absent`.
+    assert (mean is None) == (expected_state == EP_STATE_ABSENT), shape
+
+
+@pytest.mark.parametrize("state, measured, expected", [
+    # The #2490 fold, on both sides of the question (the table's TERMINAL row):
+    # a decayed posterior IS a stored value, so `measured` downgrades to
+    # `baseline` — and an ABSENT state stays ABSENT, because a terminal row that
+    # never held a belief has no decayed posterior to report.
+    (EP_STATE_MEASURED, False, EP_STATE_BASELINE),
+    (EP_STATE_ABSENT, False, EP_STATE_ABSENT),
+    (EP_STATE_BASELINE, False, EP_STATE_BASELINE),
+    (EP_STATE_MEASURED, True, EP_STATE_MEASURED),
+])
+def test_the_terminal_fold_moves_measured_only(state, measured, expected):
+    """`ep_state_resolve` must never turn `absent` into a number-bearing state."""
+    assert _se.ep_state_resolve(state, measured=measured) == expected
+
+
+def test_a_born_terminal_claim_has_no_decayed_posterior(sdk):
+    """A claim CREATED terminal never went through a terminalising write.
+
+    The #2490 fold maps `measured` → `baseline` because a terminalising WRITE
+    stamps the decayed 0.5/1.0/1.0. A born-terminal claim has no such write, so
+    there is no value to report: the state stays `absent` and the mean stays
+    `None`. Stated as a test because the prose claimed the opposite twice (a
+    terminal claim's state is "never absent", and "an absent state STAYS absent
+    because a terminal row never held a belief" — which is exactly this row, and
+    NOT the `retract` row the prose described).
+    """
+    pid = sdk.create_point("statement", "born-terminal claim",
+                           status="superseded")["id"]
+    eps = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
+    assert eps.ep_state == EP_STATE_ABSENT, eps
+    assert eps.confidence_mean is None, eps
+    assert eps.measured is False and eps.has_ep is False, eps
+
+
+def test_a_declared_baseline_with_a_mirror_reports_the_mirror_not_the_prior(sdk):
+    """`baseline=True` does NOT mean "the mean is the declared prior".
+
+    R1 leads with the `n.confidence` mirror, so a prior-only claim that also
+    carries one reports `baseline` with the MIRROR's value — measured here: the
+    prior mean is 2/3 and the reported mean is 0.95. The field's `baseline`
+    flag still says prior-only, which is why the two must not be read as one
+    statement.
+    """
+    pid = sdk.create_point("statement", "declared baseline with mirror",
+                           dedup=False, status="live")["id"]
+    sdk.set_point_baseline(pid, 2.0, 1.0)
+    sdk.update_point(pid, confidence=0.95)
+    eps = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
+    assert eps.ep_state == EP_STATE_BASELINE, eps
+    assert eps.baseline is True, eps
+    assert eps.confidence_mean == pytest.approx(0.95, abs=1e-4), (
+        f"the mirror leads R1, so the prior mean 0.667 is NOT the answer: {eps}")
+    assert eps.confidence_mean != pytest.approx(2.0 / 3.0, abs=1e-3)
 
 
 def test_ep_breakdown_default_reports_none_and_absent():
@@ -330,6 +505,14 @@ def test_a_degenerate_declared_baseline_is_absent_and_not_prior_only(sdk):
     assert why_ep.get("confidence_mean") is None, why_ep
 
 
+@pytest.mark.skipif(
+    not _DIGIT_CONVERSION_LIMIT,
+    reason=(
+        "this interpreter has no int()/str conversion limit "
+        "(sys.int_max_str_digits == 0), so the pre-fix body reads the padded "
+        "literal too and this pin cannot discriminate"
+    ),
+)
 def test_a_literal_past_the_int_str_digit_cap_reads_like_its_short_spelling():
     """Cycle 30 P2: `Fraction("<4301 digits>")` raises `ValueError` — CPython
     caps int↔str conversion — and the `exact is None` fallback then DISCARDED
@@ -386,39 +569,96 @@ def test_a_literal_past_the_int_str_digit_cap_reads_like_its_short_spelling():
                 short, numeric_operand(long), expected)
 
 
+@pytest.mark.skipif(
+    not _DIGIT_CONVERSION_LIMIT,
+    reason=(
+        "this interpreter has no int()/str conversion limit "
+        "(sys.int_max_str_digits == 0), so the pre-fix body reads the padded "
+        "literal too and this pin cannot discriminate"
+    ),
+)
 def test_a_padded_hex_exponent_cannot_empty_the_batch():
-    """Cycle 30 P2: the padding axis this cycle bounded had a CRASHING sibling.
+    """#11702: the padding axis this PR bounded had a CRASHING sibling.
 
-    The mantissa of a hex literal is reconstructed with `int(digits, 16)`, which
-    CPython's int↔str cap exempts — but the `p` exponent is base 10 and is NOT
-    exempt. A zero-padded exponent (`p-000…149`, the same cheap padding that
-    makes any stored operand arbitrarily long) raised `ValueError` inside
-    `int()`, and `annotate_ep_batch`'s blanket handler answered `{}` for the
-    whole batch: ONE legacy row made every claim in the response read
-    `ep_state: "absent"`, `confidence_mean: null`, `measured: false` — including
-    claims genuinely measured — and any belief floor then returned nothing.
+    The MANTISSA of a hex literal is reconstructed with `int(digits, 16)`, which
+    CPython's int↔str cap exempts (it applies to non-power-of-two bases only) —
+    but the `p` EXPONENT is base 10 and is NOT exempt. A zero-padded exponent
+    (`p-000…149`, the same cheap padding that makes any stored operand
+    arbitrarily long) raised `ValueError` inside `int()`, and
+    `annotate_ep_batch`'s blanket handler answered `{}` for the WHOLE batch: ONE
+    legacy row made every claim in the response read `ep_state: "absent"`,
+    `confidence_mean: null`, `measured: false` — including claims genuinely
+    measured — and any belief floor then returned nothing.
 
-    Pinned on the HELPER (the batch surface needs a live graph and the helper is
-    where the raise was), and on the shape that matters: the value must be the
-    literal's, not a discarded `None`.
+    Pinned on the HELPER (the batch surface needs a live graph, and the helper
+    is where the raise was), and on the shape that matters: a padded exponent is
+    the SAME exponent, so the value must be the literal's — never a discarded
+    `None`, and never a raise.
+    """
+    from fractions import Fraction
+
+    from tortoise.search_engine import _exact_literal_fraction, numeric_operand
+
+    # The same exponent, spelled with 4,300 zeros: the value, not None.
+    padded = "0x1p-" + "0" * 4300 + "149"
+    assert len(padded) > 4300
+    assert _exact_literal_fraction(padded) == Fraction(1, 2 ** 149), (
+        "a zero-padded exponent was not read as its own value")
+    assert numeric_operand(padded) == float.fromhex("0x1p-149"), (
+        numeric_operand(padded))
+    # …and a padded exponent that is genuinely OUT of bounds is still refused
+    # rather than converted: the strip cannot change the value, and the digit
+    # count short-circuits the conversion the cap would raise on.
+    assert _exact_literal_fraction("0x1p+" + "9" * 4400) is None
+    assert numeric_operand("0x1p+" + "9" * 4400) is None
+
+
+def test_the_hex_exponent_guard_is_value_shaped_not_length_shaped():
+    """⛔ The exponent guard must not be a DIGIT-LENGTH short-circuit.
+
+    A 4,300-character padded exponent has to be refused without being converted,
+    and the tempting way to do that is
+    ``len(exp_digits) > len(str(_EXACT_FRACTION_MAX_EXP))``. That bound is
+    GRAMMAR-shaped: it refuses a five-digit exponent outright, including one whose
+    VALUE is far inside the bound, because a long mantissa's fractional zeros
+    cancel it. `"0x0." + "0"*1476 + "1p10000"` has magnitude_bits
+    ``4*1 + 10000 - 4*1477 == 4096`` — exactly the bound, a value the store
+    serves — and the length form answered `None` for it, i.e. it re-opened the
+    measured-vs-absent split #11897 closed, from the other side.
+
+    The guard is therefore a `try: int(...) except ValueError`, so it refuses only
+    the conversion the int↔str cap would actually raise on.
     """
     from fractions import Fraction
 
     from tortoise.search_engine import _exact_literal_fraction
 
-    # A padded exponent is the SAME exponent: value must be unchanged, not None.
-    assert _exact_literal_fraction("0x1p-149") == Fraction(1, 2 ** 149)
-    padded = "0x1p-" + "0" * 4400 + "149"
-    assert len(padded) > 4300, len(padded)
-    assert _exact_literal_fraction(padded) == Fraction(1, 2 ** 149), (
-        f"a {len(padded)}-character exponent of the SAME value read "
-        f"{_exact_literal_fraction(padded)!r} instead of 2**-149 — the literal "
-        "was discarded, and one such row empties the whole batch")
-    assert _exact_literal_fraction("0x1p+1") == 2
-    assert _exact_literal_fraction("0x1p+" + "0" * 4400 + "1") == 2
-    # …and a genuinely out-of-bound exponent still declines, without raising.
-    assert _exact_literal_fraction("0x1p+9999") is None
-    assert _exact_literal_fraction("0x1p+" + "9" * 4400) is None
+    in_bounds = "0x0." + "0" * 1476 + "1p10000"
+    assert _exact_literal_fraction(in_bounds) == Fraction(2 ** 4092), (
+        "a five-digit exponent whose magnitude is inside the bound must be READ, "
+        f"not refused: {_exact_literal_fraction(in_bounds)!r}")
+    past_bound = "0x0." + "0" * 1476 + "1p11000"
+    assert _exact_literal_fraction(past_bound) is None, (
+        "the same mantissa with an out-of-bounds exponent must still be refused")
+
+
+def test_a_zero_literal_with_an_empty_integer_part_is_still_zero():
+    """`.0` is a literal whose EXACT value is 0, not an unreadable string.
+
+    Canonicalising the mantissa strips trailing fractional zeros, which empties
+    the integer part for `.0` / `+.00` / `-.0e5` / `.000E-7` — and `Decimal("")`
+    (or `Decimal("+")`) RAISES, so the helper answered `None` where the literal's
+    exact value is 0. Not reachable through `numeric_operand` (it
+    short-circuits `val == 0.0`), but this helper's contract is "the literal's
+    EXACT value, or None", and 0 is a value.
+    """
+    from fractions import Fraction
+
+    from tortoise.search_engine import _exact_literal_fraction
+
+    for lit in (".0", ".00", "+.00", "-.0", "-.0e5", ".000E-7", "+.000e+3"):
+        assert _exact_literal_fraction(lit) == Fraction(0), (
+            f"{lit!r} read {_exact_literal_fraction(lit)!r} instead of 0")
 
 
 # ── A hex exponent the mantissa CANCELS is not an unreadable literal ──────
@@ -658,29 +898,6 @@ def test_a_hex_magnitude_past_the_bound_is_refused_before_it_is_built(
     assert built, "the spy never fired — the refusals above prove nothing"
 
 
-def test_a_zero_literal_with_an_empty_integer_part_is_still_zero():
-    """Cycle 30 P3: the trailing-zero canonicalisation can EMPTY the integer
-    part, and `Decimal("")` raises — so `.0`, `+.00`, `-.0e5` returned `None`
-    where the literal's exact value is 0.
-
-    Latent rather than live — `numeric_operand` short-circuits `val == 0.0`
-    before the string path, so no served value changed — but this helper's
-    contract is "the literal's EXACT value, or None", and 0 is a value. A later
-    caller that reaches the helper directly would otherwise read "absent" for a
-    literal that is exactly zero.
-    """
-    from fractions import Fraction
-
-    from tortoise.search_engine import _exact_literal_fraction
-
-    for spelling in (".0", ".00", "+.0", "-.0", ".0e5", ".000E-7", "+.00e+0"):
-        assert _exact_literal_fraction(spelling) == Fraction(0), (
-            f"{spelling!r} read {_exact_literal_fraction(spelling)!r} — the "
-            "canonicalisation emptied the integer part and `Decimal` raised")
-    # A dot with no digits at all is not a number, and must still decline.
-    assert _exact_literal_fraction(".") is None
-
-
 # ── The property: an absent claim is not ORDERED as a 0.5 ──────────────────
 
 def test_absent_and_measured_symmetric_do_not_share_an_ordering_input(sdk):
@@ -844,6 +1061,18 @@ def test_the_subgraph_labels_a_terminal_claim_the_same_way_the_ep_block_does(sdk
     assert node["ep_state"] == ep.get("ep_state"), (
         f"the response contradicts itself: subgraph {node['ep_state']!r} vs "
         f"the ep block {ep.get('ep_state')!r}")
+    # …and the ROW the derivation table states for a terminal claim that HAD a
+    # posterior: `has_ep`/`baseline` are both False (the #2490 gate clears the
+    # first, the resolved state clears the second) and the value is the decayed
+    # posterior — 0.5 here, because (1.0, 1.0) IS Beta(1,1). Pinned here because
+    # those three columns are computed in `annotate_ep_batch` and no unit-level
+    # row can reach them.
+    eps = annotate_ep_batch(proj.g, [pid])[pid]
+    assert eps.ep_state == EP_STATE_BASELINE, eps
+    assert eps.has_ep is False and eps.measured is False, eps
+    assert eps.baseline is False, eps
+    assert eps.confidence_mean == pytest.approx(0.5, abs=1e-6), (
+        f"a terminal claim's decayed posterior is a VALUE (0.5 here): {eps}")
 
 
 def test_a_legacy_string_operand_outside_float32_is_absent_on_every_surface(sdk):
@@ -1373,6 +1602,12 @@ def test_mirror_only_claim_agrees_on_the_value_everywhere(sdk):
         [{"id": pid, "scores": {"rrf": 1.0}}])[0]["recall_ranking"]
 
     assert eps.ep_state == EP_STATE_BASELINE, eps.ep_state
+    # ⛔ NEITHER flag is a state, and this is the row that proves it: no α column
+    # exists at all, so `measured` is False beside `baseline` False — and the
+    # belief IS readable (`baseline`, 0.95). "measured=False, baseline=False ⇒
+    # absent, mean None" is false on this shape.
+    assert eps.measured is False and eps.baseline is False, (
+        f"mirror-only flags: measured={eps.measured} baseline={eps.baseline}")
     for name, value in (("ep block", eps.confidence_mean),
                         ("why block", why_ep["confidence_mean"]),
                         ("graph signal", sig["confidence"]),
@@ -2141,6 +2376,18 @@ def test_degenerate_baseline_writes_no_mirror(sdk):
     eps = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
     assert eps.ep_state == EP_STATE_ABSENT, eps
     assert eps.confidence_mean is None, eps
+    # ⛔ …and the α columns ARE persisted anyway, so "measured=False,
+    # baseline=False" is NOT "no α column": the state is `absent` WITH operands
+    # stored, and the flags are False for a second reason (the degenerate prior
+    # fails the mean rule, and `baseline` follows the RESOLVED state).
+    stored_alpha, stored_beta = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.ep_alpha, n.ep_beta",
+        params={"id": pid}).result_set[0]
+    assert stored_alpha == 0.0 and stored_beta == 0.0, (
+        f"expected persisted 0/0: {stored_alpha!r}/{stored_beta!r}")
+    assert eps.measured is False and eps.baseline is False and eps.has_ep is False, (
+        f"degenerate-prior flags: measured={eps.measured} "
+        f"baseline={eps.baseline} has_ep={eps.has_ep}")
 
 
 def test_update_point_clearing_the_mirror_leaves_one_answer(sdk):
