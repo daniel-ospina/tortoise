@@ -5287,15 +5287,23 @@ def internal_client():
         app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
         _orig_init = _patch_tortoise_sdk_init(db_path)
         # #2273/#1950: pin TORTOISE_DB_PATH to the SAME temp DB the patched
-        # init forces. The C3 seed below and the mint's team lookup must be
-        # ONE database: the seed writes through `_make_sdk` (patched onto
-        # `db_path`), the lookup reads through `_registry_anchor` (which
-        # resolves `_resolve_embedded_db_path()` — i.e. `TORTOISE_DB_PATH`).
-        # Unpinned, they diverge: `_anchor_usable()` is False on every access,
-        # so the anchor is evicted + closed + recreated per call and the seed
-        # is only visible because the redislite close happens to SAVE. That is
-        # the "explicit and self-contained seed" #2273's acceptance asked for
-        # — self-contained needs the pin, not just the CREATE.
+        # init forces, so the KEEPALIVE ANCHOR stays usable.
+        #
+        # What is NOT the reason (measured 2026-11-10, unpinned = pre-fix): the
+        # C3 seed below and the mint's team lookup already share ONE database —
+        # the seed writes through `_make_sdk` and the mint reads through that
+        # same SDK's `_get_registry()` (`sdk.py::_get_registry` uses the
+        # existing connection, not `_registry_anchor()`), and the patched
+        # `__init__` forces BOTH onto `db_path`. `-k TestBodySweepCaps` is
+        # **4 passed** with the pin removed entirely.
+        #
+        # What the pin fixes: `_make_sdk` also maintains the process-lifetime
+        # keepalive anchor, created through the same patched `__init__` and so
+        # bound to `db_path` — but `_anchor_usable()` compares the anchor's real
+        # path against `_resolve_embedded_db_path()`, i.e. `TORTOISE_DB_PATH`.
+        # Unpinned, that comparison is False on EVERY access, so a healthy
+        # anchor is evicted + closed + recreated per call (#1607/#1950: "the
+        # anchor is not process-lifetime", plus the #2172 evict/create race).
         _prev_db_path = _pin_db_path(db_path)
 
         try:
@@ -5319,30 +5327,39 @@ def internal_client():
 
 
 def _assert_fixture_pins_anchor_db_path(fixture_name: str) -> None:
-    """#2273/#1950: the fixture's seed and the anchor's read share ONE DB.
+    """#2273/#1950: the fixture must pin `TORTOISE_DB_PATH` to the DB its patched
+    `__init__` forces, so the keepalive ANCHOR stays usable.
 
-    The patch forces every SDK the fixture's app builds onto its temp DB;
-    `_resolve_embedded_db_path()` — the single policy `_make_sdk` /
-    `_registry_anchor` read — resolves from `TORTOISE_DB_PATH` instead. If the
-    fixture does not pin them to the same value the registry anchor is bound
-    to a DIFFERENT database than the fixture seeded, so `_anchor_usable()` is
-    False on every access: the anchor is evicted, closed and recreated per
-    call, and the process-lifetime guarantee it exists for (#1607) is void.
+    What the pin is NOT for (measured 2026-11-10, embedded lane, this file):
+    the C3 seed and the mint's team lookup already share ONE database — the
+    patch forces every SDK the fixture's app builds onto its temp DB, and the
+    mint reads through that same SDK's own connection (`_get_registry`), never
+    through `_registry_anchor()`. `-k TestBodySweepCaps` is 4 passed with the
+    pin removed entirely, so nothing here depends on the seed landing in the
+    anchor's DB.
 
-    Measured pre-fix (2026-11-10, embedded lane, this file)
-    — ``tests/test_hosted_api.py::TestBodySweepCaps`` depends on this:
+    What it IS for: `_make_sdk` also creates the process-lifetime keepalive
+    anchor through the same patched `__init__`, so the anchor is bound to the
+    temp DB — but `_anchor_usable(anchor, _resolve_embedded_db_path())`
+    compares it against `TORTOISE_DB_PATH`. Unpinned, that comparison is False
+    on EVERY access, so a healthy anchor is evicted, closed and recreated per
+    registry access: the process-lifetime guarantee it exists for (#1607) is
+    void, and the evict/create path is the #2172 race.
 
-        inside_internal_client  .pin=<guard>/tortoise.db
-                                .anchor_path=<fixture tmp>/test.db  .usable=False
+    Measured 2026-11-10 (embedded lane):
+
+        fixed:              pin == forced == anchor._proj._path   usable=True
+        unpinned (pre-fix): .pin=<guard>/tortoise.db
+                            .anchor_path=<fixture tmp>/test.db  usable=False
     """
     import tortoise.hosted_api as ha
 
     pin = os.environ.get("TORTOISE_DB_PATH") or ""
     assert pin, (
         f"{fixture_name} must pin TORTOISE_DB_PATH (#2273/#1950): the patch "
-        "forces the fixture's SDKs onto its temp DB while the anchor policy "
-        "resolves the ambient (here: unset) env, so the two databases "
-        "diverge and the seed is not the DB the anchor serves")
+        "forces the fixture's SDKs onto its temp DB while _anchor_usable() "
+        "compares the keepalive anchor against the ambient (here: unset) "
+        "env, so the anchor can never match and is recreated per access")
     # ⛔ THIS IS THE DISCRIMINATING ASSERTION (#2273 review finding 1). A wrong
     # pin — set, but to a DIFFERENT DB than the fixture patches its SDKs onto —
     # is the #2273 divergence, and only this comparison can see it:
@@ -5356,9 +5373,10 @@ def _assert_fixture_pins_anchor_db_path(fixture_name: str) -> None:
         "TortoiseSDK.__init__ recorded the DB path it forces (#2273)")
     assert pin == forced, (
         f"{fixture_name}'s TORTOISE_DB_PATH pin ({pin!r}) must be the DB its "
-        f"patched TortoiseSDK.__init__ forces ({forced!r}) — the seed would "
-        "otherwise land in a different database than the registry anchor "
-        "reads (#2273/#1950)")
+        f"patched TortoiseSDK.__init__ forces ({forced!r}) — otherwise "
+        "_anchor_usable() compares the keepalive anchor (bound to that DB) "
+        "against the ambient pin, is False on every access, and the healthy "
+        "anchor is evicted + recreated per registry access (#2273/#1950)")
     assert pin == ha._resolve_embedded_db_path(), (
         f"{fixture_name}'s TORTOISE_DB_PATH pin ({pin!r}) must be the path "
         "_resolve_embedded_db_path() returns "
