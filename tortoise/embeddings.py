@@ -612,18 +612,18 @@ def _stamp_journal_vector_width(payload: dict) -> None:
         payload[JOURNAL_VECTOR_WIDTH_KEY] = JOURNAL_VECTOR_WIDTH_F64
         return
     if payload.get(JOURNAL_VECTOR_WIDTH_KEY) == JOURNAL_VECTOR_WIDTH_F32:
-        # IDEMPOTENT (#11835 review, P3). This function is the ONLY writer of
-        # `f32` — callers are refused it at every home — so a payload that
-        # already declares it holds THIS function's own output, already at the
-        # shortest float32 text. Re-deciding would find those values OFF the
-        # float32 grid (they are the round-tripping decimals, not the widened
-        # float32s) and flip the declaration to `f64` while leaving the values
-        # unchanged: a payload stating a width its text does not have, which is
-        # the one thing the marker exists to prevent. Measured before this
-        # guard: stamp twice -> `f32` then `f64`, values byte-identical.
-        #
-        # The verbatim arm is checked FIRST on purpose: a preserved vector must
-        # always re-declare `f64`, even if a stale `f32` rode in beside it.
+        # IDEMPOTENT (#11835 review, P3). This function is the ONLY writer of `f32`; a
+        # declared `f32` is honest because TWO gates hold it: callers cannot set the key
+        # (`_sanitize_props`'s `_embed_identity_keys`, `api.py`'s `_forged`, the homes),
+        # and every producer that can REPLACE a vector under an existing marker POPS it
+        # first (`EventAPI.add_point`) — load-bearing, not tidiness: without the pop an
+        # off-grid caller vector journalled as `f32` over `_point(...)`'s server one
+        # (`test_add_point_does_not_keep_the_servers_width_over_a_caller_vector`) — a
+        # producer that skips the pop re-opens that hole (residual: #11883).
+        # Re-deciding would find these values OFF the float32 grid (round-tripping
+        # decimals, not widened float32s) and flip the declaration to `f64`, values
+        # unchanged: a width its text lacks (before this guard: stamp twice -> `f32`
+        # then `f64`). The verbatim arm is FIRST: a preserved vector re-declares `f64`.
         return
     narrowed = shortest_float32_vector(raw)
     if narrowed is None:

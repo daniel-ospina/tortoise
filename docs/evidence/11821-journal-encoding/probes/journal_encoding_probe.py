@@ -162,6 +162,59 @@ def per_type(total: dict) -> dict[str, int]:
     return {name: row["bytes"] for name, row in total["by_type"].items()}
 
 
+def _embedding_span(value, seps, depth: int = 0) -> int:
+    """One record's `embedding` values, encoded in `seps` (see the caller)."""
+    if isinstance(value, dict):
+        total = 0
+        for k, v in value.items():
+            if k == "embedding":
+                if v is None or (isinstance(v, (list, tuple, dict, str))
+                                 and not v):
+                    continue    # the forced-absent shape, not a vector
+                total += len(json.dumps(v, ensure_ascii=False,
+                                        separators=seps).encode("utf-8"))
+            else:
+                total += _embedding_span(v, seps, depth + 1)
+        return total
+    if isinstance(value, list):
+        return sum(_embedding_span(v, seps, depth + 1) for v in value)
+    return 0
+
+
+def embedding_span_on_disk(directory: Path, *, compact: bool) -> int:
+    """The `embedding` VALUE's byte span in a journal this probe wrote.
+
+    ``tools/journal_growth.py`` cannot answer this: ``_embedding_bytes``
+    attributes through ``_json_bytes``, which RE-SERIALISES each value with
+    ``json.dumps``' DEFAULT separators (``", "`` / ``": "``) — an
+    *attribution*, as its own docstring says, and therefore a SPACED figure
+    whatever the journal on disk looks like. Before #11821 P0 the writer also
+    spaced, so dividing it by the journal's on-disk bytes was one ruler; the
+    compact writer puts the two on different rulers, and the quotient then
+    describes neither (it reads the spacing as if it were vector text).
+
+    So this walks the journal the probe just wrote and re-encodes each
+    ``embedding`` value in the separators THAT journal was written with, which
+    makes numerator and denominator the same ruler. It mirrors
+    ``_embedding_bytes``' walk (any ``embedding`` key at any depth, and a
+    ``None``/empty value is the forced-absent shape rather than a vector)
+    instead of counting top-level keys: the vector rides inside
+    ``record["point"]``.
+    """
+    seps = (",", ":") if compact else None
+    total = 0
+    for path in sorted(Path(directory).glob("*.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            total += _embedding_span(record, seps)
+    return total
+
+
 def main() -> int:
     recs = records()
     by_type = richest_by_type(recs)
@@ -189,6 +242,9 @@ def main() -> int:
                               [after_record(by_type[t], vec) for t in ordered])
         before = measure(before_dir)["total"]
         after = measure(after_dir)["total"]
+        # Same-ruler embedding spans, taken from the journals just written.
+        before_span = embedding_span_on_disk(before_dir, compact=False)
+        after_span = embedding_span_on_disk(after_dir, compact=True)
         cb = measure(class_before)["total"]
         ca = measure(class_after)["total"]
 
@@ -198,9 +254,22 @@ def main() -> int:
         print(f"  {label}  {total['records']:>3} records {total['bytes']:>8,} B"
               f"  mean {row['mean']:>7.1f} B  p50 {row['p50']:>6,} B"
               f"  p95 {row['p95']:>6,} B  max {row['max']:>6,} B")
-    print(f"  embedding share: {before['embedding_bytes']:,} B → "
-          f"{after['embedding_bytes']:,} B "
-          f"({100.0 * after['embedding_bytes'] / after['bytes']:.1f}% of the corpus)")
+    # ⛔ TWO RULERS, and each percentage is taken on ONE of them. The tool's
+    # `embedding_bytes` is a SPACED re-serialisation whatever the journal looks
+    # like (`tools/journal_growth.py:_json_bytes`), so on the compact AFTER
+    # journal it cannot be divided by `['bytes']` — that quotient (78.9% at the
+    # #11821 P0 head) mixes a spaced numerator with a compact denominator and
+    # is why this line reports the on-disk spans instead.
+    print("  embedding share, numerator and denominator on ONE ruler each:")
+    print(f"    before  {before_span:>6,} B of {before['bytes']:>6,} B = "
+          f"{100.0 * before_span / before['bytes']:.1f}% (both spaced)")
+    print(f"    after   {after_span:>6,} B of {after['bytes']:>6,} B = "
+          f"{100.0 * after_span / after['bytes']:.1f}% (both compact)")
+    print("    ⚠️ the tool's own attribution for the AFTER journal is "
+          f"{after['embedding_bytes']:,} B — a SPACED re-serialisation, so it "
+          "is NOT the numerator for the compact"
+          f" {after['bytes']:,} B (that mix reads "
+          f"{100.0 * after['embedding_bytes'] / after['bytes']:.1f}%).")
     print()
 
     print("== per class (bytes on disk, JSON line + terminator)")

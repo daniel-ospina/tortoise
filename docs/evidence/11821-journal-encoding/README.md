@@ -20,6 +20,15 @@ same committed 29-type corpus (`supabase/tests/fixtures/record_projection_journa
 **9,176 B → 5,423 B** (**1.69×**), with the decoded values unchanged at float32 (and, in
 fact, bit-identical in float64 — see *Why the VALUE is quantised*).
 
+⚠️ **Two figures for the vector, and each names its instrument.** `4,689 B` (and its
+`12.2 chars/float`) is the **on-disk span** of the `embedding` value in the compact
+journal — arithmetic from this probe (*Two rulers, below*). `tools/journal_growth.py`
+reports **5,072 B (1.66×, 13.2 chars/float)** for the same vector, because it attributes
+bytes by **re-serialising** each value with `json.dumps`' default (spaced) separators
+(`tools/journal_growth.py:_json_bytes`, and its own docstring calls the output
+*attribution*, not accounting). A reader reproducing the vector figure with the named
+tool gets the tool's number, not the probe's — so neither number is quoted as the other's.
+
 **What it does not prove, stated up front.** It is **not** "the record halved". A JSON
 *number* encoding cannot reach 50 % of 8,414 B at float32 precision: the floor for this
 corpus's magnitude distribution is ~4,689 B, because 9 significant digits with leading
@@ -50,20 +59,38 @@ probe. `measurement.txt` beside this file is one run's output.
 == tools/journal_growth.py — the WHOLE 29-type corpus (39 records)
   before #11821 P0   39 records   51,346 B  mean  1316.6 B  p50    219 B  p95  8,877 B  max  9,176 B
   after  #11821 P0   39 records   32,130 B  mean   823.8 B  p50    201 B  p95  5,148 B  max  5,423 B
-  embedding share: 42,070 B → 25,360 B (78.9% of the corpus)
+  embedding share, numerator and denominator on ONE ruler each:
+    before  42,070 B of 51,346 B = 81.9% (both spaced)
+    after   23,445 B of 32,130 B = 73.0% (both compact)
+    ⚠️ the tool's own attribution for the AFTER journal is 25,360 B — a SPACED re-serialisation, so it is NOT the numerator for the compact 32,130 B (that mix reads 78.9%).
 ```
+
+**Two rulers, and the share is taken on one of them.** `tools/journal_growth.py`'s
+`embedding_bytes` is a **spaced** figure whatever the journal on disk looks like, because
+it re-serialises each value with `json.dumps`' default separators; `bytes` is the
+journal's own on-disk total. Before this change both were spaced, so the quotient was one
+ruler. The compact writer puts them on different rulers, and their quotient (25,360 /
+32,130 = **78.9 %**) reads part of the spacing change as if it were vector text — which
+is why this probe measures the on-disk span itself (each journal, its own separators) and
+prints the pair above instead. The honest statement is that the vector's share of the
+journal went **81.9 % → 73.0 %** on a fixed ruler.
 
 Per class — one record per type, the **fullest** one (the shape production writes):
 
 | record class | before | after | saved | ratio |
 |---|---|---|---|---|
 | `PointAdded` (create) | 9,176 B | **5,423 B** | 3,753 B | **1.69×** |
-| — its **vector payload** | 8,414 B | **4,689 B** | 3,725 B | **1.79×** (21.9 → 12.2 chars/float) |
+| — its **vector payload**<sup>†</sup> | 8,414 B | **4,689 B** | 3,725 B | **1.79×** (21.9 → 12.2 chars/float) |
 | `OperatorAdded` | 8,859 B | 5,124 B | 3,735 B | 1.73× |
 | `PointPromoted` (re-emitted snapshot) | 8,657 B | 4,936 B | 3,721 B | 1.75× |
 | `OperatorPromoted` | 8,647 B | 4,924 B | 3,723 B | 1.76× |
 | `PointRevised` (delta, no vector) | 196 B | 181 B | 15 B | 1.08× |
 | `EntityLinked` (delta, no vector) | 249 B | 228 B | 21 B | 1.09× |
+
+<sup>†</sup> The vector row is the **on-disk span** of the `embedding` value (this probe's
+arithmetic, each journal with its own separators). The tool's spaced re-serialisation of
+the *same* vector is **5,072 B** after (13.2 chars/float); `4,689 B` cannot be produced by
+`tools/journal_growth.py`, whose `_json_bytes` always uses default separators.
 
 **The two halves of the delta are separately attributable, and the attribution is
 carried by the MEASUREMENT — not by the history: both changes landed in ONE commit.**
@@ -72,7 +99,9 @@ float32 change; the ~8 % on the rows that carry **no vector at all** (`PointRevi
 `EntityLinked`, and every other
 1.07–1.10× row in `measurement.txt`) is the **compact separators** alone — `", "` /
 `": "` cost one byte per separator, measured at 435 B of a 9,176 B record and 383 B of
-its 5,072 B vector.
+its 5,072 B vector (the tool's spaced attribution; the same separator benefit on the
+on-disk compact vector is 5,072 − 4,689 = 383 B, which is why the two figures agree here
+and diverge nowhere else).
 
 ## Why the VALUE is quantised, not just the text
 

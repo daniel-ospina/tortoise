@@ -4,7 +4,10 @@ vector: 384-d, BAAI/bge-small-en-v1.5; written through `tortoise.embeddings.stam
 == tools/journal_growth.py — the WHOLE 29-type corpus (39 records)
   before #11821 P0   39 records   51,346 B  mean  1316.6 B  p50    219 B  p95  8,877 B  max  9,176 B
   after  #11821 P0   39 records   32,130 B  mean   823.8 B  p50    201 B  p95  5,148 B  max  5,423 B
-  embedding share: 42,070 B → 25,360 B (78.9% of the corpus)
+  embedding share, numerator and denominator on ONE ruler each:
+    before  42,070 B of 51,346 B = 81.9% (both spaced)
+    after   23,445 B of 32,130 B = 73.0% (both compact)
+    ⚠️ the tool's own attribution for the AFTER journal is 25,360 B — a SPACED re-serialisation, so it is NOT the numerator for the compact 32,130 B (that mix reads 78.9%).
 
 == per class (bytes on disk, JSON line + terminator)
   record class         before    after    saved   ratio
