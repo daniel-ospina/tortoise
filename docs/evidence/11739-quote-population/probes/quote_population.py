@@ -732,13 +732,23 @@ def main(argv: list[str]) -> int:
             sys.stdout.write(text)
             # ⛔ The WRITE is not the I/O: stdout is a buffered text stream (8 KiB), and this
             # artifact is ~5.3 kB, so `write` only fills the buffer and returns — the OSError
-            # surfaced at interpreter shutdown, i.e. OUTSIDE this guard, where it was either
-            # swallowed by a truncating reader (exit 0 on a short artifact) or turned into
+            # surfaced at interpreter shutdown, i.e. OUTSIDE this guard, where a reader that
+            # closed early left exit 0 on a short artifact and a full disk turned it into
             # exit 120. FLUSH here, the way the file arm's `with open(...)` flushes by closing
-            # inside its own guard.
+            # inside its own guard. (`| head -1` is NOT this arm: one write of ~5 kB fits the
+            # pipe buffer, the write succeeds, and a reader that discards a published artifact
+            # is not a lost write — measured.)
             sys.stdout.flush()
-        except OSError as e:  # a full/closed stdout (`> /dev/full`, `| head -1`)
+        except OSError as e:  # a full/closed stdout (`> /dev/full`)
             sys.stderr.write(f"PROBE-WRITE(<stdout>): {e}\n")
+            # ⛔ RETURNING 2 IS NOT ENOUGH: the buffer that just failed is still DIRTY, so
+            # interpreter shutdown flushes it AGAIN and THAT failure sets exit 120 over our 2
+            # (measured on the real process, `--out - > /dev/full`). The real stdout's buffer
+            # cannot be cleared from here, so point `sys.stdout` at devnull — the discard has
+            # already been reported on stderr, which is the channel the contract promises.
+            # (handed to `sys.stdout`, deliberately not closed: shutdown flushes it)
+            null = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
+            sys.stdout = null
             return 2
         return 0
     try:

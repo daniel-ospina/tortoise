@@ -16,6 +16,7 @@ this file is safe in the docker lane and in CI.
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import sys
 from pathlib import Path
@@ -937,15 +938,20 @@ def test_an_endpoint_without_a_scheme_exits_three(monkeypatch, endpoint):
 
 
 def test_an_unwritable_stdout_returns_two(monkeypatch):
-    """FAILS IF the `--out -` branch is unguarded: `> /dev/full` or `| head -1` raised
-    `OSError` out of `main` and exited 1 — outside the documented contract, in the same class
-    the file branch is already guarded for (review, attestation round 3).
+    """FAILS IF the `--out -` branch is unguarded: `> /dev/full` raised `OSError` out of
+    `main` and exited 1 — outside the documented contract, in the same class the file branch
+    is already guarded for (review, attestation round 3).
 
     ⛔ The stream must be BUFFERED, like the real one: a stub whose `.write` raises tests an
-    unbuffered stdout, which is not what `> /dev/full` or a pipe is. With the real shape
+    unbuffered stdout, which is not what `> /dev/full` is. With the real shape
     (`TextIOWrapper` over a buffer) `.write` succeeds and `.flush` raises — so this test reds
-    on a write-only guard (review F6: the artifact is 5,325 B, under the 8 KiB buffer, and the
+    on a write-only guard (review F6: the artifact is under the 8 KiB buffer, and the
     unflushed arm exited 0 with a truncated artifact).
+
+    ⛔ AND RETURNING 2 FROM `main` IS NOT THE SAME AS EXITING 2: the failed buffer stays dirty,
+    so interpreter shutdown flushes it again and that failure sets **120** over the returned 2
+    (measured on the real process). The arm therefore re-points `sys.stdout` at devnull before
+    returning — a guard without that is green here and still exits 120 in production.
     """
     _stub_main(monkeypatch)
 
@@ -958,8 +964,13 @@ def test_an_unwritable_stdout_returns_two(monkeypatch):
         def write(self, _b) -> int:
             raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(qp.sys, "stdout", io.TextIOWrapper(io.BufferedWriter(_FullRaw())))
+    stdout = io.TextIOWrapper(io.BufferedWriter(_FullRaw()))
+    monkeypatch.setattr(qp.sys, "stdout", stdout)
     assert qp.main(["quote_population", "--out", "-"]) == 2
+    # the dirty buffer was abandoned, not left for shutdown to re-flush: `sys.stdout` is now
+    # a devnull handle and the original stream is no longer the one the interpreter owns.
+    assert qp.sys.stdout is not stdout
+    assert qp.sys.stdout.name == os.devnull
 
 
 def test_page_one_without_a_total_exits_four():
