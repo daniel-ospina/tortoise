@@ -765,6 +765,29 @@ def test_a_second_table_is_rejected(tmp_path, monkeypatch):
 # ── citations resolve ──────────────────────────────────────────────────────
 
 
+def test_a_letter_stated_two_different_ways_is_rejected(tmp_path, monkeypatch):
+    """FAILS if a contradicting duplicate mention is out-voted by the other one.
+
+    Both attribution maps held ONE verdict per letter (`before` overwrote,
+    `following` setdefaulted), so `**(e)** is **DRIFTED**, and **(e)** is
+    **ADOPTED**` returned `[]` (clean) while the sentence contradicted itself and the
+    table — and the reverse order red, so the outcome depended on which mention a
+    partial sentence edit left second (measured). A stale duplicate is exactly what
+    a half-applied rewrite leaves behind.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace(
+            "**(e)** is\n**ADOPTED**",
+            "**(e)** is **DRIFTED**, and **(e)** is\n**ADOPTED**",
+            1,
+        ),
+    )
+    problems = _doc_problems()
+    assert any("assigns a different verdict" in p for p in problems), problems
+
+
 def test_citation_to_missing_file_is_rejected(tmp_path, monkeypatch):
     """FAILS when a `path:line` names a file that is not in the tree.
 
@@ -1358,6 +1381,82 @@ def test_test_file_is_selected_on_the_diffs_it_guards():
     )
 
 
+def _third_party_imports(source: str) -> tuple[list[str], list[str]]:
+    """Third-party modules a checker source imports, and dynamic imports it cannot verify.
+
+    Returns `(third_party, unverifiable)`. `ast.Import`/`ast.ImportFrom` cover the
+    static spellings; a CALL to `__import__`/`import_module` covers the dynamic ones
+    (`importlib.import_module("yaml")` was invisible to a walk that only visited
+    import nodes — measured, the test stayed green while the module required
+    pyyaml). A dynamic import whose target is NOT a literal cannot be resolved
+    statically, so it is reported as unverifiable rather than assumed harmless: a
+    guard that cannot see the target has not measured it.
+    """
+    imported: set[str] = set()
+    unverifiable: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+        elif isinstance(node, ast.Call):
+            func = node.func
+            name = (
+                func.id
+                if isinstance(func, ast.Name)
+                else func.attr
+                if isinstance(func, ast.Attribute)
+                else None
+            )
+            if name not in ("__import__", "import_module"):
+                continue
+            target = node.args[0] if node.args else None
+            if isinstance(target, ast.Constant) and isinstance(target.value, str):
+                imported.add(target.value.split(".")[0])
+            else:
+                unverifiable.append(
+                    f"line {node.lineno}: `{name}(…)` with a non-literal target "
+                    "— the module cannot be resolved without running the code"
+                )
+    third_party = sorted(imported - set(sys.stdlib_module_names) - {"__future__"})
+    return third_party, unverifiable
+
+
+def test_the_stdlib_scan_sees_every_import_spelling():
+    """FAILS if any import spelling can carry a third-party package past `core`.
+
+    The substring version this replaced could not see `from yaml import safe_load`;
+    the AST version could not see `importlib.import_module("yaml")` or
+    `__import__("yaml")` — both measured green over a checker that genuinely
+    required pyyaml, while the comment above the walk named that exact spelling as
+    covered. Each spelling is asserted here so a future rewrite of the scan has to
+    keep covering all of them, and a NON-literal call must report unverifiable
+    rather than pass: an unresolved target is not a clean one.
+    """
+    for spelling in (
+        "import yaml\n",
+        "import os, yaml\n",
+        "from yaml import safe_load\n",
+        "import importlib\nimportlib.import_module('yaml')\n",
+        "__import__('yaml')\n",
+    ):
+        third_party, unverifiable = _third_party_imports(spelling + "\n")
+        assert third_party == ["yaml"], (spelling, third_party)
+        assert unverifiable == [], (spelling, unverifiable)
+    third_party, unverifiable = _third_party_imports(
+        "import importlib\nimportlib.import_module(name)\n"
+    )
+    assert third_party == [], third_party
+    assert len(unverifiable) == 1, unverifiable
+    assert "non-literal" in unverifiable[0], unverifiable
+    # The real checker must be clean on BOTH legs, not just the literal one.
+    third_party, unverifiable = _third_party_imports(
+        (REPO / "tools" / "findings_ledger_check.py").read_text(encoding="utf-8")
+    )
+    assert third_party == [], third_party
+    assert unverifiable == [], unverifiable
+
+
 def test_tool_is_stdlib_only():
     """FAILS if the checker grows a third-party import.
 
@@ -1370,21 +1469,23 @@ def test_tool_is_stdlib_only():
     """
     source = (REPO / "tools" / "findings_ledger_check.py").read_text(encoding="utf-8")
     # ⛔ AST, not a substring scan. The four-literal version this replaced could not
-    # see `from yaml import safe_load`, `import os, yaml` or
-    # `importlib.import_module("yaml")` — measured: the test stayed green with
-    # `from yaml import safe_load` added, while the docstring claimed it "FAILS if
-    # the checker grows a third-party import". A guard that cannot see the common
-    # spelling of the thing it forbids is the fail-open class this PR keeps closing.
-    imported: set[str] = set()
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.Import):
-            imported.update(alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imported.add(node.module.split(".")[0])
-    third_party = sorted(imported - set(sys.stdlib_module_names) - {"__future__"})
+    # see `from yaml import safe_load` or `import os, yaml`, and the AST version that
+    # replaced it could not see `importlib.import_module("yaml")` — measured: the test
+    # stayed green in every one of those cases while the docstring claimed it "FAILS
+    # if the checker grows a third-party import". `_third_party_imports` covers the
+    # import statements AND a `__import__`/`import_module` call with a LITERAL target,
+    # and reports a non-literal target as unverifiable instead of clearing it.
+    # ⚠️ Not reachable by any AST walk: a target assembled at runtime
+    # (`getattr(importlib, "import_" + "module")`, `eval`). This test does not claim
+    # it, and the `--self-test` leg below is a smoke probe, not a second opinion.
+    third_party, unverifiable = _third_party_imports(source)
     assert third_party == [], (
         f"the checker must be stdlib-only (the `docs` job runs it beside a `pip "
         f"install -e .`, whose absence must never break the guard); found {third_party}"
+    )
+    assert unverifiable == [], (
+        "every dynamic import in the checker must name its target literally, or this "
+        f"test cannot tell whether it is stdlib-only: {unverifiable}"
     )
     assert subprocess.run(
         [sys.executable, str(REPO / "tools" / "findings_ledger_check.py"), "--self-test"],

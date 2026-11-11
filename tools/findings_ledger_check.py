@@ -552,9 +552,16 @@ def check_verdict_tally(text: str) -> list[str]:
     # left rc 0, while §1 gives those classes different handling rules ("do not
     # re-derive it" vs "treat the new behaviour as the norm" vs "do not assert it
     # either way"), so the sentence sent the reader to the wrong action.
-    attributed: dict[str, str] = {}
-    before: dict[str, str] = {}
-    following: dict[str, str] = {}
+    # ⛔ EVERY mention of a letter counts, not the last (or first) one. Both maps
+    # held ONE verdict per letter — `before` overwrote, `following` setdefaulted — so
+    # `**(e)** is **DRIFTED**, and **(e)** is **ADOPTED**` returned `[]` (clean) while
+    # the sentence contradicted itself and the table, and the reverse order red: the
+    # outcome depended on which mention a partial sentence edit left second
+    # (measured). A stale duplicate is exactly what a half-applied rewrite leaves
+    # behind, and self-contradicting prose is what a reader is least likely to
+    # re-count. Sets per letter make every mention a claim the arm must reconcile.
+    before: dict[str, set[str]] = {}
+    following: dict[str, set[str]] = {}
     previous = 0
     tokens = [
         tok
@@ -565,13 +572,13 @@ def check_verdict_tally(text: str) -> list[str]:
         for label in re.findall(
             r"\*\*\(([a-z])\)\*\*", non_still_sentence[previous : token.start()]
         ):
-            before[label] = token.group(1)
+            before.setdefault(label, set()).add(token.group(1))
         previous = token.start()
         stop = tokens[pos + 1].start() if pos + 1 < len(tokens) else len(non_still_sentence)
         for label in re.findall(
             r"\*\*\(([a-z])\)\*\*", non_still_sentence[token.end() : stop]
         ):
-            following.setdefault(label, token.group(1))
+            following.setdefault(label, set()).add(token.group(1))
 
     # ⛔ TWO LEGAL ORDERINGS, and the arm must accept BOTH without going blind.
     # Letters-first (`(c), (d) and (g) are **SUPERSEDED-BY-FIX**`) is the shipped
@@ -586,20 +593,21 @@ def check_verdict_tally(text: str) -> list[str]:
     # AND agrees with the table. A genuine swap still reds, because its class-first
     # reading covers only the few letters that happen to follow a class token, so it
     # is never adopted and the letters-first map is reported.
-    def _consistent(mapping: dict[str, str]) -> bool:
+    def _consistent(mapping: dict[str, set[str]]) -> bool:
         return set(non_still) <= set(mapping) and all(
-            mapping.get(label) == verdicts.get(label) for label in non_still
+            mapping.get(label) == {verdicts.get(label)} for label in non_still
         )
 
     attributed = following if _consistent(following) else before
-    misattributed = {
-        label: (attributed.get(label), verdicts.get(label))
+    misattributed: dict[str, tuple[list[str], str | None]] = {
+        label: (sorted(attributed.get(label, set())), verdicts.get(label))
         for label in non_still
-        if attributed.get(label) != verdicts.get(label)
+        if attributed.get(label, set()) != {verdicts.get(label)}
     }
     if misattributed:
         detail = "; ".join(
-            f"({label}) stated {stated}, table says {actual}"
+            f"({label}) stated {'+'.join(stated) if stated else 'no verdict'}, table "
+            f"says {actual}"
             for label, (stated, actual) in sorted(misattributed.items())
         )
         problems.append(
