@@ -191,11 +191,12 @@ SPAN_TRAILING_RE = re.compile(r"[\s.,;:)\]]+$")
 #:     in this repo) as `path # LINE`;
 #:   * `@` parsed commit refs (`origin/main@3ac6b1636`), and `,` parsed SQL and
 #:     function-call prose (`coalesce(n.version, 0)+1`) as citations.
-#: The residue after those exclusions was 30 spans, still mostly prose. So this arm
-#: measures ONE spelling — `path <LINE>` — and §8 names `path#LINE`, `path@LINE`,
-#: `path-LINE`, `path_LINE`, `path/LINE`, `path,LINE` and `path:L LINE` as shapes it
-#: does NOT refuse. A rule that refuses a page's own plain paths and issue refs is the
-#: false-accusation class one arm over, so the goal is an honest boundary, not breadth.
+#: The residue after those exclusions was 30 spans, still mostly prose. So the
+#: WHITESPACE delimiter measures ONE spelling — `path <LINE>` — and §8 names
+#: `path#LINE`, `path@LINE`, `path-LINE`, `path_LINE`, `path/LINE`, `path,LINE` and
+#: `path:L LINE` as shapes it does NOT refuse. A rule that refuses a page's own plain
+#: paths and issue refs is the false-accusation class one arm over, so the goal is an
+#: honest boundary, not breadth.
 CITATION_UNCOLONED_SHAPE_RE = re.compile(
     r"(?P<path>"
     r"\.[A-Za-z][\w.-]*"
@@ -203,6 +204,23 @@ CITATION_UNCOLONED_SHAPE_RE = re.compile(
     r"|[\w~][\w./+@-]*\.[A-Za-z]\w*"
     r")"
     r"\s+(?P<num>\d{1,7})(?![\w.>&|/-])"
+)
+
+#: `path#L16` — the **GitHub permalink** spelling, and the ONE delimiter the sweep
+#: above rejected for a reason that does not apply to it (#11952 P1). `#` alone is a
+#: carve-out because it parses `owner/repo#9363` issue refs — the form this repo
+#: writes everywhere — but an issue ref carries no `L`, so `#L` + digits is not
+#: ambiguous with one, and a human copying a GitHub permalink writes exactly this.
+#: Without the arm the token was INVISIBLE: `CITATION_RE` and every shape pattern
+#: above need a `:`, so an out-of-range `path#L999999` and an unverifiable
+#: `path#L16` both left the page CLEAN (measured — #11952), i.e. the likeliest
+#: real-world spelling was also the one shape that looked verified and was not.
+#: MEASURED, as every delimiter in this file must be: every code span in all 1144
+#: tracked files under `docs/` was scanned with this exact pattern — ZERO matches, so
+#: refusing it cannot red this repository's own prose. The bare-number form
+#: (`path#16`) stays a declared carve-out: it is the one that collides with issue refs.
+CITATION_HASH_LINE_RE = re.compile(
+    r"(?P<path>[\w~.][\w./+@-]*?)\s*#\s*L(?P<num>\d{1,7})(?![\w.>])"
 )
 
 #: A `path:line` occurring ANYWHERE inside a backticked span. The span-level
@@ -249,7 +267,7 @@ VOCAB_ROW_RE = re.compile(r"^\|\s*\*\*(?P<token>[A-Z][A-Z-]*)\*\*\s*\|")
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-MIN_SELF_TEST_MUTATIONS = 28
+MIN_SELF_TEST_MUTATIONS = 29
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -795,6 +813,17 @@ def check_citation_shapes(text: str) -> list[str]:
         # sits on both sides of a code span, so the mangled form does not look
         # mangled to a reader either.
         body = SPAN_TRAILING_RE.sub("", match.group(0)[1:-1])
+        # The GitHub permalink spelling FIRST: it is the likeliest real-world form and
+        # the one shape nothing else in this module could see (measured, #11952 P1).
+        permalink = CITATION_HASH_LINE_RE.search(body)
+        if permalink and not COMMAND_RE.match(match.group(0)):
+            problems.append(
+                f"`{match.group(0)[1:-1]}` is not a recognised citation — it carries "
+                f"{permalink.group(0)!r}, the GitHub permalink spelling, which the "
+                "resolver does not read; §8 claims every `path:line` here is checked, "
+                "so an unreadable shape must be refused rather than skipped"
+            )
+            continue
         uncoloned = CITATION_UNCOLONED_SHAPE_RE.search(body)
         if uncoloned and (
             not CITATION_RE.fullmatch(match.group(0))
@@ -1579,6 +1608,17 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
             1,
         ).replace("- **`#2730` was dropped", "- dropped", 1),
         "none of them names a CLOSED issue",
+    ),
+    (
+        # #11952 P1: the GitHub permalink spelling. THIS ARM IS THE PIN for
+        # `CITATION_HASH_LINE_RE` — deleting that refusal takes the self-test to
+        # `FAIL (1 failing arm(s))` (measured), which is what §8's "the self-test
+        # proves those rules still fire" rests on.
+        "a citation written as a GitHub permalink",
+        lambda t: t.replace(
+            "`tortoise/pipeline.py:16`", "`tortoise/pipeline.py#L999999`", 1
+        ),
+        "not a recognised citation",
     ),
     (
         "a second table in a pinned section",
