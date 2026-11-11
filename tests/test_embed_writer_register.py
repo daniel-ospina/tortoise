@@ -1032,7 +1032,7 @@ def test_every_declared_label_re_derives_at_this_head() -> None:
                     _without_comments(text) for text in _constants_named_by(node, constants)
                 ))
         assert bodies, f"{key} cites {rel}::{symbol}, which that file does not define"
-        assert any(needle in body for body in bodies), (
+        assert any(_needle_present(needle, body) for body in bodies), (
             f"{key} declares stores={declared} but {rel}::{symbol} no longer carries {needle!r} — "
             "the store moved, so the declaration is stale"
         )
@@ -1526,6 +1526,38 @@ def _without_comments(text: str) -> str:
     """
     return "\n".join(
         line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
+#: A pinned `for` header that walks `_CANONICAL_ENTITY_ID_PROPS`, with its BINDING NAMES
+#: parameterised. ⛔ The needle for `sdk::_update_entity` (
+#: `for label, prop in _CANONICAL_ENTITY_ID_PROPS:`) pins the LOOP over the canonical labels, and a
+#: binding name is not part of that claim — the loop's keys are derived through
+#: `_entity_identity_probes()`, so `#11836` (`ccf5c4036c09`) renamed the second binding
+#: `prop` -> `_prop` because the value stopped being read, and the exact-text comparison reddened
+#: `test` on `main` for EVERY PR with no store having moved (measured: shard `g` of run
+#: 43046031520, `1 failed, 2721 passed`). That is a false block — the one direction this pin must
+#: not have. It cannot produce the opposite error: the header still has to be there, over the SAME
+#: constant, inside the SAME symbol, so a loop that moved to another constant (or disappeared) is
+#: still RED — verified by mutation, not asserted here.
+#: ⚠️ STATED BOUND — only a two-binding `for ... in <constant>:` header is parameterised; every
+#: other needle is still compared as the exact source text it cites.
+_PINNED_FOR_HEADER = re.compile(
+    r"for\s+\w+\s*,\s*_?\w+\s+in\s+_CANONICAL_ENTITY_ID_PROPS:")
+_PINNED_FOR_HEADER_PLACEHOLDER = (
+    "for <binding>, <binding> in _CANONICAL_ENTITY_ID_PROPS:")
+
+
+def _needle_present(needle: str, body: str) -> bool:
+    """Whether `needle` is stated in `body`, ignoring a pinned `for` header's binding NAMES.
+
+    Byte-for-byte everywhere else, deliberately: this pin's value is that it reds on a REWORDED or
+    MOVED store clause, and a loose match would buy that back at the cost of a false PASS. Only the
+    binding names of a `_CANONICAL_ENTITY_ID_PROPS` header are normalised, in the body and in the
+    needle alike, so the historical needle text (`for label, prop in …`) still matches a header
+    that binds `_prop` — and a future rename needs no edit to the declaration above.
+    """
+    return (_PINNED_FOR_HEADER.sub(_PINNED_FOR_HEADER_PLACEHOLDER, needle)
+            in _PINNED_FOR_HEADER.sub(_PINNED_FOR_HEADER_PLACEHOLDER, body))
 
 
 def _constants_named_by(node: ast.AST, constants: dict[str, str]) -> list[str]:
