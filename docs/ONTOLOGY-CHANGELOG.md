@@ -42,7 +42,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > part of this change — this is the model.
 >
 > **§4.3 gains a declared write vocabulary for CORE object kinds** — `draft` / `live` / `superseded` /
-> `deprecated` / `archived` / `in_progress` / `completed`. Two members are load-bearing: `superseded`
+> `deprecated` / `archived` / `in_progress` / `completed`. The load-bearing parts are: `superseded`
 > requires the successor in the same write (a removal with no successor is `archived` — the D7 two-arm
 > rule the extractor architecture already states), and `outdated` / `retracted` are **not** Object
 > lifecycle words. The reason `outdated` must be refused rather than tolerated is measured: it is
