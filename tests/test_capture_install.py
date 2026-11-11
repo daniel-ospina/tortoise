@@ -2991,8 +2991,17 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_cloud_agent_limit
     # unscoped form; the absence needle is provably NOT a substring of the
     # scoped one (the qualifier sits between "a" and "Cursor"), so it cannot
     # RED correct text.
+    # ⛔ AND ON A LOWERED COPY (#11810 review r26 P3): this absence leg was the
+    # one guard in the block left case-EXACT after r25 lowered the six below it,
+    # on the stated principle that the claim is the words and never their
+    # casing — and the message's OWN `install --list` line already prints
+    # `A HOSTED CURSOR CLOUD AGENT VM …` in caps, so a re-cased unscoped clause
+    # ("which a CURSOR CLOUD AGENT VM cannot read") stayed GREEN. Verified: the
+    # banned form is not a substring of the scoped one, so lowering cannot RED
+    # correct text.
+    lowered = r.stdout.lower()
     assert "which a hosted Cursor cloud agent VM cannot read" in r.stdout, r.stdout
-    assert "which a Cursor cloud agent VM cannot read" not in r.stdout, r.stdout
+    assert "which a cursor cloud agent vm cannot read" not in lowered, r.stdout
     assert "no editor-lifetime session boundary" in r.stdout, r.stdout
     # #2122: the disclosure must cover the INJECTION hook too, not only
     # capture. Cursor's docs exclude `sessionStart` from cloud agents and say a
@@ -3067,8 +3076,8 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_cloud_agent_limit
     # product-name casing this CLI itself prints ("tortoise …") stayed GREEN
     # through `"gets a Tortoise hook"`. Lowering only the haystack does not fix
     # the second one — the NEEDLES carry the capital too — so both sides are
-    # lowered. The claim is the words, never their casing.
-    lowered = r.stdout.lower()
+    # lowered (in one `lowered` binding, shared with the absence leg above). The
+    # claim is the words, never their casing.
     assert "neither the capture seam" not in lowered, r.stdout
     assert "hook reaches a cloud agent" not in lowered, r.stdout
     assert "seam reaches a cloud agent" not in lowered, r.stdout
