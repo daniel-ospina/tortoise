@@ -118,18 +118,24 @@ def test_no_propagate_shock_callers():
     # mention is a string constant and cannot produce one, and whitespace, continuations,
     # invocations and import-aliases all still resolve to a reference.
     #
-    # ⛔ THIS SCAN HAS BEEN WRONG TWICE (a substring match, then an AST walk that skipped
-    # `ast.alias`), and each version passed its own bug — the forms were reasoned about
-    # rather than pinned. `test_the_reference_scan_catches_every_static_form` now parses a
-    # fixture tree containing every static form, positive and negative, so the next
-    # iteration breaks a test instead of quietly narrowing the gate again.
+    # ⛔ THIS SCAN HAS BEEN WRONG THREE TIMES (a substring match, then an AST walk that
+    # skipped `ast.alias`, then a form list with no traversal constraint), and each version
+    # passed its own bug — the forms were reasoned about rather than pinned.
+    # `test_the_reference_scan_catches_every_static_form` now parses a fixture tree
+    # containing every static form, positive and negative, AND a caller inside a
+    # subpackage, so the next iteration breaks a test instead of quietly narrowing the gate.
     #
-    # Residual, named rather than hidden: a reference whose name is computed at runtime
-    # (`getattr(mod, "propagate_shock")`) is a string to the parser and invisible here —
-    # as it is to any static check. Everything STATIC is pinned below.
+    # Residual, named rather than hidden: a reference CARRIED IN A STRING LITERAL —
+    # `getattr(mod, "propagate_shock")`, `globals()[...]`, `exec(...)`, an `__all__` entry, a
+    # registry key — is not a node at all, so no AST walk can see it. No such string exists
+    # in this tree (measured: `grep -rn "['\"]propagate_shock['\"]" tortoise/` is empty).
+    # Every node-shaped reference is pinned below, and traversal is pinned too.
     ast_refs = _production_ast_references()
 
-    # The only "production" reference is a comment: no actual call
+    # ⛔ The word-grep bucket still lists #11702's DOCSTRING lines
+    # (`projection/propagation.py:70,73` explain why this path is unreachable) — they are
+    # prose, not callers, which is the false positive #11907 exposed. The AST scan is the
+    # gate; `callers["production_code"]` is context, and it is expected to be non-empty.
     assert not ast_refs, (
         "PRODUCTION CODE CALLS propagate_shock:\n"
         + "\n".join(f"{path}:{lineno}" for path, lineno in ast_refs)
@@ -144,8 +150,9 @@ def test_no_propagate_shock_callers():
     print(f"  Comments:   {len(callers['comment/reference only'])}")
     print(f"  Test files: {len(callers['test_files'])}")
     print(f"  Fixup scripts: {len(callers['fixup_scripts (historical)'])}")
-    print(f"  PRODUCTION: {len(callers['production_code'])}  ← key metric")
-    print("  ✅ No production code calls propagate_shock")
+    print(f"  word-grep 'production' context: {len(callers['production_code'])} "
+          f"(docstring prose — NOT the gate; the AST scan is, and it found {len(ast_refs)})")
+    print("  ✅ No production code calls propagate_shock (AST scan)")
 
 
 def test_the_reference_scan_catches_every_static_form(tmp_path):
@@ -178,7 +185,23 @@ def test_the_reference_scan_catches_every_static_form(tmp_path):
     for name, body in {**must_be_caught, **must_stay_green}.items():
         (tmp_path / "tortoise" / name).write_text(body, encoding="utf-8")
 
-    found = {Path(p).name for p, _ in _production_ast_references(root=tmp_path)}
+    # ⛔ TRAVERSAL IS PART OF THE CONTRACT. The scan's question is "does `tortoise/**`
+    # depend on this", and the one place it would be called from is a subpackage — the
+    # deprecated definition lives in `projection/`. A flat-only fixture tree passes
+    # unchanged if someone swaps `rglob` for `glob`, and the gate would then print a clean
+    # bill of health while blind to every subpackage. So the tree is nested on purpose.
+    nested = tmp_path / "tortoise" / "projection"
+    nested.mkdir(parents=True, exist_ok=True)
+    (nested / "nested_call.py").write_text("propagate_shock(graph, n)\n", encoding="utf-8")
+
+    refs = _production_ast_references(root=tmp_path)
+    found = {Path(p).name for p, _ in refs}
+
+    assert any(p.endswith("projection/nested_call.py") for p, _ in refs), (
+        "the reference scan does not descend into subpackages, so a caller in"
+        " `tortoise/projection/` — where the deprecated definition lives — would read as no"
+        f" dependency at all. Paths seen: {sorted({p for p, _ in refs})}"
+    )
 
     missed = sorted(set(must_be_caught) - found)
     assert not missed, (
