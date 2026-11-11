@@ -21,11 +21,19 @@ selection). That is the #4309/#8474/#8614 class, and every sibling doc pin
 `test_8093_registry_namespace_doc.py`, …) is dual/triple-registered for exactly this
 reason.
 
-`api` is not decoration either: a change to `tortoise/__main__.py` matches
-`SOURCE_PATTERNS["api"]`, which REPLACES the `core` fallback — measured,
-`printf 'tortoise/__main__.py\\n' | tools/ci_selection.py --changed-files -` →
-`surfaces: ['api']`. Without the `api` row the message-direction arm would sleep on
-the only diff that can break it.
+`api` is registered for the message-direction arm: a change to
+`tortoise/__main__.py` matches `SOURCE_PATTERNS["api"]`, which REPLACES the `core`
+fallback — measured, `printf 'tortoise/__main__.py\\n' | tools/ci_selection.py
+--changed-files -` → `surfaces: ['api']`.
+
+⚠️ Not claimed: that `api` (or `core`) is what makes the pin RUN. Review r10 (P3)
+measured the opposite and this file now states it: `select()` unions `tier1` into
+**every** PR selection (`files = set(tier1)`, then the surface's members), so this
+file's `tier1` row ALONE selects the pin on both the docs-only diff and the
+`__main__.py` diff, and the two surface rows add no coverage. They are kept
+belt-and-braces as the durable home — `tier1` is a curated smoke list, and one
+edit there would drop the pin silently — not because either row carries an arm.
+`tests/test_ci_selection.py` measures both facts instead of asserting them in prose.
 
 WHAT IT ASSERTS, in BOTH directions:
 
@@ -61,6 +69,10 @@ WHAT IT STILL DOES NOT CATCH, stated so the docstring is not the next over-claim
   * a PARAPHRASE, a synonym, a different word order, or a JOINED token
     (`cloudagent`) — beyond any string guard. `test_capture_install.py` keeps an
     ENUMERATED list for that and says so; #11812 holds the structural form.
+  * a delimiter INSIDE a word (`clou\u200bd`, `clou\u00add`, `cl<wbr>oud`) splits
+    the word rather than separating it, so the fragment is no longer a word
+    subsequence. No editor produces these; measured as missed, recorded rather
+    than claimed.
   * a HOMOGLYPH (`\u0441loud` rendering as `cloud`). That needs a confusables
     table; it is out of proportion for a docs pin, so it is a recorded residual
     rather than a fix. (Measured: entities/tags now caught, homoglyphs not.)
@@ -81,6 +93,8 @@ MUTATION (each verified RED at this head, restoring byte-identical):
   * correct quote with `**hosted**` emphasised → now PASSES    → was RED (P3)
   * drop `hosted` from `tortoise/__main__.py`'s message         → (2) RED
   * delete the record's quoted sentence                         → (1) RED
+  * widen the tag strip back to `<[^>]+>` and inject one
+    "a hook count of < 5 is suspect" before §3's quote          → new tag test RED
 """
 from __future__ import annotations
 
@@ -99,6 +113,16 @@ _PLATFORM_SEAMS_DOC = (_REPO_ROOT / "docs" / "research"
 _SHIPPED_FRAGMENT = "a session running in a hosted cloud agent VM"
 _UNSCOPED_FRAGMENT = "a session running in a cloud agent VM"
 _PY = sys.executable
+
+#: A TAG-SHAPED strip, deliberately not `<[^>]+>`. The loose form spans any `<` …
+#: `>` anywhere in a 50 KB document, so one ordinary sentence — "a hook count of
+#: < 5 is suspect" — swallows everything up to the next `>`. Measured on THIS
+#: record with that sentence injected before §3's quote: the loose strip removed
+#: 2,755 bytes and took the quoted words with them, which would false-RED the
+#: presence arm on a record that states the right thing. (It also strips 130
+#: bytes of legitimate `<harness>` / `<ws>` prose that this form keeps.) This
+#: form cannot cross a `<`, a `>`, or a line break.
+_TAG = r"</?[A-Za-z][A-Za-z0-9-]*(\s[^<>\n]*)?/?>"
 
 
 def _normalised(text: str) -> str:
@@ -121,7 +145,7 @@ def _normalised(text: str) -> str:
     One function for both arms, so they cannot drift apart — the failure this
     file exists to catch, one level up.
     """
-    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(_TAG, " ", text)
     return re.sub(r"[\W_]+", " ", html.unescape(text).lower()).strip()
 
 
@@ -175,6 +199,24 @@ def test_the_record_quotes_the_HOSTED_scoped_fragment():
     # it is deliberately over-broad.
     assert _normalised(_UNSCOPED_FRAGMENT) not in normalised_doc, (
         "the record quotes the unscoped universal as though it were the message")
+
+
+def test_a_stray_angle_bracket_cannot_swallow_the_quoted_sentence():
+    """The strip itself, pinned — review r10 measured this fail-open direction.
+
+    `_normalised` is the only thing between the record and both arms, so its tag
+    strip is load-bearing: the loose `<[^>]+>` runs from ANY `<` to the next `>`,
+    so one ordinary half-sentence ("a hook count of < 5 is suspect") deletes
+    everything up to the following `>`, including a correctly quoted sentence,
+    and the pin would RED a record that is right. Hermetic: no file, no install.
+
+    Mutation: widen `_TAG` back to `<[^>]+>` — this REDs (measured; the loose
+    strip removes the quoted words from the sample below)."""
+    sample = ('a hook count of < 5 is suspect. §3 says '
+              '"a session running in a hosted cloud agent VM" and <b>bold</b>.')
+    assert _normalised(_SHIPPED_FRAGMENT) in _normalised(sample), (
+        "a stray `<` in ordinary prose must not eat the quoted sentence")
+    assert _normalised(_UNSCOPED_FRAGMENT) not in _normalised(sample)
 
 
 def test_the_shipped_message_carries_the_fragment_the_record_quotes(tmp_path):
