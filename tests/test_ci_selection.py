@@ -161,6 +161,17 @@ def test_docs_scanning_gates_stay_in_tier1():
         "stays internally consistent while the pin sleeps on the exact edit it "
         "exists to catch (#4309/#8474 class, the hole #10244 closed)"
     )
+    assert "test_11810_platform_seams_doc_pin.py" in tier1, (
+        "#11810 review r7 (P2): the platform-seams doc↔message pin guards "
+        "docs/research/2026-09-01-gbrain-learnings/platform-seams.md, which is "
+        "in NON_PYTHON_PREFIXES and matches no SOURCE_PATTERNS entry, so a "
+        "docs-only edit selects NO surface and runs tier1 ONLY. It shipped in "
+        "test_capture_install.py (`api` + `core`, not tier1) and therefore ran "
+        "ZERO times on the exact diff that restores the unscoped quote. The "
+        "`api` row and the `durations` row survive a dropped tier1 row, so "
+        "nothing would red: the pin would sleep again (#4309/#8474/#10244 "
+        "class)"
+    )
     assert "test_fly_secret_drift.py" in tier1, (
         "#8614: the runbook's secret-drift guards read docs/infra-runbook.md "
         "(`docs/` is in NON_PYTHON_PREFIXES and the runbook matches no "
@@ -402,6 +413,46 @@ def test_7949_e5_section10_writeback_runs_on_a_docs_only_diff():
         "that binds it to the scorer — otherwise the table can be retyped, "
         "edited one digit, or deleted and merge green (#10108 review P1, "
         "#4309 class)"
+    )
+
+
+def test_11810_platform_seams_doc_pin_runs_on_a_docs_only_diff_and_on_the_message_diff():
+    """#11810 review r7 (P2): pin the SELECTION of the doc↔message pin, both arms.
+
+    `tests/test_11810_platform_seams_doc_pin.py` binds
+    `docs/research/2026-09-01-gbrain-learnings/platform-seams.md` §3 to the
+    shipped `tortoise install cursor` message. The pin originally lived in
+    `tests/test_capture_install.py` (`api` + `core`), so on a docs-only edit of
+    the record — the direction the r6 review actually measured — it ran zero
+    times: `docs/` is in NON_PYTHON_PREFIXES, the record matches no
+    SOURCE_PATTERNS entry, `changed` empties and `select()` takes the tier1-only
+    early return. Measured at the r7 head before the fix:
+    `_sel([<the doc>])['surfaces'] == []`, 85 tier1 files, pin absent.
+
+    The second arm is why `api` is registered too: the message is a
+    `tortoise/__main__.py` string, and that path is an exact SOURCE_PATTERNS
+    entry, so a named-surface match REPLACES the `core` fallback — measured
+    `surfaces == ['api']` with `core` absent.
+
+    The manifest assertion in :func:`test_docs_scanning_gates_stay_in_tier1`
+    catches a DELETED row; this catches a row that is present but no longer
+    reaches the file (#9778 review P2 made the same point)."""
+    doc = "docs/research/2026-09-01-gbrain-learnings/platform-seams.md"
+    r = _sel([doc])
+    assert r["full"] is False
+    assert r["surfaces"] == [], r["surfaces"]
+    assert "test_11810_platform_seams_doc_pin.py" in r["test_files"], (
+        "a docs-only edit of §3 must select the pin that binds the record's "
+        "quote to the shipped message — otherwise the unscoped quote can be "
+        "restored and merge green (#11810 r7 P2, #4309 class)"
+    )
+
+    m = _sel(["tortoise/__main__.py"])
+    assert m["surfaces"] == ["api"], m["surfaces"]
+    assert "test_11810_platform_seams_doc_pin.py" in m["test_files"], (
+        "a `__main__.py` diff must run the message arm of the pin — that path "
+        "resolves to `api` ALONE (it replaces the `core` fallback), so the "
+        "`core` row alone would leave it asleep"
     )
 
 

@@ -3014,10 +3014,19 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_cloud_agent_limit
     # suite GREEN, because every other assert is a presence pin on prose that
     # coexists with the absolute. Pin the scoping on THIS surface, not only on
     # the `install --list` line. The guards are CLAIM-SHAPED — "<X> reaches a
-    # cloud agent" / "gets a Tortoise hook" — not verb+object, because the
-    # message's own recommendation ("use the MCP pull surface") is a thing that
-    # DOES reach a cloud agent, so banning the bare phrase would red correct
-    # prose (measured, review round 4 note 1).
+    # cloud agent" / "gets a Tortoise hook" — and the two subject-less ones are
+    # DELIBERATELY OVER-BROAD: they also ban a hypothetical ACCURATE sentence
+    # such as "the MCP pull seam reaches a cloud agent" (the message recommends
+    # that surface). That is friction on correct prose — one reword — and it is
+    # kept on purpose, because the narrower guard (matching only this
+    # installer's seam names) would let a RE-WORDED universal through, and that
+    # is the fail-open direction: it would ship the over-claim this PR removes.
+    # ⛔ The residual is recorded, not silently trusted: #11807 carries it, and
+    # review rounds 6/7 both declined to hold the merge for it. Measured at r8:
+    # injecting "The MCP pull seam reaches a cloud agent." REDs, and re-appending
+    # the round-1 universal REDs on BOTH this arm and "neither the capture".
+    # (An earlier version of this comment claimed the guards were "not
+    # verb+object" — false of :3024 — which is the drift r6 flagged.)
     assert "hosted cloud agent VM is NOT captured" in r.stdout, r.stdout
     assert "neither the capture seam" not in r.stdout, r.stdout
     assert "hook reaches a cloud agent" not in r.stdout, r.stdout
@@ -3046,47 +3055,13 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_cloud_agent_limit
     assert "hooks are IDE-ONLY" not in listing.stdout, listing.stdout
 
 
-_PLATFORM_SEAMS_DOC = (_REPO_ROOT / "docs" / "research"
-                       / "2026-09-01-gbrain-learnings" / "platform-seams.md")
-
-
-def test_platform_seams_record_quotes_the_shipped_install_message(tmp_path):
-    """#11810 r6: `platform-seams.md` §3 cites the install message as the evidence
-    that the exclusion is HOSTED-scoped, and §3 is what a future lane cites for
-    #11807 — so the fragment it quotes must be a substring of the message it
-    claims to quote.
-
-    The r6 review measured the drift: the record quoted "a session running in a
-    cloud agent VM" (the UNSCOPED universal this PR removes) while the shipped
-    message says "in a HOSTED cloud agent VM". A fragment in double quotes that
-    is not in its source reads as evidence FOR the over-assertion, and the claim
-    around it ("both … scope it there") then rests on nothing.
-
-    Mutation: drop `hosted` from the quoted fragment — or from the message — and
-    this REDs, which is the point: the two cannot drift apart in either
-    direction."""
-    quoted = "a session running in a hosted cloud agent VM"
-    doc = _PLATFORM_SEAMS_DOC.read_text(encoding="utf-8")
-    assert f'("{quoted}")' in doc, (
-        "the platform-seams record must quote the HOSTED-scoped message")
-    # …and the unscoped shape may not reappear as a QUOTED fragment: that is the
-    # absolute #11806 removed and this PR's title says it scoped.
-    assert '("a session running in a cloud agent VM")' not in doc, (
-        "the record quotes the unscoped universal as though it were the message")
-
-    root = tmp_path / "proj"
-    home = tmp_path / "home"
-    root.mkdir()
-    home.mkdir()
-    env = {
-        **os.environ,
-        "HOME": str(home),
-        "TORTOISE_DB_URI": "",
-        "TORTOISE_SECRET_PEPPER": "test-static-pepper",
-    }
-    r = _run(("install", "cursor", "--dir", str(root)), env, root)
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert quoted in r.stdout, r.stdout
+# ⛔ THE DOC↔MESSAGE PIN LIVES IN ITS OWN `tier1`-REGISTERED MODULE
+# (`tests/test_11810_platform_seams_doc_pin.py`, #11810 review r7 P2). It was
+# here first, and that is why it was asleep: `docs/` is in `NON_PYTHON_PREFIXES`,
+# so a docs-only edit of `platform-seams.md` takes the tier1-only early return —
+# and THIS file is registered on `api` + `core`, not `tier1`. The pin ran zero
+# times on exactly the change it exists to catch. Do not move it back: a pin on a
+# doc must live on the surface that tests docs the diff selects.
 
 
 def test_cli_install_cursor_uninstall_says_the_seam_remains(tmp_path):
