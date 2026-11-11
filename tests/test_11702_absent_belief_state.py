@@ -31,7 +31,7 @@ covering more than it does). PINNED here: the vocabulary (`ep_state`,
 `navigation.confidenceMin`, `sdk.approve`'s `confidence_delta`, and the
 journal records both belief-clearing writers emit. Each is pinned for the
 whole rule, not one shape: absent / half pair / zero-total pair / mirror-only /
-unreadable-spelling / measured.
+unreadable-operand / out-of-band-mirror / measured.
 
 Deliberately OUT of this file's scope: `battery/arms/a4_tortoise.py` (an eval
 arm, not a product surface) and `sdk.get_confidence` /
@@ -932,11 +932,22 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
 
     Both rules are now the shared predicate, so the agreement is structural —
     but "structural" is a claim, and this is the assertion that keeps it true
-    across all SEVEN stored shapes if either side is edited again. The seventh
-    (`unreadable spelling`) is cycle 24's: a hex-float mirror is a belief to the
-    store and no number to this process, so the VALUE is null while the state is
-    true, and `confidence_source` names that — a null is never collapsed to
-    "absent" beside a non-absent state.
+    across all EIGHT stored shapes if either side is edited again.
+
+    Two of the eight are the readability boundary, and they are DIFFERENT
+    shapes with different honest answers:
+
+    * an OPERAND written as a hex-float literal (`posterior_alpha = '0x1p4'`) is
+      READABLE to the store (16.0) and not to this process — the state stays
+      `measured` and `confidence_source` says `"unreadable"`, so the null is
+      named rather than denied;
+    * a MIRROR written the same way (`n.confidence = '0x1p4'`) is not a
+      probability, so the served-belief band rejects it on BOTH twins and the
+      row is `absent`/`absent`.
+
+    Collapsing those two into one shape is how the token lost its only test
+    when the band landed (cycle 25 review): the fixture stayed the mirror, so it
+    asserted `absent` and nothing exercised `"unreadable"` any more.
     """
     proj = sdk._get_proj()
 
@@ -955,15 +966,22 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
     measured = _symmetric_point(sdk)  # α = β = 2.0, a real measured 0.5
     baseline = _point("a declared baseline")
     sdk.set_point_baseline(baseline, 18.0, 2.0)
-    # The seventh shape, and the one that used to contradict itself: FalkorDB's
-    # `toFloatOrNull` reads a hex-float literal (16.0) so the SHARED PRESENCE
-    # PREDICATE says a belief exists, while the pinned Python grammar
-    # (`_FLOAT_LITERAL`) refuses it, so no VALUE is available. Presence is
-    # `ep_has_belief_cypher`, hence `ep_state: "baseline"`; the value is null.
-    unreadable = _point("a hex-float mirror", "n.confidence = '0x1p4'")
+    # The readability boundary, split into its TWO shapes (they are not the
+    # same row and they do not have the same answer — see the docstring):
+    #
+    # (a) OPERAND: `toFloatOrNull('0x1p4')` is 16.0, so the Cypher presence
+    #     predicate calls this claim measured, while the pinned Python grammar
+    #     refuses the literal, so the Python twin has no VALUE. That is the
+    #     `"unreadable"` shape.
+    unreadable = _point("a hex-float operand",
+                        "n.posterior_alpha = '0x1p4', n.posterior_beta = '1'")
+    # (b) MIRROR: 16.0 is not a probability, so the served-belief band rejects
+    #     it on both twins — the row is ABSENT, not "unreadable".
+    out_of_band_mirror = _point("a hex-float mirror",
+                                "n.confidence = '0x1p4'")
 
     ids = [absent, half_pair, zero_total, mirror_only, measured, baseline,
-           unreadable]
+           unreadable, out_of_band_mirror]
     recs = {r["id"]: r["recall_ranking"] for r in
             StateRanker(projection=proj).rerank(
                 [{"id": p, "scores": {"rrf": 1.0}} for p in ids])}
@@ -1013,12 +1031,12 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
         assert recs[pid]["ep_state"] == EP_STATE_BASELINE, recs[pid]
         assert recs[pid]["confidence_source"] != EP_STATE_ABSENT, recs[pid]
 
-    # The seventh shape, named so it cannot be dropped again: the store reads
-    # the mirror (`toFloatOrNull` → 16.0, i.e. PRESENT) and this process does
-    # not (`numeric_operand` → None, the pinned grammar). Assert BOTH halves,
-    # so the fixture cannot pass by failing to be the shape it claims — a
-    # fixture that stopped being unreadable would otherwise assert agreement
-    # between two identical absent rows.
+    # (a) The OPERAND shape, named so it cannot be dropped again: the store
+    # reads it (`toFloatOrNull` → 16.0, i.e. PRESENT) and this process does not
+    # (`numeric_operand` → None, the pinned grammar). Assert BOTH halves, so the
+    # fixture cannot pass by failing to be the shape it claims — a fixture that
+    # stopped being unreadable would otherwise assert agreement between two
+    # identical absent rows.
     assert _se.numeric_operand("0x1p4") is None, (
         "the pinned Python grammar now reads hex floats — the fixture is no "
         "longer the unreadable shape")
@@ -1026,7 +1044,27 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
         "RETURN toFloatOrNull('0x1p4') AS v").result_set == [[16.0]], (
         "the store no longer reads the hex-float spelling — the fixture is no "
         "longer the unreadable shape")
-    # ⛔ Cycle 24's BAND resolves the seventh shape rather than reporting it: a
+    for name, row in (("recall_ranking", recs[unreadable]),
+                      ("gaps_ranking", gaps[unreadable])):
+        assert row["ep_state"] == EP_STATE_MEASURED, (name, row)
+        assert row["confidence"] is None, (name, row)
+        assert row["confidence_source"] == UNREADABLE_CONFIDENCE_SOURCE, (
+            f"{name} denies a belief it has: source={row['confidence_source']!r}"
+            f" beside ep_state={row['ep_state']!r}")
+    assert recs[unreadable]["belief_informed_order"] is False, recs[unreadable]
+    # …and the `ep` block still disagrees with the rankers about this one row:
+    # its state comes from the PYTHON twin, which cannot read the operand, so it
+    # says "absent" beside the rankers' "measured". That is #11841's residual
+    # (the grammar is not widened by #11702) and it is asserted HERE so a fix
+    # cannot land silently: whoever closes #11841 must update this assertion, the
+    # `ep` block, and the `recall_ranking.ep_state` manifest row together.
+    eps = annotate_ep_batch(proj.g, [unreadable])[unreadable]
+    assert eps.ep_state == EP_STATE_ABSENT, (
+        "the operand twin split is fixed upstream (#11841) — update this pin, "
+        f"the `ep` block and the manifest row together; got {eps.ep_state!r}")
+    assert eps.confidence_mean is None, eps
+
+    # (b) The MIRROR shape: the band resolves it rather than reporting it. A
     # served belief is a probability, so `16.0` is not a belief on EITHER twin —
     # `belief_mirror_cypher` answers null and `ep_has_belief_cypher` is false,
     # which is what the Python side always said. (Before the band this row was
@@ -1037,12 +1075,13 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
     assert _se.belief_mirror("0x1p4") is None, (
         "the band admits the hex-float spelling — the fixture is no longer the "
         "out-of-band shape")
-    for name, row in (("recall_ranking", recs[unreadable]),
-                      ("gaps_ranking", gaps[unreadable])):
+    for name, row in (("recall_ranking", recs[out_of_band_mirror]),
+                      ("gaps_ranking", gaps[out_of_band_mirror])):
         assert row["ep_state"] == EP_STATE_ABSENT, (name, row)
         assert row["confidence"] is None, (name, row)
         assert row["confidence_source"] == EP_STATE_ABSENT, (name, row)
-    assert recs[unreadable]["belief_informed_order"] is False, recs[unreadable]
+    assert recs[out_of_band_mirror]["belief_informed_order"] is False, (
+        recs[out_of_band_mirror])
 
 
 def test_a_draft_withholds_its_belief_without_denying_it(sdk):

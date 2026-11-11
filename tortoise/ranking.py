@@ -75,15 +75,26 @@ UNCOMPUTED_CONFIDENCE_SOURCE = "uncomputed"
 
 #: #11702 — the ``confidence_source`` value for a row that DOES persist a belief
 #: (``ep_state`` is ``baseline``/``measured``) whose stored spelling this
-#: process cannot read. There is exactly one shape: a mirror written as a
-#: hex-float literal (``"0x1p4"``), which FalkorDB's ``toFloatOrNull`` reads as
-#: ``16.0`` — so the shared presence predicate says a belief exists — while the
-#: pinned Python grammar (:data:`tortoise.search_engine._FLOAT_LITERAL`) refuses
-#: it, so no value is available. Reporting ``"absent"`` there denies the state
-#: beside it (`"baseline"`), and ``"posterior"``/``"neutral"`` would claim a
+#: process cannot read. The REACHABLE shape is a belief OPERAND written as a
+#: hex-float literal (``posterior_alpha = "0x1p4"``), which FalkorDB's
+#: ``toFloatOrNull`` reads as ``16.0`` — so the shared presence predicate says a
+#: belief exists — while the pinned Python grammar
+#: (:data:`tortoise.search_engine._FLOAT_LITERAL`) refuses it, so no value is
+#: available to this process. Reporting ``"absent"`` there denies the state
+#: beside it (`"measured"`), and ``"posterior"``/``"neutral"`` would claim a
 #: measurement that was never read; this token says the one true thing: the row
-#: has a belief we could not decode. Recorded as a residual on #11841 (the wider
-#: belief-writer audit); the grammar is NOT widened here.
+#: has a belief we could not decode.
+#: ⚠️ The MIRROR spelling (``n.confidence = "0x1p4"``) is NOT this shape and is
+#: not reachable here: a served belief is a probability, so the band rejects
+#: ``16.0`` on BOTH twins and that row is ``absent``, which is what this module's
+#: ``_confidence_of`` now reports for it. Recorded as a residual on #11841 (the
+#: wider belief-writer audit); the grammar is NOT widened here, so an operand
+#: spelling remains the one shape where the twins disagree about READABILITY (the
+#: store can read it, this process cannot) — and therefore about the STATE the
+#: `ep` block reports ("absent", its Python twin) versus the rankers
+#: ("measured", the Cypher predicate). That disagreement is #11841's to close,
+#: not this module's: it is recorded on the `recall_ranking.ep_state` surface row
+#: and pinned in the #11702 test file, so it cannot be fixed silently.
 UNREADABLE_CONFIDENCE_SOURCE = "unreadable"
 
 
@@ -1649,10 +1660,13 @@ class StateRanker:
                     # REACHABLE, by exactly one recorded residual — NOT
                     # `unreachable`, which is what this arm used to say. The
                     # presence predicate is Cypher's `toFloatOrNull`, which
-                    # reads a hex-float spelling (`"0x1p4"` → 16.0) that
+                    # reads an OPERAND written as a hex-float spelling
+                    # (`posterior_alpha: "0x1p4"` → 16.0) that
                     # `numeric_operand`'s pinned grammar refuses; on that one
                     # shape the predicate says `has_prior` and this read has
-                    # no number. The state stays true and
+                    # no number. (A hex-float MIRROR is not this shape — the
+                    # served-belief band rejects 16.0 on both twins.) The state
+                    # stays true and
                     # `confidence_source: "unreadable"` names the missing
                     # value (`_confidence_of` derives it from the state, never
                     # from this `None`). Pre-#11702's `IS NOT NULL` predicate
