@@ -420,6 +420,16 @@ NUMERIC_OPERAND_CYPHER_TEMPLATE = (
 #: * in range → value: `"1.1754944e-38"` (min normal), `"1.2e-38"`, `"1e-37"`.
 _FLOAT32_MIN_NORMAL = 1.1754943508222875e-38
 _FLOAT32_MAX = 3.4028234663852886e38
+#: The LOWEST literal magnitude the store still READS although it is not a
+#: float32: one quarter of a subnormal ULP (2**-149) below min-normal. The read
+#: band is everything from here upward — at or above this value an inexact
+#: literal rounds UP to min-normal, so it is not a subnormal after rounding and
+#: `strtof` does not set ERANGE. Below it the rounded result IS subnormal and an
+#: inexact literal answers null. Pinned by measurement, not derived — see
+#: `_string_operand`'s table: at exactly this offset (`0x1ffffffp-151`) the store
+#: reads, and half a subnormal ULP below min-normal (`0x1fffffep-151`,
+#: `0xffffffp-150`) it answers null.
+_F32_UNDERFLOW_READ_FLOOR = _FLOAT32_MIN_NORMAL - 2.0 ** -151
 #: A literal whose MANTISSA is all zeros — the only kind that reads as a zero
 #: NUMBER. `"1e-400"` is not one: `float()` makes it zero because it underflowed,
 #: and `toFloat` answers null for it.
@@ -613,24 +623,42 @@ def _string_operand(raw: str, val: float):
     just below min-normal rounds UP to it and yet is null there
     (`"1.1754943e-38"`, measured).
 
-    ⛔ **The underflow edge is about INEXACTNESS, not about subnormal-ness** —
-    which only becomes visible once hex literals are read (`numeric_operand`'s
-    hex branch calls this function too). A SUBNORMAL result that the literal
-    names EXACTLY is not an error to `strtof` and READS; a subnormal result the
-    literal cannot represent is ERANGE and answers null. Measured on FalkorDB
-    4.20.6, both twins for each row:
+    ⛔ **The underflow edge is about INEXACTNESS OF THE LITERAL — not about
+    subnormal-ness, and not about the double** — which only becomes visible once
+    hex literals are read (`numeric_operand`'s hex branch calls this function
+    too). A SUBNORMAL result the literal names EXACTLY is not an error to
+    `strtof` and READS; one the literal cannot represent is ERANGE and answers
+    null. "Cannot represent" is a question about the TEXT: a subnormal's
+    ``repr()`` is EXACT as a double and INEXACT as text, so testing
+    ``rounded != val`` (the double) served every decimal spelling of every
+    subnormal — the same split, mirrored. Measured on FalkorDB 4.20.6, both
+    twins for each row:
 
-    ===================  =================  ============
-    literal              exact in float32?  ``toFloat``
-    ===================  =================  ============
-    ``'0x1p-149'``       yes (min subnormal) reads
-    ``'0x1p-127'``       yes (subnormal)    reads
-    ``'0x1.fffffcp-127'`` yes (max subnormal) reads
-    ``'0x1.8p-149'``     no                 null
-    ``'0x1.fffffep-127'`` no (rounds to min normal) null
-    ``'1e-38'``          no                 null
-    ``'1.1754943e-38'``  no                 null
-    ===================  =================  ============
+    ================================  ====================  ============
+    literal                           exact to the TEXT?    ``toFloat``
+    ================================  ====================  ============
+    ``'0x1p-149'``                    yes (min subnormal)   reads
+    ``'0x1p-127'``                    yes (subnormal)       reads
+    ``'0x1.fffffcp-127'``             yes (max subnormal)   reads
+    ``'0x1.8p-149'``                  no                    null
+    ``'0x1.fffffep-127'``             no (the midpoint)     null
+    ``'0x1.0000000000000001p-127'``    no (below the double) null
+    ``'5.877471754111438e-39'``       no (a ``repr()``)     null
+    ``'1.401298464324817e-45'``       no (a ``repr()``)     null
+    ``'1e-38'`` / ``'1.1754943e-38'``  no                    null
+    ================================  ====================  ============
+
+    ⛔ **The store's read window does not end at min-normal: it ends a quarter
+    of a subnormal ULP BELOW it** (`_F32_UNDERFLOW_READ_FLOOR`). `strtof` does not
+    treat every value below min-normal as an underflow: an inexact literal in this
+    band still rounds UP to min-normal, is not subnormal after rounding, and
+    READS. Swept on the live store at a quarter-ULP resolution and again at
+    2**-163, both spellings agreeing: at ``min_normal - 2**-151``
+    (``'0x1ffffffp-151'``) it reads, and half a subnormal ULP below min-normal
+    (``'0x1fffffep-151'``) it answers null. Without the band the rule would
+    refuse a spelling the store serves — the SAME split pointing the other way,
+    which is why both edges are pinned in the twin-grammar table rather than only
+    the nulls.
 
     Refusing every subnormal (the rule before this) split the twins across the
     whole exact-subnormal window — 23 exponents wide — on a value the store
@@ -650,13 +678,30 @@ def _string_operand(raw: str, val: float):
         return None
     if abs(rounded) > _FLOAT32_MAX:     # belt and braces; pack guarantees it
         return None
-    if (val != 0.0 and abs(val) < _FLOAT32_MIN_NORMAL
-            and rounded != val):
-        # INEXACT subnormal (`strtof` sets ERANGE, so the engine nulls it) — not
-        # every subnormal: one the literal names exactly READS. See the table in
-        # this function's docstring; refusing all of them was a 23-exponent twin
-        # split on hex operands.
-        return None
+    # The underflow decision needs the literal, so the (comparatively costly)
+    # exact parse is confined to the zone where it can matter. The guard SKIPS
+    # doubles at or above twice min-normal — no literal that large can have an
+    # exact value below the floor — and does not skip anything smaller: a
+    # literal far below min-normal still needs the parse, because that is the
+    # only way to tell an EXACT subnormal (`'0x1p-149'`) from a `repr()` of one.
+    if val != 0.0 and abs(val) < _FLOAT32_MIN_NORMAL * 2:
+        exact = _exact_literal_fraction(raw)
+        if exact is None:                       # pragma: no cover — grammar-pinned
+            # A spelling the exact parse cannot reconstruct: fall back to the
+            # FLOOR on the double. Deliberately not `abs(val) < min_normal`,
+            # which would refuse the whole read band this function exists to
+            # serve — the mirrored split. Unreachable for both grammars today
+            # (measured: 0/16,000 guard-zone literals), so this is a fail-safe
+            # for a future widening, not a live branch.
+            return None if abs(val) < _F32_UNDERFLOW_READ_FLOOR else rounded
+        if (abs(exact) < _F32_UNDERFLOW_READ_FLOOR
+                and Fraction(rounded) != exact):
+            # INEXACT below the store's read floor (`strtof` sets ERANGE, so the
+            # engine nulls it) — not every subnormal: one the literal names
+            # exactly READS, and one within a quarter ULP of min-normal still
+            # rounds up to it. See the table in this function's docstring;
+            # refusing all of them was a 23-exponent twin split on hex operands.
+            return None
     return rounded
 
 

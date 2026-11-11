@@ -3347,7 +3347,7 @@ def test_the_twins_parse_the_same_string_language(sdk):
     `'1e39'`/`'1e308'`/`'1e-40'` had the same split at magnitudes the table
     below now covers. A string outside the range is ABSENT on both twins.
 
-    NO KNOWN RESIDUAL (cycles 26, 27, 28 — and the qualifier is the point).
+    NO KNOWN RESIDUAL (cycles 26, 27, 28, 29 — and the qualifier is the point).
     Three rounds of "bounded divergence" turned out to be three splits in which
     one twin could not read what the other could, and each one moved `ep_state`
     somewhere; a fourth round then found two more inside the "closed" ones. So
@@ -3371,7 +3371,14 @@ def test_the_twins_parse_the_same_string_language(sdk):
       down in Python). `_f32_from_literal` resolves ONLY that case, from the
       literal, with exact `Fraction` arithmetic — for a HEX literal too, where
       `float.fromhex` keeps only 53 bits, and on the SIDE of the midpoint the
-      literal actually lies (cycle 28).
+      literal actually lies (cycle 28);
+    * the UNDERFLOW edge, second time (cycle 29): the inexactness `strtof` sets
+      ERANGE on is a property of the TEXT, not of the double. A subnormal's
+      `repr()` is EXACT as a double and INEXACT as text, so the guard
+      `rounded != val` served every decimal spelling of every subnormal while
+      the store nulled it — the same split, mirrored. And the store's read
+      window does not end AT min-normal: it ends a quarter of a subnormal ULP
+      below it, so both edges are pinned here.
 
     So the table below asserts agreement on presence AND on value; the rows are
     the shapes this repo has measured a split on.
@@ -3456,6 +3463,25 @@ def test_the_twins_parse_the_same_string_language(sdk):
         "0x1.fffffcp-127": float.fromhex("0x1.fffffcp-127"),  # max subnormal
         "0x1.8p-149": None,                        # not representable
         "0x1.fffffep-127": None,                   # rounds to min normal → inexact
+        # ⛔ The inexactness is a property of the TEXT, not of the double
+        # (cycle 29). A subnormal's `repr()` — and any hex literal carrying more
+        # precision than `float.fromhex` keeps — is EXACT as a double and
+        # INEXACT as text, so `rounded != val` served every one of these while
+        # the store nulled them: the `ep` block read `measured / 5.9e-39` beside
+        # `absent / null` in every ranker, one block apart in one response.
+        "0x1.0000000000000001p-127": None,
+        "0x1.ffffffffffffffffp-128": None,
+        "5.877471754111438e-39": None,             # repr() of 0x1p-127
+        "1.401298464324817e-45": None,             # repr() of 0x1p-149
+        "1.1754942106924411e-38": None,            # repr() of 0x1.fffffcp-127
+        # …and the read window does NOT end at min-normal: an inexact literal
+        # within a quarter subnormal-ULP BELOW min-normal still rounds UP to it
+        # and reads (measured at a quarter-ULP sweep and again at 2⁻¹⁶³). BOTH
+        # edges are pinned: a rule that refused this band would be the same
+        # split pointing the other way, and only the nulls would stay green if
+        # it did.
+        "0x1ffffffp-151": float.fromhex("0x1p-126"),   # min-normal − 2⁻¹⁵¹ → reads
+        "0x1fffffep-151": None,                     # min-normal − 2⁻¹⁵⁰ → null
         # The MIDPOINT edge, for HEX (cycle 28). `float.fromhex` keeps 53 bits,
         # so a hex literal with more precision than that lands ON a float32
         # midpoint after the double rounding — and the tie-break must be taken
