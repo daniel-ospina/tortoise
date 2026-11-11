@@ -92,9 +92,14 @@ def _count_source_events(source_db: str) -> int:
 def _pack_selection_shape(counts: dict) -> tuple[str, str]:
     """Delegate to the ONE shape answer (`tortoise.projection`).
 
-    Four consumers report this gap (the two projection recovery callers, this
-    migration route, and the `rebuild` CLI); a second copy of the shape rule
-    here is how the four drifted apart in the first place (review rounds 3-4).
+    THREE of the four reporters route through it: the two projection recovery
+    callers and this migration route (both its warning sites). The fourth — the
+    `rebuild` CLI — keeps its own branch chain deliberately, because it prints a
+    count line and per-shape prose whose exact wording is pinned by
+    `test_cmd_rebuild_reports_the_pack_selection_marker`; a second copy of the
+    RULE here is what let the reporters drift apart across review rounds 3-4,
+    whereas the CLI's copy is behaviour-pinned and states no rule the helper
+    contradicts.
     """
     from tortoise.projection import pack_selection_shape
 

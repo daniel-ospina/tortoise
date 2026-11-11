@@ -3385,8 +3385,9 @@ def recover_from_log(events_dir: str, projection) -> dict:
     shape — `pack_selection_gap`, `pack_selection_state_unknown`,
     `pack_selection_conflict` (a DIFFERENT marker is live, so the graph IS
     configured and may hold a NEWER set — a reported conflict, never an
-    asserted loss), and their own additive `reason` clauses — because an absent
-    marker makes the rebuilt
+    asserted loss), `pack_selection_verified` (forwarded so a caller can tell an
+    UNVERIFIED read from an observed loss), and their own
+    additive `reason` clauses — because an absent marker makes the rebuilt
     graph read as UNCONFIGURED: `resolved_pack_set` falls back to the
     records/union arms, so a pack an admin REMOVED is re-admitted with its
     `revision` reset. All three classes report SEPARATELY, for the same reason
@@ -3891,6 +3892,18 @@ def recover_from_log(events_dir: str, projection) -> dict:
             # an absence from a DIFFERENT live marker).
             if counts.get("pack_selection_conflict"):
                 result["pack_selection_conflict"] = True
+            # ⛔ The UNVERIFIED discriminator MUST travel in `result`, not only in
+            # the `reason` clause below: both recovery consumers
+            # (`_auto_health_recover`, `_recover_or_raise`) label the gap by
+            # calling `pack_selection_shape(result)`, and without this key the
+            # helper cannot see the unverified state — so it fell through to
+            # "restore gap … reads as UNCONFIGURED" while the SAME line's reason
+            # said "COULD NOT RUN … UNVERIFIED". Reproduced on a real run at
+            # head ebe23a2b26 (#9752 review round 5, P1). `migrate_db` already
+            # forwards it; this was the odd one out.
+            if "pack_selection_verified" in counts:
+                result["pack_selection_verified"] = counts.get(
+                    "pack_selection_verified")
             if counts.get("pack_selection_verified") is False:
                 result["reason"] += (
                     "; WARNING: the :PackSelection post-restore verification "
