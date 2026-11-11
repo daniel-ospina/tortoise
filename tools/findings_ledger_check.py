@@ -20,7 +20,11 @@ That makes three things load-bearing in a way that is invisible to a reader:
 2. **A citation that does not resolve looks identical to evidence.** The page is
    the review's record of "declared ≠ stored" (its defect pattern 1); a
    `path:line` that points at nothing is that same defect *in the artifact about
-   it*. It must red, because prose cannot.
+   it*. It must red, because prose cannot. The page also uses the shorthand
+   `:LINE` inside a cell (`classes at tortoise/commit_schema.py:395, :792, :1002`),
+   which resolves against the nearest preceding full-path citation — measured, not
+   skipped: leaving it unmatched exempted the load-bearing half of rows (b), (c)
+   and (e) while §8 advertised them as checked.
 3. **The population must be pinned.** Deleting a correction row — and every
    mention of it — satisfies every referential check there is. So the row count
    is pinned like `#2820`'s status table is, and §6's arithmetic is re-derived
@@ -63,6 +67,15 @@ red it. `check_document()` is therefore the history-free half (and what
 clone. Copy the sibling precedent rather than inventing one: `tools/problem_map_check.py`
 reports ancestry as UNVERIFIED in a shallow clone, and `tests/test_substrate_map.py`
 skips only its ancestry assertion for the same reason (#10406).
+
+What that split does NOT license, and the trap to avoid: the `docs` job runs **no
+pytest at all**, so a test that skips in a depth-1 clone is not "covered in the
+docs job" — it is inert. The live ancestry claim is proved by the `docs` job's
+`--check` invocation (which IS `check_all`), and the not-ancestor BRANCH is pinned
+in every pytest job by a monkeypatched-`git` case
+(`test_measured_commit_not_ancestor_of_head_is_rejected`) that needs no history.
+Neither the skip's docstring nor the self-test comment may claim a test coverage
+that no job supplies.
 """
 
 from __future__ import annotations
@@ -103,12 +116,26 @@ STATE_ROWS: tuple[str, ...] = (
 )
 
 #: `path/to/file.ext:LINE` or `path/to/file.ext:START-END`, inside backticks.
+#: The path is OPTIONAL so the page's shorthand `:LINE` form is matched too — a
+#: shorthand nothing resolves is scope the guard silently did not measure, and §8
+#: tells the reader every `path:line` in §3/§5 is checked. A shorthand is resolved
+#: against the nearest PRECEDING full-path citation (see `check_citations`); the
+#: required `:` right after the backtick is what keeps a plain backticked integer
+#: (`` `42` ``) out of the match.
 CITATION_RE = re.compile(
-    r"`(?!\*\*)([\w][\w./+-]*\.(?:py|md|yml|yaml|json|jsonc|ts|sh))"
-    r":(\d+)(?:-(\d+))?`"
+    r"`(?!\*\*)(?P<path>[\w][\w./+-]*\.(?:py|md|yml|yaml|json|jsonc|ts|sh))?"
+    r":(?P<start>\d+)(?:-(?P<end>\d+))?`"
 )
 
 CORRECTION_ROW_RE = re.compile(r"^\|\s*\*\*([a-z])\*\*\s*\|")
+
+#: Floor on the mutation population. `--self-test` is the arm the page's own
+#: justification rests on (*"`--self-test` is what proves the rules still fire"*),
+#: and `MUTATIONS = ()` is a ONE-place edit: without a floor it printed
+#: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
+#: over a self-test that proved nothing — a gate that reports OK when it cannot
+#: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
+MIN_SELF_TEST_MUTATIONS = 6
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -144,6 +171,34 @@ def _region(text: str, start: str, end: str) -> str:
     return text[i:j]
 
 
+def _split_row_cells(line: str) -> list[str]:
+    """Split a markdown table row on UNESCAPED pipes only.
+
+    `\\|` is legal table syntax for a literal pipe inside a cell. A plain
+    `line.split("|")` splits there too, shifts every later column and reports a
+    correct row as "no bolded verdict" — a false red the reader cannot act on,
+    and the shape a lane learns to route around.
+    """
+    cells: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for char in line:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == "|":
+            cells.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    cells.append("".join(current))
+    return cells
+
+
 def check_verdicts(text: str) -> list[str]:
     """§3: exactly the pinned labels, each carrying a member of the closed set."""
     problems: list[str] = []
@@ -159,7 +214,7 @@ def check_verdicts(text: str) -> list[str]:
         )
 
     for label, line in zip(labels, rows, strict=True):
-        cells = line.split("|")
+        cells = _split_row_cells(line)
         # | # | claim | correction | verdict | evidence | -> cells[0] == ''
         verdict_cell = cells[4] if len(cells) > 4 else ""
         tokens = BOLD_TOKEN_RE.findall(verdict_cell)
@@ -186,30 +241,54 @@ def _line_count(path: Path) -> int | None:
 
 
 def check_citations(text: str, root: Path = REPO) -> list[str]:
-    """Every backticked `path:line` must resolve, and the line must be in range."""
+    """Every backticked `path:line` must resolve, and the line must be in range.
+
+    A shorthand `:LINE` is resolved against the nearest PRECEDING full-path
+    citation, which is how the page reads (`classes at <path>:395`, then `:792`).
+    It is not skipped: skipping it is what let row (b)'s only two commitments about
+    `tortoise/commit_schema.py` point at nothing while §8 promised they were
+    checked. A shorthand with no preceding full path at all is reported — the
+    guard will not invent an anchor for it.
+    """
     problems: list[str] = []
     seen: set[str] = set()
+    anchor: str | None = None
     for match in CITATION_RE.finditer(text):
-        rel, start, end = match.group(1), int(match.group(2)), match.group(3)
-        token = match.group(0)[1:-1]
-        if token in seen:
+        raw = match.group(0)[1:-1]
+        start, end = int(match.group("start")), match.group("end")
+        span = f"{start}{'-' + end if end else ''}"
+        rel = match.group("path")
+        origin = ""
+        if rel:
+            anchor = rel
+        elif anchor is None:
+            problems.append(
+                f"citation {raw}: shorthand with no preceding `path:line` to resolve "
+                "it against — write the path, or the guard cannot tell what it points at"
+            )
             continue
-        seen.add(token)
+        else:
+            rel = anchor
+            origin = f" (shorthand {raw} resolved against {rel})"
+        label = f"{rel}:{span}"
+        if label in seen:
+            continue
+        seen.add(label)
         target = root / rel
         if not target.is_file():
-            problems.append(f"citation {token}: {rel} does not exist in the tree")
+            problems.append(f"citation {label}{origin}: {rel} does not exist in the tree")
             continue
         total = _line_count(target)
         if total is None:
-            problems.append(f"citation {token}: {rel} exists but cannot be read")
+            problems.append(f"citation {label}{origin}: {rel} exists but cannot be read")
             continue
         last = int(end) if end else start
         if start < 1 or last > total or last < start:
             problems.append(
-                f"citation {token}: line {start}{'-' + end if end else ''} is out "
+                f"citation {label}{origin}: line {span} is out "
                 f"of range for {rel} ({total} lines)"
             )
-    if not seen:
+    if not seen and not problems:
         raise Unverifiable("no `path:line` citations found — the guard measured nothing")
     return problems
 
@@ -328,11 +407,12 @@ def check_all(root: Path = REPO) -> list[str]:
 # The arms drive `check_document()`, not `check_all()`: every mutation below
 # targets a doc-level rule, so dragging ancestry in would make `--self-test`
 # unrunnable in a depth-1 clone while proving nothing extra — no arm here mutates
-# `measured_at_commit`. That arm is covered where it CAN be answered: the
-# `--check` invocation in the REQUIRED `docs` job (fetch-depth 0), which exits 2
-# rather than 0 when it cannot resolve the commit, and
-# `tests/test_findings_ledger_2852.py::test_measured_commit_must_be_an_ancestor_of_head`
-# (which needs no history — an absent sha is absent in every clone).
+# `measured_at_commit`. `MIN_SELF_TEST_MUTATIONS` above keeps the population from
+# being emptied; the ancestry arm is covered where it CAN be answered (the
+# `--check` invocation in the REQUIRED `docs` job, which exits 2 rather than 0
+# when it cannot resolve the commit) and its not-ancestor branch by
+# `tests/test_findings_ledger_2852.py::test_measured_commit_not_ancestor_of_head_is_rejected`,
+# which stubs `git` and needs no history at all.
 
 MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
     (
@@ -364,10 +444,21 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         lambda t: t.replace("| **OPEN** | **4** |", "| **OPEN** | **5** |", 1),
         "declares 5 but its own list names 4",
     ),
+    (
+        "a shorthand citation pointing past the end of its anchor's file",
+        lambda t: t.replace("`:3115`", "`:999999`", 1),
+        "out of range",
+    ),
 )
 
 
 def self_test(root: Path = REPO) -> int:
+    if len(MUTATIONS) < MIN_SELF_TEST_MUTATIONS:
+        print(
+            f"self-test: {len(MUTATIONS)} mutation arm(s) registered, at least "
+            f"{MIN_SELF_TEST_MUTATIONS} required — a shrunk mutation population proves nothing"
+        )
+        return 1
     original = read_doc(root)
     base = check_document(original, root)
     if base:

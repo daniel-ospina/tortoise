@@ -3112,6 +3112,25 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by tests/test_ci_selection.py::
              # test_problem_map_guard_runs_on_the_diffs_it_guards.
              "tools/problem_map_check.py",
+             # #2852 review F1: the findings ledger's drift guard has the SAME two
+             # arms and the same hole as its #5086/#2820 siblings. The row that
+             # registers `tests/test_findings_ledger_2852.py` was `core` ONLY, and
+             # a `core` row is classification, not selection: `tools/` is a flat
+             # NON_PYTHON_PREFIXES entry with no SOURCE_PATTERNS match, so a
+             # `tools/findings_ledger_check.py`-only diff came back `changed == []`
+             # and took the docs-only early return, which emits tier-1 only.
+             # MEASURED before this entry (`select()` in-process, at the PR head):
+             # `select(["tools/findings_ledger_check.py"])` -> surfaces=[],
+             # 87 test files, the guard's pin ABSENT — so the tool that re-measures
+             # the ledger could be weakened without its own negative controls
+             # running once. After: surfaces=['core'], pin present. The DOC half
+             # (`docs/architecture/MEMORY-SUBSTRATE-FINDINGS-LEDGER.md`) stays
+             # unclaimed here for the sibling reason (a docs-only diff must stay on
+             # the tier-1 path, which is why the file is dual-registered in
+             # config/ci-surfaces.yml's `tier1` block).
+             # Pinned by tests/test_findings_ledger_2852.py::
+             # test_test_file_is_selected_on_the_diffs_it_guards.
+             "tools/findings_ledger_check.py",
              # #10131 review P1: tools/ci_catch_history.py owns
              # tests/test_ci_catch_history.py — registered `core` (the registration this
              # PR adds) — but `tools/` is a flat NON_PYTHON_PREFIXES entry and no
