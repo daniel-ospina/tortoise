@@ -186,6 +186,11 @@ def migrate(force: bool = False) -> dict:
         # fallback replays nothing, so it has no salvage tally). Bound here so
         # the returned counts can carry it on EVERY route without a NameError.
         rebuild_counts: dict | None = None
+        # #11866: which producer set `pack_selection_state_unknown`, computed
+        # against the value the REBUILD returned (below) and carried in the
+        # result dict so the CLI can print the cause that is true for its
+        # shape. Bound here too, for the same no-NameError reason.
+        _pack_unknown_inherited = False
         if not events_dir:
             # No JSONL available: copy the RDB snapshot (documented fallback —
             # NOT the binary-copy path for the primary flow; this is the
@@ -417,6 +422,16 @@ def migrate(force: bool = False) -> dict:
                 "pack_selection_state_unknown": bool(
                     (rebuild_counts or {}).get(
                         "pack_selection_state_unknown")),
+                # #11866: WHICH producer set the flag above — False is THIS
+                # route's own empty-capture override (the shape with no sidecar
+                # at all), True is an inherited report from a leftover rescue
+                # file, which DID make the rebuild log an ERROR naming that
+                # file. Carried because `main()` prints an operator-facing line
+                # of its own: without this it cannot tell the two apart and
+                # printed the sidecar cause on the sidecar-less shape — the
+                # same defect one surface down.
+                "pack_selection_state_unknown_inherited": bool(
+                    _pack_unknown_inherited),
                 # The other two shape discriminators, carried for the same
                 # reason: without them a caller cannot tell a CONFLICT (the
                 # graph IS configured, possibly with a newer set) or an
@@ -467,10 +482,25 @@ def main(argv: list[str] | None = None) -> int:
             # must never be reported as an observed loss.
             if result.get("pack_selection_gap"):
                 _label, _consequence = _pack_selection_shape(result)
-                logger.warning(
-                    "migrated graph's :PackSelection pack-set marker is NOT "
-                    "confirmed intact (%s) — %s (#9752).",
-                    _label, _consequence)
+                # #11866: same two producers as the route warning above, and
+                # the same rule — this surface must not name the sidecar on the
+                # shape that has none (see the `migrate()` arm for the full
+                # reasoning). `main()` cannot re-derive it, so the discriminator
+                # rides the result dict.
+                if (result.get("pack_selection_state_unknown")
+                        and not result.get(
+                            "pack_selection_state_unknown_inherited")):
+                    logger.warning(
+                        "migrated graph's :PackSelection pack-set marker is NOT "
+                        "confirmed intact (%s) — the capture read the graph it "
+                        "is about to wipe (the fresh `target`), so the marker "
+                        "was NOT OBSERVED, not observed gone — this is not an "
+                        "observed loss (#9752/#11866).", _label)
+                else:
+                    logger.warning(
+                        "migrated graph's :PackSelection pack-set marker is NOT "
+                        "confirmed intact (%s) — %s (#9752).",
+                        _label, _consequence)
         elif result.get("status") == "already-migrated":
             logger.warning("already migrated (marker present, %s nodes) — skip",
                            result.get("nodes"))

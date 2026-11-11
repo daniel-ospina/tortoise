@@ -1521,9 +1521,9 @@ def test_migrate_route_keeps_the_error_pointer_for_a_rescue_file(
     A fix for shape (a) that also rewrote shape (b) shipped once and was caught
     by review: it told a retrying operator "this is the known #11866
     capture-source limitation" while the one artifact that can say a marker was
-    destroyed — the rescue file beside the target — went unnamed, and the
-    pointer that was correct for this shape was deleted. Pinned so a future
-    fix for (a) cannot silently absorb (b) again.
+    destroyed — the rescue file beside the SOURCE's event log — went unnamed,
+    and the pointer that was correct for this shape was deleted. Pinned so a
+    future fix for (a) cannot silently absorb (b) again.
     """
     counts = {"nodes": 0, "edges": 0, "events": 0,
               "pack_selection_expected": 0, "pack_selection_verified": True,
@@ -1539,6 +1539,11 @@ def test_migrate_route_keeps_the_error_pointer_for_a_rescue_file(
         f"is the correct one: {msg}")
     assert "NOT OBSERVED, not observed gone" not in msg, (
         f"the capture-source cause is false on the rescue-file shape: {msg}")
+    # "Keeps BOTH" needs both halves pinned, or a later fix for shape (a) can
+    # drop the shared consequence here and still leave this test green.
+    assert "pre-wipe sidecar" in msg, (
+        "this is one of the shapes that DOES have a pre-wipe sidecar, so the "
+        f"shared cause belongs here: {msg}")
 
 
 def test_migrate_cli_reports_the_pack_selection_gap(caplog, monkeypatch):
@@ -1573,6 +1578,23 @@ def test_migrate_cli_reports_the_pack_selection_gap(caplog, monkeypatch):
     msgs = " | ".join(r.getMessage() for r in caplog.records)
     assert "pre-preservation/UNKNOWN" in msgs, msgs
     assert "restore gap" not in msgs, msgs
+    # #11866: `main()` printed the shared consequence on BOTH producers' shape,
+    # so the CLI — the surface a human actually runs — said "the pre-wipe
+    # sidecar cannot say" for the route that has no sidecar, two lines under a
+    # warning that named the capture source. Pinned in both directions here.
+    assert "pre-wipe sidecar" not in msgs, (
+        f"shape (a) has no pre-wipe sidecar: {msgs}")
+    assert "the capture read the graph it is about to wipe" in msgs, msgs
+
+    # …and the inherited shape DOES have one, so the CLI must name it there.
+    caplog.clear()
+    gap.update({"pack_selection_state_unknown_inherited": True})
+    monkeypatch.setattr(mdb, "migrate", lambda force=False: dict(gap))
+    with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
+        assert mdb.main(["--force"]) == 0
+    msgs = " | ".join(r.getMessage() for r in caplog.records)
+    assert "pre-wipe sidecar" in msgs, (
+        f"the rescue-file shape's cause must survive on the CLI: {msgs}")
 
 
 def test_a_live_conflict_outranks_unknown_when_both_flags_are_set():
@@ -1584,12 +1606,19 @@ def test_a_live_conflict_outranks_unknown_when_both_flags_are_set():
     Every other test here that sets `pack_selection_conflict` also sets
     `pack_selection_state_unknown: False`, and every test that sets
     `state_unknown: True` leaves `conflict` false — so no test passed both, and
-    swapping the two `if` conditions in `pack_selection_shape`
-    (`projection/__init__.py:2287`/`:2292`) left this whole file GREEN while
-    re-shipping the round-5 defect: UNKNOWN's "the graph may read as
-    UNCONFIGURED" printed over a graph observed to still hold a marker
-    (#9752 review round 8, P2). MEASURED by mutation: the swap was applied
-    (line-count neutral, so no cite moves) and 46 tests passed under it.
+    moving the UNKNOWN block ABOVE the CONFLICT block in `pack_selection_shape`
+    (a genuine revert of the round-5 rule, line-count neutral so no cite moves)
+    left this whole file GREEN while re-shipping that defect: UNKNOWN's "the
+    graph may read as UNCONFIGURED" printed over a graph observed to still hold
+    a marker (#9752 review round 8, P2). MEASURED by mutation: the blocks were
+    swapped and the 46 tests that existed then all passed.
+
+    ⚠️ Measured and worth naming, because the first version of this docstring
+    said "swapping the two `if` CONDITIONS": that swap is a DIFFERENT mutation
+    and it does not reproduce this result — the pinned test still passes (the
+    first branch, now gated on `state_unknown`, returns the CONFLICT text) while
+    seven sibling tests fail. The mutation that isolates this pin is the BLOCK
+    move: it reds this test alone and leaves the other 38 green.
 
     REACHABLE: `migrate()`'s override is not the only producer of
     `state_unknown`; a leftover sidecar beside the SOURCE's event log can set
