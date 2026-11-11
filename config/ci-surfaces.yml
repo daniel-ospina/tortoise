@@ -5856,8 +5856,9 @@ surfaces:
   - test_rebuild_pack_selection_marker_9752.py
   # #9210: the SAME wipe+replay, read from the other side — every non-record
   # snapshot-restore leg (`:Batch`, `:Session`, onboarding, `:TeamMeta`, the
-  # config registry, the `#4305` derived Point properties, the
-  # `:GraphEventMeta` watermark) must observe its own named §17.1 declaration
+  # `:PackSelection` pack-set marker, the config registry, the `#4305` derived
+  # Point properties, the `:GraphEventMeta` watermark) must observe its own
+  # named §17.1 declaration
   # AT THE WRITE HANDLE, and must not inherit the replay lane even when the
   # engine is wrapped in one. `tortoise/projection/` is the file it pins, so a
   # projection change must run it.
