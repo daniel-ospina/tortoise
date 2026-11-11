@@ -1,6 +1,7 @@
 """#11810 review (P2) — `platform-seams.md` and the shipped install message cannot drift apart.
 
-WHY THIS PIN EXISTS. `docs/research/2026-09-01-gbrain-learnings/platform-seams.md` §3
+WHY THIS PIN EXISTS. The `#2122` Cursor section of
+`docs/research/2026-09-01-gbrain-learnings/platform-seams.md`
 cites the `tortoise install cursor` message as the evidence that the cloud-agent
 exclusion is **HOSTED**-scoped, and that record is what a future lane cites for
 #11807. The r6 review measured the drift in the DOC direction: the record quoted
@@ -43,11 +44,12 @@ WHAT IT ASSERTS, in BOTH directions:
       dropping `hosted` from the message (or restoring the unscoped quote in the
       record) REDs instead of passing silently;
   (3) the record's OWN restatements of the same scoping — the `#2122` matrix row
-      and §3.2/§3.3, which state the claim in words that are NOT the quoted
-      fragment — are each still HOSTED-scoped. Without this arm every one of
-      them could be reverted to #11806's universal with the whole file GREEN
-      (measured at r18 for four of them, and at r19 for the three §3.2
-      methodology sentences r18 missed).
+      and the two items of that section (`Hosted cloud agents get NEITHER hook`
+      and `"IDE-only" is NOT the right absolute`), which state the claim in words
+      that are NOT the quoted fragment — are each still HOSTED-scoped. Without this
+      arm every one of them could be reverted to #11806's universal with the whole
+      file GREEN (measured at r18 for four of them, and at r19 for the three
+      `"IDE-only" is NOT the right absolute` sentences r18 missed).
   (4) the customer promise #11806 added and this PR retracted — *"can get BOTH
       seams by checking a PROJECT-level `.cursor/hooks.json` into their
       repository"* — does not come back, AND the record keeps the reason it is
@@ -72,9 +74,10 @@ corrected in opposite directions without this file noticing.
 successive rounds shipped a form-exactness hole here, each one level deeper: r7
 matched `("…")` only (a re-emphasis walked through); r8's bare-words fix was
 still whitespace- and case-exact (a hard wrap inside the phrase walked through —
-this record is hard-wrapped, and the §3 sentence "the same scoping applies to the
+this record is hard-wrapped, and the `"IDE-only" is NOT the right absolute` sentence
+"the same scoping applies to the
 exclusion itself" is split across two lines; the 95-column reading is head-bound
-and moves whenever §3 gains a line above it); r9 stripped whitespace and
+and moves whenever that section gains a line above it); r9 stripped whitespace and
 case but not PUNCTUATION, so a delimiter INSIDE the phrase walked through. Every
 one of these is the same words and the same claim.
 
@@ -121,12 +124,13 @@ WHAT IT STILL DOES NOT CATCH, stated so the docstring is not the next over-claim
   * this arm is deliberately OVER-BROAD in the safe direction: it bans the words
     wherever they appear in any order-adjacent form, so an HONEST correction that
     quotes the retracted wording to reject it — this record's own house style,
-    see the §3 sentence that names the retracted IDE-only label in order to
+    see the `"IDE-only" is NOT the right absolute` sentence that names the retracted
+    IDE-only label in order to
     reject it — REDs. Reword such an entry instead of reproducing the phrase
     verbatim. Likewise the presence arm answers "are these words in this file",
     not "is this an actual quote", so it cannot tell a quote from prose.
   * (3) pins the seven restatements as WORD SEQUENCES, so a legitimate RE-WORDING of
-    the matrix row or of §3.2/§3.3 — even one that KEEPS the hosted scoping — REDs.
+    the matrix row or of either item — even one that KEEPS the hosted scoping — REDs.
     That is the same trade arms (1)/(2) already take (the claim IS the words):
     reword such a sentence only together with its `_RESTATEMENTS` row, in one edit.
   * (4)'s PRESENCE needles are that SAME word-sequence trade: re-wording any of
@@ -153,8 +157,8 @@ WHAT IT STILL DOES NOT CATCH, stated so the docstring is not the next over-claim
     "guard rationale vs guard lines" class.
 
 MUTATION (each verified RED at this head, restoring byte-identical):
-  * restore the unscoped quote at §3's "settled for the **hosted VM**"
-    sentence (`platform-seams.md`, section 3.2)                → (1) RED
+  * restore the unscoped quote at the `"IDE-only" is NOT the right absolute`
+    "settled for the **hosted VM**" sentence                   → (1) RED
   * re-add with OTHER delimiters, whole-phrase (`*"…"*`)      → (1) RED (r8)
   * re-add with a LINE BREAK / double space / capital           → (1) RED (r8)
   * re-add with in-phrase `**`, `` ` ``, `*`, `~~`, `_`         → (1) RED (r9)
@@ -164,7 +168,7 @@ MUTATION (each verified RED at this head, restoring byte-identical):
   * drop `hosted` from `tortoise/__main__.py`'s message         → (2) RED
   * delete the record's quoted sentence                         → (1) RED
   * widen the tag strip back to `<[^>]+>` and inject one
-    "a hook count of < 5 is suspect" before §3's quote          → new tag test RED
+    "a hook count of < 5 is suspect" before the record's quote → new tag test RED
   * `_renderings` → `[_normalised(text)]` (the `_TAG` reading only)
     → the bare-attribute sample REDs               (r12 P3 #1)
   * `_renderings` → the bare-attribute reading only
@@ -181,11 +185,11 @@ MUTATION (each verified RED at this head, restoring byte-identical):
     → the forged-tag PRESENCE assert REDs          (r12 P3 #1)
   * drop `hosted` from the record's `#2122` matrix row
     ("A hosted cloud agent runs neither")            → (3) RED   (r18 P2)
-  * drop `Hosted ` from §3.2's heading
-    ("Hosted cloud agents get NEITHER hook")         → (3) RED   (r18 P2)
-  * drop `**hosted**` from §3.2's "so a hosted Cursor cloud agent
+  * drop `Hosted ` from the `Hosted cloud agents get NEITHER hook` heading
+                                                      → (3) RED   (r18 P2)
+  * drop `**hosted**` from that item's "so a hosted Cursor cloud agent
     runs no Tortoise hook at all"                     → (3) RED   (r18 P2)
-  * drop `Hosted-` from §3.3's "Hosted-cloud-agent users'"
+  * drop `Hosted-` from the "…pull only" consequence in that same item
                                                       → (3) RED   (r18 P2)
   * `it is settled for the **hosted VM**` → `**cloud agents**`
                                                       → (3) RED   (r19 P2)
@@ -202,10 +206,11 @@ MUTATION (each verified RED at this head, restoring byte-identical):
   * delete `plus team and enterprise-managed hooks on Enterprise` from the
     `#2122` matrix row                                 → (2b) RED  (r21 P2)
   * delete `(plus team and enterprise-managed hooks on Enterprise — the page's
-    own gate)` from §3                               → (2b) RED  (r21 P2)
+    own gate)` from the `"IDE-only" is NOT the right absolute` item
+                                                      → (2b) RED  (r21 P2)
   * reduce the quoted evidence to `command-based project hooks.`
                                                       → (2b) RED  (r22 P2)
-  * reduce §3's own summary to `(the page names project hooks there)`
+  * reduce that item's own summary to `(the page names project hooks there)`
                                                       → (2b) RED  (r22 P2)
   * prefix a negator to a `_RETRACTION_CAUSE` needle ("which do **not** register
     by **absolute** path")                            → (4) RED  (r22 P3)
@@ -356,8 +361,9 @@ _RETRACTION_NEGATIONS: tuple[str, ...] = (
 #: Item 2 of this PR exists because #11806's correction named only the
 #: PROJECT-level source, and naming one of three reads as EXCLUSIVE. Every site
 #: that states all three was measured revertible to the one-source reading with the
-#: whole file GREEN: two at r21 (the `#2122` matrix row and §3's consequence
-#: sentence, while the PR body meanwhile claimed this very arm existed), and two
+#: whole file GREEN: two at r21 (the `#2122` matrix row and the
+#: `"IDE-only" is NOT the right absolute` item's consequence sentence, while the PR
+#: body meanwhile claimed this very arm existed), and two
 #: more at r22 (the quoted evidence itself, and the record's own summary of it —
 #: sites the r21 arm's "both places" claim had missed). The counts live in that
 #: history, never in a standing claim: r21 said "two" and r22 measured four.
@@ -370,7 +376,7 @@ _HOOK_SOURCE_RESTATEMENTS: tuple[str, ...] = (
     "project hooks plus team and enterprise managed hooks on enterprise",           # #2122 matrix row
     "command based project hooks and on enterprise also run team and enterprise managed hooks",  # quoted evidence
     "the page names project team and enterprise managed hooks there",               # record's own summary
-    "registration plus team and enterprise managed hooks on enterprise",            # §3 consequence
+    "registration plus team and enterprise managed hooks on enterprise",            # that item's consequence
 )
 
 #: A tag's attributes AS MARKUP — `name=value`, quoted or bare. NOT `[^<>\n]*`:
@@ -388,8 +394,8 @@ _TAG_ATTRS_ASSIGNED = (r"(?:\s+[A-Za-z_:][-A-Za-z0-9_:.]*\s*=\s*"
 #: …and a TAG-SHAPED strip, deliberately not `<[^>]+>`. The fully loose form spans
 #: any `<` … `>` anywhere in a 50 KB document, so one ordinary sentence — "a hook
 #: count of < 5 is suspect" — swallows everything up to the next `>`. Measured on
-#: THIS record with that sentence inserted as its own line IMMEDIATELY BEFORE §3's
-#: quote: `<[^>]+>` matches ONE span of 2,485 characters / 2,498 bytes that
+#: THIS record with that sentence inserted as its own line IMMEDIATELY BEFORE the
+#: quote in the `"IDE-only" is NOT the right absolute` item: `<[^>]+>` matches ONE span of 2,485 characters / 2,498 bytes that
 #: CONTAINS the quoted words, so it deletes them and false-REDs the presence arm on
 #: a record that states the right thing; `_TAG` matches nothing containing the
 #: quote. ⚠️ That figure is RECIPE-dependent and must not be hand-copied as a
@@ -512,29 +518,46 @@ def _absent(fragment: str, text: str) -> bool:
     return not any(needle in rendering for rendering in _renderings(text))
 
 
+#: The RECORD's item markers, matched once and used by BOTH the locator and the block
+#: terminator — two independent patterns could disagree, and a boundary that is
+#: narrower than the locator is a fail-OPEN: the block bleeds into the next item, so
+#: a sentence that MOVED there still reads as "in" the labelled item and the guard
+#: reports GREEN over the defect it exists to catch. Measured by review r28 P3 #1:
+#: a bold-numbered `**3.** …` pseudo-item inserted before the real item 3 left
+#: `8 passed` while row 3's sentence sat in the wrong item. Hence `\d+[.]` AND
+#: `\d+)` AND a `**`-wrapped number, plus any heading level as a terminator.
+_ITEM_START = re.compile(r"^(?:\*\*)?\(?\d+[.)](?:\*\*)?\s")
+
+
 def _record_site_block(doc: str, site: str) -> str:
     """The record text `site` names — the contracts-table row, or one numbered item.
 
-    An item runs from its own first line (`2. **Heading …**`) to the next numbered
-    item or `###` section, and is located by its BOLD HEADING's words, not by its
-    NUMBER — a renumbering therefore cannot make a label point at a neighbour.
+    An item runs from its own first line (`2. **Heading …**`) to the next item marker
+    or heading, and is located by its BOLD HEADING's words, not by its NUMBER — a
+    renumbering therefore cannot make a label point at a neighbour.
 
     Returns "" when the site cannot be located, so a re-worded heading REDs the
     label guard. Returning the whole document instead would make every label pass
     wherever its sentence had MOVED to, which is the false PASS this guard exists
     to prevent (review r27 P3 #1: two rows named the wrong item, and nothing could
     tell).
+
+    ⚠️ Recorded bound: the `_MATRIX_ROW` block is the FIRST `| #2122` table row (the
+    contracts row today — it is the only one). A second `| #2122` row added elsewhere
+    would not widen it, but would also not be reachable as a site; the row's needle is
+    the only thing pinned there either way.
     """
     lines = doc.splitlines()
     if site == _MATRIX_ROW:
-        return "\n".join(ln for ln in lines if ln.startswith("| #2122"))
+        return next((ln for ln in lines if ln.startswith("| #2122")), "")
     needle = _normalised(site)
     start = next((i for i, ln in enumerate(lines)
-                  if re.match(r"\d+\.\s", ln) and needle in _normalised(ln)), None)
+                  if _ITEM_START.match(ln) and needle in _normalised(ln)), None)
     if start is None:
         return ""
     end = start + 1
-    while end < len(lines) and not re.match(r"\d+\.\s|#{2,4}\s", lines[end]):
+    while end < len(lines) and not (_ITEM_START.match(lines[end])
+                                   or re.match(r"#{1,6}\s", lines[end])):
         end += 1
     return "\n".join(lines[start:end])
 
@@ -658,7 +681,11 @@ def test_every_restatement_site_label_names_the_item_that_states_it():
 
     Mutation (measured): move any restatement's sentence into the sibling item →
     the second assert REDs naming that needle and the site; re-word either heading
-    → the first assert REDs naming the site."""
+    → the first assert REDs naming the site; move a sentence into a **BOLD-NUMBERED**
+    pseudo-item (`**3.** …`) inserted before the real item → RED here, and GREEN if
+    the block terminator is narrowed back to `^\d+\.\s` — the fail-open review r28
+    P3 #1 measured, and the reason `_ITEM_START` is one pattern shared by the locator
+    and the boundary rather than two that can disagree."""
     doc = _PLATFORM_SEAMS_DOC.read_text(encoding="utf-8")
     assert len(_RESTATEMENT_SITES) == len(_RESTATEMENTS), (
         "every `_RESTATEMENTS` row needs a site label — the legend's map is one "
@@ -721,7 +748,7 @@ def test_every_hook_source_restatement_names_all_three_sources():
     three reads as EXCLUSIVE — which is the defect item 2 of this PR fixes, in the
     message and in the record. Review r21 measured two record sites unpinned:
     deleting the "plus team and enterprise-managed hooks on Enterprise" clause from
-    EITHER the `#2122` matrix row or §3's consequence sentence left the whole file
+    EITHER the `#2122` matrix row or that item's consequence sentence left the whole file
     GREEN, while the PR body already claimed a `_HOOK_SOURCE_RESTATEMENTS` arm that
     did not exist at this head. Review r22 then measured TWO MORE — the quoted
     evidence, and the record's own summary of it — so r21's "both places" claim was
