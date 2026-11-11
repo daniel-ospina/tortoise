@@ -1284,18 +1284,21 @@ def test_rebuild_all_honours_a_carried_pack_selection_unknown_flag(
         batch_snapshot=[{"id": "b1"}], pack_selection=[])
     payload["pack_selection_unknown"] = True
     # The fixture plants a PRESENT-but-EMPTY `pack_selection` section through
-    # the explicit override above, so only the inherited flag can produce the
-    # UNKNOWN. ⛔ No assertion on that shape: the two `==` preconditions this
-    # replaces (`payload["version"] == _PREWIPE_SNAPSHOT_VERSION` and
-    # `payload["pack_selection"] == []`) both compared a literal to itself —
-    # the helper BUILDS both from `_PREWIPE_SNAPSHOT_VERSION` /
-    # `_SNAPSHOT_SECTIONS` and the override then re-sets the section, so no
-    # mutation of the production diff could red either (review P3, #11839).
-    # The exact version value is owned by
+    # the override above (`_sidecar_payload` already builds every section from
+    # `_SNAPSHOT_SECTIONS`, so the override is redundant but explicit). ⛔ No
+    # assertion on that shape: the two `==` preconditions this replaces
+    # (`payload["version"] == _PREWIPE_SNAPSHOT_VERSION` and
+    # `payload["pack_selection"] == []`) both compared a literal to itself, so
+    # no mutation of the production diff could red either (review P3, #11839).
+    # What IS pinned, and where: the exact version value by
     # `test_pack_selection_section_and_validator_are_wired`'s
-    # `_PREWIPE_SNAPSHOT_VERSION == 7` pin, and the section's presence is
-    # asserted by `"pack_selection_unknown" in _PREWIPE_SNAPSHOT_META_KEYS`
-    # below plus the planted-file read-back.
+    # `_PREWIPE_SNAPSHOT_VERSION == 7`; the flag's REGISTRATION as a META key
+    # (not a section) by the assertion immediately below; and the flag's
+    # INHERITANCE by `counts["pack_selection_state_unknown"] is True` further
+    # down. ⚠️ Presence is deliberately NOT what this test discriminates —
+    # `rebuild_all` reports the UNKNOWN from EITHER clause (the inherited flag,
+    # or a payload carrying no `pack_selection` key at all), which is why there
+    # is no "the section is present" assertion to lose here.
     assert "pack_selection_unknown" in _PREWIPE_SNAPSHOT_META_KEYS, (
         "the flag must be a registered META key, or the loader refuses the file "
         "as carrying a foreign section and a second interruption is "
