@@ -692,15 +692,20 @@ def _stamp_journal_vector_width(payload: dict) -> None:
     # this arm ("callers are refused `f32` at every home, so a payload that
     # already declares it holds THIS function's own output") is FALSE.
     # `_forged` refuses a caller who PASSES the marker; it cannot see a marker
-    # left STALE by a vector replaced after the stamp was written — which is
-    # exactly what `EventAPI.add_point` does (`_point` stamps its server vector,
-    # then `p.update(fields)` swaps in the caller's, then this seam re-stamps).
-    # Trusting the marker there declared a caller's OFF-GRID vector `f32`. So
-    # the arm now asks the only question that makes its claim true, of the text
-    # actually in the payload: is this already the shortest float32 round-trip
-    # of its own bits? If it is, nothing to do (idempotence). If it is not, the
-    # marker does not describe this text — fall THROUGH and re-decide it from
-    # the values.
+    # left STALE by a vector replaced after the stamp was written. `EventAPI`
+    # had exactly such a home — `_point` stamped its server vector, then
+    # `p.update(fields)` swapped in the caller's, then this seam re-stamped —
+    # and it now pops the marker between the swap and the re-stamp
+    # (`api.add_point`, #11835 review F2). ⛔ THIS ARM MUST NOT DEPEND ON EVERY
+    # SUCH DOOR REMEMBERING TO: `_emit_event`'s `id=`/`**extra` branch takes a
+    # record whose `embedding_width` is not in `_RESERVED_ENVELOPE_PROPS` or
+    # `_RESERVED_EMIT_CALL_PROPS`, so a caller-named marker still arrived here
+    # intact and was honoured over off-grid values (measured at 5e590ab625, and
+    # closed by this verification). So the arm asks the only question that makes
+    # its claim true, of the text actually in the payload: is this already the
+    # shortest float32 round-trip of its own bits? If it is, nothing to do
+    # (idempotence). If it is not, the marker does not describe this text — fall
+    # THROUGH and re-decide it from the values.
     #
     # The verbatim arm is checked FIRST on purpose: a preserved vector must
     # always re-declare `f64`, even if a stale `f32` rode in beside it.
