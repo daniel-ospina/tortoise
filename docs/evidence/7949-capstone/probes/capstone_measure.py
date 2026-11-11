@@ -3165,7 +3165,7 @@ def _a4_layer_counts(projection, label: str, kind_prop: str) -> dict[str, int]:
     return _a4_counts(rows)
 
 
-def _a4_claim_diagnostics(projection) -> dict:
+def _a4_claim_diagnostics(projection, counts: dict[str, int] | None = None) -> dict:
     """`A4`'s DIAGNOSTIC block: the typed / `statement` / `NULL` shares over CLAIMS.
 
     ⛔ Kept, and kept SEPARATE from the criterion. A4's metric is per-layer label coverage; these
@@ -3173,7 +3173,8 @@ def _a4_claim_diagnostics(projection) -> dict:
     "a share quoted without its `NULL` denominator is not a measurement this epic accepts".
     The retired framing is what must not be built — not the diagnostic that was always honest.
     """
-    counts = _a4_layer_counts(projection, "Point", "pointKind")
+    counts = (_a4_layer_counts(projection, "Point", "pointKind")
+              if counts is None else counts)
     capture = projection.g.query(
         "MATCH (n:Point) WHERE coalesce(n.is_episodic, false) OR coalesce(n.is_operator, false) "
         "RETURN count(n)").result_set
@@ -3262,11 +3263,17 @@ def _a4_label_coverage(projection) -> dict:
     row, which is the one adoption this epic's contradiction rule forbids.
     """
     result: dict = {}
+    counts_by_layer: dict[str, dict[str, int]] = {}
     for layer, label, kind_prop in A4_LAYERS:
         declared = _a4_declared_kinds(kind_prop)
+        counts_by_layer[layer] = _a4_layer_counts(projection, label, kind_prop)
         result[layer] = label_coverage(
-            _a4_layer_counts(projection, label, kind_prop), declared, layer=layer)
-    result.update(_a4_claim_diagnostics(projection))
+            counts_by_layer[layer], declared, layer=layer)
+    # ⛔ ONE read of the claims histogram, SHARED with the criterion above. A second query is a
+    # second population: on the LIVE fleet graph a write landing between the two reads would
+    # publish one layer's population twice — `a4 claims population=<X>` beside
+    # `a4 diagnostics claim_points=<Y>` — with every suite green (#11837 review).
+    result.update(_a4_claim_diagnostics(projection, counts=counts_by_layer["claims"]))
     result["per_writer"] = _a4_writer_attribution(projection)
     return result
 
