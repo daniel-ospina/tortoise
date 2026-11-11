@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.32"
+title: "Tortoise — Canonical Ontology v3.33"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-11-08
+updated: 2026-11-11
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.32
+# Tortoise — Canonical Ontology v3.33
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -440,7 +440,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `name` | string | ✅ | `schema:name` | Human-readable name (`_upsert_object` writes `title`; `name` aliased) |
 | `objectKind` | string | ✅ | — | The §5 object-kind vocabulary (Project, WorkItem, Problem, tag, user, skill, tool, agent, workflow, agreement, standard, other, strategy, plan, goal, target) + pack objectKinds |
 | `title` | string | — | `dc:title` | Display title (what `_upsert_object` actually stores) |
-| `status` | string | — | `pav:status` | Write-through cache of lifecycle events (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy` + `supersededAt`; built-in connector work-item events→in_progress/completed; **pack-declared `kindDefs[].statuses`/`folds` for the pack's own kinds — #2729**, dispatched on the namespaced kind and suppressed for built-in folds once a kind declares a lifecycle) — **the event stream is the reconstruction source for `Object.status` (§11 cache doctrine); the property is a performance cache, folded keep-first per Object (divergent re-folds never blind-overwrite — #2193 resolved)** |
+| `status` | string | — | `pav:status` | Write-through cache of lifecycle events (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy` + `supersededAt`; built-in connector work-item events→in_progress/completed; **pack-declared `kindDefs[].statuses`/`folds` for the pack's own kinds — #2729**, dispatched on the namespaced kind and suppressed for built-in folds once a kind declares a lifecycle) — **the event stream is the reconstruction source for `Object.status` (§11 cache doctrine); the property is a performance cache, folded keep-first per Object (divergent re-folds never blind-overwrite — #2193 resolved)**. **The declared write vocabulary for a CORE object kind is `draft` / `live` / `superseded` / `deprecated` / `archived` / `in_progress` / `completed`; `superseded` requires the successor to be named in the same write, and a removal with no successor is `archived`; `outdated` and `retracted` are NOT Object lifecycle words — read-only, retained in the terminal filter for a state a legacy or raw producer may already have stored (the §4.2 Subject precedent). A pack-declared kind validates against its OWN declared `statuses` (§5), unchanged** |
 | `supersededAt` | ISO8601 | — | — | The fold TIMESTAMP written by the supersession fold (`apply_supersessions` / `ObjectSuperseded` projection, pinned after the fold via `SET o.supersededAt` for byte-reproducible state headers). R17 P3-1 (#2165): `supersededAt` is the connected-assembly state-header's date source — **byte-golden renders depend on it being a pinned story date, never a wall-clock fold time** (Task-1 fixture pins `2026-09-01T00:00:00Z`). Absent on non-superseded Objects. A separate fact from `expiredAt` — "replaced by a successor" and "our record stopped being current" are independent, and both can apply (§4.7). |
 | `supersededBy` | string | — | — | Successor name written by the supersession fold (see `status`); the connected-assembly successor probe verifies a VISIBLE (non-recall-excluded) Object exists before rendering a full supersession clause — a never-created / excluded / empty successor renders a NAME-ONLY annotation, never a fabricated link (R12/C6, #2165 Task 5). |
 | `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | Valid-time window — when the Object held in the world (declared §4.7, #3642) |
@@ -552,7 +552,7 @@ suppresses operator promotion exactly as a draft Point does.
 > three: it is carried by the same extras lane, and it IS read as state by
 > `_promote_incident_operators` (#7853) — see the note above. The pack-declared
 > fold generalization (#2729) is Object-scoped and does not extend to Events —
-> the Event-carries-state question was answered **no** in #2725.
+> the Event-carries-state question was answered **no**. ⚠️ **That ruling's citation to #2725 was measured FALSE (#11825): #2725 is a `venture` pack design issue containing no reference to Events.** The ruling does not rest on it — it rests on this section and on `live.STATUS_CARRYING_EPISTEMIC_LABELS`, which carry it executably — but the accepted-and-half-honoured state it has today (the write is accepted, belief honours it, and every retrieval leg ignores it) is tracked at **#11825**.
 
 ### §4.6 Source
 
@@ -667,7 +667,7 @@ window, independent of when Tortoise learned it. Canonical pair:
 >   `[vF, vT)`; the code is closed `[vF, vT]`. Which is canonical is an **open
 >   decision** — flip to half-open (a global boundary-semantics change, which also
 >   makes a zero-length window genuinely empty; evaluated as R2 of the #5362 plan),
->   accept the closed ambiguity, or a third shape — tracked at **#7818**. Until it
+>   accept the closed ambiguity, or a third shape — tracked at **#7818**, which is CLOSED (`COMPLETED` 2026-10-18, closed as "already delivered" by PR #8956) while `_covers` remains closed-interval, so this open decision currently has **no live tracker** (the R2 evaluation lived only in the #5362 plan). Until it
 >   is decided, a shared boundary instant is a known property of the closed
 >   reading, not a defect to be silently patched reader-by-reader. The flip is
 >   **not a predicate-only change**, and the reason is measured rather

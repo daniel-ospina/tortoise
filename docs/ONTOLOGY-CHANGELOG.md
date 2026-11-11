@@ -33,6 +33,43 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
+> **Changelog v3.33 (2026-11-11 — issue #11824 — a core Object kind gets a declared lifecycle vocabulary, and two false citations are corrected):**
+>
+> **Owner approval of the exact changes** is on record on #11824 (2026-11-11, approving the proposed §4.3
+> sentence verbatim, answer `D2 — A`). This entry records the change; **v3.32 → v3.33** because a model
+> statement moves. The **build** of the vocabulary guard is not part of this change — this is the model.
+>
+> **§4.3 gains a declared write vocabulary for CORE object kinds** — `draft` / `live` / `superseded` /
+> `deprecated` / `archived` / `in_progress` / `completed`. Two members are load-bearing: `superseded`
+> requires the successor in the same write (a removal with no successor is `archived` — the D7 two-arm
+> rule the extractor architecture already states), and `outdated` / `retracted` are **not** Object
+> lifecycle words. The reason `outdated` must be refused rather than tolerated is measured: it is
+> terminal to belief propagation (`ep.py`, via `TERMINAL_EXCLUDED_STATUSES`) while being **current** to
+> all four Object retrieval legs (`search_engine._STATUS_FILTERED_LABELS` / `OBJECT_TERMINAL_STATUSES`),
+> so the same word means two opposite things (#11826). Validation stays **per kind**: a pack-declared
+> kind keeps validating against its own `statuses` (§5), which is why this is a core-kind default and
+> not the shared closed set `EXTRACTOR-V4-ARCHITECTURE.md:1076`/`:1084` forecloses.
+>
+> **A consequence worth stating here rather than leaving to be rediscovered:** §4.3's own `status` row
+> calls the property a *performance cache of lifecycle events*, so the write this vocabulary guards is a
+> cache write. Under `docs/ax/ax-principles.md` (#10183) every refusal it produces must carry **three
+> parts** — that it refused, exactly what failed, and exactly what to do — and where the caller's meaning
+> is ambiguous the refusal must **name the choice** rather than pick one (`status='outdated'` therefore
+> refuses pointing at both `archived` and `superseded`). The refusal wording itself is AX behaviour and
+> lives at the decision site, not in this file (§4's placement rules).
+>
+> **Two citations corrected, neither of which was a model change.** (1) §4.5 attributed the
+> *Event-carries-no-state* ruling to **#2725**; that is measured false — #2725 is a `venture` pack design
+> issue containing no reference to Events (#11825). The ruling stands on §4.5's own text and on
+> `live.STATUS_CARRYING_EPISTEMIC_LABELS`, and the live defect it leaves (write accepted, belief honours
+> it, retrieval ignores it) is now attributed there. (2) §4.7 named **#7818** as the tracker of the
+> closed-vs-half-open boundary decision; #7818 is CLOSED (`COMPLETED` 2026-10-18, as "already delivered"
+> by PR #8956) while `_covers` is still closed-interval, so the section now records that the open decision
+> has **no** live tracker instead of naming a closed one. Both were stale flags recording a past state,
+> which is the class this file's own rules exist to prevent.
+
+---
+
 > **Changelog v3.32 (2026-11-08 — issue #11083 — `ownedBy`'s range opens, and `produces` becomes a Layer-2 meaning):**
 >
 > **Owner approval of the exact changes** is on record on #11083 (comment 6667121779, 2026-11-05, "Approval
