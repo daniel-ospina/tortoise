@@ -104,14 +104,15 @@ response_fields:
 - response: tortoise_search
   field: ep.ep_state
   emitted_when: 'ALWAYS on a Point hit that carries an `ep` block — the #11702 state NAME for the belief beside it,
-    one of "measured" (a READABLE belief from a persisted posterior OR a non-baseline legacy ep_alpha prior — a direct update_point(posterior_alpha=…, posterior_beta=…) writes one too, so the state name is NOT proof of an EP pass; a persisted α that yields no mean (a 0/0 pair, an unreadable operand, or a half pair whose β exists in neither column) is "absent"), "baseline" (a persisted prior EP did not measure: a #2199
+    one of "measured" (a READABLE belief from a persisted posterior OR a non-baseline legacy ep_alpha prior — a direct update_point(posterior_alpha=…, posterior_beta=…) writes one too, so the state name is NOT proof of an EP pass; a persisted α that yields no mean (either operand missing after the per-operand coalesce (α with no β, or β with no α), a sum ≤ 0, a negative operand, or an unreadable operand) is "absent"), "baseline" (a persisted prior EP did not measure: a #2199
     declared baseline, a legacy `n.confidence` mirror, or a TERMINAL claim whose posterior is the #2490 decayed
-    0.5/1.0/1.0), or "absent" (no READABLE belief — nothing persisted, or a persisted α that yields no mean: a 0/0 pair, an unreadable operand, or a half pair whose β exists in neither column). It is the key that makes `ep.confidence_mean` readable:
+    0.5/1.0/1.0), or "absent" (no READABLE belief — nothing persisted, or operands that yield no mean: either operand missing after the per-operand coalesce (α with no β, or β with no α), a sum ≤ 0, a negative operand, or an unreadable operand). It is the key that makes `ep.confidence_mean` readable:
     the value is `null` if and only if the state is "absent", so a consumer never has to infer the state from the
     number. It is emitted from the same `EpBreakdown` the `ep` block is serialised from, with the SAME mirror-first
     precedence as every other surface (the `n.confidence` mirror leads, then posterior_alpha/beta, then ep_alpha/beta)
-    and the SAME absence rule (a half pair whose β exists in neither column, and a degenerate α+β of 0, carry no
+    and the SAME absence rule (either operand missing after the per-operand coalesce (α with no β, or β with no α), a sum ≤ 0, a negative operand, or an unreadable operand, carries no
     belief). The three tokens are shared
+    and the SAME absence rule (either operand missing after the per-operand coalesce (α with no β, or β with no α), a sum ≤ 0, a negative operand, or an unreadable operand, carries no belief). The three tokens are shared
     with recall_ranking.ep_state, gaps_ranking.ep_state, graph_ranking.ep_state and the SubgraphExpander node
     payload, so all of them join on one vocabulary. #11702.'
   unchanged_when_off: 'NO — additive key on an existing `ep` block, so the key set grows by one on every Point hit
@@ -411,10 +412,10 @@ response_fields:
 - response: tortoise_recall
   field: recall_ranking.ep_state
   emitted_when: 'ALWAYS on every row of mode=state and mode=custom — the #11702 state NAME for the belief behind
-    the row: "measured" (a READABLE belief from a persisted posterior OR a non-baseline legacy ep_alpha prior on this claim — a direct update_point(posterior_alpha=…, posterior_beta=…) writes one too, so the state name is NOT proof of an EP pass; a persisted α that yields no mean (a 0/0 pair, an unreadable operand, or a half pair whose β exists in neither column) is "absent"), "baseline" (a persisted prior EP did not measure — a #2199 declared
+    the row: "measured" (a READABLE belief from a persisted posterior OR a non-baseline legacy ep_alpha prior on this claim — a direct update_point(posterior_alpha=…, posterior_beta=…) writes one too, so the state name is NOT proof of an EP pass; a persisted α that yields no mean (either operand missing after the per-operand coalesce (α with no β, or β with no α), a sum ≤ 0, a negative operand, or an unreadable operand) is "absent"), "baseline" (a persisted prior EP did not measure — a #2199 declared
     baseline, a legacy n.confidence mirror, or a TERMINAL claim whose posterior is the #2490 decayed 0.5/1.0/1.0),
-    or "absent" (nothing that YIELDS a mean — no persisted belief, a 0/0 pair, an unreadable operand, or a half pair
-    whose β exists in neither column). It is the key that makes recall_ranking.confidence readable: null
+    or "absent" (nothing that YIELDS a mean — no persisted belief, or operands that yield none: either operand missing after the per-operand coalesce (α with no β, or β with no α), a sum ≤ 0, a negative operand, or an unreadable operand). It is the key that makes recall_ranking.confidence readable: null
+    or "absent" (nothing that YIELDS a mean — no persisted belief, or operands that yield none: either operand missing after the per-operand coalesce (α with no β, or β with no α), a sum ≤ 0, a negative operand, or an unreadable operand). It is the key that makes recall_ranking.confidence readable: null
     means the belief is ABSENT, **or** that this row withholds a belief it has. `ep_state` is the AUTHORITY on
     which: "absent" means there is no belief, "baseline"/"measured" mean there is one. A #2598 DRAFT row reports
     `confidence: null` with `confidence_source: "uncomputed"` and its REAL state, because the draft gate

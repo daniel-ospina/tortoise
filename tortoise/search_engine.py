@@ -304,9 +304,8 @@ class SearchScores:
 # TERMINAL decayed posterior). So deriving the state from the flags invents an
 # absence for a belief that exists — the exact failure #11702 removes. In the
 # other direction `(has_ep=True, baseline=False)` covers both a readable
-# ``measured`` belief and an ``absent`` shape (0/0 pair, unreadable operand, or
-# a half pair whose β exists in NEITHER column), where an α is stored but
-# yields no mean.
+# ``measured`` belief and an ``absent`` shape, where operands are stored but no
+# mean exists: either operand missing after the per-operand coalesce (an α with no β, or a β with no α), a pair summing to ≤ 0, a negative operand, or an operand this process cannot read.
 #
 # The terminal 0.5 and the mirror are not a measurement; the neutral Beta(1,1)
 # mean this used to answer for a truly absent claim is indistinguishable from a
@@ -370,8 +369,9 @@ def ep_measurement_state(*, posterior_alpha, ep_alpha,
 # A read/rank surface needs a different, blunter answer: *is there a READABLE
 # belief here at all?* — because for a claim that has none there is no number
 # to report, and inventing one is the defect #11702 names. The two questions
-# diverge on a persisted α that yields no mean (a half pair, a 0/0 pair): that
-# row is 'measured' as a PREDICATE and `absent` as a STATE.
+# diverge on stored operands that yield no mean (either operand missing after the per-operand coalesce (α with no β, or β with no α), a sum ≤ 0, a negative operand, or an unreadable operand): such a row is
+# 'measured' as a PREDICATE (when it carries a non-baseline α) and `absent` as a
+# STATE; a BETA-ONLY row is `absent` in both.
 # The recorded rule is
 # `docs/architecture/SEARCH-ARCHITECTURE.md` §6.3: **absent state is `null`
 # with `ep_state: "absent"`, never 0.5 — a value the ranker refuses to order
@@ -1169,9 +1169,10 @@ def ep_state_cypher(alias: str) -> str:
 
     ⚠️ The ``measured`` ARM is ``ep_has_belief_cypher AND ep_measured_cypher``,
     so the PREDICATE (a non-baseline α is persisted) is necessary but not
-    sufficient: a shape that persists an α but yields no mean — a `(0,0)` pair,
-    an unreadable operand, a half pair with no β in either column — passes the
-    predicate and takes the ``absent`` arm. Do not read this docstring as "a
+    sufficient: a shape that persists an α but yields no mean passes the
+    predicate and takes the ``absent`` arm. `ep_has_belief_cypher` is the
+    exhaustive rule — a belief exists iff BOTH coalesced operands are present,
+    non-negative, and sum > 0 — so the absences are: either operand missing after the per-operand coalesce (an α with no β, or a β with no α), a pair summing to ≤ 0, a negative operand, or an operand this process cannot read. Do not read this docstring as "a
     persisted α answers measured"; run the two arms.
 
     A **terminal** claim (#2490) carries the decayed
@@ -1382,9 +1383,9 @@ class EpBreakdown:
     #: ``baseline`` (a persisted prior EP has not measured — a #2199 declared
     #: baseline, a legacy mirror, or a terminal decayed posterior; a half pair
     #: reaches it only when a readable mirror survives beside it) / ``absent`` (nothing that yields a mean — no persisted
-    #: belief, a `0/0` pair, an operand this process cannot read, or a half pair
-    #: whose β exists in NEITHER column ⇒ the value is ``None``). Derives from
-    #: :func:`ep_state`, the single
+    #: belief, or operands that yield none: either operand missing after the
+    #: per-operand coalesce (α with no β, or β with no α), a sum ≤ 0, a negative
+    #: operand, or an unreadable operand ⇒ the value is ``None``). Derives from :func:`ep_state`, the single
     #: mapping of the #11702 vocabulary; ``has_ep``/``measured`` keep their
     #: narrower #2490 / #3276 meanings and are NOT this field's source.
     ep_state: str = EP_STATE_ABSENT
@@ -1414,7 +1415,8 @@ class EpBreakdown:
     # False = no α persisted (or a #2490 terminal gate); ``confidence_mean`` is
     # then the prior mean when ``baseline`` is True, else reading it from these
     # two flags is WRONG — a mirror-only prior reads (False, False) with a real
-    # 0.95, and a half pair reads (True, False) with ``None``. Read
+    # 0.95, an α-only half pair reads (True, False) with ``None``, and a
+    # β-only row reads (False, False) with ``None`` and state ``absent``. Read
     # :attr:`ep_state`. Neither flag is a signal of contestation.
     # #2490 has_ep overload: TERMINAL claims (terminal vocab status OR the
     # legacy outdated=true flag) are also gated to False — their posterior
@@ -1433,16 +1435,17 @@ class EpBreakdown:
     # `update_point(posterior_alpha=…)` satisfies it with no EP pass anywhere,
     # so this flag is not an EP receipt.
     #
-    # The two questions DO diverge, on the two shapes this state fold names
-    # absent — a `(0, 0)` pair (no mean exists) and a HALF pair whose β exists
-    # in NEITHER column (an α alone; `update_point(posterior_alpha=…)` on a bare
-    # claim). ⚠️ A half POSTERIOR over an existing `ep_beta` IS readable
-    # (coalesced per operand) — it reads `measured` at 0.5/1.5 = 0.3333, so the
-    # φ "half pair ⇒ absent" holds only for the no-β-anywhere shape. An α is
-    # persisted on both, so `measured` stays True; there is no readable belief, so `ep_state`
-    # is `absent` and the mean is `None`. A consumer deciding whether a stored
-    # posterior can be reasoned from reads `measured`; one deciding whether to
-    # show/number a belief reads `ep_state`/`confidence_mean`. Do not infer
+    # The two questions DO diverge. On a pair that yields no mean an α may still
+    # be persisted — an α-only half pair, a 0/0 pair, a pair summing to ≤ 0, a
+    # negative or unreadable operand — so `measured` stays True while `ep_state`
+    # is `absent` and the mean is `None`. A BETA-ONLY pair diverges the other
+    # way: no α is persisted, so `measured` is False while the row still stores
+    # an operand and its state is `absent` (never `baseline` — there is no mean
+    # for a prior to be). Neither flag pair can be inverted into the state.
+    #
+    # A consumer deciding whether a stored posterior can be reasoned from reads
+    # `measured`; one deciding whether to show/number a belief reads
+    # `ep_state`/`confidence_mean`. Do not infer
     # either from the other: `measured=True` does NOT imply a non-null mean, and
     # it does NOT prove EP ran — so a caller that needs an EP measurement still
     # has to ask for one rather than reading this flag as its receipt.
@@ -1451,9 +1454,10 @@ class EpBreakdown:
     #   measured=True                     → a non-baseline α persisted (has_ep
     #                                      True) — see the `has_ep` note above:
     #                                      this promises NEITHER a readable
-    #                                      belief (a 0/0 pair, an unreadable
-    #                                      operand, or a half pair with no β
-    #                                      anywhere ⇒ ep_state "absent") NOR an
+    #                                      belief (a pair with no mean: an
+    #                                      operand missing after the coalesce,
+    #                                      a sum ≤ 0, a negative or unreadable
+    #                                      operand ⇒ ep_state "absent") NOR an
     #                                      EP pass
     #   measured=False, baseline=True     → prior-only (declared baseline)
     #   measured=False, baseline=False    → ⛔ NOT necessarily absent: this
@@ -5481,8 +5485,9 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                         if (pair_stored and alpha_num is not None
                             and beta_num is not None) else 0.0)
             breakdowns[pid] = EpBreakdown(
-                # #11702: `None` when nothing YIELDS a mean (nothing persisted, a
-                # half pair, a 0/0 pair, an unreadable operand) — never the
+                # #11702: `None` when nothing YIELDS a mean (nothing persisted,
+                # an operand missing after the coalesce, a sum ≤ 0, a negative
+                # or unreadable operand) — never the
                 # neutral 0.5, which is what made "no evidence" and "a measured
                 # coin flip" the same number here.
                 confidence_mean=value,

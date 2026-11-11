@@ -37502,7 +37502,8 @@ class TortoiseSDK:
         never-measured hit as "confirmed". #11702 makes that shape read
         ``confidence_mean: None`` instead (so the comparison below is guarded
         against ``None``, not merely unreachable); #3276 makes ``has_ep`` mean
-        "a non-baseline α is persisted", so a #2199 auto-baselined decide part is
+        "a non-baseline α is persisted" (less the #2490 terminal gate), so a #2199
+        auto-baselined decide part is
         still excluded — and by the RIGHT mechanism: it DOES persist an α
         (Beta(3,1), the 0.75 prior mean, stored as ``ep_alpha``/``ep_beta``), so
         an α-presence test would admit it; what excludes it is
