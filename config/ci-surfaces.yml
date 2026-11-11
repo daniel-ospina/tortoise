@@ -2262,6 +2262,13 @@ surfaces:
   # (`test_socket_bound_not_multiplied_2969.py`) — cite it by name, not by
   # offset: a line count here rots with every insertion between the two.
   - test_8093_registry_namespace_doc.py
+  # #11923 review: `docs/plans/2026-11-11-goal-measurement-and-reasoning.md` is the design of record
+  # #11934 cites, and its §3 table's totals, its unstepped-🟡-rows claim, and its #7860 criterion-3
+  # datum are all machine-checkable against the doc itself. Dual-registered with `tier1` for the reason
+  # `test_11656_endpoint_kind_binding_scope.py` states there: `core` is the not-found FALLBACK, so a
+  # docs-only diff takes the tier-1 early return and would run this ZERO times — exactly when the doc it
+  # guards moves. The doc lives under `docs/`, which is in NON_PYTHON_PREFIXES.
+  - test_11923_goal_measurement_doc_consistency.py
   # #5612: concurrent journal appends are serialised and the recovery read
   # salvages a damaged mid-file line. `tortoise/log.py` matches no
   # SOURCE_PATTERN, so a change to it falls through to `core` — registering the
@@ -8653,6 +8660,7 @@ tier1:
 - test_11739_quote_population_probe.py  # #11739: the `quote` population evidence bundle's arithmetic + fail-closed walk (whitespace is not a quote, the embedded-only denominator, the endpoint shaping, and exit 4 on an unprovable walk) — a docs-only diff runs tier1 only, and every guarded artifact is under `docs/`; dual-registered with `core`
 - test_11656_endpoint_kind_binding_scope.py  # #11656 review F1: this pin's own docstring says it exists so "a manifest edit that makes a scope claim false reds here instead of rotting in prose", and it also pins the two DOC defects (the `docs/00_index.md` row, the ambiguous bare citation). Before this row it was registered in `core` ONLY, and `core` is the not-found FALLBACK — so a docs-only diff took the tier1 early return and ran it ZERO times (measured: `--changed-files docs/plans/2026-11-09-11656-endpoint-kind-binding.md` → `surfaces: []`, 84 files, pin absent; `docs/research/…` likewise) while the `docs/00_index.md` edit DID select `core` and reach it. That is the silent-drop class this manifest documents at `test_10156_alert_registers.py` above, and the exact change class that re-stales the figures a lane implements against. Same shape and reasoning as `test_8093_registry_namespace_doc.py`, `test_extractor_v4_doc_citations.py`, `test_7949_capstone_measure.py`, `test_capstone_*` — every sibling doc/citation pin is dual-registered. Import weight is not a reason to withhold tier1 (`test_config.py`/`test_ids.py`/`test_taxonomy.py` already import `tortoise.*`); hermetic, ~5s, no DB, no graph. — dual-registered with `core`
 - test_8093_registry_namespace_doc.py  # #8093: `docs/registry-graph-schema.md` §Graph namespace cell vs the derived namespace (hermetic doc↔code pin; a docs-only diff runs tier1 only) — dual-registered with `core`
+- test_11923_goal_measurement_doc_consistency.py  # #11923 review: the goal-measurement design of record's own arithmetic (stated totals vs §3's table), its unstepped-🟡-rows claim as a COMPLETE set, and #7860 criterion 3's datum attribution — a docs-only diff runs tier1 only and every guarded artifact is under `docs/`; hermetic (3 files read as text, no `tortoise.*` import, no DB), ~0.2s — dual-registered with `core`
 - test_cli_serve.py
 - test_config.py
 - test_crypto.py
