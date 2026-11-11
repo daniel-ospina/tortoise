@@ -100,8 +100,7 @@ decision? The **2026-09-24** direction said *"keep the vectors, make them search
 unindexed labels that means ADDING indexes, which is more RAM and a surface change. The **later 2026-10-08
 billing ruling** (tiers are capped and priced per feature; **retained bytes are revenue**) removes the COST
 argument in both directions: removing bytes changes the bill by **$0.00**. So **no recorded decision
-authorises** this removal — the earlier direction points the other way, and the later ruling is silent on
-it. **That is why S3 stops at a census**: the removal **was** the owner's decision and has been given — **REFUSED, 2026-11-10, `#11395` comment `6781921075`** — so nothing is removed and no surface gate is triggered by a refusal; the census stands as the measurement, and what remains is §14.3 V3's INDEX work item.
+authorises** this removal — the earlier direction points the other way, and the **2026-10-08 billing ruling** is silent on the disposition. **That is why S3 stops at a census**: the removal **was** the owner's decision and has been given — **REFUSED, 2026-11-10, `#11395` comment `6781921075`** — so nothing is removed and no surface gate is triggered by a refusal; the census stands as the measurement, and what remains is §14.3 V3's INDEX work item.
 
 ---
 

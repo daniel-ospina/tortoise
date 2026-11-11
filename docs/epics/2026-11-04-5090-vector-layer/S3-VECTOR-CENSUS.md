@@ -399,8 +399,10 @@ lane holding either issue's body is not collided with:
 
 ⚠️ **SUPERSEDED 2026-11-07.** §12.1c now reads *"✅ DECIDED 2026-11-07 — the vector index does NOT live in
 FalkorDB"* (`docs/architecture/SEARCH-ARCHITECTURE.md`), so the *"pending V1"* premise of the two comments
-above no longer holds: the location is decided (Postgres). **Neither comment has been re-pointed — that
-reconciliation is still OWED** (`05-decompose.md`'s "also in this child" item). The wording they should carry is
+above no longer holds: the location is decided (Postgres). ✅ **Both comments WERE re-pointed on 2026-11-10** — `#10976` →
+[`6779662659`](https://github.com/daniel-ospina/tortoise/issues/10976#issuecomment-6779662659),
+`#7879` → [`6779663836`](https://github.com/daniel-ospina/tortoise/issues/7879#issuecomment-6779663836) — so the
+reconciliation `05-decompose.md` carried as OWED is discharged. The wording they now carry is
 "the vector layer — its census and surface request; its location is decided and the WORK is #4051's", not
 "pending V1". The sentence below is the state those comments were qualified against, kept
 as the record of it and **not** as current text:
