@@ -1514,6 +1514,159 @@ def test_migrate_route_names_the_capture_source_when_it_observed_nothing(
         f"that do, and it contradicts this arm's own cause: {msg}")
 
 
+def test_migrate_route_keeps_the_UNCONFIGURED_consequence_on_shape_a(
+        tmp_path, caplog, monkeypatch):
+    """Shape (a) drops the sidecar clause, and must NOT drop the HARM with it.
+
+    FAILING VALUE: the fix that scoped this arm for #11866 omitted
+    `_consequence` wholesale, so the one clause that IS true on this shape went
+    with it — "so the graph may read as UNCONFIGURED". That is the measured harm
+    of the empty capture, not a sidecar artefact: a source carrying
+    `configured=True revision=2` with an EMPTY approved set migrates to
+    `configured=False revision=0`, so a pack an admin REMOVED is re-admitted
+    with its `revision` reset. The operator's line therefore named the cause and
+    then stopped short of saying what it costs — the shape whose consequence the
+    message deleted was the only one whose consequence was certain.
+
+    REACHABLE: the real `migrate()` replay route with `rebuild_all`'s counts
+    injected (the empty-capture signature), asserting on both the warning and
+    the returned dict a caller reads.
+    """
+    counts = {"nodes": 0, "edges": 0, "events": 0,
+              "pack_selection_expected": 0, "pack_selection_verified": True,
+              "pack_selection_restored": 0,
+              "pack_selection_gap": 0, "pack_selection_state_unknown": False,
+              "pack_selection_conflict": False}
+    with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
+        result = _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
+
+    msg = next(m for m in (r.getMessage() for r in caplog.records)
+               if ":PackSelection" in m)
+    assert "UNCONFIGURED" in msg, (
+        "the consequence that is TRUE on this shape was dropped with the "
+        f"sidecar clause it had to be separated from: {msg}")
+    assert "not an observed loss" in msg, (
+        f"the consequence must stay bounded to what was observed: {msg}")
+    # …and the cause and the consequence travel in ONE line, not two clauses
+    # asserting different mechanisms.
+    assert msg.index("capture read") < msg.index("UNCONFIGURED"), msg
+
+    assert result["pack_selection_state_unknown"] is True
+    assert result["pack_selection_gap"] == 1
+
+
+def test_migrate_result_says_whose_unknown_it_is(
+        tmp_path, monkeypatch):
+    """The returned dict must distinguish the two producers of UNKNOWN.
+
+    FAILING VALUE: `pack_selection_state_unknown` is set by THIS route's
+    empty-capture override (shape a) and by the rebuild's own rescue-file
+    report (shape b), and the returned dict carried no field that told them
+    apart — so the CLI one layer up could only print the SHARED consequence,
+    which names the pre-wipe sidecar on the one shape that has none. That is
+    #11866 review P2-1: the same defect the migrate warning had just been fixed
+    for, still live one layer up, reachable only through the CLI.
+
+    REACHABLE: both shapes through the real `migrate()` route — shape (a) with
+    the empty-capture signature, shape (b) with the rebuild already reporting
+    its own `state_unknown` (which the override must NOT relabel).
+    """
+    empty_capture = {"nodes": 0, "edges": 0, "events": 0,
+                     "pack_selection_expected": 0,
+                     "pack_selection_verified": True,
+                     "pack_selection_restored": 0,
+                     "pack_selection_gap": 0,
+                     "pack_selection_state_unknown": False,
+                     "pack_selection_conflict": False}
+    shape_a = _migrate_with_rebuild_counts(tmp_path / "a", monkeypatch,
+                                           empty_capture)
+    assert shape_a["pack_selection_unknown_from_empty_capture"] is True, (
+        "the route's own override produced this UNKNOWN, and a caller cannot "
+        "see that from the dict")
+
+    rescue_file = {"nodes": 0, "edges": 0, "events": 0,
+                   "pack_selection_expected": 0,
+                   "pack_selection_verified": True,
+                   "pack_selection_restored": 0,
+                   "pack_selection_gap": 1,
+                   "pack_selection_state_unknown": True,
+                   "pack_selection_conflict": False}
+    shape_b = _migrate_with_rebuild_counts(tmp_path / "b", monkeypatch,
+                                           rescue_file)
+    assert shape_b["pack_selection_state_unknown"] is True
+    assert shape_b["pack_selection_unknown_from_empty_capture"] is False, (
+        "this UNKNOWN came from the rebuild's rescue file, which DOES have an "
+        "ERROR line to point at — the empty-capture sentence is false here")
+
+
+def test_migrate_cli_scopes_the_consequence_to_the_capture_source(
+        tmp_path, caplog, monkeypatch):
+    """The CLI is the operator's LAST line and printed the deleted clause.
+
+    FAILING VALUE: `main()` called `_pack_selection_shape(result)`
+    UNCONDITIONALLY for any `pack_selection_gap`, and the returned dict carried
+    no shape discriminator, so on shape (a) the operator's final line was "the
+    pre-wipe sidecar cannot say whether the marker existed, so the graph may
+    read as UNCONFIGURED" — naming the artifact this route does not have, 130
+    lines below the warning that had just been fixed to delete exactly that
+    clause. Reproduced by driving the REAL `migrate()` (not a hand-built dict)
+    and then the real `main()`, because the defect was in the plumbing between
+    them.
+
+    REACHABLE: `migrate()` with the empty-capture counts injected, its result
+    dict returned by `main()`'s own `migrate` call.
+    """
+    import tortoise.migrate_db as mdb
+
+    counts = {"nodes": 0, "edges": 0, "events": 0,
+              "pack_selection_expected": 0, "pack_selection_verified": True,
+              "pack_selection_restored": 0,
+              "pack_selection_gap": 0, "pack_selection_state_unknown": False,
+              "pack_selection_conflict": False}
+    result = _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
+    assert result["pack_selection_gap"] == 1, result
+
+    monkeypatch.setattr(mdb, "migrate", lambda force=False: dict(result))
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
+        assert mdb.main(["--force"]) == 0
+    msg = next(m for m in (r.getMessage() for r in caplog.records)
+               if ":PackSelection" in m)
+    assert "pre-wipe sidecar" not in msg, (
+        "the CLI named the pre-wipe sidecar on the ONE shape that has none — "
+        f"the clause the warning above it already deletes: {msg}")
+    assert "capture read" in msg and "UNCONFIGURED" in msg, (
+        f"the CLI must carry the shape's own cause and consequence: {msg}")
+
+
+def test_migrate_cli_keeps_the_sidecar_clause_for_the_rescue_file_shape(
+        tmp_path, caplog, monkeypatch):
+    """…and the scoping must not leak: shape (b) keeps the shared sentence.
+
+    A fix that shape-scopes the CLI by DROPPING the consequence whenever
+    `state_unknown` is set would delete the correct text on the rescue-file
+    shape, where the rebuild really did write an ERROR and the sidecar really is
+    the suspect. Pinned beside the shape-(a) test so one cannot be widened into
+    the other.
+    """
+    import tortoise.migrate_db as mdb
+
+    counts = {"nodes": 0, "edges": 0, "events": 0,
+              "pack_selection_expected": 0, "pack_selection_verified": True,
+              "pack_selection_restored": 0,
+              "pack_selection_gap": 1, "pack_selection_state_unknown": True,
+              "pack_selection_conflict": False}
+    result = _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
+    monkeypatch.setattr(mdb, "migrate", lambda force=False: dict(result))
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
+        assert mdb.main(["--force"]) == 0
+    msg = next(m for m in (r.getMessage() for r in caplog.records)
+               if ":PackSelection" in m)
+    assert "pre-wipe sidecar" in msg, (
+        f"this shape's UNKNOWN does come from the sidecar: {msg}")
+
+
 def test_migrate_route_keeps_the_error_pointer_for_a_rescue_file(
         tmp_path, caplog, monkeypatch):
     """UNKNOWN shape (b): an inherited leftover rescue file DID log an ERROR.
@@ -1521,7 +1674,8 @@ def test_migrate_route_keeps_the_error_pointer_for_a_rescue_file(
     A fix for shape (a) that also rewrote shape (b) shipped once and was caught
     by review: it told a retrying operator "this is the known #11866
     capture-source limitation" while the one artifact that can say a marker was
-    destroyed — the rescue file beside the target — went unnamed, and the
+    destroyed — the rescue file beside the SOURCE's event log, never beside the
+    target — went unnamed, and the
     pointer that was correct for this shape was deleted. Pinned so a future
     fix for (a) cannot silently absorb (b) again.
     """

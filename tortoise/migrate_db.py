@@ -89,21 +89,49 @@ def _count_source_events(source_db: str) -> int:
     return count if count is not None else 0
 
 
-def _pack_selection_shape(counts: dict) -> tuple[str, str]:
-    """Delegate to the ONE shape answer (`tortoise.projection`).
+# ── #11866 review P2-2: the shape-(a) consequence, written ONCE ──────────────
+# Shape (a) is this route's OWN override: the capture read the graph it is about
+# to wipe (the fresh `target`), so `rebuild_all` logged no ERROR at all. The
+# shared text is wrong here in BOTH halves — it names the pre-wipe sidecar (the
+# one artifact this shape does not have) and, by replacing it with the cause
+# alone, it dropped the clause that IS true here: the graph may read as
+# UNCONFIGURED, measured (a source with `configured=True revision=2` and an EMPTY
+# approved set migrates to `configured=False revision=0`, so a pack an admin
+# REMOVED is re-admitted). Consequence and cause therefore travel together.
+_EMPTY_CAPTURE_CONSEQUENCE = (
+    "the capture read the graph it is about to wipe (the fresh `target`) — the "
+    "marker was NOT OBSERVED, not observed gone, so the graph may read as "
+    "UNCONFIGURED — this is not an observed loss")
 
-    THREE of the four reporters route through it: the two projection recovery
-    callers and this migration route (both its warning sites). The fourth — the
-    `rebuild` CLI — keeps its own branch chain deliberately, because it prints a
-    count line and per-shape prose whose exact wording is pinned by
+
+def _pack_selection_shape(counts: dict) -> tuple[str, str]:
+    """This route's shape answer: the shared one, plus its OWN empty-capture shape.
+
+    THREE of the four reporters route through `tortoise.projection`'s
+    `pack_selection_shape`: the two projection recovery callers and this
+    migration route (both its warning sites). The fourth — the `rebuild` CLI —
+    keeps its own branch chain deliberately, because it prints a count line and
+    per-shape prose whose exact wording is pinned by
     `test_cmd_rebuild_reports_the_pack_selection_marker`; a second copy of the
     RULE here is what let the reporters drift apart across review rounds 3-4,
     whereas the CLI's copy is behaviour-pinned and states no rule the helper
     contradicts.
+
+    ⛔ ONE shape is this route's alone and the shared sentence is wrong on it, so
+    it is substituted HERE and nowhere else. Both of this route's surfaces — the
+    `migrate()` warning and the `migrate-db` CLI report — read the answer from
+    this function; a consequence written at one site and copied at the other is
+    how the CLI kept printing the clause the warning had already deleted
+    (#11866 review P2-1).
     """
     from tortoise.projection import pack_selection_shape
 
-    return pack_selection_shape(counts or {})
+    counts = counts or {}
+    label, consequence = pack_selection_shape(counts)
+    if (counts.get("pack_selection_state_unknown")
+            and counts.get("pack_selection_unknown_from_empty_capture")):
+        return (label, _EMPTY_CAPTURE_CONSEQUENCE)
+    return (label, consequence)
 
 
 def migrate(force: bool = False) -> dict:
@@ -272,10 +300,11 @@ def migrate(force: bool = False) -> dict:
             # nothing — `rebuild_all` logs no ERROR for that shape. (b) a
             # leftover rescue file beside the SOURCE's event log that cannot say
             # (pre-v7, or no `pack_selection` section) — `rebuild_all` DOES log
-            # an ERROR naming that file. Snapshot the flag BEFORE the override so
-            # the warning can still tell the two apart.
-            _pack_unknown_inherited = bool(
-                rebuild_counts.get("pack_selection_state_unknown"))
+            # an ERROR naming that file. The override MARKS its own answer with
+            # `pack_selection_unknown_from_empty_capture` instead of leaving the
+            # warning to infer it from a snapshot of the rebuild's flags: the
+            # mark is what both this warning and the CLI report read (`migrate()`
+            # returns it), so the two cannot drift apart again.
             if not rebuild_counts.get("pack_selection_expected"):
                 rebuild_counts = dict(rebuild_counts)
                 rebuild_counts["pack_selection_verified"] = False
@@ -286,6 +315,8 @@ def migrate(force: bool = False) -> dict:
                 ):
                     rebuild_counts["pack_selection_state_unknown"] = True
                     rebuild_counts["pack_selection_gap"] = 1
+                    rebuild_counts[
+                        "pack_selection_unknown_from_empty_capture"] = True
             # #4641: the JSONL rebuild path is one of the three routes that
             # performs the unconditional wipe, so a completed rebuild can
             # still leave the migrated graph's onboarding state NOT confirmed
@@ -332,8 +363,7 @@ def migrate(force: bool = False) -> dict:
             # the gap/UNKNOWN pair does.
             if rebuild_counts.get("pack_selection_gap"):
                 _label, _consequence = _pack_selection_shape(rebuild_counts)
-                if (rebuild_counts.get("pack_selection_state_unknown")
-                        and not _pack_unknown_inherited):
+                if rebuild_counts.get("pack_selection_unknown_from_empty_capture"):
                     # #11866 — shape (a) ONLY: the cause is the CAPTURE SOURCE,
                     # not a stale sidecar. `rebuild_all` captures each
                     # preservation section from the graph it is about to wipe,
@@ -343,27 +373,23 @@ def migrate(force: bool = False) -> dict:
                     # logged no ERROR at all, and the tail this route used to
                     # print ("see the rebuild ERROR log") sent the operator to
                     # an empty line while naming the sidecar as the suspect. An
-                    # operator who goes looking for a stale rescue file beside
-                    # the target finds nothing, because that is not the failure
-                    # and not the fix.
+                    # operator who goes looking for a stale rescue file will not
+                    # find one here — the sidecar is keyed to the SOURCE's event
+                    # log, never to the target's DB directory — because there is
+                    # no sidecar failure, and no sidecar fix.
                     #
-                    # ⛔ `_consequence` is DELIBERATELY not printed on this
-                    # arm. It is the shared text for the callers that HAVE a
-                    # capture sidecar, and on this shape it reads "the pre-wipe
-                    # sidecar cannot say whether the marker existed" — naming
-                    # the one artifact this route does not have (#11866).
-                    # Printing it and then naming the capture source two
-                    # clauses later left one line asserting two mechanisms, so
-                    # the operator the old tail misdirected was misdirected
-                    # again, in the sentence that was supposed to fix it. Shape
-                    # (b) and the two recovery callers keep the shared text,
-                    # where it is true.
+                    # `_consequence` is the SHAPE-SCOPED sentence
+                    # `_pack_selection_shape` returns for this key: the cause
+                    # PLUS the consequence that is true here (the graph may read
+                    # as UNCONFIGURED). Printing the shared text instead would
+                    # name "the pre-wipe sidecar" — the one artifact this shape
+                    # does not have; dropping it wholesale would drop the harm
+                    # (#11866 review P2-2). Shape (b) and the two recovery
+                    # callers keep the shared text, where it is true.
                     logger.warning(
                         "rebuild: the migrated graph's :PackSelection pack-set "
-                        "marker is NOT confirmed intact (%s) — the capture read "
-                        "the graph it is about to wipe (the fresh `target`), so "
-                        "the marker was NOT OBSERVED, not observed gone — this "
-                        "is not an observed loss (#9752/#11866)", _label)
+                        "marker is NOT confirmed intact (%s) — %s "
+                        "(#9752/#11866)", _label, _consequence)
                 else:
                     logger.warning(
                         "rebuild: the migrated graph's :PackSelection pack-set "
@@ -425,7 +451,19 @@ def migrate(force: bool = False) -> dict:
                 "pack_selection_verified": (
                     (rebuild_counts or {}).get("pack_selection_verified")),
                 "pack_selection_conflict": bool(
-                    (rebuild_counts or {}).get("pack_selection_conflict"))}
+                    (rebuild_counts or {}).get("pack_selection_conflict")),
+                # #11866 review P2-1: WHOSE UNKNOWN this is. `True` means this
+                # ROUTE's own empty-capture override produced it, not the
+                # rebuild — the two shapes need different sentences (only (b)
+                # has a rescue file to point at), and the returned dict
+                # carried no field that could tell them apart, so the CLI one
+                # layer up could only print the shared text: on shape (a) that
+                # is the clause naming the pre-wipe sidecar, the artifact the
+                # shape does not have. Additive and defaulted, like the keys
+                # above, so an existing caller is unaffected.
+                "pack_selection_unknown_from_empty_capture": bool(
+                    (rebuild_counts or {}).get(
+                        "pack_selection_unknown_from_empty_capture"))}
     finally:
         lock.release()
 
@@ -465,6 +503,14 @@ def main(argv: list[str] | None = None) -> int:
             # with the UNKNOWN/gap discrimination for the same reason the
             # `rebuild` CLI prints the shapes separately: "could not confirm"
             # must never be reported as an observed loss.
+            #
+            # #11866 review P2-1: this line printed the SHARED consequence on
+            # every shape, so on the empty-capture shape the operator's last
+            # line named "the pre-wipe sidecar" — the exact clause the warning
+            # 130 lines above had just been fixed to delete, on the exact shape
+            # that has no sidecar. `_pack_selection_shape` is now shape-scoped
+            # and reads the route's own discriminator out of `result`, so the
+            # two surfaces cannot disagree about a shape again.
             if result.get("pack_selection_gap"):
                 _label, _consequence = _pack_selection_shape(result)
                 logger.warning(
