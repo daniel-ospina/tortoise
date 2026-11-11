@@ -415,7 +415,10 @@ as the record of it and **not** as current text:
 > ✅ **ANSWERED 2026-11-10 — this section is the RECORD of the request, not a live ask.** The owner ruled
 > **KEEP**: the `:Object`/`:Subject` embeddings stay, no pass may remove them or stop writing them, and
 > because **nothing contracts** no surface approval follows (`#11395` comment `6781921075`, mirrored into
-> `STORAGE-ARCHITECTURE.md` §14.3 V3). ⚠️ **The census itself is a dated measurement and is deliberately NOT
+> `STORAGE-ARCHITECTURE.md` §14.3 V3). ⚠️ **The ruling names those two labels and no others**, so the
+> request below for `:Event` and `:Source` is **not** answered by it — the 2026-09-24 direction (*"keep the
+> vectors, make them searchable"*) is the record that covers them, and it authorises no removal either.
+> ⚠️ **The census itself is a dated measurement and is deliberately NOT
 > edited to match** — what follows is what was requested before the ruling existed.
 
 **Requested:** the owner's decision on whether to **remove** the `embedding` property from the

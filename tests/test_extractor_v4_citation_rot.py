@@ -261,8 +261,29 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[
     ),
     (
         STORAGE,
-        "STORAGE attributes the vector-LOCATION ruling to V1/§12.1c and leaves V3's remainder the INDEX question",
-        "settles where the vector index LIVES (Postgres, 2026-11-07), and it did not settle whether these two labels carry embeddings",
+        "STORAGE §12.2c scopes the 2026-11-10 KEEP ruling to the two labels it names and does not extend it to `:Event`",
+        "it names `:Object` and `:Subject` — never `:Event`",
+        "12.2c",
+    ),
+    (
+        # The P3 advisory on this PR: the pin above used to stop at the label
+        # pair and silently dropped the sentence's second fact — that what is
+        # LEFT of V3 for the ruled pair is the INDEX question. Deleting that
+        # clause would have stayed green. Pinned separately, so each fact reds
+        # on its own deletion.
+        STORAGE,
+        "STORAGE §12.2c leaves V3's remainder, for the ruled pair, the INDEX question",
+        "what remains of §14.3 V3 is whether they are INDEXED",
+        "12.2c",
+    ),
+    (
+        # ISSUE 1 of the review at `d9f3042`: §12.1b's paragraph is about the
+        # labels the query side advertises and the index side never created, and
+        # it attached the 2026-11-10 ruling to ALL of them. The ruling names two.
+        STORAGE,
+        "STORAGE §12.1b states the 2026-11-10 ruling's label scope rather than generalising it",
+        "The 2026-11-10 ruling covers two of these labels and no others — `:Object` and `:Subject`",
+        "12.1b",
     ),
     (
         STORAGE,
@@ -1287,12 +1308,16 @@ def _changelog_entry(needle: str) -> str:
     return matches[0]
 
 
-#: ⛔ The label may be NUMERIC (`9.1`) or a LETTER+digit phase label (`P6`) — the
-#: eval spec's sections are `### P6 — …`, so a numeric-only pattern made
-#: ``_section_body(EVAL_SPEC, "P6")`` raise "carries no §P6" and forced every
-#: eval-spec pin to stay document-wide, i.e. a name that says P6 while the
-#: assertion cannot see P6.
-_SECTION_HEADING = re.compile(r"(?m)^(#{2,4}) (\d+(?:\.\d+)*|P\d+)[.\s]")
+#: ⛔ The label may be NUMERIC (`9.1`), carry a lowercase PHASE SUFFIX (`12.2c`,
+#: `12.1b` — how `STORAGE-ARCHITECTURE.md` labels its sub-decisions), or be a
+#: LETTER+digit phase label (`P6`) — the eval spec's sections are `### P6 — …`,
+#: so a numeric-only pattern made ``_section_body(EVAL_SPEC, "P6")`` raise
+#: "carries no §P6" and forced every eval-spec pin to stay document-wide, i.e. a
+#: name that says P6 while the assertion cannot see P6. The same held for the
+#: phase-suffixed sections: `("… §12.2c …", "12.2c")` raised "§12.2c does not
+#: exist" even though `### 12.2c ⭐ …` was there, because `[.\s]` after `12.2`
+#: met the `c`. A name that cannot be resolved is not a citation.
+_SECTION_HEADING = re.compile(r"(?m)^(#{2,4}) (\d+(?:\.\d+)*[a-z]?|P\d+)[.\s]")
 
 
 def _section_body(path: Path, number: str) -> str:

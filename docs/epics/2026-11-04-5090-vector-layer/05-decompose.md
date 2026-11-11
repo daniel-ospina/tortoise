@@ -133,7 +133,7 @@ claim and not an assertion:
   reports no per-label vector count for them at all, so what they hold is what `--census` measures, never
   something inferred from the inventory (`S3-VECTOR-CENSUS.md` §5). Removing the vectors removes that answer —
   an MCP/SDK surface change, which `AGENTS.md` requires **Daniel's approval for before implementation**.
-  The census is the evidence for that request; acting on it is not a lane's. **✅ ANSWERED 2026-11-10 (owner): the ruling is KEEP** — the `:Object`/`:Subject` embeddings are kept, no pass may remove them or stop writing them, and because **nothing contracts**, the surface approval named above is not needed. Recorded at `#11395` comment `6781921075` and mirrored into `STORAGE-ARCHITECTURE.md` §14.3 V3.
+  The census is the evidence for that request; acting on it is not a lane's. **✅ ANSWERED 2026-11-10 (owner) for the two labels the ruling names — KEEP** — the `:Object`/`:Subject` embeddings are kept, no pass may remove them or stop writing them, and because **nothing contracts** for any label, the surface approval named above is not needed. ⚠️ **It does not name `:Event`, `:Source` or `:Document`** — the rest of the census's request — so those stand on the 2026-09-24 direction and no removal of them is authorised either. Recorded at `#11395` comment `6781921075` and mirrored into `STORAGE-ARCHITECTURE.md` §14.3 V3.
 - ⚠️ **Contradiction test, recorded:** **no recorded decision authorises** this removal. The 2026-09-24
   direction is *"keep the vectors, make them searchable"* — for the unindexed labels that means adding
   indexes, i.e. more RAM and a surface change. The later **2026-10-08 billing ruling** removes the COST
@@ -229,4 +229,4 @@ proves a decision, not an implementation, so `MET` is unreachable for this row b
 **V1 itself was answered on 2026-11-07**, so what its remainder names is the WORK — the
 `jsonb` → `vector(384)` migration, the index build and the backfill, which are **`#4051`'s** for as long as it
 is open. **An epic may close with a row whose remainder names a live OWNER — it may not close with a row naming nothing.**
-§14.3 **V3**'s removal half (whether these labels carry embeddings at all) is **settled — KEEP, 2026-11-10 (`#11395` comment `6781921075`)** — and what stays open is only whether they are INDEXED; neither is what row 4 names.
+§14.3 **V3**'s removal half is **settled KEEP for the two labels the ruling names — `:Object` and `:Subject`, 2026-11-10 (`#11395` comment `6781921075`)** — while `:Event`, `:Source` and `:Document` are **not covered by it** (the 2026-09-24 direction stands for them); what stays open for the ruled pair is only whether they are INDEXED, and neither is what row 4 names.
