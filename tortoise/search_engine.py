@@ -374,8 +374,10 @@ def ep_measurement_state(*, posterior_alpha, ep_alpha,
 # that yield no mean (an α with no β, a β with no α, a sum ≤ 0, a negative or
 # unreadable operand): such a row is 'measured' as a PREDICATE (when it carries
 # a non-baseline α) and `absent` as a STATE; a BETA-ONLY row is `absent` in both;
-# and a row with a READABLE mirror beside unusable operands is `baseline` with
-# the mirror's value, because the mirror term is the first disjunct.
+# and a row with a READABLE mirror beside unusable operands is a BELIEF whose
+# VALUE is the mirror's. The mirror term does not by itself decide the STATE:
+# it is `measured` when a non-baseline α is persisted and the claim is not
+# terminal, else `baseline`.
 # The recorded rule is
 # `docs/architecture/SEARCH-ARCHITECTURE.md` §6.3: **absent state is `null`
 # with `ep_state: "absent"`, never 0.5 — a value the ranker refuses to order
@@ -1131,11 +1133,16 @@ def ep_has_belief_cypher(alias: str) -> str:
     pair is absent too} — nothing is known either way, and every surface now
     says so through this ONE predicate.
 
-    **A HALF pair is no belief either**: both coalesced values must be present.
+    **A HALF pair is no belief ON ITS OWN**: the operand term (below) requires
+    both coalesced values, so a half pair with no mirror answers ``absent`` —
+    but a readable mirror beside it IS a belief, whose value is the mirror's
+    (see the mirror term in the predicate).
     A row carrying only `posterior_beta = 3.0` (no α, no prior, no mirror) has
     no mean; read as present it invented one from the `coalesce(…, 1.0)`
     default — `1/4 = 0.25`, a number nothing measured. The same rule, stated as:
-    a belief exists when the expression that computes it has both operands.
+    the OPERAND term of the predicate is true only when the expression that
+    computes the mean has both operands (the mirror term is the other disjunct,
+    so this is a statement about that term, not about the whole predicate).
     """
     # #11702 cycle 16: COERCED, not compared raw. A stored numeric STRING
     # ("0.7") is non-null but not comparable to `0` (the comparison is NULL, the
@@ -1175,9 +1182,13 @@ def ep_state_cypher(alias: str) -> str:
     so the PREDICATE (a non-baseline α is persisted) is necessary but not
     sufficient: a shape that persists an α but yields no mean passes the
     predicate and takes the ``absent`` arm. `ep_has_belief_cypher` is the
-    exhaustive rule — a belief exists iff BOTH coalesced operands are present,
-    non-negative, and sum > 0 — so the absences are: either operand missing after the per-operand coalesce (an α with no β, or a β with no α), a pair summing to ≤ 0, a negative operand, or an operand this process cannot read. Do not read this docstring as "a
-    persisted α answers measured"; run the two arms.
+    exhaustive rule, and it is a DISJUNCTION: a belief exists iff a readable
+    ``n.confidence`` mirror is present (``belief_mirror_cypher`` — in [0, 1])
+    OR both coalesced operands are present, non-negative, and sum > 0. So a
+    belief is absent iff there is NO readable mirror AND one of: an α with no β,
+    a β with no α, a pair summing to ≤ 0, a negative operand, or an operand this
+    process cannot read. Do not read this docstring as "a persisted α answers
+    measured"; run the two arms.
 
     A **terminal** claim (#2490) carries the decayed
     ``0.5 / 1.0 / 1.0`` that ``live.VACUITY_BELIEF`` stamps on every
@@ -1446,9 +1457,11 @@ class EpBreakdown:
     # A BETA-ONLY pair diverges the other way: no α is persisted, so `measured`
     # is False while the row still stores an operand and its state is `absent`
     # (never `baseline` — there is no mean for a prior to be). And a shape with a
-    # READABLE mirror beside unusable operands is neither: the mirror answers,
-    # so the state is `baseline` with the mirror's value (measured: an α-only
-    # half pair + mirror 0.9 → `baseline` / 0.9). Neither flag pair can be
+    # READABLE mirror beside unusable operands is a belief whose VALUE is the
+    # mirror's; its STATE is `measured` when a non-baseline α is persisted and
+    # the claim is not terminal (measured: `posterior_alpha=0.5` + mirror 0.9 →
+    # `measured` 0.9), else `baseline` (measured: `ep_alpha=0.5` +
+    # `baseline_set` + mirror 0.9 → `baseline` 0.9). Neither flag pair can be
     # inverted into the state.
     #
     # A consumer deciding whether a stored posterior can be reasoned from reads
