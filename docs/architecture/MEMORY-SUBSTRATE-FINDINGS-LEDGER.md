@@ -334,8 +334,8 @@ ruling above does not reach them and a guard for them could not pass by not look
 come straight out of §4's own table: count its rows (14) and its `**No copy of its content in-repo**`
 cells among the `research/` rows (3) — the same way the §6 arithmetic is already re-derived from its
 own table rather than trusted. Until an arm is added they are **hand-derived and unmeasured**, and
-that was measured: deleting the `<corpus>/2026-09-09-ontology-evidence.md` row — leaving §4 covering
-14 of the 15 artefacts `#2852` §3 lists, so the coverage sentence above is false again — and reverting
+that was measured: deleting the `<corpus>/2026-09-09-ontology-evidence.md` row — after which §4 has
+13 rows and covers 14 of the 15 artefacts `#2852` §3 lists — and reverting
 §0 to *"six of the eight"* both leave `--check` at exit 0 and the test file fully green. Re-derive
 both from §4's table before quoting them; `#2852` §3 is the population source, not the derivation.
 
