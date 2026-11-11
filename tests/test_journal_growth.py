@@ -595,7 +595,7 @@ def test_probe_pins_its_published_outputs(
     assert keys_added == 228
     assert growth == vector_growth + keys_added
 
-    # WHERE those 202 B come from, and why they are not a second charge for
+    # WHERE those 228 B come from, and why they are not a second charge for
     # keys the baseline already has: the committed record carries #5004's three
     # identity keys at its TOP LEVEL (the fixture's stub values), while `point`
     # carries none — and `stamp_journal_embedding` writes the identity INSIDE

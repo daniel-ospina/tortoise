@@ -21,10 +21,14 @@ What this file pins, in the order the decisions were made:
 5. the marker is a payload description only: never a node property, never a
    record column, never callable-settable;
 6. the journal line carries no insignificant whitespace (its own delta —
-   attributable by measurement, because both changes share ONE commit).
+   attributable by measurement, because both changes share ONE commit);
+7. the `EventRecorded` DOOR (`sdk._journal_event_raw_write`, the fourth
+   vector-bearing producer) declares its own width — the one stamp whose
+   absence no other pin could see.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import struct
 
@@ -333,3 +337,86 @@ def test_the_turn_snapshot_contract_admits_the_marker():
                                   | rp.TURNS_SNAPSHOT_OPTIONAL_KEYS)
     assert not undeclared, (
         f"the snapshot carries undeclared keys {sorted(undeclared)}")
+
+
+# ── 7. the fourth producer: the `EventRecorded` door ─────────────────────────
+
+
+def _door_record(tmp_path, *, embedding, event_id="evt-11821"):
+    """Drive the REAL door and return the record it journalled.
+
+    ``sdk._journal_event_raw_write`` builds its own payload (it does not pass
+    through `_emit_event`'s stamp), so its width declaration is a SEPARATE
+    producer — the review's finding was that deleting that block reddened
+    nothing, anywhere.
+
+    ``graph=None``: the props here name no pack kind, so `#5475`'s gate takes
+    its no-pack early return (`payload_names_pack(record)` is empty) and never
+    reads a graph. The gate itself is pinned in
+    `tests/test_9068_pack_gate_residuals.py`; this file stays hermetic
+    (`tmp_path` only — no DB, no graph, no network), which is what lets its
+    registration run on every lane.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    journal = tmp_path / "events.jsonl"
+    sdk = TortoiseSDK(str(tmp_path / "door.db"), event_log_path=str(journal))
+    try:
+        committed = sdk._journal_event_raw_write(
+            event_id, {"content": "a session event"}, graph=None,
+            embedding=list(embedding))
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+    assert committed is not False, (
+        "the door reports a failed append as False — nothing to assert then")
+    records = [json.loads(ln) for ln in
+               journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(records) == 1, f"expected exactly one record, got {records!r}"
+    assert records[0]["type"] == "EventRecorded"
+    return records[0]
+
+
+def test_the_event_recorded_door_declares_its_width(tmp_path):
+    """#11821 P0's FOURTH producer: `sdk._journal_event_raw_write`.
+
+    A session `:Event`'s vector is `_session_embedding`'s — our embedder's
+    float32 — or a value read back off the node, and this door builds its
+    payload from `props` instead of going through `_emit_event`'s stamp. Delete
+    the stamp block at `sdk.py::_journal_event_raw_write` and the whole suite
+    stayed green while the door silently journalled an UNDECLARED-width vector:
+    the one vector-bearing record the seam's contract ("every journalled vector
+    says what width it was written at") would not cover, and the population
+    P2's base64 migration would have to guess about.
+
+    So both halves are asserted — the DECLARATION and the NARROWING — because a
+    marker written without the values it describes would be a lie the next
+    reader acts on.
+    """
+    widened = _vector()
+    record = _door_record(tmp_path, embedding=widened)
+
+    assert record[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F32, (
+        "the EventRecorded door journalled a vector with no width declared")
+    assert _f32_bits(record["embedding"]) == _f32_bits(widened)
+    assert len(_text(record["embedding"])) < len(_text(widened)), (
+        "the door's vector must be stored at the embedder's float32, not the "
+        "widened float64 repr the seam exists to remove")
+
+
+def test_the_event_recorded_door_declares_f64_for_a_vector_it_cannot_narrow(
+        tmp_path):
+    """The other half of the marker at this door.
+
+    The door does not carry a route through `creating=True`, and its vector can
+    be one it did not produce (a value read back off the node). A vector with an
+    element float32 cannot represent must therefore still be journalled —
+    UNTOUCHED — and must say `f64`, so a later width/format migration cannot
+    narrow a population nobody declared as foreign.
+    """
+    source = [1e-300, 0.5, -1e-300]
+    record = _door_record(tmp_path, embedding=source, event_id="evt-11821-f64")
+
+    assert record["embedding"] == source, "the values must be left ALONE"
+    assert record[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64
