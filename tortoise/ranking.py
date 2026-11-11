@@ -43,7 +43,7 @@ from .search_engine import (  # noqa: E402, RUF100
     belief_mean_cypher,  # #11702: the ONE Cypher belief-mean expression
     belief_value,  # #11702: the ONE Python belief VALUE reader
     ep_has_belief_cypher,  # #11702: presence-to-persisted-belief predicate
-    ep_measured_cypher,  # #3276: has_ep == EP measured (baseline prior != measured)
+    ep_measured_cypher,  # #3276: has_ep == a non-baseline α persisted AND NOT #2490-terminal
     ep_pair_stored,  # #11702: a variance needs BOTH α/β operands stored
     ep_state_cypher,  # #11702: the present-state NAME on the wire
     ep_state_resolve,  # #11702: the ONE #2490 terminal fold for the state name
@@ -840,7 +840,9 @@ class GraphRanker:
         0.4·mean EP confidence of produced Points.
 
         #11702 — an ABSENT belief contributes NO term. When the read answered
-        ``confidence: None`` (nothing is persisted) the belief term is dropped
+        ``confidence: None`` (nothing that yields a mean — nothing persisted, a
+        half pair, a 0/0 pair, a negative operand, an unreadable operand — and
+        no readable mirror supplying one) the belief term is dropped
         and the remaining term keeps ITS OWN weight, rather than a fabricated
         0.5 standing in for it. Substituting 0.5 was not neutral: it gave a
         never-measured claim exactly the boost of a measured coin flip, so the
@@ -1009,7 +1011,7 @@ class GraphRanker:
             "  coalesce(n.posterior_alpha, n.ep_alpha) AS alpha, coalesce(n.posterior_beta, n.ep_beta) AS beta, "
             # #2490: aligned with StateRanker/GapsRanker — has_ep rides the
             # status/outdated columns for the Python-side terminal gate.
-            # #3276: has_ep == EP measured (ep_measured_cypher) — a #2199
+            # #3276: has_ep == a non-baseline α persisted, less the #2490 terminal gate — a #2199
             # baseline prior alone is prior-only, NOT measured.
             f"  {ep_measured_cypher('n')} AS has_ep, "
             "  n.status, coalesce(n.outdated, false), "
@@ -1021,7 +1023,8 @@ class GraphRanker:
             # "StateRanker's is α/β only" note described a divergence that no
             # longer exists, and a second copy of the predicate is how the two
             # rankers would drift apart again. `has_ep` remains #3276's
-            # narrower "EP measured this"; a #2199 baseline prior is
+            # narrower "a non-baseline α persisted", less the #2490 gate (not "EP ran");
+            # a #2199 prior is
             # prior-only but IS a belief value the score multiplies in.
             f"  {ep_has_belief_cypher('n')} AS has_prior, "
             # #11702: the RAW pair rides the TAIL (10..13) so the VARIANCE is
@@ -1121,9 +1124,11 @@ class GraphRanker:
                 # #11702: THREE states, not two. The Event's number is
                 # `avg(p.confidence)` — the legacy flush-mirror column only —
                 # so a non-null mean is a PERSISTED PRIOR, never a measurement:
-                # labelling it `measured` asserted that EP ran on the Event
-                # when nothing did, and split the meaning of the state name
-                # against every other read (where a mirror is `baseline`).
+                # labelling it `measured` claimed a measurement nobody made
+                # (and would keep claiming one AFTER EP ran on its Points, since
+                # an Event still has no posterior columns to read) and split the
+                # meaning of the state name against every other read, where a
+                # mirror is `baseline`.
                 # An Event has no posterior columns of its own to consult, so
                 # `measured` is not reachable here until it does.
                 "ep_state": (EP_STATE_ABSENT if raw_conf is None
@@ -1506,7 +1511,8 @@ class StateRanker:
     # ── Signal computation ────────────────────────────────────────────
 
     def _has_ep(self, result: dict, signals: dict) -> bool:
-        """Whether EP has MEASURED this claim (#3276 semantics).
+        """Whether a NON-BASELINE α is persisted for this claim (#3276), less the
+        #2490 terminal gate — a terminalised claim reads False with its α intact.
 
         The graph signal (``has_ep``) wins when the batch read returned the id;
         the embedded ``state_has_ep`` is the projection=None unit-path fallback.
@@ -1527,16 +1533,28 @@ class StateRanker:
         measurement is NOT low support" is kept where it belongs: the
         absent term does not participate at all (see ``base`` in :meth:`rerank`),
         so an unmeasured claim is neither buried nor given a fabricated
-        confidence. Source is ``"posterior"`` when EP actually measured the
-        claim and ``"neutral"`` when a PERSISTED prior (not a measurement)
-        answered — those two are real values. A non-absent state with no
+        confidence. Source is ``"posterior"`` when ``has_ep`` is true — a
+        non-baseline α persisted, less the #2490 terminal gate — and
+        ``"neutral"`` when a PERSISTED prior
+        (not a measurement) answered — those two are real values.
+
+        ⛔ The token follows the FLAG, not the column the number was read from.
+        The value prefers the ``n.confidence`` mirror — a Python branch in
+        :meth:`_fetch_point_signals`, the mirror read first, the pair after; the
+        coalesce that spelled this in Cypher is GraphRanker's — so a row with a
+        pair AND a mirror is served the MIRROR's value
+        under the ``"posterior"`` token. Read the token as "a persisting
+        measurement-class belief exists for this row", never as "this number IS
+        the posterior mean". A non-absent state with no
         readable value answers ``(None, UNREADABLE_CONFIDENCE_SOURCE)``
         instead, so the null is named rather than denied; no stored shape this
         repo has MEASURED produces it (cycles 26–28 and #11897 taught both
         coercions the same spellings — hex OPERAND, exact subnormal, hex
         midpoint, and the exponent BOUND whose cancelling mantissa was in band),
         so that arm is DEFENSIVE. There are therefore two nulls —
-        ``absent`` (nothing is persisted) and ``unreadable`` (a belief exists) —
+        ``absent`` (nothing YIELDS a mean: nothing persisted, a half pair, a
+        0/0 pair, a negative operand, or an unreadable operand — and no
+        readable mirror supplying one) and ``unreadable`` (a belief exists) —
         and they are not the same fact.
         """
         if "confidence" in signals:
@@ -1712,9 +1730,12 @@ class StateRanker:
                     # three are pinned in
                     # `test_the_twins_parse_the_same_string_language` (whose
                     # literals never exceed `|p|` 151, so it cannot witness this
-                    # bound); the fourth in the two #11897 tests in
-                    # `tests/test_11702_absent_belief_state.py`, which are the
-                    # only place an exponent past 4096 appears. (A
+                    # bound); the fourth is EXPECTED TO READ at the two `#11897`
+                    # read-shape tests in `tests/test_11702_absent_belief_state.py`
+                    # (`test_a_hex_exponent_past_the_bound_its_mantissa_cancels_is_still_read`,
+                    # `test_a_cancelling_hex_exponent_reads_at_both_band_edges`) —
+                    # the file's other `#11897` pins refuse a past-4096 exponent on
+                    # purpose, so "the only place one appears" would be false. (A
                     # hex-float MIRROR at 16.0 is not one of them: the
                     # served-belief band rejects it on both twins.) If a fifth
                     # does land here, the state stays true and
@@ -2065,7 +2086,8 @@ class GapsRanker:
     # ── Signal computation ────────────────────────────────────────────
 
     def _has_ep(self, result: dict, signals: dict) -> bool:
-        """Whether EP has MEASURED this claim (#3276 semantics).
+        """Whether a NON-BASELINE α is persisted for this claim (#3276), less the
+        #2490 terminal gate — a terminalised claim reads False with its α intact.
 
         The graph signal (``has_ep``) wins when the batch read returned the id;
         the embedded ``gaps_has_ep`` is the projection=None unit-path fallback.
