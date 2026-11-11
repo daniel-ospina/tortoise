@@ -10,9 +10,16 @@ census has one command:
 
     uv run python tools/hosted_api_cite_census.py            # human-readable
     uv run python tools/hosted_api_cite_census.py --json     # for a script
-    uv run python tools/hosted_api_cite_census.py --pivot 23466
+    uv run python tools/hosted_api_cite_census.py --pivot <line>   # override the DERIVED pivot
     uv run python tools/hosted_api_cite_census.py --check    # exit 1 when a note is stale
     uv run python tools/hosted_api_cite_census.py --refresh  # re-state every figure in place
+
+The `--pivot` value is DERIVED from the tree on every shipped path
+(`lifetime_query_sites()[0]`), which is why that example is a placeholder and not a
+number: a literal typed into prose is a figure nobody re-takes, and it goes stale the
+moment an edit above the site moves it. `DEFAULT_PIVOT` exists only as the fallback
+for a caller that passes nothing, and it is the ONE spelling `--check`/`--refresh`
+cannot see (#11891) — bump it by hand in the same edit as the notes.
 
 ⛔ `--refresh`, never a hand-paste: copying four figures out of a printout into two
 prose notes by hand is the operation that produced the wrong count twice. One
