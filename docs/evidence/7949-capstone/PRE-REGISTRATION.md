@@ -2382,10 +2382,6 @@ to answer.
 
 ### 10.25 — the §548 blank-`pointKind` cite re-pointed for `#9752`'s own insert (2026-11-11, `#9752`)
 
-> ⛔ **Superseded for the merged tree by §10.26.** The numbers above are the `9ba2da35` head this
-> entry measured — `:14225-14227` really was the window there. A later commit on this same branch
-> inserted above the anchor and did not re-derive the cite, so the live numbers are §10.26's.
-
 > **A successor entry, not an edit to §10.24.** §10.24's numbers are a faithful record of the
 > `#11795` head it names, and §10.19's rule — quoted by §10.23 and by §10.24 above — is that
 > re-numbering a history entry in place would be a false record of what was measured. The tree moved
@@ -2422,6 +2418,10 @@ to answer.
   threshold, class set or corpus pin is changed — every §1-§9 criterion VALUE and the E4
   denominator are the ones this record froze. `document_sha256` is re-cut in this same commit, per
   §8's rule for *any* edit to this file.
+- ⛔ **Superseded for the merged tree by §10.26.** The numbers above are the `9ba2da35` head this
+  entry measured — `:14225-14227` really was the window there. A later commit on this same branch
+  (`93dafca241`) inserted 20 lines above the anchor and did not re-derive the cite, so the live
+  numbers are §10.26's.
 
 ### 10.26 — the same §548 cite re-pointed again, for this branch's own `+20` (2026-11-11, `#9752`)
 
@@ -2448,9 +2448,10 @@ to answer.
   Against §10.24's `13804` the movement is `+441` (`13804` → `14245`). Against §10.25's `14225` it
   is `+20` (`14225` → `14245`), and that `+20` is `93dafca241`'s own insert at this site — not a
   file total, and not a value to apply to another line.
-- **Only this cite moved in this file's §10.24 block.** §10.24's cites are `extractor_v2.py` and
-  `sdk.py` ones; this change touches neither file, so they resolve at this head unchanged. Nothing
-  outside `tortoise/projection/__init__.py` was re-pointed by this entry.
+- **Only this cite moved in this file's §10.24 block.** §10.24 also re-points cites in
+  `extractor_v2.py`, `sdk.py`, `projection/entities.py` and `hosted_api.py` — this change touches
+  none of those four files, so they resolve at this head unchanged (each re-opened). Beyond its own
+  entries, nothing outside `tortoise/projection/__init__.py` was re-pointed by this entry.
 - **What moved: one citation, and nothing that is a protocol value.** No metric, denominator,
   threshold, class set or corpus pin is changed — every §1-§9 criterion VALUE and the E4
   denominator are the ones this record froze. `document_sha256` is re-cut in this same commit, per
