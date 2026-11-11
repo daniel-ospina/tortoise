@@ -803,8 +803,6 @@ def test_the_artifact_names_a_commit_whose_probe_is_the_probe_that_made_it():
     # permanently on a correct artifact (review F1); skipping on a value the artifact
     # declares about itself would let one word disable the pin (review F5). So the skip is
     # keyed off what THIS checkout can see, read from git rather than from the artifact.
-    if head == "unknown":
-        pytest.skip("the artifact records no commit — measured from a copy with no git")
     try:
         shown = subprocess.run(
             ["git", "show",
@@ -863,6 +861,14 @@ def test_the_readme_documents_every_reason_the_probe_exits_two():
     assert "PROBE-WRITE" in probe_src, (
         "the probe no longer emits PROBE-WRITE — revisit what `2` means before this pin "
         "keeps requiring the README to document it")
+    # …and the module docstring is the tool's `--help` TEXT (`description=__doc__`), so its
+    # contract line must carry the arm too: asserting only the stderr tag left the help text
+    # saying "2 usage" while the code returned 2 from the output path (review, round 5).
+    doc = re.search(r"Exit codes:.*?(?=\n\n)", probe_src, re.S)
+    assert doc, "the exit-code contract left the module docstring — repoint this pin"
+    assert "PROBE-WRITE" in doc.group(0), (
+        "the probe's `--help` exit contract does not name the write arm: `2` reads as usage "
+        "only, which sends the operator back to the arguments")
     readme = (REPO / "docs" / "evidence" / "11739-quote-population" / "README.md").read_text(
         encoding="utf-8")
     contract = re.search(r"Exit codes are the measurement's own guard rails.*?(?=\n\n)",

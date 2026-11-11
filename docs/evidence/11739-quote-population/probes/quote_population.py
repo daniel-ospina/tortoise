@@ -45,7 +45,7 @@ Usage
     python docs/evidence/11739-quote-population/probes/quote_population.py \
         --out docs/evidence/11739-quote-population/census.json
 
-Exit codes: 0 measured · 2 usage · 3 graph unreachable / not configured / the query could not
+Exit codes: 0 measured · 2 usage, OR the --out destination was not writable (PROBE-WRITE — the graph WAS read and the walk succeeded: fix the PATH, not the arguments) · 3 graph unreachable / not configured / the query could not
 be read at any page size (never a silent zero) · 4 a page walk that cannot be proven complete
 (a short page with `hasMore` true, a row repeated across pages, a count that disagrees with
 the walk's own total, or a reply shape that is not a paginated page).
