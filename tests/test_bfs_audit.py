@@ -148,17 +148,26 @@ def test_no_propagate_shock_callers():
     # containing every static form, positive and negative, AND a caller inside a
     # subpackage, so the next iteration breaks a test instead of quietly narrowing the gate.
     #
-    # Residual, named rather than hidden: a reference CARRIED IN A STRING LITERAL —
-    # `getattr(mod, "propagate_shock")`, `globals()[...]`, `exec(...)`, an `__all__` entry, a
-    # registry key — is not a node at all, so no AST walk can see it. The AST leg therefore
-    # CANNOT be the whole gate: main's word-grep caught those shapes, and replacing that grep
-    # with the AST scan would have WIDENED a hole while closing a false positive — measured
-    # on a synthetic tree whose `__all__` names the symbol, the AST-only gate went GREEN where
-    # `origin/main` red.
+    # Residual, named rather than hidden — TWO, and they are not the same size.
     #
-    # So the AST leg is not alone: `_production_string_references` keeps the one thing only a
-    # textual read can see, and asserts it stays absent. Every node-shaped reference is
-    # pinned below, traversal is pinned, and the string arm is pinned by its own fixtures.
+    # (a) a reference carried in a STRING LITERAL whose content IS the symbol —
+    # `getattr(mod, "propagate_shock")`, `globals()["propagate_shock"]`, an `__all__` entry, a
+    # registry key — is not a node at all, so no AST walk can see it. main's word-grep DID see
+    # these, and replacing that grep with the AST scan would have WIDENED a hole while closing a
+    # false positive: measured on a synthetic tree whose `__all__` names the symbol, the
+    # AST-only gate went GREEN where `origin/main` red. So `_production_string_references` keeps
+    # exactly this class, and asserts it stays absent.
+    #
+    # (b) a quoted literal that CONTAINS the symbol rather than BEING it —
+    # `exec("propagate_shock(g, n)")`, `raise X("…propagate_shock…")` — is deliberately NOT
+    # matched. Widening the arm to a word-substring test would re-import the false positive
+    # #11903 exists to remove (`"""call propagate_shock(node)"""` is prose, not a caller), and
+    # #11903 is the decision that forbids the word grep. This is a real narrowing against
+    # `origin/main`, recorded rather than hidden, and pinned in `must_stay_green` below so a
+    # later widening is a deliberate choice that breaks a test instead of a silent drift.
+    #
+    # Every node-shaped reference is pinned below, traversal is pinned for BOTH arms, and each
+    # arm's positive and negative form sets are pinned by its own fixtures.
     ast_refs = _production_ast_references()
 
     # ⛔ The word-grep bucket still lists #11702's DOCSTRING lines
@@ -187,7 +196,8 @@ def test_no_propagate_shock_callers():
     print(f"  Test files: {len(callers['test_files'])}")
     print(f"  Fixup scripts: {len(callers['fixup_scripts (historical)'])}")
     print(f"  word-grep 'production' context: {len(callers['production_code'])} "
-          f"(docstring prose — NOT the gate; the AST scan is, and it found {len(ast_refs)})")
+          f"(docstring prose — NOT the gate; the AST scan and the string arm are, and they"
+          f" found {len(ast_refs)} node-shaped and {len(string_refs)} quoted)")
     print("  ✅ No production code calls propagate_shock (AST scan + string-literal arm)")
 
 
@@ -260,6 +270,12 @@ def test_the_string_literal_arm_catches_what_no_ast_can(tmp_path):
     tree containing it while `origin/main`'s word-grep red. A gate that traded a false
     positive for a false NEGATIVE is not an improvement, so the coverage is restored as an
     assertion — and this test is what stops the next rewrite from dropping it silently.
+
+    ⛔ TRAVERSAL IS PART OF THIS ARM'S CONTRACT TOO, and for a sharper reason than the AST
+    leg's: `tortoise/projection/` is exactly where a re-export of the deprecated function
+    would be registered, so a `rglob`→`glob` swap here would blind the arm precisely where
+    the event it guards against is most likely. Measured: without the nested fixture such a
+    swap passed this test unchanged.
     """
     (tmp_path / "tortoise").mkdir()
 
@@ -272,11 +288,30 @@ def test_the_string_literal_arm_catches_what_no_ast_can(tmp_path):
     must_stay_green = {
         "backticked_prose.py": 'def f():\n    """`propagate_shock` is never invoked."""\n    return 1\n',
         "lookalike.py": 'NAME = "propagate_shock_v2"\n',
+        # Residual (b), pinned deliberately: a quoted literal that CONTAINS the symbol is not
+        # matched, because a word-substring match would re-import the #11903 false positive.
+        # Pinning it green makes any future widening a decision that breaks this test.
+        "embedded_literal.py": 'exec("propagate_shock(g, n)")\n',
     }
     for name, body in {**must_be_caught, **must_stay_green}.items():
         (tmp_path / "tortoise" / name).write_text(body, encoding="utf-8")
 
-    found = {Path(p).name for p, _ in _production_string_references(root=tmp_path)}
+    # The nested fixture, and the assert that reads it: a flat-only tree passes unchanged
+    # under `glob`, which is how the AST leg's own traversal pin was found necessary.
+    nested = tmp_path / "tortoise" / "projection"
+    nested.mkdir(parents=True, exist_ok=True)
+    (nested / "all_export_nested.py").write_text(
+        '__all__ = ["propagate_shock"]\n', encoding="utf-8"
+    )
+
+    refs = _production_string_references(root=tmp_path)
+    found = {Path(p).name for p, _ in refs}
+
+    assert any(p.endswith("projection/all_export_nested.py") for p, _ in refs), (
+        "the string-literal arm does not descend into subpackages, so a re-export registered"
+        " in `tortoise/projection/` — where the deprecated definition lives — would read as no"
+        f" dependency at all. Paths seen: {sorted({p for p, _ in refs})}"
+    )
 
     missed = sorted(set(must_be_caught) - found)
     assert not missed, (
