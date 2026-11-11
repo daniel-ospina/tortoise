@@ -2830,7 +2830,10 @@ def test_checker_refuses_a_binding_whose_measured_side_is_unanchored(
     below-floor run `MATCHED` while the arm lines still printed the real numbers.
     `objects` has been anchored to the scored arm since V15 was written; the share
     is anchored to the control arm's `share=` and the E2b population to the scored
-    arm's `metric=atomic_points atomic=`.
+    arm's `metric=real_facts count=` line — the surviving PLANTED units, the
+    population the record's E2b row is written over (`real_facts`, #10989; until the
+    floor was re-pointed this sentence read `metric=atomic_points atomic=`, which is
+    the operand #10989 removes). Case (e) below exercises exactly this anchor.
     """
     scored = _scored(log_text)
     # (a) an inflated control-arm share on the binding line only
