@@ -333,7 +333,7 @@ def ensure_embed_threads() -> None:
 #: every one of the homes those two live in (`projection.entities._META_KEYS`,
 #: `record_projection`'s record-meta set, `consistency._EXCLUSION_REASONS`,
 #: `mcp_server._SERVER_MANAGED_PROPS`, `sdk._sanitize_props`,
-#: `api.EventAPI._point`'s forged-key refusal, and
+#: `api.EventAPI.add_point`'s forged-key refusal, and
 #: `record_projection.TURNS_SNAPSHOT_OPTIONAL_KEYS` for the carrier).
 JOURNAL_VECTOR_WIDTH_KEY = "embedding_width"
 #: The vector is stored at the embedder's own float32, shortest round-trip text.
@@ -606,6 +606,20 @@ def _stamp_journal_vector_width(payload: dict) -> None:
     # not carry the verbatim marker, so it is the only signal there.
     if is_verbatim(payload) or payload.get("embedding_preserved"):
         payload[JOURNAL_VECTOR_WIDTH_KEY] = JOURNAL_VECTOR_WIDTH_F64
+        return
+    if payload.get(JOURNAL_VECTOR_WIDTH_KEY) == JOURNAL_VECTOR_WIDTH_F32:
+        # IDEMPOTENT (#11835 review, P3). This function is the ONLY writer of
+        # `f32` — callers are refused it at every home — so a payload that
+        # already declares it holds THIS function's own output, already at the
+        # shortest float32 text. Re-deciding would find those values OFF the
+        # float32 grid (they are the round-tripping decimals, not the widened
+        # float32s) and flip the declaration to `f64` while leaving the values
+        # unchanged: a payload stating a width its text does not have, which is
+        # the one thing the marker exists to prevent. Measured before this
+        # guard: stamp twice -> `f32` then `f64`, values byte-identical.
+        #
+        # The verbatim arm is checked FIRST on purpose: a preserved vector must
+        # always re-declare `f64`, even if a stale `f32` rode in beside it.
         return
     narrowed = shortest_float32_vector(raw)
     if narrowed is None:

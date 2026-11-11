@@ -24,7 +24,9 @@ What this file pins, in the order the decisions were made:
    attributable by measurement, because both changes share ONE commit);
 7. the `EventRecorded` DOOR (`sdk._journal_event_raw_write`, the fourth
    vector-bearing producer) declares its own width — the one stamp whose
-   absence no other pin could see.
+   absence no other pin could see;
+8. the declaration is IDEMPOTENT: a second application of the single declared
+   seam does not flip `f32` to `f64` over values it did not change.
 """
 from __future__ import annotations
 
@@ -113,6 +115,45 @@ def test_the_journal_text_decodes_back_to_the_same_values_exactly():
     stamped = stamp_journal_embedding(_payload(_vector()), creating=True)
     line = _text(stamped)
     assert json.loads(line)["embedding"] == stamped["embedding"]
+
+
+def test_the_width_declaration_is_idempotent_under_a_second_stamp():
+    """A payload re-stamped by the same seam must not flip `f32` -> `f64`.
+
+    #11835 review (P3), measured before the guard: the narrowed values are the
+    round-tripping DECIMALS, not the widened float32s, so they sit off the
+    float32 grid the ownership test asks for. A second application therefore
+    read them as "not ours to narrow" and re-declared `f64` while leaving the
+    values byte-identical — a payload stating a width its text does not have,
+    which is the one thing the marker exists to prevent.
+    """
+    once = stamp_journal_embedding(_payload(_vector()), creating=True)
+    assert once[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F32
+
+    twice = stamp_journal_embedding(dict(once), creating=False)
+
+    assert twice[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F32, (
+        "a second application of the single declared seam flipped the "
+        "declaration to f64 — these values are that seam's own output, so the "
+        "width it declares must not move")
+    assert twice["embedding"] == once["embedding"], (
+        "the second application must leave the values untouched")
+
+
+def test_a_preserved_vector_still_declares_f64_even_beside_a_stale_f32():
+    """The idempotency guard must not swallow the verbatim arm.
+
+    The guard returns early on an `f32` marker, so if it were placed ABOVE the
+    verbatim arm a preserved vector carrying a stale `f32` would keep it — and
+    #5004 round-7's population would be declared narrowed while it must stay
+    raw. Order is the assertion.
+    """
+    stale = _payload(_vector(), embedding_preserved=True,
+                     **{JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32})
+    stamped = stamp_journal_embedding(stale, creating=False)
+
+    assert stamped[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64, (
+        "a preserved vector declared f32 — the guard ran before the verbatim arm")
 
 
 def test_the_quantiser_is_the_shortest_float32_round_trip_not_a_fixed_width():
@@ -393,18 +434,23 @@ def test_the_journal_line_carries_no_insignificant_whitespace(tmp_path):
 
 
 def test_the_marker_is_declared_in_every_home_so_it_cannot_become_node_state():
-    """The same seven homes `embedding_preserved` lives in.
+    """The homes `embedding_preserved` lives in.
 
     Each one is a place where an undeclared payload key would LEAK: onto a node
     (`_POINT_HANDLED` / `_META_KEYS` / `_SERVER_MANAGED_PROPS`), into the
     record's `props` jsonb tail (`_RECORD_ONLY_KEYS`), or into a caller's reach.
 
-    Six are asserted here. The SEVENTH — `api.EventAPI._point`'s forged-key
-    refusal — is pinned where it can actually redden: that set is a
-    function-local literal, so no test can assert its membership; the refusal
-    is driven through the door instead, by
-    `test_journal_embedding_5004.py::test_eventapi_rejects_the_server_managed_journal_markers`
-    (#11835 review P2 — the omission left deleting the `api.py` entry GREEN).
+    There are EIGHT, and this test asserts SIX of them. The other two are pinned
+    where each can actually redden, and are NOT covered by anything below:
+
+    * `sdk._sanitize_props` -> `test_a_caller_cannot_forge_the_width` (the next
+      test down in this file);
+    * `api.EventAPI.add_point`'s forged-key refusal ->
+      `test_journal_embedding_5004.py::test_eventapi_rejects_the_server_managed_journal_markers`.
+      That set is a function-local literal, so no test can assert its
+      membership; the refusal is driven through the door instead (#11835 review
+      F1 — while it was uncovered, deleting the `api.py` entry left every row
+      GREEN).
     """
     from tortoise import record_projection as rp
     from tortoise.consistency import _EXCLUSION_REASONS
