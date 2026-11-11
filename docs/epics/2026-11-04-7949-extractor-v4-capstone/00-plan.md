@@ -136,11 +136,11 @@ and `hierarchies: Theme→Epic / Epic→Issue (type: hasPart)` (`:193`). Also
 `hasPart` is on the structural write allowlist (`tortoise/projection/edges.py:621-630`) and
 `docs/ONTOLOGY.md` §3.7 types it **Object → Object**, N-ary, `dcterms:hasPart`, with inverse traversal
 covering "part of" (**no separate `partOf` edge**). The writer is `TortoiseSDK.create_edge` →
-`projection.edges.create_edge` (`edges.py:2899`).
+`projection.edges.create_edge` (`edges.py:2900`).
 ⚠️ **`decomposesInto` — the predicate the packs actually declare — is NOT in that set.** Its route to a
 write is its `semantics: hasPart`, and **nothing derives the writable predicate from the declaration on
 the extraction path**. That is the seam.
-⚠️ **`create_edge` takes no property parameter and no `**kwargs`** (`edges.py:2903-2908`): a derivation
+⚠️ **`create_edge` takes no property parameter and no `**kwargs`** (`edges.py:2904-2909`): a derivation
 edge minted there carries **no `sourceVersion` anchor and nothing can supply one**. That is §9.6's
 boundary, pinned by `tests/test_references_boundary_5213.py`, and `#5213`'s resolution was **option 3 —
 document, do not re-route**. See R11/E3 for why that constrains C3.
@@ -373,7 +373,7 @@ a hand-labelled ground truth (an edge count alone is gameable); **E1's registere
 unaffected** (C8's arm).
 ⛔ **Anchor obligation, corrected.** The first version of this child demanded **100 % anchor coverage on
 the new edges** and told the implementer to use `create_edge`. Both are wrong: `create_edge` *cannot*
-carry a `sourceVersion` (`edges.py:2903-2908`, pinned by `tests/test_references_boundary_5213.py`), and
+carry a `sourceVersion` (`edges.py:2904-2909`, pinned by `tests/test_references_boundary_5213.py`), and
 `#5213`'s recorded resolution is **option 3 — document, do not re-route**. `:Object` mention links are
 unanchored **by design** (owner-approved option A, `#5199`). ⇒ **E3's obligation for these edges is
 ROUTED to `#9736`** (the metric's owner). The child must **state** which writer it uses and, if it wants

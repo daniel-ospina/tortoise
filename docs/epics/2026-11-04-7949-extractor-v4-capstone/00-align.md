@@ -200,7 +200,7 @@ Written here because a decision that cites only its conclusion is unauditable; t
 
 - **R1/R2 — the packs already declare it** (`decomposesInto`, `hasPart`, `hierarchies`), the schema admits
   it (`hasPart` on the structural allowlist; Object→Object per ONTOLOGY §3.7) and the writer exists
-  (`edges.py:2899`). ⚠️ `decomposesInto` is **not itself writable** — its route is `semantics: hasPart`,
+  (`edges.py:2900`). ⚠️ `decomposesInto` is **not itself writable** — its route is `semantics: hasPart`,
   and **nothing derives the writable predicate from the declaration**.
 - **R3 — the extraction lane writes no structural edge at all.**
 - **R6 — the door is the v2 lane** (`_capture_lane()` → `"v2"` unless `TORTOISE_SESSION_EXTRACTOR=m2`).
