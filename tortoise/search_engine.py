@@ -5280,8 +5280,15 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                 # a measured one. A TERMINAL claim is neither measured nor
                 # prior-only (its 0.5 is the #2490 decayed posterior), so the
                 # terminal gate above also clears `baseline` — see the
-                # EpBreakdown three-state note.
-                baseline=baseline_set and not measured and not terminal,
+                # EpBreakdown three-state note. And the flag follows the
+                # RESOLVED state rather than `baseline_set` alone: a DECLARED but
+                # DEGENERATE prior (`set_point_baseline(claim, 0, 0)`, which every
+                # surface reads as `absent` because 0/0 has no mean — #11702
+                # cycle 30) must not claim prior-only beside `ep_state: "absent"`,
+                # because `baseline` is documented as "confidence_mean IS the
+                # declared prior mean" and a consumer reading it that way got None.
+                baseline=(baseline_set and not measured and not terminal
+                          and state == EP_STATE_BASELINE),
             )
 
         # Fill in defaults for IDs that are not Point nodes (defaults match

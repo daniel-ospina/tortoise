@@ -297,6 +297,28 @@ def test_declared_baseline_prior_keeps_its_value_and_is_not_measured(sdk):
     assert ep.measured is False and ep.baseline is True
 
 
+def test_a_degenerate_declared_baseline_is_absent_and_not_prior_only(sdk):
+    """A `set_point_baseline(claim, 0, 0)` has no prior MEAN — 0/0 — so it cannot
+    be the `baseline` state (#11702 cycle 30).
+
+    `baseline=True` is the alias for "prior-only: confidence_mean IS the declared
+    prior mean". Every surface reads the (0, 0) prior as `absent` (the mean does
+    not exist), so the flag claiming prior-only was the same two-keys-of-one-block
+    contradiction the state vocabulary exists to remove — a consumer deciding
+    "there is a prior, use the mean" from `baseline` got `None`.
+    """
+    pid = sdk.create_point("statement", "a degenerate baseline")["id"]
+    sdk.set_point_baseline(pid, 0.0, 0.0)
+
+    ep = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
+    assert ep.ep_state == EP_STATE_ABSENT, (
+        f"a 0/0 prior has no mean, so the state is absent — got {ep.ep_state!r}")
+    assert ep.confidence_mean is None, ep
+    assert ep.baseline is False, (
+        "baseline=True beside ep_state='absent' — prior-only claims a mean that "
+        "does not exist for a degenerate (0, 0) prior")
+
+
 # ── The property: an absent claim is not ORDERED as a 0.5 ──────────────────
 
 def test_absent_and_measured_symmetric_do_not_share_an_ordering_input(sdk):
