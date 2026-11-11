@@ -2411,8 +2411,12 @@ to answer.
   `if "pointKind" not in clean:` and `14227` is `clean["pointKind"] = ""`, the same three-line
   window §10.24 re-pointed to at its own head.
 - **The offset is the cite's, never the file's.** At this cite the movement is `+421`
-  (`13804` → `14225`). `#9752` moves the file by `+748`/`-27` (net `+721`) across 38 hunks, and the
-  hunks BELOW this anchor carry the rest — so `+721` applied here would land 300 lines late. This is
+  (`13804` → `14225`). `#9752` moves the file by `+760`/`-27` (net `+733`) across 38 hunks —
+  measured at the head the closing bullet below names, both sides of the range being
+  `git diff --numstat ea714fca1c 9ba2da35 -- tortoise/projection/__init__.py` (a total taken from
+  an intermediate commit of this branch reads `+748`/`-27`, which is where an earlier draft of this
+  line got it — hunk count right, total from a different head) — and the hunks BELOW this anchor
+  carry the rest, so `+733` applied here would land 312 lines late. This is
   §10.24's own rule applied to a third file, and the reason every number in this entry is a
   before/after at a line that was opened rather than a file total.
 - **Only this cite moved.** `#9752` touches `tortoise/projection/__init__.py` and no other file
@@ -2443,6 +2447,16 @@ to answer.
   entry measured — `:14225-14227` really was the window there. A later commit on this same branch
   (`93dafca241`) inserted 20 lines above the anchor and did not re-derive the cite, so the live
   numbers are §10.26's.
+- ⛔ **The `hosted_api.py` pivot is superseded too, and was missed by the first pass of this
+  marker.** `:23466` WAS `life = proj.g.query(LIFETIME_MEMORY_QUERY).result_set` at the `9ba2da35`
+  head this entry measured — the claim above is true of the head it names. On the merged tree it is
+  not: `main` moved `hosted_api.py` under `#11836`/`#11702` without re-pointing this bundle, and the
+  pivot is at `:23477` (`:23466` now holds nothing but a four-space-indented `)`). So the "still
+  resolve at this head" sentence above holds only for `:23466`'s own head, exactly as the
+  `:14225-14227` window does, and the number is HISTORICAL here — re-derive it by NAME
+  (`LIFETIME_MEMORY_QUERY`'s `proj.g.query(...)` read inside `_read_graph`), never by offset. The
+  `extractor_v2.py` group and `entities.py:1478` were re-opened on this merged tree and DO still
+  resolve; `hosted_api.py` is not in `_BUNDLE_SOURCES`, which is why no gate caught it.
 
 ### 10.26 — the same §548 cite re-pointed again, for this branch's own `+20` (2026-11-11, `#9752`)
 

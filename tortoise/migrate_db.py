@@ -89,6 +89,31 @@ def _count_source_events(source_db: str) -> int:
     return count if count is not None else 0
 
 
+# ── #11866 review P2-2: the shape-(a) sentence, written ONCE ───────────────
+# Shape (a) is this route's OWN override: the capture read the graph it is about
+# to wipe (the fresh `target`), so `rebuild_all` logged no ERROR at all and there
+# is no sidecar to blame. Replacing the shared cause with this one is only half
+# the message: the consequence is TRUE here and is the measured harm — a source
+# with `configured=True revision=2` and an EMPTY approved set migrates to
+# `configured=False revision=0`, so a pack an admin REMOVED is re-admitted with
+# its `revision` reset. Dropping `_consequence` wholesale to get rid of the
+# sidecar clause dropped that harm with it (review P2-2), so the cause and the
+# consequence travel in one string. Both of this route's printed surfaces
+# interpolate THIS string: a sentence copied at the second site is how the CLI
+# came to print the clause the warning had already deleted (#11866 P2-1).
+#: The label for the shape that has NO pre-preservation sidecar. `_label` from
+#: `pack_selection_shape` is `"pre-preservation/UNKNOWN"`, whose own consequence
+#: begins "the pre-wipe sidecar cannot say…" — naming the one artifact this
+#: shape does not have (#9752 review round 4).
+_EMPTY_CAPTURE_LABEL = (
+    "state UNKNOWN — the CAPTURE SOURCE, not a pre-preservation sidecar")
+
+_EMPTY_CAPTURE_CAUSE = (
+    "the capture read the graph it is about to wipe (the fresh `target`), so "
+    "the marker was NOT OBSERVED, not observed gone, and the graph may read as "
+    "UNCONFIGURED — this is not an observed loss")
+
+
 def _pack_selection_shape(counts: dict) -> tuple[str, str]:
     """Delegate to the ONE shape answer (`tortoise.projection`).
 
@@ -349,8 +374,9 @@ def migrate(force: bool = False) -> dict:
                     # print ("see the rebuild ERROR log") sent the operator to
                     # an empty line while naming the sidecar as the suspect. An
                     # operator who goes looking for a stale rescue file beside
-                    # the target finds nothing, because that is not the failure
-                    # and not the fix.
+                    # the target finds nothing — the sidecar is keyed to the
+                    # SOURCE's event log, never to the target's DB directory —
+                    # because there is no sidecar failure and no sidecar fix.
                     #
                     # ⛔ `_consequence` is DELIBERATELY not printed on this
                     # arm. It is the shared text for the callers that HAVE a
@@ -363,13 +389,19 @@ def migrate(force: bool = False) -> dict:
                     # again, in the sentence that was supposed to fix it. Shape
                     # (b) and the two recovery callers keep the shared text,
                     # where it is true.
+                    #
+                    # ⛔ What this arm DROPS is the sidecar clause, never the
+                    # consequence: `_EMPTY_CAPTURE_CAUSE` above carries the harm
+                    # that IS true here (the graph may read as UNCONFIGURED, so
+                    # a pack an admin removed is re-admitted). Deleting the
+                    # clause and the harm together is the regression this arm
+                    # already had once — do not re-derive "silence" from the
+                    # sentence above.
                     logger.warning(
                         "rebuild: the migrated graph's :PackSelection pack-set "
-                        "marker is NOT confirmed intact (state UNKNOWN — the "
-                        "CAPTURE SOURCE, not a pre-preservation sidecar) — the "
-                        "capture read the graph it is about to wipe (the fresh "
-                        "`target`), so the marker was NOT OBSERVED, not observed "
-                        "gone — this is not an observed loss (#9752/#11866)")
+                        "marker is NOT confirmed intact (%s) — %s "
+                        "(#9752/#11866)", _EMPTY_CAPTURE_LABEL,
+                        _EMPTY_CAPTURE_CAUSE)
                 else:
                     logger.warning(
                         "rebuild: the migrated graph's :PackSelection pack-set "
@@ -493,11 +525,8 @@ def main(argv: list[str] | None = None) -> int:
                             "pack_selection_state_unknown_inherited")):
                     logger.warning(
                         "migrated graph's :PackSelection pack-set marker is NOT "
-                        "confirmed intact (state UNKNOWN — the CAPTURE SOURCE, "
-                        "not a pre-preservation sidecar) — the capture read the "
-                        "graph it is about to wipe (the fresh `target`), so the "
-                        "marker was NOT OBSERVED, not observed gone — this is "
-                        "not an observed loss (#9752/#11866).")
+                        "confirmed intact (%s) — %s (#9752/#11866).",
+                        _EMPTY_CAPTURE_LABEL, _EMPTY_CAPTURE_CAUSE)
                 else:
                     logger.warning(
                         "migrated graph's :PackSelection pack-set marker is NOT "
