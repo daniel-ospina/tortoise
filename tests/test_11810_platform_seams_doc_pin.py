@@ -48,6 +48,12 @@ WHAT IT ASSERTS, in BOTH directions:
       them could be reverted to #11806's universal with the whole file GREEN
       (measured at r18 for four of them, and at r19 for the three §3.2
       methodology sentences r18 missed).
+  (4) the customer promise #11806 added and this PR retracted — *"can get BOTH
+      seams by checking a PROJECT-level `.cursor/hooks.json` into their
+      repository"* — does not come back, AND the record keeps the reason it is
+      false (the scripts register by absolute path and read `$HOME`). Pinned in
+      both directions because r19 measured it pinned in NEITHER: re-instating the
+      sentence kept all five tests GREEN.
 
 `_SHIPPED_FRAGMENT` is the single string both arms bind to, so the two cannot be
 corrected in opposite directions without this file noticing.
@@ -151,6 +157,10 @@ MUTATION (each verified RED at this head, restoring byte-identical):
                                                       → (3) RED   (r19 P2)
   * `scopes the exclusion to the` / `hosted VM` → `cloud agents`
                                                       → (3) RED   (r19 P2)
+  * restore #11806's "can get BOTH seams by checking a PROJECT-level
+    `.cursor/hooks.json` into their repository"        → (4) RED   (r19 P2)
+  * delete the record's "repo-committed `hooks.json` cannot …" clause
+                                                      → (4) RED   (r19 P2)
 """
 from __future__ import annotations
 
@@ -201,6 +211,33 @@ _RESTATEMENTS: tuple[tuple[str, "str | None"], ...] = (
     ('this row ("a hosted cloud agent")', 'this row ("a cloud agent")'),
     ("scopes the exclusion to the hosted vm", "scopes the exclusion to cloud agents"),
 )
+
+#: (4) — the customer promise THIS PR RETRACTED, and the correction that replaced it.
+#:
+#: #11806's correction log told a customer that *"an Enterprise self-hosted-pool
+#: user can get BOTH seams by checking a PROJECT-level `.cursor/hooks.json` into
+#: their repository"*. That is false about this code: the shipped scripts are
+#: registered by ABSOLUTE path out of `~/.cursor/hooks/`
+#: (`tortoise/hook_install.py`, `absolute_command=True`) and read their state from
+#: `$HOME` (`tortoise/cursor-hooks/session-start.sh`), so a repo-committed
+#: `hooks.json` cannot name another machine's home, the command does not resolve on
+#: the worker — and Cursor hooks fail OPEN, so the customer would believe they
+#: shipped a seam that never fires (the unshipped-seam claim #2122 forbids).
+#:
+#: Pinned in BOTH directions, because r19 measured the record pinned in NEITHER:
+#: restoring that exact sentence left all five tests GREEN — the absence arms banned
+#: only `_UNSCOPED_FRAGMENT` and the four `_RESTATEMENTS` sequences, and
+#: `test_capture_install.py` reads the message's stdout, never the record. That is
+#: item 4 of this PR one claim over: a retraction with no absence guard.
+#:
+#: ⚠️ Same over-broad trade as arm (1): an honest entry that quotes the retracted
+#: wording verbatim REDs. Reword such an entry instead of reproducing the phrase.
+_RETRACTED_PROMISE = "get both seams by checking a project level"
+
+#: …and the record must keep SAYING why the promise is false. Without the reason the
+#: retraction reads as an arbitrary exclusion and the next lane re-adds the promise
+#: as an attractive route — the drift this file exists to stop.
+_RETRACTION_CAUSE = "repo committed hooks json cannot"
 
 #: A tag's attributes AS MARKUP — `name=value`, quoted or bare. NOT `[^<>\n]*`:
 #: a bare word list is PROSE, and `if a<b and c>d then …` is an ordinary sentence,
@@ -437,6 +474,34 @@ def test_every_restatement_of_the_scoping_in_the_record_is_HOSTED_scoped():
                 f"the record states the UNSCOPED result again: {unscoped!r}")
 
 
+def test_the_retracted_project_level_promise_cannot_come_back():
+    """(4) — the false customer promise is gone, and the correction survives it.
+
+    Review r19 P2 measured this record pinned in NEITHER direction: re-instating
+    #11806's sentence — *"an Enterprise self-hosted-pool user can get BOTH seams by
+    checking a PROJECT-level `.cursor/hooks.json` into their repository"* — kept all
+    five tests GREEN. The absence arms cover `_UNSCOPED_FRAGMENT` and the four
+    `_RESTATEMENTS` word sequences; none of them matches this claim, and the
+    message arm reads stdout rather than the record. So the one statement in this
+    PR that was **wrong about the code** had no guard at all, which is precisely
+    the defect item 4 of this PR fixes one surface over.
+
+    Mutation: restore the retracted sentence anywhere in the record → the ABSENCE
+    leg REDs (measured at this head). Delete the "repo-committed `hooks.json`
+    cannot …" clause → the PRESENCE leg REDs (measured)."""
+    doc = _PLATFORM_SEAMS_DOC.read_text(encoding="utf-8")
+    assert _absent(_RETRACTED_PROMISE, doc), (
+        "the record promises the seams again via a repo-committed PROJECT-level "
+        "hooks.json — the shipped scripts register by ABSOLUTE path under "
+        "~/.cursor/hooks/ and read their state from $HOME, so that command does not "
+        "resolve on a worker and Cursor hooks fail OPEN: the user would believe "
+        "they shipped a seam that never fires")
+    assert _normalised(_RETRACTION_CAUSE) in _normalised(doc), (
+        "the record dropped WHY a repo-committed hooks.json cannot reach these "
+        "seams — without the reason the retraction reads as an arbitrary "
+        "exclusion, and the next lane re-adds the promise")
+
+
 def test_a_stray_angle_bracket_cannot_swallow_the_quoted_sentence():
     """The strip itself, pinned — review r10 measured this fail-open direction.
 
@@ -452,22 +517,28 @@ def test_a_stray_angle_bracket_cannot_swallow_the_quoted_sentence():
               '"a session running in a hosted cloud agent VM" and <b>bold</b>.')
     assert _normalised(_SHIPPED_FRAGMENT) in _normalised(sample), (
         "a stray `<` in ordinary prose must not eat the quoted sentence")
-    # …and the banned words must be SEEN when they sit inside the region a forged
-    # tag would delete. The mutant that bites here is the loose `<[^>]+>` (and the
-    # r10 permissive form whose attribute group was `<[^>]+>`-shaped): it runs from
-    # the `<` in `< 5` to the next `>`, so it eats the phrase. ⚠️ `_TAG_WITH_BARE_ATTRS`
-    # does NOT bite on this sample — measured (r15 P3 #5): its tag name must start
-    # with a LETTER, so `< 5` cannot open a match, and naming it as a biter here was
-    # itself an over-claim (an assert credited to a mutant that cannot redden it).
-    prose_forgery = ('a hook count of < 5 is suspect — "a session running in a cloud agent VM" '
-                     'would be banned. §3 quotes '
-                     '"a session running in a hosted cloud agent VM" and <b>bold</b>.')
-    assert not _absent(_UNSCOPED_FRAGMENT, prose_forgery), (
-        "a forged tag must not swallow the banned phrase out of the absence leg")
-    # …and the PRESENCE leg reads ONE strip (`_TAG`), so the same forgery must not
-    # delete the quote there either. This is what makes `_TAG`'s ASSIGNED-attribute
-    # narrowing load-bearing rather than decorative: the absence union survives the
-    # permissive form, this assert does not.
+    # ⚠️ `_TAG_WITH_BARE_ATTRS` does NOT bite on this sample — measured (r15 P3 #5):
+    # its tag name must start with a LETTER, so `< 5` cannot open a match. That is
+    # why `_TAG`'s ASSIGNED-attribute narrowing is the presence arm and the
+    # permissive form is never used as one.
+    #
+    # ⛔ A second assert lived here until r19 and is REMOVED, not reworded. It read
+    # `not _absent(_UNSCOPED_FRAGMENT, prose_forgery)` on a sample that spelled the
+    # banned phrase out, which is unfalsifiable BY CONSTRUCTION: `_absent` is
+    # `not any(needle in rendering …)` and `_renderings` always includes the
+    # no-strip reading, so a fragment that literally appears in the text is always
+    # seen. Measured (r19 P2): GREEN under the loose `<[^>]+>` mutant it was
+    # credited to, and GREEN even with the no-strip reading dropped — an assert no
+    # mutation can redden, credited as coverage (the r15 P3 #5 class again). The
+    # property it named is carried by the attribute-value sample in
+    # `test_no_single_tag_strip_can_hide_the_unscoped_phrase`, which exercises a
+    # genuine single-reading blind spot (r15 P3 #6 precedent: remove, do not
+    # reword, a sample no reading demonstrates).
+    #
+    # …and the PRESENCE leg reads ONE strip (`_TAG`), so an `a<b … c>d` forgery must
+    # not delete the quote there either. This is what makes `_TAG`'s
+    # ASSIGNED-attribute narrowing load-bearing rather than decorative: the absence
+    # union survives the permissive form, this assert does not.
     forged_around_the_quote = ('if a<b and §3 says "a session running in a hosted cloud agent VM" '
                                'c>d, the quote must survive.')
     assert _normalised(_SHIPPED_FRAGMENT) in _normalised(forged_around_the_quote), (
