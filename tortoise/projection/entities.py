@@ -2540,6 +2540,22 @@ class _EntityHandlers:
         # does not log a FALSE `"Point prop %r is not declared"` drift warning
         # on every rebuild.
         "baseline_system_default",
+        # #11822: the JUDGEMENT claim's own properties — the comparator's inputs
+        # and the state they produced, carried by a `statement` Point with
+        # `claimClass: 'derived'` (`tortoise/goal_judgement.py`).
+        # `judgementState` / `judgementReason` are what `latest_judgement`
+        # reads to find the LIVE judgement after a flip (the superseded one is
+        # excluded by `status`), and `goalId` / `indicatorId` / `targetId` are
+        # the scope it reads them by — so without these declarations a rebuild
+        # would log a FALSE `"Point prop %r is not declared"` drift warning for
+        # the whole judgement contract, on every judged goal, and the scope the
+        # read depends on would look undeclared rather than persisted. The
+        # remaining three (`comparator`/`threshold`/`dwell`) restate the target
+        # the judgement was taken against, so a superseded judgement still says
+        # what bar it was measured against after the target is revised.
+        "judgementState", "judgementReason", "comparator", "threshold", "dwell",
+        "goalId", "indicatorId", "targetId", "readingId", "readingValue",
+        "evaluatedAt",
     }) | frozenset(MONEY_VALUE_FIELDS)
     # #2782 / WS-C design (`docs/plans/2026-09-10-ws-c-numeric-normalization.md`)
     # §7.1, §7.2 step 2: a money value is a FLAT structural field
