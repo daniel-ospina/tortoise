@@ -190,8 +190,8 @@ SPAN_TRAILING_RE = re.compile(r"[\s.,;:)\]]+$")
 #: program prefix (the `uv run`-prefixed form IS excluded). None is on this page, and
 #: the earlier delimiter sets refused 7, then 600+; each figure was re-measured rather
 #: than carried forward, which is why this line states the current one.
-#: THE DELIMITER IS WHITESPACE ONLY, and every wider version was measured against a
-#: false accusation over `docs/**` before it was dropped:
+#: THE DELIMITER IS WHITESPACE OR A STRAY `|`, and every wider version was measured
+#: against a false accusation over `docs/**` before it was dropped:
 #:   * `_` parsed the identifier `tests/test_findings_ledger_2852.py` as `path _ 2852`;
 #:   * `-` collided with a dated slug (`2026-10-15-7879-postgres-…`) and a commit ref;
 #:   * `/` parsed plain paths as citations — `docs/evidence/11083/README.md`,
@@ -294,7 +294,7 @@ VOCAB_ROW_RE = re.compile(r"^\|\s*\*\*(?P<token>[A-Z][A-Z-]*)\*\*\s*\|")
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-MIN_SELF_TEST_MUTATIONS = 29
+MIN_SELF_TEST_MUTATIONS = 31
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -854,20 +854,26 @@ def check_citation_shapes(text: str) -> list[str]:
         body = SPAN_TRAILING_RE.sub("", match.group(0)[1:-1])
         # The GitHub permalink spelling FIRST: it is the likeliest real-world form and
         # the one shape nothing else in this module could see (measured, #11952 P1).
-        permalink = CITATION_HASH_LINE_RE.search(body)
-        if (
-            permalink
-            and not COMMAND_RE.match(match.group(0))
-            # A `~`-rooted path is §8's remaining carve-out: the resolver recognises it
-            # and COUNTS it (`exempted`) rather than resolving it, because it is a dated
-            # reading of something outside this repository. Refusing its permalink
-            # spelling red the required `docs` job over a citation §8 declares exempt
-            # (found by review, measured) — so the carve-out covers both spellings.
-            and not permalink.group("path").startswith("~")
-        ):
+        #
+        # ⛔ EVERY match in the span, not just the first. The `~` carve-out below is
+        # per-CITATION, and testing only `search()`'s first match made one exempt
+        # `~`-rooted permalink certify a whole span: measured, the span below went
+        # REFUSED → CLEAN, an out-of-range permalink riding behind an exempt one —
+        # a red→green in exactly the class this arm exists for (found by review).
+        permalinks = [
+            p
+            for p in CITATION_HASH_LINE_RE.finditer(body)
+            # A `~`-rooted path is §8's remaining carve-out: a dated reading of
+            # something outside this repository. Refusing its permalink spelling red
+            # the required `docs` job over a citation §8 declares exempt (found by
+            # review, measured) — so the carve-out covers both spellings, and the
+            # deferral is per-citation, never for whatever else shares the span.
+            if not p.group("path").startswith("~")
+        ]
+        if permalinks and not COMMAND_RE.match(match.group(0)):
             problems.append(
                 f"`{match.group(0)[1:-1]}` is not a recognised citation — it carries "
-                f"{permalink.group(0)!r}, the GitHub permalink spelling, which the "
+                f"{permalinks[0].group(0)!r}, the GitHub permalink spelling, which the "
                 "resolver does not read; §8 claims every `path:line` here is checked, "
                 "so an unreadable shape must be refused rather than skipped"
             )
@@ -1674,6 +1680,30 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         "a citation written as a GitHub permalink",
         lambda t: t.replace(
             "`tortoise/pipeline.py:16`", "`tortoise/pipeline.py#L999999`", 1
+        ),
+        "not a recognised citation",
+    ),
+    (
+        # The pipe delimiter's pin. §8 names three measured spellings, so the
+        # self-test — which §8 calls the proof that "those rules still fire" — has to
+        # fire for each one: deleting `\s*\|\s*` from the shape arm left `--self-test`
+        # PASS while only the pytest boundary test noticed (found by review).
+        "a citation separated from its line by a pipe",
+        lambda t: t.replace(
+            "`tortoise/pipeline.py:16`", "`tortoise/pipeline.py|999999`", 1
+        ),
+        "not a recognised citation",
+    ),
+    (
+        # The `~` carve-out's pin, in the shape that FAILED: the deferral was once
+        # span-scoped, so an exempt `~`-rooted permalink certified everything beside it
+        # and an out-of-range permalink went REFUSED → CLEAN (found by review,
+        # measured). This arm fails if the deferral ever goes back to per-span.
+        "an exempt permalink hiding a refused one in the same span",
+        lambda t: t.replace(
+            "`tortoise/pipeline.py:16`",
+            "`~/.swarm/x.md#L1 and tortoise/pipeline.py#L999999`",
+            1,
         ),
         "not a recognised citation",
     ),

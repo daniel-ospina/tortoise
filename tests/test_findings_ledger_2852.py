@@ -201,8 +201,8 @@ def test_mutation_population_is_pinned():
         "the registered population must EQUAL the floor it declares — a `>=` floor "
         "cannot see a one-arm shrink"
     )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 29, (
-        "this line RECORDS the population (29 arms); removing one means editing the "
+    assert flc.MIN_SELF_TEST_MUTATIONS == 31, (
+        "this line RECORDS the population (31 arms); removing one means editing the "
         "floor here too, which is the second place a shrink has to touch"
     )
 
