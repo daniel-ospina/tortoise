@@ -58,10 +58,6 @@ def _propagate_shock_reference_sites() -> dict[str, set[int]]:
             if isinstance(node, ast.ImportFrom):
                 aliases.update(a.asname or a.name for a in node.names
                                if a.name == "propagate_shock")
-            elif isinstance(node, ast.Import):
-                aliases.update(
-                    a.asname or a.name.split(".")[0] for a in node.names
-                    if a.name.split(".")[-1] == "propagation")
         for node in ast.walk(tree):
             is_shock_attr = isinstance(node, ast.Attribute) and node.attr == "propagate_shock"
             is_alias_name = isinstance(node, ast.Name) and node.id in aliases
