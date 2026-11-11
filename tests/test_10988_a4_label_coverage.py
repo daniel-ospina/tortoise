@@ -229,7 +229,8 @@ def test_the_declared_vocabulary_includes_the_kinds_the_SDK_itself_registers():
 def test_the_three_layers_are_reported_SEPARATELY_and_never_blended():
     """FAILS IF `_a4_label_coverage` collapses things/events/claims into one percentage.
 
-    A single blended rate is the failure mode `04-plan.md` §2 W2c lists first: a failing thing or
+    A single blended rate is the failure mode `04-plan.md` §2 W2c lists **second** (the first is the
+    graph head, which this artifact §5 says the run cannot supply): a failing thing or
     event layer would hide inside a green claim layer. The three populations below are deliberately
     DIFFERENT sizes, so any union changes at least one of the three `coverage` values.
     """
@@ -507,7 +508,8 @@ def test_the_per_writer_split_attributes_by_REPRODUCTION_and_says_it_is_not_a_st
     persisted property and none is a writer stamp), so the split is a REPRODUCTION test: the rule
     classifier (`extractor.py::_classify_point_kind`) re-derived over each node's content. And
     `extractor_v2` cannot be the source of a typed claim at all — its write gate repairs every
-    non-master point kind to `statement` (`extractor_v2.py:10413-10420`, `:11044`).
+    non-master point kind to `statement` (`extractor_v2.py:10419-10422`, the non-master arm;
+    `:10413` is the EMPTY-kind default and repairs nothing else).
     """
     probe = _probe()
     projection = _FakeProjection({
@@ -517,15 +519,38 @@ def test_the_per_writer_split_attributes_by_REPRODUCTION_and_says_it_is_not_a_st
             ["We decided to adopt option A.", "decision"],
             # stored `plan`, but the classifier derives `statement` from this content -> supplied
             ["The cat sat on the mat.", "plan"],
+            # the classifier RAISES on this one -> the NAMED `unattributed` bucket
+            ["SENTINEL content the classifier cannot read", "decision"],
         ],
     })
-    split = probe._a4_writer_attribution(projection)
-    assert split["typed_claims"] == 2
+    # ⛔ The `except` arm is EXERCISED, not merely present: with every fixture row attributed,
+    # `"attributed": total` passed this arm (#11837 review round 5, P2), so a census claiming
+    # EVERYTHING was attributed could not be caught — the honesty cell was unfalsifiable. The
+    # classifier is imported INSIDE the probe function, so the patch point is the SOURCE module.
+    import tortoise.extractor as _extractor
+    real_classify = _extractor._classify_point_kind
+
+    def _sometimes_unreadable(content):
+        if "SENTINEL" in content:
+            raise RuntimeError("the classifier cannot read this content")
+        return real_classify(content)
+
+    _extractor._classify_point_kind = _sometimes_unreadable
+    try:
+        split = probe._a4_writer_attribution(projection)
+    finally:
+        _extractor._classify_point_kind = real_classify
+    assert split["typed_claims"] == 3
     assert split["by_writer"]["classifier-reproduces"]["total"] == 1
     assert split["by_writer"]["caller-supplied"]["total"] == 1
     assert split["by_writer"]["classifier-reproduces"]["by_kind"] == {"decision": 1}
     assert split["by_writer"]["caller-supplied"]["by_kind"] == {"plan": 1}
-    assert split["attributed"] == 2
+    assert split["by_writer"]["unattributed"]["by_kind"] == {"decision": 1}, (
+        "an unreadable row must land in the NAMED `unattributed` bucket, not vanish or be guessed")
+    assert split["attributed"] == 2, (
+        f"`attributed` must EXCLUDE the unattributed bucket, not restate typed_claims "
+        f"({split['typed_claims']})")
+    assert split["attributed"] < split["typed_claims"]
     assert str(split["provenance"]).startswith("UNMEASURED("), (
         "attribution must not be presented as a stored fact — no writer stamp exists")
     assert "extractor_v2" in split["v2_lane_excluded_by_construction"]
@@ -607,11 +632,15 @@ def test_the_rendered_block_emits_EVERY_layer_with_its_own_denominator():
         assert f"population={want_pop} labelled={want_lab} " in line[0], (
             f"the {layer} line does not carry THAT layer's numbers — a renderer emitting one "
             f"layer under three keys reads as three measured layers:\n{line[0]}")
+        # ⛔ A LEADING SPACE on every name: `unlabelled_undeclared=` is printed EARLIER on the same
+        # line, so a bare `undeclared=` substring is satisfied by it and the renderer could drop
+        # the key that reports the UNDECLARED kinds with this loop still GREEN (measured, #11837
+        # review round 5, P2).
         for part in ("population", "labelled", "unlabelled", "unlabelled_null",
                      "unlabelled_undeclared", "coverage", "non_vacuity",
                      "declared_present", "declared_absent", "expected_absent",
                      "undeclared", "labelled_by_declared_kind"):
-            assert f"{part}=" in line[0], (layer, part, line[0])
+            assert f" {part}=" in line[0], (layer, part, line[0])
         # The rendered halves are NUMBERS that add up to the rendered total — a placeholder
         # (`unlabelled_null=None`) or a re-worded key is not the decomposition the epic accepts.
         fields = dict(part.split("=", 1) for part in line[0].split() if "=" in part)

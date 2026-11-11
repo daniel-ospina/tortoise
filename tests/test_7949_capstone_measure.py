@@ -4303,7 +4303,7 @@ _BUNDLE_RULES = (
     # widening the claim.
     ("the v2 write gate's statement repair (A4's attribution)", "extractor_v2",
      ("write gate repairs every point kind",),
-     ('pkind = str(p.get("pointKind", "")).strip() or "statement"',), "line", None),
+     ('elif pkind.lower() not in {k.lower() for k in master["points"]}:',), "line", None),
     # The S2.1 FINDING in `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`: the
     # call that hands extraction the raw alongside the story. A RANGE, because
     # the claim is the ARGUMENTS — `edus=edus` sits one line below the call and
