@@ -2378,7 +2378,12 @@ class TortoiseEP:
         # it). Only the declared-baseline state is removed; ``unmeasured``
         # keeps its deliberate listing. See ``sdk._review_prune`` for the
         # sibling scan that ALSO requires measurement.
-        from .search_engine import ep_measured_cypher, ep_prior_only_cypher
+        from .search_engine import (
+            beta_variance_cypher,  # #11702: the ONE width formula
+            ep_measured_cypher,
+            ep_prior_only_cypher,
+            ep_variance_admissible_cypher,  # #11702: the variance-SCAN rule
+        )
         # #7927: ``n`` is the SUBJECT of this scan — contested claims are
         # enumerated GRAPH-WIDE (no id anchor to index), so the labels come
         # from the shared ``live.EPISTEMIC_LABELS`` declaration and one
@@ -2451,6 +2456,18 @@ class TortoiseEP:
                 "n.op_type IS NULL",
                 _terminal_excluded("n.status"),
                 f"NOT {ep_prior_only_cypher('n')}",
+                # #11702 cycle 13: the WIDTH rule, not just "a pair exists".
+                # The operands are coalesced to 1.0 below so a variance can be
+                # computed at all, and that default FABRICATES a width for a
+                # half pair — measured: an α-only claim (absent everywhere
+                # else) listed here at `variance 0.0889, contested True`
+                # while `annotate_ep_batch`, the rankers and `why` said
+                # `absent / 0.0 / False`. A mirror-only claim is the mirror
+                # case (no operands, so the defaults also answer the Beta(1,1)
+                # MAXIMUM 1/12 and it sorts to the top of an "how uncertain
+                # are we" report). The composite also refuses a negative
+                # operand and the zero-total pair.
+                ep_variance_admissible_cypher("n"),
             ]
             if _label != EPISTEMIC_LABELS[0]:
                 # The canonical measurement predicate (#3276), not a re-spelling:
@@ -2463,9 +2480,32 @@ class TortoiseEP:
             rows.extend(self.g.query(
                 f"MATCH (n:{_label}) "
                 "WHERE " + " AND ".join(conds) + " "
+                # ⛔ #11702 cycle 27: the 1.0 defaults are why a claim with NO
+                # operands at all can be listed at the Beta(1,1) MAXIMUM width
+                # 1/12 — that listing is the #169 decision and is deliberate —
+                # but the ROW than carries `alpha: 1.0, beta: 1.0` as if they
+                # were STORED. They are not: they are the uniform prior the
+                # claim is measured AGAINST, never `variance: 0.083333` beside
+                # `annotate_ep_batch`'s `absent / mean None / variance 0.0` for
+                # the same node. So read the returned `alpha`/`beta` as the
+                # prior this scan compares to, never as a persisted pair — the
+                # two surfaces agree about the claims that HAVE a width, and
+                # this arm is the recorded exception (see the note below).
                 "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
                 "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
-                "WITH n, a, b, (a*b)/((a+b)*(a+b)*(a+b+1)) AS v "
+                # #11702 cycle 11: `toFloat` on every operand. FalkorDB's
+                # `/` is INTEGER division on integer operands, and α/β are
+                # stored as ints when written as ints (`update_point(2, 2)`) —
+                # so a genuinely contested integer-pair claim computed v = 0,
+                # failed `v > $t`, and was omitted here while
+                # `annotate_ep_batch`, `why` and all three rankers reported
+                # variance 0.05 / contested True for the same claim.
+                # #11702 cycle 15: the WIDTH comes from the shared twin — it
+                # carries the `toFloat` guard cycle 11 added here (an int-stored
+                # (2, 2) computed v = 0 and the claim was omitted) AND the
+                # representability band, without which a large pair answers NaN
+                # and `v > $t` silently drops it.
+                f"WITH n, a, b, {beta_variance_cypher('a', 'b')} AS v "
                 # Entity labels store their text in name/title — a Point's
                 # ``content``-only read returned None for them.
                 "WHERE v > $t "
@@ -2792,7 +2832,15 @@ class TortoiseEP:
                 "    n.posterior_alpha = CASE WHEN coalesce(n.baseline_set,false) "
                 "                           THEN n.posterior_alpha ELSE null END, "
                 "    n.posterior_beta  = CASE WHEN coalesce(n.baseline_set,false) "
-                "                           THEN n.posterior_beta  ELSE null END"
+                "                           THEN n.posterior_beta  ELSE null END, "
+                # #11702: clear the `n.confidence` flush-mirror with the
+                # posterior it summarises. It is the SERVED belief mean (#2206)
+                # and every read/rank surface prefers it, so leaving it behind
+                # made a claim report its OLD posterior mean beside its NEW
+                # prior — two numbers for one belief on one response. A later
+                # flush writes the real value; a baseline'd claim keeps both.
+                "    n.confidence = CASE WHEN coalesce(n.baseline_set,false) "
+                "                       THEN n.confidence ELSE null END"
             ):
                 self._hop_query(
                     _q, {"params": params_list}, hop=None,
@@ -2855,8 +2903,18 @@ class TortoiseEP:
                 # Sorted, so the journal order is a property of the id set
                 # rather than of the engine's row order (every record here is
                 # the same posterior clear, so only determinism is at stake).
+                #
+                # ⛔ #11702: `confidence=None` MUST ride too. The fold is
+                # presence-conditional — only the keys a record carries are
+                # written — so a record with just the two posterior keys clears
+                # the posterior and LEAVES the `n.confidence` mirror the
+                # statement above just nulled. Live: the claim reads
+                # `absent`/None. Rebuilt from the journal: `baseline`/0.9 — a
+                # belief the live graph no longer has, resurrected by recovery.
+                # The emit is already filtered to non-baseline claims, which is
+                # exactly the predicate the SET uses for the mirror.
                 for _cid in sorted(seen.values(), key=str):
-                    self._emit("ConfidenceChanged", id=_cid,
+                    self._emit("ConfidenceChanged", id=_cid, confidence=None,
                                posterior_alpha=None, posterior_beta=None)
 
         # #395 (delta C): stash the run set BEFORE the early returns — the

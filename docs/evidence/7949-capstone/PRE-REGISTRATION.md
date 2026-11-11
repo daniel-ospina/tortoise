@@ -1460,7 +1460,7 @@ place a machine reads it.
   at the pre-registration commit; a run log may not declare it.
 - **Why it is not a relaxation**: `S2.3` structurally cannot run on a corpus whose S2 map types every
   candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:11803-11825`) collects only
-  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:14205`, `:14358`).
+  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:14222`, `:14375`).
   The old rule therefore could not be satisfied by **any** legitimate run of the registered corpus,
   so the gate could not return a verdict at all (§11.2's four ordered refusals). Every one of the
   eight still has to be accounted for, and an idle claim needs the run's own four facts — flag ON,

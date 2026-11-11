@@ -9,6 +9,9 @@ import logging
 import math
 import os
 import re
+import struct
+from decimal import Decimal
+from fractions import Fraction
 import threading
 import time
 from collections import Counter
@@ -278,7 +281,10 @@ class SearchScores:
 # ep_alpha that is NOT a #2199 baseline (legacy EP-prior back-compat).
 # PRIOR-ONLY (has_ep=False, baseline=True): a declared baseline prior — the
 # value is the prior mean, explicitly NOT a measured confidence. UNMEASURED
-# (has_ep=False, baseline=False): neutral Beta(1,1) mean 0.5.
+# (has_ep=False, baseline=False): NO persisted belief at all — `ep_state:
+# "absent"` and `confidence_mean: None`, never a number (#11702: the neutral
+# Beta(1,1) mean 0.5 this used to answer is indistinguishable from a measured
+# symmetric coin flip; see SEARCH-ARCHITECTURE.md §6.3).
 
 def ep_measured_cypher(alias: str) -> str:
     """Cypher boolean: EP has MEASURED the :Point bound to ``alias`` (#3276)."""
@@ -298,7 +304,8 @@ def ep_prior_only_cypher(alias: str) -> str:
 
     The third predicate of the three-state vocabulary: a declared #2199
     baseline with NO EP measurement. NOT the same as "unmeasured" — an
-    unmeasured claim carries no persisted prior at all (Beta(1,1) neutral),
+    unmeasured claim carries no persisted prior at all (and since #11702 its
+    confidence_mean is `None` + `ep_state: "absent"`, not a neutral 0.5),
     while a prior-only claim's confidence_mean IS the declared PRIOR mean.
 
     Kept textually in step with the Python twin: for every combination of
@@ -325,6 +332,865 @@ def ep_measurement_state(*, posterior_alpha, ep_alpha,
     return "baseline" if baseline_set else "unmeasured"
 
 
+# ── #11702: ABSENT belief state has a NAME, and NO value ────────────────────
+# `ep_measurement_state` answers the internal question (did EP measure this?).
+# A read/rank surface needs a different, blunter answer: *is there a persisted
+# belief here at all?* — because for a claim that has none there is no number
+# to report, and inventing one is the defect #11702 names. The recorded rule is
+# `docs/architecture/SEARCH-ARCHITECTURE.md` §6.3: **absent state is `null`
+# with `ep_state: "absent"`, never 0.5 — a value the ranker refuses to order
+# on.**
+#
+# ONE token differs from the internal vocabulary, deliberately and in exactly
+# one place: the decision names the state `absent` (the word the rule uses),
+# while the internal predicate calls it `unmeasured`. They are the same state;
+# this mapping is the only place the two spellings meet, so they cannot drift
+# into two vocabularies.
+EP_STATE_MEASURED = "measured"
+EP_STATE_BASELINE = "baseline"
+EP_STATE_ABSENT = "absent"
+
+
+#: FalkorDB's `toFloat` REFUSES a stored Boolean ("Type mismatch: expected
+#: String, Integer, Float, or Null but was Boolean", measured) and takes the
+#: whole QUERY down with it, so a single `update_point(confidence=True)` — which
+#: the API accepts — would break every belief read on the batch. `CASE` is
+#: evaluated EAGERLY in FalkorDB (measured: `CASE WHEN toString(x) IN ['true',
+#: 'false'] THEN null ELSE toFloat(x) END` still raises on a bool), so the
+#: guard has to sit INSIDE the coercion's argument: the inner `CASE` maps a
+#: Boolean to null and everything else to itself, and `toFloat(null)` is null.
+#: The `toString` test is the only type discriminator available (a numeric
+#: comparison against a Boolean is NULL, and against a numeric STRING also
+#: NULL, so comparison cannot tell them apart — but `toFloat` works on the
+#: string and raises on the bool).
+#:
+#: ⛔ `toFloat` and `toString` are the RAISING spellings, and a stored LIST is
+#: the second type they refuse ("Type mismatch: expected String, Integer,
+#: Float, or Null but was List", measured). A pre-guard node carrying
+#: `[0.7]` therefore took the presence predicate down — and because every
+#: belief expression in this module goes through THIS template, one such row
+#: blanked a whole batch: measured at `be229efdb7df`, a healthy `(3, 1)` claim
+#: beside it read `absent` on `StateRanker` (`StateRanker signal fetch failed
+#: (point): Type mismatch: …`), which is the batch-scope conflation #11702
+#: removes. The `*OrNull` twins answer NULL for every type these two refuse
+#: (measured: `toFloatOrNull(<List>)` → null, `toStringOrNull(<List>)` → null)
+#: and are identical for every type they accept, so the coercion is TOTAL.
+NUMERIC_OPERAND_CYPHER_TEMPLATE = (
+    "toFloatOrNull(CASE WHEN toStringOrNull({operand}) IN ['true', 'false'] "
+    "THEN null ELSE {operand} END)")
+
+#: The decimal grammar BOTH twins accept for a STRING operand. Python's
+#: ``float()`` and FalkorDB's ``toFloat`` do not parse the same language, and the
+#: differences are not cosmetic:
+#:
+#: * ``float("0.7 ")`` is 0.7 and ``toFloat("0.7 ")`` is null — a trailing space
+#:   (a value copied out of a form or CSV) was a measured 0.7 in the `ep` block
+#:   and `absent` in every ranker beside it;
+#: * ``toFloat("Infinity")`` is ``inf`` while `numeric_operand` answers ``None``
+#:   for it (the finiteness guard) — that spelling put a fabricated
+#:   maximum-certainty 1.0 on `graph_ranking` for a claim with no readable
+#:   belief, and `0.0` from `recall_ranking`, beside `absent` in the `ep` block:
+#:   three answers.
+#:
+#: So the string spelling is pinned to a DECIMAL literal or a HEX float, the
+#: intersection of the two GRAMMARS (`_FLOAT_LITERAL` / `_HEX_FLOAT_LITERAL`,
+#: the latter read by ``float.fromhex`` — the parser the store's own
+#: ``toFloat("0x1p4") == 16.0`` shares) — and, in `numeric_operand`, of the two
+#: RANGES, which apply to BOTH spellings alike. A hex literal is therefore a
+#: number to both twins; a stored belief MIRROR may still refuse one, but for
+#: the other reason (`belief_mirror`'s probability band, not the grammar).
+#: `toFloat` parses a string into a **float32** (measured 4.20.6:
+#: `toFloat("0.7")` is `0.699999988079071`) and answers null outside the normal
+#: float32 range, so magnitude is part of the same pin: `"1e308"` and `"1e39"`
+#: are null there, and `"1e-40"` is null there too. A string outside either is
+#: ABSENT on both twins.
+#: Measured `toFloat` grammar: leading whitespace is skipped, trailing is not
+#: (`" 0.7"` parses, `"0.7 "` does not). Hex floats (`"0x1p4"` → 16.0) and the
+#: `Infinity`/`nan` spellings parse there too; the hex float is READ by both
+#: twins (`_HEX_FLOAT_LITERAL` + `float.fromhex`, under the same float32 window
+#: as a decimal), the second is nulled by the finiteness guard in
+#: `numeric_operand_cypher`.
+#: The float32 NORMAL range a STRING operand must land in to be readable in
+#: Cypher: `toFloat`/`toFloatOrNull` parse a string as a float32 and answer null
+#: rather than a number when the correctly-rounded result would not be a normal
+#: float32 — that is what `strtof` does, and `ERANGE` is what makes it null.
+#: Measured on 4.20.6, both twins side by side:
+#:
+#: * over range → null: `"3.4028236e38"`, `"1e39"`, `"1e308"`, `"1e309"`,
+#:   `"1e400"`;
+#: * in range → value: `"3.4028235e38"` (max), and `"3.40282355e38"`, which
+#:   ROUNDS DOWN to max — hence `struct` packing in `_string_operand` rather
+#:   than a plain double comparison, which would call that literal absent here
+#:   and readable there;
+#: * under range → null: `"1e-38"`, `"1e-40"`, `"1e-320"`, `"1.4e-45"`, and a
+#:   SUBNORMAL's 16-digit `repr()` (`"1.401298464324817e-45"`) — the edge is the
+#:   LITERAL's exactness, not the magnitude: that same value written out to all
+#:   149 digits READS, because then the text names 2**-149 exactly. See
+#:   `_string_operand` and `_F32_UNDERFLOW_READ_FLOOR`;
+#: * in range → value: `"1.1754944e-38"` (min normal), `"1.2e-38"`, `"1e-37"`,
+#:   and — measured — `"1.175494316e-38"`, which is BELOW min-normal and still
+#:   reads; the read band ends a quarter of a subnormal ULP below min-normal.
+_FLOAT32_MIN_NORMAL = 1.1754943508222875e-38
+_FLOAT32_MAX = 3.4028234663852886e38
+#: The float32 OVERFLOW rounding boundary: the exact midpoint between
+#: ``_FLOAT32_MAX`` and ``2**128``. `strtof` reads a literal STRICTLY below it
+#: (rounding DOWN to max) and answers null at or above it (the rounding goes to
+#: ``2**128``, which is not a float32). Measured on FalkorDB 4.20.6:
+#: ``'0x1.ffffffp127'`` IS this midpoint and is null, ``'0x1.fffffefffffffp127'``
+#: is one float32 ULP below and reads as max, and the DECIMAL
+#: ``'3.4028235677973366e38'`` reads even though its nearest DOUBLE is exactly on
+#: the midpoint — which is why this edge cannot be decided from the double.
+_FLOAT32_OVERFLOW_MIDPOINT = 2 ** 128 - 2 ** 103
+#: The cheap CEILING that keeps the exact-literal parse bounded. A literal whose
+#: DOUBLE is above ``2**128`` cannot be below the overflow midpoint (a double ULP
+#: at this magnitude is ~2**75, far smaller than the distance to the boundary), so
+#: the parse is skipped there and the answer is `None` — the same answer, without
+#: building `10**exp`. Without this guard the parse is reachable with an UNBOUNDED
+#: exponent: `numeric_operand("1e10000000")` — a stored string operand, which is
+#: exactly the population this coercion exists for — took 7.5 s (measured) and
+#: `"1e100000000"` grew superlinearly, while the store answers `null` for both and
+#: the pre-overflow-branch code answered `None` in microseconds. The hex path has
+#: the same bound as `_EXACT_FRACTION_MAX_EXP`; this is the decimal one.
+_FLOAT32_OVERFLOW_CEILING = 2.0 ** 128
+#: The LOWEST literal magnitude the store still READS although it is not a
+#: float32: one quarter of a subnormal ULP (2**-149) below min-normal. The read
+#: band is everything from here upward — at or above this value an inexact
+#: literal rounds UP to min-normal, so it is not a subnormal after rounding and
+#: `strtof` does not set ERANGE. Below it the rounded result IS subnormal and an
+#: inexact literal answers null. Pinned by measurement, not derived — see
+#: `_string_operand`'s table: at exactly this offset (`0x1ffffffp-151`) the store
+#: reads, and half a subnormal ULP below min-normal (`0x1fffffep-151`,
+#: `0xffffffp-150`) it answers null.
+_F32_UNDERFLOW_READ_FLOOR = _FLOAT32_MIN_NORMAL - 2.0 ** -151
+#: A literal whose MANTISSA is all zeros — the only kind that reads as a zero
+#: NUMBER. `"1e-400"` is not one: `float()` makes it zero because it underflowed,
+#: and `toFloat` answers null for it.
+#: A HEX float, the other spelling the store parses (`toFloat("0x1p4")` is 16.0,
+#: measured) and the one `float.fromhex` shares with it — including the `0x`
+#: prefix, which is what keeps `"abc"` (a valid hex DIGIT string, 2748.0 to
+#: `fromhex`) out: the store answers null for it, so Python must too. Trailing
+#: whitespace is refused by both (`"0x1p4 "` is null there).
+_HEX_FLOAT_LITERAL = re.compile(
+    r"\s*[+-]?0[xX][0-9a-fA-F]*(?:\.[0-9a-fA-F]*)?(?:[pP][+-]?[0-9]+)?\Z",
+    re.ASCII)
+#: A hex literal whose MANTISSA is all zeros — the only kind that reads as a zero
+#: number (`"0x1p-9999"` underflows to zero in Python and is null to the store).
+_ZERO_HEX_LITERAL = re.compile(
+    r"\s*[+-]?0[xX]0*(?:\.[0]*)?(?:[pP][+-]?[0-9]+)?\Z", re.ASCII)
+_ZERO_LITERAL = re.compile(r"\s*[+-]?0*(?:\.0*)?(?:[eE][+-]?[0-9]+)?\Z",
+                           re.ASCII)
+#: `re.ASCII` is load-bearing on both patterns: without it `\s` matches Unicode
+#: spaces that `float()` skips and `strtof` does not — `"\u00a00.7"` (a value
+#: pasted out of a spreadsheet) was 0.7 in Python and null to the store, the same
+#: twin split this grammar exists to prevent — and `[0-9]`/`\d` stay Latin,
+#: which is what the store parses.
+_FLOAT_LITERAL = re.compile(r"\s*[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)"
+                            r"(?:[eE][+-]?[0-9]+)?\Z", re.ASCII)
+
+
+def numeric_operand_cypher(operand: str) -> str:
+    """Cypher: the TOTAL numeric coercion for one RAW column expression.
+
+    #11702 cycle 16. `ep_has_belief_cypher` compared the raw coalesced operand
+    to `0` while `belief_mean_cypher` coerced with `toFloat`, so a
+    NUMERIC-STRING operand made the presence conjunction NULL and the claim read
+    `absent` in Cypher, `measured` in Python, in the same query that computed a
+    mean of 0.7 and a variance of 0.105. One claim, two states, the vocabulary
+    contradicting itself. (The shape PRE-DATES the cycle-20 write guard, which
+    refuses a string belief at `_sanitize_props` — it arrives now only from rows
+    written before that guard, or by raw Cypher. It is still the population this
+    coercion exists for.)
+
+    Non-numeric text (`"abc"`), a stored Boolean, a stored LIST, `null` and the
+    empty string all answer NULL, which the presence rule turns into ABSENT —
+    matching :func:`numeric_operand`, the Python twin.
+    """
+    coerced = NUMERIC_OPERAND_CYPHER_TEMPLATE.format(operand=operand)
+    # …and it must be FINITE. `toFloat` accepts spellings Python does not —
+    # measured: `toFloat("Infinity")` is `inf`, which made a claim with no
+    # readable belief read `mean 1.0` (maximum certainty) on `graph_ranking`
+    # and `0.0` on `recall_ranking` beside `absent` in the `ep` block. There is
+    # no `isfinite` in FalkorDB, so the finite range is spelled as two
+    # comparisons; a NaN makes both NULL, so it falls to the ELSE too.
+    # The bound is the DOUBLE MAX (`sys.float_info.max`), not `1e308`: a stored
+    # `1.7e308` is a perfectly finite double and `_beta_mean` has an
+    # overflow-free identity for exactly that pair — bounding at `1e308` nulled
+    # it and re-broke `test_every_ranker_reads_an_overflowing_pair_the_same_way`.
+    return (f"CASE WHEN {coerced} <= 1.7976931348623157e308 "
+            f"AND {coerced} >= -1.7976931348623157e308 "
+            f"THEN {coerced} ELSE null END")
+
+
+def _float32(val: float):
+    """The float32 a STRING operand becomes in the store, or None.
+
+    `strtof` — what `toFloat`/`toFloatOrNull` use on a string — rounds to a
+    float32, so THIS is the value the store serves for a string property, and it
+    is the value every band/compare on such a property must be decided on.
+    Returns None when the rounding overflows (past float32's rounding boundary)
+    or is not finite.
+    """
+    try:
+        rounded = struct.unpack("<f", struct.pack("<f", val))[0]
+    except (OverflowError, ValueError):
+        return None
+    return rounded if math.isfinite(rounded) else None
+
+
+def _f32_neighbour(value: float, step: int) -> float:
+    """The float32 one ULP above (``step=+1``) or below (``-1``) ``value``.
+
+    #11702 cycle 30: the UNSIGNED bit pattern is monotonic in the VALUE only for
+    non-negative floats. For a negative one it runs the other way — more
+    negative means a LARGER unsigned pattern — so `bits + step` moved toward
+    zero: asked for the neighbour of ``-1.0`` on the ``-1`` side it answered
+    ``-0.99999994``, i.e. a value on the opposite side of the input. In
+    :func:`_f32_from_literal` that made the midpoint test compare the double
+    against a distance that was not the distance to the real neighbour, so a
+    NEGATIVE string operand sitting exactly on a float32 midpoint fell through
+    to the plain double rounding `_f32_from_literal` exists to remove (the
+    store's `strtof` reads the literal, not the double) — the negative mirror of
+    the presence split that function was written for. Zero is its own case: the
+    neighbour of `+0.0` is not an unsigned step past a pattern that carries a
+    sign bit.
+    """
+    if value == 0.0:
+        smallest = struct.unpack("<f", struct.pack("<I", 1))[0]
+        return smallest if step > 0 else -smallest
+    bits = struct.unpack("<I", struct.pack("<f", value))[0]
+    if bits & 0x80000000:                  # negative: the pattern DECREASES up
+        return struct.unpack("<f", struct.pack("<I", bits - step))[0]
+    return struct.unpack("<f", struct.pack("<I", bits + step))[0]
+
+
+#: The PARTS of a hex-float literal, for EXACT reconstruction as a `Fraction`.
+#: `_HEX_FLOAT_LITERAL` decides whether the store reads the spelling; this one
+#: only decomposes a literal that is already admitted, so it cannot widen the
+#: grammar.
+_HEX_LITERAL_PARTS = re.compile(
+    r"[ \t]*(?P<sign>[+-]?)0[xX](?P<int>[0-9a-fA-F]*)"
+    r"(?:\.(?P<frac>[0-9a-fA-F]*))?(?:[pP](?P<exp>[+-]?[0-9]+))?\Z",
+    re.ASCII)
+
+#: How far a hex literal's binary exponent may run before exact reconstruction is
+#: skipped. The midpoint branch needs a FINITE float32 target, so a literal with
+#: an exponent this large is nowhere near it; the bound exists so a malformed
+#: literal cannot ask for `Fraction(2) ** 10**9`.
+_EXACT_FRACTION_MAX_EXP = 4096
+
+
+def _exact_literal_fraction(raw: str):
+    """The literal's EXACT value as a `Fraction`, or None (#11702).
+
+    `Fraction(Decimal("1.0000000596046448"))` reads a DECIMAL literal exactly,
+    which is what the midpoint rule needs — and it does so for a literal of ANY
+    length: `Fraction("<4301 digits>")` raises `ValueError` because CPython caps
+    int↔str conversion (`sys.get_int_max_str_digits`), while `Decimal` parses the
+    digits and `as_integer_ratio` never converts them back to a string. That
+    limit is reachable from a stored operand (a `repr()` padded with trailing
+    fractional zeros keeps its value and its spelling), and the old fallback then
+    DISCARDED the literal and answered from the double — the rounding this
+    function exists to remove, in both directions (measured: the 1 + 2⁻²⁴
+    midpoint spelled with 4,400 trailing zeros served `1.0`, maximum certainty,
+    beside the store's `absent`).
+
+    Hex literals are reconstructed through `int(digits, 16)`, which is EXEMPT
+    from that cap (it applies to non-power-of-two bases only), and bounded by
+    `_EXACT_FRACTION_MAX_EXP` so no literal can ask for `Fraction(2) ** 10**9`.
+
+    `Fraction` cannot read a HEX float at all — it raises `ValueError` — so a hex
+    literal used to fall through to the DOUBLE's rounding, which is the SAME
+    double rounding this module removes one layer up. `float.fromhex` keeps 53
+    bits, so a hex literal whose exact value has more rounds ONTO the float32
+    midpoint and the tie-break then followed the wrong side: measured,
+    `"0x1.0000010000000001p0"` is 1 + 2⁻²⁴ + 2⁻⁶⁴, the store serves
+    `1.000000119…` (outside the [0, 1] band ⇒ ABSENT) while Python read `1.0`
+    (present at MAXIMUM certainty) — a presence split at the band edge, from a
+    shape stored data can hold.
+    """
+    text = raw.strip()
+    match = _HEX_LITERAL_PARTS.match(text)
+    if match is None:
+        try:
+            return Fraction(Decimal(text))
+        except (ValueError, ZeroDivisionError, ArithmeticError):
+            return None
+    digits = (match.group("int") or "") + (match.group("frac") or "")
+    if not digits:
+        return None
+    exponent = int(match.group("exp") or 0)
+    if abs(exponent) > _EXACT_FRACTION_MAX_EXP:
+        return None
+    value = Fraction(int(digits, 16), 16 ** len(match.group("frac") or ""))
+    if exponent >= 0:
+        value *= Fraction(2 ** exponent)
+    else:
+        value /= Fraction(2 ** -exponent)
+    return -value if match.group("sign") == "-" else value
+
+
+def _f32_from_literal(raw: str, val: float):
+    """Correctly-rounded literal → float32, the way `strtof` rounds (#11702).
+
+    ⛔ **This is not the same as rounding the DOUBLE.** `float(raw)` is a
+    correctly-rounded literal → *float64*, and rounding THAT to float32 is a
+    DOUBLE rounding: at a literal that lands exactly on a float32 midpoint the
+    two disagree, and they disagree in opposite directions
+    (`"1.0000000596046448"` is 1 + 2⁻²⁴ exactly; `strtof` rounds it UP to
+    1.00000012 while round-half-to-even on the double sends it DOWN to 1.0). At
+    the band edge that flipped PRESENCE: the store said "outside [0, 1], absent"
+    while Python said "present at 1.0", so one claim reported `1.0 / baseline`
+    on the `ep` block and `absent` on every ranker — measured, with the claim
+    clearing a 1.0 belief floor.
+
+    So the double is used as the fast path, and ONLY when it sits exactly on a
+    float32 midpoint is the direction decided from the literal itself, with
+    `Fraction` arithmetic (exact, no second rounding). **Hex literals are
+    covered by the same rule** — `_exact_literal_fraction` reconstructs them
+    too, because this applies to every spelling the store parses and a hex
+    literal carries more precision than the double that `float.fromhex` keeps.
+    """
+    rounded = _float32(val)
+    if rounded is None or abs(rounded) >= _FLOAT32_MAX:
+        # The OVERFLOW edge, the mirror of the underflow one, and decided from
+        # the LITERAL for the same reason: `struct.pack('<f', val)` rounds the
+        # DOUBLE, and `float(raw)` is already a rounding of the text. At this
+        # boundary the two disagree — measured on 4.20.6,
+        # `'3.4028235677973366e38'` is strictly BELOW the overflow midpoint as a
+        # literal (`strtof` rounds it down, the store SERVES max) while its
+        # nearest double IS the midpoint (`struct` raises OverflowError), so
+        # Python answered `absent` for a value every Cypher surface measured.
+        # ⛔ The exact parse is NOT free, and it must not be reachable with an
+        # unbounded exponent: measured, the unguarded form spent 7.5 s building
+        # `10**10**7` for `"1e10000000"` and grew superlinearly from there — on
+        # the very inputs the store answers `null` for in one instruction. The
+        # double's own magnitude is the cheap, EXACT bound (see
+        # `_FLOAT32_OVERFLOW_CEILING`): above it no literal can be below the
+        # midpoint, so the answer is `None` without parsing anything.
+        if not math.isfinite(val) or abs(val) > _FLOAT32_OVERFLOW_CEILING:
+            return None
+        exact = _exact_literal_fraction(raw)
+        if exact is None:                   # pragma: no cover — see the docstring
+            # Unreachable for an admitted literal: the decimal path is length-
+            # unlimited (`Decimal`) and the hex path is bounded but only returns
+            # None for an exponent whose double is 0 or inf — and neither can be
+            # in the overflow band this branch guards. A fail-safe, not a live
+            # branch: the old answer was `rounded` (the double's rounding),
+            # which is what the literal is consulted to avoid.
+            return None
+        if abs(exact) < _FLOAT32_OVERFLOW_MIDPOINT:
+            return -_FLOAT32_MAX if exact < 0 else _FLOAT32_MAX
+        return None
+    if rounded == val:
+        return rounded
+    step = 1 if val > rounded else -1
+    neighbour = _f32_neighbour(rounded, step)
+    if abs(val - rounded) != abs(neighbour - val):
+        return rounded                      # not a midpoint: already correct
+    exact = _exact_literal_fraction(raw)
+    if exact is None:                       # pragma: no cover — see the docstring
+        # Same fail-safe as above, and for the same reason: an unreconstructable
+        # literal must not be answered from the double, which is the rounding
+        # this branch exists to correct.
+        return None
+    # Halfway exactly → the LITERAL decides, and the SIDE is not a detail: the
+    # two candidates are `rounded` and its neighbour on the side `val` lies, and
+    # `_float32`'s tie-break can put `rounded` on EITHER one. A literal that is
+    # exactly the midpoint is a genuine tie and `rounded` already carries
+    # round-half-to-even; one the DOUBLE rounded ONTO the midpoint from above
+    # (`0x1.0000030000000001p0` = midpoint + 2⁻⁶⁴) is above it and the store
+    # rounds UP — the candidate that happens to be `rounded` there.
+    low, high = (rounded, neighbour) if rounded < neighbour else (
+        neighbour, rounded)
+    midpoint = (Fraction(low) + Fraction(high)) / 2
+    if exact == midpoint:
+        return rounded
+    return high if exact > midpoint else low
+
+
+def _string_operand(raw: str, val: float):
+    """The float `toFloat` serves for a string operand, or None (#11702).
+
+    ``val`` is Python's DOUBLE for the literal; the VALUE RETURNED is the
+    float32 the store serves, so the twins agree on the value as well as on
+    presence (`"0.6"` → 0.6000000238418579 on both).
+
+    The overflow edge is decided by the LITERAL, for the same reason the
+    underflow edge is: `strtof` rounds the TEXT, not the double. A literal just
+    above float32 max but strictly below the overflow midpoint lands on max and
+    READS (`"3.40282355e38"`, measured) — and `"3.4028235677973366e38"` does
+    too, even though its nearest DOUBLE sits exactly ON that midpoint and
+    `struct.pack('<f', …)` refuses it, which is why `_f32_from_literal` parses
+    the literal there instead of reading `_float32(val)`. A plain
+    `abs(val) <= _FLOAT32_MAX` would call the band absent only here. A literal
+    at or above the midpoint overflows to `2**128` and is null. The underflow
+    edge is decided by the EXACT magnitude for the mirror reason: a literal
+    just below min-normal rounds UP to it and yet is null there
+    (`"1.1754943e-38"`, measured).
+
+    ⛔ **The underflow edge is about INEXACTNESS OF THE LITERAL — not about
+    subnormal-ness, and not about the double** — which only becomes visible once
+    hex literals are read (`numeric_operand`'s hex branch calls this function
+    too). A SUBNORMAL result the literal names EXACTLY is not an error to
+    `strtof` and READS; one the literal cannot represent is ERANGE and answers
+    null. "Cannot represent" is a question about the TEXT: a subnormal's
+    ``repr()`` is EXACT as a double and INEXACT as text, so testing
+    ``rounded != val`` (the double) served every decimal spelling of every
+    subnormal — the same split, mirrored. Measured on FalkorDB 4.20.6, both
+    twins for each row:
+
+    ================================  ====================  ============
+    literal                           exact to the TEXT?    ``toFloat``
+    ================================  ====================  ============
+    ``'0x1p-149'``                    yes (min subnormal)   reads
+    ``'0x1p-127'``                    yes (subnormal)       reads
+    ``'0x1.fffffcp-127'``             yes (max subnormal)   reads
+    ``'0x1.8p-149'``                  no                    null
+    ``'0x1.fffffep-127'``             no (the midpoint)     null
+    ``'0x1.0000000000000001p-127'``    no (below the double) null
+    ``'5.877471754111438e-39'``       no (a ``repr()``)     null
+    ``'1.401298464324817e-45'``       no (a ``repr()``)     null
+    ``'1e-38'`` / ``'1.1754943e-38'``  no                    null
+    ================================  ====================  ============
+
+    ⛔ **The store's read window does not end at min-normal: it ends a quarter
+    of a subnormal ULP BELOW it** (`_F32_UNDERFLOW_READ_FLOOR`). `strtof` does not
+    treat every value below min-normal as an underflow: an inexact literal in this
+    band still rounds UP to min-normal, is not subnormal after rounding, and
+    READS. Swept on the live store at a quarter-ULP resolution and again at
+    2**-163, both spellings agreeing: at ``min_normal - 2**-151``
+    (``'0x1ffffffp-151'``) it reads, and half a subnormal ULP below min-normal
+    (``'0x1fffffep-151'``) it answers null. Without the band the rule would
+    refuse a spelling the store serves — the SAME split pointing the other way,
+    which is why both edges are pinned in the twin-grammar table rather than only
+    the nulls.
+
+    Refusing every subnormal (the rule before this) split the twins across the
+    whole exact-subnormal window — 23 exponents wide — on a value the store
+    serves: the `ep` block answered `absent` while every ranker answered
+    `measured` with the number, and that number moved the ORDER.
+
+    ⛔ **The MIDPOINT edge is decided from the literal, for hex as well as
+    decimal** (`_f32_from_literal` → `_exact_literal_fraction`). It has to be:
+    `float.fromhex` keeps only 53 bits, so a hex literal with more precision than
+    that lands ON a float32 midpoint after the double rounding and the tie-break
+    then followed the wrong side — measured, `"0x1.0000010000000001p0"` read
+    `1.0` here while the store served `1.000000119…`, i.e. present at maximum
+    certainty beside the store's ABSENT.
+    """
+    rounded = _f32_from_literal(raw, val)
+    if rounded is None:
+        return None
+    if abs(rounded) > _FLOAT32_MAX:     # belt and braces; pack guarantees it
+        return None
+    # The underflow decision needs the literal, so the (comparatively costly)
+    # exact parse is confined to the zone where it can matter. The guard SKIPS
+    # doubles at or above twice min-normal — no literal that large can have an
+    # exact value below the floor — and does not skip anything smaller: a
+    # literal far below min-normal still needs the parse, because that is the
+    # only way to tell an EXACT subnormal (`'0x1p-149'`) from a `repr()` of one.
+    if val != 0.0 and abs(val) < _FLOAT32_MIN_NORMAL * 2:
+        exact = _exact_literal_fraction(raw)
+        if exact is None:                       # pragma: no cover — see the docstring
+            # A spelling the exact parse cannot reconstruct. Refused, not
+            # answered from the double: `abs(val) < _FLOAT32_MIN_NORMAL` would
+            # refuse the whole read band this function exists to serve (the
+            # mirrored split), and `rounded` would serve one the store may null.
+            # Unreachable for both grammars — the decimal path is length-unlimited
+            # and the hex path's only None is an exponent whose double is 0/inf,
+            # which `val != 0.0` above already excluded — so this is a fail-safe
+            # for a future widening, not a live branch.
+            return None
+        if (abs(exact) < _F32_UNDERFLOW_READ_FLOOR
+                and Fraction(rounded) != exact):
+            # INEXACT below the store's read floor (`strtof` sets ERANGE, so the
+            # engine nulls it) — not every subnormal: one the literal names
+            # exactly READS, and one within a quarter ULP of min-normal still
+            # rounds up to it. See the table in this function's docstring;
+            # refusing all of them was a 23-exponent twin split on hex operands.
+            return None
+    return rounded
+
+
+def numeric_operand(raw):
+    """Python twin of :func:`numeric_operand_cypher`: float, or None.
+
+    `bool` is deliberately NOT a number here, although `float(True) == 1.0`.
+    Cycle 12 accepted it for symmetry with `annotate_ep_batch`'s arithmetic;
+    cycle 16 measured that NO Cypher surface can follow — `toFloat` raises on a
+    Boolean and every comparison against one is NULL — so the symmetry it bought
+    was one-sided, and a stored `confidence=True` answered `measured / 1.0` in
+    Python beside `absent` in Cypher. A Boolean belief is a writer defect, not a
+    certainty, and it is now ABSENT on both twins.
+
+    NaN/inf are also None: `json.dumps` emits them as bare tokens, and neither
+    is a belief (see `belief_value`).
+
+    ⛔ **A string operand must also land where the store can READ it** — and the
+    store parses a string with ``strtof``, i.e. into a **float32**, setting
+    ``ERANGE`` (and answering ``null``) for anything outside float32's NORMAL
+    range. Measured against the live engine:
+
+    ==================  ==================  ====================
+    literal             ``toFloat``        floats the store
+    ==================  ==================  ====================
+    ``'0.6'``           ``0.60000002384``   reads (as float32)
+    ``'1e38'``          ``9.9999996803e37`` reads
+    ``'1e-38'``         ``null``            refuses (subnormal)
+    ``'1e-320'``        ``null``            refuses (underflow)
+    ``'1e308'``         ``null``            refuses (overflow)
+    ``'1e400'``         ``null``            refuses (overflow)
+    ==================  ==================  ====================
+
+    So the branch used to answer a NUMBER (**``inf``** for ``'1e400'``, ``0.0``
+    for ``'1e-400'``) for a literal the engine calls ABSENT — and ``inf`` then
+    propagated into ``EpBreakdown.confidence_mean``, which ``asdict`` +
+    ``json.dumps(allow_nan=False)`` (Starlette's ``JSONResponse``) turns into a
+    500 on the agent-facing surfaces. The window is the one `_string_operand`
+    applies, and inside it the value returned is the **float32 the store serves**
+    (`"0.6"` → ``0.6000000238418579``), not Python's double for the literal:
+    a string property is served as a float32, so the twins must agree on the
+    VALUE as well as on presence, or every band and midpoint compare downstream
+    is decided on a number the store never held. (The double is an INPUT to that
+    rounding, not its result — ``_f32_from_literal`` uses it as the fast path and
+    lets the literal itself settle a midpoint tie.)
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, str):
+        # The pinned decimal grammar — see `_FLOAT_LITERAL`. Anything FalkorDB
+        # parses and this twin does not (`Infinity`/`nan`, a trailing space
+        # Python tolerates and Cypher does not) is exactly the twin split this
+        # coercion exists to prevent, so the STRICTER of the two languages wins.
+        # A HEX float is NOT in that set — the branch below reads it, because
+        # the store does.
+        if not _FLOAT_LITERAL.match(raw):
+            # ⛔ A HEX float is a spelling the STORE reads (`toFloat("0x1p4")` is
+            # 16.0, measured). Refusing it here did not make the shape
+            # unreachable — it made PYTHON blind to it, so presence (decided in
+            # Cypher) and value/state (decided in Python) split: a legacy
+            # `posterior_alpha="0x1p4"` pair read `absent` in the `ep` block and
+            # `measured / 0.94` in the rankers and in `analyze`, which then
+            # RANKED it first in `most_uncertain`. `float.fromhex` is the same
+            # parser the store uses for the same spelling, so the twins read it
+            # identically.
+            if not _HEX_FLOAT_LITERAL.match(raw):
+                return None
+            try:
+                hexval = float.fromhex(raw.strip())
+            except (ValueError, SyntaxError, OverflowError):
+                return None
+            if hexval == 0.0 and not _ZERO_HEX_LITERAL.match(raw):
+                # Underflowed to zero (`"0x1p-9999"`): the store answers null.
+                return None
+            return _string_operand(raw, hexval)
+        val = float(raw)
+        if val == 0.0:
+            # An exact-zero literal (`"0"`, `"0e400"`, `"-0.0"`) reads as a
+            # number; one that underflowed the DOUBLE to zero does not —
+            # `"1e-350"`/`"1e-400"` are null to `toFloat`, and answering 0.0 for
+            # them is maximum disbelief for a claim with no readable belief.
+            # `float()` cannot tell the two apart (both are zero) and
+            # `_string_operand` cannot either (it receives the float), so the
+            # literal's own MANTISSA decides.
+            return val if _ZERO_LITERAL.match(raw) else None
+        return _string_operand(raw, val)
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return val if math.isfinite(val) else None
+
+
+#: The band a SERVED belief lives in. A probability, by definition — and every
+#: consumer already assumes it: `ranking.py`'s graph_boost is documented as a
+#: `[0, 1]` combination, `analyze` compares against thresholds in `[0, 1]`, and
+#: the manifest row promises "the value is `null` if and only if the state is
+#: `absent`". The band is applied to the value the STORE serves — for a STRING
+#: property that is its float32 rounding (`belief_mirror` rounds with `_float32`
+#: before comparing), so the two twins cannot split at the band edge either
+#: (`"1.00000001"` rounds to exactly 1.0 and reads on both; `"1.00000006"` is past
+#: the midpoint and is absent on both). Nothing enforced it before, so a STRING
+#: mirror the Cypher coercion reads and Python's grammar refuses — `"0x1p4"` is 16.0 to `toFloat` and unreadable
+#: to `_FLOAT_LITERAL` — was a belief on the Cypher surfaces and absent on the
+#: Python ones: measured, one legacy `n.confidence="0x1p4"` row read
+#: `graph_ranking confidence 16.0 / baseline` with `graph_boost 8.0` and ranked
+#: FIRST, above a genuinely measured 0.9 (0.6146), while `annotate`, `why`, the
+#: StateRanker and the GapsRanker all said `absent`. A value outside the band is
+#: not a weaker belief, it is not a belief — so the band is part of the coercion,
+#: on both twins, rather than a threshold each consumer re-applies.
+BELIEF_VALUE_MIN = 0.0
+BELIEF_VALUE_MAX = 1.0
+
+
+def belief_mirror(raw):
+    """A SERVED belief mirror (``n.confidence``) — a number in [0, 1], or None.
+
+    The Python twin of :func:`belief_mirror_cypher`. Use it wherever the
+    ``n.confidence`` mirror is read as a BELIEF; use :func:`numeric_operand` for
+    the α/β OPERANDS, which are pseudo-counts and legitimately larger than 1.
+    """
+    val = numeric_operand(raw)
+    if val is None:
+        return None
+    if isinstance(raw, str):
+        # ⛔ A string property is served as a FLOAT32 (see `_float32`), so the band
+        # must be applied to the value the store actually holds — otherwise the
+        # twins split at the band edge: `"1.00000001"` rounds to exactly 1.0 in
+        # the store (inside the band, max certainty) while the exact double is
+        # outside it, so Cypher said present and Python said absent — a shape
+        # measured ranking a claim above a genuinely measured 0.9. Returning the
+        # ROUNDED value also closes the in-range precision divergence for a
+        # mirror (`"0.6"` → 0.6000000238, exactly what the store serves).
+        val = _float32(val)
+        if val is None:
+            return None
+    if not (BELIEF_VALUE_MIN <= val <= BELIEF_VALUE_MAX):
+        return None
+    return val
+
+
+def belief_mirror_cypher(operand: str) -> str:
+    """Cypher twin of :func:`belief_mirror` — :func:`numeric_operand_cypher`,
+    nulled outside [0, 1].
+
+    One expression, so the value read and the presence predicate cannot disagree
+    about what "a stored belief" means (they did: the value came from Python's
+    coercion and the state from Cypher's, giving one row `confidence: null` BESIDE
+    `ep_state: "baseline"`).
+    """
+    coerced = numeric_operand_cypher(operand)
+    return (f"CASE WHEN {coerced} IS NOT NULL AND {coerced} >= {BELIEF_VALUE_MIN} "
+            f"AND {coerced} <= {BELIEF_VALUE_MAX} THEN {coerced} ELSE null END")
+
+
+def ep_has_belief_cypher(alias: str) -> str:
+    """Cypher boolean: a PERSISTED belief exists for ``alias`` (#11702).
+
+    The presence predicate, NOT the measurement predicate: it is true for an
+    EP-measured posterior, for a declared #2199 baseline prior, and for a
+    legacy EP-flush mirror (``n.confidence``) — every form in which a number
+    is genuinely stored. It is false only when there is nothing to report,
+    which is the one case where a read must return ``null`` rather than a
+    value. Textually in step with the Python twin :func:`ep_state`.
+
+    ⛔ **A stored pair with ``α + β <= 0`` is NOT a belief**, and this is the
+    whole reason the predicate is a sum rather than an ``IS NOT NULL``. A
+    Beta(0, 0) is not a distribution — it carries no information — and
+    ``ep.py::_write_node`` writes exactly that pair verbatim (a decayed or
+    never-seeded posterior). Tested as "columns present", it was a belief with
+    NO computable mean, which gave four surfaces four answers for one claim: a
+    fabricated 0.5 in the ``ep`` block, ``None`` in ``recall_ranking``,
+    ``absent`` in ``gaps_ranking``, and **``nan``** in ``graph_ranking`` (the
+    Cypher ``α/(α+β)`` division with no guard, serialised onto the wire as a
+    bare ``NaN`` token). {"Absent" if no columns are set, but a stored zero
+    pair is absent too} — nothing is known either way, and every surface now
+    says so through this ONE predicate.
+
+    **A HALF pair is no belief either**: both coalesced values must be present.
+    A row carrying only `posterior_beta = 3.0` (no α, no prior, no mirror) has
+    no mean; read as present it invented one from the `coalesce(…, 1.0)`
+    default — `1/4 = 0.25`, a number nothing measured. The same rule, stated as:
+    a belief exists when the expression that computes it has both operands.
+    """
+    # #11702 cycle 16: COERCED, not compared raw. A stored numeric STRING
+    # ("0.7") is non-null but not comparable to `0` (the comparison is NULL, the
+    # conjunction is NULL, the state read `absent`) while the value formula's
+    # `toFloat` computed 0.7 — so one query said `absent` and `0.7` about the
+    # same claim. `numeric_operand_cypher` is the total coercion both sides now
+    # share: it answers NULL for `"abc"`, for a stored Boolean (which `toFloat`
+    # would RAISE on) and for `null`, which makes them ABSENT here and in
+    # :func:`numeric_operand`.
+    a = numeric_operand_cypher(
+        f"coalesce({alias}.posterior_alpha, {alias}.ep_alpha)")
+    b = numeric_operand_cypher(
+        f"coalesce({alias}.posterior_beta, {alias}.ep_beta)")
+    # ⛔ BANDED (cycle 24): the mirror is a served probability, so a stored value
+    # outside [0, 1] is not a belief here — otherwise a legacy `"0x1p4"` mirror,
+    # which only Cyber's coercion can read, was present in Cypher and absent in
+    # Python, and the state disagreed with the value on the same row.
+    mirror = belief_mirror_cypher(f"{alias}.confidence")
+    return (f"({mirror} IS NOT NULL OR ({a} IS NOT NULL AND {b} IS NOT NULL "
+            # #11702 cycle 11: NON-NEGATIVE as well as non-empty. Beta operands
+            # are counts; a negative one (reachable through the unvalidated
+            # `tortoise_set_point_baseline` / `update_point` arguments) passes
+            # a bare `α+β > 0` and yields a "mean" of -0.5 and a "variance" of
+            # -0.25, i.e. an out-of-range belief every threshold consumer reads
+            # as a real, maximally-certain number.
+            f"AND {a} >= 0 AND {b} >= 0 AND ({a} + {b}) > 0))")
+
+
+def ep_state_cypher(alias: str) -> str:
+    """Cypher string: the #11702 state NAME — 'measured' | 'baseline' | 'absent'.
+
+    Read it beside the belief value so a consumer can tell the three apart:
+    a *measured* 0.5 (symmetric evidence, a real coin flip) and an *absent*
+    belief are both 0.5 on the old coalesce and must never be again.
+
+    ⚠️ ``measured`` here means ``ep_measured_cypher``, i.e. EP ran on this
+    claim — NOT the ``has_ep``/``measured`` fields, which #2490 additionally
+    gate on terminal-ness. A **terminal** claim (#2490) carries the decayed
+    ``0.5 / 1.0 / 1.0`` that ``live.VACUITY_BELIEF`` stamps on every
+    terminalising write: that is a persisted VALUE (so the state is never
+    ``absent``) but nothing measured it in that form, so a caller reporting
+    measurement must fold ``terminal`` in and land on ``baseline``. See
+    :func:`ep_state_resolve`, which is the ONE place that fold happens, and
+    the callers in :func:`annotate_ep_batch` / ``ranking.py`` that use it.
+    """
+    # #11702 cycle 15: the absent arm is `coalesce(<predicate>, false) = false`,
+    # NOT `NOT <predicate>`. An UNKNOWN predicate is NULL, `NOT NULL` is NULL,
+    # and a NULL CASE arm falls through to the NEXT arm — so a stored
+    # non-numeric operand (which makes `α >= 0` NULL in FalkorDB, reachable
+    # through `update_point(posterior_alpha="abc")`) was reported as the
+    # STRONGEST state, `measured`, while the Python twin raised and
+    # `belief_value` answered `None`. Three answers for one claim, on the
+    # least-known input. `coalesce(…, false)` makes an unknown operand read
+    # ABSENT, which is what the totality decision of cycle 11 says.
+    return (f"CASE WHEN coalesce({ep_has_belief_cypher(alias)}, false) = false "
+            f"THEN '{EP_STATE_ABSENT}' "
+            f"WHEN coalesce({ep_measured_cypher(alias)}, false) "
+            f"THEN '{EP_STATE_MEASURED}' "
+            f"ELSE '{EP_STATE_BASELINE}' END")
+
+
+def ep_state(*, posterior_alpha, ep_alpha, confidence=None,
+             posterior_beta=None, ep_beta=None,
+             baseline_set: bool = False) -> str:
+    """Python twin of :func:`ep_state_cypher` — 'measured' | 'baseline' | 'absent'.
+
+    ``absent`` means NO persisted belief in any form: the read must carry
+    ``None``, never a fabricated Beta(1,1) mean. ``baseline`` is a persisted
+    prior EP has not measured (a #2199 declared baseline, or a legacy
+    EP-flush mirror) — still a value, just not a measurement.
+
+    A stored ``α + β <= 0`` pair is ``absent``: Beta(0, 0) is not a
+    distribution, so the pair carries no belief. Same rule as
+    :func:`ep_has_belief_cypher`, which spells it in Cypher — the two must not
+    drift, or a surface reads a state the `ep` block denies for one claim.
+    Pass the β columns too, or a stored zero pair reads as ``present`` here
+    while Cypher calls it absent.
+    """
+    # α and β are each coalesced INDEPENDENTLY, posterior first, then the ep_*
+    # prior — the same precedence `ep_has_belief_cypher` spells in Cypher (both
+    # twins mix the same way, so they cannot disagree). ⚠️ Stated exactly: a
+    # HALF posterior plus a complete prior therefore MIXES the pairs
+    # (`posterior_alpha=0.5`, `ep_beta=3.0` → 0.5/3.5). That is the shipped
+    # behaviour, not an oversight — a pair-strict rule would change the belief
+    # of every half-posterior claim and would have to change the Cypher
+    # predicate with it, so it is a separate decision, not a comment fix.
+    # #11702 cycle 15: TOTAL on a non-numeric operand. `float("abc")` raised
+    # TypeError out of `ep_state`, which discarded the WHOLE `annotate_ep_batch`
+    # (and `why`'s block, and the GraphRanker signal fetch) for any graph that
+    # stored a string in α — while `belief_value` (cycle 11) and the Cypher twin
+    # (now `coalesce(…, false)`) both answer absent. A value the store cannot
+    # hold as a number is absent, which is the one decision all three must share.
+    _num = numeric_operand
+
+    alpha = _num(posterior_alpha if posterior_alpha is not None else ep_alpha)
+    beta = _num(posterior_beta if posterior_beta is not None else ep_beta)
+    # #11702 cycle 11: non-NEGATIVE as well as non-empty — see
+    # `ep_has_belief_cypher` (the twins must agree on every shape, negative
+    # operands included). A Beta operand is a count; a negative one is not a
+    # belief, and reading it as one produced a mean of 1.5 and a variance of
+    # -0.25 on every surface.
+    present = (alpha is not None and beta is not None
+               and alpha >= 0 and beta >= 0
+               and (alpha + beta) > 0)
+    # #11702 cycle 16: the gate uses the COERCED mirror, exactly as the Cypher
+    # predicate does. Testing the RAW value (`confidence is None`) made a stored
+    # `"abc"` / `True` mirror — non-null, unreadable — skip this return and land
+    # in `ep_measurement_state`'s baseline arm, so one claim read `absent` in
+    # Cypher and `baseline` in Python, with `confidence_mean: 0.5` beside it
+    # (the Beta(1,1) default, i.e. the fabricated belief this issue removes).
+    # `baseline_set` is a FLAG; it does not turn an unreadable value into a
+    # prior. Cypher's baseline arm sits BEHIND the presence predicate for the
+    # same reason.
+    if belief_mirror(confidence) is None and not present:
+        return EP_STATE_ABSENT
+    return (EP_STATE_MEASURED
+            if ep_measurement_state(posterior_alpha=posterior_alpha,
+                                    ep_alpha=ep_alpha,
+                                    baseline_set=baseline_set) == "measured"
+            else EP_STATE_BASELINE)
+
+
+def belief_value(*, confidence=None, posterior_alpha=None,
+                 posterior_beta=None, ep_alpha=None, ep_beta=None,
+                 round_to: int | None = None):
+    """The belief VALUE for a set of raw columns — ``None`` when there is none.
+
+    THE Python twin of the value expression the Cypher surfaces build, so a
+    surface holding a plain property dict (``navigation.confidenceMin``,
+    ``sdk.approve``) does not re-decide precedence or presence for itself. That
+    re-decision is the defect class this issue exists for: it produced a
+    HALF pair read as a belief (``1/4`` from the ``coalesce(…, 1.0)`` default),
+    a mirror-only read that called a measured claim absent, and a mirror-only
+    write that a rebuild could not reproduce.
+
+    Precedence is #2206's: the ``n.confidence`` mirror is the SERVED belief and
+    leads (it is what every ranker prefers), with the pair mean as the fallback
+    for a node whose flush never reached it. Presence is
+    :func:`ep_state`'s rule — mirror, or BOTH coalesced operands with
+    ``α >= 0`` and ``β >= 0`` and ``α + β > 0`` — so a zero-total, half or
+    negative pair answers ``None``.
+
+    TOTAL: a value the store cannot hold as a number (a legacy string
+    property, a NaN) is treated as ABSENT rather than raised on. This reader
+    serves every read surface, including the ones that must still render a
+    point whose stored properties are garbage — a raise here would discard the
+    whole decoration and be indistinguishable from "no belief", which is
+    exactly what the ``None`` return says honestly.
+    """
+    # #11702 cycle 16: `numeric_operand` (bool is NOT a number — see its
+    # docstring for the measurement that retired cycle 12's opposite reading).
+    _num = numeric_operand
+
+    conf = belief_mirror(confidence)
+    if conf is not None:
+        value = conf
+    else:
+        alpha = _num(posterior_alpha if posterior_alpha is not None
+                     else ep_alpha)
+        beta = _num(posterior_beta if posterior_beta is not None else ep_beta)
+        if alpha is None or beta is None:
+            return None
+        if alpha < 0 or beta < 0 or (alpha + beta) <= 0:
+            return None
+        # #11702 cycle 13: THROUGH `_beta_mean`, not a bare division. A pair
+        # whose sum overflows (`update_point(posterior_alpha=1e308,
+        # posterior_beta=1e308)`) computed `1e308/inf == 0.0` here — "maximally
+        # disbelieved" for a perfectly symmetric claim — while `_beta_mean`
+        # (behind the `ep` block) answered 0.5 for the same node: the
+        # vocabulary disagreeing with itself, on the two halves of ONE
+        # response. `_beta_mean` owns the guard; this reader must not re-spell
+        # the arithmetic.
+        value = _beta_mean(alpha, beta)
+    return round(value, round_to) if round_to is not None else value
+
+
+def ep_state_resolve(state: str, *, measured: bool) -> str:
+    """Fold the #2490 terminal gate into a presence-derived state name.
+
+    The ONE place this fold happens, so every surface that reports a state
+    reports the SAME one for the same claim. ``measured`` is the caller's
+    #2490-gated field (``has_ep`` after the terminal check), while ``state``
+    comes from the raw persisted columns.
+
+    * ``absent`` stays ``absent`` — there is no persisted belief either way.
+    * ``measured`` **downgrades to ``baseline``** when the claim is terminal or
+      otherwise not measured: a decayed posterior is a stored value, not a
+      measurement, and reporting it as ``measured`` tells a consumer EP ran
+      where only a terminalising write did.
+    * ``baseline`` stays ``baseline``.
+
+    Not folded: a live claim whose stored posterior *is* the measurement —
+    ``measured`` is then true and the state survives unchanged.
+    """
+    if state == EP_STATE_MEASURED and not measured:
+        return EP_STATE_BASELINE
+    return state
+
+
 @dataclass
 class EpEvidence:
     impl_count: int = 0
@@ -336,14 +1202,34 @@ class EpEvidence:
 class EpBreakdown:
     # THE point confidence (issue #2206 contract): the belief mean α/(α+β)
     # of the PERSISTED posterior when EP has run on the claim
-    # (posterior_alpha/beta), else the persisted prior mean (ep_alpha/beta),
-    # else the neutral Beta(1,1) mean 0.5 — identical to the number
-    # TortoiseEP.compute_confidence / sdk.get_confidence return for the same
-    # point (coalesce(n.posterior_alpha, n.ep_alpha, 1.0)). Historically this
+    # (posterior_alpha/beta), else the persisted prior mean (ep_alpha/beta).
+    # It matches the number TortoiseEP.compute_confidence / sdk.get_confidence
+    # return for the same point WHENEVER one is persisted — with ONE stated
+    # exception, ``None`` here: those two still answer the Beta(1,1) prior mean
+    # (0.5) for a claim with no persisted belief at all, because they are the
+    # EP read under an explicit `require_calibration=False`, not a read/rank
+    # surface. That divergence is deliberate and recorded in the #11702 decision
+    # comment (issuecomment-6781252637) — it is the one place "no belief" still
+    # answers 0.5, and it is
+    # outside this field's contract rather than a second vocabulary for it.
+    # Historically this
     # field was the structural edge-ratio impl/(impl+nand); it is NOT that
     # quantity anymore — a claim EP converged at 0.88 with no incoming IMPL
     # edges reads 0.88 here, and 0.0 only for a genuinely impossible store.
-    confidence_mean: float = 0.5
+    #
+    # #11702: ``None`` when there is NO persisted belief — the third state of
+    # the #2206 contract, which used to be reported as the neutral Beta(1,1)
+    # mean 0.5 and was therefore indistinguishable from a computed coin flip
+    # at every threshold and every order. Read :attr:`ep_state` beside it: a
+    # number here is a belief that exists, and ``None`` means none does.
+    confidence_mean: float | None = None
+    #: #11702 — the STATE NAME for :attr:`confidence_mean`, one of
+    #: ``measured`` (EP ran) / ``baseline`` (a persisted prior EP has not
+    #: measured) / ``absent`` (no persisted belief at all ⇒ the value is
+    #: ``None``). Derives from :func:`ep_state`, the single mapping of the
+    #: #11702 vocabulary; ``has_ep``/``measured`` keep their narrower #2490 /
+    #: #3276 meanings and are NOT this field's source.
+    ep_state: str = EP_STATE_ABSENT
     evidence: EpEvidence | None = None
     # Structural ratio nand/(impl+nand) — a DIFFERENT quantity from
     # confidence_mean (issue #2206): it answers "how much of the incoming
@@ -366,7 +1252,8 @@ class EpBreakdown:
     # with the kind-derived system-default baseline reads has_ep=False here
     # (it used to read True at the 0.75 prior mean — the #3276 leak).
     # False = not measured; confidence_mean is then the declared prior mean
-    # when ``baseline`` is True, else the neutral Beta(1,1) mean 0.5. Neither
+    # when ``baseline`` is True, else ``None`` (no persisted belief at all —
+    # #11702; it used to be the neutral Beta(1,1) mean 0.5). Neither
     # is a signal of contestation.
     # #2490 has_ep overload: TERMINAL claims (terminal vocab status OR the
     # legacy outdated=true flag) are also gated to False — their posterior
@@ -378,7 +1265,10 @@ class EpBreakdown:
     # #3276 aliases of the same measurement state, explicit and unambiguous:
     #   measured=True                     → EP measured (has_ep True)
     #   measured=False, baseline=True     → prior-only (declared baseline)
-    #   measured=False, baseline=False    → unmeasured (neutral 0.5)
+    #   measured=False, baseline=False    → ABSENT (#11702): confidence_mean is
+    #                                       `None`, never the old neutral 0.5 —
+    #                                       "no evidence" and "a measured coin
+    #                                       flip" are different answers
     # A TERMINAL claim (#2490 gate) reads measured=False, baseline=False even
     # when it was measured-and-baseline'd pre-terminalization: its 0.5 is the
     # decayed vacuity posterior, not the prior, so it is neither prior-only
@@ -3904,18 +4794,260 @@ def _recency_factors(entries: list[tuple[str, Any]]) -> dict[str, float]:
     return factors
 
 
+def ep_pair_stored_cypher(alias: str) -> str:
+    """Cypher twin of :func:`ep_pair_stored` (#11702).
+
+    Both coalesced operands present — the condition under which a VARIANCE is
+    a posterior statistic rather than an artifact of the `coalesce(…, 1.0)`
+    defaults. Used wherever a read must decide the WIDTH inside Cypher (an
+    ordering or a class-selection predicate) so the query and the Python
+    assembly cannot disagree about which claims carry a width."""
+    return (f"(coalesce({alias}.posterior_alpha, {alias}.ep_alpha) "
+            f"IS NOT NULL AND coalesce({alias}.posterior_beta, "
+            f"{alias}.ep_beta) IS NOT NULL)")
+
+
+def ep_pair_stored(*, posterior_alpha=None, posterior_beta=None,
+                   ep_alpha=None, ep_beta=None) -> bool:
+    """True when BOTH operands of the α/β PAIR are persisted (#11702).
+
+    The companion of :func:`ep_has_belief_cypher` for the WIDTH of the
+    posterior rather than its MEAN. Every read coalesces the operands to `1.0`
+    so a variance can be computed at all, and that default fabricates a width
+    when the pair is not stored: a HALF pair (β only, or α only) and a
+    never-measured claim both came out at the Beta(1,1) MAXIMUM `1/12`, so a
+    block that said ``confidence_mean: null, ep_state: "absent"`` said
+    ``variance: 0.083, contested: true`` in the next field — "there is no
+    belief here, and it is maximally uncertain", which is the same
+    two-answers-for-one-claim defect this issue removes one level up. The
+    volunteer then surfaced "read the counterargument" for a claim with zero
+    counterarguments.
+
+    A stored ``(0, 0)`` pair IS stored by this rule but is ABSENT by the
+    presence rule, and ``_beta_variance``'s own ``s <= 0`` guard answers `0.0`
+    — so both rules agree that nothing is claimed.
+
+    ONE definition, imported by `why`, `annotate_ep_batch` and all three
+    rankers: a second spelling of "the pair is stored" is how the surfaces
+    drifted apart in the first place."""
+    return ((posterior_alpha is not None or ep_alpha is not None)
+            and (posterior_beta is not None or ep_beta is not None))
+
+
+#: The sum range in which `αβ/((α+β)²(α+β+1))` is representable as a double.
+#: Above it the CUBE overflows to `inf`, and FalkorDB then evaluates the query's
+#: own formula as `NaN` — while `_beta_variance` (which guards the denominator)
+#: answers `0.0`. Measured (cycle 15): a `(1e200, 1e200)` claim rendered
+#: `var: nan` and sorted FIRST on `analyze.most_uncertain`, ahead of a genuine
+#: Beta(1,1) `1/12`, and with two such rows the whole list came back de-sorted,
+#: because FalkorDB's comparator is not total over NaN.
+#:
+#: The FLOOR is set by the NUMERATOR, not the denominator (cycle 16): the
+#: denominator `s²(s+1)` only stops being representable near `s ≈ 1.5e-162`,
+#: but `αβ` underflows for equal operands at `s ≈ 3e-154`, and once it does the
+#: formula answers `0.0` for a pair whose true variance is the Beta MAXIMUM
+#: `0.25` — "fabricated certainty", the failure class this issue removes.
+#: Cycle 15 shipped `1e-100`, ~54 orders too tight, so a stored
+#: `(1e-150, 1e-150)` pair — true variance 0.25, computable — was published as
+#: `variance: 0.0, contested: false` and excluded from every uncertainty scan
+#: (measured). The boundary is `αβ` NORMAL, i.e. `αβ ≥ 2.2e-308`, and with
+#: `αβ ≤ s²/4` the equal-operand pair reaches it at `s = 2·√2.2e-308 ≈ 3e-154`:
+#: the floor sits just BELOW that, so every pair whose width a double can carry
+#: at full precision is admitted, and a shape it refuses has an untrustworthy
+#: numerator (measured: `(1e-166, 1e-166)` computes `2.5e-333`, which is 0.0 in
+#: a double). The ceiling `1e102` keeps `s² · (s+1) ≤ 1e306`, inside the
+#: `1.8e308` range.
+VARIANCE_SUM_MIN = 1e-154
+VARIANCE_SUM_MAX = 1e102
+
+
+def beta_variance_cypher(alpha_operand: str, beta_operand: str) -> str:
+    """Cypher twin of :func:`_beta_variance` — `0.0` where it is not computable.
+
+    It carries EVERY guard its Python owner has, in the same order: a NEGATIVE
+    operand is not a Beta count (α=3, β=-1 would otherwise answer the
+    "variance" -0.25 — measured, and the width rule excludes that shape from
+    the scans, so a surface that computes the width WITHOUT the rule must not
+    disagree with it), and the SUM must lie inside the band where
+    `s * s * (s + 1)` is representable (`_beta_variance` guards that
+    denominator; `isfinite` does not exist in FalkorDB, so the band is the same
+    condition written once). Every surface that RANKS on a width must use this
+    — the formula inlined in a template makes the ordering depend on NaN.
+    """
+    a = numeric_operand_cypher(alpha_operand)
+    b = numeric_operand_cypher(beta_operand)
+    s_sum = f"({a} + {b})"
+    # #11702 cycle 19: `{a} IS NULL` is a guard, not an afterthought. An
+    # UNREADABLE operand (`update_point(posterior_alpha="abc")`, or a stored
+    # Boolean) makes every comparison in this CASE NULL, and a NULL WHEN arm
+    # does not match — so the query fell through to the arithmetic, which is
+    # NULL too, and the expression answered NULL where its docstring and its
+    # Python twin both promise `0.0`. Measured: `most_uncertain` rendered
+    # `var: None`, `_format_uncertain` raised TypeError on `{None:.4f}`, and
+    # `analyze()`'s blanket handler turned the whole answer into
+    # "Formatting error: …".
+    return (f"CASE WHEN {a} IS NULL OR {b} IS NULL "
+            f"     OR {a} < 0 OR {b} < 0 "
+            f"     OR {s_sum} <= 0 OR {s_sum} < {VARIANCE_SUM_MIN!r} "
+            f"     OR {s_sum} > {VARIANCE_SUM_MAX!r} THEN 0.0 "
+            f"     ELSE ({a} * {b}) / ({s_sum} * {s_sum} * ({s_sum} + 1)) END")
+
+
+def ep_width_cypher(alias: str) -> str:
+    """Cypher: this node carries a USABLE WIDTH (variance) — the composite rule.
+
+    ``ep_pair_stored_cypher`` is only half of it, and using half of it is how a
+    variance scan admitted shapes that cannot have a variance:
+
+    * a MIRROR-only claim (a real served belief with no stored operands) —
+      the ``coalesce(…, 1.0)`` defaults then produce the Beta(1,1) MAXIMUM
+      ``1/12``, so the least-known claim wins a "how uncertain are we" answer;
+    * a HALF pair (α only or β only) — the missing operand is INVENTED as 1.0,
+      which is the fabricated width #11702 exists to remove (measured: an
+      α-only claim reported ``variance 0.0889, contested True`` on
+      ``ep.get_contested_claims`` while ``annotate_ep_batch`` said
+      ``absent / 0.0 / contested False`` for the same node);
+    * a NEGATIVE operand (β is a pseudo-count) — ``α=3, β=-1`` gives a
+      negative "variance" every threshold consumer reads as certain;
+    * a zero-total ``(0, 0)`` — absent by the presence rule, and ``v > t``
+      would list it at ``0/0``.
+
+    ONE definition, imported by ``ep.get_contested_claims``,
+    ``sdk._review_prune`` and the ``analyze`` templates, so a variance scan and
+    the ``ep`` block cannot disagree about which claims have a width.
+    """
+    a = numeric_operand_cypher(
+        f"coalesce({alias}.posterior_alpha, {alias}.ep_alpha)")
+    b = numeric_operand_cypher(
+        f"coalesce({alias}.posterior_beta, {alias}.ep_beta)")
+    # …and the sum must be inside the band where the formula is REPRESENTABLE
+    # (`VARIANCE_SUM_MIN … VARIANCE_SUM_MAX`), not merely finite: `s * s * (s+1)`
+    # overflows a double past `s ≈ 5.6e102` and `αβ` underflows below
+    # `s ≈ 3e-154`, and both make the formula answer a number that is not the
+    # variance (`NaN`, or `0.0` for a maximally-wide pair) while
+    # `_beta_variance` answers 0.0. The earlier form of this guard bounded `s`
+    # at `1e308` — ~1e154 too loose on the overflow side and with no lower bound
+    # at all — so `(1e200, 1e200)` and `(1e-200, 0)` passed it and then won the
+    # uncertainty ranking with `var: nan` (measured). A width that cannot be
+    # COMPUTED is not a width; the admissibility rule and the formula now share
+    # one band, so they cannot disagree about which claims have one.
+    # #11702 cycle 19: the operands must be READABLE, not merely stored —
+    # `coalesce(<operand>, 0.0)` collapsed "unreadable" into "zero", so a
+    # stored `("abc", 2.0)` pair was ADMITTED by this rule while
+    # `beta_variance_cypher` answered NULL for it. `most_uncertain` then put
+    # that claim FIRST — ahead of a genuine Beta(1,1) 1/12 — with a NULL width,
+    # which is the inversion (and the exception) cycle 15 declared fixed, one
+    # level down. `IS NOT NULL` is the honest test: a shape whose operands
+    # cannot be read has no width.
+    return (f"({ep_pair_stored_cypher(alias)} "
+            f"AND {a} IS NOT NULL AND {b} IS NOT NULL "
+            f"AND {a} >= 0 AND {b} >= 0 "
+            f"AND ({a} + {b}) >= {VARIANCE_SUM_MIN!r} "
+            f"AND ({a} + {b}) <= {VARIANCE_SUM_MAX!r})")
+
+
+def ep_variance_admissible_cypher(alias: str) -> str:
+    """Cypher: may this node be LISTED by a graph-wide variance SCAN?
+
+    The scan rule, which is NOT the same question as :func:`ep_width_cypher`'s
+    ("does this node carry a stored width"). A whole-graph "where are we least
+    certain" report has a deliberate #169 arm: a claim with **no persisted
+    belief at all** IS the least certain thing in the graph, so it lists at the
+    Beta(1,1) prior's `1/12` maximum. That is a statement about a zero
+    information prior, not a fabricated posterior, and it is pinned by
+    ``test_3276_has_ep_measured.py::test_unmeasured_live_claim_still_listed``.
+
+    What must NOT list is every shape where the coalesce default FABRICATES a
+    width for something that already carries a belief or a malformed pair:
+
+    * a HALF pair (α only / β only) — the missing operand is invented as 1.0,
+      so an α-only claim reported `variance 0.0889, contested True` while the
+      `ep` block said `absent / 0.0 / False` for the same node (measured);
+    * a MIRROR-only claim — a served belief with no operands, reported at the
+      maximum `1/12` instead of "there is nothing to compute a width from";
+    * a NEGATIVE operand — a negative "variance" every threshold reads as
+      certain;
+    * a zero-total `(0, 0)` pair — 0/0, and absent by the presence rule.
+
+    So: admissible = the strict width, OR (neither operand stored AND no
+    mirror). ONE definition, used by ``ep.get_contested_claims`` and the
+    PR-prune scan.
+    """
+    a = numeric_operand_cypher(
+        f"coalesce({alias}.posterior_alpha, {alias}.ep_alpha)")
+    b = numeric_operand_cypher(
+        f"coalesce({alias}.posterior_beta, {alias}.ep_beta)")
+    # #11702 cycle 24: the mirror arm is the BANDED read — the same one
+    # `ep_has_belief_cypher` uses. Unbanded, a legacy `confidence="0x1p4"`
+    # answered `ep_has_belief_cypher=False` (not a belief) AND
+    # `ep_variance_admissible=False` (there IS something to measure a width on),
+    # two presence answers for one claim.
+    no_operands = (f"({a} IS NULL AND {b} IS NULL AND "
+                   f"{belief_mirror_cypher(f'{alias}.confidence')} IS NULL)")
+    return f"({ep_width_cypher(alias)} OR {no_operands})"
+
+
+def belief_mean_cypher(alpha_operand: str, beta_operand: str, *,
+                       degenerate: str = "null") -> str:
+    """Cypher twin of :func:`_beta_mean` for two RAW column expressions.
+
+    Returns a ``CASE`` expression, because three things the Python owner
+    guards must be guarded in the query too:
+
+    * INTEGER division — FalkorDB's ``/`` truncates on int operands, so an
+      int-stored pair (``update_point(posterior_alpha=9, posterior_beta=1)``)
+      answered ``0.00`` beside an ``ep`` block of ``0.90``;
+    * an OVERFLOWING sum (``1e308 + 1e308`` is ``inf``) — ``α/inf == 0.0``,
+      i.e. maximum disbelief for a symmetric pair. Answered by the
+      overflow-free identity ``1/(1 + β/α)``, exactly as ``_beta_mean`` does;
+    * a degenerate sum (``0``, negative, ``NaN``) — the caller's
+      ``degenerate`` rendering (``"null"`` where an absent belief must stay
+      null, a literal where the surface must still answer something).
+    """
+    a = numeric_operand_cypher(alpha_operand)
+    b = numeric_operand_cypher(beta_operand)
+    s_sum = f"({a} + {b})"
+    # The overflow arm applies ONLY when the identity is defined (`α > 0`).
+    # Keying the whole branch on the sum alone made `(0, 1.7e308)` — a stored
+    # pair the presence rule accepts, sum finite but > 1e308 — fall into the
+    # `ELSE degenerate` arm and render `null` beside `ep_state: "measured"`,
+    # while `_beta_mean` answers `0.0` for the same pair. With `α > 0` folded
+    # into the condition that pair takes the ordinary division, which is what
+    # the Python owner computes.
+    return (f"CASE WHEN {s_sum} > 1e308 AND {a} > 0 "
+            f"THEN 1.0 / (1.0 + {b} / {a}) "
+            f"     WHEN {s_sum} > 0 THEN {a} / {s_sum} "
+            f"     ELSE {degenerate} END")
+
+
 def _beta_variance(alpha: float, beta: float) -> float:
     """Variance of the Beta(α, β) posterior: αβ/((α+β)²(α+β+1)).
 
     Max is 1/12 ≈ 0.0833 at α=β=1 (uninformative prior). Same formula as
     TortoiseEP.get_contested_claims.
     """
+    # #11702 cycle 11: a NEGATIVE operand is not a Beta count. `α=3, β=-1`
+    # passed every guard below (s = 2 > 0, denom finite) and returned a
+    # negative "variance" (-0.25) that every threshold consumer read as a real,
+    # maximally-certain number — reachable through the unvalidated
+    # `update_point`/`set_point_baseline` arguments.
+    if not (math.isfinite(alpha) and math.isfinite(beta)) \
+            or alpha < 0 or beta < 0:
+        return 0.0
     s = alpha + beta
     # A sum that is not finite is not a usable pair either: an overflowing sum
     # gives a denominator of inf (0.0/0.0-free but meaningless), and a NaN alpha
     # would put a NaN variance on the wire (`json.dumps` emits a bare `NaN`
     # token). Report "no variance" instead of a bogus or unwritable number.
     if not math.isfinite(s) or s <= 0:
+        return 0.0
+    # #11702 cycle 15: the same BAND `ep_width_cypher` / `beta_variance_cypher`
+    # apply, so "the predicate admits this claim" and "the formula computes a
+    # value" are one condition. Outside the band the cube underflows to `0.0`
+    # or overflows to `inf`, and the query's own copy of the formula answers
+    # `NaN` where this returns `0.0` — the two disagreed on `(1e200, 1e200)`
+    # and `(1e-200, 0)` for exactly that reason.
+    if s < VARIANCE_SUM_MIN or s > VARIANCE_SUM_MAX:
         return 0.0
     denom = s * s * (s + 1)
     # Underflow case: a subnormal pair (e.g. α=β=1e-200) makes `s*s` and
@@ -3938,8 +5070,21 @@ def _beta_mean(alpha: float, beta: float) -> float:
     s = alpha + beta
     # `isfinite` as well as `> 0`: an overflowing sum (+inf) would otherwise
     # yield α/inf == 0.0 — a wrong belief (maximum disbelief) rather than the
-    # neutral fallback this guard exists to serve.
-    return alpha / s if math.isfinite(s) and s > 0 else 0.5
+    # value the pair actually describes.
+    #
+    # #11702 cycle 13: a non-finite sum is NOT "no information". For an
+    # overflowing pair the true mean is still well defined (α = β = 1e308 is
+    # 0.5, and 1.7e308/1e307 is 0.944), so answer it by the overflow-free
+    # identity `1/(1 + β/α)` instead of the neutral 0.5 this used to return —
+    # which was itself a wrong belief, just a less alarming one. Only a pair
+    # that is genuinely unusable (α <= 0, β < 0 — a mean of 0 or below) falls
+    # back to neutral.
+    if not math.isfinite(s):
+        if math.isfinite(alpha) and alpha > 0 and math.isfinite(beta) \
+                and beta >= 0:
+            return 1.0 / (1.0 + beta / alpha)
+        return 0.5
+    return alpha / s if s > 0 else 0.5
 
 
 def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
@@ -3960,18 +5105,27 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
     confidence and agrees with ``get_confidence``/``recall`` for the same
     point: it is the belief mean α/(α+β) of the persisted posterior
     (posterior_alpha/beta) when EP has run on the claim, else the persisted
-    prior mean (ep_alpha/beta), else the neutral Beta(1,1) mean 0.5. It is
+    prior mean (ep_alpha/beta), else ``None`` (#11702 — the third state of
+    that contract, named by ``ep_state``; it used to be the neutral Beta(1,1)
+    mean 0.5). It is
     NOT the structural edge-ratio impl/(impl+nand) that this field used to
     carry — that quantity lives on in ``evidence`` (impl_count/nand_count/
     total) and ``contention`` (the NAND fraction), which are legitimately
     different from a belief.
 
-    Points with no EP data (no posterior_alpha AND no ep_alpha) get
-    has_ep=False + confidence_mean=0.5 (neutral — absence of measurement is
-    NOT low support, matching the recall/why-layer convention);
-    contention=0.0. variance/contested are computed from the PERSISTED
-    posterior (posterior_alpha/beta, falling back to ep_alpha/beta priors)
-    (posterior stability), not from edge ratios.
+    Points with no EP data (no posterior_alpha AND no ep_alpha AND no
+    ``n.confidence`` mirror) get has_ep=False + **confidence_mean=None** +
+    ``ep_state='absent'`` (#11702). This read used to answer the neutral
+    Beta(1,1) mean 0.5 there, which made "we have not computed this" and "a
+    measured symmetric coin flip (α=β)" the same number — indistinguishable
+    at every threshold and every ordering. The rule that replaced it is
+    `docs/architecture/SEARCH-ARCHITECTURE.md` §6.3: absent state is ``null``
+    with ``ep_state: "absent"``, never 0.5. A claim that DOES carry a
+    persisted belief keeps its number: a computed posterior of 0.5 still
+    reads 0.5 — the distinction is presence, not value. contention=0.0.
+    variance/contested are computed from the PERSISTED posterior
+    (posterior_alpha/beta, falling back to ep_alpha/beta priors) (posterior
+    stability), not from edge ratios.
 
     #2490 has_ep overload: TERMINAL claims (status in the terminal vocab or
     the legacy outdated=true flag) are gated to has_ep=False + contested=False
@@ -4029,13 +5183,39 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             # baseline_set plumbs the prior-only distinction to Python.
             f"  {ep_measured_cypher('n')} AS has_ep, "
             "  n.status, coalesce(n.outdated, false), "
-            f"  {ep_baseline_cypher('n')} AS baseline_set "
+            f"  {ep_baseline_cypher('n')} AS baseline_set, "
+            # #11702: the RAW presence columns ride the tail (10/11/12) so the
+            # state is derived from what is PERSISTED, not from the coalesced
+            # 1.0 defaults above — `coalesce(n.posterior_alpha, …, 1.0)`
+            # answers 0.5 for a claim that has no belief at all, which is
+            # precisely the number this issue removes.
+            "  n.posterior_alpha, n.ep_alpha, n.confidence, "
+            # #11702 cycle 3: the β columns ride too, so the Python twin can
+            # apply the SAME α+β <= 0 rule the Cypher predicate applies. Without
+            # them `ep_state()` called a stored (0, 0) pair PRESENT while
+            # `ep_has_belief_cypher` called it absent — the four-surface split
+            # (0.5 / None / absent / nan) this class of bug kept reappearing as.
+            "  n.posterior_beta, n.ep_beta "
         )
         rows = graph.query(cypher, params={"ids": point_ids}).result_set
 
         breakdowns: dict[str, EpBreakdown] = {}
+        # #11702 cycle 16: ONE total coercion (`numeric_operand`), applied to the
+        # MIRROR as well. Cycle 15 coerced the α/β columns only, so a LEGACY row
+        # stored with a non-numeric mirror (a pre-guard `confidence="abc"`, or a
+        # raw-Cypher write) still raised here — and the blanket
+        # `except` below discarded the WHOLE BATCH, which reads as
+        # "ep_state: absent" for every claim in the response, including measured
+        # ones, and makes any belief floor (`min_confidence`) return nothing
+        # (measured on `sdk.recall_state`).
+        _f = numeric_operand
+
         for row in rows:
-            pid, impl, nand, contention, alpha, beta, has_ep = row[0], int(row[1]), int(row[2]), float(row[3]), float(row[4]), float(row[5]), row[6]
+            pid, impl, nand, contention = row[0], int(row[1]), int(row[2]), float(row[3])
+            alpha_num, beta_num = _f(row[4]), _f(row[5])
+            alpha = alpha_num if alpha_num is not None else 1.0
+            beta = beta_num if beta_num is not None else 1.0
+            has_ep = row[6]
             # #2490: terminal claims never surface a frozen/decayed posterior
             # as measured EP — has_ep=False + contested=False (the columns
             # are fetched so the terminal state is read, not guessed; the len
@@ -4047,10 +5227,68 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             # 7/9-col row shapes keep their index mapping under the len guard.
             baseline_set = bool(row[9]) if len(row) > 9 else False
             measured = bool(has_ep)
+            # #11702: PRESENCE, derived from the RAW columns (10/11/12). A
+            # test double that predates them asserts the numeric contract, so
+            # its row carries a belief by construction — that fallback keeps
+            # the doubles honest instead of silently marking them absent.
+            if len(row) > 14:
+                state = ep_state(posterior_alpha=row[10], ep_alpha=row[11],
+                                 confidence=row[12], posterior_beta=row[13],
+                                 ep_beta=row[14], baseline_set=baseline_set)
+            else:
+                state = (EP_STATE_MEASURED if measured
+                         else EP_STATE_BASELINE)
+            # #11702: the #2490 terminal gate applies to the STATE too, not
+            # only to `measured` — a terminal claim's decayed posterior is a
+            # persisted value that EP never measured in that form, so a
+            # surface saying `measured` there tells a consumer an EP run
+            # happened. Resolved through the shared fold so the rankers (which
+            # read the same claim through a different query) cannot disagree.
+            state = ep_state_resolve(state, measured=measured)
+            # #11702: the VALUE follows the same precedence the rankers use
+            # (`ranking._fetch_point_signals`): the `n.confidence` mirror
+            # first (#2206's served belief), the α/β mean as the fallback for a
+            # node the flush never reached. Keeping the two surfaces on one
+            # precedence is the whole point — the same claim reporting 0.5 in
+            # the `ep` block and 0.95 in the ranking was the mirror/αβ split
+            # one level down. A row shape that predates the raw columns cannot
+            # be absent (the state above already answered), so the α/β mean is
+            # the honest answer there.
+            # #11702 cycle 24: BANDED, like every other mirror read (#2206's
+            # served belief is a probability). Unbanded here, a claim carrying
+            # BOTH a legacy hex/out-of-range mirror and a stored α/β pair served
+            # the mirror as `confidence_mean` (16.0) while `belief_value` and all
+            # three rankers served the pair mean — the `ep`-block-vs-ranking
+            # split this precedence exists to close, one level down.
+            mirror = belief_mirror(row[12]) if len(row) > 12 else None
+            if state == EP_STATE_ABSENT:
+                value = None
+            elif mirror is not None:
+                value = round(mirror, 4)
+            else:
+                value = round(_beta_mean(alpha, beta), 4)
             total = impl + nand
-            variance = _beta_variance(alpha, beta)
+            # #11702: the variance is only a POSTERIOR statistic when the PAIR
+            # is stored (the coalesced 1.0 defaults otherwise answer the
+            # maximum 1/12 — see `ep_pair_stored`). The raw β columns ride the
+            # row (13/14) for exactly this.
+            pair_stored = (
+                ep_pair_stored(posterior_alpha=row[10], ep_alpha=row[11],
+                               posterior_beta=row[13], ep_beta=row[14])
+                if len(row) > 14 else True)
+            # A non-numeric operand is not a computable width (cycle 15):
+            # `_beta_variance` refuses a non-finite or negative input, and the
+            # coerced 1.0 above would otherwise answer the Beta(1,1) maximum
+            # for a claim whose "pair" is unreadable.
+            variance = (_beta_variance(alpha, beta)
+                        if (pair_stored and alpha_num is not None
+                            and beta_num is not None) else 0.0)
             breakdowns[pid] = EpBreakdown(
-                confidence_mean=round(_beta_mean(alpha, beta), 4),
+                # #11702: `None` when nothing is persisted — never the neutral
+                # 0.5, which is what made "no evidence" and "a measured coin
+                # flip" the same number here.
+                confidence_mean=value,
+                ep_state=state,
                 evidence=EpEvidence(impl_count=impl, nand_count=nand, total=total),
                 contention=contention,
                 variance=round(variance, 6),
@@ -4059,7 +5297,14 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                 # contested, it's unmeasured. (#2490: terminal claims are
                 # gated above, so their decayed (1,1) posterior never reads
                 # contested either.)
-                contested=measured and variance > CONTESTED_VARIANCE_THRESHOLD,
+                #
+                # #11702: and never when the state is ABSENT — "no belief
+                # exists" beside "its posterior is maximally uncertain" is the
+                # contradiction this issue is about, and an α-only half pair
+                # reached `contested: True` through the coalesced 1.0 default.
+                contested=(measured and state != EP_STATE_ABSENT
+                           and pair_stored
+                           and variance > CONTESTED_VARIANCE_THRESHOLD),
                 has_ep=measured,
                 measured=measured,
                 # prior-only: a declared #2199 baseline on a LIVE claim with
@@ -4067,16 +5312,25 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                 # a measured one. A TERMINAL claim is neither measured nor
                 # prior-only (its 0.5 is the #2490 decayed posterior), so the
                 # terminal gate above also clears `baseline` — see the
-                # EpBreakdown three-state note.
-                baseline=baseline_set and not measured and not terminal,
+                # EpBreakdown three-state note. And the flag follows the
+                # RESOLVED state rather than `baseline_set` alone: a DECLARED but
+                # DEGENERATE prior (`set_point_baseline(claim, 0, 0)`, which every
+                # surface reads as `absent` because 0/0 has no mean — #11702
+                # cycle 30) must not claim prior-only beside `ep_state: "absent"`,
+                # because `baseline` is documented as "confidence_mean IS the
+                # declared prior mean" and a consumer reading it that way got None.
+                baseline=(baseline_set and not measured and not terminal
+                          and state == EP_STATE_BASELINE),
             )
 
         # Fill in defaults for IDs that are not Point nodes (defaults match
-        # the neutral contract: confidence_mean 0.5, has_ep False).
+        # the ABSENT contract: no belief ⇒ confidence_mean None, ep_state
+        # 'absent', has_ep False — #11702; this used to report 0.5).
         for pid in point_ids:
             if pid not in breakdowns:
                 breakdowns[pid] = EpBreakdown(
-                    confidence_mean=0.5,
+                    confidence_mean=None,
+                    ep_state=EP_STATE_ABSENT,
                     evidence=EpEvidence(impl_count=0, nand_count=0, total=0),
                     contention=0.0,
                 )
@@ -4557,10 +5811,28 @@ def get_relationships_bounded(
                 "  AND NOT (op)-[:mitigated_by]->(other) "
                 "  AND (type(r2) = 'NAND' "
                 f"       OR {_terminal_expression('other.status')} "
+                # #11702: the SELECTION must agree with the flag the assembly
+                # computes. The in-query variance runs on the coalesced 1.0
+                # defaults, so a HALF pair (the public write path can produce
+                # one) read 0.3333 / variance 0.0889 > threshold and entered
+                # the CRITICAL class — which is exempt from the per-point and
+                # global caps — for a claim no surface calls measured. The
+                # pair-stored test and the presence rule come from the one
+                # owner (`ep_has_belief_cypher` / `ep_pair_stored`).
                 f"       OR ({ep_measured_cypher('other')} "
-                "           AND (coalesce(other.posterior_alpha, other.ep_alpha, 1.0) * coalesce(other.posterior_beta, other.ep_beta, 1.0)) "
-                "               / ((coalesce(other.posterior_alpha, other.ep_alpha, 1.0) + coalesce(other.posterior_beta, other.ep_beta, 1.0)) ^ 2 "
-                "                  * (coalesce(other.posterior_alpha, other.ep_alpha, 1.0) + coalesce(other.posterior_beta, other.ep_beta, 1.0) + 1)) > $contested_threshold)) "
+                f"           AND {ep_pair_stored_cypher('other')} "
+                # #11702 cycle 17: the shared width formula, not a local
+                # re-derivation. FalkorDB RAISES on `string * string` /
+                # `bool * bool` ("Type mismatch: expected Integer, Float, or
+                # Null but was String"), and the raise is not per-row — it took
+                # the WHOLE query down, so `get_relationships_bounded` returned
+                # its fail-open seed with `decoration_error` set and EVERY
+                # requested point lost its relationships. Three shapes this PR
+                # declares must read as ABSENT destroyed the decoration
+                # instead. `beta_variance_cypher` carries the coercion, the
+                # sign guard and the band, so the two twins agree about
+                # whether the shape is readable at all.
+                f"           AND {beta_variance_cypher('coalesce(other.posterior_alpha, other.ep_alpha, 1.0)', 'coalesce(other.posterior_beta, other.ep_beta, 1.0)')} > $contested_threshold)) "
                 "RETURN op.id, type(r2) AS et, r2.idx AS other_idx, other.id, "
                 "  other.pointKind, other.status, "
                 "  coalesce(other.posterior_alpha, other.ep_alpha, 1.0), "
@@ -4571,17 +5843,31 @@ def get_relationships_bounded(
                 # gate lives INSIDE the projection). #3276: "measured" is
                 # ep_measured_cypher — a #2199 baseline prior is NOT measurement.
                 f"  ({ep_measured_cypher('other')} AND {_alive_flag('other.status')}), "
-                "  other.createdAt, coalesce(other.outdated, false) "
+                "  other.createdAt, coalesce(other.outdated, false), "
+                # #11702: the RAW belief columns (11..14) + the mirror (15), so
+                # the assembly reads the VALUE and the WIDTH through the one
+                # owner instead of re-deriving presence from the coalesced
+                # defaults (a half pair read 0.3333 with variance 0.0889 here
+                # while every other surface answered None + absent).
+                "  other.posterior_alpha, other.ep_alpha, "
+                "  other.posterior_beta, other.ep_beta, other.confidence "
                 "LIMIT $raw_cap",
                 params={"op_ids": list(op_ids), "raw_cap": raw_cap,
                         "contested_threshold": CONTESTED_VARIANCE_THRESHOLD},
                 timeout=_DECORATION_TIMEOUT_MS,
             ).result_set
             for row in rows:
+                # #11702 cycle 16: TOTAL coercion on the coalesced operands —
+                # a stored non-numeric α raised here and the whole operator
+                # decoration for the response was dropped.
+                a_num, b_num = numeric_operand(row[6]), numeric_operand(row[7])
                 op_crit.setdefault(row[0], {})[row[3]] = (
                     row[1], row[2], row[4] or "", row[5] or "",
-                    float(row[6]), float(row[7]), bool(row[8]), row[9],
+                    a_num or 0.0, b_num or 0.0, bool(row[8]), row[9],
                     bool(row[10]),
+                    # #11702: raw α/β + mirror (11..15) for the shared readers.
+                    (row[11], row[12], row[13], row[14], row[15])
+                    if len(row) > 15 else None,
                 )
 
         # The operators of the TOP-K result points are the ones that get
@@ -4614,15 +5900,25 @@ def get_relationships_bounded(
                 # never reads as measured EP in the assembly. #3276: measured
                 # excludes the #2199 baseline prior (see ep_measured_cypher).
                 f"  ({ep_measured_cypher('other')} AND {_alive_flag('other.status')}), "
-                "  other.createdAt, coalesce(other.outdated, false)",
+                "  other.createdAt, coalesce(other.outdated, false), "
+                # #11702: raw belief columns + mirror (see op_crit).
+                "  other.posterior_alpha, other.ep_alpha, "
+                "  other.posterior_beta, other.ep_beta, other.confidence",
                 params={"op_ids": list(expand_ops), "per_op": per_op_cap},
                 timeout=_DECORATION_TIMEOUT_MS,
             ).result_set
             for row in rows:
+                # #11702 cycle 16: TOTAL coercion, same as the Q2-crit twin
+                # above — a stored non-numeric operand on a SUPPORT peer raised
+                # here and the blanket `except` dropped the relationship
+                # decoration for the whole response.
+                a_num, b_num = numeric_operand(row[6]), numeric_operand(row[7])
                 op_support.setdefault(row[0], {})[row[3]] = (
                     row[1], row[2], row[4] or "", row[5] or "",
-                    float(row[6]), float(row[7]), bool(row[8]), row[9],
+                    a_num or 0.0, b_num or 0.0, bool(row[8]), row[9],
                     bool(row[10]),
+                    (row[11], row[12], row[13], row[14], row[15])
+                    if len(row) > 15 else None,
                 )
 
         # Unified endpoint store: critical classes first, then support filler
@@ -4666,9 +5962,64 @@ def get_relationships_bounded(
                 for other_id, ep in op_endpoints.get(op_id, {}).items():
                     if other_id == pid:
                         continue  # self-peer exclusion
-                    et2, other_idx, kind, status, alpha, beta, has_ep, created, outdated = ep  # noqa: RUF059
-                    variance = _beta_variance(alpha, beta)
-                    contested = has_ep and variance > CONTESTED_VARIANCE_THRESHOLD
+                    (et2, _other_idx, kind, status, alpha, beta, has_ep,
+                     created, outdated, raw) = ep
+                    # #11702: ONE owner for presence, one for the width. The
+                    # coalesced α/β above are only the ARITHMETIC inputs; the
+                    # raw columns decide whether a belief and a width EXIST.
+                    # Without this block a HALF pair (α only — writable through
+                    # `sdk.update_point`) read `confidence: 0.3333, variance:
+                    # 0.0889, contested: true` here while `annotate_ep_batch`,
+                    # `why` and all three rankers answered `None` + `"absent"`
+                    # for the same claim; and because `contested` promotes a
+                    # peer into the CRITICAL class (cap- and budget-exempt),
+                    # the fabricated flag displaced real support peers.
+                    if raw is not None:
+                        rpa, rea, rpb, reb, rmirror = raw
+                        pair_stored = ep_pair_stored(
+                            posterior_alpha=rpa, ep_alpha=rea,
+                            posterior_beta=rpb, ep_beta=reb)
+                        # ⛔ `baseline_set` is deliberately NOT passed. Neither
+                        # peer query selects the column, and passing
+                        # `baseline_set=bool(has_ep)` (the obvious-looking
+                        # shortcut, which this did until #11702 review cycle
+                        # 12) INVERTS it: `has_ep` is `ep_measured_cypher`'s
+                        # "EP measured this", the exact opposite of a declared
+                        # baseline. Measured on the legacy-EP-prior shape
+                        # (`ep_alpha`/`ep_beta` set, no posterior, no mirror —
+                        # what ep.py's evidence pre-write leaves on a
+                        # non-baseline claim it clears): `annotate_ep_batch`,
+                        # `why` and all three rankers said `measured` while
+                        # this block said `baseline`, breaking the
+                        # one-vocabulary invariant on the block `sdk.search`
+                        # attaches to every point result. Leaving it False is
+                        # not a guess: `ep_state_resolve(measured=has_ep)` is
+                        # the ONE fold that reconciles the two, and it lands on
+                        # the same token either way — a #2199 baseline has
+                        # `has_ep=False`, so its `measured` reads as `baseline`
+                        # there, while the legacy prior has `has_ep=True` and
+                        # keeps `measured`. Pinned by
+                        # `test_relationship_peer_block_agrees_on_ep_state_for_
+                        # every_stored_shape`.
+                        state = ep_state_resolve(
+                            ep_state(posterior_alpha=rpa, ep_alpha=rea,
+                                     confidence=rmirror, posterior_beta=rpb,
+                                     ep_beta=reb),
+                            measured=has_ep)
+                        value = belief_value(confidence=rmirror,
+                                             posterior_alpha=rpa, ep_alpha=rea,
+                                             posterior_beta=rpb, ep_beta=reb)
+                    else:  # pragma: no cover — pre-#11702 row double
+                        pair_stored = True
+                        state = (EP_STATE_MEASURED if has_ep
+                                 else EP_STATE_BASELINE)
+                        value = (round(_beta_mean(alpha, beta), 4)
+                                 if has_ep else None)
+                    variance = (_beta_variance(alpha, beta)
+                                if pair_stored else 0.0)
+                    contested = (has_ep and state != EP_STATE_ABSENT
+                                 and pair_stored
+                                 and variance > CONTESTED_VARIANCE_THRESHOLD)
                     # #2490: terminal peers (full live.py vocab OR the legacy
                     # outdated=true flag — a flag-outdated live-status peer is
                     # in no status-set member, only the fetched column
@@ -4699,21 +6050,48 @@ def get_relationships_bounded(
                             # raw division here raised ZeroDivisionError
                             # mid-assembly — discarding every point assembled
                             # before it (#330's guard, missed at this site).
-                            # `_beta_mean` carries that guard, and its uniform
-                            # fallback (0.5) is the SAME value the sibling
-                            # signal surface reports for the pair
-                            # (StateRanker._fetch_point_signals,
-                            # ranking.py:1046 → NEUTRAL_CONFIDENCE: measured
-                            # on the write-path shape, which mirrors
-                            # `confidence`; the GraphRanker sibling has no
-                            # guard and is untouched by this read).
+                            # `_beta_mean` carries that guard. #11702: this
+                            # 0.5 is NOT a neutral-absence constant (that one
+                            # is deleted) and it is NOT a value any sibling
+                            # still reports — the rankers and `why` answer
+                            # `None` + `ep_state: "absent"` for this pair,
+                            # because a stored (0,0) is ABSENT under the
+                            # presence rule (`α+β > 0` fails). This read is
+                            # reached only when `has_ep` is true on a shape
+                            # whose α+β is non-positive, so the fallback is
+                            # the arithmetic mean of a degenerate pair inside a
+                            # block that also reports `variance: 0.0` — never
+                            # a fabricated Beta(1,1) posterior.
                             # It is not the fabricated posterior above: for this
                             # pair `_beta_variance`'s own s <= 0 guard yields
                             # variance 0.0, so contested stays False and nothing
                             # above the threshold is claimed.
-                            "confidence": round(_beta_mean(alpha, beta), 4) if has_ep else None,
-                            "variance": round(variance, 6) if has_ep else None,
+                            # #11702 cycle 27: rounded to 6 dp, matching the
+                            # RANKERS and this payload's own `variance` key two
+                            # lines down. It was a raw double, so the same claim
+                            # read `0.3333333333333333` here and `0.333333` on a
+                            # ranker — two numbers for one belief.
+                            # ⚠️ It does NOT make every cross-surface compare
+                            # exact: `annotate_ep_batch` rounds its
+                            # `confidence_mean` to 4 dp, so peer-vs-`ep`-block is
+                            # `0.333333` vs `0.3333` by design. Compare at the
+                            # COARSER precision, or compare peer-to-ranker.
+                            "confidence": (None if value is None
+                                           else round(value, 6)),
+                            # `None` when nothing is claimed at all — the same
+                            # `None` a mitigation / CORRECTS peer emits, so the
+                            # value can never be read as a Beta(1,1) width.
+                            "variance": (round(variance, 6)
+                                         if pair_stored
+                                         and state != EP_STATE_ABSENT
+                                         else None),
                             "contested": contested,
+                            # #11702: the state NAME rides beside the value on
+                            # every other surface (`ep` block, rankers); this
+                            # peer block was the one place it did not, so a
+                            # consumer could not tell a `None` value from an
+                            # absent belief and a degenerate pair.
+                            "ep_state": state,
                             "created_at": created,
                         },
                         "family_size": op_family.get((op_id, et2), 0),

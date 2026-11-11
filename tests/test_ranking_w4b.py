@@ -623,7 +623,23 @@ def _seed_twin_conflict(sdk, counter_content: str) -> tuple[str, str, str]:
     cc_parity = sdk.create_point(
         "statement", "regional weather fronts shift whole bird populations")
     proj = sdk._get_proj()
-    for pid, a, b in [(calm["id"], 10.0, 10.0), (hot["id"], 2.0, 2.0)]:
+    for pid, a, b in [(calm["id"], 9.0, 1.0), (hot["id"], 0.9, 0.1)]:
+        # #11702: the twins must be SELF-CONSISTENT — the same belief mean on
+        # every surface — because the rankers now read the persisted α/β as the
+        # belief and treat `n.confidence` as their cache. This fixture used to
+        # write α/β = (10,10) / (2,2) (mean 0.5) beside `confidence = 0.9`, i.e.
+        # a node whose mirror contradicted its own posterior; that IS a state
+        # the public writes can reach — `update_point(confidence=0.9)` after a
+        # pair write leaves exactly that shape, and #11702's precedence pins the
+        # mirror as the winner for it (see the contract test
+        # `test_the_mirror_wins_over_a_contradicting_pair` in
+        # `tests/test_11702_absent_belief_state.py`). It is NOT what this
+        # fixture is about, though: once the read used the (stale) mirror the
+        # boost came from 0.9 while the α/β span premise below came from 0.5,
+        # so the twin pair stopped differing ONLY in variance. Both twins keep
+        # mean 0.9 — the pair still differs only in variance (0.0082 calm vs
+        # 0.045 hot, bracketing the 0.04 contested threshold) — so the fixture
+        # measures the boost, not the precedence.
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.confidence = 0.9, "
             "n.posterior_alpha = $a, n.posterior_beta = $b, "
