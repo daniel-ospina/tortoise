@@ -1548,6 +1548,19 @@ def test_migrate_route_keeps_the_UNCONFIGURED_consequence_on_shape_a(
               "pack_selection_conflict": False}
     with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
         result = _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
+    # The returned dict, not only the log line: the harm ("may read as
+    # UNCONFIGURED") is TRUE of this shape *because* the route reported it as
+    # UNKNOWN off its own empty-capture override, and NOT as an inherited
+    # rescue-file report — those two shapes print different text and only this
+    # one carries this consequence. Without the pair a caller branching on the
+    # dict could not tell them apart, and this test's docstring claim
+    # ("asserting on ... the returned dict a caller branches on") was carried by
+    # an assignment Ruff flags as unused (F841): the assertion had gone missing.
+    assert result["pack_selection_state_unknown"] is True, (
+        f"this route's own empty-capture override did not fire: {result}")
+    assert result["pack_selection_state_unknown_inherited"] is False, (
+        "the UNKNOWN here is this route's own override, not an inherited "
+        f"rescue-file report - the consequence belongs to the first: {result}")
 
     msg = next(m for m in (r.getMessage() for r in caplog.records)
                if ":PackSelection" in m)
