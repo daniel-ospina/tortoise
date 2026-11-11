@@ -4148,6 +4148,23 @@ surfaces:
   # NOT carve_out-registered: it is DB-free and runs on any lane, and a
   # measurement that only ran on one lane would stop being checkable.
   - test_journal_growth.py
+  # #11821 P0: the journal's vector WIDTH (`tortoise/embeddings.py::
+  # stamp_journal_embedding` / `shortest_float32_vector`) and the compact-separator
+  # write in `tortoise/log.py::EventLog.append`. It landed with NO row here, so
+  # `tools/ci_selection.py --integrity` redded (`manifest drift:
+  # ['test_11821_journal_vector_width.py']`) and `manifest-integrity` — which IS in
+  # `python-ci-gate.needs` — held the merge red while the pins ran in NO lane. Same
+  # class and same remedy as `test_journal_growth.py` above. The guarded sources
+  # (`tortoise/embeddings.py`, `tortoise/log.py`, `tortoise/sdk.py`,
+  # `tortoise/record_projection.py`, `tortoise/mcp_server.py`,
+  # `tortoise/projection/entities.py`, `tortoise/consistency.py`) are all
+  # SOURCE_PATTERNS entries, so this row is what makes the pins run on a
+  # seam-only diff. Hermetic — `numpy` and `tmp_path` only, no DB, no graph, no
+  # network — so it is deliberately NOT carve_out-registered: the pins are
+  # fail-closed format claims that must run on every lane. The single most
+  # load-bearing one is `test_a_verbatim_vector_is_never_narrowed` (the #5004
+  # round-7 promise that a caller-owned vector keeps its raw form).
+  - test_11821_journal_vector_width.py
   - test_test_lane_tool.py
   # #11385 (review P1): the S4 re-emit tax's instrument (`tools/s4_reeemit_tax.py`)
   # and its evidence bundle. Same class as `test_journal_growth.py` above — a
