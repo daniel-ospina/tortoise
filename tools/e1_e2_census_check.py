@@ -287,8 +287,21 @@ def check(text: str) -> tuple[list[str], dict]:
     totals: dict[str, int] = {}
     #: E2b's population per arm — the ANCHOR for the binding's `surviving_units=`,
     #: and the same quantity `capstone_measure`/`e1_e2_scores` compare that floor
-    #: against (one frozen key, one denominator — #11689 review).
-    atomic_pts: dict[str, int] = {}
+    #: against (one frozen key, one denominator — #11689 review). ⛔ It is the
+    #: surviving PLANTED units (`real_facts`), never `atomic_points`: the record's
+    #: §3.1 E2b row is written over "the planted units that survived (floor ≥ 30)",
+    #: while `atomic_points` counts every payload point — so 25 non-planted rows
+    #: plus 6 planted ones cleared a floor of 30 with 84 of 90 planted units lost
+    #: (#10989).
+    planted_pts: dict[str, int] = {}
+    #: Nothing is accumulated for the atomicity control: it is VALIDATED below
+    #: (a non-count `atomic=` token must be a V3 finding, not an absent line) and
+    #: then dropped. There is no accumulator because there is no reader — V5/V6/V7
+    #: go through `arm_metric()` straight off the log (V7 words an ABSENT arm line
+    #: itself: `arm_metric` returns `{}`, so its row reads "prints no
+    #: atomic_points"), and V15's anchor is `planted_pts` (#10989). The
+    #: `state["atomic_points"]` publish that used to sit here was write-only and is
+    #: gone (#11833 review r1 P2-2, r2 P2-1).
     pre_shas: dict[str, str] = {}
     for arm in arms:
         line = next((ln for ln in log.find(f"arm={arm} metric=objects ")), None)
@@ -328,13 +341,29 @@ def check(text: str) -> tuple[list[str], dict]:
         ap_line = next((ln for ln in log.find(f"arm={arm} metric=atomic_points ")), None)
         if ap_line is not None:
             ap = log.kv(ap_line).get("atomic", "")
-            if ap.isdigit():
-                atomic_pts[arm] = int(ap)
-            else:
+            #: VALIDATE ONLY — the value is not kept: anything reading the atomicity
+            #: control reads it off the log (`arm_metric()`), so an accumulator here
+            #: would be dead weight (#11833 review r2 P2-1). The check itself earns
+            #: its keep: `arm_metric()` reads a missing key as an ABSENT line, so a
+            #: non-count token has to be refused HERE or it would read as "no
+            #: atomic_points printed" rather than as the defect it is.
+            if not ap.isdigit():
                 findings.append(
                     f"[V3] arm {arm}: metric=atomic_points atomic={ap!r} is "
-                    f"not a count — E2b's denominator cannot be reconciled")
-    state["atomic_points"] = atomic_pts
+                    f"not a count — the atomicity control cannot be reconciled")
+        # The binding's `surviving_units=` anchor: the SAME population the E2b row's
+        # floor is written over — the surviving PLANTED units, which the probe prints
+        # on `metric=real_facts count=`. Read from the arm's OWN line, first match,
+        # for the reason stated above: an appended duplicate must not re-anchor it.
+        rf_line = next((ln for ln in log.find(f"arm={arm} metric=real_facts ")), None)
+        if rf_line is not None:
+            rf = log.kv(rf_line).get("count", "")
+            if rf.isdigit():
+                planted_pts[arm] = int(rf)
+            else:
+                findings.append(
+                    f"[V3] arm {arm}: metric=real_facts count={rf!r} is not a "
+                    f"count — E2b's population cannot be reconciled")
     state["shares"] = shares
 
     # ── V3 (cont.): the `e1` line reconciles with the arm lines ───────────
@@ -1109,18 +1138,72 @@ def check(text: str) -> tuple[list[str], dict]:
                     f"[V15] the binding states surviving_units="
                     f"{bind.get('surviving_units')!r}, not a count — a population "
                     f"the gate cannot read is refused, not skipped")
-            elif scored not in atomic_pts:
+            elif scored not in planted_pts:
                 findings.append(
                     "[V15] the binding states surviving_units= but the scored arm "
-                    "prints no metric=atomic_points line — the measured side "
+                    "prints no metric=real_facts line — the measured side "
                     "of E2b's floor is anchored to nothing, so a hand-edited "
                     "binding could satisfy it on its own word")
-            elif int(bind["surviving_units"]) != atomic_pts[scored]:
+            elif int(bind["surviving_units"]) != planted_pts[scored]:
                 findings.append(
                     f"[V15] the binding checks surviving_units="
                     f"{bind['surviving_units']} but the scored arm {scored} "
-                    f"measured {atomic_pts[scored]} atomic Points — the floor was "
+                    f"measured {planted_pts[scored]} surviving planted units "
+                    f"(`real_facts`) — the floor was "
                     f"checked against a population this run did not produce")
+        # The population the floor reads is printed ON the line, so a binding that
+        # NAMES another basis is refused rather than read as the count it happens
+        # to carry. `atomic_points` was that wrong basis (#10989), so a log that
+        # still prints it is a finding.
+        #
+        # ⛔ THIS ROW SITS OUTSIDE THE COUNT BRANCH ABOVE, on purpose. Nested
+        # inside it — where it was first written — the row could only fire when a
+        # count was STATED. The shape that let through (measured at `c48e426a23`:
+        # `surviving_units=n/a`, `declared_surviving_floor=n/a`, and
+        # `e2b_surviving_units` dropped from `floors_owned=`) came back with ZERO
+        # findings and was ACCEPTED: a floor shed AND a wrong population named in
+        # one binding. Deleting only the count token was not enough to get there
+        # — two count-absence rows still refused that log with 2 findings — so the
+        # accepted shape took four coordinated edits, not one removed token.
+        # Outside the branch this row fires on ANY named wrong basis, count or no
+        # count. The tolerance tuple below keeps the move a no-op for every
+        # well-formed log. (#11833 review r10 P2: the wording that stood here said
+        # the one-token shape "came back GREEN", which measured false.)
+        #
+        # ⛔ THE EMPTY STRING IS TOLERATED ON PURPOSE — it is not a fail-open.
+        # This token does not exist before #10989, and the probe now prints it
+        # on every binding it emits, so an ABSENT token can only be a log
+        # written by an older probe. What this row closes is a binding that
+        # NAMES another basis — `atomic_points` above all — so a NAMED basis
+        # is what is graded: absent and `n/a` are both tolerated, because a
+        # basis the probe could not read never named a population.
+        # (#11833 review r7 P3: this sentence said "PRESENCE is what is
+        # graded", which is the opposite of the tuple below and of the
+        # paragraph above — an ABSENT token is tolerated, not graded.)
+        #
+        # ⚠️ THE TOLERANCE IS ON THE BASIS VALUE, NOT ON THE POPULATION, and is
+        # worth stating exactly rather than as "the historical artifacts": an
+        # ABSENT basis is tolerated whether or not a count is stated, because this
+        # token post-dates the logs it is absent from; the count itself is
+        # anchored by its own rows above, which this row no longer depends on. So
+        # the shape this protects is a well-formed pre-#10989 log on the right
+        # population, whose only sin is not saying so. Narrowing this tuple to
+        # ("n/a", "real_facts") is a corpus-wide decision about older logs,
+        # deliberately not taken here.
+        # (#11833 review P2-3 corrected this comment: it claimed refusing the
+        # absent token would refuse the historical artifacts, but the count
+        # branch above already refuses every one whose count does not match.
+        # #11833 review r10 P3: that sentence said a legacy binding is "only
+        # reached here when its `surviving_units` already EQUALS …", which stopped
+        # being true of THIS row the moment the row moved out of that branch — it
+        # evaluates for an absent count and for `n/a` alike.)
+        basis = bind.get("surviving_units_basis", "")
+        if basis not in ("", "n/a", "real_facts"):
+            findings.append(
+                f"[V15] the binding states surviving_units_basis={basis!r} — "
+                f"the E2b floor's population is the surviving PLANTED units "
+                f"(`real_facts`); a floor checked against another population "
+                f"is the fail-open #10989 closes")
         # A floor that was COMPARED is an owned floor: `declared_*` carries a number
         # only when the probe read that floor, so a binding that prints one without
         # claiming the key is a comparison it then denies making.

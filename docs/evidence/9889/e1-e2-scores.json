@@ -161,6 +161,9 @@
   "e2b": {
    "fused": 1,
    "atomic_points": 114,
+   "surviving_units": 90,
+   "population": "surviving planted units (real_facts)",
+   "share_population": "atomic_points",
    "share": 0.008772,
    "below_floor": false,
    "floor": 30,
