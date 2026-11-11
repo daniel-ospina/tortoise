@@ -398,7 +398,10 @@ def _eligible(block: dict, *, min_confidence: float,
     neutral-0.5 statement is NO LONGER true of every unmeasured point — a
     #2199 DECLARED baseline (``baseline=True``, e.g. the decide-part system
     default Beta(3,1) mean 0.75, or an author ``credibility=`` prior) is
-    prior-only yet reads its PRIOR mean, so it clears the mean floor. That is
+    prior-only yet reads a mean — its PRIOR mean, or a readable
+    ``n.confidence`` mirror's value, which LEADS it — so it clears the mean
+    floor (at ``min_confidence=0.8`` a declared Beta(3,1) beside a stored 0.9
+    clears it because of the mirror, not the 0.75 prior mean). That is
     deliberate: #2199 treats a baseline as the author's stated starting
     belief ("set-by-author") and the mean floor is a NOTABILITY gate, not a
     measurement claim. The why-block discloses the state honestly: every entry
