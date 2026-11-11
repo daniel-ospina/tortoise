@@ -755,8 +755,17 @@ def test_pack_selection_section_and_validator_are_wired():
     assert "pack_selection" in _SNAPSHOT_SECTIONS
     assert _SNAPSHOT_ENTRY_CHECK["pack_selection"] is \
         _validate_pack_selection_entry
-    assert _PREWIPE_SNAPSHOT_VERSION >= 7, (
-        "`:PackSelection` landed at v7; a LOWER read/write version would let a "
+    # ⛔ EXACT, in the NEWEST section's own test — this is the one pin that ties
+    # `_PREWIPE_SNAPSHOT_VERSION` to the SECTION SET. The two older sections'
+    # pins are `>=` on purpose (a later bump must not red a test about another
+    # class), but the sum of three `>=` pins would be that NO test sees the
+    # constant: a future section landing without a bump would leave every pin
+    # green, and the version gate is exactly what makes an older build REFUSE a
+    # snapshot it would otherwise accept and wipe on. So the newest section owns
+    # the current value, and a bump moves it with the section that caused it.
+    assert _PREWIPE_SNAPSHOT_VERSION == 7, (
+        "`:PackSelection` landed at v7 — if you bumped the version, move THIS "
+        "pin with the section you added; a LOWER read/write version lets a "
         "pre-#9752 build accept the file and ignore the section")
     assert set(_PREWIPE_SNAPSHOT_READABLE_VERSIONS) >= {1, 2, 3, 4, 5, 6, 7}
     # The union's return literal is hand-written per section, so pin its key set
@@ -1351,26 +1360,36 @@ def test_migrate_route_does_not_report_the_empty_target_as_verified(
 
 def test_migrate_route_does_not_override_a_stronger_rebuild_report(
         tmp_path, caplog, monkeypatch):
-    """The route's UNKNOWN must never MASK a gap the rebuild really measured.
+    """The route's UNKNOWN must never MASK an observation the rebuild made.
 
     The override exists for one shape only: a rebuild that reported a clean
-    verification it could not have performed. A non-zero gap is an observation
-    and outranks it — overwriting that would trade one wrong report for another.
+    verification over an empty capture. An OBSERVED state outranks it — here a
+    CONFLICT (a live marker that is not the captured one), which is the shape
+    whose consequence is the OPPOSITE of "reads as UNCONFIGURED": the graph IS
+    configured and may hold a newer set, so the re-pin remedy would overwrite a
+    decision. `pack_selection_expected` is 0 so the empty-capture clause is
+    active and this bracket is the only thing standing between the route and a
+    relabelled conflict.
     """
-    counts = {"nodes": 0, "edges": 0, "events": 0,
-              "pack_selection_expected": 1, "pack_selection_verified": True,
+    counts = {"nodes": 1, "edges": 0, "events": 1,
+              "pack_selection_expected": 0, "pack_selection_verified": True,
               "pack_selection_restored": 0,
-              "pack_selection_restore_failures": 1,
-              "pack_selection_gap": 1, "pack_selection_state_unknown": False}
+              "pack_selection_restore_failures": 0,
+              "pack_selection_gap": 1, "pack_selection_state_unknown": False,
+              "pack_selection_conflict": True}
 
     with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
         result = _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
 
-    assert result["pack_selection_gap"] == 1
+    assert result["pack_selection_conflict"] is True
     assert result["pack_selection_state_unknown"] is False, (
-        "a measured restore gap was relabelled UNKNOWN by the route")
+        "an observed CONFLICT was relabelled UNKNOWN by the route")
+    assert result["pack_selection_gap"] == 1
     msgs = [r.getMessage() for r in caplog.records]
-    assert any("restore gap" in m for m in msgs), msgs
+    assert any("CONFLICT" in m for m in msgs), msgs
+    assert not any("restore gap" in m for m in msgs), msgs
+    assert not any("re-pin" in m.lower() and "UNCONFIGURED" in m
+                   for m in msgs), msgs
 
 
 def test_migrate_route_does_not_override_a_verified_non_empty_capture(
@@ -1421,6 +1440,9 @@ def test_migrate_db_caller_distinguishes_the_unknown_shape(
         result = _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
 
     assert result["pack_selection_state_unknown"] is True
+    assert result["pack_selection_verified"] is False, (
+        "nothing was verified on this route, so the UNKNOWN shape must not also "
+        "carry `verified: True` for a caller that reads that field")
     msgs = [r.getMessage() for r in caplog.records]
     matching = [m for m in msgs if ":PackSelection" in m]
     assert matching, f"no pack-set line at all: {msgs}"

@@ -598,7 +598,15 @@ customer-facing territory that owns per-graph permissions.
 > marker loss silently RE-ADMITTED a pack an admin removed and reset `revision`.
 > **Fixed by #9752** — the marker now rides a `pack_selection` sidecar SECTION
 > (`projection`, snapshot v7), so the JOURNAL rebuild (`rebuild_all` / `rebuild`)
-> preserves `configured` and `revision` and cannot re-admit a removed pack. The
+> preserves `configured` and `revision` and cannot re-admit a removed pack — on a
+> graph rebuilt IN PLACE. **One journal route does not**: `tortoise migrate-db`
+> replays the legacy graph's journal into a freshly created target, and the
+> preservation sections are captured from the graph that is about to be wiped —
+> the empty target — so it drops the marker (and the `:PackInstall` rows with it)
+> and the migrated graph reads as the catalog union. That route now reports
+> `pre-preservation/UNKNOWN` on `pack_selection_gap` instead of a verified
+> success, and re-checking the approved set after a migration is the safe habit
+> until **#11866** gives the route a capture source that is not the target. The
 > scope is deliberate: the RECORD-sourced `rebuild_from_record` still DROPS the
 > class (it reads no cache — *"the cache is a destination, never an input"*),
 > and that drop is named rather than silent in `tortoise/cache_projection.py`

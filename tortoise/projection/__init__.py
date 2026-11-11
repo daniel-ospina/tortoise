@@ -17505,11 +17505,12 @@ class FalkorProjection(
                     "rebuild: :PackSelection marker restore attempt raised "
                     "(%s: %s) — the write did not complete, so the pre-wipe "
                     "marker is not confirmed restored. The post-restore "
-                    "verification below decides the outcome; if the marker is "
-                    "absent the graph reads as UNCONFIGURED (the self-heal and "
-                    "the records/union arms become live again) and a pack an "
-                    "admin had REMOVED can be re-admitted with its `revision` "
-                    "reset (#9752)",
+                    "verification below decides the outcome: if its read finds "
+                    "NO marker at all, the graph reads as UNCONFIGURED (the "
+                    "self-heal and the records/union arms become live again) "
+                    "and a pack an admin had REMOVED can be re-admitted with "
+                    "its `revision` reset; if it finds a DIFFERENT marker that "
+                    "is a CONFLICT, not a loss (#9752)",
                     type(e).__name__, e,
                 )
         # Post-restore verification: the marker must be PRESENT and carry the

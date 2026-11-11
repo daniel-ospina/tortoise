@@ -251,17 +251,25 @@ def migrate(force: bool = False) -> dict:
             # becomes non-zero and a genuinely verified carry is reported as one,
             # instead of being relabelled UNKNOWN by a rule that only ever
             # described an empty target.
-            if (rebuild_counts.get("pack_selection_verified")
-                    and not rebuild_counts.get("pack_selection_expected")
-                    and not (
-                        rebuild_counts.get("pack_selection_gap")
-                        or rebuild_counts.get("pack_selection_state_unknown")
-                        or rebuild_counts.get("pack_selection_conflict")
-                    )):
+            #
+            # The `verified = False` is NOT conditional, because an empty capture
+            # means nothing was verified — whatever flag the rebuild returned for
+            # it. The one shape where that matters on its own is a pre-v7 leftover
+            # beside the target: the rebuild then already reports
+            # `state_unknown: True, gap: 1`, so the block below is skipped, but
+            # leaving its `verified: True` in place would still tell a caller that
+            # reads that field (rather than `gap`) that the migrated graph's marker
+            # was confirmed — the same false PASS, one field over.
+            if not rebuild_counts.get("pack_selection_expected"):
                 rebuild_counts = dict(rebuild_counts)
-                rebuild_counts["pack_selection_state_unknown"] = True
                 rebuild_counts["pack_selection_verified"] = False
-                rebuild_counts["pack_selection_gap"] = 1
+                if not (
+                    rebuild_counts.get("pack_selection_gap")
+                    or rebuild_counts.get("pack_selection_state_unknown")
+                    or rebuild_counts.get("pack_selection_conflict")
+                ):
+                    rebuild_counts["pack_selection_state_unknown"] = True
+                    rebuild_counts["pack_selection_gap"] = 1
             # #4641: the JSONL rebuild path is one of the three routes that
             # performs the unconditional wipe, so a completed rebuild can
             # still leave the migrated graph's onboarding state NOT confirmed
