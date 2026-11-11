@@ -44,10 +44,10 @@ What it re-measures, offline, from the tree in front of it:
   6. **Registration** — the page is listed in `docs/00_index.md`, so it is
      reachable rather than merely committed — **and the index entry's own
      headline counts match §2's**, because the index is what most readers see and
-     a stale count there is the same defect as a stale count here (found by the
-     verification gate on this page's first landing: the index said
-     `22 fixed · 4 open` while the map said `21 fixed · 5 open`, and the filename
-     check was happy).
+     a stale count there is the same defect as a stale count here (the
+     registration half only asked that the filename appear, so a headline that
+     contradicted §2 passed it; found by the verification gate on this page's
+     first landing).
 
 ⛔ **RESIDUALS THIS TOOL CANNOT DECIDE — stated, not implied.**
 
@@ -727,10 +727,10 @@ def check_registration(
     """Registered, AND the index entry's counts agree with the document's §2.
 
     The count half is not decoration. The index is the artifact most readers
-    meet first, and on this page's first landing it said `22 fixed · 4 open`
-    while §2 said `21 fixed · 5 open` — `--check` was CLEAN, because a filename
-    match proves reachability and nothing about agreement. The verification gate
-    caught it; this check is that catch, mechanised.
+    meet first, and a headline there that disagrees with §2 is the same defect as
+    a stale count in §2 — while a filename match proves reachability and nothing
+    about agreement, so `--check` was CLEAN over it. The verification gate caught
+    it on this page's first landing; this check is that catch, mechanised.
     """
     index = repo / INDEX_REL
     # Dispatch on the FULL state, not just `missing`: falling through an

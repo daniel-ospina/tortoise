@@ -209,8 +209,8 @@ on 2026-11-11, after the issue closed `COMPLETED` (`#11836`, merge
 `ccf5c4036c09`; its update-door residual `#11863` closed the same hour): the
 *representation* landed earlier — a flat, currency-safe money value on entities
 (#8641) and on the Point lane (#8976) — and the **write boundary**, which is what
-"money has no representation" was really about, now refuses every malformed shape
-at the SDK/MCP props doors and grades an *update* on the state it leaves
+"money has no representation" was really about, refuses the malformed shapes it
+can see at the SDK/MCP props doors and grades an *update* on the state it leaves
 (`money_view_after_update`) rather than on the bag. Pinned by
 `tests/test_money_value_2782.py`, whose `TestWriteBoundary` is the arm that fails
 if the gate is removed.
@@ -222,8 +222,11 @@ whose brief is a research artifact rather than a mechanism. So the row moves
 without claiming money identity shipped: a reader asking "is money representable,
 validated at the door, and summable?" gets yes with a pin, and a reader asking
 for cross-parent money identity is sent to #2730 by name. The one bound the fix
-states about itself — a re-create through the ON MATCH arm can still install a
-lone exponent — is its own OPEN ticket, **#11868**, which this page does not
+states about itself — a CREATE door grades the caller's props bag because a
+create predicate cannot see the target it will MERGE onto, so a re-create through
+the `create_object` ON MATCH arm, or one through `EventAPI.add_point(id=…)`
+against an existing point, can still install a lone exponent — is its own OPEN
+ticket, **#11868**, which this page does not
 track.
 
 **#2684 — OPEN, and the mechanism is not what is missing.** The mechanism landed
@@ -339,10 +342,9 @@ The `TORTOISE_TEST_CARVE_OUT=1` is not decoration: this suite is DB-free, and on
 a box with no database the default conftest refuses the run outright
 (`default pytest requires TORTOISE_DB_URI (epic #1647 P4)` — one refusal per
 collected test, 58 at this head), which reads as the guard being broken rather
-than the target being absent. That number is a property of the RUN, not of the
-document and not a fact about the commit the page names, and nothing reads it
-(see the residuals below): it is re-derived with `--collect-only` rather than
-read off the page's `measured_at_commit`.
+than the target being absent. That number is a property of the RUN, and nothing
+reads it (see the residuals below): it is re-derived with `--collect-only`
+rather than read off the page's `measured_at_commit`.
 
 The checker re-measures, offline and without network access:
 
@@ -386,8 +388,8 @@ The checker re-measures, offline and without network access:
    `**N fixed · N open · N unknown**` headline must equal §2's**, read from the
    ONE index row whose LAST cell is this file's path (a mention of the filename
    elsewhere is a cross-reference, not a registration). The index is the half
-   most readers meet first, and it said `22 fixed · 4 open` on this page's first
-   landing while §2 said something else. Like a pin, an index that cannot be
+   most readers meet first, so a stale headline there is the same defect as a
+   stale count here. Like a pin, an index that cannot be
    **read** (a directory at that path, an unreadable file) is NO ANSWER (a state
    error, exit 2) rather
    than drift, because registration was never checked.
