@@ -918,9 +918,13 @@ class GraphRanker:
             # evidence behind it, so the mirror leads and α/β is the fallback
             # for a node the flush never reached. The staleness that made the
             # mirror unsafe (a write moving α/β and leaving it behind) is fixed
-            # AT THE WRITE — `sdk.set_point_baseline` refreshes it, the EP
-            # evidence pre-write clears it alongside the posterior — rather
-            # than by demoting the served value here.
+            # AT THE WRITE, on all THREE writers — `sdk.set_point_baseline`
+            # refreshes it, the EP evidence pre-write clears it alongside the
+            # posterior, and `sdk.update_point` CLEARS it when it moves
+            # `posterior_alpha`/`posterior_beta` (the third writer, closed at
+            # #11702 review cycle 12 — before that it stored a new pair beside
+            # the old flush value) — rather than by demoting the served value
+            # here.
             # #11702 cycle 3: the division carries its OWN zero guard. The
             # presence predicate now excludes a stored (0, 0) pair, but
             # `coalesce(…, 1.0)` substitutes NULL only — a persisted 0.0 is
@@ -1545,10 +1549,12 @@ class StateRanker:
                 # The mirror is the SERVED belief (#2206's contract) and the
                 # α/β columns are the evidence behind it, so this is the same
                 # precedence every other surface uses. What made the mirror
-                # unsafe was that two write paths changed α/β and left it
+                # unsafe was that THREE write paths changed α/β and left it
                 # behind — fixed at the WRITE (`sdk.set_point_baseline`
                 # refreshes it; the EP evidence pre-write clears it with the
-                # posterior), not by demoting the served value here.
+                # posterior; `sdk.update_point` clears it when it moves
+                # `posterior_alpha`/`posterior_beta`, the third writer closed at
+                # review cycle 12), not by demoting the served value here.
                 if mirror is not None:
                     conf = float(mirror)
                 elif (alpha + beta) > 0:

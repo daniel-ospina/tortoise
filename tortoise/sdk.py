@@ -18623,6 +18623,39 @@ class TortoiseSDK:
         props = _sanitize_props(props, reject_id=True,
                                 reject_belief_props=True,
                                 reject_claim_class=True)
+        # ⛔ #11702 (review cycle 12, P2): THIS is the THIRD writer that moves a
+        # belief pair, and it was the one that left the `n.confidence` mirror
+        # behind. `reject_belief_props` refuses `credibility` and the baseline
+        # quartet only — `posterior_alpha` / `posterior_beta` / `confidence`
+        # ride through, so `update_point(id, posterior_alpha=10.0,
+        # posterior_beta=10.0)` stored a new pair beside the OLD flush value.
+        #
+        # Pre-#11702 that disagreement was VISIBLE (the mirror-led surfaces said
+        # 0.9, the `ep` block said 0.5); post-#11702 the same ~12 surfaces all
+        # read the mirror FIRST, so a stale mirror is indistinguishable from a
+        # correct one and the served belief contradicts the persisted pair that
+        # is supposedly behind it. The other two members of the family were
+        # closed at their writes (`sdk.set_point_baseline` refreshes the mirror,
+        # the EP evidence pre-write clears it with the posterior); this is the
+        # same treatment, so no path moves α/β and leaves the mirror.
+        #
+        # The clear — not a recomputed mean — because the mirror is a FLUSH of
+        # the posterior, and inventing one here would claim an EP write that
+        # never ran. With the mirror gone, every mirror-first read falls through
+        # to the pair mean (the #2206 precedence), which is the honest value for
+        # the pair the caller just wrote — including a HALF pair, which then
+        # reads absent instead of inheriting the stale mirror's number.
+        #
+        # A caller-supplied `confidence` still WINS (it is caller-owned, like
+        # `tags`), so mirror≠pair stays reachable through the public writes —
+        # pinned by `test_the_mirror_wins_over_a_contradicting_pair`.
+        if (("posterior_alpha" in props or "posterior_beta" in props)
+                and "confidence" not in props):
+            # `SET n += $props` with a None REMOVES the property, and `props` is
+            # also `emit_props`' base below — so the clear rides the same
+            # `PointRevised` record (`BELIEF_PROPS` is in its fold whitelist,
+            # with `None` the journaled clear) and a rebuild reproduces it.
+            props["confidence"] = None
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
         # #11239: same rule at the UPDATE door. Idempotent — a value already in

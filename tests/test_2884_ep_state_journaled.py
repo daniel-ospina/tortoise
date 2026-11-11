@@ -516,6 +516,64 @@ def test_f4_update_point_belief_props_folded_on_replay(journaled):
     assert pts["p"]["posterior_alpha"] == 2.0
 
 
+def test_f4b_update_point_moving_the_pair_clears_the_stale_mirror(journaled):
+    """#11702 review cycle 12 (P2): `update_point` is the THIRD belief writer.
+
+    `reject_belief_props` refuses `credibility` and the baseline quartet only,
+    so `posterior_alpha` / `posterior_beta` ride straight through this door —
+    and until this fix it stored a new PAIR beside the OLD flush mirror. That
+    is the "a write moving α/β and leaving it behind" state three docstrings
+    claimed the two other writers had made impossible. Pre-#11702 the
+    disagreement was visible (mirror-led surfaces said 0.9, the `ep` block said
+    0.5); post-#11702 every surface reads the mirror FIRST, so the stale value
+    became indistinguishable from a correct one — a false belief on ~12
+    surfaces from one accepted write.
+
+    The mirror is now CLEARED with the pair it summarised, live and on replay
+    (the `PointRevised` record carries `confidence: null`, which both the
+    graph and the pure fold apply as the journaled clear). Not "refreshed to
+    the mean": the mirror is a FLUSH of an EP posterior, and inventing one
+    here would claim an EP write that never ran. With it gone, the mirror-first
+    reads fall through to the pair mean.
+
+    Discriminating power: pre-fix `confidence` stays 0.9 beside α=β=10.
+    """
+    _db, events, sdk = journaled
+    ids = _chain(sdk, n=2)
+    # A caller-set mirror beside no pair — a real public shape
+    # (`update_point(confidence=…)` is caller-owned, folded by FIX-4 above).
+    sdk.update_point(ids[0], confidence=0.9)
+    assert _state(sdk, [ids[0]])[ids[0]]["confidence"] == pytest.approx(0.9)
+
+    # Moving the posterior must not leave it behind.
+    sdk.update_point(ids[0], posterior_alpha=10.0, posterior_beta=10.0)
+    st = _state(sdk, [ids[0]])[ids[0]]
+    assert st["confidence"] is None, (
+        "update_point moved the pair and left the stale mirror: " + repr(st))
+    assert st["posterior_alpha"] == pytest.approx(10.0), st
+    assert st["posterior_beta"] == pytest.approx(10.0), st
+
+    # A HALF pair is the same rule, and it is the shape that used to inherit
+    # the mirror's number for a claim with no mean at all.
+    sdk.update_point(ids[1], confidence=0.7)
+    sdk.update_point(ids[1], posterior_alpha=3.0)
+    st1 = _state(sdk, [ids[1]])[ids[1]]
+    assert st1["confidence"] is None, st1
+
+    # An explicit caller-supplied `confidence` still wins — it is caller-owned,
+    # so the only writer this door overrides is the one it defeats.
+    sdk.update_point(ids[0], confidence=0.42, posterior_alpha=1.0,
+                     posterior_beta=1.0)
+    assert _state(sdk, [ids[0]])[ids[0]]["confidence"] == pytest.approx(0.42)
+
+    # live == rebuild: the clear rode the same `PointRevised` record.
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    rebuilt = _state(sdk, ids)
+    assert rebuilt[ids[0]]["confidence"] == pytest.approx(0.42), rebuilt
+    assert rebuilt[ids[1]]["confidence"] is None, rebuilt
+    assert rebuilt[ids[1]]["posterior_alpha"] == pytest.approx(3.0), rebuilt
+
+
 # ── FIX-5: the ingest-propagation EP gets a journal emitter ────────
 
 

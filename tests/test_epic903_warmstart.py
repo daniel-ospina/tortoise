@@ -90,7 +90,34 @@ class TestDe2e6aEquivalenceHardGate:
     def test_negative_a_delete_operator(self):
         """Operator delete → warm-start must not reuse stale seeds:
         equivalence vs an isolated from-scratch reference on the SAME
-        post-delete state."""
+        post-delete state.
+
+        ⛔ THE REFERENCE MUST CARRY THE SAME PRE-DELETE BELIEF STATE (#11702).
+        "The same post-delete state" is not only the same TOPOLOGY: this used
+        to build `f2`, delete the operator, and run from scratch — without ever
+        running EP on `f2` first — so the two graphs differed in a belief
+        dimension by construction. A claim whose only factor was the deleted
+        operator leaves the EP closure, and EP does not rewrite a claim it no
+        longer reasons about, so:
+
+            f  (ran EP, then deleted)  p1 keeps its pre-delete posterior
+            f2 (deleted, never ran EP) p1 keeps the baseline prior
+
+        Comparing those two is the artifact the `_confidences` docstring says
+        the None-skip exists to avoid ("comparing a stale posterior against a
+        null would be an artifact, not a drift"). Pre-#11702 the asymmetry was
+        invisible because the mirror was `None` on the `f2` side and the delta
+        loop skipped it; #11702's write-path fix makes `set_point_baseline`
+        refresh the mirror, so `f2` now honestly reports the prior mean
+        (0.8333) and the same artifact surfaces as a NUMBER — measured as
+        `max|Δ|=0.022066` against warm's 0.811234, i.e. exactly 0.8333 − 0.8112,
+        on a claim neither run recomputed.
+
+        The gate is NOT weakened: it still compares two runs over the SAME
+        graph state, and it still reds if warm-start reuses a stale seed for a
+        claim the run DOES recompute (the mutation: censoring every factor —
+        `if delta <= gamma: continue` → `if True: continue` — reds this test).
+        """
         f = f1_corpus()
         try:
             _dream_full_clean(f.sdk)
@@ -101,9 +128,11 @@ class TestDe2e6aEquivalenceHardGate:
             r_warm = f.sdk.dream(mode="full")
             assert r_warm["converged_all"] is True
             warm_conf = _confidences(f.sdk, set(f.claims.values()))
-            # Isolated from-scratch reference on the same post-delete graph.
+            # Isolated from-scratch reference on the same post-delete state —
+            # which includes the pre-delete EP run above.
             f2 = f1_corpus()
             try:
+                _dream_full_clean(f2.sdk)
                 f2.sdk.delete_point(f2.operators[op_key])
                 r_iso = _dream_full_clean(f2.sdk)
                 assert r_iso["converged_all"] is True

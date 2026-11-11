@@ -5068,11 +5068,32 @@ def get_relationships_bounded(
                         pair_stored = ep_pair_stored(
                             posterior_alpha=rpa, ep_alpha=rea,
                             posterior_beta=rpb, ep_beta=reb)
+                        # ⛔ `baseline_set` is deliberately NOT passed. Neither
+                        # peer query selects the column, and passing
+                        # `baseline_set=bool(has_ep)` (the obvious-looking
+                        # shortcut, which this did until #11702 review cycle
+                        # 12) INVERTS it: `has_ep` is `ep_measured_cypher`'s
+                        # "EP measured this", the exact opposite of a declared
+                        # baseline. Measured on the legacy-EP-prior shape
+                        # (`ep_alpha`/`ep_beta` set, no posterior, no mirror —
+                        # what ep.py's evidence pre-write leaves on a
+                        # non-baseline claim it clears): `annotate_ep_batch`,
+                        # `why` and all three rankers said `measured` while
+                        # this block said `baseline`, breaking the
+                        # one-vocabulary invariant on the block `sdk.search`
+                        # attaches to every point result. Leaving it False is
+                        # not a guess: `ep_state_resolve(measured=has_ep)` is
+                        # the ONE fold that reconciles the two, and it lands on
+                        # the same token either way — a #2199 baseline has
+                        # `has_ep=False`, so its `measured` reads as `baseline`
+                        # there, while the legacy prior has `has_ep=True` and
+                        # keeps `measured`. Pinned by
+                        # `test_relationship_peer_block_agrees_on_ep_state_for_
+                        # every_stored_shape`.
                         state = ep_state_resolve(
                             ep_state(posterior_alpha=rpa, ep_alpha=rea,
                                      confidence=rmirror, posterior_beta=rpb,
-                                     ep_beta=reb,
-                                     baseline_set=bool(has_ep)),
+                                     ep_beta=reb),
                             measured=has_ep)
                         value = belief_value(confidence=rmirror,
                                              posterior_alpha=rpa, ep_alpha=rea,

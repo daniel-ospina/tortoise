@@ -349,7 +349,9 @@ def _persisted_belief(node: dict) -> float | None:
     and the `ep` block about one claim:
 
     * the served ``n.confidence`` MIRROR first (the EP flush writes it, and the
-      staleness is fixed at the write paths);
+      staleness is fixed at ALL THREE write paths — ``set_point_baseline``
+      refreshes it, the EP evidence pre-write clears it with the posterior, and
+      ``update_point`` clears it when it moves the pair);
     * then the persisted pair mean. Each operand is coalesced on its OWN —
       ``posterior_alpha or ep_alpha`` for α, ``posterior_beta or ep_beta`` for β
       — exactly the precedence ``ep_has_belief_cypher``/``ep_state`` apply in

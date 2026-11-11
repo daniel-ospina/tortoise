@@ -872,6 +872,92 @@ def test_degenerate_baseline_writes_no_mirror(sdk):
     assert eps.confidence_mean is None, eps
 
 
+def test_update_point_clearing_the_mirror_leaves_one_answer(sdk):
+    """Review cycle 12 (P2): `update_point` is the THIRD belief writer.
+
+    `reject_belief_props` refuses `credibility` and the baseline quartet only,
+    so `posterior_alpha` / `posterior_beta` ride through this door and stored a
+    NEW PAIR beside the OLD flush mirror — the state three docstrings said the
+    other two writers had made impossible. Post-#11702 the mirror leads on ~12
+    surfaces, so the stale value is indistinguishable from a correct one. The
+    door now clears the mirror with the pair (the same treatment
+    `set_point_baseline` got), and every surface falls through to the pair mean.
+
+    Discriminating power: pre-fix every assertion below sees 0.9 (the stale
+    mirror) where the pair says 0.5.
+    """
+    pid = sdk.create_point("statement", "mirror vs pair claim",
+                           dedup=False, status="live")["id"]
+    proj = sdk._get_proj()
+    # A caller-set mirror beside no pair — a real public shape.
+    sdk.update_point(pid, confidence=0.9)
+    assert annotate_ep_batch(proj.g, [pid])[pid].confidence_mean == pytest.approx(0.9)
+    # Moving the pair must not leave it behind.
+    sdk.update_point(pid, posterior_alpha=10.0, posterior_beta=10.0)
+    stored = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.confidence",
+        params={"id": pid}).result_set[0][0]
+    assert stored is None, f"the stale mirror survived the pair write: {stored!r}"
+
+    eps = annotate_ep_batch(proj.g, [pid])[pid]
+    assert eps.confidence_mean == pytest.approx(0.5), (
+        "the ep block still reports the stale mirror: " + repr(eps))
+    assert eps.ep_state == "measured", eps
+    sig = StateRanker(projection=proj)._fetch_point_signals([pid])[pid]
+    assert sig["confidence"] == pytest.approx(0.5), sig
+    node = next(n for n in SubgraphExpander(proj).expand([pid], depth=1)["nodes"]
+                if n["id"] == pid)
+    assert node["confidence"] == pytest.approx(0.5), node
+    assert node["ep_state"] == "measured", node
+
+    # A HALF pair is the same rule, and it used to inherit the mirror's number
+    # for a claim that has no mean at all — so on a FRESH claim (no stored β)
+    # the cleared mirror is what turns 0.7 into an honest `absent`.
+    half = sdk.create_point("statement", "half pair after a mirror",
+                            dedup=False, status="live")["id"]
+    sdk.update_point(half, confidence=0.7)
+    sdk.update_point(half, posterior_alpha=3.0)
+    eps = annotate_ep_batch(proj.g, [half])[half]
+    assert eps.ep_state == EP_STATE_ABSENT, eps
+    assert eps.confidence_mean is None, eps
+
+
+def test_the_mirror_wins_over_a_contradicting_pair(sdk):
+    """The CONTRACT for the reachable mirror≠pair shape, pinned as a contract.
+
+    `test_ranking_w4b`'s fixture used to call mirror≠posterior "not a state any
+    write path produces". That was false — the public writes reach it in this
+    order (`update_point(posterior…)` clears the mirror, then a caller-owned
+    `update_point(confidence=…)` sets it), and `create_point`-side writers that
+    flush the mirror can be followed by a pair write from an operator run.
+
+    So the precedence is pinned here rather than assumed: the `n.confidence`
+    MIRROR is the SERVED belief (#2206) and it WINS over a contradicting pair
+    on every surface — one number, not two — while the STATE still comes from
+    the pair (a mirrored claim with a pair is `measured`, not `baseline`).
+
+    Discriminating power: a reader that preferred α/β answers 0.5 here.
+    """
+    pid = sdk.create_point("statement", "contradicting pair claim",
+                           dedup=False, status="live")["id"]
+    proj = sdk._get_proj()
+    sdk.update_point(pid, posterior_alpha=1.0, posterior_beta=1.0)  # pair 0.5
+    sdk.update_point(pid, confidence=0.9)  # caller-owned mirror, wins
+    stored = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.confidence, n.posterior_alpha, "
+        "n.posterior_beta", params={"id": pid}).result_set[0]
+    assert stored[0] == pytest.approx(0.9), stored
+    assert stored[1] == pytest.approx(1.0) and stored[2] == pytest.approx(1.0), stored
+
+    eps = annotate_ep_batch(proj.g, [pid])[pid]
+    assert eps.confidence_mean == pytest.approx(0.9), eps
+    assert eps.ep_state == "measured", eps
+    sig = StateRanker(projection=proj)._fetch_point_signals([pid])[pid]
+    assert sig["confidence"] == pytest.approx(0.9), sig
+    assert GraphRanker(projection=proj)._fetch_point_signals([pid])[pid][
+        "confidence"] == pytest.approx(0.9)
+
+
 def test_why_support_chain_does_not_weigh_an_absent_supporter(sdk):
     """The support chain is ordered and capped by `weight`.
 
@@ -1464,6 +1550,94 @@ def test_relationship_peer_block_uses_the_shared_belief_readers(sdk):
     assert peers[measured]["variance"] == pytest.approx(1 / 12, abs=1e-5), peers[measured]
     assert peers[measured]["contested"] is True, peers[measured]
     assert eps[measured].variance == pytest.approx(1 / 12, abs=1e-5), eps[measured]
+
+    # The STATE must agree too, on every shape — not only on the absent ones.
+    # The measured peer is the case that catches a wrong `baseline_set`
+    # argument: seeded with a posterior it answers `measured` either way, so
+    # the legacy-EP-prior population below is the discriminating one.
+    for pid in (half, degenerate, measured):
+        assert peers[pid]["ep_state"] == eps[pid].ep_state, (
+            f"the peer block and the ep block disagree on {pid}: "
+            f"{peers[pid]['ep_state']!r} vs {eps[pid].ep_state!r}")
+
+
+def test_relationship_peer_block_agrees_on_ep_state_for_every_stored_shape(sdk):
+    """Review cycle 12 (P2): the peer block reported the WRONG state name.
+
+    It passed `baseline_set=bool(has_ep)` to `ep_state` — but `has_ep` is
+    `ep_measured_cypher`'s "EP measured this", the exact OPPOSITE of a declared
+    baseline. For a legacy EP prior (`ep_alpha`/`ep_beta` set, no posterior, no
+    mirror — the shape `ep.py`'s evidence pre-write LEAVES on a non-baseline
+    claim it clears) this block answered `baseline` while `annotate_ep_batch`,
+    `why` and all three rankers answered `measured` — breaking the
+    one-vocabulary invariant on the block `sdk.search` attaches to EVERY point
+    result.
+
+    Discriminating power: pre-fix the legacy-prior row below answers
+    `baseline` where the `ep` block answers `measured`.
+    """
+    from tortoise.search_engine import annotate_ep_batch, get_relationships_bounded
+
+    proj = sdk._get_proj()
+    target = sdk.create_point("statement", "the ep-state peer target")["id"]
+    shapes = {
+        # id: (cypher SET body, expected token) — every stored shape the
+        # presence/measurement rules distinguish.
+        "peer_posterior": ("n.posterior_alpha = 9.0, n.posterior_beta = 1.0",
+                           "measured"),
+        "peer_legacy_prior": ("n.ep_alpha = 3.0, n.ep_beta = 1.0",
+                              "measured"),
+        "peer_declared_baseline": ("n.ep_alpha = 5.0, n.ep_beta = 1.0, "
+                                   "n.baseline_set = true", "baseline"),
+        "peer_mirror_only": ("n.confidence = 0.9", "baseline"),
+        "peer_half_pair": ("n.posterior_alpha = 0.5", "absent"),
+        "peer_degenerate": ("n.posterior_alpha = 0.0, n.posterior_beta = 0.0",
+                            "absent"),
+        "peer_terminal": ("n.posterior_alpha = 1.0, n.posterior_beta = 1.0, "
+                          "n.status = 'retracted'", "baseline"),
+        "peer_absent": (None, "absent"),
+    }
+    ids = {}
+    for pid, (sets, _expected) in shapes.items():
+        ids[pid] = sdk.create_point("statement", f"shape {pid}")["id"]
+        if sets:
+            proj.g.query(f"MATCH (n:Point {{id:$id}}) SET {sets}",
+                         params={"id": ids[pid]})
+    op = sdk.create_point("statement", "the ep-state peer operator")["id"]
+    proj.g.query(
+        "MATCH (o:Point {id:$o}) SET o.is_operator = true, o.op_type = 'IMPL'",
+        params={"o": op})
+    proj.g.query(
+        "MATCH (o:Point {id:$o}), (t:Point {id:$t}) CREATE (o)-[:IMPL]->(t)",
+        params={"o": op, "t": target})
+    for idx, pid in enumerate(ids.values(), start=1):
+        proj.g.query(
+            "MATCH (p:Point {id:$p}), (o:Point {id:$o}) "
+            f"CREATE (p)-[:IMPL {{idx:{idx}}}]->(o)",
+            params={"p": pid, "o": op})
+
+    out = get_relationships_bounded(proj.g, [target])
+    assert out.decoration_error == "", out.decoration_error
+    peers = {e["related_id"]: e["peer"] for e in out[target]}
+    eps = annotate_ep_batch(proj.g, list(ids.values()))
+    for name, (_sets, expected) in shapes.items():
+        pid = ids[name]
+        assert pid in peers, f"{name} was dropped from the peer block"
+        assert eps[pid].ep_state == expected, (
+            f"the ep block answered {eps[pid].ep_state!r} for {name}, "
+            f"expected {expected!r}")
+        assert peers[pid]["ep_state"] == expected, (
+            f"the peer block answered {peers[pid]['ep_state']!r} for {name}, "
+            f"expected {expected!r} — the one-vocabulary invariant broken on "
+            "the block sdk.search attaches to every point result")
+        # The value must be consistent with the state on both surfaces: null
+        # exactly when absent.
+        assert (peers[pid]["confidence"] is None) == (expected == "absent"), (
+            f"{name}: peer confidence {peers[pid]['confidence']!r} beside "
+            f"state {peers[pid]['ep_state']!r}")
+        assert (eps[pid].confidence_mean is None) == (expected == "absent"), (
+            f"{name}: ep confidence_mean {eps[pid].confidence_mean!r} beside "
+            f"state {eps[pid].ep_state!r}")
 
 
 def test_negative_beta_operands_are_not_a_belief(sdk):
