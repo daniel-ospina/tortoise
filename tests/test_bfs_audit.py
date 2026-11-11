@@ -29,11 +29,14 @@ def _grep(pattern: str, *dirs: str) -> list[str]:
 
 # ── 1. propagate_shock callers ────────────────────────────────────
 
-# A call site, allowing whitespace between the symbol and its `(`. `ruff` does
-# not catch `f (1)` (E211 is preview-only), so the space-separated form is
-# shippable Python and the literal `"propagate_shock("` test bucketed it as a
-# reference — a false PASS for exactly the restore this audit exists to catch.
-_PROPAGATE_SHOCK_CALL = re.compile(r"propagate_shock\s*\(")
+# A call site, allowing whitespace between the symbol and its `(`, and also
+# matching a BACKSLASH-CONTINUED line whose `(` is on the next physical line.
+# `ruff` catches neither: `f (1)` is E211, which is preview-only, and the
+# continuation form is not E211 at all (measured with the pinned ruff 0.16.4 —
+# `--select E,W,F` passes on both). Both are shippable Python, and the literal
+# `"propagate_shock("` test bucketed each as a reference — a false PASS for
+# exactly the restore this audit exists to catch.
+_PROPAGATE_SHOCK_CALL = re.compile(r"propagate_shock\s*(?:\(|\\\s*$)")
 
 
 def _classify_propagate_shock_refs(lines: list[str]) -> dict[str, list[str]]:
@@ -48,9 +51,11 @@ def _classify_propagate_shock_refs(lines: list[str]) -> dict[str, list[str]]:
     `projection/propagation.py` is that case: docstring lines stating the path is
     UNREACHABLE were reported as "PRODUCTION CODE CALLS propagate_shock". The
     call shape is the honest discriminator — a call site must read
-    `propagate_shock(` or `propagate_shock (` (`ruff` cannot catch the spaced
-    form: E211 is preview-only) — and
-    `test_the_audit_discriminates_a_call_from_a_mention` pins both directions.
+    `propagate_shock(`, `propagate_shock (` (a space before `(` is E211, and
+    E211 is preview-only so `ruff` does not catch it), or `propagate_shock \\`
+    with the `(` on the NEXT physical line (a backslash continuation, which is
+    not E211 at all and which a line-based grep otherwise cannot see) — and
+    `test_the_audit_discriminates_a_call_from_a_mention` pins all of them.
 
     A line that takes a REFERENCE to the method is production code too, even
     though it has no `(` after the symbol: `self._shock = proj.propagate_shock`,
@@ -65,10 +70,13 @@ def _classify_propagate_shock_refs(lines: list[str]) -> dict[str, list[str]]:
     reads, rather than letting a call through): prose that spells a call
     (`propagate_shock(x)` inside a docstring) counts as production code, and so
     does prose that spells an attribute reference. Declared residual, which
-    fails OPEN and is not detected: a bare, undotted, uncalled reference —
-    `getattr(proj, "propagate_shock")`, or `partial(propagate_shock, eid)` on a
-    module-level import. A grep audit cannot see those shapes; a lane restoring
-    the path that way is caught by review, not by this classifier.
+    fails OPEN and is not detected: a bare, undotted reference that is neither
+    called nor backslash-continued — `getattr(proj, "propagate_shock")`, or
+    `partial(propagate_shock, eid)` on a module-level import — and an undotted
+    call whose `(` sits on the next physical line with NO backslash (implicit
+    continuation inside brackets), since a line-based grep cannot join it. A
+    grep audit cannot see those shapes; a lane restoring the path that way is
+    caught by review, not by this classifier.
     """
     callers: dict[str, list[str]] = {
         "definition (deprecated)": [],
@@ -117,7 +125,10 @@ def test_the_audit_discriminates_a_call_from_a_mention():
     call = f"{ROOT}/tortoise/api.py:999:            self.propagate_shock(epicenter_id)"
     # References that can be invoked later: an attribute alias, a partial, and a
     # line-continued call. None carries `(` after the symbol, and every one of
-    # them wired the deprecated path back up if a lane shipped it.
+    # them wired the deprecated path back up if a lane shipped it. NOTE: this
+    # row is the DOTTED form, so the attribute arm above already catches it — it
+    # does NOT discriminate the continuation handling. `continued_undotted`
+    # below is the row that does.
     alias = f"{ROOT}/tortoise/api.py:1000:            self._shock = proj.propagate_shock"
     partial = f"{ROOT}/tortoise/api.py:1001:            p = functools.partial(proj.propagate_shock, eid)"
     continued = f"{ROOT}/tortoise/api.py:1002:            proj.propagate_shock \\"
@@ -127,13 +138,19 @@ def test_the_audit_discriminates_a_call_from_a_mention():
     # deliberately UNDOTTED: a dotted `self.propagate_shock (` is already caught
     # by the attribute rule, so only this shape discriminates the `\s*`.
     spaced_call = f"{ROOT}/tortoise/api.py:1003:            propagate_shock (epicenter_id)"
+    # UNDOTTED and backslash-continued, so `(` is on the next physical line: no
+    # arm above sees it (no dot for the attribute rule, no `(` for the call
+    # rule), and ruff does not flag the form at all. Without the continuation
+    # alternative this row lands in `comment/reference only` — a false PASS.
+    continued_undotted = f"{ROOT}/tortoise/api.py:1004:            propagate_shock \\"
     callers = _classify_propagate_shock_refs(
-        [prose, call, alias, partial, continued, spaced_call])
+        [prose, call, alias, partial, continued, spaced_call, continued_undotted])
 
     assert callers["comment/reference only"] == [prose], (
         "a line that only NAMES propagate_shock is a reference, not a call; "
         f"bucketed as: {callers['comment/reference only']}")
-    assert callers["production_code"] == [call, alias, partial, continued, spaced_call], (
+    assert callers["production_code"] == [
+        call, alias, partial, continued, spaced_call, continued_undotted], (
         "a real CALL site, and every reference that can be invoked later, must "
         f"be reported as production code; bucketed as: {callers['production_code']}")
 
