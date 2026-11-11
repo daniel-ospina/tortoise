@@ -485,8 +485,14 @@ def refuse_malformed_money_in_payload(payload, *, door: str = "") -> None:
     which it is. That is the correct direction for a write gate — the
     alternative (an allowlist of which nesting carries a real value) is a
     second copy of the fold's knowledge that goes stale silently, and a stale
-    ALLOWLIST fails OPEN. The refusal names the field and the door, so a writer
-    that hits it can act on it.
+    ALLOWLIST fails OPEN. The refusal names the door, and the field too when the
+    refusal is about one, so a writer that hits it can act on it.
+
+    ⚠️ THE DEPTH REFUSAL IS NOT ABOUT A MONEY VALUE, and its message must not
+    pretend otherwise: the walk refuses a payload it could not finish reading
+    EVEN WHEN that payload carries no money at all (#11836 review P3). It says
+    what it measured (the depth) and what it could not do (see inside), never a
+    member it never found.
     """
     seen: set[int] = set()
     stack: list[tuple[object, int]] = [(payload, 0)]
@@ -499,11 +505,18 @@ def refuse_malformed_money_in_payload(payload, *, door: str = "") -> None:
             # posture this function states ("REFUSE, not admit") inverted. The
             # loop is bounded by `seen`, not by this number, so the depth is a
             # judgement about payload SHAPE and its failure must be visible.
+            # ⛔ The message reports the SHAPE, never a money member: this refusal
+            # fires on a money-free payload too (it is about what the walk could
+            # not read, not about what it found), so claiming a "money value
+            # inside it" states a fact nobody measured (#11836 review P3). The
+            # door renders through the same `where` form as the sibling refusal,
+            # so the default empty door no longer prints `()`.
+            where = f" ({door})" if door else ""
             raise MoneyValueError(
-                f"money value refused at the write boundary ({door}): the "
-                f"payload nests deeper than {_MONEY_PAYLOAD_MAX_DEPTH} levels, "
-                "so a money value inside it could not be graded — flatten the "
-                "payload or write the value through the props door")
+                f"the payload nests deeper than {_MONEY_PAYLOAD_MAX_DEPTH} "
+                f"levels, so this gate cannot see what it holds — refused at "
+                f"the write boundary{where}: flatten the payload or write the "
+                "value through the props door (#2782)")
         if isinstance(node, Mapping):
             if id(node) in seen:  # a self-referential payload cannot loop us
                 continue

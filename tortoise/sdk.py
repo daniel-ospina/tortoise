@@ -10106,6 +10106,18 @@ def _money_views_for_update(g, props: dict, *, node_id: str,
     treats it. And when SEVERAL pairs match, every one of their rows is graded:
     the write fans out across labels, so grading only the first pair would leave
     a sibling label's value ungraded.
+    ⚠️ STATED BOUND — the union is deliberately WIDER than the write, in the
+    direction a gate must be wide: every pair is probed and every row graded,
+    while ``_update_entity`` BREAKS at the first matching key per label
+    (primary, secondary only on a miss). So if two nodes answered one value
+    through two keys of the SAME label (``:Source{id:X}`` beside
+    ``:Source{url:X}``), the gate would grade BOTH while the write touches only
+    the first — an over-REFUSAL, never a hole. It is unreachable today because
+    the only secondary key is ``:Source``'s ``url`` and a ``:Source``'s closed
+    surface refuses every money member (``#3998``/D30), so no money-bearing
+    label has a second key. Closing it would mean replicating the write's break
+    order here; the failure direction is the one a gate must have, so the
+    asymmetry is recorded rather than "fixed" (#11836 review P3).
     ⚠️ Cost: each pair is a LABEL-SCOPED index lookup (a miss on the primary key
     is what costs the secondary one), so the probe stays flat as the graph grows
     instead of scanning it — measured 0.54 ms at 2 nodes → 6.68 ms at 45 002 with

@@ -46,11 +46,21 @@ from tortoise.money import (
     read_money_value,
     total_minor,
 )
-from tortoise.sdk import TortoiseSDK, _sanitize_props
+from tortoise.sdk import (
+    TortoiseSDK,
+    _entity_identity_probes,
+    _sanitize_props,
+)
 
 #: R$ 250.000,00 and R$ 100.000,00 in minor units at exponent 2.
 COMMITTED_MINOR = 25_000_000
 RELEASED_MINOR = 18_750_000  # exactly 75% of committed
+
+#: Every ``(label, key)`` pair the ONE identity enumeration declares — the
+#: parameter set of the write↔gate invariant test, DERIVED rather than
+#: hand-listed so a newly declared pair arrives with its own row instead of
+#: silently falling outside a table.
+_ENTITY_IDENTITY_PAIRS = _entity_identity_probes()
 
 
 @pytest.fixture
@@ -1134,14 +1144,20 @@ class TestTheProbeUsesTheWritesOwnKeyDiscipline:
     (``CREATE (e:Event {eventId:$eid})``).
     """
 
-    def test_the_probe_enumerates_exactly_what_the_write_iterates(self):
-        """The helper is derived from the write's own constants; if it drifts,
-        the gate grades a different node from the one the write touches."""
+    def test_the_probe_and_the_declaration_agree(self):
+        """Helper↔CONSTANTS: the enumeration is the declaration's own product,
+        so a constant added without the helper (or the reverse) reds here.
+
+        ⛔ This is NOT the write↔gate invariant, and must not be read as it: it
+        restates the helper's own comprehension, so it cannot notice the write
+        looping over a different set. The invariant is pinned BEHAVIOURALLY by
+        the three tests below — the additive and subtractive monkeypatch pins,
+        and the per-pair graph measurement.
+        """
         from tortoise.projection import (
             _CANONICAL_ENTITY_ID_PROPS,
             secondary_entity_id_props,
         )
-        from tortoise.sdk import _entity_identity_probes
 
         assert _entity_identity_probes() == tuple(
             (f":{label}", key)
@@ -1209,6 +1225,53 @@ class TestTheProbeUsesTheWritesOwnKeyDiscipline:
             params={"id": object_id}).result_set
         assert rows and rows[0][0] == "written by the primary-key fallback", (
             "a label missing from the enumeration lost its write")
+
+    @pytest.mark.parametrize("label,key", _ENTITY_IDENTITY_PAIRS)
+    def test_every_pair_the_helper_declares_is_reached_by_the_write_and_gated(
+            self, journaled_sdk, label, key):
+        """PER-PAIR coverage of the write↔gate invariant (#11836 review P2).
+
+        The two monkeypatch tests above pin the CALL (additively) and the
+        fallback (subtractively); this one pins the ENUMERATION ITSELF on the
+        real graph, because "it holds by construction" is only true until
+        someone edits one side, and the equality test cannot see that. Each pair
+        the helper declares is measured twice on a node addressed by that key
+        ALONE:
+
+          1. the WRITE reaches it — a money-free update lands (a pair the write
+             does not iterate never sees its ``summary`` set);
+          2. the GATE graded the SAME node — ``currency=None`` is refused. The
+             bag alone names no money at all (``read_money_value`` returns
+             ``None`` for a bare ``None`` currency), so ONLY a stored state can
+             make this raise: a refusal proves the probe found this node.
+
+        A pair whose gate half is missing is the Finding-1 regression
+        (``keys=`` dropped); a pair whose write half is missing is the drift
+        this test exists for. Parametrizing over the helper means a NEW pair
+        arrives with a row instead of silently falling outside a hand table.
+        """
+        sdk, _events = journaled_sdk
+        bare = label.lstrip(":")
+        value = f"pair-{bare}-{key}"
+        sdk._get_proj().g.query(
+            f"CREATE (n{label} {{{key}:$v}}) SET n += $props",
+            params={"v": value,
+                    "props": dict(money_props(COMMITTED_MINOR, "BRL",
+                                              minor_unit_exponent=2))})
+        # (1) the write's own value: it resolves the node by THIS key.
+        # `summary` is declared on every canonical label, so the probe stays
+        # uniform — no per-label table a new pair could fall outside of.
+        sdk.update_entity(value, summary="pair-reached")
+        assert _node_props(sdk, bare, key, value)["summary"] == "pair-reached", (
+            f"update_entity does not resolve a :{bare} by {key!r} — a probe "
+            "keyed on it would grade a node the write never touches, and one "
+            "keyed differently would miss the node it does")
+        # (2) the gate's own value: the SAME node is graded, before the write.
+        with pytest.raises(ValueError, match="write boundary"):
+            sdk.update_entity(value, currency=None)
+        assert _node_props(sdk, bare, key, value)[CURRENCY] == "BRL", (
+            "the gate admitted a currency strip on the node the write touches")
+
 
     @staticmethod
     def _indexer_shaped_event(sdk, event_id: str, *,
@@ -1642,6 +1705,38 @@ class TestThePayloadWalkFailsClosedAtItsDepthBound:
             "statement", "deep metadata is fine",
             meta=self._nest(_MONEY_PAYLOAD_MAX_DEPTH - 2))
         assert pid["id"]
+
+    def test_the_depth_refusal_names_no_phantom_money_value(self):
+        """P3 (#11836 review): the depth refusal fires on a payload it could not
+        FINISH READING — including one that carries no money at all — so its
+        message must report the SHAPE ("nests deeper than N"), never a member it
+        never found. It used to say "so a money value inside it could not be
+        graded", which asserts a money value nobody measured.
+
+        The door renders through the same ``where`` form as the sibling refusal,
+        so a default (empty) door no longer prints a bare ``()``.
+        """
+        from tortoise.money import (
+            _MONEY_PAYLOAD_MAX_DEPTH,
+            refuse_malformed_money_in_payload,
+        )
+        money_free: dict = {"meta": "no money here"}
+        for _ in range(_MONEY_PAYLOAD_MAX_DEPTH + 1):
+            money_free = {"meta": money_free}
+        with pytest.raises(MoneyValueError) as caught:
+            refuse_malformed_money_in_payload(money_free)
+        message = str(caught.value)
+        assert "nests deeper than" in message
+        assert "money value inside it" not in message, (
+            "the refusal asserts a money value exists in a payload that has "
+            "none — the message names a fact the walk never measured")
+        assert "()" not in message, (
+            f"the default door rendered as empty parens: {message!r}")
+        with pytest.raises(MoneyValueError) as doored:
+            refuse_malformed_money_in_payload(money_free, door="EventAPI.add_object")
+        assert "(EventAPI.add_object)" in str(doored.value), (
+            "a supplied door must still be named: "
+            f"{str(doored.value)!r}")
 
 
 class TestKnownResidualCreateDoorOnMatch:
