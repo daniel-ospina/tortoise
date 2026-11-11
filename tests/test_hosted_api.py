@@ -18,6 +18,7 @@ import pathlib
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -251,6 +252,35 @@ def _restore_tortoise_sdk_init(original_init):
     # consent seed and the gate read (intermittent 403). Close the anchors
     # deterministically (redislite SHUTDOWN SAVE) before dropping the dict.
     _close_keepalive_anchors(ha_mod)
+
+
+@contextmanager
+def _forced_db_path_patch(db_path: str):
+    """Patch ``TortoiseSDK.__init__`` to force *db_path*, restoring ALWAYS.
+
+    :func:`_patch_tortoise_sdk_init` and :func:`_restore_tortoise_sdk_init` are
+    a setup/teardown PAIR, so a caller that writes them as straight-line code
+    runs the restore only on the PASSING path. On the failing path the restore
+    is skipped — and with it the ``_FORCED_DB_PATH`` reset and
+    :func:`_close_keepalive_anchors` — so ``TortoiseSDK.__init__`` stays bound
+    to the forcing closure and ``_FORCED_DB_PATH`` stays set for the rest of
+    the pytest process: every later ``TortoiseSDK(...)`` in the file (and in
+    every file sharing the process) lands on one stray temp DB, and the pin
+    guard's ``assert forced`` is satisfied by a fixture that is no longer
+    active. That is the failure the teardown guard below exists to report, so
+    it must not be the failure that skips its own cleanup.
+
+    pytest states the same contract for its own fixtures — "if any of those
+    steps in the setup raise an exception, none of the teardown code will run"
+    (docs: how-to/fixtures) — which is why ``yield`` fixtures and
+    ``addfinalizer`` exist instead of straight-line teardown. This is that
+    shape for a non-fixture caller (#2273 review, exception-safety).
+    """
+    orig_init = _patch_tortoise_sdk_init(db_path)
+    try:
+        yield orig_init
+    finally:
+        _restore_tortoise_sdk_init(orig_init)
 
 
 def _close_keepalive_anchors(ha_mod) -> None:
@@ -5463,18 +5493,57 @@ def test_the_forced_path_record_does_not_outlive_its_fixture():
     record is per-fixture-activation state, so teardown must reset it.
 
     Ordering-independent by construction: it drives the real patch/restore pair
-    rather than relying on another test having leaked a value.
+    rather than relying on another test having leaked a value, and it drives it
+    through :func:`_forced_db_path_patch` so the cleanup is a ``finally`` and
+    not straight-line code after an assertion (#2273 review, exception-safety:
+    a guard whose cleanup runs only when it passes is a guard that damages the
+    run it is supposed to explain).
     """
-    orig_init = _patch_tortoise_sdk_init("/tmp/tt_not_a_real_db/test.db")
-    assert _FORCED_DB_PATH == "/tmp/tt_not_a_real_db/test.db", (
-        "the patch must record the path it forces — otherwise the pin guard at "
-        "_assert_fixture_pins_anchor_db_path has nothing to compare against")
-    _restore_tortoise_sdk_init(orig_init)
+    with _forced_db_path_patch("/tmp/tt_not_a_real_db/test.db"):
+        assert _FORCED_DB_PATH == "/tmp/tt_not_a_real_db/test.db", (
+            "the patch must record the path it forces — otherwise the pin "
+            "guard at _assert_fixture_pins_anchor_db_path has nothing to "
+            "compare against")
     assert _FORCED_DB_PATH is None, (
         f"teardown must clear the recorded forced path (still "
         f"{_FORCED_DB_PATH!r}): a stale record makes `assert forced` pass for a "
         "run with NO fixture active, so the guard cannot tell an active "
         "fixture from a dead one (#2273 review finding 1)")
+
+
+def test_the_forced_path_record_is_cleared_even_when_the_guard_body_fails():
+    """#2273 review, exception-safety: the FAILING path must clean up too.
+
+    The sibling teardown guard drives the real patch/restore pair. If that pair
+    were straight-line code, the one case the guard exists to report — a red
+    assertion inside its body — would also be the case where it skipped its own
+    restore, leaving ``TortoiseSDK.__init__`` rebound to the forcing closure
+    and ``_FORCED_DB_PATH`` set for the rest of the process. The PR body's
+    mutant A (recording removed) reds the sibling guard exactly that way, and
+    on a full-file run it would turn one honest failure into hundreds of
+    misattributed ones. This test injects that failure and asserts BOTH halves
+    of the restore ran.
+
+    Not marked ``embedded_only``: like its sibling it needs no DB (the patch
+    replaces the constructor, so nothing is ever opened) and runs in both legs.
+    """
+    orig_init = _ha_mod.TortoiseSDK.__init__
+
+    with pytest.raises(RuntimeError, match="stand-in for a red assertion"):
+        with _forced_db_path_patch("/tmp/tt_not_a_real_db/test.db"):
+            assert _FORCED_DB_PATH == "/tmp/tt_not_a_real_db/test.db", (
+                "the patch must record the path it forces")
+            raise RuntimeError("stand-in for a red assertion inside the guard")
+
+    assert _FORCED_DB_PATH is None, (
+        f"the FAILING path must still clear the recorded forced path (still "
+        f"{_FORCED_DB_PATH!r}): a stale record makes `assert forced` pass for a "
+        "run with NO fixture active, so the pin guard silently validates a dead "
+        "fixture (#2273 review, exception-safety)")
+    assert _ha_mod.TortoiseSDK.__init__ is orig_init, (
+        "the FAILING path must still restore TortoiseSDK.__init__ — otherwise "
+        "every later SDK in this process opens one stray temp DB, so one "
+        "honest failure becomes hundreds of misattributed ones")
 
 
 def test_register_journals_minted_team_graph(tmp_path, monkeypatch):
