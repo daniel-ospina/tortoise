@@ -72,7 +72,7 @@ Measured at `32c0f39d4b` (with the two `search_engine.py` citations re-anchored 
 | 1 | a reading records value + unit + source + as-of | detect | ✅ | `create_event`; extras lane stores arbitrary props; `startedAt` is the as-of slot (`ONTOLOGY.md` §4.7) |
 | 2 | a reading is never mutated; a correction is a new reading that retires the old | replace | ⛔ | an `:Event` cannot be superseded (`LIFECYCLE_FANOUT_QUERY` is `MATCH (n:Point {id:$id})`, `live.py:386`) — and it **can** be marked: `update_entity(event, status=…)` is accepted and `ep.py:2128` **honours** it (the node is stripped from factors), while **no retrieval leg filters it** (`_STATUS_FILTERED_LABELS` omits `Event`) — **#11825** |
 | 3 | a target states comparator + threshold + due | decide | ⛔ | no target shape; `target` is a core Object kind with no comparator field |
-| 4 | **compare the current reading to the target → a state** | decide | ⛔ | no goal-scoped comparator or threshold exists. The word appears in 7 lines under `tortoise/` — all unrelated commentary, on no goal or target (`rg -c '\bcomparator\b' tortoise/*.py tortoise/pi-hooks/*.ts`): tolerance policy `reconciliation.py:75`, search ordering `search_engine.py:4388`, NaN ordering `:5095`, provider AST `model_adapters.py:596`, stored-form drift `stored_form.py:19` and `:42`, and one test comment `tortoise/pi-hooks/tortoise-capture.test.ts:1827`. The nearest neighbour in the tree is `tools/capstone_preregistration_check.py:419`'s `COMPARATORS` operator set, which reads a preregistration cell's threshold — not a reading against a target. No such field, function or comparison exists for a goal or a target |
+| 4 | **compare the current reading to the target → a state** | decide | ⛔ | no goal-scoped comparator or threshold exists. The word appears in 7 lines under `tortoise/` — all unrelated commentary, on no goal or target (`rg -c '\bcomparator\b' tortoise/*.py tortoise/pi-hooks/*.ts`): tolerance policy `reconciliation.py:75`, search ordering `search_engine.py:4388`, NaN ordering `:5095`, provider AST `model_adapters.py:596`, stored-form drift `stored_form.py:19` and `:42`, and one test comment `tortoise/pi-hooks/tortoise-capture.test.ts:1827`. The nearest neighbour in the tree is `tools/capstone_preregistration_check.py:419`'s `COMPARATORS` operator set, which reads a preregistration cell's threshold — not a reading against a target. **None exists in the graph or in `tortoise/`**; the one *working* comparator in the system is hardcoded outside both — `~/.pi/agent/scripts/objective.py:3526` (`crit_max > GUIDELINE_CI_MIN`) and `:3543` (`waiting < TARGET_PRS`) — which is the shape this design is meant to replace, and which #7860 names as such |
 | 5 | a state is a claim with a confidence **and** a validity window | replace + weigh | ✅ | `supersede_point`: contiguous `validFrom`/`validTo`, `expiredAt`, `CORRECTS` |
 | 6 | when the state changes the old one **stops counting everywhere** | replace | ⛔ | search omits `Event` from `_STATUS_FILTERED_LABELS`; an Object supersede leaves operators attached and EP silently drops the factor (**#11825**, **#11826**) |
 | 7 | the current state is what belief reads | weigh | ✅ | measured `0.347 → 0.639` on an IMPL (the #7860 D12 ruling) |
@@ -158,7 +158,9 @@ completeness — "target revised" and "definition changed" (capabilities 8 and 9
 you to enumerate and a function lets you forget.
 
 **Why not C:** the ECA warning is not theoretical — it is the failure mode this repo has already lived
-through once, as five different supersession implementations that nobody chose (see §3, capability 6).
+through once, as five different supersession implementations that nobody chose (§3's summary paragraph, which
+carries #11824's re-measured figures — *"5 as 5 semantic models / 6 functions"* — rather than the issue
+body's superseded count).
 
 **OVERRIDES:** the industry default of a general rule/trigger engine for declarative business logic
 (active databases, workflow engines) — we declare only the **decision**, because the literature that
@@ -178,8 +180,8 @@ change produces"*, read by one engine step. **It has no home for the general cas
 |---|---|---|
 | `goal` | a qualitative commitment, with `goalState` (#7856) | the objective is the owner's, never a number |
 | `indicator` | the **definition**: what is measured, unit, direction of good, source, cadence | convergence: SRE's SLI, QUDT's quantity-kind (*"length is a quantity kind while the height of a rocket is a specific quantity of length"*), FHIR `ObservationDefinition` vs `Observation` |
-| `target` | comparator + threshold(s) + due + optional tolerance, **linked to both** the goal and the indicator, 0..n | SRE: *"one SLI can feed more than one SLO (two marks on the same ruler). Some SLIs never get an SLO"* — only a reified target allows 0..n *and* two targets on one goal |
-| reading | a `:Event` carrying the value + verbatim + `startedAt` | one reading = one value (SOSA: *"an Execution has a single result"*); history is table stakes in every comparable (ClearPoint sells "full history retained — no overwritten cells") |
+| `target` | comparator + threshold(s) + due, **linked to both** the goal and the indicator, 0..n | SRE: *"one SLI can feed more than one SLO (two marks on the same ruler). Some SLIs never get an SLO"* — only a reified target allows 0..n *and* two targets on one goal. (`tolerance` is **not** a decided field: it appears nowhere on #7860, whose **D4** names comparator / threshold / window — add it only with a decision) |
+| reading | a `:Event` carrying the value + verbatim + `startedAt` | one reading = one value (history is table stakes in every comparable — ClearPoint sells "full history retained — no overwritten cells"); a reading carries no confidence and no NAND-ability |
 
 **Where the `indicator` kind lives — decided, not open.** #7860 records the owner decision (2026-10-13)
 *"promote `indicator` to a core Object kind — option (a)"*, carried as that issue's **D1**: *"`indicator` is
@@ -226,7 +228,7 @@ puts in a field.
 | step | what | why here |
 |---|---|---|
 | **0** | the **replace** primitive works uniformly across entity kinds (**#11824**, **#11825**, **#11826**) | everything above it inherits its blind spots. This is a **prerequisite of the reasoning mechanism**, not ontology hygiene. ⚠️ #11824 carries its own dispatch gate — *"do not dispatch implementation before that decision is recorded"* — so step 0 opens when that decision lands |
-| **1** | the comparison as a declared decision table (**#11822**) | needs only the reading, the target, and a place to write the state |
+| **1** | the comparison as a declared decision table (**#11822**) | needs only the reading, the target, and a place to write the state. ⚠️ **Step 1's gate is also closed:** #7860's **D13 — "what triggers the loop?" — is not ruled** (it sits under that issue's *"OPEN — the owner has two questions outstanding"* with a recommendation only), and **#11822's scope waits on that ruling**. Do not dispatch #11822 on the strength of §5 alone |
 | **2** | invalidation when inputs change — target revised, definition changed, goal retired (**capabilities 8/9/12**) | the cases a complete table forces you to enumerate |
 | **3** | the effect-declaration surface generalised from `folds` (**§5 seam**) | only after 0, or a declared effect cannot retire the old state reliably |
 | **4** | deeper cascades without the silent stop (**#11823**) | measured: 6 levels then stop; 4-level cascades already work |
@@ -244,7 +246,7 @@ sitting on it — #2782 is the money-typed instance of that ruling, not an alter
 - **Being a BI engine.** Aggregation — grain, group-by, joins over a warehouse — is a different product.
   The seam is that an indicator names where its reading comes from, and readings are pushed in.
 - **The analytics ingestion path** (an event write door; `:Source` provenance for machine readings) —
-  wave 6 on #11081, deliberately not prioritised.
+  wave 5 on #11081, deliberately not prioritised (#11081's own wave 6 names it as *wave 5*).
 - **Causal inference and simulation.** Gartner's decision-intelligence platforms do Monte Carlo and
   counterfactuals and are criticised for it (*model-rich, adoption-poor*). Our `IMPL`/`NAND` +
   mitigations are *attribution with confidence*, not arithmetic decomposition; that difference is a
@@ -261,4 +263,4 @@ sitting on it — #2782 is the money-typed instance of that ruling, not an alter
 | — | D13 (what triggers the loop?) | **recommended on #7860 — NOT yet ruled**, and it sits under that issue's *"OPEN — the owner has two questions outstanding"*: *the judgement write is the trigger* (per D11), the only option where the trigger and the answer are the same write. **#11822's scope waits on the owner ruling this**, so the gate is still closed: #11822 must not be dispatched as if the trigger were settled. Marking that write does **not** make a deeper cascade converge (#11823) — this is the trigger, not the convergence fix |
 | — | where does the **effect** rule live? | **decided here: §5** (declared decision table; engine-owned effect; no general rule engine) — a design decision of this doc, relayed to #7860 |
 | O1 | does this doc deliver #7860's acceptance criteria? | **No.** It is a capability design of record: `grep -c -i '\bindicator\b' docs/ONTOLOGY.md` is still **0**, so criteria 1 and 3 remain unmet and **#7860 stays open** |
-| Q3 | the §5 quotations ("rope for programmer", "hired? fired? …") name no pinned source | pin them before this doc is cited as evidence — they are reproduced from the design pass's research, not from a tracked document |
+| Q3 | **every** quoted passage in this doc (the §5 ECA / OMG DMN quotations, the §6 SRE / QUDT / FHIR / ClearPoint quotations) names no pinned source — document, version or link | pin them all before this doc is cited as evidence — they are reproduced from the design pass's research, not from a tracked document. One quotation has already been withdrawn as unpinnable rather than left looking sourced |
