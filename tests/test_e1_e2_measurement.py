@@ -3335,9 +3335,19 @@ def test_the_e2b_floor_is_FED_the_planted_population_and_the_line_says_so():
         f"{call.group(1)}; the record's §3.1 row is written over the surviving "
         "PLANTED units (`real_facts`). `atomic_points` counts non-planted rows "
         "too, which is the fail-open #10989 closes")
-    assert "surviving_units_basis=real_facts" in source, (
+    # ⛔ Pinned on the EMITTED line, never as a grep of the whole file. The same
+    # literal also appears in `e2b_note`'s prose, which is emitted on a DIFFERENT
+    # log line (`prereg_e2_floor=`) — so `in source` was satisfied by a sentence
+    # in another code path, and deleting the emitter's own token left this test
+    # (and the whole suite) green. Measured mutant, #11833 review P2-1.
+    corpus = _REPO_ROOT / _CORPUS_REL
+    emitted = probe.binding_line(probe.prereg_binding(
+        _prereg_for_e2b_floor(30), corpus,
+        "e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b",
+        25, before_share=0.6, surviving_units=30))
+    assert "surviving_units_basis=real_facts" in emitted, (
         "the binding line must state which population its measured side is, so "
-        "the gate is auditable from the log alone")
+        f"the gate is auditable from the log alone — emitted: {emitted}")
     # One key, one denominator: the two sibling readers of the same frozen key
     # test the same population, so a `MATCHED` binding cannot be a population the
     # E2b row refuses.
