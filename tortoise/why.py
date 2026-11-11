@@ -74,7 +74,7 @@ from .search_engine import (  # type: ignore[import-not-found]
     belief_mirror,
     belief_value,  # #11702: the ONE Python belief VALUE reader
     ep_has_belief_cypher,
-    ep_measured_cypher,  # #3276: has_ep == an α is persisted (NOT "EP ran")
+    ep_measured_cypher,  # #3276: has_ep == a non-baseline α is persisted (NOT "EP ran")
     ep_pair_stored,  # #11702: a variance needs BOTH α/β operands stored
     ep_state,
     ep_state_resolve,
@@ -715,7 +715,7 @@ _EP_CYPHER = (
     "RETURN n.id, "
     "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0), "
     "  coalesce(n.posterior_beta, n.ep_beta, 1.0), "
-    # #3276: has_ep == an α is persisted (ep_measured_cypher) — a #2199
+    # #3276: has_ep == a non-baseline α is persisted (ep_measured_cypher) — a #2199
     # baseline prior alone is prior-only, never a measured confidence.
     f"  {ep_measured_cypher('n')}, "
     # #2490: status/outdated ride the RETURN so _assemble_ep_rows can apply

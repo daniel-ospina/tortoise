@@ -400,13 +400,19 @@ def _eligible(block: dict, *, min_confidence: float,
     prior-only yet reads its PRIOR mean, so it clears the mean floor. That is
     deliberate: #2199 treats a baseline as the author's stated starting
     belief ("set-by-author") and the mean floor is a NOTABILITY gate, not a
-    measurement claim. The why-block discloses the state honestly — every
-    entry carries ``ep.ep_state`` (the field that ANSWERS it) beside
-    ``ep.measured`` / ``ep.baseline``. Read the state, not the two flags: a
-    legacy ``n.confidence`` mirror and a terminal decayed posterior both read
+    measurement claim. The why-block discloses the state honestly: every entry
+    carries ``ep.ep_state`` — the field that ANSWERS the question — plus
+    ``confidence_mean`` (None iff the state is absent).
+
+    ⛔ Do NOT branch on ``ep.measured`` / ``ep.baseline``: they are not a state
+    derivation, and the FALLBACK entry (`why_entry`'s default for a point with
+    no ``ep`` sub-block) does not even carry them — only ``confidence_mean``,
+    ``variance``, ``contested``, ``has_ep`` and ``ep_state``. A legacy
+    ``n.confidence`` mirror and a terminal decayed posterior both read
     ``measured=False, baseline=False`` while their state is ``baseline`` with a
-    real number, so a consumer that filters on the flags alone drops a live
-    prior as "no belief".
+    real number, so a consumer filtering on the flags drops a live prior as "no
+    belief" — and one indexing ``ep["measured"]`` raises ``KeyError`` on the
+    fallback entry.
 
     Contentiousness participates: a CONTESTED state (persisted variance >
     threshold) whose dispute the window actually touches may cross the floor

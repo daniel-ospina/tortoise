@@ -37502,9 +37502,12 @@ class TortoiseSDK:
         never-measured hit as "confirmed". #11702 makes that shape read
         ``confidence_mean: None`` instead (so the comparison below is guarded
         against ``None``, not merely unreachable); #3276 makes ``has_ep`` mean
-        "an α is persisted", so a #2199 auto-baselined decide part (prior mean
-        0.75, no α) still does not clear the gate, though a direct write of a
-        posterior does — the flag is NOT proof EP ran; ``measured`` is preferred when
+        "a non-baseline α is persisted", so a #2199 auto-baselined decide part is
+        still excluded — and by the RIGHT mechanism: it DOES persist an α
+        (Beta(3,1), the 0.75 prior mean, stored as ``ep_alpha``/``ep_beta``), so
+        an α-presence test would admit it; what excludes it is
+        ``baseline_set``. A direct write of a posterior does clear the flag —
+        without any EP pass, so it is NOT proof EP ran; ``measured`` is preferred when
         the caller supplies it, with ``has_ep`` as the honest fallback. The
         token floor protects the TF-IDF fallback path (ep=None) from
         single-token coincidences and keeps unmeasured FTS hits out unless
@@ -37542,14 +37545,14 @@ class TortoiseSDK:
         Behaviour vs #3276:
           * pre-#3276  → edgeless kind-prior false positives are rejected; the
             edge-having kind-prior case is NOT (undecidable from the payload);
-          * post-#3276 → ``has_ep`` becomes α-persistence-derived, so no kind
+          * post-#3276 → ``has_ep`` becomes non-baseline-α-persistence-derived, so no kind
             prior clears this predicate at all (and a directly- WRITTEN
             posterior does, without any EP pass — the flag is not a receipt).
         A genuinely measured claim whose belief came from an OUTGOING edge, or
         an explicit edgeless EP seed, is NOT boosted (``evidence`` counts
         incoming edges only). That is the deliberate fail-safe direction —
         never invent a 'decided' signal. The residual BECOMES CLOSEABLE once
-        #3276 lands: with α-persistence-derived ``has_ep`` the evidence
+        #3276 lands: with non-baseline-α-persistence-derived ``has_ep`` the evidence
         requirement COULD then be relaxed — but relaxing it on the strength of
         ``has_ep`` alone would boost a hand-written posterior that has no
         incoming evidence, so the follow-up has to read the evidence itself

@@ -269,13 +269,19 @@ class SearchScores:
 
 
 # ── #3276: honest EP measurement state ─────────────────────────────────
-# ``has_ep`` means "an α column is PERSISTED for this claim" — not "a persisted
-# prior exists", and NOT "EP ran" (a direct write stamps it).
+# ``has_ep`` means "a NON-BASELINE α is persisted for this claim". Three things
+# it is NOT:
+#   * not "a persisted prior exists" — a #2199 declared baseline DOES persist
+#     `ep_alpha` (Beta(3,1), prior mean 0.75) and must NOT set this, which is
+#     the whole distinction #3276 exists to draw;
+#   * not "EP ran" — a direct `update_point(posterior_alpha=…)` stamps it with
+#     no EP pass anywhere;
+#   * not "an α is stored" — that reading would reinstate the #3276 false
+#     positive for every auto-baselined decide part.
 #
-# A claim carries a persisted α when EP flushed one (`posterior_alpha` — which
-# a direct `update_point(posterior_alpha=…)` ALSO writes, so this is not
-# evidence of an EP pass), or when it carries a persisted ep_alpha that is NOT a
-# #2199 baseline (legacy EP-prior back-compat).
+# The predicate: `posterior_alpha IS NOT NULL` (EP flushed one, or a direct
+# write) `OR (ep_alpha IS NOT NULL AND NOT baseline_set)` (a legacy EP-prior
+# back-compat value that no #2199 baseline stamped).
 #
 # ⛔ **THE FLAGS ARE NOT A STATE DERIVATION — read :attr:`ep_state` for the
 # state.** The pair `(has_ep=False, baseline=False)` covers BOTH "nothing
@@ -292,7 +298,7 @@ class SearchScores:
 # measured symmetric coin flip (SEARCH-ARCHITECTURE.md §6.3).
 
 def ep_measured_cypher(alias: str) -> str:
-    """Cypher boolean: an α column is PERSISTED on the :Point at ``alias`` (#3276).
+    """Cypher boolean: a NON-BASELINE α is persisted on the :Point at ``alias`` (#3276).
 
     Not an EP receipt: `posterior_alpha` is also written by a direct
     `update_point`, and the legacy `ep_alpha` arm is written by a prior stamp.
@@ -1333,7 +1339,7 @@ class EpBreakdown:
     # as a first-class flag so agents treat the claim as disputed, not merely
     # high/low probability.
     contested: bool = False
-    # #3276: whether an α column is PERSISTED for this point — True iff a real
+    # #3276: whether a NON-BASELINE α is persisted for this point — True iff a real
     # EP flush persisted a posterior (or a non-baseline legacy ep_alpha prior).
     # ⛔ Not an EP receipt: a direct `update_point(posterior_alpha=…)` sets it
     # with no EP pass anywhere (see the #11702 note further down). A
@@ -1355,7 +1361,7 @@ class EpBreakdown:
     # ⛔ `has_ep`/`measured` answer "is there a PERSISTED α column"; `ep_state`
     # and `confidence_mean` answer "is a belief READABLE". The predicate is
     # `ep_measured_cypher`: `posterior_alpha IS NOT NULL OR (ep_alpha IS NOT NULL
-    # AND NOT baseline_set)` — an α is persisted. That is NOT the same claim as
+    # AND NOT baseline_set)` — a non-baseline α is persisted. That is NOT the same claim as
     # "EP wrote it": a plain `update_point(posterior_alpha=…)` satisfies it with
     # no EP pass anywhere, so this flag is not an EP receipt.
     #
@@ -6102,7 +6108,7 @@ def get_relationships_bounded(
                         # `baseline_set=bool(has_ep)` (the obvious-looking
                         # shortcut, which this did until #11702 review cycle
                         # 12) INVERTS it: `has_ep` is `ep_measured_cypher`'s
-                        # "an α is persisted", the exact opposite of a declared
+                        # "a non-baseline α is persisted", the exact opposite of a declared
                         # baseline. Measured on the legacy-EP-prior shape
                         # (`ep_alpha`/`ep_beta` set, no posterior, no mirror —
                         # what ep.py's evidence pre-write leaves on a
