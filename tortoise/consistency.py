@@ -380,6 +380,25 @@ _UNCARRIED_TAGS_UNWRITABLE = (
     "string, null inside an array, map/bytes/set) and an int outside INT64 is "
     "clamped or refused (`_store_holds_prop_value`)"
 )
+# #11239: the same predicate for the JSON-RECORD props, with the reason naming
+# the right prop — the `tags` text would tell a reader the wrong thing about a
+# `mentions` loss. Judged on the writer's OUTPUT (the encoded scalar), which is
+# what the store actually receives.
+#: A shape the encoder POPS rather than stores. Distinct from
+#: `_UNCARRIED_NON_PERSISTABLE`, whose text blames `_is_persistable_prop_value` —
+#: measured, `5`/`True`/`2.5` PASS that filter and are dropped by the encoder's
+#: own `pop` arm, so reusing that reason misdirects the diagnosis.
+_UNCARRIED_JSON_RECORD_POPPED = (
+    "a `mentions` value the encoder POPS — a shape that is neither a `str` nor "
+    "a `list`/`tuple` is dropped before the SET rather than refused by "
+    "`_is_persistable_prop_value` (`encode_json_record_props`)"
+)
+_UNCARRIED_JSON_RECORD_UNWRITABLE = (
+    "a `mentions` record the store cannot hold as stated — the `#7369` "
+    "transport gate nulls what `_value_ok` refuses (a NUL/surrogate string, a "
+    "null inside an array), so the encoded scalar never lands even though the "
+    "payload states the record (`_store_holds_prop_value`)"
+)
 # ⚠️ BOUND, stated rather than implied, on the `tags` branch that reads the
 # reason above (#8317 review round 4):
 #   * an `_uncarried` key is skipped on BOTH sides (journal AND graph) and left
@@ -758,19 +777,45 @@ def _uncarried(journal_by_id: dict) -> dict[str, dict[str, str]]:
                 # `entities.py`), so a journal carrying `mentions: 5` is a real
                 # drop and must be NAMED — exactly the value-dependent carriage
                 # the `tags` branch above exists for (review P3 on PR #11795).
+                #
+                # ⛔ BOUND, stated rather than implied (review on PR #11795): on
+                # the PRODUCTION path this branch sees the FOLD's view, and the
+                # fold applies the same predicate first (`stated_json_record_prop`
+                # → `_apply_one`), so a store-refusing value never reaches here
+                # from `check_consistency` — it is removed upstream. What this
+                # branch actually decides on that path is (i) the EMPTY list,
+                # which must not be reported as an `_UNCARRIED_LIST` loss, and
+                # (ii) the non-str/non-list shapes the fold's `skip` arm leaves
+                # in the view. The store-exactness tests below are defence for a
+                # HAND-BUILT snapshot (a foreign or older-emitter journal), not a
+                # repair of a live divergence — no row pins them, and none could
+                # without bypassing the fold.
                 if isinstance(v, str):
                     # A canonical string is carried only when the STORE can hold
                     # it EXACTLY: `#7369` degrades a NUL / lone-surrogate string
                     # to null before dispatch, so the property never lands. Same
-                    # predicate as the `tags` branch above, for the same reason —
-                    # testing the SHAPE alone reports such a value as carried
-                    # while nothing reaches the node (review P1 on PR #11795).
+                    # predicate as the `tags` branch above.
                     if not _store_holds_prop_value(v):
-                        found[k] = _UNCARRIED_TAGS_UNWRITABLE
+                        found[k] = _UNCARRIED_JSON_RECORD_UNWRITABLE
                     continue
                 if isinstance(v, (list, tuple)):
+                    # Judged on the writer's OUTPUT, not on the payload type: the
+                    # store receives `encode_json_record_props(v)`, so a record
+                    # whose encoded scalar it cannot carry (a lone surrogate in a
+                    # `surface`) is as uncarried as its `str` spelling. Same
+                    # predicate, both spellings — defence for the hand-built
+                    # case above.
+                    _view = {k: v}
+                    encode_json_record_props(_view)
+                    _encoded = _view.get(k)
+                    if _encoded is not None and not _store_holds_prop_value(
+                            _encoded):
+                        found[k] = _UNCARRIED_JSON_RECORD_UNWRITABLE
                     continue
-                found[k] = _UNCARRIED_NON_PERSISTABLE
+                # A shape neither carried nor encoded: `encode_json_record_props`
+                # POPS it, so `_is_persistable_prop_value` is not the reason it
+                # is missing (measured: `_is_persistable_prop_value(5)` is True).
+                found[k] = _UNCARRIED_JSON_RECORD_POPPED
                 continue
             elif isinstance(v, list) and k not in _POINT_LIST_PROPS:
                 found[k] = _UNCARRIED_CONTENT_PROPS.get(k, _UNCARRIED_LIST)

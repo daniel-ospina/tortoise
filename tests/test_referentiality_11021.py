@@ -1350,6 +1350,26 @@ def test_the_mention_record_reaches_the_claim_point_and_says_so():
     assert "mentions" not in selfhost_api.CreatePointRequest.model_fields, (
         "the self-host REST door now accepts `mentions` — #4032's parity "
         "mirror must move with the hosted pair, and this field is neither's")
+    # …and BEHAVIOURALLY: a client that POSTs one anyway must not have it
+    # silently swallowed (review S2 on PR #11795). Both models inherit pydantic's
+    # default `extra='ignore'`, so `mentions` in the body is DROPPED and the write
+    # answers OK with nothing stored — the same silent-false-green the file's own
+    # comment records for `confidence`/`authoredBy`. The verdict is "not a client
+    # field", so the drop is correct; that nothing surfaces it is the trap, and
+    # this row pins that the field does not reach the constructed model (the
+    # upstream of `sdk.create_point`'s kwarg list).
+    for _model in (hosted_api.CreatePointRequest,
+                   selfhost_api.CreatePointRequest):
+        _built = _model(content="the claim", kind="statement",
+                        mentions=[{"surface": "it", "span_start": 0,
+                                   "span_end": 2}])
+        assert "mentions" not in _built.model_dump(), (
+            f"{_model.__name__} round-tripped a `mentions` field: it is a "
+            "writer-produced record, not a client field (#11239)")
+        assert not hasattr(_built, "mentions") or _built.mentions is None, (
+            f"{_model.__name__} exposed `mentions` on the parsed body, so a "
+            "route could thread it into `sdk.create_point` — the one thing the "
+            "door verdict forbids")
     # …and pin the ROUTE's own write, not only its request model (review P3 on
     # PR #11795: the pre-#11239 row asserted exactly this and the rewrite
     # dropped it, so a `body.mentions` kwarg could be threaded into the route's

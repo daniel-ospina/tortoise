@@ -1195,6 +1195,12 @@ _POINT_FLATTEN_LIST_PROPS: frozenset = frozenset({"search_keys", "quote"})
 #:   `tests/test_mention_write_11239.py::test_the_event_api_door_carries_a_mention_to_the_point`.
 #: The parity claim (#330) rests on every door emitting a pure function of the
 #: payload — which is why the encode lives in ONE helper and not per door.
+#: ⚠️ THE RECORD LANE HAS NO COUNTERPART TO THIS DECLARATION — the Postgres
+#: record's Point snapshot keeps the PAYLOAD spelling (a list of records), so the
+#: record side of `record_reconcile` and a record-sourced `rebuild_from_record`
+#: see a value the graph writer encodes. `#11815` tracks the record-boundary
+#: encoder and the parity pin that would make this class visible; until it lands,
+#: a deployment on that lane holds two spellings of one record.
 _POINT_JSON_RECORD_PROPS: frozenset = frozenset({"mentions"})
 
 
