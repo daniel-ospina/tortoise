@@ -297,6 +297,21 @@ _RESTATEMENT_SITES: tuple[str, ...] = (
     _ITEM_NOT_ABSOLUTE,    # "scopes the exclusion to the hosted VM"
 )
 
+#: The `_RESTATEMENTS` rows (1-based, index-aligned with the tuple above) whose SITE
+#: phrase IS their own needle. For those the label guard's SECOND assert cannot vary:
+#: `_record_site_block` returns a block only when some item line already carries the
+#: site's word sequence, so for row 2 — `_ITEM_NEITHER_HOOK` naming the very heading it
+#: restates — a passing `assert block` has already proved the sentence is "in" the
+#: block (`review r30 P3 #1`, measured: for every other row a moved sentence or a
+#: re-pointed label reds the second assert, and for row 2 NO mutation can red it while
+#: the first passes). Such a row is not dead weight — the FIRST assert is its whole
+#: job, and it reds the moment that heading is re-worded or the item deleted — but the
+#: second assert would be an assertion whose value cannot vary, which is the dead weight
+#: this file's own review rounds remove (`:791–802`, r19 P2). It is skipped BY DERIVATION
+#: below and the derived set is asserted, so a NEW circular row cannot inherit the dead
+#: leg silently, and a row that STOPS being circular cannot lose its content check.
+_CIRCULAR_SITE_ROWS = frozenset({2})
+
 #: (4) — the customer promise THIS PR RETRACTED, and the correction that replaced it.
 #:
 #: #11806's correction log told a customer that *"an Enterprise self-hosted-pool
@@ -679,6 +694,13 @@ def test_every_restatement_site_label_names_the_item_that_states_it():
         deliberately avoids (`_record_site_block` never falls back to the full text)
         is the only thing that can catch.
 
+    ⚠️ The halves are distinct for SIX of the seven rows. Row 2's site IS its
+    restatement needle (`Hosted cloud agents get NEITHER hook`), so locating the block by
+    that phrase already proves the phrase is in it — its second assert can never vary,
+    and is skipped by derivation (`_CIRCULAR_SITE_ROWS`), with the DERIVED set asserted so
+    a new circular row cannot inherit the same dead leg (review r30 P3 #1). Row 2 keeps
+    its whole job: a re-worded heading reds the first assert.
+
     Mutation (measured): move any restatement's sentence into the sibling item →
     the second assert REDs naming that needle and the site; re-word either heading
     → the first assert REDs naming the site; move a sentence into a **BOLD-NUMBERED**
@@ -690,12 +712,27 @@ def test_every_restatement_site_label_names_the_item_that_states_it():
     assert len(_RESTATEMENT_SITES) == len(_RESTATEMENTS), (
         "every `_RESTATEMENTS` row needs a site label — the legend's map is one "
         "row per restatement")
-    for (scoped, _unscoped), site in zip(_RESTATEMENTS, _RESTATEMENT_SITES, strict=True):
+    circular = frozenset(
+        row for row, ((scoped, _unscoped), site) in enumerate(
+            zip(_RESTATEMENTS, _RESTATEMENT_SITES, strict=True), start=1)
+        if _normalised(scoped) == _normalised(site))
+    assert circular == _CIRCULAR_SITE_ROWS, (
+        f"the rows whose site IS their needle are {sorted(circular)}, not "
+        f"{sorted(_CIRCULAR_SITE_ROWS)} — a row that became circular just lost its "
+        f"independent content check, and a row that stopped being circular needs that "
+        f"check back; re-derive `_CIRCULAR_SITE_ROWS` from the two tuples")
+    for row, ((scoped, _unscoped), site) in enumerate(
+            zip(_RESTATEMENTS, _RESTATEMENT_SITES, strict=True), start=1):
         block = _record_site_block(doc, site)
         assert block, (
             f"the site {site!r} that the `_RESTATEMENTS` legend names does not resolve "
             f"in the record — a re-worded heading or a deleted item leaves the legend "
             f"pointing at nothing")
+        if row in circular:
+            # Locating the block BY this row's own words already proved they are in it;
+            # see `_CIRCULAR_SITE_ROWS`. Asserting it again would be an assertion whose
+            # value cannot vary, and this file removes those rather than carrying them.
+            continue
         assert _normalised(scoped) in _normalised(block), (
             f"{scoped!r} is not stated in the item the legend names ({site!r}) — the "
             f"label is stale, or the sentence MOVED to another item")
