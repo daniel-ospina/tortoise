@@ -171,16 +171,18 @@ def test_mutation_population_is_pinned():
     `check_survivor_arithmetic`'s `len(matches) > 1` branch: deleting that branch left
     every other arm, every test and `--check` green (measured).
 
-    The population is 18 after the #11902 review cycles: the §6 survivor-sentence arms,
-    the four fail-open arms (unclassifiable §3 row, emptied evidence column,
-    unclassifiable §6 row, declined citation shape), the §3 tally arm, the three
-    citation-shape arms (space in the path, trailing space, trailing space on a
-    shorthand) and the verdict-attribution arm. The floor is pinned WITH it — a
-    floor below the population is the "shrunk population proves nothing" shape it
-    exists to catch. Re-derive by counting `caught` lines in `--self-test`.
-
-    ...plus a §1 vocabulary arm, the only pin on `check_vocabulary()`, which is
-    why the population is 19. ⚠️ The `>=` below is the tool's own rule: an ADDED
+    The population is 24 after the #11902 review cycles. The arms are, in order:
+    the closed verdict vocabulary; the six §3/§6 population and citation arms
+    (missing file, out-of-range line, deleted row, §6 count, out-of-range shorthand,
+    unclassifiable §3 row); the emptied evidence column; an unclassifiable §6 row;
+    a declined citation shape; the three inserted-character shapes (space in the
+    path, trailing space, trailing space on a shorthand); a citation embedded in a
+    longer span; an absolute path outside the tree; an evidence cell pointing at a
+    section that does not exist; a verdict moved between classes; the §3 tally; a
+    decoy tally paragraph; the §6 survivor count, total, decoy sentence and deleted
+    CLOSED bullet; and the §1 vocabulary arm. The floor is pinned WITH it — a floor
+    below the population is the "shrunk population proves nothing" shape it exists
+    to catch. Re-derive by counting `caught` lines in `--self-test`. ⚠️ The `>=` below is the tool's own rule: an ADDED
     arm must not red this. The second assert RECORDS the population, so removing
     an arm forces the floor to be edited here as well — a shrink cannot happen in
     one place.
@@ -188,8 +190,8 @@ def test_mutation_population_is_pinned():
     assert len(flc.MUTATIONS) >= flc.MIN_SELF_TEST_MUTATIONS, (
         "the registered population must meet the floor it declares"
     )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 19, (
-        "this line RECORDS the population (19 arms); removing one means editing the "
+    assert flc.MIN_SELF_TEST_MUTATIONS == 24, (
+        "this line RECORDS the population (24 arms); removing one means editing the "
         "floor here too, which is the second place a shrink has to touch"
     )
 
@@ -541,6 +543,98 @@ def test_a_shorthand_with_a_trailing_character_is_refused(tmp_path, monkeypatch)
         _mutated(tmp_path, monkeypatch, lambda t, o=old, n=new: t.replace(o, n, 1))
         problems = _doc_problems()
         assert any("not a recognised citation" in p for p in problems), (old, problems)
+
+
+def test_a_citation_embedded_in_a_longer_span_is_refused(tmp_path, monkeypatch):
+    """FAILS if appending a word inside the backticks defuses an out-of-range red.
+
+    The shape arms only see a span whose WHOLE body is `path:line`, so a lane that
+    gets a legitimate red could go green by writing the citation inside a sentence.
+    Measured: `…:999999 (dead)` and `see …:999999 here` both exited 0.
+    """
+    for new in (
+        "`tortoise/pipeline.py:999999 (dead)`",
+        "`see tortoise/pipeline.py:999999 here`",
+    ):
+        _mutated(
+            tmp_path,
+            monkeypatch,
+            lambda t, n=new: t.replace("`tortoise/pipeline.py:16`", n, 1),
+        )
+        problems = _doc_problems()
+        assert any("not a recognised citation" in p for p in problems), (new, problems)
+
+
+def test_an_absolute_path_outside_the_tree_is_refused(tmp_path, monkeypatch):
+    """FAILS if `/`-rooted citations are exempt wholesale.
+
+    The exemption used to be `startswith(("~", "/"))`, so rewriting every citation
+    to an absolute path left the page CLEAN with nothing resolved. An absolute path
+    is only evidence if it points inside this tree.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace(
+            "`tortoise/pipeline.py:16`", "`/nope/tortoise/pipeline.py:16`", 1
+        ),
+    )
+    problems = _doc_problems()
+    assert any("absolute path outside" in p for p in problems), problems
+
+
+def test_a_page_of_nothing_but_exempt_citations_is_unverifiable(tmp_path, monkeypatch):
+    """FAILS if the "measured nothing" floor can be reached past by `~`-exempting.
+
+    The floor counted MATCHES rather than RESOLUTIONS, so every citation exempted to
+    `~` still counted as measured. It is exit 2, never 0: a guard that measured
+    nothing must not report clean.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: re.sub(
+            r"`((?:tortoise|tests|docs|\.github|config|tools)/[^`]*:\d[^`]*)`", r"`~\1`", t
+        ),
+    )
+    with pytest.raises(flc.Unverifiable):
+        _doc_problems()
+
+
+def test_an_evidence_reference_to_a_missing_section_is_rejected(tmp_path, monkeypatch):
+    """FAILS if `§N` is accepted without checking section N exists.
+
+    Measured: replacing all twelve §3 evidence cells with `§9` (there is no §9) left
+    `--check` at rc 0 — the emptied column, wearing a section number.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace("| §6 below, measured per issue |", "| §9 below, measured per issue |", 1),
+    )
+    problems = _doc_problems()
+    assert any("names no `path:line`, issue, command or §N" in p for p in problems), problems
+
+
+def test_a_decoy_headline_paragraph_is_rejected(tmp_path, monkeypatch):
+    """FAILS if the tally arm takes the FIRST such paragraph anywhere in the file.
+
+    Measured: a decoy carrying a correct-looking tally above §3 plus a falsified real
+    sentence left rc 0 — the arm compared a sentence nobody quotes. More than one is a
+    page defect, mirroring `check_survivor_arithmetic`'s `len(matches) > 1` rule.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace(
+            "**Read §3 first if you are about to fix something.**",
+            "**The one thing to take away:** whatever the table says.\n\n"
+            "**Read §3 first if you are about to fix something.**",
+            1,
+        ),
+    )
+    problems = _doc_problems()
+    assert any("paragraphs starting" in p for p in problems), problems
 
 
 # ── the headline tally is derived, not asserted ────────────────────────────
