@@ -143,6 +143,11 @@ WHAT IT STILL DOES NOT CATCH, stated so the docstring is not the next over-claim
     relative path", a negation AFTER the needle). Measured (r22): the enumerated
     forms are caught; a re-worded inversion is not. Same trade as the rest of this
     file — a closed list that states its bound beats a clever parser nobody owns.
+  * …and it is OVER-BROAD too (r23): an honest CONTRAST reds — "which do not read
+    their state from a repository, but from `$HOME`" is truthful and is reported as
+    a negation of the code. One reword, or extend the needle with the object it
+    negates. Recorded because a bound stated in one direction only is the r15-P3
+    "guard rationale vs guard lines" class.
 
 MUTATION (each verified RED at this head, restoring byte-identical):
   * restore the unscoped quote at `platform-seams.md:315`      → (1) RED
@@ -295,6 +300,13 @@ _RETRACTION_CAUSE: tuple[str, ...] = (
 #: direct negation of a `_RETRACTION_CAUSE` needle, because a closed list is honest
 #: about what it covers and a cleverer rule would be a parser nobody maintains.
 #: A differently-worded negation is a recorded residual (see the module docstring).
+#:
+#: ⚠️ It is also OVER-BROAD in the other direction, and that bound is stated rather
+#: than hidden: an honest CONTRAST reds — "which do not read their state from a
+#: repository, but from `$HOME`" and "which do not register by absolute path on the
+#: worker" are truthful and are reported as a negation of the code. Measured (r23).
+#: The remedy is one reword, or extending the needle with the object it negates;
+#: the trade is accepted because the alternative is a negation parser nobody owns.
 _RETRACTION_NEGATIONS: tuple[str, ...] = (
     "do not register by absolute path",
     "do not read their state from",
@@ -306,12 +318,13 @@ _RETRACTION_NEGATIONS: tuple[str, ...] = (
 #: (2b) — the THREE hook sources, at EVERY site where the record restates them.
 #:
 #: Item 2 of this PR exists because #11806's correction named only the
-#: PROJECT-level source, and naming one of three reads as EXCLUSIVE. Four sites
-#: state all three, and EACH was measured revertible to the one-source reading with
-#: the whole file GREEN: two at r21 (the `#2122` matrix row and §3's consequence
+#: PROJECT-level source, and naming one of three reads as EXCLUSIVE. Every site
+#: that states all three was measured revertible to the one-source reading with the
+#: whole file GREEN: two at r21 (the `#2122` matrix row and §3's consequence
 #: sentence, while the PR body meanwhile claimed this very arm existed), and two
 #: more at r22 (the quoted evidence itself, and the record's own summary of it —
-#: sites the r21 arm's "both places" claim had missed).
+#: sites the r21 arm's "both places" claim had missed). The counts live in that
+#: history, never in a standing claim: r21 said "two" and r22 measured four.
 #:
 #: Site-UNIQUE needles: a shared one would let a revert at one site hide behind
 #: another still naming all three. The tuple IS the completeness claim — there is
@@ -593,9 +606,10 @@ def test_the_retracted_project_level_promise_cannot_come_back():
             f"promise as an attractive route")
     for negated in _RETRACTION_NEGATIONS:
         assert _absent(negated, doc), (
-            f"the record NEGATES the ground the retraction rests on "
-            f"({negated!r}) — the shipped scripts DO register by absolute path "
-            f"and DO read state from $HOME, so this is the inverse of the code")
+            f"the record carries a NEGATED form of the ground the retraction "
+            f"rests on ({negated!r}) — if this is an honest CONTRAST (\"do not read "
+            f"their state from a repository, but from $HOME\"), reword it; if it "
+            f"negates the shipped behaviour, drop it")
 
 
 def test_both_hook_source_restatements_name_all_three_sources():
