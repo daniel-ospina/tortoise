@@ -193,35 +193,27 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_8906_points_gate_counts_write_graph.py": {"registry": "prod-coupled"},
     "test_hosted_volunteer_context.py": {"registry": "prod-coupled"},   # #2103 (W4C) — registry control-plane mint/revoke mirrors test_hosted_auth
     "test_capture_phase_d_dedup.py": {"team-001": "team-identity"},  # #2104 (W5-D) — hosted _make_sdk(namespace="team-001") mirror arm
-    # tests/test_11702_absent_belief_state.py — deliberately NO row below.
     # #11702's `_EP_FLAG_CONV` hosted arm is the SAME construction as
-    # test_capture_phase_d_dedup's mirror arm (it reaches the graph the REAL
-    # `POST /v1/sessions` route just wrote, using the shared `team-001` org
-    # `tests/test_hosted_api.py`'s `client` fixture authenticates as) — but it
-    # deliberately has NO row here. It spells the id as the fixture's own
-    # `TEST_ORG_ID` (#11905), so there is no literal for this scan to see, and
-    # the routing fact stays single-source in the fixture. ⛔ Do NOT re-add a
-    # `{"team-001": …}` row for it: the row #11900 landed here (d206b12b) is
-    # #11905's own REJECTED alternative — rejected because it re-states a
-    # routing fact the fixture already owns — and it outlived its literal. A
-    # declaration with no literal is not documentation, it is a WHITELIST: a
-    # future `namespace="team-001"` in that file would be silently
-    # re-authorised by it instead of reddening this guard. That failure is already live
-    # elsewhere in this table: THREE declared rows outlive their literal —
-    # `test_onboarding_state.py` and its `…_split_checkpoint` /
-    # `…_split_projection` siblings, all `registry` — tracked as #11929. Cite
-    # it; do not widen it. (Count them per file across BOTH scanned roots:
-    # `test_billing_upgrade.py`'s `registry` literal lives under `tests/e2e/`,
-    # so that row is LIVE and deleting it would red this guard.)
-    #
-    # OVERRIDES: `docs/epics/2026-08-24-test-db-migration/plan.md:1783`'s "an
-    # intentional team-graph semantic must be DECLARED in the table, never
-    # silent" — which d206b12b cited as the reason to add the row. #11905's
-    # scope (its own "Rejected alternatives") supersedes that MECHANISM for
-    # this file with a newer, specific ruling: the constant keeps the coupling
-    # single-source, and this scan cannot see a variable. The plan's PURPOSE is
-    # preserved, not dropped — nothing goes silent, because reintroducing the
-    # literal now reds the guard (measured) instead of being whitelisted.
+    # test_capture_phase_d_dedup's mirror arm — it reaches the graph the REAL
+    # `POST /v1/sessions` route just wrote, using the shared `team-001` org that
+    # `tests/test_hosted_api.py`'s `client` fixture authenticates as — but it
+    # declares NO literal: it spells the id as the fixture's own `TEST_ORG_ID`
+    # (#11905), so the scan has nothing literal to see and the routing fact
+    # stays single-source in the fixture. The empty dict is the "considered,
+    # nothing to route" declaration (#4290's form), which keeps this module's
+    # key greppable and pinned by test_namespace_routing_table_keys_exist
+    # without whitelisting anything.
+    # ⛔ Do NOT add a `{"team-001": …}` entry here. That form (what #11900's
+    # d206b12b added, and #11905 rejected — it re-states a routing fact the
+    # fixture already owns) re-authorises EVERY future `namespace="team-001"`
+    # in this module instead of reddening the guard; measured, the literal goes
+    # from 1 failed back to 1 passed. Same hole, still live elsewhere in this
+    # table: THREE declared rows outlive their literal — `test_onboarding_state.py`
+    # and its `…_split_checkpoint` / `…_split_projection` siblings, all
+    # `registry` — tracked as #11929. Cite it; do not widen it. (Count them per
+    # file across BOTH scanned roots: `test_billing_upgrade.py`'s `registry`
+    # literal lives under `tests/e2e/`, so that row is LIVE.)
+    "test_11702_absent_belief_state.py": {},
     "test_capture_loop_responsiveness.py": {"registry": "prod-coupled"},  # #3086 — the capture-writer loop-affinity proof reaches the graph class via _make_sdk(namespace="registry") to record writer-thread affinity
     # #3718: the concurrent-commit cases read the MeteringRecord back through
     # the CANONICAL registry namespace — the graph prod's `_record_write_op`
