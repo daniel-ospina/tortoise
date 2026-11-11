@@ -228,28 +228,42 @@ def test_a_vector_that_UNDERFLOWS_float32_is_left_alone():
 
 def test_a_verbatim_vector_is_never_narrowed():
     """**THE PIN.** If P0 narrowed a caller-owned vector it would silently
-    change a value the journal promised to keep raw (#5004 round-7: the graph-only
+    change what the journal promised to keep raw (#5004 round-7: the graph-only
     id's only restorer is `projection.FalkorProjection._rebuild_all_replay`'s `embedding_verbatim`
     guard — *"a CALLER-owned vector must keep its RAW form. `vecf32()` is the ONE
     form it must not take"* — and the flag picks the storage form in
     `projection/entities.py::_upsert_point_props`'s `CASE WHEN $embedding_verbatim
     THEN $embedding ELSE vecf32($embedding)`).
 
-    The fixture is deliberately OFF the float32 grid, and the test asserts that
-    a narrowing WOULD change it — so the assertion below is a real one.
+    ⛔ TWO fixtures, and the second is the one that makes this the MARKER's pin
+    rather than the grid rule's:
+
+    * an OFF-GRID caller vector — a narrowing would change the VALUE; and
+    * a **grid-exact** caller vector — a narrowing would change only the raw
+      TEXT (`0.10000000149011612` → `0.1`), which is exactly the "keeps its RAW
+      form" promise, and which the grid rule alone cannot protect.
+
+    Measured: with the `is_verbatim` arm removed, the off-grid fixture still
+    passes (the grid refuses it) and this test went GREEN — a pin that could not
+    fail. With the grid-exact fixture added it reds, which is what makes the
+    assertion below real.
     """
-    caller_owned = [0.1234567890123, 0.1, 1.0 / 3.0, 2.718281828459045]
-    assert [float(np.float32(x)) for x in caller_owned] != caller_owned, (
-        "fixture is on the float32 grid, so narrowing it would be invisible — "
-        "this test could not fail")
+    off_grid = [0.1234567890123, 0.1, 1.0 / 3.0, 2.718281828459045]
+    assert [float(np.float32(x)) for x in off_grid] != off_grid, (
+        "fixture is on the float32 grid, so narrowing it would be invisible")
+    grid_exact = [float(np.float32(v)) for v in (0.1, -0.25, 1.0 / 3.0)]
+    assert np.all(np.asarray(grid_exact, dtype=np.float32).astype(np.float64)
+                  == np.asarray(grid_exact, dtype=np.float64)), (
+        "the second fixture must be ON the grid — it is the raw-TEXT half")
 
-    stamped = stamp_journal_embedding(
-        _payload(list(caller_owned), embedding_verbatim=True), creating=True)
+    for caller_owned in (off_grid, grid_exact):
+        stamped = stamp_journal_embedding(
+            _payload(list(caller_owned), embedding_verbatim=True), creating=True)
 
-    assert stamped["embedding"] == caller_owned, (
-        "a caller-owned vector was narrowed; the verbatim population must keep "
-        "its own width")
-    assert stamped[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64
+        assert stamped["embedding"] == caller_owned, (
+            "a caller-owned vector was narrowed; the verbatim population must "
+            "keep its own width AND its own text")
+        assert stamped[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64
 
 
 def test_a_preserved_vector_is_never_narrowed():
