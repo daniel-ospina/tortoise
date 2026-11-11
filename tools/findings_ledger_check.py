@@ -205,7 +205,7 @@ VOCAB_ROW_RE = re.compile(r"^\|\s*\*\*(?P<token>[A-Z][A-Z-]*)\*\*\s*\|")
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-MIN_SELF_TEST_MUTATIONS = 24
+MIN_SELF_TEST_MUTATIONS = 25
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -705,6 +705,25 @@ def check_citations(text: str, root: Path = REPO) -> list[str]:
         span = f"{start}{'-' + end if end else ''}"
         rel = match.group("path")
         origin = ""
+        if rel and not _has_path_marker(rel):
+            # `python3:11`, `localhost:6379` — PROSE, not a path. The resolver used
+            # to have no marker rule while the refusal arm did, so a host:port
+            # example red the required `docs` job as "does not exist in the tree"
+            # (measured). The carve-out — a marker-less extension-less FILENAME
+            # such as `Makefile:12` is unmeasured — is named in §8 rather than
+            # implied away.
+            #
+            # ⛔ AND IT MUST NOT BECOME THE ANCHOR (#11902 review P2). This test
+            # used to run BELOW the anchor assignment, so a marker-less token was
+            # installed as `anchor` first and every `:LINE` shorthand after it was
+            # then skipped by the same test at the bottom — silently, with no
+            # problem recorded, while §8 promises a shorthand resolves against the
+            # nearest preceding full-path citation or is refused. Measured: row
+            # (b)'s `` `:792` `` rewritten to `` `:999999` `` with
+            # `` (`localhost:6379`) `` inserted before it returned `[]` (green);
+            # without the inserted token the same edit reported "out of range".
+            # A red must not be defusable by inserting a prose example.
+            continue
         if rel:
             anchor = rel
         elif anchor is None:
@@ -721,12 +740,10 @@ def check_citations(text: str, root: Path = REPO) -> list[str]:
             continue
         seen.add(label)
         if not _has_path_marker(rel):
-            # `python3:11`, `localhost:6379` — PROSE, not a path. The resolver used
-            # to have no marker rule while the refusal arm did, so a host:port
-            # example red the required `docs` job as "does not exist in the tree"
-            # (measured). The carve-out — a marker-less extension-less FILENAME
-            # such as `Makefile:12` is unmeasured — is named in §8 rather than
-            # implied away.
+            # Already excluded as the ANCHOR above (#11902 review P2): a shorthand
+            # resolved against an anchor is always a marked path, so this arm is
+            # unreachable for shorthands and remains for a full path that lost its
+            # marker. Kept rather than deleted so the two orders cannot drift back.
             continue
         if rel.startswith("~"):
             # A dated reading of something OUTSIDE this repository — §5's `~/.swarm`
@@ -1088,6 +1105,21 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         "a §6 count that no longer matches its own list",
         lambda t: t.replace("| **OPEN** | **4** |", "| **OPEN** | **5** |", 1),
         "declares 5 but its own list names 4",
+    ),
+    (
+        # The EXACT shipped defect (#11902 review P2): a marker-less `word:digits`
+        # token used to be installed as the shorthand ANCHOR *before* the marker
+        # test ran, so inserting one before a shorthand made that shorthand
+        # silently skipped instead of resolved — a red defused by reformatting a
+        # citation. Re-injecting the prose token must leave the bad shorthand
+        # still caught.
+        "a shorthand defused by a preceding prose host:port token",
+        lambda t: t.replace(
+            "`tortoise/commit_schema.py:395`, `:792`",
+            "`tortoise/commit_schema.py:395` (`localhost:6379`), `:999999`",
+            1,
+        ),
+        "out of range",
     ),
     (
         "a shorthand citation pointing past the end of its anchor's file",

@@ -171,29 +171,14 @@ def test_mutation_population_is_pinned():
     `check_survivor_arithmetic`'s `len(matches) > 1` branch: deleting that branch left
     every other arm, every test and `--check` green (measured).
 
-    The population is 24 after the #11902 review cycles. The arms are, in order:
-    the closed verdict vocabulary; the six §3/§6 population and citation arms
-    (missing file, out-of-range line, deleted row, §6 count, out-of-range shorthand,
-    unclassifiable §3 row); the emptied evidence column; an unclassifiable §6 row;
-    a declined citation shape; the three inserted-character shapes (space in the
-    path, trailing space, trailing space on a shorthand); a citation embedded in a
-    longer span; an absolute path outside the tree; an evidence cell pointing at a
-    section that does not exist; a verdict moved between classes; the §3 tally; a
-    decoy tally paragraph; the §6 survivor count, total, decoy sentence and deleted
-    CLOSED bullet; and the §1 vocabulary arm. The floor is pinned WITH it — a floor
-    below the population is the "shrunk population proves nothing" shape it exists
-    to catch. Re-derive by counting `caught` lines in `--self-test`. ⚠️ The `>=` below is the tool's own rule: an ADDED
-    arm must not red this. The second assert RECORDS the population, so removing
-    an arm forces the floor to be edited here as well — a shrink cannot happen in
-    one place.
+    #11902's review added the 25th: a marker-less `host:port` prose token used to be
+    installed as the shorthand ANCHOR before the marker test ran, so inserting one in
+    front of a bad shorthand defused its red (measured green). The population and the
+    floor move together.
     """
-    assert len(flc.MUTATIONS) >= flc.MIN_SELF_TEST_MUTATIONS, (
-        "the registered population must meet the floor it declares"
-    )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 24, (
-        "this line RECORDS the population (24 arms); removing one means editing the "
-        "floor here too, which is the second place a shrink has to touch"
-    )
+    assert len(flc.MUTATIONS) == 25
+    assert flc.MIN_SELF_TEST_MUTATIONS == 25
+
 
 
 def test_self_test_floor_catches_a_shrunk_population(monkeypatch):
