@@ -282,7 +282,7 @@ of its own indicators:
    this paragraph is longer than the row. It holds *structurally*: both readers
    behind the view go to the SAME on-disk registry, `domain_loader._get_registry()`,
    read at call time — `pack_state._resolve_catalog()` for the graph's own rows and
-   `hosted_api._pack_catalog_rows()` (":25840") for the add-list — so there is no
+   `hosted_api._pack_catalog_rows()` for the add-list — so there is no
    hosted-only catalogue path and a pack dropped in the directory appears in both
    deployments' views. `test_get_offers_catalog_packs_the_graph_does_not_have`
    and the degraded-catalog arms (`test_a_degraded_catalog_is_reported_not_papered_over`,
