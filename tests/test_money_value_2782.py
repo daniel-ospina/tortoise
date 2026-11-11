@@ -577,6 +577,25 @@ MALFORMED_MONEY_SHAPES = [
 ]
 
 
+#: What a one-sided UPDATE may not do to a well-formed value. The first four
+#: are "no money" read as a BAG — the reader engages on neither an
+#: ``amountMinor`` nor a ``currency``, so a bag carrying only a deletion or only
+#: an exponent is "no money" to it — and a gate grading the caller's props
+#: therefore ADMITS them. Measured at #11836 on the pre-fix head: they were
+#: ACCEPTED and the node was left unreadable. The last three ARE visible to a
+#: bag-graded gate and were already refused by it; they are pinned here so the
+#: merged-state rule does not regress the refusals it inherits.
+ONE_SIDED_UPDATES = [
+    ("currency-deleted", {"currency": None}),
+    ("amount-deleted", {"amountMinor": None}),
+    ("exponent-deleted", {"minorUnitExponent": None}),
+    ("mis-scaled-exponent", {"minorUnitExponent": 3}),
+    ("lowercase-currency", {"currency": "brl"}),
+    ("float-amount", {"amountMinor": COMMITTED_MINOR + 0.5}),
+    ("unknown-currency", {"currency": "XXX"}),
+]
+
+
 class TestWriteBoundary:
     """#2782 — the money shape is enforced at the WRITE boundary too.
 
@@ -628,14 +647,122 @@ class TestWriteBoundary:
     def test_an_update_cannot_install_a_malformed_value_either(
             self, journaled_sdk):
         """A create-only gate is one verb away from useless: an update that adds
-        a half value is the same unreadable record."""
+        a half value is the same unreadable record.
+
+        ⚠️ The node is deliberately BARE. Until #11836 this test started from a
+        well-formed value and asserted that `update_entity(id, currency="BRL")`
+        (a restatement of the currency already stored) was refused — i.e. it
+        pinned the gate grading the BAG rather than the state the write leaves.
+        Those two readings differ both ways, and the bag reading was the defect:
+        it refused this harmless restatement while ADMITTING
+        `update_entity(id, currency=None)`, which deletes the currency from a
+        well-formed value. The gate now grades the merged state, so:
+          * half value onto a bare node → REFUSED (this test);
+          * restatement of a member that already matches → ADMITTED
+            (`test_a_complete_update_that_restates_nothing_is_admitted`);
+          * a member DELETED from a well-formed value → REFUSED
+            (`test_a_one_sided_update_cannot_strip_a_well_formed_value`).
+        """
+        sdk, _events = journaled_sdk
+        bare = sdk.create_object("Tranche bare", "venture:tranche")
+        with pytest.raises(ValueError, match="write boundary"):
+            sdk.update_entity(bare["id"], currency="BRL")
+        assert read_money_value(sdk.get_entity(bare["id"])) is None
+
+    @pytest.mark.parametrize("label,update", ONE_SIDED_UPDATES,
+                             ids=[s[0] for s in ONE_SIDED_UPDATES])
+    @pytest.mark.parametrize("door", ["update_entity", "update_point"])
+    def test_a_one_sided_update_cannot_strip_a_well_formed_value(
+            self, journaled_sdk, door, label, update):
+        """The gate grades the state the UPDATE LEAVES, never the bag.
+
+        `SET n += $props` REMOVES a property whose value is null, so a bag that
+        says `currency=None` carries no money and passes any bag-shaped gate —
+        while it strips the currency off a well-formed value, after which
+        `total_minor` refuses the WHOLE set. `minorUnitExponent=3` on BRL is the
+        mis-scale this value exists to refuse and is equally invisible to a
+        bag-shaped gate. Both directions were measured on the pre-fix head of
+        #11836: `currency=None` ACCEPTED, and the sums unreadable.
+        """
+        sdk, _events = journaled_sdk
+        value = money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
+                            verbatim="R$ 250.000,00")
+        if door == "update_entity":
+            created = sdk.create_object("Tranche one-sided",
+                                        "venture:tranche", **value)
+        else:
+            created = sdk.create_point("statement",
+                                       "tranche one is 250000 BRL", **value)
+        with pytest.raises(ValueError, match="write boundary"):
+            getattr(sdk, door)(created["id"], **update)
+        # nothing landed, and the sum that the gate exists to keep answerable
+        # still answers
+        stored = sdk.get_entity(created["id"])
+        assert read_money_value(stored) == ("BRL", COMMITTED_MINOR, 2), stored
+        assert total_minor([stored]) == {"BRL": COMMITTED_MINOR}
+
+    def test_a_complete_update_that_restates_nothing_is_admitted(
+            self, journaled_sdk):
+        """The other half of the same rule: a PART of a value is not a
+        malformed value. `amountMinor=…` alone is coherent with the stored
+        currency and exponent — and a bag-shaped gate REFUSED it, a false block
+        on an ordinary edit (measured at #11836)."""
         sdk, _events = journaled_sdk
         created = sdk.create_object(
-            "Tranche U", "venture:tranche",
-            **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
-                          verbatim="R$ 250.000,00"))
+            "Tranche partial", "venture:tranche",
+            **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2))
+        sdk.update_entity(created["id"], amountMinor=RELEASED_MINOR)
+        assert read_money_value(sdk.get_entity(created["id"])) == \
+            ("BRL", RELEASED_MINOR, 2)
+        # and a member restated at the value it already holds is not a half
+        # value — the pre-#11836 bag-shaped gate refused exactly this
+        sdk.update_entity(created["id"], currency="BRL")
+        assert read_money_value(sdk.get_entity(created["id"])) == \
+            ("BRL", RELEASED_MINOR, 2)
+        # RE-DENOMINATING at the value's own scale is admitted too, and that is
+        # deliberate (it is what the docstring states): the result is a
+        # complete readable value, so `currency="USD"` on a BRL carrier is the
+        # caller asking for the same minor units under another code. The bag-
+        # shaped gate refused it; the merged-state rule does not pretend a
+        # legal edit is a malformed value. What it will not admit is a scale
+        # the table contradicts (`minorUnitExponent=3` on BRL, one of the
+        # ONE_SIDED_UPDATES shapes).
+        sdk.update_entity(created["id"], currency="USD")
+        assert read_money_value(sdk.get_entity(created["id"])) == \
+            ("USD", RELEASED_MINOR, 2)
+
+    def test_deleting_the_whole_value_is_still_allowed(self, journaled_sdk):
+        """Clearing every member leaves NO money — a legitimate state (the
+        node is simply not a money carrier), so the gate must not turn a
+        deliberate delete into an error."""
+        sdk, _events = journaled_sdk
+        created = sdk.create_object(
+            "Tranche cleared", "venture:tranche",
+            **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2))
+        sdk.update_entity(created["id"], amountMinor=None, currency=None,
+                          minorUnitExponent=None)
+        assert read_money_value(sdk.get_entity(created["id"])) is None
+
+    def test_the_optional_members_are_graded_with_the_value(self,
+                                                            journaled_sdk):
+        """`verbatim` and `asOf` are money members with their own validators,
+        and `read_money_value` never applied them — so an int `verbatim` was
+        durable state `money_props` would have refused. They are graded at the
+        DOOR when the value carries money, and left alone when it does not
+        (they are somebody else's props then)."""
+        sdk, _events = journaled_sdk
+        value = money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2)
         with pytest.raises(ValueError, match="write boundary"):
-            sdk.update_entity(created["id"], currency="BRL")
+            sdk.create_object("Tranche bad verbatim", "venture:tranche",
+                              verbatim=123, **value)
+        created = sdk.create_object("Tranche cited", "venture:tranche",
+                                    **value)
+        with pytest.raises(ValueError, match="write boundary"):
+            sdk.update_entity(created["id"], asOf="not-a-date")
+        # no money in the bag: `asOf` is an ordinary prop, untouched
+        note = sdk.create_object("Note asOf", "venture:note",
+                                 asOf="2026-06-30")
+        assert sdk.get_entity(note["id"])["asOf"] == "2026-06-30"
 
     def test_the_gate_is_the_readers_own_rule(self):
         """One home: every shape the reader refuses is refused at the door, and
@@ -771,16 +898,39 @@ class TestUpdateDoorCannotDeleteOrMisScale:
     @pytest.mark.parametrize("exponent", [
         9,   # not an exponent at all
         0,   # a legal exponent for JPY/PYG — a 100x mis-scale for BRL
-        2,   # even the no-op: a lone exponent cannot be scale-checked here
     ])
     def test_a_lone_exponent_cannot_be_installed_on_an_update(
             self, journaled_sdk, door, exponent):
+        """A lone exponent on a MONEY node is graded against the stored value
+        (the `(currency, exponent)` pair is what the table contradicts), so the
+        mis-scale is refused even though the bag carries no currency."""
         sdk, _events = journaled_sdk
         node_id = _create_money_carrier(sdk, door)
         with pytest.raises(ValueError) as exc:
             getattr(sdk, door)(node_id, **{MINOR_UNIT_EXPONENT: exponent})
         assert "write boundary" in str(exc.value), str(exc.value)
         assert MINOR_UNIT_EXPONENT in str(exc.value), str(exc.value)
+        assert _money_node(sdk, node_id) == {
+            AMOUNT_MINOR: COMMITTED_MINOR, CURRENCY: "BRL",
+            MINOR_UNIT_EXPONENT: 2}
+        assert _whole_sum(sdk) == {"BRL": COMMITTED_MINOR}
+
+    @pytest.mark.parametrize("door", UPDATE_DOORS)
+    def test_the_same_exponent_the_node_already_holds_is_a_no_op(
+            self, journaled_sdk, door):
+        """The merged state decides, and the no-op is well-formed.
+
+        The bag-shaped rule refused this ("a lone exponent cannot be
+        scale-checked here") because it could not SEE the stored currency; the
+        merged-state rule can, so `minorUnitExponent=2` on a BRL node at 2 is a
+        write that leaves a valid value and is admitted. That is not a
+        relaxation of the mis-scale refusal — `0` and `9` above are still
+        refused — it is the same predicate applied to the state instead of to
+        the bag, and it is what makes a re-run of a create (`create_point`'s
+        dedup relay, `_create_money_carrier` above) idempotent."""
+        sdk, _events = journaled_sdk
+        node_id = _create_money_carrier(sdk, door)
+        getattr(sdk, door)(node_id, **{MINOR_UNIT_EXPONENT: 2})
         assert _money_node(sdk, node_id) == {
             AMOUNT_MINOR: COMMITTED_MINOR, CURRENCY: "BRL",
             MINOR_UNIT_EXPONENT: 2}
@@ -814,11 +964,64 @@ class TestUpdateDoorCannotDeleteOrMisScale:
             AMOUNT_MINOR: COMMITTED_MINOR, CURRENCY: "BRL",
             MINOR_UNIT_EXPONENT: 2}
 
+    def test_a_create_point_dedup_re_run_stays_idempotent(self, journaled_sdk):
+        """A dedup hit is graded as an UPDATE, and a lone `minorUnitExponent` is a
+        legitimate stray property on a create
+        (`test_a_non_money_prop_is_not_collateral_damage`) — so the re-run must
+        stay the no-op the first run was.
+
+        #11836 review P2 (measured): the blanket lone-exponent refusal the update
+        door carried refused the dedup relay, so the FIRST create succeeded and the
+        SECOND, identical call RAISED — `ingest` calls `create_point(..., **props)`
+        once per item, so re-ingest stopped being an idempotent no-op. This test is
+        red against that rule and green under merged-state grading.
+
+        ⚠️ Scope, stated: this does NOT discriminate bag grading from merged-state
+        grading on its own — the bag here carries no amount and no currency, so a
+        bag-shaped predicate no-ops on it too (a VGATE mutation check measured
+        exactly that). The discrimination lives in
+        `test_a_dedup_re_run_cannot_mis_scale_an_existing_money_point`, where the
+        stored value is what decides.
+        """
+        sdk, _events = journaled_sdk
+        first = sdk.create_point("statement", "curtains are blue",
+                                 dedup=True, minorUnitExponent=2)
+        again = sdk.create_point("statement", "curtains are blue",
+                                 dedup=True, minorUnitExponent=2)
+        assert again["id"] == first["id"], "the second call must dedup onto the first"
+        assert sdk.get_point(first["id"])[MINOR_UNIT_EXPONENT] == 2
+
+    def test_a_dedup_re_run_cannot_mis_scale_an_existing_money_point(
+            self, journaled_sdk):
+        """The discriminating row for the relay: on a MONEY carrier, a lone
+        exponent in the re-run is refused because the merged state is a 100x
+        mis-scale — while bag grading ADMITS it (the bag carries no
+        `amountMinor`/`currency`, so it engages on nothing) and leaves
+        `{amountMinor, currency, 0}`, which makes `total_minor` refuse the whole
+        set.
+
+        So the relay is graded on the state the write would LEAVE, not on the bag
+        the caller passed — measured: with the bag restored as the graded view,
+        this test fails on the `pytest.raises`.
+        """
+        sdk, _events = journaled_sdk
+        pid = sdk.create_point(
+            "statement", "tranche one is 250000 BRL",
+            **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2))["id"]
+        with pytest.raises(ValueError, match="write boundary"):
+            sdk.create_point("statement", "tranche one is 250000 BRL",
+                             dedup=True, minorUnitExponent=0)
+        assert _money_node(sdk, pid) == {
+            AMOUNT_MINOR: COMMITTED_MINOR, CURRENCY: "BRL",
+            MINOR_UNIT_EXPONENT: 2}
+        assert _whole_sum(sdk) == {"BRL": COMMITTED_MINOR}
+
 
 class TestTheUpdateArmOfThePredicate:
     """The rule itself, without a graph — so the boundary is readable in one
-    place: the two extra refusals belong to the UPDATE door and to nothing
-    else."""
+    place: an UPDATE is graded on the money state it LEAVES
+    (:func:`money_view_after_update`), and a CREATE on its bag, which IS the
+    state it leaves."""
 
     def test_a_lone_sibling_stays_a_no_op_on_a_create(self):
         from tortoise.money import refuse_malformed_money
@@ -826,20 +1029,34 @@ class TestTheUpdateArmOfThePredicate:
         assert refuse_malformed_money({VERBATIM: "quoted"}) is None
         assert refuse_malformed_money({AS_OF: "2026-06-30"}) is None
 
-    def test_a_lone_exponent_is_refused_on_an_update(self):
-        from tortoise.money import refuse_malformed_money
-        with pytest.raises(MoneyValueError, match="without its currency"):
-            refuse_malformed_money({MINOR_UNIT_EXPONENT: 2}, on_update=True)
+    def test_a_lone_exponent_is_refused_only_where_a_value_would_break(self):
+        from tortoise.money import (money_view_after_update,
+                                    refuse_malformed_money)
+        money = {AMOUNT_MINOR: COMMITTED_MINOR, CURRENCY: "BRL",
+                 MINOR_UNIT_EXPONENT: 2}
+        # on a money node: 0 is a 100x mis-scale for BRL — refused
+        with pytest.raises(MoneyValueError):
+            refuse_malformed_money(
+                money_view_after_update(money, {MINOR_UNIT_EXPONENT: 0}))
+        # on a node that carries no money: a stray property, exactly as on a
+        # create → admitted (this is what keeps `create_point`'s dedup re-run
+        # idempotent instead of raising on the second call)
+        assert refuse_malformed_money(
+            money_view_after_update({}, {MINOR_UNIT_EXPONENT: 2})) is None
 
     @pytest.mark.parametrize("field", [AMOUNT_MINOR, CURRENCY,
                                        MINOR_UNIT_EXPONENT])
     def test_an_explicit_null_is_refused_on_an_update_only(self, field):
-        from tortoise.money import refuse_malformed_money
+        from tortoise.money import (money_view_after_update,
+                                    refuse_malformed_money)
+        money = {AMOUNT_MINOR: COMMITTED_MINOR, CURRENCY: "BRL",
+                 MINOR_UNIT_EXPONENT: 2}
         # a create drops a None value (the fold excludes it) — harmless
         assert refuse_malformed_money({field: None}) is None
-        # an update DELETES on it — a partial value, refused
-        with pytest.raises(MoneyValueError, match="explicit null"):
-            refuse_malformed_money({field: None}, on_update=True)
+        # an update DELETES on it — the members left behind are a half value
+        with pytest.raises(MoneyValueError):
+            refuse_malformed_money(
+                money_view_after_update(money, {field: None}))
 
 
 #: The event type each ``EventAPI`` door journals — the seam test below asserts
@@ -873,11 +1090,22 @@ class TestNonSanitizedSeams:
     @pytest.mark.parametrize("door", ["add_object", "add_event", "add_point"])
     def test_the_pipeline_seam_cannot_land_a_malformed_money_value(
             self, journaled_sdk, tmp_path, door):
+        """All THREE prop-carrying doors, including the one that NESTS its
+        payload (`add_point` → `_emit("PointAdded", point=p, …)`).
+
+        #11836 review P1 (measured): the gate graded the flat record, so
+        `add_point(content, provenance, amountMinor=25_000_000)` was ACCEPTED
+        and wrote `{amountMinor: 25000000, currency: None,
+        minorUnitExponent: None}` durably — and it survived `rebuild_all` —
+        while the same bag through `add_object` was refused. A gate that covers
+        the flat doors and not the nesting one is a gate with a hole in the
+        shape of the payload.
+        """
         from tortoise.api import EventAPI
         from tortoise.log import EventLog
 
         sdk, _events = journaled_sdk
-        api_log = tmp_path / "api-events.jsonl"
+        api_log = tmp_path / f"api-events-{door}.jsonl"
         api = EventAPI(EventLog(str(api_log)), initiated_by="extractor",
                        projection=sdk._get_proj())
         writer = getattr(api, door)
@@ -895,9 +1123,16 @@ class TestNonSanitizedSeams:
         rows = sdk._get_proj().g.query(
             "MATCH (n) WHERE n.amountMinor IS NOT NULL RETURN count(n)"
         ).result_set
-        assert rows[0][0] == 0, "the seam landed a malformed money value"
-        # the refusal runs BEFORE the append (the seam's commit point), so a
-        # refused write leaves no record for a replay to fold
+        assert rows[0][0] == 0, f"{door} landed a malformed money value"
+        # The refusal runs BEFORE the append (the seam's commit point), so a
+        # refused write leaves NO record for a replay to fold — asserted over
+        # the WHOLE log, not over one record name: the earlier version checked
+        # `"ObjectRegistered"` on every parameter, which was vacuous on the two
+        # doors that emit a different record (#11836 review P2), and a
+        # door-specific name still could not see any OTHER record appended
+        # before the refusal.
+        assert not api_log.exists() or api_log.read_text().strip() == "", \
+            f"{door} appended a record before the refusal"
         assert not api_log.exists() or _SEAM_DOOR_EVENT[door] not in \
             api_log.read_text()
 
