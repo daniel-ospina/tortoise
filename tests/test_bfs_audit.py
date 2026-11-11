@@ -100,8 +100,8 @@ def _production_string_references(
     - ⚠️ RESIDUAL on the non-Python side, and it is the SAME over-block class as Python's rather
       than an exemption: "this half carries no prose" is FALSE. `tortoise/` ships 9 tracked
       `.md` files (`git ls-files 'tortoise/**/*.md'`), and a bare-word mention in any of them
-      REDs this arm — measured: a `tortoise/notes.md` reading "We no longer call
-      propagate_shock anywhere." returns `[('tortoise/notes.md', 1)]`. It is latent, not live
+      REDs this arm — measured: a `tortoise/prose.md` reading "We no longer call
+      propagate_shock anywhere." returns `[('tortoise/prose.md', 1)]`. It is latent, not live
       (the real tree measures `[]`, and none of the 9 names the symbol) and it is fail-CLOSED —
       a false red, never a false pass. Pinned by `prose.md` in
       `test_the_string_literal_arm_catches_what_no_ast_can`, so a suffix filter that silently
