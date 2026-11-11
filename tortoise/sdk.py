@@ -37497,11 +37497,14 @@ class TortoiseSDK:
         A hit counts as "relates to this issue" when it is EP-confirmed
         (measured AND confidence_mean >= 0.5 — the 'we already decided this'
         signal) OR it shares >= 2 tokens with the query text. A measurement
-        flag is required post-#2206 because an unmeasured point reads the
-        neutral Beta(1,1) mean 0.5 — a bare >= 0.5 floor would count every
-        never-measured hit as "confirmed". #3276: ``has_ep`` now means EP
-        MEASURED, so a #2199 auto-baselined decide part (prior mean 0.75 but
-        no EP run) no longer clears the gate; ``measured`` is preferred when
+        flag is required post-#2206 because an unmeasured point USED to read
+        the neutral Beta(1,1) mean 0.5 — a bare >= 0.5 floor counted every
+        never-measured hit as "confirmed". #11702 makes that shape read
+        ``confidence_mean: None`` instead (so the comparison below is guarded
+        against ``None``, not merely unreachable); #3276 makes ``has_ep`` mean
+        "an α is persisted", so a #2199 auto-baselined decide part (prior mean
+        0.75, no α) still does not clear the gate, though a direct write of a
+        posterior does — the flag is NOT proof EP ran; ``measured`` is preferred when
         the caller supplies it, with ``has_ep`` as the honest fallback. The
         token floor protects the TF-IDF fallback path (ep=None) from
         single-token coincidences and keeps unmeasured FTS hits out unless
@@ -37539,15 +37542,18 @@ class TortoiseSDK:
         Behaviour vs #3276:
           * pre-#3276  → edgeless kind-prior false positives are rejected; the
             edge-having kind-prior case is NOT (undecidable from the payload);
-          * post-#3276 → ``has_ep`` becomes measurement-derived, so no kind
-            prior clears this predicate at all.
+          * post-#3276 → ``has_ep`` becomes α-persistence-derived, so no kind
+            prior clears this predicate at all (and a directly- WRITTEN
+            posterior does, without any EP pass — the flag is not a receipt).
         A genuinely measured claim whose belief came from an OUTGOING edge, or
         an explicit edgeless EP seed, is NOT boosted (``evidence`` counts
         incoming edges only). That is the deliberate fail-safe direction —
         never invent a 'decided' signal. The residual BECOMES CLOSEABLE once
-        #3276 lands: with measurement-derived ``has_ep`` the evidence
-        requirement could then be relaxed (dropping it is the follow-up change
-        in this predicate), which would boost edgeless measured claims. It is
+        #3276 lands: with α-persistence-derived ``has_ep`` the evidence
+        requirement COULD then be relaxed — but relaxing it on the strength of
+        ``has_ep`` alone would boost a hand-written posterior that has no
+        incoming evidence, so the follow-up has to read the evidence itself
+        rather than treating the flag as a measurement receipt. It is
         never dropped by the RANKING: the relevance gate still admits it on
         lexical overlap, it just keeps retrieval order (and therefore remains
         subject to `[:limit]`).
@@ -37931,7 +37937,9 @@ class TortoiseSDK:
         Point results annotated with EP breakdown. confidence_mean is THE
         point's confidence (issue #2206 contract): the belief mean α/(α+β) of
         the persisted posterior when EP has run, else the persisted prior
-        mean — and ``null`` + ``ep_state: "absent"`` when NOTHING is persisted (#11702: there is then no belief
+        mean — and ``null`` + ``ep_state: "absent"`` when nothing YIELDS a mean:
+        nothing persisted, a half pair, a 0/0 pair, or an operand this process
+        cannot read (#11702: there is then no belief
         to report; the neutral Beta(1,1) 0.5 was indistinguishable from a
         measured symmetric coin flip, so it is no longer substituted anywhere
         on a read/rank surface — ``get_confidence`` remains the EP prior read
@@ -41153,7 +41161,8 @@ class TortoiseSDK:
           ``counter_evidence`` (NANDing point id/content) attached.
         - Most important arguments (operators, by annotator_precision) and
           high-contention NANDs / mitigations attached to top results.
-        - Uncalibrated points (no persisted belief at all) carry
+        - Uncalibrated points (nothing that YIELDS a mean: no persisted
+          belief, a half pair, a 0/0 pair, or an unreadable operand) carry
           ``confidence: null`` + ``ep_state: "absent"`` and are ordered AFTER
           every row that has a belief (#11702). This replaces the documented
           neutral-0.5 fallback: absence is still not scored as LOW support —

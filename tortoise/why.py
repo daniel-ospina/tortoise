@@ -74,7 +74,7 @@ from .search_engine import (  # type: ignore[import-not-found]
     belief_mirror,
     belief_value,  # #11702: the ONE Python belief VALUE reader
     ep_has_belief_cypher,
-    ep_measured_cypher,  # #3276: has_ep == EP measured (baseline prior != measured)
+    ep_measured_cypher,  # #3276: has_ep == an α is persisted (NOT "EP ran")
     ep_pair_stored,  # #11702: a variance needs BOTH α/β operands stored
     ep_state,
     ep_state_resolve,
@@ -499,7 +499,8 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
         if not pair_stored:
             variance = 0.0
         by_id[pid]["ep"] = {
-            # #11702: `None` when nothing is persisted — never the Beta(1,1)
+            # #11702: `None` when nothing YIELDS a mean (nothing persisted, a
+            # half pair, a 0/0 pair, an unreadable operand) — never the Beta(1,1)
             # mean. This is the block a caller reads to decide whether to
             # surface/notify, so a fabricated 0.5 here admitted a
             # never-measured claim through every `min_confidence <= 0.5`
@@ -714,8 +715,8 @@ _EP_CYPHER = (
     "RETURN n.id, "
     "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0), "
     "  coalesce(n.posterior_beta, n.ep_beta, 1.0), "
-    # #3276: has_ep == EP MEASURED (ep_measured_cypher) — a #2199 baseline
-    # prior alone is prior-only, never a measured confidence.
+    # #3276: has_ep == an α is persisted (ep_measured_cypher) — a #2199
+    # baseline prior alone is prior-only, never a measured confidence.
     f"  {ep_measured_cypher('n')}, "
     # #2490: status/outdated ride the RETURN so _assemble_ep_rows can apply
     # the projection-side has_ep override for terminal rows (why must serve
