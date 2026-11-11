@@ -6015,8 +6015,11 @@ def _install_capture_seam(args, install_capture) -> int:
                 "`additional_context` (sessionStart is Cursor's only context-"
                 "injection seam — its per-turn beforeSubmitPrompt event can "
                 "observe/block a prompt but cannot inject).")
-        # #2122: BOTH hooks miss a cloud agent — not just capture. Cursor's
-        # hook reference (re-fetched 2026-11-10) lists `sessionStart` under
+        # #2122: BOTH hooks miss a HOSTED cloud-agent session — not just capture.
+        # HOSTED per #11810: a Self-Hosted Machines worker fires project hooks (plus
+        # team/enterprise-managed hooks on Enterprise), so the unscoped version of
+        # this header was the exact over-assertion the block below removes.
+        # Cursor's hook reference (re-fetched 2026-11-10) lists `sessionStart` under
         # "Hooks not available in cloud agents" ("Deferred while cloud agents
         # can still start in a read-only environment. Hooks don't load there,
         # so a cloud sessionStart would fire too late") AND states "User-level

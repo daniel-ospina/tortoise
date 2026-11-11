@@ -161,10 +161,13 @@ _TAG_ATTRS_ASSIGNED = (r"(?:\s+[A-Za-z_:][-A-Za-z0-9_:.]*\s*=\s*"
 #: …and a TAG-SHAPED strip, deliberately not `<[^>]+>`. The fully loose form spans
 #: any `<` … `>` anywhere in a 50 KB document, so one ordinary sentence — "a hook
 #: count of < 5 is suspect" — swallows everything up to the next `>`. Measured on
-#: THIS record with that sentence injected IMMEDIATELY BEFORE §3's quote (line
-#: 315): the loose form matches a single 2,481-byte span that CONTAINS the quoted
-#: words, so it deletes them and false-REDs the presence arm on a record that
-#: states the right thing; `_TAG` matches nothing there.
+#: THIS record with that sentence inserted as its own line IMMEDIATELY BEFORE §3's
+#: quote: `<[^>]+>` matches ONE span of 2,485 characters / 2,498 bytes that
+#: CONTAINS the quoted words, so it deletes them and false-REDs the presence arm on
+#: a record that states the right thing; `_TAG` matches nothing containing the
+#: quote. ⚠️ That figure is RECIPE-dependent (it moves with the injected line and
+#: with any edit to the record, and an earlier revision of this comment carried a
+#: stale 2,481 from a smaller record) — hence the recipe, not a bare constant.
 #: ⚠️ The measured reason `_TAG` is preferable is NOT that it keeps prose
 #: angle-brackets — it does not. `<harness>` and `<ws>` are tag-SHAPED, so BOTH
 #: forms strip them. Over this record `<[^>]+>` strips 314 bytes (28 spans) and
@@ -382,8 +385,8 @@ def test_no_single_tag_strip_can_hide_the_unscoped_phrase():
 
     The absence leg takes the union (`_renderings`) precisely because each single
     reading hides the banned phrase in a case another catches. Each sample below is
-    a measured fail-open of exactly ONE reading, and each names the mutant that
-    reddens it:
+    MISSED by at least one reading, and the three mutants are chosen so that each
+    one reddens a DIFFERENT sample:
 
       * PROSE FORGERY — `if a<b and … c>d` is an ordinary sentence, but a strip
         admitting bare attributes reads `<b and … c>` as a tag and deletes the
