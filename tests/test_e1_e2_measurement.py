@@ -3289,9 +3289,10 @@ def test_the_e2b_floor_refuses_six_surviving_planted_units_and_matches_thirty():
     unchanged by #10989, so this test passes on the pre-fix tree too: the mutant
     that reverts the fix is the CALL SITE (which population the probe hands the
     binding), and a test that never executes it cannot redden on it. The operand
-    is pinned by `test_the_e2b_floor_is_FED_the_planted_population_and_the_line_
-    says_so`, which reads the call site out of the tree. Naming this one for the
-    operand would count #10989 as pinned by an assertion that cannot fail on it.
+    is pinned by
+    `test_the_e2b_floor_is_FED_the_planted_population_and_the_line_says_so` — which
+    reads the call site out of the tree — and naming this one for the operand would
+    count #10989 as pinned by an assertion that cannot fail on it.
     """
     prereg = _prereg_for_e2b_floor(30)
     corpus = _REPO_ROOT / _CORPUS_REL

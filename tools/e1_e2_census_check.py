@@ -296,10 +296,11 @@ def check(text: str) -> tuple[list[str], dict]:
     planted_pts: dict[str, int] = {}
     #: The E2 ATOMICITY CONTROL's population (`atomic_points`), which is NOT E2b's
     #: floor population. Published as `state["atomic_points"]` so the atomicity count
-    #: stays available to callers; nothing in this module reads it (V5/V6/V7 go
-    #: through `arm_metric()` straight off the log, and what V7's "prints no
-    #: atomic_points" wording rests on is the V3 parse guard above), and V15's anchor
-    #: is `planted_pts`, not this (#10989).
+    #: stays available to callers; nothing in this module reads it back — V5/V6/V7 go
+    #: through `arm_metric()` straight off the log, and V7 words an ABSENT arm line
+    #: itself (`arm_metric` returns `{}`, so its row reads "prints no atomic_points").
+    #: The V3 parse guard above is what keeps this dict to real counts and what
+    #: reports a non-count token; V15's anchor is `planted_pts`, not this (#10989).
     atomic_pts: dict[str, int] = {}
     pre_shas: dict[str, str] = {}
     for arm in arms:
