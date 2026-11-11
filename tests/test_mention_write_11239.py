@@ -831,3 +831,90 @@ def test_a_creation_after_a_revision_wins_the_mention_record_on_replay(env):
     assert report["ok"] is True, (
         "both replay engines fold the same journal to the same record, so the "
         "checker must not red: " + str(report.get("divergent_points")))
+
+
+def test_the_first_creation_folds_the_writers_bytes_not_the_payload_spelling(env):
+    """The creation fold's disposition runs on the FIRST creation too (review P2).
+
+    The `set`/`skip`/`null` disposition used to sit inside the carry-forward
+    block, which only runs when the id ALREADY has a folded entry — so a fresh
+    claim's payload reached `points[p["id"]] = p` verbatim and the journal view
+    held the raw LIST while the node held the compact SCALAR. One payload, two
+    fold values, which is the "one payload, one value" property this prop
+    exists for (`_upsert_point_props` / `stated_json_record_prop` share it).
+
+    `EventAPI.add_point` is the door that journals the list spelling
+    (`api.py` `_emit("PointAdded", point=p)` with no store-value filter), so it
+    is also the door that reaches this arm on a FIRST creation.
+
+    Mutant it reds on: nesting the loop back inside `if isinstance(_prev, dict)`
+    (the pre-fix shape) — the fold then yields the payload list, not the scalar.
+    """
+    from tortoise.consistency import _fold_journal
+
+    sdk, events = env
+    api = EventAPI(EventLog(str(events / "events.jsonl")),
+                   initiated_by="extractor", projection=sdk._get_proj())
+    prov = provenance("session.md", [0, 23], "quote", extracted_by="t@0")
+    pid = api.add_point(CONTENT, prov, mentions=[dict(m) for m in MENTIONS])
+    live = _node_prop(sdk, pid)
+    assert live is not None, "the add_point door did not store the record"
+
+    rows = [json.loads(line)
+            for line in (events / "events.jsonl").read_text().splitlines()
+            if line.strip()]
+    assert any(isinstance((r.get("point") or {}).get("mentions"), list)
+               for r in rows if r.get("type") == "PointAdded"), (
+        "this row can only pin the fold's dispose if the journal really carries "
+        "the PAYLOAD spelling")
+    assert len([r for r in rows
+                if r.get("type") == "PointAdded"
+                and (r.get("point") or {}).get("id") == pid]) == 1, (
+        "the row must reach the FIRST-creation arm — a second PointAdded takes "
+        "the carry-forward branch instead")
+
+    folded = _fold_journal(rows)[pid]
+    assert isinstance(folded.get("mentions"), str), (
+        "the FIRST creation folded the payload's raw list: the writer stored "
+        f"the encoded scalar, the fold kept {folded.get('mentions')!r}")
+    assert folded["mentions"] == live, (
+        "the fold's view and the node disagree on the same journal record: "
+        f"folded {folded['mentions']!r} vs node {live!r}")
+
+
+def test_an_unwritable_record_on_a_first_creation_folds_as_absent(env):
+    """The other half of the same arm — the #7369 null (review P2).
+
+    `add_point(mentions="a\\x00b")` journals that raw string; the transport gate
+    nulls it at dispatch, so the node holds NO property at all. A fold that
+    keeps the raw value makes `check_consistency` compare it against an absent
+    property on a FAITHFUL graph — and `consistency._uncarried` classes a `str`
+    as canonically carried, so nothing suppresses the comparison: the #5048
+    red whose own advice ("replay the journal") reproduces it.
+
+    Mutant it reds on: nesting the loop back inside `if isinstance(_prev, dict)`
+    (no `_prev` on a first creation, so the null disposition never runs).
+    """
+    from tortoise.consistency import _fold_journal, check_consistency
+
+    sdk, events = env
+    api = EventAPI(EventLog(str(events / "events.jsonl")),
+                   initiated_by="extractor", projection=sdk._get_proj())
+    prov = provenance("session.md", [0, 23], "quote", extracted_by="t@0")
+    pid = api.add_point(CONTENT, prov, mentions="a\x00b")
+    assert _node_prop(sdk, pid) is None, (
+        "guard: the store must have refused the unusable string — otherwise "
+        "this row measures nothing")
+
+    rows = [json.loads(line)
+            for line in (events / "events.jsonl").read_text().splitlines()
+            if line.strip()]
+    folded = _fold_journal(rows)[pid]
+    assert "mentions" not in folded, (
+        "the fold kept a record the node cannot hold (#7369 nulls it before "
+        f"dispatch): {folded.get('mentions')!r}")
+
+    report = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
+    assert report["ok"] is True, (
+        "the graph is faithful, so the checker must not red it: "
+        + str(report.get("divergent_points")))

@@ -43834,8 +43834,10 @@ class TortoiseSDK:
         # ⛔ ``mentions`` is NOT an instance of that pre-existing class (review
         # R1, PR #11795). The #4094 exemption is declared for props that
         # ALREADY reached the node live without a record; #11239 is what made
-        # ``mentions`` persistable on this surface AT ALL, and before the encode
-        # below the same call was a SILENT no-store rather than a write — `SET n
+        # ``mentions`` persistable on this surface AT ALL, and before the
+        # encode in this same body (`_encode_json_record_props(props)`, beside
+        # `_flatten_search_keys_prop`, ABOVE this note) the same call was a SILENT
+        # no-store rather than a write — `SET n
         # += $p` with an array of maps succeeds and the driver degrades the value
         # to ``null`` before dispatch (measured on this head; the same degrade the
         # tree already documents for ``tags``, #7369), so the property simply

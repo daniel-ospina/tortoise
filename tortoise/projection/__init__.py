@@ -9709,41 +9709,50 @@ def _apply_one(points: dict[str, dict], ev: dict,
                 if (not (isinstance(_ef_all, (list, tuple)) and _ef_all)
                         and "extractedFromAll" in _prev):
                     _carried["extractedFromAll"] = _prev["extractedFromAll"]
-                # #11239: the SAME omitted-key carry-forward for DM1's mention
-                # record — the one `_POINT_JSON_RECORD_PROPS` key, whose writer
-                # is the open-set passthrough AFTER `encode_json_record_props`.
-                # The graph MERGE therefore keeps the stored record whenever the
-                # payload states none the writer can persist (absent, `None`,
-                # an empty list the encoder POPS, or any shape the encoder pops
-                # — everything that is neither a `str` nor a `list`/`tuple`),
-                # and replacing the entry outright below would drop it from the
-                # journal view ONLY — the exact asymmetry `check_consistency`
-                # reports as a `mentions` divergence whose own action reproduces
-                # the graph. ⛔ NOT "a value `_is_persistable_prop_value`
-                # refuses": that filter refutes the payload's OWN list spelling,
-                # which the encoder turns into a storable scalar, so the ENCODER
-                # is the arbiter for this key (`stated_json_record_prop`, review
-                # P1 on PR #11795). When the
-                # payload DOES state one, the fold stores the WRITER's bytes
-                # (the encoded scalar), so a list-shaped journal record folds to
-                # the same value the node holds. Gated on the same
-                # `journal_recreate` boundary so a re-created node does not
-                # inherit a dead incarnation's record (the wipe mirrors this).
-                for _jk in _POINT_JSON_RECORD_PROPS:
-                    _jstate, _jvalue = stated_json_record_prop(p, _jk)
-                    if _jstate == "set":
-                        if _jvalue != p.get(_jk):
-                            p = {**p, _jk: _jvalue}
-                    elif _jstate == "null":
-                        # The writer dispatches a null (#7369), which REMOVES the
-                        # property — folding the raw value instead would keep a
-                        # value the node does not hold.
-                        _dropped.add(_jk)
-                    elif _jk in _prev:
-                        _carried[_jk] = _prev[_jk]
                 if _carried or _dropped:
                     p = {**{_k: _v for _k, _v in p.items() if _k not in _dropped},
                          **_carried}
+        # #11239: DM1's mention record — the one `_POINT_JSON_RECORD_PROPS` key,
+        # whose writer is the open-set passthrough AFTER
+        # `encode_json_record_props`. The DISPOSITION is folded for EVERY
+        # creation, including the FIRST one for an id: it used to sit inside the
+        # carry-forward block above, which only runs when `_prev` exists, so a
+        # fresh claim's payload reached `points[p["id"]] = p` VERBATIM — a list
+        # spelling in the journal view against the compact scalar the node
+        # holds (review P2 on PR #11795, measured). The visible consequence is
+        # the #5048/#5256 unclearable red: `EventAPI.add_point(mentions="a\x00b")`
+        # journals the raw string, the #7369 transport gate dispatches a null so
+        # the node holds NO property, and `consistency._uncarried` classes a
+        # `str` as canonically carried — so the checker compared the journal's
+        # raw value against an absent property on a FAITHFUL graph, with the
+        # advice ("replay the journal") that reproduces it.
+        #
+        # Only the `"skip"` arm needs `_prev`, and only a NON-re-creation may
+        # carry: pass 1a wipes the record on a re-create (`n.mentions = NULL`),
+        # so inheriting a dead incarnation's value would be the opposite bug.
+        _prev_mentions = None if journal_recreate else points.get(p["id"])
+        for _jk in _POINT_JSON_RECORD_PROPS:
+            _jstate, _jvalue = stated_json_record_prop(p, _jk)
+            if _jstate == "set":
+                # The WRITER's bytes (the encoded scalar), so a list-shaped
+                # journal record folds to the same value the node holds.
+                if _jvalue != p.get(_jk):
+                    p = {**p, _jk: _jvalue}
+            elif _jstate == "null":
+                # The writer dispatches a null (#7369), which REMOVES the
+                # property — folding the raw value instead would keep a value
+                # the node does not hold.
+                p = {**{_k: _v for _k, _v in p.items() if _k != _jk}}
+            elif isinstance(_prev_mentions, dict) and _jk in _prev_mentions:
+                # The graph MERGEs and the passthrough writes only a stated
+                # key, so a second creation that says nothing about the record
+                # KEEPS the stored one; replacing the entry outright would drop
+                # it from the journal view only. ⛔ NOT "a value
+                # `_is_persistable_prop_value` refuses": that filter refutes the
+                # payload's OWN list spelling, which the encoder turns into a
+                # storable scalar, so the ENCODER is the arbiter for this key
+                # (`stated_json_record_prop`, review P1 on PR #11795).
+                p = {**p, _jk: _prev_mentions[_jk]}
         points[p["id"]] = p
         # Flatten speaker from point's provenance into node data
         # #331: non-dict provenance (null/string) must not crash flattening.
