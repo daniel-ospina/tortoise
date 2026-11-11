@@ -77,6 +77,7 @@ from pathlib import Path
 from typing import Any
 
 from . import measurement_posture
+from .window_reconciliation import reconciliation_variant_rows
 
 #: Receipt schema keys mandated by plan §6.6 (same vocabulary as the
 #: W2/W3 harness receipts).
@@ -460,6 +461,17 @@ def variant_rows(outcomes: list[dict], k: int | str = 5) -> dict[str, Any]:
                      "role=='user' turn corpus); read from the report",
             "value": None,  # filled from the report's retrieval block
         },
+        # C3-4 (#2570, #2519 P3): the stratified window-reconciliation
+        # labeled variant — the paired census of the failing class re-run
+        # on a raised reader window. NEVER merged into any official row
+        # above (the official recall_all@k derives from the one-shot
+        # ``session_recall@k`` alone; the re-run does not mutate it).
+        # ⛔ This block CANNOT identify the arm state on its own:
+        # ``reconciliation_variant_rows`` always returns a full row, and
+        # ``n_fired: 0`` is also what an arm-ON run whose cohort never fired
+        # reports. Read ``methodology.window_reconciliation`` for the arm
+        # state — this block only says what the arm observed.
+        "window_reconciliation": reconciliation_variant_rows(outcomes, k=k),
     }
     # #2516 (C1): the per-category official rows ride WITH the top-level
     # rows (one projection implementation, one artifact) — the sealed
