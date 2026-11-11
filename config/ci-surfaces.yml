@@ -11864,8 +11864,9 @@ durations:
   # continuation line was invisible to it. The row must EXIST, not merely default: the `core`
   # registration above puts it in `fast_pool()`, and `--integrity`'s coverage floor is measured
   # against that pool's own size. ⛔ The CASE COUNT is deliberately NOT quoted (#11837 review, same
-  # P2): a hand-written count re-stales on every case a later round adds, and this PR re-staled its
-  # own three times (13 -> 14 -> 15). MEASURED LOCALLY as context only, never as the weight (a local
+  # P2): a hand-written count re-stales on every case a later round adds — this row has already
+  # re-staled across five successive review rounds of this PR, which is why no number is quoted
+  # here at all. MEASURED LOCALLY as context only, never as the weight (a local
   # reading is forbidden as a SHARD-LAYOUT input, #2818/#3419): the file's own arms are sub-second and
   # its one child interpreter is ~1.5 s, while the SESSION total is load-bound — the same tree measured
   # 11.5-12 s at load average 30 on the host that wrote this line, so re-measure instead of quoting this

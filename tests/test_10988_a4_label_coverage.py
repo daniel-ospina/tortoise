@@ -260,7 +260,8 @@ def test_the_three_layers_are_reported_SEPARATELY_and_never_blended():
 def test_the_claim_layer_keeps_its_EXCLUSION_predicate_so_capture_rows_are_not_claims():
     """FAILS IF the per-layer rewrite drops the `is_episodic`/`is_operator` filter.
 
-    Turn rows are written `pointKind='event'` (`sdk.py:2530` `_TURN_WRITE_CYPHER`) and operator
+    Turn rows are written `pointKind='event'` (`sdk.py:2530` `_TURN_WRITE_CYPHER`, whose
+    `t.pointKind=turn.k` is fed by the payload's own `"k": "event"` at `sdk.py:3063`) and operator
     Points are operators, not claims. On the committed corpus 159 of 354 Points are turn rows, so
     counting them read ~45 % "typed" against the owner's 0.6 % reading (`#10982` review, finding 4).
     ⛔ Asserted on the QUERY TEXT: the fake answers the same rows with the clause deleted, so this
