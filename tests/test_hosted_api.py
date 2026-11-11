@@ -5448,15 +5448,20 @@ def _assert_fixture_pins_anchor_db_path(fixture_name: str) -> None:
         "pin can only come from a dead daemon")
 
 
-# ⛔ `embedded_only` IS LOAD-BEARING, NOT DECORATION (#2273 review finding 1).
-# Without the mark these guards ran in NO CI job: `test_hosted_api.py` is in
-# `config/ci-surfaces.yml` `slow_files` (not `carve_out`), so the only job that
-# runs it in full is the docker slow leg, which exports TORTOISE_DB_URI — the
-# URI-unset branch above is dead there. `test-d14-hosted-api` selects by
-# `-m embedded_only` precisely because that file's URI-less anchor guards had no
-# lane; an unmarked test is DESELECTED, so the mark is the whole reason the
-# anchor/identity legs execute on every PR. (D14's checked-in manifest accepts
-# supersets, so new marks need no manifest edit.)
+# ⛔ `embedded_only` IS LOAD-BEARING — FOR THE ANCHOR ARMS, NOT THE PIN ASSERTION.
+# What the mark buys: `test_hosted_api.py` is in `config/ci-surfaces.yml`
+# `slow_files` (not `carve_out`), so the docker slow leg DOES run this file in
+# full — but that leg exports `TORTOISE_DB_URI`, and the guard returns at the
+# URI branch above before it reaches its anchor arms. Unmarked, the guards
+# would still execute there and `pin == forced` would still catch a missing
+# pin (measured: marks stripped, docker-shape lane → 4 passed; marks stripped
+# + `_pin_db_path` made a no-op → 3 failed, 1 passed), so the pin assertion is
+# NOT what the mark protects — the URI-less anchor/identity arms are, and
+# without the mark they run in NO CI job. `test-d14-hosted-api` selects by
+# `-m embedded_only` with no URI precisely for them: the mark is what makes
+# those legs execute on every PR. Unmarked, a guard is deselected from D14
+# (and is stopped nowhere else). (D14's checked-in manifest accepts supersets,
+# so new marks need no manifest edit.)
 
 
 @pytest.mark.embedded_only  # #2273 pins-anchor guard: URI-less anchor/identity legs (D14)
