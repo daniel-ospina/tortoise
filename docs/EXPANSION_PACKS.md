@@ -599,7 +599,12 @@ customer-facing territory that owns per-graph permissions.
 > **Fixed by #9752** — the marker now rides a `pack_selection` sidecar SECTION
 > (`projection`, snapshot v7), so the JOURNAL rebuild (`rebuild_all` / `rebuild`)
 > preserves `configured` and `revision` and cannot re-admit a removed pack — on a
-> graph rebuilt IN PLACE. **One journal route does not**: `tortoise migrate-db`
+> graph rebuilt IN PLACE. ⚠️ The in-memory `rebuild()` engine restores the MARKER
+> but not the `:PackInstall` registry (only `rebuild_all` captures that), so there
+> the approved set resolves over an empty registry — data leg only — and a write of
+> a previously-approved kind can refuse until the packs are re-pinned; the engine
+> reports that at WARNING instead of logging that the pack set survived.
+> **One journal route does not**: `tortoise migrate-db`
 > replays the legacy graph's journal into a freshly created target, and the
 > preservation sections are captured from the graph that is about to be wiped —
 > the empty target — so it drops the marker (and the `:PackInstall` rows with it)

@@ -13811,14 +13811,14 @@ class FalkorProjection(
                         # reads configured-but-EMPTY until the graph is re-pinned.
                         # Saying "the pack set survived" would assert the rows
                         # came back (#9752 review P2).
-                        logger.info(
+                        logger.warning(
                             "rebuild: restored the :PackSelection pack-set "
-                            "marker — its `configured` and `revision` values "
-                            "survive the wipe. The `:PackInstall` rows are "
-                            "restored only by `rebuild_all`, so on this path "
-                            "the approved set resolves over an empty registry "
-                            "(data leg only) until it is re-pinned deliberately "
-                            "(#9752)")
+                            "marker (`configured`, `revision`) but NOT the "
+                            "`:PackInstall` rows — only `rebuild_all` restores "
+                            "those — so the approved set resolves over an empty "
+                            "registry (data leg only): a write of a previously-"
+                            "approved kind can refuse until the packs are "
+                            "re-pinned deliberately (#9752)")
                     elif live_markers:
                         logger.warning(
                             "rebuild: a DIFFERENT :PackSelection marker is "

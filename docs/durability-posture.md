@@ -106,7 +106,7 @@ accept the file and wipe over a class it cannot see. The reserved numbers are
 `graph_identity`), `4` = `2` + `onboarding_snapshot` / `onboarding_step_links`
 (#4641) — a **distinct** integer taken *because* `3` is contested, deliberately
 carrying neither sibling's section — `5` = `4` + `event_meta` (#4653), and
-`6` = `5` + `team_meta` (#5353). Two rules follow. **The constant may only
+`6` = `5` + `team_meta` (#5353), and `7` = `6` + `pack_selection` (#9752). Two rules follow. **The constant may only
 increase**, and a payload shape that is not a superset of the previous one
 takes a **new integer** — reusing a number for a disjoint payload is the
 failure the gate exists to prevent, and a build that reuses one reopens the
@@ -216,7 +216,15 @@ property). It gets its own declared sidecar sections instead:
   and a rescue file written before this class had a vehicle reports
   `team_meta_state_unknown` instead of assuming the class was never there.
 - `:PackSelection` — the per-graph **pack-set marker**, preserved by the
-  `pack_selection` section (**#9752**; feature #2728 / PR #8648). It is ONE node
+  `pack_selection` section (**#9752**; feature #2728 / PR #8648). ⚠️ **The
+  journal-replay route only**: `rebuild_all` captures and restores it, but the
+  in-memory `rebuild()` restores the MARKER alone (it captures no
+  `:PackInstall` registry), so on that engine the approved set resolves over an
+  empty registry — data leg only — until the packs are re-pinned, and the engine
+  logs that at WARNING. `tortoise migrate-db` preserves neither this class nor
+  `:TeamMeta`, because it replays a legacy journal into a freshly created target
+  and the sections are captured from the graph about to be wiped; it reports
+  `state_unknown` rather than a verified success (#11866). It is ONE node
   per graph with **no identity property at all** (`pack_state` MERGEs
   `(s:PackSelection)` — the graph is the isolation boundary, so no id is
   needed), so it fits neither the config registry above (a row keyed on one
