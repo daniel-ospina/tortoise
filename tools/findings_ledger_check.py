@@ -62,8 +62,8 @@ Exit codes
 Which arms need history, and why that split exists
 --------------------------------------------------
 Exactly ONE arm needs `git` history: `measured_at_commit` ancestry. Everything
-else — the verdict vocabulary, the citations, the registration row, §6's
-arithmetic — reads this checkout's tree and nothing more.
+else — §1's vocabulary definition, §3's verdicts, the citations, the registration
+row, §6's arithmetic — reads this checkout's tree and nothing more.
 
 The split is load-bearing, not tidiness. The `docs` job (the REQUIRED gate, and
 the only one that runs `--check`) checks out at `fetch-depth: 0`. The `test`
@@ -183,6 +183,8 @@ CORRECTION_ROW_RE = re.compile(r"^\|\s*\*\*([a-z])\*\*\s*\|")
 
 #: A markdown table's header separator (`|---|---|`).
 TABLE_SEPARATOR_RE = re.compile(r"^\|[\s:|-]+\|$")
+#: A row of §1's vocabulary table: `| **VERDICT** | Means | What a lane should do |`.
+VOCAB_ROW_RE = re.compile(r"^\|\s*\*\*(?P<token>[A-Z][A-Z-]*)\*\*\s*\|")
 
 #: Floor on the mutation population. `--self-test` is the arm the page's own
 #: justification rests on (*"`--self-test` is what proves the rules still fire"*),
@@ -190,7 +192,7 @@ TABLE_SEPARATOR_RE = re.compile(r"^\|[\s:|-]+\|$")
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-MIN_SELF_TEST_MUTATIONS = 18
+MIN_SELF_TEST_MUTATIONS = 19
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -603,6 +605,31 @@ def check_citation_shapes(text: str) -> list[str]:
     return problems
 
 
+def check_vocabulary(text: str) -> list[str]:
+    """§1's table must define EXACTLY the closed vocabulary the guard enforces.
+
+    The page tells the reader (§8) that every verdict in §3 is a member of the
+    vocabulary "in §1". `check_verdicts()` alone compared §3 against this module's
+    constant, so the two could drift: deleting §1's `ADOPTED` row left
+    `check_document()` empty while §3 still used it and §8 still claimed §1 was the
+    authority (measured). The page would then define a vocabulary narrower than its
+    own table uses — the "claim class with no handling rule" §1 exists to prevent.
+    """
+    section = _region(text, "## 1. What a row means", "## 2. The four defect classes")
+    defined = tuple(
+        m.group("token")
+        for m in (VOCAB_ROW_RE.match(line) for line in section.splitlines())
+        if m
+    )
+    if defined != VERDICTS:
+        return [
+            f"§1 vocabulary drift: the page defines {defined or '(none)'}, the guard "
+            f"enforces {VERDICTS} — in either direction a verdict has no handling "
+            "rule, and §8 names §1 as the authority"
+        ]
+    return []
+
+
 def _line_count(path: Path) -> int | None:
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -661,6 +688,25 @@ def check_citations(text: str, root: Path = REPO) -> list[str]:
             # name `~` or `/` to get it.
             continue
         target = root / rel
+        # ⛔ A `../..` path walks OUT of the tree, and pathlib would let an absolute
+        # one through by DISCARDING `root` (absolute paths are exempted above by
+        # design, so this arm is about relative escapes). An existence check alone
+        # then certifies a file the repository does not contain — the "looks exactly
+        # like evidence" class this page is about (measured: `../../..` was clean).
+        resolved_root = root.resolve()
+        try:
+            resolved = target.resolve()
+        except (OSError, RuntimeError):
+            # Unreadable component or a symlink loop (`resolve()` raises
+            # RuntimeError for that, not OSError): fall through to the existence
+            # check rather than escaping `main()` with a traceback.
+            resolved = None
+        if resolved is not None and not resolved.is_relative_to(resolved_root):
+            problems.append(
+                f"citation {label}{origin}: {rel} resolves outside the repository — "
+                "evidence the repo does not contain is not evidence"
+            )
+            continue
         if not target.is_file():
             problems.append(f"citation {label}{origin}: {rel} does not exist in the tree")
             continue
@@ -873,6 +919,7 @@ def check_document(text: str, root: Path = REPO) -> list[str]:
     lives in `check_all()`, because answering it needs the whole clone.
     """
     problems: list[str] = []
+    problems.extend(check_vocabulary(text))
     problems.extend(check_verdicts(text))
     problems.extend(check_verdict_tally(text))
     problems.extend(check_evidence_cells(text))
@@ -967,6 +1014,16 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         "a shorthand citation pointing past the end of its anchor's file",
         lambda t: t.replace("`:3115`", "`:999999`", 1),
         "out of range",
+    ),
+    (
+        "a removed §1 vocabulary row",
+        # §1 is what the page tells the reader is the authority (§8). Deleting one
+        # of its five rows used to leave every arm green while §3 kept using the
+        # verdict — the page then defines less than it enforces.
+        lambda t: "\n".join(
+            ln for ln in t.splitlines() if not ln.startswith("| **ADOPTED** |")
+        ),
+        "§1 vocabulary drift",
     ),
     (
         "a thirteenth correction row shaped so the population pin cannot see it",
