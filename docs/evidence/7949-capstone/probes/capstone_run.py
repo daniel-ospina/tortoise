@@ -25,7 +25,7 @@ the corrected reading:
    entry point … can drive all eight in one pass"* is an open question. It can:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
    (``sdk.py:16630``, called at ``:15656``) →
-   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:13634``) calls
+   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:13651``) calls
    ``_edus_from_conversation`` (S0, ``:13752``) and then ``_arm_extract`` — the
    S1→S2→S2.2 prefix, which it calls twice since `#11002`: the first arm and the
    retry — and that one function drives ``run_s1`` (S1, ``:16677``), ``run_s2``

@@ -13207,11 +13207,11 @@ class TortoiseSDK:
             # `_emit_event("PointRevised", id=..., **emit_props)`), which no
             # payload stamp reaches — measured, such a record carries
             # `embedding` and no `embedding_width`. That population is a known
-            # residual, not something this door claims to cover. `creating=False` PRESERVES this door's behaviour
-            # exactly: it stamps no identity today and stamps none after (the
-            # vector's provenance here is not a creating write's), so what is
-            # added is the width declaration and the float32 narrowing it
-            # names.
+            # residual, not something this door claims to cover. `creating=False`
+            # stamps no identity, and that arm DROPS identity keys the props
+            # already carried (measured: `embedding_model`/`embedding_revision`/
+            # `embedding_text_hash` are popped) — a caller-supplied one is now
+            # absent. `_META_KEYS` skips them, so no node/replay change follows.
             try:
                 from .embeddings import stamp_journal_embedding
             except Exception:  # noqa: BLE001, RUF100 — #5148: never fail a write on an import
