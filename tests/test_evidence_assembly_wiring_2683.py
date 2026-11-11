@@ -47,10 +47,20 @@ ABOVE its own distilled point, plus a cross-session restatement of the same
 fact) so the differential isolates the arm: everything after the fetch —
 annotation, per-session dedup, boost, packaging, assembly — is the real path.
 * **the product seam** (tests 4-6) — HERMETIC: no graph, no model, no
-network. The ask lane's only graph-touching calls are
-``sdk.tortoise_fts_query`` and ``sdk.annotate_ask_hits``; both are stubbed and
-everything after them is the real product path, so these tests do not skip on
-a box with no FalkorDB (the seam they pin has no graph in it).
+network. FOUR per-test substitutions, plus two file-wide ones, listed so none
+is invisible. Per-test: ``sdk.tortoise_fts_query`` (the retrieval fetch) and
+``sdk.annotate_ask_hits`` (the batch annotation — stubbed to a PASS-THROUGH,
+so the pool arrives WITHOUT the graph-derived ``session_date``/``speaker``
+keys the real call adds) are stubbed; ``sdk._get_proj()`` — the SDK's
+projection accessor, which would otherwise build a real ``FalkorProjection``
+— returns a bare sentinel; and ``_ask_lane._default_ask_reader_factory`` is
+replaced by ``_AskCaptureReader``, whose MODEL is canned while the reader
+PLUMBING (the call, its argument, the response) is real. File-wide: the
+autouse ``_no_embedder`` pins the embedder out, and ``_run_ask`` wraps
+``_retrieval.assemble_context`` in a DELEGATING spy — it records the pool,
+then calls the real function. Real throughout: per-session dedup, A5 boost,
+A7 rerank, packaging, assembly and ``render_context``, so these tests do not
+skip on a box with no FalkorDB (the seam they pin has no graph in it).
 
 Each test names its FAIL VALUE.
 """
@@ -499,12 +509,15 @@ def test_a_tr_question_is_excluded_and_leaves_the_window_untouched(
 # actually received. A pin that asserted the census instead would be pinning
 # the one thing this lane throws away.
 #
-# LAYER: HERMETIC — no graph, no model, no network. On the branch these pins
-# drive, the ask lane's only graph-touching calls are
-# ``sdk.tortoise_fts_query`` and ``sdk.annotate_ask_hits``; both are stubbed,
-# and everything after them
-# (per-session dedup, A5 boost, A7 rerank, packaging, ``assemble_context``,
-# ``render_context``, the reader call) is the REAL product path. Same
+# LAYER: HERMETIC — no graph, no model, no network. See the module
+# docstring's "the product seam" bullet for the full inventory of six
+# substitutions (four per-test, two file-wide). In one line: the fetch and
+# the batch annotation are STUBBED (annotation as a pass-through, so the pool
+# arrives unannotated), ``sdk._get_proj()`` hands back a bare sentinel instead
+# of a real ``FalkorProjection``, the reader factory returns a canned MODEL
+# over real PLUMBING, the autouse ``_no_embedder`` pins the embedder out, and
+# ``assemble_context`` is a delegating spy. Real throughout: per-session
+# dedup, A5 boost, A7 rerank, packaging, assembly, ``render_context``. Same
 # ``_FakeSDK`` shape as ``tests/test_ask_retrieval_budget.py``.
 
 ASK_QUOTE = "the tea set cost 300 dollars"
