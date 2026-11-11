@@ -546,7 +546,10 @@ def test_probe_pins_its_published_outputs(
         if isinstance(rec.get("type"), str) and rec.get("type"):
             last_wins[rec["type"]] = rec
     assert probe.line_bytes(last_wins["PointAdded"]) == 246   # what the fix rejects
-    assert probe.line_bytes(by_type["PointAdded"]) == 570     # what production writes
+    # The FULLEST PointAdded shape. `line_bytes` re-encodes with the PRE-P0
+    # spaced separators, so the live writer's own line for this record is 523 B,
+    # not 570 — the 47 B is this PR's compact-separator change.
+    assert probe.line_bytes(by_type["PointAdded"]) == 570
 
     # The published per-operation table (README / §5.2).
     #
@@ -559,9 +562,12 @@ def test_probe_pins_its_published_outputs(
     # the writer by design; `docs/evidence/5612-journal-growth/README.md`'s
     # 2026-10-17 block is retained as the historical measurement, and
     # `docs/evidence/11821-journal-encoding/` carries the re-measurement and the
-    # per-class delta. `line_bytes` keeps the PRE-P0 separators (spaced), so
-    # these numbers sit 437 B above what the live writer emits (5,860 − 5,423) — stated here
-    # because the two are easy to confuse.
+    # per-class delta. `line_bytes` keeps the PRE-P0 separators (spaced), so each
+    # figure sits ABOVE what the live writer emits, by its own amount: 47 B on
+    # the vector-less PointAdded row (570 → 523) and 437 / 419 / 405 B on the
+    # stamped PointAdded / OperatorAdded / PointPromoted rows (5,860 → 5,423,
+    # 5,543 → 5,124, 5,341 → 4,936). Stated here because the two shapes are easy
+    # to confuse, and a single shared offset would be wrong for two of the rows.
     plain_point = by_type["PointAdded"]
     stamped_point = probe.stamp(plain_point, vec)
     assert probe.line_bytes(stamped_point) == 5_860
