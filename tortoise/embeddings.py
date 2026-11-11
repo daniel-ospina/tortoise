@@ -365,7 +365,7 @@ def shortest_float32_vector(vector: list[float]) -> list[float] | None:
     while the journal holds 9 — so a LIVE write and a REPLAY of the same record
     would put different numbers in the record's ``embedding`` jsonb. Quantising
     here keeps the invariant exact instead of "equal at the store's width":
-    ``json.loads(journal_text) == payload["embedding"]``, bit for bit.
+    ``json.loads(journal_text)["embedding"] == payload["embedding"]``, bit for bit.
 
     The returned floats are the float64s whose ``repr`` IS the shortest decimal
     that rounds back to the same float32, so every consumer sees:
