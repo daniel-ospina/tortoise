@@ -1157,11 +1157,18 @@ def check(text: str) -> tuple[list[str], dict]:
         # still prints it is a finding.
         #
         # ⛔ THIS ROW SITS OUTSIDE THE COUNT BRANCH ABOVE, on purpose. Nested
-        # inside it — where it was first written — a binding that names
-        # `atomic_points` and simply DELETES its `surviving_units=` token skipped
-        # both the count anchor and this row and came back GREEN: the pre-#10989
-        # reading, reachable by removing one token (#11833 review r9 P2). The
-        # tolerance tuple below keeps the move a no-op for every well-formed log.
+        # inside it — where it was first written — the row could only fire when a
+        # count was STATED. The shape that let through (measured at `c48e426a23`:
+        # `surviving_units=n/a`, `declared_surviving_floor=n/a`, and
+        # `e2b_surviving_units` dropped from `floors_owned=`) came back with ZERO
+        # findings and was ACCEPTED: a floor shed AND a wrong population named in
+        # one binding. Deleting only the count token was not enough to get there
+        # — two count-absence rows still refused that log with 2 findings — so the
+        # accepted shape took four coordinated edits, not one removed token.
+        # Outside the branch this row fires on ANY named wrong basis, count or no
+        # count. The tolerance tuple below keeps the move a no-op for every
+        # well-formed log. (#11833 review r10 P2: the wording that stood here said
+        # the one-token shape "came back GREEN", which measured false.)
         #
         # ⛔ THE EMPTY STRING IS TOLERATED ON PURPOSE — it is not a fail-open.
         # This token does not exist before #10989, and the probe now prints it
@@ -1174,17 +1181,22 @@ def check(text: str) -> tuple[list[str], dict]:
         # graded", which is the opposite of the tuple below and of the
         # paragraph above — an ABSENT token is tolerated, not graded.)
         #
-        # ⚠️ THE TOLERANCE IS NARROW, and worth stating exactly rather than
-        # as "the historical artifacts": a legacy binding is only reached
-        # here when its `surviving_units` already EQUALS the scored arm's own
-        # `metric=real_facts` count — the count branch above refuses every
-        # legacy log whose count disagrees. So the shape this protects is a
-        # well-formed pre-#10989 log on the right population, whose only sin
-        # is not saying so. Narrowing this tuple to ("n/a", "real_facts") is a
-        # corpus-wide decision about older logs, deliberately not taken here.
+        # ⚠️ THE TOLERANCE IS ON THE BASIS VALUE, NOT ON THE POPULATION, and is
+        # worth stating exactly rather than as "the historical artifacts": an
+        # ABSENT basis is tolerated whether or not a count is stated, because this
+        # token post-dates the logs it is absent from; the count itself is
+        # anchored by its own rows above, which this row no longer depends on. So
+        # the shape this protects is a well-formed pre-#10989 log on the right
+        # population, whose only sin is not saying so. Narrowing this tuple to
+        # ("n/a", "real_facts") is a corpus-wide decision about older logs,
+        # deliberately not taken here.
         # (#11833 review P2-3 corrected this comment: it claimed refusing the
         # absent token would refuse the historical artifacts, but the count
-        # branch above already refuses every one whose count does not match.)
+        # branch above already refuses every one whose count does not match.
+        # #11833 review r10 P3: that sentence said a legacy binding is "only
+        # reached here when its `surviving_units` already EQUALS …", which stopped
+        # being true of THIS row the moment the row moved out of that branch — it
+        # evaluates for an absent count and for `n/a` alike.)
         basis = bind.get("surviving_units_basis", "")
         if basis not in ("", "n/a", "real_facts"):
             findings.append(
