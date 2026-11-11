@@ -1160,6 +1160,56 @@ def test_the_s8_citation_carve_outs_stay_skippable(tmp_path, monkeypatch):
             ), f"{carve_out!r} is a §8 carve-out and must stay skippable"
 
 
+def test_an_evidence_cell_of_prose_is_rejected(tmp_path, monkeypatch):
+    """FAILS if `word:digits` counts as evidence.
+
+    `CITATION_RE`'s path group is OPTIONAL, so a `fullmatch` alone accepted any
+    marker-less token ending in `:digits`. Measured: every §3 evidence cell replaced
+    with `username:1234` (or one cell with `see row (c):3115`) left `--check` at rc 0
+    — the whole evidence column unopenable, while §1 and §8 promise each cell names
+    something a reader can open. The marker test is the one `check_citations` already
+    applies, so removing it from the evidence floor reds this test.
+    """
+    def prose_only_evidence(text: str) -> str:
+        """Row (a)'s whole evidence cell becomes `word:digits` English."""
+        out = []
+        for line in text.splitlines(keepends=True):
+            if line.startswith("| **a** |"):
+                head, sep, _ = line.rpartition("| **STILL-TRUE** |")
+                line = f"{head}{sep} `username:1234` |\n"
+            out.append(line)
+        return "".join(out)
+
+    _mutated(tmp_path, monkeypatch, prose_only_evidence)
+    assert any("evidence cell" in p for p in _doc_problems()), (
+        "an evidence cell carrying only `word:digits` prose was accepted as evidence"
+    )
+
+
+def test_an_owner_repo_issue_ref_counts_as_evidence(tmp_path, monkeypatch):
+    """FAILS if `owner/repo#N` is not accepted as an issue reference.
+
+    §8 calls that spelling "the form this repo writes everywhere", and §1 accepts "an
+    issue" without prescribing a spelling — but the bare-`#N` pattern refused it as
+    "names no `path:line`, issue, command or §N", i.e. a false accusation on correct
+    evidence at the REQUIRED `docs` job. Widening it back to `` `#\d+` `` reds this test.
+    """
+    def issue_ref_only_evidence(text: str) -> str:
+        """Row (a)'s whole evidence cell becomes one `owner/repo#N` reference."""
+        out = []
+        for line in text.splitlines(keepends=True):
+            if line.startswith("| **a** |"):
+                head, sep, _ = line.rpartition("| **STILL-TRUE** |")
+                line = f"{head}{sep} `daniel-ospina/tortoise#9363` |\n"
+            out.append(line)
+        return "".join(out)
+
+    _mutated(tmp_path, monkeypatch, issue_ref_only_evidence)
+    assert not any("evidence cell" in p for p in _doc_problems()), (
+        "an `owner/repo#N` issue ref was refused as an evidence cell"
+    )
+
+
 def test_citation_to_missing_file_is_rejected(tmp_path, monkeypatch):
     """FAILS when a `path:line` names a file that is not in the tree.
 
