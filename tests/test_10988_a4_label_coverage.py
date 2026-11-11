@@ -326,6 +326,15 @@ def test_each_layer_QUERIES_its_own_node_label_and_only_claims_carries_the_exclu
     "Point"`) silently losing the turn-row/operator exclusion — with every suite GREEN (measured,
     `#11837` review round 4, P2). The label is pinned as QUERY TEXT, the way the predicate already
     is; the file's own header says this hazard is known, and it was only half-closed.
+
+    ⛔ AND THE HOP, not just the row (`#11837` round-5 P2). The loop below hands
+    `_a4_layer_counts` each label itself, so a mutant one frame up — hardcoding `"Point"` in
+    `_a4_label_coverage`'s `for layer, label, kind_prop in A4_LAYERS` loop — left this whole
+    test **GREEN** while every layer measured the CLAIM population (measured: 16 passed). The
+    doc claimed the pin made "a layer cannot measure a sibling's population" true; it did not,
+    because nothing observed the queries the census entry point emits. The second block drives
+    `_a4_label_coverage` and asserts on THOSE queries, so that hop is closed rather than the
+    sentence weakened.
     """
     probe = _probe()
     assert [label for _layer, label, _prop in probe.A4_LAYERS] == ["Point", "Object", "Event"], (
@@ -345,6 +354,29 @@ def test_each_layer_QUERIES_its_own_node_label_and_only_claims_carries_the_exclu
             assert "is_episodic" not in query and "is_operator" not in query, (
                 f"the {layer} layer carries an exclusion it must not — a `:{label}` is not a "
                 f"claim: {query}")
+
+    # ⛔ THE HOP (`#11837` round-5 P2). Drive the census entry point the production code actually
+    # calls and assert on the queries IT emits: a hop that hardcodes one label for every layer
+    # reds here and only here.
+    census = _FakeProjection({
+        **_CLAIM_ROWS,
+        "RETURN coalesce(n.objectKind, 'NULL') AS k": [["Project", 4], ["NULL", 1]],
+        "RETURN coalesce(n.eventKind, 'NULL') AS k": [["meeting", 2], ["turn", 6]],
+    })
+    probe._a4_label_coverage(census)
+    emitted = list(census.g.queries)
+    for layer, label, prop in probe.A4_LAYERS:
+        # The per-layer histogram is the only query the census emits that carries
+        # `coalesce(n.<prop>, 'NULL')`: the writer split's nearest neighbour is
+        # `coalesce(n.pointKind, '')` (probe:3219), a DIFFERENT literal, so the filter cannot pick
+        # up a sibling's query.
+        own = [q for q in emitted if f"coalesce(n.{prop}, 'NULL')" in q]
+        assert own, (f"the census issued no histogram query for the {layer} layer", emitted)
+        for query in own:
+            assert f"MATCH (n:{label})" in query, (
+                f"the census emitted the {layer} layer's histogram against a sibling's label — "
+                f"a hop that hardcodes one label measures every layer's population as that "
+                f"layer's: {query}")
 
 
 def test_object_kinds_are_compared_CASE_INSENSITIVELY_because_the_ontology_mixes_case():
