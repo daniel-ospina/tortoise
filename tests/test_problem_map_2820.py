@@ -159,8 +159,8 @@ def test_the_taxonomy_counts_are_what_the_summary_declares():
     """
     rows, _ = pmc.parse_rows(DOC.read_text(encoding="utf-8"))
     counts = pmc.parse_summary(DOC.read_text(encoding="utf-8"))
-    assert counts["VERIFIED-FIXED"] == sum(1 for r in rows if r.is_fixed) == 21
-    assert counts["OPEN"] == sum(1 for r in rows if r.status == "OPEN") == 5
+    assert counts["VERIFIED-FIXED"] == sum(1 for r in rows if r.is_fixed) == 22
+    assert counts["OPEN"] == sum(1 for r in rows if r.status == "OPEN") == 4
     assert counts["UNKNOWN"] == 0
 
 
@@ -363,10 +363,10 @@ def test_a_summary_count_that_disagrees_with_the_table_is_drift(tmp_path):
     because a summary drifted from its table (the 2026-09-10 body).
     """
     copy = _doc_copy(tmp_path)
-    text = copy.read_text().replace("| VERIFIED-FIXED | 21 |", "| VERIFIED-FIXED | 25 |", 1)
+    text = copy.read_text().replace("| VERIFIED-FIXED | 22 |", "| VERIFIED-FIXED | 26 |", 1)
     copy.write_text(text, encoding="utf-8")
     errors = pmc.run(REPO, copy).errors
-    assert any("summary says 25" in e for e in errors), errors
+    assert any("summary says 26" in e for e in errors), errors
 
 
 def test_a_workstream_count_that_disagrees_with_its_rows_is_drift(tmp_path):
@@ -445,8 +445,8 @@ def test_two_abstract_headlines_are_reported_as_ambiguous(tmp_path):
     copy = _doc_copy(tmp_path)
     text = copy.read_text(encoding="utf-8")
     mutated = text.replace(
-        "> **21 fixed and 5 open**.",
-        "> **20 fixed and 6 open**.\n> **21 fixed and 5 open**.",
+        "> **22 fixed and 4 open**.",
+        "> **21 fixed and 5 open**.\n> **22 fixed and 4 open**.",
         1,
     )
     assert mutated != text, "fixture no longer finds the abstract"
@@ -456,7 +456,7 @@ def test_two_abstract_headlines_are_reported_as_ambiguous(tmp_path):
 
 
 def test_the_ABSTRACT_headline_must_agree_with_the_tables(tmp_path):
-    """Fails when the page's own "**21 fixed and 5 open**" abstract goes stale.
+    """Fails when the page's own "**22 fixed and 4 open**" abstract goes stale.
 
     Reachable: that sentence is the one most readers quote (it is the opening
     blockquote of the whole page), and it was not compared to anything before this
@@ -471,11 +471,11 @@ def test_the_ABSTRACT_headline_must_agree_with_the_tables(tmp_path):
     """
     copy = _doc_copy(tmp_path)
     text = copy.read_text(encoding="utf-8")
-    mutated = text.replace("**21 fixed and 5 open**", "**22 fixed and 4 open**", 1)
+    mutated = text.replace("**22 fixed and 4 open**", "**21 fixed and 5 open**", 1)
     assert mutated != text, "fixture no longer finds the headline"
     copy.write_text(mutated, encoding="utf-8")
     errors = pmc.run(REPO, copy).errors
-    assert any("headline says 22 fixed and 4 open" in e for e in errors), errors
+    assert any("headline says 21 fixed and 5 open" in e for e in errors), errors
 
 
 def test_a_decoy_summary_ROW_outside_section_2_cannot_satisfy_the_check(tmp_path):
@@ -484,25 +484,25 @@ def test_a_decoy_summary_ROW_outside_section_2_cannot_satisfy_the_check(tmp_path
     Reachable, and found by fresh review at the post-merge head: `parse_summary`
     scanned the whole document and kept the LAST `| OPEN | n |` match, so an
     ordinary table appended after §2 ("## Appendix") SUBSTITUTED for §2's number.
-    Measured before the fix: §2 corrupted to `| OPEN | 3 |` plus
-    `## Appendix` / `| OPEN | 5 |` returned NO summary errors, and the index count
+    Measured before the fix: §2 corrupted to `| OPEN | 2 |` plus
+    `## Appendix` / `| OPEN | 4 |` returned NO summary errors, and the index count
     check — which compares against the same parse — agreed with the decoy, so a
     document contradicting its own table read CLEAN. Pages like this grow
     appendixes; the counts belong to one section.
     """
     copy = _doc_copy(tmp_path)
     text = copy.read_text(encoding="utf-8")
-    corrupted = text.replace("| OPEN | 5 |", "| OPEN | 3 |", 1)
+    corrupted = text.replace("| OPEN | 4 |", "| OPEN | 2 |", 1)
     assert corrupted != text, "fixture no longer finds §2's OPEN row"
     copy.write_text(
-        corrupted + "\n## Appendix\n\n| Status | Rows |\n|---|---|\n| OPEN | 5 |\n",
+        corrupted + "\n## Appendix\n\n| Status | Rows |\n|---|---|\n| OPEN | 4 |\n",
         encoding="utf-8",
     )
-    assert pmc.parse_summary(copy.read_text(encoding="utf-8"))["OPEN"] == 3, (
+    assert pmc.parse_summary(copy.read_text(encoding="utf-8"))["OPEN"] == 2, (
         "the decoy outside §2 was read as §2's count — the parse is not scoped"
     )
     errors = pmc.check_summary(copy.read_text(encoding="utf-8"), pmc.parse_rows(text)[0])
-    assert any("summary says 3" in e for e in errors), errors
+    assert any("summary says 2" in e for e in errors), errors
 
 
 def test_an_index_entry_whose_counts_disagree_is_drift(tmp_path):
@@ -519,7 +519,7 @@ def test_an_index_entry_whose_counts_disagree_is_drift(tmp_path):
     (repo / "docs").mkdir(parents=True)
     index = repo / pmc.INDEX_REL
     index.write_text(
-        "# index\n| the map | **22 fixed · 4 open · 0 unknown** | `" + DOC.name + "` |\n",
+        "# index\n| the map | **21 fixed · 5 open · 0 unknown** | `" + DOC.name + "` |\n",
         encoding="utf-8",
     )
     errors = pmc.check_registration(repo, DOC, DOC.read_text(encoding="utf-8"))
@@ -1309,7 +1309,7 @@ def test_the_cli_exits_one_on_drift(tmp_path):
     would be measuring the clone, not the guard).
     """
     copy = _doc_copy(tmp_path)
-    text = copy.read_text().replace("| OPEN | 5 |", "| OPEN | 3 |", 1)
+    text = copy.read_text().replace("| OPEN | 4 |", "| OPEN | 2 |", 1)
     copy.write_text(text, encoding="utf-8")
     assert pmc.main(["--repo", str(REPO), "--doc", str(copy)]) == 1
 
