@@ -149,6 +149,27 @@ def test_unlabelled_is_EXACTLY_the_null_plus_undeclared_share_and_nothing_escape
 # ── 2. per layer, never blended ──────────────────────────────────────────
 
 
+def test_the_declared_vocabulary_includes_the_kinds_the_SDK_itself_registers():
+    """FAILS IF `_a4_declared_kinds` imports only `domain_loader` and misses the SDK's own kinds.
+
+    ⛔ MEASURED ON THE LIVE GRAPH 2026-11-11, which is why this arm exists: with only
+    `domain_loader` imported, `evidence` (121 nodes) and `option` (2) read UNDECLARED — FOUR of
+    the fleet's six declared typed kinds, since `tortoise.sdk` registers them through
+    `register_kind` at import time. That is a FALSE failing run, and a refusal that names a false
+    reason is the one failure mode a refusal must not have (`tools/ax_write_eval.py` records the
+    same defect as `#9695` review P1).
+    """
+    probe = _probe()
+    declared = probe._a4_declared_kinds("pointKind")
+    for kind in ("evidence", "option", "criterion"):
+        assert kind in declared, (
+            f"{kind!r} is registered by `tortoise.sdk` at import time and must count as declared "
+            f"— a census that misses it reports the fleet's own writes as inventions")
+    # …and the arm is not vacuous: a kind nothing registers stays undeclared, which is what makes
+    # the live graph's single `finding` Point a real finding rather than an artefact of the import.
+    assert "finding" not in declared
+
+
 def test_the_three_layers_are_reported_SEPARATELY_and_never_blended():
     """FAILS IF `_a4_label_coverage` collapses things/events/claims into one percentage.
 
