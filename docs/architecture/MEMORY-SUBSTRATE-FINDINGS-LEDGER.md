@@ -254,8 +254,17 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   `tortoise/commit_schema.py:395` is followed by `:792` and `:1002`. A shorthand resolves against the
   nearest preceding full-path citation, and one with nothing to anchor it is refused rather than
   guessed; without that rule, the load-bearing half of rows (b), (c) and (e) was unchecked while this
-  section said it was checked. **No citation shape is exempt:** a backticked token that ends in a line
-  number but is not a recognised `path:line` is **refused**, not skipped. Skipping it was a hole with
+  section said it was checked. **A `path:line`-shaped token that the resolver cannot read is
+  refused**, not skipped — and the ONE spelling measured here is `path <LINE>` (a path followed by
+  whitespace and a number), because every wider delimiter set refused correct prose when tried
+  against this repository's own `docs/`: `_` parses an identifier (`tests/test_findings_ledger_2852.py`),
+  `-` parses a dated slug, `/` parses plain paths and dates (600+ spans across 799 files), `#`
+  parses the `owner/repo#N` issue refs this repo writes everywhere, `@` parses commit refs, and `,`
+  parses SQL and call prose. Rewriting a citation's delimiter is therefore **not** universally
+  refused: `path#LINE`, `path@LINE`, `path-LINE`, `path_LINE`, `path/LINE`, `path,LINE` and
+  `path:L LINE` are **named carve-outs**, exactly as the two below are, because a rule that refuses
+  this page's own issue refs and paths is the false-accusation class one arm over. The rest of this
+  paragraph is what IS measured. Skipping it was a hole with
   three doors — a `.txt` path, an extension-less path, and a leading-dot path like
   `.github/workflows/ci.yml:892` matched nothing, so reformatting a citation was enough to defuse a
   real red — and there was a fourth: **one inserted space**, in the form “tortoise/pipeline .py:16”
@@ -267,7 +276,10 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   a space after the shorthand's number, and a full stop after an out-of-range number all match no
   resolver, so they are refused rather than skipped (the examples are left unspanned on purpose — the
   scan would, correctly, refuse them). Two
-  carve-outs are named rather than implied away: a **marker-less, extension-less filename**
+  carve-outs are named rather than implied away: the delimiter shapes listed above, a
+  **backticked command** (a legal evidence form whose trailing number is an argument —
+  `uv run python tools/collision_preflight.py 2852 --repo .` must not red this context), and a
+  **marker-less, extension-less filename**
   (a bare `Makefile` with a line number) is not treated as a path — a host:port or `key: value` in
   prose must not red this
   required context — and a row's tally class is its **leading** bold token, which is why row (j)'s
