@@ -402,23 +402,24 @@ rounding:**
   and §8 carries neither date nor commit — the commit for the whole page is the
   frontmatter's `measured_at_commit`, restated in §10. Do not read §2 or §8 as
   self-dating.
-- **A status token SWAPPED so that every count site still agrees.** Before this
-  revision every comparison in the pin file was a COUNT, so one row demoted to
-  `OPEN` while another was promoted held §2's tally, the abstract, the index
-  headline and the WS-C cell — measured: reverting `#2782` to `OPEN` **with**
-  `#2684` promoted to `VERIFIED-FIXED` read CLEAN under
+- **A status token SWAPPED between two rows, when nothing reads a row's status
+  by issue.** No comparison in the pin file did, before this revision: one row
+  demoted to `OPEN` while another was promoted held §2's tally, the abstract, the
+  index headline and the WS-C cell — measured: reverting `#2782` to `OPEN`
+  **with** `#2684` promoted to `VERIFIED-FIXED` read CLEAN under
   `tools/problem_map_check.py --check` and passed the whole suite before review
   caught it. The re-cut row and §8's four survivors are therefore pinned **by
   issue**
   (`tests/test_problem_map_2820.py::test_the_recut_row_and_survivors_hold_their_status_by_ISSUE`),
-  which closes that class entirely: §8's OPEN set is exactly those four rows, so
-  any swap that holds the tally has to promote one of them and reds the pin.
-  What survives is a change carried **consistently** — demote an unnamed
-  `VERIFIED-FIXED` row to `OPEN` and correct §2, the abstract, the index headline
-  and the WS cell to match, and nothing reds, because for a status the page is
-  its own only witness. Pinning all 26 rows is the complete form and it is not
-  taken on here: it would make every future re-cut edit the pin file as well, and
-  this page's re-cuts are hand measurements. Named sets, not a claim of coverage.
+  which closes that class: §8's `OPEN` set is exactly those four rows, so any swap
+  that holds the tally has to promote one of them and reds the pin.
+  **What survives is the pin's own provenance.** Those expected values — the four
+  statuses and the `22`/`4` literals beside them — are a second copy of the same
+  hand measurement, not an independent source, so a re-cut that moves the page and
+  the pin together is not caught by anything here: the tracker is the only
+  independent witness for a status and the guard deliberately refuses to read
+  GitHub. Re-derive those literals from the tree on every re-cut; a re-cut that
+  only makes the suite green has proven nothing about the statuses.
 - **Anchor RELEVANCE.** The guard proves an anchor exists and is merged. It cannot
   prove the commit is *the fix* — a lane once cited a merge that mentioned nothing
   of the issue (this page carried exactly that defect until review caught it on
