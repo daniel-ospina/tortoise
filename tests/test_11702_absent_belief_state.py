@@ -1152,7 +1152,9 @@ def test_why_half_posterior_is_not_contested_and_has_no_variance(sdk):
     _assemble_ep_rows(rows, blocks)
     block = blocks[half]["ep"]
     assert block.get("ep_state") == EP_STATE_ABSENT, block
-    assert block.get("variance") in (None, 0.0), (
+    # Pin the EXACT value: a disjunction accepts either rendering of "absent"
+    # and so cannot fail if the width comes back as any zero-ish number.
+    assert block.get("variance") == 0.0, (
         "a half pair (β only) was given a variance — the coalesce default "
         "invented an α it does not store: " + repr(block))
     assert block.get("contested") is not True, (
@@ -1565,3 +1567,77 @@ def test_contested_claims_reads_an_int_stored_pair(sdk):
         "Cypher divided as integers and computed v = 0 while every read "
         "surface says variance 0.05 / contested: "
         + repr(sorted(listed)))
+
+
+def test_why_width_is_guarded_for_hostile_pairs_like_every_other_surface(sdk):
+    """`why` carried its OWN `_beta_variance`/`_mean` — a second spelling.
+
+    Cycle 11 hardened `search_engine._beta_variance` and left the local copy
+    untouched, so the CANONICAL block (`/v1/context`, the volunteer reflex,
+    webhooks) was the one surface still emitting, for a pair the public
+    `update_point` accepts:
+
+        (3, -1)        variance -0.25   (a "width" below zero)
+        (1e200, 1e200) variance NaN     (Starlette renders with
+                                         allow_nan=False → a 500 on the hosted
+                                         path; why_snapshot persists a bare
+                                         `NaN` token)
+        (1e308, 1e308) confidence 0.0   (maximum disbelief)
+        (1e-200, 1e-200) ZeroDivisionError → the WHOLE batch's enrichment is
+                                         discarded (#8504's failure shape)
+
+    Both names now come from `search_engine`, so the guard cannot drift again.
+    """
+    from tortoise.search_engine import _beta_mean, _beta_variance
+    from tortoise.why import _assemble_ep_rows
+    from tortoise.why import _beta_variance as why_var
+
+    assert why_var is _beta_variance, (
+        "why re-declares its own `_beta_variance` — a second spelling of the "
+        "arithmetic the shared reader owns")
+
+    # The arithmetic itself, over the hostile shapes.
+    for alpha, beta in ((-1.0, 3.0), (3.0, -1.0), (float("nan"), 1.0),
+                        (float("inf"), float("inf")), (1e200, 1e200),
+                        (1e-200, 1e-200), (0.0, 0.0)):
+        var = _beta_variance(alpha, beta)
+        assert var == 0.0, (
+            f"_beta_variance({alpha!r}, {beta!r}) = {var!r} — not a width")
+    assert _beta_mean(1e308, 1e308) == pytest.approx(0.5, abs=1e-9), (
+        "an overflowing pair must not report maximum disbelief")
+    assert _beta_mean(1e-200, 1e-200) == pytest.approx(0.5, abs=1e-9)
+
+    # …and through the block assembly, on a real graph.
+    proj = sdk._get_proj()
+    ids = {}
+    for label, (a, b) in (("neg", (3.0, -1.0)), ("big", (1e200, 1e200)),
+                          ("huge", (1e308, 1e308)),
+                          ("tiny", (1e-200, 1e-200))):
+        pid = sdk.create_point("statement", f"{label} pair claim")["id"]
+        proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = $a, "
+                     "n.posterior_beta = $b", params={"id": pid, "a": a, "b": b})
+        ids[label] = pid
+    blocks = {pid: {} for pid in ids.values()}
+    rows = proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
+        "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0), "
+        "  coalesce(n.posterior_beta, n.ep_beta, 1.0), "
+        "  n.ep_alpha IS NOT NULL AS measured, coalesce(n.status,'') AS st, "
+        "  coalesce(n.outdated, false) AS od, false AS baseline_set, "
+        "  true AS has_belief, n.posterior_alpha AS pa, n.ep_alpha AS ea, "
+        "  n.confidence AS conf, n.posterior_beta AS pb, n.ep_beta AS eb",
+        params={"ids": list(ids.values())}).result_set
+    _assemble_ep_rows(rows, blocks)
+    import math as _math
+    for label, pid in ids.items():
+        ep = blocks[pid]["ep"]
+        assert ep["variance"] is not None, (label, ep)
+        assert _math.isfinite(ep["variance"]), (
+            f"{label}: the why block put a non-finite width on the wire — "
+            f"Starlette renders with allow_nan=False: {ep}")
+        assert ep["variance"] >= 0.0, (
+            f"{label}: a negative width reached the canonical block: {ep}")
+        assert ep["contested"] is False, (label, ep)
+        if ep["confidence_mean"] is not None:
+            assert 0.0 <= ep["confidence_mean"] <= 1.0, (
+                f"{label}: out-of-range belief in the canonical block: {ep}")

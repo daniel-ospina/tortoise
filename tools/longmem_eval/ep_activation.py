@@ -469,6 +469,17 @@ _SELECT_CLAIM_EP_STATES = (
     "RETURN n.id, n.posterior_alpha, n.posterior_beta, "
     "n.ep_alpha, n.ep_beta"
 )
+# ⛔ #11702 cycle 12 — the population is PAIR-ONLY, deliberately, and the
+# earlier sentence "the census must agree with the canonical read by
+# construction" was wrong once the canonical read became MIRROR-FIRST: a
+# mirror-only claim (`update_point(confidence=0.9)` — a served belief with no
+# stored α/β) renders its real value through `read_confidence` and
+# `subgraph_render`, but is NOT in this population. That is the metric's
+# meaning, not an oversight: this census measures EP ACTIVATION (did a
+# measured posterior exist?), so a mirror the flush wrote is evidence of a
+# flush, not of a measurement. Widening it would silently change the number
+# every past run published; if a mirror-aware count is wanted, it needs its own
+# cell — the same #10210 gap that "state present but unusable" needs.
 
 def read_confidence(p) -> float | None:
     """Canonical EP posterior read for a point property dict.
@@ -523,7 +534,11 @@ def read_confidence(p) -> float | None:
         b = float(beta)
     except (TypeError, ValueError):
         return None
-    if a + b <= 0:
+    # #11702 cycle 12: NON-NEGATIVE too — α and β are pseudo-counts, and the
+    # product surfaces call a negative pair ABSENT (`belief_value`,
+    # `ep_state`, every ranker). Without this the census published an
+    # out-of-range "belief" of 1.5 for a claim the product says has none.
+    if a < 0 or b < 0 or a + b <= 0:
         return None
     return a / (a + b)
 

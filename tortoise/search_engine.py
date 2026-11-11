@@ -487,7 +487,12 @@ def belief_value(*, confidence=None, posterior_alpha=None,
     exactly what the ``None`` return says honestly.
     """
     def _num(raw):
-        if raw is None or isinstance(raw, bool):
+        # #11702 cycle 12: a bool IS a number in Python (`float(True) == 1.0`),
+        # and the rest of the tree reads one that way (`annotate_ep_batch`
+        # answers 1.0 for a `confidence=True` row). Rejecting it here made this
+        # reader the ONE surface that called such a row absent — a twin
+        # asymmetry that cannot be justified while claiming a single vocabulary.
+        if raw is None:
             return None
         try:
             val = float(raw)
