@@ -22,11 +22,12 @@ measured_at: 2026-11-12
 >
 > **Why it needed a re-cut, in one measurement.** The ledger's own §7 exists so
 > nobody re-learns a falsified claim the hard way. Re-measured at `f70d884b7`,
-> **five of its twelve corrections have been overtaken by the very fixes they
-> motivated** — a lane that trusted §7 today would believe the Point fold still
+> **seven of its twelve rows no longer read as written** — four of them overtaken by
+> the very fixes they motivated, three by a number or a tracker state that moved —
+> so a lane that trusted §7 today would believe the Point fold still
 > drops props (#2795 closed that), and would go looking for a defect that is gone.
-> Meanwhile **six of the eight research briefs §3 indexes have no in-repo mirror at
-> all**, and the machine they lived on no longer carries them (§5).
+> Meanwhile **three of the seven research briefs §3.1 indexes have no copy in this repo at
+> all**, and the out-of-repo tree they lived on no longer exists (§5).
 >
 > **What this page does NOT do.** It does not re-open a defect, propose a fix, or
 > schedule anything. It does not restate the 26-entry status table — read the
@@ -52,9 +53,9 @@ failure this page exists to prevent is a reader treating a *dated finding* as a
 | **DRIFTED** | The claim's *shape* survives but a number, path or state in it moved | Use the re-measured value on the page, never the 2026-09-10 one |
 | **MOOT-BY-LOSS** | The claim cannot be re-measured because its subject no longer exists | Do not assert it either way |
 
-Every evidence cell names a `path:line`, an issue, or a command. A row whose
-evidence cannot be opened is not evidence; it is a memory. `tools/findings_ledger_check.py`
-refuses the page if a code citation stops resolving (§8).
+Every evidence cell names a `path:line`, an issue, a command, or an in-page section.
+A row whose evidence cannot be opened is not evidence; it is a memory. `tools/findings_ledger_check.py`
+refuses the page if an evidence cell names none of those, or if a code citation stops resolving (§8).
 
 ---
 
@@ -94,7 +95,7 @@ this re-cut keeps them *and* records which ones the tree has since overtaken.
 | **b** | `CommitEvent` has 8 fields; `Point` has 15; `Entity` has 3 | Counts corrected to 10 / 15 / 3 — the prep #1418/#1533 additions were missed | **DRIFTED** — `Entity` 3 ✓, `CommitEvent` 10 ✓, **`Point` is now 18** (+`id`, `mentions`, `span_start`/`span_end` moved on) | `.venv/bin/python -c "from tortoise.commit_schema import Entity, Point, CommitEvent; print([len(c.model_fields) for c in (Entity, Point, CommitEvent)])"` → `[3, 18, 10]`; classes at `tortoise/commit_schema.py:395`, `:792`, `:1002` (the old `:429-438` cite now lands in `ParticipantSlots`) |
 | **c** | "Props are not durable by construction" | **Too broad.** The journal carries them; only the **Point** fold dropped them. Subject/Object/Event/Document/Source extras survived rebuild. | **SUPERSEDED-BY-FIX** — the Point fold now persists and restores extras, so *no* label drops them | `tortoise/projection/entities.py:2632` (`_upsert_point_props`) calls `_persist_extra_props` at `:3115` and returns `persisted_extra_keys`; #2795 CLOSED |
 | **d** | Route all doors through `sdk.ingest` and the loss class cannot recur | **`sdk.ingest` itself lost Point extras on replay** — the canonical bundle contract inherited #2795 | **SUPERSEDED-BY-FIX** — replay restores Point extras; `content_hash` is now recomputed from replayed content, so a rebuild is self-healing | `tortoise/sdk.py:36042-36046` states the rebuild case is "NOT … any more — `projection/entities.py::_upsert_point_props` (#2795 D2) now RECOMPUTES `content_hash`"; pin `tests/test_ingest_rebuild_durability.py` |
-| **e** | The terminal outcome set `{won, lost, withdrawn, completed}` is fine | **Narrowed** — split the **outcome axis** from the **completion axis** (#2826 C9/C14) | **ADOPTED** — both axes are shipped properties, and the doc says so in those words | `tortoise/pipeline.py:16` ("`pipelineStageId` / `pipelineSlot` / `pipelineOutcome` … the separation #2826's C14 recommends"), `:66`; #2792 CLOSED COMPLETED 2026-10-15 |
+| **e** | The terminal outcome set `{won, lost, withdrawn, completed}` is fine | **Narrowed** — split the **outcome axis** from the **completion axis** (#2826 C9/C14) | **ADOPTED** — both axes are shipped properties, and the code names the separation | `tortoise/pipeline.py:16` carries the props (`pipelineStageId` / `pipelineSlot` / `pipelineOutcome`), and `:27` is where the separation #2826's C14 recommends is stated; `:66` holds both axes in `STAGE_PROPS`; #2792 CLOSED COMPLETED 2026-10-15 |
 | **f** | `tortoise/semantic_extractor.py` exists | **False** — verified absent | **STILL-TRUE** | `ls tortoise/semantic_extractor.py` → *No such file or directory* at `f70d884b7` |
 | **g** | #2795's prop loss is a **journal** gap | **False.** The journal carries the full snapshot; the loss was the **replay fold** (`_upsert_point_props` never called `_persist_extra_props`). Fix = one code path. | **SUPERSEDED-BY-FIX** — that one code path was added | same evidence as **(c)**: `tortoise/projection/entities.py:3115` |
 | **h** | The write-path benchmark exercises the **eval** lane, so it cannot see this class | **False.** It runs the **product** lane (`sdk.capture_session` → `_extract_session_v2`); it was blind because its graded vocabulary never asserted those props exist | **STILL-TRUE** (citation relocated — the 2026-09-10 `runner.py` line citation no longer resolves at this head) | `tests/eval/write_path/test_write_path_relation_lane.py:9` ("**capture commit** (`sdk.capture_session` → `_extract_session_v2`)") |
@@ -103,9 +104,14 @@ this re-cut keeps them *and* records which ones the tree has since overtaken.
 | **k** | #2820 estimated "~40 decisions scattered" | **Undercount.** #2826's verified count was **50 open** (17 owner-required, 33 engineering) | **DRIFTED** — the count is now a closed-book figure: #2826 was closed `NOT_PLANNED` 2026-09-17, so the register is a *snapshot*, not a live queue | `gh issue view 2826` → `CLOSED NOT_PLANNED @ 2026-09-17T20:54:28Z` |
 | **l** | A list of issues the ledger recorded as OPEN | Corrected 2026-09-10: #2748, #1695, #1418, #1535, #2313, #2083 are **closed** | **DRIFTED, and much further than one step** — of the 40 issues §4 indexed, **4 remain open**: `#2696`, `#2728`, `#2684`, `#2811` | §6 below, measured per issue |
 
-**The one thing to take away:** **(c)**, **(d)**, **(e)**, **(g)** and **(k)** are no
-longer true statements about the tree. The review's central correction — *"the Point
-fold drops props"* — is the exact defect #2795 D2 fixed. A lane that reads the
+**The one thing to take away:** **seven of the twelve rows no longer read as
+written** — **(c)**, **(d)** and **(g)** are **SUPERSEDED-BY-FIX**, **(e)** is
+**ADOPTED**, and **(b)**, **(k)** and **(l)** are **DRIFTED**. Only **(a)**, **(f)**,
+**(h)**, **(i)** and **(j)** still read as written. (Four of the seven were
+*overtaken by the very fixes they motivated* — (c), (d), (e) and (g); the other
+three moved for a different reason, a number or a tracker state, which is why the
+count is stated both ways.) The review's central correction — *"the Point fold
+drops props"* — is the exact defect #2795 D2 fixed. A lane that reads the
 2026-09-10 ledger and goes hunting for it will find the fix and call it a regression.
 
 ---
@@ -124,13 +130,14 @@ code while the brief itself never did.
 | `research/2026-09-09-entity-attachment.md` (258 l) | **In-repo successor** — `docs/research/2026-09-24-2730-entity-attachment/research-brief.md`, which explicitly *reconciles* the predecessor (PR #8639) | The ladder and the code facts were re-derived in-repo; the **out-of-repo predecessor's** external precedent list (X1–X10) survives only condensed on #2730 |
 | `research/2026-09-09-numeric-storage-audit.md` (286 l) | **Cited by** `docs/plans/2026-09-10-ws-c-numeric-normalization.md:558-559` + condensed comment on #2782 | The per-layer storage table and the rebuild transcript are lost; the conclusions are baked into the WS-C design |
 | `research/2026-09-09-typed-values-and-lifecycles.md` (298 l) | **Cited by** the same WS-C plan, `:558-559` + condensed comment on #2792 | Same shape — conclusions baked in, evidence lost |
-| `research/2026-09-09-ontology-naming-review.md` (200 l) | Condensed comment on #2725 only | **No in-repo mirror** (0 hits for its name under `docs/`) |
-| `research/2026-09-09-ontology-packs-venture-builder.md` (47 l) | Condensed in #2696 §5 (issue body, not a comment) | **No in-repo mirror** |
-| `research/2026-09-09-pack-fit-selection.md` (33 l) | Condensed in #2714 body | **No in-repo mirror** (and #2714 is now CLOSED — its body is the only copy) |
+| `research/2026-09-09-ontology-naming-review.md` (200 l) | Condensed comment on #2725 only | **No copy of its content in-repo** — its only `docs/` hit is this page's own row |
+| `research/2026-09-09-ontology-packs-venture-builder.md` (47 l) | Condensed in #2696 §5 (issue body, not a comment) | **No copy of its content in-repo** — its only `docs/` hit is this page's own row |
+| `research/2026-09-09-pack-fit-selection.md` (33 l) | Condensed in #2714 body | **No copy of its content in-repo** — its only `docs/` hit is this page's own row (and #2714 is now CLOSED — its body is the only copy) |
 | `design/2026-09-09-lifecycle-pipelines-design.md` (556 l) | **Shipped as code** — `tortoise/pipeline.py` (#2792) + near-full comment on #2792 | The design is a *product*, not a document: the behaviour is pinned by tests, the rationale only by the issue comment |
 | `design/2026-09-10-decision-briefs-workstream-C.md` (167 l) | Near-full comment on #2826 | #2826 is CLOSED `NOT_PLANNED` — still readable, no longer a queue |
 | `design/2026-09-10-a1-a2-comment.md` (103 l) | Near-full comment on #2826 (A1/A2 briefs) | Same |
 | `design/2026-09-10-a1-a2-decision-briefs.md` (71 l) | **Gone** — never posted, superseded by the A1 comment by design | Nothing; flagged local-only when written |
+| `<corpus>/2026-09-09-ontology-evidence.md` (431 l) | Condensed comment on #2725 only (“Corpus-grounding verification”, 8,099 B) | **No copy of its content in-repo** — its only `docs/` hit is this page's own row |
 | `<corpus>/README.md` + 8 `.docx` + 8 `plaintext/*.txt` (~976 KB) | **Gone from this machine** — and **must never** enter this public repo (#2852 §6.3) | Nothing reachable; originals were also in `~/Downloads`, unverified |
 | `~/.swarm/issue-triage-2026-09-09.md` (~5 KB) | **Gone** — local-only by design | Nothing; its outcome (33 closures + a 10-item shortlist) is in the tracker, the reasoning is not |
 
@@ -184,11 +191,11 @@ Three consequences, and they are the actionable part of this page:
 The ledger indexed **40 issues and 2 PRs** across §4.1/§4.2, with states read on 2026-09-10.
 Re-read per issue on 2026-11-12 — 42 rows, and they reconcile:
 
-| State | Count | Which |
+| State (`stateReason`) | Count | Which |
 |---|---|---|
 | **OPEN** | **4** | `#2696` (an epic, not a defect) · `#2728` (per-graph pack selection) · `#2684` (value-span slice) · `#2811` (answer normalizer) |
-| CLOSED COMPLETED | 31 | incl. `#2714`, `#2725`, `#2726`, `#2727`, `#2729`, `#2730`, `#2766`, `#2767`, `#2781`, `#2782`, `#2783`, `#2786`, `#2787`, `#2788`, `#2792`, `#2795`, `#2813`, `#2814`, `#2817`, `#2818`, `#2749`, `#2734`, `#2742`, `#2083`, `#2105`, `#1509`, `#1695`, `#1370`, `#1418`, `#1535`, `#2313` |
-| CLOSED other | 5 | `#2748` (`NOT_PLANNED`, fixed in effect) · `#2820` · `#2826` (`NOT_PLANNED`) · `#2296` · `#2790` |
+| CLOSED COMPLETED | 32 | incl. `#2714`, `#2725`, `#2726`, `#2727`, `#2729`, `#2730`, `#2766`, `#2767`, `#2781`, `#2782`, `#2783`, `#2786`, `#2788`, `#2792`, `#2795`, `#2813`, `#2814`, `#2817`, `#2818`, `#2749`, `#2734`, `#2742`, `#2083`, `#2105`, `#1695`, `#1370`, `#1418`, `#1535`, `#2313`, `#2296`, `#2820`, `#2790` |
+| CLOSED other | 4 | `#2748` (`NOT_PLANNED`, fixed in effect) · `#2826` (`NOT_PLANNED`) · `#1509` (`NOT_PLANNED`) · `#2787` (`NOT_PLANNED`) |
 | MERGED (both were PRs) | 2 | PR `#2747` · `#2697` — both are PRs, not issues; see correction **(i)** |
 
 **⚠️ of the four survivors, the two survivor bullets below are already re-measured elsewhere and must
@@ -235,10 +242,30 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   `tortoise/commit_schema.py:395` is followed by `:792` and `:1002`. A shorthand resolves against the
   nearest preceding full-path citation, and one with nothing to anchor it is refused rather than
   guessed; without that rule, the load-bearing half of rows (b), (c) and (e) was unchecked while this
-  section said it was checked;
+  section said it was checked. **No citation shape is exempt:** a backticked token that ends in a line
+  number but is not a recognised `path:line` is **refused**, not skipped. Skipping it was a hole with
+  three doors — a `.txt` path, an extension-less path, and a leading-dot path like
+  `.github/workflows/ci.yml:892` matched nothing, so reformatting a citation was enough to defuse a
+  real red — and there was a fourth: **one inserted space**, in the form “tortoise/pipeline .py:16”
+  or “sdk.py: 16962”, matched neither the resolver nor a refusal whose token class excluded
+  whitespace, so it went entirely unchecked (measured, `--check` exited 0). The scan is the **whole
+  page**, not just §3/§5: scoping it to the two sections named above left §2's own citation free to be
+  mangled — those two strings are deliberately NOT in code spans, because the scan would (correctly)
+  refuse them;
+- the **§3 headline tally** is derived too. The "N of the twelve rows no longer read as written"
+  count, the letter list beside it, and the four-of-the-seven "overtaken" figure are all recomputed
+  from the verdict cells and compared with the sentence a reader actually quotes. Unguarded, flipping
+  one verdict cell to `STILL-TRUE` left the page asserting a superseded count with `--check` at
+  **rc 0** — and that number is repeated in this repo's `ci.yml`, `config/ci-surfaces.yml`,
+  `docs/00_index.md` and two test docstrings, so a wrong one propagates well past this page;
+- every **§3 evidence cell** names a `path:line`, an issue, a command or a §N (§1's own rule). Without
+  this, the whole evidence column can be **emptied** while every verdict still passes — a red defused
+  by deleting what it pointed at, which is the one move this page exists to make impossible;
 - the **§3 population is pinned** to twelve rows, and the **§6 arithmetic** (open + closed + merged =
   the indexed population) is re-derived from the table rather than trusted — deleting a row and every
-  mention of it otherwise passes every referential check.
+  mention of it otherwise passes every referential check. Because a pin selects rows *by shape*, an
+  **unrecognised row shape is refused** on both tables: a thirteenth correction row, or a fifth §6
+  state bucket, used to be silently invisible (measured — appending one left the guard CLEAN);
 - the **§6 survivor sentence's two numbers** are derived as well: its survivor TOTAL must equal the
   OPEN row's own count, and its "already re-measured" count must equal the number of **bullets naming
   an OPEN issue** — the `#2730` bullet is CLOSED and is printed because *issue closure is not evidence
@@ -255,9 +282,9 @@ The self-test that proves those rules still fire has its own **population floor*
 a gate reporting OK when it cannot run — so a shrunk population now reds instead.
 
 Exactly one arm needs `git` **history**: the frontmatter's `measured_at_commit` must be an ancestor of
-`HEAD`. The other five read this checkout's tree and nothing else, and the tool keeps that split
+`HEAD`. The other eight read this checkout's tree and nothing else, and the tool keeps that split
 (`check_document()` / `check_all()`) because the two jobs that run it differ: the REQUIRED `docs` job
-checks out at `fetch-depth: 0` and runs `--check` (all six arms), while the `test` jobs check out at
+checks out at `fetch-depth: 0` and runs `--check` (all nine arms), while the `test` jobs check out at
 the default depth 1, cannot resolve `f70d884b7` at all, and are where this page's own test module runs.
 In a depth-1 clone `--check` therefore reports **exit 2 UNVERIFIED** — never `0`, and never a verdict
 against the document it could not read — and `--self-test`, which drives only the tree-only arms,

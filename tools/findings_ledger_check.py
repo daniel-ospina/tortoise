@@ -8,11 +8,12 @@ Why this exists
 ---------------
 The ledger's §3 is a **corrections log**: twelve claims the 2026-09-09/10
 memory-substrate review made and then falsified or narrowed, kept so nobody
-re-learns them the hard way. Re-measuring it at `f70d884b7` found **five of the
-twelve had been overtaken by the very fixes they motivated** — so the artifact's
+re-learns them the hard way. Re-measuring it at `f70d884b7` found **seven of the
+twelve no longer read as written** (four overtaken by the very fixes they
+motivated, three by a number or a tracker state that moved) — so the artifact's
 whole job is to tell a reader *which* of its own rows are still live.
 
-That makes three things load-bearing in a way that is invisible to a reader:
+That makes four things load-bearing in a way that is invisible to a reader:
 
 1. **The verdict is a closed vocabulary.** A verdict outside the defined set is a
    claim class with no handling rule — exactly how a superseded correction gets
@@ -29,6 +30,15 @@ That makes three things load-bearing in a way that is invisible to a reader:
    mention of it — satisfies every referential check there is. So the row count
    is pinned like `#2820`'s status table is, and §6's arithmetic is re-derived
    from the table rather than trusted.
+4. **An unrecognised row shape is an ERROR, not silence.** Pins and citations
+   select rows by shape, so a row shaped other than expected is simply not seen —
+   which made a thirteenth correction row (or a fifth §6 bucket) free: measured,
+   appending one returned CLEAN with the pin still reading `abcdefghijkl`. So §3
+   and §6 now refuse any table row whose label cell they cannot classify, and every
+   backticked `token:LINE` the citation pattern declines is refused too. The
+   evidence column is held to §1's own rule for the same reason: with no floor on
+   it, blanking every §3 evidence cell left the page green while each row went on
+   asserting a verdict with nothing behind it.
 
 What this does NOT check, deliberately
 --------------------------------------
@@ -123,12 +133,54 @@ STATE_ROWS: tuple[str, ...] = (
 #: against the nearest PRECEDING full-path citation (see `check_citations`); the
 #: required `:` right after the backtick is what keeps a plain backticked integer
 #: (`` `42` ``) out of the match.
+#:
+#: The path is NOT restricted to an extension allow-list. It used to be
+#: (`\.(?:py|md|yml|…)`), and that allow-list was a hole with three doors: a
+#: citation to `notes/thing.txt:16`, to `Makefile:12`, or to a leading-dot path
+#: such as `.github/workflows/ci.yml:892` matched NOTHING, so it was never
+#: resolved. Measured: substituting any of the three for a resolving citation left
+#: the guard reporting CLEAN, i.e. a real drift could be defused by reformatting
+#: the very citation it pointed at. Any backticked `token:LINE` is now in scope.
 CITATION_RE = re.compile(
-    r"`(?!\*\*)(?P<path>[\w][\w./+-]*\.(?:py|md|yml|yaml|json|jsonc|ts|sh))?"
+    r"`(?!\*\*)(?P<path>[\w~/.@+-][\w./+@-]*)?"
     r":(?P<start>\d+)(?:-(?P<end>\d+))?`"
 )
 
+#: Every backticked token that ENDS in `:LINE`, spelled however. Deliberately
+#: BROADER than `CITATION_RE` (any non-space run, not just the path character
+#: class): this is the arm that turns an *unrecognised* citation shape into an
+#: ERROR instead of silence. Widening one regex was otherwise the only thing
+#: standing between a real citation and a green run, and a shape the resolver
+#: declines is indistinguishable from a shape the page does not contain.
+#:
+#: The class is `[^`]`, NOT `[^\s`]`. Excluding whitespace was a fail-open with a
+#: one-keystroke exploit: inserting a space into a citation (`tortoise/pipeline
+#: .py:16`) made it match NEITHER the resolver NOR this refusal, so it was
+#: silently unchecked while §8 said no citation shape was exempt — measured, rc 0
+#: clean. The token may not contain a backtick, and that is the only exclusion.
+CITATION_SHAPE_RE = re.compile(r"^[^`]+:\d+(?:-\d+)?$")
+
+#: `path: 16962` — a space AFTER the colon. Same class, same measurement: it is
+#: not a resolvable citation, so it must be refused rather than skipped.
+CITATION_SPACED_SHAPE_RE = re.compile(r"^[^`]+:\s+\d+(?:-\d+)?$")
+
+#: An in-page section reference (`§6`) — §1 accepts it in place of a citation for
+#: a row whose evidence IS the section below it (row (l)).
+SECTION_REF_RE = re.compile(r"§\s?\d")
+
+#: A backticked command — the third evidence form §1 allows
+#: (`gh issue view N`, `ls tortoise/semantic_extractor.py`).
+COMMAND_RE = re.compile(
+    r"^`(?:\.venv/bin/|python3?\b|gh\b|git\b|ls\b|bash\b|npm\b|npx\b|uv\b|grep\b|rg\b)"
+)
+
+#: A backticked issue/PR reference.
+ISSUE_REF_RE = re.compile(r"`#\d+`")
+
 CORRECTION_ROW_RE = re.compile(r"^\|\s*\*\*([a-z])\*\*\s*\|")
+
+#: A markdown table's header separator (`|---|---|`).
+TABLE_SEPARATOR_RE = re.compile(r"^\|[\s:|-]+\|$")
 
 #: Floor on the mutation population. `--self-test` is the arm the page's own
 #: justification rests on (*"`--self-test` is what proves the rules still fire"*),
@@ -136,7 +188,7 @@ CORRECTION_ROW_RE = re.compile(r"^\|\s*\*\*([a-z])\*\*\s*\|")
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-MIN_SELF_TEST_MUTATIONS = 6
+MIN_SELF_TEST_MUTATIONS = 14
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -234,21 +286,61 @@ def _split_row_cells(line: str) -> list[str]:
     return cells
 
 
+def _table_rows(section: str) -> list[tuple[int, str]]:
+    """Every DATA row of the section's first table, with its 1-based line offset.
+
+    The first `|`-line is the header and the next is the separator; every `|`-line
+    after them, up to the first line that is not a table row, is data.
+
+    Returning the rows AS A POPULATION is the whole point. Selecting rows by "does
+    it match the shape I expect" made an unrecognised row invisible rather than
+    refused, which is how a THIRTEENTH correction row could be appended to a page
+    whose §8 advertises a population pinned to twelve — measured: appending
+    `| **M** | … | **FIXED-IT** | `tortoise/pipeline.py:16` |` returned CLEAN,
+    exit 0, with the population pin still reading `abcdefghijkl`. The same hole
+    existed in §6: a fifth state row was simply not seen, so the sum stayed at the
+    pinned 42 while a bucket moved.
+    """
+    rows: list[tuple[int, str]] = []
+    header_seen = False
+    separator_seen = False
+    for offset, line in enumerate(section.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            if separator_seen:
+                break
+            continue
+        if not header_seen:
+            header_seen = True
+            continue
+        if not separator_seen:
+            separator_seen = True
+            if TABLE_SEPARATOR_RE.match(stripped):
+                continue
+        rows.append((offset, line))
+    return rows
+
+
 def check_verdicts(text: str) -> list[str]:
     """§3: exactly the pinned labels, each carrying a member of the closed set."""
     problems: list[str] = []
     section = _region(text, "## 3. The corrections log", "## 4. The artefact index")
-    rows = [ln for ln in section.splitlines() if CORRECTION_ROW_RE.match(ln)]
+    labels: list[str] = []
 
-    labels = [CORRECTION_ROW_RE.match(ln).group(1) for ln in rows]
-    if tuple(labels) != PINNED_CORRECTION_LABELS:
-        problems.append(
-            f"§3 population drift: expected rows {''.join(PINNED_CORRECTION_LABELS)}, "
-            f"found {''.join(labels) or '(none)'} — a row that is deleted takes with "
-            "it the only record that its claim was falsified"
-        )
-
-    for label, line in zip(labels, rows, strict=True):
+    for offset, line in _table_rows(section):
+        match = CORRECTION_ROW_RE.match(line)
+        if match is None:
+            cells = _split_row_cells(line)
+            first = next((c.strip() for c in cells if c.strip()), line.strip())
+            problems.append(
+                f"§3 row {offset}: label cell {first!r} is not `**<lowercase letter>**` "
+                "— every row of this table is in scope, so a row shaped any other way "
+                "is an undeclared correction the twelve-row population pin cannot see. "
+                "Label it `**a**`..`**l**`, or delete it."
+            )
+            continue
+        label = match.group(1)
+        labels.append(label)
         cells = _split_row_cells(line)
         # | # | claim | correction | verdict | evidence | -> cells[0] == ''
         verdict_cell = cells[4] if len(cells) > 4 else ""
@@ -264,6 +356,208 @@ def check_verdicts(text: str) -> list[str]:
                 f"vocabulary {', '.join(VERDICTS)} — an undefined verdict is a "
                 "claim class with no handling rule"
             )
+
+    if tuple(labels) != PINNED_CORRECTION_LABELS:
+        problems.append(
+            f"§3 population drift: expected rows {''.join(PINNED_CORRECTION_LABELS)}, "
+            f"found {''.join(labels) or '(none)'} — a row that is deleted takes with "
+            "it the only record that its claim was falsified"
+        )
+    return problems
+
+
+def _has_evidence(cell: str) -> bool:
+    """§1's rule for an evidence cell: a `path:line`, an issue, a command, or a §N."""
+    if ISSUE_REF_RE.search(cell) or SECTION_REF_RE.search(cell):
+        return True
+    for match in re.finditer(r"`[^`\n]+`", cell):
+        body = match.group(0)
+        if (
+            CITATION_RE.fullmatch(body)
+            or CITATION_SHAPE_RE.match(body[1:-1])
+            or COMMAND_RE.match(body)
+        ):
+            return True
+    return False
+
+
+def check_evidence_cells(text: str) -> list[str]:
+    """§3: every row's evidence cell names something that can be opened.
+
+    Without this arm the whole evidence column can be EMPTIED into greenness: the
+    verdict vocabulary still passes (it reads a different cell) and a citation
+    check over zero citations has nothing to red — measured: blanking every §3
+    evidence cell left the guard reporting CLEAN while each row went on asserting
+    a verdict with no evidence at all. That is precisely the shape §1 calls "not
+    evidence; it is a memory", and the bypass is the one that matters here: a real
+    drift reds the REQUIRED `docs` job, and deleting the citation turns the red
+    green.
+    """
+    problems: list[str] = []
+    section = _region(text, "## 3. The corrections log", "## 4. The artefact index")
+    for offset, line in _table_rows(section):
+        match = CORRECTION_ROW_RE.match(line)
+        if match is None:
+            continue  # check_verdicts owns the shape refusal
+        cells = _split_row_cells(line)
+        cell = cells[5] if len(cells) > 5 else ""
+        if _has_evidence(cell):
+            continue
+        problems.append(
+            f"row ({match.group(1)}) at §3 line {offset}: its evidence cell names no "
+            "`path:line`, issue, command or §N — §1 says a row whose evidence cannot "
+            "be opened is not evidence, it is a memory"
+        )
+    return problems
+
+
+#: Frontmatter/paragraph numbers are spelled out in the page's prose.
+COUNT_WORDS: tuple[str, ...] = (
+    "zero", "one", "two", "three", "four", "five", "six",
+    "seven", "eight", "nine", "ten", "eleven", "twelve",
+)
+
+#: The paragraph whose tally the page states in words.
+TAKEAWAY_MARKER = "The one thing to take away"
+
+
+def _verdicts_by_label(text: str) -> dict[str, str]:
+    """label -> first bolded verdict token, for every §3 row (empty on no token)."""
+    section = _region(text, "## 3. The corrections log", "## 4. The artefact index")
+    out: dict[str, str] = {}
+    for _offset, line in _table_rows(section):
+        match = CORRECTION_ROW_RE.match(line)
+        if match is None:
+            continue
+        cells = _split_row_cells(line)
+        verdict_cell = cells[4] if len(cells) > 4 else ""
+        tokens = BOLD_TOKEN_RE.findall(verdict_cell)
+        out[match.group(1)] = tokens[0] if tokens else ""
+    return out
+
+
+def check_verdict_tally(text: str) -> list[str]:
+    """§3's headline tally must be DERIVED from the verdict cells it summarises.
+
+    The paragraph is a summary of the table beside it, and a summary is the one
+    thing a reader quotes without re-counting. Unguarded it is also the cheapest
+    thing to make false: flipping a single verdict cell to `STILL-TRUE` left the
+    page asserting "seven of the twelve … **(b)**, **(k)** and **(l)** are
+    **DRIFTED**" with **rc 0 CLEAN** (measured). The same number is repeated in
+    the tool's docstring, `ci.yml`, `config/ci-surfaces.yml`, `docs/00_index.md`
+    and two test docstrings, so a wrong one propagates well beyond the page.
+
+    This is the sibling precedent, not a new idea: `tools/problem_map_check.py`
+    already checks its own summary against its own table.
+    """
+    problems: list[str] = []
+    verdicts = _verdicts_by_label(text)
+    if not verdicts:
+        return ["§3: no correction rows — the tally has nothing to be derived from"]
+
+    non_still = sorted(lbl for lbl, v in verdicts.items() if v != "STILL-TRUE")
+    overtaken = sorted(
+        lbl for lbl, v in verdicts.items() if v in ("SUPERSEDED-BY-FIX", "ADOPTED")
+    )
+
+    idx = text.find(TAKEAWAY_MARKER)
+    if idx < 0:
+        return [
+            f"§3: the {TAKEAWAY_MARKER!r} paragraph is missing — the one summary a "
+            "reader quotes must exist for its counts to be checked"
+        ]
+    end = text.find("\n\n", idx)
+    paragraph = text[idx : end if end > 0 else len(text)]
+    # The page is hard-wrapped, so a phrase can straddle a newline. Normalise
+    # whitespace before matching phrases, or the arm reds on correct prose —
+    # measured: `seven of the twelve rows no longer read as\nwritten`.
+    paragraph = re.sub(r"\s+", " ", paragraph)
+
+    total = len(verdicts)
+    total_word = COUNT_WORDS[total] if total < len(COUNT_WORDS) else str(total)
+    expected = f"{COUNT_WORDS[len(non_still)]} of the {total_word} rows no longer read as written"
+    if expected not in paragraph:
+        problems.append(
+            f"§3 tally: the paragraph does not say {expected!r} — the table has "
+            f"{len(non_still)} row(s) whose verdict is not STILL-TRUE "
+            f"({', '.join(non_still)}), so the stated count is not derived from it"
+        )
+
+    # Split into sentences: the non-STILL-TRUE letters live in the "no longer read
+    # as written" sentence, its complement in the "still read as written" one.
+    # Partitioning on the phrase instead does not work — "Only **(a)** … **(j)** "
+    # sits BEFORE the words it introduces, so the head swallowed the complement and
+    # the arm named all twelve (measured).
+    sentences = re.split(r"(?<=\.)\s+", paragraph)
+    non_still_sentence = " ".join(
+        s for s in sentences if "no longer read as written" in s
+    )
+    still_sentence = " ".join(
+        s for s in sentences if "still read as written" in s and "no longer" not in s
+    )
+    named = set(re.findall(r"\*\*\(([a-z])\)\*\*", non_still_sentence))
+    if named != set(non_still):
+        problems.append(
+            f"§3 tally: the paragraph names {sorted(named) or '(none)'} as no longer "
+            f"reading as written, but the table's verdicts name {non_still} — a "
+            "letter list that disagrees with the cells beside it is a reader trap"
+        )
+    still_true = sorted(lbl for lbl, v in verdicts.items() if v == "STILL-TRUE")
+    named_still = set(re.findall(r"\*\*\(([a-z])\)\*\*", still_sentence))
+    if named_still != set(still_true):
+        problems.append(
+            f"§3 tally: the paragraph's STILL-TRUE list names "
+            f"{sorted(named_still) or '(none)'}, but the table's STILL-TRUE rows are "
+            f"{still_true}"
+        )
+
+    expected_overtaken = (
+        f"{COUNT_WORDS[len(overtaken)].capitalize()} of the "
+        f"{COUNT_WORDS[len(non_still)]} were"
+    )
+    if expected_overtaken not in paragraph:
+        problems.append(
+            f"§3 tally: the paragraph does not say {expected_overtaken!r}, though "
+            f"{len(overtaken)} row(s) are SUPERSEDED-BY-FIX/ADOPTED "
+            f"({', '.join(overtaken)})"
+        )
+    return problems
+
+
+def check_citation_shapes(text: str) -> list[str]:
+    """A backticked `token:LINE` the resolver declines is an ERROR, not silence.
+
+    §8 tells the reader every `path:line` on this page is checked. That claim is
+    only true if an unrecognised shape is refused, because a shape the pattern
+    does not match is indistinguishable from a shape the page does not contain.
+
+    The scan is the WHOLE document, not just §3/§5. Restricting it to the two
+    sections §8 names left the same hole one section up: §2's own
+    `tortoise/pipeline.py:16` could be mangled into `tortoise/pipeline .py:16` …
+    which matches neither the resolver nor a §3/§5-scoped refusal, so it went
+    unchecked and the page reported CLEAN (measured).
+    """
+    problems: list[str] = []
+    for match in re.finditer(r"`[^`\n]+`", text):
+        body = match.group(0)[1:-1]
+        if "/" not in body and "." not in body and not body.startswith(":"):
+            # A `key: value` token is not a citation: `fetch-depth: 0`, `timeout:
+            # 15`. Requiring a path marker (`/`, `.`) or the `:LINE` shorthand's
+            # own leading colon is what keeps the page's YAML and prose out of
+            # the population — measured: without it the whole-document scan
+            # refused `fetch-depth: 0` and the shipped page went red.
+            continue
+        if not (
+            CITATION_SHAPE_RE.match(body) or CITATION_SPACED_SHAPE_RE.match(body)
+        ):
+            continue
+        if CITATION_RE.fullmatch(match.group(0)):
+            continue
+        problems.append(
+            f"`{body}` ends in a line number but is not a recognised citation — "
+            "widen `CITATION_RE` or reword it, because §8 claims every "
+            "`path:line` here is checked"
+        )
     return problems
 
 
@@ -309,6 +603,13 @@ def check_citations(text: str, root: Path = REPO) -> list[str]:
         if label in seen:
             continue
         seen.add(label)
+        if rel.startswith(("~", "/")):
+            # A dated reading of something OUTSIDE this repository — §5's `~/.swarm`
+            # tree, or an absolute path on whichever box took it. §8 says those are
+            # not guarded, but the SHAPE is still recognised and counted here, so a
+            # typo'd RELATIVE path can never hide behind this exemption: it has to
+            # name `~` or `/` to get it.
+            continue
         target = root / rel
         if not target.is_file():
             problems.append(f"citation {label}{origin}: {rel} does not exist in the tree")
@@ -347,9 +648,17 @@ def check_state_arithmetic(text: str) -> list[str]:
     problems: list[str] = []
     section = _region(text, "## 6. The issue index", "## 7. What this changes")
     found: dict[str, int] = {}
-    for line in section.splitlines():
+    for offset, line in _table_rows(section):
         match = STATE_ROW_RE.match(line)
         if not match:
+            cells = _split_row_cells(line)
+            first = next((cell.strip() for cell in cells if cell.strip()), line.strip())
+            problems.append(
+                f"§6 row {offset}: state label {first!r} is not one of "
+                f"{', '.join(STATE_ROWS)} — a row the arithmetic cannot name is a "
+                "count it silently drops, so the sum stays pinned to the indexed "
+                "population while a bucket has moved"
+            )
             continue
         label, count, which = match.group("label"), int(match.group("count")), match.group("which")
         if label in found:
@@ -495,7 +804,10 @@ def check_document(text: str, root: Path = REPO) -> list[str]:
     """
     problems: list[str] = []
     problems.extend(check_verdicts(text))
+    problems.extend(check_verdict_tally(text))
+    problems.extend(check_evidence_cells(text))
     problems.extend(check_citations(text, root))
+    problems.extend(check_citation_shapes(text))
     problems.extend(check_registration(root))
     problems.extend(check_state_arithmetic(text))
     problems.extend(check_survivor_arithmetic(text))
@@ -527,6 +839,29 @@ def check_all(root: Path = REPO) -> list[str]:
 # when it cannot resolve the commit) and its not-ancestor branch by
 # `tests/test_findings_ledger_2852.py::test_measured_commit_not_ancestor_of_head_is_rejected`,
 # which stubs `git` and needs no history at all.
+
+def _empty_evidence_cells(text: str) -> str:
+    """Blank the §3 evidence column, keeping every verdict — the fail-open under test."""
+    lines = text.splitlines(keepends=True)
+    try:
+        start = next(
+            i for i, ln in enumerate(lines) if ln.startswith("## 3. The corrections log")
+        )
+        end = next(
+            i for i, ln in enumerate(lines) if ln.startswith("## 4. The artefact index")
+        )
+    except StopIteration:  # pragma: no cover - the region arms cover this
+        return text
+    for i in range(start, end):
+        row = lines[i].rstrip("\n")
+        if not CORRECTION_ROW_RE.match(row) or "\\|" in row:
+            continue
+        cells = _split_row_cells(row)
+        if len(cells) > 5:
+            cells[5] = " "
+            lines[i] = "|".join(cells) + "\n"
+    return "".join(lines)
+
 
 MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
     (
@@ -562,6 +897,52 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         "a shorthand citation pointing past the end of its anchor's file",
         lambda t: t.replace("`:3115`", "`:999999`", 1),
         "out of range",
+    ),
+    (
+        "a thirteenth correction row shaped so the population pin cannot see it",
+        lambda t: t.replace(
+            "| **l** |",
+            "| **M** | An undeclared claim | **False** | **FIXED-IT** | `tortoise/pipeline.py:16` |\n| **l** |",
+            1,
+        ),
+        "is not `**<lowercase letter>**`",
+    ),
+    (
+        "every §3 evidence cell emptied",
+        _empty_evidence_cells,
+        "names no `path:line`, issue, command or §N",
+    ),
+    (
+        "a §6 row the arithmetic cannot name",
+        lambda t: t.replace(
+            "| MERGED (both were PRs) |",
+            "| CLOSED NOT_PLANNED | 0 | |\n| MERGED (both were PRs) |",
+            1,
+        ),
+        "is not one of",
+    ),
+    (
+        "a citation shape the resolver declines",
+        lambda t: t.replace(
+            "`tests/eval/write_path/test_write_path_relation_lane.py:9`",
+            "`tests/eval/write_path/test_write_path_relation_lane.py%20:9`",
+            1,
+        ),
+        "not a recognised citation",
+    ),
+    (
+        "a citation with a space inserted into its path",
+        lambda t: t.replace(
+            "`tortoise/pipeline.py:16`", "`tortoise/pipeline .py:16`", 1
+        ),
+        "not a recognised citation",
+    ),
+    (
+        "a §3 headline tally that no longer matches the verdict cells",
+        lambda t: t.replace(
+            "| **DRIFTED** — `Entity` 3", "| **STILL-TRUE** — `Entity` 3", 1
+        ),
+        "the paragraph does not say",
     ),
     (
         # The EXACT shipped defect, re-injected: the pre-fix page said `three`
