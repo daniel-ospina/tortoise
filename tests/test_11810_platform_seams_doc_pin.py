@@ -281,9 +281,13 @@ _RESTATEMENTS: tuple[tuple[str, str | None], ...] = (
 #: The SITE of each `_RESTATEMENTS` row, aligned BY INDEX with the tuple above (so a
 #: row added without a site reds the length assert in the label guard rather than
 #: silently inheriting its neighbour's). Each site is the record's own BOLD ITEM
-#: HEADING, matched as WORDS, so it survives rewrapping and dies visibly when the
-#: heading is re-worded; `_MATRIX_ROW` is the contracts-table row, which is not inside
-#: any numbered item.
+#: HEADING, matched as WORDS against a SINGLE LINE, so a re-WORDING dies visibly —
+#: but a REFLOW that moves part of the phrase onto the next line does NOT survive
+#: it: the heading would stop resolving and the guard would RED, misreporting an
+#: honest re-wrap as stale guidance (measured: both item sites return "" after an
+#: in-phrase wrap). That bound is recorded at `_record_site_block`; it fails
+#: CLOSED, so it can over-block but never pass a moved sentence off as found.
+#: `_MATRIX_ROW` is the contracts-table row, which is not inside any numbered item.
 _MATRIX_ROW = "matrix row"
 _ITEM_NEITHER_HOOK = "Hosted cloud agents get NEITHER hook"
 _ITEM_NOT_ABSOLUTE = '"IDE-only" is NOT the right absolute'
@@ -585,6 +589,13 @@ def _record_site_block(doc: str, site: str) -> str:
     wherever its sentence had MOVED to, which is the false PASS this guard exists
     to prevent (review r27 P3 #1: two rows named the wrong item, and nothing could
     tell).
+
+    ⚠️ Recorded bound: the site is matched against ONE LINE, not a reflowed block. An
+    honest re-wrap that moves part of the heading's phrase onto the next line leaves
+    no single line carrying the needle, so the block is "" and the label guard REDs —
+    misreporting a pure reflow as a re-worded heading. Measured on both item sites
+    (1393/2309 chars before, 0 after an in-phrase wrap). It fails CLOSED: the wrong
+    direction here is a false block, never a sentence found wherever it moved.
 
     ⚠️ Recorded bound: the `_MATRIX_ROW` block is the FIRST `| #2122` table row (the
     contracts row today — it is the only one). A second `| #2122` row added elsewhere
