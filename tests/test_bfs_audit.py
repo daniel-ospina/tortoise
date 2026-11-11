@@ -77,8 +77,8 @@ def _classify_propagate_shock_refs(lines: list[str]) -> dict[str, list[str]]:
     not assumed — it is the false-positive cost the continuation arm pays, and
     naming it is what stops a later reader from "tidying" the arm away on the
     grounds that the surface was documented as two. (Prose that merely ENDS in a
-    backslash is still safe: `\s*` cannot cross the intervening text, so
-    `` ``propagate_shock`` is dead, see the note \ `` stays in
+    backslash is still safe: the `\\s*` cannot cross the intervening text, so
+    `` ``propagate_shock`` is dead, see the note \\ `` stays in
     `comment/reference only`.) Declared residual, which
     fails OPEN and is not detected: a bare, undotted reference that is neither
     called nor backslash-continued — `getattr(proj, "propagate_shock")`, or
