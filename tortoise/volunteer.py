@@ -385,10 +385,10 @@ def _eligible(block: dict, *, min_confidence: float,
               conflict_relevant: bool) -> bool:
     """Canonical stage 4 — the confidence gate (EP + contentiousness).
 
-    Eligibility is the canonical persisted posterior mean (α/(α+β), from the
-    why-block's dedicated ep read — post-#2206 identical to the search
-    path's ep.confidence_mean, which reads the same coalesce of
-    posterior_alpha/ep_alpha).
+    Eligibility is `ep.confidence_mean` from the why-block's dedicated ep read
+    — R1's value, so a readable `n.confidence` MIRROR leads and the α/(α+β)
+    mean (the coalesce of posterior_alpha/ep_alpha) is the fallback when there
+    is none. Post-#2206 it is identical to the search path's field.
     UNMEASURED points (nothing that yields a mean — no persisted belief, a half
     pair, a 0/0 pair, a negative operand, an unreadable operand — and no
     readable mirror supplying one) carry NO mean —

@@ -355,7 +355,7 @@ class SearchScores:
 #   declared baseline (2, 1) + mirror   False   True      baseline   0.95
 #   declared 0/0 (degenerate)           False   False     absent     None
 #   declared 0/0 + mirror 0.95          False   True      baseline   0.95
-#   terminal, HAD a posterior (3, 1)    False   False     baseline   0.5
+#   terminal, decayed to (1,1) + 0.5    False   False     baseline   0.5
 #   born-terminal, never had a belief   False   False     absent     None
 #   measured pair (α=3, β=1)            True    False     measured   0.75
 
@@ -1455,9 +1455,11 @@ class EpEvidence:
 
 @dataclass
 class EpBreakdown:
-    # THE point confidence (issue #2206 contract): the belief mean α/(α+β)
-    # of the PERSISTED posterior when EP has run on the claim
-    # (posterior_alpha/beta), else the persisted prior mean (ep_alpha/beta).
+    # THE point confidence (issue #2206 contract) — R1's value, stated above
+    # `ep_measured_cypher`: the readable `n.confidence` MIRROR when there is one
+    # (it LEADS), else the belief mean α/(α+β) of the PERSISTED posterior when
+    # EP has run on the claim (posterior_alpha/beta), else the persisted prior
+    # mean (ep_alpha/beta).
     # It matches the number TortoiseEP.compute_confidence / sdk.get_confidence
     # return for the same point WHENEVER one is persisted — with ONE stated
     # exception, ``None`` here: those two still answer the Beta(1,1) prior mean
