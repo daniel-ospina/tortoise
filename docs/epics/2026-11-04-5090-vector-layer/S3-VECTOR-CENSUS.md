@@ -19,7 +19,7 @@ different trees and must not be conflated: the census fields this document descr
 the base, so a reader who re-runs §6 against `af864a42a6` reads a tree that never held the instrument
 (see `tools/finding_provenance.py`).
 
-**What this document is:** the evidence for the surface-approval request `#11088` carries — ⚠️ **and that request is foreclosed: the disposition was ruled KEEP on 2026-11-10 (`#11395` comment `6781921075`), so no removal is proposed and §7 carries the answered state; the measurement below is kept as the record.** It records
+**What this document is:** the evidence for the surface-approval request `#11088` carries — ⚠️ **and that request is answered for TWO of the four labels it names: the disposition was ruled KEEP on 2026-11-10 (`#11395` comment `6781921075`) for `:Object`/`:Subject`, so no removal is proposed for those two and §7 carries the answered state; the measurement below is kept as the record.** ⚠️ **The ruling names those two labels and NO others** — it does not reach `:Event` or `:Source`, which §7 states: for them the 2026-09-24 direction (*"keep the vectors, make them searchable"*) is the record, and it authorises no removal either. So no removal is proposed for any of the four, but **on two different grounds**, and never by widening the ruling's two labels to the request's four. It records
 the census instrument's contract, the population it was measured on, the numbers, and the exact
 `entity_type` values whose query results would change if the unindexed vectors were removed. It does
 **not** decide anything: the removal is an **MCP/SDK surface change** and is
