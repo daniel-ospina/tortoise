@@ -5446,7 +5446,7 @@ _MIRROR_INVERSIONS = re.compile(
 #: that a readable mirror leads it.` passed (measured).
 _QUALIFIER_NEGATIONS = re.compile(
     r"\b(never|not|no longer|nothing|without|cannot|isn't|doesn't|"
-    r"no readable|no mirror|fails? to|nor|can't)\b",
+    r"no readable|no mirror|no case|fails? to|nor|can't)\b",
     re.IGNORECASE,
 )
 
@@ -5456,9 +5456,21 @@ _QUALIFIER_NEGATIONS = re.compile(
 _QUALIFIER_NEGATION_OK = re.compile(r"\bnot only\b", re.IGNORECASE)
 
 #: Negated OBJECTS that follow a qualifier verb ("the mirror supplies nothing
-#: for these rows"). Checked just after the verb.
+#: for these rows", "the mirror supplies no value"), and the judgement form
+#: that disowns the whole clause ("the claim that a mirror LEADS it is false").
+#: Checked just after the verb; deliberately narrower than
+#: `_QUALIFIER_NEGATIONS`, because a general after-window flags correct prose
+#: whose NEXT clause negates something else — measured on
+#: "…LEADS it), never a measured one", which is TRUE.
 _QUALIFIER_OBJECT_NEGATIONS = re.compile(
-    r"\b(nothing|none|no readable|no mirror)\b", re.IGNORECASE)
+    r"\b(nothing|none|no readable|no mirror|no value|no mean|no belief|"
+    r"no number)\b"
+    # The JUDGEMENT form only ("the claim that a mirror LEADS it is false").
+    # A bare `\bfalse\b` is not usable here: `has_ep`'s field doc opens "False =
+    # no α persisted…", and the literal value would veto a correctly qualified
+    # sentence — measured, and it flagged that doc the first time.
+    r"|\b(?:is|are|was|proves?)\s+(?:false|untrue)\b",
+    re.IGNORECASE)
 
 
 #: Restriction clauses that demote the mirror to a FALLBACK — the inverse of the
