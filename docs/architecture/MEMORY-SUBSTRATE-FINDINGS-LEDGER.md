@@ -274,19 +274,29 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   A citation whose path **resolves outside the repository** (a `..` escape) is refused for the same
   reason: an existence check alone certified a `..`-escaping citation to a real file the repo does
   not contain — the "looks exactly like evidence" class this page exists to catch (that literal is
-  left out of a code span on purpose: this very scan refuses it, which is the proof). A `~`- or
-  `/`-rooted path is the one deliberate exemption (a dated reading of something outside this repo,
-  §5); it is recognised and counted rather than silently skipped, so a typo'd *relative* path cannot
-  hide there;
+  left out of a code span on purpose: this very scan refuses it, which is the proof). An
+  **absolute** path is not exempt either: it is resolved against the repository root and refused if
+  it points outside it, because rewriting every citation to an absolute one used to leave the page
+  CLEAN with nothing resolved. A citation **embedded in a longer span** is refused too — appending one
+  word inside the backticks defused a legitimate out-of-range red (the example is unspanned for the
+  same reason as the others above). The one
+  remaining carve-out is a `~`-rooted path (a dated reading of something outside this repo, §5): it is
+  recognised and COUNTED, and the guard raises UNVERIFIED rather than reporting clean when nothing but
+  exempt citations remain, so a page cannot be re-pointed wholesale onto them;
 - the **§3 headline tally** is derived too. The "N of the twelve rows no longer read as written"
   count, the letter list beside it, and the four-of-the-seven "overtaken" figure are all recomputed
   from the verdict cells and compared with the sentence a reader actually quotes. Unguarded, flipping
   one verdict cell to `STILL-TRUE` left the page asserting a superseded count with `--check` at
   **rc 0** — and that number is repeated in this repo's `ci.yml`, `config/ci-surfaces.yml`,
-  `docs/00_index.md` and two test docstrings, so a wrong one propagates well past this page;
-- every **§3 evidence cell** names a `path:line`, an issue, a command or a §N (§1's own rule). Without
-  this, the whole evidence column can be **emptied** while every verdict still passes — a red defused
-  by deleting what it pointed at, which is the one move this page exists to make impossible;
+  `docs/00_index.md`, this module's docstring and the test module's, so a wrong one propagates well
+  past this page. It must also be the ONLY such paragraph: a decoy carrying a correct-looking tally,
+  inserted anywhere above §3, took the match while the real sentence was falsified (measured, rc 0),
+  so more than one is a page defect;
+- every **§3 evidence cell** names a `path:line`, an issue, a command or a §N (§1's own rule), and
+  the §N must name a heading that EXISTS — accepting any `§<digit>` let all twelve cells be replaced
+  with a reference to a section the page does not have (measured, rc 0). Without this, the whole
+  evidence column can be **emptied** while every verdict still passes — a red defused by deleting
+  what it pointed at, which is the one move this page exists to make impossible;
 - the **§3 population is pinned** to twelve rows, and the **§6 arithmetic** (open + closed + merged =
   the indexed population) is re-derived from the table rather than trusted — deleting a row and every
   mention of it otherwise passes every referential check. Because a pin selects rows *by shape*, an
@@ -297,7 +307,10 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   an OPEN issue** — the `#2730` bullet is CLOSED and is printed because *issue closure is not evidence
   of a fix*, not because it survives. §6 must also carry **exactly one** sentence matching that
   pattern: the check finds its subject by pattern, so a second one **anywhere** in §6 makes it report
-  that §6 carries two and check neither rather than picking one — keep exactly one. Before that was
+  that §6 carries two and check neither rather than picking one — keep exactly one. Its BULLET SET is
+  pinned as well: both derived numbers are functions of the bullets naming an OPEN issue, so the CLOSED
+  bullet could be deleted with both counts unchanged (measured, rc 0) — and that bullet is the one whose
+  whole job is *issue closure is not evidence of a fix*, so its absence now reds. Before that was
   guarded it took the first match and reported OK over the other, and one added decoy sentence was
   enough (measured). Unguarded, this sentence also carried a false `three` over two
   survivor bullets while §7 said `two`, and the guard reported OK over it: the page's own *declared ≠
