@@ -952,7 +952,15 @@ class GraphRanker:
             # answered `1e308/inf == 0.0` here — maximum disbelief for a
             # perfectly symmetric claim — while the `ep` block answered 0.5 for
             # the same node, and `1e308` is not a value this ranker can order.
-            "    coalesce(n.confidence, "
+            # #11702 cycle 18: the MIRROR is coerced, like every other reader.
+            # GraphRanker was the one belief read that passed it through raw:
+            # a stored Boolean mirror (`update_point(confidence=True)`) was
+            # read as `float(True) == 1.0` — the convention cycles 12→16 retired
+            # everywhere else — so a claim at 0.7 ranked FIRST at 1.0, and a
+            # non-numeric mirror raised out of `float(raw_conf)` below, whose
+            # caller returns None and drops the signal map for the WHOLE batch
+            # (every result then loses confidence/variance/contested).
+            "    coalesce(" + numeric_operand_cypher("n.confidence") + ", "
             "      " + belief_mean_cypher(
                 "coalesce(n.posterior_alpha, n.ep_alpha, 1.0)",
                 "coalesce(n.posterior_beta, n.ep_beta, 1.0)") + ") "
@@ -1025,9 +1033,12 @@ class GraphRanker:
             # #11702: `null` is the ABSENT state, carried through as None —
             # never coerced to a number here (a `float(None)` here, or a 0.5
             # default, is the defect this issue removes).
-            raw_conf = row[1]
+            # #11702 cycle 18: TOTAL, through the shared coercion — see the
+            # query above. A Boolean or non-numeric mirror is NOT a certainty,
+            # and must not take the batch down.
+            raw_conf = numeric_operand(row[1])
             out[pid] = {
-                "confidence": float(raw_conf) if raw_conf is not None else None,
+                "confidence": raw_conf,
                 "ep_state": state,
                 "degree": int(row[2]),
                 "created": row[3],

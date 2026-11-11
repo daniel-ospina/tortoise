@@ -2264,22 +2264,30 @@ def test_one_malformed_mirror_does_not_discard_the_batch(sdk):
     proj = sdk._get_proj()
     bad = sdk.create_point("statement", "ZQFORMAT bad mirror claim")["id"]
     good = sdk.create_point("statement", "ZQFORMAT good measured claim")["id"]
-    proj.g.query('MATCH (n:Point {id:$id}) SET n.confidence = "abc"',
+    # …WITH a valid pair beside it (cycle 18): with the mirror alone the
+    # presence predicate takes its `ELSE null` arm and the bad mirror is never
+    # served, so the test could not fail. This is the shape that reaches the
+    # value expression — the one GraphRanker got wrong for 17 cycles.
+    proj.g.query('MATCH (n:Point {id:$id}) SET n.confidence = "abc", '
+                 "n.posterior_alpha = 0.7, n.posterior_beta = 0.3",
                  params={"id": bad})
     proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 2.0, "
                  "n.posterior_beta = 2.0, n.confidence = 0.5",
                  params={"id": good})
 
+    # The mirror is unreadable; the PAIR is what the state reports.
     assert proj.g.query(
         "MATCH (n:Point {id:$id}) RETURN " + ep_state_cypher("n"),
-        params={"id": bad}).result_set[0][0] == EP_STATE_ABSENT
+        params={"id": bad}).result_set[0][0] == EP_STATE_MEASURED
 
     ann = annotate_ep_batch(proj.g, [bad, good])
     assert set(ann) == {bad, good}, (
         "the batch annotation dropped the WHOLE response because of one "
         f"malformed row: {sorted(ann)}")
-    assert ann[bad].ep_state == EP_STATE_ABSENT, ann[bad]
-    assert ann[bad].confidence_mean is None, ann[bad]
+    # The mirror is unreadable but the PAIR is not: the pair decides, exactly
+    # as the Cypher `coalesce(<coerced mirror>, <mean>)` does.
+    assert ann[bad].ep_state == EP_STATE_MEASURED, ann[bad]
+    assert ann[bad].confidence_mean == pytest.approx(0.7, abs=1e-4), ann[bad]
     assert ann[good].ep_state == EP_STATE_MEASURED, ann[good]
     assert ann[good].confidence_mean == 0.5, ann[good]
 
@@ -2291,9 +2299,78 @@ def test_one_malformed_mirror_does_not_discard_the_batch(sdk):
                 [{"id": bad, "scores": {"rrf": 1.0}},
                  {"id": good, "scores": {"rrf": 1.0}}])}
     assert set(recs) == {bad, good}, recs
-    assert recs[bad]["ep_state"] == EP_STATE_ABSENT, recs[bad]
+    # Both rankers agree with annotate: the unreadable mirror is skipped and
+    # the stored pair answers, so neither row loses its belief.
+    assert recs[bad]["ep_state"] == EP_STATE_MEASURED, recs[bad]
+    assert recs[bad]["confidence"] == pytest.approx(0.7, abs=1e-4), recs[bad]
     assert recs[good]["ep_state"] == EP_STATE_MEASURED, recs[good]
     assert recs[good]["confidence"] == 0.5, recs[good]
+
+
+def test_the_third_ranker_reads_an_unreadable_mirror_like_the_other_two(sdk):
+    """Cycle 18 P1: `GraphRanker` was the ONE read that passed the mirror raw.
+
+    Cycles 16 and 17 replaced the raw mirror at `annotate_ep_batch`, `why`,
+    `StateRanker`, `GapsRanker`, `SubgraphExpander` and the `analyze` templates
+    and missed `_fetch_point_signals`, which still did `float(raw_conf)`. Two
+    measured consequences, both on shapes this PR declares must read `absent`:
+
+    * a stored BOOLEAN mirror reached `float(True) == 1.0`, so a claim whose
+      pair says 0.7 ranked FIRST at confidence 1.0 (`final_score` 0.575 vs
+      0.5225) while every other surface answered 0.7;
+    * a non-numeric mirror raised out of the batch, and `_fetch_signals`
+      returns None on a raise — so EVERY id in the response lost its
+      confidence/variance/contested state.
+
+    The earlier fixtures could not catch either: they set the mirror with NO
+    pair, so `ep_has_belief_cypher` took its `ELSE null` arm and the unreadable
+    mirror was never served. The pair beside the bad mirror is the shape that
+    reaches the value expression, so it is the shape pinned here.
+    """
+    from tortoise.ranking import GraphRanker
+
+    proj = sdk._get_proj()
+    pids = {}
+    for label, setter in {
+        "bool_mirror_pair": ("SET n.confidence = true, "
+                             "n.posterior_alpha = 0.7, n.posterior_beta = 0.3"),
+        "bad_mirror_pair": ('SET n.confidence = "abc", '
+                            "n.posterior_alpha = 0.7, n.posterior_beta = 0.3"),
+        "clean_pair": ("SET n.posterior_alpha = 0.7, n.posterior_beta = 0.3"),
+        "measured_half": ("SET n.posterior_alpha = 1.0, n.posterior_beta = 1.0"),
+    }.items():
+        pid = sdk.create_point("statement", f"ZQGRAPH {label}")["id"]
+        proj.g.query(f"MATCH (n:Point {{id:$id}}) {setter}", params={"id": pid})
+        pids[label] = pid
+
+    signals = GraphRanker(projection=proj)._fetch_point_signals(
+        list(pids.values()))
+    assert signals, (
+        "the signal map is empty — ONE unreadable mirror dropped the whole "
+        "batch (the class cycle 16 closed in `annotate_ep_batch`)")
+    for label, pid in pids.items():
+        assert pid in signals, (label, sorted(signals))
+
+    # The pair decides, on all three: an unreadable mirror is not a certainty.
+    for label in ("bool_mirror_pair", "bad_mirror_pair", "clean_pair"):
+        got = signals[pids[label]]["confidence"]
+        assert got == pytest.approx(0.7, abs=1e-6), (
+            f"{label}: GraphRanker reads {got!r} where annotate/StateRanker/"
+            "GapsRanker read 0.7 for the same claim")
+    assert signals[pids["measured_half"]]["confidence"] == pytest.approx(0.5)
+
+    # …and the ranking ORDER follows the belief, not the unreadable mirror.
+    rows = GraphRanker(projection=proj).rerank(
+        [{"id": pid, "scores": {"rrf": 0.5}} for pid in pids.values()])
+    by_id = {r["id"]: r for r in rows}
+    assert by_id[pids["bool_mirror_pair"]]["graph_ranking"][
+        "confidence"] == pytest.approx(0.7, abs=1e-6), by_id[pids["bool_mirror_pair"]]
+    assert (by_id[pids["bool_mirror_pair"]]["graph_ranking"]["final_score"]
+            == pytest.approx(
+                by_id[pids["clean_pair"]]["graph_ranking"]["final_score"],
+                abs=1e-9)), (
+        "the Boolean mirror still outranks the identical clean claim — "
+        "`float(True) == 1.0` is back")
 
 
 def test_a_boolean_is_not_a_belief_on_either_twin(sdk):
@@ -2440,6 +2517,20 @@ def test_the_artifact_reader_agrees_with_the_shared_reader_where_both_are_total(
         "negative": {"posterior_alpha": 3.0, "posterior_beta": -1.0},
         "mirror_leads": {"confidence": 0.2, "posterior_alpha": 9.0,
                          "posterior_beta": 1.0},
+        # Cycle 18: the shapes where the two DID disagree, because a Boolean is
+        # a number to `float()` and not to the shared reader. `subgraph_render`
+        # printed `confidence: 1.00` for a claim every product surface reported
+        # `absent`. A `mirror_leads` pair beside it is included so the mirror
+        # branch is exercised on a row that is READABLE by the pair too.
+        "boolean_mirror": {"confidence": True},
+        "boolean_mirror_false": {"confidence": False},
+        "boolean_mirror_with_pair": {"confidence": True,
+                                     "posterior_alpha": 0.7,
+                                     "posterior_beta": 0.3},
+        "bad_mirror_with_pair": {"confidence": "abc",
+                                 "posterior_alpha": 0.7,
+                                 "posterior_beta": 0.3},
+        "string_operands": {"posterior_alpha": "0.7", "posterior_beta": "0.3"},
     }
     disagreements = []
     for name, props in shapes.items():

@@ -86,6 +86,7 @@ import math
 import time
 
 from tortoise.live import epistemic_disjunction
+from tortoise.search_engine import numeric_operand  # #11702: ONE coercion
 
 logger = logging.getLogger(__name__)
 
@@ -515,10 +516,17 @@ def read_confidence(p) -> float | None:
         return None
     mirror = p.get("confidence")
     if mirror is not None:
-        try:
-            return float(mirror)
-        except (TypeError, ValueError):
-            return None  # an unrepresentable mirror is not a belief
+        # #11702 cycle 18: the shared coercion, so a stored BOOLEAN mirror does
+        # not arrive as `float(True) == 1.0` — the convention cycles 12→16
+        # retired across the product. This value is RENDERED: `subgraph_render`
+        # printed `confidence: 1.00` for a claim every surface reported
+        # `absent`. An UNREADABLE mirror falls THROUGH to the pair, exactly as
+        # `belief_value` and the Cypher `coalesce(<coerced mirror>, <mean>)` do
+        # — the pair may still be readable, and refusing it here would be a
+        # third answer for one claim.
+        value = numeric_operand(mirror)
+        if value is not None:
+            return value
     # `is None` (not `or`) so a legitimate 0.0 posterior is never overridden
     # by the prior — "prefers posterior_*" must hold for falsy values too.
     alpha = p.get("posterior_alpha")
