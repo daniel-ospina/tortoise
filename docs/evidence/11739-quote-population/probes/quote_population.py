@@ -119,7 +119,15 @@ class _Client:
         self._id += 1
         body = json.dumps({"jsonrpc": "2.0", "id": self._id,
                            "method": method, "params": params}).encode()
-        req = urllib.request.Request(self.endpoint, data=body, headers=self.headers)
+        # The construction is OUTSIDE the try below and `Request` parses the URL: an endpoint
+        # short by its scheme (`TORTOISE_API_URL=api.premiselabs.co`) raised ValueError out of
+        # `main` and exited 1 — outside the documented 0/2/3/4 contract, and exactly the
+        # mistake `_mcp_endpoint` exists to absorb (review, attestation round 2).
+        try:
+            req = urllib.request.Request(self.endpoint, data=body, headers=self.headers)
+        except ValueError as e:
+            sys.stderr.write(f"GRAPH-UNREACHABLE(BAD-ENDPOINT {self.endpoint!r}): {e}\n")
+            raise SystemExit(3) from None
         try:
             with urllib.request.urlopen(req, timeout=timeout) as f:
                 raw = f.read().decode("utf-8", "replace")

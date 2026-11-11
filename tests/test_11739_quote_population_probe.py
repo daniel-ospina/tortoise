@@ -16,6 +16,7 @@ this file is safe in the docker lane and in CI.
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -742,6 +743,30 @@ class _FakeBody:
         return None
 
 
+def test_the_artifact_names_a_commit_whose_probe_is_the_probe_that_made_it():
+    """FAILS IF the census is produced on a DIRTY tree, or the probe is edited after the last
+    measurement: then no commit satisfies (`head_sha`, `probe_sha256`) and the provenance stops
+    meaning "where these numbers came from".
+
+    The repair is the bundle's established order — commit the probe, measure on a CLEAN tree,
+    commit the census — not a hand-edited digest.
+    """
+    import hashlib
+    import json
+    import subprocess
+
+    census_path = qp.pathlib.Path(qp.__file__).with_suffix("").parent.parent / "census.json"
+    artifact = json.loads(census_path.read_text())
+    head = artifact["provenance"]["head_sha"]
+    if head == "unknown":
+        pytest.skip("recorded from a copy with no git")
+    blob = subprocess.run(
+        ["git", "show",
+         f"{head}:docs/evidence/11739-quote-population/probes/quote_population.py"],
+        capture_output=True).stdout
+    assert hashlib.sha256(blob).hexdigest() == artifact["provenance"]["probe_sha256"]
+
+
 def _stub_main(monkeypatch):
     """Make `main()` reachable without a graph: a stub client and a canned report."""
     monkeypatch.setenv("TORTOISE_MCP_API_KEY", "test-key")
@@ -772,6 +797,19 @@ def test_main_writes_the_artifact_and_records_its_cost(monkeypatch, tmp_path):
     payload = json.loads(out.read_text())
     assert payload["headline"] == {"live_points": 0}
     assert payload["duration_s"] >= 0
+
+
+@pytest.mark.parametrize("endpoint", ["api.premiselabs.co", "", "/mcp/", "premiselabs.co:443/mcp/"])
+def test_an_endpoint_without_a_scheme_exits_three(monkeypatch, endpoint):
+    """FAILS IF `Request` is constructed outside a guard: it parses the URL, so an endpoint
+    short by its scheme raised `ValueError` out of `main` and exited 1 — outside the documented
+    0/2/3/4 contract, and the exact mistake `_mcp_endpoint` exists to absorb (review,
+    attestation round 2). Exit 3: the graph could not be read, which is never 0%."""
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "test-key")
+    client = qp._Client(endpoint, "test-key")
+    with pytest.raises(SystemExit) as exc:
+        client.tool("tortoise_query", {"limit": 1})
+    assert exc.value.code == 3
 
 
 def test_page_one_without_a_total_exits_four():
@@ -872,13 +910,16 @@ def test_the_committed_census_records_its_own_cost():
     artifact = json.loads(census_path.read_text())
     assert isinstance(artifact["duration_s"], (int, float))
     assert artifact["duration_s"] > 0
-    # `head_sha` names the tree the run executed against — NECESSARILY a pre-commit tree, so a
-    # reader comparing it with `git rev-parse HEAD` must expect the parent. Pin the SHAPE: the
-    # digest binds the artifact to the probe, and nothing bound this field at all.
-    import re
-
+    # `head_sha` names the commit the run executed against, and it is only meaningful if that
+    # commit's PROBE is the probe that produced this artifact — a shape check (40 hex) accepted
+    # a census measured on a dirty tree, where NO commit satisfies (head_sha, probe_sha256)
+    # (review, attestation round 2). The pin is therefore RELATIONAL, and positional claims
+    # (`HEAD~N`) are deliberately not made: a later merge or rebase moves how far back the run
+    # sits without changing the fact the pin checks.
     head = artifact["provenance"]["head_sha"]
-    assert head == "unknown" or re.fullmatch(r"[0-9a-f]{40}", head), head
+    if head == "unknown":
+        pytest.skip("recorded from a copy with no git")
+    assert re.fullmatch(r"[0-9a-f]{40}", head), head
 
 
 def test_the_committed_census_was_produced_by_this_probe():
