@@ -261,8 +261,8 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[
     ),
     (
         STORAGE,
-        "STORAGE attributes the vector-LOCATION ruling to V1/§12.1c and the embeddings question to V3",
-        "settles where the vector index LIVES (Postgres, 2026-11-07), and it does not settle whether these two labels carry embeddings — that is §14.3 **V3**'s question",
+        "STORAGE attributes the vector-LOCATION ruling to V1/§12.1c and leaves V3's remainder the INDEX question",
+        "settles where the vector index LIVES (Postgres, 2026-11-07), and it did not settle whether these two labels carry embeddings",
     ),
     (
         ONTOLOGY,

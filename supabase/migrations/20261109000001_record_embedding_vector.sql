@@ -289,6 +289,7 @@ COMMENT ON COLUMN public.event.embedding_vec IS
 -- ALREADY full-scanned (`#4997`, `#11087`). They keep that same brute-force
 -- graph scan after this move; only `Point`/`Source`/`Event` change mechanism,
 -- and the leg's own trace says which ran. Whether those two labels should
--- carry embeddings AT ALL is `STORAGE-ARCHITECTURE.md` §14.3 **V3**, which is
--- still OPEN and which V1 did not spend — this migration does not spend it
--- either.
+-- carry embeddings AT ALL is `STORAGE-ARCHITECTURE.md` §14.3 **V3** — ✅ ANSWERED
+-- KEEP on 2026-11-10 (`#11395` comment `6781921075`), so this migration is
+-- correctly silent on it: there is no removal to describe, and the surviving
+-- question is whether those labels are INDEXED — not whether they exist.
