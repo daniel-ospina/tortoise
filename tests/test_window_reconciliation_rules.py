@@ -119,12 +119,36 @@ def test_raised_window_is_the_factor_on_all_three_dimensions():
 def test_raised_window_clamps_and_rejects_a_bad_factor():
     raised = wr.raised_window(top_k=10_000, context_item_cap=10_000,
                               max_context_tokens=10_000)
-    assert raised["top_k"] == wr.MAX_RAISED_TOP_K
-    assert raised["context_item_cap"] == wr.MAX_RAISED_CONTEXT_ITEM_CAP
+    # ⛔ #2570 review round 3, finding 2: above the guard maximum the
+    # dimension cannot be RAISED, but it must never be LOWERED either — a
+    # bare ``min`` published a downgrade as a "raised window".
+    assert raised["top_k"] == 10_000
+    assert raised["context_item_cap"] == 10_000
     assert raised["max_context_tokens"] == 20_000
     with pytest.raises(ValueError):
         wr.raised_window(top_k=5, context_item_cap=5, max_context_tokens=5,
                          factor=0)
+
+
+def test_raised_window_never_downgrades_a_dimension():
+    """The raise is monotonic non-decreasing in every dimension (#2570 R3
+    finding 2). 400 is the guard maximum: at it the raise is a no-op, above
+    it the value is preserved, and the module's own census must never call a
+    smaller window a raise."""
+    for base in (1, 40, 399, 400, 500, 10_000):
+        raised = wr.raised_window(top_k=base, context_item_cap=base,
+                                  max_context_tokens=8000)
+        assert raised["top_k"] >= base, (base, raised)
+        assert raised["context_item_cap"] >= base, (base, raised)
+        assert raised["max_context_tokens"] > 8000
+    # at the guard maximum itself the raise is a no-op, not a shrink
+    at_max = wr.raised_window(top_k=wr.MAX_RAISED_TOP_K,
+                              context_item_cap=wr.MAX_RAISED_CONTEXT_ITEM_CAP,
+                              max_context_tokens=8000)
+    assert at_max["top_k"] == wr.MAX_RAISED_TOP_K
+    assert at_max["context_item_cap"] == wr.MAX_RAISED_CONTEXT_ITEM_CAP
+    # …and the token budget carries the re-run's difference on its own
+    assert at_max["max_context_tokens"] == 16000
 
 
 def test_raise_factor_default_is_pinned_to_two():
@@ -402,14 +426,23 @@ def test_wiring_abstention_fires_reason_a(monkeypatch):
 
 
 def test_wiring_cap_skips_the_pass_when_the_bound_does_not_fit(monkeypatch):
-    """The cap is a real gate: a question whose own one-shot reader burn puts
-    the conservative bound over the cap is NOT re-run."""
+    """The cap is a real gate: when the BOUND exceeds the cap the pass is NOT
+    re-run.
+
+    ⛔ #2570 review round 3, finding 3: this fixture records its 20 000 tokens
+    under ``stage="judge"`` — the ONLY stage ``marginal_bound`` reads for its
+    judge term. The previous version recorded them under ``stage="reader"``,
+    which the bound deliberately ignores (finding 3 of round 1), so the
+    docstring's causal claim was not what the fixture exercised: the bound
+    was 19 000 from the window + headrooms alone and the assertion held for a
+    reason the prose named wrongly. Pinning the judge term is the point.
+    """
     calls: list = []
     collector = lme_usage.get_collector()
     collector.reset()
     lme_usage.set_question_key("q_msr_1")
     try:
-        collector.record(stage="reader", provider="openrouter", model_id="m",
+        collector.record(stage="judge", provider="openrouter", model_id="m",
                          usage={"prompt_tokens": 20000}, usage_present=True)
         monkeypatch.setattr(
             runner, "retrieve_for_question",
@@ -427,6 +460,8 @@ def test_wiring_cap_skips_the_pass_when_the_bound_does_not_fit(monkeypatch):
         collector.reset()
     assert stats["fired"] is True
     assert stats["admitted"] is False
+    # the judge term IS in the bound: 16000 + 1000 + 2000 + 20000
+    assert stats["marginal_bound"] == 39000
     assert stats["skip_reason"] == "token_cap"
     assert stats["variant_label"] is None
     assert calls == []
@@ -717,22 +752,54 @@ def test_fingerprint_always_carries_the_arm_and_caps_only_when_armed():
     off = _fingerprint()
     assert off["window_reconciliation"] is False
     assert "window_reconciliation_token_cap" not in off
+    assert "window_reconciliation_max_context_tokens" not in off
     on = _fingerprint(window_reconciliation=True,
-                      window_reconciliation_token_cap=24000)
+                      window_reconciliation_token_cap=24000,
+                      window_reconciliation_max_context_tokens=8000)
     assert on["window_reconciliation"] is True
     assert on["window_reconciliation_token_cap"] == 24000
+    assert on["window_reconciliation_max_context_tokens"] == 8000
 
 
 def test_fingerprint_refuses_an_arm_flip_or_a_cap_change():
     """An arm-ON checkpoint cannot be resumed with the arm OFF, and two cap
     volumes can never blend into one artifact."""
     on = _fingerprint(window_reconciliation=True,
-                      window_reconciliation_token_cap=24000)
+                      window_reconciliation_token_cap=24000,
+                      window_reconciliation_max_context_tokens=8000)
     assert runner._fingerprint_diffs(on, _fingerprint())
     assert runner._fingerprint_diffs(
         on, _fingerprint(window_reconciliation=True,
-                         window_reconciliation_token_cap=12000))
+                         window_reconciliation_token_cap=12000,
+                         window_reconciliation_max_context_tokens=8000))
     assert not runner._fingerprint_diffs(on, on)
+
+
+def test_fingerprint_refuses_a_window_change_at_the_same_arm_and_cap():
+    """⛔ #2570 review round 3, finding 1 — R6 was DECLARED but not covered.
+
+    The arm's methodology comment promises an arm-ON checkpoint "can never be
+    resumed under a different cap/window — the fingerprint gate". ``top_k``
+    and ``context_item_cap`` were gated; the third window dimension
+    (``max_context_tokens``, which the raise scales) was not, so a checkpoint
+    written at 8000 could be resumed at 12000 with an identical fingerprint —
+    and the resumed segment would blend two windows into one published
+    variant block, or (past the cap) take ``token_cap`` on every question
+    while the artifact claimed a single window.
+
+    Same arm, same cap, DIFFERENT window ⇒ the resume must be refused.
+    """
+    written = _fingerprint(window_reconciliation=True,
+                           window_reconciliation_token_cap=24000,
+                           window_reconciliation_max_context_tokens=8000)
+    resumed_bigger = _fingerprint(window_reconciliation=True,
+                                 window_reconciliation_token_cap=24000,
+                                 window_reconciliation_max_context_tokens=12000)
+    resumed_smaller = _fingerprint(window_reconciliation=True,
+                                  window_reconciliation_token_cap=24000,
+                                  window_reconciliation_max_context_tokens=4000)
+    assert runner._fingerprint_diffs(written, resumed_bigger)
+    assert runner._fingerprint_diffs(written, resumed_smaller)
 
 
 def test_variant_rows_surface_pair_excludes_an_admitted_pass_without_after():

@@ -191,16 +191,26 @@ def raised_window(*, top_k: int, context_item_cap: int,
                   factor: int = DEFAULT_WINDOW_RAISE_FACTOR) -> dict[str, int]:
     """The raised-window knob triple (all three are window dimensions).
 
-    ``top_k`` and ``context_item_cap`` are clamped to the guard maxima so
-    a pathological one-shot config cannot produce an unbounded window.
+    ``top_k`` and ``context_item_cap`` are clamped to the guard maxima so a
+    pathological one-shot config cannot produce an unbounded window — but
+    the clamp is applied as ``max(base, min(base*factor, MAX))``, NEVER as a
+    bare ``min``. A bare ``min`` INVERTS the mechanism above the guard: base
+    400 stays 400 (no raise at all) and base 500 is *reduced* to 400, so a
+    run with ``--top-k 500`` would publish a DOWNGRADE as a "raised window"
+    and read its ``reader_surface@k`` delta from it. Above the guard the
+    dimension simply cannot be raised; the re-run still differs because the
+    token budget has no such clamp.
     """
     if factor < 1:
         raise ValueError(f"raise factor must be >= 1, got {factor}")
+    def _raise_dimension(base: int, maximum: int) -> int:
+        base = max(1, int(base))
+        return max(base, min(base * factor, maximum))
+
     return {
-        "top_k": min(max(1, int(top_k)) * factor, MAX_RAISED_TOP_K),
-        "context_item_cap": min(
-            max(1, int(context_item_cap)) * factor,
-            MAX_RAISED_CONTEXT_ITEM_CAP),
+        "top_k": _raise_dimension(top_k, MAX_RAISED_TOP_K),
+        "context_item_cap": _raise_dimension(context_item_cap,
+                                            MAX_RAISED_CONTEXT_ITEM_CAP),
         "max_context_tokens": max(1, int(max_context_tokens)) * factor,
     }
 

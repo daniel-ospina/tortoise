@@ -1897,6 +1897,19 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # two cap volumes can never blend into one artifact.
                        window_reconciliation: bool = False,
                        window_reconciliation_token_cap: int | None = None,
+                       # C3-4 (#2570, #2519): the THIRD window dimension —
+                       # the assembly token budget the arm's raise scales.
+                       # ``top_k`` (base dict) and ``context_item_cap``
+                       # (conditional member) are already gated, so stamping
+                       # this one completes the raised TRIPLE: without it a
+                       # checkpoint written at 8000 could be resumed at
+                       # 12000 (same fingerprint), and the resumed segment
+                       # would either blend two windows into one published
+                       # variant block or silently take ``token_cap`` on
+                       # every question. Conditional presence, like the cap:
+                       # None while the arm is OFF (the knob is inert there).
+                       window_reconciliation_max_context_tokens: int | None = (
+                           None),
                        # C5 (#2521, #2513): the aggregative-intent coverage-
                        # check arm — conditional presence like the other C2/C5
                        # knobs (a flagged checkpoint resumed without the arm
@@ -2141,6 +2154,15 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             # never be resumed by a 24k run.
             ("window_reconciliation_token_cap",
              window_reconciliation_token_cap),
+            # C3-4 (#2570, #2519): the raised window's THIRD dimension. The
+            # comment on the methodology record promises that an arm-ON
+            # checkpoint "can never be resumed under a different
+            # cap/window — the fingerprint gate"; the cap was gated and two
+            # of the three window dimensions were, but this one was not, so
+            # the promise did not hold. Conditional presence (None while the
+            # arm is OFF), same contract as the cap beside it.
+            ("window_reconciliation_max_context_tokens",
+             window_reconciliation_max_context_tokens),
             # C5 (#2521, #2513): the aggregative-intent coverage-check arm
             # — conditional presence like the C2 knob (a flagged checkpoint
             # resumed without the arm is refused by the fingerprint gate).
@@ -4964,6 +4986,12 @@ def run_evaluation(
         # resumed with the arm OFF or a different cap volume.
         window_reconciliation=bool(window_reconciliation),
         window_reconciliation_token_cap=window_reconciliation_token_cap,
+        # C3-4 (#2570): the assembly token budget completes the window
+        # triple on the fingerprint — without it a resume at a different
+        # budget passed the gate while the raised window it produces is a
+        # different instrument.
+        window_reconciliation_max_context_tokens=(
+            max_context_tokens if window_reconciliation else None),
         # C4 (#2517/#2568, #2513): the resolved re-injection arm + guard
         # ablation ride the fingerprint as ALWAYS-PRESENT resolved bools
         # (the sibling-arm convention) — a fingerprint-bearing pre-feature
