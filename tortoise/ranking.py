@@ -1231,13 +1231,20 @@ class StateRanker:
             # here is how the same claim ended up `measured` in the `ep` block
             # and `baseline` in the ranking.
             #
-            # ⛔ Unconditionally — including when the VALUE is None. A stored
-            # degenerate pair (posterior α = β = 0, which `ep.py::_write_node`
-            # writes verbatim) is PRESENT with no computable mean, so the read
-            # legitimately answers `confidence: None` beside
-            # `ep_state: "measured"`; deriving `absent` from the None value
-            # fabricated a state the signal had just denied, and pushed the row
-            # below every other one on the page.
+            # ⛔ Unconditionally — including when the VALUE is None. The state
+            # and the value are ONE read: the signal derives `has_prior` from
+            # the shared presence predicate and `confidence` from the same
+            # rule, so a None value today implies the absent state (a stored
+            # α + β == 0 pair is ABSENT there, not present-with-no-mean — the
+            # earlier predicate called it present and this row answered
+            # `confidence: null` beside `ep_state: "measured"`). Re-deriving
+            # the state from the value would be a SECOND presence rule, which
+            # is the defect class #11702 removes even on the days the two
+            # happen to agree; `confidence_source` is answered by the same
+            # `_confidence_of` and must not deny the state beside it (the
+            # reviewed head emitted `"absent"` beside `"measured"`).
+            # `test_confidence_source_never_contradicts_the_ep_state_beside_it`
+            # pins the agreement for all six stored shapes.
             ep_state = sig.get("ep_state")
             if ep_state is None:
                 ep_state = (EP_STATE_ABSENT if confidence is None
@@ -1739,13 +1746,14 @@ class GapsRanker:
                 # #11702: the state NAME (see StateRanker's recall_ranking).
                 # Taken from the SIGNAL when the graph was queried — the same
                 # field StateRanker reads — and NOT re-derived from the value:
-                # `confidence is None` is also true of a claim whose state is a
-                # non-absent one (`_confidence_of` answers None for a stored
-                # degenerate pair), so deriving here reported `absent` for a
-                # claim the `ep` block called `measured`. Two rankers inventing
-                # a state the read denies is the defect, not the fix. The value
-                # fallback survives only for the embedded (no-graph) path,
-                # which carries no signal to read.
+                # the signal decides presence and value by ONE rule, so a None
+                # value already implies the absent state (a stored
+                # α + β == 0 pair is absent there). Deriving the state here
+                # instead would be a second presence rule — the defect class
+                # this issue removes — and two rankers inventing a state the
+                # read denies is how one claim came to report `absent` and
+                # `measured` at once. The value fallback survives only for the
+                # embedded (no-graph) path, which carries no signal to read.
                 "ep_state": (
                     sig.get("ep_state")
                     or (EP_STATE_ABSENT if confidence is None

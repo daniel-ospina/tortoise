@@ -435,6 +435,80 @@ def test_degenerate_posterior_pair_is_ABSENT_on_every_surface(sdk):
     assert rec["belief_informed_order"] is False, rec
 
 
+def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
+    """`confidence_source` and `ep_state` must name the SAME fact on one row.
+
+    The source string is the vocabulary a consumer filters on ("show me the
+    rows with no belief"), and `ep_state` is the state the `ep` block reports
+    for the same claim. The reviewed head emitted `confidence_source:
+    "absent"` BESIDE `ep_state: "measured"` for a stored (α, β) = (0, 0)
+    pair: one key said "nothing is persisted" while the other said "EP
+    measured this", so no consumer could trust either. (`_confidence_of`
+    collapsed every `None` value to the absent source, and the state was read
+    from the signal, which still called that pair present — two presence rules
+    on one row.)
+
+    Both rules are now the shared predicate, so the agreement is structural —
+    but "structural" is a claim, and this is the assertion that keeps it true
+    across all six stored shapes if either side is edited again.
+    """
+    proj = sdk._get_proj()
+
+    def _point(content, sql=None, params=None):
+        pid = sdk.create_point("statement", content)["id"]
+        if sql:
+            proj.g.query(f"MATCH (n:Point {{id:$id}}) SET {sql}",
+                         params={"id": pid, **(params or {})})
+        return pid
+
+    absent = _point("no belief at all")
+    half_pair = _point("a beta-only row", "n.posterior_beta = 3.0")
+    zero_total = _point("a degenerate pair", "n.posterior_alpha = 0.0, "
+                        "n.posterior_beta = 0.0")
+    mirror_only = _point("a mirror-only claim", "n.confidence = 0.95")
+    measured = _symmetric_point(sdk)  # α = β = 2.0, a real measured 0.5
+    baseline = _point("a declared baseline")
+    sdk.set_point_baseline(baseline, 18.0, 2.0)
+
+    ids = [absent, half_pair, zero_total, mirror_only, measured, baseline]
+    recs = {r["id"]: r["recall_ranking"] for r in
+            StateRanker(projection=proj).rerank(
+                [{"id": p, "scores": {"rrf": 1.0}} for p in ids])}
+    gaps = {r["id"]: r["gaps_ranking"] for r in
+            GapsRanker(projection=proj).rerank(
+                [{"id": p, "scores": {"rrf": 1.0}} for p in ids])}
+
+    for pid in ids:
+        for name, row in (("recall_ranking", recs[pid]),
+                          ("gaps_ranking", gaps[pid])):
+            state, source = row["ep_state"], row["confidence_source"]
+            assert (source == EP_STATE_ABSENT) == (state == EP_STATE_ABSENT), (
+                f"{name} reports confidence_source={source!r} beside "
+                f"ep_state={state!r} — the two keys describe one fact")
+            # …and the VALUE follows the same rule, so a row cannot say "no
+            # belief" in the source and carry a number in the value.
+            assert (row["confidence"] is None) == (state == EP_STATE_ABSENT), (
+                f"{name} reports confidence={row['confidence']!r} beside "
+                f"ep_state={state!r}")
+        # The two rankers must not disagree about the same node either.
+        assert recs[pid]["ep_state"] == gaps[pid]["ep_state"], pid
+        assert (recs[pid]["confidence_source"] == EP_STATE_ABSENT) == (
+            gaps[pid]["confidence_source"] == EP_STATE_ABSENT), pid
+
+    # The pre-fix contradiction, named: a zero-total pair is ABSENT in BOTH
+    # keys — never `"absent"` beside `"measured"`.
+    for row in (recs[zero_total], gaps[zero_total]):
+        assert row["ep_state"] == EP_STATE_ABSENT, row
+        assert row["confidence_source"] == EP_STATE_ABSENT, row
+        assert row["confidence"] is None, row
+    # …and the source still names a REAL state for the rows that have a belief.
+    assert recs[measured]["confidence_source"] == "posterior", recs[measured]
+    assert gaps[measured]["confidence_source"] == "posterior", gaps[measured]
+    for pid in (mirror_only, baseline):
+        assert recs[pid]["ep_state"] == EP_STATE_BASELINE, recs[pid]
+        assert recs[pid]["confidence_source"] != EP_STATE_ABSENT, recs[pid]
+
+
 def test_zero_total_pair_does_not_survive_an_equal_relevance_order(sdk):
     """The absent tier places the zero-total claim after a MEASURED 0.1 claim.
 
@@ -499,6 +573,72 @@ def test_analyze_evidence_chain_reports_null_and_sorts_an_absent_claim_last(sdk)
         "an absent belief must sort LAST, not above a measured 0.1 claim: " + answer)
     assert "0.50" not in answer, (
         "the absent claim was scored 0.50 — a fabricated neutral belief: " + answer)
+
+
+@pytest.mark.parametrize("template", ["strongest_for", "counter_arguments",
+                                     "evidence_chain"])
+def test_every_ranking_template_renders_an_absent_belief_with_no_number(
+        sdk, template):
+    """All THREE admitting templates, not just the one a previous test picked.
+
+    The reviewed finding named `strongest_for` (:99), `counter_arguments`
+    (:116) and `evidence_chain` (:194) — the three templates that carry no
+    presence gate in their WHERE and therefore take the shared belief
+    expression directly. `evidence_chain` was pinned; the other two were not,
+    so a bare `opponent.confidence` (or a re-introduced `ELSE 0.5`) on either
+    would have kept the suite green. This runs each template's OWN cypher and
+    its OWN formatter, so both halves of that surface are graded.
+
+    Both directions matter: the absent claim must still be RETURNED (the IMPL / 
+    NAND edge is the evidence — absence is not disqualifying) and must carry no
+    number and no rank above a measured 0.1 claim.
+    """
+    from tests._embedded import _wipe_or as wipe
+    from tortoise.analyze import TEMPLATES
+
+    proj = sdk._get_proj()
+    wipe(proj)
+    g = proj.g
+    g.query("CREATE (:Point {id:'absent-rel', content:'absent related claim', "
+            "is_operator:false, status:'live'})")
+    g.query("CREATE (:Point {id:'low-rel', content:'measured low claim', "
+            "is_operator:false, status:'live', posterior_alpha:1.0, "
+            "posterior_beta:9.0})")
+    g.query("CREATE (:Point {id:'tgt', content:'the ai strategy is working', "
+            "is_operator:false, status:'live'})")
+    g.query("CREATE (:Point {id:'impl', content:'IMPL', op_type:'IMPL', "
+            "is_operator:true, status:'live'})")
+    g.query("CREATE (:Point {id:'nand', content:'NAND', op_type:'NAND', "
+            "is_operator:true, status:'live'})")
+    # IMPL: both related claims support the target (idx 0 = the source).
+    g.query("MATCH (a:Point {id:'absent-rel'}), (b:Point {id:'low-rel'}), "
+            "(o:Point {id:'impl'}), (t:Point {id:'tgt'}) "
+            "CREATE (a)<-[:IMPL {idx:0}]-(o)-[:IMPL {idx:1}]->(t), "
+            "       (b)<-[:IMPL {idx:0}]-(o)-[:IMPL {idx:2}]->(t)")
+    # NAND: both contradict the target, for `counter_arguments`.
+    g.query("MATCH (a:Point {id:'absent-rel'}), (b:Point {id:'low-rel'}), "
+            "(o:Point {id:'nand'}), (t:Point {id:'tgt'}) "
+            "CREATE (t)<-[:NAND {idx:1}]-(o)-[:NAND {idx:0}]->(a), "
+            "       (t)<-[:NAND {idx:2}]-(o)-[:NAND {idx:3}]->(b)")
+
+    tmpl = TEMPLATES[template]
+    rows = g.query(tmpl["cypher"],
+                   params={"entity": "ai strategy", "limit": 20}).result_set
+    answer = tmpl["format"](rows)
+
+    assert "absent related claim" in answer, (
+        f"{template} dropped an absent claim instead of rendering it without "
+        f"a number: {answer}")
+    assert "0.50" not in answer, (
+        f"{template} scored an absent belief 0.50 — the fabrication #11702 "
+        f"removes: {answer}")
+    if template != "counter_arguments":
+        # The two IMPL templates rank, so the measured 0.1 claim must lead.
+        assert "measured low claim" in answer, answer
+        assert answer.index("measured low claim") < answer.index(
+            "absent related claim"), (
+            f"{template} ranked an absent belief above a measured 0.1 claim: "
+            + answer)
 
 
 def test_ep_evidence_prewrite_journals_the_mirror_clear(tmp_path):
