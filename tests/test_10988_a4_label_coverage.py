@@ -454,9 +454,14 @@ def test_the_per_writer_split_attributes_by_REPRODUCTION_and_says_it_is_not_a_st
 
 
 def _full_census(probe) -> dict:
-    """A complete census block, as `a_row_census` would return it."""
+    """A complete census block, as `a_row_census` would return it.
+
+    ⛔ The claims histogram carries an UNDECLARED kind (`constraint`) beside the `NULL`, so BOTH
+    halves of the absent share are non-zero and a renderer that drops either one is visible: the
+    absent total is 3 = 1 `NULL` + 2 undeclared, and only the `NULL` half may reach `null=`.
+    """
     layer = lambda name: probe.label_coverage(  # noqa: E731
-        {"statement": 3, "NULL": 1} if name == "claims" else {"NULL": 2},
+        {"statement": 3, "constraint": 2, "NULL": 1} if name == "claims" else {"NULL": 2},
         frozenset({"statement"}) if name == "claims" else frozenset({"project"}),
         layer=name)
     return {
@@ -490,15 +495,32 @@ def test_the_rendered_block_emits_EVERY_layer_with_its_own_denominator():
 
     The renderer IS the artifact a scoring child reads; a field in the dict the log never prints is
     a measurement nobody sees (the `#11331` round-8 shape).
+
+    ⛔ AND the absent share is rendered as its DECOMPOSITION, not only as a total: `label_coverage`
+    computes `unlabelled_null` / `unlabelled_undeclared` so a reader never has to subtract the
+    `undeclared` dict to recover the `NULL` denominator, which is the derivation
+    `capstone_measure.py`'s own comment refuses to impose. Before this arm listed them, the
+    docstring's "or the diagnostic loses its NULL share" clause was UNFALSIFIABLE for the
+    thing/event layers — deleting either key from the renderer left it GREEN (PR #11837 round-7 P2).
     """
     probe = _probe()
     rendered = "\n".join(probe.a_row_census_lines(_full_census(probe)))
     for layer in ("claims", "things", "events"):
         line = [ln for ln in rendered.splitlines() if ln.startswith(f"a4 {layer} ")]
         assert line, f"the {layer} layer is not rendered:\n{rendered}"
-        for part in ("population", "labelled", "unlabelled", "coverage", "non_vacuity",
+        for part in ("population", "labelled", "unlabelled", "unlabelled_null",
+                     "unlabelled_undeclared", "coverage", "non_vacuity",
                      "declared_present", "declared_absent", "undeclared"):
             assert f"{part}=" in line[0], (layer, part, line[0])
+        # The rendered halves are NUMBERS that add up to the rendered total — a placeholder
+        # (`unlabelled_null=None`) or a re-worded key is not the decomposition the epic accepts.
+        fields = dict(part.split("=", 1) for part in line[0].split() if "=" in part)
+        assert (int(fields["unlabelled_null"]) + int(fields["unlabelled_undeclared"])
+                == int(fields["unlabelled"])), (layer, line[0])
+    claims = next(ln for ln in rendered.splitlines() if ln.startswith("a4 claims "))
+    assert "unlabelled_null=1 unlabelled_undeclared=2 " in claims, (
+        "the claims layer's absent share is 1 NULL + 2 undeclared; the log must carry both halves "
+        f"as their own numbers, not only the total:\n{claims}")
     diagnostics = [ln for ln in rendered.splitlines() if ln.startswith("a4 diagnostics")]
     assert diagnostics, rendered
     for part in ("claim_points", "statement", "null", "typed_share"):

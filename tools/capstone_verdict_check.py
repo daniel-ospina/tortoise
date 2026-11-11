@@ -239,11 +239,11 @@ _MEASUREMENT_RUN_KEYS = (
     "errors",
     "corpus_sha256",
     # #10982: the A-row census is written INTO the run block by the emitter
-    # (`capstone_measure.py:4364`), beside `e3_census`/`e4_receipt`. ⛔ THE NUMBER IS
+    # (`capstone_measure.py:4370`), beside `e3_census`/`e4_receipt`. ⛔ THE NUMBER IS
     # REQUIRED, not decoration: `tests/test_7949_capstone_measure.py`'s
     # `_CROSS_FILE_PROBE_CITES` reads THIS pair out of THIS file and asserts that line of the
     # probe carries `"a_row_census": a_census,` — symbol-only prose matches nothing and reds it.
-    # It has re-staled three times inside the PR that added these rows, so it is RE-DERIVED from
+    # It has re-staled four times inside the PR that added these rows, so it is RE-DERIVED from
     # the tree on every insertion above it (`grep -n '"a_row_census": a_census,'`), never
     # eyeballed. Omitting it
     # here reopened the exact construction #10601 review round 2 closed: a
@@ -270,7 +270,7 @@ _MEASUREMENT_RUN_KEYS = (
 #: one counted cell, ``door.captures`` (``door_witness()``'s ``entered``/``bypassed``),
 #: is a ROUTING witness and NO RECORD CAN VARY IT: ``main`` calls
 #: ``require_door_entered(runs)`` BEFORE it reaches ``render_log``
-#: (``capstone_measure.py:4509`` vs ``:4644``), and that function raises on any bypass,
+#: (``capstone_measure.py:4515`` vs ``:4650``), and that function raises on any bypass,
 #: so ``bypassed`` is always ``[]`` and ``entered`` is always ``sessions`` re-counted.
 #: A constant carries no number of its own — ⛔ and NOT for the reason a witness like
 #: ``steps_observed`` would give: that key is itself a MEASUREMENT member of the set
