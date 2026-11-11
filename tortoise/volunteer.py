@@ -104,8 +104,11 @@ BLOCK_MAX_BYTES = 8 * 1024
 # ``_eligible`` below, which states the same rule with its no-mean shapes
 # enumerated. ⛔ The ``credibility`` word is a validated LABEL plus ONE weak
 # evidence body (``AUTHOR_ASSERTION_WEAK_PC``, #398 owner ruling 2026-10-12) —
-# it does NOT select a ``TIER_PRIORS`` rung, so ``credibility='low'`` is
-# Beta(3.1,1) on the default, not the T3 ladder prior.
+# it does NOT select a ``TIER_PRIORS`` rung. The two shapes are different and
+# both measured: with only the #2199 system default the word adds one weak body,
+# so ``credibility='low'`` is Beta(3.1,1) (`ep.py`:2368-2372 states exactly
+# that); an EXPLICIT ``set_point_baseline(3, 1)`` wins over the word and reads
+# 0.75. Neither is the T3 ladder prior (0.6667).
 # This 0.5 only bounds how far below the caller's floor a CONFLICT-RELEVANT
 # claim may sit while still being boosted; it is compared against a real mean.
 NEUTRAL_CONFIDENCE = 0.5
