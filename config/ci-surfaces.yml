@@ -5845,6 +5845,7 @@ surfaces:
   - test_retired_tools.py  # #3883: a retired MCP name resolves and WARNS (16 names retired, #3863)
   - test_coverage_loop.py  # #2567: evidence-completeness loop E2E (C3-1, docker-lane)
   - test_coverage_loop_rules.py  # #2567: evidence-completeness loop hermetic rules
+  - test_window_reconciliation_rules.py  # #2570: stratified window reconciliation (C3-4/P3) hermetic rules + labeled-variant invariance
   - test_session_reinjection_rules.py  # #2517: source-session re-injection hermetic rules (C4)
   - test_build_cohorts_2517.py  # #2517: cohort-builder selectors + digest refusal + provenance sidecar (hermetic)
   - test_guard_measured_revision.py  # #2517: measured-revision guard — one test per declared bypass class (hermetic)
@@ -8103,6 +8104,7 @@ surfaces:
   - test_reader_4837_advice_battery.py  # #4837: hermetic pre-registration + decision-rule pin for the advice battery (`tortoise/reader.py` selects sdk)
   - test_coverage_loop.py  # #2567 (docker-lane leg, mirrors test_retrieval.py)
   - test_coverage_loop_rules.py  # #2567 (hermetic rules leg)
+  - test_window_reconciliation_rules.py  # #2570 (hermetic rules leg: the P3 failing-class predicate + cap + labeled-variant block guard `tools/longmem_eval/window_reconciliation.py` and its `run.py` wiring; imports `tortoise/reader.py`'s abstract phrase vocabulary, so an sdk reader-vocabulary change must run it too)
   - test_session_reinjection_rules.py  # #2517 (hermetic rules leg, mirrors test_retrieval.py)
   - test_build_cohorts_2517.py  # #2517 (hermetic cohort-builder leg, mirrors test_retrieval.py)
   - test_guard_measured_revision.py  # #2517 (hermetic guard leg: the declared bypass surface on synthetic fixtures, mirrors the eval lane)
@@ -8443,6 +8445,7 @@ surfaces:
   - test_temporal_leg_replay_wiring_10538.py  # #10538: the offline replay proxy reproduces the SHIPPED temporal wiring — the question's resolved date window is threaded to the leg with the question date as the recency clock (hermetic, no DB/network; TF-IDF proxy over a hand-built pool, no dataset read)
   - test_temporal_leg_non_eviction_receipt_11494.py  # #11494: the non-eviction guard's RECEIPT on a WIRED read — `tools/longmem_eval/retrieve.py` is a SOURCE_PATTERNS entry of THIS surface, so a receipt-only change selects `eval`; without this arm the pin that kills the surviving slice-mutants never runs on the change it guards. Same #10194 reasoning as the sibling above: the file lives at `tests/`, not the subtracted `tests/longmem_eval/` subtree (hermetic, no DB/network/dataset)
   - test_window_arm_baseline_10538.py  # #10538 (dual with `sdk`): the window arm's RETENTION baseline. `tools/longmem_eval/` is a SOURCE_PATTERNS entry of THIS surface, so a change to the instrument (`tools/longmem_eval/window_arm_baseline.py`) selects `eval` and REPLACES the `core` fallback — without this arm, an instrument-only change would run none of the pins that would notice its output moving (the #1349/#2938 silent-drop class)
+  - test_window_reconciliation_rules.py  # #2570 (C3-4/P3): guards `tools/longmem_eval/window_reconciliation.py` + the `run.py` arm wiring + the `w7_publish.variant_rows` labeled block — `tools/longmem_eval/` is a SOURCE_PATTERNS entry of this surface, so an eval-tool change alone selects it (also under `core`/`sdk`)
   - longmem_eval/test_temporal_admission_trace.py  # #2976: temporal admission trace — pool-membership vs reader-window-cut receipts + TR-machinery-inert mechanism pin (hermetic, no DB)
   - longmem_eval/test_variant_containment_judge.py  # #2976: deterministic variant-aware containment judge — the keyless grader that reproduces the 42/52 ceiling (hermetic; the dataset leg skips when the split is not cached)
   - longmem_eval/test_temporal_admission_arms.py  # #2976: the admission-arms instrument — arm table/shared knobs/gold census/shard partition/summary aggregation (hermetic)
@@ -11205,6 +11208,7 @@ durations:
   test_website_static.py: 4.9  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 3.9
   test_weights.py: 0.1
   test_weights_mitigation.py: 0.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 3.2
+  test_window_reconciliation_rules.py: 10.0  # #2570: measured locally on this host (58 tests, 3.3-5.4s across 3 runs); errs high on the conservative side
   test_3815_mitigation_moves_weight.py: 24.8  # carried forward (not a full-file CI measurement) — #3815: local 3-run max (19.1/24.8/24.3); refresh from CI junit — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (10.9s) is a LOWER bound; kept 24.8
   test_6151_annotation_band.py: 1.2  # #6151: local 3-run max on this host (8.97/11.20/10.03s pytest, 13.7/15.8/15.2s wall, the whole 13-test file against a private FalkorDB probe; only the three graph-reading tests take the docker lane, the other 10 are pure assertions over the module's own neutral value). 20.0 errs high, the conservative side for a shard-balance veto, without inflating the slow leg. Refresh from the first CI junit that includes it. — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.2
   test_3817_tags_rebuild_durability.py: 6.8  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 4.5 — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (3.0s) is a LOWER bound; kept 6.8
