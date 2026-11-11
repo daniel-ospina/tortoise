@@ -19,6 +19,10 @@ from .ids import now_iso, ulid
 # shared with the SDK doors and the hosted surfaces — see the leaf module.
 from .kind_fallbacks import named_kind
 
+# #2782: the money value's WRITE gate, at the one seam that bypasses
+# `_sanitize_props`. `money` imports only `numeric_domain` (no cycle).
+from .money import refuse_malformed_money
+
 # #7951 §17.1: the live-write scope the journal-first doors open around the fold.
 from .projection import _live_write_scope, fold
 
@@ -215,6 +219,26 @@ class EventAPI:
         # transport over. See `_refuse_unapproved_kinds` for why it must run
         # before the append rather than after.
         self._refuse_unapproved_kinds(event)
+        # #2782 (review Finding 2): the SAME seam, the same ordering, one field
+        # family over. This is the one live props writer that never reaches
+        # `_sanitize_props` (its own words: an internal ingest/mining/CLI
+        # seam), so the SDK intake's money gate did not cover it — measured, an
+        # `EventAPI(...).add_object(name, kind, amountMinor=25_000_000)` was
+        # ACCEPTED and wrote `{amountMinor: 25000000, currency: None,
+        # minorUnitExponent: None}` durably onto the node: the exact shape #2782
+        # exists to refuse, one transport over, through a producer the
+        # extractor, `ingest`, `docs_miner`, `mining` and the CLI all use.
+        #
+        # It runs BEFORE the append below for `_refuse_unapproved_kinds`' own
+        # reason: the append is this seam's COMMIT POINT, so a refusal raised
+        # after it would leave a record the replay would fold.
+        #
+        # ⚠️ The bound is the same one #5475 states, and it is deliberate: this
+        # gates a write that HAS a graph handle. `rebuild_all` folds a journal
+        # directly and stays ungated, because the journal is the RECONSTRUCTION
+        # SOURCE — refusing at replay would make an already-committed record
+        # unfoldable, which is strictly worse than reproducing it.
+        refuse_malformed_money(event, door=f"EventAPI.{type_}")
         # #9190: the append REPORTS the record's journal position, and that
         # number is the record's `journal_event.seq`. Dropping it here is what
         # kept layer 1 empty on live writes (the row was deferred with a

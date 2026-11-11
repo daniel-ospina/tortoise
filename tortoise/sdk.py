@@ -6463,7 +6463,8 @@ _NARRATIVE_LABELS: frozenset = frozenset({"Event", "Source", "Document"})
 
 def _sanitize_props(props: dict, *, reject_id: bool = False,
                     reject_belief_props: bool = False,
-                    reject_claim_class: bool = False) -> dict:
+                    reject_claim_class: bool = False,
+                    update: bool = False) -> dict:
     """#329: reject server-managed fields on tenant write surfaces.
 
     ``sourcePath``/``source_path`` are server-filesystem fields consumed by the
@@ -6575,7 +6576,16 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # a half-specified or mis-scaled amount is a silent unit error, and
     # dropping it would let the caller believe the amount took (the same reason
     # `cache_tier` below is refused rather than dropped).
-    refuse_malformed_money(props, door="props")
+    #
+    # `update=` says which DOOR this bag is for, not which verb: an update
+    # MERGEs onto a node that already carries the rest of the value, so the two
+    # shapes that satisfy a bag-shaped reader while breaking the stored value
+    # (an explicit `None`, which `SET n += $props` turns into a DELETE, and a
+    # lone `minorUnitExponent`, which cannot be scale-checked without the
+    # stored currency) are refused there and ONLY there — see
+    # `money.refuse_malformed_money`'s docstring, and the residual it states
+    # for the create doors' own MERGE-ON-MATCH arm.
+    refuse_malformed_money(props, door="props", on_update=update)
     for key in ("sourcePath", "source_path"):
         if key in props:
             raise ValueError(
@@ -18636,7 +18646,8 @@ class TortoiseSDK:
         # #329: id mutation + server-managed fields rejected
         props = _sanitize_props(props, reject_id=True,
                                 reject_belief_props=True,
-                                reject_claim_class=True)
+                                reject_claim_class=True,
+                                update=True)  # #2782: an UPDATE is a MERGE
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
         # #11239: same rule at the UPDATE door. Idempotent — a value already in
@@ -43629,7 +43640,8 @@ class TortoiseSDK:
         # #329: id + sourcePath/source_path are server-managed — reject
         props = _sanitize_props(props, reject_id=True,
                                 reject_belief_props=True,
-                                reject_claim_class=True)
+                                reject_claim_class=True,
+                                update=True)  # #2782: an UPDATE is a MERGE
         # ── #5475 (residual): the UPDATE door onto every label ──
         # ``update_entity`` is the documented tenant route onto Object /
         # Subject / Event / Document / Source nodes, and each of those carries
@@ -47727,6 +47739,25 @@ class TortoiseSDK:
         # later cannot bypass a guard that runs after all of them.
         for _key, _value in ev.items():
             _reject_unrepresentable_number(_key, _value)
+        # #2782 (review Finding 3): the same reason, one field family over — and
+        # the same placement discipline, over the ASSEMBLED ``ev`` so a later
+        # keyword cannot bypass it. This door is the one props write that never
+        # reaches `_sanitize_props` (`_skip_sanitize=True`), so without this the
+        # money gate left it open: measured at `51deb8ec`, a malformed money bag
+        # here was ACCEPTED (reported `ok`), silently DROPPED by the closed
+        # `:Source` surface (`_SOURCE_EXTRA_PROPS` carries no money key, #3998 —
+        # deny + log) and still JOURNALLED on the `SourceCreated` record, i.e. a
+        # durable money value nothing ever validated. A write that reports
+        # success while dropping the amount is exactly the strip-and-continue
+        # this gate's sibling comment rejects.
+        #
+        # ⚠️ Stated bound: this refuses a MALFORMED bag. A WELL-FORMED money
+        # value is still dropped here, because a `:Source` carries provenance
+        # and has no declared money field at all — that is #3998's closed-surface
+        # decision, not this gate's, and it is pinned by
+        # `tests/test_money_value_2782.py::TestNonSanitizedSeams`
+        # ::test_a_wellformed_money_value_on_a_source_is_still_dropped.
+        refuse_malformed_money(ev, door="create_source")
         # ── #5024 (T6): ONE clock for the transition ────────────────
         # `_upsert_source`'s ON MATCH sets `updatedAt = coalesce($updatedAt,
         # $now)` where `$now` is `_now_iso()` called INSIDE the fold. Reading

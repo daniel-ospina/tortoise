@@ -46,8 +46,17 @@ stale — #4282 closed without it):
     commit ``Point`` stays ``extra="forbid"`` and takes NO money field (§7.1
     S3, the owner's 2026-10-07 decision — the value is server-written);
   * **refusal** is :func:`refuse_malformed_money`, called from the SDK's one
-    props intake (``_sanitize_props``), so a value the reader would refuse can
-    no longer be *written* in the first place;
+    props intake (``_sanitize_props``: every create/update props door, with
+    the update doors widening it to a lone exponent and an explicit null) and
+    from the pipeline seam that bypasses that intake
+    (``api.EventAPI._emit``), so a value the reader would refuse cannot
+    become durable state through either live write path. Two bounds are
+    deliberately NOT covered and are stated rather than implied away: a
+    ``:Source`` cannot carry money at all (its closed property surface,
+    #3998, drops it — so ``create_source`` refuses a *malformed* money bag
+    instead of accepting one it will drop), and a CREATE that MERGEs onto an
+    existing node can still install a lone exponent, because the bag alone
+    does not name the target;
   * **persistence** is declared, not re-invented here: the projection's Point
     property list takes its declared money keys from ``MONEY_VALUE_FIELDS``
     (``projection/entities.py``), so a Point carrying a value replays under the
@@ -89,6 +98,11 @@ AS_OF = "asOf"
 MONEY_VALUE_FIELDS: tuple[str, ...] = (
     AMOUNT_MINOR, CURRENCY, MINOR_UNIT_EXPONENT, VERBATIM, AS_OF,
 )
+
+#: The three fields that TOGETHER are the value. ``verbatim``/``asOf`` are
+#: siblings that carry no amount, so they never engage the write gate on their
+#: own (a bare ``asOf`` belongs to ordinary dated metadata).
+_MONEY_GROUP: tuple[str, ...] = (AMOUNT_MINOR, CURRENCY, MINOR_UNIT_EXPONENT)
 
 #: ISO 4217 permits 0, 1, 2, 3 and (CLF/UYW) 4 minor-unit digits.
 _MIN_EXPONENT = 0
@@ -269,7 +283,8 @@ def read_money_value(record: Mapping[str, Any]) -> tuple[str, int, int] | None:
 
 
 def refuse_malformed_money(props: Mapping[str, Any], *,
-                           door: str = "") -> None:
+                           door: str = "",
+                           on_update: bool = False) -> None:
     """Refuse, at the WRITE boundary, a money value the READER would refuse.
 
     Returns ``None`` when ``props`` carries no money at all — it inherits
@@ -280,6 +295,43 @@ def refuse_malformed_money(props: Mapping[str, Any], *,
     an int minor-unit amount (never a float, never a bool), an active ISO 4217
     currency, and an explicit ``minorUnitExponent`` the pinned table agrees
     with.
+
+    ``on_update`` — WHY THE UPDATE DOORS NEED MORE THAN THE READER'S RULE
+    (measured, #2782 review): the reader judges ONE bag, but an update is a
+    MERGE onto a node that already carries the rest of the value, so two
+    shapes reach a state the reader refuses while satisfying it:
+
+      * ``{"minorUnitExponent": None}``. ``read_money_value`` engages on
+        ``amountMinor``/``currency``, so a bag carrying only a sibling reads
+        as "no money" and the gate no-ops. But the update door writes with a
+        bare ``SET n += $props``, where a key present with ``None`` DELETES
+        the property (the same Cypher fact ``update_point``'s own
+        ``claim_class`` note relies on) — so the write removes the exponent
+        from a well-formed node and leaves ``{amountMinor, currency}``, the
+        very half-value this gate exists to refuse. Deleting a money field is
+        not an update; the caller may only REPLACE the value.
+      * ``{"minorUnitExponent": 0}`` (or any lone exponent). A lone exponent
+        cannot be scale-checked here: the check is a ``(currency, exponent)``
+        pair and the stored currency is not visible at this boundary, so
+        ``0`` on a ``BRL`` node is a 100x mis-scale that looks exactly like a
+        legitimate ``JPY`` write. Refusing the lone exponent on an UPDATE is
+        the fail-closed answer; the caller writes the full bag, which is the
+        shape ``money_props`` always produces.
+
+    ⛔ The refusal is scoped to ``on_update`` ON PURPOSE, so the gate stays a
+    no-op for the shapes that are genuinely harmless: a lone sibling on a
+    CREATE is a stray property on a non-money record (``MONEY_VALUE_FIELDS``
+    is a group, not five reserved names), and an explicit ``None`` on a CREATE
+    does not delete anything — the fold's extra-props passthrough drops
+    ``None`` values (``projection/entities.py::_persist_extra_props``).
+    Refusing those would be collateral damage on a legitimate write, and
+    ``tests/test_money_value_2782.py`` pins both.
+
+    ⚠️ STATED BOUND, not a claim of closure: the create doors MERGE by name
+    (``_create_entity``'s ON MATCH arm reaches an EXISTING node), so a
+    re-create carrying a lone exponent still lands one — the discriminating
+    fact is the TARGET, which a bag-shaped predicate cannot see. Measured and
+    recorded as a #2782 follow-up (``TestKnownResidualCreateDoorOnMatch``).
 
     WHY A WRITE GATE, given the read side already refuses (measured, #2782):
     before this, all six malformed shapes were ACCEPTED by every props door and
@@ -299,7 +351,25 @@ def refuse_malformed_money(props: Mapping[str, Any], *,
     coercion — the same "never guess" posture as ``money_props`` itself.
     """
     try:
-        read_money_value(props)
+        if on_update:
+            deleted = sorted(k for k in _MONEY_GROUP
+                             if k in props and props[k] is None)
+            if deleted:
+                raise MoneyValueError(
+                    f"an explicit null for {', '.join(deleted)} deletes the "
+                    f"property on an update (``SET n += $props``), and "
+                    f"deleting a money field is not an update — the fields "
+                    f"left behind no longer read as a value. Send the whole "
+                    f"value, or leave the key out")
+        if props.get(AMOUNT_MINOR) is not None or props.get(CURRENCY) is not None:
+            read_money_value(props)
+        elif on_update and MINOR_UNIT_EXPONENT in props:
+            raise MoneyValueError(
+                f"{MINOR_UNIT_EXPONENT} cannot be validated on an update "
+                f"without its {CURRENCY} in the same write — the stored "
+                f"currency is not visible at this boundary, so a lone "
+                f"exponent could be a mis-scale. Send the whole value "
+                f"(amountMinor + currency + minorUnitExponent)")
     except MoneyValueError as exc:
         where = f" ({door})" if door else ""
         raise MoneyValueError(
