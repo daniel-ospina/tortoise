@@ -2303,10 +2303,37 @@ def open_prs(repo: str, limit: int = 400) -> GitHubRows:
 #: attribution on membership in this set, so a truncated read makes "no lane is
 #: attributed" UNPROVABLE for the issues it did not see — the claim gate would
 #: then answer "nobody" from a read that cannot claim coverage (#8175). The
-#: window is far above any repo the fleet reads; if a repo ever exceeds it the
+#: window is sized above any repo the fleet reads; if a repo ever exceeds it the
 #: board SAYS SO (``reconciliation["open_issues_truncated"]``) and the pre-flight
 #: refuses instead of answering.
-OPEN_ISSUES_LIMIT = 2000
+#:
+#: ⛔ THE WINDOW IS A COMPLETENESS BOUND, NOT A SAFETY MARGIN — when a repo crosses
+#: it, the refusal is CORRECT and it does not fade: the board is what proves "no lane
+#: holds this", so a window left too small keeps refusing for as long as the repo
+#: stays above it. Resize the window; do not argue with it. tortoise crossed the old
+#: 2000 on 2026-11-11 — 2005 open issues against a read bounded at 2000 — so the read
+#: came back FULL (``open_issues_read=2000``: SATURATED at the bound, alongside
+#: ``open_issues_truncated=True``, which is how ``>=`` catches it) and the pre-flight
+#: answered ``INCOMPLETE (exit 2)`` for every issue the board held NO ATTRIBUTION
+#: ENTRY for — the normal case for an untaken issue, so no lane could certify a
+#: pre-flight on the work in front of it. That refusal is scoped to ABSENT entries by
+#: design (an issue the board carries is still answered), which is exactly why the
+#: remedy is the window and not a workaround around the refusal.
+#: 4000 is the measured 2005 with ~2x headroom on purpose: a window sized just above
+#: today's count would re-cliff within days, and the refusal above still fires the day
+#: this one is crossed too.
+#:
+#: The read costs what it costs — ``--limit`` bounds it, it does not pad it (the
+#: fetch stops at the repo's real issue count, ~21 pages here) — so raising the
+#: window leaves the HAPPY path unchanged and moves only the BOUND. On the armed
+#: default the timeout for a WEDGED read goes 100 s -> 200 s, and because ``gh_json``
+#: retries once that arm goes 200 s -> 400 s before the board answers INCOMPLETE;
+#: under ``FLEET_STATE_GH_READ_BOUND=fixed`` the bound is a flat 60 s with no retry
+#: and none of these figures apply (see ``gh_json``: the seam promises the one
+#: attempt, so a raise cannot stretch it). Nothing pays either figure unless the
+#: read fails; the direction is still fail-closed, and the numbers are stated so a
+#: later measurement of the doubled worst case is not read as a regression.
+OPEN_ISSUES_LIMIT = 4000
 
 
 def open_issues(repo: str, limit: int = OPEN_ISSUES_LIMIT) -> GitHubRows:
