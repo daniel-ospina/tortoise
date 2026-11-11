@@ -1220,45 +1220,71 @@ def test_the_read_paths_composed_predicate_carries_both_conjuncts():
         "assertion above cannot distinguish the two arms")
 
 
-def test_the_sdk_query_where_carries_both_conjuncts():
-    """FAILS IF `sdk.query` stops passing the Point path through the composed clause, or
-    starts passing `include_outdated_flag=False` for it.
+@pytest.mark.parametrize("method, kwargs", [
+    # sdk.py:24334 — the un-paginated read
+    ("query", {"_record_reads": False}),
+    # sdk.py:24407 — `paginated_query`, and THIS is the arm the census traversed: the probe
+    # asks `tortoise_query(limit, offset)` (probe::_page), `mcp_server` dispatches the offset
+    # arm to `paginated_query` (`mcp_server.py:3905`), and the row denominator the artifact
+    # publishes IS that WHERE. Measured in review: mutating ONLY this arm left every other
+    # pin in this file green.
+    ("paginated_query", {"skip": 0, "limit": 500}),
+])
+def test_every_read_arm_that_serves_points_carries_both_conjuncts(method, kwargs):
+    """FAILS IF either SDK read arm stops passing the Point WHERE through the composed
+    clause, or starts passing `include_outdated_flag=False` for it.
 
     The census's denominator claim is about the population "the default read serves", so the
-    CALL SITE is the last link and prose cannot pin it: `sdk.py` builds `where` from
-    `_operator_scope_clauses(kind)` plus `_exclude_status_clause("n")` and hands it to
-    `proj.g.query`. This captures that query string — mutation that reds it: appending the
-    clause with `include_outdated_flag=False`, dropping the operator clause, or deleting the
-    clause append.
+    CALL SITES are the last link and prose cannot pin them: `sdk.query` and
+    `sdk.paginated_query` each build their WHERE from `_operator_scope_clauses(kind)` plus
+    their OWN `_exclude_status_clause("n")` append — two separate statements, `sdk.py:24334`
+    and `sdk.py:24407` — and the probe measured through the SECOND one. This captures the
+    Cypher each arm hands to `proj.g.query` and asserts the same three things on it.
+
+    Mutations that red it, one arm at a time or both at once: dropping the clause append,
+    appending it with `include_outdated_flag=False`, dropping the operator clause, or adding a
+    status literal the probe's vocabulary does not carry.
     """
     import re
 
+    from tortoise import sdk as sdk_module
     from tortoise.sdk import TortoiseSDK
 
-    captured: dict[str, str] = {}
+    calls: list[str] = []
 
     class _Result:
-        result_set = ()  # immutable: a class attribute, never a mutable default
+        def __init__(self, rows):
+            self.result_set = rows
 
     class _Graph:
         def query(self, q, **_kw):
-            captured["q"] = q
-            return _Result()
+            calls.append(q)
+            # `paginated_query` reads the total first (`result_set[0][0]`) and then the page;
+            # `query` reads only the page. Neither touches a graph.
+            return _Result([[0]] if "count(n)" in q else [])
 
     class _Proj:
         g = _Graph()
 
-    sdk = TortoiseSDK.__new__(TortoiseSDK)
-    sdk._get_proj = lambda: _Proj()  # instance attribute, so no real graph is touched
-    sdk.query(_record_reads=False)
+    with pytest.MonkeyPatch.context() as mp:
+        # The paged arm records into the read ledger unconditionally; that is a product
+        # instrument, not what this pin measures.
+        mp.setattr(sdk_module, "_ledger_record", lambda *_a, **_k: None)
+        sdk = TortoiseSDK.__new__(TortoiseSDK)
+        sdk._get_proj = lambda: _Proj()  # instance attribute, so no real graph is touched
+        getattr(sdk, method)(**kwargs)
 
-    where = captured["q"]
-    assert "(n.is_operator IS NULL OR n.is_operator = false) AND n.op_type IS NULL" in where, (
-        "the read must keep the operator-scope clause that makes 15,842 ':Point minus operators'")
-    assert "coalesce(n.outdated, false) = false" in where, (
-        "the read's WHERE must keep the flag conjunct — it is ON for the Point surfaces (#3301)")
-    assert set(re.findall(r"n\.status <> '([^']*)'", where)) == qp.TERMINAL_STATUSES, (
-        "the read's WHERE must exclude EXACTLY the probe's terminal vocabulary")
+    point_queries = [q for q in calls if "MATCH (n:Point)" in q]
+    assert point_queries, f"sdk.{method} issued no Point query — the capture missed the read"
+    for q in point_queries:
+        assert "(n.is_operator IS NULL OR n.is_operator = false) AND n.op_type IS NULL" in q, (
+            f"sdk.{method} must keep the operator-scope clause that makes 15,842 "
+            "':Point minus operators'")
+        assert "coalesce(n.outdated, false) = false" in q, (
+            f"sdk.{method}'s WHERE must keep the flag conjunct — it is ON for the Point "
+            "surfaces (#3301)")
+        assert set(re.findall(r"n\.status <> '([^']*)'", q)) == qp.TERMINAL_STATUSES, (
+            f"sdk.{method}'s WHERE must exclude EXACTLY the probe's terminal vocabulary")
 
 
 def test_the_population_scope_mirrors_the_read_paths_operator_clause():
