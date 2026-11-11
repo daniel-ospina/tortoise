@@ -1135,8 +1135,8 @@ class TestTheProbeUsesTheWritesOwnKeyDiscipline:
     """
 
     def test_the_probe_enumerates_exactly_what_the_write_iterates(self):
-        """One source of truth: if these two ever diverge, the gate grades a
-        different node from the one the write touches — silently."""
+        """The helper is derived from the write's own constants; if it drifts,
+        the gate grades a different node from the one the write touches."""
         from tortoise.projection import (
             _CANONICAL_ENTITY_ID_PROPS,
             secondary_entity_id_props,
@@ -1148,6 +1148,38 @@ class TestTheProbeUsesTheWritesOwnKeyDiscipline:
             for label, prop in _CANONICAL_ENTITY_ID_PROPS
             for key in (prop, *secondary_entity_id_props(label))
         )
+
+    def test_the_update_door_RESOLVES_through_the_shared_enumeration(
+            self, journaled_sdk, monkeypatch):
+        """⛔ The WRITE half, which the test above cannot see (#11836 review,
+        round 6): the equality test compares the helper against the constants it
+        is built from, so it stays green if `_update_entity` re-derives its own
+        key list inline — measured on that mutant: 176/176 passed, and a money
+        carrier addressed by the key the write no longer shared got
+        `currency=None` ADMITTED.
+
+        So this pins the CALL, behaviourally: the helper is patched to include a
+        second key for `:Object` (`Object` has no secondary key of its own), a
+        node is created that is reachable ONLY by that key, and the ordinary
+        update must land. A write that stopped consuming the helper misses the
+        node and writes nothing — which is exactly the silent divergence.
+        """
+        import tortoise.sdk as sdk_mod
+
+        sdk, _events = journaled_sdk
+        g = sdk._get_proj().g
+        g.query("CREATE (o:Object {id:'node-11836', aliasKey:'alias-11836'})")
+        real = sdk_mod._entity_identity_probes
+        monkeypatch.setattr(
+            sdk_mod, "_entity_identity_probes",
+            lambda: (*real(), (":Object", "aliasKey")))
+        sdk.update_entity("alias-11836", note="reached by the shared enumeration")
+        rows = g.query(
+            "MATCH (o:Object {aliasKey:'alias-11836'}) RETURN o.note"
+        ).result_set
+        assert rows and rows[0][0] == "reached by the shared enumeration", (
+            "`update_entity` did not resolve through `_entity_identity_probes()` "
+            "— the write re-derives its own key list again")
 
     @staticmethod
     def _indexer_shaped_event(sdk, event_id: str, *,
