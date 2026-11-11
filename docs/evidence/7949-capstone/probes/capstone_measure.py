@@ -3199,8 +3199,8 @@ def _a4_writer_attribution(projection) -> dict:
     the census must not pretend otherwise. What IS mechanical at this head:
 
     * `extractor_v2` CANNOT be the source of a typed claim. Its write gate repairs every point kind
-      that is not in the master vocabulary to the fallback `statement`
-      (`extractor_v2.py:10413`), so a claim carrying `decision`/`plan`/… did not come from that lane.
+      outside the master vocabulary to `statement` (`extractor_v2.py:10419-10422`; `:10413` is the
+      EMPTY-kind default only), so a claim carrying `decision`/`plan`/… did not come from that lane.
     * `extractor.py::_classify_point_kind` is a PURE keyword classifier over the claim's own
       content, so its answer is REPRODUCIBLE for any node: apply it and compare.
 
