@@ -6471,7 +6471,16 @@ def _is_real_number(value) -> bool:
     is one, and the store nulls it). A Boolean is ``1.0`` and a string is a
     parse, so neither is a number here.
     """
-    if isinstance(value, (bool, str, bytes)):
+    # `np.bool_` is NOT a subclass of `bool` and `float(np.bool_(True))` is 1.0,
+    # so a name check is the only way to refuse it without importing numpy:
+    # measured, `update_point(confidence=np.bool_(True))` was ACCEPTED and stored
+    # a Boolean every reader reports absent, and
+    # `set_point_baseline(claim, np.bool_(True), 0.5)` stored `ep_alpha=true`
+    # *plus* the `baseline_set` flag that freezes the claim against the
+    # source-inheritance recompute (#11702).
+    _t = type(value)
+    if isinstance(value, (bool, str, bytes)) or (
+            _t.__module__ == "numpy" and _t.__name__ in ("bool", "bool_")):
         return False
     try:
         float(value)

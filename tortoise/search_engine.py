@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import re
+import struct
 import threading
 import time
 from collections import Counter
@@ -383,14 +384,25 @@ NUMERIC_OPERAND_CYPHER_TEMPLATE = (
 #: `Infinity`/`nan` spellings parse there too; the first stays a recorded
 #: residual (see `numeric_operand`), the second is nulled by the finiteness
 #: guard in `numeric_operand_cypher`.
-# The float32 NORMAL range — the window `strtof` parses without `ERANGE`, which
-# is what FalkorDB's `toFloat` does with a STRING (measured, see
-# `numeric_operand`). Subnormals are refused by the store, so they are refused
-# here: `toFloat("1e-38")` is null, `toFloat("1.2e-38")` is 1.1999999781e-38.
+# float32's smallest NORMAL value. `strtof` — what FalkorDB's `toFloat` uses on
+# a STRING — sets `ERANGE` (and answers null) for a result that is subnormal OR
+# overflows. Measured: `toFloat("1.2e-38")` reads, `toFloat("1e-38")` is null,
+# `toFloat("3.4028235e38")` READS (it rounds to max) and `toFloat("3.5e38")` is
+# null — so the boundary is float32's ROUNDING boundary, not its max/min value.
+# `numeric_operand` therefore asks `struct` to round instead of comparing against
+# a constant: `struct.pack("f", x)` is exactly round-half-to-even into float32
+# and raises `OverflowError` past the top, so neither a hand-computed endpoint
+# nor an off-by-an-ulp refusal of a literal the store reads can creep back in.
 _FLOAT32_MIN_NORMAL = 1.1754943508222875e-38
-_FLOAT32_MAX = 3.4028234663852886e38
+# `re.ASCII` is load-bearing: without it `\s` matches Unicode spaces that
+# `float()` skips and `strtof` does not — `"\u00a00.7"` was 0.7 in Python and
+# null to the store, the same twin split this grammar exists to prevent.
 _FLOAT_LITERAL = re.compile(r"\s*[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)"
-                            r"(?:[eE][+-]?[0-9]+)?\Z")
+                            r"(?:[eE][+-]?[0-9]+)?\Z", re.ASCII)
+# A literal whose MANTISSA is all zeros — the only kind that reads as a zero
+# number. `"1e-400"` is not one: it is zero to `float()` because it underflowed.
+_ZERO_LITERAL = re.compile(r"\s*[+-]?0*(?:\.0*)?(?:[eE][+-]?[0-9]+)?\Z",
+                           re.ASCII)
 
 
 def numeric_operand_cypher(operand: str) -> str:
@@ -473,14 +485,23 @@ def numeric_operand(raw):
         if not _FLOAT_LITERAL.match(raw):
             return None
         val = float(raw)
-        # ONE window, not two: a non-finite value is outside it too (`nan`
-        # fails the chained comparison, `inf` exceeds the maximum), so an
-        # explicit `isfinite` line would be a second spelling of this rule.
-        if val != 0.0 and not (
-                _FLOAT32_MIN_NORMAL <= abs(val) <= _FLOAT32_MAX):
-            # strtof ERANGE: out of float32's normal range → the store answers
-            # null, so a number here would be one only Python can see.
-            return None
+        if val == 0.0:
+            # An exact-zero literal (`"0"`, `"0e400"`, `"-0.0"`) reads as a
+            # number; one that UNDERFLOWED the double (`"1e-400"`, `"1e-350"`)
+            # is null to the store. `float()` cannot tell them apart — both are
+            # zero — so the literal's own digits do. Answering 0.0 for the
+            # underflowed one was maximum disbelief for a claim with no readable
+            # belief, the very defect this issue removes.
+            return val if _ZERO_LITERAL.match(raw) else None
+        # Round EXACTLY as the store does (`struct` is round-half-to-even into
+        # float32 and saturates to INF rather than raising), then apply
+        # `strtof`'s ERANGE rule: a result that is infinite, subnormal, or
+        # underflowed to zero is null.
+        narrowed = struct.unpack("f", struct.pack("f", val))[0]
+        if not math.isfinite(narrowed):
+            return None                      # overflow: `"3.5e38"`, `"1e308"`
+        if abs(narrowed) < _FLOAT32_MIN_NORMAL:
+            return None                      # subnormal / underflow: `"1e-320"`
         return val
     try:
         val = float(raw)

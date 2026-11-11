@@ -890,7 +890,7 @@ class GraphRanker:
     def _fetch_point_signals(self, ids: list[str]) -> dict[str, dict]:
         # Post-#2206/#2286 parity: a point's confidence is the belief MEAN
         # α/(α+β) of the coalesced posterior→prior columns
-        # (coalesce(n.posterior_alpha, n.ep_alpha, 1.0) / ... — the same
+        # (coalesce(n.posterior_alpha, n.ep_alpha) / ... — the same
         # canonical read annotate_ep_batch / get_confidence / why /
         # StateRanker use). n.confidence (the EP-flush mirror of that mean)
         # is preferred when present — it is byte-identical for flushed
@@ -962,10 +962,10 @@ class GraphRanker:
             # (every result then loses confidence/variance/contested).
             "    coalesce(" + numeric_operand_cypher("n.confidence") + ", "
             "      " + belief_mean_cypher(
-                "coalesce(n.posterior_alpha, n.ep_alpha, 1.0)",
-                "coalesce(n.posterior_beta, n.ep_beta, 1.0)") + ") "
+                "coalesce(n.posterior_alpha, n.ep_alpha)",
+                "coalesce(n.posterior_beta, n.ep_beta)") + ") "
             "  ELSE null END AS conf, degree, n.createdAt AS created, "
-            "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
+            "  coalesce(n.posterior_alpha, n.ep_alpha) AS alpha, coalesce(n.posterior_beta, n.ep_beta) AS beta, "
             # #2490: aligned with StateRanker/GapsRanker — has_ep rides the
             # status/outdated columns for the Python-side terminal gate.
             # #3276: has_ep == EP measured (ep_measured_cypher) — a #2199
@@ -1510,8 +1510,8 @@ class StateRanker:
             "aboutEvent|aboutPoint|aboutDocument]->() "
             "WITH n, ep_degree, count(a) AS about_degree "
             "RETURN n.id, "
-            "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, "
-            "  coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
+            "  coalesce(n.posterior_alpha, n.ep_alpha) AS alpha, "
+            "  coalesce(n.posterior_beta, n.ep_beta) AS beta, "
             f"  {ep_measured_cypher('n')} AS has_ep, "
             "  ep_degree + about_degree AS degree, "
             "  n.status, coalesce(n.outdated, false), "
@@ -2093,8 +2093,8 @@ class GapsRanker:
             self.projection.g,
             "MATCH (n:{label}) WHERE n.id IN $ids "
             "RETURN n.id, "
-            "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, "
-            "  coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
+            "  coalesce(n.posterior_alpha, n.ep_alpha) AS alpha, "
+            "  coalesce(n.posterior_beta, n.ep_beta) AS beta, "
             f"  {ep_measured_cypher('n')} AS has_ep, "
             "  n.status, coalesce(n.outdated, false), "
             # #11702: PRESENCE + the EP-flush mirror, exactly as StateRanker /
@@ -2428,8 +2428,8 @@ class SubgraphExpander:
             # `ep_has_belief_cypher` above has already decided presence.
             "      coalesce(" + numeric_operand_cypher("n.confidence") + ", "
             "  " + belief_mean_cypher(
-                "coalesce(n.posterior_alpha, n.ep_alpha, 1.0)",
-                "coalesce(n.posterior_beta, n.ep_beta, 1.0)") + ") "
+                "coalesce(n.posterior_alpha, n.ep_alpha)",
+                "coalesce(n.posterior_beta, n.ep_beta)") + ") "
             "    ELSE null END "
             "  ELSE null END AS confidence, "
             f"  CASE WHEN labels(n)[0] = 'Point' THEN {ep_state_cypher('n')} "

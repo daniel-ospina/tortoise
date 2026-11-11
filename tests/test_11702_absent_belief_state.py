@@ -427,7 +427,12 @@ def test_a_legacy_string_operand_outside_float32_is_absent_on_every_surface(sdk)
     # `'1e-320'` is a perfectly finite double that the store's float32 parse
     # underflows to null (caught only by the range guard). A test that used just
     # the first stayed green when the second guard was disabled — measured.
-    for literal in ("1e400", "1e-320"):
+    # Four literals, four rules, each proved by mutation: `'1e400'` overflows the
+    # DOUBLE; `'1e-320'` is a finite double the store's float32 parse
+    # underflows; `'1e-350'` / `'1e-400'` are ALREADY zero as a double, so only
+    # the literal's own mantissa distinguishes them from an exact `'0'` (they
+    # answered `0.0` — maximum disbelief — until cycle 23).
+    for literal in ("1e400", "1e-320", "1e-350", "1e-400"):
         assert numeric_operand(literal) is None, (
             f"the Python twin still answers {numeric_operand(literal)!r} for "
             f"{literal!r}, which the store reports as absent")
@@ -475,6 +480,110 @@ def _assert_absent_everywhere(proj, pid):
     # template, and the template's own comments legitimately say "inf".
     assert "inf" not in answers["answer"].lower(), answers["answer"][:400]
     assert "formatting error" not in answers["answer"].lower(), answers["answer"]
+
+
+def test_a_literal_at_the_stores_rounding_boundary_is_read_not_refused(sdk):
+    """Cycle 23 P2: the string window's ENDPOINTS were float32's min/max values,
+    but `strtof` sets ERANGE on the ROUNDED result.
+
+    `"3.4028235e38"` is above `float32`'s maximum (3.40282346638529e38) yet
+    rounds to it, so the store READS it — and the hand-computed `<= max` bound
+    refused it. The consequence was not a value difference: with the mirror
+    refused, the rankers fell through to their operands, which the query spelled
+    `coalesce(n.posterior_alpha, n.ep_alpha, 1.0)` — an IMPUTED Beta(1, 1) —
+    and answered `0.5` labelled `belief_informed_order: True`. Three answers for
+    one claim: absent / 3.4e38 / 0.5, the last of them the exact neutral score
+    this issue removes, in an order-moving tier.
+    """
+    from tortoise.ranking import GapsRanker, GraphRanker, StateRanker
+    from tortoise.search_engine import numeric_operand
+
+    proj = sdk._get_proj()
+    assert numeric_operand("3.4028235e38") is not None, (
+        "a literal that rounds to float32's maximum is read by the store")
+    assert numeric_operand("1.1754944e-38") is not None  # min normal, reads
+    # …and the rules stay exact one notch out, in both directions.
+    assert numeric_operand("3.4028236e38") is None       # rounds to inf
+    assert numeric_operand("1e-38") is None              # subnormal
+
+    pid = sdk.create_point("statement", "ZQROUND a boundary mirror")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.confidence = '3.4028235e38'",
+                 params={"id": pid})
+    ann = annotate_ep_batch(proj.g, [pid])[pid]
+    assert ann.confidence_mean is not None, ann
+    state = StateRanker(projection=proj)._fetch_point_signals([pid])[pid]
+    graph = GraphRanker(projection=proj)._fetch_signals([pid], "point")[pid]
+    gaps = GapsRanker(projection=proj)._fetch_confidence_signals(
+        [pid], labels=["Point"])[pid]
+    for name, sig in (("state", state), ("graph", graph), ("gaps", gaps)):
+        assert sig.get("confidence") is not None, (name, sig)
+        assert sig["confidence"] != pytest.approx(0.5, abs=1e-9), (name, sig)
+
+
+def test_an_unreadable_mirror_is_not_replaced_by_an_imputed_pair(sdk):
+    """Cycle 23 P2: the rankers' operand columns defaulted to `1.0`/`1.0`.
+
+    `coalesce(n.posterior_alpha, n.ep_alpha, 1.0)` invents a Beta(1, 1) for a
+    claim with NO stored operands, so whenever the mirror was unreadable in
+    Python but readable to Cypher — `"0x1p4"`, the recorded hex-float residual —
+    the pair arm produced `_beta_mean(1.0, 1.0) == 0.5`, labelled
+    `confidence_source: "neutral"` and `belief_informed_order: True`. That is the
+    neutral score this issue exists to remove, in the tier that decides order —
+    and it contradicted the `ep` block, which answered `absent` for the same
+    claim. The operand columns no longer carry a default, so the pair arm needs
+    STORED operands.
+    """
+    from tortoise.ranking import GapsRanker, GraphRanker, StateRanker
+
+    proj = sdk._get_proj()
+    pid = sdk.create_point("statement", "ZQIMPUTE an unreadable mirror")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.confidence = '0x1p4'",
+                 params={"id": pid})
+    ann = annotate_ep_batch(proj.g, [pid])[pid]
+    assert ann.confidence_mean is None, ann
+
+    state = StateRanker(projection=proj)._fetch_point_signals([pid])[pid]
+    gaps = GapsRanker(projection=proj)._fetch_confidence_signals(
+        [pid], labels=["Point"])[pid]
+    for name, sig in (("state", state), ("gaps", gaps)):
+        assert sig.get("confidence") is None, (
+            f"{name} imputed a belief for a mirror it cannot read: {sig}")
+        assert "belief_informed_order" not in sig or not sig[
+            "belief_informed_order"], (name, sig)
+    # A claim WITH stored operands still reads normally — the fix is about the
+    # default, not the pair.
+    ok = sdk.create_point("statement", "ZQIMPUTE a measured claim")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 3.0, "
+                 "n.posterior_beta = 1.0", params={"id": ok})
+    assert StateRanker(projection=proj)._fetch_point_signals([ok])[
+        ok]["confidence"] == pytest.approx(0.75, abs=1e-3)
+    assert GraphRanker(projection=proj)._fetch_signals([ok], "point")[
+        ok]["confidence"] == pytest.approx(0.75, abs=1e-3)
+
+
+def test_a_numpy_boolean_is_not_a_belief_count(sdk):
+    """Cycle 23 P2: `np.bool_` slipped the cycle-22 predicate.
+
+    It is not a `bool` subclass and `float(np.bool_(True))` is `1.0`, so
+    `_is_real_number` admitted it — and both belief writers then stored a
+    Boolean: `update_point(confidence=np.bool_(True))` (every reader reports the
+    claim ABSENT, because a Boolean is not a number) and
+    `set_point_baseline(claim, np.bool_(True), 0.5)`, which ALSO set
+    `baseline_set` + `baseline_source="set-by-author"`, freezing the claim
+    against the source-inheritance recompute that would have given it a belief.
+    """
+    import numpy as np
+
+    proj = sdk._get_proj()
+    pid = sdk.create_point("statement", "ZQNPBOOL a pseudo-count")["id"]
+    with pytest.raises(ValueError):
+        sdk.update_point(pid, confidence=np.bool_(True))
+    with pytest.raises(ValueError):
+        sdk.set_point_baseline(pid, np.bool_(True), 0.5)
+    stored = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.confidence, n.ep_alpha, "
+        "coalesce(n.baseline_set, false)", params={"id": pid}).result_set[0]
+    assert stored == [None, None, False], stored
 
 
 def test_the_object_aggregate_reports_absent_without_a_mean_over_nothing(sdk):
@@ -2900,6 +3009,12 @@ def test_the_twins_parse_the_same_string_language(sdk):
         "-1e400": None,
         "0e400": 0.0,
         "-0.0": -0.0,
+        # Cycle 23 P3: `\s` under an ASCII flag — `float()` skips a NBSP and
+        # `strtof` does not, so without `re.ASCII` a value pasted out of a
+        # spreadsheet was 0.7 to Python and null to the store.
+        "\u00a00.7": None,
+        "\u20070.7": None,
+        "\u0667.7": None,
     }
     for raw, expected in shapes.items():
         proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = $a, "
