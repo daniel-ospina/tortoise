@@ -5392,7 +5392,7 @@ _ABSENT_CLAIM = re.compile(
 #: readable cache exists" and the bare `\bLEADS it\b` matched "the evidence
 #: total LEADS it" (both measured on this file's own `_unqualified_claims`, so
 #: the guard passed while the prose stated something else).
-_MIRROR_NOUN = re.compile(r"\bmirror\b", re.IGNORECASE)
+_MIRROR_NOUN = re.compile(r"\bmirror\b|\bn\.confidence\b", re.IGNORECASE)
 
 #: A qualifier's VERB, searched just AFTER the mirror noun — the position every
 #: real site puts it in ("mirror LEADS", "mirror, if present, LEADS it",
@@ -5410,6 +5410,13 @@ _QUALIFIER_VERB = re.compile(
 #: How far after the mirror noun its verb may sit ("mirror, if present, LEADS
 #: it" is 21 characters).
 _QUALIFIER_VERB_WINDOW = 60
+
+#: How far BEFORE a claim its own sentence may begin. A qualifier may precede the
+#: claim it qualifies ("Because a readable ``n.confidence`` mirror leads it, a
+#: prior-only claim's confidence_mean IS the declared PRIOR mean only when no
+#: mirror is readable"), and a forward-only window reported that TRUE sentence as
+#: unqualified (measured).
+_QUALIFIER_LOOKBEHIND = 200
 
 #: Sentences that INVERT the rule outright, however many affirmative forms they
 #: also carry. The case the subject/verb pair cannot see is an AFFIRMATIVE
@@ -5521,26 +5528,41 @@ def _claim_sites(patterns) -> dict[str, int]:
     return found
 
 
-def _claim_sentence(window: str) -> str:
-    """The claim's OWN sentence: the window cut at the first sentence break.
+def _claim_sentence(window: str, claim_at: int = 0) -> str:
+    """The claim's OWN sentence, cut FORWARD and BACKWARD from the claim.
 
     A 300-character window alone spans several sentences in these modules, so a
     qualifier parked in a FOLLOWING sentence about a different shape satisfied
     it (measured: "…PRIOR mean. The legacy n.confidence mirror supplies the
     served value for a measured claim." passed). The rule the tests document is
     "same sentence", so the check must implement exactly that.
+
+    `claim_at` is the claim's offset inside `window` (the window may reach back
+    so a qualifier placed BEFORE its claim is visible). The cut MUST be relative
+    to the claim: splitting the whole window from its start bisected it in the
+    lookbehind region and discarded the claim's own sentence, which reported
+    every real site as unqualified (measured).
+
+    A break is punctuation followed by whitespace and then ANY word start —
+    including a lowercase one. The earlier lookahead required a capital and so
+    saw no break in "…PRIOR mean. the n.confidence mirror leads it when EP has
+    run.", which put a whole sentence about a DIFFERENT row inside the "claim
+    sentence" (measured). Erring toward a SHORTER window is the safe direction:
+    it drops a qualifier and reds a correct edit, which a human then reads.
     """
-    parts = re.split(r"(?<=[.!?])\s+(?=[`\"'(A-Z0-9])", window, maxsplit=1)
-    return parts[0]
+    break_at = re.compile(r"(?<=[.!?])\s+(?=[`\"'(A-Za-z0-9])")
+    tail = break_at.split(window[claim_at:], maxsplit=1)[0]
+    head = break_at.split(window[:claim_at])[-1]
+    return head + tail
 
 
-def _qualified(window: str) -> bool:
+def _qualified(window: str, claim_at: int = 0) -> bool:
     """Whether the claim's own sentence carries an AFFIRMATIVE qualifier.
 
     Requires all three: the MIRROR noun, a qualifying verb after it, and no
     negation across the whole claim→verb span (bar an allowed "not only").
     """
-    sentence = _claim_sentence(window)
+    sentence = _claim_sentence(window, claim_at)
     # Fail-closed on an outright inversion ANYWHERE in the sentence, however
     # many well-formed mirror+verb clauses it also carries.
     if _MIRROR_INVERSIONS.search(sentence):
@@ -5576,20 +5598,39 @@ def _unqualified_claims(patterns) -> list[str]:
         prose = _belief_prose(rel)
         for pattern in patterns:
             for match in pattern.finditer(prose):
-                window = prose[match.start():match.start() + _QUALIFIER_WINDOW]
-                if _qualified(window):
+                # The window reaches BACK as well: a qualifier may precede the
+                # claim it qualifies.
+                start = max(0, match.start() - _QUALIFIER_LOOKBEHIND)
+                window = prose[start:match.start() + _QUALIFIER_WINDOW]
+                if _qualified(window, match.start() - start):
                     continue
                 problems.append(f"{rel}: …{prose[match.start():match.start() + 180]}…")
     return problems
 
 
 def _assert_sites_survive(patterns, expected: dict[str, int]) -> None:
-    """Fail when the scan has stopped finding the sites it is meant to own."""
+    """Fail when the scan has stopped finding the sites it is meant to own.
+
+    The pin is a FLOOR, not an exact population: the failure this exists to
+    catch is a guard that has gone BLIND (it finds fewer sites than it owns, or
+    none at all). An ADDITION — a new claim sentence the scan correctly finds —
+    raises the count and is not a blind spot; gating on equality made a
+    fully-qualified sentence added by a future lane fail with a message saying
+    the guard "no longer finds the sites it exists to check", which is the
+    opposite of what happened (measured: inserting one qualified sentence gave
+    `found search_engine.py: 6` against an expected 5 and red-ed). A DROP is
+    always a failure.
+    """
     found = _claim_sites(patterns)
-    assert found == expected, (
+    blind = {
+        rel: (found.get(rel, 0), want)
+        for rel, want in expected.items()
+        if found.get(rel, 0) < want
+    }
+    assert not blind, (
         "the belief-prose guard no longer finds the sites it exists to check "
-        f"(found {found}, expected {expected}). A tripwire that matches "
-        "nothing passes vacuously; if a sentence was deliberately removed or "
+        f"(found/expected: {blind}). A tripwire that matches fewer sites than "
+        "it owns passes vacuously; if a sentence was deliberately removed or "
         "reworded, update _EXPECTED_*_SITES in the same commit.")
 
 
