@@ -305,8 +305,11 @@ class SearchScores:
 # absence for a belief that exists — the exact failure #11702 removes. In the
 # other direction `(has_ep=True, baseline=False)` covers both a readable
 # ``measured`` belief and an ``absent`` shape — operands stored but no mean, with
-# no readable `n.confidence` mirror either (a mirror in [0, 1] IS a belief, which
-# is the `baseline` case above): an α with no β, a β with no α, a pair summing to ≤ 0, a negative operand, or an operand this process cannot read.
+# no readable `n.confidence` mirror either (a mirror in [0, 1] IS a belief, and
+# its state is `measured` when a non-baseline α is persisted and the claim is not
+# terminal, else `baseline` — the mirror supplies the VALUE, not the state): an α
+# with no β, a β with no α, a pair summing to ≤ 0, a negative operand, or an
+# operand this process cannot read.
 #
 # The terminal 0.5 and the mirror are not a measurement; the neutral Beta(1,1)
 # mean this used to answer for a truly absent claim is indistinguishable from a
@@ -1183,7 +1186,9 @@ def ep_state_cypher(alias: str) -> str:
     ⚠️ The ``measured`` ARM is ``ep_has_belief_cypher AND ep_measured_cypher``,
     so the PREDICATE (a non-baseline α is persisted) is necessary but not
     sufficient: a shape that persists an α but yields no mean passes the
-    predicate and takes the ``absent`` arm. `ep_has_belief_cypher` is the
+    predicate, and WITHOUT a readable mirror it takes the ``absent`` arm (with
+    one, the mirror's value is the belief and the state follows the measured
+    arm, as above). `ep_has_belief_cypher` is the
     exhaustive rule, and it is a DISJUNCTION: a belief exists iff a readable
     ``n.confidence`` mirror is present (``belief_mirror_cypher`` — in [0, 1])
     OR both coalesced operands are present, non-negative, and sum > 0. So a
