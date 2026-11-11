@@ -265,6 +265,12 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[
         "settles where the vector index LIVES (Postgres, 2026-11-07), and it did not settle whether these two labels carry embeddings",
     ),
     (
+        STORAGE,
+        "STORAGE's §14.3 V3 row states that the `#11642` migration header cannot be corrected in place",
+        "`supabase/migrations/` is append-only, so that file cannot be corrected in place",
+        "14.3",
+    ),
+    (
         ONTOLOGY,
         "ONTOLOGY states the four-value direction vocabulary",
         "four values: `->`, `<-`, `<->`, `-`",
