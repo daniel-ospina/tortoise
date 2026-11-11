@@ -1233,6 +1233,12 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         "Part of v3 has already landed.",
         "`#2354` **OPEN, epistemic-team** —",
         "this reopen is CLOSED",
+        # The state word BEFORE a parenthesised `#NNN` — the shape #11803 left in
+        # `SEARCH-ARCHITECTURE.md` (§2 item 5 and §6.3) while every arm above
+        # passed: the arms were exercised on `#NNN`-first and copula forms, and no
+        # existing `must_flag` row carried this order. Verbatim, pre-fix.
+        "**✅ FIXED (#11702) — kept here as the reason the rule exists.**",
+        "5. the **`null`-not-0.5 rule** for absent belief state (§6.3) — **landed** (#11702, implementing",
         "*An earlier draft said* the opposite of this paragraph.",
         "**CORRECTED 2026-09-24** \u2014 this passage was repaired.",
         # The parenthesised-date form, verbatim from what #7948 added to
