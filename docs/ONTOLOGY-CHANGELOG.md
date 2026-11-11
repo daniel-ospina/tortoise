@@ -47,7 +47,8 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > terminal to belief propagation (`ep.py`, via `TERMINAL_EXCLUDED_STATUSES`) while being **current** to
 > all four Object retrieval legs (`search_engine._STATUS_FILTERED_LABELS` / `OBJECT_TERMINAL_STATUSES`),
 > so the same word means two opposite things (#11826). Validation stays **per kind**: a pack-declared
-> kind keeps validating against its own `statuses` (§5), which is why this is a core-kind default and
+> kind keeps validating against its own `statuses` (declared per kind in the pack manifest, `kindDefs[].statuses`, and
+> enforced by `status_folds.py`), which is why this is a core-kind default and
 > not the shared closed set `EXTRACTOR-V4-ARCHITECTURE.md:1076`/`:1084` forecloses.
 >
 > **A consequence worth stating here rather than leaving to be rediscovered:** §4.3's own `status` row
