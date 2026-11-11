@@ -67,10 +67,19 @@ def _classify_propagate_shock_refs(lines: list[str]) -> dict[str, list[str]]:
     that restore. The attribute form (`.propagate_shock`) is therefore also
     production code.
 
-    Deliberate boundaries, both failing CLOSED (they red an audit a human then
-    reads, rather than letting a call through): prose that spells a call
-    (`propagate_shock(x)` inside a docstring) counts as production code, and so
-    does prose that spells an attribute reference. Declared residual, which
+    Deliberate boundaries, ALL THREE failing CLOSED (they red an audit a human
+    then reads, rather than letting a call through): prose that spells a call
+    (`propagate_shock(x)` inside a docstring) counts as production code; so does
+    prose that spells an attribute reference; and so does a comment or docstring
+    line ENDING in the symbol plus a continuation backslash (`# about
+    propagate_shock \\`), which the continuation alternative cannot tell apart
+    from a wrapped call. That third boundary was MEASURED on this classifier,
+    not assumed — it is the false-positive cost the continuation arm pays, and
+    naming it is what stops a later reader from "tidying" the arm away on the
+    grounds that the surface was documented as two. (Prose that merely ENDS in a
+    backslash is still safe: `\s*` cannot cross the intervening text, so
+    `` ``propagate_shock`` is dead, see the note \ `` stays in
+    `comment/reference only`.) Declared residual, which
     fails OPEN and is not detected: a bare, undotted reference that is neither
     called nor backslash-continued — `getattr(proj, "propagate_shock")`, or
     `partial(propagate_shock, eid)` on a module-level import — and an undotted
