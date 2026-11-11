@@ -5370,8 +5370,12 @@ _PRIOR_MEAN_CLAIM_PATTERNS = (
     re.compile(r"reads its PRIOR mean", re.IGNORECASE),
     # The canonical `EpBreakdown` field doc and `annotate_ep_batch`'s contract
     # both say "else the persisted prior mean (ep_alpha/beta)" — the same false
-    # prediction for a mirror-bearing row.
-    re.compile(r"else the persisted prior mean \(ep_alpha/beta\)", re.IGNORECASE),
+    # prediction for a mirror-bearing row. `tortoise/sdk.py` states it in the
+    # shorter "else the persisted prior mean" form with no parenthetical, so the
+    # parenthetical and its `the` are optional here. Without the optional parts
+    # that site matched NOTHING and the sentence read as covered.
+    re.compile(r"else (the )?persisted prior mean( \(ep_alpha/beta\))?",
+               re.IGNORECASE),
 )
 
 #: The class-2 claim: "… else the persisted prior mean (ep_alpha/beta), else
@@ -5425,6 +5429,10 @@ _EXPECTED_PRIOR_MEAN_SITES = {
     # 1, not 2: `why.py`'s second site is now the same verbatim quotation.
     "tortoise/why.py": 1,
     "tortoise/volunteer.py": 1,
+    # `sdk.py`'s "else the persisted prior mean" — the `tortoise_fts_query`
+    # description, the sentence an SDK consumer reads. It contributed 0 sites
+    # until the `(ep_alpha/beta)` parenthetical in the pattern became optional.
+    "tortoise/sdk.py": 1,
 }
 _EXPECTED_ABSENT_SITES = {"tortoise/search_engine.py": 1}
 

@@ -37941,6 +37941,8 @@ class TortoiseSDK:
         Point results annotated with EP breakdown. confidence_mean is THE
         point's confidence (issue #2206 contract): the belief mean α/(α+β) of
         the persisted posterior when EP has run, else the persisted prior
+        mean — EXCEPT that a readable ``n.confidence`` mirror LEADS both, so a
+        declared Beta(3,1) beside a stored 0.9 reads 0.9, not the 0.75 prior
         mean — and ``null`` + ``ep_state: "absent"`` when nothing YIELDS a mean
         and no readable ``n.confidence`` mirror supplies one:
         nothing persisted, a half pair, a 0/0 pair, a negative operand, or an
