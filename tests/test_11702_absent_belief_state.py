@@ -439,9 +439,9 @@ def test_degenerate_posterior_pair_is_ABSENT_on_every_surface(sdk):
                         ("gaps_ranking", gap["confidence"]),
                         ("graph_ranking", graph["confidence"]),
                         ("graph signal", sig["confidence"])):
+        # A NaN-specific assertion here would be unreachable: NaN is not None,
+        # so this pin already grades the unguarded-0/0 path.
         assert value is None, f"{name} reports {value!r} for a zero-total pair"
-        assert not isinstance(value, float) or value == value, (
-            f"{name} answered NaN — an unguarded 0/0 reached the wire")
     for name, state in (("recall_ranking", rec["ep_state"]),
                         ("gaps_ranking", gap["ep_state"]),
                         ("graph_ranking", graph["ep_state"]),
@@ -743,6 +743,9 @@ def test_entity_profile_floor_reads_a_posterior_only_belief(sdk):
     assert absent_kid not in ids(0.3), "an absent belief cleared a real floor"
     assert {measured_kid, absent_kid} <= ids(0.0), (
         "the no-op floor must keep an absent claim (0.0 is the #11702 default)")
+
+
+def test_belief_value_is_the_one_python_twin():
     """`belief_value` is the Python twin of the Cypher presence+precedence rule.
 
     Every surface that holds a plain property dict (navigation's floor,
