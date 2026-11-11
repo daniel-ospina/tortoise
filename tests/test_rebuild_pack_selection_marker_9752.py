@@ -1552,14 +1552,14 @@ def test_migrate_route_keeps_the_UNCONFIGURED_consequence_on_shape_a(
               "pack_selection_conflict": False}
     with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
         result = _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
-    # The returned dict, not only the log line: the harm ("may read as
-    # UNCONFIGURED") is TRUE of this shape *because* the route reported it as
-    # UNKNOWN off its own empty-capture override, and NOT as an inherited
-    # rescue-file report — those two shapes print different text and only this
-    # one carries this consequence. Without the pair a caller branching on the
-    # dict could not tell them apart, and this test's docstring claim
-    # ("asserting on ... the returned dict a caller branches on") was carried by
-    # an assignment Ruff flags as unused (F841): the assertion had gone missing.
+    # The returned dict, not only the log line: the docstring above promises
+    # both, and `main()` branches on exactly this pair. The harm ("may read as
+    # UNCONFIGURED") is TRUE of this shape *because* the route reported UNKNOWN
+    # off its own empty-capture override, and NOT as an inherited rescue-file
+    # report — those two shapes print different text and only this one carries
+    # this consequence. Without the pair a caller branching on the dict could
+    # not tell them apart, and the claim in the docstring would be carried by an
+    # unused local (ruff F841, which reds the repo-wide lint leg).
     assert result["pack_selection_state_unknown"] is True, (
         f"this route's own empty-capture override did not fire: {result}")
     assert result["pack_selection_state_unknown_inherited"] is False, (
@@ -1574,14 +1574,6 @@ def test_migrate_route_keeps_the_UNCONFIGURED_consequence_on_shape_a(
     assert "not an observed loss" in msg, (
         f"the consequence must stay bounded to what was observed: {msg}")
     assert msg.index("capture read") < msg.index("UNCONFIGURED"), msg
-    # The docstring above promises the RETURNED dict too, and a caller branches
-    # on exactly these two: without these assertions `result` is an unused local
-    # (ruff F841, which reds the repo-wide lint leg) and the claim is false.
-    assert result["pack_selection_state_unknown"] is True, result
-    assert result["pack_selection_state_unknown_inherited"] is False, (
-        "this route's own empty-capture override must report itself as NOT "
-        f"inherited, or the CLI prints the sidecar cause: {result}")
-
 
 def test_migrate_route_keeps_the_error_pointer_for_a_rescue_file(
         tmp_path, caplog, monkeypatch):

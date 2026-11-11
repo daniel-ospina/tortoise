@@ -2491,8 +2491,9 @@ to answer.
   exactly this reason, so the `sdk.py` numbers are historical at this head. The other three
   files' cites still resolve for the `extractor_v2.py` group and `projection/entities.py:1478`
   (re-opened here) — ⛔ **but NOT for `hosted_api.py`**, whose pivot has moved on: `:23466` WAS
-  `life = proj.g.query(LIFETIME_MEMORY_QUERY).result_set` at this entry's own head and reads
-  `    )` on the merged tree, where the pivot is at `:23477`. It moved under `main`'s `#11803`
+  `life = proj.g.query(LIFETIME_MEMORY_QUERY).result_set` at this entry's own head and now holds
+  nothing but a four-space-indented `)` on the merged tree, where the pivot is at `:23477`. It moved
+  under `main`'s `#11803`
   family, not under anything this branch did, and NO gate can see it: the bundle sweep's
   `_BUNDLE_SOURCES` covers `sdk.py`, `edges.py`, `extractor_v2.py` and `projection/*.py` and not
   `hosted_api.py`. It is HISTORICAL here too — re-derive by NAME (`LIFETIME_MEMORY_QUERY`'s
