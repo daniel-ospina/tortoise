@@ -481,6 +481,12 @@ def refuse_malformed_money_in_payload(payload, *, door: str = "") -> None:
     Widening engagement here would refuse legitimate writes — that is what the
     review's "presence-based" candidate was withdrawn for.
 
+    ⚠️ SHAPE IS THE ONE OTHER TRIGGER, and it is not a money rule: a payload
+    nested deeper than :data:`_MONEY_PAYLOAD_MAX_DEPTH` is refused whether or
+    not it carries money at all (see the depth refusal below), so "gated only
+    if it carries an ``amountMinor``/``currency``" describes the money REFUSAL,
+    not every refusal this walk can raise (#11836 review P3).
+
     ⚠️ FAILURE DIRECTION — REFUSE, not admit, for the family it matches: a
     nested mapping that carries a non-null ``amountMinor``/``currency`` for a
     non-money purpose would be refused too, because the bag alone cannot say

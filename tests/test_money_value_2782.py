@@ -1685,14 +1685,39 @@ class TestThePayloadWalkFailsClosedAtItsDepthBound:
             refuse_malformed_money_in_payload,
         )
 
-        # the bound itself still grades (a malformed bag deep inside is caught)
-        with pytest.raises(ValueError, match="write boundary"):
-            refuse_malformed_money_in_payload(
-                self._nest(_MONEY_PAYLOAD_MAX_DEPTH - 1), door="test")
-        # … and past it the answer is a REFUSAL, never a silent pass
+        # past the bound the answer is a REFUSAL, never a silent pass
         with pytest.raises(ValueError, match="nests deeper than"):
             refuse_malformed_money_in_payload(
                 self._nest(_MONEY_PAYLOAD_MAX_DEPTH + 1), door="test")
+
+    @pytest.mark.parametrize("offset", [0, 1])
+    def test_the_bound_itself_still_grades(self, offset):
+        """A malformed bag AT the bound is graded by the MONEY rule.
+
+        ⛔ Pin the END of the range, not ``MAX - 1`` only: the sibling test used
+        to grade ``_MONEY_PAYLOAD_MAX_DEPTH - 1`` while claiming "the bound
+        itself still grades", so flipping ``>`` to ``>=`` — which refuses a
+        payload of exactly the bound while the message claims it "nests deeper
+        than 32" — left every test green (measured). The two refusals are
+        distinguishable by their message, so the discriminating assertion is
+        that the SHAPE rule did NOT fire on a payload it should have graded.
+        """
+        from tortoise.money import (
+            _MONEY_PAYLOAD_MAX_DEPTH,
+            refuse_malformed_money_in_payload,
+        )
+
+        depth = _MONEY_PAYLOAD_MAX_DEPTH - 1 + offset
+        with pytest.raises(MoneyValueError) as caught:
+            refuse_malformed_money_in_payload(self._nest(depth), door="test")
+        message = str(caught.value)
+        assert "nests deeper than" not in message, (
+            f"a malformed bag at depth {depth} (the bound is "
+            f"{_MONEY_PAYLOAD_MAX_DEPTH}) was refused by the SHAPE rule "
+            f"instead of being graded by the money rule: {message!r}")
+        assert "money value refused" in message, (
+            f"the money rule did not grade the bag at depth {depth}: "
+            f"{message!r}")
 
     def test_a_real_door_refuses_a_payload_it_cannot_grade(self):
         import tempfile
@@ -1722,20 +1747,26 @@ class TestThePayloadWalkFailsClosedAtItsDepthBound:
         payload is MONEY-FREE: a deep malformed bag is correctly refused, so
         only a money-free one can tell "no collateral damage" apart from "the
         walk never ran".
+
+        ⛔ The depth is a FIXED literal, never ``_MONEY_PAYLOAD_MAX_DEPTH - n``:
+        a payload derived from the constant TRACKS the bound, so tightening the
+        bound could never red this test — measured on the merged head, where the
+        whole class stayed green with the bound set to 2. 10 is far below the
+        bound's own stated headroom (no journal payload nests past ~4) and far
+        above it once the bound is tightened, which is what makes it a guard.
         """
         import tempfile
         from pathlib import Path
 
         from tortoise.api import EventAPI
         from tortoise.log import EventLog
-        from tortoise.money import _MONEY_PAYLOAD_MAX_DEPTH
 
         with tempfile.TemporaryDirectory() as tmp:
             journal = Path(tmp) / "events.jsonl"
             api = EventAPI(EventLog(str(journal)), initiated_by="extractor")
             api.add_object(
                 "deep metadata is fine", "venture:tranche",
-                meta=self._nest_money_free(_MONEY_PAYLOAD_MAX_DEPTH - 2))
+                meta=self._nest_money_free(10))
             assert journal.exists() and journal.read_text(), (
                 "the write did not land — a legitimate deep payload was refused")
             assert "ObjectRegistered" in journal.read_text()
