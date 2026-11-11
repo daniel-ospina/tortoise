@@ -574,10 +574,14 @@ def test_the_hex_bound_is_a_magnitude_and_zero_is_zero():
     # The bound measures SIGNIFICANT digits, so a LEFT-padded mantissa is still
     # a small value: only `digits.lstrip("0")` keeps this in band (the leading
     # zeros would otherwise contribute 4 bits each and put it 13,000+ bits over
-    # the bound). `main` reads this literal today — the pre-#11897 bound was on
-    # the EXPONENT, and `p0` is well inside it — so bounding the padded spelling
-    # instead of the value would refuse a served literal: the same defect class
-    # this PR exists to remove, re-entered from the other side (#11898 review).
+    # the bound). Leading zeros are ordinary hex digits — C99's `strtod` grammar
+    # (and so the store's `toFloat`) accepts them and they do not change the
+    # value — and this literal is SERVED, not hypothetical: measured on
+    # FalkorDB 4.20.6, `toFloat` answers `1.0` and `_exact_literal_fraction`
+    # answers `Fraction(1)`, the same answer `main` gives (its bound was on the
+    # EXPONENT, and `p0` is far inside it). So bounding the padded SPELLING
+    # instead of the value refuses a served literal: the same defect class this
+    # PR exists to remove, re-entered from the other side (#11898 review).
     assert _exact_literal_fraction("0x" + "0" * 4400 + "1p0") == Fraction(1)
 
 
