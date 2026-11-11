@@ -252,7 +252,7 @@ def test_rebuild_all_leaves_no_marker_when_the_graph_had_none(tmp_path):
     assert _resolved(sdk).configured is False
 
 
-def test_rebuild_journal_only_engine_keeps_the_marker(tmp_path):
+def test_rebuild_journal_only_engine_keeps_the_marker(tmp_path, caplog):
     """The IN-MEMORY `rebuild()` path carries it too (no sidecar there).
 
     FAILING VALUE: the marker is held in memory and restored after the wipe; with
@@ -280,8 +280,19 @@ def test_rebuild_journal_only_engine_keeps_the_marker(tmp_path):
     _configure(sdk, [{"namespace": "dev", "status": "active"}])
     before = _resolved(sdk)
 
-    _proj(sdk).rebuild(
-        EventLog(str(events / "events.jsonl")), confirm_destructive=True)
+    with caplog.at_level(logging.WARNING, logger="tortoise.projection"):
+        _proj(sdk).rebuild(
+            EventLog(str(events / "events.jsonl")), confirm_destructive=True)
+
+    # ⛔ The live WRITE is a `logger.warning`: two operator docs state that
+    # contract ("the engine reports that at WARNING instead of logging that the
+    # pack set survived"). `warning` -> `info` left this test and both
+    # `replay_log_reports_*` arms GREEN (#9752 r9), so the level is pinned here.
+    _warn = [r.getMessage() for r in caplog.records
+             if r.levelno == logging.WARNING]
+    assert any(":PackInstall" in m and "NOT" in m for m in _warn), (
+        "`rebuild()` must WARN that the marker came back but the :PackInstall "
+        f"rows did not — that is the documented contract: {_warn}")
 
     after = _resolved(sdk)
     assert after.configured is True, (
@@ -545,7 +556,13 @@ def test_unverifiable_post_restore_read_is_a_gap_not_a_success(
     assert counts["pack_selection_gap"] == 1, (
         f"the gap must be reported when confirmation could not run: {counts}")
     msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
-    assert any("UNVERIFIED" in m and ":PackSelection" in m for m in msgs), (
+    # ⛔ Name the BLOCK, not the word: the inner `except` log also says
+    # "UNVERIFIED", so an assertion on the word alone stayed GREEN with
+    # `if not pack_selection_verified:` replaced by `if False:` — and that block
+    # is also what suppresses the "treated as transient" restore-failure line,
+    # i.e. deleting it prints the inverse verdict (#9752 review round 9).
+    assert any("post-restore verification COULD NOT RUN" in m
+               and ":PackSelection" in m for m in msgs), (
         "the operator must be told the marker is UNVERIFIED (not confirmed "
         f"intact, not observed gone) rather than shown a success: {msgs}")
 
@@ -1137,6 +1154,16 @@ def test_auto_health_recover_warns_on_the_pack_selection_gap(
         f"whether the marker existed: {_msg}")
     assert "re-admitted" not in _msg, (
         f"an UNKNOWN sidecar must not assert an observed loss: {_msg}")
+    # ⛔ The clean "auto-recovered" line is the contradictory pair this branch
+    # exists to suppress (`_auto_health_recover`'s gate takes
+    # `or result.get("pack_selection_gap")`); dropping that term left this test
+    # GREEN while the run printed "auto-recovered … (0 events)" immediately
+    # above "BUT its :PackSelection … is NOT confirmed intact" (#9752 r9).
+    assert not any("auto-recovered empty embedded DB" in r.getMessage()
+                   and "NOT confirmed intact" not in r.getMessage()
+                   for r in caplog.records), (
+        "the success-shaped clean line must not be printed beside the gap: "
+        f"{[r.getMessage() for r in caplog.records]}")
 
 
 def test_auto_health_recover_does_not_mask_the_team_meta_gap(
@@ -1539,6 +1566,14 @@ def test_migrate_route_does_not_override_a_stronger_rebuild_report(
     decision. `pack_selection_expected` is 0 so the empty-capture clause is
     active and this bracket is the only thing standing between the route and a
     relabelled conflict.
+
+    ⛔ WHICH TERM protects it, measured: the injected dict sets `gap: 1`, and the
+    bracket's `pack_selection_conflict` term is UNREACHABLE on this route —
+    `conflict` is `missing and live_markers`, `missing` is assigned only under
+    `pack_selection_marker is not None`, and `expected = len(snapshot)`, so
+    conflict implies `expected >= 1` and cannot be true inside
+    `if not expected:`. The term is kept as defence against that changing; the
+    `gap` term is what reds this row (#9752 review round 9).
     """
     counts = {"nodes": 1, "edges": 0, "events": 1,
               "pack_selection_expected": 0, "pack_selection_verified": True,
