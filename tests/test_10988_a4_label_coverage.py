@@ -533,6 +533,31 @@ def test_the_typed_statement_NULL_diagnostics_are_reported_beside_the_criterion(
     assert a4["typed_share"] == 109 / 272
 
 
+def test_the_claims_histogram_is_read_ONCE_and_both_published_numbers_share_it():
+    """FAILS IF `_a4_claim_diagnostics` issues its OWN claims query beside the criterion's.
+
+    ⛔ A second read is a SECOND POPULATION, and it is the one defect here that no other arm can
+    see: on the live fleet graph a write landing between the two reads publishes one layer's
+    population twice — `a4 claims population=<X>` beside `a4 diagnostics claim_points=<Y>` — with
+    every rendering, fold and vocabulary arm still GREEN (`#11837` review; the guards are the
+    `counts=` parameter at `capstone_measure.py:3276` and its `if counts is None` default).
+
+    Pinned as QUERY TEXT, the way the predicate and the node label are: `_FakeGraph` records every
+    cypher it answers, and the claims histogram is uniquely identifiable by its `RETURN`.
+    """
+    probe = _probe()
+    projection = _FakeProjection(_CLAIM_ROWS)
+    a4 = probe._a4_label_coverage(projection)
+    histograms = [q for q in projection.g.queries
+                  if "RETURN coalesce(n.pointKind, 'NULL') AS k" in q]
+    assert len(histograms) == 1, (
+        "the claims histogram was read more than once — a second read is a second population, so "
+        f"the criterion and the diagnostic can disagree on one layer: {histograms}")
+    assert a4["claim_points"] == a4["claims"]["population"], (
+        "the criterion and the diagnostic report two populations for the SAME layer",
+        a4["claims"]["population"], a4["claim_points"])
+
+
 def test_the_per_writer_split_attributes_by_REPRODUCTION_and_says_it_is_not_a_stamp():
     """FAILS IF attribution is presented as a stored fact, or as "some other lane".
 

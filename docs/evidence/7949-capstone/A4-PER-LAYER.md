@@ -132,7 +132,7 @@ not a residue of the rule classifier and not v2-lane drift.**
 
 ## 4 · The CI contract twin
 
-`tests/test_10988_a4_label_coverage.py` — 16 offline, deterministic cases, each naming the mutation that
+`tests/test_10988_a4_label_coverage.py` — 17 offline, deterministic cases, each naming the mutation that
 reds it: `NULL` and the blank kind are one absent share; `unlabelled` decomposes exactly **and the
 RENDERED layer block carries both halves as their own numbers** (a renderer that prints only the total
 hands the `NULL` denominator back to the reader as a subtraction, which is the derivation
@@ -141,8 +141,11 @@ clause was unfalsifiable for the thing/event layers); the three layers
 are never blended, and the census CHOOSES each layer's vocabulary itself, so one vocabulary wired into all
 three reds even though the direct calls above cannot see it; each layer's node **label** is pinned as
 QUERY TEXT **through the census entry point**, so a hop that hardcodes one label reds and a layer cannot
-measure a sibling's population, while the turn-row/operator exclusion stays on `claims` alone; a layer is
-judged against its own vocabulary (a point kind on a thing is not coverage);
+measure a sibling's population, while the turn-row/operator exclusion stays on `claims` alone; the
+claims histogram is read **once** and SHARED with the diagnostic, so the criterion's population and
+`claim_points` cannot be two populations of one layer (pinned as query text: the second read is
+invisible to every fold, render and vocabulary arm above); a layer is judged against its own
+vocabulary (a point kind on a thing is not coverage);
 object kinds compare case-insensitively; the declared vocabulary includes the SDK's own registered kinds;
 `0 of 0` is not coverage and one labelled node clears the floor; `declared_absent` is reported and decides
 nothing while `expected_absent` names only the kinds a CORPUS expectation requires; the diagnostics
