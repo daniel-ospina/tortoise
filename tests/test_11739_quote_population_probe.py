@@ -1002,6 +1002,56 @@ def test_a_full_stderr_does_not_change_the_exit_code(monkeypatch, tmp_path):
     assert qp.sys.stderr.name == os.devnull
 
 
+def test_help_with_a_full_stdout_still_exits_zero(monkeypatch):
+    """FAILS IF the usage exits check only ONE stream.
+
+    argparse writes help through its OWN `sys.stdout` call, which this module never sees. On
+    this stream shape the write fills the buffer, `_print_message` swallows the error, and the
+    failure only surfaces at interpreter shutdown — where it sets **120** over a documented
+    `0` (the same defect the `--out -` arm had). When the help is long enough to exceed
+    stdout's 4,096-byte direct-write threshold the write fails earlier and the exit stays 0
+    (measured), so this test pins the ABANDONMENT, which is the property that holds in both
+    cases; the real-process arm is checked separately.
+    """
+    import io
+
+    class _FullRaw(io.RawIOBase):
+        def writable(self) -> bool:
+            return True
+
+        def write(self, _b) -> int:
+            raise OSError(28, "No space left on device")
+
+    stdout = io.TextIOWrapper(io.BufferedWriter(_FullRaw()))
+    monkeypatch.setattr(qp.sys, "stdout", stdout)
+    with pytest.raises(SystemExit) as raised:
+        qp.main(["quote_population", "--help"])
+    assert raised.value.code == 0
+    assert qp.sys.stdout is not stdout
+    assert qp.sys.stdout.name == os.devnull
+
+
+def test_help_with_a_closed_stdout_exits_zero(monkeypatch):
+    """Pins the OTHER half: `--help >&-` must exit 0, and the help lands on STDERR.
+
+    With fd 1 closed CPython sets `sys.stdout = None`; argparse's `_print_message` then falls
+    back to `file = file or _sys.stderr`, so the help is written to stderr rather than dropped
+    or raised (measured on the real process: 4,199 B on stderr, exit 0). Asserting the channel
+    matters — the earlier version of this docstring claimed the `AttributeError` was swallowed,
+    which is not the mechanism that runs, and a test that only checked the exit code would pass
+    under either explanation.
+    """
+    import io
+
+    sink = io.StringIO()
+    monkeypatch.setattr(qp.sys, "stdout", None)
+    monkeypatch.setattr(qp.sys, "stderr", sink)
+    with pytest.raises(SystemExit) as raised:
+        qp.main(["quote_population", "--help"])
+    assert raised.value.code == 0
+    assert "usage:" in sink.getvalue()
+
+
 def test_a_full_stderr_does_not_turn_usage_into_a_hundred_and_twenty(monkeypatch):
     """FAILS IF argparse's OWN usage write leaves a dirty stderr for shutdown to re-flush.
 

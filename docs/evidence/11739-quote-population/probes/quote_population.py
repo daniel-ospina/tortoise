@@ -749,18 +749,33 @@ def main(argv: list[str]) -> int:
     try:
         args = ap.parse_args(argv[1:])
     except SystemExit:
-        # `--help` (0) and a usage error (2) both write through ARGPARSE's own `sys.stderr`
-        # call, which this module never sees — so a full stderr left a dirty buffer and the
-        # documented 2 became 120 at shutdown, the same class as `--out - > /dev/full`
-        # (measured: `--nonsense 2>/dev/full` → 120). Check the flush and abandon the stream
-        # if it failed, then re-raise the exit argparse chose.
-        stream = sys.stderr
-        if stream is not None:
+        # `--help` (0) and a usage error (2) write through ARGPARSE's own calls — help to
+        # stdout, the usage error to stderr — and this module never sees either. A full stream
+        # left a dirty buffer and the documented exit became 120 at shutdown (measured:
+        # `--nonsense 2>/dev/full` → 120; and for a help short enough to sit in stdout's buffer,
+        # `--help > /dev/full` → 120 too). Check BOTH, abandon whichever failed, then re-raise
+        # the code argparse chose.
+        for name in ("stdout", "stderr"):
+            stream = getattr(sys, name)
+            if stream is None:
+                continue
             try:
                 stream.flush()
             except (OSError, ValueError):
-                sys.stderr = _abandon(stream)
+                setattr(sys, name, _abandon(stream))
         raise
+    except (OSError, ValueError, AttributeError) as e:
+        # A GUARD, not a measured path. Two measured reasons it does not fire here:
+        #   * `--help >&-` does not raise at all — `sys.stdout` is None, so argparse's
+        #     `_print_message` falls back to `file = file or _sys.stderr` and the help is
+        #     written to STDERR (measured: 4,199 B of help on stderr, exit 0);
+        #   * `--help > /dev/full` does not raise either — the 4,199-byte help exceeds stdout's
+        #     4,096-byte direct-write threshold, so the failing write happens on the raw fd and
+        #     `TextIOWrapper` drops its pending bytes, leaving a CLEAN buffer.
+        # It stays because a failure that DOES surface from `parse_args` must not leave the
+        # contract: the destination was not writable, which is the `2` arm.
+        _say(f"PROBE-WRITE(<stdout>): {e}\n")
+        return 2
 
     key = os.environ.get("TORTOISE_MCP_API_KEY") or os.environ.get("TORTOISE_API_KEY")
     if not key:
