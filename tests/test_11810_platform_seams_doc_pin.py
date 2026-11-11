@@ -87,6 +87,13 @@ WHAT IT STILL DOES NOT CATCH, stated so the docstring is not the next over-claim
   * a HOMOGLYPH (`\u0441loud` rendering as `cloud`). That needs a confusables
     table; it is out of proportion for a docs pin, so it is a recorded residual
     rather than a fix. (Measured: entities/tags now caught, homoglyphs not.)
+  * ⚠️ The PRESENCE arm reads ONE rendering (`_TAG`), so it CAN false-RED a
+    truthful, render-identical record whose quoted fragment is split by a
+    bare-attribute tag: `'a session running in a <span data-x>hosted</span>
+    cloud agent VM'` → the fragment is NOT found, because that tag's words
+    interpose (measured, review r15 P3). The ABSENCE leg is protected by the
+    union; the presence leg cannot join it without turning arm 1 fail-open, so
+    this is recorded rather than fixed — and no editor produces this shape.
   * this arm is deliberately OVER-BROAD in the safe direction: it bans the words
     wherever they appear in any order-adjacent form, so an HONEST correction that
     quotes the retracted wording to reject it — this record's own house style,
@@ -255,7 +262,7 @@ def _renderings(text: str) -> list[str]:
     covers prose that forges a tag no pattern anticipates AND a phrase carried in
     an ATTRIBUTE VALUE — `<b title="…">` — which both tag strips legitimately
     remove (measured; pinned by the `attribute-value` sample, r13 P3). A cost of 3
-    normalisations over a 50 KB record — the pin runs 3 tests.
+    normalisations over a 50 KB record — the module runs 4 tests.
     """
     return [_normalised(text, p) for p in (_TAG, _TAG_WITH_BARE_ATTRS, None)]
 
