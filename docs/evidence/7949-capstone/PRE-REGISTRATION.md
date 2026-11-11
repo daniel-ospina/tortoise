@@ -249,7 +249,7 @@ through `referentiality.ENV_FLAG`), `TORTOISE_CHANGE_FEED` (an ambient `=1` adds
 to the graph the run writes), and the two confidence gates `TORTOISE_SUBJECT_TAU_HI` /
 `TORTOISE_SUBJECT_TAU_LO` (read through a parameter by `subject_binding`, and they decide whether
 the `:aboutSubject`/`:aboutObject` edge is written at all), plus `TORTOISE_LABEL_ORDER_SEED` (inert while
-`TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split), `TORTOISE_CONTEXT_ENRICH` (the per-turn REWRITE of the text each turn embeds, gated in `context_enrich.enrich_enabled` and reached from `sdk.capture_session` as `enrich_fn=_capture_enriched_texts`; fail-safe OFF) — all pinned **unset** — and `TORTOISE_JSON_MODE`, pinned to **`1`** because its absent state is already ON and it is read PER CALL to flip the request's `response_format` (`model_adapters`), and `TORTOISE_IDENTIFIER_TOKENS`, pinned to **`1`** because its absent state is already ON (`sparse.py:226`, `env_flag(IDENTIFIER_ENV, True)`) and it rewrites `search_keys` on every `:Point` the run writes (`projection/entities.py:1478`, the `identifier_tokens_enabled()` gate inside `point_identifier_aliases`, reached from `create_point`); the registered corpus yields no aliases either way, measured — and
+`TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split), `TORTOISE_CONTEXT_ENRICH` (the per-turn REWRITE of the text each turn embeds, gated in `context_enrich.enrich_enabled` and reached from `sdk.capture_session` as `enrich_fn=_capture_enriched_texts`; fail-safe OFF) — all pinned **unset** — and `TORTOISE_JSON_MODE`, pinned to **`1`** because its absent state is already ON and it is read PER CALL to flip the request's `response_format` (`model_adapters`), and `TORTOISE_IDENTIFIER_TOKENS`, pinned to **`1`** because its absent state is already ON (`sparse.py:226`, `env_flag(IDENTIFIER_ENV, True)`) and it rewrites `search_keys` on every `:Point` the run writes (`projection/entities.py:1478`, reached from `create_point`); the registered corpus yields no aliases either way, measured — and
 `TORTOISE_STATE_VALUE_VERBATIM`, pinned to **`1`** because its absent state is already ON
 (`extractor_v2._state_value_verbatim_enforced`, `env_flag(…, True)`) and it is read PER POINT at
 the emit site, where it decides whether a REWRITTEN value is WITHHELD (`=0` writes what the shipped
@@ -1460,7 +1460,7 @@ place a machine reads it.
   at the pre-registration commit; a run log may not declare it.
 - **Why it is not a relaxation**: `S2.3` structurally cannot run on a corpus whose S2 map types every
   candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:11803-11825`) collects only
-  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:14222`, `:14375`).
+  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:14205`, `:14358`).
   The old rule therefore could not be satisfied by **any** legitimate run of the registered corpus,
   so the gate could not return a verdict at all (§11.2's four ordered refusals). Every one of the
   eight still has to be accounted for, and an idle claim needs the run's own four facts — flag ON,
@@ -2280,21 +2280,16 @@ to answer.
   `main`**, each a faithful record of the head it names, and the live values are here.
 - **New value — measured at this head:** `_collect_classify_items` at `:11803`, its
   extent `:11803-11825` (23 lines, `def` to `return items` — unchanged in size, so the extent is
-  still the 23 lines §10.19 measured), the two `if items:` gates at `:14222`/`:14375`
-  (the S2 pass and the post-S4 pass), the two fail-open `except` arms at `:14235`/`:14386`,
-  the two result blocks at `:14586` (closing `:14592`) and `:14596` (closing `:14600`), and
-  `_run_vet_pass`'s S2.2 call at `:16780` and its post-S4 union call at `:14351`.
-  ⛔ **Re-derived once more, by content, after this entry was written** — `#11832`'s lane found
-  every cite below the collector a further **+17** on the shipped tree (`#11795`'s and `#11814`'s
-  inserts). The ``+108``/``+293``/``+44`` constants this entry was written around are
-  unchanged and still describe the heads they name; the numbers above are this tree's, which is
-  what this entry claims to carry.
+  still the 23 lines §10.19 measured), the two `if items:` gates at `:14205`/`:14358`
+  (the S2 pass and the post-S4 pass), the two fail-open `except` arms at `:14218`/`:14369`,
+  the two result blocks at `:14569` (closing `:14575`) and `:14579` (closing `:14583`), and
+  `_run_vet_pass`'s S2.2 call at `:16763` and its post-S4 union call at `:14334`.
 - **Verified by content, not by arithmetic.** Each line was opened at this head, not shifted:
   `:11803` is `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:11825` is
-  `return items`; `:14222`/`:14375` are the two `if items:` gates; `:14235`/`:14386` are the
+  `return items`; `:14205`/`:14358` are the two `if items:` gates; `:14218`/`:14369` are the
   two fail-open `except` arms whose warnings name `classify(S2) failed` / `classify(union)
-  failed`; `:14586` opens `result["classify_later"]` and `:14596` opens `result["vet"]`;
-  `:16780` is `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(` and `:14351` is
+  failed`; `:14569` opens `result["classify_later"]` and `:14579` opens `result["vet"]`;
+  `:16763` is `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(` and `:14334` is
   `complete_list, vet_union_stats, _w, _ = _run_vet_pass(`. The constants differ between the
   sides (`+293` for this branch's own inserts above the collector, `+108` for `#11654`, `+44` for
   `#11660`'s `sdk.py` move), which is exactly why a constant could not be trusted here.
