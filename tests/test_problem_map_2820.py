@@ -540,7 +540,7 @@ def test_a_decoy_index_ROW_cannot_satisfy_the_count_check(tmp_path):
     index = repo / pmc.INDEX_REL
     # ⛔ THE DECOY CARRIES THE DOCUMENT'S OWN COUNTS, DERIVED. A frozen literal
     # (this control shipped `20 fixed · 6 open`, true when it was written) stops
-    # discriminating the moment §2 moves: with the real 21/5 the "ours" row is
+    # discriminating the moment §2 moves: with the real 22/4 the "ours" row is
     # ALREADY wrong, so BOTH the fixed check and the whole-body mutant report a
     # disagreement and the assertion passes either way — a control that cannot
     # fail for the reason it states (#2820 review round 11, measured by mutating

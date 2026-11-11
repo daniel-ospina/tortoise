@@ -178,8 +178,8 @@ Object kinds that violate the bucket rule is a validation error naming the rule*
 The relation validator carries the **shape** check only (`mechanism must be IMPL or
 NAND`); no kind-bucket coherence check exists — `grep -n 'bucket'
 tortoise/pack_registry.py` returns the `storeAs` stream comment, the #2781
-reference buckets, and the `LEGACY_KIND_ALIASES` expansion buckets (`:2943`),
-and never a relation arm.
+reference buckets, and the `LEGACY_KIND_ALIASES` expansion buckets (in
+`_build_kind_expansions`), and never a relation arm.
 
 This row shipped as **VERIFIED-FIXED** on the first landing, on an inference
 ("conservatively … subsumed by the mechanism-inversion table") rather than a
