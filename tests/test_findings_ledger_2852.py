@@ -173,14 +173,21 @@ def test_mutation_population_is_pinned():
 
     #11902's review added the 25th: a marker-less `host:port` prose token used to be
     installed as the shorthand ANCHOR before the marker test ran, so inserting one in
-    front of a bad shorthand defused its red (measured green). The population and the
-    floor move together.
+    front of a bad shorthand defused its red (measured green).
+
+    The last cycle added four more, each closing a degeneracy a reviewer reproduced:
+    an `§N` reference in every evidence cell (a heading that EXISTS, so the §9 arm
+    missed it), an evidence command with no argument (a bare `git`/`ls` has nothing to
+    open), an issue id that this page's §6 index does not carry (`#1`), and the
+    overtaken clause's own letter enumeration (`(c), (d), (e) and (g)` could be
+    rewritten to name a DRIFTED row, or the STILL-TRUE ones, with the word "Four"
+    still correct). The population and the floor move together.
     """
     assert len(flc.MUTATIONS) >= flc.MIN_SELF_TEST_MUTATIONS, (
         "the registered population must meet the floor it declares"
     )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 25, (
-        "this line RECORDS the population (25 arms); removing one means editing the "
+    assert flc.MIN_SELF_TEST_MUTATIONS == 29, (
+        "this line RECORDS the population (29 arms); removing one means editing the "
         "floor here too, which is the second place a shrink has to touch"
     )
 
@@ -624,6 +631,82 @@ def test_a_decoy_headline_paragraph_is_rejected(tmp_path, monkeypatch):
     )
     problems = _doc_problems()
     assert any("paragraphs starting" in p for p in problems), problems
+
+def _blank_evidence_cells(text: str, token: str) -> str:
+    """Replace every §3 evidence cell with `token` — the emptied column, disguised."""
+    return re.sub(
+        r"(?m)^(\| \*\*[a-z]+\*\* \|.*?\| \*\*[A-Z][^|]*\| )[^|]*\|$",
+        lambda m: m.group(1) + f" {token} |",
+        text,
+    )
+
+
+def test_a_section_reference_in_every_evidence_cell_is_rejected(tmp_path, monkeypatch):
+    """FAILS if the `§N` form can carry the whole column.
+
+    The §9 arm only caught a section that does NOT exist. `§1` exists, and twelve of
+    them left the guard CLEAN with every verdict unbacked (measured) — the emptied
+    column wearing a section number. Only one row may legitimately rest on it (row
+    (l)'s evidence IS the section below it).
+    """
+    _mutated(tmp_path, monkeypatch, lambda t: _blank_evidence_cells(t, "§6"))
+    problems = _doc_problems()
+    assert any("rest on a bare §N reference" in p for p in problems), problems
+
+
+def test_an_evidence_command_without_an_argument_is_rejected(tmp_path, monkeypatch):
+    """FAILS if a bare command name counts as evidence.
+
+    `COMMAND_RE` matched a prefix, so twelve cells of `` `git` `` or `` `ls` `` — no
+    argv, nothing to open — satisfied the floor (measured, rc 0).
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace("`ls tortoise/semantic_extractor.py`", "`ls`", 1),
+    )
+    problems = _doc_problems()
+    assert any("names no `path:line`" in p for p in problems), problems
+
+
+def test_an_issue_reference_the_index_does_not_carry_is_rejected(tmp_path, monkeypatch):
+    """FAILS if any backticked `#NNN` counts as "an issue".
+
+    `#1` is a well-formed reference that names nothing on this page, and twelve of
+    them satisfied the floor (measured, rc 0). "An issue" means one §6 indexes.
+    """
+    _mutated(tmp_path, monkeypatch, lambda t: _blank_evidence_cells(t, "`#1`"))
+    problems = _doc_problems()
+    assert any("names no `path:line`" in p for p in problems), problems
+
+
+def test_the_overtaken_clause_enumerates_the_right_letters(tmp_path, monkeypatch):
+    """FAILS if the overtaken clause can name a row of a different class.
+
+    The word "Four" was derived but the letters beside it were not: `(c), (d), (e) and
+    (g)` could be rewritten to name a DRIFTED row, to name three while the word still
+    says four, or to name the four STILL-TRUE rows — all rc 0 (measured). §1 gives
+    those classes different handling rules, so the wrong letter is the wrong action.
+    """
+    for new in ("(c), (d), (e) and (k)", "(a), (f), (h) and (i)"):
+        _mutated(
+            tmp_path,
+            monkeypatch,
+            lambda t, n=new: t.replace("(c), (d), (e) and (g)", n, 1),
+        )
+        problems = _doc_problems()
+        assert any("the overtaken clause enumerates" in p for p in problems), (new, problems)
+
+
+def test_the_other_rows_count_is_derived(tmp_path, monkeypatch):
+    """FAILS if "the other N moved" can drift from the paragraph's own counts."""
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace("three moved for a different reason", "two moved for a different reason", 1),
+    )
+    problems = _doc_problems()
+    assert any("other rows moved" in p for p in problems), problems
 
 
 # ── the headline tally is derived, not asserted ────────────────────────────

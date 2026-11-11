@@ -205,7 +205,7 @@ VOCAB_ROW_RE = re.compile(r"^\|\s*\*\*(?P<token>[A-Z][A-Z-]*)\*\*\s*\|")
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-MIN_SELF_TEST_MUTATIONS = 25
+MIN_SELF_TEST_MUTATIONS = 29
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -386,27 +386,44 @@ def check_verdicts(text: str) -> list[str]:
     return problems
 
 
-def _has_evidence(cell: str, sections: set[int]) -> bool:
+#: A command WITH an argument. `COMMAND_RE` alone matched a bare `` `git` `` or
+#: `` `ls` `` — no argv, nothing to open — and twelve of those "satisfied" the
+#: evidence floor (measured, rc 0).
+COMMAND_ARGV_RE = re.compile(
+    r"^`(?:\.venv/bin/[^\s`]+|(?:python3?|gh|git|ls|bash|npm|npx|uv|grep|rg))\s+[^\s`]"
+)
+
+
+def _evidence_kind(
+    cell: str, sections: set[int], indexed_ids: set[str]
+) -> str | None:
     """§1's rule for an evidence cell: a `path:line`, an issue, a command, or a §N.
 
-    `§N` must name a heading that EXISTS. Accepting any `§<digit>` let all twelve
-    evidence cells be replaced with a reference to a section the page does not
-    have (`§9`) — measured, rc 0 — which is the "emptied evidence column" bypass
-    wearing a section number.
+    Each form is held to its own substance, because every one of them was
+    degenerate-able on its own (all three measured at rc 0 with the whole column
+    replaced by the degenerate form):
+
+    * `§N` must name a heading that EXISTS — `§9` never did;
+    * an issue reference must be one this page's §6 index actually carries — `#1`
+      is an issue id that names nothing here;
+    * a command must carry an ARGUMENT — a bare `git` or `ls` has nothing to open.
+
+    The returned kind lets `check_evidence_cells()` floor the §N carve-out, which
+    is the one form that can legitimately stand alone (row (l)'s evidence IS the
+    section below it).
     """
-    if ISSUE_REF_RE.search(cell):
-        return True
-    if any(int(n) in sections for n in SECTION_REF_TOKEN_RE.findall(cell)):
-        return True
+    for match in ISSUE_REF_RE.finditer(cell):
+        if match.group(0)[2:-1] in indexed_ids:
+            return "issue"
     for match in re.finditer(r"`[^`\n]+`", cell):
         body = match.group(0)
-        if (
-            CITATION_RE.fullmatch(body)
-            or CITATION_SHAPE_RE.match(body[1:-1])
-            or COMMAND_RE.match(body)
-        ):
-            return True
-    return False
+        if CITATION_RE.fullmatch(body) or CITATION_SHAPE_RE.match(body[1:-1]):
+            return "citation"
+        if COMMAND_ARGV_RE.match(body):
+            return "command"
+    if any(int(n) in sections for n in SECTION_REF_TOKEN_RE.findall(cell)):
+        return "section"
+    return None
 
 
 def check_evidence_cells(text: str) -> list[str]:
@@ -424,18 +441,42 @@ def check_evidence_cells(text: str) -> list[str]:
     problems: list[str] = []
     section = _region(text, "## 3. The corrections log", "## 4. The artefact index")
     sections = {int(n) for n in HEADING_NUMBER_RE.findall(text)}
+    # The issue ids this page's §6 index actually carries. `#1` is a well-formed
+    # issue reference that names nothing here, and twelve of them satisfied the
+    # floor (measured, rc 0).
+    index_section = _region(text, "## 6. The issue index", "## 7. What this changes")
+    indexed_ids: set[str] = set()
+    for _off, row in _table_rows(index_section):
+        state = STATE_ROW_RE.match(row)
+        if state:
+            indexed_ids |= set(ISSUE_ID_RE.findall(state.group("which")))
+    section_only: list[str] = []
     for offset, line in _table_rows(section):
         match = CORRECTION_ROW_RE.match(line)
         if match is None:
             continue  # check_verdicts owns the shape refusal
         cells = _split_row_cells(line)
         cell = cells[5] if len(cells) > 5 else ""
-        if _has_evidence(cell, sections):
+        kind = _evidence_kind(cell, sections, indexed_ids)
+        if kind is None:
+            problems.append(
+                f"row ({match.group(1)}) at §3 line {offset}: its evidence cell names no "
+                "`path:line`, issue, command or §N — §1 says a row whose evidence cannot "
+                "be opened is not evidence, it is a memory"
+            )
             continue
+        if kind == "section":
+            section_only.append(match.group(1))
+    # ⛔ AT MOST ONE ROW MAY REST ON THE `§N` CARVE-OUT. Row (l)'s evidence IS the
+    # section below it, which is why the form exists at all; twelve of them is the
+    # emptied column wearing a section number (measured: every cell replaced by
+    # `§1`, a heading that exists, left the guard CLEAN).
+    if len(section_only) > 1:
         problems.append(
-            f"row ({match.group(1)}) at §3 line {offset}: its evidence cell names no "
-            "`path:line`, issue, command or §N — §1 says a row whose evidence cannot "
-            "be opened is not evidence, it is a memory"
+            f"§3 evidence: {len(section_only)} row(s) rest on a bare §N reference "
+            f"({', '.join(section_only)}) — only one may (the row whose evidence IS "
+            "the section below it); the rest are an emptied column wearing a section "
+            "number"
         )
     return problems
 
@@ -626,6 +667,40 @@ def check_verdict_tally(text: str) -> list[str]:
             f"{len(overtaken)} row(s) are SUPERSEDED-BY-FIX/ADOPTED "
             f"({', '.join(overtaken)})"
         )
+
+    # ⛔ THE OVERTAKEN CLAUSE'S OWN LETTER LIST IS DERIVED TOO. The word "Four" was
+    # checked but the enumeration beside it was not, so it could be made to
+    # contradict the table silently — measured, all rc 0: `(c), (d), (e) and (g)`
+    # rewritten to `… and (k)` (calls a DRIFTED row "overtaken by the very fixes they
+    # motivated"), to `(c), (d) and (e)` (says four, names three), or to
+    # `(a), (f), (h) and (i)` (the four STILL-TRUE rows — the exact opposite class).
+    clause = re.search(r"overtaken by the very fixes[^—]*—([^;]*)", paragraph)
+    if clause is None:
+        problems.append(
+            "§3 tally: the 'overtaken by the very fixes they motivated' clause is "
+            "absent — its enumeration cannot be checked"
+        )
+    else:
+        listed = set(re.findall(r"\(([a-z])\)", clause.group(1)))
+        if listed != set(overtaken):
+            problems.append(
+                f"§3 tally: the overtaken clause enumerates {sorted(listed) or '(none)'}, "
+                f"but the rows whose verdict is SUPERSEDED-BY-FIX or ADOPTED are "
+                f"{overtaken} — this page gives those classes a different handling "
+                "rule from DRIFTED, so the wrong letter sends the reader to the "
+                "wrong action"
+            )
+    # ...and its complement count: "the other N moved for a different reason".
+    other = re.search(r"the other (\w+) moved", paragraph)
+    if other is not None:
+        want = len(non_still) - len(overtaken)
+        if other.group(1) != COUNT_WORDS[want]:
+            problems.append(
+                f"§3 tally: the paragraph says {other.group(1)!r} other rows moved, "
+                f"but {want} is what its own counts leave ({len(non_still)} no longer "
+                "read as written minus "
+                f"{len(overtaken)} overtaken)"
+            )
     return problems
 
 
@@ -1354,6 +1429,25 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
             1,
         ),
         "carries 2 tables",
+    ),
+    (
+        "every §3 evidence cell replaced by a bare section reference",
+        lambda t: re.sub(
+            r"(?m)^(\| \*\*[a-z]+\*\* \|.*?\| \*\*[A-Z][^|]*\| )[^|]*\|$",
+            lambda m: m.group(1) + " §6 |",
+            t,
+        ),
+        "rest on a bare §N reference",
+    ),
+    (
+        "an evidence command with no argument",
+        lambda t: t.replace("`ls tortoise/semantic_extractor.py`", "`ls`", 1),
+        "names no `path:line`",
+    ),
+    (
+        "the overtaken clause naming a DRIFTED row",
+        lambda t: t.replace("(c), (d), (e) and (g)", "(c), (d), (e) and (k)", 1),
+        "the overtaken clause enumerates",
     ),
 )
 

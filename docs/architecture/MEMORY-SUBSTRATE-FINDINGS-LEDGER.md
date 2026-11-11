@@ -292,12 +292,20 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   `docs/00_index.md`, this module's docstring and the test module's, so a wrong one propagates well
   past this page. It must also be the ONLY such paragraph: a decoy carrying a correct-looking tally,
   inserted anywhere above §3, took the match while the real sentence was falsified (measured, rc 0),
-  so more than one is a page defect;
+  so more than one is a page defect. Its **overtaken clause is derived too** — the letters after
+  "overtaken by the very fixes they motivated" must be exactly the SUPERSEDED-BY-FIX/ADOPTED rows
+  and the "other N" must be what its own counts leave, because the word "Four" alone stayed
+  correct while `(c), (d), (e) and (g)` was rewritten to name a DRIFTED row, to name three, or to
+  name the four STILL-TRUE ones (measured, rc 0);
 - every **§3 evidence cell** names a `path:line`, an issue, a command or a §N (§1's own rule), and
-  the §N must name a heading that EXISTS — accepting any `§<digit>` let all twelve cells be replaced
-  with a reference to a section the page does not have (measured, rc 0). Without this, the whole
-  evidence column can be **emptied** while every verdict still passes — a red defused by deleting
-  what it pointed at, which is the one move this page exists to make impossible;
+  each of those four forms is held to its own substance, because each was degenerate-able on its
+  own (every one measured at rc 0 with the whole column replaced by it): the §N must name a heading
+  that EXISTS **and at most one row may rest on it** (row (l)'s evidence IS the section below it;
+  twelve `§1`s is the emptied column wearing a section number); a command must carry an
+  **argument** (a bare `git` or `ls` opens nothing); and an issue reference must be one this page's
+  §6 index actually **carries** (`#1` names nothing here). Without this, the whole evidence column
+  can be **emptied** while every verdict still passes — a red defused by deleting what it pointed
+  at, which is the one move this page exists to make impossible;
 - the **§3 population is pinned** to twelve rows, and the **§6 arithmetic** (open + closed + merged =
   the indexed population) is re-derived from the table rather than trusted — deleting a row and every
   mention of it otherwise passes every referential check. Because a pin selects rows *by shape*, an
