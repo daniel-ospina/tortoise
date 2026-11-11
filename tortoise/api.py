@@ -573,11 +573,11 @@ class EventAPI:
         log line while the identical ``point=`` refusal raised. One class of
         malformed payload, two answers; the caller of a best-effort seam is the
         only one who can react, so every payload-shape refusal is raised here,
-        BEFORE the arm that swallows I/O: the record-shaped, envelope, marker
-        and money families. That list is the entirety of what `_emit` refuses
-        on payload shape — a new family added there must be added here in the
-        same commit, which is what makes the sentence true rather than
-        aspirational.
+        BEFORE the arm that swallows I/O: the record-shaped, envelope, marker,
+        money and kind families — i.e. every gate `_emit` runs before its commit
+        point. That enumeration is not decorative: a family added to `_emit`
+        must be added here in the same commit, or the sentence goes back to
+        being a claim the code does not honour (it has twice).
         """
         _refuse_caller_named_funnel_keys(payload, "`emit_belief`")
         # …and the MONEY family, which is the other gate `_emit` runs and this
@@ -589,6 +589,16 @@ class EventAPI:
         # funnel uses (`refuse_malformed_money_in_payload`), so the two cannot
         # disagree about which shapes are malformed.
         refuse_malformed_money_in_payload(payload, door="EventAPI.emit_belief")
+        # …and the KIND family, the last gate `_emit` runs before its commit
+        # point. Found by the review of the money fix one family over AGAIN,
+        # with the same measurement: at that head
+        # `emit_belief(eventKind="marketing:campaign")` and
+        # `emit_belief(pointKind="statement\u2003")` were dropped with a log
+        # line while `add_object`/`add_event` raised on the identical payload.
+        # The predicate is the funnel's own (a bare module call inside it, so a
+        # duck-typed double still works), and it abstains identically when the
+        # lane holds no graph — so calling it here cannot disagree with `_emit`.
+        self._refuse_unapproved_kinds(payload)
         try:
             self._emit(type_, **payload)
         except Exception as exc:  # noqa: BLE001, RUF100

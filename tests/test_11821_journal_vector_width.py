@@ -1161,7 +1161,7 @@ def test_add_object_is_the_third_door_and_guards_both_of_its_families(tmp_path):
     nothing for the replay to fold:
 
     * `point=` — the record-shaped payload from #11835 review round 4. At this
-      head it journalled a `ObjectRegistered`-shaped payload the replay folds
+      head it journalled an `ObjectRegistered`-shaped payload the replay folds
       with NEITHER half of the vector rule applied: an off-grid float64 vector
       declaring `embedding_width: "f32"` (a marker that LIES — the #5004
       round-7 must-never-narrow population).
@@ -1268,6 +1268,15 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
     with pytest.raises(Exception, match="money value refused"):
         api.add_object("an object", "skill", id="obj-money",
                        amountMinor=25_000_000)
+    # …and the KIND family, found the same way one family over from the money
+    # fix: the two gates `_emit` runs before its commit point are exactly the
+    # two this arm used to swallow. Both are pinned at BOTH doors so the next
+    # reader does not have to trust the enumeration in the docstring.
+    with pytest.raises(ValueError, match="pointKind must be an identifier"):
+        api.emit_belief("ConfidenceChanged", id="node-1",
+                        pointKind="statement\u2003")
+    with pytest.raises(ValueError, match="pointKind must be an identifier"):
+        api.add_event("evt-kind", "session", pointKind="statement\u2003")
     assert not journal.exists() or not journal.read_text().strip(), (
         "the refusal must not leave a half-record behind")
 
