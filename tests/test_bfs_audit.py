@@ -31,11 +31,12 @@ def _grep(pattern: str, *dirs: str) -> list[str]:
 
 # A call site, allowing whitespace between the symbol and its `(`, and also
 # matching a BACKSLASH-CONTINUED line whose `(` is on the next physical line.
-# `ruff` catches neither: `f (1)` is E211, which is preview-only, and the
-# continuation form is not E211 at all (measured with the pinned ruff 0.16.4 —
-# `--select E,W,F` passes on both). Both are shippable Python, and the literal
-# `"propagate_shock("` test bucketed each as a reference — a false PASS for
-# exactly the restore this audit exists to catch.
+# `ruff` reports NEITHER at this repo's selection: both shapes are E211
+# (`whitespace-before-parameters`), which is preview-only and not enabled here
+# (measured with the pinned ruff 0.16.4 — `--select E,W,F` passes on both,
+# while `--select E211 --preview` flags both). Both are shippable Python, and
+# the literal `"propagate_shock("` test bucketed each as a reference — a false
+# PASS for exactly the restore this audit exists to catch.
 _PROPAGATE_SHOCK_CALL = re.compile(r"propagate_shock\s*(?:\(|\\\s*$)")
 
 
@@ -51,10 +52,10 @@ def _classify_propagate_shock_refs(lines: list[str]) -> dict[str, list[str]]:
     `projection/propagation.py` is that case: docstring lines stating the path is
     UNREACHABLE were reported as "PRODUCTION CODE CALLS propagate_shock". The
     call shape is the honest discriminator — a call site must read
-    `propagate_shock(`, `propagate_shock (` (a space before `(` is E211, and
-    E211 is preview-only so `ruff` does not catch it), or `propagate_shock \\`
-    with the `(` on the NEXT physical line (a backslash continuation, which is
-    not E211 at all and which a line-based grep otherwise cannot see) — and
+    `propagate_shock(`, `propagate_shock (` (whitespace before `(` is E211, and
+    E211 is preview-only, which this repo does not enable), or
+    `propagate_shock \\` with the `(` on the NEXT physical line (the SAME E211
+    under `--preview`, and a line-based grep cannot see it either way) — and
     `test_the_audit_discriminates_a_call_from_a_mention` pins all of them.
 
     A line that takes a REFERENCE to the method is production code too, even
@@ -140,8 +141,9 @@ def test_the_audit_discriminates_a_call_from_a_mention():
     spaced_call = f"{ROOT}/tortoise/api.py:1003:            propagate_shock (epicenter_id)"
     # UNDOTTED and backslash-continued, so `(` is on the next physical line: no
     # arm above sees it (no dot for the attribute rule, no `(` for the call
-    # rule), and ruff does not flag the form at all. Without the continuation
-    # alternative this row lands in `comment/reference only` — a false PASS.
+    # rule), and ruff does not flag the form without `--preview`. Without the
+    # continuation alternative this row lands in `comment/reference only` — a
+    # false PASS.
     continued_undotted = f"{ROOT}/tortoise/api.py:1004:            propagate_shock \\"
     callers = _classify_propagate_shock_refs(
         [prose, call, alias, partial, continued, spaced_call, continued_undotted])
