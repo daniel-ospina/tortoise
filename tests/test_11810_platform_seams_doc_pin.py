@@ -554,13 +554,16 @@ def _absent(fragment: str, text: str) -> bool:
     return not any(needle in rendering for rendering in _renderings(text))
 
 
-#: The RECORD's item markers, matched once and used by the LOCATOR. Every shape the
-#: record can spell an item as must be here, because a boundary that is narrower than
-#: the locator is a fail-OPEN: the block bleeds into the next item, so a sentence that
-#: MOVED there still reads as "in" the labelled item and the guard reports GREEN over
-#: the defect it exists to catch. Measured by review r28 P3 #1: a bold-numbered
-#: `**3.** …` pseudo-item inserted before the real item 3 left `8 passed` while row 3's
-#: sentence sat in the wrong item. Hence `\d+[.]` AND `\d+)` AND a `**`-wrapped number.
+#: The RECORD's item markers, matched once and used by the LOCATOR — and nothing else,
+#: since the item's EXTENT is the parser's (below). Every shape the record can spell an
+#: item as must be here, because a locator that MISSES a shape leaves the site
+#: unresolvable, and a locator that matches a line the parser does not make an item gets
+#: no extent — `_parser_item_end` returns `None`, the block is "", and the first assert
+#: REDs. ⛔ Both of those fail CLOSED. That is the opposite of the pre-parser rule, where
+#: a locator wider than the hand-computed boundary was a fail-OPEN that let a MOVED
+#: sentence read as "in" the labelled item (review r28 P3 #1 measured a bold-numbered
+#: `**3.** …` pseudo-item leaving `8 passed`; r41 P3 #1 caught this line still justifying
+#: itself with that deleted boundary). Hence `\d+[.]` AND `\d+)` AND a `**`-wrapped number.
 _ITEM_START = re.compile(r"^(?:\*\*)?\(?\d+[.)](?:\*\*)?\s")
 
 #: ⛔ The item's EXTENT comes from the CommonMark parser, not from a boundary this file
@@ -770,10 +773,13 @@ def test_every_restatement_site_label_names_the_item_that_states_it():
     Mutation (measured): move any restatement's sentence into the sibling item →
     the second assert REDs naming that needle and the site; re-word either heading
     → the first assert REDs naming the site; move a sentence into a **BOLD-NUMBERED**
-    pseudo-item (`**3.** …`) inserted before the real item → RED here, and GREEN if
-    the item extent is narrowed back to `^\d+\.\s` — the fail-open review r28 P3 #1
-    measured, and the reason the LOCATOR (`_ITEM_START`) covers every shape the record
-    can spell an item as.
+    pseudo-item (`**3.** …`) inserted before the real item → RED here, at every head:
+    the extent is the parser's `map`, so there is no boundary to narrow. (Narrowing the
+    LOCATOR to `^\d+\.\s` also REDs, by a different route: the pseudo-item becomes
+    unlocatable, so the real item is used and the sentence is measured outside it —
+    measured, `1291` chars and the needle absent. The old "GREEN if narrowed" clause
+    described the hand-computed boundary deleted at r40, review r41 P3 #2.) The LOCATOR
+    still has to cover every shape the record can spell an item as.
 
     ⛔ The EXTENT is not ours to compute. Six rounds measured a hand-rolled boundary
     failing in BOTH directions: it swallowed a sentence moved into a column-0 bullet, an
