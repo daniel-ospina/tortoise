@@ -494,7 +494,8 @@ rounding:**
   closed is the *unresolved-identity* one, measured at this head: `556e581ceb`'s
   `test_the_graph_node_count_does_not_increase` passes, so an unresolved identity
   is HELD rather than minted, and what stays unbuilt is surface-form retention
-  plus the honorific folding (`grep -ci honorific tortoise/extractor_v2.py` → 0)),
+  plus the honorific/name-suffix folding (`grep -ci honorific
+  tortoise/extractor_v2.py` → 0)),
   and `#2684` / `#2696`
   OPEN in the tracker.
 
