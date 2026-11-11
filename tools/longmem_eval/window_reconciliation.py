@@ -325,7 +325,13 @@ def spend_is_unknown(envelope: dict | None, *stages: str) -> bool:
 
     Absent/malformed envelopes report ``False`` (nothing known to be
     unknown); a caller that has no envelope at all must treat that case
-    itself.
+    itself — see :func:`pass_spend_is_unmetered`, which does.
+
+    ⛔ KNOWN UPSTREAM GAP (pre-existing, #11844): a provider usage block whose
+    keys the sanitizer drops ENTIRELY is recorded with ``usage_present``
+    True and zero tokens, so it is invisible here. This guard therefore makes
+    the arm honest about everything the meter CAN report; it does not repair
+    the meter.
     """
     if not isinstance(envelope, dict):
         return False
@@ -352,16 +358,51 @@ def spend_is_unknown(envelope: dict | None, *stages: str) -> bool:
 def envelope_calls(envelope: dict | None) -> int:
     """How many metered calls the envelope's ``total`` block reports (0 when
     the envelope is absent — the collector returns ``None`` for a qid with no
-    rows yet)."""
+    rows yet).
+
+    ⛔ This is the TOTAL across every stage, and the question key is bound
+    BEFORE ingest, so on a real run it is never 0 for an admitted pass even
+    when the reader and judge were silent. Never use it to decide whether a
+    READER/JUDGE pass was watched — use :func:`stage_calls`.
+    """
     if not isinstance(envelope, dict):
         return 0
     total = envelope.get("total")
     if not isinstance(total, dict):
         return 0
-    calls = total.get("calls")
-    if isinstance(calls, bool) or not isinstance(calls, int):
+    return _call_count(total.get("calls"))
+
+
+def _call_count(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
         return 0
-    return max(0, calls)
+    return max(0, value)
+
+
+def stage_calls(envelope: dict | None, *stages: str) -> int:
+    """How many calls the NAMED stages report, summed over providers/models.
+
+    The distinction from :func:`envelope_calls` is load-bearing: the qid is
+    keyed before ingest, so an envelope carrying only ``ingest`` rows proves
+    the question ran, never that its reader/judge pass was watched.
+    """
+    if not isinstance(envelope, dict):
+        return 0
+    by_stage = envelope.get("by_stage")
+    if not isinstance(by_stage, dict):
+        return 0
+    total = 0
+    for stage in stages:
+        providers = by_stage.get(stage)
+        if not isinstance(providers, dict):
+            continue
+        for models in providers.values():
+            if not isinstance(models, dict):
+                continue
+            for bucket in models.values():
+                if isinstance(bucket, dict):
+                    total += _call_count(bucket.get("calls"))
+    return total
 
 
 def pass_spend_is_unmetered(before: dict | None,
@@ -371,19 +412,22 @@ def pass_spend_is_unmetered(before: dict | None,
     Two distinct shapes, both of which must refuse to certify "within
     budget":
 
-    1. **No metering rows at all.** ``spend_is_unknown(None)`` is False by
-       design (nothing is *known* to be unknown), so an adapter carrying no
-       sink — the collector holds no row for the qid — would otherwise price
-       the pass at 0. An admitted pass performs at least one reader and one
-       judge call, so an absent or zero-call ``after`` envelope PROVES the
-       pass was unwatched.
+    1. **The reader/judge pass left no metering rows.** ``spend_is_unknown()``
+       on ``None`` is False by design (nothing is *known* to be unknown), so
+       an adapter carrying no sink would otherwise price the pass at 0. An
+       admitted pass performs at least one reader AND one judge call, so the
+       reader+judge call count must GROW across it. Counting ``total.calls``
+       instead would be inert on a real run: the question key is bound before
+       ingest, so ingest rows alone keep the total non-zero — which is why the
+       growth is measured per STAGE.
     2. **Rows that report no usage block** (``usage_present`` False, or
        ``calls_without_usage`` > 0), which make any token sum a lower bound.
 
     Checked on BOTH envelopes: the delta subtracts ``before`` from ``after``,
     so an unmeasured *one-shot* side corrupts the difference just as much.
     """
-    if envelope_calls(after) <= 0:
+    if stage_calls(after, "reader", "judge") \
+            <= stage_calls(before, "reader", "judge"):
         return True
     return (spend_is_unknown(before, "reader", "judge")
             or spend_is_unknown(after, "reader", "judge"))

@@ -264,30 +264,67 @@ def test_a_raised_window_that_cannot_fit_the_cap_is_refused():
         bound=bound, cap=wr.DEFAULT_RECONCILIATION_TOKEN_CAP) is False
 
 
+def _env(*, reader: int = 1, judge: int = 1, ingest: int = 0,
+         reader_usage_present: bool = True) -> dict:
+    """An envelope with per-STAGE ``calls`` counts (the field
+    :func:`wr.stage_calls` reads) and a ``total`` that sums them — the shape
+    ``UsageCollector._to_envelope`` emits."""
+    by_stage: dict = {}
+    if reader:
+        by_stage["reader"] = {"openrouter": {"m": {
+            "prompt_tokens": 100, "completion_tokens": 10,
+            "calls": reader, "usage_present": reader_usage_present}}}
+    if judge:
+        by_stage["judge"] = {"openrouter": {"m": {
+            "prompt_tokens": 20, "completion_tokens": 2,
+            "calls": judge, "usage_present": True}}}
+    if ingest:
+        by_stage["extractor"] = {"openrouter": {"m": {
+            "prompt_tokens": 9999, "completion_tokens": 9999,
+            "calls": ingest, "usage_present": True}}}
+    return {"by_stage": by_stage,
+            "total": {"prompt_tokens": 0, "completion_tokens": 0,
+                      "calls": reader + judge + ingest}}
+
+
 def test_pass_spend_is_unmetered_covers_the_no_rows_shape():
     """⛔ #11830 round-2 P1: ``spend_is_unknown(None)`` is False by design,
     so WITHOUT this rule an admitted pass whose adapters carry no sink
     publishes 0 tokens and "within budget". An admitted pass makes at least
-    one reader and one judge call, so an absent/zero-call AFTER envelope
-    proves it was never watched."""
-    known = _envelope()
+    one reader and one judge call, so the reader/judge call count must
+    GROW across it."""
     assert wr.envelope_calls(None) == 0
-    assert wr.envelope_calls(known) == 0        # this fixture has no total
-    with_total = dict(known)
-    with_total["total"] = {"prompt_tokens": 1, "completion_tokens": 1,
-                           "calls": 2}
-    assert wr.envelope_calls(with_total) == 2
+    assert wr.stage_calls(None, "reader", "judge") == 0
 
     # No rows at all -> unmetered, even though neither flag says "unknown".
     assert wr.pass_spend_is_unmetered(None, None) is True
     assert wr.spend_is_unknown(None, "reader", "judge") is False  # by design
-    # Rows exist and every call was priced -> a real measurement.
-    assert wr.pass_spend_is_unmetered(with_total, with_total) is False
+    # The reader+judge count grew -> a real measurement.
+    one_shot = _env()                    # the one-shot reader + judge
+    after = _env(reader=2, judge=2)      # + the pass's own pair
+    assert wr.pass_spend_is_unmetered(one_shot, after) is False
+    # No growth -> the pass was not watched.
+    assert wr.pass_spend_is_unmetered(one_shot, one_shot) is True
     # Rows exist but a call reported no usage block -> a lower bound.
-    unknown = {**with_total, "by_stage": {
-        "judge": {"openrouter": {"m": {"prompt_tokens": 5,
-                                       "usage_present": False}}}}}
-    assert wr.pass_spend_is_unmetered(with_total, unknown) is True
+    assert wr.pass_spend_is_unmetered(
+        one_shot, _env(reader=2, judge=2, reader_usage_present=False)) is True
+
+
+def test_the_unmetered_guard_is_not_inert_when_only_ingest_rows_exist():
+    """⛔ #11830 round-3 P1 — the regression this rule exists for.
+
+    The question key is bound BEFORE ingest, so a real run's envelope always
+    carries ``extractor`` rows under the same qid. A guard that tested
+    ``total.calls`` would therefore NEVER fire on a silent reader/judge pass
+    — it would publish `marginal_tokens: 0, cap_exceeded: False` for spend
+    nobody measured. The growth must be measured on the reader/judge stages.
+    """
+    one_shot = _env(reader=0, judge=0, ingest=3)   # ingest rows only so far
+    silent_pass = _env(reader=0, judge=0, ingest=3)  # reader/judge stayed silent
+    assert wr.envelope_calls(silent_pass) == 3   # total is NON-zero …
+    assert wr.stage_calls(silent_pass, "reader", "judge") == 0
+    # … so a total-based guard would call this measured. It is not.
+    assert wr.pass_spend_is_unmetered(one_shot, silent_pass) is True
 
 
 def test_variant_rows_total_is_null_when_nothing_was_metered():

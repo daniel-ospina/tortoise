@@ -622,9 +622,11 @@ def _resolve_window_reconciliation_cap(arm_on: bool,
     cap-24k run (two re-run volumes must not blend into one artifact).
 
     Off-path hygiene (the ``_resolve_reinjection_total_cap`` precedent):
-    an arm-OFF run resolves ``None`` — it never reads the env and never
-    stamps an inert knob (the always-present ``window_reconciliation``
-    bool is what refuses a fingerprint-bearing pre-feature resume).
+    THIS resolver returns ``None`` arm-OFF — it never reads the env. The
+    METHODOLOGY record still stamps the product default when the arm is off
+    (``... if resolved is not None else DEFAULT_RECONCILIATION_TOKEN_CAP``),
+    matching ``session_reinjection_total_cap``: the record documents the
+    value an arm-ON run would have used, it is not a knob the off run read.
     Arm-ON resolution is explicit > env > the module default, and both
     sides go through the SAME ``_clamp_int`` so a garbage value falls back
     to the default rather than serving a silent zero-token cap (which
@@ -693,9 +695,14 @@ def _reconcile_failing_question(
         "raised": dict(raised),
         "marginal_bound": 0,
         "marginal_tokens": None,
-        "marginal_unmetered": False,
-        "cap_exceeded": False,
-        "bound_exceeded": False,
+        # ⛔ FAIL-CLOSED DEFAULTS. Only the success path below measures these;
+        # an admitted pass that RAISES (after the reader has already spent)
+        # never reaches that assignment, so "False" here would publish
+        # "measured, and it fit" for a pass nobody priced. Unmeasured until
+        # proven otherwise.
+        "marginal_unmetered": True,
+        "cap_exceeded": None,
+        "bound_exceeded": None,
         "reader_surface_before": None,
         "reader_surface_after": None,
         "session_recall_before": None,
