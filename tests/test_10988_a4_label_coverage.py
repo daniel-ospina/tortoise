@@ -609,7 +609,8 @@ def test_the_rendered_block_emits_EVERY_layer_with_its_own_denominator():
             f"layer under three keys reads as three measured layers:\n{line[0]}")
         for part in ("population", "labelled", "unlabelled", "unlabelled_null",
                      "unlabelled_undeclared", "coverage", "non_vacuity",
-                     "declared_present", "declared_absent", "undeclared"):
+                     "declared_present", "declared_absent", "expected_absent",
+                     "undeclared", "labelled_by_declared_kind"):
             assert f"{part}=" in line[0], (layer, part, line[0])
         # The rendered halves are NUMBERS that add up to the rendered total — a placeholder
         # (`unlabelled_null=None`) or a re-worded key is not the decomposition the epic accepts.

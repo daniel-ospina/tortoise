@@ -39,7 +39,7 @@ its `NULL` denominator.
 
 | symbol | what it does |
 |---|---|
-| `A4_LAYERS` | the three layers with **their own** kind property — `pointKind` / `objectKind` / `eventKind`. One blended rate is the failure mode §2 W2c lists first: a failing thing/event layer hiding inside a green claim layer |
+| `A4_LAYERS` | the three layers with **their own** kind property — `pointKind` / `objectKind` / `eventKind`. One blended rate is the failure mode §2 W2c lists second: a failing thing/event layer hiding inside a green claim layer |
 | `label_coverage()` | **pure**, so the CI twin can drive it: `NULL` **and** the blank string are ONE absent state; `unlabelled = unlabelled_null + unlabelled_undeclared` exactly, so no present kind leaves the denominator; `declared_present` / `declared_absent` / `undeclared` / `by_kind`; `coverage` is `None` at a zero population (100 % of 0 is not coverage) and `non_vacuity` is `labelled >= 1` **per layer** — ⛔ the registered `a4_labelled_nodes: 1` floor reads the **thing/event** layers' value, never `claims`'s (which is emitted uniformly and is NOT the floor) |
 | `_a4_declared_kinds()` | the layer's declared vocabulary, **imported** (`domain_loader.known_kinds`) after `import tortoise.sdk`, because the SDK's own `register_kind` calls are half the vocabulary — §3 below is why that import is load-bearing |
 | `_a4_claim_diagnostics()` | the typed / `statement` / `NULL` shares over CLAIMS, keeping the `is_episodic`/`is_operator` exclusion (turn rows are written `pointKind='event'`; 159 of the committed corpus's 354 Points are turn rows) |
