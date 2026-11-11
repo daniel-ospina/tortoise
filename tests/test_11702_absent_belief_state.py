@@ -5321,8 +5321,8 @@ def test_update_entity_clearing_the_pair_clears_the_mirror(sdk, tmp_path):
 #    "IS the declared PRIOR mean" is false for exactly the row
 #    `set_point_baseline(3.0, 1.0)` + `update_point(confidence=0.9)`: the
 #    declared prior mean is 0.75 and the field reads 0.9. That sentence stood
-#    at `search_engine.py`:347 while the precedence at `search_engine.py`:5520
-#    (`elif mirror is not None:`) said otherwise — 5,172 lines away, not the
+#    at `search_engine.py`:347 while the precedence at `search_engine.py`:5527
+#    (`elif mirror is not None:`) said otherwise — 5,180 lines away, not the
 #    "nine hundred" an earlier revision of this note claimed. `origin/main`'s belief prose carried TEN unqualified matches
 #    (`search_engine.py` 6, `why.py` 2, `volunteer.py` 1, `sdk.py` 1 — the
 #    numbers this guard measures, not a count taken on trust), plus one
@@ -5369,12 +5369,17 @@ _BELIEF_PROSE = (
 
 #: How far after a claim its qualifier may sit for the SCAN to find it. This is
 #: not what enforces "same sentence": some sentences in these modules run past
-#: 300 characters once whitespace is collapsed (measured on this head: 390 of
-#: 1,022 `search_engine.py` sentences run past 300 characters under this guard's
-#: own splitter, 333 of 1,486 under a plain ``(?<=[.!?])\s+``), so a window
-#: alone can span several sentences.
-#: `_claim_sentence` cuts at the first sentence boundary; this bound only keeps
-#: the scan cheap.
+#: 300 characters once whitespace is collapsed (measured at this head, with this
+#: guard's own splitter: 333 of 1,486 `search_engine.py` sentences run past 300
+#: characters). A plain ``(?<=[.!?])\s+`` measures the SAME 333 of 1,486 — the
+#: two splitters agree, because `\s+` is greedy so the ``(?=\S)`` lookahead
+#: never moves a split point; an earlier revision of this note cited "390 of
+#: 1,022" and drew a contrast between the two that does not exist.
+#: ⚠️ The bound is NOT cosmetic: it truncates a sentence longer than 300
+#: characters, so a TRUE qualifier sitting past 300 inside one long sentence is
+#: reported unqualified (measured; real claim sentences run to 345/500 chars in
+#: `search_engine.py`, 434 in `sdk.py`). That is a FALSE BLOCK — the safe
+#: direction — never a pass on a false claim.
 _QUALIFIER_WINDOW = 300
 
 #: Sentences that ASSERT the value of a prior-only claim's mean. The verb is
@@ -5457,9 +5462,19 @@ _MIRROR_INVERSIONS = re.compile(
 )
 
 #: Words that INVERT a qualifier ("the mirror never leads it", "unless no
-#: readable mirror supplies one"). Scanned over the WHOLE claim→verb span, not a
-#: 24-character lookbehind: at that distance `…; it is not true, as some claim,
-#: that a readable mirror leads it.` passed (measured).
+#: readable mirror supplies one"). Scanned over the whole claim→verb span — the
+#: span STARTS AT THE CLAIM, not at the sentence start — because: (a) a
+#: 24-character lookbehind let `…; it is not true, as some claim, that a readable
+#: mirror leads it.` pass (measured), and (b) starting at the sentence start made
+#: a negation about a DIFFERENT shape false-block a true sentence ("Nothing
+#: persisted means no mean; a readable mirror leads it, so confidence_mean IS
+#: the declared PRIOR mean", measured).
+#: ⚠️ NAMED RESIDUAL, fail-closed: a negation inside the claim's OWN sentence
+#: that negates some other object still blocks the qualifier — `…IS the declared
+#: PRIOR mean — not the Beta(1,1) neutral 0.5 — and a readable mirror leads
+#: both` is TRUE and is still reported. That blocks a correct rewrite (a human
+#: then reads it); it never passes a false claim, which is the property that
+#: matters here.
 _QUALIFIER_NEGATIONS = re.compile(
     r"\b(never|not|no longer|nothing|without|cannot|isn't|doesn't|"
     r"no readable|no mirror|no case|fails? to|nor|can't)\b",
@@ -5617,13 +5632,27 @@ def _claim_sentence(window: str, claim_at: int = 0) -> str:
     return head + tail
 
 
+def _claim_sentence_with_offset(window: str, claim_at: int = 0) -> tuple[str, int]:
+    """`_claim_sentence` plus WHERE the claim starts inside the result.
+
+    The negation test must run over the claim→verb span, not over the whole
+    sentence: a negation BEFORE the claim ("Nothing persisted means no mean; a
+    readable mirror leads it, so confidence_mean IS the declared PRIOR mean") is
+    about the opposite shape and flagged a TRUE sentence (measured).
+    """
+    break_at = re.compile(r"(?<=[.!?])\s+(?=\S)")
+    tail = break_at.split(window[claim_at:], maxsplit=1)[0]
+    head = break_at.split(window[:claim_at])[-1]
+    return head + tail, len(head)
+
+
 def _qualified(window: str, claim_at: int = 0) -> bool:
     """Whether the claim's own sentence carries an AFFIRMATIVE qualifier.
 
     Requires all three: the MIRROR noun, a qualifying verb after it, and no
     negation across the whole claim→verb span (bar an allowed "not only").
     """
-    sentence = _claim_sentence(window, claim_at)
+    sentence, claim_pos = _claim_sentence_with_offset(window, claim_at)
     # Fail-closed on an outright inversion ANYWHERE in the sentence, however
     # many well-formed mirror+verb clauses it also carries.
     if _MIRROR_INVERSIONS.search(sentence):
@@ -5633,7 +5662,7 @@ def _qualified(window: str, claim_at: int = 0) -> bool:
             sentence, noun.end(), noun.end() + _QUALIFIER_VERB_WINDOW)
         if verb is None:
             continue
-        span = sentence[:verb.end()]
+        span = sentence[claim_pos:verb.end()]
         if _QUALIFIER_NEGATIONS.search(_QUALIFIER_NEGATION_OK.sub("", span)):
             continue
         after = sentence[verb.end():verb.end() + 16]

@@ -83,12 +83,15 @@ BLOCK_MAX_BYTES = 8 * 1024
 #     with ``ep_state: "absent"``;
 #   * a #2199 DECLARED baseline is ALSO unmeasured
 #     (``measured = bool(has_ep)``, search_engine.py:5490) yet answers its OWN
-#     declared prior mean — 0.75 for the Beta(3,1) system default, 0.7561 for
-#     that default plus an author ``credibility='low'`` word, 0.5238 for the
-#     word alone on a claim with no #2199 default — unless a readable
-#     ``n.confidence`` mirror supplies the value, which LEADS it, and
-#   * a DECLARED but DEGENERATE prior (a 0/0 or negative-operand pair, e.g.
-#     ``set_point_baseline(claim, 0, 0)``) yields no mean at all and reads
+#     declared prior mean — 0.75 for the Beta(3,1) system default, 0.5238 for
+#     an author ``credibility='low'`` word on a claim with no #2199 default —
+#     unless a readable ``n.confidence`` mirror supplies the value, which LEADS
+#     it. (A declared pair WINS over the credibility word: the same Beta(3,1)
+#     plus ``credibility='low'`` still reads 0.75, measured — the word only
+#     supplies a prior when no declared one exists.)
+#   * a DECLARED but DEGENERATE prior (a 0/0 pair, e.g.
+#     ``set_point_baseline(claim, 0, 0)``; a negative operand is refused by that
+#     writer, though a legacy row can still carry one) yields no mean at all and reads
 #     ``absent`` / ``None`` even with ``baseline_set`` — but ONLY when no
 #     readable ``n.confidence`` mirror sits beside it: a stored 0.9 on that same
 #     0/0 row reads ``baseline`` at 0.9 (measured), because the mirror LEADS and
