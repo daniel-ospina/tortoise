@@ -991,9 +991,12 @@ def test_measured_commit_not_ancestor_is_unverifiable_in_a_shallow_clone(monkeyp
         assert flc.check_measured_commit(flc.read_doc(REPO), REPO) == []
 
     for state in ("true\n", ""):  # shallow, and an unanswerable probe
-        def fake_run(cmd, *args, **kwargs):
+        # `_state` binds the loop variable at definition time (ruff B023): the
+        # closure is installed on the tool's `subprocess` and called later, so a
+        # bare `state` would read whatever the loop left behind.
+        def fake_run(cmd, *args, _state=state, **kwargs):
             if "--is-shallow-repository" in cmd:
-                return _Result(0, state)
+                return _Result(0, _state)
             if "rev-parse" in cmd:
                 return _Result(0, "f70d884b7f51\n")
             return _Result(1)  # a real ancestor, cut off by the graft boundary
