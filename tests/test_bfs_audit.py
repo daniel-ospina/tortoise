@@ -43,9 +43,23 @@ def _classify_propagate_shock_refs(lines: list[str]) -> dict[str, list[str]]:
     `propagate_shock(` — and
     `test_the_audit_discriminates_a_call_from_a_mention` pins both directions.
 
-    Deliberate boundary: prose that spells a call (`propagate_shock(x)` inside a
-    docstring) still counts as production code. That direction fails CLOSED — it
-    reds an audit a human then reads.
+    A line that takes a REFERENCE to the method is production code too, even
+    though it has no `(` after the symbol: `self._shock = proj.propagate_shock`,
+    `functools.partial(proj.propagate_shock, eid)` and a line-continued
+    `proj.propagate_shock \\` can all be invoked later, so the `(`-only rule
+    would bucket them as prose and let the audit go green while the path was
+    wired back up — a false PASS in the one instrument that exists to notice
+    that restore. The attribute form (`.propagate_shock`) is therefore also
+    production code.
+
+    Deliberate boundaries, both failing CLOSED (they red an audit a human then
+    reads, rather than letting a call through): prose that spells a call
+    (`propagate_shock(x)` inside a docstring) counts as production code, and so
+    does prose that spells an attribute reference. Declared residual, which
+    fails OPEN and is not detected: a bare, undotted, uncalled reference —
+    `getattr(proj, "propagate_shock")`, or `partial(propagate_shock, eid)` on a
+    module-level import. A grep audit cannot see those shapes; a lane restoring
+    the path that way is caught by review, not by this classifier.
     """
     callers: dict[str, list[str]] = {
         "definition (deprecated)": [],
@@ -69,7 +83,9 @@ def _classify_propagate_shock_refs(lines: list[str]) -> dict[str, list[str]]:
             callers["fixup_scripts (historical)"].append(line)
         elif "/graph-scripts/" in path_part:
             callers["test_files"].append(line)  # test_6707_shock.py
-        elif "/tortoise/" in path_part and "propagate_shock(" not in line:
+        elif "/tortoise/" in path_part \
+                and "propagate_shock(" not in line \
+                and ".propagate_shock" not in line:
             callers["comment/reference only"].append(line)
         elif "/tortoise/" in path_part:
             callers["production_code"].append(line)
@@ -90,14 +106,20 @@ def test_the_audit_discriminates_a_call_from_a_mention():
     """
     prose = f"{ROOT}/tortoise/projection/propagation.py:71:        `propagate_shock` PERSISTS the blend"
     call = f"{ROOT}/tortoise/api.py:999:            self.propagate_shock(epicenter_id)"
-    callers = _classify_propagate_shock_refs([prose, call])
+    # References that can be invoked later: an attribute alias, a partial, and a
+    # line-continued call. None carries `(` after the symbol, and every one of
+    # them wired the deprecated path back up if a lane shipped it.
+    alias = f"{ROOT}/tortoise/api.py:1000:            self._shock = proj.propagate_shock"
+    partial = f"{ROOT}/tortoise/api.py:1001:            p = functools.partial(proj.propagate_shock, eid)"
+    continued = f"{ROOT}/tortoise/api.py:1002:            proj.propagate_shock \\"
+    callers = _classify_propagate_shock_refs([prose, call, alias, partial, continued])
 
     assert callers["comment/reference only"] == [prose], (
         "a line that only NAMES propagate_shock is a reference, not a call; "
         f"bucketed as: {callers['comment/reference only']}")
-    assert callers["production_code"] == [call], (
-        "a real CALL site must still be reported as production code; "
-        f"bucketed as: {callers['production_code']}")
+    assert callers["production_code"] == [call, alias, partial, continued], (
+        "a real CALL site, and every reference that can be invoked later, must "
+        f"be reported as production code; bucketed as: {callers['production_code']}")
 
 
 def test_no_propagate_shock_callers():
