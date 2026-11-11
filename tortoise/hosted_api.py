@@ -21293,7 +21293,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # cue-OFF records nothing here. Tracked as #11811 (behaviour, needs a
             # journalled write and the metering decision, so it is not a doc
             # fix), and pinned by
-            # `tests/test_mention_write_11239.py::test_the_merge_leg_is_a_bump_and_does_not_restate_the_record`.
+            # `tests/test_commit_endpoint.py::test_the_merge_leg_drops_a_stated_record_and_that_is_declared`.
             proj.g.query(
                 "MATCH (p:Point {id:$pid}) SET p.updatedAt=$now",
                 params={"pid": pid, "now": now},

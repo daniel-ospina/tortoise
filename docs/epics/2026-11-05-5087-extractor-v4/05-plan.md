@@ -112,7 +112,10 @@ engine never stores an array containing a map — the projection denies it and a
 the payload keeps the record shape, and
 `consistency._uncarried` reads that same declaration instead of re-listing it.
 Neither REST `CreatePointRequest` (hosted or self-host) has the field: it is a
-writer-produced record, not a client field.
+writer-produced record, not a client field. ⚠️ One leg does not carry it yet —
+the hosted commit door's MERGE leg (same id + same content, i.e. the ordinary
+re-commit of an existing claim) is a zero-budget bump, so a cue-ON re-capture over
+a claim first captured cue-OFF records nothing; `#11811` tracks it.
 
 **Integrity constraints:** no mention row without its claim; no held item silently dropped; every committed node must walk to its `Source` (§2.4.1 — value-bearing today, the widening is `#2684`); the hierarchy edge must replay.
 

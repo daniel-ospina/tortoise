@@ -758,7 +758,17 @@ def _uncarried(journal_by_id: dict) -> dict[str, dict[str, str]]:
                 # `entities.py`), so a journal carrying `mentions: 5` is a real
                 # drop and must be NAMED — exactly the value-dependent carriage
                 # the `tags` branch above exists for (review P3 on PR #11795).
-                if isinstance(v, (str, list, tuple)):
+                if isinstance(v, str):
+                    # A canonical string is carried only when the STORE can hold
+                    # it EXACTLY: `#7369` degrades a NUL / lone-surrogate string
+                    # to null before dispatch, so the property never lands. Same
+                    # predicate as the `tags` branch above, for the same reason —
+                    # testing the SHAPE alone reports such a value as carried
+                    # while nothing reaches the node (review P1 on PR #11795).
+                    if not _store_holds_prop_value(v):
+                        found[k] = _UNCARRIED_TAGS_UNWRITABLE
+                    continue
+                if isinstance(v, (list, tuple)):
                     continue
                 found[k] = _UNCARRIED_NON_PERSISTABLE
                 continue

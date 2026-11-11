@@ -708,11 +708,18 @@ class Mention(BaseModel):
       route — **NOT carried**. A SEPARATE model and route, not an alias;
       ``#4032`` frames the pair as parity mirrors, so a hosted-only addition
       would re-open the divergence. Its route forwards no ``mentions`` either.
-    - ``hosted_api._execute_commit_writes`` — **CARRIED**, on BOTH its create
-      legs (the supersede leg and the plain-create leg), by setting
+    - ``hosted_api._execute_commit_writes`` — **CARRIED on both of its CREATE
+      legs** (the supersede leg and the plain-create leg), by setting
       ``point_props["mentions"]`` and only when the payload carries a
       non-empty record list. ⛔ Never ``mentions=_mention_props or None`` on the
       call: on a dedup hit a ``None`` in a generic prop REMOVES the property.
+      ⚠️ Its **MERGE leg does NOT carry it**: `reconcile_payload` picks `merge`
+      for same id + same content (the ordinary re-commit of an existing claim)
+      and that leg is a zero-budget `SET p.updatedAt` bump that writes no prop
+      and journals nothing, so a cue-ON re-capture over a claim first captured
+      cue-OFF records nothing. Declared deliberately, tracked as `#11811`, and
+      pinned by
+      `tests/test_commit_endpoint.py::test_the_merge_leg_drops_a_stated_record_and_that_is_declared`.
     - the SDK capture seam (``_extract_session_v2``'s create branch) —
       **CARRIED**, into ``create_point``'s ``props`` exactly as it carries
       ``validFrom``. Create branch only, so a dedup hit writes nothing

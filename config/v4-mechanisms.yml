@@ -1636,7 +1636,11 @@ mechanisms:
       surface (#2949 response parity), so widening it would advertise a field no
       client model declares. Neither REST `CreatePointRequest` (hosted or
       self-host) has the field: it is a writer-produced record, not a client
-      field.
+      field. ⚠️ ONE leg does not carry it: the hosted commit door's MERGE leg
+      (same id + same content — the ordinary re-commit of an existing claim) is a
+      zero-budget bump that writes no prop, so a cue-ON re-capture over a claim
+      first captured cue-OFF records nothing. Declared, not silent: `#11811`
+      tracks the behaviour.
       On the node the value is ONE compact JSON scalar
       (`projection.entities.encode_json_record_props`, declared in
       `_POINT_JSON_RECORD_PROPS` and `_POINT_DECLARED_PROPS`), because an array

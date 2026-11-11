@@ -12131,7 +12131,10 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     ``point_props["mentions"]`` — not a ``mentions=`` kwarg), the SDK capture
     seam's create branch (carried exactly as it carries ``validFrom``), and the
     generic ``update_entity`` ``:Point`` branch (journalled as
-    ``PointRevised(mentions=…)``). ⛔ The full per-door list lives in
+    ``PointRevised(mentions=…)``). ⚠️ The hosted door's MERGE leg (same id +
+    same content — the ordinary re-commit of an existing claim) does NOT carry
+    it: that leg is a zero-budget bump, so a cue-ON re-capture over a claim first
+    captured cue-OFF records nothing (`#11811`). ⛔ The full per-door list lives in
     ``commit_schema.Mention``'s docstring — one list with a verdict each, so
     the two enumerations cannot drift. Every carrier is **stored, never
     advertised**: it is deliberately NOT in ``sdk._CAPTURE_PASSTHROUGH_ORDER``
