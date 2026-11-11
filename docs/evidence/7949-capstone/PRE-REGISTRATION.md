@@ -1460,7 +1460,7 @@ place a machine reads it.
   at the pre-registration commit; a run log may not declare it.
 - **Why it is not a relaxation**: `S2.3` structurally cannot run on a corpus whose S2 map types every
   candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:11803-11825`) collects only
-  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:14205`, `:14358`).
+  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:14222`, `:14375`).
   The old rule therefore could not be satisfied by **any** legitimate run of the registered corpus,
   so the gate could not return a verdict at all (§11.2's four ordered refusals). Every one of the
   eight still has to be accounted for, and an idle claim needs the run's own four facts — flag ON,
@@ -2280,16 +2280,16 @@ to answer.
   `main`**, each a faithful record of the head it names, and the live values are here.
 - **New value — measured at this head:** `_collect_classify_items` at `:11803`, its
   extent `:11803-11825` (23 lines, `def` to `return items` — unchanged in size, so the extent is
-  still the 23 lines §10.19 measured), the two `if items:` gates at `:14205`/`:14358`
-  (the S2 pass and the post-S4 pass), the two fail-open `except` arms at `:14218`/`:14369`,
-  the two result blocks at `:14569` (closing `:14575`) and `:14579` (closing `:14583`), and
-  `_run_vet_pass`'s S2.2 call at `:16763` and its post-S4 union call at `:14334`.
+  still the 23 lines §10.19 measured), the two `if items:` gates at `:14222`/`:14375`
+  (the S2 pass and the post-S4 pass), the two fail-open `except` arms at `:14235`/`:14386`,
+  the two result blocks at `:14586` (closing `:14592`) and `:14596` (closing `:14600`), and
+  `_run_vet_pass`'s S2.2 call at `:16780` and its post-S4 union call at `:14351`.
 - **Verified by content, not by arithmetic.** Each line was opened at this head, not shifted:
   `:11803` is `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:11825` is
-  `return items`; `:14205`/`:14358` are the two `if items:` gates; `:14218`/`:14369` are the
+  `return items`; `:14222`/`:14375` are the two `if items:` gates; `:14235`/`:14386` are the
   two fail-open `except` arms whose warnings name `classify(S2) failed` / `classify(union)
-  failed`; `:14569` opens `result["classify_later"]` and `:14579` opens `result["vet"]`;
-  `:16763` is `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(` and `:14334` is
+  failed`; `:14586` opens `result["classify_later"]` and `:14596` opens `result["vet"]`;
+  `:16780` is `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(` and `:14351` is
   `complete_list, vet_union_stats, _w, _ = _run_vet_pass(`. The constants differ between the
   sides (`+293` for this branch's own inserts above the collector, `+108` for `#11654`, `+44` for
   `#11660`'s `sdk.py` move), which is exactly why a constant could not be trusted here.
