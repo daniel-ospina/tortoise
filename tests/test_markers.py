@@ -205,6 +205,15 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # with no literal is not documentation — it is a WHITELIST, so a future
     # `namespace="team-001"` in that file would be silently re-authorised by
     # it instead of reddening this guard.
+    #
+    # OVERRIDES: `docs/epics/2026-08-24-test-db-migration/plan.md:1783`'s "an
+    # intentional team-graph semantic must be DECLARED in the table, never
+    # silent" — which d206b12b cited as the reason to add the row. #11905's
+    # scope (its own "Rejected alternatives") supersedes that MECHANISM for
+    # this file with a newer, specific ruling: the constant keeps the coupling
+    # single-source, and this scan cannot see a variable. The plan's PURPOSE is
+    # preserved, not dropped — nothing goes silent, because reintroducing the
+    # literal now reds the guard (measured) instead of being whitelisted.
     "test_capture_loop_responsiveness.py": {"registry": "prod-coupled"},  # #3086 — the capture-writer loop-affinity proof reaches the graph class via _make_sdk(namespace="registry") to record writer-thread affinity
     # #3718: the concurrent-commit cases read the MeteringRecord back through
     # the CANONICAL registry namespace — the graph prod's `_record_write_op`

@@ -2782,20 +2782,23 @@ def test_write_verb_ep_updated_pins_the_hosted_mirror_only_claim(
     pid = body["points"][0]["id"]
 
     import tortoise.hosted_api as ha_mod
-    # The mirror belief lives in the graph the HOSTED write verb opens, which is
-    # keyed by the AUTHENTICATED team id (`_make_sdk(namespace=org_id)`) — so
-    # this handle must be built from the fixture's own `TEST_ORG_ID`, imported
+    # The mirror belief lives in the graph the HOSTED write verb opens, which for
+    # an org with no promoted graph is keyed by the AUTHENTICATED team id
+    # (`_org_sdk_for_credential` -> `_make_sdk(namespace=org_id)`) — so this
+    # handle must be built from the fixture's own `TEST_ORG_ID`, imported
     # beside the `client` fixture above, not from a second hardcoded copy of
-    # the id. The form matters twice: `tests/test_markers.py`'s
-    # `test_namespace_literals_guard_passing_or_routed` reds on an un-routed
-    # non-test literal (#11905) and this scan cannot see a variable, so the
-    # construction needs no `ROUTED_NAMESPACES` declaration — do not re-add a
-    # `"team-001"` row for it, that is the rejected alternative and it becomes
-    # a whitelist once the literal is gone. And a `test_*` rename would open a
-    # DIFFERENT graph than the write verb writes — `_clear_belief` would seed
-    # the mirror where the route never reads it, so the `ep_updated: True` arm
-    # below would fail loudly, and the later β-only `is False` arm would pass
-    # vacuously.
+    # the id. (That default is a POINTER that a promotion can move, #10180 —
+    # true of this fixture's unpromoted org, and a move would red the
+    # `ep_updated: True` arm rather than let it pass.) The form matters twice:
+    # `tests/test_markers.py`'s `test_namespace_literals_guard_passing_or_routed`
+    # reds on an un-routed non-test literal (#11905) and this scan cannot see a
+    # variable, so the construction needs no `ROUTED_NAMESPACES` declaration —
+    # do not re-add a `"team-001"` row for it, that is the rejected alternative
+    # and it becomes a whitelist once the literal is gone. And a `test_*`
+    # rename would open a DIFFERENT graph than the write verb writes —
+    # `_clear_belief` would seed the mirror where the route never reads it, so
+    # the `ep_updated: True` arm below would fail loudly, and the later β-only
+    # `is False` arm would pass vacuously.
     proj = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj()
     _clear_belief(proj, pid, mirror=0.95)
     payload = dict(payload, session_id="zq-ep-flag-http-b")
