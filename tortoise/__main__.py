@@ -229,6 +229,66 @@ def _cmd_rebuild(args):
                 "(#5353).",
                 file=sys.stderr,
             )
+        # #9752: the `:PackSelection` pack-set marker. Printed at zero expected
+        # too, so "this graph had no pack set to preserve" is distinguishable
+        # from "preservation was not attempted". The count line and the shape
+        # lines are separate for the same reason as the `:TeamMeta` pair above:
+        # the projection's `pack_selection_gap` is a max over a confirmed loss,
+        # an unverified restore and a pre-preservation UNKNOWN, so the CLI names
+        # the shapes instead of printing the aggregate.
+        #
+        # Without this block a rebuild whose marker restore FAILED prints a
+        # clean `Done:` and never mentions the class, while the graph now reads
+        # as UNCONFIGURED — which re-arms the self-heal and the records/union
+        # arms and so re-admits a pack an admin REMOVED, with its `revision`
+        # reset. That is the same "written and never surfaced on the very path
+        # an operator reads" defect the config third state's line was added for
+        # (#2814), and `docs/durability-posture.md` declares the class
+        # "reported (`pack_selection_gap`, never a silent success)" — true of
+        # the returned dict, false of this surface until now.
+        pack_selection_expected = counts.get("pack_selection_expected", 0)
+        pack_selection_unverified = (
+            counts.get("pack_selection_verified") is False)
+        if pack_selection_unverified:
+            print(f"PackSelection: restore UNVERIFIED "
+                  f"({pack_selection_expected} pack-set marker(s) expected)")
+        else:
+            print(f"PackSelection: {counts.get('pack_selection_restored', 0)} "
+                  f"of {pack_selection_expected} pack-set marker(s) restored")
+        if pack_selection_unverified:
+            # "Could not confirm" must not be printed as "gone" (round 5's
+            # rule, applied to this class): the missing flag is unset when the
+            # verification read never produced a result.
+            print(
+                "PackSelection: the post-restore verification COULD NOT RUN — "
+                "the rebuilt graph's pack-set marker is UNVERIFIED: not "
+                "confirmed intact, and NOT observed gone. Check the graph's "
+                "approved pack set before trusting it (#9752).",
+                file=sys.stderr,
+            )
+        elif pack_selection_expected and not counts.get(
+                "pack_selection_restored"):
+            print(
+                "PackSelection: the pre-wipe pack-set marker was NOT restored "
+                "— the wipe is unconditional, only the journal is replayed, "
+                "and no replay pass recreates this marker, so the graph now "
+                "reads as UNCONFIGURED: the self-heal and the records/union "
+                "arms become live again and a pack an admin had REMOVED can "
+                "be re-admitted with its `revision` reset. Re-set the graph's "
+                "packs deliberately (#9752).",
+                file=sys.stderr,
+            )
+        if counts.get("pack_selection_state_unknown"):
+            print(
+                "PackSelection: the leftover pre-wipe snapshot does not carry "
+                "a usable pack-set marker record — it either predates the "
+                "marker's preservation or carries a state-UNKNOWN marker from "
+                "an earlier interrupted rebuild — so whether this graph's "
+                "pack-set marker was destroyed CANNOT be determined (UNKNOWN, "
+                "not absent). Check the graph's approved pack set before "
+                "trusting it (#9752).",
+                file=sys.stderr,
+            )
         if counts.get("config_reset"):
             if counts.get("config_reset_read_failed"):
                 # `config_reset` is fail-SAFE, so it does not prove the marker

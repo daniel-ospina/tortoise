@@ -2252,7 +2252,7 @@ def _team_meta_marker(entries) -> dict | None:
 # owns the writer and declares the label (`PACK_SELECTION_LABEL`), but importing
 # it here would be the module cycle `_config_classes` documents (projection →
 # pack_state → sdk → projection), so the literal is repeated and pinned by
-# `test_pack_selection_label_matches_the_pack_state_module` instead.
+# `test_pack_selection_section_and_validator_are_wired` instead.
 _PACK_SELECTION_LABEL = "PackSelection"
 
 

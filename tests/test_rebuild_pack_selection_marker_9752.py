@@ -504,6 +504,176 @@ def test_rebuild_refuses_before_the_wipe_when_the_marker_capture_fails(
     assert not os.path.exists(_sidecar_path(events))
 
 
+# ── #9752: the gap has the same producer → consumer contract as #5353 ───────
+
+
+def _pack_selection_only_gap_sidecar() -> dict:
+    """A rescue file whose `pack_selection` record is UNKNOWN and nothing else is.
+
+    Version 6 (this build's previous format, i.e. pre-#9752) with no
+    `pack_selection` key at all: every other section is present and empty, so
+    the ONLY gap this file produces is the pack-set marker's — the shape the
+    recovery consumers had no *reachable* branch for.
+    """
+    payload = _sidecar_payload(batch_snapshot=[{"id": "b1"}], version=6)
+    payload.pop("pack_selection")
+    return payload
+
+
+def test_pack_selection_gap_is_visible_to_recover_from_log(tmp_path):
+    """The automatic-recovery ENTRY POINT must not return a clean success (#9752).
+
+    FAILING VALUE: `recover_from_log` built its result dict from a WHITELIST —
+    it copied `onboarding_*` and `team_meta_*` and nothing else — so
+    `pack_selection_gap` was dropped on the floor here even though
+    `rebuild_all` had computed it. Both consumers below
+    (`_auto_health_recover`, `_recover_or_raise`) read the key off THIS dict, so
+    without this hop they were unreachable dead code and the class the change
+    exists to make durable was still silent on the auto-recovery path.
+
+    REACHABLE: the pending sidecar is retired after the replay, so these keys
+    plus the appended `reason` clause are the only record the entry point can
+    hand its caller. `recovered` stays True — the rebuild DID complete — exactly
+    as the onboarding leg does.
+    """
+    from tortoise.consistency import recover_from_log
+
+    sdk, events = _mk_sdk(tmp_path)
+    _write_journal(events)
+    _plant(Path(_sidecar_path(events)), _pack_selection_only_gap_sidecar())
+    _proj(sdk).g.query("MATCH (n) DETACH DELETE n")
+
+    rec = recover_from_log(str(events), _proj(sdk))
+
+    assert rec["recovered"] is True, "the rebuild itself did complete"
+    assert rec.get("pack_selection_gap") == 1, (
+        "a missing/unconfirmable pack-set marker must be machine-visible to "
+        "the auto-recovery caller — otherwise both warning legs are dead code")
+    assert rec.get("pack_selection_state_unknown") is True, (
+        "a pre-preservation sidecar cannot say whether the marker was "
+        "destroyed")
+    assert ":PackSelection" in rec["reason"], (
+        "`reason` is the only record in-repo callers log for a completed "
+        "recovery; it must name the class it could not confirm")
+
+
+def test_auto_health_recover_warns_on_the_pack_selection_gap(
+        tmp_path, caplog, monkeypatch):
+    """The embedded auto-recovery consumer of `pack_selection_gap` acts on it.
+
+    FAILING VALUE: `_auto_health_recover` is an `elif` chain whose clean
+    "auto-recovered" line DROPS `reason`, so a pack-set-only gap produced a
+    success-shaped log over a graph that now reads as UNCONFIGURED. Deleting
+    the branch reddened nothing before this pin (mutation-verified in the
+    review: "NO ROW REDDENS").
+
+    REACHABLE: the real `_auto_health_recover` on the probe-OK lost-graph path,
+    with the discovery seam pointed at the test's events dir.
+    """
+    sdk, events = _mk_sdk(tmp_path)
+    _write_journal(events)
+    _plant(Path(_sidecar_path(events)), _pack_selection_only_gap_sidecar())
+    _proj(sdk).g.query("MATCH (n) DETACH DELETE n")
+    proj = _proj(sdk)
+    monkeypatch.setattr(type(proj), "_find_local_jsonl_dir",
+                        lambda self: str(events))
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.projection"):
+        proj._auto_health_recover()
+
+    # Assert the CALLER's own message, not a bare `:PackSelection` substring:
+    # `rebuild_all` already logs an ERROR naming the class on this path, so a
+    # looser match would pass with the consumer removed.
+    assert any("auto-recovered empty embedded DB" in r.getMessage()
+               and ":PackSelection pack-set marker" in r.getMessage()
+               and "NOT confirmed intact" in r.getMessage()
+               for r in caplog.records), (
+        f"the auto-recovery consumer discarded the marker gap: "
+        f"{[r.getMessage() for r in caplog.records]}")
+
+
+def test_pack_selection_gap_warns_in_the_recover_or_raise_caller(
+        tmp_path, caplog):
+    """A producer signal with no consumer is the same log-only defect (#9752).
+
+    FAILING VALUE: `_recover_or_raise` is the real caller on the
+    unresponsive-graph path, the one where NO other surface reports the gap. It
+    must warn on a pack-set gap and must NOT raise — the store is usable, so
+    refusing to open would be strictly worse.
+    """
+    sdk, events = _mk_sdk(tmp_path)
+    _write_journal(events)
+    _plant(Path(_sidecar_path(events)), _pack_selection_only_gap_sidecar())
+    _proj(sdk).g.query("MATCH (n) DETACH DELETE n")
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.projection"):
+        _proj(sdk)._recover_or_raise(str(events))  # must not raise
+
+    assert any("recovery completed but the rebuilt graph's :PackSelection"
+               in r.getMessage()
+               and "NOT confirmed intact" in r.getMessage()
+               for r in caplog.records), (
+        f"the recovery caller discarded the pack-set gap: "
+        f"{[r.getMessage() for r in caplog.records]}")
+
+
+def test_cmd_rebuild_reports_the_pack_selection_marker(tmp_path, capsys,
+                                                       monkeypatch):
+    """The CLI operator surface must name the class (#9752).
+
+    FAILING VALUE: `_cmd_rebuild` printed a dedicated line per preserved class
+    for Config, Onboarding and TeamMeta and NONE for `:PackSelection`, so a
+    rebuild whose marker restore failed printed a clean `Done:` with
+    `pack_selection_gap == 1` sitting in the counts — the "written and never
+    surfaced on the very path an operator reads" defect the config line was
+    added to close (#2814). `docs/durability-posture.md` declares the class
+    "reported (`pack_selection_gap`, never a silent success)", which was true of
+    the dict and false of this surface.
+
+    REACHABLE: the counts are `rebuild_all`'s own return value; they are
+    injected so each rung can be asserted positively (the end-to-end producer
+    of a non-zero gap is `test_rebuild_all_reports_a_pre_9752_sidecar_as_
+    state_unknown`).
+    """
+    import argparse
+
+    from tortoise.__main__ import _cmd_rebuild
+    from tortoise.projection import FalkorProjection
+
+    counts = {"nodes": 0, "edges": 0, "events": 0,
+              "pack_selection_expected": 1, "pack_selection_verified": True,
+              "pack_selection_restored": 0, "pack_selection_restore_failures": 1,
+              "pack_selection_gap": 1, "pack_selection_state_unknown": False}
+    monkeypatch.setattr(FalkorProjection, "rebuild_all",
+                        lambda self, _dir, **kw: dict(counts))
+    sdk, events = _mk_sdk(tmp_path, name="cli.db")
+    sdk.close()
+    _write_journal(events)
+
+    rc = _cmd_rebuild(argparse.Namespace(dir=str(events),
+                                        db=str(tmp_path / "cli2.db")))
+    out = capsys.readouterr()
+
+    assert rc in (None, 0)
+    assert "PackSelection: 0 of 1 pack-set marker(s) restored" in out.out, out.out
+    assert "the pre-wipe pack-set marker was NOT restored" in out.err, out.err
+    assert "REMOVED" in out.err, out.err
+
+    # The UNKNOWN rung is a different shape and must be nameable on its own: a
+    # pre-v7 rescue file cannot say whether the marker was destroyed, and
+    # printing the loss wording for it would assert a loss nobody observed.
+    counts.update({"pack_selection_expected": 0, "pack_selection_restored": 0,
+                   "pack_selection_state_unknown": True})
+    rc = _cmd_rebuild(argparse.Namespace(dir=str(events),
+                                        db=str(tmp_path / "cli3.db")))
+    out = capsys.readouterr()
+
+    assert rc in (None, 0)
+    assert "CANNOT be determined" in out.err, out.err
+    assert "was NOT restored" not in out.err, out.err
+
+
 def test_marker_declared_in_the_durability_posture():
     """T2: the class has a DECLARED disposition, not an inference.
 
