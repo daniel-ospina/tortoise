@@ -3525,11 +3525,17 @@ def a_row_census_lines(census_a: dict | None) -> list[str]:
     # ⛔ PER LAYER, never one blended percentage: a failing thing/event layer must not be able to
     # hide inside a green claim layer (plan §2 W2c's listed failure mode). The declared/absent
     # lists are the "a declared kind absent" leg; `unlabelled` is the "a thing or event left
-    # unlabelled" leg; `coverage` is REPORTED and carries no bar.
+    # unlabelled" leg; `coverage` is REPORTED and carries no bar. ⛔ The absent share is rendered
+    # BOTH as its total AND as its two halves (`unlabelled = unlabelled_null + unlabelled_undeclared`,
+    # exactly) — `label_coverage` computes the decomposition because a share quoted without its
+    # `NULL` denominator is not a measurement this epic accepts (plan §3.1 A4), and a renderer that
+    # drops it hands that derivation back to the reader (PR #11837 round-7 P2).
     for layer, _label, _prop in A4_LAYERS:
         block = a4.get(layer) or {}
         add(f"a4 {layer} population={block.get('population')} "
             f"labelled={block.get('labelled')} unlabelled={block.get('unlabelled')} "
+            f"unlabelled_null={block.get('unlabelled_null')} "
+            f"unlabelled_undeclared={block.get('unlabelled_undeclared')} "
             f"coverage={block.get('coverage')} non_vacuity={block.get('non_vacuity')} "
             f"declared_present={block.get('declared_present') or '[]'} "
             f"declared_absent={block.get('declared_absent') or '[]'} "
