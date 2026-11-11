@@ -571,6 +571,15 @@ def test_the_hex_bound_is_a_magnitude_and_zero_is_zero():
                 "-0x0p-999999999", "0x0000", "-0x.0p4097"):
         assert _exact_literal_fraction(raw) == Fraction(0), raw
 
+    # The bound measures SIGNIFICANT digits, so a LEFT-padded mantissa is still
+    # a small value: only `digits.lstrip("0")` keeps this in band (the leading
+    # zeros would otherwise contribute 4 bits each and put it 13,000+ bits over
+    # the bound). `main` reads this literal today — the pre-#11897 bound was on
+    # the EXPONENT, and `p0` is well inside it — so bounding the padded spelling
+    # instead of the value would refuse a served literal: the same defect class
+    # this PR exists to remove, re-entered from the other side (#11898 review).
+    assert _exact_literal_fraction("0x" + "0" * 4400 + "1p0") == Fraction(1)
+
 
 def test_a_hex_magnitude_past_the_bound_is_refused_before_it_is_built(
         monkeypatch):
