@@ -541,7 +541,7 @@ def test_the_claims_histogram_is_read_ONCE_and_both_published_numbers_share_it()
     see: on the live fleet graph a write landing between the two reads publishes one layer's
     population twice — `a4 claims population=<X>` beside `a4 diagnostics claim_points=<Y>` — with
     every rendering, fold and vocabulary arm still GREEN (`#11837` review; the guards are the
-    `counts=` parameter at `capstone_measure.py:3276` and its `if counts is None` default).
+    `counts=` parameter at `capstone_measure.py:3287` and its `if counts is None` default).
 
     Pinned as QUERY TEXT, the way the predicate and the node label are: `_FakeGraph` records every
     cypher it answers, and the claims histogram is uniquely identifiable by its `RETURN`.
