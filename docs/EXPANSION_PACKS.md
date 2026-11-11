@@ -589,21 +589,25 @@ customer-facing territory that owns per-graph permissions.
 > zero records (a tombstone counts; the catalog arm of `available` does not).
 > ⚠️ The predicate derives the record set from the two lists the payload carries
 > rather than from the resolved set itself, so it cannot see a tombstone the
-> catalog arm offers as `available` instead of `removed`. **That shape is
-> reachable today, and a REBUILD produces it:** `:PackSelection` is not enrolled
-> in the projection's `_config_classes()`, so `rebuild_all` keeps the
-> tombstoned `:PackInstall` row and drops the marker. Measured — before
-> `configured: true, revision: 1`; after `configured: false, revision: 0` with a
-> `removed` row, which reads as the catalog union while the resolved set is that
-> one removed namespace. The same marker loss silently RE-ADMITS a pack an admin
-> removed and resets `revision`. Preserving the marker fixes both — #9752 — and
-> the SHAPE of that fix matters: `:PackSelection` is ONE node per graph with no
-> identity property, so it is a SECTION like `:TeamMeta`, NOT a
-> `_config_classes()` row. The registry keys on a single string identity property
-> and `_capture_config_snapshot` silently skips a class whose identity value is
-> not a string, so "enrol it as a config class" would capture nothing and leave
-> both defects in place. Surfacing the record count — or `namespaces is None`
-> itself — on the payload would make the client exact in the meantime. Separately,
+> catalog arm offers as `available` instead of `removed`. **A REBUILD used to
+> produce exactly that shape** — `:PackSelection` was not carried by the
+> projection, so `rebuild_all` kept the tombstoned `:PackInstall` row and
+> dropped the marker. Measured before the fix: `configured: true, revision: 1`
+> → `configured: false, revision: 0` with a `removed` row, which reads as the
+> catalog union while the resolved set is that one removed namespace; the same
+> marker loss silently RE-ADMITTED a pack an admin removed and reset `revision`.
+> **Fixed by #9752** — the marker now rides a `pack_selection` sidecar SECTION
+> (`projection`, snapshot v7), so a rebuild preserves `configured` and
+> `revision` and cannot re-admit a removed pack; the SHAPE of that fix matters:
+> `:PackSelection` is ONE node per graph with no identity property, so it is a
+> SECTION like `:TeamMeta`, NOT a `_config_classes()` row (the registry keys on
+> a single string identity property and `_capture_config_snapshot` silently
+> skips a class whose identity value is not a string, so "enrol it as a config
+> class" would capture nothing and leave both defects in place). The predicate's
+> own inexactness survives that fix and is narrower: it still derives the record
+> set from two lossy lists, so surfacing the record count — or
+> `namespaces is None` itself — on the payload is what would make the client
+> exact. Separately,
 > `pack_manifest_store.delete_tenant_manifest` sets `removed` without moving the
 > marker and has no caller or route today — latent, and the same preservation
 > covers it.
