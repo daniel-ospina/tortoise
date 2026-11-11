@@ -664,8 +664,19 @@ def _stamp_journal_vector_width(payload: dict) -> None:
     Which is correct for a NON-creating snapshot too (``PointPromoted`` &c.):
     the store writes ``vecf32($embedding)`` for every non-verbatim vector
     (`stored_form.node_statement`), so a non-verbatim vector the writer hands
-    over is ALREADY on the float32 grid — narrowing it is a no-op on the value
-    and only shortens its text. Only the width's own declaration moves.
+    over is ALREADY on the float32 grid — narrowing it keeps the float32 bits
+    the store holds AND shortens the text. Only the width's own declaration
+    moves.
+
+    ⛔ IT IS NOT A NO-OP ON THE VALUE (#11835 review round 3, F1). The
+    payload's float64 is REWRITTEN to the shortest decimal for those bits —
+    `0.001230153371579945` (the store's widening) becomes `0.0012301534` — which
+    is deliberately OFF the grid as a float64, exactly as
+    :func:`shortest_float32_vector` says. So the journal's record and the node's
+    `vecf32` widening still DIFFER as float64, and the record↔cache comparison
+    must keep narrowing the truth side (`stored_form.narrow_to_stored_width` —
+    `consistency._as_f32`, #8615). **That narrowing is not redundant; deleting it
+    reports `field_mismatches` for every faithfully replayed vector.**
     """
     raw = payload.get("embedding")
     if raw is None:

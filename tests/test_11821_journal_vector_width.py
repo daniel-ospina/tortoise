@@ -463,8 +463,14 @@ def test_a_preserved_vector_is_never_narrowed():
 def test_a_reemitted_snapshot_is_narrowed_because_the_store_already_did():
     """`PointPromoted` &c. carry a vector read back off the node, and the store
     writes `vecf32($embedding)` for every non-verbatim vector
-    (`stored_form.node_statement`) — so narrowing is a no-op on the value and
-    only shortens the text. The width declaration is what moves."""
+    (`stored_form.node_statement`) — so narrowing keeps the float32 bits the
+    store holds and shortens the text. The width declaration is what moves.
+
+    ⛔ It is NOT a no-op on the float64 (#11835 review round 3, F1): the payload's
+    value becomes the shortest decimal for those bits (`0.001230153371579945` →
+    `0.0012301534`), which is OFF the grid, which is exactly why the record↔cache
+    comparison still narrows the truth side (`stored_form.narrow_to_stored_width`,
+    #8615 — see `consistency._as_f32`)."""
     widened = _vector()
     stamped = stamp_journal_embedding(_payload(list(widened)), creating=False)
 
@@ -771,8 +777,25 @@ def test_the_emit_event_extra_branch_leaves_a_verbatim_vector_raw(tmp_path):
     level with `embedding_verbatim=true` (#5004 round-7: a caller-owned vector
     keeps its RAW form). The new stamp must therefore declare `f64` and touch
     nothing.
+
+    ⛔ THE FIXTURE IS GRID-EXACT ON PURPOSE (#11835 review round 3, F2). It used
+    to be `[0.1, 1/3, 2.718281828459045]`, which is OFF the grid — so
+    `shortest_float32_vector` returned `None`, the seam declared `f64` and left
+    the values alone with the `is_verbatim` arm present OR DELETED: a pin that
+    could not fail for the arm its docstring names. Measured by neutralising
+    `stored_form.is_verbatim`: off-grid → `f64`/raw either way; grid-exact →
+    `f64`/raw with the arm, `f32`/narrowed to `[0.1, -0.25, 0.33333334]`
+    without it. The sibling `test_a_verbatim_vector_is_never_narrowed` above
+    measured this same trap and adopted this same shape.
+
+    (`float(str(np.float32(v)))` does NOT discriminate — it yields the plain
+    literal `0.1`, still off-grid. Hand over the widening.)
     """
-    caller = [0.1, 1 / 3, 2.718281828459045]
+    caller = [float(np.float32(v)) for v in (0.1, -0.25, 1.0 / 3.0)]
+    assert np.all(np.asarray(caller, dtype=np.float32).astype(np.float64)
+                  == np.asarray(caller, dtype=np.float64)), (
+        "the fixture must be ON the float32 grid, or this row passes without "
+        "the verbatim arm — a pin that cannot fail")
     record = _emit_record(tmp_path, embedding=list(caller), eventId="evt-verbatim",
                           embedding_verbatim=True)
 
