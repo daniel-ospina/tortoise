@@ -746,12 +746,19 @@ def _e2a_result(*, survived: int, units: int, bars: dict) -> dict:
         value=f"value_units {survived}/{units} survived")
 
 
-def _e2b_result(*, fused: int, atomic: int, bars: dict) -> dict:
-    """An E2b result shaped like `main`'s own, without the run."""
+def _e2b_result(*, fused: int, atomic: int, surviving: int, bars: dict) -> dict:
+    """An E2b result shaped like the arm's own, without the run.
+
+    `atomic` is the fused-share DENOMINATOR (`fused/atomic` — that is the E2b bar's
+    own operand) and `surviving` is the FLOOR population, the surviving PLANTED units
+    (`real_facts`). They are different counts and one must not stand in for the other:
+    the floor tested against `atomic` is exactly the fail-open #10989 closes, so both
+    are REQUIRED keywords, mirroring `prereg_binding`'s own rule.
+    """
     share = fused / atomic if atomic else 1.0
     return measure.outcome(
         measured=True,
-        below_floor=atomic < bars["floors"]["e2b_surviving_units"],
+        below_floor=surviving < bars["floors"]["e2b_surviving_units"],
         passed=share <= bars["E2b"]["max_fused_share"],
         bar=f"fused share <= {bars['E2b']['max_fused_share']}",
         value=f"fused={fused}/{atomic} = {share:.6f}")
@@ -772,8 +779,8 @@ def test_the_e2_row_is_the_composite_and_not_e2a_alone():
     """
     bars = measure.parse_bars(json.loads(PREREG.read_text()))
     e2a_green = _e2a_result(survived=13, units=14, bars=bars)
-    e2b_bad = _e2b_result(fused=7, atomic=114, bars=bars)
-    e2b_good = _e2b_result(fused=1, atomic=114, bars=bars)
+    e2b_bad = _e2b_result(fused=7, atomic=114, surviving=90, bars=bars)
+    e2b_good = _e2b_result(fused=1, atomic=114, surviving=90, bars=bars)
     assert e2a_green["outcome"] == "PASS", e2a_green
     assert e2b_bad["outcome"] == "FAIL", e2b_bad
 
@@ -806,7 +813,7 @@ def test_the_e2_composite_is_blocked_when_a_half_was_never_measured():
     first arm reads FAIL and the floor arm reads FAIL too.
     """
     bars = measure.parse_bars(_prereg())
-    e2b_good = _e2b_result(fused=1, atomic=114, bars=bars)
+    e2b_good = _e2b_result(fused=1, atomic=114, surviving=90, bars=bars)
     e2a_green = _e2a_result(survived=13, units=14, bars=bars)
 
     e2a_unmeasured = measure.outcome(
@@ -852,7 +859,7 @@ def test_the_e2_note_never_claims_a_shortfall_for_a_half_that_was_not_measured()
     e2a_unmeasured = measure.outcome(
         measured=False, below_floor=False, passed=False, bar="13 of 14",
         value="value_units=None survived=None")
-    e2b_good = _e2b_result(fused=1, atomic=114, bars=bars)
+    e2b_good = _e2b_result(fused=1, atomic=114, surviving=90, bars=bars)
     composite = measure.e2_outcome(e2a_result=e2a_unmeasured,
                                    e2b_result=e2b_good, bars=bars)
     note = measure.e2_row_note(parsed, e2a_unmeasured, e2b_good, composite)
@@ -1284,7 +1291,7 @@ def test_the_e2_note_never_claims_a_shortfall_that_did_not_happen():
     parsed = measure.measure_e1_e2(_REPO)
     bars = measure.parse_bars(json.loads(PREREG.read_text()))
     e2a_green = _e2a_result(survived=13, units=14, bars=bars)
-    e2b_good = _e2b_result(fused=1, atomic=114, bars=bars)
+    e2b_good = _e2b_result(fused=1, atomic=114, surviving=90, bars=bars)
     green = measure.e2_outcome(e2a_result=e2a_green, e2b_result=e2b_good,
                                bars=bars)
     assert measure.verdict_word(green) == "GREEN", green
@@ -1546,11 +1553,13 @@ def test_the_scores_probe_refuses_an_after_arm_on_another_graph(tmp_path, capsys
     review). The fixture used `capstone_on_54922a800_other`, whose HEAD TOKEN is
     still the right one — but `_names_head` requires the last segment to be a
     numeric epoch, so `other` fails the shape test and `score()`'s
-    graph-names-its-own-head guard (`#10996`, `e1_e2_scores.py:1773`) refused it
-    FIRST. With `pass` in place of that guard the earlier mutation runs showed
-    it, and with the guard live the assertion below was satisfied by ITS message
-    — which also contains the graph string. So this pin was measuring the wrong
-    guard, and deleting the identity check it is named for left the suite green.
+    graph-names-its-own-head guard (`#10996` — the `_names_head` check on the ON
+    arm's own `# graph:` line, in `e1_e2_scores.py`; cited by SYMBOL, because no arm
+    reads a line number for it) refused it FIRST. With `pass` in place of that
+    guard the earlier mutation runs showed it, and with the guard live the
+    assertion below was satisfied by ITS message — which also contains the graph
+    string. So this pin was measuring the wrong guard, and deleting the identity
+    check it is named for left the suite green.
     An epoch-differing graph (`…_1793378319` vs the log's `…_1793378318`) passes
     the head guard and can ONLY be refused by the identity check, which is what
     the assertion now keys on.
@@ -1985,7 +1994,7 @@ def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch):
             e2a_out=e2a_out,
             e2b_out=measure.outcome(
                 measured=True,
-                below_floor=e1["atomic_points"] < e2b_floor,
+                below_floor=e1["real_facts"] < e2b_floor,
                 passed=e2b_share <= bars["E2b"]["max_fused_share"],
                 bar=f"fused share <= {bars['E2b']['max_fused_share']}",
                 value=f"fused={e1['fused']}/{e1['atomic_points']}"),
@@ -9960,14 +9969,19 @@ def test_an_e2b_population_under_its_floor_is_REFUSED_not_FAILED(tmp_path):
     log = repo / "docs/evidence/9889/on-arm.log"
     text = log.read_text()
     assert "fused=1/114 = 0.008772" in text
-    # Keep the printed share consistent with the counts: the reconciliation that
-    # refuses a counts/share disagreement is a different guard, and this case is about
-    # the FLOOR (a self-consistent small population still refuses).
-    log.write_text(text.replace("fused=1/114 = 0.008772", "fused=1/10 = 0.100000"))
+    # ⛔ The FLOOR's population is the surviving PLANTED units, `real_facts`
+    # (#10989), NOT the atomicity control's `atomic_points`: a payload padded with
+    # non-planted rows could otherwise clear a floor the criterion was never
+    # written over. So the population this case shrinks is the planted one — a run
+    # that kept 6 of 90 planted units cannot carry E2b at ANY atomic count.
+    assert "real_facts=90" in text
+    log.write_text(text.replace("e1b outcome=PASS real_facts=90",
+                                "e1b outcome=PASS real_facts=6"))
     record = scores_probe.score(repo)
     e2 = record["e2"]
     assert e2["e2b"]["below_floor"] is True, e2["e2b"]
-    assert e2["e2b"]["atomic_points"] == 10, e2["e2b"]
+    assert e2["e2b"]["surviving_units"] == 6, e2["e2b"]
+    assert e2["e2b"]["atomic_points"] == 114, e2["e2b"]
     assert e2["e2b"]["floor"] == 30, e2["e2b"]
     assert e2["outcome"] == "REFUSED", e2
     assert e2["decidable"] is False, e2
