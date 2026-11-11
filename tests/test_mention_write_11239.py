@@ -925,3 +925,71 @@ def test_an_unwritable_record_on_a_first_creation_folds_as_absent(env):
     assert report["ok"] is True, (
         "the graph is faithful, so the checker must not red it: "
         + str(report.get("divergent_points")))
+
+
+def test_the_uncarried_branch_names_what_the_encoder_pops(env):
+    """The `_uncarried` mentions branch's DECISIONS, pinned (review P3, PR #11795).
+
+    On the ordinary `PointAdded`/`PointRevised` path the fold disposes the value
+    first, so this branch sees the fold's view; what it still decides there is
+    (i) an EMPTY list must not be reported as an `_UNCARRIED_LIST` loss and (ii) a
+    non-str/non-list shape the fold's `skip` arm leaves in the view must be NAMED
+    with the encoder's reason (`encode_json_record_props` POPS it — measured,
+    `_is_persistable_prop_value(5)` is True, so the map/bytes/set text would
+    misdirect the diagnosis).
+
+    Mutant this reds on: restoring the `_is_persistable_prop_value` pre-check
+    (the number stops being named) or routing the empty list to `_UNCARRIED_LIST`.
+    """
+    from tortoise.consistency import _UNCARRIED_JSON_RECORD_POPPED, _uncarried
+
+    assert _uncarried({"p1": {"mentions": []}}) == {}, (
+        "an empty list is POPPED by the writer, not a lost list — reporting it "
+        "would be an `_UNCARRIED_LIST` false positive")
+
+    named = _uncarried({"p1": {"mentions": 5}})
+    assert named == {"p1": {"mentions": _UNCARRIED_JSON_RECORD_POPPED}}, (
+        "a non-str/non-list `mentions` must be named with the ENCODER's reason, "
+        f"not `_is_persistable_prop_value`'s: {named}")
+
+
+def test_a_promotion_carrying_a_store_refusing_scalar_is_named_uncarried(env):
+    """The REACHABLE hand-built path: a `PointPromoted` snapshot.
+
+    `_fold_journal` merges a promotion's snapshot VERBATIM (`merged.update(p)`),
+    with no `stated_json_record_prop` pass — so a store-refusing scalar arrives at
+    `_uncarried` through `check_consistency` itself, not only through a
+    hand-called helper. This is the row that makes the branch's store-exactness
+    test reachable rather than defensive-only (review P3 on PR #11795).
+
+    Mutant this reds on: the shape-only `isinstance(v, str)` test (the value is
+    then reported as carried and the promotion's divergence is never named).
+    """
+    sdk, events = env
+    pid = sdk.create_point("statement", CONTENT, dedup=True,
+                           status="draft")["id"]
+
+    log = events / "events.jsonl"
+    rows = [json.loads(line) for line in log.read_text().splitlines()
+            if line.strip()]
+    rows.append({"type": "PointPromoted",
+                 "point": {"id": pid, "mentions": "a\x00b"}})
+    log.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    from tortoise.consistency import (
+        _UNCARRIED_JSON_RECORD_UNWRITABLE,
+        _fold_journal,
+    )
+
+    folded = _fold_journal(rows)[pid]
+    assert folded.get("mentions") == "a\x00b", (
+        "the promotion arm no longer merges the snapshot verbatim — this row "
+        f"can only prove the branch is reachable if it does: {folded!r}")
+
+    from tortoise.consistency import _uncarried
+
+    named = _uncarried({pid: folded})
+    assert named.get(pid, {}).get("mentions") == (
+        _UNCARRIED_JSON_RECORD_UNWRITABLE), (
+        "a promoted snapshot carrying a store-refusing scalar was reported as "
+        f"carried: {named}")

@@ -779,17 +779,21 @@ def _uncarried(journal_by_id: dict) -> dict[str, dict[str, str]]:
                 # the `tags` branch above exists for (review P3 on PR #11795).
                 #
                 # ⛔ BOUND, stated rather than implied (review on PR #11795): on
-                # the PRODUCTION path this branch sees the FOLD's view, and the
-                # fold applies the same predicate first (`stated_json_record_prop`
-                # → `_apply_one`), so a store-refusing value never reaches here
-                # from `check_consistency` — it is removed upstream. What this
-                # branch actually decides on that path is (i) the EMPTY list,
-                # which must not be reported as an `_UNCARRIED_LIST` loss, and
-                # (ii) the non-str/non-list shapes the fold's `skip` arm leaves
-                # in the view. The store-exactness tests below are defence for a
-                # HAND-BUILT snapshot (a foreign or older-emitter journal), not a
-                # repair of a live divergence — no row pins them, and none could
-                # without bypassing the fold.
+                # the `PointAdded`/`PointRevised` path the fold applies the same
+                # predicate FIRST (`stated_json_record_prop` → `_apply_one`), so
+                # a store-refusing value is removed upstream and never arrives
+                # here. It DOES arrive on the PROMOTION arms — `_fold_journal`
+                # merges a `PointPromoted`'s snapshot verbatim (`merged.update(p)`
+                # / `merged | p`) with no disposition pass — which is reachable
+                # from `check_consistency` and is where these tests earn their
+                # keep (a foreign or older-emitter snapshot, and a promotion that
+                # copies the node's own scalar). On the ordinary path what the
+                # branch still decides is (i) the EMPTY list, which must not be
+                # reported as an `_UNCARRIED_LIST` loss, and (ii) the
+                # non-str/non-list shapes the fold's `skip` arm leaves in the
+                # view. Pinned by
+                # `tests/test_mention_write_11239.py::test_the_uncarried_branch_names_what_the_encoder_pops`
+                # and `…::test_a_promotion_carrying_a_store_refusing_scalar_is_named_uncarried`.
                 if isinstance(v, str):
                     # A canonical string is carried only when the STORE can hold
                     # it EXACTLY: `#7369` degrades a NUL / lone-surrogate string
