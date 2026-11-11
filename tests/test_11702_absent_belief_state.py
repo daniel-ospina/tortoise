@@ -5321,8 +5321,9 @@ def test_update_entity_clearing_the_pair_clears_the_mirror(sdk, tmp_path):
 #    "IS the declared PRIOR mean" is false for exactly the row
 #    `set_point_baseline(3.0, 1.0)` + `update_point(confidence=0.9)`: the
 #    declared prior mean is 0.75 and the field reads 0.9. That sentence stood
-#    at `search_engine.py`:347 while the code nine hundred lines away said
-#    otherwise. `origin/main`'s belief prose carried TEN unqualified matches
+#    at `search_engine.py`:347 while the precedence at `search_engine.py`:5520
+#    (`elif mirror is not None:`) said otherwise — 5,172 lines away, not the
+#    "nine hundred" an earlier revision of this note claimed. `origin/main`'s belief prose carried TEN unqualified matches
 #    (`search_engine.py` 6, `why.py` 2, `volunteer.py` 1, `sdk.py` 1 — the
 #    numbers this guard measures, not a count taken on trust), plus one
 #    `else ``None``` match below.
@@ -5425,14 +5426,15 @@ _QUALIFIER_LOOKBEHIND = 200
 #: clause followed by a LATER-clause inversion — "…unless a readable mirror
 #: supplies one; except that the mirror never LEADS it" — because each clause's
 #: mirror+verb pair is individually clean. Fail-closed on it.
-#: ⚠️ NAMED RESIDUALS, both directions. This is a tripwire on the class, not a
-#: parser: (1) FALSE PASS — an inversion phrased around the shapes below is not
-#: detected; (2) FALSE BLOCK — a qualifier placed BEFORE the claim ("A readable
-#: mirror supplies the value; without one, confidence_mean IS the … PRIOR mean")
-#: is flagged, because the scan windows FORWARD from the claim. (2) blocks a
-#: rewrite rather than passing an inversion, which is the safe direction, and
-#: the guard's claim is "the settled wordings of the rule do not invert
-#: silently" — never "no English sentence can defeat it".
+#: ⚠️ NAMED RESIDUAL — ONE DIRECTION. This is a tripwire on the class, not a
+#: parser: an inversion phrased around the shapes below is not detected. The
+#: guard's claim is "the settled wordings of the rule do not invert silently" —
+#: never "no English sentence can defeat it".
+#: (A qualifier placed BEFORE its claim is NO LONGER a false block: the scan
+#: reaches back `_QUALIFIER_LOOKBEHIND` characters and `_claim_sentence` cuts
+#: backward too, so "A readable mirror supplies the value; without one,
+#: confidence_mean IS the … PRIOR mean" is accepted — measured. An earlier
+#: revision of this note listed that as a residual and it had gone stale.)
 _MIRROR_INVERSIONS = re.compile(
     r"mirror\s+(?:never|not|isn't|is\s+not|does\s*n[o']t|doesn't)\s+lead"
     r"|suppl(?:y|ies)\s+(?:no|nothing)\b"
@@ -5565,14 +5567,19 @@ def _claim_sentence(window: str, claim_at: int = 0) -> str:
     lookbehind region and discarded the claim's own sentence, which reported
     every real site as unqualified (measured).
 
-    A break is punctuation followed by whitespace and then ANY word start —
-    including a lowercase one. The earlier lookahead required a capital and so
-    saw no break in "…PRIOR mean. the n.confidence mirror leads it when EP has
-    run.", which put a whole sentence about a DIFFERENT row inside the "claim
-    sentence" (measured). Erring toward a SHORTER window is the safe direction:
-    it drops a qualifier and reds a correct edit, which a human then reads.
+    A break is punctuation followed by whitespace and then ANY non-space
+    character. Requiring a WORD start was too narrow twice over: it missed
+    lowercase sentence starts ("…PRIOR mean. the n.confidence mirror leads it
+    when EP has run") AND every bulleted/dashed/bold sentence start that these
+    files use heavily — "* ", "- ", "— ", "**The …**" — so a qualifier in the
+    NEXT bullet qualified a FALSE claim (measured: all four passed).
+
+    Erring toward a SHORTER window is the safe direction: it drops a qualifier
+    and reds a correct edit, which a human then reads. The cost is a possible
+    false block when an abbreviation ("e.g. the …") ends the cut early — a red
+    on a true sentence, never a pass on a false one.
     """
-    break_at = re.compile(r"(?<=[.!?])\s+(?=[`\"'(A-Za-z0-9])")
+    break_at = re.compile(r"(?<=[.!?])\s+(?=\S)")
     tail = break_at.split(window[claim_at:], maxsplit=1)[0]
     head = break_at.split(window[:claim_at])[-1]
     return head + tail
