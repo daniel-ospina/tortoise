@@ -10029,8 +10029,33 @@ def _stored_bound(*values: object) -> object:
     return ""
 
 
+def _entity_identity_probes() -> tuple[tuple[str, str], ...]:
+    """The ``(label, match_prop)`` pairs an entity write can resolve by, in the
+    WRITE's order — one source of truth for both the write and the money gate.
+
+    ``_update_entity`` iterates ``_CANONICAL_ENTITY_ID_PROPS`` and, per label,
+    its ``secondary_entity_id_props`` (primary key first, secondary only on a
+    miss). Any gate that wants "the node this write will touch" must ask the
+    same question in the same order; two lists would drift and the gate would
+    silently grade a different node — which is exactly how the money gate became
+    inert on an ``:Event`` keyed by ``eventId`` (#11836 review Finding 1).
+    """
+    from tortoise.projection import (
+        _CANONICAL_ENTITY_ID_PROPS,
+        secondary_entity_id_props,
+    )
+
+    return tuple(
+        (f":{label}", key)
+        for label, prop in _CANONICAL_ENTITY_ID_PROPS
+        for key in (prop, *secondary_entity_id_props(label))
+    )
+
+
 def _money_views_for_update(g, props: dict, *, node_id: str,
-                           label: str = "") -> list[dict] | None:
+                           label: str = "",
+                           keys: tuple[tuple[str, str], ...] | None = None,
+                           ) -> list[dict] | None:
     """#2782: the money views an UPDATE leaves behind, for ``_sanitize_props``.
 
     Returns ``None`` when the caller's bag names no money member — the gate is
@@ -10056,59 +10081,76 @@ def _money_views_for_update(g, props: dict, *, node_id: str,
     matching node is graded on the bag alone — nothing is stored, so the bag is
     the state, exactly as the create door treats it.
 
-    ``label`` is the caller's own constant (``":Point"`` from ``update_point``,
-    empty from ``_update_entity``), never caller input, and ``node_id`` is a
-    query PARAMETER. ``_update_entity`` deliberately passes NO label: it is the
-    documented tenant route onto every carrier, and a label here would have to
-    enumerate them (Object/Event/Point/Subject, plus any future carrier) — a
-    wrong guess is a HOLE (money on an unlisted label escapes the gate).
-    ⚠️ The unlabelled pattern is NOT "only marginally slower", which is what an
-    earlier revision of this docstring claimed: FalkorDB indexes are
-    label-scoped, so it can use no label's ``id`` index and the cost is LINEAR
-    in graph size (measured on the lane's FalkorDB: 0.54 ms at 2 nodes → 6.68 ms
-    at 45 002, against a flat ~0.5 ms for the labelled form), and it is paid only
-    by a bag that names a money member. The PROJECTION is what keeps that
-    acceptable: only the money members are read, because ``RETURN
-    properties(n)`` drags the node's ``content`` and its vector along (3.80 ms vs
-    0.51 ms on a ``:Point`` carrying a 1024-dim vector — 7.4x, for five keys).
-    Narrowing the MATCH itself to the labels the write loop already enumerates is
-    tortoise#11867 (filed for this residual, not implied to be fixed here — a
-    label list that drifts from the WRITE's own enumeration would be a hole in
-    this gate, which is why it is not guessed at).
-
-    STATED RESIDUAL: ``{id:$id}`` is NARROWER than the write's own key
-    discipline. This door reaches a node by its PRIMARY key then its SECONDARY
-    one (``_label_reachable_by``; e.g. ``Event``→``eventId``,
-    ``Source``→``url``), so a carrier reachable ONLY by a secondary key would
-    be graded on the bag alone. Measured clear on this change's tree: every
-    money-bearing creator stamps ``id`` as well (``create_event`` writes both
-    ``id`` and ``eventId``), so the id probe finds the node the write touches.
-    If a future creator mints a money carrier without ``id``, widen this probe
-    with it — do not drop the grading.
+    ⛔ THE PROBE USES THE WRITE'S OWN KEY DISCIPLINE, and that is a correctness
+    requirement, not a refinement. An earlier revision matched ``{id:$id}`` only,
+    which is NARROWER than what the door it guards actually keys on: the writes
+    iterate ``_CANONICAL_ENTITY_ID_PROPS`` — ``("Event", "eventId")`` among them
+    — and each label's ``secondary_entity_id_props`` (``Source``→``url``). A
+    probe on ``id`` alone therefore MISSED the very node the ``SET n += $props``
+    touched, fell through to the bag-only arm, and was inert in BOTH directions
+    on an ``:Event`` keyed by ``eventId`` (measured, #11836 review Finding 1):
+    ``update_entity(eventId, currency=None)`` ADMITTED and left
+    ``{amountMinor, None, 2}`` — a stored value that read fine, made unreadable —
+    while ``update_entity(eventId, amountMinor=…)`` was REFUSED. ``:Event`` nodes
+    with no ``id`` are not hypothetical: ``session_indexer`` mints them
+    (``CREATE (e:Event {eventId:$eid})``).
+    So ``keys`` IS the caller's own enumeration — ``(label, match_prop)`` pairs
+    in the write's order, built from the same constants the write loop uses
+    (tortoise#11867) — never a second list maintained here. ``label`` remains the
+    single-label shortcut for ``update_point``. ``node_id`` is a query
+    PARAMETER and no label/prop here is ever caller input.
+    A bag that names money but matches NO pair is graded on the bag alone:
+    nothing is stored, so the bag is the state, exactly as the create door
+    treats it. And when SEVERAL pairs match, every one of their rows is graded:
+    the write fans out across labels, so grading only the first pair would leave
+    a sibling label's value ungraded.
+    ⚠️ Cost: each pair is a LABEL-SCOPED index lookup (a miss on the primary key
+    is what costs the secondary one), so the probe stays flat as the graph grows
+    instead of scanning it — measured 0.54 ms at 2 nodes → 6.68 ms at 45 002 with
+    the old unlabelled pattern, and flat ~0.5 ms per pair here. It is paid only
+    by a bag that names a money member, and the PROJECTION matters for the same
+    reason: only the money members are read, because ``RETURN properties(n)``
+    drags the node's ``content`` and its vector along (3.80 ms vs 0.51 ms on a
+    ``:Point`` carrying a 1024-dim vector — 7.4x, for five keys).
     """
     if not any(key in props for key in MONEY_VALUE_FIELDS):
         return None
     # ⛔ Project the money members, never `properties(n)`: the whole-node form
     # drags `content` and the embedding across the wire for five keys (measured
     # 3.80 ms vs 0.51 ms on a 1024-dim :Point).
-    rows = g.query(
-        f"MATCH (n{label} {{id:$id}}) "
-        "RETURN n.amountMinor, n.currency, n.minorUnitExponent, "
-        "       n.verbatim, n.asOf",
-        params={"id": node_id},
-    ).result_set
-    if not rows:
-        return [money_view_after_update({}, props)]
-    # `strict=True`: the projection above lists exactly `MONEY_VALUE_FIELDS` in
-    # order, so a length mismatch can only mean the two drifted apart — and a
-    # silently mis-mapped row would grade `currency` as `amountMinor`. Fail
-    # closed on the drift rather than shift the value into the wrong member.
-    return [money_view_after_update(
+    probe = ("MATCH (n{label} {{{match_prop}:$id}}) "
+             "RETURN n.amountMinor, n.currency, n.minorUnitExponent, "
+             "       n.verbatim, n.asOf")
+    # ⛔ EVERY pair is probed, and the views are UNIONED — never "the first pair
+    # that matched". `_update_entity` fans out: its label loop writes EVERY label
+    # whose identity key equals `$id`, so one call can stamp a `:Point` and an
+    # `:Object` that share an id. Returning at the first hit graded one of them
+    # and left the other ungraded — measured (#11836 review, VGATE round 8):
+    # `:Point{id:'dup'}` money-free beside `:Object{id:'dup'}` carrying a
+    # complete triple, then `update_entity('dup', currency=None)` was ADMITTED,
+    # leaving `{amountMinor, None, 2}` on the `:Object` and making `total_minor`
+    # refuse the whole set — a hole the pre-change unlabelled `MATCH` did NOT
+    # have, because it returned every row it matched.
+    views: list[dict] = []
+    for probe_label, match_prop in (keys or ((label, "id"),)):
+        rows = g.query(
+            probe.format(label=probe_label, match_prop=match_prop),
+            params={"id": node_id},
+        ).result_set
+        for row in rows:
+            # `strict=True`: the projection above lists exactly
+            # `MONEY_VALUE_FIELDS` in order, so a length mismatch can only mean
+            # the two drifted apart — and a silently mis-mapped row would grade
+            # `currency` as `amountMinor`. Fail closed on the drift rather than
+            # shift the value into the wrong member.
+            views.append(money_view_after_update(
                 {key: value for key, value in zip(MONEY_VALUE_FIELDS, row,
                                                  strict=True)
                  if value is not None},
-                props)
-            for row in rows]
+                props))
+    if not views:
+        return [money_view_after_update({}, props)]
+    return views
 
 
 def _refuse_inconsistent_validity_precision(g, props: dict, *,
@@ -43800,16 +43842,20 @@ class TortoiseSDK:
         # #329: id + sourcePath/source_path are server-managed — reject
         # #2782: same rule at this door as at ``update_point`` — the money gate
         # is shown the STATE the write leaves (stored ∪ props, `None` deleting),
-        # never the bag alone. No label is passed: this is the documented tenant
-        # route onto every carrier, and the probe's own residual (it matches the
-        # primary key only, while this door also reaches a node by its secondary
-        # key) is stated on `_money_views_for_update`.
+        # never the bag alone. The probe is handed the WRITE'S OWN key
+        # enumeration (the same `_CANONICAL_ENTITY_ID_PROPS` + secondary keys the
+        # match loop below iterates, in the same order), because this door
+        # reaches a node by its primary key THEN its secondary one — a probe on
+        # `id` alone was inert on an `:Event` keyed by `eventId` (measured,
+        # #11836 review Finding 1), in both directions. See
+        # `_money_views_for_update`.
         props = _sanitize_props(props, reject_id=True,
                                 reject_belief_props=True,
                                 reject_claim_class=True,
                                 money_views=_money_views_for_update(
                                     self._get_proj().g, props,
-                                    node_id=id_val))
+                                    node_id=id_val,
+                                    keys=_entity_identity_probes()))
         # ── #5475 (residual): the UPDATE door onto every label ──
         # ``update_entity`` is the documented tenant route onto Object /
         # Subject / Event / Document / Source nodes, and each of those carries

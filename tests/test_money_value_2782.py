@@ -844,6 +844,18 @@ def _money_node(sdk, node_id: str) -> dict:
             MINOR_UNIT_EXPONENT: rows[0][2]}
 
 
+def _money_node_by_event_id(sdk, event_id: str) -> dict:
+    """The `:Event` shape `session_indexer` mints — addressed by `eventId`, with
+    no `id` at all — read back by the key it actually carries."""
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Event {eventId:$eid}) "
+        "RETURN n.amountMinor, n.currency, n.minorUnitExponent",
+        params={"eid": event_id}).result_set
+    assert rows, f"no :Event {event_id!r}"
+    return {AMOUNT_MINOR: rows[0][0], CURRENCY: rows[0][1],
+            MINOR_UNIT_EXPONENT: rows[0][2]}
+
+
 def _whole_sum(sdk) -> dict:
     """`total_minor` over every node that carries an amount — the indicator-3
     reading, which REFUSES the whole sum on the first unreadable member."""
@@ -1101,6 +1113,127 @@ class TestALegacyOptionalMemberDoesNotBrickTheRow:
         node = _money_node(sdk, pid)
         assert node[AMOUNT_MINOR] == COMMITTED_MINOR
         assert node[CURRENCY] == "BRL"
+
+
+
+class TestTheProbeUsesTheWritesOwnKeyDiscipline:
+    """#11836 review Finding 1 (P1, measured): the merged-state probe matched
+    ``{id:$id}`` while the write it guards resolves by the label's OWN identity
+    key — so on an ``:Event`` keyed by ``eventId`` the gate was inert in BOTH
+    directions.
+
+    ``_update_entity`` iterates ``_CANONICAL_ENTITY_ID_PROPS`` and each label's
+    secondary key, so ``:Event`` is reached by ``eventId``. A probe on ``id``
+    missed the very node the ``SET n += $props`` touched, fell through to the
+    bag-only arm, and measured: ``update_entity(eventId, currency=None)`` was
+    ADMITTED, leaving ``{amountMinor, None, 2}`` — a stored value that read fine
+    made unreadable, with ``total_minor`` refusing the whole set — while
+    ``update_entity(eventId, amountMinor=…)`` was REFUSED. ``:Event`` nodes with
+    no ``id`` are not hypothetical: ``session_indexer`` mints them
+    (``CREATE (e:Event {eventId:$eid})``).
+    """
+
+    def test_the_probe_enumerates_exactly_what_the_write_iterates(self):
+        """One source of truth: if these two ever diverge, the gate grades a
+        different node from the one the write touches — silently."""
+        from tortoise.projection import (
+            _CANONICAL_ENTITY_ID_PROPS,
+            secondary_entity_id_props,
+        )
+        from tortoise.sdk import _entity_identity_probes
+
+        assert _entity_identity_probes() == tuple(
+            (f":{label}", key)
+            for label, prop in _CANONICAL_ENTITY_ID_PROPS
+            for key in (prop, *secondary_entity_id_props(label))
+        )
+
+    @staticmethod
+    def _indexer_shaped_event(sdk, event_id: str, *,
+                              node_id: str | None = None) -> None:
+        """The shape `session_indexer` mints: an `:Event` addressed by
+        `eventId`, optionally with no `id` at all."""
+        sdk._get_proj().g.query(
+            "CREATE (e:Event {eventId:$eid}) SET e += $props",
+            params={"eid": event_id, "props": (
+                {} if node_id is None else {"id": node_id})},
+        )
+
+    @pytest.mark.parametrize("with_id", [False, True])
+    def test_a_currency_delete_by_event_id_is_refused(self, journaled_sdk,
+                                                      with_id):
+        """The FAIL-OPEN half, on both shapes: the indexer's id-less event, and
+        one whose `id` differs from the `eventId` the caller addresses."""
+        sdk, _events = journaled_sdk
+        event_id = "ev_gate_11836"
+        self._indexer_shaped_event(
+            sdk, event_id,
+            node_id=None if not with_id else "some-other-id")
+        sdk.update_entity(event_id,
+                          **money_props(COMMITTED_MINOR, "BRL",
+                                        minor_unit_exponent=2))
+        with pytest.raises(ValueError, match="write boundary"):
+            sdk.update_entity(event_id, currency=None)
+        node = _money_node_by_event_id(sdk, event_id)
+        assert node[AMOUNT_MINOR] == COMMITTED_MINOR
+        assert node[CURRENCY] == "BRL"
+        assert node[MINOR_UNIT_EXPONENT] == 2
+
+    @pytest.mark.parametrize("with_id", [False, True])
+    def test_a_partial_edit_by_event_id_is_admitted(self, journaled_sdk,
+                                                    with_id):
+        """The FALSE-BLOCK half: `amountMinor` alone is a complete edit once the
+        stored currency/exponent are visible — which is the entire point of
+        grading the merged state."""
+        sdk, _events = journaled_sdk
+        event_id = "ev_gate_11836_partial"
+        self._indexer_shaped_event(
+            sdk, event_id,
+            node_id=None if not with_id else "other-id-for-partial")
+        sdk.update_entity(event_id,
+                          **money_props(COMMITTED_MINOR, "BRL",
+                                        minor_unit_exponent=2))
+        sdk.update_entity(event_id, amountMinor=COMMITTED_MINOR + 1)
+        node = _money_node_by_event_id(sdk, event_id)
+        assert node[AMOUNT_MINOR] == COMMITTED_MINOR + 1
+        assert node[CURRENCY] == "BRL"
+        assert node[MINOR_UNIT_EXPONENT] == 2
+        assert _whole_sum(sdk) == {"BRL": COMMITTED_MINOR + 1}
+
+    @pytest.mark.parametrize("money_label_first", [True, False])
+    def test_one_call_that_stamps_two_labels_grades_both(
+            self, journaled_sdk, money_label_first):
+        """The FAN-OUT half (VGATE round 8): `_update_entity` writes EVERY label
+        whose identity key equals the caller's `$id`, so one call can stamp a
+        `:Point` and an `:Object` that share an id. A probe that returned at the
+        first matching pair graded one of them and left the other ungraded —
+        measured: a money-free `:Point{id:'dup'}` beside a `:Object{id:'dup'}`
+        carrying a complete triple made ``update_entity('dup', currency=None)``
+        ADMITTED, leaving ``{amountMinor, None, 2}`` and making ``total_minor``
+        refuse the whole set. The pre-change unlabelled ``MATCH`` did not have
+        this hole (it returned every row), so it is a regression the union
+        closes, and the ORDER of the two nodes must not matter.
+        """
+        sdk, _events = journaled_sdk
+        g = sdk._get_proj().g
+        money = money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2)
+        if money_label_first:
+            g.query("CREATE (o:Object {id:'dup-11836'}) SET o += $p",
+                    params={"p": money})
+            g.query("CREATE (pt:Point {id:'dup-11836'})")
+        else:
+            g.query("CREATE (pt:Point {id:'dup-11836'})")
+            g.query("CREATE (o:Object {id:'dup-11836'}) SET o += $p",
+                    params={"p": money})
+        with pytest.raises(ValueError, match="write boundary"):
+            sdk.update_entity("dup-11836", currency=None)
+        rows = g.query(
+            "MATCH (o:Object {id:'dup-11836'}) "
+            "RETURN o.amountMinor, o.currency, o.minorUnitExponent"
+        ).result_set
+        assert tuple(rows[0]) == (COMMITTED_MINOR, "BRL", 2), (
+            "the :Object's value was stripped by a write the gate admitted")
+        assert _whole_sum(sdk) == {"BRL": COMMITTED_MINOR}
 
 
 class TestTheUpdateArmOfThePredicate:
