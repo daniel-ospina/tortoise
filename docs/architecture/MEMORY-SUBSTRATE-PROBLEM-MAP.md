@@ -506,5 +506,6 @@ rounding:**
   but nothing validates *"the issue this row calls open is now closed, and what it
   was really waiting for has been measured onto another row"* — the tracker is
   exactly the source `tools/problem_map_check.py` refuses to read. A CLOSED row's
-  fix can therefore ship and leave the page saying OPEN (this one did, for five
-  hours of lane time), and only a re-measurement pass catches it.
+  fix can therefore ship and leave the page saying OPEN (this one did, for four and
+  a half hours of lane time — `#2782` closed at 14:17Z, the row moved at 18:42Z),
+  and only a re-measurement pass catches it.
