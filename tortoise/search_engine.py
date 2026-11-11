@@ -337,10 +337,12 @@ def ep_prior_only_cypher(alias: str) -> str:
 
     The third predicate of the three-state vocabulary: a declared #2199
     baseline with NO EP measurement. NOT the same as "unmeasured" — an
-    unmeasured claim carries no persisted prior at all AND no readable
-    ``n.confidence`` mirror (with such a mirror it still reads ``baseline`` at
-    the mirror's value, which is why the mirror-only row is `unmeasured`
-    internally and `baseline` here). Without one, and since #11702, its
+    unmeasured claim carries no persisted prior at all; with NO readable
+    ``n.confidence`` mirror it reads ``absent``, and with one it reads
+    ``baseline`` at the mirror's value (which is why the mirror-only row is
+    ``unmeasured`` internally and ``baseline`` in the read STATE vocabulary —
+    this helper answers false for it, since ``baseline_set`` is unset and it
+    never reads the mirror). Without one, and since #11702, its
     confidence_mean is `None` + `ep_state: "absent"`, not a neutral 0.5.
     A prior-only claim's confidence_mean IS the declared PRIOR mean.
 
@@ -1403,8 +1405,9 @@ class EpBreakdown:
     #
     # #11702: ``None`` when nothing YIELDS a mean AND no readable
     # ``n.confidence`` mirror supplies one — no persisted belief, a half
-    # pair, a 0/0 pair, or an unreadable operand (the third state of the #2206
-    # contract). A readable mirror beside any of those shapes is the value.
+    # pair, a 0/0 pair, a negative operand, or an unreadable operand (the
+    # third state of the #2206 contract). A readable mirror beside any of
+    # those shapes is the value.
     # It used to be reported as the neutral Beta(1,1)
     # mean 0.5 and was therefore indistinguishable from a computed coin flip
     # at every threshold and every order. Read :attr:`ep_state` beside it: a
@@ -1457,11 +1460,10 @@ class EpBreakdown:
     # two flags is WRONG — a mirror-only prior reads (False, False) with a real
     # 0.95, an α-only half pair reads (True, False) with ``None`` when no
     # readable mirror survives beside it (with one, the value is the mirror's),
-    # and a
-    # β-only row reads (False, False) with ``None`` and state ``absent`` when no
-    # readable mirror survives beside it (with one, ``baseline`` at the
-    # mirror's value). Read
-    # :attr:`ep_state`. Neither flag is a signal of contestation.
+    # and a β-only row reads (False, False) with ``None`` and state ``absent``
+    # when no readable mirror survives beside it (with one, ``baseline`` at the
+    # mirror's value). Read :attr:`ep_state`. Neither flag is a signal of
+    # contestation.
     # #2490 has_ep overload: TERMINAL claims (terminal vocab status OR the
     # legacy outdated=true flag) are also gated to False — their posterior
     # decays to vacuity at the terminalizing write, so a terminal claim's
