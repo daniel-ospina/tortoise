@@ -5383,34 +5383,39 @@ _PRIOR_MEAN_CLAIM_PATTERNS = (
 _ABSENT_CLAIM = re.compile(
     r"prior mean \(ep_alpha/beta\), else ``None``", re.IGNORECASE)
 
-#: AFFIRMATIVE qualifier forms. A bare `"mirror" in window` is polarity-blind:
-#: "…IS the declared PRIOR mean; the mirror never leads it." satisfied it
-#: (measured), so a future edit could invert the rule and stay green. Each
-#: pattern below is a phrase the true rule actually uses; a rewording that
-#: drops all three fails loudly, which is the intended cost.
-_QUALIFIER_FORMS = (
-    re.compile(r"mirror\s+(LEADS|leads)\b"),
-    re.compile(r"mirror's value, which LEADS"),
-    re.compile(r"\bLEADS it\b"),
-    re.compile(r"unless a readable"),
-    re.compile(r"mirror supplies"),
-)
+#: A qualifier's SUBJECT: the mirror noun, required. A form list alone is
+#: subject-blind and object-blind — `unless a readable` matched "unless a
+#: readable cache exists" and the bare `\bLEADS it\b` matched "the evidence
+#: total LEADS it" (both measured on this file's own `_unqualified_claims`, so
+#: the guard passed while the prose stated something else).
+_MIRROR_NOUN = re.compile(r"\bmirror\b", re.IGNORECASE)
+
+#: A qualifier's VERB, searched just AFTER the mirror noun — the position every
+#: real site puts it in ("mirror LEADS", "mirror, if present, LEADS it",
+#: "mirror's value, which LEADS", "mirror supplies the value").
+_QUALIFIER_VERB = re.compile(r"\b(?:LEADS|leads|lead|supplies|supply)\b")
+
+#: How far after the mirror noun its verb may sit ("mirror, if present, LEADS
+#: it" is 21 characters).
+_QUALIFIER_VERB_WINDOW = 60
 
 #: Words that INVERT a qualifier ("the mirror never leads it", "unless no
-#: readable mirror supplies one"). Scanned in the few characters BEFORE a
-#: matched form — the position where these negate the qualifier itself.
+#: readable mirror supplies one"). Scanned over the WHOLE claim→verb span, not a
+#: 24-character lookbehind: at that distance `…; it is not true, as some claim,
+#: that a readable mirror leads it.` passed (measured).
 _QUALIFIER_NEGATIONS = re.compile(
     r"\b(never|not|no longer|nothing|without|cannot|isn't|doesn't|"
-    r"no readable|no mirror|fails? to)\b",
+    r"no readable|no mirror|fails? to|nor|can't)\b",
     re.IGNORECASE,
 )
 
-#: Negated OBJECTS that follow a qualifier verb ("the mirror supplies
-#: nothing for these rows"). Checked in a short window AFTER the form, and
-#: deliberately NARROWER than `_QUALIFIER_NEGATIONS`: a general after-window
-#: flags correct prose whose next clause negates something else — measured on
-#: "…LEADS it), never a measured one", which is TRUE and was reported as an
-#: unqualified claim.
+#: A negation that does NOT invert — stripped before the test above, so the TRUE
+#: "not only does a readable mirror lead it, but the pair does too" is not
+#: reported as an unqualified claim (measured: it was).
+_QUALIFIER_NEGATION_OK = re.compile(r"\bnot only\b", re.IGNORECASE)
+
+#: Negated OBJECTS that follow a qualifier verb ("the mirror supplies nothing
+#: for these rows"). Checked just after the verb.
 _QUALIFIER_OBJECT_NEGATIONS = re.compile(
     r"\b(nothing|none|no readable|no mirror)\b", re.IGNORECASE)
 
@@ -5477,17 +5482,24 @@ def _claim_sentence(window: str) -> str:
 
 
 def _qualified(window: str) -> bool:
-    """Whether the claim's own sentence carries an AFFIRMATIVE qualifier."""
+    """Whether the claim's own sentence carries an AFFIRMATIVE qualifier.
+
+    Requires all three: the MIRROR noun, a qualifying verb after it, and no
+    negation across the whole claim→verb span (bar an allowed "not only").
+    """
     sentence = _claim_sentence(window)
-    for pattern in _QUALIFIER_FORMS:
-        for match in pattern.finditer(sentence):
-            before = sentence[max(0, match.start() - 24):match.start()]
-            after = sentence[match.end():min(len(sentence),
-                                             match.end() + 16)]
-            if (_QUALIFIER_NEGATIONS.search(before)
-                    or _QUALIFIER_OBJECT_NEGATIONS.search(after)):
-                continue
-            return True
+    for noun in _MIRROR_NOUN.finditer(sentence):
+        verb = _QUALIFIER_VERB.search(
+            sentence, noun.end(), noun.end() + _QUALIFIER_VERB_WINDOW)
+        if verb is None:
+            continue
+        span = sentence[:verb.end()]
+        if _QUALIFIER_NEGATIONS.search(_QUALIFIER_NEGATION_OK.sub("", span)):
+            continue
+        after = sentence[verb.end():verb.end() + 16]
+        if _QUALIFIER_OBJECT_NEGATIONS.search(after):
+            continue
+        return True
     return False
 
 
