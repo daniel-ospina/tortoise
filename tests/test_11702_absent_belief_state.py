@@ -5345,17 +5345,22 @@ _BELIEF_PROSE = (
     "tortoise/ranking.py",
 )
 
-#: How far after a claim its qualifier may sit. A sentence in these modules is
-#: under ~300 characters once whitespace is collapsed, and the fixed wording
-#: puts "mirror" within ~60 of every claim, so this bound is generous for the
-#: real sentences and too tight for a qualifier parked in a later sentence.
+#: How far after a claim its qualifier may sit for the SCAN to find it. This is
+#: not what enforces "same sentence": some sentences in these modules run past
+#: 300 characters once whitespace is collapsed (measured: 331 of 1,485 sentence
+#: splits in `search_engine.py`), so a window alone can span several sentences.
+#: `_claim_sentence` cuts at the first sentence boundary; this bound only keeps
+#: the scan cheap.
 _QUALIFIER_WINDOW = 300
 
 #: Sentences that ASSERT the value of a prior-only claim's mean. The verb is
 #: what distinguishes a CLAIM from a factual mention of a number ("Beta(3,1),
 #: prior mean 0.75" / "the 0.75 prior mean" assert nothing about the field).
 _PRIOR_MEAN_CLAIM_PATTERNS = (
-    re.compile(r"confidence_mean\s+(is|IS)\s+(the\s+)?(declared\s+)?PRIOR mean",
+    # `\`\`confidence_mean\`\` is then the prior mean` — the `then` form is how
+    # `EpBreakdown`'s `has_ep` field doc states it, and the backticks are how
+    # every RST mention spells the field.
+    re.compile(r"confidence_mean`*\s+(is|IS)(\s+then)?\s+(the\s+)?(declared\s+)?PRIOR mean",
                re.IGNORECASE),
     re.compile(r"reads its PRIOR mean", re.IGNORECASE),
     # The canonical `EpBreakdown` field doc and `annotate_ep_batch`'s contract
@@ -5395,7 +5400,7 @@ _QUALIFIER_NEGATIONS = re.compile(r"\b(never|not|no longer|isn't|doesn't)\b",
 #: prose is added or removed; a mismatch means the guard went blind, which is
 #: exactly what it exists to detect.
 _EXPECTED_PRIOR_MEAN_SITES = {
-    "tortoise/search_engine.py": 5,
+    "tortoise/search_engine.py": 6,
     "tortoise/why.py": 2,
     "tortoise/volunteer.py": 1,
 }
@@ -5423,11 +5428,25 @@ def _claim_sites(patterns) -> dict[str, int]:
     return found
 
 
+def _claim_sentence(window: str) -> str:
+    """The claim's OWN sentence: the window cut at the first sentence break.
+
+    A 300-character window alone spans several sentences in these modules, so a
+    qualifier parked in a FOLLOWING sentence about a different shape satisfied
+    it (measured: "…PRIOR mean. The legacy n.confidence mirror supplies the
+    served value for a measured claim." passed). The rule the tests document is
+    "same sentence", so the check must implement exactly that.
+    """
+    parts = re.split(r"(?<=[.!?])\s+(?=[`\"'(A-Z0-9])", window, maxsplit=1)
+    return parts[0]
+
+
 def _qualified(window: str) -> bool:
-    """Whether the window carries an AFFIRMATIVE mirror qualifier."""
+    """Whether the claim's own sentence carries an AFFIRMATIVE qualifier."""
+    sentence = _claim_sentence(window)
     for pattern in _QUALIFIER_FORMS:
-        for match in pattern.finditer(window):
-            before = window[max(0, match.start() - 24):match.start()]
+        for match in pattern.finditer(sentence):
+            before = sentence[max(0, match.start() - 24):match.start()]
             if _QUALIFIER_NEGATIONS.search(before):
                 continue
             return True

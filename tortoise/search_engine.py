@@ -1461,14 +1461,15 @@ class EpBreakdown:
     # with the kind-derived system-default baseline reads has_ep=False here
     # (it used to read True at the 0.75 prior mean — the #3276 leak).
     # False = no α persisted (or a #2490 terminal gate); ``confidence_mean`` is
-    # then the prior mean when ``baseline`` is True, else reading it from these
-    # two flags is WRONG — a mirror-only prior reads (False, False) with a real
-    # 0.95, an α-only half pair reads (True, False) with ``None`` when no
-    # readable mirror survives beside it (with one, the value is the mirror's),
-    # and a β-only row reads (False, False) with ``None`` and state ``absent``
-    # when no readable mirror survives beside it (with one, ``baseline`` at the
-    # mirror's value). Read :attr:`ep_state`. Neither flag is a signal of
-    # contestation.
+    # then the prior mean when ``baseline`` is True — unless a readable
+    # ``n.confidence`` mirror supplies the value, which LEADS it. Otherwise
+    # reading it from these two flags is WRONG — a mirror-only prior reads
+    # (False, False) with a real 0.95, an α-only half pair reads (True, False)
+    # with ``None`` when no readable mirror survives beside it (with one, the
+    # value is the mirror's), and a β-only row reads (False, False) with
+    # ``None`` and state ``absent`` when no readable mirror survives beside it
+    # (with one, ``baseline`` at the mirror's value). Read :attr:`ep_state`.
+    # Neither flag is a signal of contestation.
     # #2490 has_ep overload: TERMINAL claims (terminal vocab status OR the
     # legacy outdated=true flag) are also gated to False — their posterior
     # decays to vacuity at the terminalizing write, so a terminal claim's
@@ -5363,9 +5364,9 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
     (posterior_alpha/beta) when EP has run on the claim, else the persisted
     prior mean (ep_alpha/beta), else ``None`` unless a readable
     ``n.confidence`` mirror supplies one — the mirror LEADS both, so a
-    mirror-only Point reads ``baseline`` at the mirror's value, never ``None``
-    (#11702 — the third state of that contract, named by ``ep_state``; it used
-    to be the neutral Beta(1,1) mean 0.5). It is
+    mirror-only Point reads ``ep_state: "baseline"`` at the mirror's value,
+    never ``None`` (#11702 — the third state of that contract, named by
+    ``ep_state``; it used to be the neutral Beta(1,1) mean 0.5). It is
     NOT the structural edge-ratio impl/(impl+nand) that this field used to
     carry — that quantity lives on in ``evidence`` (impl_count/nand_count/
     total) and ``contention`` (the NAND fraction), which are legitimately
