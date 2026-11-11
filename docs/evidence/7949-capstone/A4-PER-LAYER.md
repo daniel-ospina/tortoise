@@ -49,11 +49,21 @@ its `NULL` denominator.
 `plan`/`goal`/`strategy`/`target` are point AND object kinds; `decision` is a point AND event kind), so a
 single shared set would credit a mislabelled thing as coverage — the exact failure A4 exists to catch.
 Object kinds are compared case-insensitively (`§5` mixes `Project`/`WorkItem`/`tag`); point and event
-kinds stay exact. ⛔ That exactness matches the hosted WRITE path for `pointKind` only:
-`hosted_api.py::valid_kind` checks it against `known_kinds("pointKind")`, and **no** write validator
-consults `known_kinds("eventKind")` (`grep -n known_kinds tortoise/hosted_api.py` → the write check at
-`valid_kind` and the `list_points` read filter, nothing else). The event layer's exact compare is the
-census's own choice, mirroring the extractor's — not a validator's.
+kinds stay exact, and **both halves of the hosted write path agree with that**: `pointKind` through
+`hosted_api.py::valid_kind` (`if v not in known_kinds("pointKind")`) and `eventKind` through the commit
+door's Layer-1 event gate in `tortoise/commit_schema.py`, whose `payload.events` loop refuses
+`ev.eventKind not in vocab.event_kinds` — an exact, case-SENSITIVE membership test (measured on
+`compile_vocab().event_kinds`: `"AgentSession"` in, `"agentsession"` not). ⛔ `known_kinds("eventKind")`
+is **not** the instrument here (`grep -n known_kinds tortoise/hosted_api.py` returns the `pointKind` write
+check and the `list_points` read filter, nothing else) — naming that call would answer the wrong question
+correctly. ⛔ The compare is therefore **stricter than the EXTRACTOR's**, which case-folds it
+(`extractor_v2.py`: `ekind.lower() not in _event_kind_forms(master)`, and `_event_kind_forms` returns
+*"Full + bare forms, case-folded"*) and then stores the kind with its case preserved
+(`ekind.rsplit(":", 1)[-1]`). The consequence, stated rather than left to be discovered: an
+extractor-written event can carry a case-variant kind (a stored `cardcreated`) that the census reports as
+`UNDECLARED` beside the declared `cardCreated` — measured: `"cardCreated" in compile_vocab().event_kinds`
+is `True` and `"cardcreated"` is `False` — while the commit door would have REFUSED the same payload.
+The laxness is the extractor's, not the census's.
 
 ## 3 · The measurement — fleet graph, read-only, 2026-11-11T03:11Z
 
@@ -186,12 +196,13 @@ VACUOUS rather than passing for the wrong reason.
   named here rather than silently edited by this lane.
 - **The offending nodes are not NAMED.** A4's failing-run definition does not stop at a count: *"Either
   is `RED` for that layer, reported **with the offending nodes named**"* (`02-scope.md`, the
-  *"a **failing run** is concrete and checkable"* clause; restated `04-plan.md` §7 E2E-8). Both legs are
-  measured as **counts** — `_a4_layer_counts()` issues `RETURN coalesce(n.<kindProp>, 'NULL') AS k,
-  count(*) AS n`, and `label_coverage()` takes that histogram alone — so an unlabelled node is countable
-  and **not nameable**: no node id exists anywhere in the A4 path. The counts are the bar and they are
-  delivered; the identity is not, and satisfying it needs an id-returning query the census does not
-  issue. This is a gap against the plan's own wording, not a decision against it.
+  *"a **failing run** is concrete and checkable"* clause; restated `04-plan.md` §7 E2E-8). On the CLAIM
+  layer both legs are measured as **counts** — `_a4_layer_counts()` issues `RETURN coalesce(n.<kindProp>,
+  'NULL') AS k, count(*) AS n`, and `label_coverage()` takes that histogram as its only population input
+  — so an unlabelled node is countable and **not nameable**: no node id exists anywhere in the A4 path.
+  The identity is not delivered, and satisfying it needs an id-returning query the census does not issue.
+  On the thing/event layers there is not even a count (the first bullet); nothing there is delivered at
+  all. This is a gap against the plan's own wording, not a decision against it.
 - The **`expected=` half** of A4's *"a declared kind absent"* leg reads `UNMEASURED` on every real run:
   `_a4_label_coverage` calls `label_coverage(...)` with no `expected=` set, so `expected_absent` carries
   the `UNMEASURED(...)` reason rather than a list of kinds. The information is not lost — `declared_absent`
