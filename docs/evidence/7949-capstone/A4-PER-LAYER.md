@@ -48,14 +48,16 @@ its `NULL` denominator.
 ⛔ **Each layer is judged against its own vocabulary.** The sets overlap by owner ruling (`#7813`:
 `plan`/`goal`/`strategy`/`target` are point AND object kinds; `decision` is a point AND event kind), so a
 single shared set would credit a mislabelled thing as coverage — the exact failure A4 exists to catch.
-Object kinds are compared case-insensitively (`§5` mixes `Project`/`WorkItem`/`tag`); point and event
+Object kinds are compared case-insensitively (`docs/ONTOLOGY.md` §5 mixes `Project`/`WorkItem`/`tag`);
+point and event
 kinds stay exact, and **both halves of the hosted write path agree with that**: `pointKind` through
 `hosted_api.py::valid_kind` (`if v not in known_kinds("pointKind")`) and `eventKind` through the commit
 door's Layer-1 event gate in `tortoise/commit_schema.py`, whose `payload.events` loop refuses
 `ev.eventKind not in vocab.event_kinds` — an exact, case-SENSITIVE membership test (measured on
 `compile_vocab().event_kinds`: `"AgentSession"` in, `"agentsession"` not). ⛔ `known_kinds("eventKind")`
-is **not** the instrument here (`grep -n known_kinds tortoise/hosted_api.py` returns the `pointKind` write
-check and the `list_points` read filter, nothing else) — naming that call would answer the wrong question
+is **not** the instrument here (`grep -n known_kinds tortoise/hosted_api.py` returns two use sites and
+their two imports: the `pointKind` write check and the `list_points` read filter, nothing else) — naming
+that call would answer the wrong question
 correctly. ⛔ The compare is therefore **stricter than the EXTRACTOR's**, which case-folds it
 (`extractor_v2.py`: `ekind.lower() not in _event_kind_forms(master)`, and `_event_kind_forms` returns
 *"Full + bare forms, case-folded"*) and then stores the kind with its case preserved
@@ -145,8 +147,10 @@ the issue's Scope question for **this** population: the typed minority is **deli
 kinds, not a residue of the rule classifier and not v2-lane drift.**
 
 ⛔ **It does not answer *"what are the 109"*, and this run does not re-measure it.** Those are two
-different populations and the numbers are not interchangeable: the 109 is the align/plan reading of an
-EARLIER corpus (`00-align.md` · `00-plan.md`: `statement 15,534 · NULL 3,658 · typed 109`), decomposed by
+different populations and the numbers are not interchangeable: the 109 is an EARLIER reading of this
+same fleet graph (`00-align.md` · `00-plan.md`: hosted `live-v4`, 2026-11-04 — a *lane-brief reading
+with no committed artifact* (`01-align.md`, epic `#5087`) — `statement 15,534 · NULL 3,658 · typed 109`,
+on a population that has since grown to §3's fingerprint), decomposed by
 `#10982` as `constraint` 88 + `preference` 21 — and **neither kind is in this graph's typed set at all**
 (§3.1: `evidence`/`decision`/`diary`/`option`/`finding`/`jobToBeDone`/`useCase`), nor in the product's
 declared point vocabulary at this head (the CI twin pins exactly that at
@@ -197,9 +201,10 @@ VACUOUS rather than passing for the wrong reason.
 - **The offending nodes are not NAMED.** A4's failing-run definition does not stop at a count: *"Either
   is `RED` for that layer, reported **with the offending nodes named**"* (`02-scope.md`, the
   *"a **failing run** is concrete and checkable"* clause; restated `04-plan.md` §7 E2E-8). On the CLAIM
-  layer both legs are measured as **counts** — `_a4_layer_counts()` issues `RETURN coalesce(n.<kindProp>,
-  'NULL') AS k, count(*) AS n`, and `label_coverage()` takes that histogram as its only population input
-  — so an unlabelled node is countable and **not nameable**: no node id exists anywhere in the A4 path.
+  layer neither leg carries a node id: the unlabelled leg is a **count** (`_a4_layer_counts()` issues
+  `RETURN coalesce(n.<kindProp>, 'NULL') AS k, count(*) AS n`) and the absent leg is a **list of kind
+  NAMES** (`label_coverage()`'s `declared_absent`, the next bullet) — never a node list — so an unlabelled
+  node is countable and **not nameable**: no node id exists anywhere in the A4 path.
   The identity is not delivered, and satisfying it needs an id-returning query the census does not issue.
   On the thing/event layers there is not even a count (the first bullet); nothing there is delivered at
   all. This is a gap against the plan's own wording, not a decision against it.
