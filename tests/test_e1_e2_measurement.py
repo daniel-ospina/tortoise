@@ -3697,3 +3697,15 @@ def test_a_binding_that_names_another_basis_for_the_e2b_floor_is_refused(log_tex
     findings, _ = check.check(wrong)
     assert any("[V15]" in f and "surviving_units_basis=" in f for f in findings), (
         findings)
+    # ⛔ …and DELETING the count must not hide the basis. While this row sat
+    # inside the `surviving_units=` branch, a binding that named `atomic_points`
+    # and dropped its count token skipped both the anchor and the basis check and
+    # came back GREEN — the pre-#10989 reading, reachable by editing one token
+    # (#11833 review r9 P2). So the refusal must hold with the count absent.
+    forged = wrong.replace("surviving_units=90 ", "", 1)
+    assert "surviving_units=90" not in forged  # non-vacuity: the token is gone
+    assert "surviving_units_basis=atomic_points" in forged, forged
+    findings, _ = check.check(forged)
+    assert any("[V15]" in f and "surviving_units_basis=" in f for f in findings), (
+        "a binding that NAMES atomic_points but states no count is still the "
+        f"pre-#10989 reading; V15 said {findings}")

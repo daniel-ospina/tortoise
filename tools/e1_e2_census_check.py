@@ -1151,41 +1151,47 @@ def check(text: str) -> tuple[list[str], dict]:
                     f"measured {planted_pts[scored]} surviving planted units "
                     f"(`real_facts`) — the floor was "
                     f"checked against a population this run did not produce")
-            # The population the floor reads is printed ON the line, so a binding
-            # that states a count while naming another basis is refused rather than
-            # read as the count it happens to carry. `atomic_points` was that wrong
-            # basis (#10989), so a log that still prints it is a finding.
-            #
-            # ⛔ THE EMPTY STRING IS TOLERATED ON PURPOSE — it is not a fail-open.
-            # This token does not exist before #10989, and the probe now prints it
-            # on every binding it emits, so an ABSENT token can only be a log
-            # written by an older probe. What this row closes is a binding that
-            # NAMES another basis — `atomic_points` above all — so a NAMED basis
-            # is what is graded: absent and `n/a` are both tolerated, because a
-            # basis the probe could not read never named a population.
-            # (#11833 review r7 P3: this sentence said "PRESENCE is what is
-            # graded", which is the opposite of the tuple below and of the
-            # paragraph above — an ABSENT token is tolerated, not graded.)
-            #
-            # ⚠️ THE TOLERANCE IS NARROW, and worth stating exactly rather than
-            # as "the historical artifacts": a legacy binding is only reached
-            # here when its `surviving_units` already EQUALS the scored arm's own
-            # `metric=real_facts` count — the count branch above refuses every
-            # legacy log whose count disagrees. So the shape this protects is a
-            # well-formed pre-#10989 log on the right population, whose only sin
-            # is not saying so. Narrowing this tuple to ("n/a", "real_facts") is a
-            # corpus-wide decision about older logs, deliberately not taken here.
-            # (#11833 review P2-3 corrected this comment: it claimed refusing the
-            # absent token would refuse the historical artifacts, but the count
-            # branch three lines above already refuses every one whose count does
-            # not match.)
-            basis = bind.get("surviving_units_basis", "")
-            if basis not in ("", "n/a", "real_facts"):
-                findings.append(
-                    f"[V15] the binding states surviving_units_basis={basis!r} — "
-                    f"the E2b floor's population is the surviving PLANTED units "
-                    f"(`real_facts`); a floor checked against another population "
-                    f"is the fail-open #10989 closes")
+        # The population the floor reads is printed ON the line, so a binding that
+        # NAMES another basis is refused rather than read as the count it happens
+        # to carry. `atomic_points` was that wrong basis (#10989), so a log that
+        # still prints it is a finding.
+        #
+        # ⛔ THIS ROW SITS OUTSIDE THE COUNT BRANCH ABOVE, on purpose. Nested
+        # inside it — where it was first written — a binding that names
+        # `atomic_points` and simply DELETES its `surviving_units=` token skipped
+        # both the count anchor and this row and came back GREEN: the pre-#10989
+        # reading, reachable by removing one token (#11833 review r9 P2). The
+        # tolerance tuple below keeps the move a no-op for every well-formed log.
+        #
+        # ⛔ THE EMPTY STRING IS TOLERATED ON PURPOSE — it is not a fail-open.
+        # This token does not exist before #10989, and the probe now prints it
+        # on every binding it emits, so an ABSENT token can only be a log
+        # written by an older probe. What this row closes is a binding that
+        # NAMES another basis — `atomic_points` above all — so a NAMED basis
+        # is what is graded: absent and `n/a` are both tolerated, because a
+        # basis the probe could not read never named a population.
+        # (#11833 review r7 P3: this sentence said "PRESENCE is what is
+        # graded", which is the opposite of the tuple below and of the
+        # paragraph above — an ABSENT token is tolerated, not graded.)
+        #
+        # ⚠️ THE TOLERANCE IS NARROW, and worth stating exactly rather than
+        # as "the historical artifacts": a legacy binding is only reached
+        # here when its `surviving_units` already EQUALS the scored arm's own
+        # `metric=real_facts` count — the count branch above refuses every
+        # legacy log whose count disagrees. So the shape this protects is a
+        # well-formed pre-#10989 log on the right population, whose only sin
+        # is not saying so. Narrowing this tuple to ("n/a", "real_facts") is a
+        # corpus-wide decision about older logs, deliberately not taken here.
+        # (#11833 review P2-3 corrected this comment: it claimed refusing the
+        # absent token would refuse the historical artifacts, but the count
+        # branch above already refuses every one whose count does not match.)
+        basis = bind.get("surviving_units_basis", "")
+        if basis not in ("", "n/a", "real_facts"):
+            findings.append(
+                f"[V15] the binding states surviving_units_basis={basis!r} — "
+                f"the E2b floor's population is the surviving PLANTED units "
+                f"(`real_facts`); a floor checked against another population "
+                f"is the fail-open #10989 closes")
         # A floor that was COMPARED is an owned floor: `declared_*` carries a number
         # only when the probe read that floor, so a binding that prints one without
         # claiming the key is a comparison it then denies making.
