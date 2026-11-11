@@ -5649,26 +5649,43 @@ _ABSENT_CLAIM = re.compile(
 #: `update_point(posterior_alpha=…)` sets it with no EP pass anywhere, and the
 #: legacy `ep_alpha` arm is written by a prior stamp. Every surface below the
 #: contract says "not an EP receipt"; this pins that no gloss drifts back.
-#: The pre-verb segments are CAPTURED so the negation check can be scoped to
-#: them (see `_ep_pass_claims`).
+#:
+#: The windows are 300 characters and CROSS sentence boundaries on purpose
+#: (PR #11933 review round 4, ISSUE 1). The contract block defines the flag in
+#: one sentence and lists what it is NOT in the next, so the flag and the
+#: phrase it denies sit a list item apart: the original 40-character,
+#: dot-excluding windows could not span them, matched NOTHING on this head or
+#: on `origin/main`, and so the corpus assertion stayed green even when the
+#: shipped denial was reverted into the gloss it exists to catch. This bound is
+#: a PROXIMITY bound, never a grammar proof — the clause-scoped denial check in
+#: `_ep_pass_claims` is what separates a denial from an assertion, and the
+#: control test mutates the shipped denial in place to prove this guard reddens.
+#: The pre-verb segments are CAPTURED so that check can be scoped to them.
 _EP_PASS_CLAIM = re.compile(
-    r"(?:has_ep|ep_measured_cypher)(?P<pre>[^.]{0,40}?)"
-    r"(?:==|\bis\b|\bmeans?\b)(?P<link>[^.]{0,40}?)"
+    r"(?:has_ep|ep_measured_cypher)(?P<pre>.{0,300}?)"
+    r"(?:==|\bis\b|\bmeans?\b)(?P<link>.{0,300}?)"
     r"[`\"]*(?P<pass>EP has MEASURED|EP measured this|EP MEASURED)",
-    re.IGNORECASE)
+    re.IGNORECASE | re.DOTALL)
 
 #: Negators of the gloss itself. `no` is excluded on purpose: "no mere flag" is
 #: a determiner, not a negation of the claim, and admitting it exempted a live
-#: gloss.
-_NEGATED = re.compile(r"\b(?:not|never)\b|\bisn't\b|⛔", re.IGNORECASE)
+#: gloss. `⛔` is excluded for the same reason, MEASURED: the PR #11933 review
+#: proved this guard inert with the mutant that reverts the shipped denial's
+#: `not` to `is` while the bullet keeps its `⛔` glyph — the glyph marks a
+#: bullet as load-bearing, it does not negate a proposition, so a gloss carrying
+#: only `⛔` still asserts the gloss.
+_NEGATED = re.compile(r"\b(?:not|never)\b|\bisn't\b", re.IGNORECASE)
 
-#: A clause break inside the link segment: a denial in an EARLIER clause does
-#: not negate the verb ("is not a mere flag — it is EP MEASURED" asserts the
+#: A break inside the link segment: a denial in an EARLIER clause does not
+#: negate the verb ("is not a mere flag — it is EP MEASURED" asserts the
 #: gloss), while a denial in the FINAL clause does ("is no receipt — it does
 #: not prove ``EP MEASURED``"). Splitting on the last break and testing only
 #: its tail is what separates the two; testing the whole span admitted the
-#: first, and end-anchoring rejected the second.
-_CLAUSE_BREAK = re.compile(r"—|–|:|;|\bbut\b|\brather\b", re.IGNORECASE)
+#: first, and end-anchoring rejected the second. A SENTENCE end is a break too:
+#: with the wide window above, a `not` in a PREVIOUS sentence would otherwise
+#: land in the tail of a link that spans it and exempt a live gloss.
+_CLAUSE_BREAK = re.compile(
+    r"—|–|:|;|(?<=[.!?])\s|\bbut\b|\brather\b", re.IGNORECASE)
 
 
 def _belief_prose(rel: str) -> str:
@@ -5713,8 +5730,9 @@ def _unqualified_claims(patterns) -> list[str]:
 def _negates_its_verb(link: str) -> bool:
     """True when the denial sits in the clause that carries the VERB.
 
-    Only the FINAL clause counts: a `not` in an earlier clause negates a
-    different predicate and must not exempt a live claim.
+    Only the FINAL clause counts: a negator in an earlier clause — or in an
+    earlier SENTENCE — negates a different predicate and must not exempt a
+    live claim.
     """
     return bool(_NEGATED.search(_CLAUSE_BREAK.split(link)[-1]))
 
@@ -5728,6 +5746,10 @@ def _ep_pass_claims(text: str) -> list[str]:
     is where the negator is looked for. A `not` in an earlier clause belongs to
     a different predicate — "`has_ep` is not a mere flag — it is EP MEASURED"
     asserts the gloss, and searching the whole span exempted it.
+
+    The link window (300 chars) is what lets the check reach the contract's
+    list-item form; it does NOT widen what counts as a denial, which is still
+    "a worded negator in the phrase's own clause".
     """
     suspects = []
     for match in _EP_PASS_CLAIM.finditer(text):
@@ -5797,6 +5819,35 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
     assert not _ep_pass_claims(
         '`has_ep` does not mean (and never has meant) ``EP has MEASURED this claim``'), \
         "a parenthetical aside between the negator and the verb must still exempt"
+    # …and — the check that was MISSING, and whose absence let this guard pass
+    # on every tree it was ever run against (PR #11933 review round 4,
+    # ISSUE 1) — the guard must MATCH the denial the branch actually ships, and
+    # must RED when that denial is reverted. Matching nothing is not "clean".
+    denied = _belief_prose("tortoise/search_engine.py")
+    assert _EP_PASS_CLAIM.search(denied), (
+        "the EP-pass guard matches nothing in the corpus it ships on, so its "
+        "corpus assertion (:test_no_gloss_reads_has_ep_as_proof_of_an_ep_pass) "
+        "cannot fail — that is exactly how a reverted denial stayed green")
+    assert not _ep_pass_claims(denied), (
+        "the class-3 DENIAL this branch ships is itself read as a gloss: "
+        + repr(_ep_pass_claims(denied)[:1]))
+    shipped_denial = '⛔ not "EP has MEASURED this claim"'
+    reverted_denial = '⛔ is "EP has MEASURED this claim"'
+    mutants = []
+    if shipped_denial in denied:
+        # The reviewer's exact mutant: the denial's `not` reverted to `is`.
+        mutants.append((denied.replace(shipped_denial, reverted_denial),
+                        "`not` reverted to `is` (the reviewer's mutant)"))
+    # Generic fallback, so a REWORDED denial is still mutated rather than
+    # silently skipping the check: strip every negator from the span the guard
+    # matched, leaving the bare assertion.
+    mutants.append((_EP_PASS_CLAIM.sub(
+        lambda m: _NEGATED.sub("", m.group(0)), denied),
+        "every negator stripped from the gloss's own clause"))
+    for mutant, what in mutants:
+        assert _ep_pass_claims(mutant), (
+            f"the EP-pass guard stays GREEN on the reverted denial ({what}) — "
+            "it cannot fail on the tree it ships on")
 
 
 def test_a_prior_mean_claim_in_the_belief_prose_names_the_mirror():
@@ -5836,6 +5887,17 @@ def test_no_gloss_reads_has_ep_as_proof_of_an_ep_pass():
     `update_point(posterior_alpha=…)` sets the predicate with no EP pass, and
     the legacy `ep_alpha` arm is written by a prior stamp — and each round
     fixed only the site it was handed. This pins the class.
+
+    What this assertion IS: a regression tripwire over real prose, firing on a
+    gloss written in the CONTRACT'S OWN list-item form (the flag in one
+    sentence, the phrase it denies in the next). What it is NOT: a defect
+    catcher on `origin/main`, which writes the contract correctly at that site
+    — the glosses these rounds caught were introduced by the rewrite itself
+    and never committed. Its discriminating power is therefore proved by
+    mutating the shipped denial in place, in the control test
+    (`test_the_prose_guards_fire_on_the_wording_they_exist_to_catch`): before
+    this round the pattern's 40-character dot-excluding windows matched nothing
+    on any tree, so this assertion passed even on the reverted denial.
     """
     problems = []
     for rel in _BELIEF_PROSE:
