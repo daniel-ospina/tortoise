@@ -264,6 +264,26 @@ def test_a_flip_supersedes_the_judgement_and_never_edits_it(sdk):
     assert sdk.get_entity(goal["id"])["goalState"] == "unmet"
 
 
+def test_the_claim_prose_quotes_the_bar_not_the_result(sdk):
+    """`12 minutes <= 10` beside `unmet` reads as an assertion that 12 <= 10.
+
+    The claim has to state the STATE and the reading, and quote the target's
+    comparator as the bar — a human reading a superseded judgement to answer "why
+    did this flip?" must not have to disambiguate the wording.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 12.0, at="2026-11-11T10:00:00Z")
+    res = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                           target=target, subject="CI is fast")
+    text = res["content"]
+    assert text.startswith("CI is fast: unmet")
+    assert "against <= 10" in text, text
+    assert "12" in text and "minutes" in text
+    # the reading must NOT be glued to the operator with nothing between them
+    assert "minutes <=" not in text, "the comparator is quoted as the result"
+
+
 def test_supersession_window_starts_at_the_reading_instant(sdk):
     indicator, target_node, goal = _world(sdk)
     target = Target.from_node(target_node)

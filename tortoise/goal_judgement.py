@@ -648,9 +648,12 @@ def _judgement_content(
         )
     unit = f" {reading.unit}" if reading.unit else ""
     as_of = f" as of {reading.started_at}" if reading.started_at else ""
+    # "against", not the bare operator: `12 minutes <= 10` beside `unmet` reads
+    # as an assertion that 12 <= 10. The claim states the state and the reading;
+    # the target's comparator is quoted as the BAR, never as the result.
     return (
         f"{subject}: {judgement.state} — latest reading {reading.value:g}{unit} "
-        f"{target.comparator} {target.threshold:g} "
+        f"against {target.comparator} {target.threshold:g} "
         f"(dwell {target.dwell}, {judgement.reason}{as_of})"
     )
 
