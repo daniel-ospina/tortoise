@@ -1243,7 +1243,16 @@ def test_marker_declared_in_the_durability_posture():
         "the declaration must state the load-bearing consequence — an absent "
         "marker re-admits a pack the admin removed")
     assert "PackSelection" not in block("unenrolled"), (
-        "#9752 put a vehicle behind the class — it is no longer 'unenrolled'")
+        # ⛔ NEGATIVE CONTROL, and its message claims only that: this guards the
+        # "declared twice" shape, it does NOT record a move. Measured against
+        # `origin/main`, `:PackSelection` never appeared in this block either —
+        # so nothing was removed from it by #9752, and a message saying "it is
+        # no longer 'unenrolled'" would describe a state change that did not
+        # happen (the class was never an unenrolled registry row; it is a
+        # SECTION, like `:TeamMeta`). The clause reds if a future edit adds it
+        # here as well as to `preserved-sections`.
+        "the class must not be declared in BOTH blocks — it is a preserved "
+        "SECTION, never an unenrolled registry row (#9752)")
     assert ":PackSelection" in block("audit-query"), (
         "the operator audit must enumerate the class, or it under-reports what "
         "survived a rebuild")
