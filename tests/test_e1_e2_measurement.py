@@ -3720,6 +3720,14 @@ def test_a_binding_that_names_another_basis_for_the_e2b_floor_is_refused(log_tex
                         "e2b_surviving_units",
                         "floors_owned=e1_min_before_share,e1_objects", 1))
     assert "surviving_units=n/a" in blanked, blanked
+    # ⚠️ THE THIRD EDIT NEEDS ITS OWN GUARD (#11833 review r11 P2). This assert
+    # was lost when this file's merge resolution kept the peer's stronger pin and
+    # dropped the lane case that had it — and without it the `declared_surviving_floor`
+    # replace above can silently no-op (a re-registration that moves the floor
+    # edits `_scored` and the record together) while every remaining assert stays
+    # green, so the pin would stop proving the floor-shed dimension it was built
+    # for and the sentence above it would become false.
+    assert "declared_surviving_floor=n/a" in blanked, blanked
     assert "e2b_surviving_units" not in blanked, blanked
     assert "surviving_units_basis=atomic_points" in blanked, blanked
     findings, _ = check.check(blanked)
