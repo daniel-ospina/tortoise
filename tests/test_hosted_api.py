@@ -5534,11 +5534,13 @@ def test_the_forced_path_record_is_cleared_even_when_the_guard_body_fails():
     """
     orig_init = _ha_mod.TortoiseSDK.__init__
 
-    with pytest.raises(RuntimeError, match="stand-in for a red assertion"):
-        with _forced_db_path_patch("/tmp/tt_not_a_real_db/test.db"):
-            assert _FORCED_DB_PATH == "/tmp/tt_not_a_real_db/test.db", (
-                "the patch must record the path it forces")
-            raise RuntimeError("stand-in for a red assertion inside the guard")
+    with (
+        pytest.raises(RuntimeError, match="stand-in for a red assertion"),
+        _forced_db_path_patch("/tmp/tt_not_a_real_db/test.db"),
+    ):
+        assert _FORCED_DB_PATH == "/tmp/tt_not_a_real_db/test.db", (
+            "the patch must record the path it forces")
+        raise RuntimeError("stand-in for a red assertion inside the guard")
 
     assert _FORCED_DB_PATH is None, (
         f"the FAILING path must still clear the recorded forced path (still "
