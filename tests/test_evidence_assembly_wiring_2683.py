@@ -533,10 +533,6 @@ _ASK_ENV_SCRUB = (
     "TORTOISE_ASK_RERANK_MODEL",
     "TORTOISE_ASK_RERANK_CAP",
     "TORTOISE_ASK_RERANK_LAMBDA",
-    # hosted client mode — `run_ask_lane` REFUSES it (the hosted /v1/ask
-    # surface is gone), so an ambient export would red every test here with
-    # AskRetrievalUnavailable instead of the behaviour under test
-    "TORTOISE_API_URL",
     # the resolved caps — the window this section cuts on purpose
     "TORTOISE_ASK_CONTEXT_ITEM_CAP",
     "TORTOISE_ASK_CONTEXT_TOKEN_CAP",
