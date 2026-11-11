@@ -959,6 +959,65 @@ def test_auto_health_recover_warns_on_the_pack_selection_gap(
         f"an UNKNOWN sidecar must not assert an observed loss: {_msg}")
 
 
+def test_auto_health_recover_does_not_mask_the_team_meta_gap(
+        tmp_path, caplog, monkeypatch):
+    """The :TeamMeta leg is not suppressed by the onboarding leg (#9752 r6).
+
+    FAILING VALUE: `_auto_health_recover`'s gap legs are one additive block —
+    the shape the two other reporters use (`_recover_or_raise`, and the CLI at
+    `tortoise/__main__.py`), and the rule the producer states verbatim in
+    `tortoise/consistency.py` ("a confirmed loss and a pre-preservation
+    UNKNOWN can coexist, and one must not suppress the other"). Round 6's fix
+    made `pack_selection_gap` and `corrupt_lines` independent but left
+    `team_meta_gap` as `elif` on the head of that chain, so whichever class
+    matched FIRST still suppressed it.
+
+    The masking is NOT hypothetical and is the SAME rescue-file shape round 6
+    fixed for the pack-set leg: a sidecar predating BOTH `:TeamMeta`
+    preservation (v6) and the onboarding sections carries neither, so it sets
+    `onboarding_gap` AND `team_meta_gap` together. The operator then got only
+    the onboarding remedy and never "the #2789 first-org guard may read 0 and
+    a later provisioning call can re-mint the marker with the control plane's
+    name" — the one consequence that stops a destroyed first-org marker being
+    silently replaced with the WRONG org.
+
+    REACHABLE: the real `_auto_health_recover` on the probe-OK lost-graph path,
+    with the discovery seam pointed at the test's events dir and the embedded
+    reading forced on (see the sibling pin above for why the docker lane makes
+    the branch unreachable without it).
+    """
+    sdk, events = _mk_sdk(tmp_path)
+    _write_journal(events)
+    payload = _sidecar_payload(batch_snapshot=[{"id": "b1"}], version=6)
+    # Neither preservation section exists in a pre-v6 rescue file: the
+    # `team_meta` KEY gate fires on the KEY (a file written before the section
+    # landed cannot carry it), and the onboarding gate on its two keys.
+    payload.pop("team_meta")
+    payload.pop("onboarding_snapshot")
+    payload.pop("onboarding_step_links")
+    _plant(Path(_sidecar_path(events)), payload)
+    _proj(sdk).g.query("MATCH (n) DETACH DELETE n")
+    proj = _proj(sdk)
+    monkeypatch.setattr(type(proj), "_find_local_jsonl_dir",
+                        lambda self: str(events))
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    monkeypatch.setattr(proj, "_is_embedded", True)
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.projection"):
+        proj._auto_health_recover()
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("onboarding state is NOT confirmed intact" in m
+               for m in messages), (
+        f"the onboarding leg did not fire on this rescue file: {messages}")
+    assert any(":TeamMeta first-org marker" in m
+               and "NOT confirmed intact" in m for m in messages), (
+        "the :TeamMeta leg was MASKED by the onboarding leg — that is a "
+        "chain, not additive legs, and it withholds the only remedy that "
+        "stops a destroyed first-org marker being re-minted with the "
+        f"control plane's name: {messages}")
+
+
 def test_pack_selection_gap_warns_in_the_recover_or_raise_caller(
         tmp_path, caplog):
     """A producer signal with no consumer is the same log-only defect (#9752).
@@ -1022,8 +1081,8 @@ def test_rebuild_all_honours_a_carried_pack_selection_unknown_flag(
     """
     from tortoise import projection as pr
     from tortoise.projection import (
-        _PREWIPE_SNAPSHOT_VERSION,
         _PREWIPE_SNAPSHOT_META_KEYS,
+        _PREWIPE_SNAPSHOT_VERSION,
     )
 
     written: list[dict] = []

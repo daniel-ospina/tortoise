@@ -12331,7 +12331,19 @@ class FalkorProjection(
                             "(#4641). Recovery reason: %s",
                             events_dir, result.get("log_points"),
                             result.get("reason"))
-                    elif result.get("team_meta_gap"):
+                    # ⛔ The legs below are INDEPENDENT `if`s, not an `elif`
+                    # chain — the shape `_recover_or_raise` (below) and the CLI
+                    # (`tortoise/__main__.py`) already use, and the rule the
+                    # producer states in `tortoise/consistency.py` (quoted
+                    # above). The chain's head was `onboarding_gap`, so a
+                    # pre-v6 rescue file — which carries NEITHER the onboarding
+                    # sections NOR the `team_meta` key — reported only the
+                    # onboarding remedy and never "the #2789 first-org guard may
+                    # read 0 and a later provisioning call can re-mint it with
+                    # the control plane's name". Round 6 made the pack-set and
+                    # corrupt-line legs independent and left this one chained;
+                    # this is the last `elif` in the block (review round 7).
+                    if result.get("team_meta_gap"):
                         # #5353: the sibling of the onboarding leg above. A
                         # `:TeamMeta` marker that did not come back makes the
                         # `#2789` first-org guard read 0, so a later
