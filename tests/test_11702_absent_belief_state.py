@@ -5321,8 +5321,8 @@ def test_update_entity_clearing_the_pair_clears_the_mirror(sdk, tmp_path):
 #    "IS the declared PRIOR mean" is false for exactly the row
 #    `set_point_baseline(3.0, 1.0)` + `update_point(confidence=0.9)`: the
 #    declared prior mean is 0.75 and the field reads 0.9. That sentence stood
-#    at `search_engine.py`:347 while the precedence at `search_engine.py`:5527
-#    (`elif mirror is not None:`) said otherwise — 5,180 lines away, not the
+#    at `search_engine.py`:347 while the precedence at `search_engine.py`:5537
+#    (`elif mirror is not None:`) said otherwise — 5,190 lines away, not the
 #    "nine hundred" an earlier revision of this note claimed. `origin/main`'s belief prose carried TEN unqualified matches
 #    (`search_engine.py` 6, `why.py` 2, `volunteer.py` 1, `sdk.py` 1 — the
 #    numbers this guard measures, not a count taken on trust), plus one
@@ -5370,17 +5370,28 @@ _BELIEF_PROSE = (
 #: How far after a claim its qualifier may sit for the SCAN to find it. This is
 #: not what enforces "same sentence": some sentences in these modules run past
 #: 300 characters once whitespace is collapsed (measured at this head, with this
-#: guard's own splitter: 333 of 1,486 `search_engine.py` sentences run past 300
-#: characters). A plain ``(?<=[.!?])\s+`` measures the SAME 333 of 1,486 — the
+#: guard's own splitter: 333 of 1,489 `search_engine.py` sentences run past 300
+#: characters). A plain ``(?<=[.!?])\s+`` measures the SAME 333 of 1,489 — the
 #: two splitters agree, because `\s+` is greedy so the ``(?=\S)`` lookahead
 #: never moves a split point; an earlier revision of this note cited "390 of
 #: 1,022" and drew a contrast between the two that does not exist.
-#: ⚠️ The bound is NOT cosmetic: it truncates a sentence longer than 300
-#: characters, so a TRUE qualifier sitting past 300 inside one long sentence is
-#: reported unqualified (measured; real claim sentences run to 345/500 chars in
-#: `search_engine.py`, 434 in `sdk.py`). That is a FALSE BLOCK — the safe
-#: direction — never a pass on a false claim.
-_QUALIFIER_WINDOW = 300
+#: ⚠️ MEASURED TWICE, IN BOTH DIRECTIONS, so the bound has to clear real prose
+#: AND refuse the rest:
+#:   • too NARROW is a FALSE PASS. A 353-character sentence whose restriction sits
+#:     at index 325 PASSED at 300 and BLOCKED at 10**7: the sentence cut happens
+#:     inside the slice, so a restriction or an inversion past the cut is
+#:     invisible and the claim is certified on its PREFIX.
+#:   • a hard cut with no escape is a FALSE BLOCK. At 300, three SHIPPED sentences
+#:     this guard must accept (a 500-character one in `search_engine.py`, and the
+#:     `why.py`/`sdk.py` pair) were reported unqualified purely because their
+#:     mirror+verb sat past the cut.
+#: So the bound now EXCEEDS the longest real claim sentence (500 characters
+#: measured; sdk.py runs to 434), and `_qualified` additionally REFUSES any
+#: sentence whose slice stopped at the window edge without punctuation — a
+#: sentence too long to read is reported, never certified. The remaining
+#: direction is a false BLOCK on prose no one has written yet, which a human
+#: reading the evidence can act on; a false pass cannot happen.
+_QUALIFIER_WINDOW = 2000
 
 #: Sentences that ASSERT the value of a prior-only claim's mean. The verb is
 #: what distinguishes a CLAIM from a factual mention of a number ("Beta(3,1),
@@ -5436,7 +5447,7 @@ _QUALIFIER_VERB_WINDOW = 60
 #: prior-only claim's confidence_mean IS the declared PRIOR mean only when no
 #: mirror is readable"), and a forward-only window reported that TRUE sentence as
 #: unqualified (measured).
-_QUALIFIER_LOOKBEHIND = 200
+_QUALIFIER_LOOKBEHIND = 600
 
 #: Sentences that INVERT the rule outright, however many affirmative forms they
 #: also carry. The case the subject/verb pair cannot see is an AFFIRMATIVE
@@ -5646,13 +5657,24 @@ def _claim_sentence_with_offset(window: str, claim_at: int = 0) -> tuple[str, in
     return head + tail, len(head)
 
 
-def _qualified(window: str, claim_at: int = 0) -> bool:
+def _qualified(window: str, claim_at: int = 0, *, truncated: bool = False) -> bool:
     """Whether the claim's own sentence carries an AFFIRMATIVE qualifier.
 
     Requires all three: the MIRROR noun, a qualifying verb after it, and no
     negation across the whole claim→verb span (bar an allowed "not only").
+
+    ⛔ FAIL CLOSED ON A TRUNCATED SENTENCE. `window` is a SLICE; when it stopped
+    at `_QUALIFIER_WINDOW`/`_QUALIFIER_LOOKBEHIND` rather than at real punctuation,
+    the sentence inside it is only a PREFIX, and a restriction ("…only when
+    nothing else does") or an inversion ("…the mirror never leads it") placed past
+    the cut is INVISIBLE — measured: a 353-character sentence passed at a 300
+    window and blocked at 10**7. Certifying from a prefix is a false PASS, so a
+    truncated sentence is never certified; it is reported unqualified instead,
+    which is the direction a human can act on.
     """
     sentence, claim_pos = _claim_sentence_with_offset(window, claim_at)
+    if truncated and not re.search(r"[.!?]\s*$", sentence):
+        return False
     # Fail-closed on an outright inversion ANYWHERE in the sentence, however
     # many well-formed mirror+verb clauses it also carries.
     if _MIRROR_INVERSIONS.search(sentence):
@@ -5709,7 +5731,8 @@ def _unqualified_claims(patterns) -> list[str]:
                 # claim it qualifies.
                 start = max(0, match.start() - _QUALIFIER_LOOKBEHIND)
                 window = prose[start:match.start() + _QUALIFIER_WINDOW]
-                if _qualified(window, match.start() - start):
+                truncated = (match.start() + _QUALIFIER_WINDOW) < len(prose)
+                if _qualified(window, match.start() - start, truncated=truncated):
                     continue
                 problems.append(f"{rel}: …{prose[match.start():match.start() + 180]}…")
     return problems

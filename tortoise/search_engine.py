@@ -1409,10 +1409,12 @@ class EpBreakdown:
     # comment (issuecomment-6781252637) — it is the one place "no belief" still
     # answers 0.5, and it is
     # outside this field's contract rather than a second vocabulary for it.
-    # (2) A readable mirror that DISAGREES with the stored pair: this field
-    # serves the mirror, while those two read only the α/β operands
-    # (`ep.py`'s `_read_node` + `a/(a+b)`) and answer the pair mean — a
-    # posterior 1/1 beside a stored 0.9 reads 0.9 here and 0.5 there.
+    # (2) A readable mirror that LEADS — disagreeing with a stored pair, OR
+    # standing alone with no pair stored: this field serves the mirror, while
+    # those two read only the α/β operands (`ep.py`'s `_read_node` + `a/(a+b)`)
+    # and answer the pair mean, a missing pair coalescing to Beta(1,1) — a
+    # posterior 1/1 beside a stored 0.9 reads 0.9 here and 0.5 there, and a
+    # mirror-only 0.95 reads 0.95 here and 0.5 there.
     # Historically this
     # field was the structural edge-ratio impl/(impl+nand); it is NOT that
     # quantity anymore — a claim EP converged at 0.88 with no incoming IMPL
