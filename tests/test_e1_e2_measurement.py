@@ -3641,6 +3641,12 @@ def test_the_record_states_the_e2b_population_this_gate_scores():
     it: change the denominator's words and the gate that implements them is
     visibly out of date, instead of silently scoring a population the record
     never described.
+
+    ⛔ The record half is a NON-MUTANT w.r.t. this diff on its own (#11833 r6
+    P3): `preregistration.json` is not in the change, so the canonical revert
+    left every assertion ABOVE green. The IMPLEMENTATION half below is what
+    makes this a guard rather than a re-typing of the contract — a contract pin
+    that only restates the contract detects no drift.
     """
     record = json.loads(_PREREG_ARTIFACT.read_text(encoding="utf-8"))
     criteria = {c["id"]: c for c in record["criteria"]}
@@ -3651,6 +3657,18 @@ def test_the_record_states_the_e2b_population_this_gate_scores():
         "gate this issue registers tests exactly that population, so a re-"
         "registration must move both or neither")
     assert record["denominator_floors"]["e2b_surviving_units"] == 30
+    # ── the IMPLEMENTATION half ──────────────────────────────────────────
+    # `_E2B_FLOOR_POPULATION` is the census field the E2b floor's count is read
+    # OUT of, and `real_facts` is the census key that counts the surviving
+    # PLANTED units (`census()`: `"real_facts": len(must_keep)`) — i.e. exactly
+    # the population the record's denominator names.
+    # MUTANT: `_E2B_FLOOR_POPULATION = "atomic_points"` (the canonical revert)
+    # reds this line, so the file a reader counts as one of the "five pins"
+    # really does guard the change.
+    assert probe._E2B_FLOOR_POPULATION == "real_facts", (
+        "the E2b floor's population operand is not the population the record's "
+        "denominator names — probe._E2B_FLOOR_POPULATION="
+        f"{probe._E2B_FLOOR_POPULATION!r}")
     # The other two rows the same E2 gate scores, so a threshold edit in the
     # record cannot pass while the code keeps the old bar.
     assert criteria["E2a"]["threshold"] == "`>= 13 of 14`"
