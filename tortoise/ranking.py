@@ -1022,7 +1022,8 @@ class GraphRanker:
             # "StateRanker's is α/β only" note described a divergence that no
             # longer exists, and a second copy of the predicate is how the two
             # rankers would drift apart again. `has_ep` remains #3276's
-            # narrower "a non-baseline α persisted" (not "EP ran"); a #2199 prior is
+            # narrower "a non-baseline α persisted", less the #2490 gate (not "EP ran");
+            # a #2199 prior is
             # prior-only but IS a belief value the score multiplies in.
             f"  {ep_has_belief_cypher('n')} AS has_prior, "
             # #11702: the RAW pair rides the TAIL (10..13) so the VARIANCE is
