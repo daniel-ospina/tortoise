@@ -328,8 +328,12 @@ def reconciliation_variant_rows(outcomes: list[dict], *,
         (the reconstructability guard the #2512/M8 discipline requires;
         a CI alone on this cohort is too coarse).
       ``reader_surface@k`` — the before/after mean over the admitted
-        questions (the mechanism's own signal: did the raise actually
-        widen what the reader saw?).
+        questions **that carry BOTH values**, and ``n`` is that paired
+        population (the mechanism's own signal: did the raise actually
+        widen what the reader saw?). Members admitted without an ``after``
+        (an errored second reader) are excluded from BOTH means — a
+        before-mean over more questions than the after-mean would publish
+        a delta between two different populations.
       ``pool_drift`` — questions whose raised-pass ``session_recall@k``
         differs from the one-shot value. The raise is a WINDOW change
         (the pool depth is unchanged), so any drift is re-execution
@@ -346,16 +350,22 @@ def reconciliation_variant_rows(outcomes: list[dict], *,
     recovered = sum(1 for _o, a, b in pairs if not a and b)
     lost = sum(1 for _o, a, b in pairs if a and not b)
 
-    surfaces_before: list[float] = []
-    surfaces_after: list[float] = []
+    # ⛔ ONE PAIRED POPULATION, never two independently-filtered lists: an
+    # ADMITTED pass can lack an ``after`` (its second reader never produced
+    # a surface — the pass errored), and averaging ``before`` over a larger
+    # population than ``after`` publishes a delta between two different
+    # question sets. The pairing is the point of the row; ``n`` is its size.
+    surface_pairs: list[tuple[float, float]] = []
     for o in admitted:
         s = _stats(o)
         before = s.get("reader_surface_before")
         after = s.get("reader_surface_after")
-        if isinstance(before, (int, float)) and not isinstance(before, bool):
-            surfaces_before.append(float(before))
-        if isinstance(after, (int, float)) and not isinstance(after, bool):
-            surfaces_after.append(float(after))
+        if (isinstance(before, (int, float)) and not isinstance(before, bool)
+                and isinstance(after, (int, float))
+                and not isinstance(after, bool)):
+            surface_pairs.append((float(before), float(after)))
+    surfaces_before = [b for b, _a in surface_pairs]
+    surfaces_after = [a for _b, a in surface_pairs]
 
     drift = 0
     for o in admitted:
@@ -404,7 +414,7 @@ def reconciliation_variant_rows(outcomes: list[dict], *,
         f"reader_surface@{k}": {
             "before": _mean(surfaces_before),
             "after": _mean(surfaces_after),
-            "n": min(len(surfaces_before), len(surfaces_after)),
+            "n": len(surface_pairs),
         },
         "pool_drift_n": drift,
         "official_invariant": (

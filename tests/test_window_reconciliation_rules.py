@@ -733,3 +733,28 @@ def test_fingerprint_refuses_an_arm_flip_or_a_cap_change():
         on, _fingerprint(window_reconciliation=True,
                          window_reconciliation_token_cap=12000))
     assert not runner._fingerprint_diffs(on, on)
+
+
+def test_variant_rows_surface_pair_excludes_an_admitted_pass_without_after():
+    """⛔ #2570 review round 2, finding 1 — ONE PAIRED POPULATION.
+
+    An ADMITTED pass can carry ``reader_surface_before`` with no
+    ``reader_surface_after`` (its second reader errored). Filtering the two
+    means independently averaged ``before`` over a LARGER population than
+    ``after`` and then published the difference — a delta between two
+    different question sets. Both means and ``n`` must come from the paired
+    subset only.
+    """
+    errored = _variant_outcome("q1", one_shot=False, variant=None,
+                               surface_before=0.2, surface_after=None)
+    errored["window_reconciliation_stats"]["error"] = "RuntimeError: wobble"
+    paired = _variant_outcome("q2", one_shot=False, variant=True,
+                              surface_before=0.5, surface_after=1.0)
+    rows = wr.reconciliation_variant_rows([errored, paired], k=5)
+    assert rows["n_admitted"] == 2
+    assert rows["n_errored"] == 1
+    surface = rows["reader_surface@5"]
+    # the errored pass contributes to NEITHER mean
+    assert surface["before"] == pytest.approx(0.5)
+    assert surface["after"] == pytest.approx(1.0)
+    assert surface["n"] == 1
