@@ -6,6 +6,7 @@ a live FalkorDB instance — it's a grep-based documentation of the audit result
 Run with: python3 -m pytest tests/test_bfs_audit.py -v
 """
 
+import re
 import subprocess
 import sys  # noqa: F401
 from pathlib import Path
@@ -28,6 +29,13 @@ def _grep(pattern: str, *dirs: str) -> list[str]:
 
 # ── 1. propagate_shock callers ────────────────────────────────────
 
+# A call site, allowing whitespace between the symbol and its `(`. `ruff` does
+# not catch `f (1)` (E211 is preview-only), so the space-separated form is
+# shippable Python and the literal `"propagate_shock("` test bucketed it as a
+# reference — a false PASS for exactly the restore this audit exists to catch.
+_PROPAGATE_SHOCK_CALL = re.compile(r"propagate_shock\s*\(")
+
+
 def _classify_propagate_shock_refs(lines: list[str]) -> dict[str, list[str]]:
     """Bucket `grep` hits for `propagate_shock` by what each hit actually is.
 
@@ -40,7 +48,8 @@ def _classify_propagate_shock_refs(lines: list[str]) -> dict[str, list[str]]:
     `projection/propagation.py` is that case: docstring lines stating the path is
     UNREACHABLE were reported as "PRODUCTION CODE CALLS propagate_shock". The
     call shape is the honest discriminator — a call site must read
-    `propagate_shock(` — and
+    `propagate_shock(` or `propagate_shock (` (`ruff` cannot catch the spaced
+    form: E211 is preview-only) — and
     `test_the_audit_discriminates_a_call_from_a_mention` pins both directions.
 
     A line that takes a REFERENCE to the method is production code too, even
@@ -84,7 +93,7 @@ def _classify_propagate_shock_refs(lines: list[str]) -> dict[str, list[str]]:
         elif "/graph-scripts/" in path_part:
             callers["test_files"].append(line)  # test_6707_shock.py
         elif "/tortoise/" in path_part \
-                and "propagate_shock(" not in line \
+                and not _PROPAGATE_SHOCK_CALL.search(line) \
                 and ".propagate_shock" not in line:
             callers["comment/reference only"].append(line)
         elif "/tortoise/" in path_part:
@@ -112,12 +121,19 @@ def test_the_audit_discriminates_a_call_from_a_mention():
     alias = f"{ROOT}/tortoise/api.py:1000:            self._shock = proj.propagate_shock"
     partial = f"{ROOT}/tortoise/api.py:1001:            p = functools.partial(proj.propagate_shock, eid)"
     continued = f"{ROOT}/tortoise/api.py:1002:            proj.propagate_shock \\"
-    callers = _classify_propagate_shock_refs([prose, call, alias, partial, continued])
+    # A space before the `(` is legal Python that `ruff` does not flag (E211 is
+    # preview-only), so the literal `propagate_shock(` test used to bucket it as
+    # a reference — the audit went green while the path was wired back up. It is
+    # deliberately UNDOTTED: a dotted `self.propagate_shock (` is already caught
+    # by the attribute rule, so only this shape discriminates the `\s*`.
+    spaced_call = f"{ROOT}/tortoise/api.py:1003:            propagate_shock (epicenter_id)"
+    callers = _classify_propagate_shock_refs(
+        [prose, call, alias, partial, continued, spaced_call])
 
     assert callers["comment/reference only"] == [prose], (
         "a line that only NAMES propagate_shock is a reference, not a call; "
         f"bucketed as: {callers['comment/reference only']}")
-    assert callers["production_code"] == [call, alias, partial, continued], (
+    assert callers["production_code"] == [call, alias, partial, continued, spaced_call], (
         "a real CALL site, and every reference that can be invoked later, must "
         f"be reported as production code; bucketed as: {callers['production_code']}")
 

@@ -1234,14 +1234,17 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         "`#2354` **OPEN, epistemic-team** —",
         "this reopen is CLOSED",
         # The state word BEFORE a parenthesised `#NNN` — the shape #11803 left in
-        # `SEARCH-ARCHITECTURE.md` (§1.5 item 5 and §6.3) while every arm above
-        # passed: the arms were exercised on `#NNN`-first and copula forms, and no
-        # existing `must_flag` row carried this order. Row A is the pre-fix line
-        # as it stood (minus the trailing sentence, which the span below does not
-        # reach); row B is an exact prefix of the PRE-FIX §1.5 item 5's (this PR
-        # rewrote that item, so the phrase lives only in the pre-fix text).
+        # `SEARCH-ARCHITECTURE.md` (§1.5 item 5 and §6.3). The guard is NOT blind
+        # to it: it REDS on this shape on `main`, and that red is #11907. What was
+        # missing is coverage in this direction — the arms were exercised on
+        # `#NNN`-first and copula forms, so the arm that fires was itself
+        # untested here, and no existing `must_flag` row carried this order.
+        # Row A is the pre-fix line as it stood (minus the trailing sentence,
+        # which the span below does not reach); row B is an exact prefix of the
+        # PRE-FIX §1.5 item 5's (this PR rewrote that item, so the phrase lives
+        # only in the pre-fix text).
         # ⛔ The section is §1.5, not §2: `5. the **\`null\`-not-0.5 rule**` sits
-        # at line 100, under the §1.5 heading at 65; §2 opens at 121 and its
+        # at line 100, under the §1.5 heading at 65; §2 opens at 120 and its
         # numbered list runs 1..3, so "§2 item 5" is a citation that resolves to
         # nothing (a stale cite inside the instrument that exists to catch them).
         "**✅ FIXED (#11702) — kept here as the reason the rule exists, with the "
