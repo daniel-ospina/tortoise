@@ -1565,6 +1565,39 @@ def test_migrate_cli_reports_the_pack_selection_gap(caplog, monkeypatch):
     assert "restore gap" not in msgs, msgs
 
 
+def test_a_live_conflict_outranks_unknown_when_both_flags_are_set():
+    """Both flags CAN be true at once, and the order of the checks is the fix.
+
+    FAILING VALUE: `pack_selection_shape` tests CONFLICT before UNKNOWN on
+    purpose (a v6 leftover — `state_unknown` — merged with a live capture, then
+    a concurrent `set_graph_packs` landing between the wipe and the restore).
+    Every other test here that sets `pack_selection_conflict` also sets
+    `pack_selection_state_unknown: False`, and every test that sets
+    `state_unknown: True` leaves `conflict` false — so no test passed both, and
+    swapping the two `if` conditions in `pack_selection_shape`
+    (`projection/__init__.py:2287`/`:2292`) left this whole file GREEN while
+    re-shipping the round-5 defect: UNKNOWN's "the graph may read as
+    UNCONFIGURED" printed over a graph observed to still hold a marker
+    (#9752 review round 8, P2). MEASURED by mutation: the swap was applied
+    (line-count neutral, so no cite moves) and 46 tests passed under it.
+
+    REACHABLE: `migrate()`'s override is not the only producer of
+    `state_unknown`; a leftover sidecar beside the SOURCE's event log can set
+    it, and a live capture can set `conflict` on the same call.
+    """
+    from tortoise.projection import pack_selection_shape
+
+    label, consequence = pack_selection_shape(
+        {"pack_selection_conflict": True,
+         "pack_selection_state_unknown": True,
+         "pack_selection_gap": 1})
+
+    assert "CONFLICT" in label, (
+        "an observation of a LIVE marker must outrank a dearth of information, "
+        f"and must never read as an absence: {label}")
+    assert "UNCONFIGURED" not in consequence, consequence
+
+
 def test_recover_from_log_documents_the_pack_selection_keys():
     """The return contract must name the keys it returns (#9752 review, P3).
 

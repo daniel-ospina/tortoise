@@ -241,9 +241,14 @@ def migrate(force: bool = False) -> dict:
             # #11866, not this fix.
             #
             # The condition keeps a STRONGER report from the rebuild itself: a
-            # leftover pre-wipe sidecar beside the target (a previous partial
-            # migration into the same file) can say `state_unknown` on its own,
-            # and that answer is not overridden — it is the same verdict.
+            # leftover pre-wipe sidecar beside the SOURCE's event log (a
+            # previous partial migration from the same log dir) can say
+            # `state_unknown` on its own, and that answer is not overridden —
+            # it is the same verdict. The sidecar is keyed to `log_dir`, never
+            # to the DB's directory: `prewipe_snapshot_path(log_dir)`
+            # (`projection/__init__.py:2656`, read at `:14524`) is handed the
+            # SOURCE's `events_dir` below (`:211`), and the rebuild warns
+            # explicitly when the two directories differ (`:14514-14519`).
             #
             # `not pack_selection_expected` makes this the EXACT empty-capture
             # signature, so the override retires itself: the day #11866 gives
@@ -255,7 +260,7 @@ def migrate(force: bool = False) -> dict:
             # The `verified = False` is NOT conditional, because an empty capture
             # means nothing was verified — whatever flag the rebuild returned for
             # it. The one shape where that matters on its own is a pre-v7 leftover
-            # beside the target: the rebuild then already reports
+            # beside the SOURCE's event log: the rebuild then already reports
             # `state_unknown: True, gap: 1`, so the block below is skipped, but
             # leaving its `verified: True` in place would still tell a caller that
             # reads that field (rather than `gap`) that the migrated graph's marker
@@ -265,10 +270,10 @@ def migrate(force: bool = False) -> dict:
             # below must not name one cause for both. (a) THIS route's own
             # override, a few lines down, when the fresh `target` captured
             # nothing — `rebuild_all` logs no ERROR for that shape. (b) a
-            # leftover rescue file beside the target that cannot say (pre-v7, or
-            # no `pack_selection` section) — `rebuild_all` DOES log an ERROR
-            # naming that file. Snapshot the flag BEFORE the override so the
-            # warning can still tell the two apart.
+            # leftover rescue file beside the SOURCE's event log that cannot say
+            # (pre-v7, or no `pack_selection` section) — `rebuild_all` DOES log
+            # an ERROR naming that file. Snapshot the flag BEFORE the override so
+            # the warning can still tell the two apart.
             _pack_unknown_inherited = bool(
                 rebuild_counts.get("pack_selection_state_unknown"))
             if not rebuild_counts.get("pack_selection_expected"):
