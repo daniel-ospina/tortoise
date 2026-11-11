@@ -2335,22 +2335,31 @@ def open_prs(repo: str, limit: int = 400) -> GitHubRows:
 #: later measurement of the doubled worst case is not read as a regression.
 OPEN_ISSUES_LIMIT = 4000
 
-#: The largest open-issue count the window above has been measured against.
+#: The largest open-issue count the window above has been VERIFIED to cover.
 #:
-#: ⛔ A RECORDED MEASUREMENT, NOT A MARGIN AND NOT A SECOND BOUND. `OPEN_ISSUES_LIMIT`
-#: must stay at or above this, and `tests/test_fleet_state.py` asserts exactly that —
-#: the only floor before it was a literal from 2026-10-14 (989), so a silent revert of
-#: the window to 2000 passed the suite GREEN while re-creating the #11872 outage: every
-#: board truncated, every issue with no attribution entry refusing `INCOMPLETE (exit 2)`
-#: (#11917; that revert reached main's shape once through a merge resolution on a PR that
-#: never touched the file, #11914).
+#: ⛔ A RECORDED SNAPSHOT — NOT A MARGIN, NOT A SECOND BOUND, AND NOT THIS REPO'S
+#: CURRENT SIZE. `OPEN_ISSUES_LIMIT` must stay strictly ABOVE it (a read that returns
+#: `--limit` rows SATURATES: `issues_truncated = len(rows) >= OPEN_ISSUES_LIMIT`), and
+#: `tests/test_fleet_state.py` asserts exactly that. What the guard can prove is that
+#: the window was not silently SHRUNK below the coverage it was last verified to have;
+#: what it cannot prove is headroom, because the repo files issues every day and this
+#: number is only as fresh as its last bump. That is why the window carries ~2x
+#: (see the block above) rather than being sized to this figure.
+#:
+#: ⛔ THE ONLY FLOOR BEFORE IT WAS A LITERAL FROM 2026-10-14 (989), so a silent revert
+#: of the window to 2000 passed the suite GREEN while re-creating the #11872 outage:
+#: every board truncated, every issue with no attribution entry refusing
+#: `INCOMPLETE (exit 2)` (#11917; that revert reached main's shape once through a merge
+#: resolution on a PR that never touched this file, #11914).
 #:
 #: ⛔ UPDATE THIS IN THE SAME COMMIT THAT RESIZES THE WINDOW. It is the number the guard
 #: compares against, so a resize that forgets it leaves the guard measuring the previous
 #: crossing — the same stale-literal failure one level up.
 #:
 #: Measured, not estimated: `gh issue list --repo daniel-ospina/tortoise --state open
-#: --limit 5000 --json number --jq length` -> 2046 on 2026-11-11.
+#: --limit 5000 --json number --jq length` -> 2046 on 2026-11-11T22:45Z. The repo has
+#: since passed that (2047 at 22:55Z), which is the snapshot limit stated above and not
+#: a defect in the guard: the window it must clear is 4000.
 OPEN_ISSUES_WINDOW_RECORDED_CROSSING = 2046
 
 

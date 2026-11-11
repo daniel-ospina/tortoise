@@ -345,9 +345,11 @@ records `reconciliation.open_issues_truncated`; when it is true, an issue with n
 attribution entry is INCOMPLETE rather than a measured "nobody", because the
 window cannot prove the negative. A board that does not stamp the flag AT ALL is
 refused and REBUILT rather than read as complete — the writer this replaces
-capped the same read at 800 while this repo has 989 open issues, so a missing
-stamp means coverage is UNKNOWN, not complete. While the read IS wide enough
-(989 open issues against a limit of 2000 on 2026-10-14 — the normal case),
+capped the same read at 800 while this repo then held 989 open issues, so a
+missing stamp means coverage is UNKNOWN, not complete. While the read IS wide
+enough (`OPEN_ISSUES_LIMIT` above this repo's live count — 989 against a limit of
+2000 was the normal case on 2026-10-14, and the count has since passed 2000, which
+is what `fleet_state.OPEN_ISSUES_WINDOW_RECORDED_CROSSING` records),
 absence in `index.issues` IS measured: the issue was in the window and no lane's
 branch slug, worktree path or session text named it. The branch and worktree
 surfaces block independently on the issue number either way.
