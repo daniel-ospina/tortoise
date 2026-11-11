@@ -1174,7 +1174,10 @@ def test_terminal_statuses_mirror_the_read_paths_RENDERED_predicate():
     # both directions: a status the read excludes and the probe does not counts a dead row as
     # live (`offender` -> the headline falls); one the probe excludes and the read does not
     # drops a live row from the denominator it claims to measure.
-    assert set(re.findall(r"n\.status <> '([a-z_]+)'", rendered)) == qp.TERMINAL_STATUSES
+    # ⚠️ VALUE-AGNOSTIC on purpose: `([a-z_]+)` was blind to a literal that is not a plain
+    # identifier (`'staged2'`, `'Draft2'`), so such a status could be excluded by the read and
+    # still counted live by the probe with this pin green (review, delta round).
+    assert set(re.findall(r"n\.status <> '([^']*)'", rendered)) == qp.TERMINAL_STATUSES
 
     # Conjunct 2 — the legacy flag half, which is the one the artifact reports separately
     # (`excluded_by_outdated_flag`). It is measured EMPTY on this graph, which is precisely
@@ -1203,7 +1206,7 @@ def test_the_read_paths_composed_predicate_carries_both_conjuncts():
 
     composed = _exclude_status_clause("n")  # the exact call `sdk.query` appends
 
-    assert set(re.findall(r"n\.status <> '([a-z_]+)'", composed)) == qp.TERMINAL_STATUSES, (
+    assert set(re.findall(r"n\.status <> '([^']*)'", composed)) == qp.TERMINAL_STATUSES, (
         "the composed clause's status vocabulary must be EXACTLY the probe's — a status added "
         "on either side moves the denominator the census publishes against")
     assert "coalesce(n.outdated, false) = false" in composed, (
@@ -1235,7 +1238,7 @@ def test_the_sdk_query_where_carries_both_conjuncts():
     captured: dict[str, str] = {}
 
     class _Result:
-        result_set: list = []
+        result_set = ()  # immutable: a class attribute, never a mutable default
 
     class _Graph:
         def query(self, q, **_kw):
@@ -1254,7 +1257,7 @@ def test_the_sdk_query_where_carries_both_conjuncts():
         "the read must keep the operator-scope clause that makes 15,842 ':Point minus operators'")
     assert "coalesce(n.outdated, false) = false" in where, (
         "the read's WHERE must keep the flag conjunct — it is ON for the Point surfaces (#3301)")
-    assert set(re.findall(r"n\.status <> '([a-z_]+)'", where)) == qp.TERMINAL_STATUSES, (
+    assert set(re.findall(r"n\.status <> '([^']*)'", where)) == qp.TERMINAL_STATUSES, (
         "the read's WHERE must exclude EXACTLY the probe's terminal vocabulary")
 
 
