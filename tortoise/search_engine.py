@@ -351,7 +351,7 @@ def ep_prior_only_cypher(alias: str) -> str:
     no readable ``n.confidence`` mirror beside it the row reads ``None`` +
     ``ep_state: "absent"`` — with one it serves the mirror's value (``baseline``,
     or ``measured`` when a posterior pair is stored), because the mirror LEADS
-    even a 0/0 pair (see :func:`ep_state`).
+    even a 0/0 pair (see :func:`ep_state`); the mirror supplies nothing for these rows.
 
     Kept textually in step with the Python twin: for every combination of
     (posterior_alpha, ep_alpha, baseline_set) this helper is true iff
