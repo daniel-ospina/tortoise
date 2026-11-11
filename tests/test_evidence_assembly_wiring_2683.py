@@ -1,4 +1,11 @@
-"""#2683 (Slice A) — the eval-lane arm WIRING: the package IS the reader window.
+"""#2683 (Slice A) — the arm WIRING on BOTH lanes: the package IS the window.
+
+Two seams carry Slice A to a reader, and each is ONE line that can go inert
+without reddening anything: the eval seam
+(``tools/longmem_eval/retrieve.py``, below — the arm reached through
+``retrieve_for_question``) and the PRODUCT seam
+(``tortoise/ask_lane.py``, the second half of this file). The eval seam's
+rebind was pinned by #11448; the product seam's was not, and is pinned here.
 
 WHY THIS FILE EXISTS (the hole it closes)
 -----------------------------------------
@@ -30,13 +37,32 @@ lists #2683 for — the wasted eval the owner forbade.
 
 LAYER
 -----
-Docker lane (FTS-capable FalkorDB), on a dedicated per-test graph — the same
-layer as the sibling eval-lane arm pins (``test_time_aware_eval_2520.py``,
-``test_entity_key_expansion.py``). ``hybrid_search`` is stubbed to a DETERMINISTIC
-pool (a source chunk ranked ABOVE its own distilled point, plus a cross-session
-restatement of the same fact) so the differential isolates the arm: everything
-after the fetch — annotation, per-session dedup, boost, packaging, assembly — is
-the real path.
+TWO layers, one per seam — the layer belongs to the seam, not to the file:
+
+* **the eval seam** (tests 1-3) — Docker lane (FTS-capable FalkorDB), on a
+dedicated per-test graph, the same layer as the sibling eval-lane arm pins
+(``test_time_aware_eval_2520.py``, ``test_entity_key_expansion.py``).
+``hybrid_search`` is stubbed to a DETERMINISTIC pool (a source chunk ranked
+ABOVE its own distilled point, plus a cross-session restatement of the same
+fact) so the differential isolates the arm: everything after the fetch —
+annotation, per-session dedup, boost, packaging, assembly — is the real path.
+* **the product seam** (tests 4-6) — HERMETIC: no graph, no model call, no
+network. FOUR substitutions on the graph/reader seam, plus two that hold for
+the whole section, listed so none is invisible. Per test: ``sdk.tortoise_fts_query``
+(the retrieval fetch) and ``sdk.annotate_ask_hits`` (the batch annotation —
+stubbed to a PASS-THROUGH, so the pool arrives WITHOUT the graph-derived
+``session_date``/``speaker`` keys the real call adds) are stubbed;
+``sdk._get_proj()`` — the SDK's projection accessor, which would otherwise
+build a real ``FalkorProjection`` — returns a bare sentinel; and
+``_ask_lane._default_ask_reader_factory`` is replaced by ``_AskCaptureReader``,
+whose MODEL is canned while the reader PLUMBING (the call, its argument, the
+response) is real. For the whole section / module: every ask test drives the
+lane through ``_run_ask``, which wraps ``_retrieval.assemble_context`` in a
+DELEGATING spy (it records the pool, then calls the real function), and the
+autouse ``_no_embedder`` pins the embedder out module-wide. Real throughout:
+per-session dedup, A5 boost, A7 rerank, packaging, assembly and
+``render_context``, so these tests do not
+skip on a box with no FalkorDB (the seam they pin has no graph in it).
 
 Each test names its FAIL VALUE.
 """
@@ -51,7 +77,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import tortoise.retrieval as _retrieval
 from tests import _live_utils
+from tortoise import ask_lane as _ask_lane
 from tortoise.sdk import TortoiseSDK
 
 
@@ -446,3 +474,341 @@ def test_a_tr_question_is_excluded_and_leaves_the_window_untouched(
     # would pass while the R5 machinery emptied the window it protects (the
     # reason `tr_window_fallback` exists), so pin the window's size too.
     assert on["context_point_count"] == 4, _ids(on["context_points"])
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# THE PRODUCT ASK LANE (tortoise/ask_lane.py) — the SIBLING seam
+# ══════════════════════════════════════════════════════════════════════════
+#
+# WHY THIS SECTION EXISTS (the hole #11448 left open on the OTHER seam)
+# --------------------------------------------------------------------
+# #11448 pinned the EVAL seam's rebind because deleting it left 52 sibling
+# tests green. The PRODUCT seam carries the IDENTICAL single-line rebind —
+#
+#     if evidence_assembly:
+#         deduped, _pkg_stats = package_evidence_pool(deduped, mark_for=None)
+#         # tortoise/ask_lane.py, in run_ask_lane()
+#
+# — and nothing drove it: measured on `main` @ `3794677ee38a`, deleting the
+# body of that `if` leaves `tests/test_evidence_assembly.py` (30 passed),
+# `tests/longmem_eval/test_slice_a_flood_bound.py` (22 passed) and this file
+# (3 passed, docker lane) fully GREEN, i.e. an ON-vs-OFF run of the PRODUCT
+# lane reads as "Slice A changed nothing". The knob's default is the only
+# thing the hermetic suite pinned for it
+# (`test_ask_lane_knob_failsafe_off_by_default`, an ``ask_env_bool`` unit
+# call — it never enters ``run_ask_lane``), so the arm the issue's `O`
+# indicator is about was reachable-but-unpinned on the lane the product claim
+# names.
+#
+# ⛔ The census is NOT the observable here. ``_pkg_stats`` is assigned and
+# never read, and ``run_ask_lane``'s response carries no assembly or census
+# key. Its WINDOW-derived fields are ``evidence`` and ``context_tokens``
+# (``render_context(assembled)`` / ``estimate_tokens_ask(evidence)``,
+# ``ask_lane.py:689-690``), ``cost_estimate_usd`` (derived from
+# ``estimate_tokens_ask(evidence)``, ``:814``/``:832``) and
+# ``retrieved_session_ids`` (``_distinct_session_ids(assembled)``, ``:807``;
+# emitted at ``:835``); each moves between ON and OFF only because the window
+# moved — which is the effect this section measures, not a way to read the
+# census.
+# ⛔ That set is MECHANICALLY pinned, not left to prose: test 4 asserts the
+# SET of moved response keys (``_WINDOW_DERIVED_FIELDS``), because the
+# one-field form of this sentence was falsified TWICE (round 2 named
+# ``context_point_count``, which this lane's response does not carry; round 4
+# still missed ``evidence``/``context_tokens``/``cost_estimate_usd``). A fifth
+# field that starts moving reds there instead of re-staling this comment;
+# ``duration_ms`` is excluded as timing noise.
+# The READER WINDOW is the mechanism, which is why every
+# test below asserts on it: the pool handed to ``assemble_context`` (the
+# real window-fill, spied) and, for the flooding test, the text the reader
+# actually received. A pin that asserted the census instead would be pinning
+# the one thing this lane throws away.
+#
+# LAYER: HERMETIC — no graph, no model call, no network. See the module
+# docstring's "the product seam" bullet for the full inventory of six
+# substitutions (four per test, two for the whole section). In one line: the
+# fetch and the batch annotation are STUBBED (annotation as a pass-through, so
+# the pool arrives unannotated), ``sdk._get_proj()`` hands back a bare sentinel
+# instead of a real ``FalkorProjection``, the reader factory returns a canned
+# MODEL over real PLUMBING, the autouse ``_no_embedder`` pins the embedder out,
+# and ``assemble_context`` is a delegating spy. Real throughout: per-session
+# dedup, A5 boost, A7 rerank, packaging, assembly, ``render_context``. Same
+# ``_FakeSDK`` shape as ``tests/test_ask_retrieval_budget.py``.
+
+ASK_QUOTE = "the tea set cost 300 dollars"
+ASK_POINT_ID = "a2683point"
+ASK_CHUNK_ID = "a2683chunk"
+ASK_DUP_ID = "a2683dupe"
+ASK_OTHER_ID = "a2683other"
+ASK_SESSION_1 = "sess2683ask"
+ASK_SESSION_2 = "sess2683ask2"
+ASK_OTHER_FACT = "i live in lisbon"
+
+#: The response fields that move ON-vs-OFF ONLY because the reader window moved:
+#: ``ask_lane.py:689-690`` ``evidence``/``context_tokens``, ``:814`` → ``:832``
+#: ``cost_estimate_usd`` (derived from ``estimate_tokens_ask(evidence)`` plus the
+#: serving lane's rates) and ``:807`` → ``:835`` ``retrieved_session_ids``.
+#: Test 4 asserts the moved set EQUALS this, rather than asserting members one
+#: by one: the section comment's "its one WINDOW-derived field" form was
+#: falsified twice, and a set assertion makes a fifth mover red the test instead
+#: of re-staling the prose. ``duration_ms`` is deliberately absent (timing
+#: noise). Measured, not assumed — three consecutive ON/OFF pairs each moved
+#: ``cost_estimate_usd`` by 0.00049707 → 0.00049539.
+_WINDOW_DERIVED_FIELDS = frozenset(
+    {"evidence", "context_tokens", "cost_estimate_usd",
+     "retrieved_session_ids"})
+
+#: Every env-gated knob ``run_ask_lane`` reads on its call path that can move
+#: the POOL, the WINDOW or the ARM on the LEGACY branch these pins drive.
+#: Scrubbed, not tolerated: an ambient export of
+#: ``TORTOISE_ASK_CONTEXT_ITEM_CAP`` would silently re-cut the flooding
+#: window this section pins, and ``TORTOISE_ASK_RERANK`` would reorder the
+#: pool before packaging — a developer shell carrying either would red a
+#: pinned id list. (A spurious red, never a false pass — but a price for
+#: nothing.)
+#:
+#: ``TORTOISE_ASK_CONNECTED_ASSEMBLY`` is scrubbed for the opposite reason:
+#: it does not *move* the arm, it REPLACES the lane (``ask_lane.py:491`` —
+#: when the connected block fires, ``hits = []`` and the retrieval, dedup,
+#: boost, rerank and packaging stages never run at all), so an ambient export
+#: would bypass the thing this section pins rather than perturb it. It is a
+#: latent spurious red, not a false pass: ``classify_question`` returns None
+#: for this section's question today, so the fired branch is not taken.
+_ASK_ENV_SCRUB = (
+    # the arm under test
+    "TORTOISE_ASK_EVIDENCE_ASSEMBLY",
+    # not a knob on the arm — it REPLACES the lane the arm lives in
+    "TORTOISE_ASK_CONNECTED_ASSEMBLY",
+    # the A5 evidence-mark boost (reorders the pool before packaging)
+    "TORTOISE_ASK_EVIDENCE_BOOST",
+    "TORTOISE_ASK_EVIDENCE_BOOST_ANSWER_STRING",
+    "TORTOISE_ASK_EVIDENCE_BOOST_SOURCE",
+    "TORTOISE_ASK_EVIDENCE_BOOST_VERBATIM",
+    # the A7 rerank (reorders the pool before packaging; default OFF)
+    "TORTOISE_ASK_RERANK",
+    "TORTOISE_ASK_RERANK_MODEL",
+    "TORTOISE_ASK_RERANK_CAP",
+    "TORTOISE_ASK_RERANK_LAMBDA",
+    # the resolved caps — the window this section cuts on purpose
+    "TORTOISE_ASK_CONTEXT_ITEM_CAP",
+    "TORTOISE_ASK_CONTEXT_TOKEN_CAP",
+    "TORTOISE_ASK_CONTEXT_BYTE_CAP",
+    "TORTOISE_ASK_RETRIEVAL_LIMIT",
+    "TORTOISE_ASK_POOL_SIZE",
+)
+
+
+def _ask_product_pool() -> list[dict]:
+    """The PRODUCT lane's hit shape (the fields ``tortoise_fts_query`` emits
+    after #8658: ``quote`` / ``source_turn_id`` / session / ``point_kind``),
+    with the raw source chunk ranked ABOVE its own distilled point — the
+    collapse must be order-independent, not arrival-ordered.
+
+    Four pool items, TWO facts: the tea set (point + its own verbatim chunk +
+    a cross-session restatement) and an unrelated statement.
+    """
+    return [
+        {"id": ASK_CHUNK_ID,
+         "content": f"user: {ASK_QUOTE}\nthe buyer paid cash.",
+         "session_id": ASK_SESSION_1,
+         "point_kind": "session-transcript",
+         "match_source": "fts"},
+        {"id": ASK_POINT_ID, "content": ASK_QUOTE,
+         "quote": ASK_QUOTE, "source_turn_id": 2,
+         "session_id": ASK_SESSION_1, "match_source": "fts"},
+        {"id": ASK_DUP_ID, "content": ASK_QUOTE,
+         "session_id": ASK_SESSION_2, "match_source": "fts"},
+        {"id": ASK_OTHER_ID, "content": ASK_OTHER_FACT,
+         "session_id": ASK_SESSION_1, "match_source": "fts"},
+    ]
+
+
+class _AskFakeSDK:
+    """The two calls the ask lane makes against the graph are stubbed; every
+    stage after them is the real one."""
+
+    _namespace = "wiring-ask-2683"
+
+    def __init__(self, pool: list[dict]):
+        self._pool = pool
+        self.query_kwargs: dict = {}
+
+    def _get_proj(self):
+        return object()
+
+    def tortoise_fts_query(self, query, **kwargs):
+        self.query_kwargs = kwargs
+        return [dict(h) for h in self._pool]
+
+    def annotate_ask_hits(self, hits, **kwargs):
+        return [dict(h) for h in hits]
+
+
+class _AskCaptureReader:
+    model = "capture"
+    provider = "capture"
+    route = "capture"
+    last_route = "capture"
+    last_prompt_tokens = 0
+    last_completion_tokens = 0
+    last_finish_reason = "stop"
+
+    def __init__(self):
+        self.user = None
+        self.calls = 0
+
+    def complete(self, *, system, user, max_tokens=None):
+        self.calls += 1
+        self.user = user
+        return "The tea set cost 300 dollars."
+
+    def close(self):
+        pass
+
+
+def _run_ask(monkeypatch, *, item_cap: int | None = None, **env):
+    """Drive the REAL ``run_ask_lane`` once, returning
+    ``(response, reader, pool_handed_to_the_window_fill)``.
+
+    The window is read at ``assemble_context`` — the lane's own call, on the
+    pool it decided to fill from — so the assertion is the mechanism, not a
+    mock of it.
+    """
+    for var in _ASK_ENV_SCRUB:
+        monkeypatch.delenv(var, raising=False)
+    # ``TORTOISE_ASK_CONTEXT_BYTE_CAP`` is DERIVED from the token cap unless
+    # set, so the item cap alone decides what the window can hold here.
+    if item_cap is not None:
+        monkeypatch.setenv("TORTOISE_ASK_CONTEXT_ITEM_CAP", str(item_cap))
+    for key, value in env.items():
+        monkeypatch.setenv(key, str(value))
+
+    reader = _AskCaptureReader()
+    monkeypatch.setattr(_ask_lane, "_default_ask_reader_factory",
+                        lambda: reader)
+    seen: dict = {}
+    real_assemble = _retrieval.assemble_context
+
+    def _spy(pool, **kwargs):
+        seen["pool"] = [dict(h) for h in pool]
+        return real_assemble(pool, **kwargs)
+
+    monkeypatch.setattr(_retrieval, "assemble_context", _spy)
+    _ask_lane._reset_ask_reader_cache_for_tests()
+    try:
+        resp = _ask_lane.run_ask_lane(
+            _AskFakeSDK(_ask_product_pool()), "how much did the tea set cost",
+            question_date="2026-09-25")
+    finally:
+        _ask_lane._reset_ask_reader_cache_for_tests()
+    assert "pool" in seen, "assemble_context was never called"
+    return resp, reader, seen["pool"]
+
+
+# ── 4. the PRODUCT arm REBINDS the ask lane's reader window ──────────────
+
+def test_the_product_arm_rebinds_the_ask_lane_reader_window(monkeypatch):
+    """FAIL VALUE: the ON arm handing ``assemble_context`` the RAW pool —
+    i.e. the packaging line's body deleted, or its result not rebound to
+    ``deduped``. Measured on ``main`` @ `3794677ee38a`: with the body removed,
+    this module's other three tests, ``tests/test_evidence_assembly.py``
+    (30 passed) and ``tests/longmem_eval/test_slice_a_flood_bound.py``
+    (22 passed) all stay GREEN while the product arm silently does nothing.
+
+    Reachable: the pool is the exact four hits ``_ask_product_pool`` returns,
+    and the package boundary is known from them (one fact = anchor + ≤ one
+    verbatim ref, the cross-session restatement merges into it)."""
+    _off_resp, _off_reader, off_pool = _run_ask(
+        monkeypatch, TORTOISE_ASK_EVIDENCE_ASSEMBLY=0)
+    on_resp, _on_reader, on_pool = _run_ask(
+        monkeypatch, TORTOISE_ASK_EVIDENCE_ASSEMBLY=1)
+
+    # OFF is the untouched historical path: the pool arrives as retrieved,
+    # chunk still ABOVE its own point.
+    assert _ids(off_pool) == [ASK_CHUNK_ID, ASK_POINT_ID, ASK_DUP_ID,
+                              ASK_OTHER_ID], _ids(off_pool)
+
+    # ON is the PACKAGE: the restatement loses its slot and the point's own
+    # verbatim chunk sits IMMEDIATELY after its anchor (the flat
+    # anchor-then-refs shape), not at its pool rank.
+    assert _ids(on_pool) == [ASK_POINT_ID, ASK_CHUNK_ID, ASK_OTHER_ID], (
+        _ids(on_pool))
+    on_ids = _ids(on_pool)
+    assert on_ids.index(ASK_CHUNK_ID) == on_ids.index(ASK_POINT_ID) + 1, (
+        on_ids)
+
+    # …and the consequence the product actually shows: the restated fact no
+    # longer contributes a SECOND session to the window, because it no longer
+    # has a slot of its own.
+    assert on_resp["retrieved_session_ids"] == [ASK_SESSION_1], (
+        on_resp["retrieved_session_ids"])
+    assert _off_resp["retrieved_session_ids"] == [ASK_SESSION_1,
+                                                  ASK_SESSION_2], (
+        _off_resp["retrieved_session_ids"])
+
+    # The section comment's census claim, MECHANICALLY: the response fields
+    # that move ON-vs-OFF are exactly the window-derived ones it names. The
+    # ``one field`` form of that sentence was falsified twice, so the SET is
+    # asserted here — a field that starts moving without the comment following
+    # reds HERE, and the pre-fix tree reds too (no rebind ⇒ nothing moves ⇒
+    # empty set). ``duration_ms`` is excluded as timing noise; the message
+    # names the full moved set, so a reader sees which field to reconcile.
+    moved = {k for k in on_resp
+             if k != "duration_ms" and on_resp[k] != _off_resp[k]}
+    assert moved == _WINDOW_DERIVED_FIELDS, sorted(moved)
+
+
+# ── 5. the flooding the issue exists to stop, measured on the product lane ─
+
+def test_a_capped_window_holds_a_distinct_fact_where_the_flood_took_it_all(
+        monkeypatch):
+    """FAIL VALUE: the arm not reaching the reader, measured where it MATTERS
+    — a window too small to hold the pool. OFF, the three leading slots are
+    all ONE fact (chunk + point + restatement), so the unrelated statement
+    starves out of the reader's context; ON, the package frees the slot and
+    the distinct fact reaches the reader. That is Slice A's whole product
+    claim on the lane the claim names, and it is invisible to any assertion
+    that only compares pool ids."""
+    _resp, off_reader, _off_pool = _run_ask(
+        monkeypatch, item_cap=3, TORTOISE_ASK_EVIDENCE_ASSEMBLY=0)
+    _on_resp, on_reader, _on_pool = _run_ask(
+        monkeypatch, item_cap=3, TORTOISE_ASK_EVIDENCE_ASSEMBLY=1)
+
+    assert ASK_OTHER_FACT not in off_reader.user, (
+        "the OFF window is expected to be flooded by one fact (this is the "
+        "pre-fix baseline, not an aspiration): "
+        f"{off_reader.user!r}")
+    assert ASK_OTHER_FACT in on_reader.user, (
+        "the arm must free a window slot for a DISTINCT fact: "
+        f"{on_reader.user!r}")
+    # …and the one fact is still there — the point was collapsed, not dropped.
+    assert ASK_QUOTE in on_reader.user
+
+
+# ── 6. the product knob's off-switch: fail-safe, and the old path intact ──
+
+def test_the_product_knob_is_fail_safe_and_leaves_the_old_path_unchanged(
+        monkeypatch):
+    """FAIL VALUE: a default that arms the arm (the #1745 fail-safe decision
+    is OFF), or a garbage/zero value that flips it — on the PRODUCT lane the
+    knob is the only switch there is (no kwarg, no caller that can pin it),
+    so a typo must read as OFF and must leave the historical pool byte-for-
+    byte."""
+    baseline = None
+    for value in (None, "", "0", "false", "no", "maybe"):
+        kwargs = {} if value is None else {
+            "TORTOISE_ASK_EVIDENCE_ASSEMBLY": value}
+        _resp, _reader, pool = _run_ask(monkeypatch, **kwargs)
+        ids = _ids(pool)
+        assert ids == [ASK_CHUNK_ID, ASK_POINT_ID, ASK_DUP_ID, ASK_OTHER_ID], (
+            f"value={value!r} must read as OFF: {ids}")
+        if baseline is None:
+            baseline = pool
+        else:
+            assert pool == baseline, (
+                f"value={value!r} changed the OFF pool, not merely arming")
+
+    for value in ("1", "true"):
+        _resp, _reader, pool = _run_ask(
+            monkeypatch, TORTOISE_ASK_EVIDENCE_ASSEMBLY=value)
+        assert _ids(pool) == [ASK_POINT_ID, ASK_CHUNK_ID, ASK_OTHER_ID], (
+            f"value={value!r} must ARM the arm: {_ids(pool)}")

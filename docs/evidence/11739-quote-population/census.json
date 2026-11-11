@@ -1,0 +1,172 @@
+{
+  "issue": "#11739",
+  "provenance": {
+    "measured_at": "2026-11-11T09:44:26Z",
+    "probe_sha256": "e2e27172a2ecc4376bbf3c774945b761885bcecb0a6e28e0f3200c21ef1f41e9",
+    "endpoint": "https://api.premiselabs.co/mcp/",
+    "head_sha": "9f8f12041ecece01b136d541e6799e0fe58b55c6"
+  },
+  "question": "How often is a captured Point's `quote` non-empty?",
+  "source": "hosted graph, read via tortoise_query (offset paging, total order)",
+  "denominator": "live NON-OPERATOR :Point nodes \u2014 the read path applies the canonical operator-scope clause ((n.is_operator IS NULL OR n.is_operator = false) AND n.op_type IS NULL, `sdk._operator_scope_clauses`), so operator Points are NOT in this population; within it the headline divides by the subset whose status is not in `terminal_statuses` (`tortoise/live.py::TERMINAL_EXCLUDED_STATUSES`) **and** whose legacy `outdated` flag is not set (the two conjuncts of `search_engine._exclude_status_clause`), which is exactly the population the tool's default read serves; `tombstones` reports the rows that subset excludes, and `excluded_by_outdated_flag` splits the flag half out",
+  "page_size_start": 500,
+  "page_size_final": 500,
+  "pages_walked": 32,
+  "rows_walked": 15868,
+  "terminal_statuses": [
+    "archived",
+    "deprecated",
+    "outdated",
+    "retracted",
+    "superseded"
+  ],
+  "headline": {
+    "live_points": 15842,
+    "tombstones": 26,
+    "quote_non_empty": 15027,
+    "points_with_vector": 15295,
+    "points_with_vector_and_quote": 15008,
+    "quote_non_empty_pct": 94.86,
+    "vector_quote_non_empty_pct": 98.12
+  },
+  "quote_shapes": {
+    "absent_or_null": 791,
+    "list": 0,
+    "other": 0,
+    "str": 15051
+  },
+  "by_status_terminal": {
+    "superseded": {
+      "points": 26,
+      "quote_non_empty": 25,
+      "quote_empty_or_absent": 1,
+      "with_vector": 26,
+      "with_vector_quote_non_empty": 25,
+      "quote_non_empty_pct": 96.15,
+      "with_vector_quote_non_empty_pct": 96.15,
+      "quote_chars": {
+        "min": 8,
+        "median": 111,
+        "max": 200
+      }
+    }
+  },
+  "excluded_by_outdated_flag": {},
+  "quote_chars_all": {
+    "min": 8,
+    "median": 137,
+    "max": 200,
+    "n": 15027,
+    "at_cap": 2260,
+    "cap": 200,
+    "at_cap_basis": "stored (pre-collapse) length >= cap"
+  },
+  "about_property_presence": {
+    "points_with_any_about_property": 0,
+    "keys_seen": [],
+    "not_measured": "resolved about* EDGES \u2014 properties are not edges; the edge population needs a relationship census, which the MCP surface does not expose (graph_overview has no relationship section)"
+  },
+  "by_point_kind": {
+    "statement": {
+      "points": 15708,
+      "quote_non_empty": 15027,
+      "quote_empty_or_absent": 681,
+      "with_vector": 15171,
+      "with_vector_quote_non_empty": 15008,
+      "quote_non_empty_pct": 95.66,
+      "with_vector_quote_non_empty_pct": 98.93,
+      "quote_chars": {
+        "min": 8,
+        "median": 137,
+        "max": 200
+      }
+    },
+    "evidence": {
+      "points": 120,
+      "quote_non_empty": 0,
+      "quote_empty_or_absent": 120,
+      "with_vector": 113,
+      "with_vector_quote_non_empty": 0,
+      "quote_non_empty_pct": 0.0,
+      "with_vector_quote_non_empty_pct": 0.0,
+      "quote_chars": null
+    },
+    "decision": {
+      "points": 7,
+      "quote_non_empty": 0,
+      "quote_empty_or_absent": 7,
+      "with_vector": 5,
+      "with_vector_quote_non_empty": 0,
+      "quote_non_empty_pct": 0.0,
+      "with_vector_quote_non_empty_pct": 0.0,
+      "quote_chars": null
+    },
+    "diary": {
+      "points": 2,
+      "quote_non_empty": 0,
+      "quote_empty_or_absent": 2,
+      "with_vector": 1,
+      "with_vector_quote_non_empty": 0,
+      "quote_non_empty_pct": 0.0,
+      "with_vector_quote_non_empty_pct": 0.0,
+      "quote_chars": null
+    },
+    "finding": {
+      "points": 1,
+      "quote_non_empty": 0,
+      "quote_empty_or_absent": 1,
+      "with_vector": 1,
+      "with_vector_quote_non_empty": 0,
+      "quote_non_empty_pct": 0.0,
+      "with_vector_quote_non_empty_pct": 0.0,
+      "quote_chars": null
+    },
+    "useCase": {
+      "points": 1,
+      "quote_non_empty": 0,
+      "quote_empty_or_absent": 1,
+      "with_vector": 1,
+      "with_vector_quote_non_empty": 0,
+      "quote_non_empty_pct": 0.0,
+      "with_vector_quote_non_empty_pct": 0.0,
+      "quote_chars": null
+    },
+    "jobToBeDone": {
+      "points": 1,
+      "quote_non_empty": 0,
+      "quote_empty_or_absent": 1,
+      "with_vector": 1,
+      "with_vector_quote_non_empty": 0,
+      "quote_non_empty_pct": 0.0,
+      "with_vector_quote_non_empty_pct": 0.0,
+      "quote_chars": null
+    },
+    "option": {
+      "points": 2,
+      "quote_non_empty": 0,
+      "quote_empty_or_absent": 2,
+      "with_vector": 2,
+      "with_vector_quote_non_empty": 0,
+      "quote_non_empty_pct": 0.0,
+      "with_vector_quote_non_empty_pct": 0.0,
+      "quote_chars": null
+    }
+  },
+  "by_month": {
+    "2026-11": {
+      "points": 15868,
+      "quote_non_empty": 15052,
+      "quote_empty_or_absent": 816,
+      "with_vector": 15321,
+      "with_vector_quote_non_empty": 15033,
+      "quote_non_empty_pct": 94.86,
+      "with_vector_quote_non_empty_pct": 98.12,
+      "quote_chars": {
+        "min": 8,
+        "median": 137,
+        "max": 200
+      }
+    }
+  },
+  "duration_s": 68.4
+}

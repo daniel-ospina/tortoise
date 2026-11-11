@@ -805,8 +805,9 @@ def frozen_denominators(repo: Path) -> dict:
     # holds identically for all three (#10610 review at `120381532`, P2): each
     # consumer refuses a measurement that falls BELOW its floor —
     # `objects < floors["e1_objects"]` in `read_off_arms`, `after["objects"] <
-    # floors["e1_objects"]` in `e1_pairings`, `after["atomic_points"] <
-    # e2b_floor` in `score`, and `share < floors["e1_min_before_share"]` — and no
+    # floors["e1_objects"]` in `e1_pairings`, `after["surviving_units"] <
+    # e2b_floor` in `score` (the surviving PLANTED units, `real_facts` — #10989),
+    # and `share < floors["e1_min_before_share"]` — and no
     # count and no share falls below zero. So a floor of `0` is cleared by every
     # reading, and the guard it feeds passes everything.
     #
@@ -1502,6 +1503,7 @@ def read_on_arm(repo: Path) -> dict:
         "bare_definite": bare,
         "share": share,
         "real_facts": real_facts,
+        "surviving_units": real_facts,
         "e1b_bar": (e1b_required, e1b_population),
         "fused": fused,
         "atomic_points": atomic,
@@ -2011,11 +2013,30 @@ def score(repo: Path = _ROOT) -> dict:
     e2b_floor = floors["e2b_surviving_units"]
     e2b_share = (after["fused"] / after["atomic_points"]
                  if after["atomic_points"] else 1.0)
+    # ⛔ The FLOOR's population is the surviving PLANTED units, never
+    # `atomic_points` (#10989). The record's §3.1 E2b row is written over "the
+    # planted units that survived (floor ≥ 30)"; `atomic_points` counts every
+    # payload point, so a payload of the 25 non-planted `prod-graph-audit` rows
+    # plus 6 planted ones cleared a floor of 30 while 84 of the 90 planted units
+    # were GONE (measured in the issue). That is the fail-open this key exists to
+    # close: the floor is the one guard that says "there was a population here to
+    # score", so it may not be satisfied by rows the criterion was not written
+    # over. The SHARE stays the atomicity control's proxy over all Points and is
+    # disclosed as one (`share_population` below); re-scoring it over E2b's OWN
+    # registered denominator — "the planted units that survived (floor ≥ 30)", not
+    # E2a's frozen 14 value-bearing units — is #11865, not #10360 (#11833 review r1
+    # P2-1 fixed the 14; r5 P2-1 measured that #10360 owns the write-path retention
+    # guarantee and names neither E2b nor a share denominator in its body or any of
+    # its comments).
+    e2b_population = after["surviving_units"]
     e2["e2b"] = {
         "fused": after["fused"],
         "atomic_points": after["atomic_points"],
+        "surviving_units": e2b_population,
+        "population": "surviving planted units (real_facts)",
+        "share_population": "atomic_points",
         "share": round(e2b_share, 6),
-        "below_floor": after["atomic_points"] < e2b_floor,
+        "below_floor": e2b_population < e2b_floor,
         "floor": e2b_floor,
         "artifact": after["artifact"],
     }
@@ -2029,9 +2050,11 @@ def score(repo: Path = _ROOT) -> dict:
         e2["outcome"] = "REFUSED"
         e2["decidable"] = False
         e2["decided_by"] = "E2b floor"
-        e2["why"] = (f"the E2b population is {after['atomic_points']} atomic "
-                      f"Points, under the frozen floor of {e2b_floor}, so its "
-                      "fused share is REFUSED rather than scored")
+        e2["why"] = (f"the E2b population is {e2b_population} surviving planted "
+                      f"units (`real_facts`), under the frozen floor of "
+                      f"{e2b_floor}, so its fused share is REFUSED rather than "
+                      "scored — `atomic_points` is a different population (every "
+                      "payload point, planted or not) and cannot stand in for it")
     else:
         e2["outcome"] = ("PASS" if (e2["e2a"]["outcome"] == "PASS"
                                     and e2b_share <= bars["E2b"]["max_fused_share"])
