@@ -259,9 +259,10 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   OPEN row's own count, and its "already re-measured" count must equal the number of **bullets naming
   an OPEN issue** — the `#2730` bullet is CLOSED and is printed because *issue closure is not evidence
   of a fix*, not because it survives. §6 must also carry **exactly one** sentence matching that
-  pattern: the check finds its subject by pattern, so a second one earlier in §6 takes the match and the
-  guard reports OK over the sentence a lane actually reads — measured, one added decoy sentence was
-  enough. Unguarded, this sentence carried a false `three` over two
+  pattern: the check finds its subject by pattern, so a second one **anywhere** in §6 makes it report
+  that §6 carries two and check neither rather than picking one — keep exactly one. Before that was
+  guarded it took the first match and reported OK over the other, and one added decoy sentence was
+  enough (measured). Unguarded, this sentence also carried a false `three` over two
   survivor bullets while §7 said `two`, and the guard reported OK over it: the page's own *declared ≠
   stored* defect, inside the correction that exists to stop it — and the reason two reviewers could
   each "prove" the other side was the stale one.

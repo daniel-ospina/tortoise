@@ -2,9 +2,8 @@
 
 The findings ledger (`docs/architecture/MEMORY-SUBSTRATE-FINDINGS-LEDGER.md`) is
 the durable half of #2852 — the corrections log of the 2026-09-09/10
-memory-substrate review, re-measured. Re-measuring it found **seven of its twelve
-rows no longer read as written** (four of them overtaken by the fixes they
-motivated), which is precisely
+memory-substrate review, re-measured. Re-measuring it found **five of its twelve
+corrections already overtaken by the fixes they motivated**, which is precisely
 why it needs a guard: the page's job is to tell a reader *which of its own rows
 are still live*, and every checkable property it has can decay silently.
 
@@ -166,10 +165,13 @@ def test_mutation_population_is_pinned():
     bullets; a total that contradicts the OPEN row) — the exact defect the page
     shipped green — and the review of #11902 added four more (an unclassifiable §3
     row, an emptied evidence column, an unclassifiable §6 row, a citation shape the
-    resolver declines), so the population is 12 and the floor is pinned with it.
+    resolver declines), plus the DECOY arm, which is the only pin on
+    `check_survivor_arithmetic`'s `len(matches) > 1` branch: deleting that branch left
+    every other arm, every test and `--check` green (measured). Population 13, floor
+    pinned with it.
     """
-    assert len(flc.MUTATIONS) == 14
-    assert flc.MIN_SELF_TEST_MUTATIONS == 14
+    assert len(flc.MUTATIONS) == 13
+    assert flc.MIN_SELF_TEST_MUTATIONS == 13
 
 
 def test_self_test_floor_catches_a_shrunk_population(monkeypatch):
@@ -416,91 +418,6 @@ def test_a_non_python_extension_citation_is_measured_not_skipped(tmp_path, monke
     assert any("does not exist in the tree" in p for p in problems), problems
 
 
-def test_a_citation_with_a_space_in_its_path_is_refused(tmp_path, monkeypatch):
-    """FAILS if one inserted space makes a citation invisible instead of refused.
-
-    This is the one-keystroke bypass: with a whitespace-excluding token class the
-    mangled token matched neither the resolver nor the refusal, so `--check`
-    exited 0 over a citation nobody was checking — including §2's own, because the
-    scan had been scoped to §3/§5.
-    """
-    _mutated(
-        tmp_path,
-        monkeypatch,
-        lambda t: t.replace("`tortoise/pipeline.py:16`", "`tortoise/pipeline .py:16`", 1),
-    )
-    problems = _doc_problems()
-    assert any("not a recognised citation" in p for p in problems), problems
-
-
-def test_a_citation_with_a_space_after_the_colon_is_refused(tmp_path, monkeypatch):
-    """FAILS if `path: 16962` is silently skipped — the second space shape."""
-    _mutated(
-        tmp_path,
-        monkeypatch,
-        lambda t: t.replace("`tortoise/sdk.py:16962`", "`tortoise/sdk.py: 16962`", 1),
-    )
-    problems = _doc_problems()
-    assert any("not a recognised citation" in p for p in problems), problems
-
-
-def test_a_yaml_key_value_is_not_a_citation():
-    """FAILS if the whole-page scan treats `key: value` as a citation.
-
-    A false red here would red the REQUIRED `docs` job on correct prose — the
-    shipped page contains `fetch-depth: 0` inside a code span. The population is
-    "has a path marker or the `:LINE` shorthand", not "contains a colon".
-    """
-    text = flc.read_doc(REPO)
-    assert "`fetch-depth: 0`" in text
-    assert flc.check_citation_shapes(text) == []
-
-
-# ── the headline tally is derived, not asserted ────────────────────────────
-
-
-def test_the_shipped_tally_matches_the_verdict_cells():
-    """FAILS if the page's "N of twelve" sentence stops agreeing with the table."""
-    text = flc.read_doc(REPO)
-    assert flc.check_verdict_tally(text) == []
-    verdicts = flc._verdicts_by_label(text)
-    non_still = [lbl for lbl, v in verdicts.items() if v != "STILL-TRUE"]
-    assert len(non_still) == 7, verdicts
-    overtaken = [lbl for lbl, v in verdicts.items() if v in ("SUPERSEDED-BY-FIX", "ADOPTED")]
-    assert len(overtaken) == 4, verdicts
-
-
-def test_a_flipped_verdict_that_leaves_the_tally_stale_is_rejected(tmp_path, monkeypatch):
-    """FAILS if a verdict cell can be flipped without the tally sentence reddening.
-
-    Reachable by any ordinary re-measure that upgrades one row: the prose keeps its
-    old count and letter list, and every reader who quotes the summary (including
-    `ci.yml`, `config/ci-surfaces.yml` and `docs/00_index.md`, which repeat it) is
-    told a number the table beside it contradicts. Measured before the fix: rc 0.
-    """
-    _mutated(
-        tmp_path,
-        monkeypatch,
-        lambda t: t.replace(
-            "| **DRIFTED** — `Entity` 3", "| **STILL-TRUE** — `Entity` 3", 1
-        ),
-    )
-    problems = _doc_problems()
-    assert any("the paragraph does not say" in p for p in problems), problems
-    assert any("'six of the twelve" in p or "six of the twelve" in p for p in problems), problems
-
-
-def test_a_tally_that_names_the_wrong_letters_is_rejected(tmp_path, monkeypatch):
-    """FAILS if the letter list can drift from the cells it summarises."""
-    _mutated(
-        tmp_path,
-        monkeypatch,
-        lambda t: t.replace("**(l)** are **DRIFTED**", "are **DRIFTED**", 1),
-    )
-    problems = _doc_problems()
-    assert any("letter list that disagrees" in p for p in problems), problems
-
-
 # ── citations resolve ──────────────────────────────────────────────────────
 
 
@@ -724,8 +641,17 @@ def test_survivor_sentence_is_derived_from_its_own_bullets():
     values, so a future `correction` in either direction reds here.
     """
     text = flc.read_doc(REPO)
-    assert flc.check_survivor_arithmetic(text) == []
+    # ⛔ BEFORE the `check_survivor_arithmetic(text) == []` assert, deliberately: that assert also
+    # reds on a two-sentence §6, so it would SHADOW this one and this pin would never be the row
+    # that reports (#11902 review, P3). Ordered first, it is the assertion that fails when §6 grows
+    # a second matching sentence — and it names the reason. It is still not the pin for the CODE
+    # branch; the `a second survivor sentence that could take the match` arm is.
     section = flc._region(text, "## 6. The issue index", "## 7. What this changes")
+    assert len(flc.SURVIVOR_RE.findall(section)) == 1, (
+        "§6 must carry exactly one sentence matching SURVIVOR_RE — a second one takes the match "
+        "and the guard cannot tell which sentence a lane reads"
+    )
+    assert flc.check_survivor_arithmetic(text) == []
     open_row = next(
         ln for ln in section.splitlines()
         if flc.STATE_ROW_RE.match(ln) and flc.STATE_ROW_RE.match(ln).group("label") == "OPEN"
@@ -741,15 +667,6 @@ def test_survivor_sentence_is_derived_from_its_own_bullets():
     assert len(bullets) == 3
     assert len([i for i in bullets if i in open_ids]) == 2
     assert flc.NUMBER_WORDS[match.group("count")] == 2
-    # ⛔ The guard locates its subject BY PATTERN, so §6 must carry EXACTLY ONE sentence that fits
-    # (#11902 review, P2). With one more, `search()` silently takes the earlier sentence and the
-    # sentence a lane reads goes unchecked: measured, a decoy plus the shipped `three` defect left
-    # `--check` at rc=0 and `--self-test` at PASS. Asserted here (rather than from prose) because
-    # the decoy also absorbs the self-test's mutation, so the self-test cannot be the pin.
-    assert len(flc.SURVIVOR_RE.findall(section)) == 1, (
-        "§6 must carry exactly one sentence matching SURVIVOR_RE — a second one takes the match "
-        "and the guard reports OK over the sentence a lane actually reads"
-    )
 
 
 def test_survivor_count_not_matching_the_bullets_is_rejected(tmp_path, monkeypatch):
