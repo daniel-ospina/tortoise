@@ -1573,7 +1573,11 @@ def test_degenerate_persisted_posterior_peer_decorates_on_a_real_graph(
     # `decoration_error` and the surviving entry above.
     assert entries[0]["peer"]["confidence"] is None, entries[0]["peer"]
     assert entries[0]["peer"]["ep_state"] == "absent", entries[0]["peer"]
-    assert entries[0]["peer"]["variance"] in (None, 0.0), entries[0]["peer"]
+    # Exact, not a disjunction (#11702 review cycle 12): this is the LIVE
+    # 16-column row shape, where the peer block answers `None` for "no width
+    # applies" — `0.0` is the `ep` block's own rendering of the same absence,
+    # so accepting either here would license the two surfaces disagreeing.
+    assert entries[0]["peer"]["variance"] is None, entries[0]["peer"]
     assert entries[0]["peer"]["contested"] is False, entries[0]["peer"]
 
 

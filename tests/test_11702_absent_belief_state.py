@@ -864,6 +864,55 @@ def test_entity_profile_floor_reads_a_posterior_only_belief(sdk):
     assert {measured_kid, absent_kid} <= ids(0.0), (
         "the no-op floor must keep an absent claim (0.0 is the #11702 default)")
 
+    # ── the NON-Point families, which the mirror-only read admitted as well ──
+    # The floor is VALUE-based on every family the profile lines up, not only
+    # on Points. An Object / Event / Subject neighbour (or a Source with no
+    # `documentKind`) carries no Point belief at all, and the pre-#11702
+    # `node.get("confidence", 0.5)` admitted it at any floor <= 0.5 as if it
+    # carried neutral evidence. §6.3 applies UNIFORMLY: an absent belief has no
+    # number to clear a floor with, whatever label it sits on — and restoring
+    # the 0.5 "because it is not a Point" is the same fabrication one family
+    # over. The one thing that differs by label is WHERE a belief could live,
+    # not whether the floor applies: a non-Point carrying a `confidence` mirror
+    # is a value and clears it.
+    suffix = uuid.uuid4().hex[:8]
+    obj_id = f"zqfloor-object-{suffix}"
+    evt_id = f"zqfloor-event-{suffix}"
+    sub_id = f"zqfloor-subject-{suffix}"
+    src_id = f"zqfloor-source-{suffix}"
+    obj_measured = f"zqfloor-object-measured-{suffix}"
+    for nid, label, extra in (
+        (obj_id, "Object", {}),
+        (evt_id, "Event", {}),
+        (sub_id, "Subject", {}),
+        (src_id, "Source", {}),
+        (obj_measured, "Object", {"confidence": 0.8}),
+    ):
+        proj.g.query(
+            f"CREATE (n:{label} {{id:$id, name:$name}}) "
+            + "".join(f"SET n.{k} = ${k} " for k in extra),
+            params={"id": nid, "name": nid, **extra})
+        proj.g.query(
+            "MATCH (a:Point {id:$a}), (n {id:$b}) "
+            "CREATE (a)-[:aboutEntity]->(n)", params={"a": root, "b": nid})
+
+    def connected(floor):
+        out = entityProfile(proj.db, proj.graph_name, root, hops=1,
+                            confidenceMin=floor)["connected"]
+        return {n["id"] for bucket in out.values() for n in bucket}
+
+    kept_real = connected(0.4)
+    for nid, label in ((obj_id, "Object"), (evt_id, "Event"),
+                       (sub_id, "Subject"), (src_id, "Source")):
+        assert nid not in kept_real, (
+            f"a belief-less {label} neighbour cleared a 0.4 floor — the filter "
+            "fabricated the neutral 0.5 for a non-Point family")
+        assert nid in connected(0.0), (
+            f"the no-op floor must keep a belief-less {label} neighbour")
+    assert obj_measured in kept_real, (
+        "a non-Point node carrying a real `confidence` mirror was dropped by a "
+        "0.4 floor — the floor must read the VALUE, not the label")
+
 
 def test_belief_value_is_the_one_python_twin():
     """`belief_value` is the Python twin of the Cypher presence+precedence rule.
@@ -1076,6 +1125,63 @@ def test_the_mirror_wins_over_a_contradicting_pair(sdk):
     assert sig["confidence"] == pytest.approx(0.9), sig
     assert GraphRanker(projection=proj)._fetch_point_signals([pid])[pid][
         "confidence"] == pytest.approx(0.9)
+
+
+def test_a_draft_with_a_persisted_prior_names_its_belief_beside_a_null_value(sdk):
+    """Review cycle 12 (P3): the manifest said `null` means "absent" and
+    NOTHING ELSE, and a draft row breaks that — which is why the row now states
+    the exception instead of the consumer inferring a state from the number.
+
+    The #2598 staging gate forces `confidence: null` on a draft the belief
+    predicate does not call measured (`uncomputed = draft and not has_ep`),
+    while `ep_state` still names the PERSISTED belief. A draft carrying a #2199
+    declared baseline is therefore `confidence: null` + `ep_state: "baseline"`
+    + `confidence_source: "uncomputed"` — null is NOT "absent" there, and
+    `ep_state` is the key a consumer must read.
+
+    Discriminating power: this is the ONLY shape that reds a "confidence is
+    null iff ep_state is absent" assertion, so it is what keeps the qualifier
+    from being reverted as noise.
+    """
+    proj = sdk._get_proj()
+    measured = sdk.create_point("statement", "a live measured claim",
+                                dedup=False, status="live")["id"]
+    draft = sdk.create_point("statement", "a draft carrying a prior",
+                             dedup=False, status="draft")["id"]
+    proj.g.query(
+        "MATCH (n:Point {id:$id}) SET n.ep_alpha = 5.0, n.ep_beta = 1.0, "
+        "n.baseline_set = true", params={"id": draft})
+    proj.g.query(
+        "MATCH (n:Point {id:$id}) SET n.posterior_alpha = 9.0, "
+        "n.posterior_beta = 1.0", params={"id": measured})
+
+    rows = {r["id"]: r for r in StateRanker(projection=proj).rerank(
+        [{"id": measured, "scores": {"rrf": 1.0}},
+         {"id": draft, "scores": {"rrf": 1.0}}])}
+    gaps = {r["id"]: r for r in GapsRanker(projection=proj).rerank(
+        [{"id": draft, "scores": {"rrf": 1.0}}])}
+    eps = annotate_ep_batch(proj.g, [draft, measured])
+
+    rec = rows[draft]["recall_ranking"]
+    gap = gaps[draft]["gaps_ranking"]
+    # The persisted belief is NAMED …
+    assert rec["ep_state"] == EP_STATE_BASELINE, rec
+    assert gap["ep_state"] == EP_STATE_BASELINE, gap
+    assert eps[draft].ep_state == EP_STATE_BASELINE, eps[draft]
+    # … beside a null the staging gate forces, and the source says why.
+    assert rec["confidence"] is None, rec
+    assert gap["confidence"] is None, gap
+    assert rec["confidence_source"] == "uncomputed", rec
+    assert gap["confidence_source"] == "uncomputed", gap
+    # The `ep` block has no staging gate, so the same claim reports its prior
+    # mean there — that asymmetry is #2598's, and it is WHY the manifest row
+    # qualifies the "null means absent" clause rather than restating it.
+    assert eps[draft].confidence_mean == pytest.approx(0.8333, abs=1e-4), (
+        eps[draft])
+    # A live measured claim is the control: null really does mean absent only
+    # when nothing is persisted.
+    assert rows[measured]["recall_ranking"]["confidence"] == pytest.approx(0.9)
+    assert rows[measured]["recall_ranking"]["ep_state"] == "measured"
 
 
 def test_why_support_chain_does_not_weigh_an_absent_supporter(sdk):
@@ -2226,6 +2332,40 @@ def test_the_subgraph_display_agrees_with_every_other_surface(sdk):
                                                   abs=1e-3), (node, ann)
 
 
+def _decorate(proj, pid):
+    """Decorate ``pid`` through a REAL operator neighbourhood (cycle 19).
+
+    The contested arm (Q2-crit) is the only place the peer variance is
+    evaluated, and it is gated on `if op_ids:` — the operators the requested
+    points belong to. A bare point has none, so with no operator beside it the
+    variance expression is never evaluated and the query cannot raise. The
+    cycle-17 pin built exactly that fixture, so it passed on the PRE-FIX code:
+    measured with `tortoise/search_engine.py` reverted to `3bd1ba47c1`, the old
+    pin was green while the real call answered
+    `decoration_error='ResponseError: Type mismatch: …'` with 0 entries.
+
+    The peer is the point ITSELF on purpose: Q2-crit matches
+    `(op)-[r2]-(other:Point)`, so the requested point is one of its own
+    operator's `other` rows — the unreadable operands reach the variance
+    expression through the shape under test, not through a bystander.
+
+    `decoration_error` is read as the ATTRIBUTE it is. `str(out)` is the plain
+    dict repr and never carries it (measured: `"Type mismatch" in str(out)` is
+    False even with the error set), so a stringified assertion cannot see the
+    one channel the property is about — the old pin's second vacuity.
+    """
+    from tortoise.search_engine import get_relationships_bounded
+
+    out = get_relationships_bounded(proj.g, [pid])
+    # `decoration_error` is a class attribute default, so an empty answer is
+    # readable unconditionally (a plain dict from a stand-in answers "").
+    error = getattr(out, "decoration_error", "")
+    assert not error, (
+        "the relationship scan raised on an operand the store cannot read as "
+        f"a number: {error}")
+    return out
+
+
 def test_the_relationship_scan_survives_an_unreadable_operand(sdk):
     """Cycle 17 P1: the contested arm's inline variance RAISED on the whole query.
 
@@ -2233,19 +2373,23 @@ def test_the_relationship_scan_survives_an_unreadable_operand(sdk):
     expected Integer, Float, or Null but was String"), and the raise is not
     per-row: `get_relationships_bounded` returned its fail-open seed with
     `decoration_error` set, so EVERY requested point lost its relationships.
-    Three shapes this PR declares must read as ABSENT destroyed the decoration
+    Three shapes this PR declares must read ABSENT destroyed the decoration
     instead — the opposite of the totality contract. The arm now calls the
     shared `beta_variance_cypher`.
-    """
-    from tortoise.search_engine import get_relationships_bounded
 
-    # ⛔ Cycle 19 F2: the earlier form of this test created LONE points, and the
-    # arm it names (Q2-crit) only runs when the Q1a `MATCH (n)-[…]->(op:Point
-    # {is_operator:true})` found an operator — so the query never executed, the
-    # variance expression was never evaluated, and the test PASSED UNCHANGED ON
-    # `origin/main`. A real operator edge is what reaches the arm; without it
-    # this asserts nothing. Verified red-on-main / green-here with the edge
-    # present (`ResponseError: Type mismatch …` vs `decoration_error: ''`).
+    ⛔ Cycle 19 F2: the earlier form of this test created LONE points, and the
+    arm it names (Q2-crit) only runs when the Q1a `MATCH (n)-[…]->(op:Point
+    {is_operator:true})` found an operator — so the query never executed, the
+    variance expression was never evaluated, and the test PASSED UNCHANGED ON
+    `origin/main`. A real operator edge is what reaches the arm; without it
+    this asserts nothing. Verified red-on-main / green-here with the edge
+    present (`ResponseError: Type mismatch …` vs `decoration_error: ''`).
+
+    Cycle 21: the pin also carries an all-readable CONTROL. Without it a guard
+    that made the query raise unconditionally would satisfy the three bad
+    shapes on its own, and the three shapes would be indistinguishable from a
+    scan that simply returned nothing for every point.
+    """
     proj = sdk._get_proj()
     shapes = {
         "numeric_string_pair": ('SET n.posterior_alpha = "0.7", '
@@ -2253,20 +2397,33 @@ def test_the_relationship_scan_survives_an_unreadable_operand(sdk):
         "boolean_pair": ("SET n.posterior_alpha = true, n.posterior_beta = 2.0"),
         "nonnumeric_string": ('SET n.posterior_alpha = "abc", '
                               'n.posterior_beta = 1.0'),
+        "all_numeric_control": ("SET n.posterior_alpha = 0.7, "
+                                "n.posterior_beta = 0.3"),
     }
+    support = sdk.create_point("statement", "ZQDECOR one supported claim")["id"]
+    pids = {}
     for label, setter in shapes.items():
         pid = sdk.create_point("statement", f"ZQDECOR {label}")["id"]
+        # The operator is what lets Q2-crit evaluate the peer variance at all,
+        # and the requested point is its own `other` row, so the bad operands
+        # below reach the variance expression through the shape under test.
+        sdk.create_operator("IMPL", pid, [support])
         proj.g.query(f"MATCH (n:Point {{id:$id}}) {setter}", params={"id": pid})
-        # …an operator whose IMPL edge points AT the peer, so Q2-crit runs.
-        root = sdk.create_point("statement", f"ZQDECOR root {label}")["id"]
-        sdk.create_operator("IMPL", root, [pid])
-        out = get_relationships_bounded(proj.g, [root])
-        blob = str(out)
-        assert "Type mismatch" not in blob and "decoration_error" not in blob, (
-            f"{label}: the relationship scan raised on an operand the store "
-            f"cannot read as a number: {blob[:400]}")
-        assert out.get(root), (
-            f"{label}: the operator lost its whole peer decoration: {blob[:400]}")
+        pids[label] = pid
+
+    for label, pid in pids.items():
+        out = _decorate(proj, pid)
+        assert pid in out, (label, out)
+        assert out[pid], (
+            f"{label}: the requested point came back with NO relationships — "
+            "the scan could not read its own operator neighbourhood")
+
+    # The all-readable control keeps its decoration through the same path, so
+    # the three bad shapes are not passing because everything comes back empty.
+    control = pids["all_numeric_control"]
+    assert _decorate(proj, control)[control], (
+        "the control lost its relationships — the scan is empty for every "
+        "shape, so the three orderings above prove nothing")
 
 
 def test_the_trends_answer_survives_a_numeric_string_operand(sdk):
