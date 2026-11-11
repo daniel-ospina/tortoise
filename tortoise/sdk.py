@@ -31205,8 +31205,11 @@ class TortoiseSDK:
             # operands non-negative, positive total — instead of this scan's
             # own `posterior_beta IS NOT NULL OR ep_beta IS NOT NULL` half
             # gate, which admitted a half pair (the missing operand is
-            # invented as 1.0 below) and left the negative/zero-total shapes
-            # to `a > 0 AND b > 0` further down. Same rule, one spelling.
+            # invented as 1.0 below). Same rule, one spelling — and since
+            # cycle 30 that rule is the ONLY positivity gate here: the
+            # `a > 0 AND b > 0` conjunct this comment used to point at was
+            # deleted below (it compared the RAW operand, so a string-stored
+            # pair went NULL and dropped out).
             f"  AND {ep_variance_admissible_cypher('n')} "
             "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
             "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
@@ -31217,7 +31220,17 @@ class TortoiseSDK:
             # #11702 cycle 15: the shared width formula (toFloat plus the
             # representability band), same as `ep.get_contested_claims`.
             f"WITH n, a, b, {beta_variance_cypher('a', 'b')} AS v "
-            "WHERE a > 0 AND b > 0 AND v > $t RETURN n.id, v",
+            # #11702 cycle 30: NO raw-operand guard here. `a > 0 AND b > 0`
+            # compared the UNCOERCED coalesce to an integer, so a string-stored
+            # operand (`posterior_alpha="2"`, a population
+            # `numeric_operand_cypher` exists for) made the whole conjunction
+            # NULL and this scan dropped a genuinely contested pair that its
+            # twin `ep.get_contested_claims` listed from the same width rule.
+            # The guard was redundant anyway: `ep_variance_admissible_cypher`
+            # already requires both operands READABLE and non-negative, and
+            # `beta_variance_cypher` bands the sum, so `v > $t` is the whole
+            # test — which is exactly the twin's spelling.
+            "WHERE v > $t RETURN n.id, v",
             params={"t": variance_threshold},
         ).result_set
         for pid, v in rows:

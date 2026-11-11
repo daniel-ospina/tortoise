@@ -513,8 +513,28 @@ def _float32(val: float):
 
 
 def _f32_neighbour(value: float, step: int) -> float:
-    """The float32 one ULP above (``step=+1``) or below (``-1``) ``value``."""
+    """The float32 one ULP above (``step=+1``) or below (``-1``) ``value``.
+
+    #11702 cycle 30: the UNSIGNED bit pattern is monotonic in the VALUE only for
+    non-negative floats. For a negative one it runs the other way — more
+    negative means a LARGER unsigned pattern — so `bits + step` moved toward
+    zero: asked for the neighbour of ``-1.0`` on the ``-1`` side it answered
+    ``-0.99999994``, i.e. a value on the opposite side of the input. In
+    :func:`_f32_from_literal` that made the midpoint test compare the double
+    against a distance that was not the distance to the real neighbour, so a
+    NEGATIVE string operand sitting exactly on a float32 midpoint fell through
+    to the plain double rounding `_f32_from_literal` exists to remove (the
+    store's `strtof` reads the literal, not the double) — the negative mirror of
+    the presence split that function was written for. Zero is its own case: the
+    neighbour of `+0.0` is not an unsigned step past a pattern that carries a
+    sign bit.
+    """
+    if value == 0.0:
+        smallest = struct.unpack("<f", struct.pack("<I", 1))[0]
+        return smallest if step > 0 else -smallest
     bits = struct.unpack("<I", struct.pack("<f", value))[0]
+    if bits & 0x80000000:                  # negative: the pattern DECREASES up
+        return struct.unpack("<f", struct.pack("<I", bits - step))[0]
     return struct.unpack("<f", struct.pack("<I", bits + step))[0]
 
 
@@ -747,9 +767,13 @@ def numeric_operand(raw):
     propagated into ``EpBreakdown.confidence_mean``, which ``asdict`` +
     ``json.dumps(allow_nan=False)`` (Starlette's ``JSONResponse``) turns into a
     500 on the agent-facing surfaces. The window is the one `_string_operand`
-    applies; inside it the DOUBLE is returned, deliberately — the float32
-    narrowing of an in-range literal (``0.6`` → ``0.6000000238``) is a recorded
-    residual (#11841), not a twin split to close here.
+    applies, and inside it the value returned is the **float32 the store serves**
+    (`"0.6"` → ``0.6000000238418579``), not Python's double for the literal:
+    a string property is served as a float32, so the twins must agree on the
+    VALUE as well as on presence, or every band and midpoint compare downstream
+    is decided on a number the store never held. (The double is an INPUT to that
+    rounding, not its result — ``_f32_from_literal`` uses it as the fast path and
+    lets the literal itself settle a midpoint tie.)
     """
     if raw is None or isinstance(raw, bool):
         return None

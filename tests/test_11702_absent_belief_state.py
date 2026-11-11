@@ -53,6 +53,11 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# The HOSTED write verb's half of the `ep_updated` pin drives the real
+# `POST /v1/sessions` route, so it reuses `tests/test_hosted_api.py`'s
+# authenticated TestClient fixture — the established repo pattern (see
+# `tests/test_capture_phase_d_dedup.py`), not a second hand-rolled app harness.
+from tests.test_hosted_api import client as client  # noqa: E402, RUF100, F401
 from tortoise import ranking as _ranking  # noqa: E402, RUF100
 from tortoise import search_engine as _se  # noqa: E402, RUF100
 from tortoise.ranking import (  # noqa: E402, RUF100  # noqa: E402, RUF100
@@ -67,11 +72,6 @@ from tortoise.search_engine import (  # noqa: E402, RUF100
     EpBreakdown,
     annotate_ep_batch,
 )
-# The HOSTED write verb's half of the `ep_updated` pin drives the real
-# `POST /v1/sessions` route, so it reuses `tests/test_hosted_api.py`'s
-# authenticated TestClient fixture — the established repo pattern (see
-# `tests/test_capture_phase_d_dedup.py`), not a second hand-rolled app harness.
-from tests.test_hosted_api import client as client  # noqa: E402, RUF100, F401
 
 #: The #11702 vocabulary. Resolved through ``getattr`` on purpose: this file must
 #: still IMPORT against a tree that predates the fix, so that running it there
@@ -4278,3 +4278,126 @@ def test_min_confidence_refuses_an_absent_belief_at_a_floor_below_half(sdk):
             f"an absent belief has no number to clear a floor of {floor}, so "
             f"the row must be dropped — it was kept, i.e. compared as the "
             f"neutral 0.5: {got}")
+def test_review_prune_lists_a_string_stored_contested_pair(sdk):
+    """Cycle 30: `_review_prune`'s contested scan carried a SECOND gate,
+    `a > 0 AND b > 0`, on the RAW coalesced operands.
+
+    A string-stored operand (`posterior_alpha="2"` — the legacy population
+    `numeric_operand_cypher` exists for) makes `"2" > 0` NULL in FalkorDB, so
+    the whole conjunction was NULL and the pair was DROPPED, while its twin
+    `ep.get_contested_claims` lists the same node from the same width rule (it
+    has no such guard — it tests `v > $t` only). One graph, two contested
+    scans, two answers for one claim: the #11702 defect this file exists for,
+    one scan over.
+
+    The guard was redundant as well as wrong: `ep_variance_admissible_cypher`
+    already requires both operands READABLE and non-negative and bands the sum,
+    so `v > $t` is the whole test.
+    """
+    from tortoise.ep import TortoiseEP
+
+    a = sdk.create_point("statement", "string-stored contested claim")["id"]
+    b = sdk.create_point("statement", "counter claim")["id"]
+    sdk.create_operator("IMPL", a, [b])
+    proj = sdk._get_proj()
+    # STRING-stored pair: readable to `numeric_operand_cypher` as float32, and
+    # Beta(2,2) has variance 0.05 > the 0.04 default threshold.
+    proj.g.query(
+        "MATCH (n:Point {id:$id}) SET n.posterior_alpha = '2', "
+        "n.posterior_beta = '2', n.confidence = null",
+        params={"id": a})
+    stored = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.posterior_alpha, n.posterior_beta",
+        params={"id": a}).result_set
+    assert stored and isinstance(stored[0][0], str), (
+        "fixture did not store STRINGS — the raw-compare split cannot be "
+        "exercised: " + repr(stored))
+
+    listed = {c["id"] for c in TortoiseEP(projection=proj).get_contested_claims()}
+    assert a in listed, (
+        "the twin scan did not list the string-stored contested pair, so this "
+        "test cannot discriminate the divergence: " + repr(sorted(listed)))
+
+    out = sdk.review_connections(mode="prune", scope=None, prune_limit=50)
+    contested = {e["detail"].get("contested_endpoint")
+                 for e in out["prune"] if e["issue"] == "contested"}
+    assert a in contested, (
+        "_review_prune dropped a contested pair its twin lists — the raw "
+        "`a > 0 AND b > 0` compared a STRING operand to an integer and made "
+        "the conjunction NULL: " + repr(sorted(x for x in contested if x)))
+
+
+def test_census_read_refuses_a_boolean_operand():
+    """Cycle 30: the EP-activation census read a stored BOOLEAN posterior as
+    `float(True) == 1.0`.
+
+    `numeric_operand` (and `belief_mirror`, and every Cypher surface) retired
+    that convention in cycles 12→16 — a Boolean belief is a writer defect, not
+    certainty, and it is ABSENT on both twins. The census's own `_operand`
+    dispatched only on `str`, so the pair branch kept the retired reading and
+    published a rendered `confidence: 0.50` for a claim with no readable
+    belief.
+    """
+    from tools.longmem_eval.ep_activation import read_confidence
+
+    assert read_confidence({"posterior_alpha": True,
+                            "posterior_beta": True}) is None, (
+        "a Boolean PAIR still reads as certainty — the retired `True` → 1.0 "
+        "convention survived in the census")
+    assert read_confidence({"posterior_alpha": True,
+                            "posterior_beta": 1.0}) is None, (
+        "a Boolean operand beside a readable one must not be coerced to 1.0")
+    # …and the READABLE shapes keep their values, so this is not a rule that
+    # nulls everything: a mirror still leads, and a genuine float pair reads.
+    assert read_confidence({"confidence": 0.9}) == pytest.approx(0.9)
+    assert read_confidence({"posterior_alpha": 2.0,
+                            "posterior_beta": 2.0}) == pytest.approx(0.5)
+    # A string operand still reads as the float32 the store serves.
+    assert read_confidence({"posterior_alpha": "2",
+                            "posterior_beta": "2"}) == pytest.approx(0.5)
+
+
+def test_f32_neighbour_is_sign_aware():
+    """Cycle 30: `_f32_neighbour` added to the UNSIGNED bit pattern, which is
+    monotonic in the VALUE only for non-negative floats.
+
+    For a negative float the unsigned pattern runs the other way, so `bits + 1`
+    moved toward ZERO — asked for the neighbour of `-1.0` on the `-1` side it
+    answered `-0.99999994`, a value on the wrong side of the input. In
+    `_f32_from_literal` that corrupted the midpoint test, so a NEGATIVE
+    string-operand literal sitting exactly on a float32 midpoint fell back to
+    the plain double rounding the function exists to remove.
+    """
+    from tortoise.search_engine import _f32_neighbour
+
+    up = _f32_neighbour(-1.0, +1)      # toward +inf: magnitude DECREASES
+    down = _f32_neighbour(-1.0, -1)    # toward -inf: magnitude increases
+    assert up > -1.0 > down, (up, down)
+    assert up == pytest.approx(-0.99999994, abs=1e-9), up
+    assert down == pytest.approx(-1.0000001, abs=1e-6), down
+
+    # Positive values keep the old (correct) behaviour.
+    assert _f32_neighbour(1.0, +1) == pytest.approx(1.0000001, abs=1e-6)
+    assert _f32_neighbour(1.0, -1) == pytest.approx(0.99999994, abs=1e-9)
+
+    # Zero: the neighbour is the smallest subnormal on the requested side, not
+    # an unsigned step across a sign bit.
+    smallest = 1.401298464324817e-45
+    assert _f32_neighbour(0.0, +1) == smallest
+    assert _f32_neighbour(0.0, -1) == -smallest
+    assert _f32_neighbour(-0.0, +1) == smallest
+    assert _f32_neighbour(-0.0, -1) == -smallest
+
+    # …and the NEGATIVE direction reaches the same decisions. Two shapes,
+    # because they are two different branches: `-1.0000000596046448` is the
+    # decimal whose DOUBLE is exactly the float32 midpoint (its exact text is a
+    # hair INSIDE it), so the literal decides and the store's answer is the
+    # larger magnitude; the full-precision midpoint literal is a genuine tie and
+    # round-half-to-even keeps `rounded` (−1.0). The pre-fix neighbour swapped
+    # the sides for BOTH, so each assertion below is discriminating.
+    from tortoise.search_engine import _f32_from_literal
+    inside = "-1.0000000596046448"        # double == midpoint; text inside it
+    assert _f32_from_literal(inside, float(inside)) == pytest.approx(
+        -1.0000001192092896, rel=0, abs=1e-9)
+    tie = "-1.000000059604644775390625"   # the exact midpoint, half-to-even
+    assert _f32_from_literal(tie, float(tie)) == -1.0

@@ -549,9 +549,19 @@ def read_confidence(p) -> float | None:
         `numeric_operand` rounds the same way the store does; a numeric value is
         passed through `float()` so a NON-FINITE posterior still arrives as
         `nan` (the #10210 cell this reader deliberately keeps non-total for).
+
+        #11702 cycle 30: a stored BOOLEAN is not a number here either. The
+        passthrough sent `True` to `float()` → `1.0`, so this census published
+        `confidence 0.50` (rendered) for a claim whose only stored belief was a
+        writer defect — the exact `True` → certainty convention cycles 12→16
+        retired from `numeric_operand` and `belief_mirror`, which is why the
+        mirror branch above already refuses it. `None` falls to the caller's
+        "unusable operand ⇒ no belief" path, the same answer both twins give.
         """
         if isinstance(raw, str):
             return numeric_operand(raw)
+        if isinstance(raw, bool):
+            return None
         return float(raw)
 
     try:
