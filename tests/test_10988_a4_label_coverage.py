@@ -369,7 +369,7 @@ def test_each_layer_QUERIES_its_own_node_label_and_only_claims_carries_the_exclu
     for layer, label, prop in probe.A4_LAYERS:
         # The per-layer histogram is the only query the census emits that carries
         # `coalesce(n.<prop>, 'NULL')`: the writer split's nearest neighbour is
-        # `coalesce(n.pointKind, '')` (probe:3219), a DIFFERENT literal, so the filter cannot pick
+        # `coalesce(n.pointKind, '')` (probe:3234), a DIFFERENT literal, so the filter cannot pick
         # up a sibling's query.
         own = [q for q in emitted if f"coalesce(n.{prop}, 'NULL')" in q]
         assert own, (f"the census issued no histogram query for the {layer} layer", emitted)
