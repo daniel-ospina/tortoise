@@ -225,9 +225,11 @@ property). It gets its own declared sidecar sections instead:
   `:TeamMeta`, because it replays a legacy journal into a freshly created target
   and the sections are captured from the graph about to be wiped. The two are
   **not** reported alike on that route: this class is elevated to `state_unknown`
-  rather than a verified success (#11866), while `:TeamMeta` stays **silent**
-  there — its `team_meta_gap` is `0` on a fresh target, so neither the warning
-  nor the migrate result dict carries it. It is ONE node
+  rather than a verified success (#11866), while `:TeamMeta` is reported **only
+  when its gap is non-zero** — an empty capture leaves `team_meta_gap` at `0`, so
+  on the common run neither the warning nor the migrate result dict carries it,
+  and a leftover rescue file that cannot say DOES fire the route's `#5353`
+  warning. It is ONE node
   per graph with **no identity property at all** (`pack_state` MERGEs
   `(s:PackSelection)` — the graph is the isolation boundary, so no id is
   needed), so it fits neither the config registry above (a row keyed on one

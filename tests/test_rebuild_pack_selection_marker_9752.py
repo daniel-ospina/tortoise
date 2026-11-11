@@ -1514,6 +1514,42 @@ def test_migrate_route_names_the_capture_source_when_it_observed_nothing(
         f"that do, and it contradicts this arm's own cause: {msg}")
 
 
+def test_migrate_route_keeps_the_UNCONFIGURED_consequence_on_shape_a(
+        tmp_path, caplog, monkeypatch):
+    """Shape (a) drops the sidecar clause, and must NOT drop the HARM with it.
+
+    FAILING VALUE: the fix that scoped this arm for #11866 removed the shared
+    `_consequence` wholesale, so the one clause that IS true on this shape went
+    with it — "the graph may read as UNCONFIGURED". That is the measured harm of
+    the empty capture, not a sidecar artefact: a source carrying
+    `configured=True revision=2` with an EMPTY approved set migrates to
+    `configured=False revision=0`, so a pack an admin REMOVED is re-admitted with
+    its `revision` reset. The operator's line therefore named the cause and then
+    stopped short of saying what it costs — the shape whose consequence was
+    deleted is the only one whose consequence is certain (#11866 review P2-2).
+
+    REACHABLE: the real `migrate()` replay route with `rebuild_all`'s counts
+    injected (the empty-capture signature), asserting on the warning the operator
+    reads and on the returned dict a caller branches on.
+    """
+    counts = {"nodes": 0, "edges": 0, "events": 0,
+              "pack_selection_expected": 0, "pack_selection_verified": True,
+              "pack_selection_restored": 0,
+              "pack_selection_gap": 0, "pack_selection_state_unknown": False,
+              "pack_selection_conflict": False}
+    with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
+        result = _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
+
+    msg = next(m for m in (r.getMessage() for r in caplog.records)
+               if ":PackSelection" in m)
+    assert "UNCONFIGURED" in msg, (
+        "the consequence that is TRUE on this shape was dropped with the "
+        f"sidecar clause it had to be separated from: {msg}")
+    assert "not an observed loss" in msg, (
+        f"the consequence must stay bounded to what was observed: {msg}")
+    assert msg.index("capture read") < msg.index("UNCONFIGURED"), msg
+
+
 def test_migrate_route_keeps_the_error_pointer_for_a_rescue_file(
         tmp_path, caplog, monkeypatch):
     """UNKNOWN shape (b): an inherited leftover rescue file DID log an ERROR.
@@ -1595,6 +1631,45 @@ def test_migrate_cli_reports_the_pack_selection_gap(caplog, monkeypatch):
     msgs = " | ".join(r.getMessage() for r in caplog.records)
     assert "pre-wipe sidecar" in msgs, (
         f"the rescue-file shape's cause must survive on the CLI: {msgs}")
+
+
+def test_migrate_cli_keeps_the_UNCONFIGURED_consequence_on_shape_a(
+        tmp_path, caplog, monkeypatch):
+    """The CLI's shape-(a) line must carry the HARM, not only the cause.
+
+    FAILING VALUE: the fix that scoped the CLI for #11866 replaced the shared
+    consequence with the capture-source cause ALONE, so the operator's last line
+    named the mechanism and then stopped short of the consequence that is true
+    on this shape ("the graph may read as UNCONFIGURED") — the measured harm: a
+    source with `configured=True revision=2` and an EMPTY approved set migrates
+    to `configured=False revision=0`, a pack an admin REMOVED re-admitted. That
+    is #11866 review P2-2, still live one surface down after P2-1 was fixed.
+
+    REACHABLE: the REAL `migrate()` result (not a hand-built dict — the defect
+    was in the plumbing between the two surfaces) fed to the real `main()`.
+    """
+    import tortoise.migrate_db as mdb
+
+    counts = {"nodes": 0, "edges": 0, "events": 0,
+              "pack_selection_expected": 0, "pack_selection_verified": True,
+              "pack_selection_restored": 0,
+              "pack_selection_gap": 0, "pack_selection_state_unknown": False,
+              "pack_selection_conflict": False}
+    result = _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
+    assert result["pack_selection_gap"] == 1, result
+
+    monkeypatch.setattr(mdb, "migrate", lambda force=False: dict(result))
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
+        assert mdb.main(["--force"]) == 0
+    msg = next(m for m in (r.getMessage() for r in caplog.records)
+               if ":PackSelection" in m)
+    assert "capture read" in msg, (
+        f"the CLI must name the shape's own cause: {msg}")
+    assert "UNCONFIGURED" in msg, (
+        "the CLI dropped the consequence along with the sidecar clause, so the "
+        f"operator is never told what the empty capture costs: {msg}")
+    assert "pre-wipe sidecar" not in msg, msg
 
 
 def test_a_live_conflict_outranks_unknown_when_both_flags_are_set():
