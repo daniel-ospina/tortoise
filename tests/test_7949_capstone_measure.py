@@ -9960,14 +9960,19 @@ def test_an_e2b_population_under_its_floor_is_REFUSED_not_FAILED(tmp_path):
     log = repo / "docs/evidence/9889/on-arm.log"
     text = log.read_text()
     assert "fused=1/114 = 0.008772" in text
-    # Keep the printed share consistent with the counts: the reconciliation that
-    # refuses a counts/share disagreement is a different guard, and this case is about
-    # the FLOOR (a self-consistent small population still refuses).
-    log.write_text(text.replace("fused=1/114 = 0.008772", "fused=1/10 = 0.100000"))
+    # ⛔ The FLOOR's population is the surviving PLANTED units, `real_facts`
+    # (#10989), NOT the atomicity control's `atomic_points`: a payload padded with
+    # non-planted rows could otherwise clear a floor the criterion was never
+    # written over. So the population this case shrinks is the planted one — a run
+    # that kept 6 of 90 planted units cannot carry E2b at ANY atomic count.
+    assert "real_facts=90" in text
+    log.write_text(text.replace("e1b outcome=PASS real_facts=90",
+                                "e1b outcome=PASS real_facts=6"))
     record = scores_probe.score(repo)
     e2 = record["e2"]
     assert e2["e2b"]["below_floor"] is True, e2["e2b"]
-    assert e2["e2b"]["atomic_points"] == 10, e2["e2b"]
+    assert e2["e2b"]["surviving_units"] == 6, e2["e2b"]
+    assert e2["e2b"]["atomic_points"] == 114, e2["e2b"]
     assert e2["e2b"]["floor"] == 30, e2["e2b"]
     assert e2["outcome"] == "REFUSED", e2
     assert e2["decidable"] is False, e2

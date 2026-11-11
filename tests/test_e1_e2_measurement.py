@@ -769,7 +769,8 @@ def _scored(text: str) -> str:
         # numbers — `n/a` here is the unreadable shape, which V15 now refuses when
         # the same key is claimed as owned (#11689 review round 4).
         f"floor_skipped=n/a declared_before_floor=0.2 before_share=0.600000 "
-        f"declared_surviving_floor=30 surviving_units=114 reason=n/a",
+        f"declared_surviving_floor=30 surviving_units=90 "
+        f"surviving_units_basis=real_facts reason=n/a",
     ]
     return "\n".join(lines) + "\n"
 
@@ -1683,7 +1684,7 @@ def test_checker_refuses_a_scored_log_whose_binding_is_not_matched(log_text):
     assert any("[V15]" in f and "SCORED against a bar whose binding is" in f
                for f in findings), findings
     # (b) a population that is not a count
-    frac = scored.replace("surviving_units=114", "surviving_units=114.0", 1)
+    frac = scored.replace("surviving_units=90", "surviving_units=90.0", 1)
     findings, _ = check.check(frac)
     assert any("[V15]" in f and "not a count" in f for f in findings), findings
     # (c) a MISMATCH with no recognised reason
@@ -1979,7 +1980,7 @@ def test_the_owned_floors_are_checked_and_a_run_that_meets_them_binds(
             in binding), binding
     assert "floor_unconsumed=n/a" in binding, binding
     assert "declared_before_floor=0.2 before_share=0.600000" in binding, binding
-    assert "declared_surviving_floor=30 surviving_units=114" in binding, binding
+    assert "declared_surviving_floor=30 surviving_units=90" in binding, binding
     assert "result=GREEN" in text, text
     findings, _ = check.check(text)
     assert findings == [], findings
@@ -1987,7 +1988,7 @@ def test_the_owned_floors_are_checked_and_a_run_that_meets_them_binds(
 
 @pytest.mark.parametrize("floors,measured", [
     ({"e1_min_before_share": 0.7}, "before_share=0.600000"),
-    ({"e2b_surviving_units": 500}, "surviving_units=114"),
+    ({"e2b_surviving_units": 500}, "surviving_units=90"),
 ])
 def test_an_owned_floor_the_run_is_under_is_refused_not_scored(
         monkeypatch, floors, measured):
@@ -2319,7 +2320,7 @@ def test_an_owned_floor_of_zero_or_less_is_refused_not_bound(
 
     #11689 review P1: `0` is inside the share's `[0, 1]` and the count branch had no
     positivity test at all, so `e2b_surviving_units: -5` gave
-    `status=MATCHED … surviving_units=114` and a VERDICT — the exact inert-floor
+    `status=MATCHED … surviving_units=90` and a VERDICT — the exact inert-floor
     shape the bundle's sibling reader (`probes/e1_e2_scores.py`) refuses by name for
     these same keys. One record value must not mean "refused" to one instrument and
     "bound + scored" to another, so each owned floor refuses it here.
@@ -2556,7 +2557,7 @@ def test_checker_refuses_a_matched_binding_under_an_owned_share_floor(
     surviving = scored.replace("declared_surviving_floor=30",
                                "declared_surviving_floor=500", 1)
     findings, _ = check.check(surviving)
-    assert any("[V15]" in f and "surviving_units=114 is under" in f
+    assert any("[V15]" in f and "surviving_units=90 is under" in f
                for f in findings), findings
 
 
@@ -2836,14 +2837,14 @@ def test_checker_refuses_a_binding_whose_measured_side_is_unanchored(
     assert any("[V15]" in f and "control-arm share this run did not produce" in f
                for f in findings), findings
     # (b) an inflated surviving count on the binding line only
-    padded = scored.replace("surviving_units=114", "surviving_units=600", 1)
+    padded = scored.replace("surviving_units=90", "surviving_units=600", 1)
     findings, _ = check.check(padded)
     assert any("[V15]" in f and "population this run did not produce" in f
                for f in findings), findings
     # (c) the measured side deleted (anchor removed, claim kept) — also refused
-    stripped = re.sub(r"\sarm=after-vet-shipped metric=atomic_points \S+",
+    stripped = re.sub(r"\sarm=after-vet-shipped metric=real_facts \S+",
                       "", scored, count=1)
-    assert "arm=before metric=atomic_points" in stripped  # the before arm still has one
+    assert "arm=before metric=real_facts" in stripped  # the before arm still has one
     findings, _ = check.check(stripped)
     assert any("[V15]" in f and "anchored to nothing" in f for f in findings), findings
     # (d) ONE PRINTED STEP of drift (#11689 review round 12): the anchor's two sides
@@ -2857,19 +2858,21 @@ def test_checker_refuses_a_binding_whose_measured_side_is_unanchored(
                for f in findings), findings
     # (e) a DUPLICATED arm line (#11689 review round 9, T4): `Log.one()` returns the
     # LAST match while every other reader of the arm data takes the FIRST, so an
-    # appended duplicate `metric=atomic_points` line re-anchored `surviving_units=`
-    # to a population the run never produced — the exact run the E2b row REFUSES
-    # (114 atomic Points under a 115 floor) then certified MATCHED and SCORED.
+    # appended duplicate arm line re-anchored `surviving_units=` to a population the
+    # run never produced — the exact run the E2b row REFUSES then certified MATCHED
+    # and SCORED. ⛔ The anchor is now the surviving PLANTED units (`real_facts`),
+    # which is the population the record's E2b row is written over (#10989), so the
+    # duplicated line is `metric=real_facts`.
     over = scored.replace("declared_surviving_floor=30",
                           "declared_surviving_floor=115", 1)
-    over = over.replace("surviving_units=114", "surviving_units=115", 1)
+    over = over.replace("surviving_units=90", "surviving_units=91", 1)
     findings, _ = check.check(over)
     assert any("[V15]" in f and "population this run did not produce" in f
                for f in findings), findings          # the honest shape reds
     real = next(ln for ln in over.splitlines()
-                if ln.startswith("arm=after-vet-shipped metric=atomic_points "))
-    forked = over.replace(real, real + "\n" + real.replace("atomic=114", "atomic=115"), 1)
-    assert forked.count("arm=after-vet-shipped metric=atomic_points ") == 2
+                if ln.startswith("arm=after-vet-shipped metric=real_facts "))
+    forked = over.replace(real, real + "\n" + real.replace("count=90", "count=91"), 1)
+    assert forked.count("arm=after-vet-shipped metric=real_facts ") == 2
     findings, _ = check.check(forked)
     assert any("[V15]" in f and "population this run did not produce" in f
                for f in findings), findings

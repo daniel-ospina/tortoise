@@ -124,8 +124,10 @@ voided every run, so the floor the refusal existed to protect was never checked)
 ``prereg_binding`` therefore compares the artifact's corpus pin (path and/or
 sha256) and its three owned floors against THIS run — ``e1_objects`` on the scored
 arm's Objects, ``e1_min_before_share`` on the BEFORE arm's share (§3.2's refusal
-boundary) and ``e2b_surviving_units`` on the arm's ``atomic_points`` (the quantity
-both sibling consumers of that key also test) — prints the
+boundary) and ``e2b_surviving_units`` on the arm's ``real_facts`` — the surviving
+PLANTED units, which is the population the record's E2b row is written over
+(§3.1: *"the planted units that survived (floor ≥ 30)"*) and the same quantity
+both sibling consumers of that key test — prints the
 comparison on ``prereg-binding``, and refuses to score when they do not agree or a
 denominator is under its frozen floor (the artifact's own rule: *``below_floor:
 REFUSED, which is neither a pass nor a fail``*). Exit code 3, not RED: an unsound
@@ -934,9 +936,13 @@ def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
     if declared_before is not None and (
             before_share is None or before_share < float(declared_before)):
         reasons.append("below-floor")
-    # E2b's population floor, on the SAME quantity the row's floor tests
-    # (`atomic_points`) — a second population for one frozen key would let a run the
-    # E2b row refuses bind here (#11689 review).
+    # E2b's population floor, on the SAME quantity the row's floor tests — the
+    # surviving PLANTED units (`real_facts`). ⛔ NOT `atomic_points`: that counts
+    # every payload point, planted or not, so a corpus of 25 non-planted rows plus
+    # 6 planted ones clears a floor of 30 while 84 of the 90 planted units are gone
+    # (measured, #10989). The record already says which population it means (§3.1:
+    # "the planted units that survived (floor ≥ 30)"); the binding read the
+    # wrong one.
     declared_surviving = metric_floors.get("e2b_surviving_units")
     if declared_surviving is not None and (
             surviving_units < int(declared_surviving)):
@@ -1029,6 +1035,12 @@ def binding_line(bind: dict) -> str:
             f"before_share={_fmt(bind['before_share'])} "
             f"declared_surviving_floor={_floor_number(bind['declared_surviving_floor'])} "
             f"surviving_units={bind['surviving_units']} "
+            # WHICH population the floor's measured side is, printed rather than
+            # left to prose: the key's name ("surviving units") and the quantity
+            # the gate reads have to be checkable against each other, and a gate
+            # whose population is only in a docstring is one a future reader can
+            # re-point silently (#10989).
+            f"surviving_units_basis=real_facts "
             f"reason={','.join(bind['reasons']) or 'n/a'}")
 
 
@@ -1271,14 +1283,21 @@ def _run(argv: list[str] | None = None) -> int:
                                   # them cannot honour the floor (#11689).
                                   before_share=before_c["share"],
                                   # E2b's POPULATION, and deliberately the quantity
-                                  # the row's own floor already tests: the bundle's
-                                  # sibling consumers (`probes/capstone_measure.py`,
+                                  # the row's own floor tests: the bundle's sibling
+                                  # consumers (`probes/capstone_measure.py`,
                                   # `probes/e1_e2_scores.py`) both compare
                                   # `e2b_surviving_units` against the arm's
-                                  # `atomic_points`. A third population for one frozen
-                                  # key would let a run the E2b row REFUSES bind here
-                                  # (#11689 review) — one key, one denominator.
-                                  surviving_units=after_c["atomic_points"])
+                                  # surviving planted units, `real_facts`. A second
+                                  # population for one frozen key would let a run the
+                                  # E2b row REFUSES bind here — one key, one
+                                  # denominator (#11689 review).
+                                  # ⛔ `atomic_points` was that wrong population: it
+                                  # counts every payload point, so non-planted rows
+                                  # padded a floor the E2b row is written over
+                                  # surviving PLANTED units (#10989, measured: 25
+                                  # non-planted + 6 planted cleared a floor of 30
+                                  # with 84 of 90 planted units lost).
+                                  surviving_units=after_c["real_facts"])
             declared_line = f"prereg_declared={args.prereg}"
             bind_line = binding_line(bind)
             try:
@@ -1352,8 +1371,10 @@ def _run(argv: list[str] | None = None) -> int:
                     "this run bound to declares none, so there is none to check")
     else:
         e2b_note = ("E2b's population floor is separate and IS checked against the "
-                    "scored arm's atomic Points on the binding line "
-                    "(declared_surviving_floor=)")
+                    "scored arm's surviving PLANTED units (`real_facts`) on the "
+                    "binding line (declared_surviving_floor= / surviving_units= "
+                    "surviving_units_basis=real_facts) — not against "
+                    "`atomic_points`, which counts non-planted rows too (#10989)")
     lines.append(
         "prereg_e2_floor=not-consumed note=the E2 criteria state no threshold to "
         "score (no-loss: after >= before), which satisfies any stated threshold; "

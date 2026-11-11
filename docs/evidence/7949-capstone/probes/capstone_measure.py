@@ -3947,7 +3947,12 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         f"bar={e2b_out['bar']}")
     add(f"e2b note: fused={e1['fused']} of atomic={e1['atomic_points']} Points on "
         "the scored arm — the artifact's atomicity control, whose denominator is "
-        "atomic POINTS rather than surviving planted units")
+        "atomic POINTS rather than surviving planted units. The POPULATION FLOOR "
+        f"({bars['floors']['e2b_surviving_units']}) is checked against surviving "
+        "PLANTED units "
+        f"(real_facts={e1['real_facts']}), which is the population the row is "
+        "written over — not against atomic POINTS, which count non-planted rows "
+        "too (#10989)")
     add("")
     add("## E4 — the committed operator receipt, read verbatim")
     add(f"e4 receipt={e4['evidence']} run_id={e4['run_id']} date={e4['date']} "
@@ -4253,11 +4258,17 @@ def main(argv: list[str] | None = None) -> int:
     e2b_floor = bars["floors"]["e2b_surviving_units"]
     e2b_share = ((e1["fused"] / e1["atomic_points"])
                  if e1["atomic_points"] else 1.0)
+    # ⛔ The floor's population is the surviving PLANTED units (`real_facts`),
+    # which is what the record's §3.1 E2b row is written over — never
+    # `atomic_points`, which counts non-planted rows too and so let a run that lost
+    # 84 of 90 planted units clear the floor of 30 (#10989). Read from the SAME
+    # record field `e1_e2_scores.py` tests the key against, so the two readers of
+    # one frozen key agree on its population.
     e2b_result = outcome(measured=True,
-                         below_floor=e1["atomic_points"] < e2b_floor,
+                         below_floor=e1["real_facts"] < e2b_floor,
                          passed=e2b_share <= bars["E2b"]["max_fused_share"],
                          bar=f"fused share <= {bars['E2b']['max_fused_share']} "
-                             f"(floor {e2b_floor} surviving units)",
+                             f"(floor {e2b_floor} surviving planted units)",
                          value=f"fused={e1['fused']}/{e1['atomic_points']} = "
                                f"{e2b_share:.6f}")
     e2_result = e2_outcome(e2a_result=e2a_result, e2b_result=e2b_result,
