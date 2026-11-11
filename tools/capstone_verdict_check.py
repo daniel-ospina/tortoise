@@ -243,9 +243,9 @@ _MEASUREMENT_RUN_KEYS = (
     # REQUIRED, not decoration: `tests/test_7949_capstone_measure.py`'s
     # `_CROSS_FILE_PROBE_CITES` reads THIS pair out of THIS file and asserts that line of the
     # probe carries `"a_row_census": a_census,` — symbol-only prose matches nothing and reds it.
-    # It has re-staled four times inside the PR that added these rows, so it is RE-DERIVED from
-    # the tree on every insertion above it (`grep -n '"a_row_census": a_census,'`), never
-    # eyeballed. Omitting it
+    # It re-stales on EVERY insertion above it inside the PR that added these rows — a COUNT
+    # would be wrong by the next commit — and it is RE-DERIVED from the tree on each one
+    # (`grep -n '"a_row_census": a_census,'`), never eyeballed. Omitting it
     # here reopened the exact construction #10601 review round 2 closed: a
     # `REFUSED` table with every other key nulled and a CLOSED blocker named was
     # EXEMPTED from V12 while `a_row_census` still held produced numbers

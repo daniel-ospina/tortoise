@@ -167,7 +167,7 @@ in its body or comments, and no artefact in this repo re-derives the pair from t
 ⛔ **Neither kind appears on this graph in §3.1's typed
 cell, which is where a labelled kind would show:** the hosted `list_pointkinds` histogram enumerates every
 `pointKind` carried by a non-operator `Point` (`n.pointKind IS NOT NULL` plus the non-operator predicate —
-`is_operator` absent-or-false AND `op_type IS NULL`), and §3.1 lists seven kinds, neither of them
+`is_operator` absent-or-false AND `op_type IS NULL`), and §3.1's `typed` cell lists seven kinds, neither of them
 `constraint` nor `preference`. The two readings do not otherwise line up either — the 11-04 one counts
 `NULL` 3,658 of ~19,301 Point kinds where §3.1 reports **0 of 15,868** — and each `NULL` figure is quoted
 as the record that published it states it, never as a measurement of a change between two reads whose
