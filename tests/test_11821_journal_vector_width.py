@@ -765,16 +765,13 @@ def test_the_emit_event_extra_branch_leaves_a_verbatim_vector_raw(tmp_path):
         "(absent is reserved for pre-change records)")
 
 
-def test_add_point_does_not_keep_the_servers_width_over_a_caller_vector(tmp_path):
-    """#11835 review F2 (P1): the marker must die with the vector it described.
+def _added_point_with_caller(tmp_path, caller):
+    """Drive `_point` → `add_point` over a fixed SERVER vector; return the journalled point.
 
-    `EventAPI._point` stamps the SERVER's vector; `add_point` then splats the
-    caller's `fields` over it. Before the fix the second stamp hit
-    `_stamp_journal_vector_width`'s idempotency guard ("already `f32` ⇒ this is
-    mine") and returned early, so the CALLER's off-grid values were journalled
-    as `f32` — the population #5004 round-7 says a later width/base64 migration
-    must not narrow. Measured: remove the `p.pop(...)` in `api.add_point` and
-    this row reds with `'f32' == 'f64'`.
+    Shared by the two caller-vector shapes below so the PREMISE assertion (`_point`
+    really stamped the server vector `f32`, i.e. the stale marker this pin is about
+    exists at all) is stated once and cannot drift apart between them. A pin whose
+    premise stops holding passes without exercising anything.
     """
     from unittest import mock
 
@@ -799,7 +796,6 @@ def test_add_point_does_not_keep_the_servers_width_over_a_caller_vector(tmp_path
         try:
             api = EventAPI(log, initiated_by="extractor",
                            projection=sdk._get_proj())
-            caller = [0.1, 1 / 3, 2.718281828459045]
             # THE PREMISE, asserted rather than described (#11835 review, P2):
             # `_point` is called exactly as `add_point` calls it. If it stamped
             # no `f32` — an unavailable embedder, a width `_degrade_to_width`
@@ -821,9 +817,62 @@ def test_add_point_does_not_keep_the_servers_width_over_a_caller_vector(tmp_path
                 if ln.strip()]
     added = [e for e in recorded if e.get("type") == "PointAdded"]
     assert added, "EventAPI did not journal a PointAdded"
-    point = added[0]["point"]
+    return added[0]["point"]
+
+
+def test_add_point_does_not_keep_the_servers_width_over_a_caller_vector(tmp_path):
+    """#11835 review F2 (P1): the marker must die with the vector it described.
+
+    `EventAPI._point` stamps the SERVER's vector; `add_point` then splats the
+    caller's `fields` over it. Before the fix the second stamp hit
+    `_stamp_journal_vector_width`'s idempotency guard ("already `f32` ⇒ this is
+    mine") and returned early instead of re-deciding the width from the values.
+
+    ⚠️ THIS ROW NO LONGER DISCRIMINATES THE `p.pop(...)` — and it is kept because
+    of what it does discriminate. Since `61a684bf7f` the seam re-decides the width
+    from the values, so an OFF-GRID caller vector is refused `f32` whether or not
+    the pop ran: remove the pop and this row stays green. What reds here is the
+    seam's decision rule. The pop's own load-bearing shape — a caller whose text
+    is already the seam's shortest float32 round-trip, where a stale `f32` is
+    HONOURED and nothing but the pop removes it — is pinned by the sibling below
+    (`test_add_point_does_not_keep_the_servers_width_over_an_f32_text_caller_vector`),
+    which does red with the pop removed (`'f32' == 'f64'`, measured).
+    """
+    caller = [0.1, 1 / 3, 2.718281828459045]
+    point = _added_point_with_caller(tmp_path, caller)
+
     assert point["embedding"] == caller, (
         "the caller's vector must be journalled exactly as supplied")
     assert point[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64, (
         "the server's `f32` marker survived the vector it described — a caller "
         "vector is now declared narrowed")
+
+
+def test_add_point_does_not_keep_the_servers_width_over_an_f32_text_caller_vector(
+        tmp_path):
+    """The shape on which `api.add_point`'s `p.pop(...)` is LOAD-BEARING.
+
+    A caller vector whose text is ALREADY the shortest float32 round-trip of its
+    own bits (`[0.1, 0.33333334, 2.7182817]`) is exactly what the seam's
+    idempotency guard reads as "my own output". So a stale `f32` riding in from
+    `_point` is HONOURED — values left as they are, width declared `f32` — unless
+    the door removes the marker between the swap and the re-stamp.
+
+    Measured (mutation): delete `p.pop(JOURNAL_VECTOR_WIDTH_KEY, None)` in
+    `tortoise/api.py::EventAPI.add_point` and this row reds with
+    `'f32' == 'f64'`; the off-grid sibling above stays GREEN under the same
+    mutation, which is why the discriminating shape has its own pin.
+    """
+    import numpy as np
+
+    # shortest-float32 text is what the seam's quantiser itself emits, so these
+    # values are on the guard's "already mine" side of the test.
+    caller = [float(str(np.float32(v))) for v in (0.1, 1 / 3, 2.718281828459045)]
+    point = _added_point_with_caller(tmp_path, caller)
+
+    assert point["embedding"] == caller, (
+        "the caller's vector must be journalled exactly as supplied")
+    assert point[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64, (
+        "a caller vector in shortest-float32 text was declared `f32` — the "
+        "server's stale marker was honoured over the values (the pop in "
+        "`api.add_point` is what must remove it)")

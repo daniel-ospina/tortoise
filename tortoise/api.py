@@ -465,8 +465,16 @@ class EventAPI:
                 # seam's own output", so it would return early and never
                 # re-decide — leaving a CALLER's off-grid values declared
                 # `f32`, which is precisely the population #5004 round-7 says
-                # a later width/base64 migration must not narrow. Measured:
-                # without this pop the caller's vector is journalled `f32`.
+                # a later width/base64 migration must not narrow. Measured, and
+                # named by the shape it holds for: with a caller vector whose
+                # text is ALREADY the seam's shortest float32 round-trip, delete
+                # this pop and it is journalled `f32` (the seam's idempotency
+                # guard reads that text as its own output); that shape is pinned
+                # by test_add_point_does_not_keep_the_servers_width_over_an_
+                # f32_text_caller_vector. An OFF-GRID caller vector is refused
+                # `f32` with or without this pop since `61a684bf7f` (the seam
+                # re-decides from the values), so that sibling pin no longer
+                # discriminates the pop — it discriminates the decision rule.
                 p.pop(JOURNAL_VECTOR_WIDTH_KEY, None)
                 stamp_journal_embedding(p, creating=False)
         # #5004 round-7: the journal MARKERS are server-minted, and this is the
