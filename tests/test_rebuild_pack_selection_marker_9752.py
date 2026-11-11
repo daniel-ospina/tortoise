@@ -640,6 +640,68 @@ def test_recover_from_log_reports_a_conflict_not_a_loss(tmp_path, monkeypatch):
         f"HAS a marker: {rec['reason']}")
 
 
+def test_recover_from_log_forwards_the_unverified_discriminator(
+        tmp_path, monkeypatch):
+    """UNVERIFIED must survive into the dict, or BOTH callers mislabel the gap.
+
+    FAILING VALUE: `recover_from_log` read `pack_selection_verified` only to
+    append a `reason` clause and never copied it into `result`. Both recovery
+    consumers label the gap by calling `pack_selection_shape(result)`, so the
+    UNVERIFIED arm of that helper was DEAD for them: on a real run whose
+    post-restore read raised, the dict produced `('restore gap', '… reads as
+    UNCONFIGURED … a pack an admin REMOVED can be re-admitted …')` while the
+    same line's `reason` said "COULD NOT RUN … UNVERIFIED" — the false loss
+    assertion rounds 2-4 removed, on the two surfaces where no other reporter
+    exists (#9752 review round 5, P1).
+
+    REACHABLE: the real rescue path (v7 sidecar carrying a marker, empty graph)
+    with only the post-restore `MATCH (s:PackSelection) RETURN properties(s)`
+    made to raise — a failure that can only happen after the wipe, which is
+    exactly why it must not be reported as a loss.
+    """
+    from tortoise.consistency import recover_from_log
+    from tortoise.projection import pack_selection_shape
+
+    sdk, events = _mk_sdk(tmp_path)
+    _write_journal(events)
+    _plant(Path(_sidecar_path(events)),
+           _sidecar_payload(pack_selection=[{"revision": 1,
+                                             "updated_by": "admin"}]))
+    proj = _proj(sdk)
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    real_g = proj.g
+    reads = {"n": 0}
+
+    class _FailingVerifyRead:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def query(self, q, *a, **kw):
+            if "PackSelection" in q and "RETURN properties" in q:
+                reads["n"] += 1
+                if reads["n"] >= 2:      # 1 = capture, 2 = post-restore verify
+                    raise RuntimeError("post-restore read failed")
+            return self._inner.query(q, *a, **kw)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    monkeypatch.setattr(proj, "g", _FailingVerifyRead(real_g))
+
+    rec = recover_from_log(str(events), proj)
+
+    assert reads["n"] >= 2, "the verification read must actually be attempted"
+    assert rec.get("pack_selection_verified") is False, (
+        "the UNVERIFIED discriminator must travel in the returned dict — both "
+        f"recovery callers label the gap from it: {rec}")
+    label, _consequence = pack_selection_shape(rec)
+    assert "UNVERIFIED" in label, (
+        "the shape derived from this dict must read UNVERIFIED, not the "
+        f"absence/restore-gap claim: {label}")
+    assert "re-admitted" not in _consequence, (
+        f"an unverified read must not assert a loss: {_consequence}")
+
+
 def test_migrate_route_names_the_conflict_shape(tmp_path, caplog, monkeypatch):
     """The migration route must not print the loss wording on a CONFLICT.
 
@@ -1157,6 +1219,9 @@ def test_recover_from_log_documents_the_pack_selection_keys():
     assert "pack_selection_conflict" in doc, (
         "the conflict discriminator is returned but not documented, so a "
         "caller reading the contract cannot tell a conflict from a loss")
+    assert "pack_selection_verified" in doc, (
+        "the UNVERIFIED discriminator is returned but not documented, so a "
+        "caller cannot tell 'could not confirm' from an observed loss")
     assert "#9752" in doc
 
 

@@ -2260,21 +2260,35 @@ def pack_selection_shape(counts: dict) -> tuple[str, str]:
     """Name WHICH `:PackSelection` gap shape this is, and what it means.
 
     A non-zero `pack_selection_gap` is reported for four different states and
-    only ONE of them is an observed loss. Every consumer that prints the count
+    only ONE of them is an observed loss. Every consumer that printed the count
     used to hardcode the absence consequence ("reads as UNCONFIGURED, its
     `revision` is 0, a pack the admin REMOVED is back", plus a "re-pin"
     remedy), which is a FALSE report on the other three — and on the CONFLICT
     shape the remedy would overwrite a live marker that may be NEWER than the
-    one captured (review rounds 2-4 found this same collapse at seven different
-    sites; this helper is the single answer they now share).
+    one captured (review rounds 2-5 found this same collapse at seven different
+    sites). Three of the four reporters now call this function — the two
+    recovery callers and `migrate_db`; the `rebuild` CLI keeps its own pinned
+    chain, stated in `migrate_db._pack_selection_shape`'s docstring.
 
-    Order matters: UNKNOWN (a sidecar that cannot say), then UNVERIFIED (the
-    read never produced a result), then CONFLICT (a DIFFERENT marker is live),
-    then the true restore gap.
+    Order matters: CONFLICT first (a live marker is an OBSERVATION, so it
+    outranks a dearth of information — the two can be true at once), then
+    UNKNOWN (a sidecar that cannot say), then UNVERIFIED (the read never
+    produced a result), then the true restore gap.
 
     Returns ``(label, consequence)`` for the caller's message.
     """
     counts = counts or {}
+    # ⛔ CONFLICT is tested BEFORE UNKNOWN: a live marker is an OBSERVATION,
+    # while UNKNOWN is a dearth of information. Both can be true at once (a v6
+    # leftover — `state_unknown` — merged with a live capture, then a concurrent
+    # `set_graph_packs` landing between the wipe and the restore), and reporting
+    # UNKNOWN there would claim "the graph may read as UNCONFIGURED" over a graph
+    # observed to still hold a marker (#9752 review round 5).
+    if counts.get("pack_selection_conflict"):
+        return ("reported CONFLICT, not a loss",
+                "a DIFFERENT marker is present, so the graph IS configured and "
+                "may hold a NEWER pack set — do not re-pin over it without "
+                "checking which is intended")
     if counts.get("pack_selection_state_unknown"):
         return ("pre-preservation/UNKNOWN",
                 "the pre-wipe sidecar cannot say whether the marker existed, so "
@@ -2284,11 +2298,6 @@ def pack_selection_shape(counts: dict) -> tuple[str, str]:
         return ("UNVERIFIED — the post-restore verification COULD NOT RUN",
                 "the marker is not confirmed intact and NOT observed gone, so "
                 "the graph is not reported as having lost it")
-    if counts.get("pack_selection_conflict"):
-        return ("reported CONFLICT, not a loss",
-                "a DIFFERENT marker is present, so the graph IS configured and "
-                "may hold a NEWER pack set — do not re-pin over it without "
-                "checking which is intended")
     return ("restore gap",
             "the graph reads as UNCONFIGURED, so a pack an admin REMOVED can be "
             "re-admitted with its revision reset")
@@ -14449,7 +14458,7 @@ class FalkorProjection(
                 "%d session container(s), %d session link(s), "
                 "%d onboarding state(s), %d onboarding step link(s), "
                 "%d config entry(ies), event-log watermark %s, "
-                "%d TeamMeta marker(s)) "
+                "%d TeamMeta marker(s), %d PackSelection marker(s)) "
                 "from an interrupted rebuild — merging it before this "
                 "wipe+replay",
                 snapshot_path,
@@ -14462,7 +14471,13 @@ class FalkorProjection(
                 len(leftover.get("onboarding_step_links") or []),
                 len(leftover.get("config_snapshot") or []),
                 _event_meta_last_seq(leftover.get("event_meta")),
-                len(leftover.get("team_meta") or []))
+                len(leftover.get("team_meta") or []),
+                # #9752: the pack-set marker is the eleventh section the union
+                # re-merges, and it was the only one the summary omitted — a
+                # rescue file carrying a marker then read as an interrupted
+                # rebuild with nothing to say about the class this change adds
+                # (review round 5).
+                len(leftover.get("pack_selection") or []))
         # #5353: the marker count the union is about to collapse. Both legs are
         # read HERE, before `team_meta_snapshot` is rebound from `merged` below
         # (the same reason the onboarding reassignment is ordered after this
