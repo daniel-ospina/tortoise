@@ -87,6 +87,7 @@ __all__ = [
     "VERBATIM",
     "MoneyValueError",
     "money_props",
+    "money_view_after_update",
     "ratio_bp",
     "ratio_meets",
     "read_money_value",
@@ -296,7 +297,12 @@ def read_money_value(record: Mapping[str, Any]) -> tuple[str, int, int] | None:
 
 def money_view_after_update(stored: Mapping[str, Any],
                             props: Mapping[str, Any]) -> dict[str, Any]:
-    """The money view an UPDATE leaves on the node: ``stored`` ∪ ``props``.
+    """The money view an UPDATE leaves on the node.
+
+    The SCALE triple (``amountMinor``/``currency``/``minorUnitExponent``) comes
+    from ``stored`` and is then edited by ``props``; the two OPTIONAL members
+    (``verbatim``/``asOf``) come from ``props`` ONLY. The ⛔ paragraph below
+    states why that asymmetry is deliberate — read it before "fixing" it.
 
     A props value of ``None`` DELETES the stored property, because the writers
     persist props with ``SET n += $props`` and a null value removes the key —

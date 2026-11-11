@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 from pydantic import ValidationError
 
+import tortoise.money as money_module
 from tortoise.commit_schema import CommitEvent, Entity
 from tortoise.money import (
     AMOUNT_MINOR,
@@ -45,7 +46,7 @@ from tortoise.money import (
     read_money_value,
     total_minor,
 )
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import TortoiseSDK, _sanitize_props
 
 #: R$ 250.000,00 and R$ 100.000,00 in minor units at exponent 2.
 COMMITTED_MINOR = 25_000_000
@@ -1585,3 +1586,67 @@ class TestCreateDedupFoldIsIdempotent:
                                        minor_unit_exponent=2))
         assert _point_row(sdk, self.CONTENT)[AMOUNT_MINOR] == RELEASED_MINOR
         assert _whole_sum(sdk) == {"BRL": RELEASED_MINOR}
+
+
+class TestTheModulesSurfaceAndTheGateCannotBeSilentlyNarrowed:
+    """Two review findings on #11836 that were recorded and not applied.
+
+    Both are shapes where the gate/marker can be MISSING without any behaviour
+    changing on the paths in use today — which is exactly why nothing red-ed:
+    `money_view_after_update` worked without an `__all__` entry, and
+    `_sanitize_props` was reached with `money_views=None` by every live caller.
+    Each is now pinned so the TIDY-UP that removes it cannot pass as hygiene.
+    """
+
+    def test_every_public_name_in_the_module_is_exported(self):
+        """#11836 review P2 — `money_view_after_update` was absent from `__all__`.
+
+        The rest of the module's public names are all declared there, so the one
+        missing entry read like an accident rather than a decision — and the
+        next reader "tidying" the list would either add it (harmless) or, more
+        likely, trust the list as the module's surface and look no further. The
+        population is derived from the module, not typed, so a future public
+        helper that skips `__all__` reds here too.
+
+        Non-vacuity: at the pre-fix head `money_view_after_update` is a public
+        module-level function, so it is in `public` and not in `__all__`, and
+        the equality reds naming it.
+        """
+        public = {
+            name for name, value in vars(money_module).items()
+            if not name.startswith("_")
+            and (name.isupper()
+                 or getattr(value, "__module__", None) == money_module.__name__)
+        }
+        assert public == set(money_module.__all__), (
+            "the module's public names and `__all__` disagree: "
+            f"missing={sorted(public - set(money_module.__all__))}, "
+            f"stale={sorted(set(money_module.__all__) - public)}")
+
+    def test_an_empty_view_list_cannot_turn_the_money_gate_off(self):
+        """#11836 review P2 — `if money_views is None` made `[]` a bypass.
+
+        `[]` means "there is no state to grade", so the `else` arm looped over
+        nothing and the caller's bag was never shown to the predicate — the gate
+        was skipped entirely rather than falling back to the bag (which IS the
+        state when no stored version exists). No live caller produces `[]`
+        today, which is why this was P2 and not a defect: the fix is to make the
+        empty value mean what `None` means, so a future caller cannot reach the
+        bypass by building the list with a comprehension that happens to be
+        empty.
+
+        Non-vacuity: at the pre-fix head the empty list takes the `else` arm,
+        the loop body never executes, and no `ValueError` is raised.
+        """
+        # a half value (no currency) is the shape the predicate exists to refuse
+        with pytest.raises(ValueError, match="write boundary"):
+            _sanitize_props({"amountMinor": COMMITTED_MINOR}, money_views=[])
+        # the positive control: a WELL-FORMED bag is still admitted through the
+        # same empty list, so the fix is a fallback to the bag, not a refusal
+        admitted = _sanitize_props(
+            money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2),
+            money_views=[])
+        assert read_money_value(admitted) == ("BRL", COMMITTED_MINOR, 2)
+        # and a non-money bag stays the no-op it is on the create door
+        assert _sanitize_props({"colour": "blue"}, money_views=[]) == {
+            "colour": "blue"}

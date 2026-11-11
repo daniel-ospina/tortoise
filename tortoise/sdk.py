@@ -6525,7 +6525,9 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     ``minorUnitExponent``, ``verbatim``, ``asOf`` — ``money.MONEY_VALUE_FIELDS``)
     is a structural VALUE, not five reserved names, so the money members are NOT
     refused here — they are GRADED, against the state the write leaves.
-    ``None`` (the default) means the caller's bag IS that state (a CREATE); the
+    ``None`` (the default) and an EMPTY list both mean the caller's bag IS that
+    state (a CREATE — and the empty case is graded the same way on purpose, so
+    a caller passing ``[]`` can never turn the gate off); the
     two UPDATE doors pass the merge built by ``_money_views_for_update``
     (``stored`` ∪ ``props``, a ``None`` value deleting), one view per matching
     node. This kwarg exists because a bag is not a state: grading the bag refused
@@ -6627,7 +6629,7 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # just a stray property (the same no-op the create leg gave it), and on a
     # node that DOES carry a value the merge is graded — which is the case a
     # create-semantics exemption got wrong (#11863).
-    if money_views is None:
+    if not money_views:
         refuse_malformed_money(props, door="props")
     else:
         for _view in money_views:
@@ -10121,6 +10123,14 @@ def _money_views_for_update(g, props: dict, *, node_id: str,
     probe = ("MATCH (n{label} {{{match_prop}:$id}}) "
              "RETURN n.amountMinor, n.currency, n.minorUnitExponent, "
              "       n.verbatim, n.asOf")
+    #
+    # `n.verbatim` / `n.asOf` are DEAD for this view: `money_view_after_update`
+    # carries the optional members from the caller only, so a STORED value in
+    # those two columns is dropped. They stay in the projection because the view
+    # is built by zipping this RETURN list against `MONEY_VALUE_FIELDS` with
+    # `strict=True` — dropping them would make the zip raise on every
+    # money-naming update, and narrowing the tuple instead would give up the
+    # drift guard that makes a drifted RETURN fail closed.
     # ⛔ EVERY pair is probed, and the views are UNIONED — never "the first pair
     # that matched". `_update_entity` fans out: its label loop writes EVERY label
     # whose identity key equals `$id`, so one call can stamp a `:Point` and an
