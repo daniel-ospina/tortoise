@@ -19,11 +19,12 @@ Two things are pinned here, and they are different contracts:
     the attribution, because no observable here separates "the agent stated no
     relation" from "the extractor produced none".
 
-⚠️ NOT PINNED, declared: this file pins the HOSTED half only. Nothing pins that
-the SDK receipt (`sdk.py:16093-16094`) still carries the key, or that the two
-lanes agree — `grep -rn relation_write tests/*.py` finds no SDK-side case. A
-future change that renames or zero-fills the key on the SDK lane would leave
-three "byte-parity with the SDK receipt" comments false with CI green. A nudge, never a refusal
+NOT PINNED HERE, declared: this file pins the HOSTED half only. The SDK half IS
+covered elsewhere — `tests/eval/write_path/test_write_path_relation_lane.py`
+reads `cap["relation_write"]["written"]` off `_capture_session`, so a renamed or
+dropped key KeyErrors there — but that is an on-demand eval lane (#10194), not
+selected by a source-only change, so a break would land green and red later.
+Nothing pins that the two lanes agree on the same shape. A nudge, never a refusal
     (``product/2026-08-11-tooling-surface-consolidation.md:22``).
 
 Class-B doctrine — each test states the value/state that makes it fail, and
@@ -131,7 +132,11 @@ def test_the_counts_never_raise_at_receipt_assembly():
     assert ha._capture_int("not-a-number") == 0
     assert ha._capture_int(None) == 0
     assert ha._capture_int(-3) == 0
-    assert ha._capture_connection_warning({"written": [1, 2]}, 3) is not None
+    line = ha._capture_connection_warning({"written": [1, 2]}, 3)
+    assert line is not None
+    # The key exists only when the link ran, so this must NOT read as silence.
+    assert "no relation was stated" not in line
+    assert "no usable counts" in line
 
 
 def test_the_step_witness_entity_count_is_read_not_rederived():

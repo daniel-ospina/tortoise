@@ -17982,9 +17982,9 @@ def _capture_int(value) -> int:
     The advisory is appended AFTER the capture has committed, so a surprising
     shape must degrade to 0 rather than 500 a write that already landed. What
     0 then MEANS is the caller's business: for ``entities`` it suppresses the
-    line (nothing was named), while for ``written`` it makes the line fire and
-    report the count as 0 — the honest reading of a count this receipt could
-    not interpret, and strictly safer than raising on a committed capture.
+    line (nothing was named); for ``written`` it makes the line fire, and the
+    detail then says the link reported no usable counts rather than claiming
+    silence — the key's presence proves relations were stated.
     """
     try:
         return max(0, int(value or 0))
@@ -18100,6 +18100,10 @@ def _capture_connection_warning(relation_write: dict | None,
         return None
     if written + dropped + folded > 0:
         detail = f"{written} written, {dropped} dropped, {folded} folded"
+    elif relation_write is not None:
+        # The key exists only when the link ran, so relations WERE stated: an
+        # all-zero (or uninterpretable) count must not be reported as silence.
+        detail = "the write link reported no usable counts"
     elif relations_dropped > 0:
         detail = (f"{relations_dropped} stated relation(s) were dropped before "
                   f"the write link ran")
