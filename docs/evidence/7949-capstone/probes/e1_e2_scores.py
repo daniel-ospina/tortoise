@@ -2024,8 +2024,10 @@ def score(repo: Path = _ROOT) -> dict:
     # over. The SHARE stays the atomicity control's proxy over all Points and is
     # disclosed as one (`share_population` below); re-scoring it over E2b's OWN
     # registered denominator — "the planted units that survived (floor ≥ 30)", not
-    # E2a's frozen 14 value-bearing units — is #10360's remaining work (#11833
-    # review r1 P2-1: this sentence used to justify the deferral with E2a's 14).
+    # E2a's frozen 14 value-bearing units — is #11865, not #10360 (#11833 review r1
+    # P2-1 fixed the 14; r5 P2-1 measured that #10360 owns the write-path retention
+    # guarantee and names neither E2b nor a share denominator in its body or any of
+    # its comments).
     e2b_population = after["surviving_units"]
     e2["e2b"] = {
         "fused": after["fused"],
