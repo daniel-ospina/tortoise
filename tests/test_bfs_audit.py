@@ -230,12 +230,41 @@ def test_the_code_detector_sees_every_shape_it_claims(tmp_path):
 def test_the_code_detector_ignores_prose_outside_python_files(tmp_path):
     """A `.md`/`.sql` file under `tortoise/` cannot carry a Python identifier, so
     its mention is prose. Reading it as a caller was a declared-shape violation:
-    it never parses, so it fell to the `None` arm and the whole file counted."""
+    it never parses, so it fell to the `None` arm and the whole file counted.
+
+    `.pyi` is the OPPOSITE case — a stub is Python source — and is pinned by
+    :func:`test_a_stub_file_is_read_as_python_not_as_prose`. Do not add it here.
+    """
     for suffix in (".md", ".sql", ".txt", ".yml"):
         path = tmp_path / f"notes{suffix}"
         path.write_text("The deprecated helper propagate_shock is documented here.\n",
                         encoding="utf-8")
         assert _code_lines_naming(path, "propagate_shock") == frozenset(), suffix
+
+
+def test_a_stub_file_is_read_as_python_not_as_prose(tmp_path):
+    """A `.pyi` stub is Python source: it declares and re-exports names, so a name
+    inside one IS a code reference.
+
+    Pinned because the suffix gate is the only thing that decides this, and a stub
+    answering the empty set is read as "prose only" by the audit — so a module
+    could start re-exporting the helper and the audit would stay GREEN. The typing
+    spec and every static analyser (mypy, Pyright, ruff's `flake8-pyi`) parse
+    stubs as Python source for exactly that reason.
+    """
+    stub = tmp_path / "mod.pyi"
+    for src in (
+        "def propagate_shock(m: object) -> object: ...\n",
+        "from tortoise.projection.propagation import propagate_shock as _ps\n",
+        "propagate_shock(1)\n",
+    ):
+        stub.write_text(src, encoding="utf-8")
+        assert _code_lines_naming(stub, "propagate_shock") == frozenset({1}), src
+
+    # An unparseable stub is a DEGRADED read (`None` -> "every line is code"),
+    # never a prose verdict: a stub we cannot read is not a stub that is clean.
+    stub.write_text("def f(:\n", encoding="utf-8")
+    assert _code_lines_naming(stub, "propagate_shock") is None
 
 
 def test_an_unreadable_file_is_routed_to_production_code(monkeypatch):
