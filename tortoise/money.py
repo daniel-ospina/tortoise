@@ -114,8 +114,10 @@ _MONEY_GROUP: tuple[str, ...] = (AMOUNT_MINOR, CURRENCY, MINOR_UNIT_EXPONENT)
 
 #: Depth bound for :func:`refuse_malformed_money_in_payload`. Journal payloads
 #: nest two or three levels (``PointAdded.point``, ``EventRecorded.uses[]``).
-#: ⛔ This bound is NOT the loop guard — ``seen`` is (a self-referential payload
-#: is cut there) — it is a REFUSAL threshold: a payload deeper than this is
+#: ⛔ This bound is NOT the loop guard — ``seen`` is, and it cuts a
+#: self-referential payload for MAPPINGS AND SEQUENCES alike (measured: a
+#: `list` cycle used to be terminated by this bound instead, #11836 review P2).
+#: It is a REFUSAL threshold: a payload deeper than this is
 #: refused rather than skipped, because a skip is a fail-open the caller cannot
 #: see (measured, #11836 review Finding 3: at depth 9 the walk `continue`d, so a
 #: nested malformed money bag was ADMITTED through a real door). The bound is
@@ -503,7 +505,7 @@ def refuse_malformed_money_in_payload(payload, *, door: str = "") -> None:
             # walk stops looking, the money gate reports clean, and a payload
             # whose money sits deeper than the bound is never graded — the
             # posture this function states ("REFUSE, not admit") inverted. The
-            # loop is bounded by `seen`, not by this number, so the depth is a
+            # loop is bounded by `seen`, never by this number, so the depth is a
             # judgement about payload SHAPE and its failure must be visible.
             # ⛔ The message reports the SHAPE, never a money member: this refusal
             # fires on a money-free payload too (it is about what the walk could
@@ -517,10 +519,23 @@ def refuse_malformed_money_in_payload(payload, *, door: str = "") -> None:
                 f"levels, so this gate cannot see what it holds — refused at "
                 f"the write boundary{where}: flatten the payload or write the "
                 "value through the props door (#2782)")
-        if isinstance(node, Mapping):
+        if isinstance(node, (Mapping, list, tuple)):
+            # ⛔ IDENTITY IS THE ONLY LOOP GUARD, AND IT MUST COVER BOTH SHAPES.
+            # `seen` used to be consulted in the `Mapping` arm ALONE: a
+            # self-referential MAPPING was cut here, while a self-referential
+            # `list`/`tuple` was terminated by the DEPTH raise — the opposite of
+            # what this block used to claim (#11836 review P2; measured: `seen`
+            # stayed empty for a list cycle). The same commit widened the bound
+            # 8 -> 32, and a payload that shares ONE list object as TWO children
+            # per level is then 2^depth visits — 2^33 inside the write gate
+            # (measured 1.9 s at depth 20, ~4x per +2 levels), i.e. hours, where
+            # the old bound took milliseconds. Identity keeps the walk LINEAR for
+            # both shapes, which is what makes the bound a statement about payload
+            # SHAPE rather than a budget on work.
             if id(node) in seen:  # a self-referential payload cannot loop us
                 continue
             seen.add(id(node))
+        if isinstance(node, Mapping):
             if any(key in node for key in _MONEY_GROUP):
                 refuse_malformed_money(node, door=door)
             stack.extend(

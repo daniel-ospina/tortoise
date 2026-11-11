@@ -1667,6 +1667,18 @@ class TestThePayloadWalkFailsClosedAtItsDepthBound:
             node = {"meta": node}
         return node
 
+    @staticmethod
+    def _nest_money_free(depth: int) -> dict:
+        """A deep payload that carries NO money — the collateral-damage shape.
+
+        ``_nest`` cannot stand in for it: it buries a MALFORMED money bag at the
+        bottom, so it is refused at any depth the walk can reach, by design.
+        """
+        node: dict = {"note": "no money here"}
+        for _ in range(depth):
+            node = {"meta": node}
+        return node
+
     def test_a_payload_deeper_than_the_bound_is_refused(self):
         from tortoise.money import (
             _MONEY_PAYLOAD_MAX_DEPTH,
@@ -1698,13 +1710,59 @@ class TestThePayloadWalkFailsClosedAtItsDepthBound:
                     "too deep to grade", "venture:tranche",
                     meta=self._nest(_MONEY_PAYLOAD_MAX_DEPTH + 1))
 
-    def test_a_sane_depth_is_not_collateral_damage(self, journaled_sdk):
-        sdk, _events = journaled_sdk
+    def test_a_sane_depth_is_not_collateral_damage(self):
+        """A legitimate deep payload must still LAND, through the door that WALKS.
+
+        #11836 review P2, measured: this test used to call ``sdk.create_point``,
+        which reaches no ``refuse_malformed_money_in_payload`` call site at all
+        (the walk has exactly ONE, ``EventAPI._emit``), so it asserted nothing
+        about the gate and could not fail — the collateral risk the depth bound
+        introduces was claimed guarded and was unguarded. It now goes through
+        ``api.add_object``, the same real door as its refusal sibling, and the
+        payload is MONEY-FREE: a deep malformed bag is correctly refused, so
+        only a money-free one can tell "no collateral damage" apart from "the
+        walk never ran".
+        """
+        import tempfile
+        from pathlib import Path
+
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
         from tortoise.money import _MONEY_PAYLOAD_MAX_DEPTH
-        pid = sdk.create_point(
-            "statement", "deep metadata is fine",
-            meta=self._nest(_MONEY_PAYLOAD_MAX_DEPTH - 2))
-        assert pid["id"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Path(tmp) / "events.jsonl"
+            api = EventAPI(EventLog(str(journal)), initiated_by="extractor")
+            api.add_object(
+                "deep metadata is fine", "venture:tranche",
+                meta=self._nest_money_free(_MONEY_PAYLOAD_MAX_DEPTH - 2))
+            assert journal.exists() and journal.read_text(), (
+                "the write did not land — a legitimate deep payload was refused")
+            assert "ObjectRegistered" in journal.read_text()
+
+    def test_a_cyclic_sequence_is_cut_by_identity_not_by_the_depth_bound(self):
+        """``seen`` must bound SEQUENCES too — the comment this fixes said so.
+
+        #11836 review P2, measured: ``seen`` was consulted in the ``Mapping`` arm
+        only, so a cyclic ``list`` was terminated by the DEPTH raise (an
+        admission-shaped failure dressed as a refusal, and the shape the reviewer
+        measured as a hang under aliasing). With identity applied to both shapes
+        the cycle is cut where it closes, exactly as a mapping cycle already was.
+
+        Non-vacuity: without the sequence arm this raises ``MoneyValueError``
+        ("nests deeper than"), so the test reds on the pre-fix tree — and it is
+        deterministic, one child per level, so it cannot itself hang.
+        """
+        from tortoise.money import refuse_malformed_money_in_payload
+
+        cyclic: list = []
+        cyclic.append(cyclic)
+        # ADMITTED (the cycle is cut by identity), never a depth refusal
+        refuse_malformed_money_in_payload({"meta": cyclic}, door="test")
+
+        cyclic_tuple = ([],)
+        cyclic_tuple[0].append(cyclic_tuple)
+        refuse_malformed_money_in_payload({"meta": cyclic_tuple}, door="test")
 
     def test_the_depth_refusal_names_no_phantom_money_value(self):
         """P3 (#11836 review): the depth refusal fires on a payload it could not
