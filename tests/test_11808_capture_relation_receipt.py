@@ -17,15 +17,15 @@ Two things are pinned here, and they are different contracts:
   * the ADVISORY — one line when the session named ≥2 entities and no
     connection between them was written. It states the observation and refuses
     the attribution, because no observable here separates "the agent stated no
-    relation" from "the extractor produced none".
+    relation" from "the extractor produced none". A nudge, never a refusal
+    (``product/2026-08-11-tooling-surface-consolidation.md:22``).
 
 NOT PINNED HERE, declared: this file pins the HOSTED half only. The SDK half IS
 covered elsewhere — `tests/eval/write_path/test_write_path_relation_lane.py`
 reads `cap["relation_write"]["written"]` off `_capture_session`, so a renamed or
 dropped key KeyErrors there — but that is an on-demand eval lane (#10194), not
 selected by a source-only change, so a break would land green and red later.
-Nothing pins that the two lanes agree on the same shape. A nudge, never a refusal
-    (``product/2026-08-11-tooling-surface-consolidation.md:22``).
+Nothing pins that the two lanes agree on the same shape.
 
 Class-B doctrine — each test states the value/state that makes it fail, and
 that the state is reachable in its fixture.
