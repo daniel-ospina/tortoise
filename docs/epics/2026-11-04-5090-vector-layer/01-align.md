@@ -277,7 +277,7 @@ re-scoping upward (inventing children the neighbours already own).
 
 1. The embedding rule is operative on the shipped default, with the measured rate recorded (scope S1).
 2. The exemption register has a production home, and DoD rows 1–2 are re-scored as a recorded decision (S2).
-3. **The unretrievable vectors are censused and their removal carried with its surface-approval request**, and `#10976`/`#7879` are **still to be reconciled** to the ruled wording at `S3-VECTOR-CENSUS.md` §6 — **that reconciliation is OWED; both comments still read "pending V1"** — because **V1 was answered
+3. **The unretrievable vectors are censused, and their disposition is RULED — the removal is REFUSED** (owner, 2026-11-10, `#11395` comment `6781921075`), so **no surface-approval request follows** and none is demanded above; and `#10976`/`#7879` are **reconciled** to the ruled wording at `S3-VECTOR-CENSUS.md` §6 — **that reconciliation is DONE, not owed** (both comments re-pointed 2026-11-10: `6779662659`, `6779663836`) — because **V1 was answered
 2026-11-07** (the index moves to Postgres), so the target is the wording S3 §6 already carries — location decided, the work is `#4051`'s — not
 "pending V1" (S3). **V1 itself is §14.3's and is NOT this epic's acceptance.**
 4. The store reports its vector contract positively, not only when deficient (S4).
@@ -330,7 +330,8 @@ declared exemption in the product.
    way ("keep the vectors, make them searchable"), and the 2026-10-08 billing ruling removes the cost
    argument rather than granting one (retained bytes are revenue; removing bytes moves the bill by $0.00).
    ⚠️ This is a **contradiction-test result**, not an assumption — see scope §1: the census is filed, the
-   decision is the owner's, and the surface rule gates the removal.
+   decision **was** the owner's and has been given (**REFUSED**, 2026-11-10, `#11395` comment `6781921075`), so
+   nothing is removed and the surface rule gates nothing.
 4. **The epic has never had its two mandated workflow artifacts.**
 
 **Decision unchanged: REPOINT.** The repointed acceptance is in §7.1, with S3 re-scoped per the above.

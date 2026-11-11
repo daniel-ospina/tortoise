@@ -101,9 +101,7 @@ unindexed labels that means ADDING indexes, which is more RAM and a surface chan
 billing ruling** (tiers are capped and priced per feature; **retained bytes are revenue**) removes the COST
 argument in both directions: removing bytes changes the bill by **$0.00**. So **no recorded decision
 authorises** this removal — the earlier direction points the other way, and the later ruling is silent on
-it. **That is why S3 stops at a census plus an approval request**: the removal is the owner's decision,
-taken on the census — and no lane may skip the surface gate it triggers, which is why S3 stops at the census
-plus a named approval request.
+it. **That is why S3 stops at a census**: the removal **was** the owner's decision and has been given — **REFUSED, 2026-11-10, `#11395` comment `6781921075`** — so nothing is removed and no surface gate is triggered by a refusal; the census stands as the measurement, and what remains is §14.3 V3's INDEX work item.
 
 ---
 
@@ -229,7 +227,7 @@ Ontology low · Accessibility low · Library-deps none.
 
 | # | previous | now | why |
 |---|---|---|---|
-| 1 | S3 = "decide V1: keep vs move, and implement" | **S3 = census the unretrievable vectors; removal carried with its surface-approval request** | V1's home is §14.3 and its architecture owner is `#4333`; the changelog records `#5090` as a **consumer**, and corrects a wrong owner. |
+| 1 | S3 = "decide V1: keep vs move, and implement" | **S3 = census the unretrievable vectors; the removal it would have carried was RULED KEEP on 2026-11-10 (so no approval request follows)** | V1's home is §14.3 and its architecture owner is `#4333`; the changelog records `#5090` as a **consumer**, and corrects a wrong owner. |
 | 2 | **E1** = filtered-ANN recall measurement | **removed** — it moves to `#4051`, it is not parked | It is evidence *for a move*. The location is decided (2026-11-07) and the implementation is not — so the measurement leaves this epic's scope, but it is **not** consumer-less: its consumer is `SEARCH-ARCHITECTURE.md` §9 **M1** (*"whether the move ships"*), read with §6.1's shortfall assertion, which gates private-beta. |
 | 3 | Architecture **high on branch 2** | **low** | The branch is gone from scope. Flagged explicitly so `low` is not misread. |
 | 4 | Profit chain: "removable bytes ⇒ $1.32/tenant/month" | **deleted** | **Wrong model twice**: retained bytes are revenue (billing ruling), and the bill is provisioned RAM (§16.1). |
