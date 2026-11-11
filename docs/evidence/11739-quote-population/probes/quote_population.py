@@ -697,13 +697,27 @@ def census(client: _Client, endpoint: str = "") -> dict:
 
 
 
+def _abandon(stream):
+    """Replace a stream that just failed with devnull, so SHUTDOWN cannot change the exit code.
+
+    ⛔ Catching the write is not enough, and returning a code is not enough either: a failed
+    buffered stream stays DIRTY, the interpreter flushes it again at shutdown, and THAT failure
+    sets exit 120 over whatever the arm returned. Measured on both channels — `--out - >
+    /dev/full` returned 2 and the process exited 120 (fixed this way), and `2>/dev/full` turned
+    a 0, a 2, a 3 AND a 4 into 120 (same fix). A stream that is already `None` needs nothing.
+    """
+    null = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115 - outlives this call
+    return null
+
+
 def _say(text: str) -> None:
-    """Write a diagnostic to stderr, tolerating a MISSING stream.
+    """Write a diagnostic to stderr, tolerating a MISSING or UNWRITABLE stream.
 
     `2>&-` at exec closes fd 2 and CPython sets `sys.stderr = None`, so a bare
     `sys.stderr.write(...)` raises `AttributeError` and turns a documented exit into an
-    uncaught 1 — the code is the contract, the message is best-effort (review, landing
-    round 2, measured with `--out /tmp/y.json 2>&-`: exit 1 where the contract says 3).
+    uncaught 1 (measured: no key + `2>&-` → 1, where the contract says 3). And a FULL stderr
+    (`2>/dev/full`) leaves a dirty buffer that shutdown re-flushes, setting 120 over the arm's
+    code. The exit code is the contract; the message is best-effort.
     """
     stream = sys.stderr
     if stream is None:
@@ -712,7 +726,7 @@ def _say(text: str) -> None:
         stream.write(text)
         stream.flush()
     except (OSError, ValueError):
-        pass
+        sys.stderr = _abandon(stream)
 
 
 def _mcp_endpoint(raw: str) -> str:
@@ -732,7 +746,21 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--endpoint", default=os.environ.get("TORTOISE_API_URL", DEFAULT_EP))
     ap.add_argument("--out", default="-")
-    args = ap.parse_args(argv[1:])
+    try:
+        args = ap.parse_args(argv[1:])
+    except SystemExit:
+        # `--help` (0) and a usage error (2) both write through ARGPARSE's own `sys.stderr`
+        # call, which this module never sees — so a full stderr left a dirty buffer and the
+        # documented 2 became 120 at shutdown, the same class as `--out - > /dev/full`
+        # (measured: `--nonsense 2>/dev/full` → 120). Check the flush and abandon the stream
+        # if it failed, then re-raise the exit argparse chose.
+        stream = sys.stderr
+        if stream is not None:
+            try:
+                stream.flush()
+            except (OSError, ValueError):
+                sys.stderr = _abandon(stream)
+        raise
 
     key = os.environ.get("TORTOISE_MCP_API_KEY") or os.environ.get("TORTOISE_API_KEY")
     if not key:

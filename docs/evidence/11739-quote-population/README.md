@@ -12,8 +12,8 @@ aboutObjects: "#11739, #11682, #11706, #10360, #8488, #11805, sdk.create_point"
 # #11739 — the `quote` population rate
 
 **The measurement #11739 asked for before anything else.** #11682 put it plainly: *"How often is
-`quote` non-empty? If it is mostly empty, filling it is the entry point and #10360 becomes the first
-task, not a side issue."* The question decides whether the recompose seam is worth building at all,
+`quote` non-empty… If it is mostly empty, the first task is filling it and `#10360` becomes the entry
+point, not a side issue."* The question decides whether the recompose seam is worth building at all,
 because a composed text over empty quotes is `content` wearing a different name.
 
 **Answer: `quote` is populated.** 94.86% of live Points carry a non-empty `quote`, and **98.12% of the

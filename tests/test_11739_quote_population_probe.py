@@ -975,6 +975,57 @@ def test_an_unwritable_stdout_returns_two(monkeypatch):
     assert qp.sys.stdout.name == os.devnull
 
 
+def test_a_full_stderr_does_not_change_the_exit_code(monkeypatch, tmp_path):
+    """FAILS IF a FULL stderr turns a documented exit into 120.
+
+    `2>/dev/full`: the write fails, `_say` catches it — and the failed buffer is still DIRTY, so
+    interpreter shutdown re-flushes it and THAT failure sets 120 over the arm's own code
+    (measured on the real process for the 0, 2, 3 and 4 arms alike, the exact mirror of the
+    `--out - > /dev/full` defect fixed one round earlier). The stream must be ABANDONED, not
+    merely caught, so this asserts both the returned code and that `sys.stderr` was replaced.
+    """
+    import io
+
+    _stub_main(monkeypatch)
+
+    class _FullRaw(io.RawIOBase):
+        def writable(self) -> bool:
+            return True
+
+        def write(self, _b) -> int:
+            raise OSError(28, "No space left on device")
+
+    stderr = io.TextIOWrapper(io.BufferedWriter(_FullRaw()))
+    monkeypatch.setattr(qp.sys, "stderr", stderr)
+    assert qp.main(["quote_population", "--out", str(tmp_path / "census.json")]) == 0
+    assert qp.sys.stderr is not stderr
+    assert qp.sys.stderr.name == os.devnull
+
+
+def test_a_full_stderr_does_not_turn_usage_into_a_hundred_and_twenty(monkeypatch):
+    """FAILS IF argparse's OWN usage write leaves a dirty stderr for shutdown to re-flush.
+
+    `--help` and a usage error write through argparse's own `sys.stderr` call, which this module
+    never sees — so catching our own diagnostics does not cover them. Measured: `--nonsense
+    2>/dev/full` exited 120 where the contract says 2.
+    """
+    import io
+
+    class _FullRaw(io.RawIOBase):
+        def writable(self) -> bool:
+            return True
+
+        def write(self, _b) -> int:
+            raise OSError(28, "No space left on device")
+
+    stderr = io.TextIOWrapper(io.BufferedWriter(_FullRaw()))
+    monkeypatch.setattr(qp.sys, "stderr", stderr)
+    with pytest.raises(SystemExit) as raised:
+        qp.main(["quote_population", "--nonsense"])
+    assert raised.value.code == 2
+    assert qp.sys.stderr.name == os.devnull
+
+
 def test_a_closed_stdout_returns_two(monkeypatch, capsys):
     """FAILS IF `--out -` with fd 1 CLOSED exits 1.
 
