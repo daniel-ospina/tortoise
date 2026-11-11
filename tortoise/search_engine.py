@@ -1391,7 +1391,9 @@ class EpEvidence:
 class EpBreakdown:
     # THE point confidence (issue #2206 contract): the belief mean α/(α+β)
     # of the PERSISTED posterior when EP has run on the claim
-    # (posterior_alpha/beta), else the persisted prior mean (ep_alpha/beta).
+    # (posterior_alpha/beta), else the persisted prior mean (ep_alpha/beta) —
+    # unless a readable ``n.confidence`` mirror supplies the value, which LEADS
+    # both (so a declared Beta(3,1) beside a stored 0.9 reads 0.9).
     # It matches the number TortoiseEP.compute_confidence / sdk.get_confidence
     # return for the same point WHENEVER one is persisted — with ONE stated
     # exception, ``None`` here: those two still answer the Beta(1,1) prior mean
@@ -5571,7 +5573,7 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                 # prior-only: a declared #2199 baseline on a LIVE claim with
                 # no EP measurement — confidence_mean is the PRIOR mean, or a
                 # readable `n.confidence` mirror's value, which LEADS it (see
-                # the precedence below) — never a measured one. A TERMINAL
+                # the precedence above) — never a measured one. A TERMINAL
                 # claim is neither measured nor
                 # prior-only (its 0.5 is the #2490 decayed posterior), so the
                 # terminal gate above also clears `baseline` — see the

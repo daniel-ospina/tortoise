@@ -5333,9 +5333,9 @@ def test_update_entity_clearing_the_pair_clears_the_mirror(sdk, tmp_path):
 # DIFFERENT shape does not satisfy it (that is how `:345` passed every earlier
 # review). It is a regression tripwire on the class, not a grammar proof.
 #
-# Scope: the five modules that carry this contract. The architecture doc is
-# guarded by `tests/test_extractor_v4_citation_scan`-class tests and is not
-# duplicated here.
+# Scope: the five modules that carry this contract. The architecture docs are
+# guarded by their own citation tests (`tests/test_extractor_v4_citation_rot.py`,
+# `tests/test_docs_citation_refs.py`) and are not duplicated here.
 
 _BELIEF_PROSE = (
     "tortoise/search_engine.py",
@@ -5358,12 +5358,48 @@ _PRIOR_MEAN_CLAIM_PATTERNS = (
     re.compile(r"confidence_mean\s+(is|IS)\s+(the\s+)?(declared\s+)?PRIOR mean",
                re.IGNORECASE),
     re.compile(r"reads its PRIOR mean", re.IGNORECASE),
+    # The canonical `EpBreakdown` field doc and `annotate_ep_batch`'s contract
+    # both say "else the persisted prior mean (ep_alpha/beta)" — the same false
+    # prediction for a mirror-bearing row.
+    re.compile(r"else the persisted prior mean \(ep_alpha/beta\)", re.IGNORECASE),
 )
 
 #: The class-2 claim: "… else the persisted prior mean (ep_alpha/beta), else
 #: ``None``" — `None` for a mirror-only Point is the false prediction.
 _ABSENT_CLAIM = re.compile(
     r"prior mean \(ep_alpha/beta\), else ``None``", re.IGNORECASE)
+
+#: AFFIRMATIVE qualifier forms. A bare `"mirror" in window` is polarity-blind:
+#: "…IS the declared PRIOR mean; the mirror never leads it." satisfied it
+#: (measured), so a future edit could invert the rule and stay green. Each
+#: pattern below is a phrase the true rule actually uses; a rewording that
+#: drops all three fails loudly, which is the intended cost.
+_QUALIFIER_FORMS = (
+    re.compile(r"mirror\s+(LEADS|leads)\b"),
+    re.compile(r"mirror's value, which LEADS"),
+    re.compile(r"\bLEADS it\b"),
+    re.compile(r"unless a readable"),
+    re.compile(r"mirror supplies"),
+)
+
+#: Words that INVERT a qualifier ("the mirror never leads it"). Checked in the
+#: few characters before a matched form, so a negated mention cannot satisfy
+#: the guard by containing the right phrase.
+_QUALIFIER_NEGATIONS = re.compile(r"\b(never|not|no longer|isn't|doesn't)\b",
+                                  re.IGNORECASE)
+
+#: Sites the scan MUST still find, per file. A tripwire that matches nothing
+#: passes vacuously — and this change's first draft already reworded
+#: `volunteer.py` out of its own arm (`reads its PRIOR mean` went from 1 match
+#: to 0) while both tests stayed green. Update these counts DELIBERATELY when
+#: prose is added or removed; a mismatch means the guard went blind, which is
+#: exactly what it exists to detect.
+_EXPECTED_PRIOR_MEAN_SITES = {
+    "tortoise/search_engine.py": 5,
+    "tortoise/why.py": 2,
+    "tortoise/volunteer.py": 1,
+}
+_EXPECTED_ABSENT_SITES = {"tortoise/search_engine.py": 1}
 
 
 def _belief_prose(rel: str) -> str:
@@ -5376,18 +5412,56 @@ def _belief_prose(rel: str) -> str:
     return re.sub(r"\s+", " ", without_markers)
 
 
+def _claim_sites(patterns) -> dict[str, int]:
+    """How many claim sites the patterns find, per file."""
+    found: dict[str, int] = {}
+    for rel in _BELIEF_PROSE:
+        prose = _belief_prose(rel)
+        count = sum(1 for pattern in patterns for _ in pattern.finditer(prose))
+        if count:
+            found[rel] = count
+    return found
+
+
+def _qualified(window: str) -> bool:
+    """Whether the window carries an AFFIRMATIVE mirror qualifier."""
+    for pattern in _QUALIFIER_FORMS:
+        for match in pattern.finditer(window):
+            before = window[max(0, match.start() - 24):match.start()]
+            if _QUALIFIER_NEGATIONS.search(before):
+                continue
+            return True
+    return False
+
+
 def _unqualified_claims(patterns) -> list[str]:
-    """Sites where a claim matches but no `mirror` follows it in-sentence."""
+    """Sites where a claim matches but no mirror qualifier follows it."""
     problems = []
     for rel in _BELIEF_PROSE:
         prose = _belief_prose(rel)
         for pattern in patterns:
             for match in pattern.finditer(prose):
                 window = prose[match.start():match.start() + _QUALIFIER_WINDOW]
-                if "mirror" in window.lower():
+                if _qualified(window):
                     continue
                 problems.append(f"{rel}: …{prose[match.start():match.start() + 180]}…")
     return problems
+
+
+def _assert_sites_survive(patterns, expected: dict[str, int]) -> None:
+    """Fail when the scan has stopped finding the sites it is meant to own."""
+    found = _claim_sites(patterns)
+    assert found == expected, (
+        "the belief-prose guard no longer finds the sites it exists to check "
+        f"(found {found}, expected {expected}). A tripwire that matches "
+        "nothing passes vacuously; if a sentence was deliberately removed or "
+        "reworded, update _EXPECTED_*_SITES in the same commit.")
+
+
+def test_the_prior_mean_guard_still_finds_its_sites():
+    """A guard that matches nothing must fail, not pass (its own blind spot)."""
+    _assert_sites_survive(_PRIOR_MEAN_CLAIM_PATTERNS, _EXPECTED_PRIOR_MEAN_SITES)
+    _assert_sites_survive((_ABSENT_CLAIM,), _EXPECTED_ABSENT_SITES)
 
 
 def test_a_prior_mean_claim_in_the_belief_prose_names_the_mirror():
