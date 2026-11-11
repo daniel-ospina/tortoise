@@ -367,7 +367,7 @@ def shortest_float32_vector(vector: list[float]) -> list[float] | None:
 
     * the same float32 bits as the input (``struct``/``vecf32`` equality), and
     * a decimal text ~44 % shorter (measured on the pinned 384-d corpus:
-      8,414 B → 4,689 B, 21.9 → 12.2 chars/float at the writer's COMPACT separators).
+      across #11821 P0: 8,414 B → 4,689 B, 21.9 → 12.2 chars/float (value + separators).
 
     ⛔ **NOT interchangeable with `stored_form.narrow_to_stored_width`**, and a
     reader must not swap one for the other. Both agree on the float32; they
