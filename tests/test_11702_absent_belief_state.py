@@ -958,6 +958,63 @@ def test_the_mirror_wins_over_a_contradicting_pair(sdk):
         "confidence"] == pytest.approx(0.9)
 
 
+def test_a_draft_with_a_persisted_prior_names_its_belief_beside_a_null_value(sdk):
+    """Review cycle 12 (P3): the manifest said `null` means "absent" and
+    NOTHING ELSE, and a draft row breaks that — which is why the row now states
+    the exception instead of the consumer inferring a state from the number.
+
+    The #2598 staging gate forces `confidence: null` on a draft the belief
+    predicate does not call measured (`uncomputed = draft and not has_ep`),
+    while `ep_state` still names the PERSISTED belief. A draft carrying a #2199
+    declared baseline is therefore `confidence: null` + `ep_state: "baseline"`
+    + `confidence_source: "uncomputed"` — null is NOT "absent" there, and
+    `ep_state` is the key a consumer must read.
+
+    Discriminating power: this is the ONLY shape that reds a "confidence is
+    null iff ep_state is absent" assertion, so it is what keeps the qualifier
+    from being reverted as noise.
+    """
+    proj = sdk._get_proj()
+    measured = sdk.create_point("statement", "a live measured claim",
+                                dedup=False, status="live")["id"]
+    draft = sdk.create_point("statement", "a draft carrying a prior",
+                             dedup=False, status="draft")["id"]
+    proj.g.query(
+        "MATCH (n:Point {id:$id}) SET n.ep_alpha = 5.0, n.ep_beta = 1.0, "
+        "n.baseline_set = true", params={"id": draft})
+    proj.g.query(
+        "MATCH (n:Point {id:$id}) SET n.posterior_alpha = 9.0, "
+        "n.posterior_beta = 1.0", params={"id": measured})
+
+    rows = {r["id"]: r for r in StateRanker(projection=proj).rerank(
+        [{"id": measured, "scores": {"rrf": 1.0}},
+         {"id": draft, "scores": {"rrf": 1.0}}])}
+    gaps = {r["id"]: r for r in GapsRanker(projection=proj).rerank(
+        [{"id": draft, "scores": {"rrf": 1.0}}])}
+    eps = annotate_ep_batch(proj.g, [draft, measured])
+
+    rec = rows[draft]["recall_ranking"]
+    gap = gaps[draft]["gaps_ranking"]
+    # The persisted belief is NAMED …
+    assert rec["ep_state"] == EP_STATE_BASELINE, rec
+    assert gap["ep_state"] == EP_STATE_BASELINE, gap
+    assert eps[draft].ep_state == EP_STATE_BASELINE, eps[draft]
+    # … beside a null the staging gate forces, and the source says why.
+    assert rec["confidence"] is None, rec
+    assert gap["confidence"] is None, gap
+    assert rec["confidence_source"] == "uncomputed", rec
+    assert gap["confidence_source"] == "uncomputed", gap
+    # The `ep` block has no staging gate, so the same claim reports its prior
+    # mean there — that asymmetry is #2598's, and it is WHY the manifest row
+    # qualifies the "null means absent" clause rather than restating it.
+    assert eps[draft].confidence_mean == pytest.approx(0.8333, abs=1e-4), (
+        eps[draft])
+    # A live measured claim is the control: null really does mean absent only
+    # when nothing is persisted.
+    assert rows[measured]["recall_ranking"]["confidence"] == pytest.approx(0.9)
+    assert rows[measured]["recall_ranking"]["ep_state"] == "measured"
+
+
 def test_why_support_chain_does_not_weigh_an_absent_supporter(sdk):
     """The support chain is ordered and capped by `weight`.
 

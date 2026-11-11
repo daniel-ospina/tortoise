@@ -409,9 +409,14 @@ response_fields:
   emitted_when: 'ALWAYS on every row of mode=state and mode=custom — the #11702 state NAME for the belief behind
     the row: "measured" (EP ran on this claim), "baseline" (a persisted prior EP did not measure — a #2199 declared
     baseline, a legacy n.confidence mirror, or a TERMINAL claim whose posterior is the #2490 decayed 0.5/1.0/1.0),
-    or "absent" (nothing is persisted at all). It is the key that makes recall_ranking.confidence readable: null
-    means "absent" and nothing else, so a consumer never has to infer the state from the number. The same three
-    tokens are emitted by the `ep` block of a search hit, by gaps_ranking.ep_state, by graph_ranking.ep_state and
+    or "absent" (nothing is persisted at all). It is the key that makes recall_ranking.confidence readable: on a
+    LIVE row null means "absent" and nothing else, so a consumer never has to infer the state from the number.
+    ⚠️ THE ONE EXCEPTION IS A DRAFT ROW, stated here because the two keys disagree there by design: the #2598
+    staging gate forces confidence to null on a draft the belief predicate does not call measured (`uncomputed =
+    draft and not has_ep`), while ep_state still names the PERSISTED belief — so a draft carrying a #2199 declared
+    baseline emits confidence null + ep_state "baseline" + confidence_source "uncomputed". A consumer that needs
+    "is there a belief" must read ep_state, not confidence; confidence_source "uncomputed" is the other half of
+    the same statement. The same three tokens are emitted by the `ep` block of a search hit, by gaps_ranking.ep_state, by graph_ranking.ep_state and
     by the SubgraphExpander node payload, so all of them join on one vocabulary'
   unchanged_when_off: NO — additive key on an existing payload, so the key set grows by one on every row (the values
     are the contract change; the field itself is additive). Not flag-gated
@@ -429,7 +434,9 @@ response_fields:
   emitted_when: 'mode=gaps ONLY: the same three-token #11702 state as recall_ranking.ep_state, on the gaps ranker''s
     own rows (it reads its own signal query). An absent gap carries confidence null + ep_state "absent" and is
     ordered by STRUCTURE alone — the gaps score is load/(1+support), so a belief never participates in the gaps order and an absent gap is NOT demoted relative to a belief-carrying one (unlike recall_ranking, which has the
-    absent tier). This key is NOT an ordering guarantee on mode=gaps'
+    absent tier). This key is NOT an ordering guarantee on mode=gaps. The recall_ranking.ep_state draft exception
+    applies verbatim: a DRAFT row carrying a persisted prior emits confidence null (the #2598 staging gate) beside
+    ep_state "baseline" and confidence_source "uncomputed"'
   unchanged_when_off: NO — additive key on an existing payload. Not flag-gated
 - response: tortoise_search
   field: graph_ranking.confidence
