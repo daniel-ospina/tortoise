@@ -105,7 +105,47 @@ _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
 #: `point` in the keyword payload is refused, and `point` inside the positional
 #: one is refused. `add_event` / `emit_belief` still refuse it at their own
 #: doors, for a message that names the door the caller actually called.
+#:
+#: ⛔ AND THE SAME HOLE, ONE NAME OVER (#11948): `**props` splats onto the
+#: ENVELOPE as well, where `type=` RE-TYPES the record and `event_id=` /
+#: `ts=` / `initiated_by=` / `agent_id=` rewrite its identity. That family is
+#: refused at `_emit` and at the doors, exactly as this one is — see
+#: `_ENVELOPE_KEYS` below.
 _NESTED_RECORD_KEYS = frozenset({"point"})
+
+#: The journal ENVELOPE names — the shape `_emit` itself builds, not a payload.
+#: #11948: a payload key that collides with one of these does not ADD a field,
+#: it REWRITES the record's identity. `_emit` builds
+#: `{"event_id", "ts", "type", "initiated_by", "agent_id", **payload}`, so a
+#: caller `type=` re-TYPES the record (`add_object(..., type="PointAdded")`
+#: journalled a `PointAdded` no record door built, and the replay folds by
+#: `ev["type"]`), and `ts` / `initiated_by` / `agent_id` / `actor_user_id`
+#: forge who wrote the record and when. The collision — not `point=` — is what
+#: lets a caller re-type a record, and it was open at every splatting door.
+#:
+#: ⛔ `event_id` is deliberately NOT in this set: `add_document(event_id=...)`
+#: pins the envelope id on purpose (#125, with `#167`'s None default pinned by
+#: `tests/test_api.py`), and `add_document` takes NAMED parameters rather than
+#: splatting a caller's dict, so refusing it here would reverse a recorded
+#: decision instead of closing a door. The passthrough doors refuse it below.
+_ENVELOPE_KEYS = frozenset({
+    "type",
+    "ts",
+    "initiated_by",
+    "agent_id",
+    "actor_user_id",
+})
+
+#: …and the envelope names a PASSTHROUGH door can set obliquely. `_emit` binds
+#: `corrects` and `actor` as KEYWORDS, so a caller's `corrects=` filed under
+#: `add_event(**extra)` never reaches the payload check — it lands in the
+#: envelope's provenance edge directly. `add_object` can also name an
+#: `event_id` (its `id=` is the OBJECT's id, not the record's).
+_ENVELOPE_KEYS_AT_PASSTHROUGH = _ENVELOPE_KEYS | {
+    "event_id",
+    "corrects",
+    "actor",
+}
 
 
 def _refuse_caller_named_record_keys(keys, door: str) -> None:
@@ -113,10 +153,11 @@ def _refuse_caller_named_record_keys(keys, door: str) -> None:
     `_emit`'s positional record argument.
 
     Called by `_emit` itself (once over the keyword payload, once over the
-    positional record) and by `add_event` / `emit_belief`, so the rule has one
-    predicate and none of the call sites can drift. Always BEFORE any write: a
-    refusal here leaves nothing to replay, which is the same ordering argument
-    `_emit`'s own gates make.
+    positional record), by `add_event` / `emit_belief` (a message naming the
+    door the caller actually called), and by `add_object` (`**props`). One
+    predicate, one spelling: no call site can drift. Always BEFORE any write —
+    a refusal here leaves nothing to replay, which is the same ordering
+    argument `_emit`'s own gates make.
     """
     named = sorted(set(keys) & _NESTED_RECORD_KEYS)
     if named:
@@ -126,6 +167,58 @@ def _refuse_caller_named_record_keys(keys, door: str) -> None:
             "vector rule the record doors apply (width declared, caller marker "
             "refused). Use the door that owns that record (`add_point`, "
             "`add_operator`) instead of naming it here.")
+
+
+def _refuse_caller_named_envelope_keys(keys, door: str) -> None:
+    """Refuse a caller key that collides with the journal ENVELOPE.
+
+    #11948: the envelope is the FUNNEL's to build. A payload key that shares a
+    name with it does not add a field — `_emit` spreads the payload AFTER the
+    envelope, so the caller's value WINS, and the record is re-typed
+    (`type`), re-identified (`event_id`) or re-attributed (`ts`,
+    `initiated_by`, `agent_id`, `actor_user_id`, `corrects`). Nothing else in
+    the write path re-checks the record's type, so a caller-typed record is
+    folded by the replay as whatever it claims to be.
+    """
+    named = sorted(set(keys) & _ENVELOPE_KEYS_AT_PASSTHROUGH)
+    if named:
+        raise ValueError(
+            f"{named} are journal ENVELOPE fields, which `{door}` does not own: "
+            "the funnel builds the envelope, so a payload key that collides "
+            "with it REWRITES the record's identity rather than adding a "
+            "field (`type` re-types it, `event_id` re-identifies it, `ts` / "
+            "`initiated_by` / `agent_id` / `actor_user_id` forge when and by "
+            "whom it was written, `corrects` forges its provenance edge). "
+            "Name payload fields only.")
+
+
+def _refuse_caller_named_markers(keys, door: str) -> None:
+    """Refuse a caller-supplied SERVER-MANAGED vector marker at a door.
+
+    `_emit` refuses the same keys before its commit point; this is the
+    door-level copy so that a door with a best-effort arm (`emit_belief`) can
+    raise BEFORE the arm that would otherwise swallow the refusal and drop the
+    record (#11948 F2). One spelling of the set (`_SERVER_MANAGED_EMBEDDING_KEYS`),
+    two placements: at the door, and at the funnel every door funnels through.
+    """
+    named = sorted(set(keys) & _SERVER_MANAGED_EMBEDDING_KEYS)
+    if named:
+        raise ValueError(
+            f"{named} are server-managed journal fields (embedding width / "
+            f"storage form / origin) and cannot be set via `{door}`'s payload")
+
+
+def _refuse_caller_named_funnel_keys(keys, door: str) -> None:
+    """Refuse EVERY name the journal funnel owns, at one passthrough door.
+
+    The three families and their reasons live above; this is the ONE call a
+    door makes, so a fourth family (or a fourth door) cannot be half-wired —
+    the failure mode #11835 review round 4 and #11948 both measured: a rule
+    stated at two doors and silently absent at the third.
+    """
+    _refuse_caller_named_record_keys(keys, door)
+    _refuse_caller_named_envelope_keys(keys, door)
+    _refuse_caller_named_markers(keys, door)
 
 
 def provenance(source_id, span, quote, *, speaker=None, extracted_by="mock@0"):
@@ -335,6 +428,18 @@ class EventAPI:
         # a refusal raised after the append would leave a record the replay
         # folds. The marker is not a caller's to set — it DESCRIBES the values,
         # so a caller that supplies one is asserting a width nothing verified.
+        # #11948: the same argument one key family over — the ENVELOPE is this
+        # funnel's to build. `event_id` is excluded here because `add_document`
+        # deliberately pins it (#125/#167, tests/test_api.py) and takes named
+        # parameters rather than a caller's dict; every splatting door refuses
+        # it instead (`_refuse_caller_named_envelope_keys`).
+        _forged_envelope = sorted(set(payload) & _ENVELOPE_KEYS)
+        if _forged_envelope:
+            raise ValueError(
+                f"{_forged_envelope} are journal ENVELOPE fields and cannot be "
+                f"set via {type_}'s payload: the envelope is built here, so a "
+                f"colliding caller key re-types or re-attributes the record "
+                f"instead of adding a field")
         _forged_markers = sorted(set(payload) & _SERVER_MANAGED_EMBEDDING_KEYS)
         if _forged_markers:
             raise ValueError(
@@ -461,8 +566,16 @@ class EventAPI:
         false-FACT shape this module's keys exist to prevent. (`_emit` refuses
         the same payload again, which is what makes the rule total; the call
         here exists so the raise is not swallowed by the arm below.)
+
+        #11948 F2: that reasoning covers the ENVELOPE and MARKER families too,
+        and it did not. They were refused only inside ``_emit``, so the raise
+        landed in the ``except`` below — the belief record was DROPPED with a
+        log line while the identical ``point=`` refusal raised. One class of
+        malformed payload, two answers; the caller of a best-effort seam is the
+        only one who can react, so every payload-shape refusal is raised here,
+        BEFORE the arm that swallows I/O.
         """
-        _refuse_caller_named_record_keys(payload, "`emit_belief`")
+        _refuse_caller_named_funnel_keys(payload, "`emit_belief`")
         try:
             self._emit(type_, **payload)
         except Exception as exc:  # noqa: BLE001, RUF100
@@ -937,7 +1050,15 @@ class EventAPI:
 
         ``object_kind`` defaults to ``None`` (**absent**) since #9572 — the
         Object twin of ``add_subject``'s fabricated default.
+
+        #11948: this is the THIRD door that splats a caller's dict onto the
+        envelope (`**props`), and it enforced none of the funnel's rules —
+        neither a record-shaped `point=` nor an envelope collision. Both are
+        refused here, BEFORE the entity lock and the id resolution: a refusal
+        that ran after `_registration_id` would have taken the lock for a write
+        that cannot happen.
         """
+        _refuse_caller_named_funnel_keys(props, "add_object")
         from .entity_identity import entity_create_lock
         with entity_create_lock("Object", name):
             oid = self._registration_id("Object", name, explicit_id=id)
@@ -1067,9 +1188,12 @@ class EventAPI:
         NOT accept a record-shaped payload (`point=`) either — a caller-built
         record reaches the replay's fold chain untested by that rule — so it is
         refused here for a message that names THIS door, and again at `_emit`
-        (`_NESTED_RECORD_KEYS`), which is where the refusal is total.
+        (`_NESTED_RECORD_KEYS`), which is where the refusal is total. Nor may
+        it name an ENVELOPE field (`type=`, `event_id=`, `corrects=`, …): those
+        are the funnel's, and the collision re-types / re-identifies the record
+        (#11948).
         """
-        _refuse_caller_named_record_keys(extra, "`add_event`")
+        _refuse_caller_named_funnel_keys(extra, "`add_event`")
         self._emit("EventRecorded",
                    id=event_id,
                    eventKind=event_kind,

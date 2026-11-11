@@ -1151,3 +1151,173 @@ def test_the_event_recorded_door_hands_its_payload_to_the_emit_stamp(tmp_path):
         "the door pre-stamped the payload — its width declaration must live in "
         "exactly one place (`_emit_event`'s `id=`/`**extra` branch), or the "
         "dead second stamp is back and no end-to-end pin can see it")
+
+
+def test_add_object_is_the_third_door_and_guards_both_of_its_families(tmp_path):
+    """#11948 (found at `07421bde27`): `add_object` splats `**props` and guarded none.
+
+    The two families are refused here, both BEFORE the entity lock and before
+    the journal append — every refusal below leaves the log EMPTY, so there is
+    nothing for the replay to fold:
+
+    * `point=` — the record-shaped payload from #11835 review round 4. At this
+      head it journalled a `PointRegistered`-shaped payload the replay folds
+      with NEITHER half of the vector rule applied: an off-grid float64 vector
+      declaring `embedding_width: "f32"` (a marker that LIES — the #5004
+      round-7 must-never-narrow population).
+    * `type=` — the envelope collision. `_emit` spreads the payload AFTER the
+      envelope, so the caller's `type` WINS and the record is re-typed: a
+      `PointAdded` reached the replay that no record door built, folded by
+      `ev["type"]` with `ev["point"]` the caller's.
+    """
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+
+    events = tmp_path / "add-object-door"
+    events.mkdir(parents=True)
+    journal = events / "events.jsonl"
+    api = EventAPI(EventLog(journal), initiated_by="extractor", projection=None)
+
+    off_grid = [0.1234567890123, 1 / 3]
+    lying = {"id": "p-forged", "embedding": off_grid,
+             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32}
+
+    with pytest.raises(ValueError, match="RECORD-SHAPED"):
+        api.add_object("obj-x", "skill", id="obj-x", point=dict(lying))
+    with pytest.raises(ValueError, match="ENVELOPE"):
+        api.add_object("obj-y", "skill", id="obj-y", type="PointAdded")
+    with pytest.raises(ValueError, match="ENVELOPE"):
+        api.add_object("obj-z", "skill", id="obj-z", event_id="forged-event")
+    with pytest.raises(ValueError, match="server-managed"):
+        api.add_object("obj-w", "skill", id="obj-w",
+                       embedding_width=JOURNAL_VECTOR_WIDTH_F32)
+    assert not journal.exists() or not journal.read_text().strip(), (
+        "a refused `add_object` must leave NOTHING to replay")
+
+    # The door still writes what it OWNS, with its envelope minted by the
+    # funnel — the guard must not cost the door its ordinary shape.
+    api.add_object("a real object", "skill", id="obj-ok",
+                   canonical_name="A Real Object")
+    records = [json.loads(ln) for ln in
+               journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert [r["type"] for r in records] == ["ObjectRegistered"], (
+        "the record's type must be the door's own, never a caller's")
+    assert records[0]["id"] == "obj-ok", (
+        "`id=` is the OBJECT's id and must keep reaching the payload")
+    assert records[0]["canonical_name"] == "A Real Object", (
+        "an ordinary extra prop must survive the guard")
+    assert records[0]["event_id"] and records[0]["event_id"] != "forged-event", (
+        "the envelope id is the funnel's to mint")
+
+
+def test_the_collision_guard_covers_the_keyword_bound_envelope_names(tmp_path):
+    """`corrects=` / `actor=` never reach the payload — they bind `_emit`'s keywords.
+
+    So a payload-only check at the funnel cannot see them, and `add_event`'s
+    `**extra` hands them straight to the envelope's provenance edge: a caller
+    could forge `corrects` (the edge that says this record supersedes another)
+    or `actor_user_id`. The doors check the CALLER's dict, not the built
+    payload, which is the only place both families are visible at once.
+    """
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+
+    events = tmp_path / "kwargs-door"
+    events.mkdir(parents=True)
+    journal = events / "events.jsonl"
+    api = EventAPI(EventLog(journal), initiated_by="extractor", projection=None)
+
+    with pytest.raises(ValueError, match="ENVELOPE"):
+        api.add_event("evt-1", "session", corrects="evt-forged")
+    with pytest.raises(ValueError, match="ENVELOPE"):
+        api.add_event("evt-1", "session", actor="someone-else")
+    assert not journal.exists() or not journal.read_text().strip()
+
+
+def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
+    """#11948 F2: one class of malformed payload, ONE answer, at both doors.
+
+    `emit_belief` swallows I/O failures on purpose (the graph write has already
+    committed by the time EP returns). The marker refusal used to be raised
+    inside `_emit` — i.e. INSIDE that `except` — so the belief record was
+    dropped with a `logger.warning` while the identical `point=` refusal raised
+    at the caller (`journal delta 0`, measured at `07421bde27`). A best-effort
+    arm must not silently convert a caller's bug into a lost record: the
+    refusal now happens where `point=`'s does, before the arm.
+    """
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+
+    events = tmp_path / "belief-door"
+    events.mkdir(parents=True)
+    journal = events / "events.jsonl"
+    api = EventAPI(EventLog(journal), initiated_by="extractor", projection=None)
+
+    with pytest.raises(ValueError, match="server-managed"):
+        api.emit_belief("ConfidenceChanged", id="node-1",
+                        embedding_width=JOURNAL_VECTOR_WIDTH_F32)
+    with pytest.raises(ValueError, match="ENVELOPE"):
+        api.emit_belief("ConfidenceChanged", id="node-1", type="PointAdded")
+    assert not journal.exists() or not journal.read_text().strip(), (
+        "the refusal must not leave a half-record behind")
+
+    # …and the door's ordinary job still lands (the best-effort posture is
+    # narrowed, not removed — `test_2884`'s f5 pins the I/O arm).
+    api.emit_belief("ConfidenceChanged", id="node-2", confidence=0.5)
+    records = [json.loads(ln) for ln in
+               journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert [r["type"] for r in records] == ["ConfidenceChanged"]
+    assert records[0]["confidence"] == 0.5
+
+
+def test_the_envelope_collision_guard_keeps_add_documents_event_id_pin(tmp_path):
+    """The ONE deliberate exception, pinned so the guard cannot drift into it.
+
+    `add_document(event_id=...)` PINS the envelope id (#125) and defaults it to
+    `None` (#167 — so a partial update's `coalesce` does not wipe a live value);
+    both are recorded decisions with their own tests in `tests/test_api.py`.
+    `add_document` takes NAMED parameters rather than splatting a caller's
+    dict, so the funnel deliberately excludes `event_id` — this row is what
+    stops a later "tighten `_ENVELOPE_KEYS`" from reversing #167 while
+    believing it is closing #11948.
+    """
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+
+    events = tmp_path / "document-door"
+    events.mkdir(parents=True)
+    journal = events / "events.jsonl"
+    api = EventAPI(EventLog(journal), initiated_by="extractor", projection=None)
+
+    api.add_document("doc-1", "Pinned", event_id="evt-1")
+    api.add_document("doc-2", "Defaulted")
+    records = [json.loads(ln) for ln in
+               journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert [r["event_id"] for r in records] == ["evt-1", None], (
+        "`add_document`'s event_id pin and its None default are #125/#167 "
+        f"decisions, got {[r['event_id'] for r in records]!r}")
+
+
+def test_the_funnel_itself_refuses_an_envelope_key_from_any_future_door(tmp_path):
+    """The funnel's OWN guards, pinned directly — so they cannot rot unseen.
+
+    The three doors above are covered, which means a mutation of `_emit`'s
+    copies is invisible to them: they refuse first. That is the whole point of
+    keeping the funnel's gate (a door added tomorrow inherits it, and this PR
+    has already measured three times what happens when a rule lives at the
+    doors only), but it also means nothing would notice a later refactor that
+    deleted the funnel arm. So this row drives `_emit` itself.
+    """
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+
+    events = tmp_path / "funnel-door"
+    events.mkdir(parents=True)
+    journal = events / "events.jsonl"
+    api = EventAPI(EventLog(journal), initiated_by="extractor", projection=None)
+
+    with pytest.raises(ValueError, match="ENVELOPE"):
+        api._emit("ConfidenceChanged", type="PointAdded")
+    with pytest.raises(ValueError, match="server-managed"):
+        api._emit("ConfidenceChanged", embedding_width=JOURNAL_VECTOR_WIDTH_F32)
+    assert not journal.exists() or not journal.read_text().strip()
