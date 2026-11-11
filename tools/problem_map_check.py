@@ -4,7 +4,8 @@
 `docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md` is the status half of issue
 #2820 — 26 named defects, each marked VERIFIED-FIXED / OPEN / UNKNOWN. The map
 exists because the ISSUE went stale: its body was written on 2026-09-10 and still
-reads as 26 problems waiting, while the tree had fixed 21 of them. A document
+reads as 26 problems waiting, while the tree had already fixed 21 of them (22 now
+that #2782 is re-cut). A document
 whose whole purpose is *"is this still broken?"* is worthless the moment nothing
 can tell that its answers have aged out — that is the drift this tool measures.
 
@@ -616,8 +617,9 @@ def check_workstreams(text: str, rows: list[Row]) -> list[str]:
     total, so the document could print `**7 of 8 rows fixed**` over a WS-B table
     that no longer had 7 fixed rows — and the numbers the guard DID compare could
     be edited to match, leaving §2 contradicting its own tables in three places on
-    a CLEAN `docs`-job run. Flip `#2783` to OPEN, set `| VERIFIED-FIXED |` 21→20
-    and `| OPEN |` 5→6, and the pre-fix guard returned NO errors.
+    a CLEAN `docs`-job run. Flip `#2783` to OPEN and move the two summary rows one each
+    way (`| VERIFIED-FIXED |` down one, `| OPEN |` up one — the counts were `21`/`5`
+    when this was found, `22`/`4` today), and the pre-fix guard returned NO errors.
 
     A workstream's rows come from `WORKSTREAMS`, not from the document's own
     tables — same reason as `TRACKED`: a set parsed out of the artifact cannot
