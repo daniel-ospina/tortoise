@@ -52,8 +52,9 @@ DOCS_DRIFT_STEP_COMMANDS = (
     "python3 tools/test_design_map_check.py --self-test",
     # #2852: the findings ledger's doc↔tree guard. Same reason as its #5086/#2820
     # siblings — a docs-only edit of the ledger selects NO surface — plus one of
-    # its own: the page's §3 is a CORRECTIONS log, and re-measuring it found five
-    # of its twelve rows already overtaken by the fixes they motivated. A verdict
+    # its own: the page's §3 is a CORRECTIONS log, and re-measuring it found seven
+    # of its twelve rows no longer read as written (four of them overtaken by the
+    # fixes they motivated). A verdict
     # outside the closed vocabulary, or a `path:line` that stopped resolving,
     # reads exactly like evidence to the next lane. It needs HISTORY for the
     # `measured_at_commit` ancestry claim, which the depth-1 `test` job cannot
