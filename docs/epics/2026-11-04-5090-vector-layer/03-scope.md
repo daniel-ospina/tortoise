@@ -176,12 +176,12 @@ Behavioural, executable, each tracing to exactly one scope item.
 **Then** it reports the serves/indexes pair for **every** served label, **including when there is no gap**
 **And** a store with a gap still reports the gap
 
-### E2E-5: An unretrievable vector is named before it is removed — *S3*
+### E2E-5: An unretrievable vector is named, with the surface a removal would have changed — *S3*
 
 **Given** vectors stored on a label with no vector index
 **When** the dry-run census runs
 **Then** it names every such label with its vector count and bytes
-**And** it states the query paths whose results change if those vectors are removed
+**And** it states the query paths whose results **would have** changed had a removal been ruled
 **And** it writes nothing
 
 ### E2E-6: A degraded search says so — *S4*

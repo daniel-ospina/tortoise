@@ -386,7 +386,7 @@ directions), `test_the_census_states_the_consequence_of_removing_each_label` (pe
 union), `test_a_tool_whose_SDK_method_fixes_entity_type_is_named` (the fixed-type entrants and the
 default they run), and the live test's assertions on a real engine — output in §4.
 
-**Row 4 — `#10976` and `#7879` carry the "pending V1" qualification.** By comment on each issue, so a
+**Row 4 — `#10976` and `#7879` carried the "pending V1" qualification** (re-pointed 2026-11-10 — see the SUPERSEDED note below). By comment on each issue, so a
 lane holding either issue's body is not collided with:
 
 - `#10976` → [comment](https://github.com/daniel-ospina/tortoise/issues/10976#issuecomment-6695675706):
