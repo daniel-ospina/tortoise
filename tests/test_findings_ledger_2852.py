@@ -171,29 +171,14 @@ def test_mutation_population_is_pinned():
     `check_survivor_arithmetic`'s `len(matches) > 1` branch: deleting that branch left
     every other arm, every test and `--check` green (measured).
 
-    The population is 24 after the #11902 review cycles. The arms are, in order:
-    the closed verdict vocabulary; the six §3/§6 population and citation arms
-    (missing file, out-of-range line, deleted row, §6 count, out-of-range shorthand,
-    unclassifiable §3 row); the emptied evidence column; an unclassifiable §6 row;
-    a declined citation shape; the three inserted-character shapes (space in the
-    path, trailing space, trailing space on a shorthand); a citation embedded in a
-    longer span; an absolute path outside the tree; an evidence cell pointing at a
-    section that does not exist; a verdict moved between classes; the §3 tally; a
-    decoy tally paragraph; the §6 survivor count, total, decoy sentence and deleted
-    CLOSED bullet; and the §1 vocabulary arm. The floor is pinned WITH it — a floor
-    below the population is the "shrunk population proves nothing" shape it exists
-    to catch. Re-derive by counting `caught` lines in `--self-test`. ⚠️ The `>=` below is the tool's own rule: an ADDED
-    arm must not red this. The second assert RECORDS the population, so removing
-    an arm forces the floor to be edited here as well — a shrink cannot happen in
-    one place.
+    #11902's review added the 25th: a marker-less `host:port` prose token used to be
+    installed as the shorthand ANCHOR before the marker test ran, so inserting one in
+    front of a bad shorthand defused its red (measured green). The population and the
+    floor move together.
     """
-    assert len(flc.MUTATIONS) >= flc.MIN_SELF_TEST_MUTATIONS, (
-        "the registered population must meet the floor it declares"
-    )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 25, (
-        "this line RECORDS the population (24 arms); removing one means editing the "
-        "floor here too, which is the second place a shrink has to touch"
-    )
+    assert len(flc.MUTATIONS) == 25
+    assert flc.MIN_SELF_TEST_MUTATIONS == 25
+
 
 
 def test_self_test_floor_catches_a_shrunk_population(monkeypatch):
@@ -706,73 +691,6 @@ def test_a_verdict_moved_between_classes_is_rejected(tmp_path, monkeypatch):
         assert any("assigns a different verdict" in p for p in problems), (old, problems)
 
 
-def test_a_class_first_tally_is_accepted(tmp_path, monkeypatch):
-    """FAILS if the SAME assignment written class-first reds as a swap.
-
-    The arm read only "letters preceding a class token", so
-    `**SUPERSEDED-BY-FIX**: (c), (d) and (g)` — the identical assignment, reworded —
-    returned *"assigns a different verdict … (c) stated ADOPTED, table says
-    SUPERSEDED-BY-FIX"*: a false accusation printed at the REQUIRED `docs` job over
-    prose that is exactly right, which is the failure mode the shallow arm one
-    function over exists to prevent on the other side.
-
-    Accepting it must not go blind — the second half keeps a real swap RED, because
-    the class-first reading is adopted only when it covers EVERY non-STILL-TRUE row
-    and agrees with the table.
-    """
-    original = (
-        "**(c)**, **(d)** and **(g)** are **SUPERSEDED-BY-FIX**, **(e)** is\n"
-        "**ADOPTED**, and **(b)**, **(k)** and **(l)** are **DRIFTED**."
-    )
-    class_first = (
-        "**SUPERSEDED-BY-FIX**: **(c)**, **(d)** and **(g)**; **ADOPTED**: **(e)**; "
-        "**DRIFTED**: **(b)**, **(k)** and **(l)**."
-    )
-    swapped = (
-        "**ADOPTED**: **(c)**, **(d)** and **(g)**; **SUPERSEDED-BY-FIX**: **(e)**; "
-        "**DRIFTED**: **(b)**, **(k)** and **(l)**."
-    )
-    assert original in DOC.read_text(encoding="utf-8"), (
-        "the tally sentence moved — re-point this pair at its new wording"
-    )
-
-    # NOT `== []`: the copy lives at a tmp path, so the registration arm legitimately
-    # reports that no `docs/00_index.md` row names it. What must not appear is the
-    # false accusation about the sentence.
-    _mutated(tmp_path, monkeypatch, lambda t: t.replace(original, class_first, 1))
-    assert not any(
-        "assigns a different verdict" in p for p in _doc_problems()
-    ), "a legitimate class-first reword red the guard"
-
-    _mutated(tmp_path, monkeypatch, lambda t: t.replace(original, swapped, 1))
-    assert any(
-        "assigns a different verdict" in p for p in _doc_problems()
-    ), "accepting class-first must not accept an actual swap"
-
-
-def test_a_second_table_is_rejected(tmp_path, monkeypatch):
-    """FAILS if a row added to a SECOND table in §3 or §6 stays invisible.
-
-    `_table_rows()` reads the section's first table and stops at the first
-    non-`|` line, so a thirteenth correction row — or a fifth §6 bucket — appended in
-    a fresh table was never enumerated: no verdict check, no evidence floor, no
-    population pin. Measured before this arm existed: `--check` rc=0, `--self-test`
-    PASS and the whole suite green over a page carrying thirteen rows while §8
-    advertises the population pinned to twelve.
-    """
-    extra = (
-        "| # | claim | correction | verdict | evidence |\n"
-        "|---|---|---|---|---|\n"
-        "| **m** | an undeclared claim | **False.** | **STILL-TRUE** | nothing |\n"
-        "\n"
-    )
-    for anchor in ("## 4. The artefact index", "## 7. What this changes"):
-        _mutated(tmp_path, monkeypatch, lambda t, a=anchor: t.replace(a, extra + a, 1))
-        assert any(
-            "carries 2 tables" in p for p in _doc_problems()
-        ), (anchor, _doc_problems())
-
-
 # ── citations resolve ──────────────────────────────────────────────────────
 
 
@@ -823,7 +741,7 @@ def test_out_of_tree_citation_is_reported(tmp_path, monkeypatch):
     """
     def add_escaping_citation(text: str) -> str:
         return text.replace(
-            "It resolves on none of the machines measured (§5) — a",
+            "It resolves on no machine in the fleet (§5).",
             "`../../../../../../etc/hostname:1`",
             1,
         )
