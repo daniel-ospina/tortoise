@@ -403,6 +403,15 @@ response_fields:
     absent tier). This key is NOT an ordering guarantee on mode=gaps'
   unchanged_when_off: NO — additive key on an existing payload. Not flag-gated
 - response: tortoise_search
+  field: graph_ranking.confidence
+  emitted_when: 'order_by="graph" ONLY: the hit''s belief VALUE as the GraphRanker read it — `float | null`. `null` is
+    the #11702 absent state (`graph_ranking.ep_state` is "absent" beside it), never a neutral 0.5; the value follows
+    the mirror-first precedence (`n.confidence`, the #2206 served belief) with the persisted α/β mean as the fallback
+    for a node the flush never reached. Present only when the signal read answered for this id (a hit absent from the
+    read emits neither key). This is the field the pre-#11702 payload left out entirely, so a consumer could not tell
+    "no evidence" from "neutral evidence" on this surface at all'
+  unchanged_when_off: NO — additive key on an existing payload. Not flag-gated
+- response: tortoise_search
   field: graph_ranking.ep_state
   emitted_when: 'order_by="graph" ONLY (the graph_ranking block is the GraphRanker''s own payload): the same three-token
     #11702 state — "measured" | "baseline" | "absent". Emitted together with graph_ranking.confidence so the pair is

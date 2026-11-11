@@ -40,6 +40,7 @@ from .search_engine import (  # noqa: E402, RUF100
     belief_value,  # #11702: the ONE Python belief VALUE reader
     ep_has_belief_cypher,  # #11702: presence-to-persisted-belief predicate
     ep_measured_cypher,  # #3276: has_ep == EP measured (baseline prior != measured)
+    ep_pair_stored,  # #11702: a variance needs BOTH α/β operands stored
     ep_state_cypher,  # #11702: the present-state NAME on the wire
     ep_state_resolve,  # #11702: the ONE #2490 terminal fold for the state name
 )
@@ -961,14 +962,28 @@ class GraphRanker:
             # rankers would drift apart again. `has_ep` remains #3276's
             # narrower "EP measured this"; a #2199 baseline prior is
             # prior-only but IS a belief value the score multiplies in.
-            f"  {ep_has_belief_cypher('n')} AS has_prior"
+            f"  {ep_has_belief_cypher('n')} AS has_prior, "
+            # #11702: the RAW pair rides the TAIL (10..13) so the VARIANCE is
+            # only a posterior statistic when the pair is stored — the 1.0
+            # defaults above otherwise answer the Beta(1,1) maximum 1/12 for a
+            # claim with no belief (see `ep_pair_stored`).
+            "  n.posterior_alpha, n.ep_alpha, n.posterior_beta, n.ep_beta"
         )
         rows = epistemic_sweep(
             self.projection.g, cypher, {"ids": ids})
         out = {}
         for row in rows:
             pid = row[0]
-            variance = _beta_variance(float(row[4]), float(row[5]))
+            # #11702: `ep_pair_stored` decides whether that width is a
+            # statistic at all — a half pair or a never-measured claim is
+            # `absent`, and an absent claim cannot be WIDE.
+            pair_stored = (ep_pair_stored(posterior_alpha=row[10],
+                                          ep_alpha=row[11],
+                                          posterior_beta=row[12],
+                                          ep_beta=row[13])
+                           if len(row) > 13 else True)
+            variance = (_beta_variance(float(row[4]), float(row[5]))
+                        if pair_stored else 0.0)
             measured_raw = bool(row[6])
             # Test doubles mirror the pre-round-6 row shape; falling back to
             # has_ep keeps them honest without inventing a prior.
@@ -1001,8 +1016,12 @@ class GraphRanker:
                 "degree": int(row[2]),
                 "created": row[3],
                 "variance": variance,
-                # Uncalibrated (no persisted α/β) is NOT contested.
-                "contested": has_ep and variance > CONTESTED_VARIANCE_THRESHOLD,
+                # Uncalibrated (no persisted α/β) is NOT contested — and nether
+                # is an ABSENT one (#11702): "no belief" beside "maximally
+                # uncertain" is the contradiction this issue removes.
+                "contested": (has_ep and state != EP_STATE_ABSENT
+                              and pair_stored
+                              and variance > CONTESTED_VARIANCE_THRESHOLD),
                 "is_event": False,
                 "has_prior": has_prior,
             }
@@ -1485,7 +1504,10 @@ class StateRanker:
             # flush never reached. Preferring α/β (the earlier text here) made
             # a mirror-only node report a different value on this one surface
             # than annotate, `why` and the other two rankers.
-            "  n.confidence, n.posterior_alpha, n.ep_alpha"
+            "  n.confidence, n.posterior_alpha, n.ep_alpha, "
+            # #11702: the raw β columns too, so `ep_pair_stored` can tell a
+            # stored pair from the coalesced 1.0 default (see GraphRanker).
+            "  n.posterior_beta, n.ep_beta"
         )
         rows = epistemic_sweep(
             self.projection.g, cypher, {"ids": ids})
@@ -1501,7 +1523,15 @@ class StateRanker:
             status = row[5] if len(row) > 5 else ""
             if len(row) > 6 and is_terminal_status(row[5], bool(row[6])):
                 has_ep = False
-            variance = _beta_variance(alpha, beta)
+            # #11702: a width needs BOTH operands stored — see
+            # `ep_pair_stored`, the one rule `why` and `annotate_ep_batch`
+            # share.
+            pair_stored = (ep_pair_stored(posterior_alpha=row[9],
+                                          ep_alpha=row[10],
+                                          posterior_beta=row[11],
+                                          ep_beta=row[12])
+                           if len(row) > 12 else True)
+            variance = _beta_variance(alpha, beta) if pair_stored else 0.0
             has_prior = bool(row[7]) if len(row) > 7 else measured_raw
             # #11702: no persisted belief ⇒ `confidence: None`, named by
             # `ep_state`. Never the neutral 0.5, which ordered a never-measured
@@ -1547,8 +1577,12 @@ class StateRanker:
                 # needs — no extra query on the recall path.
                 "status": status or "",
                 "draft": is_draft_status(status),
-                # Uncalibrated (no persisted α/β) is NOT contested — unmeasured.
-                "contested": has_ep and variance > CONTESTED_VARIANCE_THRESHOLD,
+                # Uncalibrated (no persisted α/β) is NOT contested —
+                # unmeasured, and an ABSENT belief has no width to be wide
+                # (#11702).
+                "contested": (has_ep and state != EP_STATE_ABSENT
+                              and pair_stored
+                              and variance > CONTESTED_VARIANCE_THRESHOLD),
             }
         return out
 
@@ -2012,7 +2046,9 @@ class GapsRanker:
             f"  {ep_has_belief_cypher('n')} AS has_prior, "
             # #11702: mirror + RAW posterior columns (7/8/9), so the VALUE can
             # follow the same precedence GraphRanker and StateRanker use.
-            "  n.confidence, n.posterior_alpha, n.ep_alpha",
+            "  n.confidence, n.posterior_alpha, n.ep_alpha, "
+            # #11702: the raw β columns (10/11) — see `ep_pair_stored`.
+            "  n.posterior_beta, n.ep_beta",
             {"ids": ids},
             labels=labels,
         )
@@ -2027,7 +2063,13 @@ class GapsRanker:
             status = row[4] if len(row) > 4 else ""
             if len(row) > 5 and is_terminal_status(row[4], bool(row[5])):
                 has_ep = False
-            variance = _beta_variance(alpha, beta)
+            # #11702: a width needs BOTH operands stored (see StateRanker).
+            pair_stored = (ep_pair_stored(posterior_alpha=row[8],
+                                          ep_alpha=row[9],
+                                          posterior_beta=row[10],
+                                          ep_beta=row[11])
+                           if len(row) > 11 else True)
+            variance = _beta_variance(alpha, beta) if pair_stored else 0.0
             has_prior = bool(row[6]) if len(row) > 6 else measured_raw
             # #11702: no persisted belief ⇒ None + the state name, never 0.5.
             if not has_prior:
@@ -2064,7 +2106,10 @@ class GapsRanker:
                 # needs — no extra query on the recall path.
                 "status": status or "",
                 "draft": is_draft_status(status),
-                "contested": has_ep and variance > CONTESTED_VARIANCE_THRESHOLD,
+                # #11702: absent ⇒ no width, therefore not contested.
+                "contested": (has_ep and state != EP_STATE_ABSENT
+                              and pair_stored
+                              and variance > CONTESTED_VARIANCE_THRESHOLD),
             }
         return out
 

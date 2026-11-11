@@ -301,7 +301,8 @@ def ep_prior_only_cypher(alias: str) -> str:
 
     The third predicate of the three-state vocabulary: a declared #2199
     baseline with NO EP measurement. NOT the same as "unmeasured" — an
-    unmeasured claim carries no persisted prior at all (Beta(1,1) neutral),
+    unmeasured claim carries no persisted prior at all (and since #11702 its
+    confidence_mean is `None` + `ep_state: "absent"`, not a neutral 0.5),
     while a prior-only claim's confidence_mean IS the declared PRIOR mean.
 
     Kept textually in step with the Python twin: for every combination of
@@ -571,7 +572,10 @@ class EpBreakdown:
     # #3276 aliases of the same measurement state, explicit and unambiguous:
     #   measured=True                     → EP measured (has_ep True)
     #   measured=False, baseline=True     → prior-only (declared baseline)
-    #   measured=False, baseline=False    → unmeasured (neutral 0.5)
+    #   measured=False, baseline=False    → ABSENT (#11702): confidence_mean is
+    #                                       `None`, never the old neutral 0.5 —
+    #                                       "no evidence" and "a measured coin
+    #                                       flip" are different answers
     # A TERMINAL claim (#2490 gate) reads measured=False, baseline=False even
     # when it was measured-and-baseline'd pre-terminalization: its 0.5 is the
     # decayed vacuity posterior, not the prior, so it is neither prior-only
@@ -4097,6 +4101,33 @@ def _recency_factors(entries: list[tuple[str, Any]]) -> dict[str, float]:
     return factors
 
 
+def ep_pair_stored(*, posterior_alpha=None, posterior_beta=None,
+                   ep_alpha=None, ep_beta=None) -> bool:
+    """True when BOTH operands of the α/β PAIR are persisted (#11702).
+
+    The companion of :func:`ep_has_belief_cypher` for the WIDTH of the
+    posterior rather than its MEAN. Every read coalesces the operands to `1.0`
+    so a variance can be computed at all, and that default fabricates a width
+    when the pair is not stored: a HALF pair (β only, or α only) and a
+    never-measured claim both came out at the Beta(1,1) MAXIMUM `1/12`, so a
+    block that said ``confidence_mean: null, ep_state: "absent"`` said
+    ``variance: 0.083, contested: true`` in the next field — "there is no
+    belief here, and it is maximally uncertain", which is the same
+    two-answers-for-one-claim defect this issue removes one level up. The
+    volunteer then surfaced "read the counterargument" for a claim with zero
+    counterarguments.
+
+    A stored ``(0, 0)`` pair IS stored by this rule but is ABSENT by the
+    presence rule, and ``_beta_variance``'s own ``s <= 0`` guard answers `0.0`
+    — so both rules agree that nothing is claimed.
+
+    ONE definition, imported by `why`, `annotate_ep_batch` and all three
+    rankers: a second spelling of "the pair is stored" is how the surfaces
+    drifted apart in the first place."""
+    return ((posterior_alpha is not None or ep_alpha is not None)
+            and (posterior_beta is not None or ep_beta is not None))
+
+
 def _beta_variance(alpha: float, beta: float) -> float:
     """Variance of the Beta(α, β) posterior: αβ/((α+β)²(α+β+1)).
 
@@ -4296,7 +4327,15 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             else:
                 value = round(_beta_mean(alpha, beta), 4)
             total = impl + nand
-            variance = _beta_variance(alpha, beta)
+            # #11702: the variance is only a POSTERIOR statistic when the PAIR
+            # is stored (the coalesced 1.0 defaults otherwise answer the
+            # maximum 1/12 — see `ep_pair_stored`). The raw β columns ride the
+            # row (13/14) for exactly this.
+            pair_stored = (
+                ep_pair_stored(posterior_alpha=row[10], ep_alpha=row[11],
+                               posterior_beta=row[13], ep_beta=row[14])
+                if len(row) > 14 else True)
+            variance = _beta_variance(alpha, beta) if pair_stored else 0.0
             breakdowns[pid] = EpBreakdown(
                 # #11702: `None` when nothing is persisted — never the neutral
                 # 0.5, which is what made "no evidence" and "a measured coin
@@ -4311,7 +4350,14 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                 # contested, it's unmeasured. (#2490: terminal claims are
                 # gated above, so their decayed (1,1) posterior never reads
                 # contested either.)
-                contested=measured and variance > CONTESTED_VARIANCE_THRESHOLD,
+                #
+                # #11702: and never when the state is ABSENT — "no belief
+                # exists" beside "its posterior is maximally uncertain" is the
+                # contradiction this issue is about, and an α-only half pair
+                # reached `contested: True` through the coalesced 1.0 default.
+                contested=(measured and state != EP_STATE_ABSENT
+                           and pair_stored
+                           and variance > CONTESTED_VARIANCE_THRESHOLD),
                 has_ep=measured,
                 measured=measured,
                 # prior-only: a declared #2199 baseline on a LIVE claim with

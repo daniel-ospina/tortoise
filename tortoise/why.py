@@ -72,6 +72,7 @@ from .search_engine import (  # type: ignore[import-not-found]
     belief_value,  # #11702: the ONE Python belief VALUE reader
     ep_has_belief_cypher,
     ep_measured_cypher,  # #3276: has_ep == EP measured (baseline prior != measured)
+    ep_pair_stored,  # #11702: a variance needs BOTH α/β operands stored
     ep_state,
     ep_state_resolve,
     fetch_point_epistemic_state,
@@ -472,9 +473,16 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
         # ZERO counterarguments, and the why-suite's false-positive arm counts
         # `ep.contested` as inventing a contradiction. Half a pair has no
         # width, exactly as it has no mean.
+        # #11702 cycle 9: the rule is `search_engine.ep_pair_stored`, the same
+        # one all three rankers and `annotate_ep_batch` now apply — a second
+        # spelling here is how the surfaces drifted apart in the first place
+        # (this guard existed only in `why`, so the rankers kept reporting a
+        # fabricated 1/12 for every absent claim).
         pair_stored = (len(row) <= 12
-                       or ((row[8] is not None or row[9] is not None)
-                           and (row[11] is not None or row[12] is not None)))
+                       or ep_pair_stored(posterior_alpha=row[8],
+                                         ep_alpha=row[9],
+                                         posterior_beta=row[11],
+                                         ep_beta=row[12]))
         if not pair_stored:
             variance = 0.0
         by_id[pid]["ep"] = {

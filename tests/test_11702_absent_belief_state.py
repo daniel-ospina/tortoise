@@ -1289,3 +1289,94 @@ def test_write_verb_ep_updated_reads_the_shared_presence_predicate(sdk):
         "a mirror-only claim (a real served belief) read as 'no belief': "
         + repr(got))
     assert got[beta_only] is False, got
+
+
+def test_no_surface_fabricates_a_variance_for_an_absent_belief(sdk):
+    """`ep_pair_stored`: a WIDTH also needs both operands (#11702 cycle 9).
+
+    Cycle 7 gave `why` the half-pair guard, but `annotate_ep_batch` and all
+    three rankers kept computing `_beta_variance` from the `coalesce(…, 1.0)`
+    defaults, so a claim with NO belief still reported the Beta(1,1) MAXIMUM
+    1/12 — "there is no belief here, and it is maximally uncertain" — and an
+    α-only half pair reached `contested: True` and emitted the recall warning
+    `['contested']` for a claim nothing measured. Measured before the fix:
+
+        annotate_ep_batch : mean=None state='absent' variance=0.0833
+        recall_ranking    : conf=None state='absent' variance=0.0833
+        (α-only) contested: True on annotate + all three rankers
+        why               : variance=0.0 contested=False   <- the only guarded one
+
+    One rule now, imported by all five surfaces.
+    """
+    from tortoise.ranking import GapsRanker, GraphRanker, StateRanker
+    from tortoise.search_engine import EP_STATE_ABSENT, annotate_ep_batch, ep_pair_stored
+    from tortoise.why import _assemble_ep_rows
+
+    # The rule itself, in the four shapes that matter.
+    assert ep_pair_stored(posterior_alpha=2.0, posterior_beta=3.0) is True
+    assert ep_pair_stored(posterior_alpha=2.0) is False            # half
+    assert ep_pair_stored(posterior_beta=3.0) is False             # half
+    assert ep_pair_stored(ep_alpha=2.0, ep_beta=3.0) is True
+    assert ep_pair_stored() is False
+
+    proj = sdk._get_proj()
+    absent = sdk.create_point("statement", "no belief at all")["id"]
+    alpha_only = sdk.create_point("statement", "alpha-only half pair")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 0.5",
+                 params={"id": alpha_only})
+
+    # annotate_ep_batch: the EpBreakdown every SDK consumer reads.
+    bds = annotate_ep_batch(proj.g, [absent, alpha_only])
+    for pid, label in ((absent, "absent"), (alpha_only, "alpha-only")):
+        bd = bds[pid]
+        assert bd.ep_state == EP_STATE_ABSENT, (label, bd)
+        assert bd.variance == 0.0, (
+            f"{label}: a claim with no belief reported a posterior WIDTH "
+            f"{bd.variance} — the coalesced 1.0 default fabricated 1/12: {bd}")
+        assert bd.contested is False, (
+            f"{label}: an absent belief read contested: {bd}")
+
+    # All three rankers.
+    ids = [absent, alpha_only]
+    for name, signals in (
+            ("state", StateRanker(projection=proj)._fetch_point_signals(ids)),
+            ("graph", GraphRanker(projection=proj)._fetch_signals(ids, "point")),
+            ("gaps", GapsRanker(projection=proj)._fetch_confidence_signals(ids)),
+    ):
+        for pid in ids:
+            sig = signals[pid]
+            assert sig["ep_state"] == EP_STATE_ABSENT, (name, pid, sig)
+            assert sig["variance"] == 0.0, (
+                f"{name} ranker reported variance {sig['variance']} for an "
+                f"absent belief: {sig}")
+            assert sig["contested"] is False, (name, pid, sig)
+
+    # `why` agrees with all of them (it had the guard first).
+    blocks = {pid: {} for pid in ids}
+    rows = proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
+        "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0), "
+        "  coalesce(n.posterior_beta, n.ep_beta, 1.0), "
+        "  n.ep_alpha IS NOT NULL AS measured, coalesce(n.status,'') AS st, "
+        "  coalesce(n.outdated, false) AS od, false AS baseline_set, "
+        "  true AS has_belief, n.posterior_alpha AS pa, n.ep_alpha AS ea, "
+        "  n.confidence AS conf, n.posterior_beta AS pb, n.ep_beta AS eb",
+        params={"ids": ids}).result_set
+    _assemble_ep_rows(rows, blocks)
+    for pid in ids:
+        ep = blocks[pid]["ep"]
+        assert ep["variance"] == 0.0, ep
+        assert ep["contested"] is False, ep
+
+    # And a genuinely stored pair is STILL wide and still contested, so the
+    # guard cannot pass by answering "no" for everything.
+    # Beta(1, 1): mean 0.5, variance 1/12 — the maximum, and legitimately wide.
+    wide = sdk.create_point("statement", "a genuinely uncertain claim")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 1.0, "
+                 "n.posterior_beta = 1.0", params={"id": wide})
+    bd = annotate_ep_batch(proj.g, [wide])[wide]
+    assert bd.variance == pytest.approx(1 / 12, abs=1e-6), bd
+    assert bd.contested is True, bd
+    state_sig = StateRanker(projection=proj)._fetch_point_signals([wide])[wide]
+    assert state_sig["variance"] == pytest.approx(1 / 12, abs=1e-6), state_sig
+    assert state_sig["contested"] is True, state_sig
