@@ -110,10 +110,10 @@ Every call site / consumer of each thing this change touches:
 | `…/e1_e2_probe.py` `SKIPPED_FLOORS` | definition | key → owning criterion (`A1`–`A5`, `E3`, `E5`, `E6`); printed on the binding line | covered |
 | `…/e1_e2_probe.py` `_floor_keys()` | helper | partitions declared keys into owned / skipped / unconsumed | covered (unit-derived from the real record) |
 | `…/e1_e2_probe.py` `_declared_metric_floor()` | helper | validates `e1_min_before_share` as a share in [0,1] and `e2b_surviving_units` as an int; raises so the caller refuses (`floor-unreadable`) | covered |
-| `…/e1_e2_probe.py` `prereg_binding()` | public helper | adds two keyword-*required* params (`before_share`, `surviving_units`) and a third `below-floor` cause; returns `floors_owned`/`floor_skipped`/`declared_before_floor`/`before_share`/`declared_surviving_floor`/`surviving_units` | covered (one call site, in `main`) |
-| `…/e1_e2_probe.py` `binding_line()` | log formatter | prints the new fields and the declared skips with owners | covered (V15 parses them) |
-| `…/e1_e2_probe.py` `census()` | measurement | unchanged shape — the E2b population is the arm's existing `atomic_points`, the quantity the row's own floor tests (a third population was cut in code review: it diverged by the surviving fused points, so a run the E2b row refuses could bind here) | covered (V15 anchors on the arm line) |
-| `…/e1_e2_probe.py` main's binding call | call site | passes `before_c["share"]` and `after_c["atomic_points"]` | covered |
+| `…/e1_e2_probe.py` `prereg_binding()` | public helper | adds three keyword-*required* params (`before_share`, `surviving_units`, and `surviving_units_basis` — the last added by #10989, so the disclosure states an operand of this call rather than a constant in the emitter) and a third `below-floor` cause; returns `floors_owned`/`floor_skipped`/`declared_before_floor`/`before_share`/`declared_surviving_floor`/`surviving_units`/`surviving_units_basis` | covered (one call site, in `main`) |
+| `…/e1_e2_probe.py` `binding_line()` | log formatter | prints the new fields and the declared skips with owners; `surviving_units_basis=` is read off the binding (re-pointed by #10989 — this cell's token was a hardcoded literal, so the disclosure could not disagree with the operand and the pin on it was vacuous) | covered (V15 parses them) |
+| `…/e1_e2_probe.py` `census()` | measurement | unchanged shape — the E2b population is the arm's surviving PLANTED units (`real_facts` — re-pointed by #10989; this row read `atomic_points`, the pre-fix operand), the quantity the row's own floor tests (a third population was cut in code review: it diverged by the surviving fused points, so a run the E2b row refuses could bind here) | covered (V15 anchors on the arm line) |
+| `…/e1_e2_probe.py` main's binding call | call site | passes `before_c["share"]` and `after_c["real_facts"]` (re-pointed by #10989; this cell originally read `after_c["atomic_points"]`), and both the operand and the `surviving_units_basis=` disclosure derive from the one module constant `_E2B_FLOOR_POPULATION` | covered |
 | `tools/e1_e2_census_check.py` `_is_number()` | helper | finite-number test for the new measured/declared pairs | covered |
 | `tools/e1_e2_census_check.py` V15 floor accounting | gate | disjointness of the three buckets, skip must name an owner, a compared floor must be claimed as owned, scored logs must carry the accounting, and the two new measured sides are anchored to the ARM lines | covered (8 new pins) |
 | `tools/e1_e2_census_check.py` V15 BELOW_FLOOR | gate | generalised from `objects`/`declared_floor` to the floor that actually fired | covered |
@@ -127,7 +127,8 @@ Every call site / consumer of each thing this change touches:
    returns only unclassified keys as unconsumed → `test_the_real_pre_registration_schema_names_why_it_cannot_score_this_run`,
    `test_a_floor_no_row_owns_is_refused_not_dropped`.
 2. Validate + check the two newly owned floors (`_declared_metric_floor`, the arm's
-   `atomic_points`, required kwargs). Code review added a positivity rule to all three owned
+   surviving planted count — `real_facts` since #10989, `atomic_points` as this step was
+   written; required kwargs). Code review added a positivity rule to all three owned
    floors: a floor of `0` or less binds nothing, and the sibling reader refuses it by name → `test_the_owned_floors_are_checked_and_a_run_that_meets_them_binds`,
    `test_an_owned_floor_the_run_is_under_is_refused_not_scored` (both floors, both directions),
    `test_an_unreadable_owned_share_floor_is_refused_not_read_as_absent`.
@@ -156,7 +157,8 @@ Every call site / consumer of each thing this change touches:
   them); P1 the plan header attested `status=clean` before any verifier returned; P2 ×3 (the
   §1 reproduction cited an untracked `/tmp` script, §1 overstated the outcome, "six" pins where
   five existed). All six fixed: the measured sides are now anchored to the ARM lines
-  (`metric=atomic_points atomic=` on the scored arm, the control arm's `share=`) and pinned by
+  (`metric=atomic_points atomic=` on the scored arm — `metric=real_facts count=` since
+  #10989 — and the control arm's `share=`) and pinned by
   `test_checker_refuses_a_binding_whose_measured_side_is_unanchored`; the log was re-taken; the
   header claim was withdrawn.
 - **Cycle 2** (verifier 2, fresh): 4 issues, all P2, all plan-doc accuracy — a stale §1
@@ -243,8 +245,10 @@ comments and supersede it):
 - `T4` **denominator substitution** — the E2b floor (and E1's control-arm share) compared against
   a quantity the run did not produce. Cycle 1 found the first cut was only self-consistent
   (both sides printed on the binding line), so the measured side is now anchored to the ARM
-  lines: `arm=<name> metric=atomic_points atomic=` is printed per arm and V15 reconciles
-  the binding's `surviving_units=` against the scored arm's atomic-Point count, and
+  lines: `arm=<name> metric=real_facts count=` is printed per arm (it was
+  `metric=atomic_points atomic=` before #10989 moved the floor's population) and V15
+  reconciles the binding's `surviving_units=` against the scored arm's surviving PLANTED
+  count, and
   `before_share=` against the control arm's `share=` — the same cross-line anchor `objects=`
   has always had. Pinned by
   `test_checker_refuses_a_binding_whose_measured_side_is_unanchored` (inflated on the binding

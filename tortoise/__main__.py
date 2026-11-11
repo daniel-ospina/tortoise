@@ -6091,15 +6091,18 @@ def _install_capture_seam(args, install_capture) -> int:
                 "`additional_context` (sessionStart is Cursor's only context-"
                 "injection seam — its per-turn beforeSubmitPrompt event can "
                 "observe/block a prompt but cannot inject).")
-        # #2122: BOTH hooks miss a cloud agent — not just capture. Cursor's
-        # hook reference (re-fetched 2026-11-10) lists `sessionStart` under
+        # #2122: BOTH hooks miss a HOSTED cloud-agent session — not just capture.
+        # HOSTED per #11810: a Self-Hosted Machines worker fires project hooks (plus
+        # team/enterprise-managed hooks on Enterprise), so the unscoped version of
+        # this header was the exact over-assertion the block below removes.
+        # Cursor's hook reference (re-fetched 2026-11-10) lists `sessionStart` under
         # "Hooks not available in cloud agents" ("Deferred while cloud agents
         # can still start in a read-only environment. Hooks don't load there,
         # so a cloud sessionStart would fire too late") AND states "User-level
         # hooks (~/.cursor/hooks.json) are not available in cloud agents" —
         # and `tortoise install cursor` registers at the USER level only
         # (~/.cursor is Cursor's one writable root; there is no project-level
-        # default). A cloud agent therefore gets NEITHER hook, and disclosing
+        # default). A HOSTED cloud agent therefore gets NEITHER hook, and disclosing
         # only `sessionEnd` would leave the user believing the cold-context
         # digest still reaches a cloud session — the unshipped-seam claim this
         # issue's indicator 3 forbids, applied to the sibling hook.
@@ -6117,22 +6120,39 @@ def _install_capture_seam(args, install_capture) -> int:
         # its source does. Say what IS settled: the LOAD PATH this installer
         # writes, the two events' cloud exclusion, and the surface that DOES
         # fire both so an Enterprise self-hosted-pool user is not undersold.
+        #
+        # ⛔ AND SCOPE THE EXCLUSION TO THE VM (review round 2, P2). "Neither
+        # seam reaches a cloud agent" was the SAME over-assertion one level up:
+        # Cursor's "Choose Where Cloud Agents Run" makes Self-Hosted Machines a
+        # cloud-agent surface, and the page says both events fire there — so the
+        # universal is only settled for the HOSTED VM ("Cloud agent VMs don't
+        # have access to your local home directory configuration"). The
+        # self-hosted clause that follows names all THREE sources the page
+        # lists there (project, team, enterprise-managed), not project alone:
+        # naming one of three reads as exclusive.
+        #
+        # ⛔ AND KEEP THE PAGE'S `and on Enterprise` GATE (review round 3, P2).
+        # The page says those workers "run the same command-based project hooks,
+        # AND ON ENTERPRISE ALSO run team and enterprise-managed hooks" — so a
+        # non-Enterprise self-hosted customer must not read that team/enterprise
+        # hooks reach their workers. That is the same defect the PR removes, one
+        # level down.
         print(
             f"Both Cursor hooks are registered in "
-            f"{cursor_root / 'hooks.json'}, the USER-level file — which a "
-            "CURSOR CLOUD AGENT cannot read, so CLOUD AGENT sessions are NOT "
-            "captured and are NOT injected: Cursor's docs say 'Cloud agents "
-            "have no editor-lifetime session boundary. sessionEnd is tied to "
-            "the IDE session, not a cloud agent chat', that 'sessionStart' is "
-            "not available in cloud agents, and that 'User-level hooks "
-            "(~/.cursor/hooks.json) are not available in cloud agents'. So "
-            "neither the capture seam nor the cold-context injection seam "
-            "reaches a cloud agent — LOCAL desktop-editor sessions are the "
-            "surface this install serves; for cloud agents use the MCP pull "
-            "surface (`tortoise_search` / `tortoise_recall`). Cursor also "
-            "fires `sessionStart`/`sessionEnd` on Self-Hosted Machines "
-            "workers, which run PROJECT-level `.cursor/hooks.json` — a file "
-            "this installer does not write.")
+            f"{cursor_root / 'hooks.json'}, the USER-level file, which a "
+            "hosted Cursor cloud agent VM cannot read. So a session running "
+            "in a hosted cloud agent VM is NOT captured and is NOT injected: "
+            "Cursor's docs say 'Cloud agents have no editor-lifetime session "
+            "boundary. sessionEnd is tied to the IDE session, not a cloud "
+            "agent chat', that 'sessionStart' is not available in cloud "
+            "agents, and that 'User-level hooks (~/.cursor/hooks.json) are "
+            "not available in cloud agents'. LOCAL desktop-editor sessions "
+            "are the surface this install serves; for cloud-agent sessions "
+            "use the MCP pull surface (`tortoise_search` / "
+            "`tortoise_recall`). Cursor also fires "
+            "`sessionStart`/`sessionEnd` on Self-Hosted Machines workers — "
+            "project hooks, plus team and enterprise-managed hooks on "
+            "Enterprise — none of which this installer writes.")
     if args.harness == "openclaw" and not getattr(args, "dry_run", False):
         # #2120: the plugin is discovered under the HOME-scoped
         # ~/.openclaw/extensions and hooks only bind at Gateway startup, so a
@@ -6322,11 +6342,11 @@ def _install_read_hook_impl(args) -> int:
         print("  tortoise install cursor  → ~/.cursor/hooks.json "
               "(the sessionEnd capture hook + the sessionStart cold-context "
               "injection hook; Cursor has no per-turn shell-hook read seam — "
-              "its beforeSubmitPrompt event cannot inject. A CURSOR CLOUD "
-              "AGENT gets neither hook — that file is user-level and a cloud "
-              "agent VM cannot read it; Self-Hosted Machines workers DO fire "
-              "both, from a PROJECT-level `.cursor/hooks.json` this installer "
-              "does not write)")
+              "its beforeSubmitPrompt event cannot inject. A HOSTED CURSOR "
+              "CLOUD AGENT VM gets neither hook — that file is user-level and "
+              "the VM cannot read it; Self-Hosted Machines workers DO fire "
+              "both, from project hooks (plus team and enterprise-managed "
+              "hooks on Enterprise) this installer does not write)")
         print("  tortoise install hermes  → <dir>/.hermes/plugins/"
               "tortoise-volunteer/ (the pre_llm_call PLUGIN — Hermes' per-turn "
               "injection surface; import with `tortoise sessions import "

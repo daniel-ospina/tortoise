@@ -1981,14 +1981,15 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   `test_the_newest_change_control_entry_describes_the_shipped_tree`).
 - **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
   touched. `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to this file.
-- ⛔ **Superseded for the merged tree by §10.23.** The numbers above are the head this entry
+- ⛔ **Superseded for the merged tree by §10.24.** The numbers above are the head this entry
   names, and they are byte-identical to `main`'s copy of that entry — a history entry is not
   re-pointed in place (this entry's own warning, and the handling §10.17→§10.18 used). The inserts
   above every one of them total **+401** lines by this head — `_collect_classify_items` measures
   `:11402` at the merge base, `:11510` on `main` (`#11654`'s +108) and `:11803` here — so the live
-  values are §10.23's.
+  values are §10.24's (`§10.23`'s own block is a record of the `#11654` forward-merge head, and
+  `§10.24` is the entry that claims THIS tree).
 
-⛔ **10.20 is superseded for the shipped tree by §10.23** (the live values; §10.22 records the `#11654` head it measured).
+⛔ **10.20 is superseded for the shipped tree by §10.23** (the live values for what §10.20 pins — the `:10508` read-back — which §10.23 re-derived; §10.22 records the `#11654` head it measured).
 
 ### 10.20 — the merge of `#11523`, and the door-read pin re-pointed for THIS tree (2026-11-09, `#11534`)
 
@@ -2258,6 +2259,17 @@ to answer.
 
 ### 10.23 — the §11 cite block re-derived at the `#11654` forward merge, and the in-place re-pointings reverted (2026-11-10, `#11653`)
 
+> ⛔ **Superseded for the merged tree by §10.24** — the §11 cite-block numbers below are a faithful
+> record of the head this entry names, and §10.24 carries the live values for those cites in this
+> tree. That includes the last sentence of the note below ("it is the newest entry and its numbers
+> are this tree's"): true when this entry was written, not true of this tree.
+>
+> **One number below is still live, and it is not §10.24's.** This entry's `#10360` read-back bullet
+> re-derives that switch's read-back to `extractor_v2.py:10508`; `#11239`'s `+17` inserts sit at
+> `extractor_v2.py:12112-12157`, **below** that assignment, so it did not move. That is why §10.20's
+> pointer still names THIS entry for the `:10508` value, and why `preregistration.json`'s `read_back`
+> prose carries it: §10.24 re-derived the block's lower cites and never restates `:10508`.
+>
 > ⛔ **Renumbered from §10.21 to §10.23 in the `#11654` forward merge**, by the rule §10.22 states for
 > `#11673`'s collision: this section and `#11673`'s both claimed §10.21 on 2026-11-10, the later one
 > yields, and §10.22 holds the number the other one moved to in the same merge. The section is
