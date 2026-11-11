@@ -49,6 +49,7 @@ from .domain_loader import known_kinds, register_kind
 from .kind_fallbacks import named_kind
 from .numeric_domain import (  # #7174: the numeric domain lives in ONE place
     reject_unrepresentable_number as _reject_unrepresentable_number,
+    numeric_alteration_reason,
 )
 from .cross_lens import DEFAULT_THRESHOLD
 # #3301: the canonical OBJECT terminal vocabulary — the SAME set the four
@@ -101,6 +102,7 @@ from .live import _current_status_clause  # #4058 canonical current-status allow
 from .live import same_mitigation_assertion  # #9962 redelivery vs re-assertion
 from .live import epistemic_label_queries  # #7853 epistemic-label id sweep
 from .live import epistemic_disjunction  # #7853 epistemic-label traversal clause
+from .search_engine import belief_value  # #11702: ONE belief-value reader
 from .live import ACCEPTED_DIRECTION_VALUES  # #7852 Layer-1 four-value direction set
 from .live import direction_flows  # #7852 (source→target, target→source) flows
 from .live import direction_spellings  # #7852 stored-token equivalence class
@@ -6465,6 +6467,37 @@ _NARRATIVE_LABELS: frozenset = frozenset({"Event", "Source", "Document"})
 
 
 
+# #11702: the three props that ARE a belief. Named once so the write guard and
+# the #4647 representability loop cannot drift apart on which keys they cover.
+_BELIEF_PROPS = ("confidence", "posterior_alpha", "posterior_beta")
+
+
+def _is_real_number(value) -> bool:
+    """A value the store can hold as a REAL number — `float()` accepts it.
+
+    Deliberately wider than ``isinstance(value, (int, float))`` (`Decimal`,
+    `np.float32` are numbers) and narrower than ``numbers.Number`` (`complex`
+    is one, and the store nulls it). A Boolean is ``1.0`` and a string is a
+    parse, so neither is a number here.
+    """
+    # `np.bool_` is NOT a subclass of `bool` and `float(np.bool_(True))` is 1.0,
+    # so a name check is the only way to refuse it without importing numpy:
+    # measured, `update_point(confidence=np.bool_(True))` was ACCEPTED and stored
+    # a Boolean every reader reports absent, and
+    # `set_point_baseline(claim, np.bool_(True), 0.5)` stored `ep_alpha=true`
+    # *plus* the `baseline_set` flag that freezes the claim against the
+    # source-inheritance recompute (#11702).
+    _t = type(value)
+    if isinstance(value, (bool, str, bytes)) or (
+            _t.__module__ == "numpy" and _t.__name__ in ("bool", "bool_")):
+        return False
+    try:
+        float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return True
+
+
 def _sanitize_props(props: dict, *, reject_id: bool = False,
                     reject_belief_props: bool = False,
                     reject_claim_class: bool = False,
@@ -6596,7 +6629,13 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
             "(reserved `_emit_event` name)", _emit_name)
     # #4647: a value the store cannot hold without altering it must fail here,
     # not be silently clamped/rounded by FalkorDB on the way in.
+    # The three BELIEF keys are excluded here and validated by the loop further
+    # down instead: their domain refusal needs different advice (see there), and
+    # the domain's default advice — "store it as a string" — would send the
+    # caller straight into the belief guard's own refusal (#11702 cycle 22).
     for _key, _value in props.items():
+        if _key in _BELIEF_PROPS:
+            continue
         _reject_unrepresentable_number(_key, _value)
     # #2782: a MONEY value the reader would refuse must not be written either.
     # The typed value's shape (int minor units + ISO 4217 currency + an
@@ -6890,6 +6929,64 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
             "of those, or set_point_baseline for an explicit belief "
             "(#7951)."
         )
+    # ⛔ #11702 cycle 20: a belief VALUE the store cannot hold as a number is
+    # refused HERE, at the write, not defended against on every read.
+    # `_sanitize_props` guarded the property NAMES and not the value types, so
+    # `update_point(posterior_alpha=[0.7])` and `update_point(confidence=True)`
+    # were accepted and stored verbatim. FalkorDB then REFUSES to inspect them:
+    # `toString(<List>)` and `toFloat(<List>)` raise "Type mismatch", taking the
+    # whole query down — so one node with a list-valued belief made
+    # `tortoise_analyze` answer "Query error: …", made `recall_subgraph` raise,
+    # and blanked the belief signal map for the WHOLE recall batch (every result
+    # then reads `absent`, the exact conflation #11702 removes, at batch scope).
+    # A reader cannot be made total over a value the engine will not look at, so
+    # the failure has to be closed here. A STRING is refused for the same
+    # reason: it round-trips through `toFloat` as a float32 and its grammar is
+    # not the same language Python parses ("0.7 " is 0.7 to Python and null to
+    # the store; a hex float is read by BOTH twins, so it is not a split) — the
+    # readers stay total for data already stored
+    # that way, and #11841 owns the wider audit of every belief writer.
+    for _belief_key in _BELIEF_PROPS:
+        if _belief_key in props:
+            _belief_val = props[_belief_key]
+            if _belief_val is None:
+                continue
+            # ⛔ Cycle 21: the CLASS refusal covers only values that are not
+            # numbers at all. The representability question ("can the store hold
+            # this without altering it") belongs to its owner,
+            # `numeric_domain.numeric_alteration_reason` (#4647) — the guard
+            # `_sanitize_props` already applies to every OTHER numeric prop a
+            # few lines above. Spelling it inline with `isinstance(int, float)`
+            # refused `Decimal("0.5")` and `np.float32(0.5)`, which the double
+            # type holds EXACTLY (the domain function certifies them), and
+            # diagnosed them as "malformed" — a regression against the pre-PR
+            # tree, where both were stored faithfully.
+            # ⛔ `numbers.Number` was one notch too wide: it admits `complex`,
+            # which `numeric_alteration_reason` has no arm for (its last arm
+            # returns None), so `update_point(confidence=1j)` was ACCEPTED and
+            # the store's own degraded-value path (#7369) wrote null — the
+            # caller told the write succeeded while nothing was stored. A real
+            # number is what `float()` accepts, minus the shapes that convert
+            # but are not numbers (a Boolean is 1.0, a string is a parse).
+            if not _is_real_number(_belief_val):
+                raise ValueError(
+                    f"{_belief_key!r} must be a number (not a "
+                    f"{type(_belief_val).__name__}): FalkorDB cannot coerce a "
+                    "List/Boolean/string operand, so a single such row breaks "
+                    "every belief read on the batch (#11702, #11841). Pass a "
+                    "float, or None to clear it."
+                )
+            # …and a number it cannot hold exactly is the DOMAIN's refusal, with
+            # its own reason (a precision loss is not "malformed").
+            _belief_reason = numeric_alteration_reason(
+                _belief_key, _belief_val)
+            if _belief_reason:
+                raise ValueError(
+                    f"{_belief_reason} (For a belief column that advice does "
+                    "not apply: a STRING belief is refused, and the store "
+                    "answers `absent` for it — #11702, #11841. Pass a float, "
+                    "or None to clear it.)"
+                )
     _baseline_props = [k for k in
                        ("ep_alpha", "ep_beta", "baseline_set",
                         "baseline_source")
@@ -16514,19 +16611,37 @@ class TortoiseSDK:
             build_write_verb,
             surfaced_marker,
         )
+
+        from .search_engine import EP_STATE_ABSENT, ep_state
         skipped = 0
         facts: dict = {}
         if extracted:
             try:
+                # #11702: the RAW belief columns, read through the PYTHON
+                # twin (`ep_state`) rather than composing the Cypher predicate
+                # into the statement. Two reasons, both structural: a
+                # helper-composed clause makes this statement UNRESOLVABLE to
+                # the §17.1 census (#9124), which then classifies a READ as an
+                # undeclared write and reds the door — and the raw columns are
+                # the same input `annotate_ep_batch` / the rankers consume, so
+                # this read cannot drift from them. It replaced a local
+                # `α IS NOT NULL OR ep_α IS NOT NULL` spelling that called a
+                # MIRROR-only claim (a real served belief, e.g. 0.95) and a
+                # β-only half pair "not ep_updated".
                 rows = proj.g.query(
                     "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
                     "coalesce(n.pointKind, 'statement'), "
                     "coalesce(n.status, 'live'), "
-                    "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL)",
+                    "n.confidence, n.posterior_alpha, n.ep_alpha, "
+                    "n.posterior_beta, n.ep_beta",
                     params={"ids": [p["id"] for p in extracted]},
                 ).result_set
-                facts = {r[0]: (r[1] or "statement", r[2] or "live", bool(r[3]))
-                         for r in rows}
+                facts = {
+                    r[0]: (r[1] or "statement", r[2] or "live",
+                           ep_state(confidence=r[3], posterior_alpha=r[4],
+                                    ep_alpha=r[5], posterior_beta=r[6],
+                                    ep_beta=r[7]) != EP_STATE_ABSENT)
+                    for r in rows}
             except Exception:  # noqa: BLE001, RUF100 — fail-open, mirror
                 # hosted's enrichment-read posture (additive warning, never
                 # raise over a committed capture).
@@ -18931,6 +19046,39 @@ class TortoiseSDK:
                                 money_views=_money_views_for_update(
                                     proj.g, props, node_id=id,
                                     label=":Point"))
+        # ⛔ #11702 (review cycle 12, P2): THIS is the THIRD writer that moves a
+        # belief pair, and it was the one that left the `n.confidence` mirror
+        # behind. `reject_belief_props` refuses `credibility` and the baseline
+        # quartet only — `posterior_alpha` / `posterior_beta` / `confidence`
+        # ride through, so `update_point(id, posterior_alpha=10.0,
+        # posterior_beta=10.0)` stored a new pair beside the OLD flush value.
+        #
+        # Pre-#11702 that disagreement was VISIBLE (the mirror-led surfaces said
+        # 0.9, the `ep` block said 0.5); post-#11702 the same ~12 surfaces all
+        # read the mirror FIRST, so a stale mirror is indistinguishable from a
+        # correct one and the served belief contradicts the persisted pair that
+        # is supposedly behind it. The other two members of the family were
+        # closed at their writes (`sdk.set_point_baseline` refreshes the mirror,
+        # the EP evidence pre-write clears it with the posterior); this is the
+        # same treatment, so no path moves α/β and leaves the mirror.
+        #
+        # The clear — not a recomputed mean — because the mirror is a FLUSH of
+        # the posterior, and inventing one here would claim an EP write that
+        # never ran. With the mirror gone, every mirror-first read falls through
+        # to the pair mean (the #2206 precedence), which is the honest value for
+        # the pair the caller just wrote — including a HALF pair, which then
+        # reads absent instead of inheriting the stale mirror's number.
+        #
+        # A caller-supplied `confidence` still WINS (it is caller-owned, like
+        # `tags`), so mirror≠pair stays reachable through the public writes —
+        # pinned by `test_the_mirror_wins_over_a_contradicting_pair`.
+        if (("posterior_alpha" in props or "posterior_beta" in props)
+                and "confidence" not in props):
+            # `SET n += $props` with a None REMOVES the property, and `props` is
+            # also `emit_props`' base below — so the clear rides the same
+            # `PointRevised` record (`BELIEF_PROPS` is in its fold whitelist,
+            # with `None` the journaled clear) and a rebuild reproduces it.
+            props["confidence"] = None
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
         # #11239: same rule at the UPDATE door. Idempotent — a value already in
@@ -30304,9 +30452,25 @@ class TortoiseSDK:
 
         Returns {event_id, decision_point_id, impl_operator_ids,
                  confidence_delta} where confidence_delta maps each approved
-        claim id to its confidence change after the EP run.
+        claim id to its confidence change after the EP run — ``None`` for a
+        claim whose belief did not exist on either side of the run (#11702: a
+        delta against a fabricated 0.5 baseline reported movement that never
+        happened).
         """
+        # #11702: lazy import (the `_created_sort_key` convention in this file).
+        # ⛔ NOT because a module-scope import would pull `search_engine` in —
+        # `sdk.py` already imports `belief_value` from it at module scope, so
+        # that ship has sailed and saying otherwise is a claim a reader cannot
+        # check. The reason is only the convention: a helper used by one method
+        # is imported by that method.
+        # ⛔ BELOW the docstring on purpose: a statement above it makes the string
+        # an unused expression and `__doc__` becomes None, so the `confidence_delta`
+        # contract documented here would be invisible to `help()` and to the
+        # generated docs. Cycle 27 found this comment GLUED to the closing `"""`,
+        # which also hid that paragraph from `help()`.
         from datetime import datetime, timezone
+
+        from .search_engine import annotate_ep_batch
         proj = self._get_proj()
 
         # 1. Validate approver Subject exists (fail loudly, not silently).
@@ -30389,10 +30553,18 @@ class TortoiseSDK:
 
         # 7. EP with evidence prior on the approval Point: Beta(10,1) is a
         #    strong positive prior — dependents strengthen (issue #531).
-        before = {}
-        for pid in point_ids:
-            p = self.get_point(pid)
-            before[pid] = p.get("confidence", 0.5) if p else 0.5
+        # #11702: both endpoints come from the SHARED belief reader
+        # (`annotate_ep_batch`, the same value `search`/`recall`/`why` report),
+        # never from `get_point(...)["confidence"]`. That key is the EP-flush
+        # MIRROR: it is absent on a claim whose belief lives in its posterior
+        # pair, so reading it alone reported `None` for a claim measured at
+        # 0.75 — "the belief did not exist" about one that did. `None` now means
+        # exactly what the docstring says.
+        before = {
+            bd_id: bd.confidence_mean
+            for bd_id, bd in annotate_ep_batch(
+                self._get_proj().g, list(point_ids)).items()
+        }
         # #344: conscious opt-out from the fail-closed gate. #7739 scoped the
         # no-arg gate to the dirty roots and their closure (it is no longer
         # graph-wide), and this call still passes no anchors/factors — but the
@@ -30403,11 +30575,20 @@ class TortoiseSDK:
         # gate for any other caller: each one opts out explicitly or not at all.
         self.compute_confidence(evidence={decision_id: (10, 1)},
                                 require_calibration=False)
+        after = {
+            bd_id: bd.confidence_mean
+            for bd_id, bd in annotate_ep_batch(
+                self._get_proj().g, list(point_ids)).items()
+        }
         deltas = {}
         for pid in point_ids:
-            p = self.get_point(pid)
-            after = p.get("confidence", 0.5) if p else 0.5
-            deltas[pid] = round(after - before[pid], 4)
+            # #11702: a delta needs TWO numbers. Against a `None` endpoint the
+            # only truthful answer is `None` (the claim went from "no belief"
+            # to a value, which is not a delta on the same axis) — reporting
+            # `0.9 - 0.5` claimed a movement that never happened.
+            was, now = before.get(pid), after.get(pid)
+            deltas[pid] = (round(now - was, 4)
+                           if now is not None and was is not None else None)
 
         # 8. Approval seeds the grounding a-vector — re-compute (api.py pattern)
         if hasattr(proj, "compute_grounding"):
@@ -31272,7 +31453,11 @@ class TortoiseSDK:
         with issue in (contradictory, stale, contested) — a single edge may
         carry multiple issues (one entry each, deduped).
         """
-        from .search_engine import ep_measured_cypher  # #3276 canonical predicate
+        from .search_engine import (  # #11702 the variance-SCAN rule
+            beta_variance_cypher,
+            ep_measured_cypher,  # #3276 canonical predicate
+            ep_variance_admissible_cypher,
+        )
         edges = self._epistemic_edges()
         if not edges:
             return []
@@ -31336,11 +31521,36 @@ class TortoiseSDK:
             "WHERE n.is_operator = false "
             f"  AND {_terminal_excluded('n.status')} "
             f"  AND {ep_measured_cypher('n')} "
-            "  AND (n.posterior_beta IS NOT NULL OR n.ep_beta IS NOT NULL) "
+            # #11702 cycle 13: the shared WIDTH rule — pair stored, both
+            # operands non-negative, positive total — instead of this scan's
+            # own `posterior_beta IS NOT NULL OR ep_beta IS NOT NULL` half
+            # gate, which admitted a half pair (the missing operand is
+            # invented as 1.0 below). Same rule, one spelling — and since
+            # cycle 30 that rule is the ONLY positivity gate here: the
+            # `a > 0 AND b > 0` conjunct this comment used to point at was
+            # deleted below (it compared the RAW operand, so a string-stored
+            # pair went NULL and dropped out).
+            f"  AND {ep_variance_admissible_cypher('n')} "
             "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
             "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
-            "WITH n, a, b, (a*b)/((a+b)*(a+b)*(a+b+1)) AS v "
-            "WHERE a > 0 AND b > 0 AND v > $t RETURN n.id, v",
+            # #11702 cycle 11: `toFloat` on every operand — FalkorDB `/` is
+            # INTEGER division on integer operands, so an int-stored
+            # `(2, 2)` pair computed v = 0 and this scan silently omitted a
+            # genuinely contested claim (see `ep.get_contested_claims`).
+            # #11702 cycle 15: the shared width formula (toFloat plus the
+            # representability band), same as `ep.get_contested_claims`.
+            f"WITH n, a, b, {beta_variance_cypher('a', 'b')} AS v "
+            # #11702 cycle 30: NO raw-operand guard here. `a > 0 AND b > 0`
+            # compared the UNCOERCED coalesce to an integer, so a string-stored
+            # operand (`posterior_alpha="2"`, a population
+            # `numeric_operand_cypher` exists for) made the whole conjunction
+            # NULL and this scan dropped a genuinely contested pair that its
+            # twin `ep.get_contested_claims` listed from the same width rule.
+            # The guard was redundant anyway: `ep_variance_admissible_cypher`
+            # already requires both operands READABLE and non-negative, and
+            # `beta_variance_cypher` bands the sum, so `v > $t` is the whole
+            # test — which is exactly the twin's spelling.
+            "WHERE v > $t RETURN n.id, v",
             params={"t": variance_threshold},
         ).result_set
         for pid, v in rows:
@@ -33959,8 +34169,36 @@ class TortoiseSDK:
         # refusal paths BELOW land after the update — `written` is only known
         # after the store answers — so each one pops the seat it just planted,
         # #9262.)
+        # #11702 cycle 21: a BOOLEAN is not a Beta count, and it slips every
+        # guard below — `_reject_unrepresentable_number(True)` returns None (the
+        # numeric domain does not treat a Boolean as an altered number) and
+        # `True < 0` is False. Measured: `set_point_baseline(claim, True, 0.5)`
+        # answered ok, stored `ep_alpha=true`, which every reader then reports
+        # ABSENT (a Boolean is not a number) — while the same call set
+        # `baseline_set=true` + `baseline_source="set-by-author"`, freezing the
+        # claim against the source-inheritance recompute that would have given it
+        # a belief. Refused here, like the cycle-20 guard on the generic door.
+        for _name, _val in (("alpha", alpha), ("beta", beta)):
+            if not _is_real_number(_val):
+                raise ValueError(
+                    f"Beta {_name} must be a number, not a "
+                    f"{type(_val).__name__}: a Boolean/collection/string "
+                    "operand is not a pseudo-count and cannot be read as a "
+                    "belief (#11702)")
         _reject_unrepresentable_number("alpha", alpha)
         _reject_unrepresentable_number("beta", beta)
+        # #11702 cycle 11: a Beta operand is a COUNT. The representability
+        # guard accepts a negative float, and `(alpha + beta) > 0` passes for
+        # α=-1, β=3 — which then wrote an out-of-range "mean" (-0.5) into the
+        # SERVED `n.confidence` mirror (the value every read prefers) and
+        # journaled it, so a rebuild reproduced it. Refuse before any write or
+        # in-memory prior, exactly like the guards above.
+        for _name, _val in (("alpha", alpha), ("beta", beta)):
+            if _val < 0:
+                raise ValueError(
+                    f"Beta {_name} must be >= 0 (got {_val!r}): α and β are "
+                    "pseudo-counts, and a negative operand yields a mean "
+                    "outside [0, 1] and a negative variance")
         self._evidence[claim_id] = (alpha, beta)
         # Persist to graph so baselines survive SDK restarts
         proj = self._get_proj()
@@ -34001,13 +34239,38 @@ class TortoiseSDK:
         _set_clause = (
             "n.ep_alpha = $a, n.ep_beta = $b, n.baseline_set = true, "
             "n.baseline_source = $src, "
+            # #11702: the `n.confidence` flush-mirror is the SERVED belief mean
+            # (#2206) and every read/rank surface prefers it, so nulling the
+            # posterior without touching it left the node reporting its OLD
+            # posterior mean (0.9) beside a new prior mean (0.75) — the two
+            # halves of one claim disagreeing on one response. The mirror is
+            # refreshed to THIS prior's mean in the same write, so it can never
+            # outlive the belief it summarises.
+            "n.confidence = $c, "
             "n.posterior_alpha = null, n.posterior_beta = null"
         )
         if source != BASELINE_SOURCE_INHERITED:
             _set_clause += ", n.credibility = null, n.baseline_system_default = null"
         written = proj.g.query(
             f"MATCH (n:Point {{id: $id}}) SET {_set_clause} RETURN n.id",
-            params={"id": claim_id, "a": alpha, "b": beta, "src": source},
+            params={"id": claim_id, "a": alpha, "b": beta, "src": source,
+                    # #11702: a degenerate (0,0) baseline writes NO mirror.
+                    # Writing the #330 house 0.5 here would make the row
+                    # PRESENT by the shared predicate (`n.confidence IS NOT
+                    # NULL` wins over the zero-total pair), so one SDK call
+                    # produced the exact `0.5` + belief state §6.3 forbids —
+                    # and journaled it, so a rebuild reproduced it. `None`
+                    # removes the property (Cypher `SET n.p = null`), leaving
+                    # the row absent, which is what every read surface says.
+                    # (The value comes from `belief_value` — the ONE owner of
+                    # "mean of a Beta pair, or None" — so this call cannot
+                    # re-derive the arithmetic the eight read surfaces use;
+                    # it is also what keeps a bare `alpha / (alpha + beta)`
+                    # from raising ZeroDivisionError BEFORE the write, which
+                    # used to leave `self._evidence` holding a prior the graph
+                    # never received.)
+                    "c": belief_value(posterior_alpha=alpha,
+                                      posterior_beta=beta, round_to=4)},
         ).result_set
         # #9063: a baseline the statement did NOT write must never be reported
         # as written when the caller's node EXISTS. ``set_point_baseline`` used
@@ -34110,15 +34373,28 @@ class TortoiseSDK:
         # pre-write writes `ep_alpha`/`ep_beta` CONDITIONALLY on the
         # pre-existing `baseline_set`, so the correct payload is the
         # statement's OUTCOME, not its input params) and is filed as a
-        # residual for the controller. `confidence` is untouched here.
+        # residual for the controller.
+        #
+        # ⛔ #11702: the mirror IS journaled, because this statement now MOVES
+        # it (`n.confidence = $c` above). Leaving it out made live and rebuilt
+        # disagree — live `baseline`/0.75, rebuilt `absent`/None — because the
+        # fold is presence-conditional and only writes the keys a record
+        # carries. The payload is the value the statement itself committed, so
+        # replay cannot differ from the write.
         # NOTE (#6151 review P3): `_stamp_authored_word` — the other writer in
         # this family — carries the SAME live≠rebuild gap on the
         # existing-point paths; its docstring records the mechanism, the
         # measured symptom, and why closing it is not a small change.
         if self._event_log_path:
+            # #11702: the SAME value the statement committed — `None` for a
+            # degenerate pair, so replay leaves the row absent exactly as the
+            # live graph does (see the `c` param above). Computed by
+            # `belief_value` for the same reason the `c` param is.
+            _mirror = belief_value(posterior_alpha=alpha, posterior_beta=beta,
+                                   round_to=4)
             for row in written:
                 self._emit_event(
-                    "ConfidenceChanged", id=row[0],
+                    "ConfidenceChanged", id=row[0], confidence=_mirror,
                     posterior_alpha=None, posterior_beta=None)
         # Dreaming (#85, P1): a baseline change alters the prior — neighbors
         # whose confidence derived from this claim are now stale.
@@ -34564,15 +34840,28 @@ class TortoiseSDK:
             reverted = proj.g.query(
                 "MATCH (n:Point {id:$id}) REMOVE n.ep_alpha, n.ep_beta, "
                 "n.baseline_set, n.baseline_source, n.inherited_at, "
-                "n.posterior_alpha, n.posterior_beta "
+                "n.posterior_alpha, n.posterior_beta, n.confidence "
                 "RETURN count(n)",
                 params={"id": pid},
             ).result_set
             # #2884 D3/FIX-3: the revert REMOVEs the posteriors LIVE, so a
-            # rebuild must replay the CLEAR (the two belief keys carried here;
-            # `confidence` is untouched). `RETURN count(n)` binds the journal
-            # to the committed rows — a missing Point removed nothing and
-            # journals nothing.
+            # rebuild must replay the CLEAR (the belief keys carried here;
+            # `confidence` INCLUDED — #11702 cycle 31). `RETURN count(n)` binds
+            # the journal to the committed rows — a missing Point removed
+            # nothing and journals nothing.
+            #
+            # ⛔ `n.confidence` is NOT optional here, and "`confidence` is
+            # untouched" was true only before #11702. The inherited baseline
+            # now stamps the MIRROR through `set_point_baseline`
+            # (``n.confidence = $c``), and every read is mirror-first, so a
+            # revert that removed the pair and left the mirror turned a claim
+            # the writer deliberately returned to NEUTRAL into a permanent
+            # `confidence_mean` with no pair behind it — on every surface, for
+            # ever, and the journal reproduced it because the record carried no
+            # `confidence` either. The revert's own WHERE already requires
+            # `baseline_source='inherited-from-source' AND n.credibility IS
+            # NULL`, so there is no AUTHORED prior to preserve: an
+            # unconditional clear is the correct reading.
             # SCOPE (honest, #2884 A4): the REMOVE also clears `ep_alpha`,
             # `ep_beta`, `baseline_set`, `baseline_source` and `inherited_at`,
             # and none of those five is journaled (see the note in
@@ -34580,7 +34869,8 @@ class TortoiseSDK:
             if self._event_log_path and reverted and reverted[0][0]:
                 self._emit_event(
                     "ConfidenceChanged", id=pid,
-                    posterior_alpha=None, posterior_beta=None)
+                    posterior_alpha=None, posterior_beta=None,
+                    confidence=None)
             # Clear the stale prior from in-memory evidence cache (#652).
             # set_point_baseline writes (alpha, beta) into self._evidence
             # unconditionally, and _hydrate_evidence is additive-only — so
@@ -36936,9 +37226,15 @@ class TortoiseSDK:
         recent_events = [r[0] for r in proj.g.query(
             "MATCH (e:Event) RETURN properties(e) ORDER BY e.startedAt DESC LIMIT 20"
         ).result_set]
+        # #11702 cycle 24: the digest reports a belief, so the mirror is read
+        # through the band (`belief_mirror`) like every other surface — a legacy
+        # `"0x1p4"` / `2.5` mirror was served here as a confidence while
+        # `annotate`, `why` and all three rankers called the claim absent, and a
+        # raw string in a digest is a serialisation hazard besides.
+        from .search_engine import belief_mirror as _belief_mirror
         confidence_changes = [
             {"id": r[0], "content": r[1], "pointKind": r[2],
-             "confidence": r[3], "updatedAt": r[4]}
+             "confidence": _belief_mirror(r[3]), "updatedAt": r[4]}
             for r in proj.g.query(
                 "MATCH (n:Point) WHERE n.confidence IS NOT NULL "
                 "AND n.is_operator = false "
@@ -37694,8 +37990,11 @@ class TortoiseSDK:
         Point results annotated with EP breakdown. confidence_mean is THE
         point's confidence (issue #2206 contract): the belief mean α/(α+β) of
         the persisted posterior when EP has run, else the persisted prior
-        mean, else the neutral Beta(1,1) mean 0.5 — identical to
-        get_confidence/recall for the same point. contention/evidence stay
+        mean — and ``null`` + ``ep_state: "absent"`` when NOTHING is persisted (#11702: there is then no belief
+        to report; the neutral Beta(1,1) 0.5 was indistinguishable from a
+        measured symmetric coin flip, so it is no longer substituted anywhere
+        on a read/rank surface — ``get_confidence`` remains the EP prior read
+        and still answers 0.5 there). contention/evidence stay
         the structural edge-ratio family (a different quantity). Non-Point
         entities skip EP annotation. min_confidence filters on
         confidence_mean (belief); defaults to 0.0 (no filter).
@@ -39718,7 +40017,15 @@ class TortoiseSDK:
             cap_source_path = pt.get("sourcePath", "")  # #167
 
             # Apply min_confidence filter (Point only; non-Point always pass)
-            if entity_type == "point" and ep and ep.confidence_mean < min_confidence:
+            # #11702: an ABSENT belief has no number to clear a numeric floor,
+            # so it cannot satisfy one — but a floor of 0.0 is the shipped
+            # "filter off" default and must keep admitting it. This used to
+            # compare the fabricated neutral 0.5 against the floor, so an
+            # unmeasured claim silently passed every cut-off below 0.5 as if it
+            # had neutral evidence.
+            if (entity_type == "point" and ep and min_confidence > 0.0
+                    and (ep.confidence_mean is None
+                         or ep.confidence_mean < min_confidence)):
                 continue
 
             # Build scores
@@ -39911,10 +40218,23 @@ class TortoiseSDK:
             ranker = graph_ranker or GraphRanker(proj)
             read = ranker._fetch_signals([r.id for r in results], entity_type)
             signals = read or {}
-            results.sort(
-                key=lambda r: signals.get(r.id, {}).get("confidence", 0.5),
-                reverse=True,
-            )
+
+            def _confidence_key(r):
+                """#11702: a row with NO belief has no position on this axis.
+
+                `order_by="confidence"` sorts on a number; an absent claim has
+                none, so ordering it at the old 0.5 default put it in the
+                middle of a belief ranking it was never measured for. It is
+                placed AFTER every row that carries a number (tier 1), keeping
+                its RRF position among the other unmeasured rows — the sort
+                stays total and deterministic, and no fabricated key is used.
+                """
+                conf = (signals.get(r.id) or {}).get("confidence")
+                if conf is None:
+                    return (1, 0.0)
+                return (0, -float(conf))
+
+            results.sort(key=_confidence_key)
             # #10137 review P1 / round 7 P1: the label describes the READ and
             # the read must have supplied a MEASUREMENT — a failed fetch answers
             # None (every key stays at the neutral 0.5, leaving the list in RRF
@@ -40887,13 +41207,18 @@ class TortoiseSDK:
           (retracted stays excluded — #689 leak guard).
         - Object-centric: Objects and the Points about them are ranked
           together; an Object's confidence is the mean EP posterior of the
-          Points about it (neutral 0.5 when none).
+          Points about it (``null`` when none of them has a belief — #11702).
         - Contested claims are SURFACED, never buried: ``contested:true`` +
           ``counter_evidence`` (NANDing point id/content) attached.
         - Most important arguments (operators, by annotator_precision) and
           high-contention NANDs / mitigations attached to top results.
-        - Uncalibrated points fall back to documented neutral confidence 0.5
-          (absence of measurement is NOT low support).
+        - Uncalibrated points (no persisted belief at all) carry
+          ``confidence: null`` + ``ep_state: "absent"`` and are ordered AFTER
+          every row that has a belief (#11702). This replaces the documented
+          neutral-0.5 fallback: absence is still not scored as LOW support —
+          the belief term does not participate in the order at all, and the
+          row says so — but it is no longer ordered AS a measured coin flip
+          either. `SEARCH-ARCHITECTURE.md` §6.3 is the decision.
 
         #2598 — drafts render honestly. A DRAFT is EP-inert (``live._live_only``
         excludes it at every factor-extraction call site), so when EP has not
@@ -44297,6 +44622,7 @@ class TortoiseSDK:
         # Source by `url`.
         from tortoise.projection import (
             _CANONICAL_ENTITY_ID_PROPS,
+            BELIEF_PROPS,
             classify_entity_mutation_op,
         )
 
@@ -44598,6 +44924,48 @@ class TortoiseSDK:
                         point_props["embeddingText"] = None
                     else:
                         point_props = props
+                    # #11702 cycle 31: the SAME mirror rule `update_point`
+                    # gained, through THIS door — and applied to the FINAL
+                    # `point_props`, so it covers both branches above (a caller
+                    # who sends an embedding AND a pair hit the `if` arm and
+                    # skipped it). `_sanitize_props` refuses `credibility` and
+                    # the baseline quartet only, so `posterior_alpha` /
+                    # `posterior_beta` / `confidence` ride through here exactly
+                    # as they did on `update_point` before this PR closed that
+                    # door: a caller writing a new PAIR left the OLD flush
+                    # mirror beside it. Post-#11702 the mirror LEADS on every
+                    # read, so that is a silently-served belief the tenant's own
+                    # write contradicted — reachable as `sdk.update_entity`,
+                    # `sdk.update` on a Point, and `tortoise_update_entity` over
+                    # MCP. The COPY is load-bearing: `_CANONICAL_ENTITY_ID_PROPS`
+                    # visits every label with this same dict, so mutating `props`
+                    # here would stamp a Point-only clear onto the other labels.
+                    if (("posterior_alpha" in point_props
+                         or "posterior_beta" in point_props)
+                            and "confidence" not in point_props):
+                        if point_props is props:
+                            point_props = dict(props)
+                        point_props["confidence"] = None
+                    # #11702 cycle 32: the belief props this door APPLIES must
+                    # also be the ones it JOURNALS. `journaled_updates` above is
+                    # the annotator set plus `mentions`; neither the caller's
+                    # α/β pair nor the mirror clear is in it, so the write landed
+                    # LIVE and vanished from the record — `rebuild_all` then
+                    # replayed the `set_point_baseline` belief that was still on
+                    # the journal and served a DIFFERENT answer on recovery
+                    # (measured: live 0.5 / "measured" vs rebuilt 0.9 /
+                    # "baseline" after one `update_entity(pair)`;
+                    # `check_consistency` → divergence "content", fields
+                    # ["confidence"]). `PointRevised` already folds these —
+                    # `_revise_point` / `_apply_one` both walk `BELIEF_PROPS`
+                    # and treat `None` as the journaled clear — so the payload is
+                    # the only missing half. Presence-conditional on the FINAL
+                    # `point_props`, so an unrelated `update_entity` journals no
+                    # belief key at all (and `lastDreamedAt` still rides when the
+                    # caller sends it).
+                    belief_updates = {
+                        k: point_props[k] for k in BELIEF_PROPS
+                        if k in point_props}
                     for match_prop in id_keys:
                         res = proj.g.query(
                             f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $p "
@@ -44622,10 +44990,10 @@ class TortoiseSDK:
                     # Post-apply, per matched label — the `_delete_entity`
                     # emitter's ordering contract (a failed/no-op write never
                     # leaves a phantom record).
-                    if (journaled_updates and res.result_set
+                    if ((journaled_updates or belief_updates) and res.result_set
                             and res.result_set[0][0]):
                         self._emit_event("PointRevised", id=id_val,
-                                         **journaled_updates)
+                                         **journaled_updates, **belief_updates)
                 else:
                     # C1 (#3312 statuses, #3377 rename): this branch used to apply
                     # caller props with a live `SET n += $p` and emit NOTHING — so
@@ -48868,7 +49236,12 @@ class TortoiseSDK:
             "AND (p.outdated IS NULL OR p.outdated = false) "
             "AND e.eventKind <> 'humanApproval' "  # #531: no reputation from own approvals
             f"AND {match_clause} "
-            "RETURN p.id, p.content, coalesce(p.confidence, 0.5) AS conf",
+            # #11702: NO `coalesce(p.confidence, 0.5)` — an evidence point with
+            # no persisted belief has no confidence to report, and the report is
+            # the whole use of this column here (the Beta below counts IMPL vs
+            # NAND, it does not weight by confidence). The fabricated 0.5 made
+            # "no evidence recorded" read as "symmetric evidence".
+            "RETURN p.id, p.content, p.confidence AS conf",
             params={"sid": resolved_sid},
         ).result_set
         nand_rows = proj.g.query(
@@ -48878,16 +49251,30 @@ class TortoiseSDK:
             "AND (p.outdated IS NULL OR p.outdated = false) "
             "AND e.eventKind <> 'humanApproval' "  # #531: no reputation from own approvals
             f"AND {match_clause} "
-            "RETURN p.id, p.content, coalesce(p.confidence, 0.5) AS conf",
+            # #11702: NO `coalesce(p.confidence, 0.5)` — an evidence point with
+            # no persisted belief has no confidence to report, and the report is
+            # the whole use of this column here (the Beta below counts IMPL vs
+            # NAND, it does not weight by confidence). The fabricated 0.5 made
+            # "no evidence recorded" read as "symmetric evidence".
+            "RETURN p.id, p.content, p.confidence AS conf",
             params={"sid": resolved_sid},
         ).result_set
 
         # Collect outcomes
         outcomes: list[dict] = []
+        # #11702 cycle 16: TOTAL coercion — a stored non-numeric mirror raised
+        # `float()` here and took the whole reputation update with it, for a
+        # report that does not weight by confidence in the first place.
+        from .search_engine import belief_mirror as _belief_mirror
+
         for row in impl_rows:
-            outcomes.append({"point_id": row[0], "content": row[1], "confidence": float(row[2]), "outcome": "IMPL"})
+            outcomes.append({"point_id": row[0], "content": row[1],
+                             "confidence": _belief_mirror(row[2]),
+                             "outcome": "IMPL"})
         for row in nand_rows:
-            outcomes.append({"point_id": row[0], "content": row[1], "confidence": float(row[2]), "outcome": "NAND"})
+            outcomes.append({"point_id": row[0], "content": row[1],
+                             "confidence": _belief_mirror(row[2]),
+                             "outcome": "NAND"})
 
         total = len(outcomes)
         impl_count = sum(1 for o in outcomes if o["outcome"] == "IMPL")

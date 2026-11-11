@@ -130,6 +130,11 @@ def _claim_surfaces(sdk, pid, query_text):
         "recall_ranking": (recall_hit or {}).get("recall_ranking", {}).get("confidence"),
         "stored_confidence": float(stored[0]) if stored and stored[0] is not None else None,
         "posterior_persisted": stored is not None and stored[1] is not None,
+        # #11702: ANY persisted belief (posterior, prior, or the EP-flush
+        # mirror) makes the row "present" rather than the absent case.
+        "stored_belief_present": bool(
+            stored and (stored[0] is not None or stored[1] is not None
+                        or stored[3] is not None)),
     }
 
 
@@ -206,25 +211,44 @@ class TestCrossSurfaceAgreement:
         finally:
             sdk.close()
 
-    def test_unmeasured_point_is_neutral_everywhere(self):
-        """Pre-measurement agreement: a claim nobody measured reads the
-        neutral Beta(1,1) mean 0.5 on every surface (absence of measurement
-        is NOT low support — the search annotation must not read 0.0)."""
+    def test_unmeasured_point_is_absent_everywhere(self):
+        """Pre-measurement agreement (#11702, superseding this test's 0.5 pin):
+        a claim nobody measured has NO belief, and every READ surface that
+        reports a belief says so — ``null``, never the neutral 0.5.
+
+        The old contract read 0.5 on all five surfaces and called that
+        "neutral is not low support". It was also indistinguishable from a
+        measured symmetric coin flip, which is the defect #11702 fixes; the
+        "not low support" concern survives because absence is not scored as
+        0.0 either — it is simply not a number.
+
+        ``get_confidence`` is the ONE surface that still answers the
+        Beta(1,1) prior mean: it is the EP read under an explicit
+        ``require_calibration=False`` (the prior, not a measurement claim),
+        and it is outside #11702's read/rank scope.
+        """
         sdk = _fresh_sdk()
         try:
             u = _make_point(sdk, "Quokka patrol unmeasured claim zzqx", kind="decision")
             pid = u["id"]
             surf = _claim_surfaces(sdk, pid, "quokka patrol unmeasured")
-            mean = surf["get_confidence"]
-            assert mean == pytest.approx(0.5, abs=1e-6)  # neutral uniform read
+            assert surf["get_confidence"] == pytest.approx(0.5, abs=1e-6)
             assert surf["posterior_persisted"] is False
+            # Not a skip: this fixture is CONSTRUCTED to carry no belief, so a
+            # stored belief appearing here means the fixture (or
+            # `create_point`'s #2199 auto-baseline rule) changed under the test
+            # — that must go red, not quietly disable the five-surface
+            # agreement assertion this test exists for.
+            assert not surf["stored_belief_present"], (
+                "precondition broken: the fixture point must carry no persisted "
+                "belief, but it now does — the absent case is no longer being "
+                "tested")
             for key in ("annotate", "search_ep", "recall_ep",
                         "recall_ranking"):
                 got = surf[key]
-                assert got == pytest.approx(0.5, abs=1e-3), (
-                    f"{key}={got} must read neutral 0.5 for an unmeasured claim")
-            # No EP run → n.confidence was never written (legitimately absent;
-            # when present it must be the neutral 0.5, never 0.0).
+                assert got is None, (
+                    f"{key}={got!r} must be null for a claim with no belief "
+                    "(the old 0.5 was indistinguishable from a measured 0.5)")
             stored = surf["stored_confidence"]
             assert stored is None or stored == pytest.approx(0.5, abs=1e-3)
         finally:
@@ -312,7 +336,11 @@ class TestGraphRankerPriorOnlyParity:
             from tortoise.ranking import GraphRanker
             signals = GraphRanker(proj)._fetch_signals([high, low], "point")
             assert signals[high]["confidence"] == pytest.approx(0.75, abs=1e-6)
-            assert signals[low]["confidence"] == pytest.approx(0.5, abs=1e-6)
+            # #11702: the comparator decision carries NO persisted belief, so
+            # it is absent (None) — it used to read the neutral 0.5, which is
+            # what made "no belief" and "a measured 0.5" the same sort key.
+            assert signals[low]["confidence"] is None
+            assert signals[low]["ep_state"] == "absent"
             hits = sdk.tortoise_fts_query(
                 "quokka patrol prioronly zzqx", entity_type="point",
                 limit=50, order_by="confidence", w4_enrich=False,
@@ -320,15 +348,17 @@ class TestGraphRankerPriorOnlyParity:
             ids = [h.get("id") for h in hits]
             assert high in ids and low in ids, f"both claims must surface: {ids}"
             assert ids.index(high) < ids.index(low), (
-                "prior-only 0.75 claim ranked at/below 0.5-neutral claim: "
+                "prior-only 0.75 claim ranked at/below the unmeasured claim: "
                 f"order={ids}")
             by_id = {h.get("id"): h for h in hits}
             # The displayed annotation agrees with the rank order on the SAME
             # response (parity contract the pre-fix sort violated).
             assert by_id[high]["ep"]["confidence_mean"] == pytest.approx(
                 0.75, abs=1e-4)
-            assert by_id[low]["ep"]["confidence_mean"] == pytest.approx(
-                0.5, abs=1e-4)
+            # #11702: the unmeasured comparator reports NO belief, and the
+            # rank order agrees with the annotation on the same response.
+            assert by_id[low]["ep"]["confidence_mean"] is None
+            assert by_id[low]["ep"]["ep_state"] == "absent"
         finally:
             sdk.close()
 
@@ -423,7 +453,14 @@ class TestAnalyzePriorOnlyParity:
                 params={"id": pid},
             ).result_set[0]
             assert int(stored[0]) == 2 and int(stored[1]) == 1, stored
-            assert stored[2] is None and stored[3] is None, stored
+            # #11702: `set_point_baseline` nulls the posterior AND refreshes
+            # the `n.confidence` flush-mirror to THIS prior's mean. The mirror
+            # is the served belief, so leaving it at the old posterior would
+            # make the claim report two different numbers for one belief
+            # (measured: 0.9 from the ranking beside 0.75 from the `ep` block).
+            # It must agree with the α/β mean, not merely be non-None.
+            assert stored[2] is None and stored[3] is not None, stored
+            assert float(stored[3]) == pytest.approx(2 / 3, abs=1e-4), stored
             # Parity oracle — Python float division, never truncating.
             expected = annotate_ep_batch(proj.g, [pid])[pid].confidence_mean
             assert expected == pytest.approx(2 / 3, abs=1e-4), expected
