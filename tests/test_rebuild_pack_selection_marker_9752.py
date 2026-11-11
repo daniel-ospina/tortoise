@@ -1502,6 +1502,16 @@ def test_migrate_route_names_the_capture_source_when_it_observed_nothing(
     assert "see the rebuild ERROR log" not in msg, (
         "the rebuild wrote no ERROR on this shape, so that pointer is dead: "
         f"{msg}")
+    # #11866 review: the tail was fixed here once and the HEAD of the same
+    # sentence was left alone, so the line still opened with the shared
+    # consequence's "the pre-wipe sidecar cannot say whether the marker
+    # existed" — the one artifact this shape does not have — and then named the
+    # capture source two clauses later. One line, two mechanisms. Pinned so the
+    # shared text cannot come back into this arm (the mutation is to print
+    # `_consequence` here again).
+    assert "pre-wipe sidecar" not in msg, (
+        "shape (a) has no pre-wipe sidecar; that clause belongs to the shapes "
+        f"that do, and it contradicts this arm's own cause: {msg}")
 
 
 def test_migrate_route_keeps_the_error_pointer_for_a_rescue_file(

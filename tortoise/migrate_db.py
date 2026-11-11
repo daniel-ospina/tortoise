@@ -346,12 +346,24 @@ def migrate(force: bool = False) -> dict:
                     # operator who goes looking for a stale rescue file beside
                     # the target finds nothing, because that is not the failure
                     # and not the fix.
+                    #
+                    # ⛔ `_consequence` is DELIBERATELY not printed on this
+                    # arm. It is the shared text for the callers that HAVE a
+                    # capture sidecar, and on this shape it reads "the pre-wipe
+                    # sidecar cannot say whether the marker existed" — naming
+                    # the one artifact this route does not have (#11866).
+                    # Printing it and then naming the capture source two
+                    # clauses later left one line asserting two mechanisms, so
+                    # the operator the old tail misdirected was misdirected
+                    # again, in the sentence that was supposed to fix it. Shape
+                    # (b) and the two recovery callers keep the shared text,
+                    # where it is true.
                     logger.warning(
                         "rebuild: the migrated graph's :PackSelection pack-set "
-                        "marker is NOT confirmed intact (%s) — %s. This route "
-                        "captures from the graph it is about to wipe (the fresh "
-                        "`target`), so the marker was NOT OBSERVED, not "
-                        "observed gone (#9752/#11866)", _label, _consequence)
+                        "marker is NOT confirmed intact (%s) — the capture read "
+                        "the graph it is about to wipe (the fresh `target`), so "
+                        "the marker was NOT OBSERVED, not observed gone — this "
+                        "is not an observed loss (#9752/#11866)", _label)
                 else:
                     logger.warning(
                         "rebuild: the migrated graph's :PackSelection pack-set "
