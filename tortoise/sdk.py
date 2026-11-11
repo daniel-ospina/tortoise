@@ -44414,15 +44414,24 @@ class TortoiseSDK:
                 # inline copy is how the two drift, and a drifted gate grades a
                 # different node than the write touches while every test stays
                 # green (#11836 review Finding 1 of round 5).
+                # The fallback asks `_CANONICAL_ENTITY_ID_PROPS` for this
+                # label's PRIMARY key rather than naming the loop variable: the
+                # variable is named for the loop body, and a rename there (the
+                # lint pass renamed it `_prop` once) silently turned this into a
+                # `NameError` on the exact path it guards, while every test
+                # stayed green because none of them emptied a label's pair list
+                # (#11836, VGATE round 13).
                 id_keys = tuple(
                     key for probe_label, key in _entity_identity_probes()
-                    if probe_label == f":{label}") or (prop,)
-                # ^ the `or (prop,)` is not decoration: the enumeration is the
-                # gate's list too, so a label it does not cover must degrade to
-                # this loop's own PRIMARY key rather than an empty tuple (an
-                # empty one leaves `res` unbound and raises
-                # `UnboundLocalError` on the next line — measured) or a silent
-                # skip of the write (worse).
+                    if probe_label == f":{label}") or (
+                        next(primary for primary_label, primary
+                             in _CANONICAL_ENTITY_ID_PROPS
+                             if primary_label == label),)
+                # ^ the fallback is not decoration: the enumeration is the gate's
+                # list too, so a label it does not cover must degrade to this
+                # label's PRIMARY key rather than an empty tuple (an empty one
+                # leaves `res` unbound and raises `UnboundLocalError` on the next
+                # line — measured) or a silent skip of the write (worse).
                 if label == "Point":
                     # #9287: this IS the ``:Point`` update door (``commit_schema``
                     # lists the pair ``update_point`` / ``_update_entity``), and it

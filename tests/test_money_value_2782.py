@@ -1181,6 +1181,35 @@ class TestTheProbeUsesTheWritesOwnKeyDiscipline:
             "`update_entity` did not resolve through `_entity_identity_probes()` "
             "— the write re-derives its own key list again")
 
+    def test_a_label_missing_from_the_enumeration_still_writes(
+            self, journaled_sdk, monkeypatch):
+        """The SUBTRACTIVE patch — the branch a merely additive test can never
+        reach (#11836, VGATE round 13).
+
+        The write derives its keys through `_entity_identity_probes()`, so a
+        label the enumeration does not cover hands it an EMPTY tuple. Two ways
+        that can go wrong, both measured: an unbound `res` (`UnboundLocalError`)
+        and — after a later lint pass renamed the loop variable — a `NameError`
+        in the fallback itself, with the write silently lost and every test
+        green. So this omits `:Object` entirely and requires BOTH: no raise, and
+        the write landing by the label's PRIMARY key.
+        """
+        import tortoise.sdk as sdk_mod
+
+        sdk, _events = journaled_sdk
+        g = sdk._get_proj().g
+        object_id = sdk.create_object("carrier 11836", "venture:tranche")["id"]
+        real = sdk_mod._entity_identity_probes
+        monkeypatch.setattr(
+            sdk_mod, "_entity_identity_probes",
+            lambda: tuple(pair for pair in real() if pair[0] != ":Object"))
+        sdk.update_entity(object_id, note="written by the primary-key fallback")
+        rows = g.query(
+            "MATCH (o:Object {id:$id}) RETURN o.note",
+            params={"id": object_id}).result_set
+        assert rows and rows[0][0] == "written by the primary-key fallback", (
+            "a label missing from the enumeration lost its write")
+
     @staticmethod
     def _indexer_shaped_event(sdk, event_id: str, *,
                               node_id: str | None = None) -> None:
