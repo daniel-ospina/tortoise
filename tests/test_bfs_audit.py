@@ -49,6 +49,13 @@ def _propagate_shock_reference_sites() -> dict[str, set[int]]:
     lane actually writes, and `test_no_propagate_shock_callers` asserts on THIS set
     rather than on grep lines, so a reference on a line that never spells the name
     (the aliased call) can no longer pass.
+
+    ⚠️ SECOND STATED BOUND — only `.py` files under `tortoise/` are PARSED, because a
+    non-Python file has no AST. A name in one of the shipped hook/plugin files
+    (`tortoise/cursor-hooks/*.sh`, `codex-hooks/*.sh`, `claude-hooks/*.sh`,
+    `openclaw-plugin/index.mjs`) can therefore be judged only by the grep line, so the
+    caller treats it as a PRODUCTION reference rather than demoting it to prose
+    (review r36 P3 #2).
     """
     sites: dict[str, set[int]] = {}
     for path in sorted((ROOT / "tortoise").rglob("*.py")):
@@ -119,10 +126,18 @@ def test_no_propagate_shock_callers():
         elif "/graph-scripts/" in path_part:
             callers["test_files"].append(line)  # test_6707_shock.py
         elif "/tortoise/" in path_part:
-            # A REFERENCE, not a mention: the AST is the judge (a docstring that names
-            # the function is documentation of its deprecation, not a caller of it).
+            # A REFERENCE, not a mention: the AST is the judge for a PARSABLE file (a
+            # docstring that names the function is documentation of its deprecation,
+            # not a caller of it). ⛔ A NON-`.py` production file has no AST to consult,
+            # so it must never be demoted to prose: the record ships hooks and a plugin
+            # under `tortoise/` (`cursor-hooks/*.sh`, `codex-hooks/*.sh`,
+            # `claude-hooks/*.sh`, `openclaw-plugin/index.mjs`), and a name in one of
+            # those IS the strongest evidence available — grep sees it and the AST
+            # cannot (review r36 P3 #2: before this split the class was demoted silently
+            # and the assert below could never see it).
             lineno = line.split(":")[1]
-            if lineno.isdigit() and int(lineno) in refs.get(path_part, set()):
+            if not path_part.endswith(".py") \
+                    or (lineno.isdigit() and int(lineno) in refs.get(path_part, set())):
                 callers["production_code"].append(line)
             else:
                 callers["comment/reference only"].append(line)
