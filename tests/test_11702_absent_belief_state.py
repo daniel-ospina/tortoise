@@ -4026,6 +4026,45 @@ def test_an_overflowing_literal_is_decided_without_an_exact_parse(monkeypatch):
     assert parsed == [], parsed
 
 
+def test_a_half_pair_reports_measured_but_absent_by_design(sdk):
+    """The documented divergence: `measured` answers "did EP run", `ep_state`
+    answers "is a belief readable" (#11702 cycle 30).
+
+    A HALF pair (`posterior_alpha` with no beta — accepted by `update_point`) and
+    a `(0, 0)` pair both leave EP having measured something while no belief is
+    readable: 0.5 against nothing has no mean, and 0/0 has none either. The state
+    fold names both `absent` and the mean is `None`; `measured`/`has_ep` stay True
+    because they answer the OTHER question.
+
+    This is pinned rather than fixed so neither can be silently repurposed: a
+    consumer deciding whether to RE-RUN EP reads `measured`, and one deciding
+    whether to show or order a belief reads `ep_state`/`confidence_mean`. Collapsing
+    them would either claim a belief that does not exist or make EP re-run over a
+    measurement it already has.
+    """
+    from tortoise.why import assemble_why_blocks
+
+    proj = sdk._get_proj()
+    for label, assignment in (
+            ("half pair", "n.posterior_alpha = 0.5"),
+            ("zero pair", "n.posterior_alpha = 0.0, n.posterior_beta = 0.0")):
+        pid = sdk.create_point("statement", f"ZQMEAS {label}")["id"]
+        proj.g.query(f"MATCH (n:Point {{id:$id}}) SET {assignment}",
+                     params={"id": pid})
+
+        ep = annotate_ep_batch(proj.g, [pid])[pid]
+        why_ep = assemble_why_blocks(proj, [pid])[pid].get("ep") or {}
+        for surface, state, mean, measured in (
+                ("ep", ep.ep_state, ep.confidence_mean, ep.measured),
+                ("why", why_ep.get("ep_state"), why_ep.get("confidence_mean"),
+                 why_ep.get("measured"))):
+            assert state == EP_STATE_ABSENT, (label, surface, state)
+            assert mean is None, (label, surface, mean)
+            assert measured is True, (
+                f"{label}: {surface} dropped the documented `measured` meaning — "
+                "EP DID run on this row; only the belief is unreadable")
+
+
 def test_a_legacy_list_operand_is_absent_without_blanking_the_batch(sdk):
     """Cycle 22: the coercion is TOTAL — `toFloat`/`toString` are the RAISERS.
 

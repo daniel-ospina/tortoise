@@ -611,6 +611,29 @@ def _exact_literal_fraction(raw: str):
     text = raw.strip()
     match = _HEX_LITERAL_PARTS.match(text)
     if match is None:
+        # ⛔ Canonicalise BEFORE the exact parse. Trailing fractional zeros do not
+        # change the value, but they DO change what `Decimal(...)
+        # .as_integer_ratio()` materialises — `10**n` for n fractional digits —
+        # so a padded spelling of an in-band literal was a per-request stall:
+        # measured, a 1 MB padded float32 midpoint cost 11.4 s here and 44.6 s for
+        # one `annotate_ep_batch` call (whose coercion runs several times per
+        # node), while the STORE answers it in microseconds. Padding with zeros
+        # is the cheapest way for a stored operand to reach any length, so this
+        # is the reachable shape of the digit-count axis.
+        #
+        # ⚠ RESIDUAL (deliberate, filed rather than guessed at): a literal with
+        # that many SIGNIFICANT digits still costs time proportional to its
+        # length. Bounding it needs a policy (what a literal that long MEANS),
+        # and the store also spends time proportional to its input, so this is
+        # not a fail-open hole — it is the same cost the input itself carries.
+        exp_at = max(text.find("e"), text.find("E"))
+        mantissa, exponent = (text, "") if exp_at < 0 else (
+            text[:exp_at], text[exp_at:])
+        whole, dot, frac = mantissa.partition(".")
+        if dot:
+            frac = frac.rstrip("0")
+            mantissa = whole + ("." + frac if frac else "")
+        text = mantissa + exponent
         try:
             return Fraction(Decimal(text))
         except (ValueError, ZeroDivisionError, ArithmeticError):
@@ -1261,9 +1284,23 @@ class EpBreakdown:
     # has_ep does NOT mean "EP ran" but "not serving a dead posterior to
     # include-terminal surfaces". Consumers (topic disputed-pair gate,
     # volunteer, mcp) must not read terminal=unmeasured.
+    #
+    # ⛔ `has_ep`/`measured` answer "did EP MEASURE this point"; `ep_state` and
+    # `confidence_mean` answer "is a belief READABLE". Those are different
+    # questions and they DO diverge on two shapes this PR's own state fold names
+    # absent — a HALF pair (`posterior_alpha` with no beta, accepted by
+    # `update_point`) and a `(0, 0)` pair (no mean exists). EP ran on both, so
+    # `measured` stays True; there is no readable belief, so `ep_state` is
+    # `absent` and the mean is `None`. A consumer deciding whether to RE-RUN EP
+    # must read `measured`; one deciding whether to show/number a belief must
+    # read `ep_state`/`confidence_mean`. Do not infer either from the other: in
+    # particular `measured=True` does NOT imply a non-null mean.
     has_ep: bool = False
     # #3276 aliases of the same measurement state, explicit and unambiguous:
-    #   measured=True                     → EP measured (has_ep True)
+    #   measured=True                     → EP measured (has_ep True) — see the
+    #                                      `has_ep` note above: this does NOT
+    #                                      promise a readable belief (half pair,
+    #                                      zero pair ⇒ ep_state "absent")
     #   measured=False, baseline=True     → prior-only (declared baseline)
     #   measured=False, baseline=False    → ABSENT (#11702): confidence_mean is
     #                                       `None`, never the old neutral 0.5 —
