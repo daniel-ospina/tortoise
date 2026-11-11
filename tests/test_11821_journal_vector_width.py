@@ -178,9 +178,10 @@ def test_a_vector_that_UNDERFLOWS_float32_is_left_alone():
 
 def test_a_verbatim_vector_is_never_narrowed():
     """**THE PIN.** If P0 narrowed a caller-owned vector it would silently
-    change a value the journal promised to keep raw (#5004 round-7:
-    `projection._restore_derived_properties` — *"a CALLER-owned vector must keep
-    its RAW form. `vecf32()` is the ONE form it must not take"*).
+    change a value the journal promised to keep raw (#5004 round-7: the store
+    writes `CASE WHEN $embedding_verbatim THEN $embedding ELSE vecf32($embedding)`
+    in `projection/entities.py::_upsert_point_props` — so an `embedding_verbatim`
+    vector keeps the value nobody re-encoded, and neither may this seam).
 
     The fixture is deliberately OFF the float32 grid, and the test asserts that
     a narrowing WOULD change it — so the assertion below is a real one.
@@ -386,9 +387,15 @@ def test_the_event_recorded_door_declares_its_width(tmp_path):
     payload from `props` instead of going through `_emit_event`'s stamp. Delete
     the stamp block at `sdk.py::_journal_event_raw_write` and the whole suite
     stayed green while the door silently journalled an UNDECLARED-width vector:
-    the one vector-bearing record the seam's contract ("every journalled vector
-    says what width it was written at") would not cover, and the population
-    P2's base64 migration would have to guess about.
+    the one producer the seam's contract ("every journalled vector says what
+    width it was written at") would not cover, and the population P2's base64
+    migration would have to guess about.
+
+    ⚠️ "producer", not "record": `TortoiseSDK.update_point` splats a
+    CALLER-supplied `embedding` onto a `PointRevised` record's TOP level
+    (`_emit_event("PointRevised", id=..., **emit_props)`), which no payload stamp
+    reaches — measured, that record carries `embedding` and no
+    `embedding_width`. It is a residual population, not one this file covers.
 
     So both halves are asserted — the DECLARATION and the NARROWING — because a
     marker written without the values it describes would be a lie the next

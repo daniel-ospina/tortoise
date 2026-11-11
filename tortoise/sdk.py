@@ -13198,9 +13198,16 @@ class TortoiseSDK:
             # `_session_embedding`'s — our embedder's float32 — or a value read
             # back off the node), and it does not pass through
             # `_emit_event`'s stamp. Without this the payload would be the ONE
-            # vector-bearing record with no declared width, while the seam's
-            # whole contract is that every journalled vector says what width it
-            # was written at. `creating=False` PRESERVES this door's behaviour
+            # vector-bearing PRODUCER this seam would otherwise leave with no
+            # declared width, while the seam's whole contract is that every
+            # journalled vector it writes says what width it was written at.
+            # ⚠️ NOT "the one record": a CALLER-supplied vector on a
+            # `PointRevised` record rides its TOP level (`update_point`'s
+            # `emit_props`, splatted by
+            # `_emit_event("PointRevised", id=..., **emit_props)`), which no
+            # payload stamp reaches — measured, such a record carries
+            # `embedding` and no `embedding_width`. That population is a known
+            # residual, not something this door claims to cover. `creating=False` PRESERVES this door's behaviour
             # exactly: it stamps no identity today and stamps none after (the
             # vector's provenance here is not a creating write's), so what is
             # added is the width declaration and the float32 narrowing it

@@ -8341,9 +8341,16 @@ surfaces:
   # `SOURCE_PATTERNS["eval"]` entry. A named-surface match REPLACES the `core`
   # fallback (#2938), so without this arm an `embeddings.py`-only PR — P2's
   # base64 float32 payload lands there next — selects `['eval']` and runs NONE
-  # of the sixteen width pins while `manifest-integrity` stays green.
+  # of the eighteen width pins while `manifest-integrity` stays green.
   - test_journal_embedding_5004.py
   - test_11821_journal_vector_width.py
+  # #11835 review (P2): the SIBLING defect, measured in the same selection run —
+  # `test_journal_growth.py` pins the byte budget this change moved (9,176 ->
+  # 5,423 / 4,689 B, a function of what `tortoise/embeddings.py` writes), and it
+  # was `core`-only, so `--changed-files tortoise/embeddings.py` selected
+  # `['eval']` and did NOT run it. Same silent-drop class as the row above, and
+  # the same remedy: dual with `eval`, which OWNS that module.
+  - test_journal_growth.py
   - test_update_point_content_embedding_4208.py  # #4208: dual with `core` — the fix routes through `tortoise/embeddings.py`'s `encode_for_store`, which this surface owns
   - test_embed_gate_5008.py  # #5008: dual with `core` — `encode_for_row` (the EMBED gate's submission seam) lives in `tortoise/embeddings.py`, which this surface owns; without this arm an embeddings.py-only diff would leave the gate unguarded
   - test_embed_decision_step_11086.py  # #11086: dual with `core` — the S6a step's submission seam (`encode_for_row`) and the width/degrade path it rides live in `tortoise/embeddings.py`, which this surface owns; an embeddings.py-only diff would otherwise leave the EMBED step's ordering unguarded

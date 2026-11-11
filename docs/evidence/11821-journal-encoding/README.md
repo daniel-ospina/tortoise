@@ -93,9 +93,12 @@ the embedder's own (`struct`-verified per element by
 ## The promise this does NOT touch
 
 A **caller-owned** (`embedding_verbatim`) or **preserved** (`embedding_preserved`) vector
-is never narrowed — it is declared `f64` and keeps its raw form (`#5004` round-7:
-*"a CALLER-owned vector must keep its RAW form. `vecf32()` is the ONE form it must not
-take"*). The width marker rides the payload from this change — not from P2 — so that
+is never narrowed — it is declared `f64` and keeps its raw form (`#5004` round-7, the
+store's own rule: `projection/entities.py::_upsert_point_props` writes
+`CASE WHEN $embedding_verbatim THEN $embedding ELSE vecf32($embedding)`, and
+`sdk._create_map["embedding_verbatim"]` sets the flag — so an `embedding_verbatim`
+vector keeps the value nobody re-encoded, and this seam does not re-encode it
+either). The width marker rides the payload from this change — not from P2 — so that
 population is **named** from the first PR rather than narrowed silently by a later one.
 `tests/test_11821_journal_vector_width.py::test_a_verbatim_vector_is_never_narrowed` reds
 if it is ever narrowed, and its fixture is deliberately off the float32 grid so the

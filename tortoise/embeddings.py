@@ -554,10 +554,14 @@ def _stamp_journal_vector_width(payload: dict) -> None:
        marker. There is nothing whose width could be declared.
     2. **A caller-owned or PRESERVED vector** (``embedding_verbatim`` /
        ``embedding_preserved``) → ``f64``, values UNTOUCHED. This is #5004
-       round-7's rule read at the width rather than at the engine
-       (``projection._restore_derived_properties``: *"a CALLER-owned vector
-       must keep its RAW form. `vecf32()` is the ONE form it must not take"*),
-       and the reason the marker exists at all: without it a later
+       round-7's rule read at the width rather than at the engine: the store
+       keeps an ``embedding_verbatim`` vector's own value
+       (``projection/entities.py::_upsert_point_props`` writes
+       ``CASE WHEN $embedding_verbatim THEN $embedding ELSE vecf32($embedding)``,
+       and ``sdk._create_map["embedding_verbatim"]`` is what sets the flag), so
+       a caller-owned vector is one the store must not re-encode — and this
+       stamp must not either. That is
+       the reason the marker exists at all: without it a later
        base64/width migration could narrow exactly the population the journal
        promised to keep raw, silently. The marker is stamped HERE, in the same
        PR as the narrowing, so that population is never unnamed.
