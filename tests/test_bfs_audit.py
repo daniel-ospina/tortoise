@@ -94,14 +94,20 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
     # indices could shift. Split on exactly the parser's own line endings.
     src_lines = re.split(r"\r\n|\r|\n", src)
 
-    def _char_col(lineno: int, byte_col: int) -> int:
+    def _char_col(lineno: int, byte_col: int) -> int | None:
         """The CHARACTER column of a UTF-8 ``byte_col`` on ``lineno``.
 
         AST offsets always land on a character boundary; ``errors="ignore"`` only
         keeps the conversion total (it can never drop a whole character).
+
+        ``None`` means the line is outside the parser's own line model, so the
+        column cannot be placed at all. A box that cannot be placed is DROPPED by
+        the caller, never built in the byte unit: dropping an exemption makes the
+        prose read as CODE (the loud direction), while returning ``byte_col`` here
+        would restore the exact fail-open this conversion removes.
         """
         if not 1 <= lineno <= len(src_lines):
-            return byte_col
+            return None
         return len(src_lines[lineno - 1].encode("utf-8")[:byte_col].decode("utf-8", "ignore"))
 
     # Prose strings: any statement whose whole value is a string literal. Kept as
@@ -122,12 +128,11 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
             value = node.value
             right_line = getattr(value, "end_lineno", None) or value.lineno
             right_col = getattr(value, "end_col_offset", None)
-            prose_boxes.append((
-                value.lineno,
-                _char_col(value.lineno, value.col_offset),
-                right_line,
-                _char_col(right_line, right_col) if right_col is not None else 0,
-            ))
+            left = _char_col(value.lineno, value.col_offset)
+            right = _char_col(right_line, right_col) if right_col is not None else 0
+            if left is None or right is None:
+                continue
+            prose_boxes.append((value.lineno, left, right_line, right))
 
     def _inside_prose(start: tuple[int, int], end: tuple[int, int]) -> bool:
         return any(
@@ -246,12 +251,16 @@ def test_the_code_detector_sees_every_shape_it_claims(tmp_path):
         "docstring": ('def f():\n    """propagate_shock is deprecated."""\n', set()),
         "docstring_multiline": (
             'def f():\n    """S2 VET \u2014 the pass\n\n    propagate_shock PERSISTS the\n    blend; it is never invoked.\n    """\n', set()),
-        # A long non-ASCII docstring whose prose mention sits on its LAST line —
-        # the byte/character drift is largest exactly where the box's right edge
-        # is tested, so over-wide containment must still read this as prose.
-        "long_non_ascii_docstring_mention_on_closing_line": (
-            'def f():\n    """\u2014\u2014 the pass\n\n    ' + "\u2014" * 18
-            + ' propagate_shock PERSISTS the blend.\n    """\n', set()),
+        # ⛔ This row is the whole "a NON-ASCII docstring's prose mention is prose"
+        # claim, and it is the ONLY one: two earlier rows
+        # (`long_non_ascii_docstring_mention_on_closing_line`,
+        # `docstring_non_ascii_mention_on_closing_line`) asserted they pinned the
+        # byte/char drift "where the box's right edge is tested", but their mention
+        # sits on an INTERIOR line, so containment compares (4, col) <= (5, …) and
+        # the columns never decide — both were green under every unit, including
+        # the pre-fix mutant. A row that cannot fail is not a pin, so they were
+        # dropped and this one stays for the plain regression it names. The unit
+        # itself is pinned by the `_non_ascii` rows below.
         "class_docstring": ('class C:\n    """propagate_shock is deprecated."""\n', set()),
         "module_docstring": ('"""propagate_shock is deprecated."""\nvalue = 1\n', set()),
         # PEP 257's TOLERATED forms, which a "first statement of a def" rule misses:
@@ -274,19 +283,23 @@ def test_the_code_detector_sees_every_shape_it_claims(tmp_path):
         # UTF-8 bytes and `tokenize` columns are characters, so an ASCII-only row
         # cannot see an off-by-N-bytes comparison: the prose box's right edge
         # drifts right by one column per extra byte and swallows the literal that
-        # follows the closing quotes. 18 em dashes = 36 bytes = 36 columns of
-        # drift on one line — enough for the box built in bytes to contain a token
-        # that sits 36 columns past its true end. This row is the pin for that.
+        # follows the closing quotes. 18 em dashes = 54 UTF-8 bytes but 18
+        # characters, i.e. a 36-column drift on one line — the pre-fix box ends at
+        # column 64 against a true end of 28, so the literal at column 45 is
+        # inside it. First fail-open measured at 17 em dashes (34 columns of
+        # drift); every row here is above that wedge.
         "docstring_then_string_same_line_non_ascii": (
             'def f():\n    """' + "\u2014" * 18 + '"""; x = getattr(m, "propagate_shock")\n', {2}),
         "docstring_then_plain_string_same_line_non_ascii": (
             'def f():\n    """' + "\u2014" * 18 + '"""; y = "propagate_shock"\n', {2}),
-        # …and the other direction: a NON-ASCII docstring whose prose mentions the
-        # name on its CLOSING line stays prose. Converting the box's units must
-        # not shrink it past a literal that really is inside it.
-        "docstring_non_ascii_mention_on_closing_line": (
-            'def f():\n    """VET \u2014 the pass\n\n    propagate_shock PERSISTS it.\n    """\n'
-            '    return 1\n', set()),
+        # ⛔ …and the same fail-open on a MULTI-line docstring, whose box is the one
+        # a single-line-only conversion never exercises: a regression that
+        # converted the columns only when the span's start and end share a line
+        # passes EVERY single-line row above and still reads this live dependency
+        # as prose (measured: `[]` against the correct `{3}`).
+        "multiline_non_ascii_docstring_then_string_same_line": (
+            'def f():\n    """\u2014 the pass\n    ' + "\u2014" * 18
+            + '"""; x = getattr(m, "propagate_shock")\n', {3}),
         "implicit_concat_docstring": (
             'def f():\n    ("prose part one "\n     "propagate_shock mentioned here")\n', set()),
     }
