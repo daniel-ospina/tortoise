@@ -283,7 +283,13 @@ def test_the_claim_layer_keeps_its_EXCLUSION_predicate_so_capture_rows_are_not_c
 
 
 def test_a_layer_is_judged_against_its_OWN_vocabulary_not_a_sibling_layer_s():
-    """FAILS IF the declared set is a single vocabulary shared by all three layers.
+    """FAILS IF `label_coverage` judges a layer against a SIBLING layer's vocabulary — or if the
+    census WIRES one vocabulary into all three layers.
+
+    ⛔ CORRECTED at review round 4: this docstring used to claim it saw a shared vocabulary
+    ANYWHERE, but the calls below supply their own `frozenset`s, so they can only see the
+    FUNCTION's rule — a mutant wiring `_a4_declared_kinds("pointKind")` into all three layers left
+    this arm GREEN (measured). The WIRING half is the `_a4_label_coverage` assertion at the end.
 
     The sets overlap by owner ruling (`#7813`), which is exactly why a shared set is tempting and
     wrong: `statement` is a POINT kind and never an object label, and `meeting` is an EVENT kind the
@@ -298,6 +304,46 @@ def test_a_layer_is_judged_against_its_OWN_vocabulary_not_a_sibling_layer_s():
     events = probe.label_coverage(
         {"meeting": 5, "statement": 1}, frozenset({"meeting"}), layer="events")
     assert events["labelled"] == 5 and events["undeclared"] == {"statement": 1}
+    # ⛔ THE WIRING, which the direct calls above cannot reach: `_a4_label_coverage` chooses each
+    # layer's vocabulary itself (`declared = _a4_declared_kinds(kind_prop)`). On an empty graph
+    # every declared kind is absent, so `declared_absent` IS the vocabulary the layer was judged
+    # against — three layers, three vocabularies, or the census blended them.
+    wired = probe._a4_label_coverage(_FakeProjection())
+    vocabularies = {layer: tuple(wired[layer]["declared_absent"])
+                    for layer in ("claims", "things", "events")}
+    assert len(set(vocabularies.values())) == 3, (
+        "the three layers were judged against the same declared vocabulary — a shared set credits "
+        f"a point kind on a thing as coverage: {vocabularies}")
+
+
+def test_each_layer_QUERIES_its_own_node_label_and_only_claims_carries_the_exclusion():
+    """FAILS IF `A4_LAYERS` names the wrong node label, or the exclusion moves off `claims`.
+
+    ⛔ The fake answers on a CYPHER SUBSTRING that carries the kind PROPERTY but never the LABEL,
+    so `("claims", "Point", "pointKind")` could become `("claims", "Object", "pointKind")` — a
+    layer measuring the WRONG POPULATION, and (because the predicate is gated on `if label ==
+    "Point"`) silently losing the turn-row/operator exclusion — with every suite GREEN (measured,
+    `#11837` review round 4, P2). The label is pinned as QUERY TEXT, the way the predicate already
+    is; the file's own header says this hazard is known, and it was only half-closed.
+    """
+    probe = _probe()
+    assert [label for _layer, label, _prop in probe.A4_LAYERS] == ["Point", "Object", "Event"], (
+        "the three layers must read the three ontology node labels, in this order")
+    projection = _FakeProjection()
+    for layer, label, prop in probe.A4_LAYERS:
+        projection.g.queries.clear()
+        probe._a4_layer_counts(projection, label, prop)
+        assert len(projection.g.queries) == 1, projection.g.queries
+        (query,) = projection.g.queries
+        assert f"MATCH (n:{label})" in query, (layer, query)
+        assert f"coalesce(n.{prop}, 'NULL')" in query, (layer, query)
+        if label == "Point":
+            assert "is_episodic" in query and "is_operator" in query, (
+                f"the {layer} layer lost the turn-row/operator exclusion: {query}")
+        else:
+            assert "is_episodic" not in query and "is_operator" not in query, (
+                f"the {layer} layer carries an exclusion it must not — a `:{label}` is not a "
+                f"claim: {query}")
 
 
 def test_object_kinds_are_compared_CASE_INSENSITIVELY_because_the_ontology_mixes_case():
