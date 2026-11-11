@@ -3,7 +3,12 @@
 **Test tier: `CI`** (offline, deterministic — every arm below drives a pure function or a fake
 projection; no graph, no model, no network, no `gh`, with ONE exception: the SDK-registration arm
 spawns a single child interpreter because it needs a vocabulary built before `tortoise.sdk` is
-imported. That spawn is ~0.5 s, and the file measured 4.6 s wall on this host). A4's own measurement is **Tier E** (a read-only
+imported. That spawn is the file's ONLY child process, and every other arm is sub-second.) ⛔ The file's
+WALL cost is deliberately NOT quoted as a fixed figure here. It is a SHARD-LAYOUT input, a hand-written
+local reading re-stales on every host it is taken on (`#2818`/`#3419`), and this same tree measured
+**11.5-12 s at load average 30** on the host that wrote this line (import and load, not assertions, are
+most of it) — so the number lives in `config/ci-surfaces.yml`'s `durations` row, refreshed from CI junit,
+never in a sentence a reader has to re-measure to trust. A4's own measurement is **Tier E** (a read-only
 census over the fleet graph, `04-plan.md` §2 W2c), and this file is the contract half the epic
 requires beside it: *"a `Tier E` case without its CI contract twin is not done"* (`#11454`).
 
