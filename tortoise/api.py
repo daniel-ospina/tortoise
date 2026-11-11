@@ -183,7 +183,7 @@ def _refuse_caller_named_envelope_keys(keys, door: str) -> None:
     named = sorted(set(keys) & _ENVELOPE_KEYS_AT_PASSTHROUGH)
     if named:
         raise ValueError(
-            f"{named} are journal ENVELOPE fields, which `{door}` does not own: "
+            f"{named} are journal ENVELOPE fields, which {door} does not own: "
             "the funnel builds the envelope, so a payload key that collides "
             "with it REWRITES the record's identity rather than adding a "
             "field (`type` re-types it, `event_id` re-identifies it, `ts` / "
@@ -205,7 +205,7 @@ def _refuse_caller_named_markers(keys, door: str) -> None:
     if named:
         raise ValueError(
             f"{named} are server-managed journal fields (embedding width / "
-            f"storage form / origin) and cannot be set via `{door}`'s payload")
+            f"storage form / origin) and cannot be set via {door}'s payload")
 
 
 def _refuse_caller_named_funnel_keys(keys, door: str) -> None:
@@ -573,9 +573,22 @@ class EventAPI:
         log line while the identical ``point=`` refusal raised. One class of
         malformed payload, two answers; the caller of a best-effort seam is the
         only one who can react, so every payload-shape refusal is raised here,
-        BEFORE the arm that swallows I/O.
+        BEFORE the arm that swallows I/O: the record-shaped, envelope, marker
+        and money families. That list is the entirety of what `_emit` refuses
+        on payload shape — a new family added there must be added here in the
+        same commit, which is what makes the sentence true rather than
+        aspirational.
         """
         _refuse_caller_named_funnel_keys(payload, "`emit_belief`")
+        # …and the MONEY family, which is the other gate `_emit` runs and this
+        # arm would otherwise swallow the same way. Found by the review of the
+        # F2 fix itself, and measured at that head: `emit_belief(...,
+        # amountMinor=25_000_000)` was dropped with a log line while
+        # `add_object(..., amountMinor=25_000_000)` raised — the identical
+        # divergence F2 was filed for, one family over. Same predicate the
+        # funnel uses (`refuse_malformed_money_in_payload`), so the two cannot
+        # disagree about which shapes are malformed.
+        refuse_malformed_money_in_payload(payload, door="EventAPI.emit_belief")
         try:
             self._emit(type_, **payload)
         except Exception as exc:  # noqa: BLE001, RUF100
@@ -1058,7 +1071,7 @@ class EventAPI:
         that ran after `_registration_id` would have taken the lock for a write
         that cannot happen.
         """
-        _refuse_caller_named_funnel_keys(props, "add_object")
+        _refuse_caller_named_funnel_keys(props, "`add_object`")
         from .entity_identity import entity_create_lock
         with entity_create_lock("Object", name):
             oid = self._registration_id("Object", name, explicit_id=id)

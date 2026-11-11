@@ -1161,7 +1161,7 @@ def test_add_object_is_the_third_door_and_guards_both_of_its_families(tmp_path):
     nothing for the replay to fold:
 
     * `point=` — the record-shaped payload from #11835 review round 4. At this
-      head it journalled a `PointRegistered`-shaped payload the replay folds
+      head it journalled a `ObjectRegistered`-shaped payload the replay folds
       with NEITHER half of the vector rule applied: an off-grid float64 vector
       declaring `embedding_width: "f32"` (a marker that LIES — the #5004
       round-7 must-never-narrow population).
@@ -1258,6 +1258,16 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
                         embedding_width=JOURNAL_VECTOR_WIDTH_F32)
     with pytest.raises(ValueError, match="ENVELOPE"):
         api.emit_belief("ConfidenceChanged", id="node-1", type="PointAdded")
+    # …and the MONEY family, which is the divergence the review of THIS fix
+    # found one family over: the gate runs inside `_emit`, so the arm below
+    # swallowed it and dropped the record, while `add_object` raised on the
+    # identical payload. Same predicate at the door, so the two cannot answer
+    # differently for one malformed payload.
+    with pytest.raises(Exception, match="money value refused"):
+        api.emit_belief("ConfidenceChanged", id="node-1", amountMinor=25_000_000)
+    with pytest.raises(Exception, match="money value refused"):
+        api.add_object("an object", "skill", id="obj-money",
+                       amountMinor=25_000_000)
     assert not journal.exists() or not journal.read_text().strip(), (
         "the refusal must not leave a half-record behind")
 
