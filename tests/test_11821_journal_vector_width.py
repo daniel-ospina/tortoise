@@ -1162,14 +1162,20 @@ def test_add_object_is_the_third_door_and_guards_both_of_its_families(tmp_path):
     nothing for the replay to fold:
 
     * `point=` — the record-shaped payload from #11835 review round 4. At this
-      head it journalled an `ObjectRegistered`-shaped payload the replay folds
-      with NEITHER half of the vector rule applied: an off-grid float64 vector
-      declaring `embedding_width: "f32"` (a marker that LIES — the #5004
-      round-7 must-never-narrow population).
+      head the call RAISES and the journal stays EMPTY; it was at
+      `07421bde27` that it journalled. Nothing folded the caller's vector in
+      either state: an Object's vector comes from its NAME, so the off-grid
+      float64 and its `embedding_width: "f32"` marker (the #5004 round-7
+      must-never-narrow population) stayed on the journal line and became no
+      node property. What DID land is the id — `_norm` splices a dict `point`
+      into the record, so the replay MERGEs an Object on the caller's id.
     * `type=` — the envelope collision. `_emit` spreads the payload AFTER the
       envelope, so the caller's `type` WINS and the record is re-typed: a
-      `PointAdded` reached the replay that no record door built, folded by
-      `ev["type"]` with `ev["point"]` the caller's.
+      `PointAdded` reached the replay that no record door built. The live fold
+      does NOT fold it with the caller's `point` — this row passes NO `point`,
+      so the fold SKIPS it ("skipping PointAdded with non-dict point") and the
+      Object the door was asked to register is never created: a silent lost
+      write plus a journal line claiming a `PointAdded` no door built.
     """
     from tortoise.api import EventAPI
     from tortoise.log import EventLog

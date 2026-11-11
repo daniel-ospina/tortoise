@@ -89,9 +89,20 @@ _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
 #: `add_point(**fields)` splats INSIDE the record payload. Measured at
 #: `6aea53bb6`, where the first two were refused and the last two were not:
 #:
-#:     add_object("name", "thing", point={...off-grid f64, "f32" marker})
-#:       -> journalled `ObjectRegistered` whose `point` the fold DISPATCHES ON,
-#:          folding the caller's PointAdded (id `p-hijack`) with the marker lie
+#:     add_object("n", "thing", point={"id": "p-hijack", ...off-grid f64,
+#:                                       "f32" marker})
+#:       -> journalled `ObjectRegistered`; the replay's `_norm` SPLICES a dict
+#:          `point` into the record, so the fold MERGEs an OBJECT (not a point)
+#:          on the CALLER's id — journal `Points []`,
+#:          `Objects [['p-hijack','n',None,None]]`. The `f32` marker never
+#:          becomes a node property: it stays on the journal line, and an
+#:          Object's vector is derived from its NAME.
+#:       ⛔ AND a second route, which is why the fix closes the CHANNEL rather
+#:          than enumerating names: `_norm` splices from the NESTED dict, so a
+#:          `point={"type": "PointAdded", ...}` SHADOWS the envelope's own
+#:          `type` (see the same hazard at `FalkorProjection.apply`) — the fold
+#:          dispatches on `PointAdded` and folds the caller's point, while the
+#:          JOURNALLED type stays `ObjectRegistered`.
 #:     add_point("real", prov, point={...})
 #:       -> journalled `PointAdded` carrying the caller's record NESTED inside
 #:          its own, and returned the id of a point that never folds
