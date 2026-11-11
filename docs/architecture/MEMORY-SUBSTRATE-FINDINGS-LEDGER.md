@@ -208,6 +208,14 @@ not be re-derived — and one CLOSED issue must not be read as fixed:**
   research is done and the *mechanism* is unbuilt. **Issue closure is not evidence of a fix.**
 - **`#2696`** is an epic with human gates, not a defect. Count it as scope, never as a bug.
 
+**⚠️ Two more CLOSED rows must not be read as fixed.** `#2782` (CLOSED `COMPLETED` 2026-11-11) and
+`#2787` (CLOSED `NOT_PLANNED` 2026-09-29) both sit in the buckets above, and both are **OPEN as
+defects** on the problem map — `#2782`'s representation half shipped while its cross-company
+identity half did not (pinned by `tests/test_money_value_2782.py`), and `#2787`'s kind-bucket rule
+is still unimplemented. Tracker closure is not the status question; this page buckets by the
+tracker's own `stateReason` and says so, which is exactly why the bucket column must be read as a
+*closure* fact and never as a *fix* fact.
+
 **For the status question — *is defect N still broken?* — read
 `docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md`, not this page and not the issue bodies.**
 It re-cut all 26 entries with a commit anchor plus an in-tree pin per fixed row, and it records
@@ -251,7 +259,15 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   whitespace, so it went entirely unchecked (measured, `--check` exited 0). The scan is the **whole
   page**, not just §3/§5: scoping it to the two sections named above left §2's own citation free to be
   mangled — those two strings are deliberately NOT in code spans, because the scan would (correctly)
-  refuse them;
+  refuse them. A trailing character is refused the same way: a trailing space after the line number,
+  a space after the shorthand's number, and a full stop after an out-of-range number all match no
+  resolver, so they are refused rather than skipped (the examples are left unspanned on purpose — the
+  scan would, correctly, refuse them). Two
+  carve-outs are named rather than implied away: a **marker-less, extension-less filename**
+  (a bare `Makefile` with a line number) is not treated as a path — a host:port or `key: value` in
+  prose must not red this
+  required context — and a row's tally class is its **leading** bold token, which is why row (j)'s
+  `MOOT-BY-LOSS as an object` half does not move the count;
 - the **§3 headline tally** is derived too. The "N of the twelve rows no longer read as written"
   count, the letter list beside it, and the four-of-the-seven "overtaken" figure are all recomputed
   from the verdict cells and compared with the sentence a reader actually quotes. Unguarded, flipping

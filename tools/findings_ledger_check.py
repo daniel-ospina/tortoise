@@ -146,23 +146,25 @@ CITATION_RE = re.compile(
     r":(?P<start>\d+)(?:-(?P<end>\d+))?`"
 )
 
-#: Every backticked token that ENDS in `:LINE`, spelled however. Deliberately
-#: BROADER than `CITATION_RE` (any non-space run, not just the path character
-#: class): this is the arm that turns an *unrecognised* citation shape into an
-#: ERROR instead of silence. Widening one regex was otherwise the only thing
-#: standing between a real citation and a green run, and a shape the resolver
-#: declines is indistinguishable from a shape the page does not contain.
-#:
-#: The class is `[^`]`, NOT `[^\s`]`. Excluding whitespace was a fail-open with a
-#: one-keystroke exploit: inserting a space into a citation (`tortoise/pipeline
-#: .py:16`) made it match NEITHER the resolver NOR this refusal, so it was
-#: silently unchecked while §8 said no citation shape was exempt — measured, rc 0
-#: clean. The token may not contain a backtick, and that is the only exclusion.
-CITATION_SHAPE_RE = re.compile(r"^[^`]+:\d+(?:-\d+)?$")
+#: A token must carry a path marker (`/` or `.`) OR be the `:LINE` shorthand to be a
+#: citation at all. `word:digits` with neither (`fetch-depth: 0`, `localhost:6379`,
+#: `python3:11`) is PROSE, and treating it as a path reds correct text — measured:
+#: a host:port example red the required `docs` job with "localhost does not exist in
+#: the tree". The carve-out this creates is named in §8: a marker-less,
+#: extension-less FILENAME citation (`Makefile:12`) is not measured.
+CITATION_SHAPE_RE = re.compile(r"^[^`]*:\d+(?:-\d+)?$")
 
 #: `path: 16962` — a space AFTER the colon. Same class, same measurement: it is
 #: not a resolvable citation, so it must be refused rather than skipped.
-CITATION_SPACED_SHAPE_RE = re.compile(r"^[^`]+:\s+\d+(?:-\d+)?$")
+CITATION_SPACED_SHAPE_RE = re.compile(r"^[^`]*:\s+\d+(?:-\d+)?$")
+
+#: Trailing characters a code span may carry that are NOT part of the citation.
+SPAN_TRAILING_RE = re.compile(r"[\s.,;:)\]]+$")
+
+
+def _has_path_marker(token: str) -> bool:
+    """Is this token shaped like a path at all (`/`, `.`, or the `:LINE` shorthand)?"""
+    return "/" in token or "." in token or token.startswith(":")
 
 #: An in-page section reference (`§6`) — §1 accepts it in place of a citation for
 #: a row whose evidence IS the section below it (row (l)).
@@ -188,7 +190,7 @@ TABLE_SEPARATOR_RE = re.compile(r"^\|[\s:|-]+\|$")
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-MIN_SELF_TEST_MUTATIONS = 14
+MIN_SELF_TEST_MUTATIONS = 18
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -505,6 +507,39 @@ def check_verdict_tally(text: str) -> list[str]:
             f"reading as written, but the table's verdicts name {non_still} — a "
             "letter list that disagrees with the cells beside it is a reader trap"
         )
+
+    # WHICH verdict each letter is given, not just that it is mentioned. Comparing
+    # the letters as a SET and the overtaken rows as a COUNT let a cell move between
+    # two verdicts with the sentence unchanged — measured: (c) SUPERSEDED-BY-FIX ->
+    # ADOPTED, (e) ADOPTED -> SUPERSEDED-BY-FIX and (k) DRIFTED -> MOOT-BY-LOSS all
+    # left rc 0, while §1 gives those classes different handling rules ("do not
+    # re-derive it" vs "treat the new behaviour as the norm" vs "do not assert it
+    # either way"), so the sentence sent the reader to the wrong action.
+    attributed: dict[str, str] = {}
+    previous = 0
+    for token in re.finditer(r"\*\*([A-Z][A-Z-]+)\*\*", non_still_sentence):
+        if token.group(1) not in VERDICTS:
+            continue
+        for label in re.findall(
+            r"\*\*\(([a-z])\)\*\*", non_still_sentence[previous : token.start()]
+        ):
+            attributed[label] = token.group(1)
+        previous = token.start()
+    misattributed = {
+        label: (attributed.get(label), verdicts.get(label))
+        for label in non_still
+        if attributed.get(label) != verdicts.get(label)
+    }
+    if misattributed:
+        detail = "; ".join(
+            f"({label}) stated {stated}, table says {actual}"
+            for label, (stated, actual) in sorted(misattributed.items())
+        )
+        problems.append(
+            f"§3 tally: the sentence assigns a different verdict than the row carries "
+            f"— {detail}. Each class has its own handling rule in §1, so a swapped "
+            "class is not a cosmetic error"
+        )
     still_true = sorted(lbl for lbl, v in verdicts.items() if v == "STILL-TRUE")
     named_still = set(re.findall(r"\*\*\(([a-z])\)\*\*", still_sentence))
     if named_still != set(still_true):
@@ -542,13 +577,17 @@ def check_citation_shapes(text: str) -> list[str]:
     """
     problems: list[str] = []
     for match in re.finditer(r"`[^`\n]+`", text):
-        body = match.group(0)[1:-1]
-        if "/" not in body and "." not in body and not body.startswith(":"):
-            # A `key: value` token is not a citation: `fetch-depth: 0`, `timeout:
-            # 15`. Requiring a path marker (`/`, `.`) or the `:LINE` shorthand's
-            # own leading colon is what keeps the page's YAML and prose out of
-            # the population — measured: without it the whole-document scan
-            # refused `fetch-depth: 0` and the shipped page went red.
+        # Trailing whitespace or punctuation is STRIPPED before the shape test but
+        # NOT before the resolver: `…/sdk.py:16 ` matches no resolver, so it must be
+        # refused, not skipped — measured, a single trailing space on row (e)'s
+        # anchor, on the self-test's own `:792` target, and a period after an
+        # out-of-range number ALL left the page at rc 0 while a whole row's
+        # evidence became unverified (the `:27` / `:66` shorthands then re-anchor
+        # to the previous row's path and resolve). CommonMark strips a space that
+        # sits on both sides of a code span, so the mangled form does not look
+        # mangled to a reader either.
+        body = SPAN_TRAILING_RE.sub("", match.group(0)[1:-1])
+        if not _has_path_marker(body):
             continue
         if not (
             CITATION_SHAPE_RE.match(body) or CITATION_SPACED_SHAPE_RE.match(body)
@@ -606,6 +645,14 @@ def check_citations(text: str, root: Path = REPO) -> list[str]:
         if label in seen:
             continue
         seen.add(label)
+        if not _has_path_marker(rel):
+            # `python3:11`, `localhost:6379` — PROSE, not a path. The resolver used
+            # to have no marker rule while the refusal arm did, so a host:port
+            # example red the required `docs` job as "does not exist in the tree"
+            # (measured). The carve-out — a marker-less extension-less FILENAME
+            # such as `Makefile:12` is unmeasured — is named in §8 rather than
+            # implied away.
+            continue
         if rel.startswith(("~", "/")):
             # A dated reading of something OUTSIDE this repository — §5's `~/.swarm`
             # tree, or an absolute path on whichever box took it. §8 says those are
@@ -939,6 +986,27 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
             "`tortoise/pipeline.py:16`", "`tortoise/pipeline .py:16`", 1
         ),
         "not a recognised citation",
+    ),
+    (
+        "a citation carrying a trailing space",
+        lambda t: t.replace(
+            "`tortoise/pipeline.py:16`", "`tortoise/pipeline.py:16 `", 1
+        ),
+        "not a recognised citation",
+    ),
+    (
+        "a shorthand carrying a trailing space or full stop",
+        lambda t: t.replace("`:792`", "`:792 `", 1),
+        "not a recognised citation",
+    ),
+    (
+        "a verdict moved between classes with the headline sentence unchanged",
+        lambda t: t.replace(
+            "| **SUPERSEDED-BY-FIX** — the Point fold now persists",
+            "| **ADOPTED** — the Point fold now persists",
+            1,
+        ),
+        "assigns a different verdict",
     ),
     (
         "a §3 headline tally that no longer matches the verdict cells",

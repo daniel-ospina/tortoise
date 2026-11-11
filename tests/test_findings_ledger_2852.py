@@ -168,13 +168,18 @@ def test_mutation_population_is_pinned():
     row, an emptied evidence column, an unclassifiable §6 row, a citation shape the
     resolver declines), plus the DECOY arm, which is the only pin on
     `check_survivor_arithmetic`'s `len(matches) > 1` branch: deleting that branch left
-    every other arm, every test and `--check` green (measured). Population 13, floor
-    pinned with it.
+    every other arm, every test and `--check` green (measured).
+
+    The population is 18 after the #11902 review cycles: the §6 survivor-sentence arms,
+    the four fail-open arms (unclassifiable §3 row, emptied evidence column,
+    unclassifiable §6 row, declined citation shape), the §3 tally arm, the three
+    citation-shape arms (space in the path, trailing space, trailing space on a
+    shorthand) and the verdict-attribution arm. The floor is pinned WITH it — a
+    floor below the population is the "shrunk population proves nothing" shape it
+    exists to catch. Re-derive by counting `caught` lines in `--self-test`.
     """
-    # 14 before the §11902 cycle merged the survival-decoy arm (their 13) with the
-    # four fail-open arms and two shapes added here; the floor is pinned WITH it.
-    assert len(flc.MUTATIONS) == 15
-    assert flc.MIN_SELF_TEST_MUTATIONS == 14
+    assert len(flc.MUTATIONS) == 18
+    assert flc.MIN_SELF_TEST_MUTATIONS == 18
 
 
 def test_self_test_floor_catches_a_shrunk_population(monkeypatch):
@@ -461,6 +466,50 @@ def test_a_yaml_key_value_is_not_a_citation():
     assert flc.check_citation_shapes(text) == []
 
 
+def test_a_host_and_port_in_prose_is_not_resolved_as_a_path(tmp_path, monkeypatch):
+    """FAILS if a `word:digits` token with no path marker is resolved as a file.
+
+    Measured before the fix: a `localhost:6379` example reported "localhost does not
+    exist in the tree" and red the required, path-filter-free `docs` job — the
+    fail-closed friction that teaches a lane to route around a guard.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace("`tortoise/pipeline.py:16`", "`localhost:6379`", 1),
+    )
+    problems = _doc_problems()
+    assert not any("citation" in p for p in problems), problems
+
+
+def test_a_citation_with_a_trailing_character_is_refused(tmp_path, monkeypatch):
+    """FAILS if a trailing space or full stop makes a citation invisible.
+
+    The one-keystroke bypass again, one character further out: a trailing space on
+    row (e)'s anchor, on the self-test's own `:792` target, and a period after an
+    out-of-range number all matched neither the resolver nor the refusal, so
+    `--check` exited 0 while a whole row's evidence became unverified (its `:27` /
+    `:66` shorthands then re-anchored to the previous row's path and resolved).
+    CommonMark strips a space on both sides of a code span, so the mangled form
+    does not even look mangled to a reader.
+    """
+    for old, new in (
+        ("`tortoise/sdk.py:36042-36046`", "`tortoise/sdk.py:36042-36046 `"),
+        ("`tortoise/pipeline.py:16`", "`tortoise/pipeline.py:16 `"),
+    ):
+        _mutated(tmp_path, monkeypatch, lambda t, o=old, n=new: t.replace(o, n, 1))
+        problems = _doc_problems()
+        assert any("not a recognised citation" in p for p in problems), (old, problems)
+
+
+def test_a_shorthand_with_a_trailing_character_is_refused(tmp_path, monkeypatch):
+    """FAILS if a trailing space or period after a `:LINE` shorthand is skipped."""
+    for old, new in (("`:792`", "`:792 `"), ("`:3115`", "`:999999.`")):
+        _mutated(tmp_path, monkeypatch, lambda t, o=old, n=new: t.replace(o, n, 1))
+        problems = _doc_problems()
+        assert any("not a recognised citation" in p for p in problems), (old, problems)
+
+
 # ── the headline tally is derived, not asserted ────────────────────────────
 
 
@@ -504,6 +553,30 @@ def test_a_tally_that_names_the_wrong_letters_is_rejected(tmp_path, monkeypatch)
     )
     problems = _doc_problems()
     assert any("letter list that disagrees" in p for p in problems), problems
+
+
+def test_a_verdict_moved_between_classes_is_rejected(tmp_path, monkeypatch):
+    """FAILS if two verdict classes can be swapped without the sentence reddening.
+
+    Comparing the letters as a SET and the overtaken rows as a COUNT let a cell move
+    between classes with the quoted sentence unchanged — measured: (c)
+    SUPERSEDED-BY-FIX -> ADOPTED, (e) ADOPTED -> SUPERSEDED-BY-FIX and (k) DRIFTED ->
+    MOOT-BY-LOSS all left rc 0. §1 gives those classes different handling rules ("do
+    not re-derive it" vs "treat the new behaviour as the norm" vs "do not assert it
+    either way"), so a swapped class sends the reader to the wrong action.
+    """
+    cases = (
+        ("| **SUPERSEDED-BY-FIX** — the Point fold now persists",
+         "| **ADOPTED** — the Point fold now persists"),
+        ("| **ADOPTED** — both axes are shipped",
+         "| **SUPERSEDED-BY-FIX** — both axes are shipped"),
+        ("| **DRIFTED** — the count is now a closed-book",
+         "| **MOOT-BY-LOSS** — the count is now a closed-book"),
+    )
+    for old, new in cases:
+        _mutated(tmp_path, monkeypatch, lambda t, o=old, n=new: t.replace(o, n, 1))
+        problems = _doc_problems()
+        assert any("assigns a different verdict" in p for p in problems), (old, problems)
 
 
 # ── citations resolve ──────────────────────────────────────────────────────
