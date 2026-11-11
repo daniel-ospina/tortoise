@@ -1126,7 +1126,8 @@ def test_the_committed_census_was_produced_by_this_probe():
 # ------------------- the read path's SECOND conjunct: the legacy `outdated` flag
 
 def test_census_excludes_flag_outdated_rows_from_the_headline():
-    """FAILS IF the live subset is filtered on STATUS alone.
+    """FAILS IF the live subset is filtered on STATUS alone, or if the two exclusion buckets
+    stop being mutually exclusive.
 
     The default read's predicate is `status not terminal` **AND**
     `coalesce(n.outdated, false) = false` (`search_engine._exclude_status_clause` →
@@ -1134,6 +1135,12 @@ def test_census_excludes_flag_outdated_rows_from_the_headline():
     flag while LEAVING `status` untouched — so a status-only filter would count a flag-dead row
     as live, making "exactly the population the default read serves" false (review cycle 3,
     finding 2).
+
+    Row `c` is BOTH terminal and flagged, which is what pins the `elif`: without it, a split
+    that put the row in both buckets left every other test green while `tombstones` silently
+    over-counted (one row counted as two exclusions) — and this test's own `"retracted" not in
+    excluded_by_outdated_flag` could not catch it, because that bucket's only possible key is
+    the hardcoded literal `outdated=true` (review, landing round).
     """
     rows = [
         {"id": "a", "pointKind": "statement", "quote": "dead by the read path",
@@ -1141,15 +1148,19 @@ def test_census_excludes_flag_outdated_rows_from_the_headline():
          "createdAt": "2026-11-01T00:00:00Z"},
         {"id": "b", "pointKind": "statement", "quote": "alive", "embedding": None,
          "status": "live", "createdAt": "2026-11-01T00:00:00Z"},
+        {"id": "c", "pointKind": "statement", "quote": "dead by status AND flag",
+         "embedding": None, "status": "retracted", "outdated": True,
+         "createdAt": "2026-11-01T00:00:00Z"},
     ]
-    client = _Page({(True, 0): _page(rows, total=2, has_more=False)})
+    client = _Page({(True, 0): _page(rows, total=3, has_more=False)})
     report = qp.census(client)
 
     assert report["headline"]["live_points"] == 1          # only `b`
     assert report["headline"]["quote_non_empty"] == 1      # the flag-dead quote is NOT a live quote
-    assert report["headline"]["tombstones"] == 1           # excluded, and attributed below
+    # flag-dead (`a`) + retracted (`c`) = 2: `c` is ONE exclusion, never two
+    assert report["headline"]["tombstones"] == 2
     flag = report["excluded_by_outdated_flag"]["outdated=true"]
-    assert flag["points"] == 1
+    assert flag["points"] == 1                             # `a` only — `c` is status-bucketed
     assert flag["quote_non_empty"] == 1
-    # a terminal ROW is not double-counted into the flag bucket
-    assert "retracted" not in report["excluded_by_outdated_flag"]
+    assert list(report["by_status_terminal"]) == ["retracted"]
+    assert report["by_status_terminal"]["retracted"]["points"] == 1
