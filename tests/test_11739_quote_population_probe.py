@@ -1173,8 +1173,10 @@ def test_terminal_statuses_mirror_the_read_paths_RENDERED_predicate():
 
     # Conjunct 1 — the status half excludes EXACTLY the probe's vocabulary. Set equality in
     # both directions: a status the read excludes and the probe does not counts a dead row as
-    # live (`offender` -> the headline falls); one the probe excludes and the read does not
-    # drops a live row from the denominator it claims to measure.
+    # live (the headline MOVES — this pin establishes set equality, not the sign, and on this
+    # graph the single terminal bucket is mostly quoted, so a leaked row would usually RAISE
+    # it); one the probe excludes and the read does not drops a live row from the denominator
+    # it claims to measure.
     # ⚠️ VALUE-AGNOSTIC on purpose: `([a-z_]+)` was blind to a literal that is not a plain
     # identifier (`'staged2'`, `'Draft2'`), so such a status could be excluded by the read and
     # still counted live by the probe with this pin green (review, delta round).
@@ -1294,11 +1296,20 @@ def test_the_population_scope_mirrors_the_read_paths_operator_clause():
 
     The census cannot apply this conjunct itself — the probe sees rows the hosted
     `tortoise_query` already scoped, so the non-operator population is a property of the
-    READ path, not of the probe. Nothing else in this file reads it, so without this pin the
-    published scope is prose: #7108's shape (a bare `n.is_operator = false`, which drops the
-    Points carrying NO `is_operator` property and leaks legacy operators carrying `op_type`)
-    would restore itself and the census's denominator would silently be a different
-    population than every sentence in the README names.
+    READ path, not of the probe.
+
+    ⛔ TWO pins, two different layers, and neither covers the other (the composed-predicate pin
+    above pins the STATUS/flag half, and says nothing about the operator clause):
+    * this one — the HELPER's text. #7108's shape (a bare `n.is_operator = false`, which is
+      NULL-propagating: it drops the Points carrying NO `is_operator` property and leaks
+      legacy operators carrying `op_type`) changes the STRING, so it reds here by name. It
+      also reds the parametrised call-site test, which asserts the canonical clause in the
+      emitted Cypher — neither is a duplicate, because…
+    * the parametrised `test_every_read_arm_that_serves_points_carries_both_conjuncts` — the
+      clause being APPLIED by each read method. That is the direction this pin CANNOT see: a
+      `clauses = []` at a call site leaves this string byte-identical and stays green.
+    Deleting the call-site assertion on the grounds that this pin covers the operator clause
+    would leave the "applied?" link unpinned.
     """
     from tortoise.sdk import TortoiseSDK
 
