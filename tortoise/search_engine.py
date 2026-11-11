@@ -449,8 +449,11 @@ _FLOAT32_OVERFLOW_MIDPOINT = 2 ** 128 - 2 ** 103
 #: exponent: `numeric_operand("1e10000000")` — a stored string operand, which is
 #: exactly the population this coercion exists for — took 7.5 s (measured) and
 #: `"1e100000000"` grew superlinearly, while the store answers `null` for both and
-#: the pre-overflow-branch code answered `None` in microseconds. The hex path has
-#: the same bound as `_EXACT_FRACTION_MAX_EXP`; this is the decimal one.
+#: the pre-overflow-branch code answered `None` in microseconds. This is the
+#: DECIMAL cheap bound; the hex path has its own inside
+#: `_exact_literal_fraction`, and it bounds the value's MAGNITUDE rather than the
+#: exponent as written (#11897 — `4 * significant + exponent - 4 * fraction`, the
+#: cost of the reconstruction, so a cancelling spelling is not refused).
 _FLOAT32_OVERFLOW_CEILING = 2.0 ** 128
 #: The LOWEST literal magnitude the store still READS although it is not a
 #: float32: one quarter of a subnormal ULP (2**-149) below min-normal. The read
@@ -572,10 +575,19 @@ _HEX_LITERAL_PARTS = re.compile(
     r"(?:\.(?P<frac>[0-9a-fA-F]*))?(?:[pP](?P<exp>[+-]?[0-9]+))?\Z",
     re.ASCII)
 
-#: How far a hex literal's binary exponent may run before exact reconstruction is
-#: skipped. The midpoint branch needs a FINITE float32 target, so a literal with
-#: an exponent this large is nowhere near it; the bound exists so a malformed
-#: literal cannot ask for `Fraction(2) ** 10**9`.
+#: How far a hex literal's reconstructed VALUE may run, in binary MAGNITUDE BITS,
+#: before exact reconstruction is skipped. It is NOT a cap on the exponent as
+#: written (#11897): a long mantissa cancels a large `p` exponent, so
+#: `"...p-4249"` can name a float32 subnormal and `"...p-4204"` can name MAX.
+#: The midpoint branch needs a FINITE float32 target, so a literal this large is
+#: nowhere near it; the bound exists so a malformed literal cannot ask for
+#: `Fraction(2) ** 10**9`.
+#:
+#: ⛔ #11897: the bound it REPLACED measured the exponent as WRITTEN, so a
+#: literal whose mantissa cancelled that exponent —
+#: `"0x" + format((2**24+1) * 2**4076, "x") + "p-4100"`, exactly 1 + 2⁻²⁴, which
+#: the store serves as `1.0` — was refused for having `|exponent| > 4096`, and
+#: the three call sites answered that `None` with ABSENT.
 _EXACT_FRACTION_MAX_EXP = 4096
 
 
@@ -596,7 +608,10 @@ def _exact_literal_fraction(raw: str):
 
     Hex literals are reconstructed through `int(digits, 16)`, which is EXEMPT
     from that cap (it applies to non-power-of-two bases only), and bounded by
-    `_EXACT_FRACTION_MAX_EXP` so no literal can ask for `Fraction(2) ** 10**9`.
+    `_EXACT_FRACTION_MAX_EXP` — on the value's MAGNITUDE, which is what bounds
+    the cost, not on the exponent as written (#11897: a 4,000-bit mantissa
+    cancels a `p-4100` back to 1 + 2⁻²⁴, and bounding the spelling refused a
+    value the store serves).
 
     `Fraction` cannot read a HEX float at all — it raises `ValueError` — so a hex
     literal used to fall through to the DOUBLE's rounding, which is the SAME
@@ -618,10 +633,21 @@ def _exact_literal_fraction(raw: str):
     digits = (match.group("int") or "") + (match.group("frac") or "")
     if not digits:
         return None
+    frac_digits = len(match.group("frac") or "")
+    significant = digits.lstrip("0")
+    if not significant:                     # "0x000…" — zero, whatever the exponent
+        return Fraction(0)
     exponent = int(match.group("exp") or 0)
-    if abs(exponent) > _EXACT_FRACTION_MAX_EXP:
+    # The value is `int(digits, 16) * 2 ** (exponent - 4 * frac_digits)`, so the
+    # cost of reconstructing it is set by its MAGNITUDE in bits — and that is
+    # `4 * significant + exponent - 4 * frac_digits`, not `abs(exponent)`. A
+    # 4,000-bit mantissa with `p-4100` is a value near 1 and costs nothing to
+    # build; a short mantissa with `p-999999999` is the shape this guard exists
+    # for (`Fraction(2) ** 10**9`), and its magnitude is what trips it.
+    magnitude_bits = 4 * len(significant) + exponent - 4 * frac_digits
+    if not -_EXACT_FRACTION_MAX_EXP <= magnitude_bits <= _EXACT_FRACTION_MAX_EXP:
         return None
-    value = Fraction(int(digits, 16), 16 ** len(match.group("frac") or ""))
+    value = Fraction(int(digits, 16), 16 ** frac_digits)
     if exponent >= 0:
         value *= Fraction(2 ** exponent)
     else:
@@ -670,13 +696,22 @@ def _f32_from_literal(raw: str, val: float):
         if not math.isfinite(val) or abs(val) > _FLOAT32_OVERFLOW_CEILING:
             return None
         exact = _exact_literal_fraction(raw)
-        if exact is None:                   # pragma: no cover — see the docstring
-            # Unreachable for an admitted literal: the decimal path is length-
-            # unlimited (`Decimal`) and the hex path is bounded but only returns
-            # None for an exponent whose double is 0 or inf — and neither can be
-            # in the overflow band this branch guards. A fail-safe, not a live
-            # branch: the old answer was `rounded` (the double's rounding),
-            # which is what the literal is consulted to avoid.
+        if exact is None:                   # pragma: no cover — no known live shape
+            # ⛔ #11897: this branch used to be called unreachable on a claim the
+            # store DISPROVED. A long mantissa cancels a large `p` exponent, so a
+            # hex literal with `abs(exponent) > _EXACT_FRACTION_MAX_EXP` can still
+            # name a value in THIS band — measured on 4.20.6, float32 MAX spelled
+            # `"0x" + format(2**128 - 2**104, "x")` shifted by 4204 bits and
+            # closed with `p-4204` (`len > 1000`) served `toFloat` = MAX while
+            # this arm answered ABSENT. (The 1 + 2⁻²⁴ literal that headlines
+            # #11897 takes the MIDPOINT arm BELOW, not this one: it is in band, so
+            # it never reaches the `>= _FLOAT32_MAX` test that guards this branch
+            # — citing it here would send a reader to a witness that does not
+            # enter the arm.) The bound now measures the value's MAGNITUDE, so
+            # both reconstruct; the MAX spelling is pinned in
+            # `test_a_cancelling_hex_exponent_reads_at_both_band_edges`. Kept as a
+            # fail-safe: `rounded` is the double's rounding, which is what the
+            # literal is consulted to avoid.
             return None
         if abs(exact) < _FLOAT32_OVERFLOW_MIDPOINT:
             return -_FLOAT32_MAX if exact < 0 else _FLOAT32_MAX
@@ -688,10 +723,10 @@ def _f32_from_literal(raw: str, val: float):
     if abs(val - rounded) != abs(neighbour - val):
         return rounded                      # not a midpoint: already correct
     exact = _exact_literal_fraction(raw)
-    if exact is None:                       # pragma: no cover — see the docstring
-        # Same fail-safe as above, and for the same reason: an unreconstructable
-        # literal must not be answered from the double, which is the rounding
-        # this branch exists to correct.
+    if exact is None:                       # pragma: no cover — see #11897 above
+        # Same fail-safe, same correction: a refusal here must not be caused by the
+        # exponent as WRITTEN — the bound in `_exact_literal_fraction` measures the
+        # value's magnitude, because the two are not the same thing.
         return None
     # Halfway exactly → the LITERAL decides, and the SIDE is not a detail: the
     # two candidates are `rounded` and its neighbour on the side `val` lies, and
@@ -791,15 +826,20 @@ def _string_operand(raw: str, val: float):
     # only way to tell an EXACT subnormal (`'0x1p-149'`) from a `repr()` of one.
     if val != 0.0 and abs(val) < _FLOAT32_MIN_NORMAL * 2:
         exact = _exact_literal_fraction(raw)
-        if exact is None:                       # pragma: no cover — see the docstring
+        if exact is None:                       # pragma: no cover — see #11897 above
             # A spelling the exact parse cannot reconstruct. Refused, not
             # answered from the double: `abs(val) < _FLOAT32_MIN_NORMAL` would
             # refuse the whole read band this function exists to serve (the
             # mirrored split), and `rounded` would serve one the store may null.
-            # Unreachable for both grammars — the decimal path is length-unlimited
-            # and the hex path's only None is an exponent whose double is 0/inf,
-            # which `val != 0.0` above already excluded — so this is a fail-safe
-            # for a future widening, not a live branch.
+            # ⛔ NOT "an exponent whose double is 0/inf" — that justification was
+            # false (#11897), and it WAS a live branch: a float32 subnormal named
+            # exactly by a cancelling spelling (`0x1` + 1025 zeros + `p-4249`, i.e.
+            # 2⁻¹⁴⁹) has `|exponent| > _EXACT_FRACTION_MAX_EXP` and a double in
+            # this band, so it answered ABSENT here while every Cypher surface
+            # served `1.4e-45`. It is a fail-safe NOW because the bound measures
+            # the value's MAGNITUDE — the reachable shape is pinned in
+            # `test_a_cancelling_hex_exponent_reads_at_both_band_edges`, not
+            # assumed unreachable here.
             return None
         if (abs(exact) < _F32_UNDERFLOW_READ_FLOOR
                 and Fraction(rounded) != exact):

@@ -422,14 +422,18 @@ response_fields:
     why the value is missing — never infer the state from the number. The same three tokens are emitted by the `ep` block of a
     search hit, by gaps_ranking.ep_state, by graph_ranking.ep_state and by the SubgraphExpander node payload, so
     all of them join on one vocabulary. No stored shape THIS REPO HAS MEASURED splits it — a measurement, not a
-    proof, because the unconditional version of that sentence was falsified twice: the class was declared closed at
-    cycle 26 for one shape (a legacy belief OPERAND stored as a hex-float literal, `posterior_alpha = "0x1p4"`,
-    readable to the store — the Cypher presence predicate the rankers read reported "measured" — and not to this
-    process, whose `ep` block reported "absent"), and cycles 27 and 28 then found three more INSIDE it: an exact
-    float32 subnormal (`0x1p-127`) refused by a decimal-shaped underflow rule; a hex literal past a float32
+    proof, because the unconditional version of that sentence was falsified three times: the class was declared
+    closed at cycle 26 for one shape (a legacy belief OPERAND stored as a hex-float literal, `posterior_alpha =
+    "0x1p4"`, readable to the store — the Cypher presence predicate the rankers read reported "measured" — and not
+    to this process, whose `ep` block reported "absent"), and cycles 27 and 28 then found three more INSIDE it: an
+    exact float32 subnormal (`0x1p-127`) refused by a decimal-shaped underflow rule; a hex literal past a float32
     midpoint (`0x1.0000010000000001p0`) that the 53-bit double rounded ONTO the midpoint; and a NEGATIVE exact
     midpoint (`-1.0000000596046448`), where the ULP step read the sign-magnitude bit pattern as an integer so its
-    neighbour sat on the wrong side and the branch answered "not a midpoint". All four agree on state AND value now,
+    neighbour sat on the wrong side and the branch answered "not a midpoint". Issue 11897 then found a FIFTH shape, in
+    a FOURTH class of defect — the BOUND rather than the grammar: a 4,000-bit mantissa CANCELS a `p-4100`, so
+    `"0x" + format((2**24+1) * 2**4076, "x") + "p-4100"` is exactly 1 + 2⁻²⁴ — served by the store — and the guard
+    refused it for having an exponent past 4096; it now bounds the value''s MAGNITUDE, which is what the cost follows.
+    All five agree on state AND value now,
     and `confidence_source: "unreadable"` remains as a DEFENSIVE label for a future undecodable spelling'
   unchanged_when_off: NO — additive key on an existing payload, so the key set grows by one on every row (the values
     are the contract change; the field itself is additive). Not flag-gated
@@ -509,7 +513,9 @@ response_fields:
     class was closed at cycle 26 for one shape, a belief OPERAND written as a hex-float literal
     (`posterior_alpha = "0x1p4"`), which the Python coercion now reads too (`float.fromhex`, 16.0 as the store does)
     — and cycles 27/28 then found an exact float32 subnormal (`0x1p-127`) and a hex literal past a float32 midpoint
-    (`0x1.0000010000000001p0`) still splitting it. Both now read on both twins. A hex-float MIRROR
+    (`0x1.0000010000000001p0`) still splitting it, and issue 11897 found a fourth in the exponent BOUND (a mantissa that
+    cancels its `p` exponent is in band and served, and the bound called it absent). All now read on both twins. A
+    hex-float MIRROR
     (`n.confidence = "0x1p4"`) never reached it — the served-belief band rejects 16.0 on both twins, so that row
     reads "absent"
   unchanged_when_off: NO for an unmeasured draft, yes for everything else — the same scoping as recall_ranking.confidence;
@@ -545,8 +551,9 @@ response_fields:
     without knowing the status vocabulary. A live gap whose belief EXISTS but whose stored spelling this process cannot
     decode (ep_state "baseline"/"measured", value null) reads "unreadable", exactly as recall_ranking.confidence_source
     states — never "absent" beside a non-absent state. The shape that used to reach it — a belief OPERAND stored as a
-    hex-float literal — no longer does (the Python coercion reads hex now); a hex-float MIRROR is out of band and reads
-    "absent" on both twins
+    hex-float literal — no longer does (the Python coercion reads hex now), and neither does a hex operand whose `p`
+    exponent exceeds the old bound while its mantissa cancels it back into band (#11897 — the bound now measures the
+    value's magnitude); a hex-float MIRROR is out of band and reads "absent" on both twins
   unchanged_when_off: NO for an unmeasured draft, yes for everything else — the same scoping as gaps_ranking.confidence;
     every live gap keeps its "posterior"/"neutral" verdict EXCEPT an uncalibrated one, which now reads "absent" (#11702)
     and an unreadable-spelling one, which reads "unreadable"
