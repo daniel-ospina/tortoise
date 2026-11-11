@@ -1393,9 +1393,12 @@ class StateRanker:
             # `_confidence_of` and must not deny the state beside it (the
             # reviewed head emitted `"absent"` beside `"measured"`).
             # `test_confidence_source_never_contradicts_the_ep_state_beside_it`
-            # pins the agreement for all seven stored shapes — including the
-            # unreadable-spelling residual, where the VALUE is null for a
-            # non-absent state and `confidence_source: "unreadable"` names why.
+            # pins the agreement for all seven stored shapes — and, since cycle
+            # 26 closed the hex-float OPERAND residual at the source, the null
+            # beside a non-absent state is no longer produced by any stored
+            # shape: the arm below is DEFENSIVE. It is kept, and named, so a
+            # future undecodable spelling reports `"unreadable"` instead of
+            # denying a belief the row is known to have.
             ep_state = sig.get("ep_state")
             if ep_state is None:
                 ep_state = (EP_STATE_ABSENT if confidence is None
@@ -1508,7 +1511,13 @@ class StateRanker:
         so an unmeasured claim is neither buried nor given a fabricated
         confidence. Source is ``"posterior"`` when EP actually measured the
         claim and ``"neutral"`` when a PERSISTED prior (not a measurement)
-        answered — both are real values; only ``absent`` has none.
+        answered — those two are real values. A non-absent state with no
+        readable value answers ``(None, UNREADABLE_CONFIDENCE_SOURCE)``
+        instead, so the null is named rather than denied; no stored shape is
+        known to produce it since cycle 26 taught both coercions the same
+        spellings, so that arm is DEFENSIVE. There are therefore two nulls —
+        ``absent`` (nothing is persisted) and ``unreadable`` (a belief exists) —
+        and they are not the same fact.
         """
         if "confidence" in signals:
             raw = signals["confidence"]
@@ -1516,8 +1525,11 @@ class StateRanker:
             # VALUE is collapsed to the absent SOURCE only when the state is
             # absent. Collapsing on the value alone is a second presence rule
             # — and it is wrong for any shape where the store and this
-            # process disagree about readability (a hex-float mirror did,
-            # before cycle 26 taught the Python coercion the same spelling):
+            # process disagree about readability (one did until cycle 26 taught
+            # the Python coercion the spellings the store reads — an OPERAND
+            # written as `"0x1p4"`, which `toFloatOrNull` read as 16.0 and the
+            # pinned Python grammar refused; a hex-float MIRROR never was this
+            # shape, since the served-belief band rejects it on BOTH twins):
             # the row then said `confidence_source: "absent"` beside
             # `ep_state: "baseline"`, i.e. two keys of one response
             # disagreeing about whether a belief exists.
@@ -1971,8 +1983,9 @@ class GapsRanker:
                 # Taken from the SIGNAL when the graph was queried — the same
                 # field StateRanker reads — and NOT re-derived from the value:
                 # the signal decides presence itself, so a None value implies
-                # the absent state EXCEPT for the unreadable-spelling arm (the
-                # hex shape, closed in cycle 26), where the state is true and
+                # the absent state EXCEPT for the unreadable-spelling arm (a
+                # hex-float OPERAND, the shape cycle 26 closed; the token stays
+                # as a defensive label), where the state is true and
                 # `confidence_source: "unreadable"` explains the null.
                 # Deriving the state here
                 # instead would be a second presence rule — the defect class
@@ -2029,7 +2042,12 @@ class GapsRanker:
         #11702: ``(None, EP_STATE_ABSENT)`` when no belief is persisted — the
         same convention as StateRanker, so the three rankers cannot disagree
         about what "absent" is. (This method used to report the neutral 0.5,
-        which made a never-measured gap carry a fabricated confidence.) For a
+        which made a never-measured gap carry a fabricated confidence.) A gap
+        that has a belief whose stored spelling this process cannot decode
+        reports ``(None, UNREADABLE_CONFIDENCE_SOURCE)`` instead — never
+        ``absent`` beside a non-absent state (the arm is DEFENSIVE: cycle 26
+        closed the one shape that reached it, see
+        :data:`UNREADABLE_CONFIDENCE_SOURCE`). For a
         DRAFT the caller replaces both with null/``"uncomputed"`` (#2598) —
         this method reports the read, the staging gate lives in
         :meth:`rerank`."""
@@ -2037,9 +2055,10 @@ class GapsRanker:
             raw = signals["confidence"]
             # The STATE answers the source (see StateRanker's `_confidence_of`):
             # a `None` value is the absent source only when the state is
-            # absent. A non-absent state with no readable value is the
-            # unreadable-spelling residual, and says so — never `"absent"`
-            # beside `ep_state: "baseline"`.
+            # absent. A non-absent state with no readable value answers
+            # `"unreadable"`, never `"absent"` beside
+            # `ep_state: "baseline"` — the arm is DEFENSIVE, because cycle 26
+            # closed the hex-float OPERAND shape that used to reach it.
             state = signals.get("ep_state")
             if state == EP_STATE_ABSENT:
                 return None, EP_STATE_ABSENT
