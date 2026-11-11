@@ -3813,6 +3813,15 @@ def test_the_twins_parse_the_same_string_language(sdk):
         "-3.4028235677973367e38": None,
         "0x1.fffffefffffffp127": 3.4028234663852886e38,   # 1 ULP below → max
         "0x1.ffffffp127": None,                           # the exact midpoint
+        # The OVERFLOW edge must be decided in BOUNDED work, and the store makes
+        # that cheap: `toFloatOrNull('1e10000000')` is null in ~1 ms. Python's
+        # first attempt at this branch ran the exact literal parse on every
+        # overflowing spelling, so this row cost 7.5 s (`10**10**7`) and grew
+        # superlinearly — measured. The double's magnitude bounds the parse.
+        "1e1000000": None,
+        "1e10000000": None,
+        "1e999999999": None,
+        "-1e10000000": None,
         # The UNDERFLOW edge is INEXACTNESS, not subnormal-ness (cycle 27): the
         # rule refused every subnormal, so a hex literal naming a float32
         # subnormal EXACTLY — which `strtof` accepts — was `absent` here and
@@ -3883,6 +3892,37 @@ def test_the_twins_parse_the_same_string_language(sdk):
             assert _store_f32(py) == _store_f32(expected), (raw, py, expected)
             assert _store_f32(cypher) == _store_f32(expected), (
                 raw, cypher, expected)
+
+
+def test_an_overflowing_literal_is_decided_without_an_exact_parse(monkeypatch):
+    """Cycle 30: the overflow branch must not run the exact parse unbounded.
+
+    `Fraction("1e10000000")` builds `10**10**7`. Measured: 7.5 s for that row,
+    0.2 s for `1e1000000`, superlinear beyond — on literals the store answers
+    `null` for in about a millisecond, and that the PRE-branch code answered
+    `None` for in microseconds. A stored string operand is exactly the
+    population `numeric_operand` exists to serve, so an unbounded parse here is
+    a per-request stall on `recall_ranking` / `analyze` / `belief_mirror`.
+
+    A timing assertion would be flaky, so this pins the MECHANISM: for a literal
+    whose double is above `2**128` the exact parse is never entered. (The exact
+    parse is still what decides the real band — `0.0`-valued spellings and the
+    in-band decimals — which the twin-grammar table pins by value.)
+    """
+    import tortoise.search_engine as se
+
+    parsed: list[str] = []
+
+    def _forbidden(raw):
+        parsed.append(raw)
+        raise AssertionError(
+            "the exact-literal parse ran for a literal far outside the overflow "
+            "band — that is the unbounded-cost path this test exists to prevent")
+
+    monkeypatch.setattr(se, "_exact_literal_fraction", _forbidden)
+    for literal in ("1e10000000", "1e999999999", "-1e10000000", "1e309", "1e39"):
+        assert se.numeric_operand(literal) is None, literal
+    assert parsed == [], parsed
 
 
 def test_a_legacy_list_operand_is_absent_without_blanking_the_batch(sdk):

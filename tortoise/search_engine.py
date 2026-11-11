@@ -440,6 +440,17 @@ _FLOAT32_MAX = 3.4028234663852886e38
 #: ``'3.4028235677973366e38'`` reads even though its nearest DOUBLE is exactly on
 #: the midpoint — which is why this edge cannot be decided from the double.
 _FLOAT32_OVERFLOW_MIDPOINT = 2 ** 128 - 2 ** 103
+#: The cheap CEILING that keeps the exact-literal parse bounded. A literal whose
+#: DOUBLE is above ``2**128`` cannot be below the overflow midpoint (a double ULP
+#: at this magnitude is ~2**75, far smaller than the distance to the boundary), so
+#: the parse is skipped there and the answer is `None` — the same answer, without
+#: building `10**exp`. Without this guard the parse is reachable with an UNBOUNDED
+#: exponent: `numeric_operand("1e10000000")` — a stored string operand, which is
+#: exactly the population this coercion exists for — took 7.5 s (measured) and
+#: `"1e100000000"` grew superlinearly, while the store answers `null` for both and
+#: the pre-overflow-branch code answered `None` in microseconds. The hex path has
+#: the same bound as `_EXACT_FRACTION_MAX_EXP`; this is the decimal one.
+_FLOAT32_OVERFLOW_CEILING = 2.0 ** 128
 #: The LOWEST literal magnitude the store still READS although it is not a
 #: float32: one quarter of a subnormal ULP (2**-149) below min-normal. The read
 #: band is everything from here upward — at or above this value an inexact
@@ -633,8 +644,17 @@ def _f32_from_literal(raw: str, val: float):
         # literal (`strtof` rounds it down, the store SERVES max) while its
         # nearest double IS the midpoint (`struct` raises OverflowError), so
         # Python answered `absent` for a value every Cypher surface measured.
+        # ⛔ The exact parse is NOT free, and it must not be reachable with an
+        # unbounded exponent: measured, the unguarded form spent 7.5 s building
+        # `10**10**7` for `"1e10000000"` and grew superlinearly from there — on
+        # the very inputs the store answers `null` for in one instruction. The
+        # double's own magnitude is the cheap, EXACT bound (see
+        # `_FLOAT32_OVERFLOW_CEILING`): above it no literal can be below the
+        # midpoint, so the answer is `None` without parsing anything.
+        if not math.isfinite(val) or abs(val) > _FLOAT32_OVERFLOW_CEILING:
+            return None
         exact = _exact_literal_fraction(raw)
-        if exact is None:                   # pragma: no cover — grammar-pinned
+        if exact is None:                   # pragma: no cover — see the guard
             return rounded
         if abs(exact) < _FLOAT32_OVERFLOW_MIDPOINT:
             return -_FLOAT32_MAX if exact < 0 else _FLOAT32_MAX
