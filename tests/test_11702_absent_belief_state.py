@@ -399,16 +399,31 @@ def test_a_hex_exponent_past_the_bound_its_mantissa_cancels_is_still_read(sdk):
 
     Measured on FalkorDB 4.20.6, the literal below is exactly `1 + 2⁻²⁴`:
 
-        store   toFloat(<literal>)        -> 1.0            (non-null)
-        Python  numeric_operand(<literal>) -> None          (absent)
-        before  numeric_operand(<literal>) -> 1.0
+        store          toFloat(<literal>)         -> 1.0   (non-null; served)
+        adb5d47cf8^    numeric_operand(<literal>) -> 1.0   (the `rounded` fallback)
+        on `main`      numeric_operand(<literal>) -> None  (ABSENT — the regression)
+        at this fix    numeric_operand(<literal>) -> 1.0   (asserted below)
 
-    Stored as the α operand with `β = 3`, one claim then read FOUR ways —
-    `ep` block `(None, 'absent')`, `why` `(None, 'absent', False)`, GraphRanker
-    `0.5`, `recall_subgraph` `{"ep_state": "measured", "confidence": 0.5}`,
-    `gaps_ranking` `(None, 'measured')` — with the rankers falling through to
-    their imputed Beta(1,1). That is the two-answers defect #11702 removes,
-    re-entering through a bound that was supposed to bound COST, not SPELLING.
+    `adb5d47cf8` is the commit that replaced the three call sites' `return
+    rounded` fallbacks with `return None`; APPLYING only that payload restores
+    the regression, which is why the row is named by SHA rather than by "before"
+    (measured: the parent tree answers 1.0 for this literal).
+
+    Stored as the α operand with `β = 3`, the claim read DIFFERENTLY on the two
+    sides of the read path — and the split is exactly the Python/Cypher line,
+    because the refusal lived only in the Python parse:
+
+        Python side     `ep` block (None, 'absent'), `why` (None, 'absent', False),
+                        StateRanker (None, 'measured'), gaps_ranking (None, 'measured')
+        Cypher side     GraphRanker 0.25, recall_subgraph
+                        {"ep_state": "measured", "confidence": 0.25}
+
+    ⚠️ Not 0.5: the neutral-Beta(1,1) fallback was already gone (that is what
+    #11702 removed), so nothing answered 0.5 here. What the refusal produced was
+    the other half of the same defect — a store-reading surface reporting a
+    measured 0.25 while the `ep` block in the SAME response said there is no
+    belief. Correcting that claim changes no assertion below; the `!= 0.5` guard
+    is kept as a tripwire against a fallback ever coming back.
     """
     from fractions import Fraction
 
@@ -467,9 +482,12 @@ def test_a_cancelling_hex_exponent_reads_at_both_band_edges(sdk):
       reachability claim this PR exists to correct.
 
     Both spellings below are >1000 chars, exactly-valued, and past the bound as
-    WRITTEN (`|exponent| > _EXACT_FRACTION_MAX_EXP`) while their magnitudes are
-    ~128 bits — so `_exact_literal_fraction` refused them before #11897 and
-    reconstructs them after. The float32 MIDPOINT spelled the same way stays
+    WRITTEN (`|exponent| > _EXACT_FRACTION_MAX_EXP`) while their MAGNITUDES sit at
+    OPPOSITE ends of the band — the MAX witness at `magnitude_bits` = +128, the
+    subnormal witness at -145, both far inside the ±4096 bound — so
+    `_exact_literal_fraction` refused them before #11897 and reconstructs them
+    after. One witness near MAX would leave the negative half of the bound
+    unpinned; this test does not. The float32 MIDPOINT spelled the same way stays
     NULL: loosening the bound must not turn a null into a value either.
     """
     from fractions import Fraction
@@ -544,8 +562,11 @@ def test_the_hex_bound_is_a_magnitude_and_zero_is_zero():
     assert _exact_literal_fraction("0x1p-4100") == Fraction(1, 2**4100)
     assert _exact_literal_fraction("0x1p-4101") is None
 
-    # Zero mantissa: the value is 0 whatever the exponent says. Before #11897
-    # the exponent bound refused all of these.
+    # Zero mantissa: the value is 0 whatever the exponent says. Four of these
+    # were REFUSED before #11897 (their exponent is past the old bound); the
+    # fifth, `0x0000`, has no `p` exponent at all, so it was never refused and
+    # it asserted nothing about the zero-mantissa return — it is here as the
+    # no-exponent control, not as a fifth failure.
     for raw in ("0x" + "0" * 16 + "p-999999999", "0x0.000p1000000",
                 "-0x0p-999999999", "0x0000", "-0x.0p4097"):
         assert _exact_literal_fraction(raw) == Fraction(0), raw
@@ -1371,8 +1392,9 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
     * an OPERAND whose `p` EXPONENT the old bound refused while its mantissa
       cancelled that exponent back into band (#11897): the literal above is
       exactly 1 + 2⁻²⁴, so the store serves it and the reader called it absent —
-      `measured / 0.25` on one surface, `absent` beside a ranker's imputed
-      Beta(1,1) `0.5` on another. The bound now measures the value's MAGNITUDE,
+      `measured / 0.25` on the Cypher-reading surfaces, `absent` on the Python
+      ones, in the SAME response (not `0.5`: the neutral fallback was already
+      gone, see the headline test). The bound now measures the value's MAGNITUDE,
       not the exponent as written.
 
     Collapsing those two into one shape is how the token lost its only test
@@ -1425,9 +1447,11 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
                               "n.confidence = '0x1.0000010000000001p0'")
     # (e) The EXPONENT BOUND (#11897): a 4,000-bit mantissa CANCELS a `p-4100`,
     #     so this literal is exactly 1 + 2⁻²⁴ — in band, served by the store —
-    #     while the old bound refused it for having `|exponent| > 4096` and the
-    #     rankers fell through to their imputed Beta(1,1) at 0.5. β = 3 keeps
-    #     the mean at 0.25, so a fallback cannot pass this row by coincidence.
+    #     while the old bound refused it for having `|exponent| > 4096`. The
+    #     Python-reading surfaces then said `absent` (this ranker's `confidence`
+    #     was `None`) while the Cypher-reading ones reported the real 0.25. β = 3
+    #     keeps the mean off 0.5, so a re-introduced neutral fallback would fail
+    #     the `== 0.25` assertion rather than pass it by coincidence.
     hex_cancelling = _point(
         "a cancelling hex exponent",
         "n.posterior_alpha = $a, n.posterior_beta = '3'",
@@ -1485,11 +1509,13 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
         assert recs[pid]["ep_state"] == EP_STATE_BASELINE, recs[pid]
         assert recs[pid]["confidence_source"] != EP_STATE_ABSENT, recs[pid]
 
-    # (e) The EXPONENT-BOUND shape: a served value must be RANKED on, not
-    #     replaced by the imputed Beta(1,1) (0.5). This row is the #11897
-    #     regression: the `ep` block said `absent` while the rankers answered
-    #     0.5 from the fallback, so the claim carried no belief on one surface
-    #     and a neutral one on another.
+    # (e) The EXPONENT-BOUND shape: a served value must be RANKED on. This row is
+    #     the #11897 regression — `recall_ranking`/`gaps_ranking` answered
+    #     `confidence: None` (Python refused the operand) while `GraphRanker`
+    #     reported the store's 0.25 in the same response, so one claim carried no
+    #     belief on one surface and a measured one on another. The `!= 0.5` clause
+    #     below is a TRIPWIRE against the pre-#11702 neutral fallback returning;
+    #     it is not what this shape produced (nothing answered 0.5).
     for name, row in (("recall_ranking", recs[hex_cancelling]),
                       ("gaps_ranking", gaps[hex_cancelling])):
         assert row["ep_state"] == EP_STATE_MEASURED, (name, row)

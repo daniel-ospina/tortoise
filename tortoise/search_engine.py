@@ -575,17 +575,19 @@ _HEX_LITERAL_PARTS = re.compile(
     r"(?:\.(?P<frac>[0-9a-fA-F]*))?(?:[pP](?P<exp>[+-]?[0-9]+))?\Z",
     re.ASCII)
 
-#: How far a hex literal's binary exponent may run before exact reconstruction is
-#: skipped. The midpoint branch needs a FINITE float32 target, so a literal with
-#: an exponent this large is nowhere near it; the bound exists so a malformed
-#: literal cannot ask for `Fraction(2) ** 10**9`.
+#: How far a hex literal's reconstructed VALUE may run, in binary MAGNITUDE BITS,
+#: before exact reconstruction is skipped. It is NOT a cap on the exponent as
+#: written (#11897): a long mantissa cancels a large `p` exponent, so
+#: `"...p-4249"` can name a float32 subnormal and `"...p-4204"` can name MAX.
+#: The midpoint branch needs a FINITE float32 target, so a literal this large is
+#: nowhere near it; the bound exists so a malformed literal cannot ask for
+#: `Fraction(2) ** 10**9`.
 #:
-#: ⛔ It bounds the literal's VALUE, not its SPELLING (#11897). The exponent
-#: written after `p` is not the value's magnitude: a long mantissa cancels it —
-#: `"0x" + format((2**24+1) * 2**4076, "x") + "p-4100"` is exactly 1 + 2⁻²⁴, a
-#: literal the store serves as `1.0` — so a bound on `abs(exponent)` refused a
-#: readable value that nothing else here can reconstruct, and the three call
-#: sites answered that `None` with ABSENT while the store served `1.0`.
+#: ⛔ #11897: the bound it REPLACED measured the exponent as WRITTEN, so a
+#: literal whose mantissa cancelled that exponent —
+#: `"0x" + format((2**24+1) * 2**4076, "x") + "p-4100"`, exactly 1 + 2⁻²⁴, which
+#: the store serves as `1.0` — was refused for having `|exponent| > 4096`, and
+#: the three call sites answered that `None` with ABSENT.
 _EXACT_FRACTION_MAX_EXP = 4096
 
 
@@ -698,12 +700,18 @@ def _f32_from_literal(raw: str, val: float):
             # ⛔ #11897: this branch used to be called unreachable on a claim the
             # store DISPROVED. A long mantissa cancels a large `p` exponent, so a
             # hex literal with `abs(exponent) > _EXACT_FRACTION_MAX_EXP` can still
-            # name a finite, in-band value — and refusing it HERE answered ABSENT
-            # for a value every Cypher surface serves (`"0x" + format((2**24+1) *
-            # 2**4076, "x") + "p-4100"` is 1 + 2⁻²⁴, store `toFloat` = 1.0). The
-            # bound now measures the value's MAGNITUDE, so the known in-band
-            # shapes reconstruct. Kept as a fail-safe: `rounded` is the double's
-            # rounding, which is what the literal is consulted to avoid.
+            # name a value in THIS band — measured on 4.20.6, float32 MAX spelled
+            # `"0x" + format(2**128 - 2**104, "x")` shifted by 4204 bits and
+            # closed with `p-4204` (`len > 1000`) served `toFloat` = MAX while
+            # this arm answered ABSENT. (The 1 + 2⁻²⁴ literal that headlines
+            # #11897 takes the MIDPOINT arm BELOW, not this one: it is in band, so
+            # it never reaches the `>= _FLOAT32_MAX` test that guards this branch
+            # — citing it here would send a reader to a witness that does not
+            # enter the arm.) The bound now measures the value's MAGNITUDE, so
+            # both reconstruct; the MAX spelling is pinned in
+            # `test_a_cancelling_hex_exponent_reads_at_both_band_edges`. Kept as a
+            # fail-safe: `rounded` is the double's rounding, which is what the
+            # literal is consulted to avoid.
             return None
         if abs(exact) < _FLOAT32_OVERFLOW_MIDPOINT:
             return -_FLOAT32_MAX if exact < 0 else _FLOAT32_MAX
