@@ -286,12 +286,21 @@ skips in a depth-1 checkout is inert everywhere; the live ancestry claim is prov
 a stubbed-`git` case that needs no history. Two mechanisms, stated separately, because "the other job
 covers it" was true of the tool and false of the test.
 
-**Deliberately not checked:** the issue states in §6, the durability column in §4, and every
-`~/.swarm` claim in §5. They are **dated readings of things outside this repository**, and a guard
-that asserted them would either fail on someone else's tracker or, worse, pass by not looking. This
-follows `SUBSTRATE-REBUILD-MAP.md`'s ruling: *the tracker half is deliberately not guarded — it is
-dated and its command is recorded.* The command for §6 is `gh issue view <N> --json state`, and it
-was run per issue, not sampled.
+**Deliberately not checked:** the issue states in §6, the durability column in §4, every
+`~/.swarm` claim in §5, **§4's row population** and **§0's brief counts**. They are **dated
+readings of things outside this repository**, and a guard that asserted them would either fail on
+someone else's tracker or, worse, pass by not looking. This follows `SUBSTRATE-REBUILD-MAP.md`'s
+ruling: *the tracker half is deliberately not guarded — it is dated and its command is recorded.*
+The command for §6 is `gh issue view <N> --json state`, and it was run per issue, not sampled.
+
+⚠️ **The last two are named because they were repaired by hand, and a guard would not have caught
+them (#11902).** §4's `14 rows ⇒ 15 artefacts` arithmetic and §0's `three of the seven research
+briefs` are derived from `#2852` §3 exactly as §6 is from the tracker, and the criterion above
+(*self-contained and therefore checkable*) applies to them equally — but as of this cut they are
+**not** machine-checked, and the arms were measured: deleting the `<corpus>/2026-09-09-
+ontology-evidence.md` row (so *"indexed 15 artefacts"* is false again) and reverting §0 to *"six of
+the eight"* both leave `--check` at exit 0 and the test file fully green. Read both as dated
+readings, and re-derive them from the issue before quoting them.
 
 ---
 
