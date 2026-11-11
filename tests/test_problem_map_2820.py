@@ -12,7 +12,7 @@ guarded (a status is a dated fact — §9 of the document says so), so nothing h
 depends on GitHub.
 
 EVERY NEGATIVE CONTROL TAKES ONE OF FIVE SHAPES, and the census below is derived
-mechanically from this file (56 test functions at the head this landed on, counted
+mechanically from this file (57 test functions at the head this landed on, counted
 with the anchored grep), not asserted: a mutated copy of the shipped artifact it
 grades (23); a stand-in artifact written FROM SCRATCH for an arm whose failure is
 the artifact's absence or shape rather than its content — a synthesised
@@ -20,12 +20,16 @@ the artifact's absence or shape rather than its content — a synthesised
 (9); a throwaway directory it drives real `git` in, a repo or deliberately NOT
 one for the cannot-answer legs (4); one patched seam the arm requires (15); or
 the shipped source read as an AST — the interpreter guard's exit code, which no
-runtime fixture can produce (1). That is 51 negative controls plus 5 positives:
-three read the shipped page whole, a fourth
+runtime fixture can produce (1). That is 51 negative controls plus 6 positives:
+three read the shipped page whole
+(`test_the_recut_row_and_survivors_hold_their_status_by_ISSUE` is the fourth —
+added when fresh review measured that every other arm compares COUNTS, so a
+status swap between two rows was invisible to the whole file; see its docstring),
+a fifth
 (`test_every_status_token_is_in_the_vocabulary`) reads the closed-vocabulary
-CONSTANT rather than the page — see below — and the fifth is the positive half of
+CONSTANT rather than the page — see below — and the sixth is the positive half of
 a pair, `test_an_ancestor_anchor_passes_on_the_same_repo`, counted in the `git`
-bucket because that is the fixture it drives. 56 in all, which is every test function.
+bucket because that is the fixture it drives. 57 in all, which is every test function.
 Never a fixture that could not fail, and each test's docstring states (a) the
 exact value/state that makes it fail and (b) why that state is reachable. A guard
 whose negative case cannot be reached is a test that cannot fail — it proves the
@@ -92,7 +96,7 @@ def _decoy_and_ours() -> tuple[str, str]:
     subtracts one from OPEN, so an OPEN of 0 would emit `**N fixed · -1 open · …**`,
     which `_INDEX_COUNTS` does not match — the control would then red with "states
     no headline" rather than "the two disagree". That is a loud false red on a
-    future document (never a silent pass), and §8 records five rows still open.
+    future document (never a silent pass), and §8 records four rows still open.
     """
     text = DOC.read_text(encoding="utf-8")
     counts = pmc.parse_summary(text)
@@ -159,9 +163,33 @@ def test_the_taxonomy_counts_are_what_the_summary_declares():
     """
     rows, _ = pmc.parse_rows(DOC.read_text(encoding="utf-8"))
     counts = pmc.parse_summary(DOC.read_text(encoding="utf-8"))
-    assert counts["VERIFIED-FIXED"] == sum(1 for r in rows if r.is_fixed) == 21
-    assert counts["OPEN"] == sum(1 for r in rows if r.status == "OPEN") == 5
+    assert counts["VERIFIED-FIXED"] == sum(1 for r in rows if r.is_fixed) == 22
+    assert counts["OPEN"] == sum(1 for r in rows if r.status == "OPEN") == 4
     assert counts["UNKNOWN"] == 0
+
+
+def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
+    """Fails when two rows SWAP statuses — a compensating edit no count can see.
+
+    Reachable, and measured at the head that added this arm: every other
+    comparison in this file is a COUNT — §2's tally, the abstract headline, the
+    index headline, the WS-C cell — so an edit that holds the tally and moves
+    the claim is invisible to all of them. Reverting §2's `#2782` to `OPEN`
+    **and** promoting `#2684` to `VERIFIED-FIXED` (one row each way, so §2 stays
+    22/4/0, the total 26, WS-C 4 of 6, and both headlines intact) left
+    `tools/problem_map_check.py --check` **CLEAN** and this suite **58 passed** —
+    green over a page whose re-cut, the reason this revision exists, had been
+    undone. The count literals also expire: they must be re-derived on the next
+    re-cut, so a count-only guarantee lapses with the next count move.
+
+    So the two sets the page's prose asserts BY NAME are pinned by issue: the
+    row this re-cut is about, and the four survivors §8 counts. A count is the
+    only thing most of this file checks; a status is a per-row fact.
+    """
+    rows, _ = pmc.parse_rows(DOC.read_text(encoding="utf-8"))
+    status = {r.issue: r.status for r in rows}
+    assert status.get(2782) == "VERIFIED-FIXED", status.get(2782)
+    assert [status.get(n) for n in (2696, 2730, 2787, 2684)] == ["OPEN"] * 4, status
 
 
 def test_a_dropped_row_is_drift(tmp_path):
@@ -363,10 +391,10 @@ def test_a_summary_count_that_disagrees_with_the_table_is_drift(tmp_path):
     because a summary drifted from its table (the 2026-09-10 body).
     """
     copy = _doc_copy(tmp_path)
-    text = copy.read_text().replace("| VERIFIED-FIXED | 21 |", "| VERIFIED-FIXED | 25 |", 1)
+    text = copy.read_text().replace("| VERIFIED-FIXED | 22 |", "| VERIFIED-FIXED | 26 |", 1)
     copy.write_text(text, encoding="utf-8")
     errors = pmc.run(REPO, copy).errors
-    assert any("summary says 25" in e for e in errors), errors
+    assert any("summary says 26" in e for e in errors), errors
 
 
 def test_a_workstream_count_that_disagrees_with_its_rows_is_drift(tmp_path):
@@ -445,8 +473,8 @@ def test_two_abstract_headlines_are_reported_as_ambiguous(tmp_path):
     copy = _doc_copy(tmp_path)
     text = copy.read_text(encoding="utf-8")
     mutated = text.replace(
-        "> **21 fixed and 5 open**.",
-        "> **20 fixed and 6 open**.\n> **21 fixed and 5 open**.",
+        "> **22 fixed and 4 open**.",
+        "> **21 fixed and 5 open**.\n> **22 fixed and 4 open**.",
         1,
     )
     assert mutated != text, "fixture no longer finds the abstract"
@@ -456,7 +484,7 @@ def test_two_abstract_headlines_are_reported_as_ambiguous(tmp_path):
 
 
 def test_the_ABSTRACT_headline_must_agree_with_the_tables(tmp_path):
-    """Fails when the page's own "**21 fixed and 5 open**" abstract goes stale.
+    """Fails when the page's own "**22 fixed and 4 open**" abstract goes stale.
 
     Reachable: that sentence is the one most readers quote (it is the opening
     blockquote of the whole page), and it was not compared to anything before this
@@ -471,11 +499,11 @@ def test_the_ABSTRACT_headline_must_agree_with_the_tables(tmp_path):
     """
     copy = _doc_copy(tmp_path)
     text = copy.read_text(encoding="utf-8")
-    mutated = text.replace("**21 fixed and 5 open**", "**22 fixed and 4 open**", 1)
+    mutated = text.replace("**22 fixed and 4 open**", "**21 fixed and 5 open**", 1)
     assert mutated != text, "fixture no longer finds the headline"
     copy.write_text(mutated, encoding="utf-8")
     errors = pmc.run(REPO, copy).errors
-    assert any("headline says 22 fixed and 4 open" in e for e in errors), errors
+    assert any("headline says 21 fixed and 5 open" in e for e in errors), errors
 
 
 def test_a_decoy_summary_ROW_outside_section_2_cannot_satisfy_the_check(tmp_path):
@@ -484,42 +512,42 @@ def test_a_decoy_summary_ROW_outside_section_2_cannot_satisfy_the_check(tmp_path
     Reachable, and found by fresh review at the post-merge head: `parse_summary`
     scanned the whole document and kept the LAST `| OPEN | n |` match, so an
     ordinary table appended after §2 ("## Appendix") SUBSTITUTED for §2's number.
-    Measured before the fix: §2 corrupted to `| OPEN | 3 |` plus
-    `## Appendix` / `| OPEN | 5 |` returned NO summary errors, and the index count
-    check — which compares against the same parse — agreed with the decoy, so a
-    document contradicting its own table read CLEAN. Pages like this grow
-    appendixes; the counts belong to one section.
+    Measured before the fix (the counts then were `| OPEN | 5 |`): §2 corrupted
+    to `| OPEN | 3 |` plus `## Appendix` / `| OPEN | 5 |` returned NO summary
+    errors, and the index count check — which compares against the same parse —
+    agreed with the decoy, so a document contradicting its own table read CLEAN.
+    Pages like this grow appendixes; the counts belong to one section.
+    (This control now runs the same mutation on today's counts: 4 → 2, decoy 4.)
     """
     copy = _doc_copy(tmp_path)
     text = copy.read_text(encoding="utf-8")
-    corrupted = text.replace("| OPEN | 5 |", "| OPEN | 3 |", 1)
+    corrupted = text.replace("| OPEN | 4 |", "| OPEN | 2 |", 1)
     assert corrupted != text, "fixture no longer finds §2's OPEN row"
     copy.write_text(
-        corrupted + "\n## Appendix\n\n| Status | Rows |\n|---|---|\n| OPEN | 5 |\n",
+        corrupted + "\n## Appendix\n\n| Status | Rows |\n|---|---|\n| OPEN | 4 |\n",
         encoding="utf-8",
     )
-    assert pmc.parse_summary(copy.read_text(encoding="utf-8"))["OPEN"] == 3, (
+    assert pmc.parse_summary(copy.read_text(encoding="utf-8"))["OPEN"] == 2, (
         "the decoy outside §2 was read as §2's count — the parse is not scoped"
     )
     errors = pmc.check_summary(copy.read_text(encoding="utf-8"), pmc.parse_rows(text)[0])
-    assert any("summary says 3" in e for e in errors), errors
+    assert any("summary says 2" in e for e in errors), errors
 
 
 def test_an_index_entry_whose_counts_disagree_is_drift(tmp_path):
     """Fails when `docs/00_index.md` states counts the map's §2 does not have.
 
-    Reachable, and MEASURED on this page's first landing: the index row said
-    `22 fixed · 4 open` for eight of the thirteen minutes between the doc being
-    written and the verification gate reading it, and `--check` was CLEAN —
-    because registration was a filename match. The index is the artifact most
-    readers meet first, so a disagreeing count there is the same defect as a
-    disagreeing §2.
+    Reachable, and the reason this is a check rather than a convention: an index
+    row whose counts disagree with the map's §2 was invisible to `--check`, because
+    registration was a filename match and nothing compared the two headlines. The
+    index is the artifact most readers meet first, so a disagreeing count there is
+    the same defect as a disagreeing §2.
     """
     repo = tmp_path / "repo"
     (repo / "docs").mkdir(parents=True)
     index = repo / pmc.INDEX_REL
     index.write_text(
-        "# index\n| the map | **22 fixed · 4 open · 0 unknown** | `" + DOC.name + "` |\n",
+        "# index\n| the map | **21 fixed · 5 open · 0 unknown** | `" + DOC.name + "` |\n",
         encoding="utf-8",
     )
     errors = pmc.check_registration(repo, DOC, DOC.read_text(encoding="utf-8"))
@@ -540,7 +568,7 @@ def test_a_decoy_index_ROW_cannot_satisfy_the_count_check(tmp_path):
     index = repo / pmc.INDEX_REL
     # ⛔ THE DECOY CARRIES THE DOCUMENT'S OWN COUNTS, DERIVED. A frozen literal
     # (this control shipped `20 fixed · 6 open`, true when it was written) stops
-    # discriminating the moment §2 moves: with the real 21/5 the "ours" row is
+    # discriminating the moment §2 moves: with the real 22/4 the "ours" row is
     # ALREADY wrong, so BOTH the fixed check and the whole-body mutant report a
     # disagreement and the assertion passes either way — a control that cannot
     # fail for the reason it states (#2820 review round 11, measured by mutating
@@ -1309,7 +1337,7 @@ def test_the_cli_exits_one_on_drift(tmp_path):
     would be measuring the clone, not the guard).
     """
     copy = _doc_copy(tmp_path)
-    text = copy.read_text().replace("| OPEN | 5 |", "| OPEN | 3 |", 1)
+    text = copy.read_text().replace("| OPEN | 4 |", "| OPEN | 2 |", 1)
     copy.write_text(text, encoding="utf-8")
     assert pmc.main(["--repo", str(REPO), "--doc", str(copy)]) == 1
 

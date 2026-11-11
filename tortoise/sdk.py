@@ -37548,7 +37548,9 @@ class TortoiseSDK:
             edge-having kind-prior case is NOT (undecidable from the payload);
           * post-#3276 → ``has_ep`` becomes non-baseline-α-persistence-derived, so no kind
             prior clears this predicate at all (and a directly- WRITTEN
-            posterior does, without any EP pass — the flag is not a receipt).
+            posterior that ALSO carries incoming evidence does, without any EP
+            pass — the flag is not a receipt, but this predicate still reads the
+            evidence as well as the flag).
         A genuinely measured claim whose belief came from an OUTGOING edge, or
         an explicit edgeless EP seed, is NOT boosted (``evidence`` counts
         incoming edges only). That is the deliberate fail-safe direction —

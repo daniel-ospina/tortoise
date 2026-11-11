@@ -385,10 +385,10 @@ def _eligible(block: dict, *, min_confidence: float,
               conflict_relevant: bool) -> bool:
     """Canonical stage 4 — the confidence gate (EP + contentiousness).
 
-    Eligibility is the canonical persisted posterior mean (α/(α+β), from the
-    why-block's dedicated ep read — post-#2206 identical to the search
-    path's ep.confidence_mean, which reads the same coalesce of
-    posterior_alpha/ep_alpha).
+    Eligibility is `ep.confidence_mean` from the why-block's dedicated ep read
+    — R1's value, so a readable `n.confidence` MIRROR leads and the α/(α+β)
+    mean (the coalesce of posterior_alpha/ep_alpha) is the fallback when there
+    is none. Post-#2206 it is identical to the search path's field.
     UNMEASURED points (nothing that yields a mean — no persisted belief, a half
     pair, a 0/0 pair, a negative operand, an unreadable operand — and no
     readable mirror supplying one) carry NO mean —
@@ -398,7 +398,8 @@ def _eligible(block: dict, *, min_confidence: float,
     neutral-0.5 statement is NO LONGER true of every unmeasured point — a
     #2199 DECLARED baseline (``baseline=True``, e.g. the decide-part system
     default Beta(3,1) mean 0.75, or an author ``credibility=`` prior) is
-    prior-only yet reads its PRIOR mean, so it clears the mean floor. That is
+    prior-only yet reads its PRIOR mean — or the readable ``n.confidence``
+    mirror's value, which LEADS it — so it clears the mean floor. That is
     deliberate: #2199 treats a baseline as the author's stated starting
     belief ("set-by-author") and the mean floor is a NOTABILITY gate, not a
     measurement claim. The why-block discloses the state honestly: every entry
