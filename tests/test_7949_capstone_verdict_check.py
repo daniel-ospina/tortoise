@@ -3850,17 +3850,20 @@ def test_every_MEASUREMENT_key_the_emitter_writes_is_in_the_exemption_set():
 #: carry the claim (a markdown/code comment WRAPS, so the fragment is matched on any one line —
 #: the symbols and their order are what the assertion holds).
 #:
-#: ⛔ WHY A PIN AT ALL: `_BUNDLE_CITE` resolves `sdk|edges|extractor_v2` only, and
-#: `tests/test_7949_capstone_measure.py` sweeps `capstone_verdict_check.py` as a cite TARGET,
-#: never as a swept DOCUMENT — so anything these two paragraphs claim about the emitter was
-#: read by NOTHING. Measured on #11837's review (P2-1): the three `capstone_measure.py:<n>`
+#: ⛔ WHY A PIN AT ALL: `_BUNDLE_CITE` resolves `sdk|edges|extractor_v2` only, so the BUNDLE
+#: sweep never reads a `capstone_measure.py:<n>` cite — but that is NOT "nothing reads them":
+#: `tests/test_7949_capstone_measure.py`'s `_CROSS_FILE_PROBE_CITES` reads both paragraphs OUT of
+#: `tools/capstone_verdict_check.py` (a cite TARGET) and asserts the pair number → symbol on that
+#: line of the probe. What it never does is RE-DERIVE the number, so the pair stays green only
+#: while the symbol still sits on the line the stale number names. Measured on #11837's review
+#: (P2-1): the three `capstone_measure.py:<n>`
 #: cites were correct at the PR's merge-base, and the PR's own commit message claimed to have
 #: re-derived them while they had landed on unrelated code (an `e3_census` rule line, a comment
 #: inside `measured_arm()`, and prose inside an f-string) — the exact "a claim nothing re-checks
-#: can rot silently" defect this bundle exists to catch, in the gate's own source. The fix was
-#: to name SYMBOLS instead of lines; this pin keeps the symbols honest, and it REFUSES the line
-#: form coming back (a `file:line` into a 4,600-line probe re-stales on any insertion above it,
-#: which is how the three cites walked twice inside the PR that wrote them).
+#: can rot silently" defect this bundle exists to catch, in the gate's own source. ⛔ The cites
+#: therefore STAY (deleting them reds `_CROSS_FILE_PROBE_CITES`; a pin forbidding them was round
+#: 4's P1-B). What this pin adds is the half that pin cannot do — it keeps the SYMBOLS honest and
+#: in the ORDER the sentences assert, so a re-pointed number lands on the right code.
 _EMITTER_PROSE_CLAIMS = (
     # `_MEASUREMENT_RUN_KEYS`'s `a_row_census` entry: where the emitter WRITES that key.
     ("the A-row census is written INTO the run block by the emitter",

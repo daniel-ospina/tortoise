@@ -79,7 +79,7 @@ non-operator Points 15868 (= 19595 - 3727 operators)
 
 ⚠️ **`evidence`, `option` and `diary` are DECLARED**, and that is a measurement, not an assumption:
 they arrive through `tortoise.sdk`'s module-level `register_kind` calls. A census that imported only
-`domain_loader` reported four of these six kinds as inventions — measured on this same graph, and now
+`domain_loader` reported three of these six kinds as inventions — measured on this same graph, and now
 pinned by `test_the_declared_vocabulary_includes_the_kinds_the_SDK_itself_registers`. `finding` is
 declared by **no** layer vocabulary, which is what makes it the one genuine undeclared label here.
 
