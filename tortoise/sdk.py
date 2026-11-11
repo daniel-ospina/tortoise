@@ -66,7 +66,7 @@ from .ids import ulid
 # (no cycle), and it is already loaded via `value_normalizer` below — importing
 # the predicate here is what lets the one props intake refuse a value the
 # reader would refuse, instead of it becoming durable state.
-from .money import refuse_malformed_money
+from .money import MONEY_VALUE_FIELDS, refuse_malformed_money
 # #2817: the S5 money derivation (prose → typed value). Module scope because the
 # capture seam's `warn_on` narrowing below is derived from the CLOSED
 # `DROP_REASONS` vocabulary at import time, so a renamed reason fails here
@@ -6105,6 +6105,24 @@ _WARN_SUPPRESS: contextvars.ContextVar[frozenset[str] | None] = contextvars.Cont
     "_WARN_SUPPRESS", default=None
 )
 
+# #2782 (review #11836 Finding 1) — a dedup-hit ``create_point`` re-enters the
+# write boundary through ``update_point`` carrying the CALLER'S CREATE-SHAPED
+# props, which the create leg of the very same call already judged with the
+# create rule. The re-entry IS a MERGE (so the fold drops a ``None`` money value
+# instead of forwarding a deletion — see its pop), but its INTENT is still a
+# create: a lone ``minorUnitExponent`` must stay the no-op it is on the create
+# door, or the same call would be ADMITTED on the first run and REFUSED on the
+# retry — measured: ``create_point(..., dedup=True, minorUnitExponent=2)`` twice,
+# run 1 created the point and run 2 raised "minorUnitExponent cannot be
+# validated on an update". Read by ``_sanitize_props``; set for the ONE
+# re-entered write and cleared by its ``finally``, so an addressed
+# ``update_point`` is never judged this way. A ContextVar (not a module global)
+# so concurrent callers cannot change each other's verdict — the same reason
+# ``_WARN_SUPPRESS`` above is one.
+_CREATE_FOLD_REENTRY: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_CREATE_FOLD_REENTRY", default=False
+)
+
 # ── #2600 server-resolved human actor ───────────────────────────────────────
 # `_current_actor_user_id` carries the server-resolved human actor for
 # session + write-event stamps. SET ONLY at auth seams (mcp_auth
@@ -6585,7 +6603,17 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # stored currency) are refused there and ONLY there — see
     # `money.refuse_malformed_money`'s docstring, and the residual it states
     # for the create doors' own MERGE-ON-MATCH arm.
-    refuse_malformed_money(props, door="props", on_update=update)
+    #
+    # ⛔ …and `_CREATE_FOLD_REENTRY` says the bag is NOT an addressed edit at
+    # all: `create_point`'s dedup hit forwards the caller's CREATE-shaped props
+    # into `update_point`, so the update rule would refuse a shape the create
+    # leg of the same call admitted — a retry that raises where run 1 returned a
+    # point (#11836 review Finding 1). Those props are judged as the CREATE they
+    # are; the fold itself drops the `None`-delete half before forwarding, so
+    # the MERGE hazard is closed structurally rather than by this flag.
+    refuse_malformed_money(
+        props, door="props",
+        on_update=update and not _CREATE_FOLD_REENTRY.get())
     for key in ("sourcePath", "source_path"):
         if key in props:
             raise ValueError(
@@ -13934,6 +13962,24 @@ class TortoiseSDK:
                 # (would make the `if props:` guard always truthy and bump
                 # updatedAt on every dedup hit, #80 review).
                 props.pop("content_hash", None)
+                # ── #2782 (review #11836 Finding 1): a CREATE never DELETES. ──
+                # An explicit ``None`` for a money field is a NO-OP on the create
+                # leg — the extra-props passthrough drops ``None`` values
+                # (``projection/entities.py::_persist_extra_props``) — but this
+                # fold forwards the caller's bag to ``update_point``, whose write
+                # is a bare ``SET n += $props`` where the same ``None`` REMOVES
+                # the property. Forwarding it made the retry of an idempotent
+                # create (a) RAISE for ``amountMinor``/``currency``/
+                # ``minorUnitExponent`` (the update door refuses a null-delete)
+                # and (b) silently DELETE the field for the sibling spellings the
+                # update door leaves alone — either way a behaviour the first run
+                # never had. Dropped here rather than refused, so the retry
+                # neither raises nor deletes: that is what "idempotent creation"
+                # means for this verb. Same class, same remedy as the
+                # ``mentions=None`` pop above ("a CREATE must not DELETE").
+                for _money_field in MONEY_VALUE_FIELDS:
+                    if _money_field in props and props[_money_field] is None:
+                        props.pop(_money_field, None)
                 # ── #7704 (OWNER RULING 2026-10-25): a dedup hit KEEPS the new
                 # evidence. The owner ruled the W4-b "twin" case a DUPLICATION
                 # defect — "The dedup is the key here to solve the problem you
@@ -14191,9 +14237,15 @@ class TortoiseSDK:
                     _tok = _WARN_SUPPRESS.set(
                         frozenset({repr(_vf), repr(_vt)})
                         if (_vf is not None or _vt is not None) else None)
+                    # #2782 (review #11836 Finding 1): this is a CREATE's
+                    # re-entry, not an addressed edit, so the money gate must
+                    # judge the forwarded bag with the create rule the leg above
+                    # already applied (see the ContextVar's own note).
+                    _fold_tok = _CREATE_FOLD_REENTRY.set(True)
                     try:
                         self.update_point(pid, **props)
                     finally:
+                        _CREATE_FOLD_REENTRY.reset(_fold_tok)
                         _WARN_SUPPRESS.reset(_tok)
                 return _with_end_receipt(
                     {**self.get_point(pid),

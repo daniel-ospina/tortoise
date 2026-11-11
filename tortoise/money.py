@@ -336,11 +336,27 @@ def refuse_malformed_money(props: Mapping[str, Any], *,
     Refusing those would be collateral damage on a legitimate write, and
     ``tests/test_money_value_2782.py`` pins both.
 
+    ⚠️ THE THIRD PATH — a CREATE re-entering an UPDATE (“idempotent creation”).
+    ``create_point(dedup=True)`` folds a hit into ``update_point`` with the
+    CALLER'S create-shaped props, so that write is a MERGE whose INTENT is a
+    create. It must be judged with ``on_update=False`` (the leg that already
+    admitted the bag on the first run), NOT with the addressed-edit rule, or
+    the same call would be admitted once and refused on the retry (#11836
+    review Finding 1, measured: a lone ``minorUnitExponent`` raised
+    “minorUnitExponent cannot be validated on an update”). The one hazard the
+    flag cannot cover — an explicit ``None`` DELETING through ``SET n +=
+    $props`` — is closed structurally at that fold, which drops a ``None``
+    money value before forwarding: a CREATE never deletes. Both halves are
+    pinned by ``TestCreateDedupFoldIsIdempotent``.
+
     ⚠️ STATED BOUND, not a claim of closure: the create doors MERGE by name
     (``_create_entity``'s ON MATCH arm reaches an EXISTING node), so a
     re-create carrying a lone exponent still lands one — the discriminating
     fact is the TARGET, which a bag-shaped predicate cannot see. Measured and
     recorded as a #2782 follow-up (``TestKnownResidualCreateDoorOnMatch``).
+    The dedup fold above inherits exactly this bound and adds none of its own:
+    it is the same create, so it lands the same lone exponent the create leg
+    lands.
 
     WHY A WRITE GATE, given the read side already refuses (measured, #2782):
     before this, all six malformed shapes were ACCEPTED by every props door and

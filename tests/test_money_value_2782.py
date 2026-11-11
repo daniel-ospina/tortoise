@@ -1033,3 +1033,80 @@ class TestKnownResidualCreateDoorOnMatch:
         assert _money_node(sdk, node_id)[MINOR_UNIT_EXPONENT] == 9
         with pytest.raises(MoneyValueError):
             _whole_sum(sdk)  # the consequence, stated rather than implied
+
+
+class TestCreateDedupFoldIsIdempotent:
+    """#11836 review Finding 1 — ``create_point(dedup=True)`` is ONE call.
+
+    The verb advertises ``dedup=True`` as *idempotent creation*, and its CREATE
+    leg judges the caller's bag with the CREATE rule. A dedup HIT, though, folds
+    that same bag into ``update_point``, which judged it with the ADDRESSED-EDIT
+    rule — so the second identical call was refused for exactly the shapes the
+    first run admitted, or deleted a field the first run never touched:
+
+        create_point(kind, content, dedup=True, minorUnitExponent=2)
+          run 1 -> point created (a lone sibling is a create-legal stray, pinned
+                   by test_a_non_money_prop_is_not_collateral_damage)
+          run 2 -> MoneyValueError: minorUnitExponent cannot be validated on an
+                   update without its currency in the same write
+
+        create_point(..., dedup=True, verbatim=None)
+          run 1 -> no-op (the create passthrough drops ``None``)
+          run 2 -> the fold's ``SET n += $props`` DELETED ``verbatim``
+
+    The tenant path is the ordinary one: ``tortoise_create_point`` defaults
+    ``dedup=True`` (``mcp_server.py``), so "create the same thing twice" is a
+    retry, not a hand-built edge case. Measured on the pre-fix tree: the lone
+    exponent and both null spellings of the money group RAISED on run 2.
+    """
+
+    CONTENT = "one tranche is 250000 BRL"
+
+    def test_a_lone_exponent_does_not_make_the_retry_raise(self, journaled_sdk):
+        sdk, _events = journaled_sdk
+        first = sdk.create_point("statement", self.CONTENT, dedup=True,
+                                 minorUnitExponent=2)
+        second = sdk.create_point("statement", self.CONTENT, dedup=True,
+                                  minorUnitExponent=2)
+        assert second["id"] == first["id"], "the retry minted a second point"
+        # the retry is admitted AND still carries the create leg's value: the
+        # fix widens where the gate looks, never what it engages on
+        assert _point_row(sdk, self.CONTENT)[MINOR_UNIT_EXPONENT] == 2
+
+    @pytest.mark.parametrize("field", [AMOUNT_MINOR, CURRENCY,
+                                       MINOR_UNIT_EXPONENT, VERBATIM],
+                             ids=[AMOUNT_MINOR, CURRENCY,
+                                  MINOR_UNIT_EXPONENT, VERBATIM])
+    def test_an_explicit_null_on_a_retry_neither_raises_nor_deletes(
+            self, journaled_sdk, field):
+        """A CREATE does not DELETE: the retry of an idempotent create must
+        leave the value the first run wrote exactly as it was."""
+        sdk, _events = journaled_sdk
+        created = sdk.create_point(
+            "statement", self.CONTENT, dedup=True,
+            **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
+                          verbatim="R$ 250.000,00"))
+        retried = sdk.create_point("statement", self.CONTENT, dedup=True,
+                                   **{field: None})
+        assert retried["id"] == created["id"]
+        row = _point_row(sdk, self.CONTENT)
+        assert {AMOUNT_MINOR: row[AMOUNT_MINOR], CURRENCY: row[CURRENCY],
+                MINOR_UNIT_EXPONENT: row[MINOR_UNIT_EXPONENT],
+                VERBATIM: row[VERBATIM]} == {
+            AMOUNT_MINOR: COMMITTED_MINOR, CURRENCY: "BRL",
+            MINOR_UNIT_EXPONENT: 2, VERBATIM: "R$ 250.000,00"}
+        assert _whole_sum(sdk) == {"BRL": COMMITTED_MINOR}
+
+    def test_a_wellformed_retry_still_replaces_the_value_and_sums(
+            self, journaled_sdk):
+        """The positive control: the fold still WRITES money — a fix that made
+        the retry silently drop the bag would pass the two tests above."""
+        sdk, _events = journaled_sdk
+        sdk.create_point("statement", self.CONTENT, dedup=True,
+                         **money_props(COMMITTED_MINOR, "BRL",
+                                       minor_unit_exponent=2))
+        sdk.create_point("statement", self.CONTENT, dedup=True,
+                         **money_props(RELEASED_MINOR, "BRL",
+                                       minor_unit_exponent=2))
+        assert _point_row(sdk, self.CONTENT)[AMOUNT_MINOR] == RELEASED_MINOR
+        assert _whole_sum(sdk) == {"BRL": RELEASED_MINOR}
