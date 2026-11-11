@@ -45,6 +45,7 @@ from .search_engine import (  # noqa: E402, RUF100
     ep_pair_stored,  # #11702: a variance needs BOTH α/β operands stored
     ep_state_cypher,  # #11702: the present-state NAME on the wire
     ep_state_resolve,  # #11702: the ONE #2490 terminal fold for the state name
+    numeric_operand,  # #11702: the ONE total numeric coercion (bool != number)
 )
 from .live import (  # #2490: terminal rows are never contested; #2598: the draft predicate
     epistemic_disjunction,  # #7927: traversal-position widening
@@ -992,8 +993,12 @@ class GraphRanker:
                                           posterior_beta=row[12],
                                           ep_beta=row[13])
                            if len(row) > 13 else True)
-            variance = (_beta_variance(float(row[4]), float(row[5]))
-                        if pair_stored else 0.0)
+            # #11702 cycle 16: total coercion (a stored non-numeric operand
+            # raised here and the guard dropped the whole signal map).
+            a_num, b_num = numeric_operand(row[4]), numeric_operand(row[5])
+            variance = (_beta_variance(a_num or 0.0, b_num or 0.0)
+                        if pair_stored and a_num is not None
+                        and b_num is not None else 0.0)
             measured_raw = bool(row[6])
             # Test doubles mirror the pre-round-6 row shape; falling back to
             # has_ep keeps them honest without inventing a prior.
@@ -1524,7 +1529,8 @@ class StateRanker:
         out = {}
         for row in rows:
             pid, alpha, beta, has_ep, degree = (
-                row[0], float(row[1]), float(row[2]), bool(row[3]), int(row[4]))
+                row[0], numeric_operand(row[1]) or 0.0,
+                numeric_operand(row[2]) or 0.0, bool(row[3]), int(row[4]))
             measured_raw = has_ep
             # #2490: terminal rows never surface as measured/contested EP (len
             # guard — see GraphRanker). #2598: the len guard also covers the
@@ -1561,8 +1567,16 @@ class StateRanker:
                 # posterior; `sdk.update_point` clears it when it moves
                 # `posterior_alpha`/`posterior_beta`, the third writer closed at
                 # review cycle 12), not by demoting the served value here.
-                if mirror is not None:
-                    conf = float(mirror)
+                # #11702 cycle 16: coerced TOTALly — a stored non-numeric
+                # mirror (`update_point(confidence="abc")`) raised here and the
+                # caller's guard dropped the whole signal map, so every row in
+                # the response came back without a `recall_ranking` key at all
+                # (which `sdk` subscripts unguarded). A non-numeric mirror is
+                # not a belief: fall through to the operands, exactly as the
+                # `annotate_ep_batch` twin does.
+                conf = numeric_operand(mirror)
+                if conf is not None:
+                    pass
                 elif (alpha + beta) > 0:
                     # #11702 cycle 14: THROUGH `_beta_mean`, not a bare
                     # division. An overflowing pair
@@ -1578,11 +1592,12 @@ class StateRanker:
                     conf = round(_beta_mean(alpha, beta), 6)
                 else:  # pragma: no cover — unreachable BY the presence rule
                     # `has_prior` is now `ep_has_belief_cypher`, which requires a
-                    # mirror OR α+β > 0; with no mirror, reaching here would mean
-                    # a zero sum, which cannot be present. (Pre-#11702's
-                    # `IS NOT NULL` predicate DID reach it with a stored 0.0/0.0
-                    # pair, so this arm was live and reported None beside
-                    # `measured`.)
+                    # NUMERIC mirror OR a usable pair; with neither, reaching
+                    # here would mean the Cypher predicate and this read
+                    # disagree, which the shared vocabulary exists to prevent.
+                    # (Pre-#11702's `IS NOT NULL` predicate DID reach it with a
+                    # stored 0.0/0.0 pair, so this arm was live and reported
+                    # None beside `measured`.)
                     conf = None
                 state = (EP_STATE_MEASURED if measured_raw
                          else EP_STATE_BASELINE)
@@ -2077,7 +2092,9 @@ class GapsRanker:
         )
         out = {}
         for row in rows:
-            pid, alpha, beta, has_ep = row[0], float(row[1]), float(row[2]), bool(row[3])
+            pid, alpha, beta, has_ep = (
+                row[0], numeric_operand(row[1]) or 0.0,
+                numeric_operand(row[2]) or 0.0, bool(row[3]))
             measured_raw = has_ep
             # #2490: terminal rows never surface as measured/contested EP (len
             # guard — see GraphRanker). #2598: the len guard also covers the test
@@ -2102,8 +2119,16 @@ class GapsRanker:
                 mirror = row[7] if len(row) > 7 else None
                 # #11702: mirror FIRST — see StateRanker's read; the staleness
                 # is fixed at the write paths.
-                if mirror is not None:
-                    conf = float(mirror)
+                # #11702 cycle 16: coerced TOTALly — a stored non-numeric
+                # mirror (`update_point(confidence="abc")`) raised here and the
+                # caller's guard dropped the whole signal map, so every row in
+                # the response came back without a `recall_ranking` key at all
+                # (which `sdk` subscripts unguarded). A non-numeric mirror is
+                # not a belief: fall through to the operands, exactly as the
+                # `annotate_ep_batch` twin does.
+                conf = numeric_operand(mirror)
+                if conf is not None:
+                    pass
                 elif (alpha + beta) > 0:
                     # #11702 cycle 14: THROUGH `_beta_mean`, not a bare
                     # division. An overflowing pair
@@ -2119,11 +2144,12 @@ class GapsRanker:
                     conf = round(_beta_mean(alpha, beta), 6)
                 else:  # pragma: no cover — unreachable BY the presence rule
                     # `has_prior` is now `ep_has_belief_cypher`, which requires a
-                    # mirror OR α+β > 0; with no mirror, reaching here would mean
-                    # a zero sum, which cannot be present. (Pre-#11702's
-                    # `IS NOT NULL` predicate DID reach it with a stored 0.0/0.0
-                    # pair, so this arm was live and reported None beside
-                    # `measured`.)
+                    # NUMERIC mirror OR a usable pair; with neither, reaching
+                    # here would mean the Cypher predicate and this read
+                    # disagree, which the shared vocabulary exists to prevent.
+                    # (Pre-#11702's `IS NOT NULL` predicate DID reach it with a
+                    # stored 0.0/0.0 pair, so this arm was live and reported
+                    # None beside `measured`.)
                     conf = None
                 state = (EP_STATE_MEASURED if measured_raw
                          else EP_STATE_BASELINE)

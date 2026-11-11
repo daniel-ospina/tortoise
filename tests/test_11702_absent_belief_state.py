@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from decimal import Decimal
 
 import pytest
 
@@ -1997,29 +1998,78 @@ def test_the_width_rule_and_the_width_formula_agree_across_the_whole_range(sdk):
         params={"ids": ids}).result_set
     by_id = {r[0]: (r[1], r[2]) for r in rows}
 
+    # Cycle 16: the property has TEETH IN BOTH DIRECTIONS, and it is checked
+    # against an INDEPENDENT reference (Decimal), not against the shipped band —
+    # comparing the two twins is near-tautological now that both apply the same
+    # band. The direction the earlier form was missing is the one a too-TIGHT
+    # floor violates: a materially wide claim whose width a double CAN carry must
+    # not be published as 0.0. Measured on the cycle-15 head, which shipped a
+    # `1e-100` floor: a `(1e-150, 1e-150)` pair has true variance 0.25 and a
+    # perfectly ordinary double representation, and it was answered
+    # `variance 0.0, contested False` and excluded from every uncertainty scan.
+    MIN_NORMAL = sys.float_info.min  # 2.225e-308: the double's normal floor
+    MATERIAL = Decimal("1e-6")       # below this no threshold can care
+
+    def _true_variance(x, y):
+        """The variance at high precision, independent of any shipped band."""
+        if x < 0 or y < 0:
+            return None
+        dx, dy = Decimal(repr(x)), Decimal(repr(y))
+        total = dx + dy
+        if total <= 0:
+            return None
+        return dx * dy / (total * total * (total + 1))
+
     admittable = 0
-    for pid in ids:
+    required = 0
+    for pid, (a, b) in zip(ids, pairs, strict=False):
         admits, query_v = by_id[pid]
-        # The query's width must be a NUMBER for every row, admitted or not.
-        assert query_v is not None, (pid, "null width from the query")
-        assert query_v == query_v, (pid, "NaN width from the query")
+        # (i) The query's width is ALWAYS a number — never null, never NaN, never
+        # inf. This is the arm that catches a band too LOOSE: a NaN sorts first
+        # on FalkorDB because its comparator is not total over NaN, and one such
+        # row de-sorts the whole list.
+        assert query_v is not None, (pid, a, b, "null width from the query")
+        assert query_v == query_v, (pid, a, b, "NaN width from the query")
+        assert query_v >= 0.0 and query_v != float("inf"), (pid, a, b, query_v)
         if admits:
             admittable += 1
-            # An admitted shape must have a width the formula can produce.
-            assert query_v >= 0.0, (pid, query_v)
 
-    assert admittable >= 10, (
-        f"the sweep admitted only {admittable} shapes — the band is too narrow "
-        "to be useful")
+        truth = _true_variance(a, b)
+        numerator, total = a * b, a + b
+        denominator = total * total * (total + 1)
+        # (ii) A materially wide claim the double CAN compute must be admitted
+        # and answered with (approximately) its real width. This is the arm that
+        # catches a band too TIGHT — i.e. the bug cycle 15 shipped.
+        if (truth is not None and truth >= MATERIAL
+                and numerator >= MIN_NORMAL and 0.0 < denominator < 1e307):
+            required += 1
+            assert admits, (
+                f"({a!r}, {b!r}) has true variance {float(truth):.4g} — "
+                "materially wide, and a double carries it exactly — but the "
+                "width rule REFUSED it, so it is published as 0.0 and dropped "
+                "from every uncertainty scan (fabricated certainty)")
+            assert query_v > 0.0, (a, b, query_v)
+            assert query_v == pytest.approx(float(truth), rel=1e-6), (
+                f"({a!r}, {b!r}) answered width {query_v!r} but its true "
+                f"variance is {float(truth)!r}")
 
-    # The Python owner agrees with the Cypher twin on all of them.
-    for pid, (a, b) in zip(ids, pairs, strict=False):
+        # (iii) …and the Python owner answers what Cypher answered.
         py_var = _beta_variance(a, b)
-        cypher_var = by_id[pid][1]
-        assert py_var == pytest.approx(cypher_var, abs=1e-12) or (
-            py_var == 0.0 and cypher_var == 0.0), (
+        assert py_var == pytest.approx(query_v, abs=1e-12) or (
+            py_var == 0.0 and query_v == 0.0), (
             f"_beta_variance({a!r}, {b!r}) = {py_var!r} but the Cypher twin "
-            f"answers {cypher_var!r} — two widths for one claim")
+            f"answers {query_v!r} — two widths for one claim")
+
+    # Non-vacuity, counted on BOTH arms: the sweep must contain shapes the rule
+    # admits AND materially wide shapes whose admission is mandatory. A guard of
+    # the form `assert admittable >= 10` on its own tolerated a band ~50 orders
+    # tighter than shipped (measured: 12 of 39).
+    assert 10 <= admittable < len(ids), (
+        f"the sweep admitted {admittable} of {len(ids)} shapes — it must contain "
+        "shapes on BOTH sides of the band, or one arm is untested")
+    assert required >= 4, (
+        f"only {required} shapes in the sweep were materially wide — the sweep "
+        "cannot detect a too-tight floor")
 
     # …and the rendered answer contains no NaN, with ordinary widths in order.
     for i, (a, b) in enumerate(((1.0, 1.0), (2.0, 2.0), (90.0, 10.0))):
@@ -2032,6 +2082,167 @@ def test_the_width_rule_and_the_width_formula_agree_across_the_whole_range(sdk):
                   entity_subgraph_ids=set(ids))
     text = str(out.get("answer") or "")
     assert "nan" not in text.lower(), "the uncertainty answer rendered a NaN: " + text
+
+
+def test_a_numeric_string_operand_is_measured_on_both_twins(sdk):
+    """Cycle 16: the presence predicate compared RAW, the formula coerced.
+
+    `update_point(posterior_alpha="0.7", posterior_beta="0.3")` is accepted and
+    stored verbatim (JSON- and LLM-sourced values arrive like this). The
+    presence rule then evaluated `"0.7" >= 0`, which is NULL in Cypher, so the
+    conjunction was NULL and the claim read `absent` — in the SAME query that
+    computed `mean 0.7, variance 0.105` — while Python's `float()` said
+    `measured`. One claim, two states, and a belief floor
+    (`min_confidence=0.5`) dropped it. The twins now share ONE coercion
+    (`numeric_operand_cypher` / `numeric_operand`).
+    """
+    from tortoise.analyze import analyze
+    from tortoise.ranking import StateRanker
+    from tortoise.search_engine import (
+        belief_mean_cypher,
+        ep_has_belief_cypher,
+        ep_state_cypher,
+        numeric_operand,
+    )
+    from tortoise.why import assemble_why_blocks
+
+    proj = sdk._get_proj()
+    pid = sdk.create_point("statement", "a claim with string operands")["id"]
+    proj.g.query('MATCH (n:Point {id:$id}) SET n.posterior_alpha = "0.7", '
+                 'n.posterior_beta = "0.3", n.confidence = null',
+                 params={"id": pid})
+
+    row = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN " + ep_has_belief_cypher("n") + ", "
+        + ep_state_cypher("n") + ", "
+        + belief_mean_cypher("n.posterior_alpha", "n.posterior_beta")
+        + ", coalesce(n.posterior_alpha, n.ep_alpha, 1.0)",
+        params={"id": pid}).result_set[0]
+    has_belief, state, mean, raw = row
+    assert bool(has_belief) is True, (
+        f"the presence predicate says absent for a numeric-STRING pair, while "
+        f"the same query computed mean={mean!r} from it")
+    assert state == EP_STATE_MEASURED, state
+    assert float(mean) == pytest.approx(0.7, abs=1e-6), mean
+    assert raw == "0.7", raw  # the operand really is a string
+
+    # …and every Python surface agrees with it.
+    assert numeric_operand("0.7") == pytest.approx(0.7)
+    ann = annotate_ep_batch(proj.g, [pid])[pid]
+    assert ann.ep_state == EP_STATE_MEASURED, ann
+    assert ann.confidence_mean == pytest.approx(0.7, abs=1e-4), ann
+    rec = {r["id"]: r["recall_ranking"] for r in
+           StateRanker(projection=proj).rerank(
+               [{"id": pid, "scores": {"rrf": 1.0}}])}[pid]
+    assert rec["ep_state"] == EP_STATE_MEASURED, rec
+    assert rec["confidence"] == pytest.approx(0.7, abs=1e-4), rec
+    why_blocks = assemble_why_blocks(proj, [pid])
+    assert why_blocks, "`why` returned nothing for a measurable claim"
+    assert why_blocks[pid]["ep"]["confidence_mean"] == pytest.approx(
+        0.7, abs=1e-4), why_blocks[pid]
+    out = analyze("ZQSTRINGS", proj=proj, use_llm=False,
+                  entity_subgraph_ids={pid})
+    assert "Formatting error" not in str(out.get("answer") or ""), out
+
+
+def test_one_malformed_mirror_does_not_discard_the_batch(sdk):
+    """Cycle 16 P1: cycle 15 coerced the α/β columns and left the MIRROR raw.
+
+    `update_point(confidence="abc")` is accepted. `float(mirror)` then raised
+    inside `annotate_ep_batch`, whose blanket `except` returned `{}` — so EVERY
+    claim in the response read `ep_state: "absent"`, measured ones included, and
+    `min_confidence=0.5` returned nothing at all. The same shape emptied `why`
+    and killed the rankers' signal fetch, which left rows with no
+    `recall_ranking` key at all. One bad row must not speak for the batch.
+    """
+    from tortoise.ranking import StateRanker
+    from tortoise.search_engine import ep_state_cypher
+    from tortoise.why import assemble_why_blocks
+
+    proj = sdk._get_proj()
+    bad = sdk.create_point("statement", "ZQFORMAT bad mirror claim")["id"]
+    good = sdk.create_point("statement", "ZQFORMAT good measured claim")["id"]
+    proj.g.query('MATCH (n:Point {id:$id}) SET n.confidence = "abc"',
+                 params={"id": bad})
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 2.0, "
+                 "n.posterior_beta = 2.0, n.confidence = 0.5",
+                 params={"id": good})
+
+    assert proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN " + ep_state_cypher("n"),
+        params={"id": bad}).result_set[0][0] == EP_STATE_ABSENT
+
+    ann = annotate_ep_batch(proj.g, [bad, good])
+    assert set(ann) == {bad, good}, (
+        "the batch annotation dropped the WHOLE response because of one "
+        f"malformed row: {sorted(ann)}")
+    assert ann[bad].ep_state == EP_STATE_ABSENT, ann[bad]
+    assert ann[bad].confidence_mean is None, ann[bad]
+    assert ann[good].ep_state == EP_STATE_MEASURED, ann[good]
+    assert ann[good].confidence_mean == 0.5, ann[good]
+
+    why_blocks = assemble_why_blocks(proj, [bad, good])
+    assert why_blocks, "`why` returned nothing for the batch"
+
+    recs = {r["id"]: r["recall_ranking"] for r in
+            StateRanker(projection=proj).rerank(
+                [{"id": bad, "scores": {"rrf": 1.0}},
+                 {"id": good, "scores": {"rrf": 1.0}}])}
+    assert set(recs) == {bad, good}, recs
+    assert recs[bad]["ep_state"] == EP_STATE_ABSENT, recs[bad]
+    assert recs[good]["ep_state"] == EP_STATE_MEASURED, recs[good]
+    assert recs[good]["confidence"] == 0.5, recs[good]
+
+
+def test_a_boolean_is_not_a_belief_on_either_twin(sdk):
+    """Cycle 16: cycle 12 read `confidence=True` as 1.0. Cypher cannot.
+
+    Measured: `toFloat(<Boolean>)` RAISES ("Type mismatch: expected String,
+    Integer, Float, or Null but was Boolean") and every comparison against a
+    stored Boolean answers NULL (`true >= 0` is null), so no Cypher surface can
+    read a bool as a number — cycle 12's "symmetry with the rest of the tree"
+    was therefore one-sided: Python said `measured / 1.0` where Cypher said
+    `absent`. A Boolean belief is a writer defect; it is ABSENT on both.
+    """
+    from tortoise.search_engine import (
+        ep_state,
+        ep_state_cypher,
+        numeric_operand,
+        numeric_operand_cypher,
+    )
+
+    assert numeric_operand(True) is None
+    assert numeric_operand(False) is None
+    assert ep_state(posterior_alpha=True, ep_alpha=None,
+                    posterior_beta=2.0) == EP_STATE_ABSENT
+
+    # …and the API really does accept one (`update_point(confidence=True)` is
+    # stored as a Boolean), so the reader must be TOTAL for it, not merely
+    # handed a shape it never sees.
+    proj = sdk._get_proj()
+    pid = sdk.create_point("statement", "a claim with a boolean mirror")["id"]
+    sdk.update_point(pid, confidence=True)
+    stored = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN toString(n.confidence)",
+        params={"id": pid}).result_set
+    assert stored[0][0] == "true", stored
+    state = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN " + ep_state_cypher("n"),
+        params={"id": pid}).result_set[0][0]
+    assert state == EP_STATE_ABSENT, state
+    # …and the coercion itself does not RAISE on a Boolean, which the bare
+    # `toFloat` does — that would take the whole query down.
+    v = proj.g.query("MATCH (n:Point {id:$id}) RETURN "
+                     + numeric_operand_cypher("n.confidence"),
+                     params={"id": pid}).result_set[0][0]
+    assert v is None, v
+    # Nothing readable is left, so the state is ABSENT on the Python twin too —
+    # a `baseline_set` FLAG does not turn an unreadable value into a prior (see
+    # `ep_state`; before cycle 16 it did, and reported `baseline / 0.5` where
+    # Cypher said `absent / null`).
+    ann = annotate_ep_batch(proj.g, [pid])[pid]
+    assert ann.ep_state == EP_STATE_ABSENT, ann
+    assert ann.confidence_mean is None, ann
 
 
 def test_a_non_numeric_operand_is_absent_on_every_surface(sdk):
@@ -2085,9 +2296,18 @@ def test_a_non_numeric_operand_is_absent_on_every_surface(sdk):
     node = next(n for n in nodes if n.get("id") == pid)
     assert node["ep_state"] == EP_STATE_ABSENT, node
     assert node.get("confidence") is None, node
-    why_block = assemble_why_blocks(proj, [pid])
-    if why_block:
-        assert not why_block[0].get("ep"), why_block[0].get("ep")
+    # Cycle 16: this used to be `if why_block:` — and `why` returned `{}` for
+    # the whole batch because IT still called a bare `float(mirror)`, so the
+    # assertion never ran. A guard whose subject is the failure case is not a
+    # guard: it asserts nothing exactly when the code is broken. `why` is now
+    # total, so the block MUST exist, and its `ep` block must say absent.
+    why_blocks = assemble_why_blocks(proj, [pid])
+    assert why_blocks, (
+        "`why` returned nothing for the batch — one malformed mirror discards "
+        "the enrichment for every id in the response")
+    assert why_blocks[pid].get("ep"), why_blocks[pid]
+    assert why_blocks[pid]["ep"]["ep_state"] == EP_STATE_ABSENT, why_blocks[pid]["ep"]
+    assert why_blocks[pid]["ep"]["confidence_mean"] is None, why_blocks[pid]["ep"]
 
 
 def test_the_artifact_reader_agrees_with_the_shared_reader_where_both_are_total():

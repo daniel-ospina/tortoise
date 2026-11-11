@@ -348,6 +348,64 @@ EP_STATE_BASELINE = "baseline"
 EP_STATE_ABSENT = "absent"
 
 
+#: FalkorDB's `toFloat` REFUSES a stored Boolean ("Type mismatch: expected
+#: String, Integer, Float, or Null but was Boolean", measured) and takes the
+#: whole QUERY down with it, so a single `update_point(confidence=True)` — which
+#: the API accepts — would break every belief read on the batch. `CASE` is
+#: evaluated EAGERLY in FalkorDB (measured: `CASE WHEN toString(x) IN ['true',
+#: 'false'] THEN null ELSE toFloat(x) END` still raises on a bool), so the
+#: guard has to sit INSIDE the `toFloat` argument: the inner `CASE` maps a
+#: Boolean to null and everything else to itself, and `toFloat(null)` is null.
+#: The `toString` test is the only type discriminator available (a numeric
+#: comparison against a Boolean is NULL, and against a numeric STRING also
+#: NULL, so comparison cannot tell them apart — but `toFloat` works on the
+#: string and raises on the bool).
+NUMERIC_OPERAND_CYPHER_TEMPLATE = (
+    "toFloat(CASE WHEN toString({operand}) IN ['true', 'false'] "
+    "THEN null ELSE {operand} END)")
+
+
+def numeric_operand_cypher(operand: str) -> str:
+    """Cypher: the TOTAL numeric coercion for one RAW column expression.
+
+    #11702 cycle 16. `ep_has_belief_cypher` compared the raw coalesced operand
+    to `0` while `belief_mean_cypher` coerced with `toFloat`, so a
+    NUMERIC-STRING operand — `update_point(posterior_alpha="0.7",
+    posterior_beta="0.3")` is accepted and stored verbatim — made the presence
+    conjunction NULL and the claim read `absent` in Cypher, `measured` in
+    Python, in the same query that computed a mean of 0.7 and a variance of
+    0.105. One claim, two states, the vocabulary contradicting itself.
+
+    Non-numeric text (`"abc"`), a stored Boolean, `null` and the empty string
+    all answer NULL, which the presence rule turns into ABSENT — matching
+    :func:`numeric_operand`, the Python twin.
+    """
+    return NUMERIC_OPERAND_CYPHER_TEMPLATE.format(operand=operand)
+
+
+def numeric_operand(raw):
+    """Python twin of :func:`numeric_operand_cypher`: float, or None.
+
+    `bool` is deliberately NOT a number here, although `float(True) == 1.0`.
+    Cycle 12 accepted it for symmetry with `annotate_ep_batch`'s arithmetic;
+    cycle 16 measured that NO Cypher surface can follow — `toFloat` raises on a
+    Boolean and every comparison against one is NULL — so the symmetry it bought
+    was one-sided, and a stored `confidence=True` answered `measured / 1.0` in
+    Python beside `absent` in Cypher. A Boolean belief is a writer defect, not a
+    certainty, and it is now ABSENT on both twins.
+
+    NaN/inf are also None: `json.dumps` emits them as bare tokens, and neither
+    is a belief (see `belief_value`).
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return val if math.isfinite(val) else None
+
+
 def ep_has_belief_cypher(alias: str) -> str:
     """Cypher boolean: a PERSISTED belief exists for ``alias`` (#11702).
 
@@ -377,19 +435,27 @@ def ep_has_belief_cypher(alias: str) -> str:
     default — `1/4 = 0.25`, a number nothing measured. The same rule, stated as:
     a belief exists when the expression that computes it has both operands.
     """
-    return (f"({alias}.confidence IS NOT NULL OR ("
-            f"coalesce({alias}.posterior_alpha, {alias}.ep_alpha) IS NOT NULL "
-            f"AND coalesce({alias}.posterior_beta, {alias}.ep_beta) IS NOT NULL "
+    # #11702 cycle 16: COERCED, not compared raw. A stored numeric STRING
+    # ("0.7") is non-null but not comparable to `0` (the comparison is NULL, the
+    # conjunction is NULL, the state read `absent`) while the value formula's
+    # `toFloat` computed 0.7 — so one query said `absent` and `0.7` about the
+    # same claim. `numeric_operand_cypher` is the total coercion both sides now
+    # share: it answers NULL for `"abc"`, for a stored Boolean (which `toFloat`
+    # would RAISE on) and for `null`, which makes them ABSENT here and in
+    # :func:`numeric_operand`.
+    a = numeric_operand_cypher(
+        f"coalesce({alias}.posterior_alpha, {alias}.ep_alpha)")
+    b = numeric_operand_cypher(
+        f"coalesce({alias}.posterior_beta, {alias}.ep_beta)")
+    mirror = numeric_operand_cypher(f"{alias}.confidence")
+    return (f"({mirror} IS NOT NULL OR ({a} IS NOT NULL AND {b} IS NOT NULL "
             # #11702 cycle 11: NON-NEGATIVE as well as non-empty. Beta operands
             # are counts; a negative one (reachable through the unvalidated
             # `tortoise_set_point_baseline` / `update_point` arguments) passes
             # a bare `α+β > 0` and yields a "mean" of -0.5 and a "variance" of
             # -0.25, i.e. an out-of-range belief every threshold consumer reads
             # as a real, maximally-certain number.
-            f"AND coalesce({alias}.posterior_alpha, {alias}.ep_alpha, 0.0) >= 0 "
-            f"AND coalesce({alias}.posterior_beta, {alias}.ep_beta, 0.0) >= 0 "
-            f"AND (coalesce({alias}.posterior_alpha, {alias}.ep_alpha, 0.0) "
-            f"     + coalesce({alias}.posterior_beta, {alias}.ep_beta, 0.0)) > 0))")
+            f"AND {a} >= 0 AND {b} >= 0 AND ({a} + {b}) > 0))")
 
 
 def ep_state_cypher(alias: str) -> str:
@@ -456,14 +522,7 @@ def ep_state(*, posterior_alpha, ep_alpha, confidence=None,
     # stored a string in α — while `belief_value` (cycle 11) and the Cypher twin
     # (now `coalesce(…, false)`) both answer absent. A value the store cannot
     # hold as a number is absent, which is the one decision all three must share.
-    def _num(raw):
-        if raw is None or isinstance(raw, bool):
-            return float(raw) if isinstance(raw, bool) else None
-        try:
-            val = float(raw)
-        except (TypeError, ValueError):
-            return None
-        return val if math.isfinite(val) else None
+    _num = numeric_operand
 
     alpha = _num(posterior_alpha if posterior_alpha is not None else ep_alpha)
     beta = _num(posterior_beta if posterior_beta is not None else ep_beta)
@@ -475,7 +534,16 @@ def ep_state(*, posterior_alpha, ep_alpha, confidence=None,
     present = (alpha is not None and beta is not None
                and alpha >= 0 and beta >= 0
                and (alpha + beta) > 0)
-    if confidence is None and not present:
+    # #11702 cycle 16: the gate uses the COERCED mirror, exactly as the Cypher
+    # predicate does. Testing the RAW value (`confidence is None`) made a stored
+    # `"abc"` / `True` mirror — non-null, unreadable — skip this return and land
+    # in `ep_measurement_state`'s baseline arm, so one claim read `absent` in
+    # Cypher and `baseline` in Python, with `confidence_mean: 0.5` beside it
+    # (the Beta(1,1) default, i.e. the fabricated belief this issue removes).
+    # `baseline_set` is a FLAG; it does not turn an unreadable value into a
+    # prior. Cypher's baseline arm sits BEHIND the presence predicate for the
+    # same reason.
+    if _num(confidence) is None and not present:
         return EP_STATE_ABSENT
     return (EP_STATE_MEASURED
             if ep_measurement_state(posterior_alpha=posterior_alpha,
@@ -511,19 +579,9 @@ def belief_value(*, confidence=None, posterior_alpha=None,
     whole decoration and be indistinguishable from "no belief", which is
     exactly what the ``None`` return says honestly.
     """
-    def _num(raw):
-        # #11702 cycle 12: a bool IS a number in Python (`float(True) == 1.0`),
-        # and the rest of the tree reads one that way (`annotate_ep_batch`
-        # answers 1.0 for a `confidence=True` row). Rejecting it here made this
-        # reader the ONE surface that called such a row absent — a twin
-        # asymmetry that cannot be justified while claiming a single vocabulary.
-        if raw is None:
-            return None
-        try:
-            val = float(raw)
-        except (TypeError, ValueError):
-            return None
-        return val if math.isfinite(val) else None
+    # #11702 cycle 16: `numeric_operand` (bool is NOT a number — see its
+    # docstring for the measurement that retired cycle 12's opposite reading).
+    _num = numeric_operand
 
     conf = _num(confidence)
     if conf is not None:
@@ -4215,14 +4273,29 @@ def ep_pair_stored(*, posterior_alpha=None, posterior_beta=None,
 
 
 #: The sum range in which `αβ/((α+β)²(α+β+1))` is representable as a double.
-#: Below it the CUBE underflows to `0.0`, above it it overflows to `inf`, and
-#: FalkorDB then evaluates the query's own formula as `NaN` — while
-#: `_beta_variance` (which guards the denominator) answers `0.0`. Measured
-#: (cycle 15): a `(1e200, 1e200)` claim rendered `var: nan` and sorted FIRST on
-#: `analyze.most_uncertain`, ahead of a genuine Beta(1,1) `1/12`, and with two
-#: such rows the whole list came back de-sorted, because FalkorDB's comparator
-#: is not total over NaN. `s² · (s+1) ≤ 1e306` here, and `≥ 1e-300` at the floor.
-VARIANCE_SUM_MIN = 1e-100
+#: Above it the CUBE overflows to `inf`, and FalkorDB then evaluates the query's
+#: own formula as `NaN` — while `_beta_variance` (which guards the denominator)
+#: answers `0.0`. Measured (cycle 15): a `(1e200, 1e200)` claim rendered
+#: `var: nan` and sorted FIRST on `analyze.most_uncertain`, ahead of a genuine
+#: Beta(1,1) `1/12`, and with two such rows the whole list came back de-sorted,
+#: because FalkorDB's comparator is not total over NaN.
+#:
+#: The FLOOR is set by the NUMERATOR, not the denominator (cycle 16): the
+#: denominator `s²(s+1)` only stops being representable near `s ≈ 1.5e-162`,
+#: but `αβ` underflows for equal operands at `s ≈ 3e-154`, and once it does the
+#: formula answers `0.0` for a pair whose true variance is the Beta MAXIMUM
+#: `0.25` — "fabricated certainty", the failure class this issue removes.
+#: Cycle 15 shipped `1e-100`, ~54 orders too tight, so a stored
+#: `(1e-150, 1e-150)` pair — true variance 0.25, computable — was published as
+#: `variance: 0.0, contested: false` and excluded from every uncertainty scan
+#: (measured). The boundary is `αβ` NORMAL, i.e. `αβ ≥ 2.2e-308`, and with
+#: `αβ ≤ s²/4` the equal-operand pair reaches it at `s = 2·√2.2e-308 ≈ 3e-154`:
+#: the floor sits just BELOW that, so every pair whose width a double can carry
+#: at full precision is admitted, and a shape it refuses has an untrustworthy
+#: numerator (measured: `(1e-166, 1e-166)` computes `2.5e-333`, which is 0.0 in
+#: a double). The ceiling `1e102` keeps `s² · (s+1) ≤ 1e306`, inside the
+#: `1.8e308` range.
+VARIANCE_SUM_MIN = 1e-154
 VARIANCE_SUM_MAX = 1e102
 
 
@@ -4239,8 +4312,8 @@ def beta_variance_cypher(alpha_operand: str, beta_operand: str) -> str:
     condition written once). Every surface that RANKS on a width must use this
     — the formula inlined in a template makes the ordering depend on NaN.
     """
-    a = f"toFloat({alpha_operand})"
-    b = f"toFloat({beta_operand})"
+    a = numeric_operand_cypher(alpha_operand)
+    b = numeric_operand_cypher(beta_operand)
     s_sum = f"({a} + {b})"
     return (f"CASE WHEN {a} < 0 OR {b} < 0 "
             f"     OR {s_sum} <= 0 OR {s_sum} < {VARIANCE_SUM_MIN!r} "
@@ -4271,18 +4344,21 @@ def ep_width_cypher(alias: str) -> str:
     ``sdk._review_prune`` and the ``analyze`` templates, so a variance scan and
     the ``ep`` block cannot disagree about which claims have a width.
     """
-    a = f"coalesce({alias}.posterior_alpha, {alias}.ep_alpha)"
-    b = f"coalesce({alias}.posterior_beta, {alias}.ep_beta)"
+    a = numeric_operand_cypher(
+        f"coalesce({alias}.posterior_alpha, {alias}.ep_alpha)")
+    b = numeric_operand_cypher(
+        f"coalesce({alias}.posterior_beta, {alias}.ep_beta)")
     # …and the sum must be inside the band where the formula is REPRESENTABLE
     # (`VARIANCE_SUM_MIN … VARIANCE_SUM_MAX`), not merely finite: `s * s * (s+1)`
-    # overflows a double at `s > ~5.6e102` and underflows at `s < ~6e-108`, and
-    # both make the query answer NaN while `_beta_variance` answers 0.0. The
-    # earlier form of this guard bounded `s` at `1e308` — ~1e154 too loose on
-    # the overflow side and with no lower bound at all — so `(1e200, 1e200)`
-    # and `(1e-200, 0)` passed it and then won the uncertainty ranking with
-    # `var: nan` (measured). A width that cannot be COMPUTED is not a width;
-    # the admissibility rule and the formula now share one band, so they cannot
-    # disagree about which claims have one.
+    # overflows a double past `s ≈ 5.6e102` and `αβ` underflows below
+    # `s ≈ 3e-154`, and both make the formula answer a number that is not the
+    # variance (`NaN`, or `0.0` for a maximally-wide pair) while
+    # `_beta_variance` answers 0.0. The earlier form of this guard bounded `s`
+    # at `1e308` — ~1e154 too loose on the overflow side and with no lower bound
+    # at all — so `(1e200, 1e200)` and `(1e-200, 0)` passed it and then won the
+    # uncertainty ranking with `var: nan` (measured). A width that cannot be
+    # COMPUTED is not a width; the admissibility rule and the formula now share
+    # one band, so they cannot disagree about which claims have one.
     return (f"({ep_pair_stored_cypher(alias)} "
             f"AND coalesce({a}, 0.0) >= 0 AND coalesce({b}, 0.0) >= 0 "
             f"AND (coalesce({a}, 0.0) + coalesce({b}, 0.0)) >= {VARIANCE_SUM_MIN!r} "
@@ -4316,9 +4392,12 @@ def ep_variance_admissible_cypher(alias: str) -> str:
     mirror). ONE definition, used by ``ep.get_contested_claims`` and the
     PR-prune scan.
     """
-    a = f"coalesce({alias}.posterior_alpha, {alias}.ep_alpha)"
-    b = f"coalesce({alias}.posterior_beta, {alias}.ep_beta)"
-    no_operands = f"({a} IS NULL AND {b} IS NULL AND {alias}.confidence IS NULL)"
+    a = numeric_operand_cypher(
+        f"coalesce({alias}.posterior_alpha, {alias}.ep_alpha)")
+    b = numeric_operand_cypher(
+        f"coalesce({alias}.posterior_beta, {alias}.ep_beta)")
+    no_operands = (f"({a} IS NULL AND {b} IS NULL AND "
+                   f"{numeric_operand_cypher(f'{alias}.confidence')} IS NULL)")
     return f"({ep_width_cypher(alias)} OR {no_operands})"
 
 
@@ -4339,8 +4418,8 @@ def belief_mean_cypher(alpha_operand: str, beta_operand: str, *,
       ``degenerate`` rendering (``"null"`` where an absent belief must stay
       null, a literal where the surface must still answer something).
     """
-    a = f"toFloat({alpha_operand})"
-    b = f"toFloat({beta_operand})"
+    a = numeric_operand_cypher(alpha_operand)
+    b = numeric_operand_cypher(beta_operand)
     s_sum = f"({a} + {b})"
     # The overflow arm applies ONLY when the identity is defined (`α > 0`).
     # Keying the whole branch on the sum alone made `(0, 1.7e308)` — a stored
@@ -4382,7 +4461,7 @@ def _beta_variance(alpha: float, beta: float) -> float:
     # or overflows to `inf`, and the query's own copy of the formula answers
     # `NaN` where this returns `0.0` — the two disagreed on `(1e200, 1e200)`
     # and `(1e-200, 0)` for exactly that reason.
-    if s < 1e-100 or s > 1e102:
+    if s < VARIANCE_SUM_MIN or s > VARIANCE_SUM_MAX:
         return 0.0
     denom = s * s * (s + 1)
     # Underflow case: a subnormal pair (e.g. α=β=1e-200) makes `s*s` and
@@ -4535,23 +4614,14 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
         rows = graph.query(cypher, params={"ids": point_ids}).result_set
 
         breakdowns: dict[str, EpBreakdown] = {}
-        def _f(raw):
-            """The coalesced column as a float, or None when it is not one.
-
-            #11702 cycle 15: `float(row[4])` raised TypeError on a stored
-            non-numeric α (reachable via `update_point(posterior_alpha="abc")`,
-            which `reject_belief_props` does not cover) and the blanket
-            `except` below discarded the WHOLE BATCH — every point in the
-            response lost its `ep` block, which reads as "no belief" for all of
-            them. The presence decision comes from the RAW columns
-            (`ep_state`, now total), so a non-numeric value only has to keep
-            the arithmetic well-defined here: it is coerced to the neutral
-            1.0, and the state/variance carry the truth.
-            """
-            try:
-                return float(raw)
-            except (TypeError, ValueError):
-                return None
+        # #11702 cycle 16: ONE total coercion (`numeric_operand`), applied to the
+        # MIRROR as well. Cycle 15 coerced the α/β columns only, so a stored
+        # `update_point(confidence="abc")` still raised here — and the blanket
+        # `except` below discarded the WHOLE BATCH, which reads as
+        # "ep_state: absent" for every claim in the response, including measured
+        # ones, and makes any belief floor (`min_confidence`) return nothing
+        # (measured on `sdk.recall_state`).
+        _f = numeric_operand
 
         for row in rows:
             pid, impl, nand, contention = row[0], int(row[1]), int(row[2]), float(row[3])
@@ -4597,11 +4667,11 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             # one level down. A row shape that predates the raw columns cannot
             # be absent (the state above already answered), so the α/β mean is
             # the honest answer there.
-            mirror = row[12] if len(row) > 12 else None
+            mirror = _f(row[12]) if len(row) > 12 else None
             if state == EP_STATE_ABSENT:
                 value = None
             elif mirror is not None:
-                value = round(float(mirror), 4)
+                value = round(mirror, 4)
             else:
                 value = round(_beta_mean(alpha, beta), 4)
             total = impl + nand
@@ -5178,9 +5248,13 @@ def get_relationships_bounded(
                 timeout=_DECORATION_TIMEOUT_MS,
             ).result_set
             for row in rows:
+                # #11702 cycle 16: TOTAL coercion on the coalesced operands —
+                # a stored non-numeric α raised here and the whole operator
+                # decoration for the response was dropped.
+                a_num, b_num = numeric_operand(row[6]), numeric_operand(row[7])
                 op_crit.setdefault(row[0], {})[row[3]] = (
                     row[1], row[2], row[4] or "", row[5] or "",
-                    float(row[6]), float(row[7]), bool(row[8]), row[9],
+                    a_num or 0.0, b_num or 0.0, bool(row[8]), row[9],
                     bool(row[10]),
                     # #11702: raw α/β + mirror (11..15) for the shared readers.
                     (row[11], row[12], row[13], row[14], row[15])
@@ -5225,9 +5299,14 @@ def get_relationships_bounded(
                 timeout=_DECORATION_TIMEOUT_MS,
             ).result_set
             for row in rows:
+                # #11702 cycle 16: TOTAL coercion, same as the Q2-crit twin
+                # above — a stored non-numeric operand on a SUPPORT peer raised
+                # here and the blanket `except` dropped the relationship
+                # decoration for the whole response.
+                a_num, b_num = numeric_operand(row[6]), numeric_operand(row[7])
                 op_support.setdefault(row[0], {})[row[3]] = (
                     row[1], row[2], row[4] or "", row[5] or "",
-                    float(row[6]), float(row[7]), bool(row[8]), row[9],
+                    a_num or 0.0, b_num or 0.0, bool(row[8]), row[9],
                     bool(row[10]),
                     (row[11], row[12], row[13], row[14], row[15])
                     if len(row) > 15 else None,

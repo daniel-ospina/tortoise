@@ -48689,14 +48689,19 @@ class TortoiseSDK:
 
         # Collect outcomes
         outcomes: list[dict] = []
+        # #11702 cycle 16: TOTAL coercion — a stored non-numeric mirror raised
+        # `float()` here and took the whole reputation update with it, for a
+        # report that does not weight by confidence in the first place.
+        from .search_engine import numeric_operand as _numeric_operand
+
         for row in impl_rows:
             outcomes.append({"point_id": row[0], "content": row[1],
-                             "confidence": (float(row[2]) if row[2] is not None
-                                            else None), "outcome": "IMPL"})
+                             "confidence": _numeric_operand(row[2]),
+                             "outcome": "IMPL"})
         for row in nand_rows:
             outcomes.append({"point_id": row[0], "content": row[1],
-                             "confidence": (float(row[2]) if row[2] is not None
-                                            else None), "outcome": "NAND"})
+                             "confidence": _numeric_operand(row[2]),
+                             "outcome": "NAND"})
 
         total = len(outcomes)
         impl_count = sum(1 for o in outcomes if o["outcome"] == "IMPL")

@@ -18,6 +18,8 @@ from .live import (
 )
 from .search_engine import (  # #11702: the ONE vocabulary
     belief_mean_cypher,
+    numeric_operand,
+    numeric_operand_cypher,
     beta_variance_cypher,
     ep_has_belief_cypher,
     ep_width_cypher,
@@ -54,7 +56,12 @@ from .search_engine import (  # #11702: the ONE vocabulary
 # guard; it must not be lost again.
 _BELIEF = (
     "CASE WHEN " + ep_has_belief_cypher("{a}") + " "
-    "  THEN coalesce({a}.confidence, "
+    # #11702 cycle 16: the MIRROR is coerced too. Uncoerced, a stored
+    # `update_point(confidence="abc")` put the raw string on the wire and
+    # `float(r[2])` below raised ValueError, which `analyze()`'s blanket
+    # `except` rendered as the ANSWER — "Formatting error: …" — for a
+    # question the graph could still answer (measured on `most_uncertain`).
+    "  THEN coalesce(" + numeric_operand_cypher("{a}.confidence") + ", "
     "    " + belief_mean_cypher(
         "coalesce({a}.posterior_alpha, {a}.ep_alpha, 1.0)",
         "coalesce({a}.posterior_beta, {a}.ep_beta, 1.0)") + ") "
@@ -338,8 +345,9 @@ def _format_uncertain(rows: list) -> str:
         # #11702: an absent belief renders as "no belief" instead of raising on
         # `f"{None:.2f}"` (the blanket `except` in `analyze()` would turn that
         # into an empty answer, which reads as "found nothing").
-        conf_txt = (f"conf: {float(r[2]):.2f}"
-                    if r[2] is not None else "no belief")
+        conf_num = numeric_operand(r[2])
+        conf_txt = (f"conf: {conf_num:.2f}"
+                    if conf_num is not None else "no belief")
         lines.append(f"  {i}. \"{r[1][:80]}\" ({conf_txt}, var: {r[3]:.4f})")
     return "\n".join(lines)
 
@@ -1172,7 +1180,14 @@ def mean_grounding(proj=None) -> float:
     ).result_set
     if not rows:
         return 0.0
-    return sum(float(r[0]) for r in rows) / len(rows)
+    # #11702 cycle 16: the imputation above is DELIBERATE and unchanged; the
+    # COERCION is what must not raise. `float(r[0])` on a stored
+    # `update_point(confidence="abc")` raised ValueError out of the whole
+    # snapshot and the blanket `except` in `analyze()` reported the answer as a
+    # formatting error (measured). A non-numeric mirror takes the same 0.5 the
+    # NULL one takes.
+    values = [numeric_operand(r[0]) for r in rows]
+    return sum(v if v is not None else 0.5 for v in values) / len(values)
 
 
 def grounding_snapshot(proj=None) -> dict:
@@ -1192,7 +1207,12 @@ def grounding_snapshot(proj=None) -> dict:
         f"WHERE p.is_operator = false AND {_live_only('p.status')} "
         "RETURN p.id, coalesce(p.confidence, 0.5)"
     ).result_set
-    points = {r[0]: float(r[1]) for r in rows}
+    # #11702 cycle 16: total coercion — see `mean_grounding`. The 0.5 default
+    # is the documented DE2E-4 extension (a confidence-less Point degrades the
+    # mean rather than being dropped), not the #11702 fabricated belief: this is
+    # a drift SAMPLE over a batch, not a claim's served confidence.
+    points = {r[0]: (numeric_operand(r[1]) if numeric_operand(r[1]) is not None
+                     else 0.5) for r in rows}
     mean = sum(points.values()) / len(points) if points else 0.0
     from datetime import datetime, timezone
     return {

@@ -78,6 +78,7 @@ from .search_engine import (  # type: ignore[import-not-found]
     ep_state,
     ep_state_resolve,
     fetch_point_epistemic_state,
+    numeric_operand,  # #11702: the ONE total numeric coercion (bool != number)
 )
 
 logger = logging.getLogger(__name__)
@@ -437,7 +438,13 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
         if not row or not row[0]:
             continue
         pid = row[0]
-        a, b = float(row[1]), float(row[2])
+        # #11702 cycle 16: TOTAL coercion on both operands and the MIRROR. A
+        # stored non-numeric value raised here and the caller's guard dropped
+        # the whole block map (`{}`), so `why` disappeared for every id in the
+        # batch — measured: `W4 ep read failed: could not convert string to
+        # float` and no `ep` block at all, on the surface every agent read
+        # goes through.
+        a, b = numeric_operand(row[1]) or 0.0, numeric_operand(row[2]) or 0.0
         has_ep = bool(row[3])
         # #2490: terminal rows never surface a decayed posterior as measured
         # EP — has_ep=False + contested=False (projection-side override).
@@ -507,7 +514,8 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
             # three rankers and the subgraph read its real 0.95.
             "confidence_mean": (
                 None if state == EP_STATE_ABSENT
-                else round(float(mirror), 4) if mirror is not None
+                else round(numeric_operand(mirror), 4)
+                if numeric_operand(mirror) is not None
                 else round(_beta_mean(a, b), 4)),
             "ep_state": state,
             "variance": round(variance, 6),
