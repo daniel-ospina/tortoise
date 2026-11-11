@@ -4315,7 +4315,17 @@ def beta_variance_cypher(alpha_operand: str, beta_operand: str) -> str:
     a = numeric_operand_cypher(alpha_operand)
     b = numeric_operand_cypher(beta_operand)
     s_sum = f"({a} + {b})"
-    return (f"CASE WHEN {a} < 0 OR {b} < 0 "
+    # #11702 cycle 19: `{a} IS NULL` is a guard, not an afterthought. An
+    # UNREADABLE operand (`update_point(posterior_alpha="abc")`, or a stored
+    # Boolean) makes every comparison in this CASE NULL, and a NULL WHEN arm
+    # does not match — so the query fell through to the arithmetic, which is
+    # NULL too, and the expression answered NULL where its docstring and its
+    # Python twin both promise `0.0`. Measured: `most_uncertain` rendered
+    # `var: None`, `_format_uncertain` raised TypeError on `{None:.4f}`, and
+    # `analyze()`'s blanket handler turned the whole answer into
+    # "Formatting error: …".
+    return (f"CASE WHEN {a} IS NULL OR {b} IS NULL "
+            f"     OR {a} < 0 OR {b} < 0 "
             f"     OR {s_sum} <= 0 OR {s_sum} < {VARIANCE_SUM_MIN!r} "
             f"     OR {s_sum} > {VARIANCE_SUM_MAX!r} THEN 0.0 "
             f"     ELSE ({a} * {b}) / ({s_sum} * {s_sum} * ({s_sum} + 1)) END")
@@ -4359,10 +4369,19 @@ def ep_width_cypher(alias: str) -> str:
     # uncertainty ranking with `var: nan` (measured). A width that cannot be
     # COMPUTED is not a width; the admissibility rule and the formula now share
     # one band, so they cannot disagree about which claims have one.
+    # #11702 cycle 19: the operands must be READABLE, not merely stored —
+    # `coalesce(<operand>, 0.0)` collapsed "unreadable" into "zero", so a
+    # stored `("abc", 2.0)` pair was ADMITTED by this rule while
+    # `beta_variance_cypher` answered NULL for it. `most_uncertain` then put
+    # that claim FIRST — ahead of a genuine Beta(1,1) 1/12 — with a NULL width,
+    # which is the inversion (and the exception) cycle 15 declared fixed, one
+    # level down. `IS NOT NULL` is the honest test: a shape whose operands
+    # cannot be read has no width.
     return (f"({ep_pair_stored_cypher(alias)} "
-            f"AND coalesce({a}, 0.0) >= 0 AND coalesce({b}, 0.0) >= 0 "
-            f"AND (coalesce({a}, 0.0) + coalesce({b}, 0.0)) >= {VARIANCE_SUM_MIN!r} "
-            f"AND (coalesce({a}, 0.0) + coalesce({b}, 0.0)) <= {VARIANCE_SUM_MAX!r})")
+            f"AND {a} IS NOT NULL AND {b} IS NOT NULL "
+            f"AND {a} >= 0 AND {b} >= 0 "
+            f"AND ({a} + {b}) >= {VARIANCE_SUM_MIN!r} "
+            f"AND ({a} + {b}) <= {VARIANCE_SUM_MAX!r})")
 
 
 def ep_variance_admissible_cypher(alias: str) -> str:

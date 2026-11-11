@@ -348,7 +348,15 @@ def _format_uncertain(rows: list) -> str:
         conf_num = numeric_operand(r[2])
         conf_txt = (f"conf: {conf_num:.2f}"
                     if conf_num is not None else "no belief")
-        lines.append(f"  {i}. \"{r[1][:80]}\" ({conf_txt}, var: {r[3]:.4f})")
+        # #11702 cycle 19: the WIDTH degrades too. A row whose variance is not a
+        # number reached `f"{None:.4f}"` and raised, and `analyze()`'s blanket
+        # handler answered the question with "Formatting error: …" — once for
+        # the whole call, losing every other row with it. The width rule no
+        # longer admits such a shape; this is the belt to that brace, because a
+        # template is edited far more often than a reader.
+        var_num = numeric_operand(r[3]) if len(r) > 3 else None
+        var_txt = f"var: {var_num:.4f}" if var_num is not None else "no width"
+        lines.append(f"  {i}. \"{r[1][:80]}\" ({conf_txt}, {var_txt})")
     return "\n".join(lines)
 
 

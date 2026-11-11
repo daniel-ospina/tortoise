@@ -1981,6 +1981,16 @@ def test_the_width_rule_and_the_width_formula_agree_across_the_whole_range(sdk):
     pairs = [(10.0 ** e, 10.0 ** e) for e in exponents]
     pairs += [(10.0 ** e, 0.0) for e in exponents[:6]]
     pairs += [(1.0, 1e308), (1e308, 1.0), (3.0, -1.0)]
+    # #11702 cycle 19: the UNREADABLE shapes. The sweep was numeric-only, so the
+    # one class the rule must refuse — an operand the store cannot read as a
+    # number — was absent from it, and `("abc", 2.0)` slipped through the
+    # admission rule while the formula answered NULL. `most_uncertain` then put
+    # it FIRST with a NULL width and `analyze()` answered the question with a
+    # TypeError string (measured).
+    UNREADABLE = [(None, 2.0), ("abc", 2.0), (True, 2.0), (2.0, "abc"),
+                  (0.0, "abc"), ("", 2.0)]
+    unreadable_from = len(pairs)
+    pairs += UNREADABLE
 
     ids = []
     for i, (a, b) in enumerate(pairs):
@@ -1993,8 +2003,12 @@ def test_the_width_rule_and_the_width_formula_agree_across_the_whole_range(sdk):
     rows = proj.g.query(
         "MATCH (n:Point) WHERE n.id IN $ids "
         "RETURN n.id, " + _se.ep_width_cypher("n") + " AS admits, "
-        + beta_variance_cypher("coalesce(n.posterior_alpha, 1.0)",
-                              "coalesce(n.posterior_beta, 1.0)") + " AS v",
+        # The operands the WIDTH RULE itself reads — `coalesce(posterior, ep)`,
+        # with NO `1.0` default. A `1.0` default would pre-invent the operand
+        # and hide exactly the unreadable shapes this sweep must cover (cycle
+        # 19: `(None, 2.0)` measured 0.0556 through the default instead of 0.0).
+        + beta_variance_cypher("coalesce(n.posterior_alpha, n.ep_alpha)",
+                              "coalesce(n.posterior_beta, n.ep_beta)") + " AS v",
         params={"ids": ids}).result_set
     by_id = {r[0]: (r[1], r[2]) for r in rows}
 
@@ -2012,6 +2026,10 @@ def test_the_width_rule_and_the_width_formula_agree_across_the_whole_range(sdk):
 
     def _true_variance(x, y):
         """The variance at high precision, independent of any shipped band."""
+        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            return None  # an unreadable operand has no variance at all
+        if isinstance(x, bool) or isinstance(y, bool):
+            return None
         if x < 0 or y < 0:
             return None
         dx, dy = Decimal(repr(x)), Decimal(repr(y))
@@ -2022,6 +2040,17 @@ def test_the_width_rule_and_the_width_formula_agree_across_the_whole_range(sdk):
 
     admittable = 0
     required = 0
+    # Cycle 19: an UNREADABLE operand is never admitted, and the formula answers
+    # `0.0` (a number) for it rather than NULL — the two halves must agree.
+    for pid, (a, b) in zip(ids[unreadable_from:],
+                            pairs[unreadable_from:], strict=False):
+        admits, query_v = by_id[pid]
+        assert admits is None or bool(admits) is False, (
+            f"({a!r}, {b!r}) has an UNREADABLE operand but the width rule "
+            "admitted it — it then wins the uncertainty ranking with no width")
+        assert query_v == 0.0, (
+            f"({a!r}, {b!r}): the width formula answered {query_v!r} where its "
+            "Python twin and its docstring both answer 0.0")
     for pid, (a, b) in zip(ids, pairs, strict=False):
         admits, query_v = by_id[pid]
         # (i) The query's width is ALWAYS a number — never null, never NaN, never
@@ -2031,16 +2060,21 @@ def test_the_width_rule_and_the_width_formula_agree_across_the_whole_range(sdk):
         assert query_v is not None, (pid, a, b, "null width from the query")
         assert query_v == query_v, (pid, a, b, "NaN width from the query")
         assert query_v >= 0.0 and query_v != float("inf"), (pid, a, b, query_v)
+        if admits is None:
+            continue
         if admits:
             admittable += 1
 
         truth = _true_variance(a, b)
+        if truth is None:
+            # An unreadable/negative pair: no double arithmetic to demand.
+            continue
         numerator, total = a * b, a + b
         denominator = total * total * (total + 1)
         # (ii) A materially wide claim the double CAN compute must be admitted
         # and answered with (approximately) its real width. This is the arm that
         # catches a band too TIGHT — i.e. the bug cycle 15 shipped.
-        if (truth is not None and truth >= MATERIAL
+        if (truth >= MATERIAL
                 and numerator >= MIN_NORMAL and 0.0 < denominator < 1e307):
             required += 1
             assert admits, (
@@ -2134,6 +2168,13 @@ def test_the_relationship_scan_survives_an_unreadable_operand(sdk):
     """
     from tortoise.search_engine import get_relationships_bounded
 
+    # ⛔ Cycle 19 F2: the earlier form of this test created LONE points, and the
+    # arm it names (Q2-crit) only runs when the Q1a `MATCH (n)-[…]->(op:Point
+    # {is_operator:true})` found an operator — so the query never executed, the
+    # variance expression was never evaluated, and the test PASSED UNCHANGED ON
+    # `origin/main`. A real operator edge is what reaches the arm; without it
+    # this asserts nothing. Verified red-on-main / green-here with the edge
+    # present (`ResponseError: Type mismatch …` vs `decoration_error: ''`).
     proj = sdk._get_proj()
     shapes = {
         "numeric_string_pair": ('SET n.posterior_alpha = "0.7", '
@@ -2145,12 +2186,16 @@ def test_the_relationship_scan_survives_an_unreadable_operand(sdk):
     for label, setter in shapes.items():
         pid = sdk.create_point("statement", f"ZQDECOR {label}")["id"]
         proj.g.query(f"MATCH (n:Point {{id:$id}}) {setter}", params={"id": pid})
-        out = get_relationships_bounded(proj.g, [pid])
+        # …an operator whose IMPL edge points AT the peer, so Q2-crit runs.
+        root = sdk.create_point("statement", f"ZQDECOR root {label}")["id"]
+        sdk.create_operator("IMPL", root, [pid])
+        out = get_relationships_bounded(proj.g, [root])
         blob = str(out)
         assert "Type mismatch" not in blob and "decoration_error" not in blob, (
             f"{label}: the relationship scan raised on an operand the store "
             f"cannot read as a number: {blob[:400]}")
-        assert pid in out, (label, out)
+        assert out.get(root), (
+            f"{label}: the operator lost its whole peer decoration: {blob[:400]}")
 
 
 def test_the_trends_answer_survives_a_numeric_string_operand(sdk):
