@@ -3001,12 +3001,12 @@ _A4_CASEFOLDED_LAYERS = frozenset({"things"})
 def _a4_declared_kinds(kind_prop: str) -> frozenset[str]:
     """The DECLARED vocabulary for one layer, imported from the product.
 
-    ⛔ Imported, never re-spelled: `domain_loader.known_kinds(bucket)` is the union of §5's core
-    set, the product's own legacy registry and every LOADED pack's declarations — the DECLARED
-    set, which is the question this function answers. A hardcoded list here would drift from the
-    product in one direction (blessing kinds nothing declares) or the other (reporting a
-    pack-following write as an invention) — the same defect `tools/ax_write_eval.py` documents
-    for its own vocabulary.
+    ⛔ Imported, never re-spelled: `domain_loader.known_kinds(bucket)` is §5's core set for that
+    bucket plus every LOADED pack's declarations for that bucket — and, for `pointKind` ONLY, the
+    product's legacy `register_kind` registry (minus the names an owner ruling moved); ⛔ the
+    legacy leg contributes NOTHING to the thing/event buckets. A hardcoded list would drift in one
+    direction (blessing kinds nothing declares) or the other (reporting a pack-following write as
+    an invention) — the same defect `tools/ax_write_eval.py` documents for its own vocabulary.
     ⛔ It is NOT "the predicate the write validator runs" for every bucket: `hosted_api.py::valid_kind`
     runs `known_kinds("pointKind")` only (a point request-model validator — ⛔ qualified by FILE,
     because `selfhost_api.py::valid_kind` is a same-named validator over `known_kinds()` with no
