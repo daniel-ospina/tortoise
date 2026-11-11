@@ -224,6 +224,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from markdown_it import MarkdownIt
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PLATFORM_SEAMS_DOC = (_REPO_ROOT / "docs" / "research"
                        / "2026-09-01-gbrain-learnings" / "platform-seams.md")
@@ -561,80 +563,52 @@ def _absent(fragment: str, text: str) -> bool:
 #: sentence sat in the wrong item. Hence `\d+[.]` AND `\d+)` AND a `**`-wrapped number.
 _ITEM_START = re.compile(r"^(?:\*\*)?\(?\d+[.)](?:\*\*)?\s")
 
-#: Where a located item ENDS: the first non-blank line at column 0. Nothing else — no
-#: marker list, no heading list.
+#: ⛔ The item's EXTENT comes from the CommonMark parser, not from a boundary this file
+#: computes. Six review rounds are the evidence for why a hand-rolled terminator loses:
+#: every rule that enumerated marker shapes let a shape through (r34 P3 #1 column-0
+#: bullets, r35 P3 #1 indented furniture and table rows, r36 P2 #1 blockquotes, fences,
+#: setext rules and plain paragraphs), and every rule that replaced the enumeration with
+#: an INDENTATION test traded one error for the other: column-0-only swallowed a
+#: blank-separated de-indent (r38 P3 #1), terminating on any less-indented line falsely
+#: reddened LAZY continuations and a pure renumber (r39 P2 #1), and gating on a blank
+#: line let a paragraph-INTERRUPTING construct at 1-2 spaces stay inside the block while
+#: `markdown_it` renders it OUTSIDE the item (r40 P2 #1).
 #:
-#: ⛔ The boundary is the record's own INDENTATION, not an enumeration of marker shapes,
-#: and four review rounds are the evidence for why the enumeration kept losing. An item
-#: starts at column 0 (`3. **…**`) and every continuation line is indented by at least
-#: the marker's own width, so a less-indented line IS the next block, whatever it is
-#: spelled as. Enumerating shapes is a race the record wins: r34 P3 #1 measured column-0
-#: bullets (`* …`) swallowed into the labelled block (`platform-seams.md:430`, `:433`,
-#: `:468`); r35 P3 #1 added indented bullets and table rows (`:348`, `:408`) and r36
-#: P2 #1 still measured blockquotes (`^> `, `:106-111`, `:369-377`), fenced code
-#: (`:20-25`, `:523-539`), setext rules and plain unnumbered paragraphs passing GREEN
-#: with the sentence moved out of the item.
+#: `markdown-it-py` is already a declared test dependency (`pyproject.toml`'s `test`
+#: extra, added so `tests/test_blog_authoring_doc.py` could import it), and it IS the
+#: CommonMark reference implementation the review rounds kept measuring against. So the
+#: block is the `list_item_open` token's own `map`, and there is no boundary left for a
+#: future edit to disagree with. Measured identical to every boundary this file has
+#: produced on the current record: `764 / 1393 x3 / 2309 x3`.
 #:
-#: ⚠️ `_BLOCK_END` is only the INDENT-0 case. The rule is completed in
-#: `_record_site_block`, which also ends the block at the first non-blank line indented
-#: less than the located marker's own width — but ONLY when a BLANK LINE separates it.
-#: That qualifier is CommonMark's LAZINESS rule (§5.2 rule #5), and getting it wrong cost
-#: a P2 in both directions: r38 P3 #1 measured a blank-separated de-indent swallowed into
-#: the block (a real fail-OPEN), and r39 P2 #1 then measured that terminating on ANY
-#: less-indented line FALSE-REDs correct content — a lazy 1-/2-space or tab-indented
-#: continuation, and even a renumber (`2. ` → `10. ` grows the width), all of which
-#: `markdown_it` renders INSIDE the item. Both directions are measured; the blank-line
-#: gate is the discriminator between them.
-#:
-#: ⚠️ It also fixes the FALSE RED that the indented-marker alternative caused (review
-#: r36 P2 #2): the content lines of these items are 3-space indented, so terminating on
-#: `^[ \t]+[-*+]` cut the block on an HONEST sub-bullet added inside the item — a
-#: correct record reddening, the direction this guard must not have.
-#:
-#: ⚠️ RECORDED BOUND — a LAZY continuation line (a paragraph line written at column 0,
-#: which CommonMark renders as part of the item) ends the block here when it precedes
-#: the labelled sentence, so a correct record edited that way REDs with a message that
-#: says the sentence moved when it did not (measured). A lazy line AFTER the sentence
-#: truncates the block's tail without reddening (r38 P3 #2). It fails CLOSED, and no edit
-#: of this record has produced one; the alternative — treating a column-0 lazy line as
-#: item content — would re-open the fail-OPEN this rule closes.
-#:
-#: ⚠️ The LOCATOR (`_ITEM_START`) stays narrow and different on purpose: an item is
-#: found by its BOLD HEADING's words, so locating on "any column-0 line" would invent
-#: sites out of headings, rules and prose.
-#:
-#: Measured BYTE-NEUTRAL on the current record: all seven located blocks are identical
-#: (`764 / 1393 ×3 / 2309 ×3` chars) to what the enumerated boundary returned.
-_BLOCK_END = re.compile(r"^(?![ \t]*$)[^ \t]")
+#: ⚠️ The LOCATOR below stays a local regex: an item is found by its BOLD HEADING's
+#: words, which the parser cannot answer for us without the same needle match.
+
+
+def _parser_item_end(doc: str, start: int) -> int | None:
+    """The line index one past the end of the list item that BEGINS on `start`.
+
+    The parser is the authority for where an item ends (see the note above
+    `_ITEM_START`): a hand-rolled boundary reddened honest edits and passed moved
+    sentences in the same six rounds. `None` when no `list_item_open` token starts on
+    that line — the caller treats that as "cannot locate", which REDs, so an unexpected
+    document shape fails CLOSED.
+    """
+    for token in MarkdownIt("commonmark").parse(doc):
+        if token.type == "list_item_open" and token.map and token.map[0] == start:
+            return token.map[1]
+    return None
 
 
 def _record_site_block(doc: str, site: str) -> str:
     """The record text `site` names — the contracts-table row, or one numbered item.
 
-    An item runs from its own first line (`2. **Heading …**`) through its indented
-    continuation lines, and ends at the first line that is either at column 0
-    (`_BLOCK_END`) or BLANK-LINE-SEPARATED and indented less than the item's own marker
-    width. That gate is CommonMark's LAZINESS rule (§5.2 rule #5): a paragraph
-    CONTINUATION line keeps the item's content even with its indentation partly or fully
-    deleted, so only a blank-separated less-indented line is a new block (measured with
-    `markdown_it`: 1-space, 2-space, tab and RENUMBERED continuations all render inside
-    the `<li>`; the blank-separated one does not). An item is located by its BOLD
-    HEADING's words, not by its NUMBER — a renumbering therefore cannot make a label
-    point at a neighbour, and the blank-line gate is what keeps that true now that the
-    boundary reads the marker's width.
-    ⚠️ Recorded bounds: (a) the width is the marker's LITERAL width, `\s` consuming one
-    space — W+1, not W+N, so an item spelled with 2–4 spaces after the marker would end
-    its block at a line at W+1 (unreachable today: every item here is `N. `, width 3)
-    and a `**3.** ` pseudo-item measures 7 although that shape is not a list item at all
-    (it renders as a paragraph, so its block shrinking is fail-CLOSED); (b) a LAZY line
-    written at column 0 BEFORE the labelled sentence ends the block there and REDs a
-    correct record, with a message that says the sentence "moved" when nothing moved
-    (measured); one AFTER the sentence truncates the tail without reddening. Both fail
-    CLOSED.
-    (Read the boundary off the code, never off this sentence: a terminator described
-    more narrowly, or more widely, than the code stops at is how review r34 P3 #1, r35
-    P3 #1, r38 P3 #1 and r39 P2 #1 each shipped a defect, and r35 P3 #2 was this very
-    line naming the pre-r34 terminator.)
+    An item runs from its own first line (`2. **Heading …**`) to the line the COMMONMARK
+    PARSER ends it on (`_parser_item_end`). Nothing here computes a boundary: six review
+    rounds measured a hand-rolled one failing in both directions (see the note above
+    `_ITEM_START`), and the parser is already a declared test dependency. An item is
+    still LOCATED by its BOLD HEADING's words, not by its NUMBER — a renumbering cannot
+    make a label point at a neighbour.
 
     Returns "" when the site cannot be located, so a re-worded heading REDs the
     label guard. Returning the whole document instead would make every label pass
@@ -662,32 +636,9 @@ def _record_site_block(doc: str, site: str) -> str:
                   if _ITEM_START.match(ln) and needle in _normalised(ln)), None)
     if start is None:
         return ""
-    end = start + 1
-    # The item's own content indent is its marker's width (`2. ` -> 3), which is the
-    # CommonMark rule: a following line indented LESS than that is outside the item.
-    marker_width = len(_ITEM_START.match(lines[start]).group(0))
-    # ⛔ `prev_blank` is the whole of CommonMark's LAZINESS rule (§5.2 rule #5):
-    # deleting SOME OR ALL of the indentation from a PARAGRAPH-CONTINUATION line keeps
-    # it INSIDE the item, so a less-indented line only ends the block when a BLANK LINE
-    # separates it (then it is a new block, rendered outside). Measured with
-    # `markdown_it` (commonmark preset): 1-space, 2-space, tab-indented and renumbered
-    # continuations all render inside the `<li>`; only the blank-separated one does not.
-    # Without the gate this terminates on correct content — including on a RENUMBER
-    # (`2. ` -> `10. ` grows the width to 4), which this file promises cannot move a
-    # label (review r39 P2 #1, measured both directions).
-    prev_blank = False
-    while end < len(lines):
-        line = lines[end]
-        if _BLOCK_END.match(line):
-            break
-        if line.strip():
-            expanded = line.expandtabs(4)   # §2.2: a tab is spaces to a 4-col stop
-            if prev_blank and len(expanded) - len(expanded.lstrip(" ")) < marker_width:
-                break
-            prev_blank = False
-        else:
-            prev_blank = True
-        end += 1
+    end = _parser_item_end(doc, start)
+    if end is None:
+        return ""
     return "\n".join(lines[start:end])
 
 
@@ -820,21 +771,20 @@ def test_every_restatement_site_label_names_the_item_that_states_it():
     the second assert REDs naming that needle and the site; re-word either heading
     → the first assert REDs naming the site; move a sentence into a **BOLD-NUMBERED**
     pseudo-item (`**3.** …`) inserted before the real item → RED here, and GREEN if
-    the block terminator is narrowed back to `^\d+\.\s` — the fail-open review r28
-    P3 #1 measured, and the reason `_ITEM_START` covers every shape the record can
-    spell an item as. Move a sentence into a COLUMN-0 BULLET placed at the end of the
-    item → RED here; with the boundary narrowed back to `_ITEM_START` + headings the
-    same bullet is swallowed INTO the labelled block (measured: `MOVED SENTENCE` in
-    the block → True pre-fix, False now), which is review r34 P3 #1's fail-open and
-    the reason the boundary is `_BLOCK_END`, a superset of the locator. The same move
-    into a COLUMN-0 blockquote, a fence, a setext rule or a plain unnumbered paragraph
-    → RED here (review r36 P2 #1, measured: Green before the indentation rule), which
-    is why `_BLOCK_END` is "the first non-blank line at column 0" rather than a list of
-    marker shapes — the enumeration kept losing a shape (r34 bullets, r35 indented
-    bullets and table rows, r36 blockquotes/fences/rules/paragraphs). An INDENTED
-    bullet or table row stays INSIDE the item, which is correct — it is item content,
-    and terminating on it FALSE-REDded an honest sub-bullet added to item 3 (review
-    r36 P2 #2, measured)."""
+    the item extent is narrowed back to `^\d+\.\s` — the fail-open review r28 P3 #1
+    measured, and the reason the LOCATOR (`_ITEM_START`) covers every shape the record
+    can spell an item as.
+
+    ⛔ The EXTENT is not ours to compute. Six rounds measured a hand-rolled boundary
+    failing in BOTH directions: it swallowed a sentence moved into a column-0 bullet, an
+    indented bullet, a table row, a blockquote, a fence, a setext rule, a plain
+    paragraph, and a blank-separated de-indent (r34 P3 #1, r35 P3 #1, r36 P2 #1, r38
+    P3 #1, r40 P2 #1 — every one a FALSE PASS), and it falsely REDded an honest
+    sub-bullet added inside an item and a pure RENUMBER (r36 P2 #2, r39 P2 #1 — a FALSE
+    FAIL, the direction this guard must not have). The block is now the `list_item_open`
+    token's own `map` from `markdown-it-py`, the CommonMark implementation those rounds
+    measured against, so there is no boundary left for a future edit to disagree with.
+    Measured identical on the current record: `764 / 1393 x3 / 2309 x3`."""
     doc = _PLATFORM_SEAMS_DOC.read_text(encoding="utf-8")
     assert len(_RESTATEMENT_SITES) == len(_RESTATEMENTS), (
         "every `_RESTATEMENTS` row needs a site label — the legend's map is one "
