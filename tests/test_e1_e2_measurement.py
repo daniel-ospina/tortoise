@@ -3242,3 +3242,145 @@ def test_the_docs_index_row_publishes_the_measured_figures():
         assert "counterfactual" in row.lower(), (
             "37.5% is the counterfactual/mint-skip figure — publishing it without "
             "that qualifier reads as the shipped arm's result")
+
+
+# ── #10989: E2b's population floor is over the surviving PLANTED units ───────
+#
+# The record's §3.1 E2b row is written over **"the planted units that survived
+# (floor ≥ 30)"** (`pins.denominator_floors.e2b_surviving_units: 30`). Every
+# reader of that one frozen key tested it against `atomic_points`, which counts
+# EVERY payload point the run wrote, planted or not — so the floor that says
+# "there was a population here to score" could be satisfied by rows the
+# criterion was never written over.
+#
+# MEASURED (#10989's own comment, `census()` at `f3120ed6c0`, corpus
+# `e1e2_corpus.json`, payload = the 25 non-planted `prod-graph-audit` rows + 6
+# planted rows):
+#
+#     kept planted  = 6 of 90        # 84 planted units LOST
+#     real_facts    = 6
+#     atomic_points = 30
+#     floor e2b_surviving_units = 30 -> CLEARED
+#
+# The three pins below are the CI contract for that: the binding's own
+# arithmetic, the wiring that feeds it (a probe edited back to `atomic_points`
+# must red), and the record's words, so the population a future reader is told
+# about is the one the code tests.
+
+def _prereg_for_e2b_floor(floor: int = 30) -> dict:
+    """A BOUND artifact declaring the E2b population floor under test."""
+    return {**_bound_artifact(0.05),
+            "denominator_floors": {"e1_objects": 20,
+                                   "e2b_surviving_units": floor}}
+
+
+def test_the_e2b_floor_is_met_by_surviving_planted_units_not_by_atomic_points():
+    """The measured fail-open, at the arithmetic the binding actually does.
+
+    Six surviving planted units is under a floor of 30 and REFUSES the run even
+    though the atomicity control counted 30 — which is the corpus the issue
+    records. The pre-fix operand (`atomic_points`, 30) is the `MATCHED` arm
+    beside it, so this pin cannot pass by the floor being unreachable: the SAME
+    floor, the SAME run, two operators, two statuses.
+    """
+    prereg = _prereg_for_e2b_floor(30)
+    corpus = _REPO_ROOT / _CORPUS_REL
+
+    planted = probe.prereg_binding(
+        prereg, corpus, "e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b",
+        25, before_share=0.6, surviving_units=6)
+    assert planted["status"] == "BELOW_FLOOR", planted
+    assert planted["reasons"] == ["below-floor"], planted
+    assert planted["surviving_units"] == 6, planted
+
+    # …and the same floor is MEETABLE by the registered population, so the
+    # refusal above is about the count and not about a bar that can never bind.
+    met = probe.prereg_binding(
+        prereg, corpus, "e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b",
+        25, before_share=0.6, surviving_units=30)
+    assert met["status"] == "MATCHED", met
+
+
+def test_the_e2b_floor_is_FED_the_planted_population_and_the_line_says_so():
+    """The wiring: the binding is handed `real_facts`, and the line names it.
+
+    A pin on the arithmetic alone would stay green if the probe kept passing
+    `atomic_points` — the operand, not the formula, is what regressed. So the
+    call site is read out of the tree and required to name the census field the
+    record's row is written over, and the printed `surviving_units_basis=` token
+    is required to agree (a gate whose population lives only in a docstring is
+    one a future reader can re-point silently).
+    """
+    source = _PROBE_PATH.read_text(encoding="utf-8")
+    call = re.search(r"surviving_units=after_c\[(\"[^\"]+\")\]", source)
+    assert call is not None, (
+        "the probe no longer passes `surviving_units=after_c[...]` to "
+        "`prereg_binding` — re-derive the operand before trusting the floor")
+    assert call.group(1) == '"real_facts"', (
+        "the E2b population floor is fed "
+        f"{call.group(1)}; the record's §3.1 row is written over the surviving "
+        "PLANTED units (`real_facts`). `atomic_points` counts non-planted rows "
+        "too, which is the fail-open #10989 closes")
+    assert "surviving_units_basis=real_facts" in source, (
+        "the binding line must state which population its measured side is, so "
+        "the gate is auditable from the log alone")
+    # One key, one denominator: the two sibling readers of the same frozen key
+    # test the same population, so a `MATCHED` binding cannot be a population the
+    # E2b row refuses.
+    measure = (_REPO_ROOT / "docs" / "evidence" / "7949-capstone" / "probes"
+               / "capstone_measure.py").read_text(encoding="utf-8")
+    assert 'below_floor=e1["real_facts"] < e2b_floor' in measure, (
+        "capstone_measure.py's E2b floor reads another population than the "
+        "binding — one frozen key, one denominator")
+    scores = (_REPO_ROOT / "docs" / "evidence" / "7949-capstone" / "probes"
+              / "e1_e2_scores.py").read_text(encoding="utf-8")
+    assert 'e2b_population = after["surviving_units"]' in scores, (
+        "e1_e2_scores.py's E2b floor reads another population than the binding")
+    assert '"below_floor": e2b_population < e2b_floor' in scores, (
+        "e1_e2_scores.py computes `below_floor` from something other than the "
+        "population it just declared")
+
+
+def test_the_record_states_the_e2b_population_this_gate_scores():
+    """The registered words, verbatim: a bar is a threshold AND a population.
+
+    The issue's CI twin. `PRE-REGISTRATION.md` §3.1 already names the right
+    population — the code was what disagreed — so this pin holds the RECORD to
+    it: change the denominator's words and the gate that implements them is
+    visibly out of date, instead of silently scoring a population the record
+    never described.
+    """
+    record = json.loads(_PREREG_ARTIFACT.read_text(encoding="utf-8"))
+    criteria = {c["id"]: c for c in record["criteria"]}
+
+    assert criteria["E2b"]["threshold"] == "`<= 0.05`"
+    assert "the planted units that survived" in criteria["E2b"]["denominator"], (
+        "E2b's registered denominator is not the surviving PLANTED units — the "
+        "gate this issue registers tests exactly that population, so a re-"
+        "registration must move both or neither")
+    assert record["denominator_floors"]["e2b_surviving_units"] == 30
+    # The other two rows the same E2 gate scores, so a threshold edit in the
+    # record cannot pass while the code keeps the old bar.
+    assert criteria["E2a"]["threshold"] == "`>= 13 of 14`"
+    assert "the **14** value-bearing units" in criteria["E2a"]["denominator"]
+    assert criteria["E1"]["threshold"] == "`after_share <= 0.50 × before_share`"
+
+
+def test_a_binding_that_names_another_basis_for_the_e2b_floor_is_refused(log_text):
+    """#10989: the population the floor reads is printed, so it is checkable.
+
+    The `surviving_units=` COUNT was anchored to the right line by
+    `test_checker_refuses_a_binding_whose_measured_side_is_unanchored`; the
+    POPULATION it is a count OF was prose. A binding that states a count while
+    naming `atomic_points` as its basis is the pre-fix reading, and it is the one
+    a corpus padded with non-planted rows satisfies — so it is refused rather
+    than read as the count it happens to carry.
+    """
+    scored = _scored(log_text)
+    assert check.check(scored)[0] == [], check.check(scored)[0]
+    wrong = scored.replace("surviving_units_basis=real_facts",
+                           "surviving_units_basis=atomic_points", 1)
+    assert "surviving_units_basis=atomic_points" in wrong  # non-vacuity
+    findings, _ = check.check(wrong)
+    assert any("[V15]" in f and "surviving_units_basis=" in f for f in findings), (
+        findings)
