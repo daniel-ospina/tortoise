@@ -30997,7 +30997,13 @@ class TortoiseSDK:
             "  AND (n.posterior_beta IS NOT NULL OR n.ep_beta IS NOT NULL) "
             "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
             "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
-            "WITH n, a, b, (a*b)/((a+b)*(a+b)*(a+b+1)) AS v "
+            # #11702 cycle 11: `toFloat` on every operand — FalkorDB `/` is
+            # INTEGER division on integer operands, so an int-stored
+            # `(2, 2)` pair computed v = 0 and this scan silently omitted a
+            # genuinely contested claim (see `ep.get_contested_claims`).
+            "WITH n, a, b, (toFloat(a)*toFloat(b))"
+            "/((toFloat(a)+toFloat(b))*(toFloat(a)+toFloat(b))"
+            "*(toFloat(a)+toFloat(b)+1)) AS v "
             "WHERE a > 0 AND b > 0 AND v > $t RETURN n.id, v",
             params={"t": variance_threshold},
         ).result_set
@@ -33619,6 +33625,18 @@ class TortoiseSDK:
         # #9262.)
         _reject_unrepresentable_number("alpha", alpha)
         _reject_unrepresentable_number("beta", beta)
+        # #11702 cycle 11: a Beta operand is a COUNT. The representability
+        # guard accepts a negative float, and `(alpha + beta) > 0` passes for
+        # α=-1, β=3 — which then wrote an out-of-range "mean" (-0.5) into the
+        # SERVED `n.confidence` mirror (the value every read prefers) and
+        # journaled it, so a rebuild reproduced it. Refuse before any write or
+        # in-memory prior, exactly like the guards above.
+        for _name, _val in (("alpha", alpha), ("beta", beta)):
+            if _val < 0:
+                raise ValueError(
+                    f"Beta {_name} must be >= 0 (got {_val!r}): α and β are "
+                    "pseudo-counts, and a negative operand yields a mean "
+                    "outside [0, 1] and a negative variance")
         self._evidence[claim_id] = (alpha, beta)
         # Persist to graph so baselines survive SDK restarts
         proj = self._get_proj()

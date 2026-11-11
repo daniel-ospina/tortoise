@@ -483,9 +483,31 @@ def read_confidence(p) -> float | None:
     always persists the pair together, so a lone parameter is malformed
     state, not a measurement. A degenerate ``alpha + beta <= 0`` is ``None``
     for the same reason (no defined mean).
+
+    ⚠️ **#11702 cycle 11 — the MIRROR is now consulted first.** This was the
+    one read behind a rendered artefact
+    (``tortoise/subgraph_render._confidence_text``) that ignored the
+    ``n.confidence`` flush-mirror, so a mirror-only claim — writable through the
+    public ``update_point(confidence=0.9)``, and what ``compute_confidence`` /
+    ``dream`` write — rendered ``confidence: unmeasured`` while
+    ``annotate_ep_batch``, ``why`` and all three rankers read its real 0.9.
+    Precedence is the shared one (#2206: mirror leads, the pair is the
+    fallback). Only the PRECEDENCE is shared, deliberately: this reader stays
+    NON-TOTAL, because the census needs a non-finite posterior to arrive as
+    ``nan`` rather than ``None`` (it is excluded by an explicit finiteness
+    guard downstream, ``off_neutral_ids``, and #10210 tracks giving "state
+    present but unusable" its own cell). Collapsing it to ``None`` here would
+    make a malformed state indistinguishable from an absent one, which is the
+    very conflation this issue removes.
     """
     if not p:
         return None
+    mirror = p.get("confidence")
+    if mirror is not None:
+        try:
+            return float(mirror)
+        except (TypeError, ValueError):
+            return None  # an unrepresentable mirror is not a belief
     # `is None` (not `or`) so a legitimate 0.0 posterior is never overridden
     # by the prior — "prefers posterior_*" must hold for falsy values too.
     alpha = p.get("posterior_alpha")

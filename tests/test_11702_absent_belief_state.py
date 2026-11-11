@@ -1436,23 +1436,132 @@ def test_relationship_peer_block_uses_the_shared_belief_readers(sdk):
             "the peer block fabricated a mean for a claim with no belief: "
             + repr(peer))
         assert peer["ep_state"] == "absent", peer
-        # `None` (not 0.0) — this block's own convention for "no width
-        # applies" (a mitigation / CORRECTS peer emits `None` too), and it can
-        # never be mistaken for the Beta(1,1) maximum. The `ep` block keeps its
-        # float-typed 0.0 for the same fact; both refuse to invent a number.
-        assert peer["variance"] in (None, 0.0), (
+        # The peer block answers `None` for "no width applies" (a mitigation /
+        # CORRECTS peer emits `None` too), so it can never be mistaken for the
+        # Beta(1,1) maximum. The `ep` block renders the SAME absence as a
+        # float-typed 0.0; the two are deliberately different renderings of one
+        # fact, so this asserts each surface's own contract rather than a
+        # disjunction that accepts either.
+        assert peer["variance"] is None, (
             "the peer block fabricated a WIDTH from the coalesced 1.0 "
             "defaults: " + repr(peer))
-        assert peer["variance"] != pytest.approx(0.0833, abs=1e-3), peer
+        assert ep.variance == 0.0, ep
         assert peer["contested"] is False, (
             "a claim nothing measured entered the CRITICAL class as contested, "
             "where it is exempt from the caps and can displace real peers: "
             + repr(peer))
-        # …and the ep block agrees, which is the whole invariant.
-        assert ep.confidence_mean is None and ep.variance == 0.0, ep
+        # …and the ep block agrees on the VALUE and the state, which is the
+        # whole invariant.
+        assert ep.confidence_mean is None and ep.ep_state == "absent", ep
 
     # A genuinely wide peer keeps its width and its contested flag.
     assert peers[measured]["confidence"] == pytest.approx(0.5, abs=1e-4), peers[measured]
     assert peers[measured]["variance"] == pytest.approx(1 / 12, abs=1e-5), peers[measured]
     assert peers[measured]["contested"] is True, peers[measured]
     assert eps[measured].variance == pytest.approx(1 / 12, abs=1e-5), eps[measured]
+
+
+def test_negative_beta_operands_are_not_a_belief(sdk):
+    """Cycle 11: a NEGATIVE operand passed every pre-existing guard.
+
+    Beta α/β are pseudo-counts. `α=-1, β=3` satisfies `α+β > 0`, so the
+    presence rule called it a belief and the arithmetic produced a mean of
+    -0.5 (or 1.5 for `α=3, β=-1`) and a variance of -0.25 — an out-of-range
+    number that every threshold consumer (`min_confidence`,
+    `topic_summarization`'s "settled", `volunteer._eligible`) read as real and
+    maximally certain. The write path made it worse than before this change:
+    `set_point_baseline` refreshed the SERVED `n.confidence` mirror to it and
+    journaled it, so a rebuild reproduced it.
+    """
+    from tortoise.ranking import StateRanker
+    from tortoise.search_engine import (
+        EP_STATE_ABSENT,
+        _beta_variance,
+        annotate_ep_batch,
+        belief_value,
+        ep_has_belief_cypher,
+        ep_state,
+    )
+
+    # The rules, in isolation.
+    assert belief_value(posterior_alpha=-1.0, posterior_beta=3.0) is None
+    assert belief_value(posterior_alpha=3.0, posterior_beta=-1.0) is None
+    assert _beta_variance(3.0, -1.0) == 0.0
+    assert _beta_variance(-1.0, 3.0) == 0.0
+    assert ep_state(posterior_alpha=3.0, ep_alpha=None,
+                    posterior_beta=-1.0, ep_beta=None) == EP_STATE_ABSENT
+    assert ep_state(posterior_alpha=-1.0, ep_alpha=None,
+                    posterior_beta=3.0, ep_beta=None) == EP_STATE_ABSENT
+
+    # …and the Cypher twin agrees on the live engine.
+    proj = sdk._get_proj()
+    bad = sdk.create_point("statement", "negative beta operand")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 3.0, "
+                 "n.posterior_beta = -1.0", params={"id": bad})
+    present = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN " + ep_has_belief_cypher("n"),
+        params={"id": bad}).result_set
+    assert bool(present[0][0]) is False, (
+        "the Cypher presence rule called a NEGATIVE operand a belief — the "
+        "Python twin says absent, so a surface would read a state the `ep` "
+        "block denies")
+    bd = annotate_ep_batch(proj.g, [bad])[bad]
+    assert bd.confidence_mean is None and bd.ep_state == "absent", bd
+    assert bd.variance == 0.0 and bd.contested is False, bd
+    sig = StateRanker(projection=proj)._fetch_point_signals([bad])[bad]
+    assert sig["confidence"] is None and sig["variance"] == 0.0, sig
+
+    # The write path REFUSES a negative operand rather than persisting it.
+    with pytest.raises(ValueError, match="must be >= 0"):
+        sdk.set_point_baseline(bad, -1.0, 3.0)
+    with pytest.raises(ValueError, match="must be >= 0"):
+        sdk.set_point_baseline(bad, 3.0, -1.0)
+    after = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.ep_alpha, n.ep_beta, n.confidence",
+        params={"id": bad}).result_set[0]
+    assert after[0] is None and after[1] is None, (
+        "a refused baseline still wrote the prior: " + repr(after))
+
+
+def test_contested_claims_reads_an_int_stored_pair(sdk):
+    """Cycle 11: `(a*b)/((a+b)*(a+b)*(a+b+1))` INTEGER-divides on int operands.
+
+    FalkorDB `/` truncates when both operands are integers, and α/β are stored
+    as ints when written as ints. So a genuinely contested integer pair
+    computed `v = 0`, failed `v > threshold`, and the claim was OMITTED from
+    `ep.get_contested_claims` and the PR-prune scan — while
+    `annotate_ep_batch`, `why` and all three rankers reported `variance 0.05,
+    contested True` for it. `toFloat` on every operand, the same guard
+    `analyze._BELIEF` and the ranker reads already carry.
+    """
+    from tortoise.search_engine import annotate_ep_batch
+
+    proj = sdk._get_proj()
+    int_pair = sdk.create_point("statement", "int stored contested pair")["id"]
+    float_pair = sdk.create_point("statement", "float stored pair")["id"]
+    # Written as INTEGERS — the shape that truncated.
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 2, "
+                 "n.posterior_beta = 2", params={"id": int_pair})
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 2.0, "
+                 "n.posterior_beta = 2.0", params={"id": float_pair})
+    stored = proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.posterior_alpha, "
+        "n.posterior_beta", params={"ids": [int_pair, float_pair]}).result_set
+    kinds = {row[0]: (type(row[1]).__name__, type(row[2]).__name__)
+             for row in stored}
+    assert kinds[int_pair] == ("int", "int"), (
+        "fixture did not store integers — the truncation cannot be exercised: "
+        + repr(kinds))
+
+    expected = annotate_ep_batch(proj.g, [int_pair])[int_pair]
+    assert expected.variance == pytest.approx(0.05, abs=1e-6), expected
+    assert expected.contested is True, expected
+
+    from tortoise.ep import TortoiseEP
+    ep_view = TortoiseEP(projection=proj)
+    listed = {c["id"] for c in ep_view.get_contested_claims()}
+    assert int_pair in listed, (
+        "an INT-stored contested pair was omitted by the variance scan — the "
+        "Cypher divided as integers and computed v = 0 while every read "
+        "surface says variance 0.05 / contested: "
+        + repr(sorted(listed)))

@@ -2465,7 +2465,16 @@ class TortoiseEP:
                 "WHERE " + " AND ".join(conds) + " "
                 "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
                 "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
-                "WITH n, a, b, (a*b)/((a+b)*(a+b)*(a+b+1)) AS v "
+                # #11702 cycle 11: `toFloat` on every operand. FalkorDB's
+                # `/` is INTEGER division on integer operands, and α/β are
+                # stored as ints when written as ints (`update_point(2, 2)`) —
+                # so a genuinely contested integer-pair claim computed v = 0,
+                # failed `v > $t`, and was omitted here while
+                # `annotate_ep_batch`, `why` and all three rankers reported
+                # variance 0.05 / contested True for the same claim.
+                "WITH n, a, b, (toFloat(a)*toFloat(b))"
+                "/((toFloat(a)+toFloat(b))*(toFloat(a)+toFloat(b))"
+                "*(toFloat(a)+toFloat(b)+1)) AS v "
                 # Entity labels store their text in name/title — a Point's
                 # ``content``-only read returned None for them.
                 "WHERE v > $t "
