@@ -3062,8 +3062,8 @@ def label_coverage(counts: dict[str, int], declared: frozenset[str],
       `UNMEASURED(...)`, so a caller can tell "nothing was expected of this layer" from "everything
       expected of it was present".
     * `coverage` — **reported, never chased**. `None` at a ZERO POPULATION, because 100 % of 0 is
-      not coverage. ⛔ That is the POPULATION arm (`n > 0`), NOT A4's non-vacuity floor — the floor
-      is `a4_labelled_nodes: 1` (≥1 carrying a DECLARED label), and `non_vacuity` carries THAT.
+      not coverage. ⛔ That is the POPULATION arm (`n > 0`), NOT A4's non-vacuity floor: the floor
+      is `a4_labelled_nodes: 1`, read off the THING/EVENT layers' `non_vacuity` — never `claims`.
     * `undeclared` — kinds present that THIS layer's vocabulary does not declare (the `#9695`
       distinction — "a kind nothing declares" vs "a kind this layer does not declare" — is the
       vocabulary's own answer, and `declared_present`/`declared_absent` carry the other side of
@@ -3120,8 +3120,8 @@ def label_coverage(counts: dict[str, int], declared: frozenset[str],
                 k for k in expected if _cmp(k) not in {_cmp(x) for x in seen})),
         # Reported, never chased: there is no `>= X %` bar on this row.
         "coverage": (labelled / population) if population else None,
-        # A4's `a4_labelled_nodes` non-vacuity floor: **at least one thing or event carrying a
-        # declared label**. "0 of 0 labelled" is not coverage, so an EMPTY layer fails it too.
+        # Per-layer `labelled >= 1` ("0 of 0 labelled" is not coverage, so an EMPTY layer fails it).
+        # ⛔ The REGISTERED `a4_labelled_nodes: 1` floor is the THING/EVENT value — NOT `claims`'s.
         "non_vacuity": labelled >= 1,
     }
 

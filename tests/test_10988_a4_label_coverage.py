@@ -312,8 +312,17 @@ def test_object_kinds_are_compared_CASE_INSENSITIVELY_because_the_ontology_mixes
     cov = probe.label_coverage({"Project": 2}, frozenset({"project"}), layer="things")
     assert cov["labelled"] == 2 and cov["undeclared"] == {}
     # …and the POINT/EVENT layers stay exact: the write validator is exact for those buckets.
+    # ⛔ BOTH layers, each in its own arm: this comment named point AND event while only `claims`
+    # was exercised, so adding `events` to `_A4_CASEFOLDED_LAYERS` credited an `eventKind="Meeting"`
+    # against a declared `meeting` — a FALSE coverage credit — and left the file GREEN (#11837
+    # review round 3, P2, measured).
     exact = probe.label_coverage({"Statement": 1}, frozenset({"statement"}), layer="claims")
     assert exact["undeclared"] == {"Statement": 1}
+    exact_event = probe.label_coverage({"Meeting": 1}, frozenset({"meeting"}), layer="events")
+    assert exact_event["undeclared"] == {"Meeting": 1}, (
+        "the EVENT layer's compare must stay exact-case — case-folding it credits an undeclared "
+        "spelling as coverage, which is the fail-open direction the object layer's fold must not "
+        "be generalised into")
 
 
 def test_the_declared_vocabulary_is_IMPORTED_from_the_product_never_re_spelled():
@@ -333,6 +342,25 @@ def test_the_declared_vocabulary_is_IMPORTED_from_the_product_never_re_spelled()
     assert "meeting" in events, "`meeting` is a core EVENT kind (ONTOLOGY §5)"
     assert any(k.casefold() == "project" for k in objects), "`Project` is a core OBJECT kind"
     assert points != objects and objects != events, "the three layers are three vocabularies"
+
+    # ⛔ MEMBERSHIP IS NOT IMPORT. Every assertion above is satisfied by a LITERAL snapshot of
+    # today's vocabularies — measured GREEN with `known_kinds` swapped for a frozen copy (#11837
+    # review round 3, P2). The import is proven only by changing the PRODUCT's registry and
+    # watching the answer follow: `_a4_declared_kinds` re-imports `known_kinds` on every call, so
+    # patching the module attribute is what a real registry change looks like from here.
+    import tortoise.domain_loader as _dl
+    sentinel = "zz-sentinel-kind-11837"
+    real_known = _dl.known_kinds
+    try:
+        _dl.known_kinds = lambda bucket=None: (
+            (real_known(bucket) | {sentinel}) if bucket == "eventKind" else real_known(bucket))
+        followed = probe._a4_declared_kinds("eventKind")
+    finally:
+        _dl.known_kinds = real_known
+    assert sentinel in followed, (
+        "`_a4_declared_kinds` did not follow the product's registry when that registry changed — "
+        "a re-spelled list or a frozen snapshot passes every assertion above and then rots "
+        "silently the moment a pack declares its next kind")
 
 
 # ── 4. `0 of 0` is not coverage (the non-vacuity floor) ──────────────────

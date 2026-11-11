@@ -40,7 +40,7 @@ its `NULL` denominator.
 | symbol | what it does |
 |---|---|
 | `A4_LAYERS` | the three layers with **their own** kind property — `pointKind` / `objectKind` / `eventKind`. One blended rate is the failure mode §2 W2c lists first: a failing thing/event layer hiding inside a green claim layer |
-| `label_coverage()` | **pure**, so the CI twin can drive it: `NULL` **and** the blank string are ONE absent state; `unlabelled = unlabelled_null + unlabelled_undeclared` exactly, so no present kind leaves the denominator; `declared_present` / `declared_absent` / `undeclared` / `by_kind`; `coverage` is `None` at a zero population (100 % of 0 is not coverage) and `non_vacuity` is the `a4_labelled_nodes: 1` floor |
+| `label_coverage()` | **pure**, so the CI twin can drive it: `NULL` **and** the blank string are ONE absent state; `unlabelled = unlabelled_null + unlabelled_undeclared` exactly, so no present kind leaves the denominator; `declared_present` / `declared_absent` / `undeclared` / `by_kind`; `coverage` is `None` at a zero population (100 % of 0 is not coverage) and `non_vacuity` is `labelled >= 1` **per layer** — ⛔ the registered `a4_labelled_nodes: 1` floor reads the **thing/event** layers' value, never `claims`'s (which is emitted uniformly and is NOT the floor) |
 | `_a4_declared_kinds()` | the layer's declared vocabulary, **imported** (`domain_loader.known_kinds`) after `import tortoise.sdk`, because the SDK's own `register_kind` calls are half the vocabulary — §3 below is why that import is load-bearing |
 | `_a4_claim_diagnostics()` | the typed / `statement` / `NULL` shares over CLAIMS, keeping the `is_episodic`/`is_operator` exclusion (turn rows are written `pointKind='event'`; 159 of the committed corpus's 354 Points are turn rows) |
 | `_a4_writer_attribution()` | the per-writer split, by **reproduction** (see §4) |
@@ -167,5 +167,5 @@ VACUOUS rather than passing for the wrong reason.
   `_a4_label_coverage` calls `label_coverage(...)` with no `expected=` set, so `expected_absent` carries
   the `UNMEASURED(...)` reason rather than a list of kinds. The information is not lost — `declared_absent`
   reports every declared kind the layer does not show — but turning *"not shown"* into *"absent against
-  an expectation"* needs a corpus declaration, which is a corpus fact (`04-plan.md` §3.1) and not
-  something a graph census can derive (`#11837` review, P2).
+  an expectation"* needs a corpus declaration — *which* kinds `should appear` is the plan's own
+  phrase in §7 E2E-8, a corpus fact no graph census can derive (`#11837` review, P2).
