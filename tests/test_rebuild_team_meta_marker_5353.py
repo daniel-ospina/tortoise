@@ -393,9 +393,15 @@ def test_team_meta_section_and_validator_are_wired():
     """The section cannot silently fall out of the sidecar plumbing.
 
     FAILING VALUE: `team_meta` is in `_SNAPSHOT_SECTIONS`, has an entry check,
-    and the read/write version is 6 — one increment past #4653's v5, so a
-    pre-#5353 binary REFUSES a v6 file instead of ignoring the section and
+    and the read/write version is at least 6 — one increment past #4653's v5,
+    so a pre-#5353 binary REFUSES a v6 file instead of ignoring the section and
     wiping. Removing any one of these silently de-carries the class.
+
+    The version assertion is `>= 6` rather than `== 6` on purpose: the pin's
+    claim is "this section landed at v6", which a LATER bump does not weaken
+    (v7 added `pack_selection`, #9752, by the same refuse-don't-wipe argument).
+    Pinning the literal would make every future section bump fail HERE, which
+    is a false red on a test about `team_meta`.
 
     REACHABLE: pure import-level assertions on the module constants.
     """
@@ -414,7 +420,9 @@ def test_team_meta_section_and_validator_are_wired():
         "class from the capture, the restore and the tests")
     assert "team_meta" in _SNAPSHOT_SECTIONS
     assert _SNAPSHOT_ENTRY_CHECK["team_meta"] is _validate_team_meta_entry
-    assert _PREWIPE_SNAPSHOT_VERSION == 6
+    assert _PREWIPE_SNAPSHOT_VERSION >= 6, (
+        "`:team_meta` landed at v6; a LOWER read/write version would let a "
+        "pre-#5353 build accept the file and ignore the section")
     assert set(_PREWIPE_SNAPSHOT_READABLE_VERSIONS) >= {1, 2, 3, 4, 5, 6}
     # The union's return literal is hand-written per section, so pin its key
     # set against the tuple: a section added to `_SNAPSHOT_SECTIONS` and
@@ -544,10 +552,13 @@ def test_rebuild_all_reports_a_pre_5353_sidecar_as_state_unknown(
     which the marker is lost.
     """
     from tortoise import projection as pr
+    from tortoise.projection import _PREWIPE_SNAPSHOT_VERSION
 
     written: list[dict] = []
     real = pr._write_prewipe_snapshot
-
+    # The version of THIS build's own rescue file (the middle write below).
+    # Pinned to the constant rather than a literal: the claim is "the run's own
+    # current-format sidecar carries the flag", which survives a section bump.
     def spy(path, payload):
         written.append(payload)
         return real(path, payload)
@@ -574,7 +585,8 @@ def test_rebuild_all_reports_a_pre_5353_sidecar_as_state_unknown(
     # same writer), this run's own current-version rescue file, and the
     # entry-less retirement artifact. Pin the middle one.
     own = [p for p in written
-           if p.get("version") == 6 and not p.get("completed")]
+           if p.get("version") == _PREWIPE_SNAPSHOT_VERSION
+           and not p.get("completed")]
     assert own and own[-1].get("team_meta_unknown") is True, (
         "#5353: the UNKNOWN must ride THIS run's sidecar, or a second "
         "interruption leaves a present-but-empty section that reads as "
@@ -656,10 +668,13 @@ def test_rebuild_all_honours_a_carried_team_meta_unknown_flag(tmp_path, caplog):
     version gate fired. The version gate has its own pin,
     `test_rebuild_all_reports_a_pre_5353_sidecar_as_state_unknown`.
     """
+    from tortoise.projection import _PREWIPE_SNAPSHOT_VERSION
+
     sdk, events = _mk_sdk(tmp_path)
     payload = _sidecar_payload(
         batch_snapshot=[{"id": "b1"}], team_meta_unknown=True)
-    assert payload["version"] == 6 and payload["team_meta"] == [], (
+    assert (payload["version"] == _PREWIPE_SNAPSHOT_VERSION
+            and payload["team_meta"] == []), (
         "the fixture must plant the CURRENT version with a present-but-empty "
         "section, so only the inherited flag can produce the UNKNOWN")
     _plant(Path(_sidecar_path(events)), payload)

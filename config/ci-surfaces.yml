@@ -1926,6 +1926,15 @@ surfaces:
   # this arm a hosted_api-only change to the guard probe could ship without the
   # pin that says a rebuilt graph must read as provisioned.
   - test_rebuild_team_meta_marker_5353.py
+  # #9752: the :PackSelection pack-set marker across the same wipe+replay. The
+  # `pack_selection` sidecar section lives in tortoise/projection/ (core
+  # fallback), but the state the marker pins is written and read by
+  # `tortoise/pack_state.py` AND served by the per-graph `GET`/`PUT
+  # /v1/graphs/{graph_id}/packs` routes in `tortoise/hosted_api.py` (an exact
+  # `api` SOURCE_PATTERN) — so without this arm a hosted_api-only change to the
+  # management surface could ship without the pin that says a rebuild must not
+  # re-admit a pack an admin removed.
+  - test_rebuild_pack_selection_marker_9752.py
   # #2081 (epic #2080 W4 phase 2): the outbound webhook delivery layer —
   # subscription registry, dispatcher, retry/backoff, receipts, HMAC signing,
   # the SSRF-gated registration REST routes (POST/GET/DELETE
@@ -5785,6 +5794,12 @@ surfaces:
   # post-restore marker verification, both in tortoise/projection/ (core
   # fallback), over the `#2789` guard's probe in tortoise/hosted_api.py.
   - test_rebuild_team_meta_marker_5353.py
+  # #9752: the same wipe+replay drives the `pack_selection` sidecar section and
+  # the post-restore marker verification, both in tortoise/projection/ (core
+  # fallback), over `tortoise/pack_state.py`'s marker read
+  # (`resolved_pack_set`) — none of which matches a named SOURCE_PATTERN, so
+  # this arm is what runs it on a projection/pack_state change.
+  - test_rebuild_pack_selection_marker_9752.py
   # #9210: the SAME wipe+replay, read from the other side — every non-record
   # snapshot-restore leg (`:Batch`, `:Session`, onboarding, `:TeamMeta`, the
   # config registry, the `#4305` derived Point properties, the

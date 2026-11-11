@@ -215,6 +215,35 @@ property). It gets its own declared sidecar sections instead:
   restore. A marker that came back absent is reported (never a silent success),
   and a rescue file written before this class had a vehicle reports
   `team_meta_state_unknown` instead of assuming the class was never there.
+- `:PackSelection` — the per-graph **pack-set marker**, preserved by the
+  `pack_selection` section (**#9752**; feature #2728 / PR #8648). It is ONE node
+  per graph with **no identity property at all** (`pack_state` MERGEs
+  `(s:PackSelection)` — the graph is the isolation boundary, so no id is
+  needed), so it fits neither the config registry above (a row keyed on one
+  string identity property captures NOTHING — `_capture_config_snapshot`
+  silently skips an instance whose identity is not a string, which is the inert
+  fix the #9752 decision relay rules out) nor a container section (keyed on
+  `id`). Its **presence** is the state: it is what makes an intentional EMPTY
+  set expressible, what suppresses `get_tenant_packs`' self-heal, and what
+  carries the `revision` the per-graph `PUT` uses for optimistic concurrency. A
+  rebuilt graph that lost the marker reads as **never configured**, so
+  `resolved_pack_set` falls back to the records/data/union arms — a pack the
+  admin **removed** is re-admitted into the approved set, its `revision` resets
+  (measured: `configured=True revision=1` → `configured=False revision=0` with
+  one `removed` row), and the Settings copy then claims the catalog union over a
+  set that still holds that namespace. The class is **one per graph by
+  construction**, so the section carries at most one marker: the **highest
+  `revision`** wins (the value an optimistic-concurrency client holds, so the
+  merge never lands the graph on an older decision than one that was actually
+  made), a collapse is reported rather than silent, and the restore is an
+  idempotent `MERGE … ON CREATE SET` so a partially-restored graph cannot
+  accumulate a duplicate on retry. The post-restore check requires the captured
+  property map back **exactly** — a concurrent post-wipe `set_graph_packs`
+  cannot make the run report a marker it did not restore. A marker that came
+  back absent is reported (`pack_selection_gap`, never a silent success), and a
+  rescue file written before this class had a vehicle reports
+  `pack_selection_state_unknown` rather than assuming the graph was never
+  configured.
 <!-- config-registry:end -->
 
 ### The one carried high-water mark: `:GraphEventMeta`
@@ -380,7 +409,8 @@ this block, so naming one here would read as re-enrolling it.)
 **Operator audit** — read-only; it enumerates the configuration classes the
 registry declares, the container nodes the declared sidecar sections preserve
 (`:Batch`, `:Session`, `:OnboardingState`/`:OnboardingStep`), the carried
-first-org marker (`:TeamMeta`), and the one carried counter
+first-org marker (`:TeamMeta`), the carried pack-set marker
+(`:PackSelection`), and the one carried counter
 (`:GraphEventMeta`) by the query's last legs, so an operator can tell what
 survived a rebuild and the query cannot silently under-report after a class is
 added. The onboarding rows are pinned by the doc-consistency test (a section's
@@ -417,6 +447,9 @@ UNION ALL
 MATCH (t:TeamMeta)
 RETURN 'TeamMeta' AS cls,
        coalesce(t.name, '') + '@' + coalesce(t.created, '') AS ident
+UNION ALL
+MATCH (s:PackSelection)
+RETURN 'PackSelection' AS cls, toString(s.revision) AS ident
 ```
 <!-- config-registry:end -->
 
