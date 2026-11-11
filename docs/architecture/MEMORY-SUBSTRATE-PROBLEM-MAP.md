@@ -7,8 +7,8 @@ created: 2026-11-06
 subjects.team: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise, memory-substrate, issue 2820, issue 4917
-measured_at_commit: 23d227c53
-measured_at: 2026-11-06
+measured_at_commit: f70d884b7f
+measured_at: 2026-11-11
 ---
 
 # The memory-substrate problem map — re-cut
@@ -18,10 +18,10 @@ measured_at: 2026-11-06
 > artifact: four defect classes, five workstreams, a dependency order, and 26
 > linked issues. Its body has not changed since, and the tree has moved a very
 > long way underneath it (WS-A/WS-B/WS-C designs landed in
-> `docs/plans/2026-09-10-*.md`; 21 of the 26 rows' fixes merged, across ≈40
+> `docs/plans/2026-09-10-*.md`; 22 of the 26 rows' fixes merged, across ≈45
 > separate changes). Reading the issue today therefore tells a lane the opposite of
 > the truth about most of its rows — it reads as 26 problems waiting, when it is
-> **21 fixed and 5 open**.
+> **22 fixed and 4 open**.
 >
 > **This page is the re-cut.** Same 26 entries, same four patterns, same
 > workstreams — and, for each entry, **what the tree says now** rather than what
@@ -66,14 +66,14 @@ So: a closure can lag a fix, and a fix can lag a closure. The anchor+pin pair is
 what this map trusts.
 
 The other direction is not a tracker error and is deliberately NOT in that table:
-`#2782` and `#2684` are **OPEN** in the tracker and **OPEN** here, and that
-verdict is right in both cases — what an OPEN does not tell you is how much
-landed. `#2782`'s representation half shipped (§6; `#8641`, `#8976`, pinned by
-`tests/test_money_value_2782.py`) while its cross-company identity half did not,
-and `#2684`'s mechanism landed (`#8659`'s stamp, `#8966`'s address, pinned by
+`#2684` is **OPEN** in the tracker and **OPEN** here, and that verdict is right
+in both places — what an OPEN does not tell you is how much landed. `#2684`'s
+mechanism landed (`#8659`'s stamp, `#8966`'s address, pinned by
 `tests/test_extractor_v2.py::TestValueVerbSpan2684`) while the slice its title
 names has not run. So an OPEN is a claim that needs its own anchor+pin, exactly
-like a fix — which is why both rows carry one. Tracker state is **not** a column
+like a fix — which is why the row carries one. `#2782` sat in this sentence until
+2026-11-11, when the tracker closed it `COMPLETED` and the row was re-measured
+into VERIFIED-FIXED (§6, §10). Tracker state is **not** a column
 in the row tables: it is recorded only where it is the point (§1, §10), because
 a state column would invite exactly the reading this page exists to stop — that a
 closed issue is a fixed defect, or an open one an unfixed one.
@@ -94,23 +94,23 @@ closed issue is a fixed defect, or an open one an unfixed one.
 
 | Status | Rows |
 |---|---|
-| VERIFIED-FIXED | 21 |
-| OPEN | 5 |
+| VERIFIED-FIXED | 22 |
+| OPEN | 4 |
 | UNKNOWN | 0 |
 | **Total tracked** | **26** |
 
-| #2820 as filed (2026-09-10) | Now (2026-11-06) |
+| #2820 as filed (2026-09-10) | Now (2026-11-11) |
 |---|---|
 | WS-A write-path integrity — "a decision + three mechanical bugs" | **5 of 5 rows fixed**; the write contract design itself is in `docs/plans/2026-09-10-write-contract-five-doors.md` |
 | WS-B ontology substrate — "~2 design decisions + mostly mechanical bugs" | **7 of 8 rows fixed** (#2787 OPEN: the kind-bucket rule is not implemented); the property-declaration design is in `docs/plans/2026-09-10-ws-b-pack-property-declaration.md` |
-| WS-C state & value model — "~25 open decisions, owner-gated" | **3 of 6 fixed**; the numeric-normalization design is in `docs/plans/2026-09-10-ws-c-numeric-normalization.md`; **#2730, #2782 and #2684 remain open** |
+| WS-C state & value model — "~25 open decisions, owner-gated" | **4 of 6 fixed**; the numeric-normalization design is in `docs/plans/2026-09-10-ws-c-numeric-normalization.md`; **#2730 and #2684 remain open** |
 | WS-D venture pack delivery | **3 of 4 fixed** net of #2725/#2726/#2728; **#2696 (epic) remains open** |
 | WS-E repo / CI hygiene | **3 of 3 fixed** |
 
 **The dependency order the map proposed is spent.** It read
 `E ──► A,B ──► C ──► D`. E's three rows closed on 2026-09-10 (#2749, #2748) and
 2026-09-27 (#2734); A is fully closed; B is closed but for #2787's bucket rule; C
-is down to three rows (#2730, #2782, #2684), **none** of which blocks D (D's
+is down to two rows (#2730, #2684), **none** of which blocks D (D's
 ontology — #2725 — shipped in #3419 on 2026-10-06). What is left of C is **value
 fidelity and entity binding**, not lifecycle plumbing, so the chain that made D
 wait no longer exists. Do not plan against it.
@@ -178,8 +178,8 @@ Object kinds that violate the bucket rule is a validation error naming the rule*
 The relation validator carries the **shape** check only (`mechanism must be IMPL or
 NAND`); no kind-bucket coherence check exists — `grep -n 'bucket'
 tortoise/pack_registry.py` returns the `storeAs` stream comment, the #2781
-reference buckets, and the `LEGACY_KIND_ALIASES` expansion buckets (`:2943`),
-and never a relation arm.
+reference buckets, and the `LEGACY_KIND_ALIASES` expansion buckets (in
+`_build_kind_expansions`), and never a relation arm.
 
 This row shipped as **VERIFIED-FIXED** on the first landing, on an inference
 ("conservatively … subsumed by the mechanism-inversion table") rather than a
@@ -199,18 +199,35 @@ was never decided, so both are half-built.*
 |---|---|---|---|---|
 | #2792 | configurable per-graph pipelines — packs ship default stages, each graph can customise them, stage changes are dated events | VERIFIED-FIXED | `639137d4d` | `tests/test_pipeline_2792.py` |
 | #2729 | pack-declared per-kind status folds — the hardcoded Object `status` event→status map generalised | VERIFIED-FIXED | `72e42deea` | `tests/test_status_folds_2729.py` |
-| #2782 | money has no representation — `amount`+`currency` on entities, and same-named money items must not merge across portfolio companies | OPEN | `b408d8588` | `tests/test_money_value_2782.py` |
+| #2782 | money has no representation — `amount`+`currency` on entities, and same-named money items must not merge across portfolio companies | VERIFIED-FIXED | `b408d8588`, `ef405bd3e71`, `ccf5c4036c09` | `tests/test_money_value_2782.py` |
 | #2817 | no numeric/locale normalization anywhere — PT-BR/EN amounts cannot be canonicalized (8 failure modes) | VERIFIED-FIXED | `79c13050c`, `29cc564e1` | `tests/test_value_normalizer_2817.py` |
 | #2730 | entity attachment & disambiguation — binding facts to the right Subject/Object (name collisions, aliases, placeholders, recurring people) | OPEN | `6a73ea7ea` | `tests/test_entity_attachment_brief_claims.py` |
 | #2684 | verbatim value-spans on value-bearing points — a claim carries its exact value **and** the source span, and assembly surfaces it | OPEN | `2312845b6`, `fda19cf93` | `tests/eval/write_path/test_value_span_census_2684.py` |
 
-**#2782 — OPEN, and the row states which half.** The *representation* landed: a
-flat, currency-safe money value on entities (#8641) and on the Point lane
-(#8976), pinned by `tests/test_money_value_2782.py`. The *identity* half — two
-same-named money items under different portfolio companies must stay distinct —
-did not: that file says so in its own docstring ("staying distinct … is #2730 and
-is NOT papered over here"), and #2730's brief is a research artifact, not a
-mechanism. So the issue is open on the indicator it was really filed for.
+**#2782 — VERIFIED-FIXED, and the row records which clause moved.** Re-measured
+on 2026-11-11, after the issue closed `COMPLETED` (`#11836`, merge
+`ccf5c4036c09`; its update-door residual `#11863` closed the same hour): the
+*representation* landed earlier — a flat, currency-safe money value on entities
+(#8641) and on the Point lane (#8976) — and the **write boundary**, which is what
+"money has no representation" was really about, refuses the malformed shapes it
+can see at the SDK/MCP props doors and grades an *update* on the state it leaves
+(`money_view_after_update`) rather than on the bag. Pinned by
+`tests/test_money_value_2782.py`, whose `TestWriteBoundary` is the arm that fails
+if the gate is removed.
+
+The row's second clause — two same-named money items under different portfolio
+companies must stay distinct — is **not money's**: the closing measurement put it
+on the **identity** defect this page already tracks as **#2730** (OPEN, below),
+whose brief is a research artifact rather than a mechanism. So the row moves
+without claiming money identity shipped: a reader asking "is money representable,
+validated at the door, and summable?" gets yes with a pin, and a reader asking
+for cross-parent money identity is sent to #2730 by name. The one bound the fix
+states about itself — a CREATE door grades the caller's props bag because a
+create predicate cannot see the target it will MERGE onto, so a re-create through
+the `create_object` ON MATCH arm, or one through `EventAPI.add_point(id=…)`
+against an existing point, can still install a lone exponent — is its own OPEN
+ticket, **#11868**, which this page does not
+track.
 
 **#2684 — OPEN, and the mechanism is not what is missing.** The mechanism landed
 (#8659's stamp, #8966's "a verbatim quote is not yet an address to the value") and
@@ -268,7 +285,7 @@ of its own indicators:
    this paragraph is longer than the row. It holds *structurally*: both readers
    behind the view go to the SAME on-disk registry, `domain_loader._get_registry()`,
    read at call time — `pack_state._resolve_catalog()` for the graph's own rows and
-   `hosted_api._pack_catalog_rows()` (":25840") for the add-list — so there is no
+   `hosted_api._pack_catalog_rows()` for the add-list — so there is no
    hosted-only catalogue path and a pack dropped in the directory appears in both
    deployments' views. `test_get_offers_catalog_packs_the_graph_does_not_have`
    and the degraded-catalog arms (`test_a_degraded_catalog_is_reported_not_papered_over`,
@@ -286,30 +303,29 @@ fix**, and nobody had re-read this one against the tree.
 
 ## 8. What is actually left
 
-Five rows, and four of them are defects:
+Four rows, and three of them are defects:
 
 1. **#2696** — an epic, not a defect. Needs `epic-workflow`, with its human gates.
-2. **#2782** — the cross-company identity half of money. Blocked on nothing
-   mechanical; it is a decision about what "the same money item" means across
-   parents, which is why it has stayed open since 2026-09-10.
-3. **#2684** — the value-span slice: one extractor re-ingest + assembly
+2. **#2684** — the value-span slice: one extractor re-ingest + assembly
    surfacing. Its measurement prerequisite is built and committed.
-4. **#2787** — relation coherence: the write-path verdict shipped, the
+3. **#2787** — relation coherence: the write-path verdict shipped, the
    **IMPL/NAND kind-bucket validation** did not (see §5). It is a *validator*
    gap, not a runtime one, so it cannot corrupt data — it can let a pack declare
    an incoherent relation.
-5. **#2730** — entity attachment. **The research is done and the mechanism is
+4. **#2730** — entity attachment. **The research is done and the mechanism is
    not built** (#8639 completed the brief's alias-resolution rung and states the
    surviving defects: the alias surface form is lost, so a re-ingest re-MERGEs
-   into a second node, and nothing folds suffixes or honorifics). The pin on this
+   into a second node; what HAS closed is the mint of an *unresolved* identity
+   (`#11693` HOLDs it instead of minting it) — the surface-form arm above is
+   still open — and nothing folds suffixes or honorifics). The pin on this
    row asserts the BRIEF's wording, not the behaviour — this row is OPEN for
    exactly that reason, and a reviewer caught it claiming otherwise.
 
-Ordering, if anyone asks: **#2782, #2684 and #2730 are the ones with a customer
-consequence** (a wrong total is a wrong answer; an unsurfaced span is an
-unverifiable one; a re-MERGEd entity is two customers' facts becoming one).
-`#2696` is a pipeline with its own process. That is a priority statement, not a
-schedule.
+Ordering, if anyone asks: **#2684 and #2730 are the ones with a customer
+consequence** (an unsurfaced span is an unverifiable one; a re-MERGEd entity is
+two customers' facts becoming one). The money write gate's own stated create-door
+bound is **#11868**, its own ticket, which this page does not track. `#2696` is a
+pipeline with its own process. That is a priority statement, not a schedule.
 
 ---
 
@@ -326,12 +342,9 @@ The `TORTOISE_TEST_CARVE_OUT=1` is not decoration: this suite is DB-free, and on
 a box with no database the default conftest refuses the run outright
 (`default pytest requires TORTOISE_DB_URI (epic #1647 P4)` — one refusal per
 collected test, 58 at this head), which reads as the guard being broken rather
-than the target being absent. That number is a property of the RUN, not of the
-document, and nothing reads it (see the residuals below) — and in particular it
-is NOT a fact about `measured_at_commit`: this test file does not exist at
-`23d227c53` (`git cat-file -e 23d227c53:tests/test_problem_map_2820.py` exits
-128), so the count is re-derived with `--collect-only` rather than read off the
-commit the page is anchored to.
+than the target being absent. That number is a property of the RUN, and nothing
+reads it (see the residuals below): it is re-derived with `--collect-only`
+rather than read off the page's `measured_at_commit`.
 
 The checker re-measures, offline and without network access:
 
@@ -375,8 +388,8 @@ The checker re-measures, offline and without network access:
    `**N fixed · N open · N unknown**` headline must equal §2's**, read from the
    ONE index row whose LAST cell is this file's path (a mention of the filename
    elsewhere is a cross-reference, not a registration). The index is the half
-   most readers meet first, and it said `22 fixed · 4 open` on this page's first
-   landing while §2 said something else. Like a pin, an index that cannot be
+   most readers meet first, so a stale headline there is the same defect as a
+   stale count here. Like a pin, an index that cannot be
    **read** (a directory at that path, an unreadable file) is NO ANSWER (a state
    error, exit 2) rather
    than drift, because registration was never checked.
@@ -389,6 +402,18 @@ rounding:**
   and §8 carries neither date nor commit — the commit for the whole page is the
   frontmatter's `measured_at_commit`, restated in §10. Do not read §2 or §8 as
   self-dating.
+- **A status token SWAPPED between two rows this revision does not name.** Every
+  comparison in the pin file is a COUNT, so one row demoted to `OPEN` while
+  another is promoted holds §2's tally, the abstract, the index headline and the
+  WS-C cell — measured: reverting `#2782` to `OPEN` **with** `#2684` promoted to
+  `VERIFIED-FIXED` read CLEAN under `tools/problem_map_check.py --check` and
+  passed the whole suite before review caught it. The re-cut row and §8's four
+  survivors are therefore pinned **by issue**
+  (`tests/test_problem_map_2820.py::test_the_recut_row_and_survivors_hold_their_status_by_ISSUE`),
+  which reds that swap; the same swap between two of the other rows is still
+  invisible. Pinning all 26 is the only complete form and it is not taken on
+  here: it would make every future re-cut edit the pin file as well, and this
+  page's re-cuts are hand measurements. Named sets, not a claim of coverage.
 - **Anchor RELEVANCE.** The guard proves an anchor exists and is merged. It cannot
   prove the commit is *the fix* — a lane once cited a merge that mentioned nothing
   of the issue (this page carried exactly that defect until review caught it on
@@ -415,9 +440,9 @@ rounding:**
   §10, and §9's own refusal count.** The counts §2 states in its three status
   rows, its total, its five per-workstream cells and the abstract ARE compared
   (plus the index row's headline, in `check_registration`). These are not: §1's
-  census sentence; §2's `(#2787 OPEN: …)`, `**#2730, #2782 and #2684 remain
-  open**` and `**#2696 (epic) remains open**`; §8's "Five rows, and four of them
-  are defects"; §10's census prose; and §9's own refusal count above. Deciding
+  census sentence; §2's `(#2787 OPEN: …)`, `**#2730 and #2684 remain open**` and
+  `**#2696 (epic) remains open**`; §8's "Four rows, and three of them are
+  defects"; §10's census prose; and §9's own refusal count above. Deciding
   "which rows does this
   sentence call open" means reading prose — and §8's second clause additionally
   needs to know which row is an epic, the tracker half this guard refuses to
@@ -449,9 +474,9 @@ rounding:**
   regressions for them are in `tests/test_projection.py`, not in the A10 suite the
   row pointed at). Every fact those two corrections rest on is present at
   `23d227c53` — `git cat-file -e 23d227c53:website/apps/dashboard/src/packs.js`,
-  and `#2795`'s own regression tests in `tests/test_projection.py` — so the page's
-  `measured_at_commit` did not move; that is the point of an OPEN being a claim
-  with evidence behind it too.
+  and `#2795`'s own regression tests in `tests/test_projection.py` — so that pass
+  did not move the page's `measured_at_commit`; that is the point of an OPEN being
+  a claim with evidence behind it too.
 - The three WS design documents this re-cut assumes are already committed:
   `docs/plans/2026-09-10-write-contract-five-doors.md`,
   `docs/plans/2026-09-10-ws-b-pack-property-declaration.md`,
@@ -463,7 +488,36 @@ rounding:**
   closed, its *reason* says abandoned, and the file it named is lint-clean), one
   closed COMPLETED with the mechanism unbuilt (**#2730**), and one **OPEN** whose
   fix outran it (**#2728** — both halves landed in `08a6b0288` on 2026-10-18 and
-  are pinned in the tree) — the four cases §1 exists to keep honest. `#2782` and
-  `#2684` are OPEN in both places and are therefore NOT in that census: their
-  state is right, it is just silent about how much landed, which §1's paragraph
-  after the table records.
+  are pinned in the tree) — the four cases §1 exists to keep honest. `#2684` is
+  OPEN in both places and is therefore NOT in that census: its state is right, it
+  is just silent about how much landed, which §1's paragraph after the table
+  records.
+- **Re-measured again on 2026-11-11 at `f70d884b7f`**, because the tracker moved
+  after this page was cut: `#2782` closed `COMPLETED` on 2026-11-11
+  (`#11836`, merge `ccf5c4036c09`; its update-door residual `#11863` closed the
+  same hour) while the row still said OPEN. The row is now VERIFIED-FIXED on §1's
+  criterion — anchors `b408d8588`, `ef405bd3e71`, `ccf5c4036c09`; pin
+  `tests/test_money_value_2782.py` — and its distinctness clause is recorded as
+  **#2730**'s, which is OPEN here on its own evidence. §2's counts, the WS-C cell,
+  the abstract and the `docs/00_index.md` headline moved with it (21/5 → 22/4).
+  The other four survivors were re-measured in the same pass and **none changed
+  status**: `#2787` (`grep -n 'bucket' tortoise/pack_registry.py` still returns
+  no relation arm; aside from this map's own re-cut, no commit since 2026-11-06
+  mentions it), `#2730` (the tracker says CLOSED **COMPLETED** and this page keeps
+  it OPEN because the mechanism is unbuilt — §1's table; the arm §8 records as
+  closed is the *unresolved-identity* one, measured at this head: `556e581ceb`'s
+  `test_the_graph_node_count_does_not_increase` passes, so an unresolved identity
+  is HELD rather than minted, and what stays unbuilt is surface-form retention
+  plus the honorific/name-suffix folding (`grep -ci honorific
+  tortoise/extractor_v2.py` → 0)),
+  and `#2684` / `#2696`
+  OPEN in the tracker.
+
+  ⛔ **The guard cannot see this class of drift at all**, and that is why it is
+  recorded by hand: an OPEN row carries an anchor and a pin the guard validates,
+  but nothing validates *"the issue this row calls open is now closed, and what it
+  was really waiting for has been measured onto another row"* — the tracker is
+  exactly the source `tools/problem_map_check.py` refuses to read. A CLOSED row's
+  fix can therefore ship and leave the page saying OPEN (this one did, for four and
+  a half hours of lane time — `#2782` closed at 14:17Z, the row moved at 18:42Z),
+  and only a re-measurement pass catches it.
