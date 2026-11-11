@@ -249,7 +249,7 @@ through `referentiality.ENV_FLAG`), `TORTOISE_CHANGE_FEED` (an ambient `=1` adds
 to the graph the run writes), and the two confidence gates `TORTOISE_SUBJECT_TAU_HI` /
 `TORTOISE_SUBJECT_TAU_LO` (read through a parameter by `subject_binding`, and they decide whether
 the `:aboutSubject`/`:aboutObject` edge is written at all), plus `TORTOISE_LABEL_ORDER_SEED` (inert while
-`TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split), `TORTOISE_CONTEXT_ENRICH` (the per-turn REWRITE of the text each turn embeds, gated in `context_enrich.enrich_enabled` and reached from `sdk.capture_session` as `enrich_fn=_capture_enriched_texts`; fail-safe OFF) — all pinned **unset** — and `TORTOISE_JSON_MODE`, pinned to **`1`** because its absent state is already ON and it is read PER CALL to flip the request's `response_format` (`model_adapters`), and `TORTOISE_IDENTIFIER_TOKENS`, pinned to **`1`** because its absent state is already ON (`sparse.py:226`, `env_flag(IDENTIFIER_ENV, True)`) and it rewrites `search_keys` on every `:Point` the run writes (`projection/entities.py:1239`, reached from `create_point`); the registered corpus yields no aliases either way, measured — and
+`TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split), `TORTOISE_CONTEXT_ENRICH` (the per-turn REWRITE of the text each turn embeds, gated in `context_enrich.enrich_enabled` and reached from `sdk.capture_session` as `enrich_fn=_capture_enriched_texts`; fail-safe OFF) — all pinned **unset** — and `TORTOISE_JSON_MODE`, pinned to **`1`** because its absent state is already ON and it is read PER CALL to flip the request's `response_format` (`model_adapters`), and `TORTOISE_IDENTIFIER_TOKENS`, pinned to **`1`** because its absent state is already ON (`sparse.py:226`, `env_flag(IDENTIFIER_ENV, True)`) and it rewrites `search_keys` on every `:Point` the run writes (`projection/entities.py:1478`, reached from `create_point`); the registered corpus yields no aliases either way, measured — and
 `TORTOISE_STATE_VALUE_VERBATIM`, pinned to **`1`** because its absent state is already ON
 (`extractor_v2._state_value_verbatim_enforced`, `env_flag(…, True)`) and it is read PER POINT at
 the emit site, where it decides whether a REWRITTEN value is WITHHELD (`=0` writes what the shipped
@@ -1200,7 +1200,7 @@ except where noted; the alternative was to omit the provenance and let a reader 
 | 90 of 90 m2 baseline | `tests/eval/write_path/baselines/m2.json` at this `fixtures_hash` |
 | 53/37, 7/8, 5/9, 21/8 split counts | the per-session sums above, partitioned by §2.1 |
 | 9 of 15 shape coverage (60%) | §1.3, `is_positively_bare_definite_description` |
-| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:11803-11825` (`_collect_classify_items`, the collector's item set), `:14205` and `:14358` (the two `if items:` gates, one per classify pass) |
+| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:11803-11825` (`_collect_classify_items`, the collector's item set), `:14222` and `:14375` (the two `if items:` gates, one per classify pass) |
 | 148 / 433 (0.34180), 148 / 383 (0.38642) | `capstone-measured-e0fc940b.log`'s `E3 census` block: `e3 label=Point nodes=338 anchored=141`, `Object 50/0`, `Event 45/7`, no `Document` written (§10.1) |
 | 141/150 (0.940000), 159 turn rows, 29 operator Points | the same census block's `point composition` line — reported, NOT adopted as E3's denominator (§10.1) |
 | 5/25 (20%) vs 13/25 (52%) recovered; 0.4800 raw absolute on n=25 | §10 @ `ecc7bc8ca` (run 1 losses 80.0%/48.0%) and `capstone-measured-e0fc940b.log`'s E5 row (§10.2) |
@@ -2164,7 +2164,7 @@ the condition; the gate reads the declaration below instead of asserting eight.
 
 `_collect_classify_items` (`tortoise/extractor_v2.py:11803-11825`) collects only candidates whose kind
 is **missing or the `unclassified` sentinel**. Both classify passes are gated on that list being
-non-empty — `if items:` at `:14205` (the S2 pass) and `:14358` (the post-S4 pass). So S2.3 has work **iff the S2 map left
+non-empty — `if items:` at `:14222` (the S2 pass) and `:14375` (the post-S4 pass). So S2.3 has work **iff the S2 map left
 something untyped** — and that is a property of the candidate set, not of the pipeline's health. A
 corpus whose map assigns a concrete kind to every candidate legitimately idles the pass.
 
@@ -2208,7 +2208,7 @@ evidence or its evidence issue.
    run log, so making a step conditional is a reviewed edit to a hash-pinned artefact rather than a
    lane's local choice. A log whose declaration the frozen record does not confirm is **refused**.
 
-**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:14218`, `classify(S2) failed` / `:14369`, `classify(union) failed`) leaves
+**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:14235`, `classify(S2) failed` / `:14386`, `classify(union) failed`) leaves
 the *same* empty `s2`/`union` block as an idle pass — `#9823` measured that. Accepting a bare empty
 block would therefore hand a **crashed** classify pass the same verdict as a pass with nothing to do,
 which is the fail-open shape a gate may not have. The failure is visible: the extractor appends
@@ -2299,3 +2299,34 @@ to answer.
 - **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
   touched — every §1–§9 value and the E4 denominator are the ones this record froze.
   `document_sha256` is re-cut in this same merge, per §8's rule for *any* edit to this file.
+
+### 10.24 — the §11 cite block re-derived for `#11239`'s +17 (2026-11-11, `#11795`)
+
+> **A successor entry, not an edit to §10.23.** §10.23's numbers are a faithful record of the
+> `#11654` forward-merge head it names, and §10.19's rule is that re-numbering a history entry in
+> place would be a false record of what was measured. The tree moved again under it, so the
+> handling is the one §10.17→§10.18 used: a new dated entry.
+
+- **Why this entry exists.** `#11795` (`3794677ee3`) inserted a net **+17** lines into
+  `tortoise/extractor_v2.py` at `:12112-12157` (hunk `@@ -12112,29 +12112,46 @@`), which is **above
+  every cite in §11's block** — so every one of them moved by exactly `+17` and nothing reddened
+  the document. The same commit, together with `#11805`, moved `tortoise/sdk.py` twice: **+115**
+  above the `_extract_session_v2` region and a further **+18** above the `step_witness` meta fold,
+  so its cites are re-derived individually rather than by a constant.
+- **New value — measured at this head:** the two `if items:` gates at `:14222`/`:14375` (the S2
+  pass and the post-S4 pass), the two fail-open `except` arms at `:14235`/`:14386`, the two result
+  blocks at `:14586` (closing `:14592`) and `:14596` (closing `:14600`), and `_run_vet_pass`'s
+  S2.2 call at `:16780` and its post-S4 union call at `:14351`. In `tortoise/sdk.py`,
+  `_extract_session_v2` is now declared at `:16599` (was `16484`) and called at `:15625` (was
+  `15510`); the `step_witness` meta fold is at `:17484` (was `17351`), and
+  `proj.link_source_to_event` at `:17882` (was `17749`).
+- **Verified by content, not by arithmetic.** Each line was opened at this head:
+  `:14222`/`:14375` are the two `if items:` gates; `:14235`/`:14386` are the two fail-open
+  `except` arms whose warnings name `classify(S2) failed` / `classify(union) failed`; `:14586`
+  opens `result["classify_later"]` and `:14596` opens `result["vet"]`; `:16780` is
+  `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(` and `:14351` is
+  `complete_list, vet_union_stats, _w, _ = _run_vet_pass(`. The `#11795` growth is not uniform
+  across `sdk.py`, which is exactly why a single constant could not be trusted there either.
+- **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
+  touched — every §1–§9 value and the E4 denominator are the ones this record froze.
+  `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to this file.
