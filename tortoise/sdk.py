@@ -31037,7 +31037,10 @@ class TortoiseSDK:
         with issue in (contradictory, stale, contested) — a single edge may
         carry multiple issues (one entry each, deduped).
         """
-        from .search_engine import ep_measured_cypher  # #3276 canonical predicate
+        from .search_engine import (  # #11702 the variance-SCAN rule
+            ep_measured_cypher,  # #3276 canonical predicate
+            ep_variance_admissible_cypher,
+        )
         edges = self._epistemic_edges()
         if not edges:
             return []
@@ -31101,7 +31104,13 @@ class TortoiseSDK:
             "WHERE n.is_operator = false "
             f"  AND {_terminal_excluded('n.status')} "
             f"  AND {ep_measured_cypher('n')} "
-            "  AND (n.posterior_beta IS NOT NULL OR n.ep_beta IS NOT NULL) "
+            # #11702 cycle 13: the shared WIDTH rule — pair stored, both
+            # operands non-negative, positive total — instead of this scan's
+            # own `posterior_beta IS NOT NULL OR ep_beta IS NOT NULL` half
+            # gate, which admitted a half pair (the missing operand is
+            # invented as 1.0 below) and left the negative/zero-total shapes
+            # to `a > 0 AND b > 0` further down. Same rule, one spelling.
+            f"  AND {ep_variance_admissible_cypher('n')} "
             "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
             "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
             # #11702 cycle 11: `toFloat` on every operand — FalkorDB `/` is

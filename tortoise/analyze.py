@@ -16,8 +16,10 @@ from .live import (
     epistemic_labels_of,
     epistemic_sweep,
 )
-from .search_engine import (  # #11702: the ONE presence predicate
+from .search_engine import (  # #11702: the ONE vocabulary
+    belief_mean_cypher,
     ep_has_belief_cypher,
+    ep_width_cypher,
 )
 
 
@@ -52,9 +54,9 @@ from .search_engine import (  # #11702: the ONE presence predicate
 _BELIEF = (
     "CASE WHEN " + ep_has_belief_cypher("{a}") + " "
     "  THEN coalesce({a}.confidence, "
-    "    toFloat(coalesce({a}.posterior_alpha, {a}.ep_alpha, 1.0)) "
-    "    / (toFloat(coalesce({a}.posterior_alpha, {a}.ep_alpha, 1.0)) "
-    "       + toFloat(coalesce({a}.posterior_beta, {a}.ep_beta, 1.0)))) "
+    "    " + belief_mean_cypher(
+        "coalesce({a}.posterior_alpha, {a}.ep_alpha, 1.0)",
+        "coalesce({a}.posterior_beta, {a}.ep_beta, 1.0)") + ") "
     "  ELSE null END"
 )
 
@@ -201,18 +203,14 @@ TEMPLATES: dict[str, dict] = {
               // place on a "how uncertain are we" answer. A stored (0, 0) or a
               // HALF pair has no variance either, and `… > 0` excludes the
               // zero-total one.
-              AND coalesce(c.posterior_alpha, c.ep_alpha) IS NOT NULL
-              AND coalesce(c.posterior_beta, c.ep_beta) IS NOT NULL
-              // #11702 cycle 12: NON-NEGATIVE as well as non-empty. β is a
-              // pseudo-count; a negative operand passed `α+β > 0` and the
-              // template rendered `var: -0.2500` beside `conf: no belief` — an
-              // out-of-range number from the same rule the shared predicate
-              // spells (`ep_has_belief_cypher`), which every other surface
-              // applies.
-              AND coalesce(c.posterior_alpha, c.ep_alpha, 0.0) >= 0
-              AND coalesce(c.posterior_beta, c.ep_beta, 0.0) >= 0
-              AND (coalesce(c.posterior_alpha, c.ep_alpha, 0.0)
-                   + coalesce(c.posterior_beta, c.ep_beta, 0.0)) > 0
+              // #11702 cycle 13: the shared WIDTH rule in ONE import
+              // (`ep_width_cypher`) instead of this file's own spelling of
+              // pair-stored + non-negative + positive-total. That spelling was
+              // correct and tested — and it was still a SECOND definition of a
+              // rule whose copies drift (the drift is the defect #11702
+              // removes one level up). Cycle 12 added the non-negativity here
+              // after measuring `var: -0.2500` beside `conf: no belief`.
+              AND {ep_width_cypher('c')}
             WITH c, coalesce(c.posterior_alpha, c.ep_alpha, 1.0) AS a,
                  coalesce(c.posterior_beta, c.ep_beta, 1.0) AS b
             WITH c, a, b, (a * b) / 
@@ -265,18 +263,14 @@ TEMPLATES: dict[str, dict] = {
               // complete pair. A mirror-only claim (a real belief with no stored
               // operands) is not a TIMELINE row — there is no α/β history to
               // show — and it is the only shape the presence predicate would add.
-              AND coalesce(c.posterior_alpha, c.ep_alpha) IS NOT NULL
-              AND coalesce(c.posterior_beta, c.ep_beta) IS NOT NULL
-              // #11702 cycle 12: NON-NEGATIVE as well as non-empty. β is a
-              // pseudo-count; a negative operand passed `α+β > 0` and the
-              // template rendered `var: -0.2500` beside `conf: no belief` — an
-              // out-of-range number from the same rule the shared predicate
-              // spells (`ep_has_belief_cypher`), which every other surface
-              // applies.
-              AND coalesce(c.posterior_alpha, c.ep_alpha, 0.0) >= 0
-              AND coalesce(c.posterior_beta, c.ep_beta, 0.0) >= 0
-              AND (coalesce(c.posterior_alpha, c.ep_alpha, 0.0)
-                   + coalesce(c.posterior_beta, c.ep_beta, 0.0)) > 0
+              // #11702 cycle 13: the shared WIDTH rule in ONE import
+              // (`ep_width_cypher`) instead of this file's own spelling of
+              // pair-stored + non-negative + positive-total. That spelling was
+              // correct and tested — and it was still a SECOND definition of a
+              // rule whose copies drift (the drift is the defect #11702
+              // removes one level up). Cycle 12 added the non-negativity here
+              // after measuring `var: -0.2500` beside `conf: no belief`.
+              AND {ep_width_cypher('c')}
             WITH c, coalesce(c.posterior_alpha, c.ep_alpha, 1.0) AS a,
                  coalesce(c.posterior_beta, c.ep_beta, 1.0) AS b
             RETURN c.id, c.content, {_belief('c')} as conf,

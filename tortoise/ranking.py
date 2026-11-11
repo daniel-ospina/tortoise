@@ -37,6 +37,7 @@ from .search_engine import (  # noqa: E402, RUF100
     EP_STATE_ABSENT,  # #11702: the absent belief state has a NAME and no value
     EP_STATE_BASELINE,
     EP_STATE_MEASURED,
+    belief_mean_cypher,  # #11702: the ONE Cypher belief-mean expression
     belief_value,  # #11702: the ONE Python belief VALUE reader
     ep_has_belief_cypher,  # #11702: presence-to-persisted-belief predicate
     ep_measured_cypher,  # #3276: has_ep == EP measured (baseline prior != measured)
@@ -941,13 +942,17 @@ class GraphRanker:
             # `set_point_baseline(2, 1)`, the legacy `tier_map` — answered
             # `0.0` on this ranker where the `ep` block answered `0.90`.
             # Measured: the same claim, one read 0.9 and one 0.0.
+            # #11702 cycle 13: the MEAN comes from `belief_mean_cypher`, the
+            # Cypher twin of `_beta_mean`, instead of this expression's own
+            # division. The two had already drifted: an OVERFLOWING pair
+            # (`update_point(posterior_alpha=1e308, posterior_beta=1e308)`)
+            # answered `1e308/inf == 0.0` here — maximum disbelief for a
+            # perfectly symmetric claim — while the `ep` block answered 0.5 for
+            # the same node, and `1e308` is not a value this ranker can order.
             "    coalesce(n.confidence, "
-            "      CASE WHEN (coalesce(n.posterior_alpha, n.ep_alpha, 0.0) "
-            "                 + coalesce(n.posterior_beta, n.ep_beta, 0.0)) > 0 "
-            "           THEN toFloat(coalesce(n.posterior_alpha, n.ep_alpha, 1.0)) "
-            "                / (toFloat(coalesce(n.posterior_alpha, n.ep_alpha, 1.0)) "
-            "                   + toFloat(coalesce(n.posterior_beta, n.ep_beta, 1.0))) "
-            "           ELSE null END) "
+            "      " + belief_mean_cypher(
+                "coalesce(n.posterior_alpha, n.ep_alpha, 1.0)",
+                "coalesce(n.posterior_beta, n.ep_beta, 1.0)") + ") "
             "  ELSE null END AS conf, degree, n.createdAt AS created, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
             # #2490: aligned with StateRanker/GapsRanker — has_ep rides the
@@ -2343,9 +2348,14 @@ class SubgraphExpander:
             # GraphRanker._fetch_point_signals — an int α/β pair truncated
             # this display mean to 0.00 beside an `ep_state` of `measured`,
             # i.e. a measured 0.90 claim shown as 0.00 with a straight face.
-            "             THEN toFloat(coalesce(n.posterior_alpha, n.ep_alpha, 1.0)) "
-            "                  / (toFloat(coalesce(n.posterior_alpha, n.ep_alpha, 1.0)) "
-            "                     + toFloat(coalesce(n.posterior_beta, n.ep_beta, 1.0))) "
+            # #11702 cycle 13: the shared Cypher mean (see GraphRanker) —
+            # this display value carried its own division, so the overflow
+            # shape this change made reachable answered 0.00 beside an
+            # `ep_state` of `measured`.
+            "             THEN "
+            "  " + belief_mean_cypher(
+                "coalesce(n.posterior_alpha, n.ep_alpha, 1.0)",
+                "coalesce(n.posterior_beta, n.ep_beta, 1.0)") + " "
             "             ELSE null END) "
             "    ELSE null END "
             "  ELSE null END AS confidence, "

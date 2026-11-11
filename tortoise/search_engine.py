@@ -511,7 +511,15 @@ def belief_value(*, confidence=None, posterior_alpha=None,
             return None
         if alpha < 0 or beta < 0 or (alpha + beta) <= 0:
             return None
-        value = alpha / (alpha + beta)
+        # #11702 cycle 13: THROUGH `_beta_mean`, not a bare division. A pair
+        # whose sum overflows (`update_point(posterior_alpha=1e308,
+        # posterior_beta=1e308)`) computed `1e308/inf == 0.0` here — "maximally
+        # disbelieved" for a perfectly symmetric claim — while `_beta_mean`
+        # (behind the `ep` block) answered 0.5 for the same node: the
+        # vocabulary disagreeing with itself, on the two halves of ONE
+        # response. `_beta_mean` owns the guard; this reader must not re-spell
+        # the arithmetic.
+        value = _beta_mean(alpha, beta)
     return round(value, round_to) if round_to is not None else value
 
 
@@ -4181,6 +4189,96 @@ def ep_pair_stored(*, posterior_alpha=None, posterior_beta=None,
             and (posterior_beta is not None or ep_beta is not None))
 
 
+def ep_width_cypher(alias: str) -> str:
+    """Cypher: this node carries a USABLE WIDTH (variance) — the composite rule.
+
+    ``ep_pair_stored_cypher`` is only half of it, and using half of it is how a
+    variance scan admitted shapes that cannot have a variance:
+
+    * a MIRROR-only claim (a real served belief with no stored operands) —
+      the ``coalesce(…, 1.0)`` defaults then produce the Beta(1,1) MAXIMUM
+      ``1/12``, so the least-known claim wins a "how uncertain are we" answer;
+    * a HALF pair (α only or β only) — the missing operand is INVENTED as 1.0,
+      which is the fabricated width #11702 exists to remove (measured: an
+      α-only claim reported ``variance 0.0889, contested True`` on
+      ``ep.get_contested_claims`` while ``annotate_ep_batch`` said
+      ``absent / 0.0 / contested False`` for the same node);
+    * a NEGATIVE operand (β is a pseudo-count) — ``α=3, β=-1`` gives a
+      negative "variance" every threshold consumer reads as certain;
+    * a zero-total ``(0, 0)`` — absent by the presence rule, and ``v > t``
+      would list it at ``0/0``.
+
+    ONE definition, imported by ``ep.get_contested_claims``,
+    ``sdk._review_prune`` and the ``analyze`` templates, so a variance scan and
+    the ``ep`` block cannot disagree about which claims have a width.
+    """
+    a = f"coalesce({alias}.posterior_alpha, {alias}.ep_alpha)"
+    b = f"coalesce({alias}.posterior_beta, {alias}.ep_beta)"
+    return (f"({ep_pair_stored_cypher(alias)} "
+            f"AND coalesce({a}, 0.0) >= 0 AND coalesce({b}, 0.0) >= 0 "
+            f"AND (coalesce({a}, 0.0) + coalesce({b}, 0.0)) > 0)")
+
+
+def ep_variance_admissible_cypher(alias: str) -> str:
+    """Cypher: may this node be LISTED by a graph-wide variance SCAN?
+
+    The scan rule, which is NOT the same question as :func:`ep_width_cypher`'s
+    ("does this node carry a stored width"). A whole-graph "where are we least
+    certain" report has a deliberate #169 arm: a claim with **no persisted
+    belief at all** IS the least certain thing in the graph, so it lists at the
+    Beta(1,1) prior's `1/12` maximum. That is a statement about a zero
+    information prior, not a fabricated posterior, and it is pinned by
+    ``test_3276_has_ep_measured.py::test_unmeasured_live_claim_still_listed``.
+
+    What must NOT list is every shape where the coalesce default FABRICATES a
+    width for something that already carries a belief or a malformed pair:
+
+    * a HALF pair (α only / β only) — the missing operand is invented as 1.0,
+      so an α-only claim reported `variance 0.0889, contested True` while the
+      `ep` block said `absent / 0.0 / False` for the same node (measured);
+    * a MIRROR-only claim — a served belief with no operands, reported at the
+      maximum `1/12` instead of "there is nothing to compute a width from";
+    * a NEGATIVE operand — a negative "variance" every threshold reads as
+      certain;
+    * a zero-total `(0, 0)` pair — 0/0, and absent by the presence rule.
+
+    So: admissible = the strict width, OR (neither operand stored AND no
+    mirror). ONE definition, used by ``ep.get_contested_claims`` and the
+    PR-prune scan.
+    """
+    a = f"coalesce({alias}.posterior_alpha, {alias}.ep_alpha)"
+    b = f"coalesce({alias}.posterior_beta, {alias}.ep_beta)"
+    no_operands = f"({a} IS NULL AND {b} IS NULL AND {alias}.confidence IS NULL)"
+    return f"({ep_width_cypher(alias)} OR {no_operands})"
+
+
+def belief_mean_cypher(alpha_operand: str, beta_operand: str, *,
+                       degenerate: str = "null") -> str:
+    """Cypher twin of :func:`_beta_mean` for two RAW column expressions.
+
+    Returns a ``CASE`` expression, because three things the Python owner
+    guards must be guarded in the query too:
+
+    * INTEGER division — FalkorDB's ``/`` truncates on int operands, so an
+      int-stored pair (``update_point(posterior_alpha=9, posterior_beta=1)``)
+      answered ``0.00`` beside an ``ep`` block of ``0.90``;
+    * an OVERFLOWING sum (``1e308 + 1e308`` is ``inf``) — ``α/inf == 0.0``,
+      i.e. maximum disbelief for a symmetric pair. Answered by the
+      overflow-free identity ``1/(1 + β/α)``, exactly as ``_beta_mean`` does;
+    * a degenerate sum (``0``, negative, ``NaN``) — the caller's
+      ``degenerate`` rendering (``"null"`` where an absent belief must stay
+      null, a literal where the surface must still answer something).
+    """
+    a = f"toFloat({alpha_operand})"
+    b = f"toFloat({beta_operand})"
+    s_sum = f"({a} + {b})"
+    return (f"CASE WHEN {s_sum} > 1e308 "
+            f"THEN CASE WHEN {a} > 0 THEN 1.0 / (1.0 + {b} / {a}) "
+            f"          ELSE {degenerate} END "
+            f"     WHEN {s_sum} > 0 THEN {a} / {s_sum} "
+            f"     ELSE {degenerate} END")
+
+
 def _beta_variance(alpha: float, beta: float) -> float:
     """Variance of the Beta(α, β) posterior: αβ/((α+β)²(α+β+1)).
 
@@ -4223,8 +4321,21 @@ def _beta_mean(alpha: float, beta: float) -> float:
     s = alpha + beta
     # `isfinite` as well as `> 0`: an overflowing sum (+inf) would otherwise
     # yield α/inf == 0.0 — a wrong belief (maximum disbelief) rather than the
-    # neutral fallback this guard exists to serve.
-    return alpha / s if math.isfinite(s) and s > 0 else 0.5
+    # value the pair actually describes.
+    #
+    # #11702 cycle 13: a non-finite sum is NOT "no information". For an
+    # overflowing pair the true mean is still well defined (α = β = 1e308 is
+    # 0.5, and 1.7e308/1e307 is 0.944), so answer it by the overflow-free
+    # identity `1/(1 + β/α)` instead of the neutral 0.5 this used to return —
+    # which was itself a wrong belief, just a less alarming one. Only a pair
+    # that is genuinely unusable (α <= 0, β < 0 — a mean of 0 or below) falls
+    # back to neutral.
+    if not math.isfinite(s):
+        if math.isfinite(alpha) and alpha > 0 and math.isfinite(beta) \
+                and beta >= 0:
+            return 1.0 / (1.0 + beta / alpha)
+        return 0.5
+    return alpha / s if s > 0 else 0.5
 
 
 def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:

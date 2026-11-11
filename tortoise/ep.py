@@ -2378,7 +2378,11 @@ class TortoiseEP:
         # it). Only the declared-baseline state is removed; ``unmeasured``
         # keeps its deliberate listing. See ``sdk._review_prune`` for the
         # sibling scan that ALSO requires measurement.
-        from .search_engine import ep_measured_cypher, ep_prior_only_cypher
+        from .search_engine import (
+            ep_measured_cypher,
+            ep_prior_only_cypher,
+            ep_variance_admissible_cypher,  # #11702: the variance-SCAN rule
+        )
         # #7927: ``n`` is the SUBJECT of this scan — contested claims are
         # enumerated GRAPH-WIDE (no id anchor to index), so the labels come
         # from the shared ``live.EPISTEMIC_LABELS`` declaration and one
@@ -2451,6 +2455,18 @@ class TortoiseEP:
                 "n.op_type IS NULL",
                 _terminal_excluded("n.status"),
                 f"NOT {ep_prior_only_cypher('n')}",
+                # #11702 cycle 13: the WIDTH rule, not just "a pair exists".
+                # The operands are coalesced to 1.0 below so a variance can be
+                # computed at all, and that default FABRICATES a width for a
+                # half pair — measured: an α-only claim (absent everywhere
+                # else) listed here at `variance 0.0889, contested True`
+                # while `annotate_ep_batch`, the rankers and `why` said
+                # `absent / 0.0 / False`. A mirror-only claim is the mirror
+                # case (no operands, so the defaults also answer the Beta(1,1)
+                # MAXIMUM 1/12 and it sorts to the top of an "how uncertain
+                # are we" report). The composite also refuses a negative
+                # operand and the zero-total pair.
+                ep_variance_admissible_cypher("n"),
             ]
             if _label != EPISTEMIC_LABELS[0]:
                 # The canonical measurement predicate (#3276), not a re-spelling:

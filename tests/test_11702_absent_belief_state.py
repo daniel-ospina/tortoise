@@ -42,6 +42,7 @@ one stated exception, recorded in the #11702 decision comment
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -50,7 +51,8 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise import search_engine as _se  # noqa: E402, RUF100
-from tortoise.ranking import (  # noqa: E402, RUF100
+from tortoise.ranking import (  # noqa: E402, RUF100  # noqa: E402, RUF100
+    UNCOMPUTED_CONFIDENCE_SOURCE,
     GapsRanker,
     GraphRanker,
     StateRanker,
@@ -501,10 +503,17 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
                 f"{name} reports confidence_source={source!r} beside "
                 f"ep_state={state!r} — the two keys describe one fact")
             # …and the VALUE follows the same rule, so a row cannot say "no
-            # belief" in the source and carry a number in the value.
+            # belief" in the source and carry a number in the value. TWO
+            # causes of a null, and `confidence_source` names which one:
+            # absent, or a #2598 DRAFT row whose belief is withheld from
+            # DISPLAY (source "uncomputed") while its state stays true. Those
+            # rows are exercised by
+            # `test_a_draft_withholds_its_belief_without_denying_it` below;
+            # every row here is live, so the second clause is not reachable
+            # and the assertion is the strict one.
             assert (row["confidence"] is None) == (state == EP_STATE_ABSENT), (
                 f"{name} reports confidence={row['confidence']!r} beside "
-                f"ep_state={state!r}")
+                f"ep_state={state!r} (source {source!r})")
         # The two rankers must not disagree about the same node either.
         assert recs[pid]["ep_state"] == gaps[pid]["ep_state"], pid
         assert (recs[pid]["confidence_source"] == EP_STATE_ABSENT) == (
@@ -522,6 +531,45 @@ def test_confidence_source_never_contradicts_the_ep_state_beside_it(sdk):
     for pid in (mirror_only, baseline):
         assert recs[pid]["ep_state"] == EP_STATE_BASELINE, recs[pid]
         assert recs[pid]["confidence_source"] != EP_STATE_ABSENT, recs[pid]
+
+
+def test_a_draft_withholds_its_belief_without_denying_it(sdk):
+    """A #2598 draft row reports `confidence: null` while it HAS a belief.
+
+    The draft gate (pre-existing, owner-reviewed, NOT reversed by #11702)
+    suppresses the DISPLAY value so a staged claim is not ranked on a belief.
+    #11702 adds `ep_state` and `belief_informed_order` beside that null, so the
+    three keys must be readable together: the state NAME stays true ("baseline"
+    for a persisted prior), the flag stays true (the belief DID move the order),
+    and `confidence_source: "uncomputed"` is what says the null is a
+    withholding rather than an absence. Measured before this test: `ep_state:
+    "baseline"` + `belief_informed_order: true` + `confidence: null` on one row,
+    with no test covering a draft at all — so a revert that called it "absent"
+    would have been green.
+    """
+    proj = sdk._get_proj()
+    draft = sdk.create_point(
+        "statement", "a staged claim that carries a prior",
+        credibility="high", status="draft")["id"]
+    rows = {r["id"]: r for r in StateRanker(projection=proj).rerank(
+        [{"id": draft, "scores": {"rrf": 1.0}}])}
+    row = rows[draft]["recall_ranking"]
+    assert row.get("draft") is True, row
+    # The belief exists and is NAMED…
+    assert row["ep_state"] == EP_STATE_BASELINE, row
+    # …the display value is withheld, and the source says so…
+    assert row["confidence"] is None, row
+    assert row["confidence_source"] == UNCOMPUTED_CONFIDENCE_SOURCE, row
+    # …and the flag reports what actually happened to the ORDER, which is that
+    # the belief participated (`base_score` carries the confidence factor).
+    assert row["belief_informed_order"] is True, row
+    # The `ep` block for the same claim reports the same state and a VALUE —
+    # so the null is provably a display decision, not a missing belief.
+    ep = row  # keep the row readable in the failure message
+    del ep
+    ann = annotate_ep_batch(proj.g, [draft])[draft]
+    assert ann.ep_state == EP_STATE_BASELINE, ann
+    assert ann.confidence_mean is not None, ann
 
 
 def test_zero_total_pair_does_not_survive_an_equal_relevance_order(sdk):
@@ -1744,6 +1792,191 @@ def test_contested_claims_reads_an_int_stored_pair(sdk):
         "Cypher divided as integers and computed v = 0 while every read "
         "surface says variance 0.05 / contested: "
         + repr(sorted(listed)))
+
+
+def test_the_artifact_reader_agrees_with_the_shared_reader_where_both_are_total():
+    """Cycle 13 (P3 follow-up): the seventh surface duplicates `belief_value`.
+
+    `tools/longmem_eval/ep_activation.read_confidence` is the ONE read behind
+    the rendered artefact, and it re-implements mirror-first precedence,
+    non-negativity and the positive-sum rule instead of importing them. It
+    documents WHY it stays separate (the census needs a non-finite posterior to
+    arrive as `nan`, not `None` — #10210 tracks that cell), which is a real
+    reason for the totality to differ — but the VALUES must not.
+
+    This is the assertion that keeps the duplication honest: on every shape
+    where both are total, they answer the same number (or both nothing).
+    """
+    from tools.longmem_eval.ep_activation import read_confidence
+
+    shapes = {
+        "absent": {},
+        "mirror_only": {"confidence": 0.95},
+        "posterior_pair": {"posterior_alpha": 3.0, "posterior_beta": 1.0},
+        "legacy_prior": {"ep_alpha": 2.0, "ep_beta": 2.0},
+        "posterior_wins": {"posterior_alpha": 1.0, "posterior_beta": 9.0,
+                           "ep_alpha": 5.0, "ep_beta": 1.0},
+        "half_alpha": {"posterior_alpha": 0.5},
+        "half_beta": {"posterior_beta": 0.5},
+        "zero_total": {"posterior_alpha": 0.0, "posterior_beta": 0.0},
+        "negative": {"posterior_alpha": 3.0, "posterior_beta": -1.0},
+        "mirror_leads": {"confidence": 0.2, "posterior_alpha": 9.0,
+                         "posterior_beta": 1.0},
+    }
+    disagreements = []
+    for name, props in shapes.items():
+        mine = _se.belief_value(
+            confidence=props.get("confidence"),
+            posterior_alpha=props.get("posterior_alpha"),
+            posterior_beta=props.get("posterior_beta"),
+            ep_alpha=props.get("ep_alpha"), ep_beta=props.get("ep_beta"))
+        theirs = read_confidence(_Props(props))
+        if (mine is None) != (theirs is None) or (
+                mine is not None and abs(mine - theirs) > 1e-9):
+            disagreements.append((name, mine, theirs))
+    assert not disagreements, (
+        "the artifact reader and the shared reader disagree — one of them is "
+        "a second vocabulary: " + repr(disagreements))
+
+
+class _Props(dict):
+    """A property dict that also answers ``get``/attribute access the way the
+    reader calls it (``p.get("posterior_alpha")``)."""
+
+
+def test_a_variance_scan_never_invents_a_width_for_an_absent_belief(sdk):
+    """Cycle 13: `get_contested_claims` admitted shapes that cannot have a width.
+
+    `ep_pair_stored_cypher` alone is HALF the rule. The scan coalesced the
+    operands to `1.0` "so a variance can be computed at all", and that default
+    fabricated a width for every shape the presence rule calls absent:
+
+        α-only          → β invented as 1.0 → variance 0.0889 → CONTESTED
+        mirror-only     → both invented      → the Beta(1,1) MAXIMUM 1/12
+        (3, -1)         → a NEGATIVE "variance" every threshold reads as certain
+        (0, 0)          → 0/0
+
+    Measured on the reviewed head: the α-only claim was listed as contested
+    while `annotate_ep_batch`, all three rankers and `why` answered
+    `absent / variance 0.0 / contested False` for the same node — one claim,
+    two answers, which is the defect class this issue exists to remove. The
+    scan now gates on `ep_width_cypher`, the composite (pair stored, both
+    non-negative, positive total) the `analyze` templates and the PR prune use.
+    """
+    from tortoise.ep import TortoiseEP
+    from tortoise.ranking import GapsRanker
+    from tortoise.search_engine import annotate_ep_batch
+
+    proj = sdk._get_proj()
+
+    def _point(content, sql=None):
+        pid = sdk.create_point("statement", content)["id"]
+        if sql:
+            proj.g.query(f"MATCH (n:Point {{id:$id}}) SET {sql}",
+                         params={"id": pid})
+        return pid
+
+    alpha_only = _point("an alpha-only claim", "n.posterior_alpha = 0.5")
+    mirror_only = _point("a mirror-only claim", "n.confidence = 0.95")
+    negative = _point("a negative beta", "n.posterior_alpha = 3.0, "
+                      "n.posterior_beta = -1.0")
+    zero_total = _point("a degenerate pair", "n.posterior_alpha = 0.0, "
+                        "n.posterior_beta = 0.0")
+    really_wide = _point("a genuinely wide claim", "n.posterior_alpha = 1.0, "
+                         "n.posterior_beta = 1.0")
+    shapes = [alpha_only, mirror_only, negative, zero_total, really_wide]
+
+    ep_view = TortoiseEP(projection=proj)
+    listed = {c["id"] for c in ep_view.get_contested_claims()}
+    for pid in (alpha_only, mirror_only, negative, zero_total):
+        assert pid not in listed, (
+            "the variance scan invented a width for a claim that cannot have "
+            f"one — {pid} is listed as contested")
+    assert really_wide in listed, (
+        "the gate must not drop the real shape: a stored Beta(1,1) IS the "
+        "maximum variance (1/12) and is legitimately contested")
+
+    # …but the #169 arm is NOT narrowed: a claim with no persisted belief at
+    # all still lists at the zero-information maximum, because for THAT claim
+    # "maximally uncertain" is the truth and the pin exists for it.
+    untracked = sdk.create_point("statement", "no belief at all zzq")["id"]
+    listed_again = {c["id"] for c in ep_view.get_contested_claims()}
+    assert untracked in listed_again, (
+        "the #169 deliberate listing (an unmeasured claim IS the least certain "
+        "thing in the graph) was narrowed away — that is a recorded decision, "
+        "not part of this defect")
+
+    # …and the scan now agrees with the surfaces that read the same claim.
+    ann = annotate_ep_batch(proj.g, shapes)
+    gaps = {r["id"]: r["gaps_ranking"] for r in GapsRanker(projection=proj).rerank(
+        [{"id": p, "scores": {"rrf": 1.0}} for p in shapes])}
+    for pid in (alpha_only, negative, zero_total):
+        assert ann[pid].ep_state == EP_STATE_ABSENT, (pid, ann[pid])
+    # A MIRROR-only claim is the one shape of the four that is NOT absent: a
+    # served belief with no stored operands. It has no WIDTH (nothing to
+    # compute a variance from), so it must not be listed as contested either —
+    # that listing is the Beta(1,1) maximum the coalesce default invents.
+    assert ann[mirror_only].ep_state == EP_STATE_BASELINE, ann[mirror_only]
+    assert ann[mirror_only].confidence_mean == pytest.approx(0.95, abs=1e-9)
+    for pid in (alpha_only, mirror_only, negative, zero_total):
+        assert ann[pid].variance == 0.0, (pid, ann[pid])
+        assert ann[pid].contested is False, (pid, ann[pid])
+        assert gaps[pid]["contested"] is False, (pid, gaps[pid])
+
+
+def test_an_overflowing_pair_is_not_maximum_disbelief(sdk):
+    """Cycle 13: `belief_value` disagreed with `_beta_mean` on an overflow pair.
+
+    `update_point(posterior_alpha=1e308, posterior_beta=1e308)` is a shape the
+    public write accepts. `1e308 + 1e308` overflows to `inf`, so every reader
+    that divided directly computed `1e308/inf == 0.0` — MAXIMUM disbelief for a
+    perfectly symmetric claim — while `_beta_mean` (behind the `ep` block)
+    answered 0.5 for the same node: the two halves of one response disagreeing,
+    on an input the rankers then ORDER on (`base = rel × conf**exp`).
+
+    Both now answer the true mean, and so do the Cypher twins every ranker uses
+    (`belief_mean_cypher`, which falls back to the overflow-free identity
+    `1/(1 + β/α)`).
+    """
+    from tortoise.search_engine import _beta_mean, belief_value
+
+    proj = sdk._get_proj()
+    symmetric = sdk.create_point("statement", "an overflowing symmetric pair")["id"]
+    biased = sdk.create_point("statement", "an overflowing skewed pair")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 1e308, "
+                 "n.posterior_beta = 1e308, n.confidence = null",
+                 params={"id": symmetric})
+    # Python's own `1e308 + 1e307` overflows to `inf` too, so the expected
+    # value must be computed the same overflow-free way the readers do.
+    A, B = 1.7e308, 1e307
+    true_biased_mean = 1.0 / (1.0 + B / A)
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = $a, "
+                 "n.posterior_beta = $b, n.confidence = null",
+                 params={"id": biased, "a": A, "b": B})
+
+    # The Python reader and the mean owner must agree, and be RIGHT.
+    assert belief_value(posterior_alpha=1e308, posterior_beta=1e308) == \
+        pytest.approx(0.5, abs=1e-9)
+    assert _beta_mean(A, B) == pytest.approx(true_biased_mean, abs=1e-9)
+    assert belief_value(posterior_alpha=A, posterior_beta=B) == \
+        pytest.approx(true_biased_mean, abs=1e-9)
+
+    # The Cypher expression must answer the same value the Python owner does.
+    rows = proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids "
+        "RETURN n.id, coalesce(n.posterior_alpha, 1.0) AS a, "
+        "       coalesce(n.posterior_beta, 1.0) AS b, "
+        "       " + _se.belief_mean_cypher(
+            "coalesce(n.posterior_alpha, 1.0)",
+            "coalesce(n.posterior_beta, 1.0)") + " AS m",
+        params={"ids": [symmetric, biased]}).result_set
+    by_id = {r[0]: (r[1], r[2], r[3]) for r in rows}
+    assert by_id[symmetric][2] == pytest.approx(0.5, abs=1e-9), by_id
+    assert by_id[biased][2] == pytest.approx(true_biased_mean, abs=1e-9), by_id
+    # Never 0.0 (maximum disbelief) and never NaN on the wire.
+    for pid, (_a, _b, m) in by_id.items():
+        assert m is not None and m > 0.0, (pid, m)
+        json.dumps({"m": m}, allow_nan=False)  # raises on NaN/inf
 
 
 def test_why_width_is_guarded_for_hostile_pairs_like_every_other_surface(sdk):
