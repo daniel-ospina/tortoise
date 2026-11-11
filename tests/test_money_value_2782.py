@@ -1030,8 +1030,7 @@ class TestTheUpdateArmOfThePredicate:
         assert refuse_malformed_money({AS_OF: "2026-06-30"}) is None
 
     def test_a_lone_exponent_is_refused_only_where_a_value_would_break(self):
-        from tortoise.money import (money_view_after_update,
-                                    refuse_malformed_money)
+        from tortoise.money import money_view_after_update, refuse_malformed_money
         money = {AMOUNT_MINOR: COMMITTED_MINOR, CURRENCY: "BRL",
                  MINOR_UNIT_EXPONENT: 2}
         # on a money node: 0 is a 100x mis-scale for BRL — refused
@@ -1047,8 +1046,7 @@ class TestTheUpdateArmOfThePredicate:
     @pytest.mark.parametrize("field", [AMOUNT_MINOR, CURRENCY,
                                        MINOR_UNIT_EXPONENT])
     def test_an_explicit_null_is_refused_on_an_update_only(self, field):
-        from tortoise.money import (money_view_after_update,
-                                    refuse_malformed_money)
+        from tortoise.money import money_view_after_update, refuse_malformed_money
         money = {AMOUNT_MINOR: COMMITTED_MINOR, CURRENCY: "BRL",
                  MINOR_UNIT_EXPONENT: 2}
         # a create drops a None value (the fold excludes it) — harmless
@@ -1273,6 +1271,10 @@ class TestKnownResidualCreateDoorOnMatch:
     ``test_a_non_money_prop_is_not_collateral_damage``. Closing this needs a
     target-aware check at the create funnels (a stored read on the id the door
     already resolved). When that lands, THIS pin must be inverted deliberately.
+    Tracked as tortoise#11868, which also carries the second door this bound
+    reaches — ``api.EventAPI.add_point(..., id=<existing point>)`` MERGEs onto
+    that id too (measured: `minorUnitExponent=9` lands and `total_minor` then
+    refuses the whole set).
     """
 
     def test_a_recreate_onto_an_existing_money_node_still_installs_a_lone_exponent(

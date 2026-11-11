@@ -14333,7 +14333,7 @@ class TortoiseSDK:
                         frozenset({repr(_vf), repr(_vt)})
                         if (_vf is not None or _vt is not None) else None)
                     # #2782: the money grade needs no flag here — this re-entry
-                    # is graded on the merged state like any addressd edit, so a
+                    # is graded on the merged state like any addressed edit, so a
                     # lone sibling on a node with no value stays the no-op the
                     # create leg gave it (idempotency) and a lone sibling on a
                     # MONEY node is refused as the mis-scale it would be

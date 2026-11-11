@@ -53,14 +53,16 @@ stale — #4282 closed without it):
     :func:`refuse_malformed_money_in_payload` — that seam journals a RECORD, so
     the gate walks the payload rather than reading one flat bag; ``add_point``
     nests its money under ``point=``), so a
-    value the reader would refuse cannot become durable state through either
-    live write path. Two bounds are
+    value the reader would refuse cannot ENTER through either live props
+    intake — the two bounds below are the exceptions the next sentence names,
+    not counter-examples to it. Two bounds are
     deliberately NOT covered and are stated rather than implied away: a
     ``:Source`` cannot carry money at all (its closed property surface,
     #3998, drops it — so ``create_source`` refuses a *malformed* money bag
     instead of accepting one it will drop), and a CREATE that MERGEs onto an
     existing node can still install a lone exponent, because the bag alone
-    does not name the target;
+    does not name the target (tracked as #11868 — that is the door which has
+    to read its target; the dedup fold, which knows its ``pid``, is closed);
   * **persistence** is declared, not re-invented here: the projection's Point
     property list takes its declared money keys from ``MONEY_VALUE_FIELDS``
     (``projection/entities.py``), so a Point carrying a value replays under the
@@ -379,9 +381,11 @@ def refuse_malformed_money(props: Mapping[str, Any], *,
     ⚠️ STATED BOUND, not a claim of closure: the create doors MERGE by name
     (``_create_entity``'s ON MATCH arm reaches an EXISTING node), so a
     re-create carrying a lone exponent still lands one — a bag-shaped create
-    predicate cannot see the target. Measured and recorded as a #2782 follow-up
-    (``TestKnownResidualCreateDoorOnMatch``, and the reachability half is
-    tortoise#11863).
+    predicate cannot see the target. Measured, pinned by
+    ``TestKnownResidualCreateDoorOnMatch``, and tracked as tortoise#11868 (which
+    also covers ``EventAPI.add_point(id=…)``); the dedup re-entry in this
+    docstring's next paragraph is NOT this bound — that fold knows its ``pid``
+    and is graded on the merged state (tortoise#11863).
 
     WHY A WRITE GATE, given the read side already refuses (measured, #2782):
     before this, all six malformed shapes were ACCEPTED by every props door and
