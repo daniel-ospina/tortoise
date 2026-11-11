@@ -5321,8 +5321,8 @@ def test_update_entity_clearing_the_pair_clears_the_mirror(sdk, tmp_path):
 #    "IS the declared PRIOR mean" is false for exactly the row
 #    `set_point_baseline(3.0, 1.0)` + `update_point(confidence=0.9)`: the
 #    declared prior mean is 0.75 and the field reads 0.9. That sentence stood
-#    at `search_engine.py`:347 while the precedence at `search_engine.py`:5537
-#    (`elif mirror is not None:`) said otherwise — 5,190 lines away, not the
+#    at `search_engine.py`:347 while the precedence at `search_engine.py`:5539
+#    (`elif mirror is not None:`) said otherwise — 5,192 lines away, not the
 #    "nine hundred" an earlier revision of this note claimed. `origin/main`'s belief prose carried TEN unqualified matches
 #    (`search_engine.py` 6, `why.py` 2, `volunteer.py` 1, `sdk.py` 1 — the
 #    numbers this guard measures, not a count taken on trust), plus one
@@ -5370,8 +5370,8 @@ _BELIEF_PROSE = (
 #: How far after a claim its qualifier may sit for the SCAN to find it. This is
 #: not what enforces "same sentence": some sentences in these modules run past
 #: 300 characters once whitespace is collapsed (measured at this head, with this
-#: guard's own splitter: 333 of 1,489 `search_engine.py` sentences run past 300
-#: characters). A plain ``(?<=[.!?])\s+`` measures the SAME 333 of 1,489 — the
+#: guard's own splitter: 334 of 1,489 `search_engine.py` sentences run past 300
+#: characters). A plain ``(?<=[.!?])\s+`` measures the SAME 334 of 1,489 — the
 #: two splitters agree, because `\s+` is greedy so the ``(?=\S)`` lookahead
 #: never moves a split point; an earlier revision of this note cited "390 of
 #: 1,022" and drew a contrast between the two that does not exist.
@@ -5381,12 +5381,15 @@ _BELIEF_PROSE = (
 #:     at index 325 PASSED at 300 and BLOCKED at 10**7: the sentence cut happens
 #:     inside the slice, so a restriction or an inversion past the cut is
 #:     invisible and the claim is certified on its PREFIX.
-#:   • a hard cut with no escape is a FALSE BLOCK. At 300, three SHIPPED sentences
-#:     this guard must accept (a 500-character one in `search_engine.py`, and the
-#:     `why.py`/`sdk.py` pair) were reported unqualified purely because their
-#:     mirror+verb sat past the cut.
-#: So the bound now EXCEEDS the longest real claim sentence (500 characters
-#: measured; sdk.py runs to 434), and `_qualified` additionally REFUSES any
+#:   • a hard cut with no escape is a FALSE BLOCK. With the refusal switched on at
+#:     300, three SHIPPED sentences this guard must accept — 603 characters in
+#:     `search_engine.py`, 475 in `why.py`, 796 in `sdk.py` — were reported
+#:     unqualified because the sentence RAN PAST the cut. (Without the refusal, 300
+#:     blocks none of them: every shipped qualifier sits inside it. So the refusal
+#:     is what surfaces them and the bound is what must clear them — neither half
+#:     works alone, which is why both changed together.)
+#: So the bound now EXCEEDS the longest real claim sentence (796 characters
+#: measured, in `sdk.py`), and `_qualified` additionally REFUSES any
 #: sentence whose slice stopped at the window edge without punctuation — a
 #: sentence too long to read is reported, never certified. The remaining
 #: direction is a false BLOCK on prose no one has written yet, which a human
@@ -5439,7 +5442,7 @@ _QUALIFIER_VERB = re.compile(
 )
 
 #: How far after the mirror noun its verb may sit ("mirror, if present, LEADS
-#: it" is 21 characters).
+#: it" is 28 characters).
 _QUALIFIER_VERB_WINDOW = 60
 
 #: How far BEFORE a claim its own sentence may begin. A qualifier may precede the

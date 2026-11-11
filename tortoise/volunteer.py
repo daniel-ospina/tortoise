@@ -82,7 +82,7 @@ BLOCK_MAX_BYTES = 8 * 1024
 #     ``n.confidence`` mirror beside it — answers ``confidence_mean: None``
 #     with ``ep_state: "absent"``;
 #   * a #2199 DECLARED baseline is ALSO unmeasured
-#     (``measured = bool(has_ep)``, search_engine.py:5500) yet answers its OWN
+#     (``measured = bool(has_ep)``, search_engine.py:5502) yet answers its OWN
 #     declared prior mean — 0.75 for the Beta(3,1) system default, 0.7561 for
 #     that default PLUS an author ``credibility='low'`` word (the word ADDS one
 #     weak body on top of the provision: Beta(3.1,1), measured), 0.5238 for the
