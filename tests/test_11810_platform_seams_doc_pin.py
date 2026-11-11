@@ -165,9 +165,12 @@ _TAG_ATTRS_ASSIGNED = (r"(?:\s+[A-Za-z_:][-A-Za-z0-9_:.]*\s*=\s*"
 #: quote: `<[^>]+>` matches ONE span of 2,485 characters / 2,498 bytes that
 #: CONTAINS the quoted words, so it deletes them and false-REDs the presence arm on
 #: a record that states the right thing; `_TAG` matches nothing containing the
-#: quote. ⚠️ That figure is RECIPE-dependent (it moves with the injected line and
-#: with any edit to the record, and an earlier revision of this comment carried a
-#: stale 2,481 from a smaller record) — hence the recipe, not a bare constant.
+#: quote. ⚠️ That figure is RECIPE-dependent and must not be hand-copied as a
+#: constant: an earlier revision of this comment carried a `2,481` that does NOT
+#: reproduce at this head under the recipe above — and the record blob is
+#: byte-identical to the revision that wrote it, so the cause is a mis-stated or
+#: differently-injected measurement, NOT record growth (review r17 P3 measured
+#: this after an earlier draft of this very sentence blamed a smaller record).
 #: ⚠️ The measured reason `_TAG` is preferable is NOT that it keeps prose
 #: angle-brackets — it does not. `<harness>` and `<ws>` are tag-SHAPED, so BOTH
 #: forms strip them. Over this record `<[^>]+>` strips 314 bytes (28 spans) and
