@@ -5580,8 +5580,10 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                 # terminal gate above also clears `baseline` — see the
                 # EpBreakdown three-state note. And the flag follows the
                 # RESOLVED state rather than `baseline_set` alone: a DECLARED but
-                # DEGENERATE prior (`set_point_baseline(claim, 0, 0)`, which every
-                # surface reads as `absent` because 0/0 has no mean — #11702
+                # DEGENERATE prior (`set_point_baseline(claim, 0, 0)`, which reads
+                # as `absent` because 0/0 has no mean — but `baseline` at the
+                # mirror's value when a readable `n.confidence` sits beside it;
+                # #11702
                 # cycle 30) must not claim prior-only beside `ep_state: "absent"`,
                 # because `baseline` is documented as the prior mean "unless a
                 # readable ``n.confidence`` mirror supplies the value, which

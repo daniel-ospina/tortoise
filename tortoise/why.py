@@ -534,7 +534,9 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
             # #11702 cycle 30: the flag follows the RESOLVED state, not
             # `baseline_set` alone — the same rule `annotate_ep_batch` applies.
             # A DECLARED but DEGENERATE prior (`set_point_baseline(claim, 0, 0)`)
-            # has no mean (0/0) and reads `absent` here, so claiming prior-only
+            # has no mean (0/0) and reads `absent` here UNLESS a readable
+            # `n.confidence` mirror sits beside it (then the row is `baseline`
+            # at the mirror's value), so claiming prior-only
             # would contradict `ep_state` beside it AND disagree with the `ep`
             # block for the same claim. `baseline` is documented as the prior
             # mean "unless a readable ``n.confidence`` mirror supplies the

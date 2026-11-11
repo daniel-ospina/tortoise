@@ -5341,7 +5341,19 @@ def test_update_entity_clearing_the_pair_clears_the_mirror(sdk, tmp_path):
 # The check is a PROXIMITY one on normalised prose: a qualifier must follow its
 # claim within the same sentence, so a paragraph that mentions the mirror for a
 # DIFFERENT shape does not satisfy it (that is how `:347` passed every earlier
-# review). It is a regression tripwire on the class, not a grammar proof.
+# review).
+#
+# ⛔ WHAT THIS GUARD IS, STATED SO IT CANNOT OVER-PROMISE. It is a regression
+# tripwire over the WORDINGS the tree has actually used, in both directions:
+# it flags a claim whose sentence carries no affirmative mirror clause, and it
+# vetoes a claim whose sentence carries a negation, a restriction clause
+# ("only when…", "last", "ignored", "fallback") or a precedence verb attached to
+# the PAIR rather than the mirror. It is NOT a grammar proof and CANNOT be: a
+# paraphrase that states the rule wrongly without reusing any of these shapes
+# passes, and six review cycles each produced one. Its honest claim is "the
+# settled wordings do not invert silently", which is why `_EXPECTED_*_SITES` is
+# a FLOOR (a new site is covered, a vanished one fails) and why every failure
+# message quotes the offending sentence rather than asserting a verdict.
 #
 # Scope: the five modules that carry this contract. The architecture docs are
 # guarded by their own citation tests (`tests/test_extractor_v4_citation_rot.py`,
@@ -5478,8 +5490,10 @@ _QUALIFIER_OBJECT_NEGATIONS = re.compile(
 
 
 #: Restriction clauses that demote the mirror to a FALLBACK — the inverse of the
-#: shipped precedence. Checked in the ~60 characters after a clean mirror+verb
-#: pair, which is where every measured defeat puts them.
+#: shipped precedence. Checked over the WHOLE claim sentence: English puts a
+#: restriction in a relative clause BEFORE the main verb ("the mirror, IGNORED
+#: whenever a pair exists, supplies the value"), which a post-verb window cannot
+#: see (measured — three such inversions were certified qualified).
 _MIRROR_RESTRICTIONS = re.compile(
     r"(?<!-)\bonly\b"
     r"|\bfallback\b"
@@ -5496,7 +5510,14 @@ _MIRROR_RESTRICTIONS = re.compile(
     # "…supplies the value — but the pair takes precedence" and
     # "…which the α/β pair then OVERWRITES" both passed before this.
     r"|(?:pair|posterior|α/β|alpha/beta|mean)\s+"
-    r"(?:then\s+)?(?:takes\s+precedence|overwrites?|overrides|wins|supersedes)",
+    r"(?:then\s+|is\s+what\s+\w+\s+serves|actually\s+)?"
+    r"(?:takes\s+precedence|overwrites?|overrides|wins|supersedes)"
+    # …and the mirror as subject with a PRECEDENCE verb denied or reversed:
+    # "it never takes precedence OVER the pair", "the mirror is what the row
+    # actually serves" is not enough on its own, so both parties are named.
+    r"|(?:never|not)\s+takes?\s+precedence\s+over\s+the\s+"
+    r"(?:pair|posterior|α/β|alpha/beta|mean)"
+    r"|is\s+what\s+the\s+row\s+actually\s+serves",
     re.IGNORECASE,
 )
 
@@ -5614,7 +5635,7 @@ def _qualified(window: str, claim_at: int = 0) -> bool:
         # mirror+verb pair, so only a look past the verb sees it.
         # ⚠️ `(?<!-)only` is load-bearing: a bare `\bonly\b` matches
         # "mirror-ONLY Point", which is the canonical TRUE wording.
-        if _MIRROR_RESTRICTIONS.search(sentence[verb.end():verb.end() + 60]):
+        if _MIRROR_RESTRICTIONS.search(sentence):
             continue
         return True
     return False
