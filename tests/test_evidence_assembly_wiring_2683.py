@@ -497,9 +497,10 @@ def test_a_tr_question_is_excluded_and_leaves_the_window_untouched(
 # actually received. A pin that asserted the census instead would be pinning
 # the one thing this lane throws away.
 #
-# LAYER: HERMETIC — no graph, no model, no network. The ask lane's only
-# graph-touching calls are ``sdk.tortoise_fts_query`` and
-# ``sdk.annotate_ask_hits``; both are stubbed, and everything after them
+# LAYER: HERMETIC — no graph, no model, no network. On the branch these pins
+# drive, the ask lane's only graph-touching calls are
+# ``sdk.tortoise_fts_query`` and ``sdk.annotate_ask_hits``; both are stubbed,
+# and everything after them
 # (per-session dedup, A5 boost, A7 rerank, packaging, ``assemble_context``,
 # ``render_context``, the reader call) is the REAL product path. Same
 # ``_FakeSDK`` shape as ``tests/test_ask_retrieval_budget.py``.
@@ -514,15 +515,26 @@ ASK_SESSION_2 = "sess2683ask2"
 ASK_OTHER_FACT = "i live in lisbon"
 
 #: Every env-gated knob ``run_ask_lane`` reads on its call path that can move
-#: the POOL, the WINDOW or the ARM. Scrubbed, not tolerated: an ambient export
-#: of ``TORTOISE_ASK_CONTEXT_ITEM_CAP`` would silently re-cut the flooding
+#: the POOL, the WINDOW or the ARM on the LEGACY branch these pins drive.
+#: Scrubbed, not tolerated: an ambient export of
+#: ``TORTOISE_ASK_CONTEXT_ITEM_CAP`` would silently re-cut the flooding
 #: window this section pins, and ``TORTOISE_ASK_RERANK`` would reorder the
 #: pool before packaging — a developer shell carrying either would red a
 #: pinned id list. (A spurious red, never a false pass — but a price for
 #: nothing.)
+#:
+#: ``TORTOISE_ASK_CONNECTED_ASSEMBLY`` is scrubbed for the opposite reason:
+#: it does not *move* the arm, it REPLACES the lane (``ask_lane.py:491`` —
+#: when the connected block fires, ``hits = []`` and the retrieval, dedup,
+#: boost, rerank and packaging stages never run at all), so an ambient export
+#: would bypass the thing this section pins rather than perturb it. It is a
+#: latent spurious red, not a false pass: ``classify_question`` returns None
+#: for this section's question today, so the fired branch is not taken.
 _ASK_ENV_SCRUB = (
     # the arm under test
     "TORTOISE_ASK_EVIDENCE_ASSEMBLY",
+    # not a knob on the arm — it REPLACES the lane the arm lives in
+    "TORTOISE_ASK_CONNECTED_ASSEMBLY",
     # the A5 evidence-mark boost (reorders the pool before packaging)
     "TORTOISE_ASK_EVIDENCE_BOOST",
     "TORTOISE_ASK_EVIDENCE_BOOST_ANSWER_STRING",
