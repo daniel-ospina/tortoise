@@ -3481,10 +3481,22 @@ def test_the_e2b_floor_is_FED_the_planted_population_and_the_line_says_so():
     assert _subscript(operand.left) == ("e1", "real_facts"), (
         "capstone_measure.py's E2b floor reads another population than the "
         f"binding — one frozen key, one denominator: {ast.dump(operand.left)}")
-    assert any(isinstance(node, ast.Name) and node.id == "e2b_floor"
-               for node in ast.walk(operand)), (
-        "capstone_measure.py's E2b `below_floor=` no longer compares against "
-        f"`e2b_floor`: {ast.dump(operand)}")
+    # ⛔ THE OPERATOR IS THE REFUSAL, so it is pinned as strictly as the operand.
+    # A pin that only checks the LEFT side and that `e2b_floor` appears somewhere
+    # in the subtree leaves `<` free: inverting it to `>` keeps
+    # `e1["real_facts"]` and the name `e2b_floor` intact, so the whole selection
+    # stayed green while a capture that lost the planted population stopped being
+    # REFUSED — the #10989 fail-open, silently re-opened by one character
+    # (#11833 review P1, measured: 873 passed with `<` → `>`; the previous
+    # substring pin caught it, so the AST rewrite was a NET LOSS without this).
+    assert (len(operand.ops) == 1
+            and isinstance(operand.ops[0], ast.Lt)
+            and isinstance(operand.comparators[0], ast.Name)
+            and operand.comparators[0].id == "e2b_floor"), (
+        "capstone_measure.py's E2b `below_floor=` must be exactly "
+        "`e1[\"real_facts\"] < e2b_floor` — `<` IS the refusal: inverted, a capture "
+        "that lost the planted population stops being REFUSED and the E2b row can "
+        f"read its bar MET on a failed capture. Got {ast.dump(operand)}")
 
     declared = [node.value for node in ast.walk(
         ast.parse(_SCORES_PATH.read_text(encoding="utf-8")))

@@ -846,9 +846,12 @@ def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
       ``below_floor: REFUSED, which is neither a pass nor a fail``, so a 25-Object
       run under a 30-Object floor may not be reported RED either.
 
-    ``before_share`` and ``surviving_units`` are REQUIRED keyword arguments, not
-    defaults: a caller that forgets one would silently skip a floor this probe owns,
-    which is the fail-open the owned set exists to close (#11689).
+    ``before_share``, ``surviving_units`` and ``surviving_units_basis`` are
+    REQUIRED keyword arguments, not defaults: a caller that forgets one would
+    silently skip a floor this probe owns, which is the fail-open the owned set
+    exists to close (#11689) — and the basis is what makes the printed
+    `surviving_units_basis=` token an OPERAND of this call rather than a constant
+    in the emitter (#11833 review P2-2).
 
     ``status`` is ``MATCHED`` only when a pin exists, it agrees, and no floor is
     violated. Everything else means the artifact and the run are about different
