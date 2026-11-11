@@ -2309,8 +2309,12 @@ to answer.
 
 - **Why this entry exists.** `#11795` (`3794677ee3`) inserted a net **+17** lines into
   `tortoise/extractor_v2.py` at `:12112-12157` (hunk `@@ -12112,29 +12112,46 @@`), which is **above
-  every cite in §11's block** — so every one of them moved by exactly `+17` and nothing reddened
-  the document. The same commit, together with `#11805`, moved `tortoise/sdk.py` twice: **+115**
+  every cite in §11's block that sits BELOW `:12112`** — so each of those moved by exactly `+17`
+  and nothing reddened the document. The block's collector cite (`:11803-11825`,
+  `def _collect_classify_items` to its `return items`) sits ABOVE the insert, so it did NOT move
+  and is carried unchanged: the `+17` is the block's LOWER half, not the whole block, and applying
+  it to the collector would manufacture the stale cite this record exists to prevent. The same
+  commit, together with `#11805`, moved `tortoise/sdk.py` twice: **+115**
   above the `_extract_session_v2` region and a further **+18** above the `step_witness` meta fold,
   so its cites are re-derived individually rather than by a constant.
 - **New value — measured at this head:** the two `if items:` gates at `:14222`/`:14375` (the S2
