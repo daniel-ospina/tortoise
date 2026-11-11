@@ -1559,11 +1559,11 @@ class TestThePayloadWalkFailsClosedAtItsDepthBound:
                 self._nest(_MONEY_PAYLOAD_MAX_DEPTH + 1), door="test")
 
     def test_a_real_door_refuses_a_payload_it_cannot_grade(self):
-        from tortoise.api import EventAPI
-        from tortoise.log import EventLog
         import tempfile
         from pathlib import Path
 
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
         from tortoise.money import _MONEY_PAYLOAD_MAX_DEPTH
 
         with tempfile.TemporaryDirectory() as tmp:

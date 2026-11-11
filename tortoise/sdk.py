@@ -44227,7 +44227,6 @@ class TortoiseSDK:
         from tortoise.projection import (
             _CANONICAL_ENTITY_ID_PROPS,
             classify_entity_mutation_op,
-            secondary_entity_id_props,
         )
 
         # #3311: POINT-LABEL PRECEDENCE on the multi-label shape. A node that
@@ -44399,8 +44398,11 @@ class TortoiseSDK:
                     entity_create_lock(*_lock_key))
             if _rename_locks:
                 self._refuse_ambiguous_rename(id_val, props["name"])
-            for label, prop in _CANONICAL_ENTITY_ID_PROPS:
+            for label, _prop in _CANONICAL_ENTITY_ID_PROPS:
                 # #4649: a canonical label's identity is an OR-SET, not one key.
+                # NOTE: the primary key is not read here any more — `id_keys` below
+                # is derived THROUGH `_entity_identity_probes()`, so the write and the
+                # money gate cannot drift (#11836 review Finding 1 of round 5).
                 # `_CANONICAL_ENTITY_ID_PROPS` is the PRIMARY key; a label may also
                 # carry a secondary one (`Source` by `url` — url-only stubs minted
                 # by `_link_source` have no `id`, so the primary MATCH below used to
