@@ -294,15 +294,14 @@ def check(text: str) -> tuple[list[str], dict]:
     #: plus 6 planted ones cleared a floor of 30 with 84 of 90 planted units lost
     #: (#10989).
     planted_pts: dict[str, int] = {}
-    #: The E2 ATOMICITY CONTROL's population (`atomic_points`), which is NOT E2b's
-    #: floor population. Accumulated only because the V3 parse guard below is what
-    #: refuses an unparseable `atomic=` token — V5/V6/V7 go through `arm_metric()`
-    #: straight off the log, and V7 words an ABSENT arm line itself (`arm_metric`
-    #: returns `{}`, so its row reads "prints no atomic_points"). V15's anchor is
-    #: `planted_pts`, not this (#10989). ⛔ Not published into `state`: it was, and
-    #: nothing read it — a publish with no caller is dead code, not a surface
-    #: (#11833 review r1 P2-2).
-    atomic_pts: dict[str, int] = {}
+    #: Nothing is accumulated for the atomicity control: it is VALIDATED below
+    #: (a non-count `atomic=` token must be a V3 finding, not an absent line) and
+    #: then dropped. There is no accumulator because there is no reader — V5/V6/V7
+    #: go through `arm_metric()` straight off the log (V7 words an ABSENT arm line
+    #: itself: `arm_metric` returns `{}`, so its row reads "prints no
+    #: atomic_points"), and V15's anchor is `planted_pts` (#10989). The
+    #: `state["atomic_points"]` publish that used to sit here was write-only and is
+    #: gone (#11833 review r1 P2-2, r2 P2-1).
     pre_shas: dict[str, str] = {}
     for arm in arms:
         line = next((ln for ln in log.find(f"arm={arm} metric=objects ")), None)
@@ -342,9 +341,13 @@ def check(text: str) -> tuple[list[str], dict]:
         ap_line = next((ln for ln in log.find(f"arm={arm} metric=atomic_points ")), None)
         if ap_line is not None:
             ap = log.kv(ap_line).get("atomic", "")
-            if ap.isdigit():
-                atomic_pts[arm] = int(ap)
-            else:
+            #: VALIDATE ONLY — the value is not kept: anything reading the atomicity
+            #: control reads it off the log (`arm_metric()`), so an accumulator here
+            #: would be dead weight (#11833 review r2 P2-1). The check itself earns
+            #: its keep: `arm_metric()` reads a missing key as an ABSENT line, so a
+            #: non-count token has to be refused HERE or it would read as "no
+            #: atomic_points printed" rather than as the defect it is.
+            if not ap.isdigit():
                 findings.append(
                     f"[V3] arm {arm}: metric=atomic_points atomic={ap!r} is "
                     f"not a count — the atomicity control cannot be reconciled")

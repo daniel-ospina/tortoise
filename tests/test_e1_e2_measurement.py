@@ -3326,6 +3326,21 @@ def _subscript(node):
     return None
 
 
+def _is_population_operand(node) -> bool:
+    """True for `after_c[_E2B_FLOOR_POPULATION]` — the census field, by SHAPE.
+
+    Structural on purpose: `"surviving_units=after_c[…]" in source` is satisfied
+    by a comment or docstring quoting the same fragment, which is the vacuity
+    class this file already condemns for the emitted line (see the pin below) and
+    the reason both sibling readers are pinned as ASTs (#11833 review r2 P2-2).
+    """
+    return (isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "after_c"
+            and isinstance(node.slice, ast.Name)
+            and node.slice.id == "_E2B_FLOOR_POPULATION")
+
+
 def _dict_name_compares(path):
     """`{(key, (left_name, right_name))}` for every `{"key": left < right}` entry.
 
@@ -3410,11 +3425,26 @@ def test_the_e2b_floor_is_FED_the_planted_population_and_the_line_says_so():
     # `surviving_units_basis=` have to be spelled with the constant, so the
     # population the floor is scored over and the population the line claims
     # cannot be edited apart (#11833 review P2-2).
-    assert "surviving_units=after_c[_E2B_FLOOR_POPULATION]" in source, (
+    #
+    # ⛔ Read off the CALL's keywords as AST nodes, never as `in source`. A grep of
+    # the file is satisfied by a comment or a neighbouring expression quoting the
+    # same fragment — the vacuity class this test condemns three paragraphs down for
+    # the emitted line — and the two sibling readers of this key are pinned as ASTs
+    # for the same reason (#11833 review r2 P2-2).
+    operands = _call_keyword_values(_PROBE_PATH, "prereg_binding",
+                                   "surviving_units")
+    assert len(operands) == 1, (
+        "the probe should feed exactly one `prereg_binding(..., "
+        f"surviving_units=…)` call from `after_c[_E2B_FLOOR_POPULATION]`; found "
+        f"{len(operands)} — re-derive the operand before trusting the floor")
+    assert _is_population_operand(operands[0]), (
         "the probe's `surviving_units=` operand no longer derives from "
         "`_E2B_FLOOR_POPULATION` — the binding could be fed one population "
         "while the log names another")
-    assert "surviving_units_basis=_E2B_FLOOR_POPULATION" in source, (
+    bases = _call_keyword_values(_PROBE_PATH, "prereg_binding",
+                                 "surviving_units_basis")
+    assert (len(bases) == 1 and isinstance(bases[0], ast.Name)
+            and bases[0].id == "_E2B_FLOOR_POPULATION"), (
         "the probe's `surviving_units_basis=` disclosure no longer derives from "
         "`_E2B_FLOOR_POPULATION` — the log would name a population that is not "
         "the one the binding was handed")
