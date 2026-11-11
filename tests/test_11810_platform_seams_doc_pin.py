@@ -830,10 +830,12 @@ def test_every_restatement_site_label_names_the_item_that_states_it():
     moves within it.
 
     ⚠️ The extent is only as good as `_parser_item_end`, so THAT is pinned by its own
-    hermetic test (`test_the_item_extent_is_the_parsers_map`): an off-by-one there keeps
-    every assertion in this file green while re-opening the fail-OPEN (r42 P2 #1,
-    measured: `map[1] + 1` → all 8 tests still pass, and the moved sentence then reads
-    GREEN).
+    hermetic test (`test_the_item_extent_is_the_parsers_map`): before the pin existed,
+    an off-by-one there kept every OTHER assertion in this file green while re-opening
+    the fail-OPEN (r42 P2 #1, measured then, on the then-8-test file: `map[1] + 1` →
+    all 8 tests still passed, and the moved sentence read GREEN). At this head the same
+    mutation reds that one pin instead — `RED: ['test_the_item_extent_is_the_parsers_map']`
+    with the other 8 passing — which is the whole point of it.
 
     Measured identical on the current record: `764 / 1393 x3 / 2309 x3`."""
     doc = _PLATFORM_SEAMS_DOC.read_text(encoding="utf-8")

@@ -736,6 +736,22 @@ def test_the_hosted_api_cite_notes_state_one_measurement_and_the_pivot():
         "re-derive the pivot and both notes' figures with "
         "`uv run python tools/hosted_api_cite_census.py --pivot <line>`")
 
+    # ...and the tool's own FALLBACK must agree with it, on its DEFAULT argument.
+    # Why this exists (#11891 review r43, P3): `tools/hosted_api_cite_census.py`'s
+    # `DEFAULT_PIVOT` is the ONE pivot spelling NO verb can see — `--check` and
+    # `--refresh` both derive the pivot from the tree and pass it explicitly, and the
+    # three scorecard spellings are pinned by `_PIVOT_SPELLINGS` below — so a sweep
+    # that updates the notes and stops leaves it behind and every verb stays green.
+    # That already happened TWICE (`23131 -> 23466`, then `23466 -> 23477`); measured
+    # at #11891's head, restoring `DEFAULT_PIVOT = 23466` left this whole cluster
+    # passing while `census()` split at the wrong line (above 13 / at 0, not 12 / 1).
+    assert pivot_is_the_lifetime_site(), (
+        "tools/hosted_api_cite_census.DEFAULT_PIVOT no longer agrees with the "
+        "LIFETIME_MEMORY_QUERY site at this head, so every caller that omits the "
+        "pivot splits the census at a line the notes do not name — `--check` and "
+        "`--refresh` CANNOT catch this, so bump it by hand in the SAME edit as the "
+        "notes (#11891)")
+
     # the census command is the notes' stated remedy, so it must work and must not
     # collapse to nothing (that, and only that, about the population is pinned here)
     data = census(_PIVOT)
