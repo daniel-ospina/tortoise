@@ -926,17 +926,21 @@ LABEL_EVIDENCE: dict[str, tuple[str, str, str, frozenset[str]]] = {
     "tortoise.projection::_rebuild_all_replay": (
         "tortoise/projection/__init__.py", "_rebuild_all_replay",
         '"MATCH (n:Point {id:$pid}) " + restore_guard', frozenset({"Point"})),
+    # The needle names the per-label LOOP, not the loop's variable: `#11836`
+    # renamed the unused binding `prop` -> `_prop` and the name-sensitive
+    # `"for label, prop in …"` form redded on unchanged store evidence. What the
+    # declaration is derived FROM is the iteration over the canonical constant
+    # (the `SET n += $p` map-merge inside it is the store), so the variable is
+    # not part of the claim and a rename is not a store move.
+    # The code site states the same thing in its own terms, and says why the rename
+    # cannot reach the write: the primary key is derived THROUGH
+    # `_entity_identity_probes()` and never by naming the binding, and the same
+    # rename once turned the guarded path into a `NameError` with every test green
+    # (`#11836`, VGATE round 13). So a guard that reds on the rename is measuring
+    # the rename, not the store — and its message ("the store moved") is a wrong
+    # diagnosis of a declaration that is still true.
     "tortoise.sdk::_update_entity": (
         "tortoise/sdk.py", "_update_entity",
-        # ⛔ Pin the tuple the function ITERATES, never the loop variable's NAME.
-        # The variable is named for the loop body; a lint rename (`prop` -> `_prop`,
-        # #11836) is explicitly safe at the code site — it derives the primary key
-        # THROUGH `_entity_identity_probes()` rather than naming the variable, so a
-        # rename cannot break the write. The old needle named the variable, so the
-        # rename reddened this row with "the store moved, so the declaration is
-        # stale" while the store had NOT moved and the declaration was still true.
-        # The same rename has already cost one incident (#11836, VGATE round 13); a
-        # guard that fires on it a second time is measuring the rename, not the store.
         "in _CANONICAL_ENTITY_ID_PROPS:",
         frozenset({"Point", "Subject", "Object", "Source", "Event"})),
     # `#11641`: the two writers whose label used to be decided at RUNTIME, so row 2 could not
