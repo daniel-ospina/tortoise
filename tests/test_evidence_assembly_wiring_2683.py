@@ -489,9 +489,11 @@ def test_a_tr_question_is_excluded_and_leaves_the_window_untouched(
 # names.
 #
 # ⛔ The census is NOT the observable here. ``_pkg_stats`` is assigned and
-# never read — ``run_ask_lane``'s response carries no assembly key — so a
-# product-lane ON run cannot be told from OFF by any field of its outcome.
-# The READER WINDOW is the only observable that moves, which is why every
+# never read, and ``run_ask_lane``'s response carries no assembly or census
+# key. It does carry WINDOW-derived fields — ``retrieved_session_ids``,
+# ``context_point_count`` — and those move between ON and OFF only because the
+# window moved, which is the effect this section measures. The READER WINDOW
+# is the mechanism, which is why every
 # test below asserts on it: the pool handed to ``assemble_context`` (the
 # real window-fill, spied) and, for the flooding test, the text the reader
 # actually received. A pin that asserted the census instead would be pinning

@@ -2286,7 +2286,7 @@ to answer.
   `_run_vet_pass`'s S2.2 call at `:16780` and its post-S4 union call at `:14351`.
   ⛔ **Re-derived once more, by content, after this entry was written** — `#11832`'s lane found
   every cite below the collector a further **+17** on the shipped tree (`#11795`'s and `#11814`'s
-  inserts). The four ``+108``/``+293``/``+44`` constants this entry was written around are
+  inserts). The ``+108``/``+293``/``+44`` constants this entry was written around are
   unchanged and still describe the heads they name; the numbers above are this tree's, which is
   what this entry claims to carry.
 - **Verified by content, not by arithmetic.** Each line was opened at this head, not shifted:
