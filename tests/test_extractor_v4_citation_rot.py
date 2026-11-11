@@ -1244,9 +1244,12 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         # PRE-FIX §1.5 item 5's (this PR rewrote that item, so the phrase lives
         # only in the pre-fix text).
         # ⛔ The section is §1.5, not §2: `5. the **\`null\`-not-0.5 rule**` sits
-        # at line 100, under the §1.5 heading at 65; §2 opens at 120 and its
-        # numbered list runs 1..3, so "§2 item 5" is a citation that resolves to
-        # nothing (a stale cite inside the instrument that exists to catch them).
+        # at line 100, under the §1.5 heading at 65 — both revision-invariant —
+        # while §2 opens at 121 AT THIS HEAD (120 on `main`, where item 5 is two
+        # lines rather than three). Its numbered list runs 1..3, so "§2 item 5"
+        # is a citation that resolves to nothing. ⛔ Quoting the main-side 120
+        # here without the head-side 121 is itself a stale cite, inside the
+        # instrument that exists to catch them.
         "**✅ FIXED (#11702) — kept here as the reason the rule exists, with the "
         "citations re-pointed.** A claim",
         "5. the **`null`-not-0.5 rule** for absent belief state (§6.3) — **landed** (#11702, implementing",
