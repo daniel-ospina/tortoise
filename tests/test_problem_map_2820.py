@@ -484,11 +484,12 @@ def test_a_decoy_summary_ROW_outside_section_2_cannot_satisfy_the_check(tmp_path
     Reachable, and found by fresh review at the post-merge head: `parse_summary`
     scanned the whole document and kept the LAST `| OPEN | n |` match, so an
     ordinary table appended after §2 ("## Appendix") SUBSTITUTED for §2's number.
-    Measured before the fix: §2 corrupted to `| OPEN | 2 |` plus
-    `## Appendix` / `| OPEN | 4 |` returned NO summary errors, and the index count
-    check — which compares against the same parse — agreed with the decoy, so a
-    document contradicting its own table read CLEAN. Pages like this grow
-    appendixes; the counts belong to one section.
+    Measured before the fix (the counts then were `| OPEN | 5 |`): §2 corrupted
+    to `| OPEN | 3 |` plus `## Appendix` / `| OPEN | 5 |` returned NO summary
+    errors, and the index count check — which compares against the same parse —
+    agreed with the decoy, so a document contradicting its own table read CLEAN.
+    Pages like this grow appendixes; the counts belong to one section.
+    (This control now runs the same mutation on today's counts: 4 → 2, decoy 4.)
     """
     copy = _doc_copy(tmp_path)
     text = copy.read_text(encoding="utf-8")

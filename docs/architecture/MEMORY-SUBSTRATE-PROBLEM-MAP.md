@@ -312,7 +312,9 @@ Four rows, and three of them are defects:
 4. **#2730** — entity attachment. **The research is done and the mechanism is
    not built** (#8639 completed the brief's alias-resolution rung and states the
    surviving defects: the alias surface form is lost, so a re-ingest re-MERGEs
-   into a second node, and nothing folds suffixes or honorifics). The pin on this
+   into a second node — that duplicate arm now fails closed, `#11693` HOLDs an
+   unresolved identity instead of minting it — and nothing folds suffixes or
+   honorifics). The pin on this
    row asserts the BRIEF's wording, not the behaviour — this row is OPEN for
    exactly that reason, and a reviewer caught it claiming otherwise.
 
@@ -486,15 +488,17 @@ rounding:**
   `tests/test_money_value_2782.py` — and its distinctness clause is recorded as
   **#2730**'s, which is OPEN here on its own evidence. §2's counts, the WS-C cell,
   the abstract and the `docs/00_index.md` headline moved with it (21/5 → 22/4).
-  The other four survivors were re-measured in the same pass and are
-  **unchanged**: `#2787` (`grep -n 'bucket' tortoise/pack_registry.py` still
-  returns no relation arm; aside from this map's own re-cut, no commit since
-  2026-11-06 mentions it), `#2730` (the tracker says CLOSED **COMPLETED** and
-  this page keeps it OPEN because the mechanism is unbuilt — §1's table; nothing
-  since 2026-11-06 changes that: the honorific/suffix folding §8 records as
-  missing is still absent (`grep -ci honorific tortoise/extractor_v2.py` → 0), and
-  the S3 disambiguation work that landed (`397a2d34b4`, `556e581ceb`) changes how
-  an unresolved identity is *held*), and `#2684` / `#2696`
+  The other four survivors were re-measured in the same pass and **none changed
+  status**: `#2787` (`grep -n 'bucket' tortoise/pack_registry.py` still returns
+  no relation arm; aside from this map's own re-cut, no commit since 2026-11-06
+  mentions it), `#2730` (the tracker says CLOSED **COMPLETED** and this page keeps
+  it OPEN because the mechanism is unbuilt — §1's table; §8's duplicate-node arm
+  now fails closed, measured at this head: `556e581ceb`'s
+  `test_the_graph_node_count_does_not_increase` passes, so an unresolved identity
+  is HELD rather than minted, and what stays unbuilt is surface-form retention
+  plus the honorific/name-suffix folding (`grep -ci honorific
+  tortoise/extractor_v2.py` → 0, and no `_fold_name`/`_strip_suffix` helper exists)),
+  and `#2684` / `#2696`
   OPEN in the tracker.
 
   ⛔ **The guard cannot see this class of drift at all**, and that is why it is
