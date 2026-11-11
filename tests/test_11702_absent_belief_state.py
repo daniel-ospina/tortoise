@@ -5308,7 +5308,8 @@ def test_update_entity_clearing_the_pair_clears_the_mirror(sdk, tmp_path):
 #
 # The defect class that survived six review rounds here is not behavioural: it
 # is a SENTENCE that restates the absence rule at one site while the code and
-# `EpBreakdown`'s canonical statement (`search_engine.py`:1392-1420) say
+# `EpBreakdown`'s canonical statement (`search_engine.py`:1396-1427 — the class
+# opens at 1396, so the old `1392` started inside `EpEvidence`) say
 # something else. Each round fixed the sites that review named and left the
 # same class at a site nobody had looked at, because nothing checked the CLASS.
 #
