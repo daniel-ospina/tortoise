@@ -28,6 +28,7 @@ module on a docs-only or `tools/`-only diff (both prefixes are dropped by
 """
 from __future__ import annotations
 
+import ast
 import re
 import subprocess
 import sys
@@ -154,7 +155,7 @@ def test_shipped_document_passes_the_full_check():
 
 
 def test_mutation_population_is_pinned():
-    """FAILS if the self-test arm population is shrunk, or the floor with it.
+    """FAILS if the self-test arm population drops below the declared floor.
 
     Reachable by the shape a weakening edit takes: `MUTATIONS = ()` is a
     ONE-place edit, and it used to print `self-test: PASS (0 failing arm(s))` and
@@ -177,9 +178,20 @@ def test_mutation_population_is_pinned():
     shorthand) and the verdict-attribution arm. The floor is pinned WITH it — a
     floor below the population is the "shrunk population proves nothing" shape it
     exists to catch. Re-derive by counting `caught` lines in `--self-test`.
+
+    ...plus a §1 vocabulary arm, the only pin on `check_vocabulary()`, which is
+    why the population is 19. ⚠️ The `>=` below is the tool's own rule: an ADDED
+    arm must not red this. The second assert RECORDS the population, so removing
+    an arm forces the floor to be edited here as well — a shrink cannot happen in
+    one place.
     """
-    assert len(flc.MUTATIONS) == 18
-    assert flc.MIN_SELF_TEST_MUTATIONS == 18
+    assert len(flc.MUTATIONS) >= flc.MIN_SELF_TEST_MUTATIONS, (
+        "the registered population must meet the floor it declares"
+    )
+    assert flc.MIN_SELF_TEST_MUTATIONS == 19, (
+        "this line RECORDS the population (19 arms); removing one means editing the "
+        "floor here too, which is the second place a shrink has to touch"
+    )
 
 
 def test_self_test_floor_catches_a_shrunk_population(monkeypatch):
@@ -225,6 +237,27 @@ def test_doc_level_arms_make_no_git_call(monkeypatch):
 
 
 # ── closed verdict vocabulary ──────────────────────────────────────────────
+
+
+def test_section1_vocabulary_must_match_the_enforced_set(tmp_path, monkeypatch):
+    """FAILS when §1 defines a different vocabulary than the guard enforces.
+
+    Reachable by deleting one of §1's five rows: §3 could still use the verdict
+    and §8 would still call §1 the authority, while the guard — which compared §3
+    against its own constant only — reported clean (measured: removing the
+    `ADOPTED` row left `check_document()` empty). The page would then define a
+    vocabulary narrower than its own table uses, which is the "claim class with no
+    handling rule" §1 exists to prevent.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: "\n".join(
+            ln for ln in t.splitlines() if not ln.startswith("| **ADOPTED** |")
+        ),
+    )
+    problems = _doc_problems()
+    assert any("§1 vocabulary drift" in p for p in problems), problems
 
 
 def test_invented_verdict_is_rejected(tmp_path, monkeypatch):
@@ -611,6 +644,32 @@ def test_citation_past_end_of_file_is_rejected(tmp_path, monkeypatch):
     )
     problems = _doc_problems()
     assert any("out of range" in p for p in problems), problems
+
+
+def test_out_of_tree_citation_is_reported(tmp_path, monkeypatch):
+    """FAILS if a RELATIVE citation that escapes the repository is called clean.
+
+    Reachable, and measured clean before this arm: a `../..`-escaping citation
+    resolves to a real file (`../../../../..` + `/etc/hostname:1` verified) that
+    `is_file()` accepts, so the existence-only check certified "evidence" the repo
+    does not contain — the class this page is about.
+
+    ⚠️ The arm is about RELATIVE escapes only. A `~`- or `/`-rooted path is §8's
+    deliberate exemption (a dated reading of something outside this repo) and is
+    recognised, counted and skipped — do not read this test as closing that door,
+    and do not "fix" it by un-exempting absolute paths: that would reverse a
+    recorded decision.
+    """
+    def add_escaping_citation(text: str) -> str:
+        return text.replace(
+            "It resolves on no machine in the fleet (§5).",
+            "`../../../../../../etc/hostname:1`",
+            1,
+        )
+
+    _mutated(tmp_path, monkeypatch, add_escaping_citation)
+    problems = _doc_problems()
+    assert any("resolves outside the repository" in p for p in problems), problems
 
 
 def test_document_with_no_citations_is_unverifiable(tmp_path, monkeypatch):
@@ -1160,8 +1219,23 @@ def test_tool_is_stdlib_only():
     shallow clone returns for `--check`.
     """
     source = (REPO / "tools" / "findings_ledger_check.py").read_text(encoding="utf-8")
-    for banned in ("import yaml", "import requests", "import pytest", "import httpx"):
-        assert banned not in source
+    # ⛔ AST, not a substring scan. The four-literal version this replaced could not
+    # see `from yaml import safe_load`, `import os, yaml` or
+    # `importlib.import_module("yaml")` — measured: the test stayed green with
+    # `from yaml import safe_load` added, while the docstring claimed it "FAILS if
+    # the checker grows a third-party import". A guard that cannot see the common
+    # spelling of the thing it forbids is the fail-open class this PR keeps closing.
+    imported: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
+    third_party = sorted(imported - set(sys.stdlib_module_names) - {"__future__"})
+    assert third_party == [], (
+        f"the checker must be stdlib-only (the `docs` job runs it beside a `pip "
+        f"install -e .`, whose absence must never break the guard); found {third_party}"
+    )
     assert subprocess.run(
         [sys.executable, str(REPO / "tools" / "findings_ledger_check.py"), "--self-test"],
         cwd=REPO, capture_output=True, check=False,
