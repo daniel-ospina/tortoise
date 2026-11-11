@@ -862,26 +862,106 @@ def test_a_letter_stated_two_different_ways_is_rejected(tmp_path, monkeypatch):
         assert any("assigns a different verdict" in p for p in problems), (connector, problems)
 
 
-def test_a_duplicate_mention_in_letters_first_form_is_rejected(tmp_path, monkeypatch):
-    """FAILS if a contradicting repeat AFTER the group is dropped.
+def test_a_duplicate_mention_after_the_group_is_rejected(tmp_path, monkeypatch):
+    """FAILS if a contradicting repeat AFTER a class group is dropped.
 
-    The repeat can also sit outside the group it contradicts —
-    `… are **SUPERSEDED-BY-FIX**, and **(c)** is also **DRIFTED**` — which is what a
-    half-applied edit to a letters-first sentence leaves behind (measured: clean
-    before the fix).
+    … are **SUPERSEDED-BY-FIX**, and **(d)** is also **ADOPTED**, **(e)** is
+    **ADOPTED**, and **(b)**, **(k)** and **(l)** are **DRIFTED**.
+
+    Two mechanisms catch this shape, and either one suffices: the attribution maps hold
+    one verdict per letter with the LAST assignment winning, so the trailing repeat
+    overwrites the group's correct verdict (measured: a `before.setdefault(...)` map
+    reds here too), and the adjacency layer sees `(d)` + `is also` + `**ADOPTED**`.
+    It therefore fails only when BOTH are removed — the test that ISOLATES the
+    adjacency layer is `test_a_contradicting_mention_before_the_group_is_rejected`,
+    where the maps land on the correct verdict and the repeat sits before it.
     """
     _mutated(
         tmp_path,
         monkeypatch,
         lambda t: t.replace(
-            "**(c)**, **(d)** and **(g)** are **SUPERSEDED-BY-FIX**",
-            "**(c)**, **(d)** and **(g)** are **SUPERSEDED-BY-FIX**, and **(c)** is "
-            "also **DRIFTED**",
+            "**(c)**, **(d)** and **(g)** are **SUPERSEDED-BY-FIX**, **(e)** is",
+            "**(c)**, **(d)** and **(g)** are **SUPERSEDED-BY-FIX**, and **(d)** is "
+            "also **ADOPTED**, **(e)** is",
             1,
         ),
     )
     problems = _doc_problems()
     assert any("assigns a different verdict" in p for p in problems), problems
+
+
+def test_a_duplicate_in_a_later_sentence_is_rejected(tmp_path, monkeypatch):
+    """FAILS if the mention scan stops at the sentence carrying the letter list.
+
+    Reachable, and measured: the takeaway paragraph's closing sentence is what a lane
+    quoting the summary may include —
+
+        … and **(b)**, **(k)** and **(l)** are **DRIFTED**. Note **(d)** is **ADOPTED**.
+
+    — and reading only the sentence that carries "no longer read as written" returned
+    `[]` (clean) over it, while the table says `(d)` is SUPERSEDED-BY-FIX. The scan
+    covers the whole paragraph for exactly this reason; only rows the table calls
+    non-STILL-TRUE can be misattributed, so the complement sentence adds no claims.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace(
+            "**(b)**, **(k)** and **(l)** are **DRIFTED**.",
+            "**(b)**, **(k)** and **(l)** are **DRIFTED**. Note **(d)** is "
+            "**ADOPTED**.",
+            1,
+        ),
+    )
+    problems = _doc_problems()
+    assert any("assigns a different verdict" in p for p in problems), problems
+
+
+def test_a_citation_with_a_non_colon_delimiter_is_refused(tmp_path, monkeypatch):
+    """FAILS if a citation is defused by rewriting its delimiter.
+
+    §8 promises no citation shape is exempt, so a backticked token naming a real file
+    and ending in a line number must be REFUSED when the delimiter is not the `:` the
+    resolver reads. Measured before the fix: every spelling below left the page CLEAN,
+    including `tortoise/nope.py 16` (a file that does not exist) and
+    `tortoise/pipeline.py 999999` (past the end of a 979-line file).
+    """
+    for spelling in (
+        "tortoise/pipeline.py 999999",
+        "tortoise/pipeline.py#999999",
+        "tortoise/pipeline.py@999999",
+        "tortoise/pipeline.py-999999",
+        "tortoise/pipeline.py/999999",
+        "tortoise/pipeline.py,999999",
+        "tortoise/pipeline.py:L999999",
+        "tortoise/nope.py 16",
+    ):
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, _s=spelling: t.replace(
+                    "`tortoise/pipeline.py:16`", f"`{_s}`", 1
+                ),
+            )
+            problems = _doc_problems()
+            assert any("not a recognised citation" in p for p in problems), (
+                f"a citation rewritten as {spelling!r} was accepted — one character "
+                f"of reformatting defused the red: {problems}"
+            )
+    # The prose carve-outs must stay exactly as wide as they were.
+    for prose in ("localhost 6379", "fetch-depth 0"):
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, _s=prose: t.replace(
+                    "`tortoise/pipeline.py:16`", f"`{_s}`", 1
+                ),
+            )
+            assert not any(
+                "not a recognised citation" in p for p in _doc_problems()
+            ), f"{prose!r} is prose, not a citation"
 
 
 def test_a_class_first_group_with_a_later_mention_is_not_a_swap(tmp_path, monkeypatch):
