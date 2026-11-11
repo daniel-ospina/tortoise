@@ -746,12 +746,19 @@ def _e2a_result(*, survived: int, units: int, bars: dict) -> dict:
         value=f"value_units {survived}/{units} survived")
 
 
-def _e2b_result(*, fused: int, atomic: int, bars: dict) -> dict:
-    """An E2b result shaped like `main`'s own, without the run."""
+def _e2b_result(*, fused: int, atomic: int, surviving: int, bars: dict) -> dict:
+    """An E2b result shaped like the arm's own, without the run.
+
+    `atomic` is the fused-share DENOMINATOR (`fused/atomic` — that is the E2b bar's
+    own operand) and `surviving` is the FLOOR population, the surviving PLANTED units
+    (`real_facts`). They are different counts and one must not stand in for the other:
+    the floor tested against `atomic` is exactly the fail-open #10989 closes, so both
+    are REQUIRED keywords, mirroring `prereg_binding`'s own rule.
+    """
     share = fused / atomic if atomic else 1.0
     return measure.outcome(
         measured=True,
-        below_floor=atomic < bars["floors"]["e2b_surviving_units"],
+        below_floor=surviving < bars["floors"]["e2b_surviving_units"],
         passed=share <= bars["E2b"]["max_fused_share"],
         bar=f"fused share <= {bars['E2b']['max_fused_share']}",
         value=f"fused={fused}/{atomic} = {share:.6f}")
@@ -772,8 +779,8 @@ def test_the_e2_row_is_the_composite_and_not_e2a_alone():
     """
     bars = measure.parse_bars(json.loads(PREREG.read_text()))
     e2a_green = _e2a_result(survived=13, units=14, bars=bars)
-    e2b_bad = _e2b_result(fused=7, atomic=114, bars=bars)
-    e2b_good = _e2b_result(fused=1, atomic=114, bars=bars)
+    e2b_bad = _e2b_result(fused=7, atomic=114, surviving=90, bars=bars)
+    e2b_good = _e2b_result(fused=1, atomic=114, surviving=90, bars=bars)
     assert e2a_green["outcome"] == "PASS", e2a_green
     assert e2b_bad["outcome"] == "FAIL", e2b_bad
 
@@ -806,7 +813,7 @@ def test_the_e2_composite_is_blocked_when_a_half_was_never_measured():
     first arm reads FAIL and the floor arm reads FAIL too.
     """
     bars = measure.parse_bars(_prereg())
-    e2b_good = _e2b_result(fused=1, atomic=114, bars=bars)
+    e2b_good = _e2b_result(fused=1, atomic=114, surviving=90, bars=bars)
     e2a_green = _e2a_result(survived=13, units=14, bars=bars)
 
     e2a_unmeasured = measure.outcome(
@@ -852,7 +859,7 @@ def test_the_e2_note_never_claims_a_shortfall_for_a_half_that_was_not_measured()
     e2a_unmeasured = measure.outcome(
         measured=False, below_floor=False, passed=False, bar="13 of 14",
         value="value_units=None survived=None")
-    e2b_good = _e2b_result(fused=1, atomic=114, bars=bars)
+    e2b_good = _e2b_result(fused=1, atomic=114, surviving=90, bars=bars)
     composite = measure.e2_outcome(e2a_result=e2a_unmeasured,
                                    e2b_result=e2b_good, bars=bars)
     note = measure.e2_row_note(parsed, e2a_unmeasured, e2b_good, composite)
@@ -1284,7 +1291,7 @@ def test_the_e2_note_never_claims_a_shortfall_that_did_not_happen():
     parsed = measure.measure_e1_e2(_REPO)
     bars = measure.parse_bars(json.loads(PREREG.read_text()))
     e2a_green = _e2a_result(survived=13, units=14, bars=bars)
-    e2b_good = _e2b_result(fused=1, atomic=114, bars=bars)
+    e2b_good = _e2b_result(fused=1, atomic=114, surviving=90, bars=bars)
     green = measure.e2_outcome(e2a_result=e2a_green, e2b_result=e2b_good,
                                bars=bars)
     assert measure.verdict_word(green) == "GREEN", green
@@ -1985,7 +1992,7 @@ def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch):
             e2a_out=e2a_out,
             e2b_out=measure.outcome(
                 measured=True,
-                below_floor=e1["atomic_points"] < e2b_floor,
+                below_floor=e1["real_facts"] < e2b_floor,
                 passed=e2b_share <= bars["E2b"]["max_fused_share"],
                 bar=f"fused share <= {bars['E2b']['max_fused_share']}",
                 value=f"fused={e1['fused']}/{e1['atomic_points']}"),

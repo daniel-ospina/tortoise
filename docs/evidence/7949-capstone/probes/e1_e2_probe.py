@@ -809,7 +809,8 @@ def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
     * ``BELOW_FLOOR`` — the corpus agrees but the run's denominator is under one of
       the artifact's own owned floors (``e1_objects``, or — since #11689, and CHECKED
       rather than merely printed — ``e1_min_before_share`` on the control arm and
-      ``e2b_surviving_units`` on the arm's ``atomic_points``). The artifact's rule is
+      ``e2b_surviving_units`` on the arm's surviving PLANTED units, ``real_facts``
+      — #10989). The artifact's rule is
       ``below_floor: REFUSED, which is neither a pass nor a fail``, so a 25-Object
       run under a 30-Object floor may not be reported RED either.
 
@@ -1333,7 +1334,8 @@ def _run(argv: list[str] | None = None) -> int:
     # threshold the pre-registration states — so no E2 criterion number is consumed,
     # and that is said rather than implied. E2b's POPULATION floor is a different
     # quantity and IS consumed, on the binding line (#11689): it is checked against
-    # the scored arm's atomic Points, so leaving that floor unread while claiming "any
+    # the scored arm's surviving PLANTED units (`real_facts`), so leaving that floor
+    # unread while claiming "any
     # stated floor" is satisfied would be the fail-open the line exists to rule out.
     #
     # The clause is THREE-WAY, because "no E2b floor was checked" has three different

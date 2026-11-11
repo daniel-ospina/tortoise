@@ -1147,7 +1147,17 @@ def check(text: str) -> tuple[list[str], dict]:
             # The population the floor reads is printed ON the line, so a binding
             # that states a count while naming another basis is refused rather than
             # read as the count it happens to carry. `atomic_points` was that wrong
-            # basis (#10989), so an older log that still prints it is a finding.
+            # basis (#10989), so a log that still prints it is a finding.
+            #
+            # ⛔ THE EMPTY STRING IS TOLERATED ON PURPOSE — it is not a fail-open.
+            # This token does not exist before #10989, and the probe prints it on
+            # every binding it emits (`surviving_units_basis=real_facts`), so an
+            # ABSENT token can only be a log written by an older probe; refusing it
+            # would refuse the historical artifacts this checker is run over. What
+            # this row closes is a binding that NAMES another basis —
+            # `atomic_points` above all — so PRESENCE is what is graded. Narrowing
+            # this tuple to ("n/a", "real_facts") is a corpus-wide decision about
+            # older logs, deliberately not taken here.
             basis = bind.get("surviving_units_basis", "")
             if basis not in ("", "n/a", "real_facts"):
                 findings.append(

@@ -1962,7 +1962,8 @@ def test_the_owned_floors_are_checked_and_a_run_that_meets_them_binds(
     Every floor this probe scores is compared against the run it is about —
     `e1_objects` on the scored arm's Objects, `e1_min_before_share` on the CONTROL
     arm's share (§3.2's refusal boundary), `e2b_surviving_units` on the scored
-    arm's atomic Points (the quantity the row's own floor tests) — so a run that
+    arm's surviving PLANTED units, `real_facts` (the quantity the row's own floor
+    tests) — so a run that
     meets all three is `MATCHED` and SCORES. Pre-fix
     this artifact was refused for `floor-unconsumed`, because `e1_min_before_share`
     and `e2b_surviving_units` were in the record's floor block and the binding
