@@ -19855,7 +19855,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         surfaced_marker,
     )
 
-    from .search_engine import ep_has_belief_cypher
+    from .search_engine import EP_STATE_ABSENT, ep_state
     skipped = 0
     facts: dict = {}
     if extracted:
@@ -19863,18 +19863,24 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # P1 (review round 1): the enrichment read runs AFTER the writes
             # are committed — a transient graph failure here must NEVER 500 a
             # committed capture (D4 posture: additive warning, never raise).
+            # #11702: the RAW belief columns through the PYTHON twin — see
+            # sdk.capture_session's twin read for why (a helper-composed clause
+            # is unresolvable to the §17.1 census, and the raw columns are what
+            # every other surface consumes).
             rows = proj.g.query(
                 "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
                 "coalesce(n.pointKind, 'statement'), "
                 "coalesce(n.status, 'live'), "
-                # #11702: the SHARED presence predicate (see sdk.py's twin)
-                # — a local spelling here called a mirror-only claim and a
-                # β-only half pair `ep_updated: false`.
-                f"{ep_has_belief_cypher('n')}",
+                "n.confidence, n.posterior_alpha, n.ep_alpha, "
+                "n.posterior_beta, n.ep_beta",
                 params={"ids": [p["id"] for p in extracted]},
             ).result_set
-            facts = {r[0]: (r[1] or "statement", r[2] or "live", bool(r[3]))
-                     for r in rows}
+            facts = {
+                r[0]: (r[1] or "statement", r[2] or "live",
+                       ep_state(confidence=r[3], posterior_alpha=r[4],
+                                ep_alpha=r[5], posterior_beta=r[6],
+                                ep_beta=r[7]) != EP_STATE_ABSENT)
+                for r in rows}
         except Exception:
             import logging
             logging.getLogger("tortoise.api").exception(

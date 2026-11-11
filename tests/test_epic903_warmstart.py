@@ -10,10 +10,29 @@ from __future__ import annotations
 import random
 import threading
 
+import pytest
+
 from tests.epic903_fixtures import FIXED_SEED, f1_corpus
 
 # Re-locked at calibration; consistent with test_rerun_stability.
 PARITY_TOL = 1e-3
+
+
+def _has_factor(sdk, claim_id: str) -> bool:
+    """True when the claim still participates in an IMPL|NAND factor.
+
+    #11702: this is the population key the equivalence deltas must use. The
+    old key was `confidence IS NULL` ("never recomputed — operator-less"),
+    which stopped meaning that once a served belief could be a real number:
+    an operator-less claim now carries its PRIOR's mean in the mirror, so
+    „null" no longer distinguishes "EP never ran here" from "EP ran and
+    wrote". Topology answers the question directly.
+    """
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) WHERE NOT (n)-[:IMPL|NAND]-() "
+        "RETURN n.id", params={"id": claim_id},
+    ).result_set
+    return not rows
 
 
 def _confidences(sdk, claim_ids):
@@ -140,6 +159,16 @@ class TestDe2e6aEquivalenceHardGate:
                 warm_by_key = {k: warm_conf.get(v)
                                for k, v in f.claims.items()}
                 key_conf = {k: iso_conf.get(v) for k, v in f2.claims.items()}
+                # #11702: the whole population is comparable now that the
+                # reference carries the same PRE-delete EP state (see the
+                # docstring) — including `p1`, the claim whose only factor this
+                # test deletes. Do not filter it back out on a `None` mirror:
+                # that skip is what hid the asymmetry before. The residual this
+                # claim still carries — an operator-less root keeps the
+                # posterior of the factor that was deleted — is a distinct
+                # DEFECT (#11843), pinned by
+                # `test_a_claim_that_lost_its_last_factor_keeps_its_posterior`
+                # below, not absorbed by narrowing this gate.
                 delta = max(
                     abs(key_conf[k] - warm_by_key[k])
                     for k in key_conf if key_conf[k] is not None
@@ -148,6 +177,39 @@ class TestDe2e6aEquivalenceHardGate:
                     f"delete-operator warm-start drifted: max|Δ|={delta}")
             finally:
                 f2.sdk.close()
+        finally:
+            f.sdk.close()
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="#11702 follow-up (#11843): an operator-less claim keeps the "
+               "POSTERIOR of a factor the graph no longer has, so a warm-start "
+               "after `delete_point` serves 0.8112 where the from-scratch "
+               "reference serves the prior's mean 0.8333. `_trivial_stamp` "
+               "stamps the freshness of an operator-less root but never "
+               "invalidates the posterior that root can no longer justify. "
+               "Strict: this test turns GREEN the day the invalidation lands.")
+    def test_a_claim_that_lost_its_last_factor_keeps_its_posterior(self):
+        f = f1_corpus()
+        try:
+            _dream_full_clean(f.sdk)
+            op_key = next(k for k in f.operators if k.startswith("impl"))
+            f.sdk.delete_point(f.operators[op_key])
+            random.seed(FIXED_SEED)
+            f.sdk.dream(mode="full")
+            pid = f.claims["p1"]  # `impl_1` is p1's ONLY edge
+            assert not _has_factor(f.sdk, pid), "p1 must be operator-less now"
+            row = f.sdk._get_proj().g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.confidence, "
+                "n.posterior_alpha, n.posterior_beta, n.ep_alpha, n.ep_beta",
+                params={"id": pid},
+            ).result_set[0]
+            confidence, pa, _pb, ea, _eb = row
+            # The defect: a posterior survives the delete.
+            assert pa is None, (
+                f"p1 still carries posterior_alpha={pa} after its last factor "
+                f"was deleted (served confidence {confidence}, prior "
+                f"{ea}/{_eb})")
         finally:
             f.sdk.close()
 
@@ -189,6 +251,16 @@ class TestDe2e6aEquivalenceHardGate:
                 warm_by_key = {k: warm_conf.get(v)
                                for k, v in f.claims.items()}
                 key_conf = {k: iso_conf.get(v) for k, v in f2.claims.items()}
+                # #11702: the whole population is comparable now that the
+                # reference carries the same PRE-delete EP state (see the
+                # docstring) — including `p1`, the claim whose only factor this
+                # test deletes. Do not filter it back out on a `None` mirror:
+                # that skip is what hid the asymmetry before. The residual this
+                # claim still carries — an operator-less root keeps the
+                # posterior of the factor that was deleted — is a distinct
+                # DEFECT (#11843), pinned by
+                # `test_a_claim_that_lost_its_last_factor_keeps_its_posterior`
+                # below, not absorbed by narrowing this gate.
                 delta = max(
                     abs(key_conf[k] - warm_by_key[k])
                     for k in key_conf if key_conf[k] is not None
@@ -251,6 +323,16 @@ class TestDe2e6aEquivalenceHardGate:
                 warm_by_key = {k: warm_conf.get(v)
                                for k, v in f.claims.items()}
                 key_conf = {k: iso_conf.get(v) for k, v in f2.claims.items()}
+                # #11702: the whole population is comparable now that the
+                # reference carries the same PRE-delete EP state (see the
+                # docstring) — including `p1`, the claim whose only factor this
+                # test deletes. Do not filter it back out on a `None` mirror:
+                # that skip is what hid the asymmetry before. The residual this
+                # claim still carries — an operator-less root keeps the
+                # posterior of the factor that was deleted — is a distinct
+                # DEFECT (#11843), pinned by
+                # `test_a_claim_that_lost_its_last_factor_keeps_its_posterior`
+                # below, not absorbed by narrowing this gate.
                 delta = max(
                     abs(key_conf[k] - warm_by_key[k])
                     for k in key_conf if key_conf[k] is not None

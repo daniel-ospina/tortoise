@@ -92,6 +92,7 @@ from .live import _current_status_clause  # #4058 canonical current-status allow
 from .live import same_mitigation_assertion  # #9962 redelivery vs re-assertion
 from .live import epistemic_label_queries  # #7853 epistemic-label id sweep
 from .live import epistemic_disjunction  # #7853 epistemic-label traversal clause
+from .search_engine import belief_value  # #11702: ONE belief-value reader
 from .live import ACCEPTED_DIRECTION_VALUES  # #7852 Layer-1 four-value direction set
 from .live import direction_flows  # #7852 (source→target, target→source) flows
 from .live import direction_spellings  # #7852 stored-token equivalence class
@@ -16208,25 +16209,36 @@ class TortoiseSDK:
             surfaced_marker,
         )
 
-        from .search_engine import ep_has_belief_cypher
+        from .search_engine import EP_STATE_ABSENT, ep_state
         skipped = 0
         facts: dict = {}
         if extracted:
             try:
+                # #11702: the RAW belief columns, read through the PYTHON
+                # twin (`ep_state`) rather than composing the Cypher predicate
+                # into the statement. Two reasons, both structural: a
+                # helper-composed clause makes this statement UNRESOLVABLE to
+                # the §17.1 census (#9124), which then classifies a READ as an
+                # undeclared write and reds the door — and the raw columns are
+                # the same input `annotate_ep_batch` / the rankers consume, so
+                # this read cannot drift from them. It replaced a local
+                # `α IS NOT NULL OR ep_α IS NOT NULL` spelling that called a
+                # MIRROR-only claim (a real served belief, e.g. 0.95) and a
+                # β-only half pair "not ep_updated".
                 rows = proj.g.query(
                     "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
                     "coalesce(n.pointKind, 'statement'), "
                     "coalesce(n.status, 'live'), "
-                    # #11702: the SHARED presence predicate, not a local
-                    # `α IS NOT NULL OR ep_α IS NOT NULL` spelling — that one
-                    # calls a MIRROR-only claim (a real served belief, e.g.
-                    # 0.95) and a β-only half pair "not ep_updated". One
-                    # vocabulary, one owner (`search_engine`).
-                    f"{ep_has_belief_cypher('n')}",
+                    "n.confidence, n.posterior_alpha, n.ep_alpha, "
+                    "n.posterior_beta, n.ep_beta",
                     params={"ids": [p["id"] for p in extracted]},
                 ).result_set
-                facts = {r[0]: (r[1] or "statement", r[2] or "live", bool(r[3]))
-                         for r in rows}
+                facts = {
+                    r[0]: (r[1] or "statement", r[2] or "live",
+                           ep_state(confidence=r[3], posterior_alpha=r[4],
+                                    ep_alpha=r[5], posterior_beta=r[6],
+                                    ep_beta=r[7]) != EP_STATE_ABSENT)
+                    for r in rows}
             except Exception:  # noqa: BLE001, RUF100 — fail-open, mirror
                 # hosted's enrichment-read posture (additive warning, never
                 # raise over a committed capture).
@@ -33795,12 +33807,15 @@ class TortoiseSDK:
                     # and journaled it, so a rebuild reproduced it. `None`
                     # removes the property (Cypher `SET n.p = null`), leaving
                     # the row absent, which is what every read surface says.
-                    # (The division guard also keeps a bare `alpha / (alpha +
-                    # beta)` from raising ZeroDivisionError BEFORE the write,
-                    # which used to leave `self._evidence` holding a prior the
-                    # graph never received.)
-                    "c": (round(alpha / (alpha + beta), 4)
-                          if (alpha + beta) > 0 else None)},
+                    # (The value comes from `belief_value` — the ONE owner of
+                    # "mean of a Beta pair, or None" — so this call cannot
+                    # re-derive the arithmetic the eight read surfaces use;
+                    # it is also what keeps a bare `alpha / (alpha + beta)`
+                    # from raising ZeroDivisionError BEFORE the write, which
+                    # used to leave `self._evidence` holding a prior the graph
+                    # never received.)
+                    "c": belief_value(posterior_alpha=alpha,
+                                      posterior_beta=beta, round_to=4)},
         ).result_set
         # #9063: a baseline the statement did NOT write must never be reported
         # as written when the caller's node EXISTS. ``set_point_baseline`` used
@@ -33918,9 +33933,10 @@ class TortoiseSDK:
         if self._event_log_path:
             # #11702: the SAME value the statement committed — `None` for a
             # degenerate pair, so replay leaves the row absent exactly as the
-            # live graph does (see the `c` param above).
-            _mirror = (round(alpha / (alpha + beta), 4)
-                       if (alpha + beta) > 0 else None)
+            # live graph does (see the `c` param above). Computed by
+            # `belief_value` for the same reason the `c` param is.
+            _mirror = belief_value(posterior_alpha=alpha, posterior_beta=beta,
+                                   round_to=4)
             for row in written:
                 self._emit_event(
                     "ConfidenceChanged", id=row[0], confidence=_mirror,
