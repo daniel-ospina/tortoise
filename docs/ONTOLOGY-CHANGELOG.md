@@ -33,11 +33,13 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
-> **Changelog v3.33 (2026-11-11 — issue #11824 — a core Object kind gets a declared lifecycle vocabulary, and two false citations are corrected):**
+> **Changelog v3.33 (2026-11-11 — issue #11824 — a core Object kind gets a declared lifecycle vocabulary, and one stale tracker flag is recorded):**
 >
-> **Owner approval of the exact changes** is on record on #11824 (2026-11-11, approving the proposed §4.3
-> sentence verbatim, answer `D2 — A`). This entry records the change; **v3.32 → v3.33** because a model
-> statement moves. The **build** of the vocabulary guard is not part of this change — this is the model.
+> **Approval** is the owner's decision `D2 — A` on #11824 (2026-11-11): core Object types get their own
+> lifecycle vocabulary, validated per kind. This entry lands that decision comment's **proposed §4.3
+> sentence verbatim** — it is that comment's own text, not a re-draft of it. This entry records the
+> change; **v3.32 → v3.33** because a model statement moves. The **build** of the vocabulary guard is not
+> part of this change — this is the model.
 >
 > **§4.3 gains a declared write vocabulary for CORE object kinds** — `draft` / `live` / `superseded` /
 > `deprecated` / `archived` / `in_progress` / `completed`. Two members are load-bearing: `superseded`
@@ -59,15 +61,23 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > refuses pointing at both `archived` and `superseded`). The refusal wording itself is AX behaviour and
 > lives at the decision site, not in this file (§4's placement rules).
 >
-> **Two citations corrected, neither of which was a model change.** (1) §4.5 attributed the
-> *Event-carries-no-state* ruling to **#2725**; that is measured false — #2725 is a `venture` pack design
-> issue containing no reference to Events (#11825). The ruling stands on §4.5's own text and on
-> `live.STATUS_CARRYING_EPISTEMIC_LABELS`, and the live defect it leaves (write accepted, belief honours
-> it, retrieval ignores it) is now attributed there. (2) §4.7 named **#7818** as the tracker of the
-> closed-vs-half-open boundary decision; #7818 is CLOSED (`COMPLETED` 2026-10-18, as "already delivered"
-> by PR #8956) while `_covers` is still closed-interval, so the section now records that the open decision
-> has **no** live tracker instead of naming a closed one. Both were stale flags recording a past state,
-> which is the class this file's own rules exist to prevent.
+> **One stale tracker flag is recorded here, and one proposed "correction" is withdrawn — neither is a
+> model change.** (1) §4.7 named **#7818** as the tracker of the closed-vs-half-open boundary decision;
+> #7818 is CLOSED (`COMPLETED` 2026-10-18, as "already delivered" by PR #8956) while `_covers` is still
+> closed-interval, so that open decision has **no** live tracker. The flag is recorded **here** and not in
+> `ONTOLOGY.md`, because an issue's open/closed state and the narrative of what changed are the build
+> record, not the model (§4's placement rules — the rule `tests/test_extractor_v4_citation_rot.py`
+> enforces); the ontology keeps the `tracked at **#7818**` anchor its pin requires and states nothing
+> about its state. (2) An earlier draft of this entry also recorded §4.5's *"answered no in #2725"*
+> attribution as measured FALSE, resting on #11825's finding that #2725 "contains **no reference to
+> Events**". **That finding is wrong, so the correction is withdrawn before landing:** #2725 carries a
+> comment (`#issuecomment-5619843002`) whose `### A.2 KEY QUESTION — can an Event carry current state, or
+> only a dated fact?` is answered *"Only a dated fact. Unambiguously, and this is enforced at three
+> independent layers"* — the ruling's own home, and exactly what §4.5 attributes to it. The absence was
+> measured against the issue **body**, which holds no occurrence of "Event", while the issue's comments
+> hold 35. §4.5 therefore keeps its attribution — it was never stale. What *is* stale is the state the
+> ruling leaves behind (write accepted, belief honours it, every retrieval leg ignores it), which is
+> tracked at **#11825**.
 
 ---
 

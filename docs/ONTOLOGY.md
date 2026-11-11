@@ -552,7 +552,7 @@ suppresses operator promotion exactly as a draft Point does.
 > three: it is carried by the same extras lane, and it IS read as state by
 > `_promote_incident_operators` (#7853) — see the note above. The pack-declared
 > fold generalization (#2729) is Object-scoped and does not extend to Events —
-> the Event-carries-state question was answered **no**. ⚠️ **That ruling's citation to #2725 was measured FALSE (#11825): #2725 is a `venture` pack design issue containing no reference to Events.** The ruling does not rest on it — it rests on this section and on `live.STATUS_CARRYING_EPISTEMIC_LABELS`, which carry it executably — but the accepted-and-half-honoured state it has today (the write is accepted, belief honours it, and every retrieval leg ignores it) is tracked at **#11825**.
+> the Event-carries-state question was answered **no** in #2725. The accepted-and-half-honoured state it has today — the write is accepted, belief honours it, and every retrieval leg ignores it — is tracked at **#11825**.
 
 ### §4.6 Source
 
@@ -667,7 +667,7 @@ window, independent of when Tortoise learned it. Canonical pair:
 >   `[vF, vT)`; the code is closed `[vF, vT]`. Which is canonical is an **open
 >   decision** — flip to half-open (a global boundary-semantics change, which also
 >   makes a zero-length window genuinely empty; evaluated as R2 of the #5362 plan),
->   accept the closed ambiguity, or a third shape — tracked at **#7818**, which is CLOSED (`COMPLETED` 2026-10-18, closed as "already delivered" by PR #8956) while `_covers` remains closed-interval, so this open decision currently has **no live tracker** (the R2 evaluation lived only in the #5362 plan). Until it
+>   accept the closed ambiguity, or a third shape — tracked at **#7818**. Until it
 >   is decided, a shared boundary instant is a known property of the closed
 >   reading, not a defect to be silently patched reader-by-reader. The flip is
 >   **not a predicate-only change**, and the reason is measured rather
