@@ -110,6 +110,8 @@ MUTATION (each verified RED at this head, restoring byte-identical):
     → the bare-attribute sample REDs               (r12 P3 #1)
   * `_renderings` → the bare-attribute reading only
     → the prose-forgery sample REDs                (r12 P3 #1)
+  * `_renderings` → both tag strips, no-strip reading dropped
+    → the attribute-value sample REDs              (r13 P3)
   * revert `_TAG` to the permissive `_TAG_WITH_BARE_ATTRS` form
     → the forged-tag PRESENCE assert REDs          (r12 P3 #1)
 """
@@ -222,8 +224,10 @@ def _renderings(text: str) -> list[str]:
 
     The UNION closes both: a phrase counts as present if ANY reading shows it, so
     no single strip can hide it. The third reading strips nothing at all, which
-    covers prose that forges a tag no pattern anticipates (a cost of 3
-    normalisations over a 50 KB record — the pin runs 3 tests).
+    covers prose that forges a tag no pattern anticipates AND a phrase carried in
+    an ATTRIBUTE VALUE — `<b title="…">` — which both tag strips legitimately
+    remove (measured; pinned by the `attribute-value` sample, r13 P3). A cost of 3
+    normalisations over a 50 KB record — the pin runs 3 tests.
     """
     return [_normalised(text, p) for p in (_TAG, _TAG_WITH_BARE_ATTRS, None)]
 
@@ -330,28 +334,38 @@ def test_no_single_tag_strip_can_hide_the_unscoped_phrase():
     """Review r12 P3 #1 — the attribute group, in BOTH fail-open directions.
 
     The absence leg takes the union (`_renderings`) precisely because each single
-    strip hides the banned phrase in the case the other catches. Both samples are
-    measured fail-opens of a single strip, and each is the other's mutant:
+    strip hides the banned phrase in the case the other catches. Each sample below
+    is a measured fail-open of at least one strip:
 
       * PROSE FORGERY — `if a<b and … c>d` is an ordinary sentence, but a strip
         admitting bare attributes reads `<b and … c>` as a tag and deletes the
         banned phrase between the comparison signs → false PASS;
       * BARE ATTRIBUTE — `A <span hidden>session running in a cloud agent VM`
         renders as the banned sentence, and `_TAG` alone leaves `<span hidden>`
-        interposed, so the words are never adjacent → false PASS.
+        interposed, so the words are never adjacent → false PASS;
+      * ATTRIBUTE VALUE — `<b title="a session running in a cloud agent VM">` is
+        removed by BOTH tag strips (the `title` value is advisory UI, not page
+        text, so a strip legitimately drops it), and ONLY the no-strip reading
+        sees the words. This is the sample that makes the THIRD reading
+        load-bearing; neither sample above reddens without it.
 
     Mutation: make `_renderings` return `[_normalised(text)]` (the `_TAG` reading
     only) → the bare-attribute sample REDs; return only the bare-attribute reading
-    → the prose sample REDs. Dropping the no-strip reading too REDs the prose arm
-    of the stray-`<` test above."""
+    → the prose sample REDs; drop the no-strip reading (both tag strips only) →
+    the attribute-value sample REDs. (Review r13 P3 measured the PREVIOUS wording
+    here FALSE — it claimed that last mutant reddened the prose arm of the
+    stray-`<` test above, which stays GREEN because `_TAG` alone sees that phrase.)"""
     prose_forgery = ('if a<b and the record says "a session running in a cloud agent VM" c>d, '
                      'the pin false-PASSes.')
     bare_attribute = ('A <span hidden>session running in a cloud agent VM</span> is still the '
                       'unscoped universal, rendered.')
     tag_wrapped = 'A <span class="x">session</span> running in a cloud agent VM, split by markup.'
+    attribute_value = ('A badge: <b title="a session running in a cloud agent VM">x</b> is the '
+                       'unscoped universal carried in an attribute value.')
     for name, sample in (("prose-forgery", prose_forgery),
                          ("bare-attribute", bare_attribute),
-                         ("tag-wrapped", tag_wrapped)):
+                         ("tag-wrapped", tag_wrapped),
+                         ("attribute-value", attribute_value)):
         assert not _absent(_UNSCOPED_FRAGMENT, sample), (
             f"the absence leg must see the unscoped phrase in the {name} sample")
 
