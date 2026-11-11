@@ -1508,7 +1508,13 @@ class StateRanker:
         so an unmeasured claim is neither buried nor given a fabricated
         confidence. Source is ``"posterior"`` when EP actually measured the
         claim and ``"neutral"`` when a PERSISTED prior (not a measurement)
-        answered — both are real values; only ``absent`` has none.
+        answered — those two are real values. A row that DOES persist a belief
+        whose stored spelling this process cannot decode answers
+        ``(None, UNREADABLE_CONFIDENCE_SOURCE)``, so its null is named rather
+        than denied; the reachable shape is a belief OPERAND written as a
+        hex-float literal (see :data:`UNREADABLE_CONFIDENCE_SOURCE`). So there
+        are TWO nulls — ``absent`` (nothing is persisted) and ``unreadable`` (a
+        belief exists) — and they are not the same fact.
         """
         if "confidence" in signals:
             raw = signals["confidence"]
@@ -1516,8 +1522,11 @@ class StateRanker:
             # VALUE is collapsed to the absent SOURCE only when the state is
             # absent. Collapsing on the value alone is a second presence rule
             # — and it is wrong for the one shape where the store and this
-            # process disagree about readability (a hex-float mirror, which
-            # Cypher reads and the pinned Python grammar refuses): the row
+            # process disagree about readability (an OPERAND written as a
+            # hex-float literal — `posterior_alpha = "0x1p4"` — which
+            # `toFloatOrNull` reads as 16.0 and the pinned Python grammar
+            # refuses; a hex-float MIRROR is NOT this shape, the served-belief
+            # band rejects it on BOTH twins): the row
             # then said `confidence_source: "absent"` beside `ep_state:
             # "baseline"`, i.e. two keys of one response disagreeing about
             # whether a belief exists.
@@ -1971,8 +1980,11 @@ class GapsRanker:
                 # field StateRanker reads — and NOT re-derived from the value:
                 # the signal decides presence itself, so a None value implies
                 # the absent state EXCEPT for the unreadable-spelling residual
-                # (a hex-float mirror), where the state is true and
-                # `confidence_source: "unreadable"` explains the null.
+                # (a hex-float OPERAND — `posterior_alpha = "0x1p4"` — the
+                # store reads it, this process cannot; a hex-float MIRROR is
+                # out of band and reads `absent` on both twins), where the
+                # state is true and `confidence_source: "unreadable"` explains
+                # the null.
                 # Deriving the state here
                 # instead would be a second presence rule — the defect class
                 # this issue removes — and two rankers inventing a state the
@@ -2028,7 +2040,12 @@ class GapsRanker:
         #11702: ``(None, EP_STATE_ABSENT)`` when no belief is persisted — the
         same convention as StateRanker, so the three rankers cannot disagree
         about what "absent" is. (This method used to report the neutral 0.5,
-        which made a never-measured gap carry a fabricated confidence.) For a
+        which made a never-measured gap carry a fabricated confidence.) A gap
+        that persists a belief whose stored spelling this process cannot decode
+        reports ``(None, UNREADABLE_CONFIDENCE_SOURCE)`` instead — never
+        ``absent`` beside a non-absent state (the reachable shape is a belief
+        OPERAND written as a hex-float literal: see
+        :data:`UNREADABLE_CONFIDENCE_SOURCE`). For a
         DRAFT the caller replaces both with null/``"uncomputed"`` (#2598) —
         this method reports the read, the staging gate lives in
         :meth:`rerank`."""
@@ -2235,10 +2252,12 @@ class GapsRanker:
                     conf = round(_beta_mean(alpha, beta), 6)
                 else:
                     # REACHABLE by the one recorded residual (a hex-float
-                    # mirror): the Cypher presence predicate reads it, the
-                    # pinned Python grammar refuses it. See StateRanker's arm —
-                    # the value is null, the state stays true, and the source
-                    # says `"unreadable"`.
+                    # OPERAND — `posterior_alpha = "0x1p4"`): the Cypher
+                    # presence predicate reads it, the pinned Python grammar
+                    # refuses it. A hex-float MIRROR is not this shape — the
+                    # served-belief band rejects it on both twins, so that row
+                    # is `absent`. See StateRanker's arm — the value is null,
+                    # the state stays true, and the source says `"unreadable"`.
                     conf = None
                 state = (EP_STATE_MEASURED if measured_raw
                          else EP_STATE_BASELINE)
