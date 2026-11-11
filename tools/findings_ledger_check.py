@@ -790,6 +790,26 @@ def check_measured_commit(text: str, root: Path = REPO) -> list[str]:
         )
     verdict = git("merge-base", "--is-ancestor", resolved.stdout.strip(), "HEAD")
     if verdict.returncode == 1:
+        # ⛔ ONLY `False` CERTIFIES DRIFT — `tools/substrate_map_check.py`'s rule,
+        # which the module docstring above says to copy rather than invent.
+        # `merge-base --is-ancestor` exits 1 BOTH for "an unrelated tree" and for
+        # "the graft boundary cut the walk", so in a shallow/deepened-shallow
+        # checkout a REAL ancestor reads as not-ancestor. Accusing the page of "a
+        # cut it did not make" on that evidence is a false red over a correct
+        # document (the same defect `tests/test_findings_ledger_2852.py`'s
+        # `_history_available()` guards the TEST against, #10356). An
+        # unanswerable probe is UNVERIFIED — exit 2, never a verdict.
+        shallow = git("rev-parse", "--is-shallow-repository")
+        if shallow.returncode != 0 or shallow.stdout.strip() != "false":
+            state = shallow.stdout.strip() or "unanswered"
+            raise Unverifiable(
+                "git answered 'not an ancestor', but this checkout is shallow or "
+                f"grafted (`rev-parse --is-shallow-repository` → {state}), so the "
+                "graft boundary cut the path to it and a truncated walk exits with "
+                "the same status as an unrelated tree — drift cannot be certified "
+                "here (the `docs` job checks out at fetch-depth: 0 for exactly this "
+                "question)"
+            )
         return [f"`measured_at_commit: {sha}` is NOT an ancestor of HEAD — the page claims a cut it did not make"]
     if verdict.returncode != 0:
         raise Unverifiable(f"git merge-base --is-ancestor exited {verdict.returncode}: {verdict.stderr.strip()}")
