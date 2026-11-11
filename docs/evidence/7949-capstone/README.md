@@ -1206,7 +1206,7 @@ the same lesson (cite the symbol, not the line).
 | step | call site | witness the probe reads | on the receipt? |
 |---|---|---|---|
 | S0 READ | `_edus_from_conversation` `:13769` | `stats["edus"]`, `stats["chunks"]` | ✅ |
-| S1 NARRATE | `run_s1` `:16677` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
+| S1 NARRATE | `run_s1` `:16694` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
 | S2.1 EXTRACT | `run_s2` `:16726` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
 | S2.2 VET | `_run_vet_pass` `:16780` | `result["vet"]` — built at `extractor_v2.py:14596-14600`, copied onto the receipt at the meta fold `sdk.py:17484` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `stats["step_witness"]["vet"]` `enabled=true`, `s2={"candidates": 40, "by_outcome": {"KEEP": 40}}` (the SUPERSEDED `e0fc940b5` log is the one that predates the seam) |
 | S2.3 CLASSIFY | `_apply_classify_kinds` `:14224` | `result["classify_later"]` — built at `extractor_v2.py:14586-14592`, copied at the same fold as `stats["step_witness"]["classify_later"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `enabled: true`, `s2 = {"adjudication_calls": 1, "assigned_llm": 7, …}` (`assigned_llm` is the evidence it did work, so this is not an idle pass) |
