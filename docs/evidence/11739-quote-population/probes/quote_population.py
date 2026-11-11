@@ -703,7 +703,7 @@ def main(argv: list[str]) -> int:
     key = os.environ.get("TORTOISE_MCP_API_KEY") or os.environ.get("TORTOISE_API_KEY")
     if not key:
         sys.stderr.write("GRAPH-UNREACHABLE(NO-KEY): TORTOISE_MCP_API_KEY is not set. "
-                         "A missing key is never an empty graph — do not read it as 0%%.\n")
+                         "A missing key is never an empty graph — do not read it as 0%.\n")
         return 3
 
     endpoint = _mcp_endpoint(args.endpoint)
@@ -716,10 +716,18 @@ def main(argv: list[str]) -> int:
     text = json.dumps(report, indent=2, sort_keys=False) + "\n"
     if args.out == "-":
         sys.stdout.write(text)
-    else:
+        return 0
+    try:
         with open(args.out, "w", encoding="utf-8") as f:
             f.write(text)
-        sys.stderr.write(f"wrote {args.out}\n")
+    except OSError as e:
+        # The last unguarded I/O in the process, and it runs AFTER the whole walk: an
+        # unwritable `--out` raised out of `main` and exited 1, discarding a measured result
+        # and landing OUTSIDE the documented 0/2/3/4 contract (review, attestation round).
+        # `2` is usage — the graph was read fine, the destination was not writable.
+        sys.stderr.write(f"PROBE-WRITE({args.out}): {e}\n")
+        return 2
+    sys.stderr.write(f"wrote {args.out}\n")
     return 0
 
 

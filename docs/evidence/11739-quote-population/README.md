@@ -39,7 +39,12 @@ scope     = every NON-OPERATOR :Point the walk saw (15,868) — the read path ap
             the 26 excluded ones are reported separately.
 artifact  = census.json, carrying its own `provenance` (measured_at, probe_sha256,
             endpoint, head_sha) — `tests/test_11739_quote_population_probe.py` recomputes
-            the digest from the committed probe and reds if the artifact outlives its code
+            the digest from the committed probe and reds if the artifact outlives its code.
+            `head_sha` names the tree the run executed against, which is necessarily a
+            PRE-COMMIT tree: the artifact is committed after the measurement, so compare it
+            with `git rev-parse HEAD~1` of the commit that carries it, not with `HEAD`. The
+            digest is the binding that reds on drift; `head_sha` records where the numbers
+            came from.
 ```
 
 ## The number (`census.json`)

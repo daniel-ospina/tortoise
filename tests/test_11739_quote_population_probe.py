@@ -533,7 +533,10 @@ def test_a_missing_key_exits_three_and_never_reports_zero(monkeypatch, capsys):
     monkeypatch.delenv("TORTOISE_MCP_API_KEY", raising=False)
     monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
     assert qp.main(["quote_population"]) == 3
-    assert "NO-KEY" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "NO-KEY" in err
+    # the message is not %-formatted, so a `0%%` in the source reached the operator verbatim
+    assert "0%" in err and "0%%" not in err
 
 
 class _RawReply:
@@ -739,6 +742,38 @@ class _FakeBody:
         return None
 
 
+def _stub_main(monkeypatch):
+    """Make `main()` reachable without a graph: a stub client and a canned report."""
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "test-key")
+    monkeypatch.setattr(qp, "_Client", lambda *a, **k: object())
+    monkeypatch.setattr(qp, "census", lambda *a, **k: {"headline": {"live_points": 0}})
+
+
+def test_an_unwritable_out_path_returns_two(monkeypatch, tmp_path):
+    """FAILS IF the `--out` write is unguarded: the only I/O outside a guard, and it runs
+    AFTER the whole walk, so an unwritable destination raised `OSError` out of `main` and
+    exited 1 — discarding a measured result and landing outside the documented 0/2/3/4
+    contract (review, attestation round; `2` is usage: the graph was fine, the destination
+    was not)."""
+    _stub_main(monkeypatch)
+    code = qp.main(["quote_population", "--out", str(tmp_path / "nope" / "census.json")])
+    assert code == 2
+
+
+def test_main_writes_the_artifact_and_records_its_cost(monkeypatch, tmp_path):
+    """FAILS IF `main()` stops writing `--out`, or stops recording `duration_s` on the success
+    path — which no test reached: the no-key case returns before it (review, attestation
+    round). `duration_s` is what the README tells a reader to quote instead of a range."""
+    import json
+
+    _stub_main(monkeypatch)
+    out = tmp_path / "census.json"
+    assert qp.main(["quote_population", "--out", str(out)]) == 0
+    payload = json.loads(out.read_text())
+    assert payload["headline"] == {"live_points": 0}
+    assert payload["duration_s"] >= 0
+
+
 def test_page_one_without_a_total_exits_four():
     """FAILS IF the first-page shape guard checks `results` only: a reply missing `total`
     raised `KeyError` and exited 1."""
@@ -837,6 +872,13 @@ def test_the_committed_census_records_its_own_cost():
     artifact = json.loads(census_path.read_text())
     assert isinstance(artifact["duration_s"], (int, float))
     assert artifact["duration_s"] > 0
+    # `head_sha` names the tree the run executed against — NECESSARILY a pre-commit tree, so a
+    # reader comparing it with `git rev-parse HEAD` must expect the parent. Pin the SHAPE: the
+    # digest binds the artifact to the probe, and nothing bound this field at all.
+    import re
+
+    head = artifact["provenance"]["head_sha"]
+    assert head == "unknown" or re.fullmatch(r"[0-9a-f]{40}", head), head
 
 
 def test_the_committed_census_was_produced_by_this_probe():
