@@ -128,7 +128,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > form of the regression this change could have created, and it is why every in-repo read surface was swept
 > before this landed: the Object legs go through the NULL-tolerant predicate (`TortoiseSDK.belief_timeline`'s
 > `_terminal_excluded('o.status')` arm; `projection/entities.py`'s `_fold_object_superseded`
-> computes `WITH o, (o.status IS NULL OR NOT (o.status IN $excluded)) AS live`), `audit.py:528,539` spells the arm out (`active.status IS NULL OR active.status = 'live'`), and the
+> computes `WITH o, (o.status IS NULL OR NOT (o.status IN $excluded)) AS live`), `audit.py:529,540` spells the arm out (`active.status IS NULL OR active.status = 'live'`), and the
 > retrieval legs take their family vocabulary from `search_engine._status_vocab_for(label)`. None of them
 > relies on the literal. **Filter on the
 > predicate, never on the literal:** `live._terminal_excluded` (whose composition is
@@ -138,7 +138,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > reports (`'live'` for a status-carrying label, `''` for an `:Event`). **Scope of the trap:** `:Object` and
 > `:Subject` only. `Point` births keep the `#7856` born-live contract and still STORE `status='live'`, so the
 > `MATCH (p:Point {status:'live'})` idiom printed in **§5's Point Status Vocabulary**
-> (`ONTOLOGY.md:1156`) remains correct as written.
+> (`ONTOLOGY.md:1166`) remains correct as written.
 
 ---
 
