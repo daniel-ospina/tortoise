@@ -2788,10 +2788,14 @@ def test_write_verb_ep_updated_pins_the_hosted_mirror_only_claim(
     # beside the `client` fixture above, not from a second hardcoded copy of
     # the id. The form matters twice: `tests/test_markers.py`'s
     # `test_namespace_literals_guard_passing_or_routed` reds on an un-routed
-    # non-test literal (#11905), and a `test_*` rename would open a DIFFERENT
-    # graph than the write verb writes — `_clear_belief` would seed the mirror
-    # where the route never reads it, so the `ep_updated: True` arm below would
-    # fail loudly, and the later β-only `is False` arm would pass vacuously.
+    # non-test literal (#11905) and this scan cannot see a variable, so the
+    # construction needs no `ROUTED_NAMESPACES` declaration — do not re-add a
+    # `"team-001"` row for it, that is the rejected alternative and it becomes
+    # a whitelist once the literal is gone. And a `test_*` rename would open a
+    # DIFFERENT graph than the write verb writes — `_clear_belief` would seed
+    # the mirror where the route never reads it, so the `ep_updated: True` arm
+    # below would fail loudly, and the later β-only `is False` arm would pass
+    # vacuously.
     proj = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj()
     _clear_belief(proj, pid, mirror=0.95)
     payload = dict(payload, session_id="zq-ep-flag-http-b")
