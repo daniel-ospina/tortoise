@@ -2786,11 +2786,12 @@ def test_write_verb_ep_updated_pins_the_hosted_mirror_only_claim(
     # keyed by the AUTHENTICATED team id (`_make_sdk(namespace=org_id)`) — so
     # this handle must be built from the fixture's own `TEST_ORG_ID`, imported
     # beside the `client` fixture above, not from a second hardcoded copy of
-    # the id. Spelled as the constant rather than the literal for exactly the
-    # reason `tests/test_markers.py`'s namespace guard (`#2148`, `test-slow
-    # (a)` on main) enforces: a `test_*` rename here would open a DIFFERENT
-    # graph than the write verb writes, so `_clear_belief` would clear nothing
-    # and the `ep_updated: true` assertion below would pass over nothing.
+    # the id. The form matters twice: `tests/test_markers.py`'s
+    # `test_namespace_literals_guard_passing_or_routed` reds on an un-routed
+    # non-test literal (#11905), and a `test_*` rename would open a DIFFERENT
+    # graph than the write verb writes — `_clear_belief` would seed the mirror
+    # where the route never reads it, so the `ep_updated: True` arm below would
+    # fail loudly, and the later β-only `is False` arm would pass vacuously.
     proj = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj()
     _clear_belief(proj, pid, mirror=0.95)
     payload = dict(payload, session_id="zq-ep-flag-http-b")
