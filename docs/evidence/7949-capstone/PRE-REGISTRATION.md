@@ -2364,8 +2364,13 @@ to answer.
   (`@@ -168,6 +168,7 @@`, which `git show 3794677ee3 -- tortoise/sdk.py` prints) and `#11805` one
   blank line (`@@ -368,6 +368,7 @@`, which `git show 0bdb08dbdb -- tortoise/sdk.py` prints — note
   each header is quoted from ITS OWN commit's diff, because the combined diff renumbers the
-  second), and nothing else in `sdk.py` sits above that constant, so a flat `+2` genuinely holds
-  for everything in `:168`-`:2528`. Below `_extract_session_v2` the offsets are not flat either:
+  second), and nothing else in `sdk.py` sits above that constant — so `_TURN_WRITE_CYPHER` does carry
+  the full `+2`. ⛔ But `:168`-`:2528` is NOT uniformly `+2`, and this is the same trap as the file
+  totals above: those two inserts sit at `:168` and `:368`, so old `:168`-`:173` carry `0`,
+  `:174`-`:370` carry `+1`, and the full `+2` begins only at old `:371` (measured at this head:
+  `out[key] = stored` `368`→`369`, `return out` `369`→`370`, and the `# baseline_source token
+  family` comment `371`→`373`). So cite nothing else in that window from a flat `+2`. Below
+  `_extract_session_v2` the offsets are not flat either:
   measured on `git diff 0bdb08dbdb^..b50e3293a167 -- tortoise/sdk.py`, the running offset reaches
   `+115` at `:16789`, `+133` at `:18485`, then `+138` at `:18966` and keeps climbing below that
   (`+166` by `:43622`, `+171` by `:43757`, `+195` by `:44075`) — so `+133` describes citations up to
