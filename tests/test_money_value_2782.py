@@ -1236,6 +1236,47 @@ class TestTheProbeUsesTheWritesOwnKeyDiscipline:
             "the :Object's value was stripped by a write the gate admitted")
         assert _whole_sum(sdk) == {"BRL": COMMITTED_MINOR}
 
+    @pytest.mark.parametrize("money_row_first", [True, False])
+    def test_every_row_of_a_duplicate_id_is_graded(self, journaled_sdk,
+                                                   money_row_first):
+        """ROW-level coverage, which the two-label test does not give: the
+        writers MATCH by id and stamp in one query, so a DUPLICATE id matches
+        several rows and the gate must grade all of them.
+
+        VGATE/review round 5 measured the gap: narrowing the view loop to
+        ``rows[:1]`` left the whole suite green, and on that mutant a
+        money-free ``:Object{id:'dupsame'}`` ordered first let
+        ``update_entity('dupsame', currency=None)`` be ADMITTED, leaving the
+        money-carrying sibling at ``{amountMinor, None, 2}`` — the docstring's
+        own stated hazard ("a first-row-only read could pass the gate and still
+        leave a malformed value on a duplicate"), with nothing red.
+        """
+        sdk, _events = journaled_sdk
+        g = sdk._get_proj().g
+        money = money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2)
+        if money_row_first:
+            g.query("CREATE (o:Object {id:'duprow-11836'}) SET o += $p",
+                    params={"p": money})
+            g.query("CREATE (o:Object {id:'duprow-11836'})")
+        else:
+            g.query("CREATE (o:Object {id:'duprow-11836'})")
+            g.query("CREATE (o:Object {id:'duprow-11836'}) SET o += $p",
+                    params={"p": money})
+        count_before = g.query(
+            "MATCH (o:Object {id:'duprow-11836'}) RETURN count(o)"
+        ).result_set[0][0]
+        assert count_before == 2, "the duplicate rows did not mint"
+        with pytest.raises(ValueError, match="write boundary"):
+            sdk.update_entity("duprow-11836", currency=None)
+        rows = g.query(
+            "MATCH (o:Object {id:'duprow-11836'}) "
+            "RETURN o.amountMinor, o.currency, o.minorUnitExponent, "
+            "       o.id ORDER BY o.amountMinor"
+        ).result_set
+        assert rows[0][:3] == [COMMITTED_MINOR, "BRL", 2], (
+            "the value was stripped from the row the gate did not look at")
+        assert _whole_sum(sdk) == {"BRL": COMMITTED_MINOR}
+
 
 class TestTheUpdateArmOfThePredicate:
     """The rule itself, without a graph — so the boundary is readable in one
@@ -1479,6 +1520,67 @@ class TestNonSanitizedSeams:
             "the bound moved: the journal no longer carries the well-formed "
             "value, so this docstring is stale")
         assert '"currency": "BRL"' in text
+
+
+class TestThePayloadWalkFailsClosedAtItsDepthBound:
+    """#11836 review Finding 3 (P2, measured): the depth bound SKIPPED grading.
+
+    ``_MONEY_PAYLOAD_MAX_DEPTH`` was documented as "the bound only stops a
+    self-referential structure from walking forever" — but self-reference is cut
+    by ``seen``, and the depth test was a bare ``continue``: past the bound the
+    walk stopped looking and the gate reported clean. Measured: a nested
+    malformed bag was refused at depth 8 and ADMITTED at depth 9 through a real
+    door, inverting the function's own stated posture ("REFUSE, not admit").
+
+    The bound is now a REFUSAL threshold, not a skip, and it is generous enough
+    that no real payload (the journal nests two or three levels) can reach it.
+    """
+
+    @staticmethod
+    def _nest(depth: int) -> dict:
+        node: dict = {"amountMinor": 25_000_000}  # malformed: no currency
+        for _ in range(depth):
+            node = {"meta": node}
+        return node
+
+    def test_a_payload_deeper_than_the_bound_is_refused(self):
+        from tortoise.money import (
+            _MONEY_PAYLOAD_MAX_DEPTH,
+            refuse_malformed_money_in_payload,
+        )
+
+        # the bound itself still grades (a malformed bag deep inside is caught)
+        with pytest.raises(ValueError, match="write boundary"):
+            refuse_malformed_money_in_payload(
+                self._nest(_MONEY_PAYLOAD_MAX_DEPTH - 1), door="test")
+        # … and past it the answer is a REFUSAL, never a silent pass
+        with pytest.raises(ValueError, match="nests deeper than"):
+            refuse_malformed_money_in_payload(
+                self._nest(_MONEY_PAYLOAD_MAX_DEPTH + 1), door="test")
+
+    def test_a_real_door_refuses_a_payload_it_cannot_grade(self):
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+        import tempfile
+        from pathlib import Path
+
+        from tortoise.money import _MONEY_PAYLOAD_MAX_DEPTH
+
+        with tempfile.TemporaryDirectory() as tmp:
+            api = EventAPI(EventLog(str(Path(tmp) / "events.jsonl")),
+                           initiated_by="extractor")
+            with pytest.raises(ValueError, match="nests deeper than"):
+                api.add_object(
+                    "too deep to grade", "venture:tranche",
+                    meta=self._nest(_MONEY_PAYLOAD_MAX_DEPTH + 1))
+
+    def test_a_sane_depth_is_not_collateral_damage(self, journaled_sdk):
+        sdk, _events = journaled_sdk
+        from tortoise.money import _MONEY_PAYLOAD_MAX_DEPTH
+        pid = sdk.create_point(
+            "statement", "deep metadata is fine",
+            meta=self._nest(_MONEY_PAYLOAD_MAX_DEPTH - 2))
+        assert pid["id"]
 
 
 class TestKnownResidualCreateDoorOnMatch:

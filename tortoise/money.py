@@ -113,9 +113,16 @@ MONEY_VALUE_FIELDS: tuple[str, ...] = (
 _MONEY_GROUP: tuple[str, ...] = (AMOUNT_MINOR, CURRENCY, MINOR_UNIT_EXPONENT)
 
 #: Depth bound for :func:`refuse_malformed_money_in_payload`. Journal payloads
-#: nest two or three levels (``PointAdded.point``, ``EventRecorded.uses[]``);
-#: the bound only stops a self-referential structure from walking forever.
-_MONEY_PAYLOAD_MAX_DEPTH = 8
+#: nest two or three levels (``PointAdded.point``, ``EventRecorded.uses[]``).
+#: ⛔ This bound is NOT the loop guard — ``seen`` is (a self-referential payload
+#: is cut there) — it is a REFUSAL threshold: a payload deeper than this is
+#: refused rather than skipped, because a skip is a fail-open the caller cannot
+#: see (measured, #11836 review Finding 3: at depth 9 the walk `continue`d, so a
+#: nested malformed money bag was ADMITTED through a real door). The bound is
+#: generous on purpose — no journal payload in the tree nests past 4 — so the
+#: refusal is reachable only by a payload that is pathological, and the message
+#: says so instead of silently grading nothing.
+_MONEY_PAYLOAD_MAX_DEPTH = 32
 
 #: ISO 4217 permits 0, 1, 2, 3 and (CLF/UYW) 4 minor-unit digits.
 _MIN_EXPONENT = 0
@@ -453,7 +460,7 @@ def refuse_malformed_money_in_payload(payload, *, door: str = "") -> None:
     items. A gate that read only the top level was measured INERT on the Point
     door — the door ``extractor`` / ``ingest`` / ``docs_miner`` / ``mining`` /
     the CLI all write through — so ``add_point(..., amountMinor=…)`` landed
-    ``{amountMinor: 25_000_000, currency: None}`` and made :func:`total_minor`
+    ``amountMinor`` with no currency beside it and made :func:`total_minor`
     refuse every well-formed amount beside it (#11836 review Finding 1).
 
     The walk is the same shape as ``pack_state.kind_spellings_in_payload``, and
@@ -486,7 +493,17 @@ def refuse_malformed_money_in_payload(payload, *, door: str = "") -> None:
     while stack:
         node, depth = stack.pop()
         if depth > _MONEY_PAYLOAD_MAX_DEPTH:
-            continue
+            # ⛔ REFUSE, never `continue`. A skip here is a silent fail-open: the
+            # walk stops looking, the money gate reports clean, and a payload
+            # whose money sits deeper than the bound is never graded — the
+            # posture this function states ("REFUSE, not admit") inverted. The
+            # loop is bounded by `seen`, not by this number, so the depth is a
+            # judgement about payload SHAPE and its failure must be visible.
+            raise MoneyValueError(
+                f"money value refused at the write boundary ({door}): the "
+                f"payload nests deeper than {_MONEY_PAYLOAD_MAX_DEPTH} levels, "
+                "so a money value inside it could not be graded — flatten the "
+                "payload or write the value through the props door")
         if isinstance(node, Mapping):
             if id(node) in seen:  # a self-referential payload cannot loop us
                 continue

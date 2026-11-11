@@ -44407,7 +44407,14 @@ class TortoiseSDK:
                 # miss and this surface returned the UNCHANGED node as success).
                 # The primary key is ALWAYS tried first (byte-identical MATCH text
                 # and #327 index plan), the secondary only on a miss.
-                id_keys = (prop, *secondary_entity_id_props(label))
+                # ⛔ Derived THROUGH `_entity_identity_probes()` — the same
+                # helper the money gate reads — never re-derived inline. An
+                # inline copy is how the two drift, and a drifted gate grades a
+                # different node than the write touches while every test stays
+                # green (#11836 review Finding 1 of round 5).
+                id_keys = tuple(
+                    key for probe_label, key in _entity_identity_probes()
+                    if probe_label == f":{label}")
                 if label == "Point":
                     # #9287: this IS the ``:Point`` update door (``commit_schema``
                     # lists the pair ``update_point`` / ``_update_entity``), and it
