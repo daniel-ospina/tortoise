@@ -2784,7 +2784,7 @@ def test_write_verb_ep_updated_pins_the_hosted_mirror_only_claim(
     import tortoise.hosted_api as ha_mod
     # The mirror belief lives in the graph the HOSTED write verb opens, which for
     # an org with no promoted graph is keyed by the AUTHENTICATED team id
-    # (`_org_sdk_for_credential` -> `_make_sdk(namespace=org_id)`) — so this
+    # (`_data_sdk` -> `_make_sdk(namespace=org_id)`) — so this
     # handle must be built from the fixture's own `TEST_ORG_ID`, imported
     # beside the `client` fixture above, not from a second hardcoded copy of
     # the id. (That default is a POINTER that a promotion can move, #10180 —
