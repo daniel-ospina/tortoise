@@ -69,10 +69,10 @@ Measured at `32c0f39d4b` (with the two `search_engine.py` citations re-anchored 
 
 | # | capability | primitive | state | evidence |
 |---|---|---|---|---|
-| 1 | a reading records value + unit + source + as-of | detect | ✅ | `create_event`; extras lane stores arbitrary props; `startedAt` is the as-of slot (`ONTOLOGY.md` §4.7) |
+| 1 | a reading records value + unit + source + as-of | detect | 🟡 | value + unit + as-of ✅ via `create_event` and the extras lane (`startedAt` is the as-of slot, `ONTOLOGY.md` §4.7); **`:Source` provenance ⛔** — `create_event` cannot set it and `link_source_to_event` is a second write (#11081 wave 5), though #7860's **D10** makes it mandatory for a machine reading |
 | 2 | a reading is never mutated; a correction is a new reading that retires the old | replace | ⛔ | an `:Event` cannot be superseded (`LIFECYCLE_FANOUT_QUERY` is `MATCH (n:Point {id:$id})`, `live.py:386`) — and it **can** be marked: `update_entity(event, status=…)` is accepted and `ep.py:2128` **honours** it (the node is stripped from factors), while **no retrieval leg filters it** (`_STATUS_FILTERED_LABELS` omits `Event`) — **#11825** |
 | 3 | a target states comparator + threshold (+ a due, **proposed — see §6**) | decide | ⛔ | no comparator field on any target — the shipped `portfolio:allocationTarget` (a `target` subclass, `packs/investment-portfolio-manager/manifest.yaml:60`) carries a declared percent value and **no comparison** |
-| 4 | **compare the current reading to the target → a state** | decide | ⛔ | no goal-scoped comparator or threshold exists. The word appears in 7 lines under `tortoise/` — all unrelated commentary, on no goal or target (`rg -c '\bcomparator\b' tortoise/*.py tortoise/pi-hooks/*.ts`): tolerance policy `reconciliation.py:75`, search ordering `search_engine.py:4388`, NaN ordering `:5095`, provider AST `model_adapters.py:596`, stored-form drift `stored_form.py:19` and `:42`, and one test comment `tortoise/pi-hooks/tortoise-capture.test.ts:1827`. The nearest neighbour is `battery/report/classify.py:61-69` with `battery/config/thresholds.yaml` (`classification-delta`, `surfaced-rate`), which does compare a measured value against a declared bar — though for an eval cell, not a goal — and `tools/capstone_preregistration_check.py:419`'s `COMPARATORS` operator set, which reads a preregistration cell's threshold. **None exists in the graph or in `tortoise/`**; the only comparator wired to a **goal** is hardcoded outside both — `~/.pi/agent/scripts/objective.py:3527` (`crit_max > GUIDELINE_CI_MIN`) and `:3543` (`waiting < TARGET_PRS`) — which is the shape this design is meant to replace, and which #7860 names as such |
+| 4 | **compare the current reading to the target → a state** | decide | ⛔ | no goal-scoped comparator or threshold exists. The word appears in 7 lines under `tortoise/` — all unrelated commentary, on no goal or target (`rg -c '\bcomparator\b' tortoise/*.py tortoise/pi-hooks/*.ts`): tolerance policy `reconciliation.py:75`, search ordering `search_engine.py:4388`, NaN ordering `:5095`, provider AST `model_adapters.py:596`, stored-form drift `stored_form.py:19` and `:42`, and one test comment `tortoise/pi-hooks/tortoise-capture.test.ts:1827`. The nearest neighbour is `battery/report/classify.py:61-69` with `battery/config/thresholds.yaml` (`classification-delta`, `surfaced-rate`), which does compare a measured value against a declared bar — though for an eval cell, not a goal — and `tools/capstone_preregistration_check.py:419`'s `COMPARATORS` operator set, which reads a preregistration cell's threshold. **None exists in the graph or in `tortoise/`.** The one target still wired to a verdict is `~/.pi/agent/scripts/objective.py:3543` (`waiting < TARGET_PRS` — queue depth, named by the owner). The CI minute figure in the same file is **not** a comparator to cite as precedent: `:3527` prints `GUIDELINE_CI_MIN`, which the owner demoted from target to **guideline** on **#6792** and which `:3540-3542` says "must not be able to flip this word" — the demotion §5 and §6 rest on, and itself an illustration of why a target needs a declared comparator rather than a hardcoded constant |
 | 5 | a state is a claim with a confidence **and** a validity window | replace + weigh | ✅ | `supersede_point`: contiguous `validFrom`/`validTo`, `expiredAt`, `CORRECTS` |
 | 6 | when the state changes the old one **stops counting everywhere** | replace | ⛔ | search omits `Event` from `_STATUS_FILTERED_LABELS`; an Object supersede leaves operators attached and EP silently drops the factor (**#11825**, **#11826**) |
 | 7 | the current state is what belief reads | weigh | ✅ | measured `0.347 → 0.639` on a goal **Object** with no stored confidence of its own, because the claim feeding it changed (the #7860 D12 ruling) |
@@ -82,8 +82,8 @@ Measured at `32c0f39d4b` (with the two `search_engine.py` citations re-anchored 
 | 11 | achievement is per-goal; **no roll-up** | decide | 🟡 | decided (D5 on #7860), nothing enforces it |
 | 12 | a goal's lifecycle affects its targets and sub-goals | replace | ⛔ | no propagation of a goal's own retirement |
 | 13 | deeper cascades converge | weigh | 🟡 | 6 levels then a **silent** stop (**#11823**) |
-| 14 | all of it survives a rebuild | replay | 🟡 | journal uniform for supersede; read gates are not (**#11824**) |
-| 15 | "why is this goal green?" | explain | 🟡 | `why.py`; blind to Object/Event endpoints |
+| 14 | all of it survives a rebuild | cross-cutting (replay) | 🟡 | journal uniform for supersede; read gates are not (**#11824**) |
+| 15 | "why is this goal green?" | cross-cutting (explain) | 🟡 | `why.py`; blind to Object/Event endpoints |
 
 **Read the "state" column, not the rows:** **no primitive is fully healthy.** `weigh` is the only one
 with no *absent* capability, and it carries one bounded partial — row 13, where a shallow pass reads as
@@ -97,7 +97,13 @@ reproduces exactly, 5 as 5 semantic models / 6 functions, 4 engines as **2 engin
 `632 / 166` as **621 / 167**. The corrected set is used here; quote the verification comment, not the
 issue body, which still carries the superseded numbers). That is why this
 question has repeatedly collapsed into "how does EP get triggered" — EP is the only part that already
-works.
+works — but note that `weigh` is not unblemished either: row 13 is its own bounded partial.
+
+**Rows 10 and 11 have no step of their own.** Both are 🟡 *decided, nothing enforces it* — row 10 is
+D4's 0..n shape, which is the shape step 1's table reads, and row 11 is D5's no-roll-up rule, which is a
+constraint on whatever computes achievement rather than a build item. Every ⛔ row does have a step; these
+two do not, so a builder working §7 in order will not be told how to close them, and should not read their
+🟡 as scheduled.
 
 ---
 
