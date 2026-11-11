@@ -419,10 +419,17 @@ def precompute(proj, point_ids: list[str], *, now: datetime | None = None,
         if not isinstance(block, dict):
             continue
         ep = block.get("ep") if isinstance(block.get("ep"), dict) else {}
+        # #11702: an ABSENT belief is `None`, not 0.0. Coercing it to 0.0 put
+        # "maximum disbelief" into a column named ``mean`` for a claim nothing
+        # had been measured on; the snapshot node then carried a number no
+        # reader could distinguish from a real posterior of 0.0. A None here
+        # removes the property on the SET below, which is the honest encoding
+        # of "there is no belief".
         try:
-            mean = float(ep.get("confidence_mean") or 0.0)
+            raw_mean = ep.get("confidence_mean")
+            mean = float(raw_mean) if raw_mean is not None else None
         except (TypeError, ValueError):
-            mean = 0.0
+            mean = None
         written_rows.append({
             "point_id": pid,
             "block": json.dumps(block, ensure_ascii=False, sort_keys=True,

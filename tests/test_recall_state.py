@@ -25,7 +25,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise.ranking import (  # noqa: E402, I001, RUF100
-    StateRanker, NEUTRAL_CONFIDENCE,
+    StateRanker,
     DEFAULT_RELEVANCE_EXP, DEFAULT_CONFIDENCE_EXP, DEFAULT_CENTRALITY_WEIGHT,  # noqa: F401
 )
 from tortoise.sdk import TortoiseSDK  # noqa: E402, RUF100
@@ -117,13 +117,18 @@ def test_zero_confidence_hard_suppresses():
     assert out[0]["id"] == "pos"
 
 
-def test_uncalibrated_points_fall_back_to_neutral():
-    """Uncalibrated points (no persisted α/β) get the documented neutral 0.5
-    (Beta(1,1) prior mean) — absence of measurement is NOT low support."""
+def test_uncalibrated_points_are_absent_not_neutral():
+    """#11702 (flips this test's pre-#11702 pin): uncalibrated points (no
+    persisted α/β, no mirror) have NO belief — ``confidence: None`` +
+    ``ep_state: "absent"``, never the neutral 0.5 that was indistinguishable
+    from a measured symmetric coin flip. "Absence is not low support" still
+    holds: the confidence term does not participate at all (see
+    test_11702_absent_belief_state.py), it is simply not a number."""
     out = StateRanker().rerank([{"id": "u", "scores": {"rrf": 0.05}}])
     rr = out[0]["recall_ranking"]
-    assert rr["confidence"] == NEUTRAL_CONFIDENCE
-    assert rr["confidence_source"] == "neutral"
+    assert rr["confidence"] is None
+    assert rr["confidence_source"] == "absent"
+    assert rr["ep_state"] == "absent"
 
 
 def test_all_equal_degree_gets_no_centrality_boost():
@@ -242,13 +247,15 @@ def test_live_rows_render_byte_identically():
         assert "draft" not in r["recall_ranking"], r
         assert isinstance(r["recall_ranking"]["confidence"], float)
         assert r["recall_ranking"]["confidence_source"] == "posterior"
-    # An uncalibrated LIVE row keeps the documented #898 neutral fallback —
-    # only DRAFTS are gated by #2598 (a recorded decision, not reopened here).
+    # #11702: an uncalibrated LIVE row is now ABSENT too (the #898 neutral 0.5
+    # is superseded for the absence case). It is still not a draft — that
+    # badge separates "staged" from "unmeasured".
     live_uncalibrated = StateRanker().rerank([
         {"id": "u", "scores": {"rrf": 0.05}, "status": "live"},
     ])[0]["recall_ranking"]
-    assert live_uncalibrated["confidence"] == NEUTRAL_CONFIDENCE
-    assert live_uncalibrated["confidence_source"] == "neutral"
+    assert live_uncalibrated["confidence"] is None
+    assert live_uncalibrated["confidence_source"] == "absent"
+    assert live_uncalibrated["ep_state"] == "absent"
     assert "draft" not in live_uncalibrated
 
 

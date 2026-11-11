@@ -74,7 +74,14 @@ MAX_POINTERS_CAP = 5
 DEFAULT_MAX_POINTERS = 3
 DEFAULT_MIN_CONFIDENCE = 0.7
 BLOCK_MAX_BYTES = 8 * 1024
-NEUTRAL_CONFIDENCE = 0.5        # unmeasured posterior (Beta(1,1)) — repo convention
+# A FLOOR for the contested-relevance boost in `_eligible` (0.5), never an
+# absent-belief value. #11702 deleted the "repo convention" this constant used
+# to name: an unmeasured claim answers ``confidence_mean: None`` (state
+# ``absent``), and substituting a Beta(1,1) mean for it is the defect that
+# issue removes — see ``ranking.py``'s note where its own copy was deleted.
+# This 0.5 only bounds how far below the caller's floor a CONFLICT-RELEVANT
+# claim may sit while still being boosted; it is compared against a real mean.
+NEUTRAL_CONFIDENCE = 0.5
 SNIPPET_MAX = 160               # privacy-safe synopses (ux-research ≤ 160 chars)
 RESOLVE_POOL_MIN = 8            # bounded resolve pool floor
 RESOLVE_POOL_MAX = 24           # bounded resolve pool cap (never unbounded)
@@ -382,9 +389,10 @@ def _eligible(block: dict, *, min_confidence: float,
     why-block's dedicated ep read — post-#2206 identical to the search
     path's ep.confidence_mean, which reads the same coalesce of
     posterior_alpha/ep_alpha).
-    UNMEASURED points (no persisted prior at all) sit at the Beta(1,1)
-    neutral 0.5 (``has_ep=False``, ``baseline=False``) — below the 0.7
-    default → below-notability/silent, never fired. #3415 correction: that
+    UNMEASURED points (no persisted belief at all) carry NO mean —
+    ``confidence_mean: None`` with ``ep_state: "absent"`` — so they fail every
+    floor and are never fired (the outcome the old Beta(1,1) 0.5 produced by
+    sitting below the 0.7 default; the reason no longer is). #3415 correction: that
     neutral-0.5 statement is NO LONGER true of every unmeasured point — a
     #2199 DECLARED baseline (``baseline=True``, e.g. the decide-part system
     default Beta(3,1) mean 0.75, or an author ``credibility=`` prior) is
@@ -402,13 +410,19 @@ def _eligible(block: dict, *, min_confidence: float,
     pure belief floor. Balanced-coinflip disputes (mean ≈ 0.5) never fire.
     """
     ep = (block or {}).get("ep") or {}
+    # #11702: an ABSENT belief has no mean. This used to substitute the neutral
+    # 0.5, which is indistinguishable from a measured coin flip at a floor — the
+    # shipped 0.7 default hid that (both were below it), but any floor at or
+    # under 0.5 admitted a never-measured claim as if it carried neutral
+    # evidence. No number, no clearance.
+    raw_mean = ep.get("confidence_mean")
     try:
-        mean = float(ep.get("confidence_mean", NEUTRAL_CONFIDENCE))
+        mean = float(raw_mean) if raw_mean is not None else None
     except (TypeError, ValueError):
-        mean = NEUTRAL_CONFIDENCE
-    if mean >= min_confidence:
+        mean = None
+    if mean is not None and mean >= min_confidence:
         return True
-    if conflict_relevant and ep.get("contested"):
+    if mean is not None and conflict_relevant and ep.get("contested"):
         boost_floor = max(NEUTRAL_CONFIDENCE, min_confidence - 0.1)
         return mean >= boost_floor
     return False
@@ -457,7 +471,18 @@ def _synopsis(content: str) -> str:
     return text[: SNIPPET_MAX - 1].rstrip() + "…"
 
 
-def _band(mean: float) -> str:
+def _band(mean: float | None) -> str:
+    """Coarse support band for the surfaced block.
+
+    #11702: an ABSENT belief has no band — ``None`` renders the fourth label
+    ``unmeasured`` (the same word ``subgraph_render._confidence_text`` uses)
+    instead of falling into the numeric comparisons, which raise on ``None``.
+    This sits inside the pipeline's blanket ``except Exception``, so the old
+    signature would have degraded the WHOLE response — every candidate
+    dropped — the moment an unmeasured candidate reached it.
+    """
+    if mean is None:
+        return "unmeasured"
     if mean >= _BAND_HIGH:
         return "high"
     if mean >= _BAND_MEDIUM:
@@ -480,10 +505,16 @@ def why_entry(block: dict) -> dict:
         "point_id": block["point_id"],
         "support_chain": block.get("support_chain") or [],
         "ep": block.get("ep") or {
-            "confidence_mean": NEUTRAL_CONFIDENCE,
+            # #11702: a missing ep sub-block means NO belief was read for this
+            # point, so the default is the ABSENT state (None + the state
+            # name), not the neutral 0.5 — the same fabrication _eligible now
+            # refuses to admit. The consumer reads `confidence_mean` only, and
+            # `None` is the answer it already handles.
+            "confidence_mean": None,
             "variance": 0.0,
             "contested": False,
             "has_ep": False,
+            "ep_state": "absent",
         },
     }
     conflicts = block.get("conflicts")
@@ -713,10 +744,13 @@ def run_volunteer_pipeline(
             if block is None:
                 continue
             ep = block.get("ep") or {}
+            # #11702: None is the ABSENT state — carried through, never coerced
+            # to the neutral 0.5 (see ``_eligible``).
+            raw_mean = ep.get("confidence_mean")
             try:
-                mean = float(ep.get("confidence_mean", NEUTRAL_CONFIDENCE))
+                mean = float(raw_mean) if raw_mean is not None else None
             except (TypeError, ValueError):
-                mean = NEUTRAL_CONFIDENCE
+                mean = None
             status = (block.get("supersession") or {}).get("status") \
                 or hit.get("status") or "live"
             cand = {
@@ -775,9 +809,16 @@ def run_volunteer_pipeline(
         #    (a live successor wins the slot when both match; a superseded
         #    point fills a remaining slot only flagged superseded — never as
         #    the current belief).
+        #    #11702: candidates with NO belief sort LAST within their
+        #    superseded/live tier (the tier above the score, exactly as
+        #    `recall_ranking` orders them) and fall through to the
+        #    deterministic tiebreaks. `-c["mean"]` on a `None` is a TypeError,
+        #    and the old code had no guard because the absent mean could not
+        #    reach here (`_assemble_ep_rows` fabricated 0.5 for it).
         kept.sort(key=lambda c: (
             c["superseded"],
-            -c["mean"],                          # trim lowest-confidence first
+            1 if c["mean"] is None else 0,     # absent never wins a slot first
+            -(c["mean"] or 0.0),               # trim lowest-confidence first
             c["rrank"],                           # relevance tiebreak
             c["id"],                              # deterministic final tiebreak
         ))

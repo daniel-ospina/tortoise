@@ -16,6 +16,75 @@ from .live import (
     epistemic_labels_of,
     epistemic_sweep,
 )
+from .search_engine import (  # #11702: the ONE vocabulary
+    belief_mean_cypher,
+    belief_mirror,
+    belief_mirror_cypher,
+    numeric_operand,
+    beta_variance_cypher,
+    ep_has_belief_cypher,
+    ep_width_cypher,
+)
+
+
+# #11702: THE belief-value expression for the analyze templates -- the served
+# `n.confidence` mirror first, the persisted alpha/beta mean as the fallback,
+# and `null` when neither exists. Specified ONCE here so the templates cannot
+# drift from each other or from `annotate_ep_batch` / the rankers (the
+# coalesced 0.5 this replaces was the fabrication #11702 removes).
+#
+# ⛔ The fallback is **null**, never 0.5 (#11702, §6.3). A `CASE ... ELSE 0.5`
+# arm cannot tell a stored (α, β) = (0, 0) from "no columns at all" — both sum
+# to 0.0 — so it handed a never-measured claim a neutral coin flip and
+# `ORDER BY conf DESC` then ranked it ABOVE a measured 0.10 claim.
+#
+# The presence gate is `ep_has_belief_cypher`, the SHARED predicate — never a
+# private sum written here. A local sum is how this file leaked a second
+# presence rule: it called a HALF pair (`posterior_beta` alone) a belief, and
+# the `coalesce(…, 1.0)` default answered `1/4` for it while the other six
+# surfaces said `absent`. Gating on the shared predicate makes that drift
+# impossible. A template that must EXCLUDE an absent belief instead gates its
+# WHERE on the same predicate (`disagreement`/`consensus`); one that
+# deliberately admits it reports `null` and orders it LAST
+# (`_order_by_belief`), which is the same refusal the rankers make.
+#
+# ⛔ `toFloat` on EVERY operand is load-bearing, not decoration. FalkorDB's `/`
+# is INTEGER division when both operands are integers (unlike Python), so a
+# prior stored as ints — `update_point(posterior_alpha=9, posterior_beta=1)`
+# accepts and stores exactly that — computed `9/10 = 0` and the claim rendered
+# `confidence: 0.00`, ranking BELOW a 0.10 claim and failing its own belief
+# floor. The expressions this replaced (`most_uncertain`/`trends`) carried the
+# guard; it must not be lost again.
+_BELIEF = (
+    "CASE WHEN " + ep_has_belief_cypher("{a}") + " "
+    # #11702 cycle 16: the MIRROR is coerced too. Uncoerced, a stored
+    # `update_point(confidence="abc")` put the raw string on the wire and
+    # `float(r[2])` below raised ValueError, which `analyze()`'s blanket
+    # `except` rendered as the ANSWER — "Formatting error: …" — for a
+    # question the graph could still answer (measured on `most_uncertain`).
+    "  THEN coalesce(" + belief_mirror_cypher("{a}.confidence") + ", "
+    "    " + belief_mean_cypher(
+        "coalesce({a}.posterior_alpha, {a}.ep_alpha, 1.0)",
+        "coalesce({a}.posterior_beta, {a}.ep_beta, 1.0)") + ") "
+    "  ELSE null END"
+)
+
+
+def _belief(alias: str) -> str:
+    """The belief expression for one alias (see `_BELIEF`)."""
+    return _BELIEF.format(a=alias)
+
+
+def _order_by_belief() -> str:
+    """`ORDER BY` clause: highest belief first, an ABSENT belief (`null`) LAST.
+
+    The explicit `CASE` is required, not decorative: Cypher sorts `null` as the
+    largest value, so a bare `ORDER BY conf DESC` puts a never-measured claim at
+    the TOP — the same inversion the multiplicative identity caused in
+    StateRanker, one layer down. Specified once so the four ranking templates
+    cannot drift apart.
+    """
+    return "ORDER BY CASE WHEN conf IS NULL THEN 1 ELSE 0 END, conf DESC"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -27,15 +96,22 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["disagree", "conflict", "oppose", "contradict", "tension", "contested"],
         "description": "Find NAND conflicts between high-confidence claims",
         "subgraph_vars": ["a", "b"],
-        "cypher": """
-            MATCH (a:Point)<-[:NAND]-(op:Point {op_type:\"NAND\"})-[:NAND]->(b:Point)
+        "cypher": f"""
+            MATCH (a:Point)<-[:NAND]-(op:Point {{op_type:"NAND"}})-[:NAND]->(b:Point)
             WHERE a.id <> b.id
               AND a.is_operator = false
               AND b.is_operator = false
-              AND coalesce(a.confidence, 0.5) > 0.45
-              AND coalesce(b.confidence, 0.5) > 0.45
-            RETURN a.id, a.content, coalesce(a.confidence,0.5) as a_conf,
-                   b.id, b.content, coalesce(b.confidence,0.5) as b_conf
+              // #11702: admission is the shared PRESENCE predicate, and the bar
+              // is compared against each claim's OWN belief -- never a
+              // fabricated 0.5, and never a bare-mirror test either (a claim
+              // whose belief lives only in its posterior is exactly the
+              // population `ep_has_belief_cypher` exists to keep).
+              AND {ep_has_belief_cypher('a')}
+              AND {ep_has_belief_cypher('b')}
+              AND {_belief('a')} > 0.45
+              AND {_belief('b')} > 0.45
+            RETURN a.id, a.content, {_belief('a')} as a_conf,
+                   b.id, b.content, {_belief('b')} as b_conf
             ORDER BY a_conf DESC LIMIT $limit
         """,
         "format": lambda rows: _format_pairs(rows, "conflict"),
@@ -52,15 +128,21 @@ TEMPLATES: dict[str, dict] = {
         # own source served as the SUPPORTER of a target: querying the source
         # returned the target as its supporter, and `tortoise_analyze` answered
         # with the claim's own hypothesis as its evidence.
-        "cypher": """
-            MATCH (supporter:Point)<-[r_in:IMPL]-(op:Point {op_type:\"IMPL\"})-[r_out:IMPL]->(target:Point)
+        "cypher": f"""
+            MATCH (supporter:Point)<-[r_in:IMPL]-(op:Point {{op_type:"IMPL"}})-[r_out:IMPL]->(target:Point)
             WHERE coalesce(r_in.idx, 0) = 0
               AND coalesce(r_out.idx, 0) >= 1
               AND target.id <> supporter.id
               AND target.content CONTAINS $entity
-              AND coalesce(supporter.confidence, 0.5) > 0.0
-            RETURN supporter.id, supporter.content, coalesce(supporter.confidence,0.5) as conf
-            ORDER BY conf DESC LIMIT $limit
+              // #11702: NO belief gate here. A supporter is admitted by the
+              // IMPL edge (that IS the evidence); the old
+              // `coalesce(supporter.confidence, 0.5) > 0.0` admitted everything
+              // anyway, and the fabricated 0.5 only decided its RANK. A claim
+              // with no persisted belief now reports `conf: null` and sorts
+              // last, instead of being scored as a neutral coin flip — and is
+              // still returned, unlike a bare-mirror test would do.
+            RETURN supporter.id, supporter.content, {_belief('supporter')} as conf
+            {_order_by_belief()} LIMIT $limit
         """,
         "format": lambda rows: _format_ranked(rows, "supporting"),
     },
@@ -68,13 +150,16 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["counter", "against", "objection", "contradicts", "opposes", "attack"],
         "description": "Find claims that contradict a target via NAND edges",
         "subgraph_vars": ["opponent"],
-        "cypher": """
-            MATCH (target:Point)<-[:NAND]-(op:Point {op_type:\"NAND\"})-[:NAND]->(opponent:Point)
+        "cypher": f"""
+            MATCH (target:Point)<-[:NAND]-(op:Point {{op_type:"NAND"}})-[:NAND]->(opponent:Point)
             WHERE target.id <> opponent.id
               AND target.content CONTAINS $entity
               AND opponent.is_operator = false
-            RETURN opponent.id, opponent.content, coalesce(opponent.confidence,0.5) as conf
-            ORDER BY conf DESC LIMIT $limit
+              // #11702: the belief VALUE by the shared precedence -- a bare
+              // `opponent.confidence` reports null for a claim whose belief is
+              // persisted in its posterior.
+            RETURN opponent.id, opponent.content, {_belief('opponent')} as conf
+            {_order_by_belief()} LIMIT $limit
         """,
         "format": lambda rows: _format_ranked(rows, "counter"),
     },
@@ -82,13 +167,17 @@ TEMPLATES: dict[str, dict] = {
         "triggers": ["consensus", "agree", "shared", "common ground", "everyone believes"],
         "description": "Find high-confidence claims with no NAND attacks (consensus)",
         "subgraph_vars": ["c"],
-        "cypher": """
+        "cypher": f"""
             MATCH (c:Point)
             WHERE c.is_operator = false
-              AND coalesce(c.confidence, 0.5) > 0.6
-              AND NOT (c)<-[:NAND]-(:Point {op_type:\"NAND\"})
-            RETURN c.id, c.content, coalesce(c.confidence,0.5) as conf
-            ORDER BY conf DESC LIMIT $limit
+              // #11702: "consensus" is agreement among claims the graph has a
+              // BELIEF for; the coalesced 0.5 let a never-measured claim in at
+              // the 0.6 bar it was fabricating against.
+              AND {ep_has_belief_cypher('c')}
+              AND {_belief('c')} > 0.6
+              AND NOT (c)<-[:NAND]-(:Point {{op_type:"NAND"}})
+            RETURN c.id, c.content, {_belief('c')} as conf
+            {_order_by_belief()} LIMIT $limit
         """,
         "format": lambda rows: _format_ranked(rows, "consensus"),
     },
@@ -115,17 +204,32 @@ TEMPLATES: dict[str, dict] = {
             MATCH (c:Point)
             WHERE c.is_operator = false
               AND {_terminal_excluded('c.status')}
-              AND (c.posterior_alpha IS NOT NULL OR c.ep_alpha IS NOT NULL)
+              // #11702: the population gate is the PAIR, not the presence
+              // predicate. Variance is COMPUTED from α/β, so it needs both
+              // operands: gating on presence alone admitted a MIRROR-ONLY claim
+              // (a real belief with no stored operands), whose `coalesce(…, 1.0)`
+              // defaults then produced the MAXIMUM variance 1/12 and first
+              // place on a "how uncertain are we" answer. A stored (0, 0) or a
+              // HALF pair has no variance either, and `… > 0` excludes the
+              // zero-total one.
+              // #11702 cycle 13: the shared WIDTH rule in ONE import
+              // (`ep_width_cypher`) instead of this file's own spelling of
+              // pair-stored + non-negative + positive-total. That spelling was
+              // correct and tested — and it was still a SECOND definition of a
+              // rule whose copies drift (the drift is the defect #11702
+              // removes one level up). Cycle 12 added the non-negativity here
+              // after measuring `var: -0.2500` beside `conf: no belief`.
+              AND {ep_width_cypher('c')}
             WITH c, coalesce(c.posterior_alpha, c.ep_alpha, 1.0) AS a,
                  coalesce(c.posterior_beta, c.ep_beta, 1.0) AS b
-            WITH c, a, b, (a * b) / 
-               ((a + b)^2 * (a + b + 1)) as variance
-            RETURN c.id, c.content,
-                   coalesce(c.confidence,
-                            CASE WHEN a + b > 0
-                                 THEN toFloat(a) / (a + b) ELSE 0.5 END)
-                     as conf,
-                   variance
+            // #11702 cycle 15: the WIDTH comes from the shared twin, not an
+            // inline formula. `(a*b)/((a+b)^2*(a+b+1))` overflows to `inf/inf`
+            // for a large pair and to `0/0` for a tiny one, and FalkorDB's
+            // ORDER BY is not total over NaN — measured: `(1e200, 1e200)`
+            // sorted FIRST with `var: nan`, and with two such rows the whole
+            // list came back de-sorted, including rows with ordinary widths.
+            WITH c, a, b, {beta_variance_cypher('a', 'b')} AS variance
+            RETURN c.id, c.content, {_belief('c')} as conf, variance
             ORDER BY variance DESC LIMIT $limit
         """,
         "format": lambda rows: _format_uncertain(rows),
@@ -138,15 +242,17 @@ TEMPLATES: dict[str, dict] = {
         # operator's idx=0 endpoint, the chained claim an idx>=1 one. Without
         # it, asking for the evidence chain of the SOURCE returned its own
         # targets as its foundation.
-        "cypher": """
-            MATCH (evidence:Point)<-[r_in:IMPL]-(op:Point {op_type:\"IMPL\"})-[r_out:IMPL]->(target:Point)
+        "cypher": f"""
+            MATCH (evidence:Point)<-[r_in:IMPL]-(op:Point {{op_type:"IMPL"}})-[r_out:IMPL]->(target:Point)
             WHERE coalesce(r_in.idx, 0) = 0
               AND coalesce(r_out.idx, 0) >= 1
               AND target.id <> evidence.id
               AND target.content CONTAINS $entity
               AND evidence.is_operator = false
-            RETURN evidence.id, evidence.content, coalesce(evidence.confidence,0.5) as conf
-            ORDER BY conf DESC LIMIT $limit
+              // #11702: the belief VALUE by the shared precedence, never a bare
+              // mirror (a claim with a persisted posterior would report null).
+            RETURN evidence.id, evidence.content, {_belief('evidence')} as conf
+            {_order_by_belief()} LIMIT $limit
         """,
         "format": lambda rows: _format_chain(rows),
     },
@@ -165,14 +271,23 @@ TEMPLATES: dict[str, dict] = {
             MATCH (c:Point)
             WHERE c.content CONTAINS $entity
               AND {_terminal_excluded('c.status')}
-              AND (c.posterior_alpha IS NOT NULL OR c.ep_alpha IS NOT NULL)
+              // #11702: this template PRINTS α/β, so it must print STORED ones:
+              // `coalesce(…, 1.0)` printed `β=1.0` for a half pair that stores no
+              // β at all, and `OR c.ep_alpha IS NOT NULL` admitted rows with no
+              // complete pair. A mirror-only claim (a real belief with no stored
+              // operands) is not a TIMELINE row — there is no α/β history to
+              // show — and it is the only shape the presence predicate would add.
+              // #11702 cycle 13: the shared WIDTH rule in ONE import
+              // (`ep_width_cypher`) instead of this file's own spelling of
+              // pair-stored + non-negative + positive-total. That spelling was
+              // correct and tested — and it was still a SECOND definition of a
+              // rule whose copies drift (the drift is the defect #11702
+              // removes one level up). Cycle 12 added the non-negativity here
+              // after measuring `var: -0.2500` beside `conf: no belief`.
+              AND {ep_width_cypher('c')}
             WITH c, coalesce(c.posterior_alpha, c.ep_alpha, 1.0) AS a,
                  coalesce(c.posterior_beta, c.ep_beta, 1.0) AS b
-            RETURN c.id, c.content,
-                   coalesce(c.confidence,
-                            CASE WHEN a + b > 0
-                                 THEN toFloat(a) / (a + b) ELSE 0.5 END)
-                     as conf,
+            RETURN c.id, c.content, {_belief('c')} as conf,
                    a, b, c.createdAt
             ORDER BY c.createdAt DESC LIMIT $limit
         """,
@@ -228,7 +343,21 @@ def _format_uncertain(rows: list) -> str:
         return "No uncertain claims found."
     lines = ["Most uncertain claims (highest variance):"]
     for i, r in enumerate(rows[:10], 1):
-        lines.append(f"  {i}. \"{r[1][:80]}\" (conf: {r[2]:.2f}, var: {r[3]:.4f})")
+        # #11702: an absent belief renders as "no belief" instead of raising on
+        # `f"{None:.2f}"` (the blanket `except` in `analyze()` would turn that
+        # into an empty answer, which reads as "found nothing").
+        conf_num = numeric_operand(r[2])
+        conf_txt = (f"conf: {conf_num:.2f}"
+                    if conf_num is not None else "no belief")
+        # #11702 cycle 19: the WIDTH degrades too. A row whose variance is not a
+        # number reached `f"{None:.4f}"` and raised, and `analyze()`'s blanket
+        # handler answered the question with "Formatting error: …" — once for
+        # the whole call, losing every other row with it. The width rule no
+        # longer admits such a shape; this is the belt to that brace, because a
+        # template is edited far more often than a reader.
+        var_num = numeric_operand(r[3]) if len(r) > 3 else None
+        var_txt = f"var: {var_num:.4f}" if var_num is not None else "no width"
+        lines.append(f"  {i}. \"{r[1][:80]}\" ({conf_txt}, {var_txt})")
     return "\n".join(lines)
 
 
@@ -254,7 +383,23 @@ def _format_timeline(rows: list) -> str:
     lines = ["Confidence timeline:"]
     for r in rows[:10]:
         ts = r[5][:10] if len(r) > 5 and r[5] else "?"
-        lines.append(f"  [{ts}] \"{r[1][:80]}\" (α={r[3]:.1f}, β={r[4]:.1f}, conf={r[2]:.2f})")
+        # #11702: an absent belief is `null` — render it as "no belief" rather
+        # than raising TypeError on `f"{None:.2f}"` (which the blanket
+        # exception in `analyze()` would turn into a silently empty answer).
+        conf_txt = (f"conf={float(r[2]):.2f}"
+                    if len(r) > 2 and r[2] is not None else "no belief")
+        # #11702 cycle 17: the OPERANDS are coerced too. The template returns
+        # the raw coalesced columns, so a stored numeric-string pair reached
+        # `f"{...:.1f}"` and raised — which `analyze()`'s blanket handler
+        # renders as the ANSWER ("Formatting error: …") for a question the
+        # graph could still answer. Same guard as `conf` beside it.
+        alpha_txt = numeric_operand(r[3]) if len(r) > 3 else None
+        beta_txt = numeric_operand(r[4]) if len(r) > 4 else None
+        lines.append(
+            f"  [{ts}] \"{r[1][:80]}\" "
+            f"(α={alpha_txt:.1f}, β={beta_txt:.1f}, {conf_txt})"
+            if alpha_txt is not None and beta_txt is not None else
+            f"  [{ts}] \"{r[1][:80]}\" (no readable operands, {conf_txt})")
     return "\n".join(lines)
 
 
@@ -1055,7 +1200,18 @@ def mean_grounding(proj=None) -> float:
     ).result_set
     if not rows:
         return 0.0
-    return sum(float(r[0]) for r in rows) / len(rows)
+    # #11702 cycle 16: the imputation above is DELIBERATE and unchanged; the
+    # COERCION is what must not raise. `float(r[0])` on a stored
+    # `update_point(confidence="abc")` raised ValueError out of the whole
+    # snapshot and the blanket `except` in `analyze()` reported the answer as a
+    # formatting error (measured). A non-numeric mirror takes the same 0.5 the
+    # NULL one takes.
+    # #11702 cycle 24: BANDED (`belief_mirror`), like every other mirror read.
+    # The 0.5 imputation below is the documented DE2E-4 extension; a stored
+    # out-of-band value (`2.5`, or a legacy `"0x1p4"` that only Cypher can read)
+    # is not a belief and must not enter the metric as one.
+    values = [belief_mirror(r[0]) for r in rows]
+    return sum(v if v is not None else 0.5 for v in values) / len(values)
 
 
 def grounding_snapshot(proj=None) -> dict:
@@ -1073,9 +1229,20 @@ def grounding_snapshot(proj=None) -> dict:
     rows = proj.g.query(
         "MATCH (p:Point) "
         f"WHERE p.is_operator = false AND {_live_only('p.status')} "
-        "RETURN p.id, coalesce(p.confidence, 0.5)"
+        # #11702 cycle 27: NO `coalesce(p.confidence, 0.5)`. The 0.5 default is
+        # applied BELOW, where it belongs — it is the documented DE2E-4 drift
+        # sample, not a served belief — but doing it in Cypher made an absent
+        # mirror and a stored `0.5` indistinguishable at the store read, before
+        # `belief_mirror` could apply the band. Reading the column raw also stops
+        # the idiom this whole issue exists to delete from appearing here.
+        "RETURN p.id, p.confidence"
     ).result_set
-    points = {r[0]: float(r[1]) for r in rows}
+    # #11702 cycle 16: total coercion — see `mean_grounding`. The 0.5 default
+    # is the documented DE2E-4 extension (a confidence-less Point degrades the
+    # mean rather than being dropped), not the #11702 fabricated belief: this is
+    # a drift SAMPLE over a batch, not a claim's served confidence.
+    _mirrors = {r[0]: belief_mirror(r[1]) for r in rows}      # ONE coercion
+    points = {k: (0.5 if v is None else v) for k, v in _mirrors.items()}
     mean = sum(points.values()) / len(points) if points else 0.0
     from datetime import datetime, timezone
     return {

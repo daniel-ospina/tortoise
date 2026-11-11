@@ -160,11 +160,14 @@ class TestSearchResult:
 
 class TestEpBreakdown:
     def test_defaults(self):
-        # Issue #2206: the default confidence_mean is the neutral Beta(1,1)
-        # mean 0.5 (unmeasured == no information, NOT zero support) — never
-        # the old structural edge-ratio default 0.0.
+        # #11702 SUPERSEDES this test's pre-#11702 pin: a default-constructed
+        # breakdown is the ABSENT state — confidence_mean is None, named by
+        # ep_state. Never the neutral Beta(1,1) mean 0.5 (indistinguishable
+        # from a measured symmetric coin flip) and never the old structural
+        # edge-ratio 0.0 (which conflated "no belief" with "no support").
         ep = EpBreakdown()
-        assert ep.confidence_mean == 0.5
+        assert ep.confidence_mean is None
+        assert ep.ep_state == "absent"
         assert ep.has_ep is False
         assert ep.contention == 0.0
 

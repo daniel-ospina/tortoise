@@ -589,12 +589,16 @@ def test_the_evidence_prewrite_journal_read_is_planned_as_an_index_read(journal_
         + "\n".join(f"  {q}\n      plan: {plan}" for q, plan in offenders)
     )
 
+    # #11702: a clear now journals `confidence=None` EXPLICITLY (absent key
+    # means "leave the mirror alone", so it could not clear the served mirror on
+    # replay — the staleness this change fixes at the write). The filter accepts
+    # either shape: what must hold is that no value is recorded.
     cleared = [
         rec["id"] for rec in emitted
         if rec["kind"] == "ConfidenceChanged"
         and rec.get("posterior_alpha") is None
         and rec.get("posterior_beta") is None
-        and "confidence" not in rec
+        and rec.get("confidence") is None
     ]
     expected = sorted([J_EV_A, J_EV_TWIN_ID, J_EV_B, J_EV_MULTI, J_EV_EVENT])
     assert cleared == expected, (
