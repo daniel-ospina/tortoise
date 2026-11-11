@@ -1567,13 +1567,18 @@ def test_migrate_route_does_not_override_a_stronger_rebuild_report(
     active and this bracket is the only thing standing between the route and a
     relabelled conflict.
 
-    ⛔ WHICH TERM protects it, measured: the injected dict sets `gap: 1`, and the
-    bracket's `pack_selection_conflict` term is UNREACHABLE on this route —
-    `conflict` is `missing and live_markers`, `missing` is assigned only under
+    ⛔ WHICH TERM protects it, measured: the injected dict sets BOTH `gap: 1`
+    and `conflict: True`, so this row stays green if EITHER term alone is
+    deleted — it reds only when both go (#9752 review round 9, corrected by the
+    review of this head: the first version claimed "the `gap` term is what reds
+    this row", which a probe of the shipped bracket disproves). The bracket's
+    `pack_selection_conflict` term is UNREACHABLE on this route — `conflict` is
+    `missing and live_markers`, `missing` is assigned only under
     `pack_selection_marker is not None`, and `expected = len(snapshot)`, so
     conflict implies `expected >= 1` and cannot be true inside
-    `if not expected:`. The term is kept as defence against that changing; the
-    `gap` term is what reds this row (#9752 review round 9).
+    `if not expected:` — which is why `gap` is the term that protects the
+    reachable shape, and why `conflict` is kept only as defence against that
+    invariant changing.
     """
     counts = {"nodes": 1, "edges": 0, "events": 1,
               "pack_selection_expected": 0, "pack_selection_verified": True,
