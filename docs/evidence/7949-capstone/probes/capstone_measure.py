@@ -3254,7 +3254,8 @@ def _a4_writer_attribution(projection) -> dict:
         # numbers so a reader cannot take `caller-supplied` for "some other lane".
         "v2_lane_excluded_by_construction": (
             "extractor_v2's write gate repairs every non-master point kind to 'statement', "
-            "so no typed claim can come from that lane"),
+            "so no typed claim can come from that lane IN A DECLARED KIND (the gate compares "
+            "case-insensitively and stores the kind verbatim, so a case-variant survives it)"),
         "provenance": unmeasured(
             "a WRITER STAMP on the node — no Point property records its producer, so attribution "
             "here is a reproduction test (the rule classifier re-derived over each node's "

@@ -139,7 +139,14 @@ content and compared with the stored kind.
 | `unattributed` | **0** measured / **1** unread | one of the 121 `evidence` rows was not returned by the point listing |
 
 `extractor_v2` is excluded **by construction**, not by measurement: its write gate repairs every point
-kind that is not in the master vocabulary to `statement`, so no typed claim can come from that lane. And
+kind that is not in the master vocabulary to `statement`, so no typed claim can come from that lane **in a
+kind the vocabulary declares**. ⚠️ The gate is CASE-INSENSITIVE and stores the kind VERBATIM
+(`tortoise/extractor_v2.py:10419` compares `pkind.lower()` against `k.lower()`; `:10695` persists
+`"pointKind": pkind`), while the census pops only the exact string `"statement"`
+(`probes/capstone_measure.py:3194`, `by_kind.pop("statement", 0)`) — so an extractor-written
+`"Statement"` would be persisted, survive the gate, and land in `typed` **and** `undeclared`. That is the
+same asymmetry §2 already states for `eventKind` (a stored `cardcreated`); no such row is on this graph
+today, and this artifact does not claim the lane is airtight. And
 the split is not an over-claim: a caller that hand-supplied the kind the classifier would have derived
 lands in the first bucket, which is why the bucket is named for what is observable.
 
@@ -152,8 +159,12 @@ kinds, not a residue of the rule classifier and not v2-lane drift.**
 ⛔ **It does not answer *"what are the 109"*, and this run does not re-measure it.** Those are two
 different populations and the numbers are not interchangeable: the 109 comes from the 2026-11-04 reading
 of the hosted `live-v4` graph (`00-align.md` · `00-plan.md` — a *lane-brief reading with no committed
-artifact*, `01-align.md` of epic `#5087`) — `statement 15,534 · NULL 3,658 · typed 109`, decomposed by
-`#10982` as `constraint` 88 + `preference` 21. ⛔ **Neither kind appears on this graph in §3.1's typed
+artifact*, `01-align.md` of epic `#5087`) — `statement 15,534 · NULL 3,658 · typed 109`, and the
+`constraint` 88 + `preference` 21 breakdown that the `#10982` FIXTURE models
+(`tests/test_capstone_a_rows_10982.py`'s `_FakeProjection` histogram, re-used as the CI twin's
+`_CLAIM_ROWS`) — ⛔ **not a decomposition `#10982` measured:** `gh issue view 10982` carries neither word
+in its body or comments, and no artefact in this repo re-derives the pair from the 11-04 reading.
+⛔ **Neither kind appears on this graph in §3.1's typed
 cell, which is where a labelled kind would show:** the hosted `list_pointkinds` histogram enumerates every
 `pointKind` carried by a non-operator `Point` (`n.pointKind IS NOT NULL` plus the non-operator predicate —
 `is_operator` absent-or-false AND `op_type IS NULL`), and §3.1 lists seven kinds, neither of them
