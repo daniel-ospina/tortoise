@@ -62,6 +62,19 @@ def test_no_propagate_shock_callers():
             callers["test_files"].append(line)  # test_6707_shock.py
         elif "/tortoise/" in path_part and "#" in line and "replaces" in line.lower():
             callers["comment/reference only"].append(line)
+        elif "/tortoise/" in path_part and "propagate_shock(" not in line \
+                and "`propagate_shock`" in line:
+            # #11803's docstring on the confidence blend names the deprecated
+            # method in PROSE — twice, backticked — to say WHY a fabricated
+            # belief is still computed and who must decide before it runs (the
+            # same docstring says the method is "UNREACHABLE today (no
+            # production caller)"). The audit's subject is *calls*: a backticked
+            # mention carrying no call shape is a REFERENCE, and a real call
+            # never arrives backticked. Measured before this branch:
+            # `assert 2 == 0` — two docstring lines of
+            # `tortoise/projection/propagation.py` bucketed as production code,
+            # reding `main` on an issue (#11803) that added no call at all.
+            callers["comment/reference only"].append(line)
         elif "/tortoise/" in path_part:
             callers["production_code"].append(line)
 
