@@ -17965,6 +17965,159 @@ def _capture_abandoned_marker(proj, session_id: str, lane: str) -> None:
             "same-session retry would legacy-replay (#3129)", session_id)
 
 
+# ── #11808: the CONNECTION half of a capture's receipt ────────────────────
+#
+# The relation link already computes what it did with the relations the
+# extractor stated (``relation_write``: ``written`` / ``dropped`` / ``folded``,
+# ``tortoise/relation_write.py``), and the SDK capture receipt already returns
+# it (``sdk.py:16093-16094``). This lane builds its OWN receipt and dropped the
+# key, so a caller could not tell "nothing was stated" from "stated and none
+# landed" — and the session that wrote 40 claims and connected none read
+# exactly like the session that wrote 40 and connected 12.
+
+
+def _capture_int(value) -> int:
+    """A non-negative int from anything a receipt count could be, never raising.
+
+    The advisory is appended AFTER the capture has committed, so a surprising
+    shape must degrade to 0 rather than 500 a write that already landed. What
+    0 then MEANS is the caller's business: for ``entities`` it suppresses the
+    line (nothing was named); for ``written`` it makes the line fire, and the
+    detail then says the link reported no usable counts rather than claiming
+    silence — the key's presence proves relations were stated.
+    """
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _capture_step_entities(meta: dict) -> int:
+    """Entities the S6 commit actually saw, from the capture's own witness.
+
+    ``stats["step_witness"]["commit"]["entities"]`` (#9116) is the extractor's
+    own count, so this asks the run instead of re-deriving one. Every branch
+    (keyless / replayed / M2) reports ``{}`` here, which reads as **0** — the
+    value that SUPPRESSES the advisory below, so a branch that ran no entity
+    pass can never accuse a caller of not connecting what it never named.
+    """
+    stats = meta.get("stats")
+    witness = stats.get("step_witness") if isinstance(stats, dict) else None
+    commit = witness.get("commit") if isinstance(witness, dict) else None
+    if not isinstance(commit, dict):
+        return 0
+    return _capture_int(commit.get("entities"))
+
+
+def _capture_relations_dropped(meta: dict) -> int:
+    """Relations the EXTRACTOR stated and its validation dropped (#10999).
+
+    ``stats["relations_dropped"]`` is the only observable that separates "the
+    model stated nothing" from "the model stated relations and they never
+    reached the link" — ``out["relations"]`` is the surviving list, so a total
+    drop leaves ``relation_write`` ABSENT exactly like silence does
+    (``extractor_v2.py:11772``). Without this the advisory would tell a caller
+    "no relation was stated" on a receipt that simultaneously reports drops.
+    """
+    stats = meta.get("stats")
+    return _capture_int(stats.get("relations_dropped")
+                        if isinstance(stats, dict) else 0)
+
+
+def _capture_relations_stated(meta: dict) -> int:
+    """Relations the extractor's payload stated, before the link touched them.
+
+    ``stats["relations"]`` (#10999) counts the SURVIVING payload list, i.e. the
+    relations the link was actually handed. It is the only observable that
+    separates "the link raised before it could report" from "nothing was
+    stated": on the defensive ``except`` arm the key is absent with zero drops
+    (``sdk.py:17388-17395``).
+    """
+    stats = meta.get("stats")
+    return _capture_int(stats.get("relations")
+                        if isinstance(stats, dict) else 0)
+
+
+def _capture_connection_warning(relation_write: dict | None,
+                                entities: int,
+                                relations_dropped: int = 0,
+                                relations_stated: int = 0) -> str | None:
+    """The one advisory a capture owes about CONNECTIONS — or ``None``.
+
+    Fires on exactly one state: **the session named at least two entities and
+    wrote no connection between them**. That is the state the "agents dump
+    claims instead of connecting them" direction (owner, 2026-11-04) is about,
+    and it is deliberately NOT "every session with no edges":
+
+    * ``entities < 2`` — there was nothing to join; silence.
+    * ``written > 0`` — connections were written; silence.
+    * keyless / replayed / M2 branches report no witness — ``entities`` is 0,
+      so silence. A branch that ran no entity pass is never accused.
+
+    The parenthetical names what the receipt can actually OBSERVE, and an
+    absent ``relation_write`` covers FOUR shapes — all of them distinguishable
+    from ``meta``, which is why none may be described as another:
+
+    1. the link ran and dropped/folded every relation -> ``written + dropped +
+       folded > 0``;
+    2. the extractor stated relations and its own validation dropped them
+       before the link (``stats["relations_dropped"]``, #10999) ->
+       ``out["relations"]`` is the surviving list, so the key is absent;
+    3. the link RAISED (``sdk.py:17388-17395``, the defensive bound) -> the key
+       is absent while ``stats["relations"]`` still counts what was stated,
+       and the leg's own warning rides the same receipt;
+    4. genuine silence -> ``stats["relations"] == 0``.
+
+    ⚠️ The SILENT arm (shape 4) is deliberate and is an amendment to #11808's
+    registered criteria, recorded on the issue (comment `6783698717`): the
+    registered condition — "stated and nothing landed" — fires only where the
+    link already emits a warning per dropped relation, so it would leave every
+    ordinary claims-only capture silent, which is the behaviour the nudge
+    exists to surface.
+
+    No observable on this receipt separates "the agent stated no relation" from
+    "the extractor produced none" — so the line states the observation and
+    explicitly refuses the attribution ("this reports what the receipt saw, not
+    who omitted it"). That is what keeps the ⛔ constraint true in substance
+    rather than only in intent: during a producer outage every multi-entity
+    capture carries this line, and none of them is accused of the omission.
+
+    It is a NUDGE, never a refusal (``product/2026-08-11-tooling-surface-
+    consolidation.md:22``, *"nudge, don't enforce"*): the capture succeeded and
+    the receipt's outcome is untouched. It also does NOT duplicate the
+    per-edge warnings the link emits for a drop or a fold — those name one
+    relation each; this names the session's outcome, which is the thing a
+    client can act on.
+    """
+    if entities < 2:
+        return None
+    written = dropped = folded = 0
+    if relation_write is not None:
+        written = _capture_int(relation_write.get("written"))
+        dropped = _capture_int(relation_write.get("dropped"))
+        folded = _capture_int(relation_write.get("folded"))
+    if written > 0:
+        return None
+    if written + dropped + folded > 0:
+        detail = f"{written} written, {dropped} dropped, {folded} folded"
+    elif relation_write is not None:
+        # The key exists only when the link ran, so relations WERE stated: an
+        # all-zero (or uninterpretable) count must not be reported as silence.
+        detail = "the write link reported no usable counts"
+    elif relations_dropped > 0:
+        detail = (f"{relations_dropped} stated relation(s) were dropped before "
+                  f"the write link ran")
+    elif relations_stated > 0:
+        detail = (f"{relations_stated} relation(s) were stated and the write "
+                  f"link reported no outcome for them")
+    else:
+        detail = "no relation was stated"
+    return (f"this session named {entities} entities and no connection between "
+            f"them was written ({detail}) — the claims are stored; retrieval "
+            f"uses only the relationships that were written. This reports what "
+            f"the receipt saw, not who omitted it (#11808)")
+
+
 @counts_capture_ops_async  # #3359: count graph ops for the whole capture
 async def _capture_session_impl(body: SessionRequest, request: Request | None,
                                 org: dict, slot: _CaptureSlot,
@@ -19899,6 +20052,19 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     if _capture_journal_failures > 0:
         extraction_warnings.append(
             _journal_write_failure_warning(_capture_journal_failures))
+    # #11808: the relation link's own accounting, plus the one advisory a
+    # session owes when it named entities and connected none. The key stays
+    # ADDITIVE (absent, never zeroed) exactly as the SDK receipt documents it
+    # — a reader must not be able to confuse "nothing was stated" with "stated
+    # and nothing landed" (sdk.py:17435-17442).
+    _relation_write = meta.get("relation_write")
+    if not isinstance(_relation_write, dict):
+        _relation_write = None
+    _capture_connection_nudge = _capture_connection_warning(
+        _relation_write, _capture_step_entities(meta),
+        _capture_relations_dropped(meta), _capture_relations_stated(meta))
+    if _capture_connection_nudge:
+        extraction_warnings.append(_capture_connection_nudge)
     resp = {"session_id": session_id, "turns": len(body.conversation),
             "extracted": len(extracted), "points": extracted,
             "surfaced": surfaced,
@@ -19913,6 +20079,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # #2335 WI-1a: the hosted receipt carries the extractor
             # telemetry (sdk meta stats - real on v2, {} on replayed/M2).
             "stats": meta.get("stats") or {},
+            # #11808: what the relation link did with the relations this
+            # session stated. Byte-parity with the SDK receipt (#2335 WI-2),
+            # which has carried this key since #11237; ADDITIVE — absent, not
+            # zeroed, when the extractor stated no relations, so "nothing was
+            # stated" and "nothing was written" cannot be read as one state.
+            **({"relation_write": _relation_write}
+               if _relation_write is not None else {}),
             # #4911: credential-shaped spans redacted from this capture's turn
             # text before persistence — always present (0 when nothing
             # matched), byte-parity with the SDK receipt.
@@ -21260,6 +21433,21 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     for pr in reconcile.points:
         pid = pr.point.id
         resolved_pid = pid
+        # #11239 (DM1's home): the phrases this claim POINTED with but did not
+        # NAME ride the Point write, so a reader of the GRAPH — not only of the
+        # capture response — can see what the sentence meant without an
+        # `:Object` having been minted for a pronoun. Built ONCE per point and
+        # as PLAIN DICTS: the payload is journalled (`PointAdded`) and a
+        # pydantic model is not JSON-serialisable, so the model boundary is
+        # crossed here rather than in the writer.
+        # ⛔ NOT added to `sdk._CAPTURE_PASSTHROUGH_PROPS`: that set is the
+        # public capture RESPONSE surface (#2949/#3945's stated reason, see
+        # `sdk._CAPTURE_PASSTHROUGH_ORDER`), and this field is stored, never
+        # advertised — the same shape as `validFrom` on the capture seam.
+        _mention_props = [
+            m if isinstance(m, dict) else m.model_dump()
+            for m in (getattr(pr.point, "mentions", None) or [])
+        ]
         # #1370 fail-closed: stays ``None`` unless a create actually ran and
         # returned a usable id, so the map below can never hold a
         # requested-but-unconfirmed id.
@@ -21269,6 +21457,21 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # re-write status (update_point refuses non-promoting transitions;
             # a live re-capture would 500 — review fix, PR #953). The node
             # already exists at the payload id, so the resolution is identity.
+            # ⛔ THIS LEG DOES NOT RESTATE PROPS — `mentions` included (review P2
+            # on PR #11795, measured). `commit_schema.reconcile_payload` picks
+            # `merge` for SAME id + SAME content, i.e. the ordinary re-commit of
+            # an existing claim, and this leg writes no prop and journals nothing
+            # (it is a bump, not a write), so a payload that DOES state a mention
+            # record over an existing claim is discarded — while the same
+            # situation one leg over (an existing claim reached by
+            # `create_point(dedup=True, …)`) forwards it into `update_point`.
+            # First-writer for every other prop on this leg too, so this is the
+            # DECLARED shape rather than a new one — the user-visible
+            # consequence is that a cue-ON re-capture over a claim first captured
+            # cue-OFF records nothing here. Tracked as #11811 (behaviour, needs a
+            # journalled write and the metering decision, so it is not a doc
+            # fix), and pinned by
+            # `tests/test_commit_endpoint.py::test_the_merge_leg_drops_a_stated_record_and_that_is_declared`.
             proj.g.query(
                 "MATCH (p:Point {id:$pid}) SET p.updatedAt=$now",
                 params={"pid": pid, "now": now},
@@ -21283,6 +21486,16 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             if pr.point.when:
                 point_props["when"] = pr.point.when
                 point_props["validFrom"] = pr.point.when
+            # #11239: DM1's mention record rides the write ONLY when it carries
+            # one. ⛔ NOT `mentions=<recs> or None` on the call: a re-commit of a
+            # claim with no mentions would then fold `mentions=None` onto the
+            # dedup target, and a `None` in a generic prop REMOVES the property
+            # (`SET n += $props`, measured) — deleting a stored record on the
+            # ordinary re-commit path, in the direction that loses memory.
+            # Absent means "this payload did not speak about mentions", which
+            # is first-writer, the same rule every other prop here follows.
+            if _mention_props:
+                point_props["mentions"] = _mention_props
             # #5363 (B) / #7000 review P2: validate THIS window here — after
             # every EARLIER point of this commit has been written, so the
             # successor this write will actually dedup onto is already visible
@@ -21437,6 +21650,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             if pr.point.when:
                 point_props["when"] = pr.point.when
                 point_props["validFrom"] = pr.point.when
+            # #11239: only when the payload carries a record — see the
+            # supersede leg's note above (an explicit None would CLEAR it).
+            if _mention_props:
+                point_props["mentions"] = _mention_props
             _written = sdk.create_point(
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,

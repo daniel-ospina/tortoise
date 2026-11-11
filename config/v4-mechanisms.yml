@@ -1585,16 +1585,22 @@ mechanisms:
     name: "DM1 — the mention record is a property on the claim Point"
     declared_in:
       - docs/epics/2026-11-05-5087-extractor-v4/05-plan.md  # §4 DM1
-    state: not-implemented
-    tracking_issue: 11239
-    pins:
-      - tests/test_referentiality_11021.py::test_the_mention_record_is_payload_only_and_says_so
+    state: implemented
     code:
       - tortoise/commit_schema.py
+      - tortoise/projection/entities.py
+      - tortoise/projection/__init__.py
+      - tortoise/sdk.py
+      - tortoise/hosted_api.py
+      - tortoise/api.py
+      - tortoise/consistency.py
     tests:
       - tests/test_referentiality_11021.py
+      - tests/test_mention_write_11239.py
+      - tests/test_commit_endpoint.py
     symbols:
       - Mention
+      - encode_json_record_props
     note: >-
       DM1 declares the mention as *"a property on the claim Point that carried
       it"* (`05-plan.md` §4, closed 2026-11-05 against the Postgres branch), and
@@ -1618,20 +1624,45 @@ mechanisms:
       `result["s2_embed"]["mentions"]`). A future write door that persists the
       payload VERBATIM therefore stores what it was handed; it must not assume
       the commit shape will have cleaned it.
-      ⚠️ WHAT IS NOT BUILT (the PERSISTENCE half, and why this row is not
-      `implemented`): NO declared write door carries `mentions` — the REST
-      `CreatePointRequest` has no such field, the SDK capture whitelist
-      (`sdk._CAPTURE_PASSTHROUGH_ORDER`) is
-      `quote/when/search_keys/source_turn_id/span_start/span_end` only, and
-      neither `hosted_api` nor `selfhost_api` names it. So a capture's
-      `stats["mentions_recorded"]` counts records the write DISCARDS, on either
-      deployment, and a graph read after a capture holds the claim and no mention
-      on it — DM1's home on the Point is declared but unfulfilled. `#11239`
-      tracks persisting it (or an explicit session-evidence-only ruling, which
-      would move the DECLARATION instead). Pinned by
-      `test_the_mention_record_is_payload_only_and_says_so`, which asserts the
-      payload-only shape and says so — the day a write door persists the record
-      it reds and this row must flip.
+      ⚠️ WHAT IS NOT BUILT IN THE PAYLOAD, AND IS NOW BUILT BESIDE IT (the
+      PERSISTENCE half, landed by #11239): DM1's home is the claim Point, and the
+      record now reaches it. `hosted_api._execute_commit_writes` sets
+      `point_props["mentions"]` on both of its create legs — ONLY when the
+      payload carries a record, because an explicit `None` would CLEAR the
+      stored one — and forwards it through `**point_props`; the SDK capture seam
+      carries it on its create branch exactly as it carries `validFrom` —
+      stored, never advertised. ⛔ `mentions` is deliberately NOT in
+      `sdk._CAPTURE_PASSTHROUGH_ORDER`: that set is the public capture RESPONSE
+      surface (#2949 response parity), so widening it would advertise a field no
+      client model declares. Neither REST `CreatePointRequest` (hosted or
+      self-host) has the field: it is a writer-produced record, not a client
+      field. ⚠️ ONE leg does not carry it: the hosted commit door's MERGE leg
+      (same id + same content — the ordinary re-commit of an existing claim) is a
+      zero-budget bump that writes no prop, so a cue-ON re-capture over a claim
+      first captured cue-OFF records nothing. Declared, not silent: `#11811`
+      tracks the behaviour.
+      On the node the value is ONE compact JSON scalar
+      (`projection.entities.encode_json_record_props`, declared in
+      `_POINT_JSON_RECORD_PROPS` and `_POINT_DECLARED_PROPS`), because an array
+      containing a map never reaches the node: the projection denies it
+      (`_is_persistable_prop_value`) and a raw `SET n += $p` gets it degraded to
+      `null` by the driver before dispatch (#7369's `tags` mechanism), and
+      `_POINT_LIST_PROPS` is deliberately empty. The SDK doors call that helper
+      themselves (`create_point`, `update_point`, `_update_entity`) and emit a
+      pure function of the payload, which is what makes the live write and every
+      rebuild byte-identical (#330); the projection's replay writer
+      (`_upsert_point_props`) calls it too, and that call is LOAD-BEARING for
+      `EventAPI.add_point` — a live door that journals the payload's LIST
+      spelling and calls no encoder of its own (neutering it stores nothing) —
+      as well as the only arm that normalises a NON-canonical record, pinned
+      behaviourally by
+      `test_the_replay_door_normalises_a_non_canonical_record`.
+      `consistency._uncarried` READS that declaration instead of
+      re-listing it, so an armed capture no longer reports a `_UNCARRIED_LIST` it
+      will never persist. Pinned by
+      `test_the_mention_record_reaches_the_claim_point_and_says_so`, which asserts
+      BOTH directions — the doors carry it, and nothing (the response surface, a
+      REST model) over-advertises it.
 
   - id: declared_pack_relations
     name: "DM5 — the pack's DECLARED relations/hierarchies become replayable Object→Object edges"
