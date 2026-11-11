@@ -57,6 +57,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # `POST /v1/sessions` route, so it reuses `tests/test_hosted_api.py`'s
 # authenticated TestClient fixture — the established repo pattern (see
 # `tests/test_capture_phase_d_dedup.py`), not a second hand-rolled app harness.
+from tests.test_hosted_api import TEST_ORG_ID  # noqa: E402, RUF100
 from tests.test_hosted_api import client as client  # noqa: E402, RUF100, F401
 from tortoise import ranking as _ranking  # noqa: E402, RUF100
 from tortoise import search_engine as _se  # noqa: E402, RUF100
@@ -2781,7 +2782,16 @@ def test_write_verb_ep_updated_pins_the_hosted_mirror_only_claim(
     pid = body["points"][0]["id"]
 
     import tortoise.hosted_api as ha_mod
-    proj = ha_mod._make_sdk(namespace="team-001")._get_proj()
+    # The mirror belief lives in the graph the HOSTED write verb opens, which is
+    # keyed by the AUTHENTICATED team id (`_make_sdk(namespace=org_id)`) — so
+    # this handle must be built from the fixture's own `TEST_ORG_ID`, imported
+    # beside the `client` fixture above, not from a second hardcoded copy of
+    # the id. Spelled as the constant rather than the literal for exactly the
+    # reason `tests/test_markers.py`'s namespace guard (`#2148`, `test-slow
+    # (a)` on main) enforces: a `test_*` rename here would open a DIFFERENT
+    # graph than the write verb writes, so `_clear_belief` would clear nothing
+    # and the `ep_updated: true` assertion below would pass over nothing.
+    proj = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj()
     _clear_belief(proj, pid, mirror=0.95)
     payload = dict(payload, session_id="zq-ep-flag-http-b")
     r2 = client.post("/v1/sessions", json=payload)
