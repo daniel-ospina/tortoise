@@ -2447,6 +2447,16 @@ to answer.
   entry measured — `:14225-14227` really was the window there. A later commit on this same branch
   (`93dafca241`) inserted 20 lines above the anchor and did not re-derive the cite, so the live
   numbers are §10.26's.
+- ⛔ **The `hosted_api.py` pivot is superseded too, and was missed by the first pass of this
+  marker.** `:23466` WAS `life = proj.g.query(LIFETIME_MEMORY_QUERY).result_set` at the `9ba2da35`
+  head this entry measured — the claim above is true of the head it names. On the merged tree it is
+  not: `main` moved `hosted_api.py` under `#11836`/`#11702` without re-pointing this bundle, and the
+  pivot is at `:23477` (`:23466` now reads `    )`). So the "still resolve at this head" sentence
+  above holds only for `:23466`'s own head, exactly as the `:14225-14227` window does, and the
+  number is HISTORICAL here — re-derive it by NAME (`LIFETIME_MEMORY_QUERY`'s `proj.g.query(...)`
+  read inside `_read_graph`), never by offset. The `extractor_v2.py` group and `entities.py:1478`
+  were re-opened on this merged tree and DO still resolve; `hosted_api.py` is not in
+  `_BUNDLE_SOURCES`, which is why no gate caught it.
 
 ### 10.26 — the same §548 cite re-pointed again, for this branch's own `+20` (2026-11-11, `#9752`)
 
