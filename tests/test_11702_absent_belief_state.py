@@ -2795,10 +2795,11 @@ def test_write_verb_ep_updated_pins_the_hosted_mirror_only_claim(
     # variable, so the construction needs no `ROUTED_NAMESPACES` declaration —
     # do not re-add a `"team-001"` row for it, that is the rejected alternative
     # and it becomes a whitelist once the literal is gone. And a `test_*`
-    # rename would open a DIFFERENT graph than the write verb writes —
-    # `_clear_belief` would seed the mirror where the route never reads it, so
-    # the `ep_updated: True` arm below would fail loudly, and the later β-only
-    # `is False` arm would pass vacuously.
+    # rename would open a DIFFERENT graph than the write verb writes, where
+    # `_clear_belief`'s `MATCH (n:Point {id:$id})` finds no node — it clears
+    # nothing, so the `ep_updated: True` arm below would fail loudly (the
+    # β-only arm after it can never be reached, so it is non-discriminating
+    # rather than merely vacuous).
     proj = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj()
     _clear_belief(proj, pid, mirror=0.95)
     payload = dict(payload, session_id="zq-ep-flag-http-b")
