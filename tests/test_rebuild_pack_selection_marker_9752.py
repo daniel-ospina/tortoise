@@ -1495,7 +1495,15 @@ def test_migrate_route_names_the_capture_source_when_it_observed_nothing(
               "pack_selection_gap": 0, "pack_selection_state_unknown": False,
               "pack_selection_conflict": False}
     with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
-        _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
+        result = _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
+    # ⛔ The PRODUCER half is pinned too (#11866 review): `main()` branches on
+    # this value, so if `migrate()` ever reported `True` here the CLI would go
+    # back to naming a sidecar this shape does not have — and, before this
+    # assertion, the whole file stayed green through exactly that mutation
+    # (measured: 39 passed with the dict entry forced to `True`).
+    assert result["pack_selection_state_unknown_inherited"] is False, (
+        "this route's own empty-capture override must report itself as NOT "
+        f"inherited, or the CLI prints the sidecar cause again: {result}")
     msg = next(m for m in (r.getMessage() for r in caplog.records)
                if ":PackSelection" in m)
     assert "NOT OBSERVED, not observed gone" in msg, (
@@ -1568,7 +1576,13 @@ def test_migrate_route_keeps_the_error_pointer_for_a_rescue_file(
               "pack_selection_gap": 1, "pack_selection_state_unknown": True,
               "pack_selection_conflict": False}
     with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
-        _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
+        result = _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
+    # The same PRODUCER half, in the other direction: a rescue-file report must
+    # travel through the result dict as INHERITED, or `main()` would print the
+    # capture-source cause for a shape whose ERROR really was written.
+    assert result["pack_selection_state_unknown_inherited"] is True, (
+        "a rescue-file UNKNOWN is INHERITED from the rebuild, and the CLI "
+        f"needs that to keep the ERROR pointer: {result}")
     msg = next(m for m in (r.getMessage() for r in caplog.records)
                if ":PackSelection" in m)
     assert "see the rebuild ERROR log" in msg, (
