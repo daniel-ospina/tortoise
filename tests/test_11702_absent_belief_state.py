@@ -1950,6 +1950,146 @@ def test_a_draft_with_no_belief_is_absent_not_withheld(sdk):
         assert (row["ep_state"] != EP_STATE_ABSENT) == has_belief, (pid, row)
 
 
+def test_the_width_rule_and_the_width_formula_agree_across_the_whole_range(sdk):
+    """Cycle 15: `ep_width_cypher` bounded the SUM, but the formula squares it.
+
+    The cycle-14 guard closed with `sum <= 1e308` and its comment claimed that
+    was "the same guard `_beta_variance` applies". It is not: `_beta_variance`
+    guards the DENOMINATOR `s*s*(s+1)`, which overflows far earlier and
+    underflows far later. Measured on the reviewed head, one predicate / one
+    formula over a log sweep:
+
+        pair            width_admits  _beta_variance  query formula
+        1e-200,0        True          0.0             nan
+        1e-165,1e-165   True          0.0             nan
+        1e+200,1e+200   True          0.0             nan
+        1e+308,1e+308   False         0.0             nan   <- the only one rejected
+
+    so `analyze.most_uncertain` put six rows in front of the genuine maxima by
+    a NaN, and with TWO nan rows FalkorDB's non-total comparator de-sorted the
+    whole list. This is the property, over the sweep: the rule admits a shape
+    IF AND ONLY IF the formula computes a value, on both twins.
+    """
+    from tortoise.search_engine import (
+        _beta_variance,
+        beta_variance_cypher,
+    )
+
+    proj = sdk._get_proj()
+    exponents = list(range(-200, 309, 17))
+    pairs = [(10.0 ** e, 10.0 ** e) for e in exponents]
+    pairs += [(10.0 ** e, 0.0) for e in exponents[:6]]
+    pairs += [(1.0, 1e308), (1e308, 1.0), (3.0, -1.0)]
+
+    ids = []
+    for i, (a, b) in enumerate(pairs):
+        pid = sdk.create_point("statement", f"width sweep {i}")["id"]
+        proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = $a, "
+                     "n.posterior_beta = $b, n.confidence = null",
+                     params={"id": pid, "a": a, "b": b})
+        ids.append(pid)
+
+    rows = proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids "
+        "RETURN n.id, " + _se.ep_width_cypher("n") + " AS admits, "
+        + beta_variance_cypher("coalesce(n.posterior_alpha, 1.0)",
+                              "coalesce(n.posterior_beta, 1.0)") + " AS v",
+        params={"ids": ids}).result_set
+    by_id = {r[0]: (r[1], r[2]) for r in rows}
+
+    admittable = 0
+    for pid in ids:
+        admits, query_v = by_id[pid]
+        # The query's width must be a NUMBER for every row, admitted or not.
+        assert query_v is not None, (pid, "null width from the query")
+        assert query_v == query_v, (pid, "NaN width from the query")
+        if admits:
+            admittable += 1
+            # An admitted shape must have a width the formula can produce.
+            assert query_v >= 0.0, (pid, query_v)
+
+    assert admittable >= 10, (
+        f"the sweep admitted only {admittable} shapes — the band is too narrow "
+        "to be useful")
+
+    # The Python owner agrees with the Cypher twin on all of them.
+    for pid, (a, b) in zip(ids, pairs, strict=False):
+        py_var = _beta_variance(a, b)
+        cypher_var = by_id[pid][1]
+        assert py_var == pytest.approx(cypher_var, abs=1e-12) or (
+            py_var == 0.0 and cypher_var == 0.0), (
+            f"_beta_variance({a!r}, {b!r}) = {py_var!r} but the Cypher twin "
+            f"answers {cypher_var!r} — two widths for one claim")
+
+    # …and the rendered answer contains no NaN, with ordinary widths in order.
+    for i, (a, b) in enumerate(((1.0, 1.0), (2.0, 2.0), (90.0, 10.0))):
+        pid = sdk.create_point("statement", f"ordinary width {i}")["id"]
+        proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = $a, "
+                     "n.posterior_beta = $b", params={"id": pid, "a": a, "b": b})
+        ids.append(pid)
+    from tortoise.analyze import analyze
+    out = analyze("what is uncertain?", proj=proj, use_llm=False,
+                  entity_subgraph_ids=set(ids))
+    text = str(out.get("answer") or "")
+    assert "nan" not in text.lower(), "the uncertainty answer rendered a NaN: " + text
+
+
+def test_a_non_numeric_operand_is_absent_on_every_surface(sdk):
+    """Cycle 15: `ep_state_cypher`'s `NOT <predicate>` fell through to `measured`.
+
+    An UNKNOWN predicate is NULL, `NOT NULL` is NULL, and a NULL CASE arm falls
+    through to the NEXT arm — so a stored non-numeric α (reachable through
+    `update_point(posterior_alpha="abc")`, which `reject_belief_props` does not
+    cover) was reported as the STRONGEST state, `measured`, with
+    `confidence: null` beside it. The Python twin RAISED instead, which
+    discarded `annotate_ep_batch`, `why` and the rankers' signal fetch for the
+    whole batch, and `belief_value` answered `None` — three answers for one
+    claim, on the least-known input.
+    """
+    from tortoise.search_engine import ep_state, ep_state_cypher
+    from tortoise.why import assemble_why_blocks
+
+    proj = sdk._get_proj()
+    pid = sdk.create_point("statement", "a claim with a string operand")["id"]
+    proj.g.query('MATCH (n:Point {id:$id}) SET n.posterior_alpha = "abc", '
+                 "n.posterior_beta = 1.0, n.confidence = null",
+                 params={"id": pid})
+    stored = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.posterior_alpha",
+        params={"id": pid}).result_set
+    assert stored[0][0] == "abc", stored
+
+    # The Python twin is TOTAL and says absent — the cycle-11 decision for
+    # `belief_value`, which this helper was the last hold-out against.
+    assert ep_state(posterior_alpha="abc", ep_alpha=None,
+                    posterior_beta=1.0) == EP_STATE_ABSENT
+    assert _se.belief_value(posterior_alpha="abc", posterior_beta=1.0) is None
+
+    # …and the Cypher twin now says the same, instead of `measured`.
+    cypher_state = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN " + ep_state_cypher("n"),
+        params={"id": pid}).result_set[0][0]
+    assert cypher_state == EP_STATE_ABSENT, cypher_state
+
+    # Every surface agrees: no belief, absent state, no exception swallowing
+    # the batch.
+    ann = annotate_ep_batch(proj.g, [pid])
+    assert ann[pid].confidence_mean is None, ann[pid]
+    assert ann[pid].ep_state == EP_STATE_ABSENT, ann[pid]
+    rec = {r["id"]: r["recall_ranking"] for r in
+           StateRanker(projection=proj).rerank(
+               [{"id": pid, "scores": {"rrf": 1.0}}])}[pid]
+    assert rec["confidence"] is None and rec["ep_state"] == EP_STATE_ABSENT, rec
+    sub = SubgraphExpander(projection=proj).expand([pid], depth=1)
+    nodes = sub.get("nodes") or (sub if isinstance(sub, list) else [])
+    node = next(n for n in nodes if n.get("id") == pid)
+    assert node["ep_state"] == EP_STATE_ABSENT, node
+    assert node.get("confidence") is None, node
+    why_block = assemble_why_blocks(proj, [pid])
+    if why_block:
+        assert not why_block[0].get("ep"), why_block[0].get("ep")
+
+
 def test_the_artifact_reader_agrees_with_the_shared_reader_where_both_are_total():
     """Cycle 13 (P3 follow-up): the seventh surface duplicates `belief_value`.
 

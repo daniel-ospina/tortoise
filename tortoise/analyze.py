@@ -18,6 +18,7 @@ from .live import (
 )
 from .search_engine import (  # #11702: the ONE vocabulary
     belief_mean_cypher,
+    beta_variance_cypher,
     ep_has_belief_cypher,
     ep_width_cypher,
 )
@@ -213,8 +214,13 @@ TEMPLATES: dict[str, dict] = {
               AND {ep_width_cypher('c')}
             WITH c, coalesce(c.posterior_alpha, c.ep_alpha, 1.0) AS a,
                  coalesce(c.posterior_beta, c.ep_beta, 1.0) AS b
-            WITH c, a, b, (a * b) / 
-               ((a + b)^2 * (a + b + 1)) as variance
+            // #11702 cycle 15: the WIDTH comes from the shared twin, not an
+            // inline formula. `(a*b)/((a+b)^2*(a+b+1))` overflows to `inf/inf`
+            // for a large pair and to `0/0` for a tiny one, and FalkorDB's
+            // ORDER BY is not total over NaN — measured: `(1e200, 1e200)`
+            // sorted FIRST with `var: nan`, and with two such rows the whole
+            // list came back de-sorted, including rows with ordinary widths.
+            WITH c, a, b, {beta_variance_cypher('a', 'b')} AS variance
             RETURN c.id, c.content, {_belief('c')} as conf, variance
             ORDER BY variance DESC LIMIT $limit
         """,

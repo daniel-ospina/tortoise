@@ -2379,6 +2379,7 @@ class TortoiseEP:
         # keeps its deliberate listing. See ``sdk._review_prune`` for the
         # sibling scan that ALSO requires measurement.
         from .search_engine import (
+            beta_variance_cypher,  # #11702: the ONE width formula
             ep_measured_cypher,
             ep_prior_only_cypher,
             ep_variance_admissible_cypher,  # #11702: the variance-SCAN rule
@@ -2488,9 +2489,12 @@ class TortoiseEP:
                 # failed `v > $t`, and was omitted here while
                 # `annotate_ep_batch`, `why` and all three rankers reported
                 # variance 0.05 / contested True for the same claim.
-                "WITH n, a, b, (toFloat(a)*toFloat(b))"
-                "/((toFloat(a)+toFloat(b))*(toFloat(a)+toFloat(b))"
-                "*(toFloat(a)+toFloat(b)+1)) AS v "
+                # #11702 cycle 15: the WIDTH comes from the shared twin — it
+                # carries the `toFloat` guard cycle 11 added here (an int-stored
+                # (2, 2) computed v = 0 and the claim was omitted) AND the
+                # representability band, without which a large pair answers NaN
+                # and `v > $t` silently drops it.
+                f"WITH n, a, b, {beta_variance_cypher('a', 'b')} AS v "
                 # Entity labels store their text in name/title — a Point's
                 # ``content``-only read returned None for them.
                 "WHERE v > $t "

@@ -409,9 +409,19 @@ def ep_state_cypher(alias: str) -> str:
     :func:`ep_state_resolve`, which is the ONE place that fold happens, and
     the callers in :func:`annotate_ep_batch` / ``ranking.py`` that use it.
     """
-    return (f"CASE WHEN NOT {ep_has_belief_cypher(alias)} "
+    # #11702 cycle 15: the absent arm is `coalesce(<predicate>, false) = false`,
+    # NOT `NOT <predicate>`. An UNKNOWN predicate is NULL, `NOT NULL` is NULL,
+    # and a NULL CASE arm falls through to the NEXT arm — so a stored
+    # non-numeric operand (which makes `α >= 0` NULL in FalkorDB, reachable
+    # through `update_point(posterior_alpha="abc")`) was reported as the
+    # STRONGEST state, `measured`, while the Python twin raised and
+    # `belief_value` answered `None`. Three answers for one claim, on the
+    # least-known input. `coalesce(…, false)` makes an unknown operand read
+    # ABSENT, which is what the totality decision of cycle 11 says.
+    return (f"CASE WHEN coalesce({ep_has_belief_cypher(alias)}, false) = false "
             f"THEN '{EP_STATE_ABSENT}' "
-            f"WHEN {ep_measured_cypher(alias)} THEN '{EP_STATE_MEASURED}' "
+            f"WHEN coalesce({ep_measured_cypher(alias)}, false) "
+            f"THEN '{EP_STATE_MEASURED}' "
             f"ELSE '{EP_STATE_BASELINE}' END")
 
 
@@ -440,8 +450,23 @@ def ep_state(*, posterior_alpha, ep_alpha, confidence=None,
     # behaviour, not an oversight — a pair-strict rule would change the belief
     # of every half-posterior claim and would have to change the Cypher
     # predicate with it, so it is a separate decision, not a comment fix.
-    alpha = posterior_alpha if posterior_alpha is not None else ep_alpha
-    beta = posterior_beta if posterior_beta is not None else ep_beta
+    # #11702 cycle 15: TOTAL on a non-numeric operand. `float("abc")` raised
+    # TypeError out of `ep_state`, which discarded the WHOLE `annotate_ep_batch`
+    # (and `why`'s block, and the GraphRanker signal fetch) for any graph that
+    # stored a string in α — while `belief_value` (cycle 11) and the Cypher twin
+    # (now `coalesce(…, false)`) both answer absent. A value the store cannot
+    # hold as a number is absent, which is the one decision all three must share.
+    def _num(raw):
+        if raw is None or isinstance(raw, bool):
+            return float(raw) if isinstance(raw, bool) else None
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return val if math.isfinite(val) else None
+
+    alpha = _num(posterior_alpha if posterior_alpha is not None else ep_alpha)
+    beta = _num(posterior_beta if posterior_beta is not None else ep_beta)
     # #11702 cycle 11: non-NEGATIVE as well as non-empty — see
     # `ep_has_belief_cypher` (the twins must agree on every shape, negative
     # operands included). A Beta operand is a count; a negative one is not a
@@ -4189,6 +4214,40 @@ def ep_pair_stored(*, posterior_alpha=None, posterior_beta=None,
             and (posterior_beta is not None or ep_beta is not None))
 
 
+#: The sum range in which `αβ/((α+β)²(α+β+1))` is representable as a double.
+#: Below it the CUBE underflows to `0.0`, above it it overflows to `inf`, and
+#: FalkorDB then evaluates the query's own formula as `NaN` — while
+#: `_beta_variance` (which guards the denominator) answers `0.0`. Measured
+#: (cycle 15): a `(1e200, 1e200)` claim rendered `var: nan` and sorted FIRST on
+#: `analyze.most_uncertain`, ahead of a genuine Beta(1,1) `1/12`, and with two
+#: such rows the whole list came back de-sorted, because FalkorDB's comparator
+#: is not total over NaN. `s² · (s+1) ≤ 1e306` here, and `≥ 1e-300` at the floor.
+VARIANCE_SUM_MIN = 1e-100
+VARIANCE_SUM_MAX = 1e102
+
+
+def beta_variance_cypher(alpha_operand: str, beta_operand: str) -> str:
+    """Cypher twin of :func:`_beta_variance` — `0.0` where it is not computable.
+
+    It carries EVERY guard its Python owner has, in the same order: a NEGATIVE
+    operand is not a Beta count (α=3, β=-1 would otherwise answer the
+    "variance" -0.25 — measured, and the width rule excludes that shape from
+    the scans, so a surface that computes the width WITHOUT the rule must not
+    disagree with it), and the SUM must lie inside the band where
+    `s * s * (s + 1)` is representable (`_beta_variance` guards that
+    denominator; `isfinite` does not exist in FalkorDB, so the band is the same
+    condition written once). Every surface that RANKS on a width must use this
+    — the formula inlined in a template makes the ordering depend on NaN.
+    """
+    a = f"toFloat({alpha_operand})"
+    b = f"toFloat({beta_operand})"
+    s_sum = f"({a} + {b})"
+    return (f"CASE WHEN {a} < 0 OR {b} < 0 "
+            f"     OR {s_sum} <= 0 OR {s_sum} < {VARIANCE_SUM_MIN!r} "
+            f"     OR {s_sum} > {VARIANCE_SUM_MAX!r} THEN 0.0 "
+            f"     ELSE ({a} * {b}) / ({s_sum} * {s_sum} * ({s_sum} + 1)) END")
+
+
 def ep_width_cypher(alias: str) -> str:
     """Cypher: this node carries a USABLE WIDTH (variance) — the composite rule.
 
@@ -4214,17 +4273,20 @@ def ep_width_cypher(alias: str) -> str:
     """
     a = f"coalesce({alias}.posterior_alpha, {alias}.ep_alpha)"
     b = f"coalesce({alias}.posterior_beta, {alias}.ep_beta)"
-    # A FINITE total as well — the same guard `_beta_variance` applies to the
-    # same rule. `(1e308, 1e308)` has both operands, both non-negative and a
-    # positive total, yet `αβ/((α+β)²(α+β+1))` overflows to `inf/inf` = NaN —
-    # measured: `analyze.most_uncertain` put that claim FIRST with `var: nan`,
-    # ahead of a genuine `1/12`. A width that cannot be computed is not a
-    # width, and "no computable width wins the uncertainty ranking" is the
-    # inversion this predicate exists to prevent.
+    # …and the sum must be inside the band where the formula is REPRESENTABLE
+    # (`VARIANCE_SUM_MIN … VARIANCE_SUM_MAX`), not merely finite: `s * s * (s+1)`
+    # overflows a double at `s > ~5.6e102` and underflows at `s < ~6e-108`, and
+    # both make the query answer NaN while `_beta_variance` answers 0.0. The
+    # earlier form of this guard bounded `s` at `1e308` — ~1e154 too loose on
+    # the overflow side and with no lower bound at all — so `(1e200, 1e200)`
+    # and `(1e-200, 0)` passed it and then won the uncertainty ranking with
+    # `var: nan` (measured). A width that cannot be COMPUTED is not a width;
+    # the admissibility rule and the formula now share one band, so they cannot
+    # disagree about which claims have one.
     return (f"({ep_pair_stored_cypher(alias)} "
             f"AND coalesce({a}, 0.0) >= 0 AND coalesce({b}, 0.0) >= 0 "
-            f"AND (coalesce({a}, 0.0) + coalesce({b}, 0.0)) > 0 "
-            f"AND (coalesce({a}, 0.0) + coalesce({b}, 0.0)) <= 1e308)")
+            f"AND (coalesce({a}, 0.0) + coalesce({b}, 0.0)) >= {VARIANCE_SUM_MIN!r} "
+            f"AND (coalesce({a}, 0.0) + coalesce({b}, 0.0)) <= {VARIANCE_SUM_MAX!r})")
 
 
 def ep_variance_admissible_cypher(alias: str) -> str:
@@ -4313,6 +4375,14 @@ def _beta_variance(alpha: float, beta: float) -> float:
     # would put a NaN variance on the wire (`json.dumps` emits a bare `NaN`
     # token). Report "no variance" instead of a bogus or unwritable number.
     if not math.isfinite(s) or s <= 0:
+        return 0.0
+    # #11702 cycle 15: the same BAND `ep_width_cypher` / `beta_variance_cypher`
+    # apply, so "the predicate admits this claim" and "the formula computes a
+    # value" are one condition. Outside the band the cube underflows to `0.0`
+    # or overflows to `inf`, and the query's own copy of the formula answers
+    # `NaN` where this returns `0.0` — the two disagreed on `(1e200, 1e200)`
+    # and `(1e-200, 0)` for exactly that reason.
+    if s < 1e-100 or s > 1e102:
         return 0.0
     denom = s * s * (s + 1)
     # Underflow case: a subnormal pair (e.g. α=β=1e-200) makes `s*s` and
@@ -4465,8 +4535,30 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
         rows = graph.query(cypher, params={"ids": point_ids}).result_set
 
         breakdowns: dict[str, EpBreakdown] = {}
+        def _f(raw):
+            """The coalesced column as a float, or None when it is not one.
+
+            #11702 cycle 15: `float(row[4])` raised TypeError on a stored
+            non-numeric α (reachable via `update_point(posterior_alpha="abc")`,
+            which `reject_belief_props` does not cover) and the blanket
+            `except` below discarded the WHOLE BATCH — every point in the
+            response lost its `ep` block, which reads as "no belief" for all of
+            them. The presence decision comes from the RAW columns
+            (`ep_state`, now total), so a non-numeric value only has to keep
+            the arithmetic well-defined here: it is coerced to the neutral
+            1.0, and the state/variance carry the truth.
+            """
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return None
+
         for row in rows:
-            pid, impl, nand, contention, alpha, beta, has_ep = row[0], int(row[1]), int(row[2]), float(row[3]), float(row[4]), float(row[5]), row[6]
+            pid, impl, nand, contention = row[0], int(row[1]), int(row[2]), float(row[3])
+            alpha_num, beta_num = _f(row[4]), _f(row[5])
+            alpha = alpha_num if alpha_num is not None else 1.0
+            beta = beta_num if beta_num is not None else 1.0
+            has_ep = row[6]
             # #2490: terminal claims never surface a frozen/decayed posterior
             # as measured EP — has_ep=False + contested=False (the columns
             # are fetched so the terminal state is read, not guessed; the len
@@ -4521,7 +4613,13 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                 ep_pair_stored(posterior_alpha=row[10], ep_alpha=row[11],
                                posterior_beta=row[13], ep_beta=row[14])
                 if len(row) > 14 else True)
-            variance = _beta_variance(alpha, beta) if pair_stored else 0.0
+            # A non-numeric operand is not a computable width (cycle 15):
+            # `_beta_variance` refuses a non-finite or negative input, and the
+            # coerced 1.0 above would otherwise answer the Beta(1,1) maximum
+            # for a claim whose "pair" is unreadable.
+            variance = (_beta_variance(alpha, beta)
+                        if (pair_stored and alpha_num is not None
+                            and beta_num is not None) else 0.0)
             breakdowns[pid] = EpBreakdown(
                 # #11702: `None` when nothing is persisted — never the neutral
                 # 0.5, which is what made "no evidence" and "a measured coin

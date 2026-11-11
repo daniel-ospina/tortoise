@@ -31038,6 +31038,7 @@ class TortoiseSDK:
         carry multiple issues (one entry each, deduped).
         """
         from .search_engine import (  # #11702 the variance-SCAN rule
+            beta_variance_cypher,
             ep_measured_cypher,  # #3276 canonical predicate
             ep_variance_admissible_cypher,
         )
@@ -31117,9 +31118,9 @@ class TortoiseSDK:
             # INTEGER division on integer operands, so an int-stored
             # `(2, 2)` pair computed v = 0 and this scan silently omitted a
             # genuinely contested claim (see `ep.get_contested_claims`).
-            "WITH n, a, b, (toFloat(a)*toFloat(b))"
-            "/((toFloat(a)+toFloat(b))*(toFloat(a)+toFloat(b))"
-            "*(toFloat(a)+toFloat(b)+1)) AS v "
+            # #11702 cycle 15: the shared width formula (toFloat plus the
+            # representability band), same as `ep.get_contested_claims`.
+            f"WITH n, a, b, {beta_variance_cypher('a', 'b')} AS v "
             "WHERE a > 0 AND b > 0 AND v > $t RETURN n.id, v",
             params={"t": variance_threshold},
         ).result_set
