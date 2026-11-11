@@ -294,8 +294,12 @@ def check(text: str) -> tuple[list[str], dict]:
     #: plus 6 planted ones cleared a floor of 30 with 84 of 90 planted units lost
     #: (#10989).
     planted_pts: dict[str, int] = {}
-    #: The E2 ATOMICITY CONTROL's population (`atomic_points`), which is NOT E2b's —
-    #: kept for V7's reconciliation of the `e2-atomic` criterion line.
+    #: The E2 ATOMICITY CONTROL's population (`atomic_points`), recorded into
+    #: `state` for callers and tests. ⛔ It is NOT what V7 reconciles against: V7
+    #: reads the scored arm's `metric=atomic_points` line directly, through
+    #: `arm_metric()` (`:478`), so no assertion here depends on this dict. What V7
+    #: DOES depend on is the V3 parse guard below, which refuses an unparseable
+    #: `atomic=` token that `arm_metric()` would otherwise read as an absent line.
     atomic_pts: dict[str, int] = {}
     pre_shas: dict[str, str] = {}
     for arm in arms:

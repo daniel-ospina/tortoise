@@ -3276,14 +3276,23 @@ def _prereg_for_e2b_floor(floor: int = 30) -> dict:
                                    "e2b_surviving_units": floor}}
 
 
-def test_the_e2b_floor_is_met_by_surviving_planted_units_not_by_atomic_points():
-    """The measured fail-open, at the arithmetic the binding actually does.
+def test_the_e2b_floor_boundary_refuses_six_and_meets_thirty():
+    """E2b's below-floor BOUNDARY: 6 surviving planted units REFUSES, 30 MATCHES.
 
-    Six surviving planted units is under a floor of 30 and REFUSES the run even
-    though the atomicity control counted 30 — which is the corpus the issue
-    records. The pre-fix operand (`atomic_points`, 30) is the `MATCHED` arm
-    beside it, so this pin cannot pass by the floor being unreachable: the SAME
-    floor, the SAME run, two operators, two statuses.
+    ⛔ SCOPE, stated because the round-3 review measured it: this pin does NOT
+    discriminate #10989's fix, and its old name ("…not by atomic_points") claimed
+    it did. `prereg_binding`'s comparison is arithmetic this change never
+    touches — pass it 6 and a floor of 30 and it refuses on `main` too. What it
+    pins is the BOUNDARY the fix relies on (the strict `<` at the floor's edge,
+    and that the same floor is meetable, so a refusal is never a bar that can
+    never bind).
+
+    The discrimination lives in two siblings, both of which RED on a revert of the
+    call site: `test_the_e2b_floor_is_FED_the_planted_population_and_the_line_says
+    _so` reads the operand out of the tree, and
+    `test_the_owned_floors_are_checked_and_a_run_that_meets_them_binds` drives the
+    production path end to end and asserts the binding prints `surviving_units=90`
+    (pre-fix: `114`).
     """
     prereg = _prereg_for_e2b_floor(30)
     corpus = _REPO_ROOT / _CORPUS_REL
