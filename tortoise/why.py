@@ -68,6 +68,8 @@ from .search_engine import (  # type: ignore[import-not-found]
     EP_STATE_ABSENT,
     EP_STATE_BASELINE,
     EP_STATE_MEASURED,
+    _beta_mean,  # #11702: the ONE Beta mean (replaces this module's local copy)
+    _beta_variance,  # #11702: the ONE Beta width (replaces this module's local copy)
     _exclude_status_clause,
     belief_value,  # #11702: the ONE Python belief VALUE reader
     ep_has_belief_cypher,
@@ -123,19 +125,17 @@ def w4_enrichment_enabled() -> bool:
 # surfaces that feed the items).
 
 
-def _beta_variance(alpha: float, beta: float) -> float:
-    """Beta(α, β) posterior variance: αβ/((α+β)²(α+β+1)) — same formula as
-    search_engine._beta_variance / TortoiseEP (kept local to avoid a second
-    import surface; the threshold constant is imported from search_engine)."""
-    s = alpha + beta
-    if s <= 0:
-        return 0.0
-    return (alpha * beta) / (s * s * (s + 1))
-
-
-def _mean(alpha: float, beta: float) -> float:
-    s = alpha + beta
-    return (alpha / s) if s > 0 else 0.5
+# ⛔ #11702 cycle 12: this module used to carry its OWN `_beta_variance` and
+# `_mean` ("kept local to avoid a second import surface"). That second spelling
+# of the arithmetic is the defect class this issue removes, and by cycle 11 it
+# had drifted: the local `_beta_variance` had no finiteness or sign guard, so
+# the CANONICAL why block (`/v1/context`, the volunteer reflex, webhooks) was
+# the one surface still emitting a negative `variance` (-0.25), a `NaN` onto the
+# JSON wire (Starlette renders with `allow_nan=False`, so that is a 500), a 0.0
+# confidence at max-disbelief for an overflowing pair, and a ZeroDivisionError
+# for a subnormal one — which discarded the WHOLE batch's enrichment, not just
+# the offending point (#8504's failure shape). The one definition lives in
+# `search_engine`; both names are imported at the top of this module.
 
 
 def _snippet(text: str) -> str:
@@ -508,7 +508,7 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
             "confidence_mean": (
                 None if state == EP_STATE_ABSENT
                 else round(float(mirror), 4) if mirror is not None
-                else round(_mean(a, b), 4)),
+                else round(_beta_mean(a, b), 4)),
             "ep_state": state,
             "variance": round(variance, 6),
             # #11702: an ABSENT state is never contested — there is no

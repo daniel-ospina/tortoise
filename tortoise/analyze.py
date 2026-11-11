@@ -203,6 +203,14 @@ TEMPLATES: dict[str, dict] = {
               // zero-total one.
               AND coalesce(c.posterior_alpha, c.ep_alpha) IS NOT NULL
               AND coalesce(c.posterior_beta, c.ep_beta) IS NOT NULL
+              // #11702 cycle 12: NON-NEGATIVE as well as non-empty. β is a
+              // pseudo-count; a negative operand passed `α+β > 0` and the
+              // template rendered `var: -0.2500` beside `conf: no belief` — an
+              // out-of-range number from the same rule the shared predicate
+              // spells (`ep_has_belief_cypher`), which every other surface
+              // applies.
+              AND coalesce(c.posterior_alpha, c.ep_alpha, 0.0) >= 0
+              AND coalesce(c.posterior_beta, c.ep_beta, 0.0) >= 0
               AND (coalesce(c.posterior_alpha, c.ep_alpha, 0.0)
                    + coalesce(c.posterior_beta, c.ep_beta, 0.0)) > 0
             WITH c, coalesce(c.posterior_alpha, c.ep_alpha, 1.0) AS a,
@@ -259,6 +267,14 @@ TEMPLATES: dict[str, dict] = {
               // show — and it is the only shape the presence predicate would add.
               AND coalesce(c.posterior_alpha, c.ep_alpha) IS NOT NULL
               AND coalesce(c.posterior_beta, c.ep_beta) IS NOT NULL
+              // #11702 cycle 12: NON-NEGATIVE as well as non-empty. β is a
+              // pseudo-count; a negative operand passed `α+β > 0` and the
+              // template rendered `var: -0.2500` beside `conf: no belief` — an
+              // out-of-range number from the same rule the shared predicate
+              // spells (`ep_has_belief_cypher`), which every other surface
+              // applies.
+              AND coalesce(c.posterior_alpha, c.ep_alpha, 0.0) >= 0
+              AND coalesce(c.posterior_beta, c.ep_beta, 0.0) >= 0
               AND (coalesce(c.posterior_alpha, c.ep_alpha, 0.0)
                    + coalesce(c.posterior_beta, c.ep_beta, 0.0)) > 0
             WITH c, coalesce(c.posterior_alpha, c.ep_alpha, 1.0) AS a,

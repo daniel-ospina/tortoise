@@ -380,6 +380,14 @@ def ep_has_belief_cypher(alias: str) -> str:
     return (f"({alias}.confidence IS NOT NULL OR ("
             f"coalesce({alias}.posterior_alpha, {alias}.ep_alpha) IS NOT NULL "
             f"AND coalesce({alias}.posterior_beta, {alias}.ep_beta) IS NOT NULL "
+            # #11702 cycle 11: NON-NEGATIVE as well as non-empty. Beta operands
+            # are counts; a negative one (reachable through the unvalidated
+            # `tortoise_set_point_baseline` / `update_point` arguments) passes
+            # a bare `α+β > 0` and yields a "mean" of -0.5 and a "variance" of
+            # -0.25, i.e. an out-of-range belief every threshold consumer reads
+            # as a real, maximally-certain number.
+            f"AND coalesce({alias}.posterior_alpha, {alias}.ep_alpha, 0.0) >= 0 "
+            f"AND coalesce({alias}.posterior_beta, {alias}.ep_beta, 0.0) >= 0 "
             f"AND (coalesce({alias}.posterior_alpha, {alias}.ep_alpha, 0.0) "
             f"     + coalesce({alias}.posterior_beta, {alias}.ep_beta, 0.0)) > 0))")
 
@@ -434,7 +442,13 @@ def ep_state(*, posterior_alpha, ep_alpha, confidence=None,
     # predicate with it, so it is a separate decision, not a comment fix.
     alpha = posterior_alpha if posterior_alpha is not None else ep_alpha
     beta = posterior_beta if posterior_beta is not None else ep_beta
+    # #11702 cycle 11: non-NEGATIVE as well as non-empty — see
+    # `ep_has_belief_cypher` (the twins must agree on every shape, negative
+    # operands included). A Beta operand is a count; a negative one is not a
+    # belief, and reading it as one produced a mean of 1.5 and a variance of
+    # -0.25 on every surface.
     present = (alpha is not None and beta is not None
+               and alpha >= 0 and beta >= 0
                and (alpha + beta) > 0)
     if confidence is None and not present:
         return EP_STATE_ABSENT
@@ -462,16 +476,42 @@ def belief_value(*, confidence=None, posterior_alpha=None,
     leads (it is what every ranker prefers), with the pair mean as the fallback
     for a node whose flush never reached it. Presence is
     :func:`ep_state`'s rule — mirror, or BOTH coalesced operands with
-    ``α + β > 0`` — so a zero-total or half pair answers ``None``.
+    ``α >= 0`` and ``β >= 0`` and ``α + β > 0`` — so a zero-total, half or
+    negative pair answers ``None``.
+
+    TOTAL: a value the store cannot hold as a number (a legacy string
+    property, a NaN) is treated as ABSENT rather than raised on. This reader
+    serves every read surface, including the ones that must still render a
+    point whose stored properties are garbage — a raise here would discard the
+    whole decoration and be indistinguishable from "no belief", which is
+    exactly what the ``None`` return says honestly.
     """
-    if confidence is not None:
-        value = float(confidence)
-    else:
-        alpha = posterior_alpha if posterior_alpha is not None else ep_alpha
-        beta = posterior_beta if posterior_beta is not None else ep_beta
-        if alpha is None or beta is None or (alpha + beta) <= 0:
+    def _num(raw):
+        # #11702 cycle 12: a bool IS a number in Python (`float(True) == 1.0`),
+        # and the rest of the tree reads one that way (`annotate_ep_batch`
+        # answers 1.0 for a `confidence=True` row). Rejecting it here made this
+        # reader the ONE surface that called such a row absent — a twin
+        # asymmetry that cannot be justified while claiming a single vocabulary.
+        if raw is None:
             return None
-        value = float(alpha) / (float(alpha) + float(beta))
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return val if math.isfinite(val) else None
+
+    conf = _num(confidence)
+    if conf is not None:
+        value = conf
+    else:
+        alpha = _num(posterior_alpha if posterior_alpha is not None
+                     else ep_alpha)
+        beta = _num(posterior_beta if posterior_beta is not None else ep_beta)
+        if alpha is None or beta is None:
+            return None
+        if alpha < 0 or beta < 0 or (alpha + beta) <= 0:
+            return None
+        value = alpha / (alpha + beta)
     return round(value, round_to) if round_to is not None else value
 
 
@@ -4147,6 +4187,14 @@ def _beta_variance(alpha: float, beta: float) -> float:
     Max is 1/12 ≈ 0.0833 at α=β=1 (uninformative prior). Same formula as
     TortoiseEP.get_contested_claims.
     """
+    # #11702 cycle 11: a NEGATIVE operand is not a Beta count. `α=3, β=-1`
+    # passed every guard below (s = 2 > 0, denom finite) and returned a
+    # negative "variance" (-0.25) that every threshold consumer read as a real,
+    # maximally-certain number — reachable through the unvalidated
+    # `update_point`/`set_point_baseline` arguments.
+    if not (math.isfinite(alpha) and math.isfinite(beta)) \
+            or alpha < 0 or beta < 0:
+        return 0.0
     s = alpha + beta
     # A sum that is not finite is not a usable pair either: an overflowing sum
     # gives a denominator of inf (0.0/0.0-free but meaningless), and a NaN alpha
@@ -5087,7 +5135,13 @@ def get_relationships_bounded(
                             # variance 0.0, so contested stays False and nothing
                             # above the threshold is claimed.
                             "confidence": value,
-                            "variance": round(variance, 6) if pair_stored else None,
+                            # `None` when nothing is claimed at all — the same
+                            # `None` a mitigation / CORRECTS peer emits, so the
+                            # value can never be read as a Beta(1,1) width.
+                            "variance": (round(variance, 6)
+                                         if pair_stored
+                                         and state != EP_STATE_ABSENT
+                                         else None),
                             "contested": contested,
                             # #11702: the state NAME rides beside the value on
                             # every other surface (`ep` block, rankers); this

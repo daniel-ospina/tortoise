@@ -469,6 +469,17 @@ _SELECT_CLAIM_EP_STATES = (
     "RETURN n.id, n.posterior_alpha, n.posterior_beta, "
     "n.ep_alpha, n.ep_beta"
 )
+# ⛔ #11702 cycle 12 — the population is PAIR-ONLY, deliberately, and the
+# earlier sentence "the census must agree with the canonical read by
+# construction" was wrong once the canonical read became MIRROR-FIRST: a
+# mirror-only claim (`update_point(confidence=0.9)` — a served belief with no
+# stored α/β) renders its real value through `read_confidence` and
+# `subgraph_render`, but is NOT in this population. That is the metric's
+# meaning, not an oversight: this census measures EP ACTIVATION (did a
+# measured posterior exist?), so a mirror the flush wrote is evidence of a
+# flush, not of a measurement. Widening it would silently change the number
+# every past run published; if a mirror-aware count is wanted, it needs its own
+# cell — the same #10210 gap that "state present but unusable" needs.
 
 def read_confidence(p) -> float | None:
     """Canonical EP posterior read for a point property dict.
@@ -483,9 +494,31 @@ def read_confidence(p) -> float | None:
     always persists the pair together, so a lone parameter is malformed
     state, not a measurement. A degenerate ``alpha + beta <= 0`` is ``None``
     for the same reason (no defined mean).
+
+    ⚠️ **#11702 cycle 11 — the MIRROR is now consulted first.** This was the
+    one read behind a rendered artefact
+    (``tortoise/subgraph_render._confidence_text``) that ignored the
+    ``n.confidence`` flush-mirror, so a mirror-only claim — writable through the
+    public ``update_point(confidence=0.9)``, and what ``compute_confidence`` /
+    ``dream`` write — rendered ``confidence: unmeasured`` while
+    ``annotate_ep_batch``, ``why`` and all three rankers read its real 0.9.
+    Precedence is the shared one (#2206: mirror leads, the pair is the
+    fallback). Only the PRECEDENCE is shared, deliberately: this reader stays
+    NON-TOTAL, because the census needs a non-finite posterior to arrive as
+    ``nan`` rather than ``None`` (it is excluded by an explicit finiteness
+    guard downstream, ``off_neutral_ids``, and #10210 tracks giving "state
+    present but unusable" its own cell). Collapsing it to ``None`` here would
+    make a malformed state indistinguishable from an absent one, which is the
+    very conflation this issue removes.
     """
     if not p:
         return None
+    mirror = p.get("confidence")
+    if mirror is not None:
+        try:
+            return float(mirror)
+        except (TypeError, ValueError):
+            return None  # an unrepresentable mirror is not a belief
     # `is None` (not `or`) so a legitimate 0.0 posterior is never overridden
     # by the prior — "prefers posterior_*" must hold for falsy values too.
     alpha = p.get("posterior_alpha")
@@ -501,7 +534,11 @@ def read_confidence(p) -> float | None:
         b = float(beta)
     except (TypeError, ValueError):
         return None
-    if a + b <= 0:
+    # #11702 cycle 12: NON-NEGATIVE too — α and β are pseudo-counts, and the
+    # product surfaces call a negative pair ABSENT (`belief_value`,
+    # `ep_state`, every ranker). Without this the census published an
+    # out-of-range "belief" of 1.5 for a claim the product says has none.
+    if a < 0 or b < 0 or a + b <= 0:
         return None
     return a / (a + b)
 

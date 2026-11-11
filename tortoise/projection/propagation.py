@@ -63,6 +63,19 @@ class _PropagationMixin:
         each NAND edge contributes (1 - neighbor's confidence) — so a
         confident contradiction hurts more than a tentative one. Default 0.5
         when no edges or no neighbors have confidence set.
+
+        ⛔ **#11702: this is the one place a FABRICATED belief is still
+        computed from an absent one** — `coalesce(m.confidence, 0.5)` treats a
+        neighbour with NO persisted belief as a symmetric coin flip, and
+        `propagate_shock` PERSISTS the blend as `SET n.confidence=$v`, which
+        the shared presence predicate then reads as a real served belief. It is
+        UNREACHABLE today (no production caller; `validation`'s e2e test asserts
+        `propagate_shock` is never invoked), which is why it is a note rather
+        than a fix: an absent neighbour should contribute NOTHING to the blend
+        (the mirror means "the served belief", not "the default belief"), and
+        whoever wires shock propagation up must decide that before it runs. A
+        lane "restoring" this path would reintroduce the fabrication at the
+        WRITE, where no read-side guard can see it.
         """
         s_rows = self.g.query(
             "MATCH (n:Point {id:$id})-[r:IMPL]-(m:Point) "
