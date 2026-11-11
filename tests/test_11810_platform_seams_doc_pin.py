@@ -117,11 +117,18 @@ _PY = sys.executable
 #: A TAG-SHAPED strip, deliberately not `<[^>]+>`. The loose form spans any `<` …
 #: `>` anywhere in a 50 KB document, so one ordinary sentence — "a hook count of
 #: < 5 is suspect" — swallows everything up to the next `>`. Measured on THIS
-#: record with that sentence injected before §3's quote: the loose strip removed
-#: 2,755 bytes and took the quoted words with them, which would false-RED the
-#: presence arm on a record that states the right thing. (It also strips 130
-#: bytes of legitimate `<harness>` / `<ws>` prose that this form keeps.) This
-#: form cannot cross a `<`, a `>`, or a line break.
+#: record with that sentence injected IMMEDIATELY BEFORE §3's quote (line 315):
+#: the loose form matches a single 2,481-byte span that CONTAINS the quoted
+#: words, so it deletes them and false-REDs the presence arm on a record that
+#: states the right thing; this form matches nothing there.
+#: ⚠️ The measured reason this form is preferable is NOT that it keeps prose
+#: angle-brackets — it does not. `<harness>` and `<ws>` are tag-SHAPED, so BOTH
+#: forms strip them. Over this record the loose form strips 314 bytes (28 spans)
+#: and this form 179 (23 spans), and the whole 135-byte difference is five
+#: spans that are not tags: `<state.db>`, `<session_id>`, `<lookup_key>`,
+#: `<message shown to user when blocked>` and `<CustomMessage, "customType"|…>`.
+#: This form cannot cross a `<`, a `>`, or a line break — that bound, not prose
+#: preservation, is the property it buys.
 _TAG = r"</?[A-Za-z][A-Za-z0-9-]*(\s[^<>\n]*)?/?>"
 
 
