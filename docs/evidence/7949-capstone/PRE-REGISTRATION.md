@@ -2313,13 +2313,28 @@ to answer.
   the document. The same commit, together with `#11805`, moved `tortoise/sdk.py` twice: **+115**
   above the `_extract_session_v2` region and a further **+18** above the `step_witness` meta fold,
   so its cites are re-derived individually rather than by a constant.
+- **Three further drifts landed in the same pass**, and they are named here rather than folded into
+  "nothing else", because a reader auditing this hash-pinned artefact has to be able to tell which
+  files moved: `tortoise/projection/entities.py` (`+239` at the alias gate, `+264` below the
+  `Mention` encode); `tortoise/projection/__init__.py` (`+66`); and `tortoise/hosted_api.py`'s
+  `LIFETIME_MEMORY_QUERY` pivot, re-measured `23249` → `23466` with
+  `tools/hosted_api_cite_census.py --refresh` (which also re-stated that note's above/below split,
+  `14`/`441` → `12`/`443`). One of them is NOT from `#11795`: `§1.6.2` of this document cited
+  `projection/entities.py:1239` for the alias gate, which was ALREADY the `Mention` payload
+  docstring at the base commit — a stale cite this pass corrects rather than a shift it follows.
+  The same correction is carried into `preregistration.json`'s live `read_back` prose (`:1239` →
+  `:1478`), which §10.22 and §10.23 disclose the same way.
 - **New value — measured at this head:** the two `if items:` gates at `:14222`/`:14375` (the S2
   pass and the post-S4 pass), the two fail-open `except` arms at `:14235`/`:14386`, the two result
   blocks at `:14586` (closing `:14592`) and `:14596` (closing `:14600`), and `_run_vet_pass`'s
   S2.2 call at `:16780` and its post-S4 union call at `:14351`. In `tortoise/sdk.py`,
   `_extract_session_v2` is now declared at `:16599` (was `16484`) and called at `:15625` (was
   `15510`); the `step_witness` meta fold is at `:17484` (was `17351`), and
-  `proj.link_source_to_event` at `:17882` (was `17749`).
+  `proj.link_source_to_event` at `:17882` (was `17749`). Also in `tortoise/sdk.py`, and re-derived
+  by content like the rest: the `relation_write` seam at `:17429`/`:17441`/`:17442` (was
+  `17296`/`17308`/`17309`) and `_TURN_WRITE_CYPHER` at `:2530` (was `2528` — a two-line comment
+  inserted above it, not one of the commits named here, which is why every number in this entry is
+  opened rather than offset).
 - **Verified by content, not by arithmetic.** Each line was opened at this head:
   `:14222`/`:14375` are the two `if items:` gates; `:14235`/`:14386` are the two fail-open
   `except` arms whose warnings name `classify(S2) failed` / `classify(union) failed`; `:14586`
@@ -2327,6 +2342,8 @@ to answer.
   `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(` and `:14351` is
   `complete_list, vet_union_stats, _w, _ = _run_vet_pass(`. The `#11795` growth is not uniform
   across `sdk.py`, which is exactly why a single constant could not be trusted there either.
-- **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
-  touched — every §1–§9 value and the E4 denominator are the ones this record froze.
-  `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to this file.
+- **What moved: the citations, and nothing that is a protocol value.** No metric, denominator,
+  threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4
+  denominator are the ones this record froze. What §1.6.2 and §11 carry changed is the `file:line`
+  each one points at, and `document_sha256` is re-cut in this same commit, per §8's rule for *any*
+  edit to this file.
