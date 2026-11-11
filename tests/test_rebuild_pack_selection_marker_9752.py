@@ -599,6 +599,91 @@ def test_a_different_live_marker_is_reported_as_a_conflict(
         f"marker: {msgs}")
 
 
+def test_the_restore_merges_onto_a_concurrent_marker_instead_of_overwriting_it(
+        tmp_path, caplog, monkeypatch):
+    """`ON CREATE SET` is the fail-safe, and NOTHING pinned it (#11839 review).
+
+    FAILING VALUE: both restore sites write
+    `MERGE (s:PackSelection) ON CREATE SET s += $props`, and the comment beside
+    them grounds it on a property nothing tested: "an admin's newer decision is
+    kept rather than overwritten by the recovered one, and because the
+    post-restore check compares EXACTLY, that conflict surfaces as a reported
+    gap instead of a quiet success". `docs/durability-posture.md` repeats it
+    ("a concurrent post-wipe `set_graph_packs` cannot make the run report a
+    marker it did not restore").
+
+    MEASURED, at the head before this test: replacing `ON CREATE SET` with an
+    unconditional `SET s += $props` at BOTH sites leaves this file 41/41 GREEN.
+    The existing conflict test cannot see the difference because it emulates
+    the competing write by substituting the props PASSED TO THE MERGE — against
+    an already-wiped graph the MERGE then CREATES, so `ON CREATE` never
+    discriminates. Under that one-word edit the behaviour does not merely go
+    unpinned, it INVERTS: a marker already present makes the MERGE match, the
+    unconditional SET overwrites the admin's newer `revision`/`updated_by`, and
+    the exact comparison then SUCCEEDS — reporting `restored: 1, gap: 0` over a
+    decision it destroyed. That is the "assert a state you did not observe"
+    class this whole change removes, so it gets a pin.
+
+    REACHABLE: `set_graph_packs` serialises only per worker, so the competing
+    write really can land between the wipe and the restore. Here it is issued
+    with our own untouched cypher immediately after the competing marker is
+    planted, so the leg under test is the product's, not a stand-in.
+
+    ⛔ The DUPLICATE half of the same claim is NOT separately pinned, and this
+    is deliberate: the section carries at most one entry by construction and the
+    wipe removes every node, so a retried full rebuild cannot accumulate a
+    second marker whatever the write keyword is (a two-run test would stay green
+    under `CREATE`). The assertion that can fail here is `len(live) == 1`, on
+    the one path where a marker can already exist when the restore runs.
+    """
+    from tortoise.projection import _PACK_SELECTION_LABEL
+
+    sdk, events = _mk_sdk(tmp_path)
+    _write_journal(events)
+    _configure(sdk, [{"namespace": "dev", "status": "active"}])
+    proj = _proj(sdk)
+    real_restore = proj._restore_write
+    landed = {"n": 0}
+
+    def _competing_write_lands_first(cypher, *, params=None, reason):
+        # Scoped to THIS leg: the other restores share `_restore_write`.
+        if "PackSelection" in cypher and not landed["n"]:
+            landed["n"] += 1
+            proj.g.query(
+                f"MERGE (s:{_PACK_SELECTION_LABEL}) SET s += $props",
+                params={"props": {"revision": 99,
+                                   "updated_by": "concurrent-admin",
+                                   "configured_at": "2099-01-01T00:00:00Z"}},
+            )
+        return real_restore(cypher, params=params, reason=reason)
+
+    monkeypatch.setattr(proj, "_restore_write", _competing_write_lands_first)
+
+    with caplog.at_level(logging.ERROR, logger="tortoise.projection"):
+        counts = proj.rebuild_all(str(events), confirm_destructive=True)
+
+    assert landed["n"] == 1, (
+        "the emulated concurrent write never reached the graph, so this test "
+        "would pass on an empty `:PackSelection` set and pin nothing")
+    live = _markers(sdk)
+    assert len(live) == 1, (
+        f"the restore must MERGE one marker, never accumulate a second: {live}")
+    props = live[0]
+    assert props.get("revision") == 99, (
+        "the admin's NEWER decision was overwritten by the recovered one — an "
+        "unconditional `SET s += $props` does exactly this and the exact "
+        f"comparison then reports a clean restore: {props}")
+    assert props.get("updated_by") == "concurrent-admin", (
+        f"the live marker is not the admin's: {props}")
+
+    assert counts["pack_selection_conflict"] is True, (
+        "the surviving marker differs from the captured one, so the run must "
+        f"report CONFLICT rather than a restored marker: {counts}")
+    assert counts["pack_selection_restored"] == 0, (
+        f"nothing of ours was restored into the graph: {counts}")
+    assert counts["pack_selection_gap"] == 1, counts
+
+
 def test_recover_from_log_reports_a_conflict_not_a_loss(tmp_path, monkeypatch):
     """The recovery `reason` must not carry the absence consequence on CONFLICT.
 
