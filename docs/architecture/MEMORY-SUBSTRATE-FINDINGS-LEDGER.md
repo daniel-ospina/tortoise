@@ -208,6 +208,14 @@ not be re-derived — and one CLOSED issue must not be read as fixed:**
   research is done and the *mechanism* is unbuilt. **Issue closure is not evidence of a fix.**
 - **`#2696`** is an epic with human gates, not a defect. Count it as scope, never as a bug.
 
+**⚠️ Two more CLOSED rows must not be read as fixed.** `#2782` (CLOSED `COMPLETED` 2026-11-11) and
+`#2787` (CLOSED `NOT_PLANNED` 2026-09-29) both sit in the buckets above, and both are **OPEN as
+defects** on the problem map — `#2782`'s representation half shipped while its cross-company
+identity half did not (pinned by `tests/test_money_value_2782.py`), and `#2787`'s kind-bucket rule
+is still unimplemented. Tracker closure is not the status question; this page buckets by the
+tracker's own `stateReason` and says so, which is exactly why the bucket column must be read as a
+*closure* fact and never as a *fix* fact.
+
 **For the status question — *is defect N still broken?* — read
 `docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md`, not this page and not the issue bodies.**
 It re-cut all 26 entries with a commit anchor plus an in-tree pin per fixed row, and it records
@@ -246,7 +254,26 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   number but is not a recognised `path:line` is **refused**, not skipped. Skipping it was a hole with
   three doors — a `.txt` path, an extension-less path, and a leading-dot path like
   `.github/workflows/ci.yml:892` matched nothing, so reformatting a citation was enough to defuse a
-  real red;
+  real red — and there was a fourth: **one inserted space**, in the form “tortoise/pipeline .py:16”
+  or “sdk.py: 16962”, matched neither the resolver nor a refusal whose token class excluded
+  whitespace, so it went entirely unchecked (measured, `--check` exited 0). The scan is the **whole
+  page**, not just §3/§5: scoping it to the two sections named above left §2's own citation free to be
+  mangled — those two strings are deliberately NOT in code spans, because the scan would (correctly)
+  refuse them. A trailing character is refused the same way: a trailing space after the line number,
+  a space after the shorthand's number, and a full stop after an out-of-range number all match no
+  resolver, so they are refused rather than skipped (the examples are left unspanned on purpose — the
+  scan would, correctly, refuse them). Two
+  carve-outs are named rather than implied away: a **marker-less, extension-less filename**
+  (a bare `Makefile` with a line number) is not treated as a path — a host:port or `key: value` in
+  prose must not red this
+  required context — and a row's tally class is its **leading** bold token, which is why row (j)'s
+  `MOOT-BY-LOSS as an object` half does not move the count;
+- the **§3 headline tally** is derived too. The "N of the twelve rows no longer read as written"
+  count, the letter list beside it, and the four-of-the-seven "overtaken" figure are all recomputed
+  from the verdict cells and compared with the sentence a reader actually quotes. Unguarded, flipping
+  one verdict cell to `STILL-TRUE` left the page asserting a superseded count with `--check` at
+  **rc 0** — and that number is repeated in this repo's `ci.yml`, `config/ci-surfaces.yml`,
+  `docs/00_index.md` and two test docstrings, so a wrong one propagates well past this page;
 - every **§3 evidence cell** names a `path:line`, an issue, a command or a §N (§1's own rule). Without
   this, the whole evidence column can be **emptied** while every verdict still passes — a red defused
   by deleting what it pointed at, which is the one move this page exists to make impossible;
@@ -272,9 +299,9 @@ The self-test that proves those rules still fire has its own **population floor*
 a gate reporting OK when it cannot run — so a shrunk population now reds instead.
 
 Exactly one arm needs `git` **history**: the frontmatter's `measured_at_commit` must be an ancestor of
-`HEAD`. The other seven read this checkout's tree and nothing else, and the tool keeps that split
+`HEAD`. The other eight read this checkout's tree and nothing else, and the tool keeps that split
 (`check_document()` / `check_all()`) because the two jobs that run it differ: the REQUIRED `docs` job
-checks out at `fetch-depth: 0` and runs `--check` (all eight arms), while the `test` jobs check out at
+checks out at `fetch-depth: 0` and runs `--check` (all nine arms), while the `test` jobs check out at
 the default depth 1, cannot resolve `f70d884b7` at all, and are where this page's own test module runs.
 In a depth-1 clone `--check` therefore reports **exit 2 UNVERIFIED** — never `0`, and never a verdict
 against the document it could not read — and `--self-test`, which drives only the tree-only arms,
