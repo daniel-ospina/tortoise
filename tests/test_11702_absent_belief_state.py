@@ -5329,9 +5329,13 @@ def test_update_entity_clearing_the_pair_clears_the_mirror(sdk, tmp_path):
 # 2. The `… else the persisted prior mean (ep_alpha/beta), else ``None```
 #    claim must name the mirror as well, or it predicts `None`/absent for a
 #    mirror-only Point — which reads `baseline` at the mirror's value, not
-#    `None`. (`sdk.py` carries no such sentence: the same claim also stands
-#    unqualified in `mcp_server.py`, which is OUTSIDE this PR's declared
-#    five-module scope and is tracked separately rather than widened here.)
+#    `None`. `sdk.py` states it in the SHORTER "else the persisted prior mean"
+#    form (the `tortoise_fts_query` description) and is scanned here. The same
+#    claim also stands unqualified in `mcp_server.py`, OUTSIDE this PR's
+#    declared five-module scope because that string is part of the FROZEN MCP
+#    surface (`tools/surface-guard.py` hashes it, so correcting it is a surface
+#    change needing owner approval, not a docs fix a lane may make).
+#    ⛔ TRACKED: daniel-ospina/tortoise#11930.
 #
 # The check is a PROXIMITY one on normalised prose: a qualifier must follow its
 # claim within the same sentence, so a paragraph that mentions the mirror for a
@@ -5399,6 +5403,24 @@ _QUALIFIER_VERB = re.compile(r"\b(?:LEADS|leads|lead|supplies|supply)\b")
 #: it" is 21 characters).
 _QUALIFIER_VERB_WINDOW = 60
 
+#: Sentences that INVERT the rule outright, however many affirmative forms they
+#: also carry. The case the subject/verb pair cannot see is an AFFIRMATIVE
+#: clause followed by a LATER-clause inversion — "…unless a readable mirror
+#: supplies one; except that the mirror never LEADS it" — because each clause's
+#: mirror+verb pair is individually clean. Fail-closed on it.
+#: ⚠️ NAMED RESIDUAL: a tripwire on the class, not a parser. An inversion
+#: phrased around these shapes is not detected; the guard's claim is "the
+#: settled wordings of the rule do not invert silently", never "no English
+#: sentence can defeat it".
+_MIRROR_INVERSIONS = re.compile(
+    r"mirror\s+(?:never|not|isn't|is\s+not|does\s*n[o']t|doesn't)\s+lead"
+    r"|suppl(?:y|ies)\s+(?:no|nothing)\b"
+    r"|mirror\s+is\s+(?:ignored|optional)"
+    r"|not\s+true\s+that\b"
+    r"|false\s+that\b",
+    re.IGNORECASE,
+)
+
 #: Words that INVERT a qualifier ("the mirror never leads it", "unless no
 #: readable mirror supplies one"). Scanned over the WHOLE claim→verb span, not a
 #: 24-character lookbehind: at that distance `…; it is not true, as some claim,
@@ -5419,6 +5441,25 @@ _QUALIFIER_NEGATION_OK = re.compile(r"\bnot only\b", re.IGNORECASE)
 _QUALIFIER_OBJECT_NEGATIONS = re.compile(
     r"\b(nothing|none|no readable|no mirror)\b", re.IGNORECASE)
 
+#: Sentences that INVERT the rule outright. The case the positional windows
+#: cannot see is an AFFIRMATIVE form followed by a later-clause inversion —
+#: "…unless a readable mirror supplies one; except that the mirror never LEADS
+#: it" — because the negation sits outside both windows. A sentence carrying
+#: any of these is UNQUALIFIED however many affirmative forms it also contains
+#: (fail-closed on every defeat measured so far).
+#: ⚠️ NAMED RESIDUAL: this is a tripwire on the class, not a parser. An
+#: inversion phrased around these shapes is not detected — the guard's claim is
+#: "the settled wordings of the rule do not invert silently", never "no English
+#: sentence can defeat it".
+_MIRROR_INVERSIONS = re.compile(
+    r"mirror\s+(?:never|not|isn't|is\s+not|does\s*n[o']t|doesn't)\s+lead"
+    r"|suppl(?:y|ies)\s+(?:no|nothing)\b"
+    r"|mirror\s+is\s+(?:ignored|optional)"
+    r"|not\s+true\s+that\b"
+    r"|false\s+that\b",
+    re.IGNORECASE,
+)
+
 #: Sites the scan MUST still find, per file. A tripwire that matches nothing
 #: passes vacuously — and this change's first draft already reworded
 #: `volunteer.py` out of its own arm (`reads its PRIOR mean` went from 1 match
@@ -5426,12 +5467,15 @@ _QUALIFIER_OBJECT_NEGATIONS = re.compile(
 #: prose is added or removed; a mismatch means the guard went blind, which is
 #: exactly what it exists to detect.
 _EXPECTED_PRIOR_MEAN_SITES = {
-    # 5, not 6: `EpBreakdown.has_ep`'s doc and `annotate_ep_batch`'s contract
-    # QUOTED the bare-claim wording while being fixed. A verbatim quotation of
-    # another site's qualified text is not an independent claim, so the two
-    # quoting sites left this population when they stopped asserting it.
+    # 5, not 6: `annotate_ep_batch`'s `baseline=` comment now QUOTES
+    # `EpBreakdown`'s qualified wording instead of restating the bare claim (it
+    # is a `grep`-able quotation of the canonical text, not an independent
+    # claim). `EpBreakdown.has_ep`'s field doc is STILL an independent claim and
+    # IS one of these 5 — it was qualified, not removed. (An earlier revision of
+    # this comment said two sites left; exactly one did — 6→5 — and that is the
+    # count this pin tracks.)
     "tortoise/search_engine.py": 5,
-    # 1, not 2: `why.py`'s second site is now the same verbatim quotation.
+    # 1, not 2: `why.py`'s second site is the same kind of verbatim quotation.
     "tortoise/why.py": 1,
     "tortoise/volunteer.py": 1,
     # `sdk.py`'s "else the persisted prior mean" — the `tortoise_fts_query`
@@ -5488,6 +5532,10 @@ def _qualified(window: str) -> bool:
     negation across the whole claim→verb span (bar an allowed "not only").
     """
     sentence = _claim_sentence(window)
+    # Fail-closed on an outright inversion ANYWHERE in the sentence, however
+    # many well-formed mirror+verb clauses it also carries.
+    if _MIRROR_INVERSIONS.search(sentence):
+        return False
     for noun in _MIRROR_NOUN.finditer(sentence):
         verb = _QUALIFIER_VERB.search(
             sentence, noun.end(), noun.end() + _QUALIFIER_VERB_WINDOW)

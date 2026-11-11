@@ -76,13 +76,21 @@ DEFAULT_MIN_CONFIDENCE = 0.7
 BLOCK_MAX_BYTES = 8 * 1024
 # A FLOOR for the contested-relevance boost in `_eligible` (0.5), never an
 # absent-belief value. #11702 deleted the "repo convention" this constant used
-# to name: an unmeasured claim with NO readable ``n.confidence`` mirror answers
-# ``confidence_mean: None`` (state ``absent``) — a mirror-only claim is also
-# unmeasured (``measured=bool(has_ep)``, search_engine.py:5490) yet reads
-# ``baseline`` at the mirror's value, which is why the qualifier is load-bearing
-# — and substituting a Beta(1,1) mean for it is the defect that issue removes.
-# See ``ranking.py``'s note where its own copy was deleted, and ``_eligible``
-# below, which states the same rule qualified.
+# to name, and the qualifier is load-bearing on BOTH axes because "unmeasured"
+# alone does NOT predict the answer:
+#   * a claim that yields NO mean at all — nothing persisted, and no readable
+#     ``n.confidence`` mirror beside it — answers ``confidence_mean: None``
+#     with ``ep_state: "absent"``;
+#   * a #2199 DECLARED baseline is ALSO unmeasured
+#     (``measured = bool(has_ep)``, search_engine.py:5490) yet answers 0.75
+#     (the Beta(3,1) system default) unless a readable ``n.confidence`` mirror
+#     supplies the value, which LEADS it, and
+#   * a mirror-only claim is also unmeasured yet reads the mirror's value.
+# Substituting a Beta(1,1) mean for the first shape is the defect that issue
+# removes; calling the first shape "the unmeasured case" is the defect this
+# note corrects. See ``ranking.py``'s note where its own copy was deleted, and
+# ``_eligible`` below, which states the same rule with its no-mean shapes
+# enumerated.
 # This 0.5 only bounds how far below the caller's floor a CONFLICT-RELEVANT
 # claim may sit while still being boosted; it is compared against a real mean.
 NEUTRAL_CONFIDENCE = 0.5
