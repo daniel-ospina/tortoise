@@ -78,7 +78,7 @@ warns when a claude registration would make the reflex fire twice per turn.
 | #2124* | Cline | `UserPromptSubmit` | `<dir>/.clinerules/hooks/UserPromptSubmit` (project — the ONE dir every Cline surface reads) or `~/Documents/Cline/Hooks` (global, extension); enable Hooks in settings | `{"cancel": false, "contextModification": "<text>"}` — **flat string**; stdin is NESTED: `{"userPromptSubmit": {"prompt": …}}` | **shipped and RE-VERIFIED 2026-11-08 against Cline's SOURCE** (indicator 2 closed): `hooks.proto` `string context_modification = 1`, `hook-factory.ts:74-84` rejects a non-string, `disk.ts` `hooksDir: ".clinerules/hooks"`. The seam was broken on three counts until #2124's repair — see the correction log |
 | #2124* | Devin | `UserPromptSubmit` | `.devin/hooks.v1.json` (also `~/.config/devin/config.json` `hooks`) | `hookSpecificOutput.additionalContext` | shipped (`install devin`); primary docs re-fetched 2026-10-11 — file IS the hooks object (no `"hooks"` wrapper), stdin carries `prompt`; `matcher` omitted (tool-events only) |
 | #2119 | Pi (pi-coding-agent) | **`before_agent_start`** — "Fired after user submits prompt, before agent loop. Can inject a message and/or modify the system prompt"; `messageType: "user"` carries `prompt`, a `pi.sendMessage(..., {triggerTurn:true})` run arrives as `"custom"` with no prompt | `~/.pi/agent/extensions/tortoise-volunteer.ts` (TS extension, written by `tortoise install pi` beside the capture extension; Pi loads every top-level file there as an INDEPENDENT extension) | `BeforeAgentStartEventResult.message` — `{customType, content, display}`; `display: false` = silent injection, `true` = rendered with the reflex's `surfaced` disclosure marker. Never `systemPrompt` (that REPLACES the run's prompt) | **shipped** — `tortoise install pi` writes both artifacts; the read seam is graded end to end by `tests/test_pi_volunteer_seam.py` (installed extension → real reflex → seeded graph) and its own `node --test` suite |
-| #2122 | Cursor | `sessionStart` → `additional_context`; per-turn `beforeSubmitPrompt` is observe/block ONLY | `~/.cursor/hooks.json` (flat script entries, absolute command; project `.cursor/hooks.json` is workspace-trust-gated) | `{"additional_context": …}` (snake_case) on `sessionStart` | **shipped** — `tortoise install cursor` registers the `sessionStart` cold-context hook (contract v4) *plus* the `sessionEnd` capture hook; per-turn push stays Cursor-blocked (watch item) |
+| #2122 | Cursor | `sessionStart` → `additional_context`; per-turn `beforeSubmitPrompt` is observe/block ONLY | `~/.cursor/hooks.json` (flat script entries, absolute command; project `.cursor/hooks.json` is workspace-trust-gated) | `{"additional_context": …}` (snake_case) on `sessionStart` | **shipped** — `tortoise install cursor` registers the `sessionStart` cold-context hook (contract v4) *plus* the `sessionEnd` capture hook; per-turn push stays Cursor-blocked (watch item). **A cloud agent runs neither** (user-level file not loaded, `sessionStart` excluded) — but NOT "IDE-only": Self-Hosted Machines workers fire BOTH events from PROJECT-level hooks; re-measured 2026-11-10, see the correction log |
 | #2120 | OpenClaw | **native plugin** — per-turn hook `before_prompt_build` → `{prependContext}` (in-process; OpenClaw has NO shell-hook surface) | `~/.openclaw/extensions/tortoise/` (plugin dir; `openclaw.plugin.json` + entry `index.mjs`) → `before_prompt_build`; capture via the `llm_output` hook → `$OPENCLAW_STATE_DIR/tortoise/turns/<session>.jsonl` (one file per session) → `tortoise sessions import --harness openclaw <file>` | `PluginHookBeforePromptBuildResult.prependContext` | **shipped** — `tortoise install openclaw` writes the plugin + `plugins.entries.tortoise.enabled`; injection graded by `tortoise/openclaw-plugin/index.test.mjs`, install by `tests/test_openclaw_seam.py`. Continuity: the plugin hands the reflex `prior_context` = the block it injected last turn (local: `tortoise volunteer`'s JSON contract; hosted: the documented `/v1/context` body), so the reflex's own re-mention suppression runs — see the 2026-10-13 correction below |
 | #2121 | Hermes | `pre_llm_call` (directory plugin: `register(ctx)` + `ctx.register_hook`) | `<dir>/.hermes/plugins/tortoise-volunteer/` (`plugin.yaml` + `__init__.py`, written by `tortoise install hermes`) | the callback RETURNS `{"context": "<block>"}`, injected into the current turn's user message | written by `install hermes`, but **INERT until two opt-ins** (`HERMES_ENABLE_PROJECT_PLUGINS=1` + `hermes plugins enable tortoise-volunteer`) — the installer prints both; ingestion: `tortoise sessions import --harness hermes --file <state.db>` (reads `$HERMES_HOME/state.db` read-only) |
 | #2124* | Gemini CLI | **`BeforeAgent`** ("after user submits prompt, before planning") — the model hook `BeforeModel`/`llm_request` also exists, but it fires per LLM CALL | `.gemini/settings.json` (project) > `~/.gemini/settings.json` (user) > `/etc/gemini-cli/settings.json` (system) > extensions, under `hooks` — the SAME matcher-group shape codex/claude/devin use; `timeout` is MILLISECONDS (default 60000) | `hookSpecificOutput.additionalContext` (the Claude field) | **NOT built — demand-gated.** A thin registration, not an unbuilt adapter (re-measured 2026-10-18 — see the correction log); `tortoise install gemini` does not exist yet |
@@ -269,6 +269,52 @@ Two further findings from the same pass:
    MCP stdio on 2026-10-11: 82 tools exposed, all three present,
    `tortoise_ask` absent. The why-contract on those three is graded by
    `tests/test_w4_why_enrichment.py` (the #2101 successor).
+
+### #2122's Cursor row — release-cadence re-check (2026-11-10)
+
+The issue's own target says *"re-check per-turn injection on Cursor release cadence"* (#2122),
+and the section above is dated 2026-10-11. Re-fetched Cursor's hook reference on 2026-11-10
+(`https://cursor.com/docs/agent/hooks`, `web_fetch` = rung 3, primary source). One finding
+holds, one is new and was undisclosed:
+
+1. **`beforeSubmitPrompt` still cannot inject — UNCHANGED.** The published output contract is
+   still exactly `{ "continue": true | false, "user_message": "<message shown to user when
+   blocked>" }`. There is no `additional_context` (nor Claude's `additionalContext`) on it, so
+   the 2026-10-11 finding stands and #2122's **indicator 3** (per-turn push NOT claimed) is
+   still correct. The watch item stays open upstream; #8109 remains the only adjacent
+   injection seam (`postToolUse` / `postToolUseFailure` → `additional_context` — post-tool
+   result, not the pre-prompt reflex).
+2. **Cloud agents get NEITHER hook — NEW, and it was previously undisclosed.** Cursor's
+   reference lists `sessionStart` under *"Hooks not available in cloud agents"* — *"Deferred
+   while cloud agents can still start in a read-only environment. Hooks don't load there, so a
+   cloud `sessionStart` would fire too late (after the first write) rather than at true session
+   start"* — and states *"User-level hooks (`~/.cursor/hooks.json`) are not available in cloud
+   agents. Cloud agent VMs don't have access to your local home directory configuration."*
+   `tortoise install cursor` registers at the **USER level only** (`~/.cursor` is Cursor's one
+   writable root — `root_home_default=".cursor"`, `root_env=None`, no project-level default),
+   so a Cursor **cloud agent runs no Tortoise hook at all** — neither capture nor cold-context
+   injection. The install surface disclosed only the `sessionEnd` half, which reads as
+   "injection still works in the cloud". Per the **#3819 owner ruling** (the IDE-only limit is
+   disclosed *where the user chooses Cursor — the install surface, not buried*), that
+   disclosure now covers both hooks and names the MCP pull surface as the cloud-agent route.
+   Cloud-agent users' volunteering memory is therefore **pull only** — the same shape this row
+   already claims for the platform, since MCP pull is the universal seam.
+
+3. **"IDE-only" is NOT the right absolute — a THIRD surface fires both events (added
+   2026-11-10 by the #11806 review; tracked as #11807).** The same page, one section below
+   the cloud table: *"Self-Hosted Machines workers (Pools and My Machines) run the same
+   command-based project hooks, and on Enterprise also run team and enterprise-managed hooks.
+   On those workers, `sessionStart` and `sessionEnd` fire when a session claims the worker and
+   when that claim is released."* So the two **events** are not IDE-only in every Cursor
+   surface, and this row's earlier label *"IDE-only, BOTH hooks"* asserted more than the source
+   settles. What stays true — and is all the install message claims — is the **load path**:
+   `tortoise install cursor` registers at the USER level, and *"User-level hooks
+   (`~/.cursor/hooks.json`) are not available in cloud agents"*. Whether a user-level
+   registration loads on a Self-Hosted Machines worker is **unverified** (the page names
+   project, team and enterprise-managed hooks there), which is exactly why the disclosure
+   states the load path instead of an absolute. Consequence for a customer: an Enterprise
+   self-hosted-pool user can get BOTH seams by checking a PROJECT-level `.cursor/hooks.json`
+   into their repository — a file this installer does not write.
 
 ### #2121 Hermes — corrected contract (2026-10-11, primary source)
 
