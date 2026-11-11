@@ -107,11 +107,15 @@ population the composed text targets: **98.93% of embedded statements**.
    distribution.
 3. **A datum for the gate step (step 4), decided nothing today.** The quote is clamped at 200 chars
    (`_write_span`, `extractor_v2._MAX_QUOTE`) and **2,260 quoted Points (15.04% of them, 14.27% of all
-   live Points) sit at or above that cap**. The stored value is `str(v).strip()[:200]`, so a quote whose
-   200th character falls inside a word is embedded mid-word — `_write_span` moves the cut only when it
-   would truncate a NUMERIC value, which is the case that does not apply here; a quote whose 200th
-   character is whitespace ends at a word boundary. **The split between those two is not measured by
-   this census** (it carries min/median/max/n/at_cap, not a boundary classification; a spot check during
+   live Points) sit at or above that cap**. The stored value goes through `_write_span(…, 200)`, whose
+   rule is narrower than "cut at 200": if the cap lands inside a token, the span moves back to the
+   previous whitespace **only when the split token's kept prefix carries a decimal digit AND the
+   discarded remainder carries an alphanumeric character** (a value straddles the cut); otherwise the
+   hard 200-char cut stands, and a quote whose 200th character is whitespace ends at a word boundary.
+   The helper's own docstring records that arm firing on `_MAX_QUOTE` cuts, so it is reachable here, not
+   excluded — this graph's quotes do carry digits (`p95`, `4.0`, `1200`). **Which of those two happened
+   at the cut is not measured by this census** (it carries min/median/max/n/at_cap, not a boundary
+   classification; a spot check during
    authoring showed one cut point ending `…— a d`, and that spot check is not a committed artifact). The
    flag is OFF; this is recorded so the 0.89 duplicate-similarity gate knows it will be reading UP TO 200 chars (the
    STORED basis, which the artifact's `quote_chars_all.at_cap_basis` field names — a composed text

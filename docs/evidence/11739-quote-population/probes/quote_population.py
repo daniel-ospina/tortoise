@@ -15,8 +15,10 @@ Points — they are not in this population), sliced by
 `pointKind`, by capture month, and restricted to the points that actually carry a vector
 (`embedding` present) — because the composed text only ever replaces an embedding input,
 so an unembedded point's empty `quote` is not a defect, it is a point that was never
-embedded. A single headline ratio over the whole graph would therefore overstate the gap
-(the graph carries diary/decision/evidence points that no embedding pass touches).
+embedded. A single headline ratio over the whole graph would therefore overstate the gap:
+this graph carries live Points with no vector at all, and its hand-authored kinds
+(`evidence`/`decision`/…) are 0% quoted even though MOST of them are embedded, so they sit
+inside the embedded denominator rather than outside it.
 
 It does NOT measure whether the quotes that ARE present are *good* (that is #10360), and
 it does NOT arm the flag or touch the composer. It is read-only.
