@@ -11,7 +11,7 @@ Run with: python3 -m pytest tests/test_bfs_audit.py -v
 import ast
 import io
 import subprocess
-import sys  # noqa: F401
+import sys
 import tokenize
 from pathlib import Path
 
@@ -116,9 +116,12 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
     for tok in tokens:
         if tok.type == tokenize.NAME and tok.string == name:
             lines.add(tok.start[0])
-        elif (tok.type == tokenize.STRING or tok.type == fstring_middle) and name in tok.string:
-            if not _inside_prose(tok.start, tok.end):
-                lines.update(range(tok.start[0], tok.end[0] + 1))
+        elif (
+            (tok.type == tokenize.STRING or tok.type == fstring_middle)
+            and name in tok.string
+            and not _inside_prose(tok.start, tok.end)
+        ):
+            lines.update(range(tok.start[0], tok.end[0] + 1))
     return frozenset(lines)
 
 
