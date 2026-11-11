@@ -1164,3 +1164,94 @@ def test_census_excludes_flag_outdated_rows_from_the_headline():
     assert flag["quote_non_empty"] == 1
     assert list(report["by_status_terminal"]) == ["retracted"]
     assert report["by_status_terminal"]["retracted"]["points"] == 1
+
+
+# ---------------- the two claims the landing round corrected, and the note that cites them
+
+def test_the_cap_note_matches_the_write_helper_at_the_quote_cap():
+    """FAILS IF `_write_span`'s rule at `_MAX_QUOTE` drifts from the rule the README publishes, or
+    if the cap note's citation reverts to a precedent the helper's docstring does not hold.
+
+    The note was corrected once (review at `9cd61c03de`) and then MIS-CITED: it claimed "the helper's
+    own docstring records that arm firing on `_MAX_QUOTE` cuts", while the docstring's only
+    `_MAX_QUOTE` precedent (`wp04_aurora_perf/raw`, a 201-char quote ending `blew up the p95.`) is a
+    case where the move did NOT fire — punctuation-only remainder, token kept — and its summary line
+    reads "on the `_MAX_QUOTE` it is the pre-existing cut". A reader following the citation therefore
+    read the opposite of the claim. Reverting the sentence to that mis-citation left the whole file
+    green (`75 passed`, review at `1156c1097e`, P3-2), which is what the citation asserts below close.
+
+    The three arms are asserted against the MODULE rather than against prose, so the rule the note
+    states cannot drift out from under it — and the second `cap` is there because the note's
+    reachability argument is precisely that the arm never consults `cap`.
+    """
+    from tortoise.extractor_v2 import _MAX_QUOTE, _write_span
+
+    cap = _MAX_QUOTE
+    # 1. the MOVE arm — the split token's KEPT prefix carries a decimal digit AND the discarded
+    #    remainder carries an alphanumeric character (a value straddles the cut).
+    moving = "x" * (cap - 6) + " ab9cdefghij"
+    assert _write_span(moving, cap) == "x" * (cap - 6) + " ", (
+        "the move arm stopped backing the span off a value-straddling cut — the README's two-"
+        "condition rule no longer describes the write path")
+    # …and it is NOT cap-specific: the same string moves at a different cap, which is what makes
+    # the arm reachable at `_MAX_QUOTE` at all.
+    assert _write_span("x" * 994 + " ab9cdefghij", 1000) == "x" * 994 + " "
+
+    # 2. the KEPT arm, letters only — dropping the token would move the identity span for no value
+    #    reason, so the hard cut stands.
+    letters = "x" * (cap - 6) + " abcdefghij"
+    assert _write_span(letters, cap) == letters[:cap] == "x" * (cap - 6) + " abcde"
+
+    # 3. the KEPT arm the docstring's own `_MAX_QUOTE` precedent is — remainder punctuation only,
+    #    so the value is intact and the token stays.
+    punctuation = "x" * (cap - 4) + " ab9. xyz"
+    assert _write_span(punctuation, cap) == punctuation[:cap] == "x" * (cap - 4) + " ab9"
+
+    readme = (REPO / "docs" / "evidence" / "11739-quote-population" / "README.md").read_text(
+        encoding="utf-8")
+    note = re.search(r"The helper's own docstring records.*?(?=\*\*Which of those two)", readme, re.S)
+    assert note, "the cap note's docstring-citation sentence moved — repoint this pin"
+    sentence = " ".join(note.group(0).split())
+    assert "blew up the p95." in sentence, (
+        "the cap note must cite the precedent the docstring actually records — the punctuation-only "
+        "remainder at `wp04_aurora_perf/raw`, where the token was KEPT")
+    assert "records that arm firing" not in sentence, (
+        "the docstring records that arm NOT firing at `_MAX_QUOTE`; a sentence claiming it fires "
+        "sends a reader to evidence that says the opposite")
+
+
+def test_the_help_premise_about_hand_authored_points_matches_the_artifact():
+    """FAILS IF the probe's `--help` premise drifts from the census it introduces, in either direction.
+
+    The module docstring IS the help text (`description=__doc__`). Its pre-delta wording asserted the
+    hand-authored kinds were points "that no embedding pass touches" — the artifact refutes it: 124 of
+    the 134 carry a vector, so they sit INSIDE the embedded denominator and their 0% is a quoting
+    property, not an embedding one. Reverting that text reds only the census DIGEST pin, whose message
+    is about provenance ("re-run the probe") and which one re-measure that changes no number clears
+    (review at `1156c1097e`, P3-2) — so the claim itself is pinned here: the artifact must still say
+    MOST, and the `134` the README publishes must still be the population it is said about.
+    """
+    import json
+
+    artifact = json.loads((PROBE.parent.parent / "census.json").read_text(encoding="utf-8"))
+    kinds = artifact["by_point_kind"]
+    hand = {kind: row for kind, row in kinds.items() if kind != "statement"}
+    points = sum(row["points"] for row in hand.values())
+    embedded = sum(row["with_vector"] for row in hand.values())
+
+    # the `--help` says "MOST of them are embedded"; if a re-measure inverts that, the premise is
+    # false and the sentence must be rewritten rather than left standing.
+    assert embedded > points / 2, (
+        f"only {embedded} of {points} hand-authored Points carry a vector — the `--help` premise "
+        "(\"MOST of them are embedded\") no longer holds")
+    # and the population the claim is about is the one the README publishes.
+    assert points == 134, (
+        f"the artifact now reports {points} hand-authored Points; the README states 134 "
+        "(`evidence` 120 + `decision` 7 + `option`/`diary`/`finding`/`useCase`/`jobToBeDone` 7)")
+
+    doc = PROBE.read_text(encoding="utf-8").split('"""')[1]
+    assert "MOST of them are embedded" in doc, (
+        "the `--help` premise must state the measured relation, not the refuted one")
+    assert "no embedding pass touches" not in doc, (
+        "the artifact refutes this premise: those kinds DO carry vectors (the census's own "
+        "`by_point_kind.with_vector` says so), so it must not come back")

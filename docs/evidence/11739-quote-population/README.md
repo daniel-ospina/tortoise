@@ -112,8 +112,12 @@ population the composed text targets: **98.93% of embedded statements**.
    previous whitespace **only when the split token's kept prefix carries a decimal digit AND the
    discarded remainder carries an alphanumeric character** (a value straddles the cut); otherwise the
    hard 200-char cut stands, and a quote whose 200th character is whitespace ends at a word boundary.
-   The helper's own docstring records that arm firing on `_MAX_QUOTE` cuts, so it is reachable here, not
-   excluded — this graph's quotes do carry digits (`p95`, `4.0`, `1200`). **Which of those two happened
+   The helper's own docstring records the cap landing **inside a token** on a `_MAX_QUOTE` cut
+   (`wp04_aurora_perf/raw`, a 201-char quote ending `blew up the p95.`) — where the discarded remainder
+   was punctuation only, so the token was KEPT, not moved; its summary line reads "on the `_MAX_QUOTE`
+   it is the pre-existing cut". The move arm is nevertheless reachable at this cap, because it is not
+   cap-specific (`_write_span` branches on the characters at the cut, never on `cap`) and reproduced
+   directly at `cap=200` it backs the span off to the previous whitespace. **Which of those two happened
    at the cut is not measured by this census** (it carries min/median/max/n/at_cap, not a boundary
    classification; a spot check during
    authoring showed one cut point ending `…— a d`, and that spot check is not a committed artifact). The
