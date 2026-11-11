@@ -232,17 +232,30 @@ _PY = sys.executable
 #: scoped each of them. None of those words is `_SHIPPED_FRAGMENT`, so none was
 #: covered until r18: deleting the single word that scopes any one of them restored
 #: the pre-PR universal with the whole file GREEN (measured: four at r18, and the
-#: three §3.2 methodology sentences the first arm missed, each at r19).
+#: three `"IDE-only" is NOT the right absolute` sentences the first arm missed, each
+#: at r19).
 #:
-#:   1. `#2122` matrix row            A hosted cloud agent runs neither
-#:   2. §3.2 heading                  Hosted cloud agents get NEITHER hook
-#:   3. §3.2 result                   a **hosted** Cursor cloud agent runs no …
-#:   4. §3.2 what the source settles  it is settled for the **hosted VM**
-#:   5. §3.2 the row it cites         this row ("a hosted cloud agent")
-#:   6. §3.2 what the disclosure does scopes the exclusion to the hosted VM
-#:   7. §3.3 consequence              Hosted-cloud-agent users' … pull only
+#: The SITE column names the record's own BOLD ITEM HEADING, never a section number.
+#: This legend used to carry `§3.2`/`§3.3`, and those resolve NOWHERE: the record has
+#: no such section (its only `§` literals point at OTHER documents), so the labels were
+#: guidance that could not be followed — and two of the seven named the WRONG item even
+#: where the numbering read plausibly (the "pull only" consequence sits in the
+#: `Hosted cloud agents get NEITHER hook` item, while the three sentences beside it sit
+#: in the `"IDE-only" is NOT the right absolute` item). A heading-named site cannot be
+#: renumbered by a later edit, and `_RESTATEMENT_SITES` (index-aligned with the tuple
+#: below) makes it checkable — see
+#: `test_every_restatement_site_label_names_the_item_that_states_it` (review r27 P3 #1).
 #:
-#: Rows 1/4/5/6 carry an ABSENCE leg as well; 2/3/7 do not. An absence leg is sound
+#:   #  site                                   needle
+#:   1. `#2122` matrix row                    A hosted cloud agent runs neither
+#:   2. Hosted cloud agents get NEITHER hook   Hosted cloud agents get NEITHER hook
+#:   3. Hosted cloud agents get NEITHER hook   a **hosted** Cursor cloud agent runs no …
+#:   4. Hosted cloud agents get NEITHER hook   Hosted-cloud-agent users' … pull only
+#:   5. "IDE-only" is NOT the right absolute   it is settled for the **hosted VM**
+#:   6. "IDE-only" is NOT the right absolute   this row ("a hosted cloud agent")
+#:   7. "IDE-only" is NOT the right absolute   scopes the exclusion to the hosted VM
+#:
+#: Rows 1/5/6/7 carry an ABSENCE leg as well; 2/3/4 do not. An absence leg is sound
 #: only where the unscoped form is NOT a word subsequence of the scoped one —
 #: `a cloud agent runs neither` breaks the sequence at `a _ cloud`, whereas
 #: `a hosted cursor cloud agent runs no tortoise hook` CONTAINS `cursor cloud agent
@@ -258,6 +271,25 @@ _RESTATEMENTS: tuple[tuple[str, str | None], ...] = (
     ("it is settled for the hosted vm", "it is settled for cloud agents"),
     ('this row ("a hosted cloud agent")', 'this row ("a cloud agent")'),
     ("scopes the exclusion to the hosted vm", "scopes the exclusion to cloud agents"),
+)
+
+#: The SITE of each `_RESTATEMENTS` row, aligned BY INDEX with the tuple above (so a
+#: row added without a site reds the length assert in the label guard rather than
+#: silently inheriting its neighbour's). Each site is the record's own BOLD ITEM
+#: HEADING, matched as WORDS, so it survives rewrapping and dies visibly when the
+#: heading is re-worded; `_MATRIX_ROW` is the contracts-table row, which is not inside
+#: any numbered item.
+_MATRIX_ROW = "matrix row"
+_ITEM_NEITHER_HOOK = "Hosted cloud agents get NEITHER hook"
+_ITEM_NOT_ABSOLUTE = '"IDE-only" is NOT the right absolute'
+_RESTATEMENT_SITES: tuple[str, ...] = (
+    _MATRIX_ROW,           # A hosted cloud agent runs neither
+    _ITEM_NEITHER_HOOK,    # the heading itself
+    _ITEM_NEITHER_HOOK,    # the item's result sentence
+    _ITEM_NEITHER_HOOK,    # the item's consequence ("pull only")
+    _ITEM_NOT_ABSOLUTE,    # "it is settled for the **hosted VM**"
+    _ITEM_NOT_ABSOLUTE,    # "this row (\"a hosted cloud agent\")"
+    _ITEM_NOT_ABSOLUTE,    # "scopes the exclusion to the hosted VM"
 )
 
 #: (4) — the customer promise THIS PR RETRACTED, and the correction that replaced it.
@@ -480,6 +512,33 @@ def _absent(fragment: str, text: str) -> bool:
     return not any(needle in rendering for rendering in _renderings(text))
 
 
+def _record_site_block(doc: str, site: str) -> str:
+    """The record text `site` names — the contracts-table row, or one numbered item.
+
+    An item runs from its own first line (`2. **Heading …**`) to the next numbered
+    item or `###` section, and is located by its BOLD HEADING's words, not by its
+    NUMBER — a renumbering therefore cannot make a label point at a neighbour.
+
+    Returns "" when the site cannot be located, so a re-worded heading REDs the
+    label guard. Returning the whole document instead would make every label pass
+    wherever its sentence had MOVED to, which is the false PASS this guard exists
+    to prevent (review r27 P3 #1: two rows named the wrong item, and nothing could
+    tell).
+    """
+    lines = doc.splitlines()
+    if site == _MATRIX_ROW:
+        return "\n".join(ln for ln in lines if ln.startswith("| #2122"))
+    needle = _normalised(site)
+    start = next((i for i, ln in enumerate(lines)
+                  if re.match(r"\d+\.\s", ln) and needle in _normalised(ln)), None)
+    if start is None:
+        return ""
+    end = start + 1
+    while end < len(lines) and not re.match(r"\d+\.\s|#{2,4}\s", lines[end]):
+        end += 1
+    return "\n".join(lines[start:end])
+
+
 def _install_cursor_stdout(tmp_path) -> str:
     """The REAL `tortoise install cursor` output, on an isolated HOME.
 
@@ -546,8 +605,9 @@ def test_the_record_quotes_the_HOSTED_scoped_fragment():
 def test_every_restatement_of_the_scoping_in_the_record_is_HOSTED_scoped():
     """(3) — the record states the claim SEVEN times, not only where it quotes the message.
 
-    The `#2122` matrix row and §3.2/§3.3 put the same scoping in their own words, and
-    THIS PR edited every one of them:
+    The `#2122` matrix row, and the two items of that section (`Hosted cloud agents
+    get NEITHER hook` and `"IDE-only" is NOT the right absolute`), put the same
+    scoping in their own words, and THIS PR edited every one of them:
 
       `A cloud agent runs neither`            → `A hosted cloud agent runs neither`
       `Cloud agents get NEITHER hook`         → `Hosted cloud agents get NEITHER hook`
@@ -564,7 +624,7 @@ def test_every_restatement_of_the_scoping_in_the_record_is_HOSTED_scoped():
     r19 P2 measured the last three, which r18's arm did not reach).
 
     Mutation: drop the scoping word from any of the seven — each REDs here, and
-    rows 1/4/5/6 RED both their presence and their absence leg."""
+    rows 1/5/6/7 RED both their presence and their absence leg."""
     doc = _PLATFORM_SEAMS_DOC.read_text(encoding="utf-8")
     normalised_doc = _normalised(doc)
     for scoped, unscoped in _RESTATEMENTS:
@@ -574,6 +634,44 @@ def test_every_restatement_of_the_scoping_in_the_record_is_HOSTED_scoped():
         if unscoped is not None:
             assert _absent(unscoped, doc), (
                 f"the record states the UNSCOPED result again: {unscoped!r}")
+
+
+def test_every_restatement_site_label_names_the_item_that_states_it():
+    """(3, labels) — the legend's SITE must resolve AND hold the sentence it claims.
+
+    The `_RESTATEMENTS` legend is the map a next rewriter follows to find the seven
+    places this PR scoped. It carried `§3.2`/`§3.3` labels, and the record has no
+    such section at all — so the map could not be followed, and two rows named the
+    WRONG item while reading perfectly plausible (review r27 P3 #1: the "pull only"
+    consequence is stated in the `Hosted cloud agents get NEITHER hook` item, the
+    three sentences beside it in `"IDE-only" is NOT the right absolute`). Guidance
+    that misdirects is how the NEXT round re-derives what this one already measured.
+
+    So the labels are pinned twice over, and each half is a distinct failure:
+
+      * a re-worded or removed heading leaves `_record_site_block` with no block →
+        the first assert, because a label that names nothing is the defect itself;
+      * a sentence MOVED to another item resolves to a block that does not contain
+        it → the second assert, which the "whole document" reading this guard
+        deliberately avoids (`_record_site_block` never falls back to the full text)
+        is the only thing that can catch.
+
+    Mutation (measured): move any restatement's sentence into the sibling item →
+    the second assert REDs naming that needle and the site; re-word either heading
+    → the first assert REDs naming the site."""
+    doc = _PLATFORM_SEAMS_DOC.read_text(encoding="utf-8")
+    assert len(_RESTATEMENT_SITES) == len(_RESTATEMENTS), (
+        "every `_RESTATEMENTS` row needs a site label — the legend's map is one "
+        "row per restatement")
+    for (scoped, _unscoped), site in zip(_RESTATEMENTS, _RESTATEMENT_SITES, strict=True):
+        block = _record_site_block(doc, site)
+        assert block, (
+            f"the site {site!r} that the `_RESTATEMENTS` legend names does not resolve "
+            f"in the record — a re-worded heading or a deleted item leaves the legend "
+            f"pointing at nothing")
+        assert _normalised(scoped) in _normalised(block), (
+            f"{scoped!r} is not stated in the item the legend names ({site!r}) — the "
+            f"label is stale, or the sentence MOVED to another item")
 
 
 def test_the_retracted_project_level_promise_cannot_come_back():
