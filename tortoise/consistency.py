@@ -3856,6 +3856,48 @@ def recover_from_log(events_dir: str, projection) -> dict:
                     "earlier interrupted rebuild — so whether this graph's "
                     "first-org marker was destroyed CANNOT be determined — "
                     "see #5353")
+        # #9752: the `:PackSelection` pack-set marker, forwarded on exactly the
+        # same contract as the `:TeamMeta` leg above — and for the same reason.
+        # Both consumers that can SEE this gap (`_auto_health_recover` and
+        # `_recover_or_raise`) read it off THIS dict, so a key that is not
+        # copied here is a warning that can never fire: the projection builds
+        # `pack_selection_gap` in `rebuild_all`'s counts and nothing else
+        # carries it out of the replay. The pending sidecar is retired once the
+        # replay lands, so these keys plus the `reason` clause are the only
+        # record the recovery entry point can hand its caller — an absent
+        # marker makes the graph read as UNCONFIGURED, which re-arms the
+        # self-heal and the records/union arms and so re-admits a pack an admin
+        # REMOVED, with its `revision` reset.
+        #
+        # Additive, not a chain (the #4641 round-7 rule the onboarding legs
+        # apply): a confirmed loss and a pre-preservation UNKNOWN can coexist,
+        # and one must not suppress the other.
+        pack_selection_gap = int(counts.get("pack_selection_gap") or 0)
+        if pack_selection_gap:
+            result["pack_selection_gap"] = pack_selection_gap
+            if counts.get("pack_selection_verified") is False:
+                result["reason"] += (
+                    "; WARNING: the :PackSelection post-restore verification "
+                    "COULD NOT RUN, so the rebuilt graph's pack-set marker is "
+                    "UNVERIFIED (not confirmed intact, and not observed "
+                    "gone) — the graph may now read as UNCONFIGURED and "
+                    "re-admit a pack an admin removed — see #9752")
+            elif (counts.get("pack_selection_expected")
+                  and not counts.get("pack_selection_restored")):
+                result["reason"] += (
+                    "; WARNING: the pre-wipe :PackSelection pack-set marker "
+                    "was NOT restored, so the graph reads as UNCONFIGURED and "
+                    "a pack an admin had REMOVED can be re-admitted with its "
+                    "`revision` reset — see the rebuild ERROR log (#9752)")
+            if counts.get("pack_selection_state_unknown"):
+                result["pack_selection_state_unknown"] = True
+                result["reason"] += (
+                    "; WARNING: the pending pre-wipe snapshot does not carry "
+                    "a usable :PackSelection record — it either predates "
+                    "pack-set marker preservation or inherits a state-UNKNOWN "
+                    "marker from an earlier interrupted rebuild — so whether "
+                    "this graph's pack-set marker was destroyed CANNOT be "
+                    "determined — see #9752")
         return result
 
     if not files:
