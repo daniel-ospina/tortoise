@@ -157,7 +157,7 @@ def test_unlabelled_is_EXACTLY_the_null_plus_undeclared_share_and_nothing_escape
 
 
 #: The five point kinds `tortoise.sdk` registers through `domain_loader.register_kind` at IMPORT time
-#: (`sdk.py:218-228`). No `packs/*/manifest.yaml` declares them and none is in
+#: (`sdk.py:227-230`, `:237`). No `packs/*/manifest.yaml` declares them and none is in
 #: `CANONICAL_POINT_KINDS`, so the SDK import is the ONLY path that makes them declared.
 _SDK_REGISTERED_KINDS = ("diary", "checkpoint-item", "option", "evidence", "criterion")
 
@@ -260,8 +260,8 @@ def test_the_three_layers_are_reported_SEPARATELY_and_never_blended():
 def test_the_claim_layer_keeps_its_EXCLUSION_predicate_so_capture_rows_are_not_claims():
     """FAILS IF the per-layer rewrite drops the `is_episodic`/`is_operator` filter.
 
-    Turn rows are written `pointKind='event'` (`sdk.py:2530` `_TURN_WRITE_CYPHER`, whose
-    `t.pointKind=turn.k` is fed by the payload's own `"k": "event"` at `sdk.py:3063`) and operator
+    Turn rows are written `pointKind='event'` (`sdk.py:2539` `_TURN_WRITE_CYPHER`, whose
+    `t.pointKind=turn.k` is fed by the payload's own `"k": "event"` at `sdk.py:3072`) and operator
     Points are operators, not claims. On the committed corpus 159 of 354 Points are turn rows, so
     counting them read ~45 % "typed" against the owner's 0.6 % reading (`#10982` review, finding 4).
     ⛔ Asserted on the QUERY TEXT: the fake answers the same rows with the clause deleted, so this
