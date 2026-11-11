@@ -15,8 +15,9 @@ The measured consequence is not bookkeeping (this worktree, embedded lane):
     after  : configured=False  revision=0   namespaces=frozenset({'venture'})
 
 i.e. a pack an admin **REMOVED** comes back into the approved set, the
-`revision` a client holds resets to 0, `get_tenant_packs`' self-heal becomes
-live again on a graph that was pinned — and the Settings surface then states the
+`revision` a client holds resets to 0, `get_tenant_packs`' self-heal re-arms
+(on a graph holding NO `:PackInstall` row — a removal leaves its tombstone, so
+not on this rule's own path) — and the Settings surface then states the
 opposite of the truth ("the full catalog applies") over a set that holds the
 removed namespace.
 

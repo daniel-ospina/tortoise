@@ -1944,8 +1944,9 @@ surfaces:
   # pin that says a rebuilt graph must read as provisioned.
   - test_rebuild_team_meta_marker_5353.py
   # #9752: the :PackSelection pack-set marker across the same wipe+replay. The
-  # `pack_selection` sidecar section lives in tortoise/projection/ (core
-  # fallback), but the state the marker pins is written and read by
+  # `pack_selection` sidecar section lives in tortoise/projection/ (a
+  # SHARED_MODULE, so a change there already selects the full matrix), but the
+  # state the marker pins is written and read by
   # `tortoise/pack_state.py` AND served by the per-graph `GET`/`PUT
   # /v1/graphs/{graph_id}/packs` routes in `tortoise/hosted_api.py` (an exact
   # `api` SOURCE_PATTERN) — so without this arm a hosted_api-only change to the

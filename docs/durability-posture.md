@@ -246,9 +246,11 @@ property). It gets its own declared sidecar sections instead:
   one `removed` row), and the Settings copy then claims the catalog union over a
   set that still holds that namespace. The class is **one per graph by
   construction**, so the section carries at most one marker: the **highest
-  `revision`** wins (the value an optimistic-concurrency client holds, so the
-  merge never lands the graph on an older decision than one that was actually
-  made), a collapse is reported rather than silent, and the restore is an
+  `revision`** wins — the value an optimistic-concurrency client holds, so the
+  highest published token is kept; that is NOT the same as "the newest decision
+  wins", because a re-pin on a wiped graph restarts `revision` at 1 and a
+  pre-crash leftover then outranks it — a collapse is reported rather than
+  silent, and the restore is an
   idempotent `MERGE … ON CREATE SET` so a partially-restored graph cannot
   accumulate a duplicate on retry. The post-restore check requires the captured
   property map back **exactly** — a concurrent post-wipe `set_graph_packs`
