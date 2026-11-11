@@ -127,7 +127,8 @@ Every call site / consumer of each thing this change touches:
    returns only unclassified keys as unconsumed → `test_the_real_pre_registration_schema_names_why_it_cannot_score_this_run`,
    `test_a_floor_no_row_owns_is_refused_not_dropped`.
 2. Validate + check the two newly owned floors (`_declared_metric_floor`, the arm's
-   `atomic_points`, required kwargs). Code review added a positivity rule to all three owned
+   surviving planted count — `real_facts` since #10989, `atomic_points` as this step was
+   written; required kwargs). Code review added a positivity rule to all three owned
    floors: a floor of `0` or less binds nothing, and the sibling reader refuses it by name → `test_the_owned_floors_are_checked_and_a_run_that_meets_them_binds`,
    `test_an_owned_floor_the_run_is_under_is_refused_not_scored` (both floors, both directions),
    `test_an_unreadable_owned_share_floor_is_refused_not_read_as_absent`.
@@ -156,7 +157,8 @@ Every call site / consumer of each thing this change touches:
   them); P1 the plan header attested `status=clean` before any verifier returned; P2 ×3 (the
   §1 reproduction cited an untracked `/tmp` script, §1 overstated the outcome, "six" pins where
   five existed). All six fixed: the measured sides are now anchored to the ARM lines
-  (`metric=atomic_points atomic=` on the scored arm, the control arm's `share=`) and pinned by
+  (`metric=atomic_points atomic=` on the scored arm — `metric=real_facts count=` since
+  #10989 — and the control arm's `share=`) and pinned by
   `test_checker_refuses_a_binding_whose_measured_side_is_unanchored`; the log was re-taken; the
   header claim was withdrawn.
 - **Cycle 2** (verifier 2, fresh): 4 issues, all P2, all plan-doc accuracy — a stale §1
@@ -243,8 +245,10 @@ comments and supersede it):
 - `T4` **denominator substitution** — the E2b floor (and E1's control-arm share) compared against
   a quantity the run did not produce. Cycle 1 found the first cut was only self-consistent
   (both sides printed on the binding line), so the measured side is now anchored to the ARM
-  lines: `arm=<name> metric=atomic_points atomic=` is printed per arm and V15 reconciles
-  the binding's `surviving_units=` against the scored arm's atomic-Point count, and
+  lines: `arm=<name> metric=real_facts count=` is printed per arm (it was
+  `metric=atomic_points atomic=` before #10989 moved the floor's population) and V15
+  reconciles the binding's `surviving_units=` against the scored arm's surviving PLANTED
+  count, and
   `before_share=` against the control arm's `share=` — the same cross-line anchor `objects=`
   has always had. Pinned by
   `test_checker_refuses_a_binding_whose_measured_side_is_unanchored` (inflated on the binding
