@@ -402,6 +402,18 @@ rounding:**
   and §8 carries neither date nor commit — the commit for the whole page is the
   frontmatter's `measured_at_commit`, restated in §10. Do not read §2 or §8 as
   self-dating.
+- **A status token SWAPPED between two rows this revision does not name.** Every
+  comparison in the pin file is a COUNT, so one row demoted to `OPEN` while
+  another is promoted holds §2's tally, the abstract, the index headline and the
+  WS-C cell — measured: reverting `#2782` to `OPEN` **with** `#2684` promoted to
+  `VERIFIED-FIXED` read CLEAN under `tools/problem_map_check.py --check` and
+  passed the whole suite before review caught it. The re-cut row and §8's four
+  survivors are therefore pinned **by issue**
+  (`tests/test_problem_map_2820.py::test_the_recut_row_and_survivors_hold_their_status_by_ISSUE`),
+  which reds that swap; the same swap between two of the other rows is still
+  invisible. Pinning all 26 is the only complete form and it is not taken on
+  here: it would make every future re-cut edit the pin file as well, and this
+  page's re-cuts are hand measurements. Named sets, not a claim of coverage.
 - **Anchor RELEVANCE.** The guard proves an anchor exists and is merged. It cannot
   prove the commit is *the fix* — a lane once cited a merge that mentioned nothing
   of the issue (this page carried exactly that defect until review caught it on

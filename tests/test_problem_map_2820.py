@@ -12,7 +12,7 @@ guarded (a status is a dated fact — §9 of the document says so), so nothing h
 depends on GitHub.
 
 EVERY NEGATIVE CONTROL TAKES ONE OF FIVE SHAPES, and the census below is derived
-mechanically from this file (56 test functions at the head this landed on, counted
+mechanically from this file (57 test functions at the head this landed on, counted
 with the anchored grep), not asserted: a mutated copy of the shipped artifact it
 grades (23); a stand-in artifact written FROM SCRATCH for an arm whose failure is
 the artifact's absence or shape rather than its content — a synthesised
@@ -20,12 +20,16 @@ the artifact's absence or shape rather than its content — a synthesised
 (9); a throwaway directory it drives real `git` in, a repo or deliberately NOT
 one for the cannot-answer legs (4); one patched seam the arm requires (15); or
 the shipped source read as an AST — the interpreter guard's exit code, which no
-runtime fixture can produce (1). That is 51 negative controls plus 5 positives:
-three read the shipped page whole, a fourth
+runtime fixture can produce (1). That is 51 negative controls plus 6 positives:
+three read the shipped page whole
+(`test_the_recut_row_and_survivors_hold_their_status_by_ISSUE` is the fourth —
+added when fresh review measured that every other arm compares COUNTS, so a
+status swap between two rows was invisible to the whole file; see its docstring),
+a fifth
 (`test_every_status_token_is_in_the_vocabulary`) reads the closed-vocabulary
-CONSTANT rather than the page — see below — and the fifth is the positive half of
+CONSTANT rather than the page — see below — and the sixth is the positive half of
 a pair, `test_an_ancestor_anchor_passes_on_the_same_repo`, counted in the `git`
-bucket because that is the fixture it drives. 56 in all, which is every test function.
+bucket because that is the fixture it drives. 57 in all, which is every test function.
 Never a fixture that could not fail, and each test's docstring states (a) the
 exact value/state that makes it fail and (b) why that state is reachable. A guard
 whose negative case cannot be reached is a test that cannot fail — it proves the
@@ -162,6 +166,30 @@ def test_the_taxonomy_counts_are_what_the_summary_declares():
     assert counts["VERIFIED-FIXED"] == sum(1 for r in rows if r.is_fixed) == 22
     assert counts["OPEN"] == sum(1 for r in rows if r.status == "OPEN") == 4
     assert counts["UNKNOWN"] == 0
+
+
+def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
+    """Fails when two rows SWAP statuses — a compensating edit no count can see.
+
+    Reachable, and measured at the head that added this arm: every other
+    comparison in this file is a COUNT — §2's tally, the abstract headline, the
+    index headline, the WS-C cell — so an edit that holds the tally and moves
+    the claim is invisible to all of them. Reverting §2's `#2782` to `OPEN`
+    **and** promoting `#2684` to `VERIFIED-FIXED` (one row each way, so §2 stays
+    22/4/0, the total 26, WS-C 4 of 6, and both headlines intact) left
+    `tools/problem_map_check.py --check` **CLEAN** and this suite **58 passed** —
+    green over a page whose re-cut, the reason this revision exists, had been
+    undone. The count literals also expire: they must be re-derived on the next
+    re-cut, so a count-only guarantee lapses with the next count move.
+
+    So the two sets the page's prose asserts BY NAME are pinned by issue: the
+    row this re-cut is about, and the four survivors §8 counts. A count is the
+    only thing most of this file checks; a status is a per-row fact.
+    """
+    rows, _ = pmc.parse_rows(DOC.read_text(encoding="utf-8"))
+    status = {r.issue: r.status for r in rows}
+    assert status.get(2782) == "VERIFIED-FIXED", status.get(2782)
+    assert [status.get(n) for n in (2696, 2730, 2787, 2684)] == ["OPEN"] * 4, status
 
 
 def test_a_dropped_row_is_drift(tmp_path):
