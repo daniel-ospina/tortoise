@@ -385,10 +385,12 @@ def ep_measurement_state(*, posterior_alpha, ep_alpha,
 #
 # The state vocabulary and the internal predicate answer DIFFERENT questions,
 # so they are NOT inter-translatable: a legacy `n.confidence` mirror alone is
-# `unmeasured` internally yet `baseline` here (value 0.95), and a HALF pair is
-# `measured` internally yet `absent` here (no mean). The two spellings meet in
-# exactly one place — :func:`ep_state` — which is why they cannot drift into two
-# vocabularies; it is not because they name the same state.
+# `unmeasured` internally yet `baseline` here (value 0.95), and an α-ONLY half
+# pair is `measured` internally yet `absent` here (no mean) — the β-only half
+# pair is `absent` in both, because the predicate reads a non-baseline α. The
+# two spellings meet in exactly one place — :func:`ep_state` — which is why they
+# cannot drift into two vocabularies; it is not because they name the same
+# state.
 EP_STATE_MEASURED = "measured"
 EP_STATE_BASELINE = "baseline"
 EP_STATE_ABSENT = "absent"

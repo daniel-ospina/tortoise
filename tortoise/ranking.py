@@ -1728,9 +1728,12 @@ class StateRanker:
                     # three are pinned in
                     # `test_the_twins_parse_the_same_string_language` (whose
                     # literals never exceed `|p|` 151, so it cannot witness this
-                    # bound); the fourth in the two #11897 tests in
-                    # `tests/test_11702_absent_belief_state.py`, which are the
-                    # only place an exponent past 4096 appears. (A
+                    # bound); the fourth is EXPECTED TO READ at the two `#11897`
+                    # read-shape tests in `tests/test_11702_absent_belief_state.py`
+                    # (`test_a_hex_exponent_past_the_bound_its_mantissa_cancels_is_still_read`,
+                    # `test_a_cancelling_hex_exponent_reads_at_both_band_edges`) —
+                    # the file's other `#11897` pins refuse a past-4096 exponent on
+                    # purpose, so "the only place one appears" would be false. (A
                     # hex-float MIRROR at 16.0 is not one of them: the
                     # served-belief band rejects it on both twins.) If a fifth
                     # does land here, the state stays true and
