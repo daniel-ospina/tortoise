@@ -54,6 +54,11 @@ WHAT IT ASSERTS, in BOTH directions:
       false (the scripts register by absolute path and read `$HOME`). Pinned in
       both directions because r19 measured it pinned in NEITHER: re-instating the
       sentence kept all five tests GREEN.
+  (5) the record's own restatement of the OTHER half of this PR — that Self-Hosted
+      Machines workers run **project, team and enterprise-managed** hooks, not
+      project-level ones — is still stated, at BOTH of its sites. The message side
+      already had a pin; the record's two restatements had none, so deleting either
+      clause left the file GREEN (measured, r20 P3).
 
 `_SHIPPED_FRAGMENT` is the single string both arms bind to, so the two cannot be
 corrected in opposite directions without this file noticing.
@@ -116,6 +121,10 @@ WHAT IT STILL DOES NOT CATCH, stated so the docstring is not the next over-claim
     the matrix row or of §3.2/§3.3 — even one that KEEPS the hosted scoping — REDs.
     That is the same trade arms (1)/(2) already take (the claim IS the words):
     reword such a sentence only together with its `_RESTATEMENTS` row, in one edit.
+  * (5) is PRESENCE only. The reverted form there is a DELETION of the clause, not a
+    word substitution, so there is no unscoped spelling to ban — the needle is made
+    site-unique instead (`project hooks — plus …` and `… — the page's own gate`), so
+    one site cannot satisfy the other's row and deleting either clause REDs.
 
 MUTATION (each verified RED at this head, restoring byte-identical):
   * restore the unscoped quote at `platform-seams.md:315`      → (1) RED
@@ -161,6 +170,10 @@ MUTATION (each verified RED at this head, restoring byte-identical):
     `.cursor/hooks.json` into their repository"        → (4) RED   (r19 P2)
   * delete the record's "repo-committed `hooks.json` cannot …" clause
                                                       → (4) RED   (r19 P2)
+  * delete the `plus … on Enterprise …` clause from the `#2122` matrix row
+                                                      → (5) RED   (r20 P3)
+  * delete the `(plus … on Enterprise — the page's own gate)` clause from §3.2
+                                                      → (5) RED   (r20 P3)
 """
 from __future__ import annotations
 
@@ -202,7 +215,7 @@ _PY = sys.executable
 #: precise false-RED this file's own review rounds are about. Hence `None` there
 #: rather than a guess. Each verdict below was measured with `_normalised()` over
 #: the pair before it was written, not assumed from the words.
-_RESTATEMENTS: tuple[tuple[str, "str | None"], ...] = (
+_RESTATEMENTS: tuple[tuple[str, str | None], ...] = (
     ("a hosted cloud agent runs neither", "a cloud agent runs neither"),
     ("hosted cloud agents get neither hook", None),
     ("a hosted cursor cloud agent runs no tortoise hook", None),
@@ -238,6 +251,27 @@ _RETRACTED_PROMISE = "get both seams by checking a project level"
 #: retraction reads as an arbitrary exclusion and the next lane re-adds the promise
 #: as an attractive route — the drift this file exists to stop.
 _RETRACTION_CAUSE = "repo committed hooks json cannot"
+
+#: (5) — the OTHER correction THIS PR makes, restated in the record at two sites, and
+#: unpinned at both (review r20 P3, each measured: deleting the clause left the file
+#: GREEN). The message side was already pinned by `test_capture_install.py:3004`;
+#: only the record's own restatements of it were not.
+#:
+#:   A. `#2122` matrix row — "… fire BOTH events from project hooks — plus team and
+#:      enterprise-managed hooks on Enterprise; re-measured 2026-11-10 …"
+#:   B. §3.2              — "(plus team and enterprise-managed hooks on Enterprise —
+#:      the page's own gate)"
+#:
+#: PRESENCE only, on purpose: the r3 revert here is a DELETION of the clause, not a
+#: substitution of an unscoped word, so there is no banned spelling for an absence leg
+#: to carry. What makes each row sound instead is that its needle is SITE-UNIQUE —
+#: measured: `plus team and enterprise-managed hooks on Enterprise` occurs TWICE in the
+#: record, so a bare row would let one site satisfy the other — and each needle below
+#: carries its own site's surrounding words and occurs exactly once (measured).
+_HOOK_SOURCE_RESTATEMENTS: tuple[str, ...] = (
+    "project hooks — plus team and enterprise managed hooks on enterprise; re measured",
+    "team and enterprise managed hooks on enterprise — the page s own gate",
+)
 
 #: A tag's attributes AS MARKUP — `name=value`, quoted or bare. NOT `[^<>\n]*`:
 #: a bare word list is PROSE, and `if a<b and c>d then …` is an ordinary sentence,
@@ -500,6 +534,33 @@ def test_the_retracted_project_level_promise_cannot_come_back():
         "the record dropped WHY a repo-committed hooks.json cannot reach these "
         "seams — without the reason the retraction reads as an arbitrary "
         "exclusion, and the next lane re-adds the promise")
+
+
+def test_the_record_still_restates_the_THREE_hook_sources_it_names():
+    """(5) — the record's own statement of the r3 fix, at BOTH of its sites.
+
+    This PR's second correction is that the self-hosted clause named ONE hook source
+    where Cursor's page names three on those workers (project, team and
+    enterprise-managed). The shipped message is pinned in
+    `test_capture_install.py`, but the RECORD restates the same correction twice and
+    neither site was pinned — measured at r20: deleting either clause left this file
+    GREEN, so the record a future lane cites for #11807 could lose the correction
+    without a single test noticing.
+
+    Site-unique needles, not a shared phrase: `plus team and enterprise-managed hooks
+    on Enterprise` occurs at BOTH sites, so a bare row would be satisfied by whichever
+    one survived. Each row below carries its own site's surrounding words and was
+    measured to occur exactly once in the record.
+
+    Mutation: delete the `plus … on Enterprise …` clause at either site, or reword the
+    matrix row back to "from project hooks; re-measured 2026-11-10" — each REDs here."""
+    doc = _PLATFORM_SEAMS_DOC.read_text(encoding="utf-8")
+    normalised_doc = _normalised(doc)
+    for scoped in _HOOK_SOURCE_RESTATEMENTS:
+        assert _normalised(scoped) in normalised_doc, (
+            f"the record no longer names this site's hook sources: {scoped!r} — the "
+            f"r3 fix (project + team + enterprise-managed, gated on Enterprise) is "
+            f"gone from that site of the record")
 
 
 def test_a_stray_angle_bracket_cannot_swallow_the_quoted_sentence():
