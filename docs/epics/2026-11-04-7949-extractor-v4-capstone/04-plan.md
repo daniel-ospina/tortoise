@@ -569,7 +569,7 @@ exactly the same gates** - not "CI". W2a's "the lane is `workflow_dispatch` only
   payload below is empty for an unresolved lookup, this reds, and `config/v4-mechanisms.yml`'s row must flip to
   `implemented`"* - plus the flip condition. ⚠️ The *"if a create gate landed, flip `failure_policy` …"* wording is
   that test's **assert message**, not its docstring, and *"the day a create gate lands"* appears in no test at all
-  (it is `docs/00_index.md:170`'s prose) — an earlier revision quoted the two as one docstring. **Do not**
+  (it is `docs/00_index.md:174`'s prose) — an earlier revision quoted the two as one docstring. **Do not**
   use `preconditions:` for composition: the file defines it as **ordering**, not "part of".
   The two planning docs disagreed (C3 vs C4); **C4 is the owner**, because `symbols:` can only be satisfied by the
   producer.
