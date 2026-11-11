@@ -102,8 +102,9 @@ quality change. **Live before private-beta:**
 3. the **rebuild headroom** measured and reserved (§7) — the #1 production risk;
 4. the **shortfall assertion** on the vector leg (§6.1), without which a beta customer can silently receive
    fewer results than exist;
-5. the **`null`-not-0.5 rule** for absent belief state (§6.3) — absent state is `null` with
-   `ep_state: "absent"`, never the neutral Beta(1,1) mean 0.5, on every read/rank surface §6.3 names;
+5. the **`null`-not-0.5 rule** for absent belief state (§6.3) — the rule §6.3 states, holding on every
+   read/rank surface, and independent of windows; a surface that admits an absent belief at 0.5 is outside
+   the design, not a smaller instance of it;
 6. the **two truncation reason strings** (§7) — `degraded: "insufficient_graph"` / `degraded:
    "truncated_boundary"` — because item 1 only makes an incomplete answer *labelled*, not *labelled with a
    reason a caller can branch on*.
@@ -285,10 +286,11 @@ That ruling stands and nothing here reverses it.
 boundary, so recomputing EP for it is **exact**, not approximate. Residency and the EP carve-out
 therefore point the same way — and no schema change is needed.
 
-**A claim with no persisted belief must not answer the neutral Beta(1,1) mean 0.5.** Answering it would
-make an absent claim indistinguishable from a computed one at the point where ordering happens. The rule
-is **absent state is `null` with `ep_state: "absent"`, never 0.5**, and it holds
-on every read/rank surface: `annotate_ep_batch`, the canonical `why` `ep` block (`tortoise/why.py`),
+**A claim with no persisted belief must not answer the neutral Beta(1,1) mean 0.5.** If a reader falls
+back to the prior it does, and a ranker that coalesces that value cannot tell it from a computed one at
+the point where ordering happens — a missing belief returns a plausible number instead of an absence.
+So **absent state is `null` with `ep_state: "absent"`, never 0.5**, and the rule
+holds on every read/rank surface: `annotate_ep_batch`, the canonical `why` `ep` block (`tortoise/why.py`),
 `GraphRanker`, `StateRanker`/`recall_ranking`, `GapsRanker`/`gaps_ranking`, `SubgraphExpander`, and the
 event/object aggregate reads; the `analyze` templates refuse an absent claim rather than admitting it at a
 coalesced 0.5. The vocabulary is declared ONCE (`search_engine.EP_STATE_*` +

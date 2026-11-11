@@ -6,6 +6,7 @@ a live FalkorDB instance — it's a grep-based documentation of the audit result
 Run with: python3 -m pytest tests/test_bfs_audit.py -v
 """
 
+import re
 import subprocess
 import sys  # noqa: F401
 from pathlib import Path
@@ -28,15 +29,65 @@ def _grep(pattern: str, *dirs: str) -> list[str]:
 
 # ── 1. propagate_shock callers ────────────────────────────────────
 
-def test_no_propagate_shock_callers():
-    """Assert: propagate_shock.calls only in deprecated definition + tests + scripts."""
-    # All references to propagate_shock (the word)
-    all_refs = _grep("propagate_shock", "tortoise/", "graph-scripts/", "validation/", "tests/")
-    filtered = [
-        l for l in all_refs  # noqa: E741
-        if "__pycache__" not in l and "test_bfs_audit.py" not in l and "test_e2e_extraction_ep.py" not in l
-    ]
+# A call site, allowing whitespace between the symbol and its `(`, and also
+# matching a BACKSLASH-CONTINUED line whose `(` is on the next physical line.
+# `ruff` reports NEITHER at this repo's selection: both shapes are E211
+# (`whitespace-before-parameters`), which is preview-only and not enabled here
+# (measured with the pinned ruff 0.16.4 — `--select E,W,F` passes on both,
+# while `--select E211 --preview` flags both). Both are shippable Python, and
+# the literal `"propagate_shock("` test bucketed each as a reference — a false
+# PASS for exactly the restore this audit exists to catch.
+_PROPAGATE_SHOCK_CALL = re.compile(r"propagate_shock\s*(?:\(|\\\s*$)")
 
+
+def _classify_propagate_shock_refs(lines: list[str]) -> dict[str, list[str]]:
+    """Bucket `grep` hits for `propagate_shock` by what each hit actually is.
+
+    The audit's question is whether PRODUCTION code **calls** the deprecated
+    path, so a bare mention is a reference, not a call — docstring prose and
+    comments name the symbol without invoking it. The earlier rule recognised a
+    comment only when the line carried BOTH `#` and `replaces` (exactly one line
+    in the tree did, `ingest.py:1361`), so every later prose mention was bucketed
+    as `production_code` and reddened the audit. #11803's #11702 note in
+    `projection/propagation.py` is that case: docstring lines stating the path is
+    UNREACHABLE were reported as "PRODUCTION CODE CALLS propagate_shock". The
+    call shape is the honest discriminator — a call site must read
+    `propagate_shock(`, `propagate_shock (` (whitespace before `(` is E211, and
+    E211 is preview-only, which this repo does not enable), or
+    `propagate_shock \\` with the `(` on the NEXT physical line (the SAME E211
+    under `--preview`, and a line-based grep cannot see it either way) — and
+    `test_the_audit_discriminates_a_call_from_a_mention` pins all of them.
+
+    A line that takes a REFERENCE to the method is production code too, even
+    though it has no `(` after the symbol: `self._shock = proj.propagate_shock`,
+    `functools.partial(proj.propagate_shock, eid)` and a line-continued
+    `proj.propagate_shock \\` can all be invoked later, so the `(`-only rule
+    would bucket them as prose and let the audit go green while the path was
+    wired back up — a false PASS in the one instrument that exists to notice
+    that restore. The attribute form (`.propagate_shock`) is therefore also
+    production code.
+
+    Deliberate boundaries, ALL THREE failing CLOSED (they red an audit a human
+    then reads, rather than letting a call through): prose that spells a call
+    (`propagate_shock(x)` inside a docstring) counts as production code; so does
+    prose that spells an attribute reference; and so does a comment or docstring
+    line ENDING in the symbol plus a continuation backslash (`# about
+    propagate_shock \\`), which the continuation alternative cannot tell apart
+    from a wrapped call. That third boundary was MEASURED on this classifier,
+    not assumed — it is the false-positive cost the continuation arm pays, and
+    naming it is what stops a later reader from "tidying" the arm away on the
+    grounds that the surface was documented as two. (Prose that merely ENDS in a
+    backslash is still safe: the `\\s*` cannot cross the intervening text, so
+    `` ``propagate_shock`` is dead, see the note \\ `` stays in
+    `comment/reference only`.) Declared residual, which
+    fails OPEN and is not detected: a bare, undotted reference that is neither
+    called nor backslash-continued — `getattr(proj, "propagate_shock")`, or
+    `partial(propagate_shock, eid)` on a module-level import — and an undotted
+    call whose `(` sits on the next physical line with NO backslash (implicit
+    continuation inside brackets), since a line-based grep cannot join it. A
+    grep audit cannot see those shapes; a lane restoring the path that way is
+    caught by review, not by this classifier.
+    """
     callers: dict[str, list[str]] = {
         "definition (deprecated)": [],
         "comment/reference only": [],
@@ -45,9 +96,8 @@ def test_no_propagate_shock_callers():
         "production_code": [],
     }
 
-    for line in filtered:
+    for line in lines:
         path_part = line.split(":")[0]
-        full_path = ROOT / path_part  # noqa: F841
 
         # #378: projection.py was split into the projection/ package — the
         # deprecated definition now lives in projection/propagation.py.
@@ -60,12 +110,75 @@ def test_no_propagate_shock_callers():
             callers["fixup_scripts (historical)"].append(line)
         elif "/graph-scripts/" in path_part:
             callers["test_files"].append(line)  # test_6707_shock.py
-        elif "/tortoise/" in path_part and "#" in line and "replaces" in line.lower():
+        elif "/tortoise/" in path_part \
+                and not _PROPAGATE_SHOCK_CALL.search(line) \
+                and ".propagate_shock" not in line:
             callers["comment/reference only"].append(line)
         elif "/tortoise/" in path_part:
             callers["production_code"].append(line)
 
-    # The only "production" reference is a comment: no actual call
+    return callers
+
+
+def test_the_audit_discriminates_a_call_from_a_mention():
+    """Non-vacuity, both directions, for `_classify_propagate_shock_refs`.
+
+    Pre-fix a docstring line that merely NAMES the symbol landed in
+    `production_code` (it carries neither `#` nor `replaces`), which is the
+    false positive that reddened `test_no_propagate_shock_callers` on #11803's
+    note — so `comment/reference only == [prose]` below reds on the pre-fix
+    classifier. Emptying the bucket would "fix" that red and kill the audit, so
+    the CALL direction is pinned as well: a real call site must still be
+    reported.
+    """
+    prose = f"{ROOT}/tortoise/projection/propagation.py:71:        `propagate_shock` PERSISTS the blend"
+    call = f"{ROOT}/tortoise/api.py:999:            self.propagate_shock(epicenter_id)"
+    # References that can be invoked later: an attribute alias, a partial, and a
+    # line-continued call. None carries `(` after the symbol, and every one of
+    # them wired the deprecated path back up if a lane shipped it. NOTE: this
+    # row is the DOTTED form, so the attribute arm above already catches it — it
+    # does NOT discriminate the continuation handling. `continued_undotted`
+    # below is the row that does.
+    alias = f"{ROOT}/tortoise/api.py:1000:            self._shock = proj.propagate_shock"
+    partial = f"{ROOT}/tortoise/api.py:1001:            p = functools.partial(proj.propagate_shock, eid)"
+    continued = f"{ROOT}/tortoise/api.py:1002:            proj.propagate_shock \\"
+    # A space before the `(` is legal Python that `ruff` does not flag (E211 is
+    # preview-only), so the literal `propagate_shock(` test used to bucket it as
+    # a reference — the audit went green while the path was wired back up. It is
+    # deliberately UNDOTTED: a dotted `self.propagate_shock (` is already caught
+    # by the attribute rule, so only this shape discriminates the `\s*`.
+    spaced_call = f"{ROOT}/tortoise/api.py:1003:            propagate_shock (epicenter_id)"
+    # UNDOTTED and backslash-continued, so `(` is on the next physical line: no
+    # arm above sees it (no dot for the attribute rule, no `(` for the call
+    # rule), and ruff does not flag the form without `--preview`. Without the
+    # continuation alternative this row lands in `comment/reference only` — a
+    # false PASS.
+    continued_undotted = f"{ROOT}/tortoise/api.py:1004:            propagate_shock \\"
+    callers = _classify_propagate_shock_refs(
+        [prose, call, alias, partial, continued, spaced_call, continued_undotted])
+
+    assert callers["comment/reference only"] == [prose], (
+        "a line that only NAMES propagate_shock is a reference, not a call; "
+        f"bucketed as: {callers['comment/reference only']}")
+    assert callers["production_code"] == [
+        call, alias, partial, continued, spaced_call, continued_undotted], (
+        "a real CALL site, and every reference that can be invoked later, must "
+        f"be reported as production code; bucketed as: {callers['production_code']}")
+
+
+def test_no_propagate_shock_callers():
+    """Assert: propagate_shock.calls only in deprecated definition + tests + scripts."""
+    # All references to propagate_shock (the word)
+    all_refs = _grep("propagate_shock", "tortoise/", "graph-scripts/", "validation/", "tests/")
+    filtered = [
+        l for l in all_refs  # noqa: E741
+        if "__pycache__" not in l and "test_bfs_audit.py" not in l and "test_e2e_extraction_ep.py" not in l
+    ]
+
+    callers = _classify_propagate_shock_refs(filtered)
+
+    # No production mention is a call: the deprecated definition, docstring prose
+    # that names the symbol, and one historical comment.
     assert len(callers["production_code"]) == 0, (
         f"PRODUCTION CODE CALLS propagate_shock:\n" + "\n".join(callers["production_code"])  # noqa: F541
     )

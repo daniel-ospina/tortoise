@@ -1233,6 +1233,28 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         "Part of v3 has already landed.",
         "`#2354` **OPEN, epistemic-team** —",
         "this reopen is CLOSED",
+        # The state word BEFORE a parenthesised `#NNN` — the shape #11803 left in
+        # `SEARCH-ARCHITECTURE.md` (§1.5 item 5 and §6.3). The guard is NOT blind
+        # to it: it REDS on this shape on `main`, and that red is #11907. What was
+        # missing is coverage in this direction — the arms were exercised on
+        # `#NNN`-first and copula forms, so the arm that fires was itself
+        # untested here, and no existing `must_flag` row carried this order.
+        # Row A is the pre-fix line as it stood (minus the trailing sentence,
+        # which the span below does not reach); row B is an exact prefix of the
+        # PRE-FIX §1.5 item 5's (this PR rewrote that item, so the phrase lives
+        # only in the pre-fix text).
+        # ⛔ The section is §1.5, not §2: `5. the **\`null\`-not-0.5 rule**` sits
+        # at line 105, under the §1.5 heading at 70 — both revision-invariant —
+        # while §2 opens at 126 AT THIS HEAD (125 on `main`, where item 5 is two
+        # lines rather than three; the +5 both sides carry is the changelog
+        # header main added above §1.5 after this PR was written). Its numbered
+        # list runs 1..3, so "§2 item 5"
+        # is a citation that resolves to nothing. ⛔ Quoting the main-side 125
+        # here without the head-side 126 is itself a stale cite, inside the
+        # instrument that exists to catch them.
+        "**✅ FIXED (#11702) — kept here as the reason the rule exists, with the "
+        "citations re-pointed.** A claim",
+        "5. the **`null`-not-0.5 rule** for absent belief state (§6.3) — **landed** (#11702, implementing",
         "*An earlier draft said* the opposite of this paragraph.",
         "**CORRECTED 2026-09-24** \u2014 this passage was repaired.",
         # The parenthesised-date form, verbatim from what #7948 added to
