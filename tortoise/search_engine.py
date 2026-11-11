@@ -1281,9 +1281,12 @@ class EpBreakdown:
     # number here is a belief that exists, and ``None`` means none does.
     confidence_mean: float | None = None
     #: #11702 — the STATE NAME for :attr:`confidence_mean`, one of
-    #: ``measured`` (an α column is persisted — not proof of an EP pass) /
+    #: ``measured`` (a READABLE belief from a persisted posterior — the name
+    #: is not proof of an EP pass: a direct `update_point` writes one too,
+    #: while a persisted α that is not readable is ``absent``, not this) /
     #: ``baseline`` (a persisted prior EP has not
-    #: measured) / ``absent`` (no persisted belief at all ⇒ the value is
+    #: measured, or a half pair) / ``absent`` (nothing that yields a mean — no
+    #: persisted belief at all, a HALF pair, or a 0/0 pair ⇒ the value is
     #: ``None``). Derives from :func:`ep_state`, the single mapping of the
     #: #11702 vocabulary; ``has_ep``/``measured`` keep their narrower #2490 /
     #: #3276 meanings and are NOT this field's source.
@@ -1312,8 +1315,9 @@ class EpBreakdown:
     # with the kind-derived system-default baseline reads has_ep=False here
     # (it used to read True at the 0.75 prior mean — the #3276 leak).
     # False = not measured; confidence_mean is then the declared prior mean
-    # when ``baseline`` is True, else ``None`` (no persisted belief at all —
-    # #11702; it used to be the neutral Beta(1,1) mean 0.5). Neither
+    # when ``baseline`` is True, else ``None`` (no READABLE belief — #11702: a
+    # 0/0 prior, a half pair, or nothing persisted; it used to be the neutral
+    # Beta(1,1) mean 0.5). Neither
     # is a signal of contestation.
     # #2490 has_ep overload: TERMINAL claims (terminal vocab status OR the
     # legacy outdated=true flag) are also gated to False — their posterior
