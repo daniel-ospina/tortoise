@@ -747,7 +747,7 @@ def test_the_rendered_block_emits_EVERY_layer_with_its_own_denominator():
         assert (int(fields["unlabelled_null"]) + int(fields["unlabelled_undeclared"])
                 == int(fields["unlabelled"])), (layer, line[0])
         # ⛔ The declared-kind HISTOGRAM must not render EMPTY beside a non-zero `labelled`: the
-        # renderer falls back to `{}` (`capstone_measure.py:3599`), so an emptied dict printed
+        # renderer falls back to `{}` (`capstone_measure.py:3611`), so an emptied dict printed
         # `labelled=<n> labelled_by_declared_kind={}` — a self-contradicting line that every
         # key-presence assertion above still passes (measured, #11837 review round 12, P2).
         if int(fields["labelled"]) > 0:
@@ -796,9 +796,11 @@ def test_a_broken_layer_query_renders_a_NAMED_GAP_and_never_a_zero():
     finally:
         projection_module.FalkorProjection.from_uri = original
     a4 = census["A4"]
-    assert str(a4["things"]["population"]).startswith("UNMEASURED("), a4["things"]
+    reason = a4["error"]
+    assert str(reason).startswith("UNMEASURED("), a4["error"]
+    assert a4["things"]["population"] == reason, a4["things"]
     assert a4["things"]["population"] != 0
-    assert str(a4["claims"]["population"]).startswith("UNMEASURED("), (
+    assert a4["claims"]["population"] == reason, (
         "the whole A4 row is the failure unit: a broken layer query must not publish the other "
         "layers' numbers under the same row")
     # ⛔ `non_vacuity` is the row's ONLY boolean, and a boolean cannot take the reason-string
@@ -810,18 +812,57 @@ def test_a_broken_layer_query_renders_a_NAMED_GAP_and_never_a_zero():
     # the row's own comment says must never be what a broken query returns (#11837 review round 13,
     # P2).
     for layer in ("claims", "things", "events"):
-        assert a4[layer]["non_vacuity"] is None, (
-            f"the {layer} layer reports non_vacuity={a4[layer]['non_vacuity']!r} on a BROKEN query — "
+        block = a4[layer]
+        assert block["non_vacuity"] is None, (
+            f"the {layer} layer reports non_vacuity={block['non_vacuity']!r} on a BROKEN query — "
             f"`True` scores an infrastructure failure as non-vacuous (false PASS) and `False` is the "
-            f"zero skeleton (a MEASURED ABSENCE): {a4[layer]}")
+            f"zero skeleton (a MEASURED ABSENCE): {block}")
+        # ⛔ EVERY OTHER FIELD MUST CARRY **THE** REASON — compared BY IDENTITY-OF-VALUE, not by a
+        # `startswith("UNMEASURED(")` prefix. A prefix pin is satisfied by the skeleton's OWN reason
+        # (`UNMEASURED(a claim-point population)`, which reads as a ZERO POPULATION) and it cannot see
+        # a field the loop simply does not name: `typed_by_kind={}` and `coverage=None` both read as
+        # MEASURED results (`None` is exactly "zero population" on this row) and both stayed green
+        # under every arm until they were named (#11837 review round 14, P2/P3).
+        for key, value in block.items():
+            if key == "non_vacuity":
+                continue
+            assert value == reason, (
+                f"the {layer} layer's `{key}` reads {value!r} on a BROKEN query instead of THE "
+                f"row's reason {reason!r} — a skeleton value under a key a real measurement also "
+                f"occupies reads as a MEASURED result: {block}")
     # ⛔ The DIAGNOSTICS are the other half of "the whole A4 row is the failure unit" asserted just
-    # above: a mutant that keeps the skeleton's numeric `0` for the top-level fields renders
-    # `claim_points=0 … error=UNMEASURED(…)` — a self-contradicting line scoring the row RED on a
-    # broken query — with every arm still green (#11837 review round 13, P2).
+    # above: a mutant that keeps the skeleton's numeric `0` — or substitutes the skeleton's OWN
+    # reason, or leaves an empty `{}` — renders `claim_points=0 … error=UNMEASURED(…)`, a
+    # self-contradicting line scoring the row RED on a broken query, with every arm still green
+    # (#11837 review rounds 13 and 14, P2).
     for key in ("claim_points", "excluded_capture_rows", "statement", "null", "typed",
-                "typed_share"):
-        assert str(a4[key]).startswith("UNMEASURED("), (
-            f"the A4 diagnostic `{key}` reads {a4[key]!r} on a BROKEN query — a numeric `0` under a "
-            f"key a real measurement occupies reads as a MEASURED ABSENCE: {a4[key]!r}")
-    assert str(a4["per_writer"]["typed_claims"]).startswith("UNMEASURED("), a4["per_writer"]
-    assert str(a4["per_writer"]["attributed"]).startswith("UNMEASURED("), a4["per_writer"]
+                "typed_share", "typed_by_kind"):
+        assert a4[key] == reason, (
+            f"the A4 diagnostic `{key}` reads {a4[key]!r} on a BROKEN query instead of THE row's "
+            f"reason {reason!r} — an empty container or the skeleton's own reason both read as a "
+            f"MEASURED result: {a4[key]!r}")
+    for key in ("typed_claims", "attributed", "by_writer", "v2_lane_excluded_by_construction",
+                "provenance"):
+        assert a4["per_writer"][key] == reason, (
+            f"`per_writer.{key}` reads {a4['per_writer'][key]!r} on a BROKEN query instead of THE "
+            f"row's reason: {a4['per_writer']}")
+    # ⛔ And the ARM'S NAME is a claim: "renders a NAMED gap". The previous revision never called the
+    # renderer at all, so `population=0` / `non_vacuity=False` on a broken query was unpinned in the
+    # very arm whose docstring forbids it (#11837 review round 14, P2). Rendered, not just computed.
+    rendered = probe.a_row_census_lines(census)
+    a4_lines = [ln for ln in rendered if ln.startswith("a4 ")]
+    assert a4_lines, rendered
+    for layer in ("claims", "things", "events"):
+        line = next((ln for ln in a4_lines if ln.startswith(f"a4 {layer} ")), None)
+        assert line is not None, (layer, a4_lines)
+        assert "population=0 " not in line, (
+            f"the {layer} line RENDERS `population=0` on a broken query — a MEASURED ABSENCE: {line}")
+        for bad in ("non_vacuity=False", "non_vacuity=True", "coverage=None"):
+            assert bad not in line, (
+                f"the {layer} line renders `{bad}` on a broken query — a MEASURED result rather "
+                f"than a named gap: {line}")
+        assert f"population={reason}" in line, (layer, line)
+    diagnostics = next(ln for ln in a4_lines if ln.startswith("a4 diagnostics "))
+    assert f"error={reason}" in diagnostics, (
+        "the diagnostics line must render the row's reason beside the fields it explains — the "
+        f"`row()` comment says so: {diagnostics}")

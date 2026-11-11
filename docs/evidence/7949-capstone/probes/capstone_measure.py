@@ -3434,11 +3434,23 @@ def a_row_census(uri: str) -> dict:
             # is never asked to infer it from the boolean.
             block: dict = {"error": reason}
             for key, value in empty.items():
-                if isinstance(value, dict):
+                if isinstance(value, bool):
+                    # ⛔ A BOOLEAN is `None`, never the reason string and never the skeleton's own
+                    # value: `True` scores an infrastructure failure as a PASS, and the skeleton's
+                    # `False` scores it as a MEASURED ABSENCE. `None` answers neither reading.
+                    block[key] = None
+                elif isinstance(value, dict) and value:
                     block[key] = {name_: (None if isinstance(name_value, bool) else reason)
                                   for name_, name_value in value.items()}
                 else:
-                    block[key] = None if isinstance(value, bool) else reason
+                    # ⛔ EVERYTHING ELSE IS THE REASON — numbers, `None`, and EMPTY containers.
+                    # An empty skeleton container (`typed_by_kind: {}`, `declared_absent: []`) used
+                    # to survive as itself, which is indistinguishable from a MEASURED empty
+                    # result: `typed_by_kind={}` beside `error=UNMEASURED(...)` reads as "no typed
+                    # kinds", and `coverage: None` reads as "zero population" — the one meaning
+                    # `None` already carries on this row (`:3076`). Both were measured green under
+                    # every arm before they were named (#11837 review round 14, P2/P3).
+                    block[key] = reason
             return block
 
     # A1 — the object→object graph, plus the rollup half.
