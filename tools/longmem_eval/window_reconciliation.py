@@ -129,9 +129,12 @@ DEFAULT_RECONCILIATION_TOKEN_CAP = 24000
 DEFAULT_RECONCILIATION_PROMPT_HEADROOM = 1000
 DEFAULT_RECONCILIATION_COMPLETION_HEADROOM = 2000
 
-#: The max number of chunks the reader window may hold after the raise.
-#: A window beyond this is not a measurement of the same mechanism any
-#: more (it is a different instrument) — the clamp is a guard, not a knob.
+#: The ceiling on the RAISE, not on the window — ``_raise_dimension`` is
+#: ``max(base, min(base * factor, maximum))``, so a base already above the
+#: constant keeps its own window (the raise is what is clamped, deliberately:
+#: a clamp that could LOWER a dimension would invert the raise). A window
+#: beyond this is not a measurement of the same mechanism any more (it is a
+#: different instrument) — the clamp is a guard, not a knob.
 MAX_RAISED_CONTEXT_ITEM_CAP = 400
 MAX_RAISED_TOP_K = 400
 
@@ -145,6 +148,29 @@ def is_abs_question(question_id: str | None) -> bool:
     """The official ``_abs`` suffix convention (abstention questions are
     excluded from the failing class entirely — their reader MUST abstain)."""
     return isinstance(question_id, str) and "_abs" in question_id
+
+
+def recall_at_k_value(recall: Any, k: int | str = 5) -> float | None:
+    """The ``session_recall@k`` fraction for ``k``, falling back to any
+    recorded k.
+
+    ⛔ Unlike ``reader_surface@k`` this metric IS k-dependent, so a fallback
+    reports a DIFFERENT k than the one requested. It is still the right
+    behaviour here: without it, a run whose ``--k`` omits the hard-coded
+    default reads ``None`` on BOTH sides, the drift loop skips every
+    question, and the census publishes ``pool_drift_n: 0`` — an EMPTY
+    population reported as a measured "no drift". The aggregate therefore
+    also publishes ``n_pool_drift_pairs``, so an unread population is
+    visible as such rather than as a zero.
+    """
+    if not isinstance(recall, dict):
+        return None
+    v = recall.get(str(k))
+    if v is None and recall:
+        v = next(iter(recall.values()))
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return float(v)
 
 
 def reader_surface_value(reader_surface: Any, k: int | str = 5,
@@ -521,14 +547,17 @@ def reconciliation_variant_rows(outcomes: list[dict], *,
     surfaces_after = [a for _b, a in surface_pairs]
 
     drift = 0
+    drift_pairs = 0
     for o in admitted:
         s = _stats(o)
         b = s.get("session_recall_before")
         a = s.get("session_recall_after")
         if (isinstance(a, (int, float)) and not isinstance(a, bool)
-                and isinstance(b, (int, float)) and not isinstance(b, bool)
-                and float(a) != float(b)):
-            drift += 1
+                and isinstance(b, (int, float))
+                and not isinstance(b, bool)):
+            drift_pairs += 1
+            if float(a) != float(b):
+                drift += 1
 
     caps = [s.get("cap") for s in (_stats(o) for o in fired)
             if isinstance(s.get("cap"), int)]
@@ -579,6 +608,12 @@ def reconciliation_variant_rows(outcomes: list[dict], *,
             "n": len(surface_pairs),
         },
         "pool_drift_n": drift,
+        # ⛔ The population the drift count was taken over. ``0`` drift out
+        # of 0 pairs is an UNREAD census, not a measured "no drift" —
+        # without this an empty population is indistinguishable from a
+        # clean one (the same class the surface delta already guards with
+        # its own ``n``).
+        "n_pool_drift_pairs": drift_pairs,
         "official_invariant": (
             "official recall_all@k derives from the one-shot "
             "session_recall@k only — the re-run never mutates the one-shot "

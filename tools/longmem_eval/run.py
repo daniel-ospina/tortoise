@@ -767,8 +767,8 @@ def _reconcile_failing_question_pass(
     stats["reason"] = reason
     stats["reader_surface_before"] = window_recon.reader_surface_value(
         ret.get("reader_surface@k"), k)
-    stats["session_recall_before"] = (ret.get("session_recall@k")
-                                     or {}).get(str(k))
+    stats["session_recall_before"] = window_recon.recall_at_k_value(
+        ret.get("session_recall@k"), k)
     collector = lme_usage.get_collector()
     before = collector.peek_question(qid)
     # The bound is denominated on the RAISED WINDOW the re-run may fill, not
@@ -811,8 +811,8 @@ def _reconcile_failing_question_pass(
     stats["variant_label"] = bool(label2)
     stats["reader_surface_after"] = window_recon.reader_surface_value(
         ret2.get("reader_surface@k"), k)
-    stats["session_recall_after"] = (ret2.get("session_recall@k")
-                                     or {}).get(str(k))
+    stats["session_recall_after"] = window_recon.recall_at_k_value(
+        ret2.get("session_recall@k"), k)
     after = collector.peek_question(qid)
     # ⛔ UNKNOWN SPEND IS NOT ZERO SPEND. `usage.py` keeps `usage_present`
     # conservatively False (and counts `calls_without_usage`) when a provider
@@ -4754,8 +4754,11 @@ def run_evaluation(
     # ONCE, before the loop — same contract as the sibling arms
     # (methodology == actual == fingerprint; fail-safe OFF: only
     # 1/true/yes/on enables — the #1745 default decision). The per-question
-    # token cap is resolved WITH it and is ``None`` while the arm is OFF
-    # (an inert knob is never read, never fingerprinted, never recorded).
+    # token cap is resolved WITH it: ``None`` while the arm is OFF, so the
+    # env is never read and no inert knob is fingerprinted. NOTE the
+    # METHODOLOGY record still stamps the product default in that case (the
+    # ``session_reinjection_total_cap`` precedent) — recording the value an
+    # arm-ON run would use is not reading a knob.
     if window_reconciliation is None:
         wr_env = (os.environ.get("TORTOISE_LME_WINDOW_RECONCILIATION") or "")
         window_reconciliation = wr_env.strip().lower() in _TRUTHY
@@ -5697,6 +5700,7 @@ def run_evaluation(
                                         question=question, qid=qid, ret=ret,
                                         label=label, hypothesis=hypothesis,
                                         ks=ks,
+                                        k=ks[0],
                                         retrieval_kwargs=_retrieval_kwargs,
                                         raised=window_reconciliation_raised,
                                         cap=window_reconciliation_token_cap,
@@ -8075,8 +8079,10 @@ def _run_main(parser: argparse.ArgumentParser, args,
     # 1/true/yes/on enables). Resolved once and threaded into
     # run_evaluation (methodology == actual). The per-question token cap
     # rides the SAME contract through the shared resolver: an arm-OFF run
-    # resolves None (the env is never read, no inert value is recorded) and
-    # an arm-ON run clamps a garbage explicit value to the default rather
+    # resolves None and never reads the env. (The METHODOLOGY record still
+    # stamps the product default — the ``session_reinjection_total_cap``
+    # precedent — so the artifact documents what an arm-ON run would use.)
+    # An arm-ON run clamps a garbage explicit value to the default rather
     # than serving a silent zero-token cap (which would admit nothing and
     # look like a dead arm).
     if args.window_reconciliation is not None:

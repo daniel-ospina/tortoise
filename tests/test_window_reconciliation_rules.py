@@ -917,6 +917,32 @@ def test_variant_rows_do_not_call_an_errored_pass_a_cap_skip():
     assert rows["n_errored"] == 1
 
 
+def test_pool_drift_is_read_at_the_runs_k_not_a_hard_coded_five():
+    """⛔ #11830 round-4 P1: the census read ``session_recall@k`` with a
+    hard-coded ``k=5`` the caller never overrode, so a run on ``--k 10,20``
+    read None on both sides, skipped every question, and published
+    ``pool_drift_n: 0`` — an EMPTY population reported as a measured "no
+    drift". The value now falls back to a recorded k, and the paired
+    population is published so an unread census is visible as one."""
+    recall = {"10": 1.0, "20": 0.5}
+    assert wr.recall_at_k_value(recall, 5) == 1.0      # falls back, not None
+    assert wr.recall_at_k_value(recall, 20) == 0.5     # exact k still wins
+    assert wr.recall_at_k_value(None, 5) is None
+    assert wr.recall_at_k_value({"5": None}, 5) is None
+
+    drifted = _variant_outcome("q1", one_shot=False, variant=True,
+                               recall_before=0.5, recall_after=1.0)
+    rows = wr.reconciliation_variant_rows([drifted], k=5)
+    assert rows["pool_drift_n"] == 1
+    assert rows["n_pool_drift_pairs"] == 1
+    # An UNREAD population reports 0 pairs — never a bare "no drift".
+    unpairable = _variant_outcome("q2", one_shot=False, variant=True)
+    unpairable["window_reconciliation_stats"]["session_recall_before"] = None
+    rows = wr.reconciliation_variant_rows([unpairable], k=5)
+    assert rows["pool_drift_n"] == 0
+    assert rows["n_pool_drift_pairs"] == 0
+
+
 def test_variant_rows_pool_drift_is_surfaced():
     outcomes = [
         _variant_outcome("q1", one_shot=False, variant=True,
