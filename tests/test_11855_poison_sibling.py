@@ -42,7 +42,11 @@ The `annotate_ep_batch` test was ALREADY green there — its coercion is Python-
 (`numeric_operand`, total since #11702 cycle 16) — so it does not discriminate
 against `be229efdb7df`; it guards the batch-level ``except → {}`` blanking that a
 future refactor of that read could reintroduce. `"abc"` and `True` pass on both
-trees for the same reason the template's inner `CASE` already covered them.
+trees for two DIFFERENT reasons, and the distinction matters to anyone editing the
+template: `"abc"` falls through the inner `CASE` and is nulled by the coercion
+itself (`toFloat`/`toFloatOrNull` answers NULL for non-numeric text), while `True`
+is nulled by the inner `CASE` (`toString(true)` is `'true'`) before the coercion
+sees it. Only the `List` is a shape the raising spellings refuse.
 
 ⛔ ONE MEASURED CORRECTION, kept because the wrong version is the obvious thing to
 reintroduce: the decoration test only discriminates because `_seed` anchors an
