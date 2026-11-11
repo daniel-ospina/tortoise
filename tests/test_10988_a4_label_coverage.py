@@ -1,7 +1,9 @@
 """`#10988` — A4's CI CONTRACT TWIN: per-layer label coverage, `NULL` kept as a reported share.
 
-**Test tier: `CI`** (offline, deterministic, sub-second — every arm below drives a pure function or
-a fake projection; no graph, no model, no network). A4's own measurement is **Tier E** (a read-only
+**Test tier: `CI`** (offline, deterministic — every arm below drives a pure function or a fake
+projection; no graph, no model, no network, no `gh`, with ONE exception: the SDK-registration arm
+spawns a single child interpreter because it needs a vocabulary built before `tortoise.sdk` is
+imported. That spawn is ~0.5 s, and the file measured 4.6 s wall on this host). A4's own measurement is **Tier E** (a read-only
 census over the fleet graph, `04-plan.md` §2 W2c), and this file is the contract half the epic
 requires beside it: *"a `Tier E` case without its CI contract twin is not done"* (`#11454`).
 
