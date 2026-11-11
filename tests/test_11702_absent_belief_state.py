@@ -57,6 +57,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # `POST /v1/sessions` route, so it reuses `tests/test_hosted_api.py`'s
 # authenticated TestClient fixture — the established repo pattern (see
 # `tests/test_capture_phase_d_dedup.py`), not a second hand-rolled app harness.
+from tests.test_hosted_api import TEST_ORG_ID  # noqa: E402, RUF100
 from tests.test_hosted_api import client as client  # noqa: E402, RUF100, F401
 from tortoise import ranking as _ranking  # noqa: E402, RUF100
 from tortoise import search_engine as _se  # noqa: E402, RUF100
@@ -2781,7 +2782,25 @@ def test_write_verb_ep_updated_pins_the_hosted_mirror_only_claim(
     pid = body["points"][0]["id"]
 
     import tortoise.hosted_api as ha_mod
-    proj = ha_mod._make_sdk(namespace="team-001")._get_proj()
+    # The mirror belief lives in the graph the HOSTED write verb opens, which for
+    # an org with no promoted graph is keyed by the AUTHENTICATED team id
+    # (`_data_sdk` -> `_make_sdk(namespace=org_id)`) — so this
+    # handle must be built from the fixture's own `TEST_ORG_ID`, imported
+    # beside the `client` fixture above, not from a second hardcoded copy of
+    # the id. (That default is a POINTER that a promotion can move, #10180 —
+    # true of this fixture's unpromoted org, and a move would red the
+    # `ep_updated: True` arm rather than let it pass.) The form matters twice:
+    # `tests/test_markers.py`'s `test_namespace_literals_guard_passing_or_routed`
+    # reds on an un-routed non-test literal (#11905) and this scan cannot see a
+    # variable, so the construction needs no `ROUTED_NAMESPACES` declaration —
+    # do not re-add a `"team-001"` row for it, that is the rejected alternative
+    # and it becomes a whitelist once the literal is gone. And a `test_*`
+    # rename would open a DIFFERENT graph than the write verb writes, where
+    # `_clear_belief`'s `MATCH (n:Point {id:$id})` finds no node — it clears
+    # nothing, so the `ep_updated: True` arm below would fail loudly (the
+    # β-only arm after it can never be reached, so it is non-discriminating
+    # rather than merely vacuous).
+    proj = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj()
     _clear_belief(proj, pid, mirror=0.95)
     payload = dict(payload, session_id="zq-ep-flag-http-b")
     r2 = client.post("/v1/sessions", json=payload)
