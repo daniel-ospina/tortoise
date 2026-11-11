@@ -31,6 +31,7 @@ import re
 from datetime import datetime, timezone
 
 from .search_engine import (  # noqa: E402, RUF100
+    _beta_mean,
     _beta_variance,
     _exclude_status_clause,
     CONTESTED_VARIANCE_THRESHOLD,
@@ -1563,7 +1564,18 @@ class StateRanker:
                 if mirror is not None:
                     conf = float(mirror)
                 elif (alpha + beta) > 0:
-                    conf = round(alpha / (alpha + beta), 6)
+                    # #11702 cycle 14: THROUGH `_beta_mean`, not a bare
+                    # division. An overflowing pair
+                    # (`update_point(posterior_alpha=1e308,
+                    # posterior_beta=1e308)`) answered `1e308/inf == 0.0` here
+                    # — maximum disbelief, on the value these two rankers
+                    # ORDER on (`base = rel × conf**exp`) — while the `ep`
+                    # block and the GraphRanker answered 0.5 for the same
+                    # node. Measured: one claim, two belief answers, both
+                    # labelled `measured`. The three other read surfaces were
+                    # converted in cycle 13; these two carried their own
+                    # division and were missed.
+                    conf = round(_beta_mean(alpha, beta), 6)
                 else:  # pragma: no cover — unreachable BY the presence rule
                     # `has_prior` is now `ep_has_belief_cypher`, which requires a
                     # mirror OR α+β > 0; with no mirror, reaching here would mean
@@ -2093,7 +2105,18 @@ class GapsRanker:
                 if mirror is not None:
                     conf = float(mirror)
                 elif (alpha + beta) > 0:
-                    conf = round(alpha / (alpha + beta), 6)
+                    # #11702 cycle 14: THROUGH `_beta_mean`, not a bare
+                    # division. An overflowing pair
+                    # (`update_point(posterior_alpha=1e308,
+                    # posterior_beta=1e308)`) answered `1e308/inf == 0.0` here
+                    # — maximum disbelief, on the value these two rankers
+                    # ORDER on (`base = rel × conf**exp`) — while the `ep`
+                    # block and the GraphRanker answered 0.5 for the same
+                    # node. Measured: one claim, two belief answers, both
+                    # labelled `measured`. The three other read surfaces were
+                    # converted in cycle 13; these two carried their own
+                    # division and were missed.
+                    conf = round(_beta_mean(alpha, beta), 6)
                 else:  # pragma: no cover — unreachable BY the presence rule
                     # `has_prior` is now `ep_has_belief_cypher`, which requires a
                     # mirror OR α+β > 0; with no mirror, reaching here would mean

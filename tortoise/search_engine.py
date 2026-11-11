@@ -4214,9 +4214,17 @@ def ep_width_cypher(alias: str) -> str:
     """
     a = f"coalesce({alias}.posterior_alpha, {alias}.ep_alpha)"
     b = f"coalesce({alias}.posterior_beta, {alias}.ep_beta)"
+    # A FINITE total as well — the same guard `_beta_variance` applies to the
+    # same rule. `(1e308, 1e308)` has both operands, both non-negative and a
+    # positive total, yet `αβ/((α+β)²(α+β+1))` overflows to `inf/inf` = NaN —
+    # measured: `analyze.most_uncertain` put that claim FIRST with `var: nan`,
+    # ahead of a genuine `1/12`. A width that cannot be computed is not a
+    # width, and "no computable width wins the uncertainty ranking" is the
+    # inversion this predicate exists to prevent.
     return (f"({ep_pair_stored_cypher(alias)} "
             f"AND coalesce({a}, 0.0) >= 0 AND coalesce({b}, 0.0) >= 0 "
-            f"AND (coalesce({a}, 0.0) + coalesce({b}, 0.0)) > 0)")
+            f"AND (coalesce({a}, 0.0) + coalesce({b}, 0.0)) > 0 "
+            f"AND (coalesce({a}, 0.0) + coalesce({b}, 0.0)) <= 1e308)")
 
 
 def ep_variance_admissible_cypher(alias: str) -> str:
@@ -4272,9 +4280,15 @@ def belief_mean_cypher(alpha_operand: str, beta_operand: str, *,
     a = f"toFloat({alpha_operand})"
     b = f"toFloat({beta_operand})"
     s_sum = f"({a} + {b})"
-    return (f"CASE WHEN {s_sum} > 1e308 "
-            f"THEN CASE WHEN {a} > 0 THEN 1.0 / (1.0 + {b} / {a}) "
-            f"          ELSE {degenerate} END "
+    # The overflow arm applies ONLY when the identity is defined (`α > 0`).
+    # Keying the whole branch on the sum alone made `(0, 1.7e308)` — a stored
+    # pair the presence rule accepts, sum finite but > 1e308 — fall into the
+    # `ELSE degenerate` arm and render `null` beside `ep_state: "measured"`,
+    # while `_beta_mean` answers `0.0` for the same pair. With `α > 0` folded
+    # into the condition that pair takes the ordinary division, which is what
+    # the Python owner computes.
+    return (f"CASE WHEN {s_sum} > 1e308 AND {a} > 0 "
+            f"THEN 1.0 / (1.0 + {b} / {a}) "
             f"     WHEN {s_sum} > 0 THEN {a} / {s_sum} "
             f"     ELSE {degenerate} END")
 

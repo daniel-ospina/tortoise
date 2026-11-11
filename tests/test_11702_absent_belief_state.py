@@ -1794,6 +1794,162 @@ def test_contested_claims_reads_an_int_stored_pair(sdk):
         + repr(sorted(listed)))
 
 
+def test_every_ranker_reads_an_overflowing_pair_the_same_way(sdk):
+    """Cycle 14: `StateRanker` and `GapsRanker` still divided directly.
+
+    Cycle 13 routed `belief_value`, `GraphRanker`, `SubgraphExpander` and
+    `analyze._BELIEF` through `_beta_mean`, and MISSED the two rankers that
+    ORDER on the value. For `update_point(posterior_alpha=1e308,
+    posterior_beta=1e308)` — a stored pair the presence rule accepts — the sum
+    overflows to `inf`, so `1e308/inf == 0.0`: measured on the reviewed head,
+    one claim answered `0.5` in the `ep` block and in `graph_ranking`, and
+    `0.0` in `recall_ranking` and `gaps_ranking`, all four labelled `measured`.
+    `recall_ranking`'s 0.0 is not cosmetic — it is the `conf**exp` base of the
+    row's score.
+
+    A `(0, 1.7e308)` pair is pinned too: its sum is FINITE but above the
+    overflow threshold, and the Cypher twin's first cut rendered `null` for it
+    (the identity `1/(1 + β/α)` is undefined at α = 0) beside
+    `ep_state: "measured"` while the Python owner answered 0.0.
+    """
+    proj = sdk._get_proj()
+
+    def _point(content, alpha, beta):
+        pid = sdk.create_point("statement", content)["id"]
+        proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = $a, "
+                     "n.posterior_beta = $b, n.confidence = null",
+                     params={"id": pid, "a": alpha, "b": beta})
+        return pid
+
+    symmetric = _point("overflowing symmetric pair", 1e308, 1e308)
+    zero_alpha = _point("zero alpha, huge beta", 0.0, 1.7e308)
+    skewed = _point("overflowing skewed pair", 1.7e308, 1e307)
+    ids = [symmetric, zero_alpha, skewed]
+    expected = {
+        symmetric: 1.0 / (1.0 + 1e308 / 1e308),          # 0.5
+        zero_alpha: 0.0,                                  # 0/1.7e308
+        skewed: 1.0 / (1.0 + 1e307 / 1.7e308),            # 0.944…
+    }
+
+    ann = annotate_ep_batch(proj.g, ids)
+    rec = {r["id"]: r["recall_ranking"] for r in
+           StateRanker(projection=proj).rerank(
+               [{"id": p, "scores": {"rrf": 1.0}} for p in ids])}
+    gaps = {r["id"]: r["gaps_ranking"] for r in
+            GapsRanker(projection=proj).rerank(
+                [{"id": p, "scores": {"rrf": 1.0}} for p in ids])}
+    graph = {r["id"]: r["graph_ranking"] for r in
+             GraphRanker(projection=proj).rerank(
+                 [{"id": p, "scores": {"rrf": 1.0}} for p in ids])}
+
+    for pid in ids:
+        want = expected[pid]
+        got = {
+            "ep": ann[pid].confidence_mean,
+            "recall_ranking": rec[pid]["confidence"],
+            "gaps_ranking": gaps[pid]["confidence"],
+            "graph_ranking": graph[pid]["confidence"],
+        }
+        for surface, value in got.items():
+            assert value is not None, (
+                f"{surface} reported no belief for {pid} — an overflowing "
+                "pair is a stored belief, and null beside a present state is "
+                "the two-answers defect")
+            # 1e-4, not 1e-9: the `ep` block rounds its mean to 4 dp.
+            assert value == pytest.approx(want, abs=1e-4), (
+                f"{surface} reports {value!r} for the pair behind {pid}; the "
+                f"mean is {want!r} — one claim, one number")
+        for surface, row in (("recall_ranking", rec[pid]),
+                             ("gaps_ranking", gaps[pid]),
+                             ("graph_ranking", graph[pid])):
+            assert row["ep_state"] == EP_STATE_MEASURED, (surface, row)
+
+
+def test_a_width_that_cannot_be_computed_is_not_the_widest_claim(sdk):
+    """Cycle 14: `ep_width_cypher` admitted a pair whose VARIANCE is NaN.
+
+    `(1e308, 1e308)` has both operands, both non-negative and a positive
+    total, so the strict width rule said "usable width" — and the variance
+    formula `αβ/((α+β)²(α+β+1))` then overflows to `inf/inf`. Measured:
+    `analyze.most_uncertain` put that claim FIRST with `var: nan`, ahead of a
+    genuine Beta(1,1) `1/12` — "no computable width" winning a "where are we
+    least certain" answer, the same inversion as the mirror-only case.
+
+    `_beta_variance` refuses a non-finite sum; the predicate that decides
+    ADMISSIBILITY must carry the same guard.
+    """
+    proj = sdk._get_proj()
+
+    def _point(content, alpha, beta):
+        pid = sdk.create_point("statement", content)["id"]
+        proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = $a, "
+                     "n.posterior_beta = $b", params={"id": pid, "a": alpha,
+                                                      "b": beta})
+        return pid
+
+    no_width = _point("a pair with no computable width", 1e308, 1e308)
+    widest = _point("a genuinely maximally wide pair", 1.0, 1.0)
+    tight = _point("a contested pair", 2.0, 2.0)
+
+    from tortoise.ep import TortoiseEP
+    listed = {c["id"]: c for c in TortoiseEP(projection=proj).get_contested_claims()}
+    assert no_width not in listed, (
+        "a pair whose variance overflows to NaN was listed as contested: "
+        + repr(listed.get(no_width)))
+    assert widest in listed and tight in listed, sorted(listed)
+
+    ann = annotate_ep_batch(proj.g, [no_width, widest, tight])
+    assert ann[no_width].variance == 0.0, ann[no_width]
+    assert ann[no_width].contested is False, ann[no_width]
+    assert ann[widest].variance == pytest.approx(1 / 12, abs=1e-6)
+    assert ann[tight].variance == pytest.approx(0.05, abs=1e-6)
+    assert ann[tight].contested is True, ann[tight]
+
+    # …and the analyze template that ranks by width must not put it on top.
+    from tortoise.analyze import analyze
+    out = analyze("which claims are least uncertain?", proj=proj,
+                  use_llm=False, entity_subgraph_ids={no_width, widest, tight})
+    text = str(out.get("answer") or "")
+    assert "no computable width" not in text, (
+        "a claim with no computable width won the uncertainty answer: " + text)
+    assert "nan" not in text.lower(), (
+        "the answer rendered a NaN width: " + text)
+
+
+def test_a_draft_with_no_belief_is_absent_not_withheld(sdk):
+    """Cycle 14: the revised manifest rule must hold for a BELIEF-LESS draft.
+
+    The doc now says `ep_state` is the authority (absent vs present) and
+    `confidence_source: "uncomputed"` explains why a value is missing. A draft
+    with NO belief emits `uncomputed` + `absent` — so `uncomputed` alone does
+    not mean "withheld", and a consumer reading it that way would label a
+    no-belief row as "carries a belief, display suppressed": the exact
+    conflation this issue removes, at the contract boundary.
+    """
+    proj = sdk._get_proj()
+    bare = sdk.create_point("statement", "a draft with no belief at all",
+                            status="draft")["id"]
+    with_prior = sdk.create_point("statement", "a draft carrying a prior",
+                                  credibility="high", status="draft")["id"]
+    rows = {r["id"]: r["recall_ranking"] for r in StateRanker(projection=proj).rerank(
+        [{"id": p, "scores": {"rrf": 1.0}} for p in (bare, with_prior)])}
+
+    assert rows[bare]["ep_state"] == EP_STATE_ABSENT, rows[bare]
+    assert rows[bare]["confidence"] is None, rows[bare]
+    assert rows[bare]["confidence_source"] == UNCOMPUTED_CONFIDENCE_SOURCE, rows[bare]
+    assert rows[bare]["belief_informed_order"] is False, rows[bare]
+
+    assert rows[with_prior]["ep_state"] == EP_STATE_BASELINE, rows[with_prior]
+    assert rows[with_prior]["confidence"] is None, rows[with_prior]
+    assert rows[with_prior]["confidence_source"] == UNCOMPUTED_CONFIDENCE_SOURCE, rows[with_prior]
+    assert rows[with_prior]["belief_informed_order"] is True, rows[with_prior]
+
+    # The documented rule, executable: the STATE decides, the SOURCE explains.
+    for pid, row in rows.items():
+        has_belief = annotate_ep_batch(proj.g, [pid])[pid].ep_state != EP_STATE_ABSENT
+        assert (row["ep_state"] != EP_STATE_ABSENT) == has_belief, (pid, row)
+
+
 def test_the_artifact_reader_agrees_with_the_shared_reader_where_both_are_total():
     """Cycle 13 (P3 follow-up): the seventh surface duplicates `belief_value`.
 
