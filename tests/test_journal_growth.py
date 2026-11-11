@@ -549,32 +549,50 @@ def test_probe_pins_its_published_outputs(
     assert probe.line_bytes(by_type["PointAdded"]) == 570     # what production writes
 
     # The published per-operation table (README / §5.2).
+    #
+    # ⚠️ #11821 P0 (#11821) RE-BASED THESE, and the pre-P0 figures are recorded
+    # beside them so the change is attributable rather than invisible:
+    #   PointAdded 9,176 → 5,860 · OperatorAdded 8,859 → 5,543 ·
+    #   PointPromoted 8,657 → 5,341 · vector 8,414 → 5,072 B (21.9 → 13.2
+    #   chars/float) · whole corpus 51,346 → 34,766 B.
+    # The probe calls the LIVE seam (`stamp_journal_embedding`), so it follows
+    # the writer by design; `docs/evidence/5612-journal-growth/README.md`'s
+    # 2026-10-17 block is retained as the historical measurement, and
+    # `docs/evidence/11821-journal-encoding/` carries the re-measurement and the
+    # per-class delta. `line_bytes` keeps the PRE-P0 separators (spaced), so
+    # these numbers sit ~431 B above what the live writer emits — stated here
+    # because the two are easy to confuse.
     plain_point = by_type["PointAdded"]
     stamped_point = probe.stamp(plain_point, vec)
-    assert probe.line_bytes(stamped_point) == 9_176
+    assert probe.line_bytes(stamped_point) == 5_860
     assert probe.line_bytes(by_type["PointRevised"]) == 196
     assert probe.line_bytes(by_type["EntityLinked"]) == 249
     assert probe.line_bytes(by_type["OperatorAdded"]) == 319
-    assert probe.line_bytes(probe.stamp(by_type["OperatorAdded"], vec)) == 8_859
+    assert probe.line_bytes(probe.stamp(by_type["OperatorAdded"], vec)) == 5_543
     assert probe.line_bytes(by_type["PointPromoted"]) == 228
-    assert probe.line_bytes(probe.stamp(by_type["PointPromoted"], vec)) == 8_657
+    assert probe.line_bytes(probe.stamp(by_type["PointPromoted"], vec)) == 5_341
 
-    # The vector's bytes, and the published decomposition of the 8,606 B
-    # growth over the `as committed` record: the 8,414 B of vector text
-    # REPLACES the committed 10 B placeholder `[0.1, 0.2]` (+8,404 B) and the
-    # three #5004 identity keys add the remaining 202 B — not 8,414 + 204,
-    # which would exceed the growth it claims to decompose.
+    # The vector's bytes, and the published decomposition of the 5,290 B
+    # growth over the `as committed` record: the 5,072 B of vector text
+    # REPLACES the committed 10 B placeholder `[0.1, 0.2]` (+5,062 B) and the
+    # three #5004 identity keys plus #11821's width marker add the remaining
+    # 228 B — not 5,072 + 204, which would exceed the growth it claims to
+    # decompose.
     emb = stamped_point["point"]["embedding"]
-    assert len(json.dumps(emb)) == 8_414
+    assert len(json.dumps(emb)) == 5_072
     growth = probe.line_bytes(stamped_point) - probe.line_bytes(plain_point)
-    assert growth == 8_606
+    assert growth == 5_290
     vector_growth = (len(json.dumps(emb))
                      - len(json.dumps(plain_point["point"]["embedding"])))
-    assert vector_growth == 8_404
+    assert vector_growth == 5_062
     keys_added = sum(
         len(f', "{k}": {json.dumps(stamped_point["point"][k])}')
-        for k in ("embedding_model", "embedding_revision", "embedding_text_hash"))
-    assert keys_added == 202
+        for k in ("embedding_model", "embedding_revision",
+                  "embedding_text_hash",
+                  # #11821 P0: the width declaration is the fourth payload key
+                  # the stamp adds, so the decomposition must count it.
+                  "embedding_width"))
+    assert keys_added == 228
     assert growth == vector_growth + keys_added
 
     # WHERE those 202 B come from, and why they are not a second charge for
@@ -605,8 +623,9 @@ def test_probe_pins_its_published_outputs(
                 39, 8_711, 218, 336, 570)
     assert (hosted["records"], hosted["bytes"], hosted["record_bytes"]["p50"],
             hosted["record_bytes"]["p95"], hosted["record_bytes"]["max"]) == (
-                39, 51_346, 219, 8_877, 9_176)
-    assert hosted["embedding_bytes"] == 42_070
+                39, 34_766, 219, 5_561, 5_860)      # #11821 P0: was 51,346 /
+                                                    # 8,877 / 9,176
+    assert hosted["embedding_bytes"] == 25_360      # #11821 P0: was 42,070
 
     # Only the creating/promoted types are stamped (`PointRevised` is a delta).
     revised = probe.stamp({"type": "PointRevised", "point": {"id": "p1"}}, vec)
@@ -616,10 +635,10 @@ def test_probe_pins_its_published_outputs(
     # reproduce them from the console block the README pastes.
     assert probe.main() == 0
     out = capsys.readouterr().out
-    assert "PointAdded           9,176 B  (as committed: 570 B)" in out
+    assert "PointAdded           5,860 B  (as committed: 570 B)" in out
     assert "p50    219 B" in out                 # the corpus p50, published 3×
-    assert "8,414 B (21.9 chars/float)" in out
-    assert "42,070 / 51,346 B (81.9%)" in out
+    assert "5,072 B (13.2 chars/float)" in out
+    assert "25,360 / 34,766 B (72.9%)" in out
     # The NOTE the README pastes states WHERE the baseline's identity keys sit —
     # the placement the 202 B attribution above depends on.
     assert "#5004's identity keys at the record's TOP LEVEL" in out

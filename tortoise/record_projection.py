@@ -591,6 +591,13 @@ TURNS_SNAPSHOT_KEYS: frozenset[str] = frozenset({
 #: with no origin, which is the silent model change the stamps expose.
 TURNS_SNAPSHOT_OPTIONAL_KEYS: frozenset[str] = frozenset({
     "embedding_preserved",
+    # #11821 P0: the width the snapshot's vector text was written at. OPTIONAL
+    # for the same reason as the identity stamps below: `stamp_journal_embedding`
+    # is the only writer and it is GUARDED at the call site (`#5148` — a write
+    # must not depend on an import), so a capture whose seam was unimportable
+    # journals the vector with no width — exactly the pre-#11821 shape, which
+    # this set must keep accepting.
+    "embedding_width",
     "embedding_model", "embedding_revision", "embedding_text_hash",
     # #8488 scope 1: the enriched text the turn's vector describes rides the
     # snapshot ONLY on the branch where the gate was ON and the enrichment
@@ -2318,6 +2325,13 @@ _RECORD_ONLY_KEYS: frozenset[str] = frozenset({
     # node property — the fold's `_POINT_HANDLED` drops them too).
     "embedding_model", "embedding_revision", "embedding_text_hash",
     "embedding_preserved",
+    # #11821 P0: the WIDTH the payload's vector text was written at (`f32` /
+    # `f64`, `embeddings.JOURNAL_VECTOR_WIDTH_KEY`). A description of the
+    # JOURNAL's encoding, in the same class as the identity stamps above: it is
+    # not a record column and must not fall into the record's `props` jsonb,
+    # where `cache_projection._props_from_row` would copy it back onto the node
+    # as a live-only property a rebuild never restores.
+    "embedding_width",
     # #10010 review P1: the dedup fold's RECORD flag (a description of the
     # record, never node state — `_POINT_HANDLED` drops it on replay too). It
     # states that this creation-shaped record folded evidence into an EXISTING

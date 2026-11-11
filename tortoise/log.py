@@ -1543,7 +1543,18 @@ class EventLog:
         ``POSITION`` block above.
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        record = json.dumps(event, ensure_ascii=False) + "\n"
+        # #11821 P0: COMPACT separators. The journal is byte-metered and never
+        # pretty-printed (nothing reads it back as text), so the default
+        # ``(", ", ": ")`` spent ONE space per separator: measured on the
+        # committed corpus, 435 B of a 9,176 B creating record and 383 B of its
+        # 5,072 B vector alone. This is not a format change — JSON whitespace
+        # is insignificant, `read_all`/`json.loads`/the strict restore reader
+        # all decode the compact line to the identical object — and it is
+        # DELIBERATELY its own commit so the byte delta is attributable
+        # separately from the float32 narrowing above (`_POSITION` already
+        # writes compact for the same reason).
+        record = json.dumps(event, ensure_ascii=False,
+                            separators=(",", ":")) + "\n"
         # Resolved ONCE per journal (memoised), then handed to both locks: the
         # ``flock`` key must be the same resolved path the thread lock uses, or
         # two spellings of one journal would contend on different flock keys.

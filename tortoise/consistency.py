@@ -183,6 +183,12 @@ _EXCLUSION_REASONS: dict[str, str] = {
     "embedding_revision": "#5004 — payload-only embedding identity, never a node prop",
     "embedding_text_hash": "#5004 — payload-only embedding identity, never a node prop",
     "embedding_preserved": "#5004 — payload-only capture marker, never a node prop",
+    # #11821 P0: the width the payload's vector TEXT was written at. A property
+    # of the journal's encoding (`embeddings.JOURNAL_VECTOR_WIDTH_KEY`), so the
+    # graph has no counterpart to compare it against — a payload carrying it and
+    # a node lacking it is a FAITHFUL projection, not a missing property.
+    "embedding_width": (
+        "#11821 — payload-only vector-width marker, never a node prop"),
     "evidence_fold": (
         "#10010 — payload-only record flag (`_fold_source_evidence`): this "
         "PointAdded folded evidence into an EXISTING Point, it created nothing"),

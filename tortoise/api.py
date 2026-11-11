@@ -432,6 +432,13 @@ class EventAPI:
                           # model change that never happened.
                           "embedding_model", "embedding_revision",
                           "embedding_text_hash",
+                          # #11821 P0: the vector-WIDTH marker is writer-minted
+                          # (see the comment above). A caller-set value would
+                          # describe a width the payload's text does not have,
+                          # and it never becomes a node property — so accepting
+                          # it would be a forged journal FACT with no node to
+                          # correct it on.
+                          "embedding_width",
                           # #8488 scope 1: the enriched text is writer-minted
                           # and no `PointRevised` arm replays it — a caller-set
                           # value would be a live-only write a rebuild drops,

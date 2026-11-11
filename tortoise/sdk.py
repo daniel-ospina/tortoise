@@ -6667,7 +6667,13 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
         # `stamp_journal_embedding` skip the identity on a CREATING record, so
         # a caller could silence the model-change record R1 exists to keep
         # (and, living only on the live side, it is a parity break too).
-        "embedding_verbatim", "embedding_preserved"}
+        "embedding_verbatim", "embedding_preserved",
+        # #11821 P0: the journal payload's vector WIDTH marker. Server-minted
+        # beside the vector (`stamp_journal_embedding`), and it must stay out of
+        # caller props for the same reason as the identity stamps: it is a
+        # recorded fact about the journal's text, and a caller could otherwise
+        # forge it.
+        "embedding_width"}
     if _embed_identity_keys:
         raise ValueError(
             f"{sorted(_embed_identity_keys)} are server-managed embedding "
@@ -13186,6 +13192,24 @@ class TortoiseSDK:
             record["eventKind"] = event_kind
         if embedding is not None:
             record["embedding"] = embedding
+            # #11821 P0: this door is the FOURTH producer of a journal payload
+            # that carries a vector (a session `:Event`, whose vector is
+            # `_session_embedding`'s — our embedder's float32 — or a value read
+            # back off the node), and it does not pass through
+            # `_emit_event`'s stamp. Without this the payload would be the ONE
+            # vector-bearing record with no declared width, while the seam's
+            # whole contract is that every journalled vector says what width it
+            # was written at. `creating=False` PRESERVES this door's behaviour
+            # exactly: it stamps no identity today and stamps none after (the
+            # vector's provenance here is not a creating write's), so what is
+            # added is the width declaration and the float32 narrowing it
+            # names.
+            try:
+                from .embeddings import stamp_journal_embedding
+            except Exception:  # noqa: BLE001, RUF100 — #5148: never fail a write on an import
+                stamp_journal_embedding = None
+            if stamp_journal_embedding is not None:
+                record = stamp_journal_embedding(record, creating=False)
         built = {"type": "EventRecorded", "id": event_id, **record}
         # ── #5475: the record door is a WRITE door ──
         # The payload carries kind spellings straight from frontmatter --

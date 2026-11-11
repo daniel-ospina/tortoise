@@ -54,6 +54,20 @@ record with the writer's own separators before measuring — see *Method* below.
 
 ## The measurement
 
+> ⚠️ **RE-MEASURED 2026-11-11 (`#11821` P0) — this block is the pre-P0 baseline, kept as
+> the dated historical record.** The probe calls the **live** writer seam
+> (`stamp_journal_embedding`) and the live `EventLog.append`, so it follows the writer by
+> design — and P0 changed both: the vector is now stored at the embedder's float32 as the
+> shortest round-trip text, and the journal line is written with compact separators. At
+> this head the same probe reports **`PointAdded` 5,860 B** (as committed 570 B),
+> **vector `5,072 B` at 13.2 chars/float**, whole corpus **34,766 B** and embedding share
+> **25,360 / 34,766 B (72.9 %)**; the live writer, which is compact, emits **5,423 B** for
+> the same record with a **4,689 B** vector. The per-class delta, the method and the two
+> separately-attributable halves are in
+> [`docs/evidence/11821-journal-encoding/`](../11821-journal-encoding/README.md). The
+> numbers below remain the measurement for **that corpus, at that head** — the record
+> shapes, the embedder width and the 21.9 chars/float diagnosis are unchanged.
+
 ```console
 $ env -u TORTOISE_DB_URI TORTOISE_TEST_CARVE_OUT=1 \
     uv run python docs/evidence/5612-journal-growth/probes/corpus_growth_probe.py
