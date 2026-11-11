@@ -707,7 +707,11 @@ def test_the_hosted_api_cite_notes_state_one_measurement_and_the_pivot():
     the total), or the pivot cite stops being the ``LIFETIME_MEMORY_QUERY`` site.
     """
     from tools.hosted_api_cite_census import (
-        DEFAULT_PIVOT, census, lifetime_query_sites, pivot_is_the_lifetime_site)
+        DEFAULT_PIVOT,
+        census,
+        lifetime_query_sites,
+        pivot_is_the_lifetime_site,
+    )
 
     scorecard = _src("tortoise/activation_scorecard.py")
     hosted = _src("tortoise/hosted_api.py")
@@ -747,7 +751,7 @@ def test_the_hosted_api_cite_notes_state_one_measurement_and_the_pivot():
     # `5d35cd58f6` the same invocation read `at the pivot 0` / `above 13` over a
     # CORRECT tree (12 above / 1 at the pivot before it). Pinning it is the only
     # thing that can red.
-    assert DEFAULT_PIVOT == lifetime_query_sites()[0], (
+    assert lifetime_query_sites()[0] == DEFAULT_PIVOT, (
         f"the census tool's fallback pivot {DEFAULT_PIVOT} is not the site "
         f"{lifetime_query_sites()} — nothing shipped reads it, but `census()` and "
         "`pivot_is_the_lifetime_site()` default to it; re-derive it in the same "
