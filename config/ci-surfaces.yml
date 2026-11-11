@@ -4604,15 +4604,16 @@ surfaces:
   # surface (the #3575/#3795 precedent: without that entry a CLI-wiring-only
   # change would run no guard for the very change it guards).
   - test_capture_install.py
+  # #3818: the Codex SessionEnd capture hook — the shipped artifact, its
+  # detach/argv behavior, and the CLI install into $CODEX_HOME. Same dual
+  # registration as test_capture_install.py (mechanism = core; CLI = api).
+  - test_codex_capture_hook.py
   # #11810 review r7 (P2): `platform-seams.md` §3 must quote the SHIPPED
   # hosted-scoped message, and the message must still contain the fragment it
   # quotes. `core` is the mechanism half; `tier1` is the half that runs on the
   # docs-only diff which breaks the RECORD, and `api` the half that runs on the
   # `__main__.py` diff which breaks the MESSAGE — see both rows.
   - test_11810_platform_seams_doc_pin.py
-  # detach/argv behavior, and the CLI install into $CODEX_HOME. Same dual
-  # registration as test_capture_install.py (mechanism = core; CLI = api).
-  - test_codex_capture_hook.py
   # #3819: the Cursor sessionEnd capture hook — the shipped artifact, its
   # detach/argv behavior, the agent-transcript parser, and the CLI install
   # into the HOME-scoped ~/.cursor. Same dual registration as
