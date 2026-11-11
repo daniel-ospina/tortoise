@@ -3439,10 +3439,13 @@ def a_row_census(uri: str) -> dict:
                                               "relations": list(CHAIN_RELATIONS)})
     # ⛔ A4 is the PER-LAYER row (#10988): things / events / claims reported SEPARATELY on the
     # **appears + labelled** bar, with the typed/`statement`/`NULL` shares and the per-writer split
-    # as DIAGNOSTICS. Each layer block is a SIBLING key rather than a nested `layers` dict:
-    # `row()` maps exactly ONE level of the `empty` skeleton, so neither layout gives a per-field
-    # gap for the one field that broke — and the renderer reads `a4.get(layer)` directly, so a
-    # nesting level would need a renderer change to buy nothing.
+    # as DIAGNOSTICS. The `row()` failure path maps ONE level of the `empty` skeleton, so each
+    # layer block is a sibling key rather than a nested `layers` dict — a nesting level here would
+    # render a failed row as a named gap for the whole layer instead of for the one field that
+    # broke, and the per-field `UNMEASURED` this row's own pins assert (`a4 claims population=…`,
+    # `tests/test_10988_a4_label_coverage.py::test_a_broken_layer_query_renders_a_NAMED_GAP_and_never_a_zero`)
+    # would collapse into one opaque string for the whole layer. The renderer reads
+    # `a4.get(layer)` directly, so a nesting level would ALSO need a renderer change to buy nothing.
     result["A4"] = row("A4", _a4_label_coverage,
                        {**{layer: _a4_empty_coverage(layer) for layer, _l, _k in A4_LAYERS},
                         "claim_points": 0, "excluded_capture_rows": 0, "statement": 0,
