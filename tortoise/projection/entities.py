@@ -1150,6 +1150,245 @@ def _point_source_transit(p: dict):
 #: a fixup row instead of pre-existing rows being silently skipped.
 _POINT_FLATTEN_LIST_PROPS: frozenset = frozenset({"search_keys", "quote"})
 
+#: #11239 — the Point props whose PAYLOAD form is a list of RECORDS and whose
+#: GRAPH form is ONE compact JSON scalar. A second declaration, not a member of
+#: the frozenset above, because the two rules carry different shapes and only
+#: one of them is a fulltext surface: `_POINT_FLATTEN_LIST_PROPS` keys flatten
+#: to a space-joined STRING and feed the FTS index (`sparse.POINT_INDEX_TEXT_
+#: FIELDS`), while these keys ENCODE to JSON and are read back as records. A
+#: space-join of `{"surface": "it", …}` would store prose no reader can parse,
+#: and adding a key here does NOT widen the search surface.
+#:
+#: Why an encoded SCALAR at all (and not the declared list the payload carries):
+#: on the PROJECTION path `_persist_extra_props` rejects any array containing a
+#: dict at ANY depth (`_is_persistable_prop_value`), and `_POINT_LIST_PROPS` is
+#: deliberately EMPTY; on a raw `SET n += $p` (the generic entity door, the graph
+#: fold) the driver instead degrades a value it cannot send to `null` BEFORE
+#: dispatch — the same degrade the tree documents for `tags` (#7369). Both are
+#: silent: a list of mention records never reaches the node either way.
+#:
+#: ⛔ WHICH CALL IS LOAD-BEARING, MEASURED (review P2 on PR #11795, twice) — the
+#: placement is stated here because the prose inverted it once and then
+#: under-stated it once.
+#:
+#: * The SDK doors call `encode_json_record_props` THEMSELVES: `create_point`
+#:   (`sdk.py`, before the write and before its dedup fold forwards the props to
+#:   `update_point`), `update_point`, and `_update_entity`. Commenting
+#:   `create_point`'s out leaves `p.mentions` UNSET.
+#: * `_upsert_point_props` — the REPLAY door — is **load-bearing for a LIVE door
+#:   too, and that is not a corner case**: `EventAPI.add_point` (`tortoise/api.py`)
+#:   updates the point dict and journals `PointAdded(point=p)` with the
+#:   payload's LIST spelling, and it calls no encoder of its own — this call is
+#:   the only one on its path. Neutering it was measured to make that same live
+#:   call store `None` (the record silently denied), live AND replay. So
+#:   "deleting the replay call changes no test" is true only of the SDK doors
+#:   below and false of `add_point`: do not delete it.
+#: * For a journal a live SDK door wrote, the call is a no-op (the helper is a
+#:   no-op for a `str`, which is also what lets `create_point`'s dedup fold hand
+#:   the encoded value straight to `update_point`). It has real work on a
+#:   NON-canonical record — a hand-written journal, an older emitter's snapshot,
+#:   or `add_point`'s — which it normalises to the same scalar instead of handing
+#:   `_persist_extra_props` an undeclared array of dicts that it DENIES SILENTLY.
+#:   That arm is pinned behaviourally by
+#:   `tests/test_mention_write_11239.py::test_the_replay_door_normalises_a_non_canonical_record`;
+#:   `add_point`'s own arm by
+#:   `tests/test_mention_write_11239.py::test_the_event_api_door_carries_a_mention_to_the_point`.
+#: The parity claim (#330) rests on every door emitting a pure function of the
+#: payload — which is why the encode lives in ONE helper and not per door.
+#: ⚠️ THE RECORD LANE HAS NO COUNTERPART TO THIS DECLARATION — the Postgres
+#: record's Point snapshot keeps the PAYLOAD spelling (a list of records), so the
+#: record side of `record_reconcile` and a record-sourced `rebuild_from_record`
+#: see a value the graph writer encodes. `#11815` tracks the record-boundary
+#: encoder and the parity pin that would make this class visible; until it lands,
+#: a deployment on that lane holds two spellings of one record.
+_POINT_JSON_RECORD_PROPS: frozenset = frozenset({"mentions"})
+
+
+def encode_json_record_props(props: dict) -> None:
+    """`_POINT_JSON_RECORD_PROPS` — THE ONE HOME of the list→JSON encode.
+
+    `mentions` is DM1's home for a held phrase (``05-plan.md``; ``#11021``,
+    persisted by ``#11239``): the claim Point carries the surfaces it POINTED
+    with, so a reader can see what the sentence meant without an ``:Object``
+    being minted for a pronoun. The payload form is a list of records; the
+    graph form is one compact JSON string.
+
+    **Determinism is the parity condition** (``#330``): the bytes must be a
+    pure function of the payload, so the value is emitted with sorted keys, no
+    spaces and ``ensure_ascii=False`` — a rebuild replaying the same record
+    re-derives byte-identical output, and a reordering of a record's FIELDS
+    cannot produce a spurious live/replay difference.
+
+    Accepts dicts (the extraction payload), model objects (``Mention``, which a
+    commit-payload validator hands us), or a string already in canonical form
+    (a replay of a graph/record payload). An empty/blank list POPS the key —
+    the same ``or None`` convention `flatten_search_keys_prop` uses, so a blank
+    list never clears an existing value with an empty JSON array.
+
+    This is deliberately NOT a policy that DROPS a RECORD — a record the
+    producer could not shape is kept by taking its ``str()`` for the surface
+    rather than dropped (a lost mention is the memory loss the channel exists to
+    prevent — ``value_gate``'s asymmetry, cited at `extractor_v2`).
+
+    ⛔ **It is NOT field-preserving, and the narrowing is DM1's, not this
+    helper's.** DM1 (`05-plan.md` §4: *"a property on the claim Point that
+    carried it"*, with no ``claim_id`` because the owning point IS the claim)
+    declares the node's record shape as ``surface``, ``span_start``,
+    ``span_end``, ``kind_guess`` — that decision is why the node does not
+    carry the model's other four fields, and it is the ONLY reason. The
+    payload's ``Mention`` model carries four MORE that this encode deliberately
+    does not write to the node:
+
+    - ``claim_ref`` — the claim's own content; the node's identity already IS
+      that claim;
+    - ``quote`` and ``span_source`` — the mention's own quoted text and **the
+      name of the haystack its offsets index into**. ⛔ They are NOT
+      interchangeable with the Point's own ``quote``/``span_start``/
+      ``span_end``, which are the CLAIM's span in a different space, and
+      ``Point`` has no ``span_source`` field at all. So the node's
+      ``span_start``/``span_end`` are a BARE OFFSET PAIR with no haystack
+      label (``Mention.span_source``'s own docstring: *"A bare offset that
+      does not say which space it is in is not an address"*) — a consumer that
+      needs that label must read ``span_source`` from the PAYLOAD/evidence
+      block, ``result["mentions"]``;
+    - ``rule_id`` — which rule held it. That is the audit channel on the
+      PAYLOAD/evidence block (``result["mentions"]``, S2.1), not on the node.
+
+    A reader must not conclude those four reached the node: **promoting any of
+    them onto the Point is a reopen of DM1 in DM1's own home, not an edit
+    here.** ⚠️ Because ``consistency._canonical_point_fields`` applies this
+    SAME encode to BOTH sides, the field loss is invisible to the drift
+    detector by construction — this docstring is the only guard, so it has to
+    be true.
+    """
+    import json
+
+    for key in _POINT_JSON_RECORD_PROPS:
+        value = props.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            # Already canonical (a rebuild reading a graph/record payload).
+            continue
+        if not isinstance(value, (list, tuple)):
+            props.pop(key, None)
+            continue
+        records: list[dict] = []
+        for item in value:
+            if isinstance(item, dict):
+                rec = dict(item)
+            elif hasattr(item, "model_dump"):
+                rec = item.model_dump()
+            else:
+                rec = {"surface": str(item)}
+            # DM1's declared field row (not the model's eight): a record
+            # always carries `surface`, `span_start` and `span_end` — the
+            # offsets are `None` when the producer supplied no usable int, so
+            # `{"surface": "the thing"}` encodes to
+            # `[{"span_end":null,"span_start":null,"surface":"the thing"}]`
+            # — and `kind_guess` only when it carries a value. The MODEL makes it
+            # optional (`commit_schema.Mention.kind_guess: str | None = None`);
+            # DM1 itself declares a four-field row with no optionality, so what
+            # permits the drop is the model, not the declaration. There is no
+            # producer that must invent one. A
+            # reader parses one schema rather than a per-call variant. The
+            # fields DM1 excludes are listed in the docstring above.
+            surface = rec.get("surface")
+            out = {"surface": "" if surface is None else str(surface)}
+            for offset in ("span_start", "span_end"):
+                raw = rec.get(offset)
+                if isinstance(raw, int) and not isinstance(raw, bool):
+                    out[offset] = raw
+                else:
+                    out[offset] = None
+            kind = rec.get("kind_guess")
+            if kind is not None:
+                out["kind_guess"] = str(kind)
+            records.append(out)
+        if not records:
+            props.pop(key, None)
+            continue
+        props[key] = json.dumps(
+            records, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False)
+
+
+def stated_json_record_prop(payload, key: str) -> tuple[str, object]:
+    """``(disposition, value)`` for one `_POINT_JSON_RECORD_PROPS` key.
+
+    The ONE rule for *"what does this writer dispatch for this key"* — the
+    create/upsert writer (`_upsert_point_props`, which encodes before
+    `_persist_extra_props` can consult the list policy) and the pure replay fold
+    (`_apply_one`) — never re-spelled at either site (#5048).
+
+    The disposition IS the writer's outcome, spelled against every gate that
+    sits between the payload and the property. ``value`` carries the bytes to
+    store when the disposition is ``"set"`` (the encoder's output, not the
+    payload's raw spelling), and ``None`` otherwise:
+
+      * ``"set"`` — the payload states a value the writer stores: a ``str``
+        already in canonical form, or a non-empty ``list``/``tuple`` normalised
+        through `encode_json_record_props` (THE encoder);
+      * ``"skip"`` — the payload states nothing the writer puts in its SET: an
+        absent key, an explicit ``None`` (`_persist_extra_props` drops those),
+        an empty list (the encoder POPS it), or any shape the encoder POPS (a
+        map, bytes, a set, an int — everything that is neither a ``str`` nor a
+        ``list``/``tuple``). ⛔ NOT "whatever `_is_persistable_prop_value`
+        refuses": that filter refutes the payload's OWN list spelling (any array
+        containing a dict), which the encoder turns into a storable scalar, so
+        consulting it would misclassify the primary shape as "skip" (measured,
+        review P1 on PR #11795). On a MERGE'd node a "skip" value SURVIVES,
+        untouched;
+      * ``"null"`` — the payload states a value the store cannot hold EXACTLY
+        (#7369 nulls it before dispatch — measured with an embedded NUL string:
+        the writer dispatches a null and the property is REMOVED). Distinct from
+        ``"skip"`` on purpose: the provenance fold spells the same split, and
+        conflating them is a live/replay divergence in the direction that
+        resurrects state. ⚠️ A LONE-SURROGATE string is a different failure and is
+        NOT this arm on the live path: it fails the journal append (invalid
+        utf-8) and the write raises ``WriteNotLandedError`` instead of dispatching
+        anything (measured) — the disposition still describes what a JOURNAL
+        carrying that value folds to, which is why the rule is stated over the
+        payload and not over one door's outcome.
+
+    Written for `_apply_one`'s two arms (`#11239`): the creation arm carries a
+    ``"skip"`` value forward (the graph MERGE keeps it) and drops a ``"null"``
+    one, while the revision arm folds ``"set"`` and treats ``"skip"``/``"null"``
+    as the absence the graph fold's ``n.<key> = NULL`` produces.
+    """
+    if not isinstance(payload, dict) or key not in payload:
+        return "skip", None
+    value = payload.get(key)
+    if value is None:
+        return "skip", None
+    if isinstance(value, str):
+        return ("set", value) if _store_holds_prop_value(value) else ("null", None)
+    # ⛔ THE LIST/TUPLE CASE IS DECIDED BY THE ENCODER, NOT BY
+    # `_is_persistable_prop_value` (review P1 on PR #11795, measured). The
+    # payload's OWN spelling — a list of mention dicts — is exactly what that
+    # filter REFUSES (`_is_persistable_prop_value` rejects any array containing
+    # a dict), so consulting it first classified the primary shape as "skip":
+    # the creation fold then carried the PREVIOUS incarnation's record forward
+    # while the live write and `rebuild_all` stored the NEW one, and the
+    # revision fold DROPPED what `_revise_point` SET. Two arms, two opposite
+    # outcomes, one journal record — the #5048/#5256 unclearable-red class this
+    # prop exists to remove, on a faithful graph. The writer never asks that
+    # question for this key: it encodes first, and the encode's OUTPUT is a
+    # JSON string the store holds.
+    if isinstance(value, (list, tuple)):
+        view = {key: value}
+        encode_json_record_props(view)
+        encoded = view.get(key)
+        if encoded is None:
+            return "skip", None
+        if not _store_holds_prop_value(encoded):
+            return "null", None
+        return "set", encoded
+    # Any other shape: `encode_json_record_props` POPS it (`entities.py`, the
+    # non-list arm), so the writer stores nothing and a MERGE keeps what the
+    # node holds.
+    return "skip", None
+
 
 def flatten_search_keys_prop(props: dict) -> None:
     """R2 (#1541) D3 — THE ONE HOME of the flatten rule for
@@ -2228,6 +2467,16 @@ class _EntityHandlers:
         # text, declared so the replay open-set passthrough does not log a
         # FALSE undeclared-prop drift warning on every rebuild.
         "span_start", "span_end",
+        # #11239 (DM1's home, #11021): the phrases this claim POINTED with but
+        # did not NAME, as ONE compact JSON scalar (`_POINT_JSON_RECORD_PROPS`,
+        # encoded by `encode_json_record_props` on this shared writer). Declared
+        # for the same reason as the two above — without it every capture that
+        # records a mention logs a FALSE "Point prop 'mentions' is not declared"
+        # drift warning on the live write and again on every rebuild, which is
+        # the noise that hides a GENUINE undeclared prop. Declaration is
+        # warning-suppression only here too: the encode above, not this entry,
+        # is what makes the value persistable.
+        "mentions",
         # #1724: the STABLE external anchor carried by extractor-minted
         # statement Points (``github:issue:*`` from the GitHub indexer's
         # dormant statement path, ``docs:<doc_id>#<claim key>`` from the docs
@@ -2485,6 +2734,19 @@ class _EntityHandlers:
         # copy, because that is also the condition that decides whether a copy
         # is needed at all: a point with no identifier takes the pre-#8933 path
         # and writes byte-identically.
+        # #11239: encode BEFORE the list policy can consult the payload —
+        # `_persist_extra_props` denies an undeclared array of dicts silently,
+        # and a silent drop is the failure mode this prop exists to end. The
+        # copy is unconditional-when-needed so the caller's dict is never
+        # mutated (the same rule `flatten_search_keys_prop` follows).
+        # The gate is `key in payload`, NOT `isinstance(…, list|tuple)`: the
+        # encoder itself is the arbiter (it no-ops on a canonical `str` and POPS
+        # any other shape), and gating on the list type let a non-list value
+        # through unencoded — measured: `EventAPI.add_point(mentions=5)` stored
+        # `mentions: 5` while `sdk.create_point(mentions=5)` stored nothing, and
+        # `stated_json_record_prop` called it a "skip" (review P3 on PR #11795).
+        _needs_json_encode = any(
+            k in p for k in _POINT_JSON_RECORD_PROPS)
         alias_tokens = point_identifier_aliases(p)
         # #10203 review round 6 (measured P1): whether the payload OWNS
         # `search_keys` decides REPLACE vs APPEND. It owns it only when it
@@ -2504,9 +2766,11 @@ class _EntityHandlers:
             owns_search_keys = bool(_pk.strip())
         else:
             owns_search_keys = False
-        if alias_tokens or any(isinstance(p.get(k), (list, tuple))
-                               for k in _POINT_FLATTEN_LIST_PROPS):
+        if (_needs_json_encode or alias_tokens
+                or any(isinstance(p.get(k), (list, tuple))
+                       for k in _POINT_FLATTEN_LIST_PROPS)):
             p = dict(p)
+            encode_json_record_props(p)
             flatten_search_keys_prop(p)
             append_identifier_aliases(p, alias_tokens)
         op = p.get("operator")
