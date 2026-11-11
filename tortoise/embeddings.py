@@ -19,6 +19,7 @@ import contextvars
 import logging
 import math
 import os
+import struct
 import threading
 import time
 
@@ -561,6 +562,74 @@ def stamp_journal_embedding(payload: dict, *, creating: bool) -> dict:
     return payload
 
 
+def _is_shortest_f32_text(vector) -> bool:
+    """Is ``vector`` already in THIS seam's own ``f32`` output form?
+
+    #11835 review (P0): the idempotence arm above returned on the `f32` MARKER
+    alone, so any payload carrying a stale marker kept it whatever its text
+    said. This is the verification that makes the arm's claim true: it asks the
+    text, not the marker, whether the values are the ``f32`` form — i.e. the
+    shortest decimals that round back to the float32 each element widens to.
+
+    Three answers, and only one of them is ``True``:
+
+    * a non-numeric SEQUENCE (a ``str``, ``bytes`` or ``dict``) or an element
+      that is not a finite number → ``False``: the seam never writes one, so no
+      width it declared can describe it;
+    * an element float32 cannot HOLD → ``False``: the narrowing never produces
+      one (the check is ``struct.pack``, not a comparison with
+      ``finfo(float32).max`` — see the comment on it);
+    * every element the shortest float32 round trip of its own bits →
+      ``True``.
+
+    ``False`` is a FAIL-CLOSED answer everywhere it is used: the caller
+    re-decides the width from the values, and an un-narrowable vector comes
+    back ``f64`` with its values untouched — never a declaration its text does
+    not earn.
+    """
+    # Refused for the same reason `stamp_journal_embedding` refuses them a few
+    # lines up (``isinstance(raw, (str, bytes, dict))`` →
+    # `_drop_journalled_embedding`): a `str` is a sequence of CHARACTERS and a
+    # `dict` a sequence of KEYS, and `bytes` is an iterable of INTS
+    # `[1.0, 2.0]` — reading any of them as numbers would answer "is every
+    # element a float32" about the wrong thing, in the PERMISSIVE direction.
+    if isinstance(vector, (str, bytes, dict)):
+        return False
+    try:
+        values = [float(x) for x in vector]
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not values:
+        # An empty vector is representable at every width, and the narrowing
+        # leaves it empty — `shortest_float32_vector` agrees (`[]`).
+        return True
+    for value in values:
+        if not math.isfinite(value):
+            return False
+        # ⛔ THE RANGE GATE IS `struct.pack`, NOT A COMPARISON WITH THE BINARY
+        # MAXIMUM. Two reasons, both measured: (1) the numpy float32 cast
+        # returns `inf` outside the range and emits a `RuntimeWarning`, which
+        # cannot be suppressed without mutating process-global filter state
+        # (see :func:`shortest_float32_vector` on why that is refused) — where
+        # `struct.pack` raises instead; (2) the largest float32's shortest
+        # DECIMAL (`3.4028235e38`) is GREATER than
+        # `finfo(float32).max` (`3.4028234663852886e38`) as a float64, so a
+        # binary-max gate rejects this seam's OWN output for that one value,
+        # falls through, and flips its declaration back to `f64` — re-opening
+        # the idempotence bug this arm exists to close.
+        try:
+            struct.pack("<f", value)
+        except OverflowError:
+            return False
+    # Widen each element to the float32 it names (in range, so the cast cannot
+    # warn), then ask the module's own quantiser for the canonical text of
+    # those bits. Equality with the payload is the whole test — and it keeps
+    # ONE definition of "the shortest float32 form" (this function is a
+    # READER of the quantiser, not a second spelling of it).
+    widened = [float(np.float32(value)) for value in values]
+    return shortest_float32_vector(widened) == values
+
+
 def _stamp_journal_vector_width(payload: dict) -> None:
     """#11821 P0: narrow an OWN vector to float32 and DECLARE the width.
 
@@ -611,19 +680,32 @@ def _stamp_journal_vector_width(payload: dict) -> None:
     if is_verbatim(payload) or payload.get("embedding_preserved"):
         payload[JOURNAL_VECTOR_WIDTH_KEY] = JOURNAL_VECTOR_WIDTH_F64
         return
-    if payload.get(JOURNAL_VECTOR_WIDTH_KEY) == JOURNAL_VECTOR_WIDTH_F32:
-        # IDEMPOTENT (#11835 review, P3). This function is the ONLY writer of
-        # `f32` — callers are refused it at every home — so a payload that
-        # already declares it holds THIS function's own output, already at the
-        # shortest float32 text. Re-deciding would find those values OFF the
-        # float32 grid (they are the round-tripping decimals, not the widened
-        # float32s) and flip the declaration to `f64` while leaving the values
-        # unchanged: a payload stating a width its text does not have, which is
-        # the one thing the marker exists to prevent. Measured before this
-        # guard: stamp twice -> `f32` then `f64`, values byte-identical.
-        #
-        # The verbatim arm is checked FIRST on purpose: a preserved vector must
-        # always re-declare `f64`, even if a stale `f32` rode in beside it.
+    # IDEMPOTENT (#11835 review, P3) — and VERIFIED, never trusted
+    # (#11835 review, P0). Re-deciding an ALREADY-NARROWED vector would find
+    # its values OFF the float32 grid (they are the round-tripping decimals, not
+    # the widened float32s) and flip the declaration to `f64` while leaving the
+    # values unchanged: a payload stating a width its text does not have, which
+    # is the one thing the marker exists to prevent. Measured before the guard:
+    # stamp twice -> `f32` then `f64`, values byte-identical.
+    #
+    # ⛔ BUT THE MARKER ALONE IS NOT PROOF, and the earlier justification of
+    # this arm ("callers are refused `f32` at every home, so a payload that
+    # already declares it holds THIS function's own output") is FALSE.
+    # `_forged` refuses a caller who PASSES the marker; it cannot see a marker
+    # left STALE by a vector replaced after the stamp was written — which is
+    # exactly what `EventAPI.add_point` does (`_point` stamps its server vector,
+    # then `p.update(fields)` swaps in the caller's, then this seam re-stamps).
+    # Trusting the marker there declared a caller's OFF-GRID vector `f32`. So
+    # the arm now asks the only question that makes its claim true, of the text
+    # actually in the payload: is this already the shortest float32 round-trip
+    # of its own bits? If it is, nothing to do (idempotence). If it is not, the
+    # marker does not describe this text — fall THROUGH and re-decide it from
+    # the values.
+    #
+    # The verbatim arm is checked FIRST on purpose: a preserved vector must
+    # always re-declare `f64`, even if a stale `f32` rode in beside it.
+    if (payload.get(JOURNAL_VECTOR_WIDTH_KEY) == JOURNAL_VECTOR_WIDTH_F32
+            and _is_shortest_f32_text(raw)):
         return
     narrowed = shortest_float32_vector(raw)
     if narrowed is None:
