@@ -81,32 +81,56 @@ def _propagate_shock_prose_sites() -> dict[str, set[int]]:
     This is the only evidence that may demote a `/tortoise/` grep line to
     "comment/reference only", and it is deliberately computed WITHOUT consulting
     `_propagate_shock_reference_sites`: a demotion has to be EARNED by the parser, not
-    assumed because the reference scan came back quiet. Two positions count as prose —
-    a `#` comment, and a line inside a string constant (a docstring documenting the
-    deprecation). Everything else is a reference.
+    assumed because the reference scan came back quiet. Two positions count, and only
+    two:
 
-    ⚠️ Why this exists (review r35 P2). Once the demotion was keyed on the reference set
-    instead, `production_code` could only be non-empty when that set was too, so the
-    `== 0` assert below became unreachable, and an EMPTY scan (the helper narrowed to
-    `Call` nodes, or `ROOT / "tortoise"` drifting) demoted every real caller to prose
-    and printed success over it. Measured on a temp root holding
-    `def write(g): propagate_shock(g)`: honest scan -> RED, empty scan -> GREEN.
-    Keyed on this map instead, an empty/broken scan produces an empty demotion set, so
-    every line stays in `production_code` and the assert reds — fail-CLOSED. It also
-    subsumes a non-`.py` production file (`cursor-hooks/*.sh`, `openclaw-plugin/*.mjs`):
-    it has no AST, so it can never be in this map, so it is never demoted.
+    * a `#` comment; and
+    * a line a STRING-LITERAL STATEMENT fully covers — a docstring, i.e. a bare string
+      expression (`ast.Expr` wrapping a `Constant`), never a string that is an argument
+      or a value.
+
+    ⚠️ Why the second is docstrings ONLY (review r35 P2 / r36 P2). Admitting every string
+    constant demoted the STRING-indirection shapes this file's own docstring lists as
+    invisible to the AST — `getattr(p, "propagate_shock")(g)`, a `{"shock": …}`
+    dispatch table, a Cypher string naming the function. Those became invisible to BOTH
+    arms (the reference scan by its stated bound, `production_code` by the demotion) and
+    printed success over a real caller that `origin/main` REDS on. Measured on a temp
+    root, base vs here: `getattr`, dict-dispatch and Cypher all RED at base and GREEN
+    with the wide rule; docstring and `#` comment are the two the fix intends.
+
+    ⚠️ Why the whole line must be covered. A literal that merely TOUCHES a line does not
+    make that line prose: `D = "propagate_shock"; propagate_shock(1)` is one physical
+    line carrying a real call, so demoting by line number alone would hide it
+    (review r36 P3). The column offsets below decide coverage exactly.
+
+    Fail-CLOSED in both directions: an empty or broken scan demotes nothing, so every
+    line stays in `production_code` and the assert reds. A non-`.py` production file
+    (`tortoise/cursor-hooks/*.sh`, `openclaw-plugin/index.mjs`) has no AST, so it can
+    never be in this map and is never demoted.
     """
     prose: dict[str, set[int]] = {}
     for path in sorted((ROOT / "tortoise").rglob("*.py")):
         text = path.read_text(encoding="utf-8")
         tree = ast.parse(text)
+        lines = text.splitlines()
         found: set[int] = set()
         for node in ast.walk(tree):
-            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                    and "propagate_shock" in node.value):
-                end = node.end_lineno or node.lineno
-                found.update(range(node.lineno, end + 1))
-        for lineno, line in enumerate(text.splitlines(), 1):
+            if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)):
+                continue
+            literal = node.value
+            if "propagate_shock" not in literal.value:
+                continue
+            first, last = literal.lineno, literal.end_lineno or literal.lineno
+            for lineno in range(first, last + 1):
+                line = lines[lineno - 1]
+                covers_start = (lineno > first
+                                or not line[:literal.col_offset].strip())
+                covers_end = (lineno < last
+                              or not line[literal.end_col_offset:].strip())
+                if covers_start and covers_end:
+                    found.add(lineno)
+        for lineno, line in enumerate(lines, 1):
             if line.lstrip().startswith("#") and "propagate_shock" in line:
                 found.add(lineno)
         if found:
