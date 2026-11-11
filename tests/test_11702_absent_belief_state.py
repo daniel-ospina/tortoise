@@ -44,10 +44,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import struct
 import sys
 import uuid
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -5300,3 +5302,118 @@ def test_update_entity_clearing_the_pair_clears_the_mirror(sdk, tmp_path):
             f"disagree: {before} -> {after}")
     finally:
         j.close()
+
+
+# ── the PROSE guard ─────────────────────────────────────────────────────────
+#
+# The defect class that survived six review rounds here is not behavioural: it
+# is a SENTENCE that restates the absence rule at one site while the code and
+# `EpBreakdown`'s canonical statement (`search_engine.py`:1404-1430) say
+# something else. Each round fixed the sites that review named and left the
+# same class at a site nobody had looked at, because nothing checked the CLASS.
+#
+# Two shapes are pinned below.
+#
+# 1. A sentence asserting what a prior-only claim's `confidence_mean` IS must
+#    also name the `n.confidence` mirror, within the same sentence. The mirror
+#    LEADS the alpha/beta mean — `annotate_ep_batch` computes
+#    `elif mirror is not None: value = round(mirror, 4)` — so an unqualified
+#    "IS the declared PRIOR mean" is false for exactly the row
+#    `set_point_baseline(3.0, 1.0)` + `update_point(confidence=0.9)`: the
+#    declared prior mean is 0.75 and the field reads 0.9. That sentence stood
+#    at `search_engine.py`:345 while the code nine hundred lines away said
+#    otherwise, and five sibling copies of the same claim did too.
+# 2. The `… else the persisted prior mean (ep_alpha/beta), else ``None```
+#    claim must name the mirror as well, or it predicts `None`/absent for a
+#    mirror-only Point — which reads `baseline` at the mirror's value, not
+#    `None` (its sibling copy in `sdk.py` carries the qualifier).
+#
+# The check is a PROXIMITY one on normalised prose: a qualifier must follow its
+# claim within the same sentence, so a paragraph that mentions the mirror for a
+# DIFFERENT shape does not satisfy it (that is how `:345` passed every earlier
+# review). It is a regression tripwire on the class, not a grammar proof.
+#
+# Scope: the five modules that carry this contract. The architecture doc is
+# guarded by `tests/test_extractor_v4_citation_scan`-class tests and is not
+# duplicated here.
+
+_BELIEF_PROSE = (
+    "tortoise/search_engine.py",
+    "tortoise/why.py",
+    "tortoise/volunteer.py",
+    "tortoise/sdk.py",
+    "tortoise/ranking.py",
+)
+
+#: How far after a claim its qualifier may sit. A sentence in these modules is
+#: under ~300 characters once whitespace is collapsed, and the fixed wording
+#: puts "mirror" within ~60 of every claim, so this bound is generous for the
+#: real sentences and too tight for a qualifier parked in a later sentence.
+_QUALIFIER_WINDOW = 300
+
+#: Sentences that ASSERT the value of a prior-only claim's mean. The verb is
+#: what distinguishes a CLAIM from a factual mention of a number ("Beta(3,1),
+#: prior mean 0.75" / "the 0.75 prior mean" assert nothing about the field).
+_PRIOR_MEAN_CLAIM_PATTERNS = (
+    re.compile(r"confidence_mean\s+(is|IS)\s+(the\s+)?(declared\s+)?PRIOR mean",
+               re.IGNORECASE),
+    re.compile(r"reads its PRIOR mean", re.IGNORECASE),
+)
+
+#: The class-2 claim: "… else the persisted prior mean (ep_alpha/beta), else
+#: ``None``" — `None` for a mirror-only Point is the false prediction.
+_ABSENT_CLAIM = re.compile(
+    r"prior mean \(ep_alpha/beta\), else ``None``", re.IGNORECASE)
+
+
+def _belief_prose(rel: str) -> str:
+    """One normalised string for a module: comment markers gone, whitespace
+    collapsed, so a sentence wrapped across `#` lines is one string and a
+    proximity window measures prose rather than line breaks."""
+    root = Path(__file__).resolve().parent.parent
+    text = (root / rel).read_text(encoding="utf-8")
+    without_markers = re.sub(r"[ \t]*(#|//)[ \t]*", " ", text)
+    return re.sub(r"\s+", " ", without_markers)
+
+
+def _unqualified_claims(patterns) -> list[str]:
+    """Sites where a claim matches but no `mirror` follows it in-sentence."""
+    problems = []
+    for rel in _BELIEF_PROSE:
+        prose = _belief_prose(rel)
+        for pattern in patterns:
+            for match in pattern.finditer(prose):
+                window = prose[match.start():match.start() + _QUALIFIER_WINDOW]
+                if "mirror" in window.lower():
+                    continue
+                problems.append(f"{rel}: …{prose[match.start():match.start() + 180]}…")
+    return problems
+
+
+def test_a_prior_mean_claim_in_the_belief_prose_names_the_mirror():
+    """A prior-only claim's mean is the mirror's when one is readable.
+
+    The mirror leads (`annotate_ep_batch`), so a sentence that says the prior
+    mean IS the answer — with no mention of a readable mirror — states a rule
+    the code does not implement, and a reader branching on it is wrong for
+    every declared-baseline row that also carries `n.confidence`.
+    """
+    problems = _unqualified_claims(_PRIOR_MEAN_CLAIM_PATTERNS)
+    assert not problems, (
+        "a belief-prose sentence asserts a prior-only claim's mean without "
+        "naming the `n.confidence` mirror, which LEADS it:\n  "
+        + "\n  ".join(problems))
+
+
+def test_an_absent_claim_that_says_none_names_the_mirror():
+    """`else ``None``` must say "and no readable mirror supplies one".
+
+    A mirror-only Point (no posterior, no alpha/beta, a stored `confidence`)
+    reads `ep_state="baseline"` at the mirror's value. A docstring that stops
+    at "else ``None``" predicts absent for it.
+    """
+    problems = _unqualified_claims((_ABSENT_CLAIM,))
+    assert not problems, (
+        "the belief prose says `else None` for a row that has no persisted "
+        "belief WITHOUT naming the readable mirror that supplies a value:\n  "
+        + "\n  ".join(problems))

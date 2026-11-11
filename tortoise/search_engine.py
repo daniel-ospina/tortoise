@@ -342,7 +342,9 @@ def ep_prior_only_cypher(alias: str) -> str:
     the mirror's value, which is why the mirror-only row is `unmeasured`
     internally and `baseline` here). Without one, and since #11702, its
     confidence_mean is `None` + `ep_state: "absent"`, not a neutral 0.5.
-    A prior-only claim's confidence_mean IS the declared PRIOR mean.
+    A prior-only claim's confidence_mean IS the declared PRIOR mean — EXCEPT
+    that a readable ``n.confidence`` mirror LEADS it, so a declared Beta(3,1)
+    beside a stored 0.9 reads 0.9, not the prior mean 0.75.
 
     Kept textually in step with the Python twin: for every combination of
     (posterior_alpha, ep_alpha, baseline_set) this helper is true iff
@@ -5354,9 +5356,11 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
     confidence and agrees with ``get_confidence``/``recall`` for the same
     point: it is the belief mean α/(α+β) of the persisted posterior
     (posterior_alpha/beta) when EP has run on the claim, else the persisted
-    prior mean (ep_alpha/beta), else ``None`` (#11702 — the third state of
-    that contract, named by ``ep_state``; it used to be the neutral Beta(1,1)
-    mean 0.5). It is
+    prior mean (ep_alpha/beta), else ``None`` unless a readable
+    ``n.confidence`` mirror supplies one — the mirror LEADS both, so a
+    mirror-only Point reads ``baseline`` at the mirror's value, never ``None``
+    (#11702 — the third state of that contract, named by ``ep_state``; it used
+    to be the neutral Beta(1,1) mean 0.5). It is
     NOT the structural edge-ratio impl/(impl+nand) that this field used to
     carry — that quantity lives on in ``evidence`` (impl_count/nand_count/
     total) and ``contention`` (the NAND fraction), which are legitimately
@@ -5562,8 +5566,10 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                 has_ep=measured,
                 measured=measured,
                 # prior-only: a declared #2199 baseline on a LIVE claim with
-                # no EP measurement — confidence_mean is the PRIOR mean, never
-                # a measured one. A TERMINAL claim is neither measured nor
+                # no EP measurement — confidence_mean is the PRIOR mean, or a
+                # readable `n.confidence` mirror's value, which LEADS it (see
+                # the precedence below) — never a measured one. A TERMINAL
+                # claim is neither measured nor
                 # prior-only (its 0.5 is the #2490 decayed posterior), so the
                 # terminal gate above also clears `baseline` — see the
                 # EpBreakdown three-state note. And the flag follows the
@@ -5572,7 +5578,8 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                 # surface reads as `absent` because 0/0 has no mean — #11702
                 # cycle 30) must not claim prior-only beside `ep_state: "absent"`,
                 # because `baseline` is documented as "confidence_mean IS the
-                # declared prior mean" and a consumer reading it that way got None.
+                # declared prior mean (unless a readable mirror supplies the
+                # value)" and a consumer reading it that way got None.
                 baseline=(baseline_set and not measured and not terminal
                           and state == EP_STATE_BASELINE),
             )
