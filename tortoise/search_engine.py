@@ -1241,6 +1241,12 @@ def ep_state(*, posterior_alpha, ep_alpha, confidence=None,
     distribution, so the pair carries no belief. Same rule as
     :func:`ep_has_belief_cypher`, which spells it in Cypher — the two must not
     drift, or a surface reads a state the `ep` block denies for one claim.
+    The half-pair exception above is GENERAL, not a half-pair special case: a
+    readable ``n.confidence`` mirror beside a ``0/0`` pair (or a negative
+    operand, or an operand this process cannot read) keeps the row readable, so
+    the state follows the measured/baseline arm and the value is the mirror's —
+    measured: ``(0.0, 0.0)`` + mirror ``0.9`` reads ``measured``/``0.9``, and
+    the same pair with no mirror reads ``absent``/``None``.
     Pass the β columns too, or a stored zero pair reads as ``present`` here
     while Cypher calls it absent.
     """
@@ -1404,10 +1410,16 @@ class EpBreakdown:
     #: pass: a direct `update_point` writes one too) /
     #: ``baseline`` (a persisted prior EP has not measured — a #2199 declared
     #: baseline, a legacy mirror, or a terminal decayed posterior; a half pair
-    #: reaches it only when a readable mirror survives beside it) / ``absent`` (nothing that yields a mean — no persisted
-    #: belief, or operands that yield none: either operand missing after the
-    #: per-operand coalesce (α with no β, or β with no α), a sum ≤ 0, a negative
-    #: operand, or an unreadable operand ⇒ the value is ``None``). Derives from :func:`ep_state`, the single
+    #: reaches it only when a readable mirror survives beside it) / ``absent``
+    #: (nothing yields a mean AND no readable ``n.confidence`` mirror survives —
+    #: no persisted belief, or operands that yield none: either operand missing
+    #: after the per-operand coalesce (α with no β, or β with no α), a sum ≤ 0, a
+    #: negative operand, or an unreadable operand ⇒ the value is ``None``). A
+    #: readable mirror beside ANY of those shapes keeps the row readable, so it
+    #: lands on ``measured``/``baseline`` with the mirror's value instead —
+    #: measured: α with no β + mirror 0.9 reads ``measured``/0.9, a ``(0, 0)``
+    #: pair + mirror 0.9 reads ``measured``/0.9, and the same shapes with no
+    #: mirror read ``absent``/``None``. Derives from :func:`ep_state`, the single
     #: mapping of the #11702 vocabulary; ``has_ep``/``measured`` keep their
     #: narrower #2490 / #3276 meanings and are NOT this field's source.
     ep_state: str = EP_STATE_ABSENT
