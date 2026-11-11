@@ -191,7 +191,7 @@ Re-read per issue on 2026-11-12 — 42 rows, and they reconcile:
 | CLOSED other | 5 | `#2748` (`NOT_PLANNED`, fixed in effect) · `#2820` · `#2826` (`NOT_PLANNED`) · `#2296` · `#2790` |
 | MERGED (both were PRs) | 2 | PR `#2747` · `#2697` — both are PRs, not issues; see correction **(i)** |
 
-**⚠️ of the four survivors, two are already re-measured elsewhere and must not be re-derived:**
+**⚠️ of the four survivors, three are already re-measured elsewhere and must not be re-derived:**
 
 - **`#2728`** was re-measured **out** of the problem map's survivor set — its Settings home and
   modal merged 2026-10-18 in `08a6b0288`, with the add-list read from the on-disk pack registry so
@@ -230,10 +230,18 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   claim class with no defined handling, which is how a superseded correction gets read as live;
 - every **`path:line` citation** in §3 and §5 resolves in the tree, and the line number is in range —
   a citation that points at nothing is the doc's own "declared ≠ stored" defect, and it looks exactly
-  like evidence;
+  like evidence. That includes the **shorthand `:LINE`** form used inside a cell — in row (b),
+  `tortoise/commit_schema.py:395` is followed by `:792` and `:1002`. A shorthand resolves against the
+  nearest preceding full-path citation, and one with nothing to anchor it is refused rather than
+  guessed; without that rule, the load-bearing half of rows (b), (c) and (e) was unchecked while this
+  section said it was checked;
 - the **§3 population is pinned** to twelve rows, and the **§6 arithmetic** (open + closed + merged =
   the indexed population) is re-derived from the table rather than trusted — deleting a row and every
   mention of it otherwise passes every referential check.
+
+The self-test that proves those rules still fire has its own **population floor**
+(`MIN_SELF_TEST_MUTATIONS`). An emptied arm set used to print `PASS (0 failing arm(s))` and exit 0 —
+a gate reporting OK when it cannot run — so a shrunk population now reds instead.
 
 Exactly one arm needs `git` **history**: the frontmatter's `measured_at_commit` must be an ancestor of
 `HEAD`. The other four read this checkout's tree and nothing else, and the tool keeps that split
@@ -244,6 +252,12 @@ In a depth-1 clone `--check` therefore reports **exit 2 UNVERIFIED** — never `
 against the document it could not read — and `--self-test`, which drives only the tree-only arms,
 still runs.
 
+⛔ **Do not read the skipped ancestry test as coverage.** The `docs` job runs no pytest, so a test that
+skips in a depth-1 checkout is inert everywhere; the live ancestry claim is proved by that job's
+`--check` (which *is* `check_all`), and the **not-an-ancestor branch** is pinned in every pytest job by
+a stubbed-`git` case that needs no history. Two mechanisms, stated separately, because "the other job
+covers it" was true of the tool and false of the test.
+
 **Deliberately not checked:** the issue states in §6, the durability column in §4, and every
 `~/.swarm` claim in §5. They are **dated readings of things outside this repository**, and a guard
 that asserted them would either fail on someone else's tracker or, worse, pass by not looking. This
@@ -253,7 +267,9 @@ was run per issue, not sampled.
 
 ---
 
-*Re-cut 2026-11-12 from `f70d884b7` (== `origin/main`), against the original ledger posted on #2852
-and re-measured claim by claim. Every code citation on this page was opened at that commit; every
-issue state was read individually. Where a 2026-09-10 claim could no longer be re-measured, it says
-so rather than repeating it.*
+*Re-cut 2026-11-12 from `f70d884b7`, which was `origin/main` at the time of the cut — it is **behind
+`origin/main` at this page's merge head** (`bf7401e4` brought later main in; the guard requires
+*ancestry*, not equality). Cut against the original ledger posted on #2852 and re-measured claim by
+claim. Every code citation on this page was opened at that commit; every issue state was read
+individually. Where a 2026-09-10 claim could no longer be re-measured, it says so rather than
+repeating it.*
