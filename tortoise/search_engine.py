@@ -1469,17 +1469,17 @@ class EpBreakdown:
     # TortoiseEP.compute_confidence / sdk.get_confidence return for the same
     # point WHENEVER one is persisted — THOSE TWO READ α/β ONLY, so a readable
     # mirror is the first stated divergence (they answer the pair mean where
-    # this field answers the mirror's value) — EXCEPT where the stored pair is
-    # one R1 rejects: those two read the COALESCED operands with a per-operand
-    # `1.0` default, so a half pair answers 0.3333 there and ``None`` here, a
-    # (0,0) pair answers 0.5 there and ``None`` here, a negative pair answers a
-    # negative "mean" there and ``None`` here, an unreadable operand RAISES
-    # there and is ``None`` here, and a sum that overflows divides bare there
-    # (0.0) where this field uses the stable mean (0.5). Those are the rest of
-    # the second stated divergence. The one case that stays 0.5 is a claim with
-    # NO operands at all, because they are the EP read under an explicit
-    # `require_calibration=False`, not a read/rank surface. That divergence is
-    # deliberate and recorded in the #11702 decision
+    # this field answers the mirror's value). The second is the pairs R1
+    # REJECTS: those two coalesce each MISSING operand to `1.0` and then divide
+    # bare, so where R1 answers ``None`` they answer a number built from those
+    # defaults — α/(α+1) for a half pair, above 1 for a negative β, below 0 for
+    # a negative α, 0.5 when the total is ≤ 0, a bare 0.0 when the sum
+    # overflows — or they RAISE on an operand Python cannot coerce at all (a
+    # Boolean is coercible, so it is silently served as 1.0). ⛔ Do not assume
+    # the two readers agree on a shape because they agree on the pairs R1
+    # ACCEPTS. A claim with NO operands at all also answers 0.5 there (the
+    # per-operand defaults); that is the divergence recorded in the #11702
+    # decision
     # comment (issuecomment-6781252637) — it is the one place a claim with NO
     # operands at all still answers 0.5, and it is
     # outside this field's contract rather than a second vocabulary for it.
@@ -5448,8 +5448,10 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
     `docs/architecture/SEARCH-ARCHITECTURE.md` §6.3: absent state is ``null``
     with ``ep_state: "absent"``, never 0.5. A claim that DOES carry a
     persisted belief keeps its number: a computed posterior of 0.5 still
-    reads 0.5 — the distinction is presence, not value. contention=0.0.
-    variance/contested are computed from the PERSISTED posterior
+    reads 0.5 — the distinction is presence, not value. contention is computed
+    from EDGES, not from the belief: a matched Point with no belief keeps its
+    edge-derived NAND fraction, and 0.0 is only for an ID this read did not
+    match. variance/contested are computed from the PERSISTED posterior
     (posterior_alpha/beta, falling back to ep_alpha/beta priors) (posterior
     stability), not from edge ratios.
 
