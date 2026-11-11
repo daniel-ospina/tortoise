@@ -3116,6 +3116,10 @@ def label_coverage(counts: dict[str, int], declared: frozenset[str],
         # left for a reader to derive — a derived denominator is one a reader can get wrong.
         "unlabelled_null": unlabelled,
         "unlabelled_undeclared": undeclared_total,
+        # ⛔ Both histograms are PINNED by INVARIANT, not by key-presence
+        # (`tests/test_10988_a4_label_coverage.py`): emptying either to `{}` left the whole pin set
+        # green, and `labelled_by_declared_kind={}` beside `labelled=3` on the rendered line is a
+        # self-contradicting artifact no test caught (#11837 review round 12, P2).
         "labelled_by_declared_kind": {k: seen[k] for k in declared_present},
         "undeclared": {k: seen[k] for k in undeclared},
         "by_kind": dict(sorted(seen.items())),
@@ -3145,6 +3149,10 @@ def _a4_empty_coverage(layer: str) -> dict:
     its `UNMEASURED(...)` reason, so a broken query renders a NAMED gap rather than `population=0`
     — a numeric zero under a key a real measurement also occupies reads as a MEASURED ABSENCE and
     scores the row RED on an infrastructure failure (#10982 review cycle 2, finding 2).
+
+    ⛔ `non_vacuity` is the exception, and it is a BOOLEAN: `row()` substitutes `None` there rather
+    than the reason string, because a truthy placeholder would read as PASS to any consumer keying
+    on the field's own name (`if not non_vacuity: RED`) — the inverse of the rule above.
     """
     return {"layer": layer, "population": 0, "labelled": 0, "unlabelled": 0,
             "unlabelled_null": 0, "unlabelled_undeclared": 0,
@@ -3413,10 +3421,19 @@ def a_row_census(uri: str) -> dict:
             # ⛔ NOT the zero skeleton: a numeric `0` under a key a real measurement also occupies
             # reads as a MEASURED ABSENCE and scores the row RED on an infrastructure failure —
             # the exact number this block exists to not print (#10982 review cycle 2, finding 2).
+            # ⛔ A BOOLEAN is NOT substituted: the reason string is TRUTHY, so `non_vacuity` — the
+            # row's only boolean — would read as PASS on a broken query to any consumer that keys
+            # on the field's own name (`if not layers[l]["non_vacuity"]: RED`), the exact inverse
+            # of the numeric rule above (#11837 review round 12, P2). `None` is neither True nor
+            # False: it renders as a visible gap, it never satisfies a PASS test, and the reason is
+            # already carried by `block["error"]`.
             block: dict = {"error": reason}
             for key, value in empty.items():
-                block[key] = ({name_: reason for name_ in value}
-                              if isinstance(value, dict) else reason)
+                if isinstance(value, dict):
+                    block[key] = {name_: (None if isinstance(name_value, bool) else reason)
+                                  for name_, name_value in value.items()}
+                else:
+                    block[key] = None if isinstance(value, bool) else reason
             return block
 
     # A1 — the object→object graph, plus the rollup half.

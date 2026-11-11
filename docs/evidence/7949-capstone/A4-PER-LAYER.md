@@ -145,7 +145,7 @@ kind that is not in the master vocabulary to `statement`, so no typed claim can 
 kind the vocabulary declares**. ⚠️ The gate is CASE-INSENSITIVE and stores the kind VERBATIM
 (`tortoise/extractor_v2.py:10419` compares `pkind.lower()` against `k.lower()`; `:10695` persists
 `"pointKind": pkind`), while the census pops only the exact string `"statement"`
-(`probes/capstone_measure.py:3197`, `by_kind.pop("statement", 0)`; the `NULL` pop is `:3196`) — so an extractor-written
+(`probes/capstone_measure.py:3205`, `by_kind.pop("statement", 0)`; the `NULL` pop is `:3204`) — so an extractor-written
 `"Statement"` would be persisted, survive the gate, and land in `typed` **and** `undeclared`. That is the
 same asymmetry §2 already states for `eventKind` (a stored `cardcreated`); no such row is on this graph
 today, and this artifact does not claim the lane is airtight. And

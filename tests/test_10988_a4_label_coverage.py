@@ -130,7 +130,9 @@ def test_null_and_blank_are_ONE_absent_state_reported_as_its_own_share():
     assert cov["unlabelled_null"] == 6
     assert cov["unlabelled_undeclared"] == 0
     assert cov["coverage"] == 10 / 16
-    assert "NULL" not in cov["by_kind"] and "" not in cov["by_kind"]
+    assert cov["by_kind"] == {"statement": 10}, (
+        "`by_kind` is the present kinds WITHOUT the absent state — an empty dict here would "
+        "satisfy a `'NULL' not in by_kind` test vacuously, so the CONTENT is asserted")
     assert cov["declared_present"] == ["statement"]
 
 
@@ -151,6 +153,41 @@ def test_unlabelled_is_EXACTLY_the_null_plus_undeclared_share_and_nothing_escape
     assert cov["unlabelled_null"] == 1
     assert cov["unlabelled"] == 3
     assert cov["labelled"] + cov["unlabelled"] == cov["population"] == 13
+
+
+def test_the_two_histograms_are_pinned_by_INVARIANT_not_by_key_presence():
+    """FAILS IF `labelled_by_declared_kind` or `by_kind` is emptied, re-keyed or made inconsistent.
+
+    ⛔ MEASURED (#11837 review round 12, P2): both fields could be replaced with `{}` and the whole
+    17-case pin set stayed GREEN — `by_kind` was asserted only as `"NULL" not in by_kind`, which an
+    empty dict satisfies vacuously, and the render arm only checked that the STRING
+    ` labelled_by_declared_kind=` appeared on the line. `capstone_measure.py`'s own render is what a
+    scoring reader consumes, so an emptied histogram printed beside `labelled=3` is a
+    self-contradicting artifact with nothing red.
+
+    The invariants are the falsifier, so a future edit that drops a bucket reds HERE:
+    the declared-kind histogram sums to `labelled`, `by_kind` holds every PRESENT kind (so it sums to
+    `population` minus the absent share), and `by_kind`'s keys are exactly the declared kinds present
+    plus the undeclared ones.
+    """
+    probe = _probe()
+    cov = probe.label_coverage(
+        {"statement": 7, "plan": 3, "constraint": 2, "NULL": 1},
+        frozenset({"statement", "plan"}), layer="claims")
+    assert sum(cov["labelled_by_declared_kind"].values()) == cov["labelled"] == 10, (
+        f"the declared-kind histogram must sum to `labelled`: {cov['labelled_by_declared_kind']}")
+    assert cov["labelled_by_declared_kind"] == {"statement": 7, "plan": 3}
+    assert sum(cov["by_kind"].values()) == cov["population"] - cov["unlabelled_null"] == 12, (
+        "`by_kind` carries every PRESENT kind — the absent state is reported as `unlabelled_null`, "
+        f"so the histogram sums to population minus that share: {cov['by_kind']}")
+    assert cov["by_kind"] == {"constraint": 2, "plan": 3, "statement": 7}
+    assert set(cov["by_kind"]) == set(cov["labelled_by_declared_kind"]) | set(cov["undeclared"]), (
+        "a kind present on the graph is in exactly one of the two histograms' key sets")
+    # An EMPTY layer is where an unpinned histogram hides: every bucket is empty and every
+    # key-presence assertion passes. Pin the zero shape too.
+    zero = probe.label_coverage({}, frozenset({"statement"}), layer="claims")
+    assert zero["labelled_by_declared_kind"] == {} and zero["by_kind"] == {}
+    assert zero["labelled"] == 0 and zero["coverage"] is None
 
 
 # ── 2. per layer, never blended ──────────────────────────────────────────
@@ -709,6 +746,15 @@ def test_the_rendered_block_emits_EVERY_layer_with_its_own_denominator():
         fields = dict(part.split("=", 1) for part in line[0].split() if "=" in part)
         assert (int(fields["unlabelled_null"]) + int(fields["unlabelled_undeclared"])
                 == int(fields["unlabelled"])), (layer, line[0])
+        # ⛔ The declared-kind HISTOGRAM must not render EMPTY beside a non-zero `labelled`: the
+        # renderer falls back to `{}` (`capstone_measure.py:3594`), so an emptied dict printed
+        # `labelled=<n> labelled_by_declared_kind={}` — a self-contradicting line that every
+        # key-presence assertion above still passes (measured, #11837 review round 12, P2).
+        if int(fields["labelled"]) > 0:
+            assert fields["labelled_by_declared_kind"] != "{}", (
+                f"the {layer} layer renders labelled={fields['labelled']} with an EMPTY "
+                f"declared-kind histogram — a scoring reader sees a self-contradicting line:\n"
+                f"{line[0]}")
     claims = next(ln for ln in rendered.splitlines() if ln.startswith("a4 claims "))
     assert "unlabelled_null=1 unlabelled_undeclared=2 " in claims, (
         "the claims layer's absent share is 1 NULL + 2 undeclared; the log must carry both halves "
@@ -755,3 +801,14 @@ def test_a_broken_layer_query_renders_a_NAMED_GAP_and_never_a_zero():
     assert str(a4["claims"]["population"]).startswith("UNMEASURED("), (
         "the whole A4 row is the failure unit: a broken layer query must not publish the other "
         "layers' numbers under the same row")
+    # ⛔ `non_vacuity` is the row's ONLY boolean, and a boolean cannot take the reason-string
+    # substitution the numerics take: the string is TRUTHY, so `non_vacuity` read as PASS on a
+    # broken query — the inverse of the rule this arm exists to enforce (measured, #11837 review
+    # round 12, P2). It must be neither `True` nor a truthy placeholder.
+    for layer in ("claims", "things", "events"):
+        assert a4[layer]["non_vacuity"] is not True, (
+            f"the {layer} layer reports non_vacuity={a4[layer]['non_vacuity']!r} on a BROKEN "
+            f"query — a truthy placeholder scores an infrastructure failure as non-vacuous: "
+            f"{a4[layer]}")
+        assert not a4[layer]["non_vacuity"], (
+            f"{layer}'s non_vacuity is truthy on a broken query: {a4[layer]}")
