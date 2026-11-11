@@ -3846,6 +3846,82 @@ def test_every_MEASUREMENT_key_the_emitter_writes_is_in_the_exemption_set():
         "stale entry masks the moment the emitter's real key is renamed")
 
 
+#: The emitter symbols this file's own PROSE names, each with the fragment that must still
+#: carry the claim (a markdown/code comment WRAPS, so the fragment is matched on any one line —
+#: the symbols and their order are what the assertion holds).
+#:
+#: ⛔ WHY A PIN AT ALL: `_BUNDLE_CITE` resolves `sdk|edges|extractor_v2` only, and
+#: `tests/test_7949_capstone_measure.py` sweeps `capstone_verdict_check.py` as a cite TARGET,
+#: never as a swept DOCUMENT — so anything these two paragraphs claim about the emitter was
+#: read by NOTHING. Measured on #11837's review (P2-1): the three `capstone_measure.py:<n>`
+#: cites were correct at the PR's merge-base, and the PR's own commit message claimed to have
+#: re-derived them while they had landed on unrelated code (an `e3_census` rule line, a comment
+#: inside `measured_arm()`, and prose inside an f-string) — the exact "a claim nothing re-checks
+#: can rot silently" defect this bundle exists to catch, in the gate's own source. The fix was
+#: to name SYMBOLS instead of lines; this pin keeps the symbols honest, and it REFUSES the line
+#: form coming back (a `file:line` into a 4,600-line probe re-stales on any insertion above it,
+#: which is how the three cites walked twice inside the PR that wrote them).
+_EMITTER_PROSE_CLAIMS = (
+    # `_MEASUREMENT_RUN_KEYS`'s `a_row_census` entry: where the emitter WRITES that key.
+    ("the A-row census is written INTO the run block by the emitter",
+     ('"a_row_census": a_census,',)),
+    # `_NON_MEASUREMENT_RUN_KEYS`'s `door` paragraph: `main`'s door check BEFORE the render.
+    # The CALL, not the `def` (a `def` anchor would resolve 3,700 lines above the call
+    # site and would stay green if `main` stopped calling it).
+    ("BEFORE it reaches", ("    require_door_entered(runs)", "text = render_log(")),
+)
+
+
+def test_the_emitter_symbols_in_this_files_own_prose_resolve_and_no_line_cite_returns():
+    """FAILS IF this gate's prose names an emitter symbol the emitter no longer has.
+
+    Three clauses, because the paragraphs make three claims: the sentence is still THERE, the
+    symbols it names EXIST in the emitter (and the `door` pair in the order the sentence
+    asserts), and no `capstone_measure.py:<n>` number comes back — a number is read by no sweep
+    here, so it rots on the next insertion above it.
+
+    Non-vacuity: the pre-#11837-fix text carried `capstone_measure.py:4336` / `4481` /
+    `4616`, so the number clause reds on it; and renaming either call in the emitter —
+    `require_door_entered` or `render_log` — reds the symbol clause instead of leaving the
+    sentence asserting something the code no longer has.
+    """
+    emitter = (_REPO / "docs/evidence/7949-capstone/probes/capstone_measure.py"
+               ).read_text(encoding="utf-8").splitlines()
+    gate_path = Path(cvc.__file__)
+    gate_text = gate_path.read_text(encoding="utf-8")
+    gate = gate_text.splitlines()
+    failures: list[str] = []
+    # 1. the sentence is still stated (a pin on a DELETED claim passes vacuously).
+    for fragment, _symbols in _EMITTER_PROSE_CLAIMS:
+        if not any(fragment in ln for ln in gate):
+            failures.append(
+                f"the sentence fragment {fragment!r} is gone from "
+                "tools/capstone_verdict_check.py — if the claim moved, re-point this pin; if it "
+                "was dropped, drop the pin with it (a pin on a deleted sentence proves nothing)")
+    # 2. …and the prose carries NO `file:line` into the emitter.
+    typed = sorted(set(re.findall(r"capstone_measure\.py:\d+", gate_text)))
+    if typed:
+        failures.append(
+            f"{typed} — a `file:line` into the emitter is read by NO sweep (that file is not in "
+            "`_BUNDLE_DOCS`), so the number rots on the next insertion above it. Name the SYMBOL")
+    # 3. …and every symbol it names resolves, in the order the sentence asserts.
+    for fragment, symbols in _EMITTER_PROSE_CLAIMS:
+        where = {symbol: [i for i, ln in enumerate(emitter) if symbol in ln]
+                 for symbol in symbols}
+        for symbol in symbols:
+            if not where[symbol]:
+                failures.append(
+                    f"`{symbol}` (named by the {fragment!r} paragraph) appears nowhere in "
+                    "capstone_measure.py — the sentence names code the emitter no longer has "
+                    "(re-derive the symbol at YOUR head)")
+        if len(symbols) == 2 and all(where.values()) and where[symbols[0]][0] > where[symbols[1]][0]:
+            failures.append(
+                f"the sentence asserts `{symbols[0]}` runs BEFORE `{symbols[1]}`, but the "
+                f"emitter has the first at line {where[symbols[0]][0] + 1} and the second at "
+                f"{where[symbols[1]][0] + 1}")
+    assert not failures, "\n".join(failures)
+
+
 def test_the_emitter_key_scan_cannot_be_defeated_by_INDENTATION():
     """The scan reads keys by PARSING, so re-indenting the literal cannot hide one (#11331).
 
