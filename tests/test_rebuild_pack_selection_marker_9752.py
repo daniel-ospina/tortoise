@@ -1425,3 +1425,53 @@ def test_replay_log_reports_the_marker_shape_it_observed(tmp_path, caplog,
         f"a raised restore write must be reported as UNVERIFIED: {errs}")
     assert not any("now reads as UNCONFIGURED" in m for m in errs), (
         f"a raised write asserted an absence it never observed: {errs}")
+
+
+def test_pack_selection_gap_is_not_masked_by_a_co_occurring_gap(
+        tmp_path, caplog, monkeypatch):
+    """Co-occurring gap classes each get their own line (#9752, review round 6 P2).
+
+    FAILING VALUE: the legs were an `elif` chain, so whichever class matched
+    FIRST suppressed every later one. A pre-preservation rescue file carries
+    NEITHER marker, so it sets `team_meta_state_unknown` AND
+    `pack_selection_state_unknown` together — the ordinary shape after one
+    interrupted rebuild. The operator then got only the TeamMeta remedy
+    ("re-mint the marker") and never "check the approved pack set before
+    trusting it", which is the one consequence that stops a pack an admin had
+    REMOVED being re-admitted with its `revision` reset. The two other
+    reporters of this class (`_recover_or_raise`, and the CLI at
+    `tortoise/__main__.py`) already emit one line per class with independent
+    `if`s; an `elif` here also contradicts the rule the producer states
+    verbatim in `tortoise/consistency.py` — "Additive, not a chain … one must
+    not suppress the other".
+
+    REACHABLE: both sections are absent from a pre-preservation payload, which
+    is exactly what the pending sidecar holds for a snapshot written before
+    marker preservation existed (version < 7).
+    """
+    sdk, events = _mk_sdk(tmp_path)
+    _write_journal(events)
+    payload = _sidecar_payload(batch_snapshot=[{"id": "b1"}], version=6)
+    payload.pop("pack_selection")
+    payload.pop("team_meta")
+    _plant(Path(_sidecar_path(events)), payload)
+    _proj(sdk).g.query("MATCH (n) DETACH DELETE n")
+    proj = _proj(sdk)
+    monkeypatch.setattr(type(proj), "_find_local_jsonl_dir",
+                        lambda self: str(events))
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    # Same lane-independent seam as the sibling pin above (#4280).
+    monkeypatch.setattr(proj, "_is_embedded", True)
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.projection"):
+        proj._auto_health_recover()
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(":TeamMeta first-org marker" in m
+               and "NOT confirmed intact" in m for m in messages), (
+        f"the :TeamMeta leg did not fire on a co-occurring gap: {messages}")
+    assert any(":PackSelection pack-set marker" in m
+               and "NOT confirmed intact" in m for m in messages), (
+        "the pack-set leg was MASKED by the earlier :TeamMeta leg — that is "
+        "a chain, not additive legs, and it withholds the only remedy that "
+        f"stops a removed pack being re-admitted: {messages}")

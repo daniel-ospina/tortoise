@@ -12307,6 +12307,21 @@ class FalkorProjection(
                     # partial loss, so name it on the same line the operator
                     # reads. Which of the three it is lives in `reason` and in
                     # the rebuild ERROR log; the aggregate gap is the trigger.
+                    #
+                    # ⛔ ADDITIVE, NOT A CHAIN (#4641 round-7, restated in
+                    # `tortoise/consistency.py` — "a confirmed loss and a
+                    # pre-preservation UNKNOWN can coexist, and one must not
+                    # suppress the other"). These legs were an `elif` chain,
+                    # so a co-occurring gap was MASKED: a v5 rescue file sets
+                    # `team_meta_state_unknown` AND `pack_selection_state_unknown`
+                    # together, and the operator then got only the TeamMeta
+                    # remedy — never "check the approved pack set before
+                    # trusting it", the one consequence that prevents a
+                    # removed pack being re-admitted. `_recover_or_raise`
+                    # (below) and the CLI (`tortoise/__main__.py`) already
+                    # emit one line per class with independent `if`s; this was
+                    # the last of the four reporters still shaped as a chain
+                    # (review round 6, P2).
                     if result.get("onboarding_gap"):
                         logger.warning(
                             "auto-recovered empty embedded DB from %s "
@@ -12335,7 +12350,7 @@ class FalkorProjection(
                             "reason: %s",
                             events_dir, result.get("log_points"),
                             result.get("reason"))
-                    elif result.get("pack_selection_gap"):
+                    if result.get("pack_selection_gap"):
                         # #9752: the sibling of the team_meta leg above. A
                         # `:PackSelection` marker that did not come back makes
                         # the graph read as UNCONFIGURED, so the self-heal and
@@ -12362,7 +12377,7 @@ class FalkorProjection(
                             "Recovery reason: %s",
                             events_dir, result.get("log_points"),
                             _shape, _consequence, result.get("reason"))
-                    elif result.get("corrupt_lines"):
+                    if result.get("corrupt_lines"):
                         # #5612: the third producer-signal leg on this surface,
                         # for the same reason as the two above — the clean
                         # "auto-recovered" line drops `reason`, and a replay
@@ -12378,7 +12393,12 @@ class FalkorProjection(
                             "(#5612). Recovery reason: %s",
                             events_dir, result.get("log_points"),
                             result["corrupt_lines"], result.get("reason"))
-                    else:
+                    # The clean line is a POSITIVE assertion — "nothing was
+                    # lost" — so it may only fire when no leg above did.
+                    if not (result.get("onboarding_gap")
+                            or result.get("team_meta_gap")
+                            or result.get("pack_selection_gap")
+                            or result.get("corrupt_lines")):
                         logger.warning(
                             "auto-recovered empty embedded DB from %s "
                             "(%s events)",
