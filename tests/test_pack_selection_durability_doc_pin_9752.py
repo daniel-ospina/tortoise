@@ -50,12 +50,24 @@ def test_marker_declared_in_the_durability_posture():
         return text[start:end]
 
     preserved = block("preserved-sections")
-    assert "`:PackSelection`" in preserved, (
+    # ⛔ Scope the assertions to the `:PackSelection` ENTRY, not the 7.4 KB
+    # block (review P3 on #11839): `removed` and `#9752` each occur twice in
+    # this entry's own prose, so a block-wide substring survives deletion of the
+    # very clause it names. The three tokens below occur ONCE in the entry, so
+    # deleting the declaration, the citation or the consequence reds its own
+    # assertion.
+    start = preserved.index("- `:PackSelection`")
+    rest = preserved[start + 1:]
+    nxt = rest.find("\n- `")
+    entry = rest if nxt == -1 else rest[:nxt]
+    assert "`:PackSelection`" in entry, (
         "the section-preserved block must name :PackSelection")
-    assert "pack_selection" in preserved, (
-        "the block must name the carrier section")
-    assert "#9752" in preserved
-    assert "removed" in preserved, (
+    assert "`pack_selection`" in entry, (
+        "the entry must name the carrier section")
+    assert "**#9752**" in entry, (
+        "the declaration must cite #9752 next to the class, or a reader cannot "
+        "trace the section back to its decision")
+    assert "re-admitted" in entry, (
         "the declaration must state the load-bearing consequence — an absent "
         "marker re-admits a pack the admin removed")
     assert "PackSelection" not in block("unenrolled"), (
