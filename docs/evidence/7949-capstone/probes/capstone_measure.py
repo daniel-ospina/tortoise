@@ -3007,8 +3007,10 @@ def _a4_declared_kinds(kind_prop: str) -> frozenset[str]:
     product in one direction (blessing kinds nothing declares) or the other (reporting a
     pack-following write as an invention) — the same defect `tools/ax_write_eval.py` documents
     for its own vocabulary.
-    ⛔ It is NOT "the predicate the write validator runs" for every bucket: `valid_kind` runs
-    `known_kinds("pointKind")` only (a point request-model validator), the event layer's write
+    ⛔ It is NOT "the predicate the write validator runs" for every bucket: `hosted_api.py::valid_kind`
+    runs `known_kinds("pointKind")` only (a point request-model validator — ⛔ qualified by FILE,
+    because `selfhost_api.py::valid_kind` is a same-named validator over `known_kinds()` with no
+    bucket, i.e. all of them), the event layer's write
     gate is the commit door's `compile_vocab().event_kinds` (exact, per-graph —
     `tortoise/commit_schema.py`), and `entities[].kind` has **no vocabulary membership test**
     (#5202) — the door's `#5475` leg refuses only an unapproved pack NAMESPACE, pre-write, and
