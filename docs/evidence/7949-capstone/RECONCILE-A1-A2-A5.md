@@ -191,7 +191,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    no structural edge of ANY kind" would be **false** — `references` is a valid structural predicate
    (`docs/ONTOLOGY.md` §3.9), and the measured run writes **7** of them (`(Source)-[:references]->…`,
    produced by `_EdgeHandlers.link_source_to_event` — `probes/capstone_measure.py:275-283`, reached from
-   the capture path at `tortoise/sdk.py:17749`). (The probe's own docstring cites it too and was
+   the capture path at `tortoise/sdk.py:17882`). (The probe's own docstring cites it too and was
    re-derived with it — `#11212` had already corrected a stale `:17465` there, and `#11459`'s +102
    insertion then moved both; both now read `17749`.)  <!-- #10226 removed 26 SDK methods above this writer: the prose cite and the `sed` were re-derived with it, this bare parenthetical was not — re-derived here off `grep -n '^ *proj\.link_source_to_event' tortoise/sdk.py`. --> What is missing is the *declared part-whole* edge, not every structural
    edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second
