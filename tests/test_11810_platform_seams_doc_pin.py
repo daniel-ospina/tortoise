@@ -660,7 +660,7 @@ def test_every_restatement_of_the_scoping_in_the_record_is_HOSTED_scoped():
 
 
 def test_every_restatement_site_label_names_the_item_that_states_it():
-    """(3, labels) — the legend's SITE must resolve AND hold the sentence it claims.
+    r"""(3, labels) — the legend's SITE must resolve AND hold the sentence it claims.
 
     The `_RESTATEMENTS` legend is the map a next rewriter follows to find the seven
     places this PR scoped. It carried `§3.2`/`§3.3` labels, and the record has no
