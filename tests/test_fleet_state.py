@@ -2228,7 +2228,7 @@ def test_a_measured_issue_read_publishes_its_count_even_when_the_pr_read_failed(
 
 
 def test_an_open_issue_read_below_the_cap_is_not_truncated(monkeypatch) -> None:
-    """The normal case (989 open issues against a limit of 2000 on 2026-10-14):
+    """The normal case (3 open issues against the window):
     absence from `index.issues` IS a measured "nobody", so the flag must be exactly
     False — not merely absent — because `collision_preflight._board_can_answer`
     refuses a board that does not stamp its coverage."""
@@ -2237,10 +2237,40 @@ def test_an_open_issue_read_below_the_cap_is_not_truncated(monkeypatch) -> None:
     assert rec["open_issues_truncated"] is False
     assert rec["open_issues_read"] == 3
     assert rec["open_issues_limit"] == fs.OPEN_ISSUES_LIMIT
-    assert fs.OPEN_ISSUES_LIMIT > 989, (
-        "the limit must clear this repo's open-issue count, or every board is "
-        "truncated and every absent issue refuses"
+
+
+def test_the_open_issue_window_clears_the_largest_measured_crossing(monkeypatch) -> None:
+    """A window below the repo's own issue count re-creates the #11872 outage, and
+    the suite must RED on it (#11917).
+
+    The only floor before this was a literal from 2026-10-14 (989) while the repo
+    passed 2005 on 2026-11-11, so any window in `(989, 2005]` — 2000 included —
+    satisfied the suite while making `open_issues_truncated` True for every real
+    board, which turns the pre-flight's *absent issue* surface into `INCOMPLETE
+    (exit 2)` for every issue nobody has taken yet. That is not hypothetical: the
+    revert reached main's shape once through a merge resolution on a PR that never
+    touched this file (#11914), and every check stayed green.
+
+    ⛔ The second assertion is the one with teeth: it builds the board from a read
+    that returns EXACTLY the recorded crossing, i.e. this repo's real size, and
+    demands the board answer at that size instead of saturating. Pinning the
+    constant alone would prove only that the constant is large.
+    """
+    assert fs.OPEN_ISSUES_LIMIT >= fs.OPEN_ISSUES_WINDOW_RECORDED_CROSSING, (
+        "the window must clear the largest open-issue count it was measured "
+        f"against ({fs.OPEN_ISSUES_LIMIT} < "
+        f"{fs.OPEN_ISSUES_WINDOW_RECORDED_CROSSING}), or every board is truncated "
+        "and every absent issue refuses"
     )
+    st = _issues_build(monkeypatch, fs.OPEN_ISSUES_WINDOW_RECORDED_CROSSING)
+    rec = st["reconciliation"]
+    assert rec["open_issues_truncated"] is False, (
+        "a read the size of this repo's measured crossing saturated the window: "
+        f"{rec['open_issues_read']} issue(s) at limit {rec['open_issues_limit']} — "
+        "the pre-flight would refuse every unattributed issue"
+    )
+    assert rec["open_issues_read"] == fs.OPEN_ISSUES_WINDOW_RECORDED_CROSSING
+
 
 
 # ---------------------------------------------------------------------------

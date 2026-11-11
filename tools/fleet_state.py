@@ -2335,6 +2335,24 @@ def open_prs(repo: str, limit: int = 400) -> GitHubRows:
 #: later measurement of the doubled worst case is not read as a regression.
 OPEN_ISSUES_LIMIT = 4000
 
+#: The largest open-issue count the window above has been measured against.
+#:
+#: ⛔ A RECORDED MEASUREMENT, NOT A MARGIN AND NOT A SECOND BOUND. `OPEN_ISSUES_LIMIT`
+#: must stay at or above this, and `tests/test_fleet_state.py` asserts exactly that —
+#: the only floor before it was a literal from 2026-10-14 (989), so a silent revert of
+#: the window to 2000 passed the suite GREEN while re-creating the #11872 outage: every
+#: board truncated, every issue with no attribution entry refusing `INCOMPLETE (exit 2)`
+#: (#11917; that revert reached main's shape once through a merge resolution on a PR that
+#: never touched the file, #11914).
+#:
+#: ⛔ UPDATE THIS IN THE SAME COMMIT THAT RESIZES THE WINDOW. It is the number the guard
+#: compares against, so a resize that forgets it leaves the guard measuring the previous
+#: crossing — the same stale-literal failure one level up.
+#:
+#: Measured, not estimated: `gh issue list --repo daniel-ospina/tortoise --state open
+#: --limit 5000 --json number --jq length` -> 2046 on 2026-11-11.
+OPEN_ISSUES_WINDOW_RECORDED_CROSSING = 2046
+
 
 def open_issues(repo: str, limit: int = OPEN_ISSUES_LIMIT) -> GitHubRows:
     """The open-issue universe, read at a bound derived from its own size (#11202).
