@@ -1301,6 +1301,78 @@ def test_pack_selection_gap_warns_in_the_migrate_db_caller(
         f"the migrate route discarded the pack-set gap: {msgs}")
 
 
+def test_migrate_route_does_not_report_the_empty_target_as_verified(
+        tmp_path, caplog, monkeypatch):
+    """The replay route's capture describes an EMPTY graph, so it cannot verify.
+
+    FAILING VALUE: `rebuild_all` captures each preservation section from the
+    graph it is ABOUT TO WIPE, and on this route that graph is the freshly
+    created `target` — not `backup_path`, the legacy graph the journal came
+    from. The capture is therefore empty by construction: nothing is restored,
+    the post-restore comparison is skipped, and the rebuild returns
+    `pack_selection_gap: 0` with `pack_selection_verified: True`. Reporting
+    that as a verification is a false PASS over a graph that really did lose
+    the marker — measured end-to-end (#11866): a source with
+    `configured=True revision=2` and an EMPTY approved set migrates to
+    `configured=False revision=0` (the catalog union, so the pack an admin
+    REMOVED is re-admitted) under `pack_selection_gap: 0,
+    pack_selection_verified: True` and no CLI line at all.
+
+    REACHABLE: the counts below are exactly what `rebuild_all` returns for a
+    fresh target, injected through the real `migrate()` via the same helper the
+    sibling rungs use. The assertion is on the ROUTE's answer — UNKNOWN, named
+    rather than silent — because that is the only state this route can honestly
+    support until the capture source is fixed (#11866).
+    """
+    counts = {"nodes": 1, "edges": 0, "events": 1,
+              "pack_selection_expected": 0, "pack_selection_verified": True,
+              "pack_selection_restored": 0,
+              "pack_selection_restore_failures": 0,
+              "pack_selection_gap": 0, "pack_selection_state_unknown": False,
+              "pack_selection_conflict": False}
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
+        result = _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
+
+    assert result["pack_selection_verified"] is False, (
+        "the route cannot verify the migrated graph's marker: its capture read "
+        "the fresh target, not the source (#11866)")
+    assert result["pack_selection_state_unknown"] is True
+    assert result["pack_selection_gap"] == 1
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(":PackSelection" in m and "pre-preservation/UNKNOWN" in m
+               for m in msgs), (
+        "the route must NAME the state it cannot observe, or the only surface a "
+        f"human runs stays silent: {msgs}")
+    assert not any("restore gap" in m for m in msgs), (
+        "nothing observed a loss, so the absence consequence and its re-pin "
+        "remedy must not be asserted")
+
+
+def test_migrate_route_does_not_override_a_stronger_rebuild_report(
+        tmp_path, caplog, monkeypatch):
+    """The route's UNKNOWN must never MASK a gap the rebuild really measured.
+
+    The override exists for one shape only: a rebuild that reported a clean
+    verification it could not have performed. A non-zero gap is an observation
+    and outranks it — overwriting that would trade one wrong report for another.
+    """
+    counts = {"nodes": 0, "edges": 0, "events": 0,
+              "pack_selection_expected": 1, "pack_selection_verified": True,
+              "pack_selection_restored": 0,
+              "pack_selection_restore_failures": 1,
+              "pack_selection_gap": 1, "pack_selection_state_unknown": False}
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
+        result = _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
+
+    assert result["pack_selection_gap"] == 1
+    assert result["pack_selection_state_unknown"] is False, (
+        "a measured restore gap was relabelled UNKNOWN by the route")
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("restore gap" in m for m in msgs), msgs
+
+
 def test_migrate_db_caller_distinguishes_the_unknown_shape(
         tmp_path, caplog, monkeypatch):
     """UNKNOWN must not be reported as an observed loss (#4641 round 5, #9752).

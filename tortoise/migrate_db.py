@@ -211,6 +211,48 @@ def migrate(force: bool = False) -> dict:
                 rebuild_counts = proj.rebuild_all(events_dir, confirm_destructive=True)
             finally:
                 proj.close()
+            # ── #9752: this route's preservation report describes an EMPTY graph ──
+            # `rebuild_all` captures each preservation section (config rows,
+            # `:TeamMeta`, `:PackSelection`) from the graph it is about to wipe —
+            # i.e. from the FRESH `target` created nine lines above, NOT from
+            # `backup_path`, the legacy graph the journal came from. On this route
+            # the capture therefore sees an empty graph BY CONSTRUCTION: no marker
+            # is captured, nothing is restored, the post-restore comparison never
+            # runs (`pack_selection_marker is None` skips it), and the rebuild
+            # returns `pack_selection_gap: 0` with `pack_selection_verified:
+            # True`. Those are facts about the empty target, not about the graph a
+            # user migrates.
+            #
+            # Reporting them as a successful verification is the false PASS this
+            # class exists to stop — measured on a private lane: a source graph
+            # carrying `configured=True revision=2` with an EMPTY approved set
+            # migrates to `configured=False revision=0` (the catalog union, so the
+            # pack an admin REMOVED is re-admitted) while this route reported
+            # `pack_selection_gap: 0, pack_selection_verified: True` and the CLI
+            # printed nothing. Also measured on the same run: `:PackInstall`
+            # returns `[]` — the same capture-source defect, on the same route,
+            # for the classes `_config_classes()` owns (tracked as #11866).
+            #
+            # So this route reports UNKNOWN: the marker is not confirmed intact,
+            # and NOT observed gone. Named rather than silent, the disposition the
+            # RECORD-sourced `rebuild_from_record` already takes for this class
+            # (`tortoise/cache_projection.py`, `06-cache-projection.md` §0.5).
+            # CARRYING it needs a capture source that is not `self.g`; that is
+            # #11866, not this fix.
+            #
+            # The condition keeps a STRONGER report from the rebuild itself: a
+            # leftover pre-wipe sidecar beside the target (a previous partial
+            # migration into the same file) can say `state_unknown` on its own,
+            # and that answer is not overridden — it is the same verdict.
+            if rebuild_counts.get("pack_selection_verified") and not (
+                rebuild_counts.get("pack_selection_gap")
+                or rebuild_counts.get("pack_selection_state_unknown")
+                or rebuild_counts.get("pack_selection_conflict")
+            ):
+                rebuild_counts = dict(rebuild_counts)
+                rebuild_counts["pack_selection_state_unknown"] = True
+                rebuild_counts["pack_selection_verified"] = False
+                rebuild_counts["pack_selection_gap"] = 1
             # #4641: the JSONL rebuild path is one of the three routes that
             # performs the unconditional wipe, so a completed rebuild can
             # still leave the migrated graph's onboarding state NOT confirmed
@@ -219,10 +261,11 @@ def migrate(force: bool = False) -> dict:
             # Reporting `migrated` while swallowing it is the silent partial
             # loss the class exists to stop, so name it here as the other
             # callers (`consistency.recover_from_log`, the CLI) now do. This
-            # route discards the counts (`migrate()` returns only status/
-            # nodes/backup), so the warning can only POINT at the rebuild ERROR
-            # lines, which carry the shape; it must not describe all three as
-            # a loss the replay could not close.
+            # route carries no `onboarding_gap`/`team_meta_gap` field of its own
+            # (its result dict reports only the pack-selection class and
+            # `corrupt_lines`), so the warning can only POINT at the rebuild
+            # ERROR lines, which carry the shape; it must not describe all three
+            # as a loss the replay could not close.
             if rebuild_counts.get("onboarding_gap"):
                 logger.warning(
                     "rebuild: the migrated graph's onboarding state is NOT "
