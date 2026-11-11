@@ -767,13 +767,14 @@ def test_survivor_count_not_matching_the_bullets_is_rejected(tmp_path, monkeypat
     on §7 to match it.
     """
     def to_three(t: str) -> str:
-        # ⛔ Target the sentence's LEAD-IN, not a phrase from its tail: the previous target quoted
-        # `the two bullets below`, so rewording the sentence made this replace a no-op and the arm
-        # died silently behind `_mutated`'s own "mutation did not change the document" assert
-        # (#11902 review). The lead-in is the same clause `SURVIVOR_RE` keys on.
+        # ⛔ Target the sentence's OPENING clause (`of the four survivors,`) — the clause
+        # `SURVIVOR_RE` keys on — not the qualifier that follows it: a target quoting
+        # `the two survivor bullets below` becomes a no-op as soon as that phrase is
+        # reworded, and the arm then dies behind `_mutated`'s own "mutation did not change
+        # the document" assert (#11902 review; the tool's own arm had this shape).
         return t.replace(
-            "survivors, the two survivor bullets below",
-            "survivors, the three survivor bullets below",
+            "of the four survivors,",
+            "of the four survivors, three are already re-measured, and",
             1,
         )
 

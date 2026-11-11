@@ -970,15 +970,16 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
     (
         # The EXACT shipped defect, re-injected: the pre-fix page said `three`
         # above two survivor bullets plus one CLOSED issue. ⛔ The target is the
-        # sentence's OPENING clause (`of the four survivors,`), the same clause
-        # `SURVIVOR_RE` keys on, and NOT the qualifier after it. Measured why: the
-        # earlier target quoted `the two survivor bullets below`, and when
-        # `eabfbed95` rewrote that qualifier the replace became a no-op and the arm
-        # went dead. A dead arm is caught LOUDLY by `self_test` ("did not change the
-        # document — the arm is dead", FAIL) — so the hazard is maintenance, not a
-        # silent false PASS, and the opposite claim would be a false one about this
-        # gate (#11902 review, twice: once for the dead target, once for claiming a
-        # tail-scoped target was tail-proof).
+        # sentence's OPENING clause (`of the four survivors,`) — the clause
+        # `SURVIVOR_RE` keys on — and NOT the qualifier that follows it. Why it
+        # matters, measured: a target that quotes the qualifier
+        # (`the two survivor bullets below`) becomes a no-op the moment that phrase
+        # is reworded, so the mutation stops changing the document and the arm dies;
+        # an earlier revision of this arm had exactly that shape while its comment
+        # claimed the lead-in. `self_test` reports a dead arm LOUDLY ("did not change
+        # the document — the arm is dead", FAIL), so the hazard is maintenance rather
+        # than a silent false PASS — and the opposite claim would be a false one about
+        # this gate (#11902 review).
         "a survivor count that does not match the bullets beneath it",
         lambda t: t.replace("of the four survivors,",
                             "of the four survivors, three are already re-measured, and", 1),
