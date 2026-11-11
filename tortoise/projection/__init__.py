@@ -17533,10 +17533,14 @@ class FalkorProjection(
                     "is a CONFLICT, not a loss (#9752)",
                     type(e).__name__, e,
                 )
-        # Post-restore verification: the marker must be PRESENT and carry the
-        # captured property map — `configured: true` AND the same `revision`,
-        # which is the check #9752's acceptance restates ("not merely that the
-        # run succeeded"). Read back through the same query shape the capture
+        # Post-restore verification: the node must be PRESENT — that presence is
+        # what makes `resolved_pack_set` report `configured: true`, which is a
+        # field of the resolved dataclass derived by `pack_state._read_selection`
+        # and NOT a property on `:PackSelection` (the writer stamps only
+        # `revision`, `configured_at`, `updated_at`, `updated_by`,
+        # `write_token`; review P3 on #11839) — and it must carry the captured
+        # property map EXACTLY, `revision` included. That is the check #9752's
+        # acceptance restates ("not merely that the run succeeded"). Read back through the same query shape the capture
         # used, so the comparison cannot drift from it. A failed read is treated
         # as a MISMATCH — "could not confirm" must not read as "confirmed" —
         # and neither branch raises (this runs after the wipe).

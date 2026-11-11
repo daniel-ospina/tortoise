@@ -348,8 +348,6 @@ def test_rebuild_all_recovers_the_marker_from_a_leftover_sidecar(tmp_path):
     written it, and a batch entry keeps the file from being read as RETIRED (an
     entry-less file is a completed-rebuild artifact and is ignored).
     """
-    from tortoise.projection import _PACK_SELECTION_LABEL
-
     sdk, events = _mk_sdk(tmp_path)
     _write_journal(events)
     marker = {"revision": 4, "configured_at": "2026-01-01T00:00:00Z",
@@ -362,12 +360,14 @@ def test_rebuild_all_recovers_the_marker_from_a_leftover_sidecar(tmp_path):
     assert _markers(sdk) == [marker], (
         "the recovered marker did not reach the rebuilt graph — the union's "
         "`pack_selection` leg or the restore write is missing")
-    assert _proj(sdk).g.query(
-        f"MATCH (s:{_PACK_SELECTION_LABEL}) RETURN count(s)"
-    ).result_set[0][0] == 1, (
-        "the restore must be an idempotent MERGE of ONE marker, never a "
-        "duplicate — two markers make `_read_selection`'s single-row read "
-        "ambiguous")
+    # ⛔ No separate `count(s) == 1` assertion here (review P3 on #11839): the
+    # section carries at most one entry and the wipe removes every node, so the
+    # restore can only ever write ONE node and a duplicated write is unreachable
+    # by construction — see `test_pack_selection_section_carries_at_most_one_
+    # marker`'s closing note for why a two-run duplicate test would stay green
+    # under `CREATE`. The `_markers(...) == [marker]` assertion above already
+    # catches BOTH "restored nothing" (empty list) and "restored two" (a second
+    # row), so a count query here cannot vary independently of it.
 
 
 def test_pack_selection_section_carries_at_most_one_marker():
@@ -1190,7 +1190,6 @@ def test_rebuild_all_honours_a_carried_pack_selection_unknown_flag(
     from tortoise import projection as pr
     from tortoise.projection import (
         _PREWIPE_SNAPSHOT_META_KEYS,
-        _PREWIPE_SNAPSHOT_VERSION,
     )
 
     written: list[dict] = []
@@ -1206,10 +1205,14 @@ def test_rebuild_all_honours_a_carried_pack_selection_unknown_flag(
     payload = _sidecar_payload(
         batch_snapshot=[{"id": "b1"}], pack_selection=[])
     payload["pack_selection_unknown"] = True
-    assert (payload["version"] == _PREWIPE_SNAPSHOT_VERSION
-            and payload["pack_selection"] == []), (
-        "the fixture must plant the CURRENT version with a present-but-empty "
-        "section, so only the inherited flag can produce the UNKNOWN")
+    # The fixture plants the CURRENT version with a present-but-empty section
+    # (`_sidecar_payload` builds BOTH from `_PREWIPE_SNAPSHOT_VERSION` and
+    # `_SNAPSHOT_SECTIONS`, so asserting `payload["version"] ==
+    # _PREWIPE_SNAPSHOT_VERSION` compared a constant to itself — review P3 on
+    # #11839). The exact value is owned by
+    # `test_pack_selection_section_and_validator_are_wired`'s
+    # `_PREWIPE_SNAPSHOT_VERSION == 7` pin, not by this precondition.
+    assert payload["pack_selection"] == []
     assert "pack_selection_unknown" in _PREWIPE_SNAPSHOT_META_KEYS, (
         "the flag must be a registered META key, or the loader refuses the file "
         "as carrying a foreign section and a second interruption is "
@@ -1311,47 +1314,11 @@ def test_cmd_rebuild_reports_the_pack_selection_marker(tmp_path, capsys,
     assert "Re-set the graph's packs deliberately" not in out.err, out.err
 
 
-def test_marker_declared_in_the_durability_posture():
-    """T2: the class has a DECLARED disposition, not an inference.
-
-    FAILING VALUE: `:PackSelection` appears in the `preserved-sections` block
-    with its section, its restore rule and #9752, in the operator audit query,
-    and NOT in `unenrolled`.
-
-    REACHABLE: `docs/durability-posture.md` is the repo's canonical durability
-    authority and the blocks are literals in it.
-    """
-    doc = Path(__file__).resolve().parent.parent / "docs" / "durability-posture.md"
-    text = doc.read_text()
-
-    def block(name: str) -> str:
-        start = text.index(f"<!-- config-registry:{name} -->")
-        end = text.index("<!-- config-registry:end -->", start)
-        return text[start:end]
-
-    preserved = block("preserved-sections")
-    assert "`:PackSelection`" in preserved, (
-        "the section-preserved block must name :PackSelection")
-    assert "pack_selection" in preserved, (
-        "the block must name the carrier section")
-    assert "#9752" in preserved
-    assert "removed" in preserved, (
-        "the declaration must state the load-bearing consequence — an absent "
-        "marker re-admits a pack the admin removed")
-    assert "PackSelection" not in block("unenrolled"), (
-        # ⛔ NEGATIVE CONTROL, and its message claims only that: this guards the
-        # "declared twice" shape, it does NOT record a move. Measured against
-        # `origin/main`, `:PackSelection` never appeared in this block either —
-        # so nothing was removed from it by #9752, and a message saying "it is
-        # no longer 'unenrolled'" would describe a state change that did not
-        # happen (the class was never an unenrolled registry row; it is a
-        # SECTION, like `:TeamMeta`). The clause reds if a future edit adds it
-        # here as well as to `preserved-sections`.
-        "the class must not be declared in BOTH blocks — it is a preserved "
-        "SECTION, never an unenrolled registry row (#9752)")
-    assert ":PackSelection" in block("audit-query"), (
-        "the operator audit must enumerate the class, or it under-reports what "
-        "survived a rebuild")
+# ⛔ The doc half of this fix (`docs/durability-posture.md`'s declaration) is
+# pinned in `tests/test_pack_selection_durability_doc_pin_9752.py`, NOT here:
+# this file is graph-touching and registered only under `api` + `core`, and a
+# docs-only diff selects NO surface, so a pin here runs ZERO times on exactly
+# the change that can delete the declaration (measured; #11839 review P2).
 
 
 # ── #9752: the THIRD `rebuild_all` caller — `tortoise migrate-db` ───────────
@@ -1810,7 +1777,9 @@ def test_a_live_conflict_outranks_unknown_when_both_flags_are_set():
     left this whole file GREEN while re-shipping that defect: UNKNOWN's "the
     graph may read as UNCONFIGURED" printed over a graph observed to still hold
     a marker (#9752 review round 8, P2). MEASURED by mutation: the blocks were
-    swapped and the 46 tests that existed then all passed.
+    swapped and the 39 tests that existed at `8cae0e66b8ec` all passed (that
+    commit's copy of this file holds 39 `def test_` bodies — the figure was
+    corrected from an unbacked 46 in review, #11839 P2).
 
     ⚠️ Measured and worth naming, because the first version of this docstring
     said "swapping the two `if` CONDITIONS": that swap is a DIFFERENT mutation

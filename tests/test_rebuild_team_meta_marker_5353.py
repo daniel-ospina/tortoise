@@ -668,15 +668,18 @@ def test_rebuild_all_honours_a_carried_team_meta_unknown_flag(tmp_path, caplog):
     version gate fired. The version gate has its own pin,
     `test_rebuild_all_reports_a_pre_5353_sidecar_as_state_unknown`.
     """
-    from tortoise.projection import _PREWIPE_SNAPSHOT_VERSION
 
     sdk, events = _mk_sdk(tmp_path)
     payload = _sidecar_payload(
         batch_snapshot=[{"id": "b1"}], team_meta_unknown=True)
-    assert (payload["version"] == _PREWIPE_SNAPSHOT_VERSION
-            and payload["team_meta"] == []), (
-        "the fixture must plant the CURRENT version with a present-but-empty "
-        "section, so only the inherited flag can produce the UNKNOWN")
+    # The fixture plants the CURRENT version with a present-but-empty section
+    # (`_sidecar_payload` builds BOTH from `_PREWIPE_SNAPSHOT_VERSION`, so
+    # asserting `payload["version"] == _PREWIPE_SNAPSHOT_VERSION` compared a
+    # constant to itself — this replaced a live `== 6` literal and became a
+    # tautology in #9752's generalisation; review P3 on #11839). The non-vacuous
+    # half is the section being PRESENT-but-empty, which the next line still
+    # pins, and the exact value is owned by the newest section's own test.
+    assert payload["team_meta"] == []
     _plant(Path(_sidecar_path(events)), payload)
 
     with caplog.at_level(logging.ERROR):
