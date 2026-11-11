@@ -706,3 +706,146 @@ def test_marker_declared_in_the_durability_posture():
     assert ":PackSelection" in block("audit-query"), (
         "the operator audit must enumerate the class, or it under-reports what "
         "survived a rebuild")
+
+
+# ── #9752: the THIRD `rebuild_all` caller — `tortoise migrate-db` ───────────
+
+
+def _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts):
+    """Run the real `migrate_db.migrate()` with `rebuild_all`'s counts injected.
+
+    REACHABLE: the counts ARE `rebuild_all`'s own return value (the end-to-end
+    producer of a non-zero gap is pinned by
+    `test_rebuild_all_reports_a_pre_9752_sidecar_as_state_unknown`); they are
+    injected here so each reporting rung can be asserted positively without
+    minting a second embedded graph. `HOME` is redirected so `_tortoise_dir()`
+    resolves inside the test, and the JSONL dir is created so `migrate()` takes
+    the replay route rather than the RDB-copy fallback (which replays nothing
+    and therefore has no counts to report).
+    """
+    from tortoise.projection import FalkorProjection
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    tortoise_dir = tmp_path / ".tortoise"
+    (tortoise_dir / "events").mkdir(parents=True)
+    # Source for backup-first; its content is never read as a graph because
+    # `rebuild_all` is stubbed (the wipe is therefore never reached).
+    (tortoise_dir / "embedded.db").write_bytes(b"not-a-real-rdb")
+    monkeypatch.setattr(FalkorProjection, "rebuild_all",
+                        lambda self, _dir, **kw: dict(counts))
+
+    from tortoise.migrate_db import migrate
+
+    return migrate(force=True)
+
+
+def test_pack_selection_gap_warns_in_the_migrate_db_caller(
+        tmp_path, caplog, monkeypatch):
+    """`rebuild_all` has THREE callers; the third must consume the gap (#9752).
+
+    FAILING VALUE: `tortoise/migrate_db.py` already carried the identical
+    warning leg for `onboarding_gap` (#4641) and `team_meta_gap` (#5353) and had
+    none for `pack_selection_gap` — `git grep -c pack_selection -- <this file>`
+    was 0. So a migration-triggered rebuild whose pack-set marker was not
+    confirmed intact reported a clean `migrated`, wrote the terminal migration
+    marker (no later open re-tries it), and left a graph that reads as
+    UNCONFIGURED with a REMOVED pack re-admitted and its `revision` reset.
+
+    REACHABLE: the real `migrate()` replay route, with `rebuild_all`'s counts
+    injected; the returned dict is asserted too, because that is the only thing
+    a caller of `migrate()` can branch on.
+    """
+    counts = {"nodes": 0, "edges": 0, "events": 0,
+              "pack_selection_expected": 1, "pack_selection_verified": True,
+              "pack_selection_restored": 0,
+              "pack_selection_restore_failures": 1,
+              "pack_selection_gap": 1, "pack_selection_state_unknown": False}
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
+        result = _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
+
+    assert result["status"] == "migrated", result
+    assert result["pack_selection_gap"] == 1, (
+        "the migration's own returned dict must carry the count — otherwise a "
+        "caller has nothing to branch on")
+    assert result["pack_selection_state_unknown"] is False
+
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(":PackSelection" in m and "NOT confirmed intact" in m
+               and "restore gap" in m and "REMOVED" in m for m in msgs), (
+        f"the migrate route discarded the pack-set gap: {msgs}")
+
+
+def test_migrate_db_caller_distinguishes_the_unknown_shape(
+        tmp_path, caplog, monkeypatch):
+    """UNKNOWN must not be reported as an observed loss (#4641 round 5, #9752).
+
+    A pre-v7 rescue file cannot say whether the marker was destroyed, so the
+    migrate route must name `pre-preservation/UNKNOWN` rather than assert a
+    loss nobody observed — and the returned dict must carry the discriminator
+    for the same reason.
+    """
+    counts = {"nodes": 0, "edges": 0, "events": 0,
+              "pack_selection_expected": 0, "pack_selection_verified": True,
+              "pack_selection_restored": 0,
+              "pack_selection_gap": 1, "pack_selection_state_unknown": True}
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
+        result = _migrate_with_rebuild_counts(tmp_path, monkeypatch, counts)
+
+    assert result["pack_selection_state_unknown"] is True
+    msgs = [r.getMessage() for r in caplog.records]
+    matching = [m for m in msgs if ":PackSelection" in m]
+    assert matching, f"no pack-set line at all: {msgs}"
+    assert any("pre-preservation/UNKNOWN" in m for m in matching), matching
+    assert not any("restore gap" in m for m in matching), (
+        "an UNKNOWN rescue file was described as an observed restore gap")
+
+
+def test_migrate_cli_reports_the_pack_selection_gap(caplog, monkeypatch):
+    """The operator surface of `tortoise migrate-db` must name the class.
+
+    FAILING VALUE: even with the count in the returned dict, `main()` printed
+    only "migrated embedded.db -> tortoise.db (N nodes)" — the pack-set loss was
+    invisible on the one surface a human runs. This is the same "written and
+    never surfaced on the very path an operator reads" defect the CLI rebuild
+    block closes (`__main__.py`).
+    """
+    import tortoise.migrate_db as mdb
+
+    gap = {"status": "migrated", "nodes": 3, "pack_selection_gap": 1,
+           "pack_selection_state_unknown": False}
+    monkeypatch.setattr(mdb, "migrate", lambda force=False: dict(gap))
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
+        assert mdb.main(["--force"]) == 0
+    msgs = " | ".join(r.getMessage() for r in caplog.records)
+    assert "migrated graph's :PackSelection pack-set marker is NOT confirmed" \
+        in msgs, msgs
+    assert "restore gap" in msgs, msgs
+    assert "REMOVED" in msgs, msgs
+
+    # The UNKNOWN rung is a different shape and must be nameable on its own.
+    caplog.clear()
+    gap.update({"pack_selection_state_unknown": True})
+    monkeypatch.setattr(mdb, "migrate", lambda force=False: dict(gap))
+    with caplog.at_level(logging.WARNING, logger="tortoise.migrate_db"):
+        assert mdb.main(["--force"]) == 0
+    msgs = " | ".join(r.getMessage() for r in caplog.records)
+    assert "pre-preservation/UNKNOWN" in msgs, msgs
+    assert "restore gap" not in msgs, msgs
+
+
+def test_recover_from_log_documents_the_pack_selection_keys():
+    """The return contract must name the keys it returns (#9752 review, P3).
+
+    `recover_from_log`'s docstring enumerates the returned dict and was
+    extended for each prior class; a caller branching on the shape reads it, so
+    a key that exists only in the code is a contract nobody documented.
+    """
+    from tortoise.consistency import recover_from_log
+
+    doc = recover_from_log.__doc__ or ""
+    assert "pack_selection_gap" in doc
+    assert "pack_selection_state_unknown" in doc
+    assert "#9752" in doc

@@ -3381,6 +3381,14 @@ def recover_from_log(events_dir: str, projection) -> dict:
     `created`. The two classes report SEPARATELY (neither aggregate absorbs the
     other) for the same reason the three onboarding shapes do.
 
+    #9752 adds the `:PackSelection` pack-set marker on that same four-part
+    shape — `pack_selection_gap`, `pack_selection_state_unknown`, and their own
+    additive `reason` clauses — because an absent marker makes the rebuilt
+    graph read as UNCONFIGURED: `resolved_pack_set` falls back to the
+    records/union arms, so a pack an admin REMOVED is re-admitted with its
+    `revision` reset. All three classes report SEPARATELY, for the same reason
+    the onboarding shapes do.
+
     ATOMICITY on refusal (#7929): the refusals this function can only reach
     AFTER the replay has landed (the non-folded set and a non-empty `ok: False`
     verdict) are UNDONE before the `recovered: False` result is returned — the

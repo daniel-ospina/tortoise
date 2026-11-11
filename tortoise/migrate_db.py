@@ -227,6 +227,26 @@ def migrate(force: bool = False) -> dict:
                     "pre-preservation/UNKNOWN"
                     if rebuild_counts.get("team_meta_state_unknown")
                     else "restore gap")
+            # #9752: the third sibling of the two lines above, and it is here
+            # for the same reason — `:PackSelection` is written with a bare
+            # `MERGE` and rides no journal record, so a rebuild only confirms
+            # it by restoring it from the pre-wipe sidecar. When that does not
+            # happen the migrated graph reads as UNCONFIGURED —
+            # `resolved_pack_set` falls back to the records/union arms — so a
+            # pack an admin REMOVED is re-admitted with its `revision` reset,
+            # the harm #9752 exists to stop. The collapse count alone would not
+            # distinguish that from a graph that was never configured; only
+            # the gap/UNKNOWN pair does.
+            if rebuild_counts.get("pack_selection_gap"):
+                logger.warning(
+                    "rebuild: the migrated graph's :PackSelection pack-set "
+                    "marker is NOT confirmed intact (%s) — the migrated graph "
+                    "reads as UNCONFIGURED, so a pack an admin REMOVED can be "
+                    "re-admitted with its revision reset; see the rebuild "
+                    "ERROR log (#9752)",
+                    "pre-preservation/UNKNOWN"
+                    if rebuild_counts.get("pack_selection_state_unknown")
+                    else "restore gap")
             # #5612: the journal read is a SALVAGE read, so a damaged mid-file
             # line no longer raises out of the rebuild — it is skipped and
             # counted. This route then writes the migration MARKER, i.e. it is
@@ -261,7 +281,20 @@ def migrate(force: bool = False) -> dict:
                 # journal held, which a caller must not read as a lossless
                 # migration (the rebuild warns; this carries the number).
                 "corrupt_lines": int((rebuild_counts or {}).get(
-                    "corrupt_lines") or 0)}
+                    "corrupt_lines") or 0),
+                # #9752: additive, same shape as `corrupt_lines` — a non-zero
+                # count means the migrated graph's pack-set marker is NOT
+                # confirmed intact, which a caller must not read as a clean
+                # migration (the rebuild warns; this carries the number).
+                "pack_selection_gap": int((rebuild_counts or {}).get(
+                    "pack_selection_gap") or 0),
+                # The shape discriminator, so a surface printing the count can
+                # say UNKNOWN instead of asserting a loss nobody observed
+                # (a pre-v7 rescue file cannot say whether the marker was
+                # destroyed).
+                "pack_selection_state_unknown": bool(
+                    (rebuild_counts or {}).get(
+                        "pack_selection_state_unknown"))}
     finally:
         lock.release()
 
@@ -294,6 +327,23 @@ def main(argv: list[str] | None = None) -> int:
         if result.get("status") == "migrated":
             logger.warning("migrated embedded.db -> tortoise.db (%s nodes)",
                            result.get("nodes"))
+            # #9752: without this line a migration whose pack-set marker was
+            # not carried back prints a clean "migrated" and says nothing,
+            # while the graph now reads as UNCONFIGURED and a pack an admin
+            # REMOVED can be re-admitted with its `revision` reset. Printed
+            # with the UNKNOWN/gap discrimination for the same reason the
+            # `rebuild` CLI prints the shapes separately: "could not confirm"
+            # must never be reported as an observed loss.
+            if result.get("pack_selection_gap"):
+                logger.warning(
+                    "migrated graph's :PackSelection pack-set marker is NOT "
+                    "confirmed intact (%s) — the graph reads as UNCONFIGURED "
+                    "and a pack an admin REMOVED can be re-admitted with its "
+                    "revision reset. Re-set the graph's packs deliberately "
+                    "(#9752)",
+                    "pre-preservation/UNKNOWN"
+                    if result.get("pack_selection_state_unknown")
+                    else "restore gap")
         elif result.get("status") == "already-migrated":
             logger.warning("already migrated (marker present, %s nodes) — skip",
                            result.get("nodes"))
