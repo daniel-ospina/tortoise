@@ -4837,7 +4837,7 @@ def test_the_inheritance_revert_clears_the_mirror_it_stamped(sdk):
     assert graph["confidence"] is None, graph
 
 
-def test_update_entity_clearing_the_pair_clears_the_mirror(sdk):
+def test_update_entity_clearing_the_pair_clears_the_mirror(sdk, tmp_path):
     """Cycle 31 (reviewer P2): `_update_entity` is the SECOND documented
     `:Point` update door, and it let a new pair ride through beside the old
     mirror.
@@ -4848,29 +4848,77 @@ def test_update_entity_clearing_the_pair_clears_the_mirror(sdk):
     closed that door. Post-#11702 the mirror LEADS, so a tenant writing a pair
     through `update_entity` (or `update` on a Point, or `tortoise_update_entity`
     over MCP) is served a belief their own write contradicted, silently.
+
+    Cycle 32: this door also had to JOURNAL what it applied. `journaled_updates`
+    is the annotator set plus `mentions`, so the pair and the mirror clear landed
+    LIVE and never reached the record — `rebuild_all` replayed the
+    `set_point_baseline` belief still on the journal and served a DIFFERENT
+    answer on recovery (measured: live 0.5 / "measured" vs rebuilt 0.9 /
+    "baseline"; `check_consistency` → divergence "content", fields
+    ["confidence"]). Both halves are pinned here, like the sibling tests that
+    assert the record.
     """
+    import json as _json
+
+    from tortoise.sdk import TortoiseSDK
     from tortoise.search_engine import annotate_ep_batch
 
-    pid = sdk.create_point("statement", "entity-door claim")["id"]
-    proj = sdk._get_proj()
-    sdk.set_point_baseline(pid, 9.0, 1.0)          # mirror 0.9, pair (9, 1)
-    assert annotate_ep_batch(proj.g, [pid])[pid].confidence_mean == pytest.approx(
-        0.9, abs=1e-3)
+    events = tmp_path / "uevents34"
+    events.mkdir()
+    j = TortoiseSDK(str(tmp_path / "ue.db"),
+                    event_log_path=str(events / "events.jsonl"))
+    try:
+        pid = j.create_point("statement", "entity-door claim")["id"]
+        proj = j._get_proj()
+        j.set_point_baseline(pid, 9.0, 1.0)          # mirror 0.9, pair (9, 1)
+        assert annotate_ep_batch(proj.g, [pid])[pid].confidence_mean == \
+            pytest.approx(0.9, abs=1e-3)
 
-    sdk.update_entity(pid, posterior_alpha=10.0, posterior_beta=10.0)
+        j.update_entity(pid, posterior_alpha=10.0, posterior_beta=10.0)
 
-    row = proj.g.query(
-        "MATCH (n:Point {id:$id}) RETURN n.confidence, n.posterior_alpha, "
-        "n.posterior_beta", params={"id": pid}).result_set
-    assert row, "the Point vanished"
-    assert row[0][1] == pytest.approx(10.0) and row[0][2] == pytest.approx(10.0), (
-        "fixture: the pair did not land through `update_entity`: " + repr(row))
-    assert row[0][0] is None, (
-        "`update_entity` wrote a new α/β pair and left the OLD mirror "
-        f"({row[0][0]!r}) beside it — the mirror leads on every read, so the "
-        "claim is served a belief its own write replaced: " + repr(row))
+        row = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.confidence, n.posterior_alpha, "
+            "n.posterior_beta", params={"id": pid}).result_set
+        assert row, "the Point vanished"
+        assert row[0][1] == pytest.approx(10.0) and row[0][2] == pytest.approx(
+            10.0), ("fixture: the pair did not land through `update_entity`: "
+                    + repr(row))
+        assert row[0][0] is None, (
+            "`update_entity` wrote a new α/β pair and left the OLD mirror "
+            f"({row[0][0]!r}) beside it — the mirror leads on every read, so the "
+            "claim is served a belief its own write replaced: " + repr(row))
 
-    ann = annotate_ep_batch(proj.g, [pid])[pid]
-    assert ann.confidence_mean == pytest.approx(0.5), (
-        "the read is still led by the stale mirror rather than the stored "
-        f"pair: {ann}")
+        ann = annotate_ep_batch(proj.g, [pid])[pid]
+        assert ann.confidence_mean == pytest.approx(0.5), (
+            "the read is still led by the stale mirror rather than the stored "
+            f"pair: {ann}")
+
+        # The RECORD must carry the belief the write applied, or a rebuild
+        # replays the older `set_point_baseline` belief instead.
+        recs = [r for r in (_json.loads(line)
+                            for line in (events / "events.jsonl").read_text(
+                                ).splitlines() if line.strip())
+                if r.get("type") == "PointRevised" and r.get("id") == pid]
+        assert recs, "`update_entity` journaled no PointRevised for the Point"
+        carried = {k: recs[-1][k] for k in
+                   ("confidence", "posterior_alpha", "posterior_beta")
+                   if k in recs[-1]}
+        assert carried.get("confidence", "MISSING") is None, (
+            "the record omitted the mirror CLEAR while the statement performed "
+            "it — a rebuild would restore the old mirror: " + repr(recs[-1]))
+        assert carried.get("posterior_alpha") == pytest.approx(10.0), carried
+        assert carried.get("posterior_beta") == pytest.approx(10.0), carried
+
+        # …and the rebuild must AGREE with the live read.
+        before = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.confidence, n.posterior_alpha, "
+            "n.posterior_beta", params={"id": pid}).result_set[0]
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        after = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.confidence, n.posterior_alpha, "
+            "n.posterior_beta", params={"id": pid}).result_set[0]
+        assert after == before, (
+            "the belief state changed across rebuild_all — live and replay "
+            f"disagree: {before} -> {after}")
+    finally:
+        j.close()

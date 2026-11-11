@@ -44563,6 +44563,7 @@ class TortoiseSDK:
         # Source by `url`.
         from tortoise.projection import (
             _CANONICAL_ENTITY_ID_PROPS,
+            BELIEF_PROPS,
             classify_entity_mutation_op,
         )
 
@@ -44886,6 +44887,26 @@ class TortoiseSDK:
                         if point_props is props:
                             point_props = dict(props)
                         point_props["confidence"] = None
+                    # #11702 cycle 32: the belief props this door APPLIES must
+                    # also be the ones it JOURNALS. `journaled_updates` above is
+                    # the annotator set plus `mentions`; neither the caller's
+                    # α/β pair nor the mirror clear is in it, so the write landed
+                    # LIVE and vanished from the record — `rebuild_all` then
+                    # replayed the `set_point_baseline` belief that was still on
+                    # the journal and served a DIFFERENT answer on recovery
+                    # (measured: live 0.5 / "measured" vs rebuilt 0.9 /
+                    # "baseline" after one `update_entity(pair)`;
+                    # `check_consistency` → divergence "content", fields
+                    # ["confidence"]). `PointRevised` already folds these —
+                    # `_revise_point` / `_apply_one` both walk `BELIEF_PROPS`
+                    # and treat `None` as the journaled clear — so the payload is
+                    # the only missing half. Presence-conditional on the FINAL
+                    # `point_props`, so an unrelated `update_entity` journals no
+                    # belief key at all (and `lastDreamedAt` still rides when the
+                    # caller sends it).
+                    belief_updates = {
+                        k: point_props[k] for k in BELIEF_PROPS
+                        if k in point_props}
                     for match_prop in id_keys:
                         res = proj.g.query(
                             f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $p "
@@ -44910,10 +44931,10 @@ class TortoiseSDK:
                     # Post-apply, per matched label — the `_delete_entity`
                     # emitter's ordering contract (a failed/no-op write never
                     # leaves a phantom record).
-                    if (journaled_updates and res.result_set
+                    if ((journaled_updates or belief_updates) and res.result_set
                             and res.result_set[0][0]):
                         self._emit_event("PointRevised", id=id_val,
-                                         **journaled_updates)
+                                         **journaled_updates, **belief_updates)
                 else:
                     # C1 (#3312 statuses, #3377 rename): this branch used to apply
                     # caller props with a live `SET n += $p` and emit NOTHING — so
