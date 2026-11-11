@@ -302,7 +302,10 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   the indexed population) is re-derived from the table rather than trusted — deleting a row and every
   mention of it otherwise passes every referential check. Because a pin selects rows *by shape*, an
   **unrecognised row shape is refused** on both tables: a thirteenth correction row, or a fifth §6
-  state bucket, used to be silently invisible (measured — appending one left the guard CLEAN);
+  state bucket, used to be silently invisible (measured — appending one left the guard CLEAN). That
+  refusal counts the first table's ROWS and every other `|` line in the section, not only table
+  separators, because a lone `|` row appended under a blank line brings no separator: measured, it
+  carried the invented verdict `FIXED-IT` and left `--check` at rc 0;
 - the **§6 survivor sentence's two numbers** are derived as well: its survivor TOTAL must equal the
   OPEN row's own count, and its "already re-measured" count must equal the number of **bullets naming
   an OPEN issue** — the `#2730` bullet is CLOSED and is printed because *issue closure is not evidence
@@ -323,9 +326,9 @@ The self-test that proves those rules still fire has its own **population floor*
 a gate reporting OK when it cannot run — so a shrunk population now reds instead.
 
 Exactly one arm needs `git` **history**: the frontmatter's `measured_at_commit` must be an ancestor of
-`HEAD`. The other nine read this checkout's tree and nothing else, and the tool keeps that split
+`HEAD`. The other eleven read this checkout's tree and nothing else, and the tool keeps that split
 (`check_document()` / `check_all()`) because the two jobs that run it differ: the REQUIRED `docs` job
-checks out at `fetch-depth: 0` and runs `--check` (all ten arms), while the `test` jobs check out at
+checks out at `fetch-depth: 0` and runs `--check` (all twelve arms), while the `test` jobs check out at
 the default depth 1, cannot resolve `f70d884b7` at all, and are where this page's own test module runs.
 In a depth-1 clone `--check` therefore reports **exit 2 UNVERIFIED** — never `0`, and never a verdict
 against the document it could not read — and `--self-test`, which drives only the tree-only arms,
