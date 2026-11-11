@@ -489,6 +489,14 @@ def test_outcomes_to_report_golden_shape():
         # pre-feature checkpoints render; the golden outcome ran OFF).
         "session_reinjection": None,
         "session_reinjection_stats": None,
+        # C3-4 (#2570, #2519 P3): the window-reconciliation arm marker +
+        # per-outcome labeled-variant census — o.get-based projection, None
+        # on golden outcomes (absent from the RAW outcome until the arm runs;
+        # the golden outcome ran OFF). Pinned here for the same reason as its
+        # siblings: the projection is UNCONDITIONAL, so a projection that
+        # DROPS these keys is the defect this entry prevents.
+        "window_reconciliation": None,
+        "window_reconciliation_stats": None,
         # C5 (#2521, #2513): the aggregative-check arm marker + verdict —
         # o.get-based projection, None on golden outcomes (absent until the
         # outcome carries them under the arm; pre-feature checkpoints
