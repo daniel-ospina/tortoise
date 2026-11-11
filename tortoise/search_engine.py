@@ -276,9 +276,10 @@ class SearchScores:
 # then read has_ep=True at the prior mean (0.75), so the #2206 relevance gate
 # could not tell "we decided this" from "nobody measured this".
 #
-# A claim is EP-MEASURED when EP flushed a posterior (posterior_alpha — the
-# one column only a real EP run writes), or when it carries a persisted
-# ep_alpha that is NOT a #2199 baseline (legacy EP-prior back-compat).
+# A claim carries a persisted α when EP flushed one (`posterior_alpha` — which
+# a direct `update_point(posterior_alpha=…)` ALSO writes, so this is not
+# evidence of an EP pass), or when it carries a persisted ep_alpha that is NOT a
+# #2199 baseline (legacy EP-prior back-compat).
 # PRIOR-ONLY (has_ep=False, baseline=True): a declared baseline prior — the
 # value is the prior mean, explicitly NOT a measured confidence. UNMEASURED
 # (has_ep=False, baseline=False): NO persisted belief at all — `ep_state:
@@ -629,10 +630,15 @@ def _exact_literal_fraction(raw: str):
         # is the reachable shape of the digit-count axis.
         #
         # ⚠ RESIDUAL (deliberate, filed rather than guessed at): a literal with
-        # that many SIGNIFICANT digits still costs time proportional to its
-        # length. Bounding it needs a policy (what a literal that long MEANS),
-        # and the store also spends time proportional to its input, so this is
-        # not a fail-open hole — it is the same cost the input itself carries.
+        # that many SIGNIFICANT digits costs QUADRATIC time — measured on this
+        # helper, significant digits only: 10,024 → 0.001 s, 30,024 → 0.011 s,
+        # 100,024 → 0.115 s, 300,024 → 1.011 s, 1,000,024 → 11.1 s. (The first
+        # guess here said "proportional to its length"; that under-sizes the
+        # docstring's own 10 MB example by ~100×, because `10**n` is built by
+        # repeated multiply.) Bounding it needs a policy (what a literal that
+        # long MEANS), and the store also spends time proportional to its input,
+        # so this is not a fail-open hole — it is the same cost the input itself
+        # carries.
         exp_at = max(text.find("e"), text.find("E"))
         mantissa, exponent = (text, "") if exp_at < 0 else (
             text[:exp_at], text[exp_at:])
@@ -1077,8 +1083,9 @@ def ep_state_cypher(alias: str) -> str:
     a *measured* 0.5 (symmetric evidence, a real coin flip) and an *absent*
     belief are both 0.5 on the old coalesce and must never be again.
 
-    ⚠️ ``measured`` here means ``ep_measured_cypher``, i.e. EP ran on this
-    claim — NOT the ``has_ep``/``measured`` fields, which #2490 additionally
+    ⚠️ ``measured`` here means ``ep_measured_cypher``, i.e. an α column is
+    PERSISTED — not that EP ran (a direct write satisfies it) — and NOT the
+    ``has_ep``/``measured`` fields, which #2490 additionally
     gate on terminal-ness. A **terminal** claim (#2490) carries the decayed
     ``0.5 / 1.0 / 1.0`` that ``live.VACUITY_BELIEF`` stamps on every
     terminalising write: that is a persisted VALUE (so the state is never
@@ -1274,7 +1281,8 @@ class EpBreakdown:
     # number here is a belief that exists, and ``None`` means none does.
     confidence_mean: float | None = None
     #: #11702 — the STATE NAME for :attr:`confidence_mean`, one of
-    #: ``measured`` (EP ran) / ``baseline`` (a persisted prior EP has not
+    #: ``measured`` (an α column is persisted — not proof of an EP pass) /
+    #: ``baseline`` (a persisted prior EP has not
     #: measured) / ``absent`` (no persisted belief at all ⇒ the value is
     #: ``None``). Derives from :func:`ep_state`, the single mapping of the
     #: #11702 vocabulary; ``has_ep``/``measured`` keep their narrower #2490 /
@@ -1296,8 +1304,10 @@ class EpBreakdown:
     # as a first-class flag so agents treat the claim as disputed, not merely
     # high/low probability.
     contested: bool = False
-    # #3276: whether EP has MEASURED this point — True iff a real EP flush
-    # persisted a posterior (or a non-baseline legacy ep_alpha prior). A
+    # #3276: whether an α column is PERSISTED for this point — True iff a real
+    # EP flush persisted a posterior (or a non-baseline legacy ep_alpha prior).
+    # ⛔ Not an EP receipt: a direct `update_point(posterior_alpha=…)` sets it
+    # with no EP pass anywhere (see the #11702 note further down). A
     # #2199 baseline prior alone does NOT set it: a never-measured decision
     # with the kind-derived system-default baseline reads has_ep=False here
     # (it used to read True at the 0.75 prior mean — the #3276 leak).

@@ -4085,20 +4085,31 @@ def test_an_overflowing_literal_is_decided_without_an_exact_parse(monkeypatch):
 
 
 def test_a_half_pair_reports_measured_but_absent_by_design(sdk):
-    """The documented divergence: `measured` answers "did EP run", `ep_state`
-    answers "is a belief readable" (#11702 cycle 30).
+    """The documented divergence: `measured` answers "is an α column persisted",
+    `ep_state` answers "is a belief readable" (#11702 cycle 30).
 
     A HALF pair (`posterior_alpha` with no beta — accepted by `update_point`) and
-    a `(0, 0)` pair both leave EP having measured something while no belief is
-    readable: 0.5 against nothing has no mean, and 0/0 has none either. The state
-    fold names both `absent` and the mean is `None`; `measured`/`has_ep` stay True
-    because they answer the OTHER question.
+    a `(0, 0)` pair both carry a persisted α while no belief is readable: 0.5
+    against nothing has no mean, and 0/0 has none either. The state fold names
+    both `absent` and the mean is `None`; `measured`/`has_ep` stay True because
+    they answer the OTHER question.
+
+    ⛔ **`measured` is NOT an EP receipt.** The rows below are written by a raw
+    `SET`, i.e. by a direct write with no EP pass anywhere — and they come back
+    `measured=True`. That is the point: the predicate is
+    `posterior_alpha IS NOT NULL OR (ep_alpha IS NOT NULL AND NOT
+    baseline_set)`, which asks whether an α is PERSISTED, not who wrote it. So a
+    caller that needs an EP measurement still has to ask for one; it must never
+    read this flag as proof one happened. (An earlier round of this docstring
+    said "did EP run" and "deciding whether to RE-RUN EP reads `measured`" — a
+    rule that would skip the one action able to produce a belief on exactly
+    these rows. Corrected here so the pin cannot teach it back.)
 
     This is pinned rather than fixed so neither can be silently repurposed: a
-    consumer deciding whether to RE-RUN EP reads `measured`, and one deciding
-    whether to show or order a belief reads `ep_state`/`confidence_mean`. Collapsing
-    them would either claim a belief that does not exist or make EP re-run over a
-    measurement it already has.
+    consumer deciding whether a stored posterior can be reasoned from reads
+    `measured`; one deciding whether to show or order a belief reads
+    `ep_state`/`confidence_mean`. Collapsing them would either claim a belief
+    that does not exist or make EP re-run over a measurement it already holds.
     """
     from tortoise.why import assemble_why_blocks
 
@@ -4120,7 +4131,8 @@ def test_a_half_pair_reports_measured_but_absent_by_design(sdk):
             assert mean is None, (label, surface, mean)
             assert measured is True, (
                 f"{label}: {surface} dropped the documented `measured` meaning — "
-                "EP DID run on this row; only the belief is unreadable")
+                "an α column IS persisted on this row (by a direct write, no EP "
+                "pass); only the belief is unreadable")
 
 
 def test_a_legacy_list_operand_is_absent_without_blanking_the_batch(sdk):
