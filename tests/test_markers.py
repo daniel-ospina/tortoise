@@ -204,7 +204,13 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # issue's own REJECTED alternative) outlived its literal, and a declaration
     # with no literal is not documentation — it is a WHITELIST, so a future
     # `namespace="team-001"` in that file would be silently re-authorised by
-    # it instead of reddening this guard.
+    # it instead of reddening this guard. That failure is already live
+    # elsewhere in this table: THREE declared rows outlive their literal —
+    # `test_onboarding_state.py` and its `…_split_checkpoint` /
+    # `…_split_projection` siblings, all `registry` — tracked as #11929. Cite
+    # it; do not widen it. (Count them per file across BOTH scanned roots:
+    # `test_billing_upgrade.py`'s `registry` literal lives under `tests/e2e/`,
+    # so that row is LIVE and deleting it would red this guard.)
     #
     # OVERRIDES: `docs/epics/2026-08-24-test-db-migration/plan.md:1783`'s "an
     # intentional team-graph semantic must be DECLARED in the table, never
