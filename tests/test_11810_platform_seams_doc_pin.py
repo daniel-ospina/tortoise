@@ -246,7 +246,7 @@ _PY = sys.executable
 #: precise false-RED this file's own review rounds are about. Hence `None` there
 #: rather than a guess. Each verdict below was measured with `_normalised()` over
 #: the pair before it was written, not assumed from the words.
-_RESTATEMENTS: tuple[tuple[str, "str | None"], ...] = (
+_RESTATEMENTS: tuple[tuple[str, str | None], ...] = (
     ("a hosted cloud agent runs neither", "a cloud agent runs neither"),
     ("hosted cloud agents get neither hook", None),
     ("a hosted cursor cloud agent runs no tortoise hook", None),
