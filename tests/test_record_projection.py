@@ -1954,29 +1954,46 @@ def test_the_schema_columns_are_read_from_disk_not_restated():
     # amount would be pushed into the `props` tail instead of its `bigint`
     # column, and `cache_projection` would not project it at all.
     for column in ("amount_minor", "currency", "minor_unit_exponent",
-                   "verbatim", "as_of"):
+                   "verbatim"):
         assert column in columns["point"], (
             f"point.{column} is missing from table_columns() — the forward "
             "ALTER TABLE … ADD COLUMN form is not read"
         )
     base_point = rp._parse_record_tables(rp._read_migrations())["point"]
     for column in ("amount_minor", "currency", "minor_unit_exponent",
-                   "verbatim", "as_of"):
+                   "verbatim"):
         assert column not in base_point, (
             f"point.{column} now comes from the CREATE TABLE, so the ALTER "
             "read above proves nothing"
         )
+    # #11827: the OTHER forward-column form — a DROP. `as_of` was added by
+    # #2782's ALTER and is retired by a NEW migration's `DROP COLUMN`, so the
+    # read must subtract it: a reader that only unioned ADDs would keep placing
+    # a replayed legacy `asOf` into a column the database no longer has, and the
+    # record's insert would fail on exactly the legacy rows it exists to carry.
+    assert "as_of" in rp._parse_added_columns(rp._read_migrations())["point"], (
+        "the ADD parse no longer sees as_of, so this pin proves nothing"
+    )
+    assert "as_of" not in columns["point"], (
+        "point.as_of is still reported as a column — the forward "
+        "`ALTER TABLE … DROP COLUMN` form is not read (#11827)"
+    )
 
 
 def test_a_point_amount_lands_in_its_money_column_not_the_props_tail():
     """#2782: the money value is AUTHORITY, so it gets a column, not the tail.
 
-    `amountMinor`/`currency`/`minorUnitExponent`/`verbatim`/`asOf` are
+    `amountMinor`/`currency`/`minorUnitExponent`/`verbatim` are
     author-supplied and carried by `PointAdded.point.<field>` — nothing
     recomputes them — so §17.5's placement classes them PRIMARY and the record
     must store each in its own column. In the `props` tail the amount would be
     an unvalidated JSON scalar (the WS-C design's `bigint`-never-float rule
     enforced by the column type instead).
+
+    #11827: `asOf` is the discriminating case now — it was a column (#2782) and
+    is retired, so a replayed legacy `asOf` must land in the props TAIL rather
+    than be placed into a column that no longer exists. Both directions are
+    asserted, so neither a lost DROP nor a resurrected column passes.
     """
     columns = rp.table_columns()
     refused = rp.refused_props_names()
@@ -1993,9 +2010,11 @@ def test_a_point_amount_lands_in_its_money_column_not_the_props_tail():
     )
     assert set(col_values) == {
         "id", "amount_minor", "currency", "minor_unit_exponent",
-        "verbatim", "as_of",
+        "verbatim",
     }, col_values
-    assert tail == {}, f"money left in the props tail: {tail}"
+    assert tail == {"asOf": "2026-10-18"}, (
+        f"a retired legacy value must ride the props tail (it is inert data, "
+        f"not a dropped key): {tail!r}")
 
 
 def test_every_record_schema_migration_on_disk_is_read():
