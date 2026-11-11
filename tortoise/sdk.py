@@ -36878,9 +36878,15 @@ class TortoiseSDK:
         recent_events = [r[0] for r in proj.g.query(
             "MATCH (e:Event) RETURN properties(e) ORDER BY e.startedAt DESC LIMIT 20"
         ).result_set]
+        # #11702 cycle 24: the digest reports a belief, so the mirror is read
+        # through the band (`belief_mirror`) like every other surface — a legacy
+        # `"0x1p4"` / `2.5` mirror was served here as a confidence while
+        # `annotate`, `why` and all three rankers called the claim absent, and a
+        # raw string in a digest is a serialisation hazard besides.
+        from .search_engine import belief_mirror as _belief_mirror
         confidence_changes = [
             {"id": r[0], "content": r[1], "pointKind": r[2],
-             "confidence": r[3], "updatedAt": r[4]}
+             "confidence": _belief_mirror(r[3]), "updatedAt": r[4]}
             for r in proj.g.query(
                 "MATCH (n:Point) WHERE n.confidence IS NOT NULL "
                 "AND n.is_operator = false "
@@ -48803,15 +48809,15 @@ class TortoiseSDK:
         # #11702 cycle 16: TOTAL coercion — a stored non-numeric mirror raised
         # `float()` here and took the whole reputation update with it, for a
         # report that does not weight by confidence in the first place.
-        from .search_engine import numeric_operand as _numeric_operand
+        from .search_engine import belief_mirror as _belief_mirror
 
         for row in impl_rows:
             outcomes.append({"point_id": row[0], "content": row[1],
-                             "confidence": _numeric_operand(row[2]),
+                             "confidence": _belief_mirror(row[2]),
                              "outcome": "IMPL"})
         for row in nand_rows:
             outcomes.append({"point_id": row[0], "content": row[1],
-                             "confidence": _numeric_operand(row[2]),
+                             "confidence": _belief_mirror(row[2]),
                              "outcome": "NAND"})
 
         total = len(outcomes)

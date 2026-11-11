@@ -32,6 +32,8 @@ from datetime import datetime, timezone
 
 from .search_engine import (  # noqa: E402, RUF100
     _beta_mean,
+    belief_mirror,
+    belief_mirror_cypher,
     _beta_variance,
     _exclude_status_clause,
     CONTESTED_VARIANCE_THRESHOLD,
@@ -46,8 +48,7 @@ from .search_engine import (  # noqa: E402, RUF100
     ep_state_cypher,  # #11702: the present-state NAME on the wire
     ep_state_resolve,  # #11702: the ONE #2490 terminal fold for the state name
     numeric_operand,  # #11702: the ONE total numeric coercion (bool != number)
-    numeric_operand_cypher,  # …and its Cypher twin
-)
+    )
 from .live import (  # #2490: terminal rows are never contested; #2598: the draft predicate
     epistemic_disjunction,  # #7927: traversal-position widening
     epistemic_identity,  # #7927: the two-key identity, declared ONCE in live.py
@@ -960,7 +961,7 @@ class GraphRanker:
             # non-numeric mirror raised out of `float(raw_conf)` below, whose
             # caller returns None and drops the signal map for the WHOLE batch
             # (every result then loses confidence/variance/contested).
-            "    coalesce(" + numeric_operand_cypher("n.confidence") + ", "
+            "    coalesce(" + belief_mirror_cypher("n.confidence") + ", "
             "      " + belief_mean_cypher(
                 "coalesce(n.posterior_alpha, n.ep_alpha)",
                 "coalesce(n.posterior_beta, n.ep_beta)") + ") "
@@ -1036,7 +1037,7 @@ class GraphRanker:
             # #11702 cycle 18: TOTAL, through the shared coercion — see the
             # query above. A Boolean or non-numeric mirror is NOT a certainty,
             # and must not take the batch down.
-            raw_conf = numeric_operand(row[1])
+            raw_conf = belief_mirror(row[1])
             out[pid] = {
                 "confidence": raw_conf,
                 "ep_state": state,
@@ -1060,7 +1061,11 @@ class GraphRanker:
             "OPTIONAL MATCH (e)-[:aboutObject]->(o:Object) "
             "WITH e, count(o) AS about_objects "
             "OPTIONAL MATCH (e)-[:PRODUCES]->(p:Point) "
-            "WITH e, about_objects, avg(p.confidence) AS avg_conf "
+            # #11702 cycle 24: the average is over BANDED mirrors, so a legacy
+            # out-of-band value cannot enter it (and a hex-string mirror, which
+            # `avg` cannot sum, no longer takes the batch read down).
+            "WITH e, about_objects, avg("
+            + belief_mirror_cypher("p.confidence") + ") AS avg_conf "
             # #11702: no trailing `coalesce(avg_conf, 0.5)` — an Event whose
             # produced Points persisted no confidence has no belief either.
             "RETURN e.eventId, avg_conf AS conf, "
@@ -1592,7 +1597,7 @@ class StateRanker:
                 # (which `sdk` subscripts unguarded). A non-numeric mirror is
                 # not a belief: fall through to the operands, exactly as the
                 # `annotate_ep_batch` twin does.
-                conf = numeric_operand(mirror)
+                conf = belief_mirror(mirror)
                 if conf is not None:
                     pass
                 elif (alpha is not None and beta is not None
@@ -2151,7 +2156,7 @@ class GapsRanker:
                 # (which `sdk` subscripts unguarded). A non-numeric mirror is
                 # not a belief: fall through to the operands, exactly as the
                 # `annotate_ep_batch` twin does.
-                conf = numeric_operand(mirror)
+                conf = belief_mirror(mirror)
                 if conf is not None:
                     pass
                 elif (alpha is not None and beta is not None
@@ -2426,7 +2431,7 @@ class SubgraphExpander:
             # shared mean needs no second rule: `belief_mean_cypher` returns
             # null itself when the sum is degenerate, and
             # `ep_has_belief_cypher` above has already decided presence.
-            "      coalesce(" + numeric_operand_cypher("n.confidence") + ", "
+            "      coalesce(" + belief_mirror_cypher("n.confidence") + ", "
             "  " + belief_mean_cypher(
                 "coalesce(n.posterior_alpha, n.ep_alpha)",
                 "coalesce(n.posterior_beta, n.ep_beta)") + ") "

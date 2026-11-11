@@ -86,7 +86,9 @@ import math
 import time
 
 from tortoise.live import epistemic_disjunction
-from tortoise.search_engine import numeric_operand  # #11702: ONE coercion
+from tortoise.search_engine import (  # #11702: ONE coercion
+    belief_mirror,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -524,7 +526,7 @@ def read_confidence(p) -> float | None:
         # `belief_value` and the Cypher `coalesce(<coerced mirror>, <mean>)` do
         # — the pair may still be readable, and refusing it here would be a
         # third answer for one claim.
-        value = numeric_operand(mirror)
+        value = belief_mirror(mirror)
         if value is not None:
             return value
     # `is None` (not `or`) so a legitimate 0.0 posterior is never overridden

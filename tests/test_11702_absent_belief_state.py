@@ -508,11 +508,16 @@ def test_a_literal_at_the_stores_rounding_boundary_is_read_not_refused(sdk):
     assert numeric_operand("1.1754943e-38") is None       # rounds up, still null
     assert numeric_operand("1e-38") is None               # subnormal
 
-    pid = sdk.create_point("statement", "ZQROUND a boundary mirror")["id"]
-    proj.g.query("MATCH (n:Point {id:$id}) SET n.confidence = '3.4028235e38'",
-                 params={"id": pid})
+    # The OPERANDS are pseudo-counts, so a large value is legitimate there — which
+    # is the surface this boundary belongs on. (The MIRROR is a probability and is
+    # banded at [0, 1] since cycle 24: see
+    # `test_a_mirror_outside_the_probability_band_is_not_a_belief`.)
+    pid = sdk.create_point("statement", "ZQROUND a boundary operand")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = "
+                 "'3.4028235e38', n.posterior_beta = '1'", params={"id": pid})
     ann = annotate_ep_batch(proj.g, [pid])[pid]
     assert ann.confidence_mean is not None, ann
+    assert ann.confidence_mean == pytest.approx(1.0, abs=1e-6), ann
     state = StateRanker(projection=proj)._fetch_point_signals([pid])[pid]
     graph = GraphRanker(projection=proj)._fetch_signals([pid], "point")[pid]
     gaps = GapsRanker(projection=proj)._fetch_confidence_signals(
@@ -584,6 +589,92 @@ def test_a_numpy_boolean_is_not_a_belief_count(sdk):
         "MATCH (n:Point {id:$id}) RETURN n.confidence, n.ep_alpha, "
         "coalesce(n.baseline_set, false)", params={"id": pid}).result_set[0]
     assert stored == [None, None, False], stored
+
+
+def test_a_mirror_outside_the_probability_band_is_not_a_belief(sdk):
+    """Cycle 24 P1: the mirror's BAND was unenforced, so a legacy string the two
+    coercions disagree about ranked FIRST.
+
+    `toFloat` parses the hex-float spelling (`"0x1p4"` → 16.0) and Python's pinned
+    grammar refuses it, so `ep_has_belief_cypher` said present while every Python
+    presence surface said absent — for ONE row. Measured at `929e18c512`, the
+    graph tier served `confidence: 16.0 / ep_state: "baseline"`,
+    `graph_boost = 0.5·16 + 0.5·0 = 8.0` (outside the module's own documented
+    `[0, 1]` boost invariant), and ranked the claim FIRST — above a genuinely
+    measured 0.9 — while `annotate`, `why`, StateRanker and GapsRanker reported
+    `absent`. One `tortoise_recall` row even carried `confidence: null` beside
+    `ep_state: "baseline"`.
+
+    The band is now part of the coercion on BOTH twins (`belief_mirror` /
+    `belief_mirror_cypher`): a served belief is a probability, so a stored value
+    outside `[0, 1]` is not a belief — which also closes the pre-existing
+    out-of-range number (`confidence = 2.5` gave `graph_boost 2.5`).
+    """
+    from tortoise.analyze import _belief
+    from tortoise.ranking import GapsRanker, GraphRanker, StateRanker, SubgraphExpander
+    from tortoise.search_engine import belief_mirror, belief_value
+
+    proj = sdk._get_proj()
+    assert belief_mirror("0x1p4") is None
+    assert belief_mirror(16.0) is None
+    assert belief_mirror(2.5) is None
+    assert belief_mirror(0.9) == pytest.approx(0.9)
+
+    for raw in ("'0x1p4'", "2.5", "-0.5"):
+        pid = sdk.create_point("statement", f"ZQBAND mirror {raw}")["id"]
+        proj.g.query(f"MATCH (n:Point {{id:$id}}) SET n.confidence = {raw}",
+                     params={"id": pid})
+        ann = annotate_ep_batch(proj.g, [pid])[pid]
+        assert (ann.confidence_mean, ann.ep_state) == (None, EP_STATE_ABSENT), (
+            raw, ann)
+        node = next(n for n in SubgraphExpander(projection=proj).expand(
+            [pid], depth=1)["nodes"] if n.get("id") == pid)
+        assert node["ep_state"] == EP_STATE_ABSENT, (raw, node)
+        assert node.get("confidence") is None, (raw, node)
+        for sigs in (
+            StateRanker(projection=proj)._fetch_point_signals([pid]),
+            GraphRanker(projection=proj)._fetch_signals([pid], "point"),
+            GapsRanker(projection=proj)._fetch_confidence_signals(
+                [pid], labels=["Point"]),
+        ):
+            assert sigs[pid].get("confidence") is None, (raw, sigs[pid])
+        # The Cypher-side `analyze` belief expression must agree with all of them.
+        assert proj.g.query(
+            "MATCH (c:Point {id:$id}) RETURN " + _belief("c"),
+            params={"id": pid}).result_set[0][0] is None, raw
+        assert belief_value(confidence=raw.strip("'")) is None
+
+    # …and a claim carrying BOTH an out-of-band mirror and a stored pair serves
+    # the PAIR on every surface (no `ep`-block-vs-ranking split).
+    mixed = sdk.create_point("statement", "ZQBAND mirror + pair")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.confidence = '0x1p4', "
+                 "n.posterior_alpha = 9.0, n.posterior_beta = 1.0",
+                 params={"id": mixed})
+    ann = annotate_ep_batch(proj.g, [mixed])[mixed]
+    assert ann.confidence_mean == pytest.approx(0.9, abs=1e-3), ann
+    assert GraphRanker(projection=proj)._fetch_signals([mixed], "point")[
+        mixed]["confidence"] == pytest.approx(0.9, abs=1e-6)
+
+    # The batch METRICS and the session digest read the same mirror, so they
+    # must be banded too: `mean_grounding`'s DE2E-4 imputation is deliberate, but
+    # an out-of-band value entering it as a belief is not.
+    from tortoise.analyze import mean_grounding
+
+    gap = sdk.create_point("statement", "ZQBAND a 2.5 mirror")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.confidence = 2.5",
+                 params={"id": gap})
+    assert mean_grounding(proj) <= 1.0, mean_grounding(proj)
+
+    # …and the ORDER: an out-of-band mirror must not outrank a measured 0.9.
+    hexed = sdk.create_point("statement", "ZQBAND a hexed claim")["id"]
+    measured = sdk.create_point("statement", "ZQBAND a measured claim")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.confidence = '0x1p4'",
+                 params={"id": hexed})
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 9.0, "
+                 "n.posterior_beta = 1.0", params={"id": measured})
+    graph = GraphRanker(projection=proj)._fetch_signals([hexed, measured], "point")
+    assert graph[hexed]["confidence"] is None, graph[hexed]
+    assert graph[measured]["confidence"] == pytest.approx(0.9, abs=1e-6)
 
 
 def test_the_object_aggregate_reports_absent_without_a_mean_over_nothing(sdk):

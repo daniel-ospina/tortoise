@@ -570,6 +570,50 @@ def numeric_operand(raw):
     return val if math.isfinite(val) else None
 
 
+#: The band a SERVED belief lives in. A probability, by definition — and every
+#: consumer already assumes it: `ranking.py`'s graph_boost is documented as a
+#: `[0, 1]` combination, `analyze` compares against thresholds in `[0, 1]`, and
+#: the manifest row promises "the value is `null` if and only if the state is
+#: `absent`". Nothing enforced it, so a STRING mirror the Cypher coercion reads
+#: and Python's grammar refuses — `"0x1p4"` is 16.0 to `toFloat` and unreadable
+#: to `_FLOAT_LITERAL` — was a belief on the Cypher surfaces and absent on the
+#: Python ones: measured, one legacy `n.confidence="0x1p4"` row read
+#: `graph_ranking confidence 16.0 / baseline` with `graph_boost 8.0` and ranked
+#: FIRST, above a genuinely measured 0.9 (0.6146), while `annotate`, `why`, the
+#: StateRanker and the GapsRanker all said `absent`. A value outside the band is
+#: not a weaker belief, it is not a belief — so the band is part of the coercion,
+#: on both twins, rather than a threshold each consumer re-applies.
+BELIEF_VALUE_MIN = 0.0
+BELIEF_VALUE_MAX = 1.0
+
+
+def belief_mirror(raw):
+    """A SERVED belief mirror (``n.confidence``) — a number in [0, 1], or None.
+
+    The Python twin of :func:`belief_mirror_cypher`. Use it wherever the
+    ``n.confidence`` mirror is read as a BELIEF; use :func:`numeric_operand` for
+    the α/β OPERANDS, which are pseudo-counts and legitimately larger than 1.
+    """
+    val = numeric_operand(raw)
+    if val is None or not (BELIEF_VALUE_MIN <= val <= BELIEF_VALUE_MAX):
+        return None
+    return val
+
+
+def belief_mirror_cypher(operand: str) -> str:
+    """Cypher twin of :func:`belief_mirror` — :func:`numeric_operand_cypher`,
+    nulled outside [0, 1].
+
+    One expression, so the value read and the presence predicate cannot disagree
+    about what "a stored belief" means (they did: the value came from Python's
+    coercion and the state from Cypher's, giving one row `confidence: null` BESIDE
+    `ep_state: "baseline"`).
+    """
+    coerced = numeric_operand_cypher(operand)
+    return (f"CASE WHEN {coerced} IS NOT NULL AND {coerced} >= {BELIEF_VALUE_MIN} "
+            f"AND {coerced} <= {BELIEF_VALUE_MAX} THEN {coerced} ELSE null END")
+
+
 def ep_has_belief_cypher(alias: str) -> str:
     """Cypher boolean: a PERSISTED belief exists for ``alias`` (#11702).
 
@@ -611,7 +655,11 @@ def ep_has_belief_cypher(alias: str) -> str:
         f"coalesce({alias}.posterior_alpha, {alias}.ep_alpha)")
     b = numeric_operand_cypher(
         f"coalesce({alias}.posterior_beta, {alias}.ep_beta)")
-    mirror = numeric_operand_cypher(f"{alias}.confidence")
+    # ⛔ BANDED (cycle 24): the mirror is a served probability, so a stored value
+    # outside [0, 1] is not a belief here — otherwise a legacy `"0x1p4"` mirror,
+    # which only Cyber's coercion can read, was present in Cypher and absent in
+    # Python, and the state disagreed with the value on the same row.
+    mirror = belief_mirror_cypher(f"{alias}.confidence")
     return (f"({mirror} IS NOT NULL OR ({a} IS NOT NULL AND {b} IS NOT NULL "
             # #11702 cycle 11: NON-NEGATIVE as well as non-empty. Beta operands
             # are counts; a negative one (reachable through the unvalidated
@@ -707,7 +755,7 @@ def ep_state(*, posterior_alpha, ep_alpha, confidence=None,
     # `baseline_set` is a FLAG; it does not turn an unreadable value into a
     # prior. Cypher's baseline arm sits BEHIND the presence predicate for the
     # same reason.
-    if _num(confidence) is None and not present:
+    if belief_mirror(confidence) is None and not present:
         return EP_STATE_ABSENT
     return (EP_STATE_MEASURED
             if ep_measurement_state(posterior_alpha=posterior_alpha,
@@ -747,7 +795,7 @@ def belief_value(*, confidence=None, posterior_alpha=None,
     # docstring for the measurement that retired cycle 12's opposite reading).
     _num = numeric_operand
 
-    conf = _num(confidence)
+    conf = belief_mirror(confidence)
     if conf is not None:
         value = conf
     else:
@@ -4579,8 +4627,13 @@ def ep_variance_admissible_cypher(alias: str) -> str:
         f"coalesce({alias}.posterior_alpha, {alias}.ep_alpha)")
     b = numeric_operand_cypher(
         f"coalesce({alias}.posterior_beta, {alias}.ep_beta)")
+    # #11702 cycle 24: the mirror arm is the BANDED read — the same one
+    # `ep_has_belief_cypher` uses. Unbanded, a legacy `confidence="0x1p4"`
+    # answered `ep_has_belief_cypher=False` (not a belief) AND
+    # `ep_variance_admissible=False` (there IS something to measure a width on),
+    # two presence answers for one claim.
     no_operands = (f"({a} IS NULL AND {b} IS NULL AND "
-                   f"{numeric_operand_cypher(f'{alias}.confidence')} IS NULL)")
+                   f"{belief_mirror_cypher(f'{alias}.confidence')} IS NULL)")
     return f"({ep_width_cypher(alias)} OR {no_operands})"
 
 
@@ -4851,7 +4904,13 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             # one level down. A row shape that predates the raw columns cannot
             # be absent (the state above already answered), so the α/β mean is
             # the honest answer there.
-            mirror = _f(row[12]) if len(row) > 12 else None
+            # #11702 cycle 24: BANDED, like every other mirror read (#2206's
+            # served belief is a probability). Unbanded here, a claim carrying
+            # BOTH a legacy hex/out-of-range mirror and a stored α/β pair served
+            # the mirror as `confidence_mean` (16.0) while `belief_value` and all
+            # three rankers served the pair mean — the `ep`-block-vs-ranking
+            # split this precedence exists to close, one level down.
+            mirror = belief_mirror(row[12]) if len(row) > 12 else None
             if state == EP_STATE_ABSENT:
                 value = None
             elif mirror is not None:

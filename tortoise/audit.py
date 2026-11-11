@@ -53,6 +53,7 @@ from tortoise.live import (  # #7927: traversal-position widening + the ONE
 # malformed ('T9') resolves neutral and is flagged. Registry-tiered kinds are
 # computed dynamically so runtime register_source_kind_default() mappings are
 # honored (SOURCE_KIND_DEFAULTS non-None entries are exactly T0-T4 by default).
+from tortoise.search_engine import belief_mirror_cypher  # #11702: the banded mirror
 from tortoise.source_credibility import SOURCE_KIND_DEFAULTS, TIER_PRIORS
 
 _log = logging.getLogger(__name__)
@@ -672,7 +673,12 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     # operator (sdk.mitigate_operator). The old `(tgt)<-[mit:mitigates]-()`
     # traversal could never see an SDK-created mitigation (wrong edge type AND
     # direction). Unit = distinct (op, tgt) pairs.
-    conf_w = f"op.confidence <= {MITIGATION_CONF_THRESHOLD}"
+    # #11702 cycle 24: the operator's mirror is read through the BAND, like every
+    # other belief read — an out-of-band value (`-0.5`, a legacy `"0x1p4"`) is not
+    # a confidence, and unbanded it was served in the issue detail ("conf=-0.5").
+    _op_conf = belief_mirror_cypher("op.confidence")
+    conf_w = (f"{_op_conf} IS NOT NULL AND {_op_conf} <= "
+              f"{MITIGATION_CONF_THRESHOLD}")
     count6 = _count(
         proj,
         # #7927: ``tgt`` is a TRAVERSAL position — a mitigated operator's target
@@ -696,7 +702,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         f"AND {_op_in_kinds('op', 'tgt')} AND {conf_w}\n"
         "OPTIONAL MATCH (op)-[mit:mitigated_by]->(:Point)\n"
         "WITH DISTINCT op, tgt, mit WHERE mit IS NULL\n"
-        "RETURN op.id, op.confidence, "
+        "RETURN op.id, " + _op_conf + ", "
         "coalesce(tgt.content, tgt.name, tgt.title, '') "
         f"LIMIT {SAMPLE_LIMIT}",
         params=params,

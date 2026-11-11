@@ -71,6 +71,7 @@ from .search_engine import (  # type: ignore[import-not-found]
     _beta_mean,  # #11702: the ONE Beta mean (replaces this module's local copy)
     _beta_variance,  # #11702: the ONE Beta width (replaces this module's local copy)
     _exclude_status_clause,
+    belief_mirror,
     belief_value,  # #11702: the ONE Python belief VALUE reader
     ep_has_belief_cypher,
     ep_measured_cypher,  # #3276: has_ep == EP measured (baseline prior != measured)
@@ -514,8 +515,8 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
             # three rankers and the subgraph read its real 0.95.
             "confidence_mean": (
                 None if state == EP_STATE_ABSENT
-                else round(numeric_operand(mirror), 4)
-                if numeric_operand(mirror) is not None
+                else round(belief_mirror(mirror), 4)
+                if belief_mirror(mirror) is not None
                 else round(_beta_mean(a, b), 4)),
             "ep_state": state,
             "variance": round(variance, 6),
