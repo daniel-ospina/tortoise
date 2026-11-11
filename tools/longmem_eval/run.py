@@ -116,6 +116,7 @@ from ..embedder_probe import DEFAULT_MODEL_ID, PROBE_MODELS, inject_model
 from . import dataset as ds
 from . import encode_cache, measurement_posture, spend_guard
 from . import usage as lme_usage
+from . import window_reconciliation as window_recon
 from .dataset_audit import audit_dataset
 from .errors import (
     INGEST_QUESTION_RETRIES,
@@ -611,6 +612,138 @@ def _pool_order_arm_on(coverage_loop: bool, session_reinjection: bool,
     """
     return bool(coverage_loop) or bool(session_reinjection
                                        and session_reinjection_guard)
+def _resolve_window_reconciliation_cap(arm_on: bool,
+                                       explicit: int | None = None,
+                                       ) -> int | None:
+    """C3-4 (#2570): the resolved per-question token cap on the window-
+    reconciliation re-run's OWN marginal spend — resolved ONCE before the
+    loop and stamped on BOTH the checkpoint fingerprint and the
+    methodology record, so a cap-12k checkpoint can never be resumed by a
+    cap-24k run (two re-run volumes must not blend into one artifact).
+
+    Off-path hygiene (the ``_resolve_reinjection_total_cap`` precedent):
+    an arm-OFF run resolves ``None`` — it never reads the env and never
+    stamps an inert knob (the always-present ``window_reconciliation``
+    bool is what refuses a fingerprint-bearing pre-feature resume).
+    Arm-ON resolution is explicit > env > the module default, and both
+    sides go through the SAME ``_clamp_int`` so a garbage value falls back
+    to the default rather than serving a silent zero-token cap (which
+    would admit nothing and look like a dead arm).
+    """
+    if not arm_on:
+        return None
+    default = window_recon.DEFAULT_RECONCILIATION_TOKEN_CAP
+    if explicit is not None:
+        return _clamp_int(explicit, default)
+    return _env_int("TORTOISE_LME_WINDOW_RECONCILIATION_CAP", default)
+
+
+def _reconcile_failing_question(
+    *,
+    sdk: Any,
+    reader: Any,
+    judge: Any,
+    question: dict,
+    qid: str,
+    ret: dict,
+    label: bool | None,
+    hypothesis: str | None,
+    ks: tuple[int, ...],
+    retrieval_kwargs: dict[str, Any],
+    raised: dict[str, int],
+    cap: int,
+    max_retries: int,
+    k: int | str = 5,
+) -> dict[str, Any]:
+    """C3-4 (#2570, #2519 P3) — ONE stratified window-reconciliation pass.
+
+    Called only when the arm is ON. Reads the failing class from the
+    ONE-SHOT outcome fields, prices its own marginal spend from the
+    question's raw-token envelope, and — when the bound fits the cap —
+    re-runs retrieval with the RAISED window (the ``top_k`` /
+    ``context_item_cap`` / ``max_context_tokens`` triple; every other arm
+    config is byte-identical via ``retrieval_kwargs``) and re-asks the
+    reader + judge.
+
+    Contract: the one-shot ``ret`` / ``label`` / ``hypothesis`` are NEVER
+    mutated or overwritten — the re-run's own results live under
+    ``variant_*`` keys, so the official ``recall_all@k`` (derived from the
+    one-shot ``session_recall@k``) and the official accuracy cannot be
+    moved by this arm. Returns the per-outcome marker dict.
+    """
+    stats: dict[str, Any] = {
+        "fired": False,
+        "admitted": False,
+        "reason": None,
+        "skip_reason": None,
+        "cap": int(cap),
+        "raised": dict(raised),
+        "marginal_bound": 0,
+        "marginal_tokens": None,
+        "cap_exceeded": False,
+        "reader_surface_before": None,
+        "reader_surface_after": None,
+        "session_recall_before": None,
+        "session_recall_after": None,
+        "variant_label": None,
+        "variant_hypothesis": None,
+        "variant_latency_ms": None,
+    }
+    reason = window_recon.failing_class_reason(
+        question_id=qid, question_type=question.get("question_type"),
+        label=label, hypothesis=hypothesis,
+        reader_surface=ret.get("reader_surface@k"), k=k)
+    if reason is None:
+        return stats
+    stats["fired"] = True
+    stats["reason"] = reason
+    stats["reader_surface_before"] = window_recon.reader_surface_value(
+        ret.get("reader_surface@k"), k)
+    stats["session_recall_before"] = (ret.get("session_recall@k")
+                                     or {}).get(str(k))
+    collector = lme_usage.get_collector()
+    before = collector.peek_question(qid)
+    bound = window_recon.marginal_bound(before)
+    stats["marginal_bound"] = bound
+    if not window_recon.admit_reconciliation(bound=bound, cap=cap):
+        # The cap is a real gate on the extra generation: a question whose
+        # own one-shot shape cannot fit the bound is never re-run.
+        stats["skip_reason"] = "token_cap"
+        return stats
+    stats["admitted"] = True
+    raised_kwargs = dict(retrieval_kwargs)
+    raised_kwargs["context_item_cap"] = raised["context_item_cap"]
+    raised_kwargs["max_context_tokens"] = raised["max_context_tokens"]
+    t0 = time.monotonic()
+    ret2 = retrieve_for_question(
+        sdk, question, ks=ks, top_k=raised["top_k"], **raised_kwargs)
+    hyp2 = _call_with_backoff(
+        lambda: reader.answer(
+            context_hits=ret2["context_points"],
+            question=question["question"],
+            question_date=question.get("question_date", "") or None,
+            question_type=question.get("question_type", "") or None),
+        what=f"window-reconciliation reader for {qid}",
+        retries=max_retries)
+    label2 = _call_with_backoff(
+        lambda: judge.judge(
+            question_type=question.get("question_type", ""),
+            question=question["question"],
+            answer=question.get("answer", ""),
+            hypothesis=hyp2, abstention=is_abstention(qid)),
+        what=f"window-reconciliation judge for {qid}",
+        retries=max_retries)
+    stats["variant_latency_ms"] = round((time.monotonic() - t0) * 1000.0, 2)
+    stats["variant_hypothesis"] = hyp2
+    stats["variant_label"] = bool(label2)
+    stats["reader_surface_after"] = window_recon.reader_surface_value(
+        ret2.get("reader_surface@k"), k)
+    stats["session_recall_after"] = (ret2.get("session_recall@k")
+                                     or {}).get(str(k))
+    stats["marginal_tokens"] = window_recon.envelope_delta(
+        before, collector.peek_question(qid))
+    stats["cap_exceeded"] = stats["marginal_tokens"] > stats["cap"]
+    return stats
 
 
 # R3 (#1542): the embedder pinned for the eval pre-flight — now derived from
@@ -1684,6 +1817,18 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # part of any fingerprint, so a lazily re-read cap
                        # could not gate resume at all.
                        reinjection_total_cap: int | None = None,
+                       # C3-4 (#2570, #2519): the stratified window
+                       # reconciliation arm — ALWAYS present as a resolved
+                       # bool (the sibling-arm convention), so a
+                       # fingerprint-bearing pre-feature checkpoint refuses
+                       # on resume (CheckpointStaleError, the safe
+                       # direction) and an arm-ON checkpoint can never be
+                       # resumed with the arm OFF. The per-question token
+                       # cap rides with it as a CONDITIONAL member (None
+                       # while the arm is OFF — the knob is inert there) so
+                       # two cap volumes can never blend into one artifact.
+                       window_reconciliation: bool = False,
+                       window_reconciliation_token_cap: int | None = None,
                        # C5 (#2521, #2513): the aggregative-intent coverage-
                        # check arm — conditional presence like the other C2/C5
                        # knobs (a flagged checkpoint resumed without the arm
@@ -1872,6 +2017,9 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
         # refuses on resume under the new defaults (safe direction) and an
         # armed checkpoint can never be resumed without the arm.
         "activate_beliefs": activate_beliefs,
+        # C3-4 (#2570, #2519): the window-reconciliation arm — ALWAYS
+        # present (the sibling-arm convention; see the kwarg comment).
+        "window_reconciliation": window_reconciliation,
     } | {
         # C1/C2/C5 (#1745): the effective reader-context + evidence-boost
         # knobs ride the fingerprint (present only when the caller passes
@@ -1917,6 +2065,14 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             # two names diverging means the cross-check silently finds
             # nothing).
             ("session_reinjection_total_cap", reinjection_total_cap),
+            # C3-4 (#2570, #2519): the resolved per-question token cap —
+            # conditional presence (None while the arm is OFF: an inert
+            # knob never gates a checkpoint; the always-present arm bool
+            # above is what refuses a fingerprint-bearing pre-feature
+            # resume). Arm-ON: always stamped, so a 12k checkpoint can
+            # never be resumed by a 24k run.
+            ("window_reconciliation_token_cap",
+             window_reconciliation_token_cap),
             # C5 (#2521, #2513): the aggregative-intent coverage-check arm
             # — conditional presence like the C2 knob (a flagged checkpoint
             # resumed without the arm is refused by the fingerprint gate).
@@ -4269,6 +4425,18 @@ def run_evaluation(
     # guard through BOTH compositions the eval lane runs.
     floor_term: bool | None = None,
     guard_per_session_cap: int | None = None,
+    # C3-4 (#2570, #2519): stratified window reconciliation — tri-state
+    # (explicit flag > ``TORTOISE_LME_WINDOW_RECONCILIATION`` env > OFF,
+    # the #1745 fail-safe default), plus the per-question token cap on the
+    # re-run's own marginal spend (explicit value >
+    # ``TORTOISE_LME_WINDOW_RECONCILIATION_CAP`` env >
+    # ``DEFAULT_RECONCILIATION_TOKEN_CAP``). A READER-side labeled-variant
+    # arm: it re-asks the failing class on a raised window and NEVER
+    # touches the one-shot retrieval result the official recall_all@k is
+    # derived from. Resolved once, fingerprinted (always-present resolved
+    # bool + the cap when armed), and recorded in the methodology.
+    window_reconciliation: bool | None = None,
+    window_reconciliation_token_cap: int | None = None,
     # C4 (#2517/#2568, #2513): source-session re-injection — tri-state
     # (explicit flag > ``TORTOISE_LME_SESSION_REINJECTION`` env > OFF, the
     # #1745 fail-safe default), plus the guard ablation
@@ -4472,6 +4640,17 @@ def run_evaluation(
     if coverage_loop is None:
         cl_env = (os.environ.get("TORTOISE_LME_COVERAGE_LOOP") or "")
         coverage_loop = cl_env.strip().lower() in _TRUTHY
+    # C3-4 (#2570, #2519): resolve the window-reconciliation arm tri-state
+    # ONCE, before the loop — same contract as the sibling arms
+    # (methodology == actual == fingerprint; fail-safe OFF: only
+    # 1/true/yes/on enables — the #1745 default decision). The per-question
+    # token cap is resolved WITH it and is ``None`` while the arm is OFF
+    # (an inert knob is never read, never fingerprinted, never recorded).
+    if window_reconciliation is None:
+        wr_env = (os.environ.get("TORTOISE_LME_WINDOW_RECONCILIATION") or "")
+        window_reconciliation = wr_env.strip().lower() in _TRUTHY
+    window_reconciliation_token_cap = _resolve_window_reconciliation_cap(
+        bool(window_reconciliation), window_reconciliation_token_cap)
     # C4 (#2517/#2568, #2513): resolve the source-session re-injection arm
     # + its guard ablation ONCE, before the loop — same contract as the
     # sibling arms (methodology == actual == fingerprint; fail-safe OFF:
@@ -4574,6 +4753,14 @@ def run_evaluation(
     if context_item_cap is None:
         context_item_cap = _env_int(
             "TORTOISE_LME_CONTEXT_ITEMS", DEFAULT_CONTEXT_ITEM_CAP)
+    # C3-4 (#2570): the raised window is derived ONCE — AFTER the base item
+    # cap is resolved above, so it scales the SAME resolved knobs
+    # ``retrieve_for_question`` receives (methodology == actual == the
+    # variant's window). Recorded in the methodology so the window a
+    # variant was produced under is reconstructable.
+    window_reconciliation_raised = window_recon.raised_window(
+        top_k=top_k, context_item_cap=context_item_cap,
+        max_context_tokens=max_context_tokens)
     if evidence_boost:
         evidence_boost_verbatim = _resolve_boost_float(
             "TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
@@ -4701,6 +4888,14 @@ def run_evaluation(
         # Conditional presence (``None`` while no pool-order arm runs) keeps
         # an inert value off the fingerprint, as documented at the parameter.
         guard_per_session_cap=guard_per_session_cap,
+        # C3-4 (#2570, #2519): the resolved window-reconciliation arm + its
+        # per-question token cap ride the fingerprint as an ALWAYS-PRESENT
+        # resolved bool + a conditional cap (None while OFF) — a
+        # fingerprint-bearing pre-feature checkpoint refuses on resume
+        # (the safe direction), and an arm-ON checkpoint can never be
+        # resumed with the arm OFF or a different cap volume.
+        window_reconciliation=bool(window_reconciliation),
+        window_reconciliation_token_cap=window_reconciliation_token_cap,
         # C4 (#2517/#2568, #2513): the resolved re-injection arm + guard
         # ablation ride the fingerprint as ALWAYS-PRESENT resolved bools
         # (the sibling-arm convention) — a fingerprint-bearing pre-feature
@@ -4907,6 +5102,10 @@ def run_evaluation(
                         db_uri=db_uri,
                         namespace=namespace,
                         work_dir=work_dir)
+                    # C3-4 (#2570): the per-question window-reconciliation
+                    # marker — reset per attempt so an R2 re-ingest never
+                    # inherits a prior attempt's variant.
+                    _window_recon_stats: dict[str, Any] | None = None
                     try:
                         _sdk_cleanup = cleanup
                         # #2080 ingest-cache seam: on a FRESH v2 docker run
@@ -5205,74 +5404,90 @@ def run_evaluation(
                         _consec_census = (0 if GATE_REASON_CENSUS_ERROR
                                           not in gate_reasons
                                           else _consec_census + 1)
-                        ret = retrieve_for_question(
-                            sdk, question, ks=ks, top_k=top_k,
-                            retriever=retriever,
-                            max_context_tokens=max_context_tokens,
-                            max_chunks_per_session=max_chunks_per_session,
-                            tr_top_k=tr_top_k,
-                            tr_date_weight=tr_date_weight,
-                            tr_events=tr_events,
-                            rerank=rr["rerank_on"],
-                            rerank_model=rr["model"],
-                            rerank_pool=rr["rerank_pool"],
-                            per_session_cap=rr["per_session_cap"],
-                            mmr_lambda=rr["mmr_lambda"],
+                        # C3-4 (#2570): ONE shared arm-config dict for the
+                        # one-shot retrieval AND the window-reconciliation
+                        # re-run — the raise changes the WINDOW and nothing
+                        # else, and an arm added here is automatically
+                        # carried by both calls (two duplicated kwarg lists
+                        # are how the calls silently drift apart, which
+                        # would make the variant's delta unattributable).
+                        # The THREE window dimensions (``top_k`` /
+                        # ``context_item_cap`` / ``max_context_tokens``)
+                        # stay OUT of the dict: they are passed per call,
+                        # the re-run with the raised values.
+                        _retrieval_kwargs: dict[str, Any] = {
+                            "retriever": retriever,
+                            "max_chunks_per_session": max_chunks_per_session,
+                            "tr_top_k": tr_top_k,
+                            "tr_date_weight": tr_date_weight,
+                            "tr_events": tr_events,
+                            "rerank": rr["rerank_on"],
+                            "rerank_model": rr["model"],
+                            "rerank_pool": rr["rerank_pool"],
+                            "per_session_cap": rr["per_session_cap"],
+                            "mmr_lambda": rr["mmr_lambda"],
                             # C1/C2 (#1745): reader-context item cap + evidence-
                             # mark boost (OFF by default; the re-validation run
                             # enables it via env/flag).
-                            context_item_cap=context_item_cap,
-                            evidence_boost=evidence_boost,
-                            evidence_boost_verbatim=evidence_boost_verbatim,
-                            evidence_boost_source=evidence_boost_source,
+                            "evidence_boost": evidence_boost,
+                            "evidence_boost_verbatim":
+                                evidence_boost_verbatim,
+                            "evidence_boost_source": evidence_boost_source,
                             # C2 (#2518, #2513): the entity/fact-augmented
                             # key expansion arm (resolved above; OFF by
                             # default — the sealed A/B decides adoption).
-                            entity_key_expansion=entity_key_expansion,
+                            "entity_key_expansion": entity_key_expansion,
                             # C6 (#2520, #2513): the time-aware query
                             # expansion arm (resolved above; OFF by
                             # default — the sealed A/B decides adoption).
-                            time_aware_qe=time_aware_qe,
+                            "time_aware_qe": time_aware_qe,
                             # C3-1 (#2519, #2567): the coverage-completeness
                             # loop arm (resolved above; OFF by default — the
                             # sealed A/B decides adoption).
-                            coverage_loop=coverage_loop,
+                            "coverage_loop": coverage_loop,
                             # #2513 (#10629 review): the guard's LOWER bound
                             # + cap, resolved ONCE above — the value the
                             # fingerprint and the methodology carry is the
                             # value the guard serves (both compositions get
                             # it through ``_floor_arm_guard_kwargs``).
-                            floor_term=floor_term,
-                            guard_per_session_cap=guard_per_session_cap,
+                            "floor_term": floor_term,
+                            "guard_per_session_cap": guard_per_session_cap,
                             # C4 (#2517/#2568, #2513): the source-session
                             # re-injection arm + guard ablation (resolved
                             # above; OFF by default — the sealed A/B
                             # decides adoption).
-                            session_reinjection=session_reinjection,
-                            session_reinjection_guard=session_reinjection_guard,
+                            "session_reinjection": session_reinjection,
+                            "session_reinjection_guard":
+                                session_reinjection_guard,
                             # C4 (#2513): the SAME resolved cap the
                             # checkpoint fingerprint and the methodology
                             # record carry — never re-resolved per question
                             # (a lazy re-read is invisible to the
                             # fingerprint gate and would blend two
                             # injection volumes into one artifact).
-                            session_reinjection_total_cap=(
-                                reinjection_total_cap),
+                            "session_reinjection_total_cap":
+                                reinjection_total_cap,
                             # C5 (#2521, #2513): the aggregative-intent
                             # coverage-check arm (resolved above; OFF by
                             # default — records the per-outcome verdict
                             # under the arm only; the C3-3 routing decides
                             # adoption).
-                            aggregative_flag=aggregative_flag,
+                            "aggregative_flag": aggregative_flag,
                             # #2886: the deterministic temporal-aggregation
                             # resolution arm (resolved above; OFF by default
                             # — records the per-outcome verdict under the arm
                             # only).
-                            temporal_aggregate=temporal_aggregate,
+                            "temporal_aggregate": temporal_aggregate,
                             # #1786 (R5): the eval's elevated HYBRID-arm
                             # retrieval deadline via the existing seam (the
                             # vector arm keeps VECTOR_TIMEOUT_MS=5000).
-                            retrieval_budget_ms=retrieval_budget_ms)
+                            "retrieval_budget_ms": retrieval_budget_ms,
+                        }
+                        ret = retrieve_for_question(
+                            sdk, question, ks=ks, top_k=top_k,
+                            max_context_tokens=max_context_tokens,
+                            context_item_cap=context_item_cap,
+                            **_retrieval_kwargs)
 
                         # #1785 (Task 1): the POST-RETRIEVAL census — a second
                         # invocation of the shared gate predicates immediately
@@ -5349,6 +5564,27 @@ def run_evaluation(
                                 ),
                                 what=f"judge for {qid}", retries=max_retries)
                             judge_ms = (time.monotonic() - t0) * 1000.0
+                            # C3-4 (#2570, #2519 P3): the stratified
+                            # window-reconciliation labeled-variant arm. On
+                            # the failing class it re-runs retrieval with a
+                            # RAISED window and re-asks reader + judge, all
+                            # inside this try (the question's SDK is still
+                            # live — the ``finally`` below closes it) and
+                            # under the per-question token cap. The one-shot
+                            # ``ret`` / ``label`` / ``hypothesis`` above are
+                            # never mutated: the official numbers stay
+                            # one-shot (w7 D3 discipline).
+                            if window_reconciliation:
+                                _window_recon_stats = (
+                                    _reconcile_failing_question(
+                                        sdk=sdk, reader=reader, judge=judge,
+                                        question=question, qid=qid, ret=ret,
+                                        label=label, hypothesis=hypothesis,
+                                        ks=ks,
+                                        retrieval_kwargs=_retrieval_kwargs,
+                                        raised=window_reconciliation_raised,
+                                        cap=window_reconciliation_token_cap,
+                                        max_retries=max_retries))
                     finally:
                         # #2080 ingest-cache hygiene (--sweep-cache): wipe
                         # the question's graph (content + cache marker) right
@@ -5516,6 +5752,17 @@ def run_evaluation(
                         # pre-feature checkpoints).
                         "coverage_loop": ret.get("coverage_loop"),
                         "coverage_loop_stats": ret.get("coverage_loop_stats"),
+                        # C3-4 (#2570, #2519 P3): the window-reconciliation
+                        # arm marker + the per-outcome labeled-variant
+                        # census (fired/reason/admitted/cap/marginal tokens/
+                        # reader_surface before-after/pool-drift/variant
+                        # label). Read via .get so a pre-feature checkpoint
+                        # stays readable; present ONLY under the arm (an
+                        # arm-OFF outcome stays byte-identical).
+                        **({"window_reconciliation": True,
+                            "window_reconciliation_stats":
+                                _window_recon_stats}
+                           if window_reconciliation else {}),
                         # C4 (#2517/#2568, #2513): the source-session
                         # re-injection arm marker + per-outcome census
                         # (seeded sessions, injected/merged counts per
@@ -6056,6 +6303,23 @@ def run_evaluation(
                 guard_per_session_cap
                 if guard_per_session_cap is not None
                 else DEFAULT_POOL_SESSION_CAP),
+            # C3-4 (#2570, #2519 P3): the stratified window-reconciliation
+            # LABELED-VARIANT arm — recorded verbatim in the methodology,
+            # together with the resolved per-question token cap and the
+            # RAISED window triple it derives from this run's base knobs.
+            # The triple is recorded because the variant's window IS the
+            # mechanism: a published variant number must carry the window
+            # it was produced under (the arm-ON checkpoint can never be
+            # resumed under a different cap/window — the fingerprint gate).
+            "window_reconciliation": bool(window_reconciliation),
+            "window_reconciliation_token_cap": (
+                window_reconciliation_token_cap
+                if window_reconciliation_token_cap is not None
+                else window_recon.DEFAULT_RECONCILIATION_TOKEN_CAP),
+            "window_reconciliation_raise_factor": (
+                window_recon.DEFAULT_WINDOW_RAISE_FACTOR),
+            "window_reconciliation_raised_window": dict(
+                window_reconciliation_raised),
             # C4 (#2517/#2568, #2513): the source-session re-injection arm
             # + its guard ablation — recorded verbatim in the methodology
             # (published numbers carry which arm produced them; the guard
@@ -6337,6 +6601,12 @@ def outcomes_to_report(
                 # the §8 per-outcome markers ride the projection (read via
                 # o.get — absent on pre-feature checkpoints).
                 "coverage_loop", "coverage_loop_stats",
+                # C3-4 (#2570, #2519 P3): the window-reconciliation arm
+                # marker + per-outcome labeled-variant census ride the
+                # Layer-1 projection (read via o.get — absent until the
+                # outcome carries them, and absent on an arm-OFF run); the
+                # publication layer's labeled-variant block consumes them.
+                "window_reconciliation", "window_reconciliation_stats",
                 # C4 (#2517/#2568, #2513): the source-session re-injection
                 # arm marker + per-outcome census ride the projection
                 # (read via o.get — absent on pre-feature checkpoints).
@@ -6942,6 +7212,40 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="disable the C3-1 coverage-completeness loop even "
                          "when TORTOISE_LME_COVERAGE_LOOP is set (tri-state: "
                          "explicit flags beat the env)")
+    # C3-4 (#2570, #2519 P3): stratified window reconciliation — tri-state
+    # --window-reconciliation / --no-window-reconciliation (None default so
+    # the TORTOISE_LME_WINDOW_RECONCILIATION env still applies; OFF by
+    # default in code — the #1745 fail-safe default). A READER-side
+    # LABELED-VARIANT arm: it re-asks the failing class on a raised window
+    # and never touches the one-shot result the official recall_all@5 is
+    # derived from. `--window-reconciliation-cap` is the per-question cap
+    # on the re-run's own marginal tokens.
+    wr = p.add_mutually_exclusive_group()
+    wr.add_argument("--window-reconciliation",
+                    dest="window_reconciliation", action="store_true",
+                    default=None,
+                    help="enable the C3-4 stratified window reconciliation "
+                         "(on the failing reader class — non-_abs "
+                         "multi-session / single-session-preference "
+                         "abstention, or judge-miss with reader_surface@k < "
+                         "1.0 — re-run retrieval with a raised "
+                         "top_k/context_item_cap/max_context_tokens window "
+                         "and re-ask the reader + judge under a "
+                         "per-question token cap; reported as a LABELED "
+                         "VARIANT, never as an official number; default: "
+                         "env TORTOISE_LME_WINDOW_RECONCILIATION — OFF by "
+                         "default in code, #2570)")
+    wr.add_argument("--no-window-reconciliation",
+                    dest="window_reconciliation", action="store_false",
+                    default=None,
+                    help="disable the C3-4 window reconciliation even when "
+                         "TORTOISE_LME_WINDOW_RECONCILIATION is set "
+                         "(tri-state: explicit flags beat the env)")
+    p.add_argument("--window-reconciliation-cap", type=int, default=None,
+                   help="per-question cap on the C3-4 re-run's marginal "
+                        "reader+judge tokens (default: env "
+                        "TORTOISE_LME_WINDOW_RECONCILIATION_CAP, else "
+                        f"{window_recon.DEFAULT_RECONCILIATION_TOKEN_CAP})")
     # C4 (#2517/#2568, #2513): source-session re-injection — tri-state
     # --session-reinjection / --no-session-reinjection (None default so the
     # TORTOISE_LME_SESSION_REINJECTION env still applies; OFF by default in
@@ -7646,6 +7950,22 @@ def _run_main(parser: argparse.ArgumentParser, args,
     else:
         cl_env = (os.environ.get("TORTOISE_LME_COVERAGE_LOOP") or "")
         coverage_loop = cl_env.strip().lower() in _TRUTHY
+    # C3-4 (#2570, #2519 P3): window reconciliation — tri-state (CLI flag >
+    # TORTOISE_LME_WINDOW_RECONCILIATION env > OFF — fail-safe: only
+    # 1/true/yes/on enables). Resolved once and threaded into
+    # run_evaluation (methodology == actual). The per-question token cap
+    # rides the SAME contract through the shared resolver: an arm-OFF run
+    # resolves None (the env is never read, no inert value is recorded) and
+    # an arm-ON run clamps a garbage explicit value to the default rather
+    # than serving a silent zero-token cap (which would admit nothing and
+    # look like a dead arm).
+    if args.window_reconciliation is not None:
+        window_reconciliation = args.window_reconciliation
+    else:
+        wr_env = (os.environ.get("TORTOISE_LME_WINDOW_RECONCILIATION") or "")
+        window_reconciliation = wr_env.strip().lower() in _TRUTHY
+    window_reconciliation_token_cap = _resolve_window_reconciliation_cap(
+        window_reconciliation, args.window_reconciliation_cap)
     # C4 (#2517/#2568, #2513): source-session re-injection + guard
     # ablation — tri-state (CLI flag > TORTOISE_LME_SESSION_REINJECTION env
     # > OFF — fail-safe: only 1/true/yes/on enables, mirroring the sibling
@@ -7990,6 +8310,12 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 # arm was never selected at all.
                 floor_term=floor_term,
                 guard_per_session_cap=guard_per_session_cap,
+                # C3-4 (#2570, #2519 P3): the stratified window-
+                # reconciliation labeled-variant arm + its per-question
+                # token cap (tri-state resolved above; OFF by default).
+                window_reconciliation=window_reconciliation,
+                window_reconciliation_token_cap=(
+                    window_reconciliation_token_cap),
                 # C4 (#2517/#2568, #2513): the source-session re-injection
                 # arm + guard ablation (tri-state resolved above; OFF by
                 # default — the sealed A/B decides adoption).
