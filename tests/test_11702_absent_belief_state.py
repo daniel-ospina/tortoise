@@ -798,3 +798,111 @@ def test_trends_prints_only_stored_alpha_beta(sdk):
     assert "α=3.0" not in answer, (
         "a half pair was printed with a fabricated β from the coalesce default: "
         + answer)
+
+
+def test_analyze_coerces_integer_alpha_beta(sdk):
+    """FalkorDB `/` truncates INTEGERS — the belief expression must coerce.
+
+    `update_point(posterior_alpha=9, posterior_beta=1)` is accepted and stores
+    INTs with no mirror (only the `ep_*` baseline fields are gated). Without
+    `toFloat`, `9/10` truncated to `0`, so a claim measured at 0.90 rendered
+    `confidence: 0.00`, ranked BELOW a 0.10 claim, and failed its own belief
+    floor — the exact inversion §6.3 removes, on a claim that HAS a belief.
+    """
+    from tests._embedded import _wipe_or as wipe
+    from tortoise.analyze import analyze
+
+    proj = sdk._get_proj()
+    wipe(proj)
+    g = proj.g
+    # Ints on purpose — the storage layer keeps them as ints.
+    g.query("CREATE (:Point {id:'strong', content:'evidence ai strategy is "
+            "working via strong', is_operator:false, status:'live', "
+            "posterior_alpha:9, posterior_beta:1})")
+    g.query("CREATE (:Point {id:'weak', content:'weak support claim', "
+            "is_operator:false, status:'live', posterior_alpha:1, "
+            "posterior_beta:9})")
+    g.query("CREATE (:Point {id:'tgt', content:'evidence ai strategy is working', "
+            "is_operator:false, status:'live'})")
+    g.query("CREATE (:Point {id:'op', content:'IMPL', op_type:'IMPL', "
+            "is_operator:true, status:'live'})")
+    g.query("MATCH (a:Point {id:'strong'}), (b:Point {id:'weak'}), "
+            "(o:Point {id:'op'}), (t:Point {id:'tgt'}) "
+            "CREATE (a)<-[:IMPL {idx:0}]-(o)-[:IMPL {idx:1}]->(t), "
+            "       (b)<-[:IMPL {idx:0}]-(o)-[:IMPL {idx:2}]->(t)")
+    answer = analyze("show me the evidence chain for the AI strategy",
+                     proj=proj, use_llm=False)["answer"]
+    assert "0.90" in answer, (
+        "integer α/β truncated to 0 — the toFloat guard is missing: " + answer)
+    assert "0.00" not in answer, answer
+    assert answer.index("strong") < answer.index("weak"), (
+        "the 0.90 claim must outrank the 0.10 one: " + answer)
+
+
+def test_why_conflict_severity_and_tradeoff_weight_use_the_shared_reader(sdk):
+    """`severity`/`ep_weight` ordered on `_mean(coalesce(…, 1.0), …)` = 0.5.
+
+    An ABSENT counter-claim therefore took a real severity tier (competing for
+    the ≤2 cap), and an absent alternative was presented as STRONGER than a
+    measured 0.4 one. Both now weigh `None` and sort in their own last tier.
+    """
+    from tortoise.why import _assemble_conflicts, _assemble_tradeoffs
+
+    proj = sdk._get_proj()
+    target = sdk.create_point("statement", "the contested claim")["id"]
+    absent = sdk.create_point("statement", "absent counter-claim")["id"]
+    measured = sdk.create_point("statement", "measured 0.55 counter-claim")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 11.0, "
+                 "n.posterior_beta = 9.0", params={"id": measured})
+    for nander in (absent, measured):
+        proj.g.query(
+            "MATCH (c:Point {id:$c}), (t:Point {id:$t}) CREATE (c)-[:NAND]->(t)",
+            params={"c": nander, "t": target})
+
+    blocks = {target: {}}
+    rows = proj.g.query(
+        "MATCH (n:Point {id:$id}) WITH n MATCH (c:Point)-[r:NAND]->(n) "
+        "RETURN n.id, c.id, c.content, "
+        "  c.confidence, c.posterior_alpha, c.posterior_beta, "
+        "  c.ep_alpha, c.ep_beta, "
+        "  null AS c1, null AS c2, null AS c3, null AS c4, null AS c5",
+        params={"id": target}).result_set
+    _assemble_conflicts(rows, blocks)
+    nands = blocks[target]["nands"]
+    by_id = {n["point_id"]: n for n in nands}
+    assert by_id[measured]["severity"] == "medium", by_id[measured]
+    assert by_id[absent]["severity"] is None, (
+        "an absent counter-claim took a real severity tier on a fabricated 0.5: "
+        + repr(by_id[absent]))
+
+    # Tradeoffs: absent must sort BELOW a measured 0.4 alternative.
+    decision = sdk.create_point("statement", "the decision",
+                                status="live")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.pointKind = 'decision'",
+                 params={"id": decision})
+    absent_alt = sdk.create_point("statement", "absent alternative")["id"]
+    measured_alt = sdk.create_point("statement", "measured 0.4 alternative")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = 2.0, "
+                 "n.posterior_beta = 3.0", params={"id": measured_alt})
+    for alt in (absent_alt, measured_alt):
+        proj.g.query(
+            "MATCH (d:Point {id:$d}), (a:Point {id:$a}) CREATE (d)-[:IMPL]->(a)",
+            params={"d": decision, "a": alt})
+    tblocks = {decision: {}}
+    trows = proj.g.query(
+        "MATCH (n:Point {id:$id}) WITH n MATCH (n)-[:IMPL]->(alt:Point) "
+        "RETURN n.id, coalesce(n.pointKind,''), alt.id, alt.content, "
+        "  coalesce(alt.pointKind,''), null AS o1, null AS o2, "
+        "  alt.confidence, alt.posterior_alpha, alt.posterior_beta, "
+        "  alt.ep_alpha, alt.ep_beta",
+        params={"id": decision}).result_set
+    _assemble_tradeoffs(trows, tblocks)
+    alts = {t["point_id"]: t for t in tblocks[decision].get("tradeoffs", [])}
+    assert alts, ("no tradeoffs assembled — the fixture did not build a "
+                  "decision with two alternatives")
+    assert alts[measured_alt]["ep_weight"] == pytest.approx(0.4, abs=1e-4), alts
+    assert alts[absent_alt]["ep_weight"] is None, (
+        "an absent alternative was weighed 0.5 and presented as stronger than "
+        "a measured 0.4: " + repr(alts[absent_alt]))
+    order = [t["point_id"] for t in tblocks[decision]["tradeoffs"]]
+    assert order.index(measured_alt) < order.index(absent_alt), order

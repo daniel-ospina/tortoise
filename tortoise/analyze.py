@@ -41,12 +41,20 @@ from .search_engine import (  # #11702: the ONE presence predicate
 # WHERE on the same predicate (`disagreement`/`consensus`); one that
 # deliberately admits it reports `null` and orders it LAST
 # (`_order_by_belief`), which is the same refusal the rankers make.
+#
+# ⛔ `toFloat` on EVERY operand is load-bearing, not decoration. FalkorDB's `/`
+# is INTEGER division when both operands are integers (unlike Python), so a
+# prior stored as ints — `update_point(posterior_alpha=9, posterior_beta=1)`
+# accepts and stores exactly that — computed `9/10 = 0` and the claim rendered
+# `confidence: 0.00`, ranking BELOW a 0.10 claim and failing its own belief
+# floor. The expressions this replaced (`most_uncertain`/`trends`) carried the
+# guard; it must not be lost again.
 _BELIEF = (
     "CASE WHEN " + ep_has_belief_cypher("{a}") + " "
     "  THEN coalesce({a}.confidence, "
-    "    coalesce({a}.posterior_alpha, {a}.ep_alpha, 1.0) "
-    "    / (coalesce({a}.posterior_alpha, {a}.ep_alpha, 1.0) "
-    "       + coalesce({a}.posterior_beta, {a}.ep_beta, 1.0))) "
+    "    toFloat(coalesce({a}.posterior_alpha, {a}.ep_alpha, 1.0)) "
+    "    / (toFloat(coalesce({a}.posterior_alpha, {a}.ep_alpha, 1.0)) "
+    "       + toFloat(coalesce({a}.posterior_beta, {a}.ep_beta, 1.0)))) "
     "  ELSE null END"
 )
 

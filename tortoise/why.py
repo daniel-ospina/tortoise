@@ -284,15 +284,29 @@ def _assemble_conflicts(rows: list, by_id: dict[str, dict]) -> None:
         nid = row[1]
         if nid not in pending.setdefault(pid, {}):
             text = row[2]
+            # #11702: the counter-claim's PERSISTED belief -- a direct Point's
+            # own columns, else the NAND operator's. `None` when neither has
+            # one, and that is a TIER of its own below every measured severity
+            # (an absent belief used to weigh 0.5 and take a real tier, so the
+            # ≤2 cap could be filled by a claim nothing measured).
+            weight = belief_value(
+                confidence=row[3], posterior_alpha=row[4],
+                posterior_beta=row[5], ep_alpha=row[6], ep_beta=row[7])
+            if weight is None:
+                weight = belief_value(
+                    confidence=row[8], posterior_alpha=row[9],
+                    posterior_beta=row[10], ep_alpha=row[11], ep_beta=row[12])
             pending[pid][nid] = {
                 "point_id": nid,
                 "content_snippet": _snippet(text),
-                "severity": _severity(_mean(float(row[3]), float(row[4]))),
+                "severity": None if weight is None else _severity(weight),
             }
     for pid, nand_map in pending.items():
         nands = sorted(
             nand_map.values(),
-            key=lambda n: (0 if n["severity"] == "high" else 1, n["point_id"]))
+            key=lambda n: (n["severity"] is None,
+                           0 if n["severity"] == "high" else 1,
+                           n["point_id"]))
         by_id[pid]["nands"] = nands[:W4_MAX_CONFLICTS]
 
 
@@ -323,7 +337,12 @@ def _assemble_tradeoffs(rows: list, by_id: dict[str, dict]) -> None:
                 # own explanation needs it. Same additive-shape rule as the
                 # support leg: present, ``None`` when the edge carries none.
                 "operator_id": row[5] or None,
-                "ep_weight": round(_mean(float(row[7]), float(row[8])), 4),
+                # #11702: `None` for an alternative with no persisted belief
+                # (never the 0.5 the `coalesce(…, 1.0)` default produced).
+                "ep_weight": belief_value(
+                    confidence=row[7], posterior_alpha=row[8],
+                    posterior_beta=row[9], ep_alpha=row[10], ep_beta=row[11],
+                    round_to=4),
                 "mitigation": _mitigation_text(row[6]),
             }
     for pid, alts in pending.items():
@@ -349,7 +368,9 @@ def _assemble_tradeoffs(rows: list, by_id: dict[str, dict]) -> None:
                 {k: v for k, v in a.items() if k != "kind"}
                 for a in alt_list
             ],
-            key=lambda t: (-t["ep_weight"], t["point_id"]))[:W4_MAX_TRADEOFFS]
+            key=lambda t: (t["ep_weight"] is None,
+                           -(t["ep_weight"] or 0.0),
+                           t["point_id"]))[:W4_MAX_TRADEOFFS]
 
 
 def _assemble_supersession(by_id: dict[str, dict],
@@ -623,8 +644,13 @@ _CONFLICTS_CYPHER = (
     f"AND {_exclude_status_clause('c')} "
     "RETURN n.id, coalesce(src.id, c.id), "
     "  coalesce(src.content, c.label, c.content, ''), "
-    "  coalesce(src.posterior_alpha, src.ep_alpha, c.posterior_alpha, c.ep_alpha, 1.0), "
-    "  coalesce(src.posterior_beta, src.ep_beta, c.posterior_beta, c.ep_beta, 1.0)"
+    # #11702: the RAW belief columns of the counter-claim (mirror first, then
+    # its own posterior/prior pair), NOT `coalesce(…, 1.0)` -- the 1.0 default
+    # supplied a missing operand, so an ABSENT nander weighed the neutral 0.5
+    # and then took a real severity TIER on it.
+    "  src.confidence, src.posterior_alpha, src.posterior_beta, "
+    "  src.ep_alpha, src.ep_beta, "
+    "  c.confidence, c.posterior_alpha, c.posterior_beta, c.ep_alpha, c.ep_beta"
 )
 # Dedicated persisted ep read for every requested Point (single-node α/β —
 # never full propagation). Runs unconditionally so the canonical ``ep`` block
@@ -681,8 +707,11 @@ _TRADEOFFS_CYPHER = (
     "OPTIONAL MATCH (op)-[:mitigated_by]->(m:Point) "
     f"WHERE {_live_only('m.status')} "
     "RETURN n.id, n.pointKind, alt.id, alt.content, alt.pointKind, op.id, m.content, "
-    "  coalesce(alt.posterior_alpha, alt.ep_alpha, 1.0), "
-    "  coalesce(alt.posterior_beta, alt.ep_beta, 1.0)"
+    # #11702: raw columns (see `_CONFLICTS_CYPHER`) -- `coalesce(…, 1.0)` gave
+    # an absent alternative `ep_weight` 0.5, which then SORTED it above a
+    # measured 0.4 one (the same inversion the support chain just had fixed).
+    "  alt.confidence, alt.posterior_alpha, alt.posterior_beta, "
+    "  alt.ep_alpha, alt.ep_beta"
 )
 
 

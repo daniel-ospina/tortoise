@@ -423,9 +423,14 @@ def ep_state(*, posterior_alpha, ep_alpha, confidence=None,
     Pass the β columns too, or a stored zero pair reads as ``present`` here
     while Cypher calls it absent.
     """
-    # α/β are coalesced as a PAIR (posterior first, then the ep_* prior), the
-    # same precedence `ep_has_belief_cypher` spells in Cypher — never α from one
-    # pair with β from the other.
+    # α and β are each coalesced INDEPENDENTLY, posterior first, then the ep_*
+    # prior — the same precedence `ep_has_belief_cypher` spells in Cypher (both
+    # twins mix the same way, so they cannot disagree). ⚠️ Stated exactly: a
+    # HALF posterior plus a complete prior therefore MIXES the pairs
+    # (`posterior_alpha=0.5`, `ep_beta=3.0` → 0.5/3.5). That is the shipped
+    # behaviour, not an oversight — a pair-strict rule would change the belief
+    # of every half-posterior claim and would have to change the Cypher
+    # predicate with it, so it is a separate decision, not a comment fix.
     alpha = posterior_alpha if posterior_alpha is not None else ep_alpha
     beta = posterior_beta if posterior_beta is not None else ep_beta
     present = (alpha is not None and beta is not None
