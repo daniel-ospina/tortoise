@@ -193,6 +193,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_8906_points_gate_counts_write_graph.py": {"registry": "prod-coupled"},
     "test_hosted_volunteer_context.py": {"registry": "prod-coupled"},   # #2103 (W4C) — registry control-plane mint/revoke mirrors test_hosted_auth
     "test_capture_phase_d_dedup.py": {"team-001": "team-identity"},  # #2104 (W5-D) — hosted _make_sdk(namespace="team-001") mirror arm
+    # tests/test_11702_absent_belief_state.py — deliberately NO row below.
     # #11702's `_EP_FLAG_CONV` hosted arm is the SAME construction as
     # test_capture_phase_d_dedup's mirror arm (it reaches the graph the REAL
     # `POST /v1/sessions` route just wrote, using the shared `team-001` org
