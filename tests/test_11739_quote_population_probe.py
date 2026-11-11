@@ -1150,17 +1150,19 @@ def test_quote_cap_mirrors_the_point_write_paths_own_constant():
 
 
 def test_terminal_statuses_mirror_the_read_paths_RENDERED_predicate():
-    """FAILS IF the vocabulary the probe divides by is only a subset of what the read path
-    renders, or if the read path stops rendering the `outdated` conjunct at all.
+    """FAILS IF the LEAF renderer (`live._terminal_excluded`) stops rendering either conjunct,
+    or stops defaulting the `outdated` conjunct ON.
 
-    `test_terminal_statuses_mirror_the_products_own_constant` above compares the probe's set
-    to `live.TERMINAL_EXCLUDED_STATUSES` — but the README's headline claim is not "the status
-    set matches"; it is "**exactly** the population the default read serves". That claim rests
-    on the PREDICATE the read path actually composes, and a vocabulary constant is not the
-    predicate: an extra `<> 'x'` added to the composition (or `include_outdated_flag` turned
-    off for the Point path) moves the population while the constant stays byte-identical, so
-    the census would publish 94.86% over a denominator the read no longer uses, with every
-    existing pin green. Read the RENDERED clause instead of the constant.
+    ⛔ THIS IS THE LEAF, NOT THE READ PATH, and the two pins below close the links this one
+    cannot see. `census.json`'s `denominator` names "the two conjuncts of
+    `search_engine._exclude_status_clause`", and `sdk.query` reaches them through that shim
+    (`sdk.py::clauses.append(_exclude_status_clause("n"))`, passing NO flag, so the SHIM's
+    `include_outdated_flag=True` default is what turns the flag half on for the Point path).
+    Measured in review: a mutation of the SHIM's default to False left a pin that only called
+    `_terminal_excluded` green — the exact "turned off for the Point path" mutation its text
+    named. So this test pins what it can actually see, and
+    `test_the_read_paths_composed_predicate_...` / `test_the_sdk_query_where_...` pin the two
+    call-site links.
     """
     import re
 
@@ -1178,9 +1180,82 @@ def test_terminal_statuses_mirror_the_read_paths_RENDERED_predicate():
     # (`excluded_by_outdated_flag`). It is measured EMPTY on this graph, which is precisely
     # why its absence from the composition would be invisible in the published numbers.
     assert "coalesce(n.outdated, false) = false" in rendered
+    # The LEAF's own default (what an un-passed `include_outdated_flag` renders to). The
+    # read path does not rely on this default — it passes the flag through the shim — so
+    # this assertion is labelled for what it is rather than for the read path.
     assert _terminal_excluded("n.status", include_outdated_flag=True) == rendered, (
-        "the Point read path must keep the flag conjunct ON — the OBJECT surfaces are the "
-        "callers that pass include_outdated_flag=False (#3301)")
+        "the leaf renderer's default must keep the flag conjunct ON")
+
+
+def test_the_read_paths_composed_predicate_carries_both_conjuncts():
+    """FAILS IF the SHIM the read path actually calls drops either conjunct.
+
+    `census.json` names this shim (`search_engine._exclude_status_clause`) as the denominator's
+    definition, and it carries its OWN `include_outdated_flag: bool = True` default that it
+    passes explicitly to the leaf — so the Point read path's flag half depends on THIS default,
+    not on `live._terminal_excluded`'s. Mutation that reds this test and not the leaf pin:
+    flipping the shim's default to False. Mutation that reds both: removing the `coalesce(...)`
+    conjunct from the leaf's composition.
+    """
+    import re
+
+    from tortoise.search_engine import _exclude_status_clause
+
+    composed = _exclude_status_clause("n")  # the exact call `sdk.query` appends
+
+    assert set(re.findall(r"n\.status <> '([a-z_]+)'", composed)) == qp.TERMINAL_STATUSES, (
+        "the composed clause's status vocabulary must be EXACTLY the probe's — a status added "
+        "on either side moves the denominator the census publishes against")
+    assert "coalesce(n.outdated, false) = false" in composed, (
+        "the composed Point clause must keep the flag conjunct ON — the OBJECT surfaces are "
+        "the callers that pass include_outdated_flag=False (#3301)")
+    # The flag is an ARGUMENT of this shim, so the OFF arm proves the default above is
+    # load-bearing rather than a coincidence of the leaf's own default.
+    assert "coalesce(n.outdated, false) = false" not in _exclude_status_clause(
+        "n", include_outdated_flag=False), (
+        "include_outdated_flag=False must actually remove the flag conjunct — otherwise the "
+        "assertion above cannot distinguish the two arms")
+
+
+def test_the_sdk_query_where_carries_both_conjuncts():
+    """FAILS IF `sdk.query` stops passing the Point path through the composed clause, or
+    starts passing `include_outdated_flag=False` for it.
+
+    The census's denominator claim is about the population "the default read serves", so the
+    CALL SITE is the last link and prose cannot pin it: `sdk.py` builds `where` from
+    `_operator_scope_clauses(kind)` plus `_exclude_status_clause("n")` and hands it to
+    `proj.g.query`. This captures that query string — mutation that reds it: appending the
+    clause with `include_outdated_flag=False`, dropping the operator clause, or deleting the
+    clause append.
+    """
+    import re
+
+    from tortoise.sdk import TortoiseSDK
+
+    captured: dict[str, str] = {}
+
+    class _Result:
+        result_set: list = []
+
+    class _Graph:
+        def query(self, q, **_kw):
+            captured["q"] = q
+            return _Result()
+
+    class _Proj:
+        g = _Graph()
+
+    sdk = TortoiseSDK.__new__(TortoiseSDK)
+    sdk._get_proj = lambda: _Proj()  # instance attribute, so no real graph is touched
+    sdk.query(_record_reads=False)
+
+    where = captured["q"]
+    assert "(n.is_operator IS NULL OR n.is_operator = false) AND n.op_type IS NULL" in where, (
+        "the read must keep the operator-scope clause that makes 15,842 ':Point minus operators'")
+    assert "coalesce(n.outdated, false) = false" in where, (
+        "the read's WHERE must keep the flag conjunct — it is ON for the Point surfaces (#3301)")
+    assert set(re.findall(r"n\.status <> '([a-z_]+)'", where)) == qp.TERMINAL_STATUSES, (
+        "the read's WHERE must exclude EXACTLY the probe's terminal vocabulary")
 
 
 def test_the_population_scope_mirrors_the_read_paths_operator_clause():
