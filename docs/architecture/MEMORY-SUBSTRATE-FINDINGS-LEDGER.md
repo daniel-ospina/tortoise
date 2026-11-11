@@ -235,6 +235,15 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   the indexed population) is re-derived from the table rather than trusted — deleting a row and every
   mention of it otherwise passes every referential check.
 
+Exactly one arm needs `git` **history**: the frontmatter's `measured_at_commit` must be an ancestor of
+`HEAD`. The other four read this checkout's tree and nothing else, and the tool keeps that split
+(`check_document()` / `check_all()`) because the two jobs that run it differ: the REQUIRED `docs` job
+checks out at `fetch-depth: 0` and runs `--check` (all five arms), while the `test` jobs check out at
+the default depth 1, cannot resolve `f70d884b7` at all, and are where this page's own test module runs.
+In a depth-1 clone `--check` therefore reports **exit 2 UNVERIFIED** — never `0`, and never a verdict
+against the document it could not read — and `--self-test`, which drives only the tree-only arms,
+still runs.
+
 **Deliberately not checked:** the issue states in §6, the durability column in §4, and every
 `~/.swarm` claim in §5. They are **dated readings of things outside this repository**, and a guard
 that asserted them would either fail on someone else's tracker or, worse, pass by not looking. This
