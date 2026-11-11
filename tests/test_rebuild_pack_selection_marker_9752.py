@@ -1589,9 +1589,9 @@ def test_migrate_route_names_the_capture_source_when_it_observed_nothing(
     # this value, so if `migrate()` ever reported `True` here the CLI would go
     # back to naming a sidecar this shape does not have — and, before this
     # assertion, the whole file stayed green through exactly that mutation
-    # (measured at the head that then collected 39 tests: the whole file went
-    # green under that mutation. The count has moved since — 41 when this
-    # paragraph was written, 42 once a further test landed — so re-measure with
+    # (measured at `25084bf04d2f`, which collected 39 tests: the whole file went
+    # green under that mutation. The count has grown since — 41 at
+    # `8f71a475aba2`, 42 from `9f90b21e01dd` — so re-measure with
     # `--collect-only -q` rather than trusting a number from here).
     assert result["pack_selection_state_unknown_inherited"] is False, (
         "this route's own empty-capture override must report itself as NOT "
@@ -2050,11 +2050,11 @@ def test_rebuild_all_reports_the_true_absence_it_observed(tmp_path, caplog,
     FAILING VALUE: `elif pack_selection_missing:` — the one branch that states
     the actual #9752 harm ("the graph now reads as UNCONFIGURED, a pack the
     admin had REMOVED is back in the approved set") — was pinned by NO test.
-    Measured at the head that wrote this: rewriting it to `elif False:` left
+    Measured at `25084bf04d2f`: rewriting it to `elif False:` left
     the whole file GREEN — 94 passed across the four rebuild suites, 39 in this
-    one. ⚠️ Counts are NOT carried: this file collected 41 when this paragraph
-    was written, and 42 once a further test landed (`--collect-only -q`), so the
-    39 above is a reading of the head that made it, not of this one, and a
+    one. ⚠️ Counts are NOT carried: 39 was this file at `25084bf04d2f`, 41 at
+    `8f71a475aba2`, 42 from `9f90b21e01dd` (`--collect-only -q`; every figure
+    here names the head that produced it, so none of them is this head's). A
     baseline quoted from another head is exactly the
     "count carried instead of re-derived" class this PR keeps removing. A report
     that can be deleted without reddening anything is not a report; it is dead
@@ -2111,10 +2111,10 @@ def test_replay_log_reports_the_absence_arm_it_observed(tmp_path, caplog,
 
     FAILING VALUE: the `else:` under the read-back — the journal-replay path's
     only statement that a lost marker reads as UNCONFIGURED — is unpinned.
-    Measured at the head that wrote this: `logger.error(` → `logger.debug(` on
-    that arm left this file GREEN (39 passed then; 41 when this paragraph was
-    written, 42 once a further test landed, so re-measure rather than trusting
-    the number), which means the single operator-visible signal on the
+    Measured at `25084bf04d2f`: `logger.error(` → `logger.debug(` on
+    that arm left this file GREEN (39 passed then; the count has grown since —
+    41 at `8f71a475aba2`, 42 from `9f90b21e01dd` — so re-measure rather than
+    trusting the number), which means the single operator-visible signal on the
     journal-only path can be silenced by an edit nothing notices.
 
     REACHABLE: `_replay_log` really runs over a real journal and the read-back
