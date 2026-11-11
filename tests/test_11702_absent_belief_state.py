@@ -67,6 +67,11 @@ from tortoise.search_engine import (  # noqa: E402, RUF100
     EpBreakdown,
     annotate_ep_batch,
 )
+# The HOSTED write verb's half of the `ep_updated` pin drives the real
+# `POST /v1/sessions` route, so it reuses `tests/test_hosted_api.py`'s
+# authenticated TestClient fixture — the established repo pattern (see
+# `tests/test_capture_phase_d_dedup.py`), not a second hand-rolled app harness.
+from tests.test_hosted_api import client as client  # noqa: E402, RUF100, F401
 
 #: The #11702 vocabulary. Resolved through ``getattr`` on purpose: this file must
 #: still IMPORT against a tree that predates the fix, so that running it there
@@ -218,6 +223,41 @@ def test_subgraph_node_reports_null_and_absent(sdk):
     node = next(n for n in nodes if n["id"] == pid)
     assert node["confidence"] is None
     assert node["ep_state"] == EP_STATE_ABSENT
+
+
+def test_a_non_point_node_carries_neither_belief_key(sdk):
+    """A non-Point node carries NEITHER key — not `null`.
+
+    `config/surface-manifest.yml`'s `nodes[].ep_state` row said "a non-Point
+    node carries `null`". It carries no key at all: `SubgraphExpander._enrich`
+    writes `ep_state` and `confidence` inside ONE `if state:` gate, and
+    `ep_state_cypher` answers `null` for `labels(n)[0] <> 'Point'`, so the gate
+    never opens for an Object/Subject/Event/Source node. `null`-vs-absent is a
+    distinction this repo treats as meaningful (#2294), so a consumer following
+    the row would index a key that is not on the wire — and no test pinned the
+    non-Point shape, which is why the row survived twenty-odd cycles.
+    """
+    pid = _absent_point(sdk)
+    obj = sdk.create_object("zq-absent-node", "product")
+    oid = obj["id"]
+    proj = sdk._get_proj()
+    proj.g.query("MATCH (p:Point {id:$pid}), (o:Object {id:$oid}) "
+                 "CREATE (p)-[:IS_ABOUT]->(o)",
+                 params={"pid": pid, "oid": oid})
+    nodes = SubgraphExpander(proj).expand([pid], depth=1)["nodes"]
+    by_id = {n["id"]: n for n in nodes}
+    assert oid in by_id, (
+        "the linked Object did not reach the expansion, so this test could "
+        "not fail: " + repr(sorted(by_id)))
+    non_point = by_id[oid]
+    assert non_point["type"] == "object", non_point
+    assert "ep_state" not in non_point and "confidence" not in non_point, (
+        "a non-Point node must carry NEITHER belief key (the manifest said "
+        "`null`, a different wire shape): " + repr(non_point))
+    # …and the Point beside it still reports the absent state, both keys.
+    assert by_id[pid]["ep_state"] == EP_STATE_ABSENT, by_id[pid]
+    assert "confidence" in by_id[pid] and by_id[pid]["confidence"] is None, \
+        by_id[pid]
 
 
 # ── Direction 2: a MEASURED 0.5 keeps its 0.5 (presence, not value) ────────
@@ -552,8 +592,10 @@ def test_an_unreadable_mirror_is_not_replaced_by_an_imputed_pair(sdk):
     """Cycle 23 P2: the rankers' operand columns defaulted to `1.0`/`1.0`.
 
     `coalesce(n.posterior_alpha, n.ep_alpha, 1.0)` invents a Beta(1, 1) for a
-    claim with NO stored operands, so whenever the mirror was unreadable in
-    Python but readable to Cypher — `"0x1p4"`, the recorded hex-float residual —
+    claim with NO stored operands, so whenever the mirror was refused in
+    Python while a Cypher arm still read it — `"0x1p4"` (16.0 to both grammars
+    now, and refused as a belief by `belief_mirror`'s [0, 1] BAND) or a numeric
+    string the pair arm alone could coerce —
     the pair arm produced `_beta_mean(1.0, 1.0) == 0.5`, labelled
     `confidence_source: "neutral"` and `belief_informed_order: True`. That is the
     neutral score this issue exists to remove, in the tier that decides order —
@@ -2224,32 +2266,124 @@ def test_conflict_dedupe_ranks_a_nullable_mean_without_raising(sdk):
         "point's boost: " + repr(got))
 
 
-def test_write_verb_ep_updated_reads_the_shared_presence_predicate(sdk):
-    """`ep_updated` used a local `α IS NOT NULL OR ep_α IS NOT NULL` spelling.
+#: The capture conversation the write-verb `ep_updated` pins drive. A single
+#: plain user turn: the deterministic v2 mock (TORTOISE_SESSION_LLM_MOCK=1) then
+#: mints ONE operator-less claim — a claim the ingest EP pass can never
+#: calibrate, so `ep_updated` reflects the PRESENCE read and nothing else. Its
+#: id is content-derived (`pt_<hash>`), so a re-capture resolves to the SAME
+#: node — which is what lets a test move a belief onto it between captures.
+_EP_FLAG_CONV = [{"role": "user",
+                  "content": "W5 write-verb presence contract test."}]
 
-    So a MIRROR-only claim — a genuinely served belief, e.g. 0.95 — and a
-    β-only half pair both reported `ep_updated: false` on the write verb, while
-    every read surface called the mirror-only one measured. Same defect class
-    (a second presence spelling), different surface.
-    """
-    from tortoise.search_engine import ep_has_belief_cypher
 
+def _clear_belief(proj, pid: str, *, mirror: float | None = None,
+                  beta: float | None = None) -> None:
+    """One belief shape per call: MIRROR-only, or a β-only HALF pair."""
+    proj.g.query(
+        "MATCH (n:Point {id:$id}) SET n.confidence = $c, "
+        "n.posterior_alpha = null, n.ep_alpha = null, "
+        "n.posterior_beta = $b, n.ep_beta = null",
+        params={"id": pid, "c": mirror, "b": beta})
+
+
+def _mirror_only_ep_flag_conversation(sdk, monkeypatch, session: str):
+    """Drive the SDK write verb twice and return the id it reports on."""
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    first = sdk._capture_session(_EP_FLAG_CONV, session_id=session)
+    assert first["points"], first
+    # Honest baseline: with no persisted belief nothing has been EP-updated.
+    assert all(p["ep_updated"] is False for p in first["points"]), \
+        first["points"]
+    pid = first["points"][0]["id"]
     proj = sdk._get_proj()
-    mirror_only = sdk.create_point("statement", "mirror-only write-verb")["id"]
-    beta_only = sdk.create_point("statement", "beta-only write-verb")["id"]
-    proj.g.query("MATCH (n:Point {id:$id}) SET n.confidence = 0.95",
-                 params={"id": mirror_only})
-    proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_beta = 3.0",
-                 params={"id": beta_only})
-    rows = proj.g.query(
-        "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
-        f"{ep_has_belief_cypher('n')}",
-        params={"ids": [mirror_only, beta_only]}).result_set
-    got = {r[0]: bool(r[1]) for r in rows}
-    assert got[mirror_only] is True, (
-        "a mirror-only claim (a real served belief) read as 'no belief': "
+    _clear_belief(proj, pid, mirror=0.95)
+    # A SECOND session id on purpose: a repeat under the same id is refused
+    # as "session already captured". Cross-session re-ingest is the seam that
+    # dedups by CONTENT onto the same node (the `pt_<hash>` id is stable).
+    second = sdk._capture_session(_EP_FLAG_CONV, session_id=session + "-b")
+    return proj, pid, second
+
+
+def test_write_verb_ep_updated_pins_the_mirror_only_claim(sdk, monkeypatch):
+    """`ep_updated` on the SDK write verb used a local presence spelling.
+
+    Cycle 20 replaced `α IS NOT NULL OR ep_α IS NOT NULL` with the shared
+    `ep_state`, because that spelling called a MIRROR-only claim — a genuinely
+    served belief, e.g. 0.95 — "not ep_updated" while every read surface called
+    it measured. This test previously asserted the Cypher predicate on two
+    seeded rows instead of reading `ep_updated` off a write verb, so the wire
+    flag could regress to any local spelling and the suite stayed green
+    (mutation-verified by the reviewing lane: reverting `tortoise/sdk.py`'s
+    producer to `origin/main` left every capture suite passing).
+
+    Here the flag is read off the REAL producer: a capture whose claim carries
+    NO belief reports False, and the same claim (same content-derived id, via a
+    re-capture that dedups onto it) carrying only the `n.confidence` MIRROR
+    reports True. Under the old spelling the second answer is False.
+    """
+    proj, pid, second = _mirror_only_ep_flag_conversation(
+        sdk, monkeypatch, "zq-ep-flag-sdk")
+    got = {p["id"]: p["ep_updated"] for p in second["points"]}
+    assert pid in got, (
+        "the re-capture did not resolve onto the same claim, so this test "
+        "could not fail: " + repr(got))
+    assert got[pid] is True, (
+        "a mirror-only claim is a persisted, served belief — the write verb "
+        "must report ep_updated: true for it, not a local α-column spelling: "
         + repr(got))
-    assert got[beta_only] is False, got
+    # …and the reverse direction, so the pin is not just `always True`.
+    _clear_belief(proj, pid, beta=3.0)
+    third = sdk._capture_session(_EP_FLAG_CONV,
+                                 session_id="zq-ep-flag-sdk-c")
+    got = {p["id"]: p["ep_updated"] for p in third["points"]}
+    assert got[pid] is False, (
+        "a β-only HALF pair is not a belief (α + β needs both operands) — the "
+        "write verb must report ep_updated: false: " + repr(got))
+
+
+def test_write_verb_ep_updated_pins_the_hosted_mirror_only_claim(
+        client, monkeypatch):
+    """The HOSTED producer (`POST /v1/sessions`) shares that presence read.
+
+    Same shape as the SDK half above, on the other write verb: the mirrored
+    claim reports `ep_updated: true`, and a β-only half pair reports false —
+    read from the served response, not from a hand-composed predicate.
+    """
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    payload = {"conversation": _EP_FLAG_CONV, "session_id": "zq-ep-flag-http",
+               "harness": "pi"}
+    # The re-captures below need a FRESH session id each time (a repeat under
+    # one id is refused as "session already captured"); the claim id is
+    # content-derived, so they still resolve onto the SAME node.
+    r = client.post("/v1/sessions", json=payload)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["points"], body
+    assert all(p["ep_updated"] is False for p in body["points"]), body["points"]
+    pid = body["points"][0]["id"]
+
+    import tortoise.hosted_api as ha_mod
+    proj = ha_mod._make_sdk(namespace="team-001")._get_proj()
+    _clear_belief(proj, pid, mirror=0.95)
+    payload = dict(payload, session_id="zq-ep-flag-http-b")
+    r2 = client.post("/v1/sessions", json=payload)
+    assert r2.status_code == 200, r2.text
+    got = {p["id"]: p["ep_updated"] for p in r2.json()["points"]}
+    assert pid in got, (
+        "the re-capture did not resolve onto the same claim, so this test "
+        "could not fail: " + repr(got))
+    assert got[pid] is True, (
+        "the hosted write verb must report ep_updated: true for a mirror-only "
+        "claim: " + repr(got))
+    _clear_belief(proj, pid, beta=3.0)
+    payload = dict(payload, session_id="zq-ep-flag-http-c")
+    r3 = client.post("/v1/sessions", json=payload)
+    assert r3.status_code == 200, r3.text
+    got = {p["id"]: p["ep_updated"] for p in r3.json()["points"]}
+    assert got[pid] is False, (
+        "a β-only HALF pair is not a belief: " + repr(got))
 
 
 def test_no_surface_fabricates_a_variance_for_an_absent_belief(sdk):
@@ -4038,3 +4172,109 @@ def test_why_width_is_guarded_for_hostile_pairs_like_every_other_surface(sdk):
         if ep["confidence_mean"] is not None:
             assert 0.0 <= ep["confidence_mean"] <= 1.0, (
                 f"{label}: out-of-range belief in the canonical block: {ep}")
+
+
+# ── The volunteer reflex: a belief-less claim never fires (#11702) ──────────
+#
+# `config/ci-surfaces.yml` advertises THIS file as pinning "`volunteer.py`'s
+# band/sort". It did not: `git grep volunteer` returned prose only, never an
+# assertion — mutation-verified by the reviewing lane, which reverted
+# `tortoise/volunteer.py` to `origin/main` and watched
+# `test_volunteer_pipeline.py test_volunteer_contract.py
+# test_w4_why_enrichment.py` report 70 passed. The two rows below are that pin.
+
+def _volunteer_window() -> list[dict]:
+    return [{"role": "user",
+             "content": "What did we decide about the zq ledger rollout?"}]
+
+
+def test_the_volunteer_reflex_never_fires_on_a_claim_with_no_belief(sdk):
+    """`_eligible` used to substitute the neutral 0.5 for an absent mean.
+
+    So a claim with NO persisted belief cleared ANY floor at or below 0.5 —
+    "we never measured this" was surfaced as neutral evidence. The shipped 0.7
+    default hid it (0.5 < 0.7), which is why no volunteer test caught it: every
+    floor in the suite is 0.9/1.0/1.5, where the pre- and post-fix answers are
+    identical. A floor in (0, 0.5] is what distinguishes the branch.
+
+    MUTANT THAT REDS THIS: `mean = float(raw_mean) if raw_mean is not None else
+    None` → `else NEUTRAL_CONFIDENCE` in `tortoise/volunteer.py::_eligible`.
+
+    A MEASURED claim rides the same window/stub as the CONTROL: without it this
+    test would pass just as happily if the resolve leg returned nothing at all.
+    """
+    from tortoise.volunteer import _band, run_volunteer_pipeline, why_entry
+
+    unmeasured = sdk.create_point(
+        "statement", "zq ledger rollout owners assigned")["id"]
+    measured = sdk.create_point(
+        "statement", "zq ledger rollout shipped to staging")["id"]
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.posterior_alpha = 12.0, "
+        "n.posterior_beta = 1.0", params={"id": measured})
+
+    def stub_search(query, **kwargs):
+        hits = [
+            {"id": unmeasured,
+             "content": "zq ledger rollout owners assigned",
+             "point_kind": "statement"},
+            {"id": measured,
+             "content": "zq ledger rollout shipped to staging",
+             "point_kind": "statement"},
+        ]
+        return hits[: kwargs.get("limit", 10)]
+
+    proj = sdk._get_proj()
+    for floor in (0.0, 0.1, 0.3, 0.5):
+        r = run_volunteer_pipeline(
+            proj, _volunteer_window(), min_confidence=floor, why=True,
+            _search_fn=stub_search)
+        assert r["degraded_reason"] is None, (floor, r["degraded_reason"])
+        surfaced = [p["id"] for p in r["pointers"]]
+        assert unmeasured not in surfaced, (
+            f"the reflex fired on a never-measured claim at floor {floor} — "
+            f"the neutral-0.5 substitution is back: {surfaced}")
+        assert measured in surfaced, (
+            f"the CONTROL claim (α=12, β=1 ≈ 0.92) did not surface at floor "
+            f"{floor}, so the assertion above could not fail: {surfaced}")
+
+    # The canonical block's DEFAULT for a point with no `ep` sub-block is the
+    # absent state, not the neutral 0.5 — and the band names it.
+    entry = why_entry({"point_id": unmeasured})
+    assert entry["ep"]["confidence_mean"] is None, entry["ep"]
+    assert entry["ep"]["ep_state"] == EP_STATE_ABSENT, entry["ep"]
+    assert entry["ep"]["has_ep"] is False, entry["ep"]
+    # `_band(None)` is defence-in-depth: `_eligible` refuses the absent mean
+    # before `kept`, so the sort's None tier is unreachable from the pipeline.
+    # It is pinned because the OLD signature fell into numeric comparisons that
+    # raise inside the pipeline's blanket `except`, which would have dropped
+    # EVERY candidate in the response.
+    assert _band(None) == "unmeasured", _band(None)
+    assert _band(0.92) == "high", _band(0.92)
+
+
+def test_min_confidence_refuses_an_absent_belief_at_a_floor_below_half(sdk):
+    """The `sdk.search` floor compared a fabricated 0.5 against `min_confidence`.
+
+    `config/surface-manifest.yml` advertises "an absent row fails any floor
+    ABOVE 0.0 and is kept by the 0.0 default", and no row distinguished that
+    branch: every existing floor test uses a floor above 0.5 over a measured
+    0.5, where the pre- and post-fix answers agree. A floor in (0, 0.5] against
+    a claim with NO belief is the discriminating shape.
+
+    MUTANT THAT REDS THIS: reintroduce `_mean = 0.5 if ep.confidence_mean is
+    None else ep.confidence_mean` and compare `_mean` against the floor.
+    """
+    pid = sdk.create_point("statement", "zqminconf floor absent claim")["id"]
+
+    kept = sdk.tortoise_fts_query("zqminconf", limit=10, min_confidence=0.0)
+    assert [r["id"] for r in kept] == [pid], (
+        "the shipped 0.0 default is 'filter off' and must keep admitting an "
+        "unmeasured claim: " + repr(kept))
+    for floor in (0.1, 0.3, 0.5):
+        got = sdk.tortoise_fts_query("zqminconf", limit=10,
+                                     min_confidence=floor)
+        assert got == [], (
+            f"an absent belief has no number to clear a floor of {floor}, so "
+            f"the row must be dropped — it was kept, i.e. compared as the "
+            f"neutral 0.5: {got}")

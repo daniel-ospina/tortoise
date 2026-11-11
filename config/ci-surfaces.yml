@@ -5981,9 +5981,12 @@ surfaces:
   - test_search_engine.py
   # #11702 (#2206's successor): the belief-presence contract on this surface's own five files —
   # `search_engine.py`'s ep_state/presence predicate, `why.py`'s `ep` block (the block /v1/context, the
-  # volunteer reflex and the webhook serve), `volunteer.py`'s band/sort, plus the rankers. Registered
-  # here as well as on `ep` because a `search_engine.py`-only diff selects `core` ALONE and replaces the
-  # fallback, so an `ep`-only row cannot red the file this pins.
+  # volunteer reflex and the webhook serve), `volunteer.py`'s `_eligible` absent-mean gate (a belief-less
+  # claim never fires at ANY floor, 0.0 included) and `why_entry`'s absent default, plus the rankers.
+  # `volunteer._band(None)` is pinned as DEFENCE-IN-DEPTH only: `_eligible` refuses the absent mean
+  # before `kept`, so the sort's None tier is unreachable from the pipeline — do not read that row as
+  # pinning the sort. Registered here as well as on `ep` because a `search_engine.py`-only diff selects
+  # `core` ALONE and replaces the fallback, so an `ep`-only row cannot red the file this pins.
   - test_11702_absent_belief_state.py
   - test_search_engine_gaps.py
   - test_search_engine_nameerror.py

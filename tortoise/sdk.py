@@ -6857,8 +6857,9 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # A reader cannot be made total over a value the engine will not look at, so
     # the failure has to be closed here. A STRING is refused for the same
     # reason: it round-trips through `toFloat` as a float32 and its grammar is
-    # not the same language Python parses ("0.7 " and "0x1p4" are numbers to one
-    # twin and not the other) — the readers stay total for data already stored
+    # not the same language Python parses ("0.7 " is 0.7 to Python and null to
+    # the store; a hex float is read by BOTH twins, so it is not a split) — the
+    # readers stay total for data already stored
     # that way, and #11841 owns the wider audit of every belief writer.
     for _belief_key in _BELIEF_PROPS:
         if _belief_key in props:

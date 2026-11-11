@@ -126,10 +126,13 @@ response_fields:
   field: nodes[].ep_state
   emitted_when: 'ALWAYS on every `Point` node in `nodes[]` — the same #11702 three-token state as
     `ep.ep_state` ("measured" / "baseline" / "absent"), paired with `nodes[].confidence`, which is `null` if and
-    only if the state is "absent". A non-Point node carries `null`, because a belief is not that surface''s to
-    report. The display read used to coalesce the absence to 0.5, which is the second path §6.3 names. #11702.'
-  unchanged_when_off: 'NO — additive key on each node payload, so the key set grows by one (the values are the
-    #11702 contract change). Not flag-gated'
+    only if the state is "absent". A non-Point node carries NEITHER key — not `ep_state` and not
+    `confidence` — because a belief is not that surface''s to report (`SubgraphExpander._enrich` writes both
+    inside one `if state:` gate, so an absent key set is the shape, not a `null` value; #2294 treats
+    null-vs-absent as meaningful, so a consumer must read the key, not only its value). The display read used to
+    coalesce the absence to 0.5, which is the second path §6.3 names. #11702.'
+  unchanged_when_off: 'NO — additive key, so on each POINT node payload the key set grows by one (the values are
+    the #11702 contract change); a non-Point node payload is byte-identical. Not flag-gated'
 - response: tortoise_analyze
   field: why
   emitted_when: TORTOISE_W4_ENRICHMENT is truthy (1/true/yes/on; unset or 0 means off)

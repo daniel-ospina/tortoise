@@ -385,13 +385,19 @@ NUMERIC_OPERAND_CYPHER_TEMPLATE = (
 #: * ``float("0.7 ")`` is 0.7 and ``toFloat("0.7 ")`` is null — a trailing space
 #:   (a value copied out of a form or CSV) was a measured 0.7 in the `ep` block
 #:   and `absent` in every ranker beside it;
-#: * ``toFloat("Infinity")`` is ``inf`` and ``toFloat("0x1p4")`` is 16.0, while
-#:   Python rejects both — the FIRST of those put a fabricated maximum-certainty
-#:   1.0 on `graph_ranking` for a claim with no readable belief, and `0.0` from
-#:   `recall_ranking`, beside `absent` in the `ep` block: three answers.
+#: * ``toFloat("Infinity")`` is ``inf`` while `numeric_operand` answers ``None``
+#:   for it (the finiteness guard) — that spelling put a fabricated
+#:   maximum-certainty 1.0 on `graph_ranking` for a claim with no readable
+#:   belief, and `0.0` from `recall_ranking`, beside `absent` in the `ep` block:
+#:   three answers.
 #:
-#: So the string spelling is pinned to a plain decimal literal, the intersection
-#: of the two GRAMMARS — and, in `numeric_operand`, of the two RANGES.
+#: So the string spelling is pinned to a DECIMAL literal or a HEX float, the
+#: intersection of the two GRAMMARS (`_FLOAT_LITERAL` / `_HEX_FLOAT_LITERAL`,
+#: the latter read by ``float.fromhex`` — the parser the store's own
+#: ``toFloat("0x1p4") == 16.0`` shares) — and, in `numeric_operand`, of the two
+#: RANGES, which apply to BOTH spellings alike. A hex literal is therefore a
+#: number to both twins; a stored belief MIRROR may still refuse one, but for
+#: the other reason (`belief_mirror`'s probability band, not the grammar).
 #: `toFloat` parses a string into a **float32** (measured 4.20.6:
 #: `toFloat("0.7")` is `0.699999988079071`) and answers null outside the normal
 #: float32 range, so magnitude is part of the same pin: `"1e308"` and `"1e39"`
@@ -399,9 +405,10 @@ NUMERIC_OPERAND_CYPHER_TEMPLATE = (
 #: ABSENT on both twins.
 #: Measured `toFloat` grammar: leading whitespace is skipped, trailing is not
 #: (`" 0.7"` parses, `"0.7 "` does not). Hex floats (`"0x1p4"` → 16.0) and the
-#: `Infinity`/`nan` spellings parse there too; the first stays a recorded
-#: residual (see `numeric_operand`), the second is nulled by the finiteness
-#: guard in `numeric_operand_cypher`.
+#: `Infinity`/`nan` spellings parse there too; the hex float is READ by both
+#: twins (`_HEX_FLOAT_LITERAL` + `float.fromhex`, under the same float32 window
+#: as a decimal), the second is nulled by the finiteness guard in
+#: `numeric_operand_cypher`.
 #: The float32 NORMAL range a STRING operand must land in to be readable in
 #: Cypher: `toFloat`/`toFloatOrNull` parse a string as a float32 and answer null
 #: rather than a number when the correctly-rounded result would not be a normal
@@ -748,9 +755,11 @@ def numeric_operand(raw):
         return None
     if isinstance(raw, str):
         # The pinned decimal grammar — see `_FLOAT_LITERAL`. Anything FalkorDB
-        # parses and Python does not (hex floats, `Infinity`, a trailing space
+        # parses and this twin does not (`Infinity`/`nan`, a trailing space
         # Python tolerates and Cypher does not) is exactly the twin split this
         # coercion exists to prevent, so the STRICTER of the two languages wins.
+        # A HEX float is NOT in that set — the branch below reads it, because
+        # the store does.
         if not _FLOAT_LITERAL.match(raw):
             # ⛔ A HEX float is a spelling the STORE reads (`toFloat("0x1p4")` is
             # 16.0, measured). Refusing it here did not make the shape
