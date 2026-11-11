@@ -631,7 +631,11 @@ def _record_site_block(doc: str, site: str) -> str:
     would not widen it, but would also not be reachable as a site; the row's needle is
     the only thing pinned there either way.
     """
-    lines = doc.splitlines()
+    # `split("\n")`, not `splitlines()`: the parser counts `\n` only, and a
+    # document carrying a `\x0c`/`\u2028` would otherwise shift every index after
+    # it — a false RED on an intact item, reported as "the site does not resolve"
+    # (review r42 P3 #1, measured).
+    lines = doc.split("\n")
     if site == _MATRIX_ROW:
         return next((ln for ln in lines if ln.startswith("| #2122")), "")
     needle = _normalised(site)
@@ -742,6 +746,34 @@ def test_every_restatement_of_the_scoping_in_the_record_is_HOSTED_scoped():
                 f"the record states the UNSCOPED result again: {unscoped!r}")
 
 
+def test_the_item_extent_is_the_parsers_map():
+    """`_parser_item_end` IS the boundary, so it is pinned hermetically (r42 P2 #1).
+
+    The whole guard rests on this one expression (`token.map[1]`), and before this test a
+    ONE-CHARACTER edit to it (`map[1] + 1`) kept every assertion in this file green while
+    re-opening the fail-OPEN six rounds closed: the block grows past the item, a sentence
+    that moved onto the NEXT item's first line reads as "in" the labelled one (measured).
+
+    Small inline documents, not the record: a pin on the record would still pass with an
+    off-by-one, because the record's items are separated by `###` headings whose text the
+    needles do not occur in.
+    """
+    plain = "1. **A** first\n   cont\n\n2. **B** second\n"
+    assert _parser_item_end(plain, 0) == 3      # includes the trailing blank line
+    assert _parser_item_end(plain, 3) == 4      # the last item ends at EOF
+
+    nested = "1. **A** first\n   - sub point\n     sub cont\n\n2. **B** second\n"
+    assert _parser_item_end(nested, 0) == 4     # an indented sub-bullet is INSIDE
+
+    outside = "1. **A** first\n\nout of the item\n\n2. **B** second\n"
+    assert _parser_item_end(outside, 0) == 2    # blank-separated de-indent is OUTSIDE
+
+    lazy = "1. **A** first\ncol0 lazy line\n\n2. **B** second\n"
+    assert _parser_item_end(lazy, 0) == 3       # a lazy continuation stays INSIDE
+
+    assert _parser_item_end("not a list\n", 0) is None
+
+
 def test_every_restatement_site_label_names_the_item_that_states_it():
     r"""(3, labels) — the legend's SITE must resolve AND hold the sentence it claims.
 
@@ -781,15 +813,28 @@ def test_every_restatement_site_label_names_the_item_that_states_it():
     described the hand-computed boundary deleted at r40, review r41 P3 #2.) The LOCATOR
     still has to cover every shape the record can spell an item as.
 
-    ⛔ The EXTENT is not ours to compute. Six rounds measured a hand-rolled boundary
-    failing in BOTH directions: it swallowed a sentence moved into a column-0 bullet, an
-    indented bullet, a table row, a blockquote, a fence, a setext rule, a plain
-    paragraph, and a blank-separated de-indent (r34 P3 #1, r35 P3 #1, r36 P2 #1, r38
-    P3 #1, r40 P2 #1 — every one a FALSE PASS), and it falsely REDded an honest
-    sub-bullet added inside an item and a pure RENUMBER (r36 P2 #2, r39 P2 #1 — a FALSE
-    FAIL, the direction this guard must not have). The block is now the `list_item_open`
-    token's own `map` from `markdown-it-py`, the CommonMark implementation those rounds
-    measured against, so there is no boundary left for a future edit to disagree with.
+    ⛔ The EXTENT is the parser's. Six rounds measured a hand-rolled boundary failing in
+    BOTH directions: it swallowed a sentence moved into a column-0 bullet, a table row, a
+    blockquote, a fence, a setext rule, a plain paragraph, and a blank-separated
+    de-indent (r34 P3 #1, r35 P3 #1, r36 P2 #1, r38 P3 #1, r40 P2 #1 — every one a FALSE
+    PASS), and it falsely REDded an honest sub-bullet added inside an item and a pure
+    RENUMBER (r36 P2 #2, r39 P2 #1 — a FALSE FAIL, the direction this guard must not
+    have). The block is now the `list_item_open` token's own `map` from `markdown-it-py`,
+    the CommonMark implementation those rounds measured against.
+
+    ⚠️ DECLARED RESIDUAL, not covered and deliberately so: a sentence moved into a
+    sub-bullet (or any indented furniture) that is INSIDE the labelled item still reads
+    GREEN — it IS item content, and ending the block at an indented marker is exactly the
+    false RED r36 P2 #2 filed (measured: block 1395, needle present, identical to the
+    pre-parser answer). The guard catches a sentence that LEAVES the item, not one that
+    moves within it.
+
+    ⚠️ The extent is only as good as `_parser_item_end`, so THAT is pinned by its own
+    hermetic test (`test_the_item_extent_is_the_parsers_map`): an off-by-one there keeps
+    every assertion in this file green while re-opening the fail-OPEN (r42 P2 #1,
+    measured: `map[1] + 1` → all 8 tests still pass, and the moved sentence then reads
+    GREEN).
+
     Measured identical on the current record: `764 / 1393 x3 / 2309 x3`."""
     doc = _PLATFORM_SEAMS_DOC.read_text(encoding="utf-8")
     assert len(_RESTATEMENT_SITES) == len(_RESTATEMENTS), (
