@@ -770,12 +770,18 @@ def test_variant_rows_count_an_unmetered_pass_separately():
     measured = _variant_outcome("q1", one_shot=False, variant=True)
     measured["window_reconciliation_stats"]["marginal_tokens"] = 900
     unmetered = _variant_outcome("q2", one_shot=False, variant=True)
-    unmetered["window_reconciliation_stats"]["marginal_tokens"] = 0
+    # ⛔ A NON-ZERO lower bound is the discriminating case (an all-unknown
+    # bucket sums to 0, which contributes nothing to the total either way and
+    # would leave this row unable to fail if the exclusion were removed):
+    # some of the spend was measured, the rest was never priced — so pricing
+    # the sum at face value would read 1300 here instead of 900.
+    unmetered["window_reconciliation_stats"]["marginal_tokens"] = 400
     unmetered["window_reconciliation_stats"]["marginal_unmetered"] = True
     unmetered["window_reconciliation_stats"]["cap_exceeded"] = None
     rows = wr.reconciliation_variant_rows([measured, unmetered], k=5)
     assert rows["n_unmetered"] == 1
-    # The total is the MEASURED spend only — never the unknown priced at 0.
+    # The total is the MEASURED spend only — the unmeasured pass is never
+    # priced at its lower bound.
     assert rows["marginal_tokens_total"] == 900
     assert rows["cap_exceeded_n"] == 0
 
@@ -783,7 +789,12 @@ def test_variant_rows_count_an_unmetered_pass_separately():
 def test_variant_rows_do_not_call_an_errored_pass_a_cap_skip():
     """⛔ #11830 review P2: an errored pass is not the budget gate refusing.
     ``skip_reason`` already distinguishes them; the census must too."""
-    errored = _variant_outcome("q1", one_shot=False, variant=None)
+    # ⛔ The reachable shape the finding names: the pass raised BEFORE
+    # admission, so ``admitted`` is False and it is the pre-fix key
+    # (``admitted is not True``) — not ``skip_reason`` — that would call it a
+    # cap refusal. With ``admitted=True`` this row cannot fail.
+    errored = _variant_outcome("q1", one_shot=False, variant=None,
+                               admitted=False)
     errored["window_reconciliation_stats"]["error"] = "RuntimeError: x"
     errored["window_reconciliation_stats"]["skip_reason"] = "error"
     capped = _variant_outcome("q2", one_shot=False, variant=None)
