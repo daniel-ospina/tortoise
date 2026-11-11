@@ -193,19 +193,27 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_8906_points_gate_counts_write_graph.py": {"registry": "prod-coupled"},
     "test_hosted_volunteer_context.py": {"registry": "prod-coupled"},   # #2103 (W4C) — registry control-plane mint/revoke mirrors test_hosted_auth
     "test_capture_phase_d_dedup.py": {"team-001": "team-identity"},  # #2104 (W5-D) — hosted _make_sdk(namespace="team-001") mirror arm
-    # #11702 cycle 30 — the SAME construction as test_capture_phase_d_dedup's
-    # mirror arm, landed without a route (e7394a9), which reds this guard on
-    # `test-slow (a)`: `_EP_FLAG_CONV`'s hosted arm drives the REAL
-    # `POST /v1/sessions` route through `tests/test_hosted_api.py`'s `client`
-    # fixture (which authenticates as the shared `team-001` org), then reaches
-    # the graph the route just wrote by rebuilding it with
-    # `hosted_api._make_sdk(namespace="team-001")` and clearing the belief on
-    # the captured node. The literal IS the org identity the endpoint resolves
-    # — a `test_*` rename would address a graph the route never writes, so
-    # `_clear_belief` would clear nothing and the `ep_updated: true` arm would
-    # red on the served response it never earned. `team-identity`, same as its
-    # sibling above.
-    "test_11702_absent_belief_state.py": {"team-001": "team-identity"},
+    # #11702's `_EP_FLAG_CONV` hosted arm is the SAME construction as
+    # test_capture_phase_d_dedup's mirror arm — it reaches the graph the REAL
+    # `POST /v1/sessions` route just wrote, using the shared `team-001` org that
+    # `tests/test_hosted_api.py`'s `client` fixture authenticates as — but it
+    # declares NO literal: it spells the id as the fixture's own `TEST_ORG_ID`
+    # (#11905), so the scan has nothing literal to see and the routing fact
+    # stays single-source in the fixture. The empty dict is the "considered,
+    # nothing to route" declaration (#4290's form), which keeps this module's
+    # key greppable and pinned by test_namespace_routing_table_keys_exist
+    # without whitelisting anything.
+    # ⛔ Do NOT add a `{"team-001": …}` entry here. That form (what #11900's
+    # d206b12b added, and #11905 rejected — it re-states a routing fact the
+    # fixture already owns) re-authorises EVERY future `namespace="team-001"`
+    # in this module instead of reddening the guard; measured, the literal goes
+    # from 1 failed back to 1 passed. Same hole, still live elsewhere in this
+    # table: THREE declared rows outlive their literal — `test_onboarding_state.py`
+    # and its `…_split_checkpoint` / `…_split_projection` siblings, all
+    # `registry` — tracked as #11929. Cite it; do not widen it. (Count them per
+    # file across BOTH scanned roots: `test_billing_upgrade.py`'s `registry`
+    # literal lives under `tests/e2e/`, so that row is LIVE.)
+    "test_11702_absent_belief_state.py": {},
     "test_capture_loop_responsiveness.py": {"registry": "prod-coupled"},  # #3086 — the capture-writer loop-affinity proof reaches the graph class via _make_sdk(namespace="registry") to record writer-thread affinity
     # #3718: the concurrent-commit cases read the MeteringRecord back through
     # the CANONICAL registry namespace — the graph prod's `_record_write_op`
