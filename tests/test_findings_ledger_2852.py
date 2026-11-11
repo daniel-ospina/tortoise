@@ -161,8 +161,8 @@ def test_mutation_population_is_pinned():
     `test_checker_self_test_passes` green while proving nothing. The floor is
     pinned here as well as in the tool so neither can be lowered alone.
     """
-    assert len(flc.MUTATIONS) == 6
-    assert flc.MIN_SELF_TEST_MUTATIONS == 6
+    assert len(flc.MUTATIONS) == 10
+    assert flc.MIN_SELF_TEST_MUTATIONS == 10
 
 
 def test_self_test_floor_catches_a_shrunk_population(monkeypatch):
@@ -260,6 +260,153 @@ def test_verdict_need_not_be_the_whole_bold_span():
     assert "**DRIFTED, and much further than one step**" in text
     assert "**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**" in text
     assert flc.check_verdicts(text) == []
+
+
+# ── an unrecognised row shape is refused, not skipped ──────────────────────
+#
+# Both tables are pinned by shape, so a row shaped differently from the pin used
+# to be INVISIBLE: not rejected, not counted — simply not seen. Measured before
+# the fix: appending a thirteenth correction row, or a fifth §6 bucket, left the
+# guard reporting CLEAN with the population pin still reading `abcdefghijkl`.
+# These arms are what make the pin a pin.
+
+
+def test_a_thirteenth_correction_row_cannot_hide_behind_label_shape(tmp_path, monkeypatch):
+    """FAILS if a row whose label cell is not `**<lowercase letter>**` is skipped.
+
+    Reachable by the ordinary act of appending a correction the way a lane writing
+    prose would (`**M**`, `**m** (new)`, `13`), or by NOT giving one a label at
+    all. Any of those adds a claim to the log that §8's "pinned to twelve rows"
+    does not cover.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace(
+            "| **l** |",
+            "| **M** | An undeclared claim | **False** | **FIXED-IT** | `tortoise/pipeline.py:16` |\n| **l** |",
+            1,
+        ),
+    )
+    problems = _doc_problems()
+    assert any("is not `**<lowercase letter>**`" in p for p in problems), problems
+
+
+def test_a_fifth_state_bucket_cannot_hide_behind_label_shape(tmp_path, monkeypatch):
+    """FAILS if a §6 row the arithmetic cannot name is silently dropped.
+
+    Reachable by any re-bucketing that invents a bucket (`CLOSED NOT_PLANNED`,
+    `CLOSED stale`) — the row is then neither counted nor flagged, so the four
+    pinned buckets still sum to the pinned 42 while a real count has moved.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace(
+            "| MERGED (both were PRs) |",
+            "| CLOSED NOT_PLANNED | 0 | |\n| MERGED (both were PRs) |",
+            1,
+        ),
+    )
+    problems = _doc_problems()
+    assert any("state label" in p and "is not one of" in p for p in problems), problems
+
+
+# ── an evidence cell must name something ───────────────────────────────────
+
+
+def test_an_evidence_cell_naming_nothing_is_rejected(tmp_path, monkeypatch):
+    """FAILS if a §3 evidence cell can name no citation, issue, command or §N.
+
+    Reachable by a lane rewording a row and leaving the evidence column as prose.
+    §1 states the rule in the page's own words; this is that rule, enforced.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace(
+            "| **STILL-TRUE** | `tortoise/sdk.py:16962` —",
+            "| **STILL-TRUE** | checked, trust me —",
+            1,
+        ).replace("`tortoise/sdk.py:17361`", "the call", 1),
+    )
+    problems = _doc_problems()
+    assert any("names no `path:line`, issue, command or §N" in p for p in problems), problems
+
+
+def test_emptying_the_whole_evidence_column_is_rejected(tmp_path, monkeypatch):
+    """FAILS if the evidence column can be deleted into greenness.
+
+    This is the bypass that matters: a real drift reds the REQUIRED `docs` job,
+    and deleting the citation turns the red green while the verdict still asserts
+    a fix. Measured before the fix: every evidence cell blanked -> CLEAN, exit 0.
+    """
+    def blank_evidence(text: str) -> str:
+        return flc._empty_evidence_cells(text)
+
+    _mutated(tmp_path, monkeypatch, blank_evidence)
+    problems = _doc_problems()
+    offenders = [p for p in problems if "names no `path:line`, issue, command or §N" in p]
+    assert len(offenders) == 12, problems
+
+
+# ── no citation shape is exempt ────────────────────────────────────────────
+
+
+def test_a_citation_outside_the_path_character_class_is_refused(tmp_path, monkeypatch):
+    """FAILS if a backticked `token:LINE` the pattern declines is skipped.
+
+    Reachable by writing a citation the old extension allow-list or character
+    class did not match — a `.txt` path, an extension-less path, or a leading-dot
+    path. Skipping it is scope the guard silently did not measure while §8 said
+    it did.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace(
+            "`tests/eval/write_path/test_write_path_relation_lane.py:9`",
+            "`tests/eval/write_path/test_write_path_relation_lane.py%20:9`",
+            1,
+        ),
+    )
+    problems = _doc_problems()
+    assert any("not a recognised citation" in p for p in problems), problems
+
+
+def test_a_leading_dot_citation_is_measured_not_skipped(tmp_path, monkeypatch):
+    """FAILS if a `.github/...`-style citation is exempt from resolution.
+
+    Reachable by citing a workflow line, which is exactly what a page about CI
+    gates does. Before the fix such a path matched NOTHING, so an out-of-range one
+    passed; here the SAME mutation must now be reported as out of range, which is
+    what "measured" means.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace(
+            "`tortoise/pipeline.py:16`", "`.github/workflows/ci.yml:999999`", 1
+        ),
+    )
+    problems = _doc_problems()
+    assert any("out of range" in p for p in problems), problems
+
+
+def test_a_non_python_extension_citation_is_measured_not_skipped(tmp_path, monkeypatch):
+    """FAILS if the old `.py|.md|.yml|…` allow-list still gates resolution.
+
+    Reachable by citing a `.txt`, `.toml` or `.cfg` path. Measured before the fix:
+    substituting one for a resolving citation left the guard CLEAN, i.e. a red
+    could be defused by reformatting the citation it pointed at.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace("`tortoise/pipeline.py:16`", "`notes/thing.txt:16`", 1),
+    )
+    problems = _doc_problems()
+    assert any("does not exist in the tree" in p for p in problems), problems
 
 
 # ── citations resolve ──────────────────────────────────────────────────────
@@ -448,7 +595,7 @@ def test_state_rows_not_summing_to_population_is_rejected(tmp_path, monkeypatch)
     _mutated(
         tmp_path,
         monkeypatch,
-        lambda t: t.replace("| CLOSED other | 5 |", "| CLOSED other | 4 |", 1),
+        lambda t: t.replace("| CLOSED other | 4 |", "| CLOSED other | 3 |", 1),
     )
     problems = _doc_problems()
     assert any("sum to 41" in p and "pinned indexed population is 42" in p for p in problems), problems
