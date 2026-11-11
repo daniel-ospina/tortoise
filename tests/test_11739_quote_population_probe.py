@@ -807,19 +807,23 @@ def test_the_artifact_names_a_commit_whose_probe_is_the_probe_that_made_it():
         shown = subprocess.run(
             ["git", "show",
              f"{head}:docs/evidence/11739-quote-population/probes/quote_population.py"],
-            cwd=REPO, capture_output=True, text=True)
+            cwd=REPO, capture_output=True)
     except FileNotFoundError:  # no `git` on this host at all
         pytest.skip("`git` is not installed here, so no commit can be read")
     if shown.returncode != 0:
         shallow = subprocess.run(
             ["git", "rev-parse", "--is-shallow-repository"],
-            cwd=REPO, capture_output=True, text=True).stdout.strip()
+            cwd=REPO, capture_output=True).stdout.strip().decode("ascii", "replace")
         pytest.skip(f"{head[:9]} is not in this checkout's history "
                     f"(shallow={shallow}) — a squash-merge does not carry a branch commit "
                     "into `main`, so the relation is UNCHECKED here, not disproved; the "
                     "enforced binding is `probe_sha256`. Re-derive it on the branch: "
                     "`git fetch origin feat/11739-quote-population`.")
-    assert hashlib.sha256(shown.stdout.encode()).hexdigest() == \
+    # ⛔ BYTES, not text: the probe carries non-ASCII lines (em dashes and the ⛔ markers), so
+    # `text=True` decoded it with the LOCALE codec (an ASCII locale raised UnicodeDecodeError
+    # and reddened this pin on a correct artifact), and re-encoding could differ on a CRLF
+    # checkout. The digest is over the object as stored, so hash the bytes.
+    assert hashlib.sha256(shown.stdout).hexdigest() == \
         artifact["provenance"]["probe_sha256"]
 
 
@@ -919,17 +923,26 @@ def test_an_endpoint_without_a_scheme_exits_three(monkeypatch, endpoint):
 def test_an_unwritable_stdout_returns_two(monkeypatch):
     """FAILS IF the `--out -` branch is unguarded: `> /dev/full` or `| head -1` raised
     `OSError` out of `main` and exited 1 — outside the documented contract, in the same class
-    the file branch is already guarded for (review, attestation round 3)."""
+    the file branch is already guarded for (review, attestation round 3).
+
+    ⛔ The stream must be BUFFERED, like the real one: a stub whose `.write` raises tests an
+    unbuffered stdout, which is not what `> /dev/full` or a pipe is. With the real shape
+    (`TextIOWrapper` over a buffer) `.write` succeeds and `.flush` raises — so this test reds
+    on a write-only guard (review F6: the artifact is 5,325 B, under the 8 KiB buffer, and the
+    unflushed arm exited 0 with a truncated artifact).
+    """
     _stub_main(monkeypatch)
 
-    class _Full:
-        def write(self, _text: str) -> int:
+    import io
+
+    class _FullRaw(io.RawIOBase):
+        def writable(self) -> bool:
+            return True
+
+        def write(self, _b) -> int:
             raise OSError(28, "No space left on device")
 
-        def flush(self) -> None:
-            return None
-
-    monkeypatch.setattr(qp.sys, "stdout", _Full())
+    monkeypatch.setattr(qp.sys, "stdout", io.TextIOWrapper(io.BufferedWriter(_FullRaw())))
     assert qp.main(["quote_population", "--out", "-"]) == 2
 
 

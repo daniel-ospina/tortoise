@@ -728,6 +728,13 @@ def main(argv: list[str]) -> int:
     if args.out == "-":
         try:
             sys.stdout.write(text)
+            # ⛔ The WRITE is not the I/O: stdout is a buffered text stream (8 KiB), and this
+            # artifact is ~5.3 kB, so `write` only fills the buffer and returns — the OSError
+            # surfaced at interpreter shutdown, i.e. OUTSIDE this guard, where it was either
+            # swallowed by a truncating reader (exit 0 on a short artifact) or turned into
+            # exit 120. FLUSH here, the way the file arm's `with open(...)` flushes by closing
+            # inside its own guard.
+            sys.stdout.flush()
         except OSError as e:  # a full/closed stdout (`> /dev/full`, `| head -1`)
             sys.stderr.write(f"PROBE-WRITE(<stdout>): {e}\n")
             return 2
