@@ -1553,11 +1553,13 @@ def test_the_scores_probe_refuses_an_after_arm_on_another_graph(tmp_path, capsys
     review). The fixture used `capstone_on_54922a800_other`, whose HEAD TOKEN is
     still the right one — but `_names_head` requires the last segment to be a
     numeric epoch, so `other` fails the shape test and `score()`'s
-    graph-names-its-own-head guard (`#10996`, `e1_e2_scores.py:1773`) refused it
-    FIRST. With `pass` in place of that guard the earlier mutation runs showed
-    it, and with the guard live the assertion below was satisfied by ITS message
-    — which also contains the graph string. So this pin was measuring the wrong
-    guard, and deleting the identity check it is named for left the suite green.
+    graph-names-its-own-head guard (`#10996` — the `_names_head` check on the ON
+    arm's own `# graph:` line, in `e1_e2_scores.py`; cited by SYMBOL, because no arm
+    reads a line number for it) refused it FIRST. With `pass` in place of that
+    guard the earlier mutation runs showed it, and with the guard live the
+    assertion below was satisfied by ITS message — which also contains the graph
+    string. So this pin was measuring the wrong guard, and deleting the identity
+    check it is named for left the suite green.
     An epoch-differing graph (`…_1793378319` vs the log's `…_1793378318`) passes
     the head guard and can ONLY be refused by the identity check, which is what
     the assertion now keys on.
