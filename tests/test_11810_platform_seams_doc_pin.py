@@ -164,8 +164,10 @@ _TAG = rf"</?[A-Za-z][A-Za-z0-9-]*{_TAG_ATTRS_ASSIGNED}\s*/?>"
 #: A strip that ADMITS bare (boolean) attributes, e.g. `<span hidden>`. Kept as a
 #: second absence rendering, never as the only one — see `_renderings`.
 #: ⚠️ Its bound is NOT `_TAG`'s (r13, measured): it cannot cross a `<` or a `>`, and
-#: its attribute part consumes at most ONE whitespace character, which MAY be a
-#: newline and only immediately after the tag name — `re.fullmatch` matches
+#: its attribute part consumes at most ONE **newline**, and only immediately after
+#: the tag name — after that one `\s`, `[^<>\n]*` accepts any amount of HORIZONTAL
+#: whitespace (`<a  b>`, `<a b c d>` and `<a\tb\tc>` all match), so "one
+#: whitespace character" would be the wrong quantifier. `re.fullmatch` matches
 #: `"<a\nb>"`, does not match `"<a\r\nb>"`, and
 #: `"<b\nhere is a session running in a hosted cloud agent VM >"` matches with the
 #: quoted words INSIDE the match. So it is tag-shaped, not line-bounded, and it can

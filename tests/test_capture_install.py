@@ -3027,10 +3027,12 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_cloud_agent_limit
     # the wording the RECORD itself uses (platform-seams.md: "a hosted Cursor
     # cloud agent runs no Tortoise hook at all"), so it is the phrasing a lane
     # would actually reuse — NOT because the list became complete. Any other
-    # unlisted re-wording is still a residual, and the structural form of this
-    # guard (every remaining `cloud agent` mention in the rendered message must
-    # carry a hosted/self-hosted qualifier) is #11812's, deliberately not added
-    # here: a structural leg that reds on accurate prose is the friction above.
+    # unlisted re-wording is still a residual. #11812 owns the DOC-side
+    # structural form (derive the quoted span from the record and assert it is a
+    # substring of the real stdout), which is a DIFFERENT leg from the
+    # message-side per-mention qualifier scan — that scan is a separate residual
+    # this pin does not implement, deliberately not added here because a
+    # structural leg that reds on accurate prose is the friction above.
     # ⛔ The residual is recorded, not silently trusted: #11807 carries it, and
     # review rounds 6/7 both declined to hold the merge for it. Measured at r8:
     # injecting "The MCP pull seam reaches a cloud agent." REDs, and re-appending
