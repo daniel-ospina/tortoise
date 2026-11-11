@@ -46,6 +46,30 @@ def _production_ast_references(
     return refs
 
 
+def _production_string_references(
+    root: Path | None = None, symbol: str = "propagate_shock"
+) -> list[tuple[str, int]]:
+    """Every QUOTED mention of `symbol` under `<root>/tortoise`, as (path, lineno).
+
+    The AST leg above is blind to this shape by construction: `getattr(mod,
+    "propagate_shock")`, `globals()["propagate_shock"]`, `__all__ = ["propagate_shock"]`
+    and a registry key spell the symbol inside a string constant, which is not a `Name`,
+    `Attribute` or `alias` node at all. Main's word-grep saw these; an AST-only gate does
+    not, so this arm exists to keep that coverage rather than trade it for the docstring
+    false positive. It reads the source text directly rather than shelling out to grep, so
+    the pattern needs no regex-dialect quoting and the arm is pinnable by fixtures
+    (`test_the_string_literal_arm_catches_what_no_ast_can`).
+    """
+    base = ROOT if root is None else Path(root)
+    forms = (f'"{symbol}"', f"'{symbol}'")
+    refs: list[tuple[str, int]] = []
+    for src in sorted((base / "tortoise").rglob("*.py")):
+        for lineno, line in enumerate(src.read_text(encoding="utf-8").splitlines(), 1):
+            if any(form in line for form in forms):
+                refs.append((str(src.relative_to(base)), lineno))
+    return refs
+
+
 def _grep(pattern: str, *dirs: str) -> list[str]:
     """Return non-empty lines from grep -rn in specified dirs (relative to ROOT)."""
     try:
@@ -98,10 +122,10 @@ def test_no_propagate_shock_callers():
         elif "/tortoise/" in path_part:
             callers["production_code"].append(line)
 
-    # ⛔ A LINE-BASED WORD GREP CANNOT ANSWER THIS QUESTION (#11907).
+    # ⛔ A LINE-BASED WORD GREP CANNOT ANSWER THIS QUESTION (#11903).
     #
     # The classifier above matches the WORD. Prose that names the function therefore
-    # reads as a caller — `#11702` added exactly such a note to `propagate_shock`'s own
+    # reads as a caller — `#11702` added exactly such a note to `_compute_confidence`'s
     # docstring (`projection/propagation.py:70,73`, explaining why the path is
     # unreachable), and this test reddened on its own documentation.
     #
@@ -126,20 +150,33 @@ def test_no_propagate_shock_callers():
     #
     # Residual, named rather than hidden: a reference CARRIED IN A STRING LITERAL —
     # `getattr(mod, "propagate_shock")`, `globals()[...]`, `exec(...)`, an `__all__` entry, a
-    # registry key — is not a node at all, so no AST walk can see it. No such string exists
-    # in this tree (measured: `grep -rn "['\"]propagate_shock['\"]" tortoise/` is empty).
-    # Every node-shaped reference is pinned below, and traversal is pinned too.
+    # registry key — is not a node at all, so no AST walk can see it. The AST leg therefore
+    # CANNOT be the whole gate: main's word-grep caught those shapes, and replacing that grep
+    # with the AST scan would have WIDENED a hole while closing a false positive — measured
+    # on a synthetic tree whose `__all__` names the symbol, the AST-only gate went GREEN where
+    # `origin/main` red.
+    #
+    # So the AST leg is not alone: `_production_string_references` keeps the one thing only a
+    # textual read can see, and asserts it stays absent. Every node-shaped reference is
+    # pinned below, traversal is pinned, and the string arm is pinned by its own fixtures.
     ast_refs = _production_ast_references()
 
     # ⛔ The word-grep bucket still lists #11702's DOCSTRING lines
     # (`projection/propagation.py:70,73` explain why this path is unreachable) — they are
-    # prose, not callers, which is the false positive #11907 exposed. The AST scan is the
-    # gate; `callers["production_code"]` is context, and it is expected to be non-empty.
+    # prose, not callers, which is the false positive #11903 exposed. The AST scan is the
+    # gate for node-shaped references; `callers["production_code"]` is context, and it is
+    # expected to be non-empty.
     assert not ast_refs, (
         "PRODUCTION CODE CALLS propagate_shock:\n"
         + "\n".join(f"{path}:{lineno}" for path, lineno in ast_refs)
         + "\n\n(word-grep context, which cannot tell a call from a mention:)\n"
         + "\n".join(callers["production_code"])
+    )
+    string_refs = _production_string_references()
+    assert not string_refs, (
+        "PRODUCTION CODE REFERENCES propagate_shock BY STRING LITERAL — no AST walk can"
+        " see this shape, so it is the word-grep arm's job:\n"
+        + "\n".join(f"{path}:{lineno}" for path, lineno in string_refs)
     )
     assert len(callers["definition (deprecated)"]) == 1, (
         "Expected exactly 1 deprecated definition in projection.py"
@@ -151,7 +188,7 @@ def test_no_propagate_shock_callers():
     print(f"  Fixup scripts: {len(callers['fixup_scripts (historical)'])}")
     print(f"  word-grep 'production' context: {len(callers['production_code'])} "
           f"(docstring prose — NOT the gate; the AST scan is, and it found {len(ast_refs)})")
-    print("  ✅ No production code calls propagate_shock (AST scan)")
+    print("  ✅ No production code calls propagate_shock (AST scan + string-literal arm)")
 
 
 def test_the_reference_scan_catches_every_static_form(tmp_path):
@@ -211,7 +248,45 @@ def test_the_reference_scan_catches_every_static_form(tmp_path):
     false_positives = sorted(found & set(must_stay_green))
     assert not false_positives, (
         "the reference scan flags prose or a lookalike as a dependency — this is the"
-        f" #11907 failure (a docstring mention reddened the gate): {false_positives}"
+        f" #11903 failure (a docstring mention reddened the gate): {false_positives}"
+    )
+
+
+def test_the_string_literal_arm_catches_what_no_ast_can(tmp_path):
+    """The string-literal arm is pinned, for the same reason the AST leg is.
+
+    `__all__ = ["propagate_shock"]` is the shape a re-export takes, and it is invisible to
+    every AST walk. Measured before this arm existed: the AST-only gate went GREEN on a
+    tree containing it while `origin/main`'s word-grep red. A gate that traded a false
+    positive for a false NEGATIVE is not an improvement, so the coverage is restored as an
+    assertion — and this test is what stops the next rewrite from dropping it silently.
+    """
+    (tmp_path / "tortoise").mkdir()
+
+    must_be_caught = {
+        "all_export.py": '__all__ = ["propagate_shock"]\n',
+        "getattr_string.py": 'getattr(mod, "propagate_shock")(g, n)\n',
+        "registry_key.py": '_HOOKS = {"shock": "propagate_shock"}\n',
+        "single_quoted.py": "HOOK = 'propagate_shock'\n",
+    }
+    must_stay_green = {
+        "backticked_prose.py": 'def f():\n    """`propagate_shock` is never invoked."""\n    return 1\n',
+        "lookalike.py": 'NAME = "propagate_shock_v2"\n',
+    }
+    for name, body in {**must_be_caught, **must_stay_green}.items():
+        (tmp_path / "tortoise" / name).write_text(body, encoding="utf-8")
+
+    found = {Path(p).name for p, _ in _production_string_references(root=tmp_path)}
+
+    missed = sorted(set(must_be_caught) - found)
+    assert not missed, (
+        "the string-literal arm MISSES a quoted reference, so the AST leg is blind to it"
+        f" and nothing else looks: {missed}"
+    )
+    false_positives = sorted(found & set(must_stay_green))
+    assert not false_positives, (
+        "the string-literal arm flags prose or a lookalike — that is the same false"
+        f" positive the AST leg was introduced to remove: {false_positives}"
     )
 
 
