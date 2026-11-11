@@ -4514,10 +4514,14 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     and `projection/entities.py`) across `README.md`, both probes, the E-row audit
     (`E1-E5-PROOFS.md`), the `docs/00_index.md` rows that are the bundle's entry
     point, and the `docs/architecture/
-    EXTRACTOR-V4-ARCHITECTURE.md` S2.1 FINDING row this bundle owns — 47 cites at
-    this head, five of them the `projection/*.py` ones the sibling pattern made
-    visible (`#10108` added the sixth document; the count is MEASURED, and it
-    moves with the documents, so re-read `checked` rather than trusting this line).
+    EXTRACTOR-V4-ARCHITECTURE.md` S2.1 FINDING row this bundle owns — five of them
+    the `projection/*.py` ones the sibling pattern made visible (`#10108` added the
+    sixth document). ⛔ NO TOTAL IS QUOTED HERE (#11837 review round 2, P2): this
+    sentence said `47`, and the sweep reports `checked` 48 at the head that review
+    read — the 48th is this PR's own `extractor_v2.py:10419-10422` cite. A
+    hand-written total re-stales on every cite a later round adds, which is the rule
+    the `config/ci-surfaces.yml` durations rows already state, so read `checked` from
+    the sweep instead of a number in this docstring.
 
     The architecture doc was the LAST unread one, and it hid a false PASS: its D3
     cite (`run_s2(...)` passing `edus=edus`) was re-derived onto `:7804` — a
