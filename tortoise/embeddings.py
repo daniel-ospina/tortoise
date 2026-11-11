@@ -376,29 +376,30 @@ def shortest_float32_vector(vector: list[float]) -> list[float] | None:
     — and it is the right answer for a COMPARISON between the record and the
     cache (#8615). This returns the SHORTEST DECIMAL for that float32 — `0.1`
     — which is the right answer for the journal's TEXT, and is deliberately
-    OFF the float32 grid as a float64 (it must narrow to it). Both properties
-    are pinned: the grid identity by `stamp_journal_embedding`'s callers, the
-    text by `tests/test_11821_journal_vector_width.py`.
+    OFF the float32 grid as a float64 (it must narrow to it).
 
-    ``None`` means **this vector is not ours to narrow** — and that is TWO
-    cases, both of which the caller must honour by leaving the values ALONE and
-    declaring the width ``f64`` (#5004's total-function rule: a record is a
-    FILE, so this degrades rather than raises):
+    ``None`` means **this vector is NOT OURS to narrow**, and the caller must
+    then leave the values ALONE and declare the width ``f64``. That is ONE
+    question with three shapes, and they are one test — *is every element
+    already a float32?*:
 
-    * an element **outside float32's range** (``1e300``) — narrowing would turn
-      it into ``inf``; and
-    * an element **off the float32 grid** (``0.1234567890123``, or
-      ``16777217.0`` which would silently lose a unit, or ``1e-50`` which would
-      silently become ``0.0``). The embedder's output IS the grid — every
-      element is `float(np.float32(x))` — so an off-grid element did not come
-      from it and is somebody's value, not a widening to undo.
+    * **over-range** (``1e300``) → the cast saturates to ``inf``;
+    * **under-range** (``1e-300``) → the cast collapses to ``0.0``, destroying
+      an element and recording the zero as the embedder's own;
+    * **off-grid in range** (``0.1234567890123``, ``16777217.0`` which would
+      silently lose a unit, ``1e-50``) → the cast rounds somebody's digits away.
 
-    ⛔ THAT SECOND HALF IS THE OWNERSHIP TEST, and it is why the grid check is
-    the primary one. A vector a caller supplied reaches this seam WITHOUT
-    `embedding_verbatim` on at least one path — `EventAPI.add_point(fields=…)`
-    refuses that marker as a forged key, because the door mints it — so
-    "marker absent" is not sufficient evidence that the vector is ours.
-    "Off the float32 grid" is: nothing our embedder emits can be.
+    A value that IS a float32 subnormal (``float(np.float32(1e-45))``) is on the
+    grid and DOES narrow; the decimal literal ``1e-45`` is not a float32 at all
+    (its nearest float32 is 40 % away) and does not.
+
+    ⛔ THE GRID CHECK IS THE OWNERSHIP TEST, and that is why it is primary. A
+    vector a caller supplied reaches this seam WITHOUT `embedding_verbatim` on at
+    least one path — `EventAPI.add_point(fields=…)` refuses that marker as a
+    forged key, because the door mints it — so "the marker is absent" is not
+    evidence that the vector is ours. "Off the embedder's float32 grid" is:
+    `encode_batch_for_store` returns ``vec.tolist()`` of a float32 array, so
+    nothing our embedder emits can be off it.
     """
     values = [float(x) for x in vector]
     if not values:
@@ -571,9 +572,16 @@ def _stamp_journal_vector_width(payload: dict) -> None:
     2. **A caller-owned or PRESERVED vector** (``embedding_verbatim`` /
        ``embedding_preserved``) → ``f64``, values UNTOUCHED. This is #5004
        round-7's rule read at the width rather than at the engine
-       (``projection._restore_derived_properties``: *"a CALLER-owned vector
-       must keep its RAW form. `vecf32()` is the ONE form it must not take"*),
-       and the reason the marker exists at all: without it a later
+       (``projection.FalkorProjection._rebuild_all_replay``'s ``embedding_verbatim`` restore
+       guard: *"a CALLER-owned vector must keep its RAW form. `vecf32()` is the
+       ONE form it must not take"* — the graph-only id's only restorer), and the
+       storage form the same flag picks
+       (``projection/entities.py::_upsert_point_props``: ``CASE WHEN
+       $embedding_verbatim THEN $embedding ELSE vecf32($embedding)``, flag set by
+       ``TortoiseSDK.create_point``'s ``_create_map["embedding_verbatim"]``).
+       So a caller-owned vector is one the store must not re-encode — and this
+       stamp must not either. That is
+       the reason the marker exists at all: without it a later
        base64/width migration could narrow exactly the population the journal
        promised to keep raw, silently. The marker is stamped HERE, in the same
        PR as the narrowing, so that population is never unnamed.

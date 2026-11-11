@@ -20,11 +20,15 @@ What this file pins, in the order the decisions were made:
 4. a record written BEFORE this change still reads and replays unchanged;
 5. the marker is a payload description only: never a node property, never a
    record column, never callable-settable;
-6. the journal line carries no insignificant whitespace (its own commit, its own
-   delta).
+6. the journal line carries no insignificant whitespace (its own delta —
+   attributable by measurement, because both changes share ONE commit);
+7. the `EventRecorded` DOOR (`sdk._journal_event_raw_write`, the fourth
+   vector-bearing producer) declares its own width — the one stamp whose
+   absence no other pin could see.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import struct
 
@@ -150,13 +154,13 @@ def test_a_vector_off_the_float32_grid_is_not_ours_to_narrow():
     `EventAPI.add_point(fields=…)` hands a CALLER's vector to this seam with no
     `embedding_verbatim` (that door refuses the marker as forged, because it
     mints it), so "the marker is absent" is not evidence that the vector is
-    ours. "Off the embedder's float32 grid" is: nothing `encode_for_row` emits
-    can be off it.
+    ours. "Off the embedder's float32 grid" is: `encode_batch_for_store` returns
+    `vec.tolist()` of a float32 array, so nothing it emits can be off it.
 
-    The earlier guard compared both sides AFTER a float32 cast, so it could only
-    ever detect overflow — every value below is IN RANGE and would have been
-    silently rewritten: `16777217.0` loses a unit, `1e-50` becomes `0.0`, and a
-    caller's digits are rounded away.
+    Every value below is IN RANGE, so a guard that compares both sides AFTER a
+    float32 cast accepts all of them and silently rewrites the record:
+    `16777217.0` loses a unit, `1e-50` becomes `0.0`, and a caller's digits are
+    rounded away.
     """
     off_grid = [0.1234567890123, 16777217.0, 1e-50, 2.718281828459045]
     assert shortest_float32_vector(off_grid) is None
@@ -173,8 +177,8 @@ def test_the_quantiser_leaves_process_wide_warning_state_alone():
     Two interleaved blocks can leave a leaked `ignore` entry behind for the life
     of the process, muting the numeric warnings that surface a bad vector.
 
-    The refusal is done in plain Python BEFORE any numpyd cast precisely so no
-    suppression is needed at all.
+    The range refusal is done in plain Python BEFORE any numpyd cast precisely
+    so that no suppression is needed at all.
     """
     import warnings
 
@@ -186,14 +190,50 @@ def test_the_quantiser_leaves_process_wide_warning_state_alone():
         "the quantiser changed the process's warning filters")
 
 
+def test_a_vector_that_UNDERFLOWS_float32_is_left_alone():
+    """The same both-sides-equal bug in the direction the first guard missed.
+
+    `np.float32(1e-300)` is `0.0`, so a cast equality compares `0.0` to `0.0`
+    and passes: the element is DESTROYED and the payload still marked `f32`
+    (measured: `shortest_float32_vector([1e-300, 0.5])` → `[0.0, 0.5]`). A
+    non-zero element whose float32 cast is zero is not representable at float32,
+    exactly as `1e300` → `inf` is — and the payload's own recorded meaning
+    ("every element is stored at the float32 the embedder produced") is a lie
+    when one element is a zero the input never held.
+
+    ⚠️ The subnormal half was RESTATED by the grid rule, and the difference is
+    the point: a value that IS a float32 subnormal (`float(np.float32(1e-45))`)
+    is on the grid and narrows, while the decimal literal `1e-45` is not a
+    float32 at all — its nearest float32 is 40 % away, so narrowing it would
+    change the number and record that as the embedder's own.
+    """
+    source = [1e-300, 0.5]
+    stamped = stamp_journal_embedding(_payload(list(source)), creating=True)
+
+    assert stamped[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64
+    assert stamped["embedding"] == source, (
+        "an underflowing element was destroyed and the payload still marked f32")
+    assert shortest_float32_vector(source) is None
+    assert shortest_float32_vector([-1e-300, 0.5]) is None, (
+        "underflow is sign-blind: -1e-300 casts to -0.0, which compares equal")
+    assert shortest_float32_vector([float(np.float32(1e-45)), 0.5]) is not None, (
+        "a float32 SUBNORMAL is on the grid — representable, so ours to narrow")
+    assert shortest_float32_vector([1e-45, 0.5]) is None, (
+        "the decimal literal 1e-45 is not a float32; narrowing it would move "
+        "the value by 40 % and call the result the embedder's own")
+
+
 # ── 2. the promise that must not be broken: verbatim / preserved ─────────────
 
 
 def test_a_verbatim_vector_is_never_narrowed():
     """**THE PIN.** If P0 narrowed a caller-owned vector it would silently
-    change a value the journal promised to keep raw (#5004 round-7:
-    `projection._restore_derived_properties` — *"a CALLER-owned vector must keep
-    its RAW form. `vecf32()` is the ONE form it must not take"*).
+    change a value the journal promised to keep raw (#5004 round-7: the graph-only
+    id's only restorer is `projection.FalkorProjection._rebuild_all_replay`'s `embedding_verbatim`
+    guard — *"a CALLER-owned vector must keep its RAW form. `vecf32()` is the ONE
+    form it must not take"* — and the flag picks the storage form in
+    `projection/entities.py::_upsert_point_props`'s `CASE WHEN $embedding_verbatim
+    THEN $embedding ELSE vecf32($embedding)`).
 
     The fixture is deliberately OFF the float32 grid, and the test asserts that
     a narrowing WOULD change it — so the assertion below is a real one.
@@ -286,7 +326,12 @@ def test_a_journal_written_before_this_change_still_reads_and_replays(tmp_path):
 
 
 def test_the_journal_line_carries_no_insignificant_whitespace(tmp_path):
-    """#11821 P0's second commit: `", "`/`": "` were 435 B of a 9,176 B record.
+    """#11821 P0's compact separators: `", "`/`": "` were 435 B of a 9,176 B record.
+
+    They share ONE commit with the float32 narrowing (the plan's proposed split
+    would have left an intermediate red test), so the separator delta is
+    attributed by measurement — the vector-less corpus rows (`PointRevised`,
+    `EntityLinked`) can only be moved by whitespace — never by `git log`.
 
     Not a format change — JSON whitespace is insignificant — so the round trip is
     asserted in the same test rather than trusted.
@@ -345,3 +390,92 @@ def test_the_turn_snapshot_contract_admits_the_marker():
                                   | rp.TURNS_SNAPSHOT_OPTIONAL_KEYS)
     assert not undeclared, (
         f"the snapshot carries undeclared keys {sorted(undeclared)}")
+
+
+# ── 7. the fourth producer: the `EventRecorded` door ─────────────────────────
+
+
+def _door_record(tmp_path, *, embedding, event_id="evt-11821"):
+    """Drive the REAL door and return the record it journalled.
+
+    ``sdk._journal_event_raw_write`` builds its own payload (it does not pass
+    through `_emit_event`'s stamp), so its width declaration is a SEPARATE
+    producer — the review's finding was that deleting that block reddened
+    nothing, anywhere.
+
+    ``graph=None``: the props here name no pack kind, so `#5475`'s gate takes
+    its no-pack early return (`payload_names_pack(record)` is empty) and never
+    reads a graph. The gate itself is pinned in
+    `tests/test_9068_pack_gate_residuals.py`; this file stays hermetic
+    (`tmp_path` only — no DB, no graph, no network), which is what lets its
+    registration run on every lane.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    journal = tmp_path / "events.jsonl"
+    sdk = TortoiseSDK(str(tmp_path / "door.db"), event_log_path=str(journal))
+    try:
+        committed = sdk._journal_event_raw_write(
+            event_id, {"content": "a session event"}, graph=None,
+            embedding=list(embedding))
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+    assert committed is not False, (
+        "the door reports a failed append as False — nothing to assert then")
+    records = [json.loads(ln) for ln in
+               journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(records) == 1, f"expected exactly one record, got {records!r}"
+    assert records[0]["type"] == "EventRecorded"
+    return records[0]
+
+
+def test_the_event_recorded_door_declares_its_width(tmp_path):
+    """#11821 P0's FOURTH producer: `sdk._journal_event_raw_write`.
+
+    A session `:Event`'s vector is `_session_embedding`'s — our embedder's
+    float32 — or a value read back off the node, and this door builds its
+    payload from `props` instead of going through `_emit_event`'s stamp. Delete
+    the stamp block at `sdk.py::_journal_event_raw_write` and the whole suite
+    stayed green while the door silently journalled an UNDECLARED-width vector:
+    the one producer the seam's contract ("every journalled vector says what
+    width it was written at") would not cover, and the population P2's base64
+    migration would have to guess about.
+
+    ⚠️ "producer", not "record": `TortoiseSDK.update_point` splats a
+    CALLER-supplied `embedding` onto a `PointRevised` record's TOP level
+    (`_emit_event("PointRevised", id=..., **emit_props)`), which no payload stamp
+    reaches — measured, that record carries `embedding` and no
+    `embedding_width`. It is a residual population, not one this file covers.
+
+    So both halves are asserted — the DECLARATION and the NARROWING — because a
+    marker written without the values it describes would be a lie the next
+    reader acts on.
+    """
+    widened = _vector()
+    record = _door_record(tmp_path, embedding=widened)
+
+    assert record[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F32, (
+        "the EventRecorded door journalled a vector with no width declared")
+    assert _f32_bits(record["embedding"]) == _f32_bits(widened)
+    assert len(_text(record["embedding"])) < len(_text(widened)), (
+        "the door's vector must be stored at the embedder's float32, not the "
+        "widened float64 repr the seam exists to remove")
+
+
+def test_the_event_recorded_door_declares_f64_for_a_vector_it_cannot_narrow(
+        tmp_path):
+    """The other half of the marker at this door.
+
+    The door does not carry a route through `creating=True`, and its vector can
+    be one it did not produce (a value read back off the node). A vector with an
+    element float32 cannot represent must therefore still be journalled —
+    UNTOUCHED — and must say `f64`, so a later width/format migration cannot
+    narrow a population nobody declared as foreign.
+    """
+    source = [1e-300, 0.5, -1e-300]
+    record = _door_record(tmp_path, embedding=source, event_id="evt-11821-f64")
+
+    assert record["embedding"] == source, "the values must be left ALONE"
+    assert record[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64

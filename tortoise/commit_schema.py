@@ -661,8 +661,8 @@ class Mention(BaseModel):
     ``span_start``, ``span_end``, ``kind_guess`` — and deliberately **no
     ``claim_id``**, because the point carrying the property IS the claim.
 
-    ⛔ **PAYLOAD-ONLY TODAY — this is not graph state, and must not be read as it.**
-    The record reaches **four** in-memory surfaces and then STOPS, and they are not
+    ⛔ **WHERE IT LIVES — PAYLOAD FIRST, THEN THE CLAIM POINT (#11239).** The
+    record reaches **four** in-memory surfaces and then the node, and they are not
     interchangeable (review at `5da3575b7a`, P2):
 
     - the extraction payload — ``points[].mentions``, built by
@@ -692,23 +692,73 @@ class Mention(BaseModel):
     a verification: it is the honest label for "the model asserted these bytes"
     (an unverified offset pair survives under it — it is demoted, never dropped).
 
-    No declared write door carries it, and there are **four** of them: the REST
-    ``CreatePointRequest`` (no ``mentions`` field at all), the SDK capture
-    whitelist (``sdk._CAPTURE_PASSTHROUGH_ORDER``, ``#2949``'s response-parity
-    surface: ``quote/when/search_keys/source_turn_id/span_start/span_end`` only),
-    ``hosted_api._execute_commit_writes`` — the door the v2 payload actually
-    uses, which enumerates its ``sdk.create_point`` kwargs (``#11239``) — and the
-    SELF-HOST mirror ``selfhost_api.CreatePointRequest`` /
-    ``selfhost_api.create_point``, which is a separate model and route that
-    enumerates its ``sdk.create_point`` kwargs the same way (``#4032`` frames the
-    two as parity mirrors, so a hosted-only addition re-opens the divergence).
-    So a capture's ``stats["mentions_recorded"]`` counts records the write
-    DISCARDS — on either deployment.
-    DM1's home on the Point is declared but unfulfilled; persisting it (a
-    flat/scalar projection, or an explicit session-evidence-only ruling) is
-    **#11239**, deliberately not this slice. ``tests/test_referentiality_11021.py
-    ::test_the_mention_record_is_payload_only_and_says_so`` pins the boundary so
-    this docstring cannot quietly become a lie.
+    ⛔ **WHICH WRITE DOORS CARRY IT — ONE list, ONE verdict each (#11239,
+    review R5 on PR #11795).** An earlier version of this paragraph enumerated
+    the doors and then contradicted itself: it listed
+    ``hosted_api._execute_commit_writes`` among the doors that do NOT carry the
+    field, then said in the next sentence that it does, and it described the
+    carrier as a ``mentions=`` kwarg when the code sets ``point_props``. The
+    verdicts below are the HEAD's code, one per door:
+
+    - hosted REST ``CreatePointRequest`` / ``hosted_api.create_point`` — **NOT
+      carried**. The model has no ``mentions`` field, and the route's
+      ``sdk.create_point`` call forwards ``content``/``kind``/``tags``/``dedup``
+      plus ``confidence``/``authoredBy``/``credibility`` — never the record.
+    - self-host REST ``selfhost_api.CreatePointRequest`` / its ``create_point``
+      route — **NOT carried**. A SEPARATE model and route, not an alias;
+      ``#4032`` frames the pair as parity mirrors, so a hosted-only addition
+      would re-open the divergence. Its route forwards no ``mentions`` either.
+    - ``hosted_api._execute_commit_writes`` — **CARRIED on both of its CREATE
+      legs** (the supersede leg and the plain-create leg), by setting
+      ``point_props["mentions"]`` and only when the payload carries a
+      non-empty record list. ⛔ Never ``mentions=_mention_props or None`` on the
+      call: on a dedup hit a ``None`` in a generic prop REMOVES the property.
+      ⚠️ Its **MERGE leg does NOT carry it**: `reconcile_payload` picks `merge`
+      for same id + same content (the ordinary re-commit of an existing claim)
+      and that leg is a zero-budget `SET p.updatedAt` bump that writes no prop
+      and journals nothing, so a cue-ON re-capture over a claim first captured
+      cue-OFF records nothing. Declared deliberately, tracked as `#11811`, and
+      pinned by
+      `tests/test_commit_endpoint.py::test_the_merge_leg_drops_a_stated_record_and_that_is_declared`.
+    - the SDK capture seam (``_extract_session_v2``'s create branch) —
+      **CARRIED**, into ``create_point``'s ``props`` exactly as it carries
+      ``validFrom``. Create branch only, so a dedup hit writes nothing
+      (first-writer).
+    - the generic ``update_entity`` surface (``_update_entity``'s ``:Point``
+      branch) — **CARRIED**, and journalled as ``PointRevised(mentions=…)`` so
+      a rebuild reproduces it (review R1 on PR #11795: journaled here rather
+      than left as a live-only third door).
+    - ``EventAPI.add_point`` (``tortoise/api.py``) — **CARRIED**, and it is the
+      door that makes the PROJECTION's encode load-bearing rather than
+      defensive: `add_point` updates the point dict and journals
+      ``PointAdded(point=p)`` with the payload's LIST spelling and calls no
+      encoder of its own, so ``_upsert_point_props``'s call is the only one on
+      its path (measured: neutering it stores nothing, live and replay). Pinned
+      by ``tests/test_mention_write_11239.py::test_the_event_api_door_carries_a_mention_to_the_point``.
+
+    ⛔ NO ARITHMETIC HERE ON PURPOSE — three rounds of this paragraph shipped a
+    count that its own bullet list refuted. Read the verdicts above: the doors
+    marked **CARRIED** are the carrier set, and the SDK Point doors
+    (``sdk.create_point`` / ``sdk.update_point``) carry a caller-supplied value
+    too — they are listed under "which call is load-bearing" in
+    ``projection/entities.py`` rather than as payload doors. Every carried leg is
+    **stored, never advertised**, so a graph read after a capture holds the claim
+    AND the mentions it used.
+
+    ⛔ Still NOT part of ``sdk._CAPTURE_PASSTHROUGH_PROPS``: that set is the
+    public capture **RESPONSE** surface (``#2949`` response parity), and widening
+    it would advertise a field no client model declares. The value is stored on
+    the node only. On the node it is ONE compact JSON scalar —
+    ``projection.entities.encode_json_record_props`` — because no path stores an
+    array of maps (the projection denies it; a raw ``SET n += $p`` gets it
+    degraded to ``null`` by the driver, ``#7369``); the payload keeps the record
+    shape, and
+    ``consistency._uncarried`` reads the same declaration so an armed capture no
+    longer reports a ``_UNCARRIED_LIST`` it will never persist.
+
+    ``tests/test_referentiality_11021.py::test_the_mention_record_reaches_the_
+    claim_point_and_says_so`` pins the boundary from BOTH sides, so this docstring
+    cannot quietly become a lie in either direction.
 
     ``span_start``/``span_end`` are the same "pointer, not payload" pair the
     Point carries (E4 / ``#5007``): all-or-nothing and ``end > start``, or both
@@ -774,9 +824,14 @@ class Point(BaseModel):
     # #11021: the phrases this claim POINTED with but did not NAME. Additive-
     # optional, so a pre-#11021 payload validates unchanged, and the write path
     # never promotes a member to an :Object — a mention is a record, not a node.
-    # ⛔ PAYLOAD-ONLY: no writer persists this list (see `Mention`'s docstring),
-    # so a graph read after a capture holds the claim and no mention on it.
-    # Persistence is #11239, not this slice.
+    # ⛔ NOT a declared REST field, and NOT part of the capture RESPONSE surface
+    # (`sdk._CAPTURE_PASSTHROUGH_PROPS`) — it is a writer-produced record, not a
+    # client field. It IS persisted on the node since #11239:
+    # `projection.entities.encode_json_record_props` stores it as one compact
+    # JSON scalar, and the write doors that carry it are enumerated with one
+    # verdict each in `Mention`'s docstring (the carrier set is the list of
+    # doors marked CARRIED there — deliberately no count, which three rounds
+    # proved cannot be kept true).
     mentions: list[Mention] = Field(default_factory=list)
 
     @model_validator(mode="after")

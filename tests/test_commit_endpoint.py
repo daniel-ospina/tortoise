@@ -5485,3 +5485,205 @@ class Test4051ChargeCoversTheLoopShape:
             "the points count moved for a `points: []` commit — if this is a "
             "real widening of the counted category, §4 of #4051 has been "
             "decided (candidate 2) and this leg must be replaced, not relaxed")
+
+
+# ── #11239 (DM1's home): the commit PAYLOAD's mentions reach the claim Point ──
+#
+# Review R2 on PR #11795. `_execute_commit_writes` is the door a v2 payload
+# actually rides, and before these rows its mention handling was guarded ONLY
+# by `inspect.getsource` substrings in `tests/test_referentiality_11021.py`.
+# Measured on the reviewed head: `if _mention_props:` → `if False and
+# _mention_props:` neutered the write completely (no record ever reached the
+# node) and every assertion stayed green, and `point_props["mentions"] =
+# _mention_props or None` — the shipped clearing bug — stayed green too
+# because `_mention_props or None` CONTAINS the asserted substring.
+#
+# So these are node read-backs through the real route: commit, then
+# `MATCH (n:Point {id}) RETURN n.mentions`.
+
+_MENTION_RECORD = {"surface": "it", "span_start": 0, "span_end": 2,
+                   "kind_guess": "pronoun"}
+
+
+def _point_mentions(pid: str):
+    """The claim Point's stored mention scalar, read straight off the node."""
+    rows = _team_sdk()._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.mentions",
+        params={"id": pid}).result_set
+    return rows[0][0] if rows else None
+
+
+def test_the_commit_payload_carries_its_mentions_to_the_claim_point(client):
+    """A `points[].mentions` payload reaches the node — not only the payload.
+
+    Mutant this reds on: `if _mention_props:` → `if False and _mention_props:`
+    (the record is built, dropped at the write, and the pre-#11239 behaviour
+    returns silently).
+    """
+    pid = "pt_11239_commit_door"
+    raw = _raw_payload(0, session_id="s11239-mentions",
+                       points=[_point(0, id=pid, content="the claim holds a pronominal mention",
+                                      mentions=[dict(_MENTION_RECORD)])])
+    r = _commit(client, raw)
+    assert r.status_code == 200, r.text[:400]
+
+    stored = _point_mentions(pid)
+    assert stored is not None, (
+        "the commit payload carried `mentions` and the claim Point holds none: "
+        "the hosted door read the payload and dropped the record (#11239)")
+    records = json.loads(stored)
+    assert records[0]["surface"] == "it" and records[0]["span_start"] == 0, records
+    assert records[0]["kind_guess"] == "pronoun", records
+
+
+def test_a_recommit_whose_payload_has_no_mentions_keeps_the_stored_record(client):
+    """The shipped clearing bug, measured through the door that had it.
+
+    `_mention_props or None` on a create leg folds `mentions=None` onto the
+    dedup target, and a `None` in a generic prop REMOVES the property — so the
+    ordinary re-commit of a claim whose payload says nothing about mentions
+    DELETED the stored record. The fix adds the key only when the payload
+    carries a record (first-writer).
+
+    ⚠️ The re-commit MUST use a different payload point id. Measured while
+    writing this row: re-submitting the SAME id with the same content never
+    reaches `_execute_commit_writes`' point write at all (the receipt says
+    `nodes_merged: 2`, `create_point` is never called, and the row would prove
+    nothing — the class of vacuous pin this whole review round is about). A
+    DIFFERENT id with the SAME content is what takes the dedup path:
+    `create_point(dedup=True, id=<new>)` → dedup hit → `update_point(<old>)`,
+    which is exactly where a forwarded `None` deletes the record.
+
+    MUTATION ATTRIBUTION (measured; `…` = this row):
+
+    * `if _mention_props:` → `if False and _mention_props:` on both create
+      legs → `…test_the_commit_payload_carries_its_mentions…` REDs (this row
+      stays green: the record is never stored, so nothing is cleared).
+    * `point_props["mentions"] = _mention_props or None` (unconditional) →
+      this row REDs **when the create door's own `mentions is None` guard is
+      also removed**. Alone it does not: `sdk.create_point` refuses to forward
+      a `None` mention into the dedup fold, so the record survives by the
+      second guard. That layering is deliberate (two independent doors cannot
+      delete a record the caller did not restate) and it is why the SDK guard
+      has its own discriminating row —
+      `test_mention_write_11239.py::test_a_recommit_passing_mentions_none_does_not_clear_the_record`,
+      which REDs for that guard alone.
+    """
+    pid = "pt_11239_recommit_door"
+    content = "the claim keeps its mention across a re-commit"
+    first = _raw_payload(
+        0, session_id="s11239-recommit-1",
+        points=[_point(0, id=pid, content=content,
+                       mentions=[dict(_MENTION_RECORD)])])
+    assert _commit(client, first).status_code == 200
+
+    stored = _point_mentions(pid)
+    assert stored is not None, "the first commit did not store the record"
+
+    # The re-commit: same CONTENT, a DIFFERENT payload point id (the dedup
+    # path — the same id never reaches this write at all, see the docstring),
+    # and the payload says NOTHING about mentions (the cue-off capture — `[]`,
+    # which `_mention_props` turns into the empty list the old `or None` made
+    # destructive). A new session so it is a real commit, not an L1 replay.
+    second = _raw_payload(
+        0, session_id="s11239-recommit-2",
+        points=[_point(0, id="pt_11239_recommit_b", content=content,
+                       mentions=[])])
+    assert _commit(client, second).status_code == 200
+
+    after = _point_mentions(pid)
+    assert after == stored, (
+        "a re-commit whose payload carries no mentions CLEARED the stored "
+        "record — the door folded `mentions=None` onto the claim and a `None` "
+        "in a generic prop removes the property (DM1: no held item silently "
+        "dropped)")
+
+
+def test_the_supersede_leg_carries_its_mentions_to_the_superseding_point(client):
+    """The OTHER create leg of `_execute_commit_writes` (review finding 1).
+
+    The plain-create leg has two node read-backs above. The supersede leg —
+    the one that mints the successor of a REVISED claim — was covered only by
+    an `inspect.getsource` assertion in `tests/test_referentiality_11021.py`
+    that counts the assignment TEXT twice. Evaluated against the mutant
+    `if False and _mention_props:`, that assertion still passes (`_mention_props
+    = [` present, `point_props["mentions"] = _mention_props` counted 2, no
+    `mentions=_mention_props` kwarg), while the supersede leg carries nothing —
+    so a supersede commit dropped the record with every row green. This row
+    executes the leg.
+
+    Mutant this reds on: `if _mention_props:` → `if False and _mention_props:`
+    on the SUPERSEDE leg only (the plain-create rows stay green).
+    """
+    sdk = _team_sdk()
+    proj = sdk._get_proj()
+    # Seed the predecessor so the commit REVISES it (same shape as
+    # `test_supersede_branch_carries_e3_point_props`).
+    # SAME id as the payload point, DIFFERENT content: that pair is what makes
+    # `reconcile_payload` choose the supersede leg (the E3 row's shape).
+    pid = "pt_11239_supersede"
+    proj.g.query(
+        "MERGE (p:Point {id:$id}) SET p.pointKind='statement', "
+        "    p.content='the old 5K claim', p.is_operator=false, "
+        "    p.status='live', p.content_hash='seed' ",
+        params={"id": pid})
+    new_content = "my 5K best is 26:58"
+    raw = _raw_payload(0, session_id="s11239-supersede", points=[_point(
+        0, id=pid, content=new_content,
+        mentions=[dict(_MENTION_RECORD)])])
+    r = _commit(client, raw)
+    assert r.status_code == 200, r.text[:400]
+
+    # The leg RAN: the predecessor was superseded by this commit.
+    old = proj.g.query(
+        "MATCH (p:Point {id:$id}) RETURN p.status",
+        params={"id": pid}).result_set
+    assert old and old[0][0] == "superseded", (
+        "the supersede leg did not run, so this row would prove nothing "
+        f"(predecessor status {old[0][0] if old else 'missing'})")
+
+    rows = proj.g.query(
+        "MATCH (p:Point) WHERE p.content = $c AND p.mentions IS NOT NULL "
+        "RETURN p.id, p.mentions LIMIT 1",
+        params={"c": new_content}).result_set
+    assert rows, (
+        "the supersede commit accepted a `mentions` payload and the "
+        "SUPERSEDING Point holds none: the second create leg reads the record "
+        "and drops it (#11239)")
+    records = json.loads(rows[0][1])
+    assert records[0]["surface"] == "it", records
+    assert records[0]["kind_guess"] == "pronoun", records
+
+
+def test_the_merge_leg_drops_a_stated_record_and_that_is_declared(client):
+    """The MERGE leg of `_execute_commit_writes` drops a stated record (#11811).
+
+    Review P2 on PR #11795, measured. `reconcile_payload` picks `merge` for SAME
+    id + SAME content — the ordinary re-commit of an existing claim — and that
+    leg is a zero-budget bump (`SET p.updatedAt`): it writes no prop and journals
+    nothing. So a payload that DOES state `mentions` over an existing claim is
+    discarded, while the plain-create leg forwards the record for the same
+    semantic situation.
+
+    This row does not endorse the behaviour — it makes the drop DECLARED instead
+    of silent. `#11811` tracks the behaviour (a journalled write on the bump leg
+    needs the metering ruling); when that lands this row must FLIP, which is
+    exactly why it exists.
+    """
+    pid = "pt_11239_merge_leg"
+    content = "the claim is re-committed with identical content"
+    first = _raw_payload(0, session_id="s11239-merge-1",
+                         points=[_point(0, id=pid, content=content)])
+    assert _commit(client, first).status_code == 200
+    assert _point_mentions(pid) is None
+
+    # SAME id, SAME content, and THIS time the payload states a record.
+    second = _raw_payload(0, session_id="s11239-merge-2",
+                          points=[_point(0, id=pid, content=content,
+                                         mentions=[dict(_MENTION_RECORD)])])
+    r = _commit(client, second)
+    assert r.status_code == 200, r.text[:400]
+
+    assert _point_mentions(pid) is None, (
+        "the merge leg STORED the record: #11811's declared behaviour changed "
+        "— flip this row (and the comment on the leg) with it")

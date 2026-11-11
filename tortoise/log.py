@@ -1549,10 +1549,14 @@ class EventLog:
         # committed corpus, 435 B of a 9,176 B creating record and 383 B of its
         # 5,072 B vector alone. This is not a format change — JSON whitespace
         # is insignificant, `read_all`/`json.loads`/the strict restore reader
-        # all decode the compact line to the identical object — and it is
-        # DELIBERATELY its own commit so the byte delta is attributable
-        # separately from the float32 narrowing above (`_POSITION` already
-        # writes compact for the same reason).
+        # all decode the compact line to the identical object — and its delta is
+        # attributable by MEASUREMENT, not by the history: it landed in the SAME
+        # commit as the float32 narrowing above (the plan's proposed split would
+        # have left an intermediate red test), and the vector-less corpus rows
+        # pin it separately (`docs/evidence/11821-journal-encoding/`: every row
+        # that carries no vector at all moves 1.07–1.10×, which whitespace alone
+        # can cause). Do not "restore" a commit split that never existed.
+        # (`_POSITION` already writes compact for the same reason).
         record = json.dumps(event, ensure_ascii=False,
                             separators=(",", ":")) + "\n"
         # Resolved ONCE per journal (memoised), then handed to both locks: the

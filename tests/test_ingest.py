@@ -56,6 +56,21 @@ def _tmp(name):
     return os.path.join(tempfile.mkdtemp(prefix="tortoise_"), name)
 
 
+def _records_of_type(log_path, type_name):
+    """The journal's records whose envelope ``type`` is ``type_name``, PARSED.
+
+    #11821 P0 made the writer COMPACT (``separators=(",", ":")`` — one fewer
+    byte per separator on every line), so a substring match on the PRETTY form
+    ``'"type": "DocumentCreated"'`` stops finding anything. Two of these call
+    sites redded on it in CI; the third asserts ABSENCE and so went silently
+    vacuous, which is the worse half. JSON whitespace is insignificant, so the
+    type is read off the DECODED object where no writer's spacing can mask it.
+    """
+    lines = Path(log_path).read_text(encoding="utf-8").splitlines()
+    return [rec for rec in (json.loads(ln) for ln in lines if ln.strip())
+            if rec.get("type") == type_name]
+
+
 # #3717: the ingest CLI defaults BOTH output paths relative to the process CWD
 # (tortoise/ingest.py: `--log` events.jsonl, `--out` graph.html). A test that
 # omits one drops an untracked artifact in the CWD (the repo root), dirtying the
@@ -471,14 +486,7 @@ Content here.
             dl_mod.load_manifest = orig_load
             dl_mod.resolve_domain_from_path = orig_resolve
 
-        # #11821 P0: parse, do not substring-match — the journal writer is
-        # compact (`{"type":"DocumentCreated"`), and a spaced literal filter
-        # silently matches NOTHING (and makes a `assert not doc_created`
-        # vacuously true).
-        events = [json.loads(ln) for ln in
-                  Path(log_path).read_text(encoding="utf-8").splitlines()
-                  if ln.strip()]
-        doc_created = [e for e in events if e.get("type") == "DocumentCreated"]
+        doc_created = _records_of_type(log_path, "DocumentCreated")
         assert doc_created, "expected DocumentCreated event"
         ev = doc_created[0]
         assert ev["document_knowledge_domain"] == "capability", \
@@ -518,12 +526,7 @@ def test_main_document_metadata_emitted():
                             "--db", db, "--log", log_path, "--out", out]):
         _run_main(None)
 
-    # #11821 P0: parse, do not substring-match — the journal writer is compact
-    # (`{"type":"DocumentCreated"`), so a spaced literal filter matches NOTHING.
-    events = [json.loads(ln) for ln in
-              Path(log_path).read_text(encoding="utf-8").splitlines()
-              if ln.strip()]
-    doc_created = [e for e in events if e.get("type") == "DocumentCreated"]
+    doc_created = _records_of_type(log_path, "DocumentCreated")
     assert doc_created, "expected DocumentCreated event"
 
     ev = doc_created[0]
@@ -547,14 +550,7 @@ def test_main_transcript_no_document():
                             "--db", db, "--log", log_path, "--out", out]):
         _run_main(None)
 
-    # #11821 P0: parse, do not substring-match (see the sibling above). A spaced
-    # literal filter made this NEGATIVE assertion vacuously true once the writer
-    # went compact — a spurious DocumentCreated for a transcript would have
-    # passed silently.
-    events = [json.loads(ln) for ln in
-              Path(log_path).read_text(encoding="utf-8").splitlines()
-              if ln.strip()]
-    doc_created = [e for e in events if e.get("type") == "DocumentCreated"]
+    doc_created = _records_of_type(log_path, "DocumentCreated")
     assert not doc_created, "DocumentCreated should NOT be emitted for transcript"
     print("PASS test_main_transcript_no_document")
 

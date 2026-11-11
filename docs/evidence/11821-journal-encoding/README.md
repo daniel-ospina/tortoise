@@ -65,9 +65,11 @@ Per class — one record per type, the **fullest** one (the shape production wri
 | `PointRevised` (delta, no vector) | 196 B | 181 B | 15 B | 1.08× |
 | `EntityLinked` (delta, no vector) | 249 B | 228 B | 21 B | 1.09× |
 
-**The two halves of the delta are separately attributable, which is why they are two
-commits.** The vector rows above are dominated by the float32 change; the ~8 % on the
-rows that carry **no vector at all** (`PointRevised`, `EntityLinked`, and every other
+**The two halves of the delta are separately attributable, and the attribution is
+carried by the MEASUREMENT — not by the history: both changes landed in ONE commit.**
+The probe separates them by construction. The vector rows above are dominated by the
+float32 change; the ~8 % on the rows that carry **no vector at all** (`PointRevised`,
+`EntityLinked`, and every other
 1.07–1.10× row in `measurement.txt`) is the **compact separators** alone — `", "` /
 `": "` cost one byte per separator, measured at 435 B of a 9,176 B record and 383 B of
 its 5,072 B vector.
@@ -91,9 +93,13 @@ the embedder's own (`struct`-verified per element by
 ## The promise this does NOT touch
 
 A **caller-owned** (`embedding_verbatim`) or **preserved** (`embedding_preserved`) vector
-is never narrowed — it is declared `f64` and keeps its raw form (`#5004` round-7:
-*"a CALLER-owned vector must keep its RAW form. `vecf32()` is the ONE form it must not
-take"*). The width marker rides the payload from this change — not from P2 — so that
+is never narrowed — it is declared `f64` and keeps its raw form (`#5004` round-7: the
+graph-only id's only restorer is `projection.FalkorProjection._rebuild_all_replay`'s
+`embedding_verbatim` guard — *"a CALLER-owned vector must keep its RAW form. `vecf32()` is the ONE form it
+must not take"* — and the flag picks the storage form in
+`projection/entities.py::_upsert_point_props`'s
+`CASE WHEN $embedding_verbatim THEN $embedding ELSE vecf32($embedding)`, set by
+`TortoiseSDK.create_point`'s `_create_map["embedding_verbatim"]`). The width marker rides the payload from this change — not from P2 — so that
 population is **named** from the first PR rather than narrowed silently by a later one.
 `tests/test_11821_journal_vector_width.py::test_a_verbatim_vector_is_never_narrowed` reds
 if it is ever narrowed, and its fixture is deliberately off the float32 grid so the
