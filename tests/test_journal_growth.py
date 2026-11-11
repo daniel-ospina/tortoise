@@ -560,7 +560,7 @@ def test_probe_pins_its_published_outputs(
     # 2026-10-17 block is retained as the historical measurement, and
     # `docs/evidence/11821-journal-encoding/` carries the re-measurement and the
     # per-class delta. `line_bytes` keeps the PRE-P0 separators (spaced), so
-    # these numbers sit ~431 B above what the live writer emits — stated here
+    # these numbers sit 437 B above what the live writer emits (5,860 − 5,423) — stated here
     # because the two are easy to confuse.
     plain_point = by_type["PointAdded"]
     stamped_point = probe.stamp(plain_point, vec)

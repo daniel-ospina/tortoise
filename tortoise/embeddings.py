@@ -367,7 +367,7 @@ def shortest_float32_vector(vector: list[float]) -> list[float] | None:
 
     * the same float32 bits as the input (``struct``/``vecf32`` equality), and
     * a decimal text ~44 % shorter (measured on the pinned 384-d corpus:
-      8,414 B → 5,072 B, 21.9 → 13.2 chars/float at the writer's separators).
+      8,414 B → 4,689 B, 21.9 → 12.2 chars/float at the writer's COMPACT separators).
 
     ⛔ **NOT interchangeable with `stored_form.narrow_to_stored_width`**, and a
     reader must not swap one for the other. Both agree on the float32; they
@@ -390,8 +390,8 @@ def shortest_float32_vector(vector: list[float]) -> list[float] | None:
       silently lose a unit, ``1e-50``) → the cast rounds somebody's digits away.
 
     A value that IS a float32 subnormal (``float(np.float32(1e-45))``) is on the
-    grid and DOES narrow; the decimal literal ``1e-45`` is not a float32 at all
-    (its nearest float32 is 40 % away) and does not.
+    grid and DOES narrow; the literal ``1e-45`` (and ``0.1``, whose widening is
+    ``0.10000000149011612``) is not, so hand over the widening, not the literal.
 
     ⛔ THE GRID CHECK IS THE OWNERSHIP TEST, and that is why it is primary. A
     vector a caller supplied reaches this seam WITHOUT `embedding_verbatim` on at

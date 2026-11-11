@@ -716,9 +716,9 @@ def _as_f32(vec: list) -> list | None:
     comparison of a faithful replay still fails. Compare at the stored width:
     `narrow_to_stored_width(journal 0.1)` → `0.10000000149011612` == the node.
 
-    A caller-owned (`embedding_verbatim`) or preserved vector is not narrowed
-    on either side (#11821), so it compares exactly and this step is a no-op
-    for it.
+    A caller-owned (`embedding_verbatim`) or preserved vector is still narrowed
+    by `_as_f32` (no marker is read), so a faithful pair compares equal only
+    because BOTH sides round identically — not because the comparison is exact.
 
     #8615: the rounding itself lives in `tortoise/stored_form.py` — ONE spelling
     shared with the writer (`cache_projection.node_statement`) and with the
