@@ -13538,34 +13538,27 @@ class TortoiseSDK:
             record["eventKind"] = event_kind
         if embedding is not None:
             record["embedding"] = embedding
-            # #11821 P0: this door is the FOURTH producer of a journal payload
-            # that carries a vector (a session `:Event`, whose vector is
+            # #11821 P0: this door is a producer of a journal payload that
+            # carries a vector (a session `:Event`, whose vector is
             # `_session_embedding`'s — our embedder's float32 — or a value read
-            # back off the node), and it does not pass through
-            # `_emit_event`'s stamp. Without this the payload would be a
-            # vector-bearing PRODUCER this seam would otherwise leave with no
-            # declared width, while the seam's whole contract is that every
-            # journalled vector says what width it was written at.
-            # ⚠️ NOT "the one producer", and not "the one record" (#11835
-            # review F1). Two other live producers journal a vector through
-            # `_emit_event`'s `id=`/`**extra` branch — `_session_event_write`
-            # and `_embedding_repair_attempt`, both `EventRecorded` — and
-            # `update_point` splats a caller vector onto a `PointRevised`
-            # record's TOP level. All three carried `embedding` and no
-            # `embedding_width` before `_emit_event` stamped its `extra` branch;
-            # they are now covered there (one stamp for every payload that
-            # meets the branch), so this door's stamp is not the population's
-            # edge any more. `creating=False`
-            # stamps no identity, and that arm DROPS identity keys the props
-            # already carried (measured: `embedding_model`/`embedding_revision`/
-            # `embedding_text_hash` are popped) — a caller-supplied one is now
-            # absent. `_META_KEYS` skips them, so no node/replay change follows.
-            try:
-                from .embeddings import stamp_journal_embedding
-            except Exception:  # noqa: BLE001, RUF100 — #5148: never fail a write on an import
-                stamp_journal_embedding = None
-            if stamp_journal_embedding is not None:
-                record = stamp_journal_embedding(record, creating=False)
+            # back off the node). ⛔ It does NOT stamp here, and must not: the
+            # seam's `creating=False` stamp lives ONE layer down, in
+            # `_emit_event`'s `id=`/`**extra` branch (`if "embedding" in
+            # event:`), which is where this payload actually lands.
+            # `_journal_entity_event` hands the record to `_emit_event` with
+            # `**_journal_record_payload(event)` ~130 lines above, so a stamp
+            # HERE is dead code — its value is overwritten by the same seam a
+            # moment later (#11835 review finding 2, measured: deleting this
+            # block reddened no row anywhere; deleting the emit branch's stamp
+            # reddened two). One stamp, one home: the emit branch owns every
+            # payload that meets it — this door's, `_session_event_write`'s,
+            # `_embedding_repair_attempt`'s and `update_point`'s top-level
+            # caller vector alike.
+            # ⚠️ `creating=False` (the emit branch's) stamps no identity, and
+            # that arm DROPS identity keys the props already carried (measured:
+            # `embedding_model`/`embedding_revision`/`embedding_text_hash` are
+            # popped) — a caller-supplied one is now absent. `_META_KEYS` skips
+            # them, so no node/replay change follows.
         built = {"type": "EventRecorded", "id": event_id, **record}
         # ── #5475: the record door is a WRITE door ──
         # The payload carries kind spellings straight from frontmatter --

@@ -606,10 +606,15 @@ def test_the_turn_snapshot_contract_admits_the_marker():
 def _door_record(tmp_path, *, embedding, event_id="evt-11821"):
     """Drive the REAL door and return the record it journalled.
 
-    ``sdk._journal_event_raw_write`` builds its own payload (it does not pass
-    through `_emit_event`'s stamp), so its width declaration is a SEPARATE
-    producer — the review's finding was that deleting that block reddened
-    nothing, anywhere.
+    ``sdk._journal_event_raw_write`` builds its own payload; the seam's width
+    declaration for it happens ONE layer down, in `_emit_event`'s
+    `id=`/`**extra` branch, because `_journal_entity_event` hands that payload
+    to `_emit_event` (~130 lines above). #11835 review finding 2: an earlier
+    revision of this file claimed the door "does not pass through
+    `_emit_event`'s stamp" and gave it its own stamp — which was dead code (its
+    output overwritten by the emit branch), and the pin below could not fail
+    for the reason its docstring gave. The door stamp is gone; the pin now
+    asserts the end-to-end behaviour an emit-branch mutation really breaks.
 
     ``graph=None``: the props here name no pack kind, so `#5475`'s gate takes
     its no-pack early return (`payload_names_pack(record)` is empty) and never
@@ -643,25 +648,24 @@ def test_the_event_recorded_door_declares_its_width(tmp_path):
     """#11821 P0's FOURTH producer: `sdk._journal_event_raw_write`.
 
     A session `:Event`'s vector is `_session_embedding`'s — our embedder's
-    float32 — or a value read back off the node, and this door builds its
-    payload from `props` instead of going through `_emit_event`'s stamp. Delete
-    the stamp block at `sdk.py::_journal_event_raw_write` and the whole suite
-    stayed green while the door silently journalled an UNDECLARED-width vector
-    — a vector-bearing producer the seam's contract ("every journalled vector
-    says what width it was written at") would not cover, and the population
-    P2's base64 migration would have to guess about.
+    float32 — or a value read back off the node, and it reaches the journal
+    through `_journal_entity_event` → `_emit_event`'s `id=`/`**extra` branch.
 
-    ⚠️ This door is not the population's EDGE (#11835 review F1). Two other
-    live producers journal a vector through `_emit_event`'s `id=`/`**extra`
-    branch — `_session_event_write` and `_embedding_repair_attempt`, both
-    `EventRecorded` — and `update_point` splats a caller vector onto a
-    `PointRevised` record's TOP level. All three used to carry `embedding` and
-    NO `embedding_width` (measured: 8,455 chars and the marker ABSENT when
-    driven through `_session_event_write`); they are covered now by the stamp on
-    that branch, pinned in
-    `test_the_emit_event_extra_branch_declares_its_width` below.
+    #11835 review finding 2: this door used to carry its OWN stamp, whose
+    comment said the payload "does not pass through `_emit_event`'s stamp" —
+    false, and the stamp was dead code. Measured at `d81169a9` (the reviewer's
+    mutations, each reverted):
 
-    So both halves are asserted — the DECLARATION and the NARROWING — because a
+      * delete the DOOR's stamp        → ``31 passed`` — nothing reds;
+      * delete the EMIT BRANCH's stamp → ``2 failed``.
+
+    So the emit branch owns the door. The door's stamp is deleted (one stamp,
+    one home); this row is now the end-to-end behaviour — delete the emit
+    branch's stamp and it reds, which is what it always claimed to pin. The
+    sibling row that pins the door's own hand-off to that branch is
+    `test_the_event_recorded_door_hands_its_payload_to_the_emit_stamp`.
+
+    Both halves are asserted — the DECLARATION and the NARROWING — because a
     marker written without the values it describes would be a lie the next
     reader acts on.
     """
@@ -876,3 +880,142 @@ def test_add_point_does_not_keep_the_servers_width_over_an_f32_text_caller_vecto
         "a caller vector in shortest-float32 text was declared `f32` — the "
         "server's stale marker was honoured over the values (the pop in "
         "`api.add_point` is what must remove it)")
+
+
+# ── 10. the OTHER journal door: `EventAPI._emit` ─────────────────────────────
+#
+# #11835 review finding 1 (P2). `EventAPI.add_point` stamps its vector AND
+# refuses a caller-named marker; `_emit` — the funnel `add_event(**extra)` and
+# `emit_belief(**payload)` splat into — did neither, so a NEW record minted
+# there carried `embedding` with `embedding_width` ABSENT (a state
+# `JOURNAL_VECTOR_WIDTH_KEY` reserves for PRE-CHANGE / FOREIGN records) and
+# accepted a caller's `f32` beside an off-grid float64 vector (a marker that
+# LIES). Measured at the pre-fix head, driving `EventAPI(log,
+# initiated_by="extractor")` against a temp journal: `evt-1` (a float32-grid
+# vector) journalled with `embedding_width` ABSENT, `evt-2` (a full float64
+# vector + a caller `f32`) journalled with `embedding_width: f32`.
+#
+# Scope honesty, stated the way the review stated it: no in-tree caller passes a
+# vector through this door today (`ingest.py` is the only caller and passes
+# none), so this closed an ENUMERATION hole rather than a live mis-journal — the
+# class this repo treats as the real defect (a declared invariant a live door
+# does not enforce).
+
+
+def _emit_door_record(tmp_path, **extra):
+    """Drive the REAL `EventAPI.add_event` door and return the record written.
+
+    `projection=None` keeps this hermetic (no DB, no graph) and is still the
+    production shape for the extraction/ingest lanes: the `#5475` pack gate
+    abstains on a projection-less lane by design.
+    """
+    from tortoise.api import EventAPI
+
+    events = tmp_path / "emit-door"
+    events.mkdir(exist_ok=True)  # the refusal row drives this helper twice
+    log = EventLog(events / "events.jsonl")
+    api = EventAPI(log, initiated_by="extractor", projection=None)
+    api.add_event("evt-11821-emit", "session", **extra)
+
+    records = [json.loads(ln) for ln in
+               (events / "events.jsonl").read_text(encoding="utf-8").splitlines()
+               if ln.strip()]
+    assert len(records) == 1, f"expected exactly one record, got {records!r}"
+    assert records[0]["type"] == "EventRecorded"
+    return records[0]
+
+
+def test_the_eventapi_emit_door_declares_its_width(tmp_path):
+    """A vector that reaches `_emit` must declare its width — no new silent row.
+
+    Measured (mutation): delete the `if "embedding" in event:` stamp in
+    `tortoise/api.py::EventAPI._emit` and this reds with `KeyError:
+    'embedding_width'`; before the fix it redded nothing, because no suite drove
+    this door with a vector.
+    """
+    widened = _vector()
+    record = _emit_door_record(tmp_path, embedding=list(widened))
+
+    assert record[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F32, (
+        "EventAPI._emit journalled a vector with no width declared — a NEW "
+        "record whose marker is absent, which the seam reserves for a "
+        "pre-change/foreign one")
+    assert _f32_bits(record["embedding"]) == _f32_bits(widened)
+    assert len(_text(record["embedding"])) < len(_text(widened)), (
+        "the door's vector must be stored at the embedder's float32, not the "
+        "widened float64 repr the seam exists to remove")
+
+
+def test_the_eventapi_emit_door_declares_f64_for_a_vector_it_cannot_narrow(
+        tmp_path):
+    """The other half: this door must not claim `f32` over values it did not get.
+
+    A vector with an element float32 cannot represent is journalled UNTOUCHED
+    and says `f64`, so a later width/format migration cannot narrow a population
+    that was never declared as foreign. (Pre-fix the marker was ABSENT here, so
+    this row reds on the assertion, not on a KeyError.)
+    """
+    source = [1e-300, 0.5, -1e-300]
+    record = _emit_door_record(tmp_path, embedding=list(source))
+
+    assert record["embedding"] == source, "the values must be left ALONE"
+    assert record[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64
+
+
+def test_the_eventapi_emit_door_refuses_a_caller_named_marker(tmp_path):
+    """The marker is writer-minted at this door too — `add_point`'s rule, one over.
+
+    Two shapes, both refused BEFORE the journal append: (1) a bare marker with
+    no vector for it to describe; (2) the measured "marker lies" form — a
+    full-float64 off-grid vector beside a caller's `f32`. Pre-fix both were
+    ACCEPTED and (2) journalled a record declaring `f32` over values that are
+    not float32.
+    """
+    with pytest.raises(ValueError):
+        _emit_door_record(tmp_path, embedding_width=JOURNAL_VECTOR_WIDTH_F32)
+
+    off_grid = [0.1234567890123456, 2.718281828459045]
+    with pytest.raises(ValueError):
+        _emit_door_record(tmp_path, embedding=off_grid,
+                          embedding_width=JOURNAL_VECTOR_WIDTH_F32)
+
+
+def test_the_event_recorded_door_hands_its_payload_to_the_emit_stamp(tmp_path):
+    """One stamp, one home — the door must NOT carry a stamp of its own.
+
+    #11835 review finding 2's remedy, pinned from the other side: the door's
+    payload reaches `_emit_event`'s `id=`/`**extra` branch UNSTAMPED, so the
+    branch's stamp is the only one that decides the width. Re-adding a stamp at
+    `sdk._journal_event_raw_write` reds this row (the marker would arrive
+    pre-set), which is exactly the dead block the finding removed — its output
+    was overwritten a moment later, so no end-to-end assertion could see it.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    journal = tmp_path / "handoff.jsonl"
+    sdk = TortoiseSDK(str(tmp_path / "handoff.db"), event_log_path=str(journal))
+    seen = {}
+
+    def _capture(type_, payload=None, **kwargs):
+        seen["type"] = type_
+        seen.update(kwargs)
+        return True
+
+    vector = [0.5, 0.25]
+    try:
+        sdk._emit_event = _capture
+        committed = sdk._journal_event_raw_write(
+            "evt-11821-handoff", {"content": "a session event"}, graph=None,
+            embedding=list(vector))
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+    assert committed is True
+    assert seen.get("type") == "EventRecorded"
+    assert seen.get("embedding") == vector, (
+        "the door must HAND the vector to the emit branch, not consume it")
+    assert JOURNAL_VECTOR_WIDTH_KEY not in seen, (
+        "the door pre-stamped the payload — its width declaration must live in "
+        "exactly one place (`_emit_event`'s `id=`/`**extra` branch), or the "
+        "dead second stamp is back and no end-to-end pin can see it")

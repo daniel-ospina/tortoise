@@ -32,6 +32,37 @@ from .quota import refuse_document_writer_demotion
 
 logger = logging.getLogger(__name__)
 
+#: The journal's SERVER-MANAGED embedding fields, in ONE spelling.
+#: #11835 review finding 1 (P2): `_emit` is a journal door in its own right, and
+#: it used to enforce neither half of the vector contract its own sibling
+#: `add_point` does — it did not DECLARE the width of a vector that reached the
+#: envelope, and it did not refuse a caller-supplied marker.
+#:
+#: ⛔ Two harms, and the second is the one the seam's contract forbids. (1) A new
+#: record built through `add_event(**extra)` / `emit_belief(**payload)` carried
+#: an `embedding` with `embedding_width` ABSENT, and `embeddings.py::
+#: JOURNAL_VECTOR_WIDTH_KEY` reserves *absent* for PRE-CHANGE / FOREIGN records
+#: — so the marker could no longer be read as "this record predates #11821".
+#: (2) A caller could pass `embedding_width="f32"` beside an off-grid float64
+#: vector and the marker LIED, because no stamp ran here to re-decide it. It is
+#: the door a later width/base64 migration would trust, which is exactly the
+#: population #5004 round-7 says must never be narrowed silently.
+#:
+#: The keys are the VECTOR's description — width, storage form, and the origin
+#: attestation — none of which a caller can mint: they are server-derived here
+#: (`stamp_journal_embedding`) exactly as they are in `add_point` and in
+#: `sdk._sanitize_props`. `embeddingText` is NOT in this set: it is the enriched
+#: TEXT (a payload field, not a marker), and `add_point` refuses it with its own
+#: reason.
+_SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
+    "embedding_width",
+    "embedding_verbatim",
+    "embedding_preserved",
+    "embedding_model",
+    "embedding_revision",
+    "embedding_text_hash",
+})
+
 
 def provenance(source_id, span, quote, *, speaker=None, extracted_by="mock@0"):
     return {
@@ -212,6 +243,45 @@ class EventAPI:
         # caller change required for existing lanes.
         if actor is not None:
             event["actor_user_id"] = actor
+        # #11835 review finding 1 (P2): this funnel is the seam's OWN journal
+        # door, and it enforced neither half of the vector contract. Its sibling
+        # `add_point` does both — it stamps (`stamp_journal_embedding`) and it
+        # refuses a forged marker (`_forged` → `ValueError`); `_emit` had
+        # neither, so `add_event(**extra)` / `emit_belief(**payload)` minted a
+        # NEW record with the marker absent (a state the contract reserves for
+        # PRE-CHANGE / FOREIGN records) and accepted a caller's `f32` over an
+        # off-grid float64 vector (a marker that LIES — measured, `evt-2`).
+        #
+        # ⛔ REFUSAL runs before the stamp and both run before the commit point
+        # below (`self.log.append`), for `_refuse_unapproved_kinds`' own reason:
+        # a refusal raised after the append would leave a record the replay
+        # folds. The marker is not a caller's to set — it DESCRIBES the values,
+        # so a caller that supplies one is asserting a width nothing verified.
+        _forged_markers = sorted(set(payload) & _SERVER_MANAGED_EMBEDDING_KEYS)
+        if _forged_markers:
+            raise ValueError(
+                f"{_forged_markers} are server-managed journal fields (embedding "
+                f"width / storage form / origin) and cannot be set via "
+                f"{type_}'s payload")
+        # ⛔ THE STAMP covers the vector THIS door carries — top-level
+        # `embedding` only. The record-shaped doors nest their payload
+        # (`add_point` emits `point=p`, `add_operator` the same), so their
+        # vector is stamped by the door that built it and is not touched here.
+        # `creating=False` because this door computed no vector from content
+        # riding with it: the seam still decides every arm from the values —
+        # ours narrows and declares `f32`, an off-grid / unrepresentable / a
+        # verbatim-or-preserved vector keeps its raw form and declares `f64`.
+        if "embedding" in event:
+            try:
+                from .embeddings import stamp_journal_embedding
+            except Exception:  # noqa: BLE001, RUF100 — #5148: never fail a write on an import
+                # Same posture as `add_point`: an unimportable seam must not
+                # fail a WRITE. The key is present, so PRESENCE IS OWNERSHIP
+                # still holds and the replay cannot invent a vector; only the
+                # normalisation and the width declaration are lost.
+                stamp_journal_embedding = None
+            if stamp_journal_embedding is not None:
+                event = stamp_journal_embedding(event, creating=False)
         # #5475 (residual): the approved-pack gate, BEFORE the commit point.
         # Every EventAPI mutation funnels through here, so gating here is what
         # closes the seam for the doors it has today AND for a door added
@@ -485,53 +555,52 @@ class EventAPI:
         # `embedding_preserved`, which makes `stamp_journal_embedding` skip the
         # model/text-hash attestation that R1 exists to keep. Reject here for
         # the same reason the SDK and MCP boundaries do.
-        _forged = sorted(set(fields) &
-                         {"embedding_verbatim", "embedding_preserved",
-                          # #5004 round-8: the IDENTITY keys too. They never
-                          # become node properties (`_POINT_HANDLED`), so this
-                          # is not a parity break — but the attestation itself
-                          # is forgeable: a caller-written `embedding_model`
-                          # rides the journal and makes the replay report a
-                          # model change that never happened.
-                          "embedding_model", "embedding_revision",
-                          "embedding_text_hash",
-                          # #11821 P0: the vector-WIDTH marker is writer-minted
-                          # (see the comment above). A caller-set value would
-                          # describe a width the payload's text does not have,
-                          # and it never becomes a node property — so accepting
-                          # it would be a forged journal FACT with no node to
-                          # correct it on.
-                          "embedding_width",
-                          # #8488 scope 1: the enriched text is writer-minted
-                          # and no `PointRevised` arm replays it — a caller-set
-                          # value would be a live-only write a rebuild drops,
-                          # and would forge the #4194 text↔vector identity.
-                          "embeddingText",
-                          # #5256: the `extractedFrom` read-version anchor is
-                          # server-derived (resolved from the :Source below).
-                          # Accepting it would let this non-SDK seam forge the
-                          # provenance record, and the same reason the SDK and
-                          # MCP boundaries reject it applies here.
-                          # #7704: `extractedFromAll` joins them — it is the
-                          # FOLD's record of the ref set, and
-                          # `_upsert_point_edges`/`_point_all_source_refs`
-                          # re-derive the `extractedFrom` edges from it on
-                          # replay, so a caller-supplied value puts the
-                          # payload's edges AHEAD of the :Source resolution
-                          # this seam performs (live wires the resolved refs,
-                          # the replay wires the caller's array too). This
-                          # seam is the one producer that never reaches
-                          # `_sanitize_props`, so the entry is the ONLY guard
-                          # on the key here — the sibling keys are registered
-                          # at every home for the same reason.
-                          "sourceVersion", "sourceVersions",
-                          "sourceVersionTransit", "extractedFromAll",
-                          # #10010: the FOLD's record FLAG — `_fold_source_evidence`
-                          # mints it on the snapshot it re-emits, and the replay's
-                          # recreate anchor reads it to tell a fold from a
-                          # creation. Server-minted like the keys above, so a
-                          # caller value is refused at this seam too.
-                          "evidence_fold"})
+        # (`_SERVER_MANAGED_EMBEDDING_KEYS` is the vector's own description —
+        # width, storage form, origin attestation — and the ONE spelling of that
+        # set: `_emit` refuses the same keys a few hundred lines up, so a caller
+        # cannot reach the journal with a marker through the door that is not
+        # `add_point`. #5004 round-8: the IDENTITY keys are in it because they
+        # never become node properties (`_POINT_HANDLED`), so this is not a
+        # parity break — but the attestation itself is forgeable: a
+        # caller-written `embedding_model` rides the journal and makes the
+        # replay report a model change that never happened. #11821 P0: the
+        # vector-WIDTH marker is writer-minted too. A caller-set value would
+        # describe a width the payload's text does not have, and it never
+        # becomes a node property — so accepting it would be a forged journal
+        # FACT with no node to correct it on.)
+        _forged_keys = _SERVER_MANAGED_EMBEDDING_KEYS | {
+            # #8488 scope 1: the enriched text is writer-minted
+            # and no `PointRevised` arm replays it — a caller-set
+            # value would be a live-only write a rebuild drops,
+            # and would forge the #4194 text↔vector identity.
+            "embeddingText",
+            # #5256: the `extractedFrom` read-version anchor is
+            # server-derived (resolved from the :Source below).
+            # Accepting it would let this non-SDK seam forge the
+            # provenance record, and the same reason the SDK and
+            # MCP boundaries reject it applies here.
+            # #7704: `extractedFromAll` joins them — it is the
+            # FOLD's record of the ref set, and
+            # `_upsert_point_edges`/`_point_all_source_refs`
+            # re-derive the `extractedFrom` edges from it on
+            # replay, so a caller-supplied value puts the
+            # payload's edges AHEAD of the :Source resolution
+            # this seam performs (live wires the resolved refs,
+            # the replay wires the caller's array too). This
+            # seam is the one producer that never reaches
+            # `_sanitize_props`, so the entry is the ONLY guard
+            # on the key here — the sibling keys are registered
+            # at every home for the same reason.
+            "sourceVersion", "sourceVersions",
+            "sourceVersionTransit", "extractedFromAll",
+            # #10010: the FOLD's record FLAG — `_fold_source_evidence`
+            # mints it on the snapshot it re-emits, and the replay's
+            # recreate anchor reads it to tell a fold from a
+            # creation. Server-minted like the keys above, so a
+            # caller value is refused at this seam too.
+            "evidence_fold",
+        }
+        _forged = sorted(set(fields) & _forged_keys)
         if _forged:
             raise ValueError(
                 f"{_forged} are server-managed journal fields (embedding "
