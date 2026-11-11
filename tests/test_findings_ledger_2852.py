@@ -794,6 +794,55 @@ def test_a_letter_stated_two_different_ways_is_rejected(tmp_path, monkeypatch):
     assert any("assigns a different verdict" in p for p in problems), problems
 
 
+def test_a_class_first_group_with_a_later_mention_is_not_a_swap(tmp_path, monkeypatch):
+    """FAILS if the agreement rule turns a legitimate class-first tally red.
+
+    The first attempt at "every mention must agree" held SETS inside the two
+    attribution maps, and that reds correct prose: a class-first group
+    (`**SUPERSEDED-BY-FIX**: (c), (d) and (g)`) makes the letters-first map's region
+    span the preceding group, so the same letters pick up a second verdict that the
+    sentence never asserts (measured: class-first prose that was clean on the parent
+    commit went RED). The rule is additive and singleton-only for exactly this
+    reason — a mention is trusted on its own only when one letter sits beside one
+    verdict.
+    """
+    original = (
+        "**(c)**, **(d)** and **(g)** are **SUPERSEDED-BY-FIX**, **(e)** is\n"
+        "**ADOPTED**, and **(b)**, **(k)** and **(l)** are **DRIFTED**."
+    )
+    legit = (
+        "**SUPERSEDED-BY-FIX**: **(c)**, **(d)** and **(g)**; **ADOPTED**: **(e)**; "
+        "**DRIFTED**: **(b)**, **(k)** and **(l)**, while **(e)** was the one the "
+        "rewrite adopted."
+    )
+    _mutated(tmp_path, monkeypatch, lambda t: t.replace(original, legit, 1))
+    assert not any(
+        "assigns a different verdict" in p for p in _doc_problems()
+    ), "a legitimate class-first tally with a later mention red the guard"
+
+
+def test_a_contradicting_mention_before_the_group_is_rejected(tmp_path, monkeypatch):
+    """FAILS if a contradicting mention outside the adopted map is dropped.
+
+    The adopted map is chosen whole, so a mention that lives in the OTHER reading was
+    silently discarded: `(e) is **DRIFTED**` followed by a class-first group that says
+    `**ADOPTED**: (e)` returned clean while the sentence asserted both (measured). The
+    singleton layer compares every unambiguous mention against the adopted map, so
+    the contradiction surfaces.
+    """
+    original = (
+        "**(c)**, **(d)** and **(g)** are **SUPERSEDED-BY-FIX**, **(e)** is\n"
+        "**ADOPTED**, and **(b)**, **(k)** and **(l)** are **DRIFTED**."
+    )
+    contradictory = (
+        "**(e)** is **DRIFTED**, **SUPERSEDED-BY-FIX**: **(c)**, **(d)** and **(g)**; "
+        "**ADOPTED**: **(e)**; **DRIFTED**: **(b)**, **(k)** and **(l)**."
+    )
+    _mutated(tmp_path, monkeypatch, lambda t: t.replace(original, contradictory, 1))
+    problems = _doc_problems()
+    assert any("assigns a different verdict" in p for p in problems), problems
+
+
 def test_citation_to_missing_file_is_rejected(tmp_path, monkeypatch):
     """FAILS when a `path:line` names a file that is not in the tree.
 
