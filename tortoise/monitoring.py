@@ -3386,7 +3386,19 @@ async def run_control_plane_call(fn, *, op: str,
             future_exc = (future.exception()
                           if future.done() and not future.cancelled() else None)
             if future_exc is not None and not isinstance(future_exc, _WorkerBacklogFull):
-                raise
+                # ⛔ ``raise future_exc``, NOT a bare ``raise`` (#11961). A bare
+                # ``raise`` here re-raises the TimeoutError THIS ARM CAUGHT — the
+                # bound's expiry — so a domain failure that merely LANDED as the
+                # bound fired is reported as "our wait expired". The class is
+                # identical, so nothing upstream can tell them apart, and
+                # ``_cp_offload`` (which maps only ``ControlPlaneOffloadError``)
+                # lets it escape as a bare unlabelled 500, skipping the route's
+                # own arms (measured: ``/v1/search``'s ``_ProjectionOpenError``
+                # became an unhandled ``TimeoutError``). The future is the only
+                # witness that the work RAN, so it must supply what propagates.
+                # ``from None``: the bound's expiry did not CAUSE this failure,
+                # it merely coincided with it (B904, and the honest chain).
+                raise future_exc from None
             reason = ("pool backlog full" if isinstance(future_exc, _WorkerBacklogFull)
                       else f"exceeded its {bound}s bound")
             if not future.done():
@@ -3477,7 +3489,12 @@ async def reawait_control_plane_call(future, *, op: str, timeout: float,
                           if future.done() and not future.cancelled() else None)
             if future_exc is not None and not isinstance(
                     future_exc, _WorkerBacklogFull):
-                raise
+                # ⛔ ``raise future_exc``, not a bare ``raise`` — the same defect
+                # as the sibling seam's (#11961). The arm above proves the
+                # FUTURE is the witness that the work RAN and failed on its own;
+                # a bare ``raise`` propagates the bound's TimeoutError instead,
+                # which is a claim about OUR wait, not about the work.
+                raise future_exc from None
             if not future.done():
                 future.add_done_callback(_log_abandoned_outcome(op))
             outcome = "bound_miss_running"

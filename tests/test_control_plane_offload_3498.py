@@ -390,6 +390,71 @@ def test_a_callable_raised_timeout_error_is_a_domain_error():
     )
 
 
+def _stall_the_loop_past(coro_factory, stall_s=0.2):
+    """Run ``coro_factory()``, stalling the loop so the bound fires LAST.
+
+    The bound's expiry and the submission's failure are two events on two
+    threads. A synchronous ``time.sleep`` on the loop thread after the call is
+    inside its wait makes the ordering deterministic: the worker has FINISHED
+    (and stored its exception) before the loop can run the bound's timer. That
+    is the CI-observed shape — a loaded runner deschedules the loop past a
+    short bound (measured on ``/v1/search`` in `test (h)` at PR #11936) —
+    reproduced here without needing load.
+    """
+    async def _run():
+        task = asyncio.ensure_future(coro_factory())
+        await asyncio.sleep(0)   # submit, then enter the wait bound
+        time.sleep(stall_s)      # the loop cannot run the timer until this returns
+        return await task
+
+    return _run()
+
+
+def test_a_domain_failure_that_lands_with_the_bound_is_not_a_bound_miss():
+    """The future is the third witness; a bare ``raise`` loses it (#11961).
+
+    ``run_control_plane_call`` disambiguates THREE ``TimeoutError``s by
+    inspecting the future, but a bare ``raise`` in the ``except TimeoutError``
+    arm re-raises the BOUND's expiry — the one this coroutine MINTS — so a
+    domain failure that merely landed as the bound fired is reported as
+    "exceeded its 0.05s bound". The class is identical, so nothing upstream can
+    tell the two apart: ``_cp_offload`` maps only ``ControlPlaneOffloadError``,
+    so the mislabelled error escapes as a bare unlabelled 500 and skips every
+    arm the route declares (the measured case: ``/v1/search``'s
+    ``_ProjectionOpenError`` reached the client as an unhandled
+    ``TimeoutError``, reddening `test (h)` on PR #11936).
+
+    RED on the pre-fix code for the right reason: the assertion fails with the
+    bound's ``TimeoutError`` instead of the domain ``ValueError``.
+    """
+    def _boom():
+        raise ValueError("store exploded")
+
+    with pytest.raises(ValueError, match="store exploded"):
+        asyncio.run(_stall_the_loop_past(
+            lambda: monitoring.run_control_plane_call(
+                _boom, op="domain-race", timeout=0.05)))
+
+
+def test_a_domain_failure_that_lands_with_a_re_armed_bound_is_not_a_bound_miss():
+    """The same witness rule on the re-await seam (#11961).
+
+    ``reawait_control_plane_call`` carries the same discrimination — and the
+    same bare ``raise`` — so a re-awaited read whose callable failed on its own
+    while the re-armed bound expired reported a ``bound_miss_running``
+    saturation event for a pool that was never saturated.
+    """
+    def _boom():
+        raise ValueError("store exploded")
+
+    future = monitoring.control_plane_worker("read").submit(_boom)
+
+    with pytest.raises(ValueError, match="store exploded"):
+        asyncio.run(_stall_the_loop_past(
+            lambda: monitoring.reawait_control_plane_call(
+                future, op="reawait-domain-race", timeout=0.05)))
+
+
 def test_a_cancelled_await_is_recorded_as_cancelled():
     """#5840: cancellation is a terminal state and is recorded as its own.
 
