@@ -873,6 +873,12 @@ def test_the_readme_documents_every_reason_the_probe_exits_two():
     assert "PROBE-WRITE" in doc.group(0), (
         "the probe's `--help` exit contract does not name the write arm: `2` reads as usage "
         "only, which sends the operator back to the arguments")
+    # …and it must be filed UNDER `2`, not merely mentioned: the same polarity the README half
+    # asserts. Without this, moving the arm into the `3` clause ("the graph was unreachable")
+    # left the pin green — a misfiled arm is the same misdiagnosis one code over (round 6).
+    arms = doc.group(0).split("·")
+    assert any(a.strip().startswith("2 ") and "PROBE-WRITE" in a for a in arms), (
+        "the `2` arm of the --help contract must name PROBE-WRITE, not merely mention it")
     readme = (REPO / "docs" / "evidence" / "11739-quote-population" / "README.md").read_text(
         encoding="utf-8")
     contract = re.search(r"Exit codes are the measurement's own guard rails.*?(?=\n\n)",

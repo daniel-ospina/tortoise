@@ -78,7 +78,9 @@ By `pointKind`:
 | `decision` | 7 | 0 | 0.0% | 5 | 0 | 0.0% |
 | `option` / `diary` / `finding` / `useCase` / `jobToBeDone` | 7 | 0 | 0.0% | 6 | 0 | 0.0% |
 
-**The split is by PROVENANCE.** Every quoted Point is a `statement`; the 134 hand-authored Points
+**The split is by PROVENANCE.** Every quoted **live** Point is a `statement` (`by_point_kind`
+covers the 15,842 live rows; the 26 terminal rows are bucketed by status instead and are NOT
+kind-split, so this census carries no kind datum for them); the 134 hand-authored Points
 (`evidence` 120 + `decision` 7 + `option`/`diary`/`finding`/`useCase`/`jobToBeDone` 7 = 134) carry none.
 That 0% is a property of how those Points are created — capture writes `quote`, hand authoring never
 did — and it is why a single headline ratio over the whole graph understates the coverage of the
