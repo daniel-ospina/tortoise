@@ -65,9 +65,11 @@ Per class — one record per type, the **fullest** one (the shape production wri
 | `PointRevised` (delta, no vector) | 196 B | 181 B | 15 B | 1.08× |
 | `EntityLinked` (delta, no vector) | 249 B | 228 B | 21 B | 1.09× |
 
-**The two halves of the delta are separately attributable, which is why they are two
-commits.** The vector rows above are dominated by the float32 change; the ~8 % on the
-rows that carry **no vector at all** (`PointRevised`, `EntityLinked`, and every other
+**The two halves of the delta are separately attributable, and the attribution is
+carried by the MEASUREMENT — not by the history: both changes landed in ONE commit.**
+The probe separates them by construction. The vector rows above are dominated by the
+float32 change; the ~8 % on the rows that carry **no vector at all** (`PointRevised`,
+`EntityLinked`, and every other
 1.07–1.10× row in `measurement.txt`) is the **compact separators** alone — `", "` /
 `": "` cost one byte per separator, measured at 435 B of a 9,176 B record and 383 B of
 its 5,072 B vector.

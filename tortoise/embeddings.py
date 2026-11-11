@@ -369,12 +369,14 @@ def shortest_float32_vector(vector: list[float]) -> list[float] | None:
     * a decimal text ~44 % shorter (measured on the pinned 384-d corpus:
       8,414 B → 5,072 B, 21.9 → 13.2 chars/float at the writer's separators).
 
-    ``None`` means **this vector cannot be represented at float32** (an element
-    outside float32's range, e.g. a hand-edited journal carrying ``1e300``).
-    The caller must then leave the values ALONE and declare the width ``f64``:
-    a vector that does not fit the store's width is not ours to narrow, and
-    narrowing it would turn the element into ``inf`` (#5004's total-function
-    rule: a record is a FILE, so this degrades rather than raises).
+    ``None`` means **this vector cannot be represented at float32** — an element
+    outside float32's range in EITHER direction: a hand-edited journal carrying
+    ``1e300`` OVERFLOWS to ``inf``, and one carrying ``1e-300`` UNDERFLOWS to
+    ``0.0``. The caller must then leave the values ALONE and declare the width
+    ``f64``: a vector that does not fit the store's width is not ours to narrow,
+    and narrowing it would replace the element with ``inf``, or with a zero it
+    never held (#5004's total-function rule: a record is a FILE, so this
+    degrades rather than raises).
     """
     values = [float(x) for x in vector]
     # `str` of a numpy float32 is the shortest decimal that round-trips to that
@@ -393,8 +395,21 @@ def shortest_float32_vector(vector: list[float]) -> list[float] | None:
         # "cannot be represented at float32" case, so it is refused first.
         if not all(math.isfinite(value) for value in candidates):
             return None
+        float32_values = np.asarray(values, dtype=np.float32)
+        # ⛔ UNDERFLOW is the SAME both-sides-equal case in the other direction:
+        # `np.float32(1e-300)` is `0.0`, so the cast equality below compares
+        # `0.0` to `0.0` and passes — measured: `[1e-300, 0.5]` came back as
+        # `[0.0, 0.5]` with the payload marked `f32`, i.e. an element DESTROYED
+        # and recorded as the embedder's own. A non-zero element whose float32
+        # cast is zero is precisely the "cannot be represented at float32" case,
+        # exactly as a cast that saturates to `inf` is, so it is refused first.
+        # A SUBNORMAL that survives the cast (`1e-45`) is representable and does
+        # narrow — the pair is pinned by the two tests.
+        if np.any((float32_values == 0.0)
+                  & (np.asarray(values, dtype=np.float64) != 0.0)):
+            return None
         if not np.array_equal(np.asarray(candidates, dtype=np.float32),
-                              np.asarray(values, dtype=np.float32)):
+                              float32_values):
             return None
     return candidates
 

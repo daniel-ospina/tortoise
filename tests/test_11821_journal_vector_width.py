@@ -20,8 +20,8 @@ What this file pins, in the order the decisions were made:
 4. a record written BEFORE this change still reads and replays unchanged;
 5. the marker is a payload description only: never a node property, never a
    record column, never callable-settable;
-6. the journal line carries no insignificant whitespace (its own commit, its own
-   delta).
+6. the journal line carries no insignificant whitespace (its own delta —
+   attributable by measurement, because both changes share ONE commit).
 """
 from __future__ import annotations
 
@@ -141,6 +141,34 @@ def test_a_vector_that_does_not_fit_float32_is_left_alone():
     assert shortest_float32_vector(source) is None
 
 
+def test_a_vector_that_UNDERFLOWS_float32_is_left_alone():
+    """The same both-sides-equal bug in the direction the first guard missed.
+
+    `np.float32(1e-300)` is `0.0`, so the cast equality compared `0.0` to `0.0`
+    and passed: the element was DESTROYED and the payload still marked `f32`
+    (measured: `shortest_float32_vector([1e-300, 0.5])` → `[0.0, 0.5]`). A
+    non-zero element whose float32 cast is zero is not representable at float32,
+    exactly as `1e300` → `inf` is — and the payload's own recorded meaning
+    ("every element is stored at the float32 the embedder produced") is a lie
+    when one element is a zero the input never held.
+
+    The subnormal assertion is the other half of the pin: `1e-45` IS
+    representable at float32, so the guard must not refuse every small
+    magnitude — it refuses the ones the cast cannot carry.
+    """
+    source = [1e-300, 0.5]
+    stamped = stamp_journal_embedding(_payload(list(source)), creating=True)
+
+    assert stamped[JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64
+    assert stamped["embedding"] == source, (
+        "an underflowing element was destroyed and the payload still marked f32")
+    assert shortest_float32_vector(source) is None
+    assert shortest_float32_vector([-1e-300, 0.5]) is None, (
+        "underflow is sign-blind: -1e-300 casts to -0.0, which compares equal")
+    assert shortest_float32_vector([1e-45, 0.5]) is not None, (
+        "1e-45 is a float32 subnormal — representable, so ours to narrow")
+
+
 # ── 2. the promise that must not be broken: verbatim / preserved ─────────────
 
 
@@ -241,7 +269,12 @@ def test_a_journal_written_before_this_change_still_reads_and_replays(tmp_path):
 
 
 def test_the_journal_line_carries_no_insignificant_whitespace(tmp_path):
-    """#11821 P0's second commit: `", "`/`": "` were 435 B of a 9,176 B record.
+    """#11821 P0's compact separators: `", "`/`": "` were 435 B of a 9,176 B record.
+
+    They share ONE commit with the float32 narrowing (the plan's proposed split
+    would have left an intermediate red test), so the separator delta is
+    attributed by measurement — the vector-less corpus rows (`PointRevised`,
+    `EntityLinked`) can only be moved by whitespace — never by `git log`.
 
     Not a format change — JSON whitespace is insignificant — so the round trip is
     asserted in the same test rather than trusted.
