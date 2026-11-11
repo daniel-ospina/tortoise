@@ -161,6 +161,19 @@ CITATION_SPACED_SHAPE_RE = re.compile(r"^[^`]*:\s+\d+(?:-\d+)?$")
 #: Trailing characters a code span may carry that are NOT part of the citation.
 SPAN_TRAILING_RE = re.compile(r"[\s.,;:)\]]+$")
 
+#: A `path:line` occurring ANYWHERE inside a backticked span. The span-level
+#: patterns above only see a span whose WHOLE body is a citation, so a legitimate
+#: `out of range` red could be defused by appending one word INSIDE the span
+#: (`tortoise/sdk.py:999999 (dead)`, `see …:999999 here`) — measured, rc 0.
+INNER_CITATION_RE = re.compile(
+    r"(?P<path>[\w~/.@+-][\w./+@-]*)\s*:\s*(?P<start>\d+)(?:-(?P<end>\d+))?"
+)
+
+#: `## N.` headings actually present, so a `§N` evidence reference can be checked
+#: for existence rather than accepted as a token.
+HEADING_NUMBER_RE = re.compile(r"(?m)^##\s+(\d+)\.")
+SECTION_REF_TOKEN_RE = re.compile(r"§\s?(\d)")
+
 
 def _has_path_marker(token: str) -> bool:
     """Is this token shaped like a path at all (`/`, `.`, or the `:LINE` shorthand)?"""
@@ -192,7 +205,7 @@ VOCAB_ROW_RE = re.compile(r"^\|\s*\*\*(?P<token>[A-Z][A-Z-]*)\*\*\s*\|")
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-MIN_SELF_TEST_MUTATIONS = 19
+MIN_SELF_TEST_MUTATIONS = 24
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -373,9 +386,17 @@ def check_verdicts(text: str) -> list[str]:
     return problems
 
 
-def _has_evidence(cell: str) -> bool:
-    """§1's rule for an evidence cell: a `path:line`, an issue, a command, or a §N."""
-    if ISSUE_REF_RE.search(cell) or SECTION_REF_RE.search(cell):
+def _has_evidence(cell: str, sections: set[int]) -> bool:
+    """§1's rule for an evidence cell: a `path:line`, an issue, a command, or a §N.
+
+    `§N` must name a heading that EXISTS. Accepting any `§<digit>` let all twelve
+    evidence cells be replaced with a reference to a section the page does not
+    have (`§9`) — measured, rc 0 — which is the "emptied evidence column" bypass
+    wearing a section number.
+    """
+    if ISSUE_REF_RE.search(cell):
+        return True
+    if any(int(n) in sections for n in SECTION_REF_TOKEN_RE.findall(cell)):
         return True
     for match in re.finditer(r"`[^`\n]+`", cell):
         body = match.group(0)
@@ -402,13 +423,14 @@ def check_evidence_cells(text: str) -> list[str]:
     """
     problems: list[str] = []
     section = _region(text, "## 3. The corrections log", "## 4. The artefact index")
+    sections = {int(n) for n in HEADING_NUMBER_RE.findall(text)}
     for offset, line in _table_rows(section):
         match = CORRECTION_ROW_RE.match(line)
         if match is None:
             continue  # check_verdicts owns the shape refusal
         cells = _split_row_cells(line)
         cell = cells[5] if len(cells) > 5 else ""
-        if _has_evidence(cell):
+        if _has_evidence(cell, sections):
             continue
         problems.append(
             f"row ({match.group(1)}) at §3 line {offset}: its evidence cell names no "
@@ -467,12 +489,25 @@ def check_verdict_tally(text: str) -> list[str]:
         lbl for lbl, v in verdicts.items() if v in ("SUPERSEDED-BY-FIX", "ADOPTED")
     )
 
-    idx = text.find(TAKEAWAY_MARKER)
-    if idx < 0:
+    # ⛔ EXACTLY ONE SUBJECT, located by pattern — the same rule the §6 survivor
+    # sentence carries, for the same measured reason: a `text.find()` takes the
+    # FIRST paragraph containing the marker anywhere in the document, so a decoy
+    # inserted above §3 becomes the guard's subject. Measured: a decoy carrying a
+    # correct-looking tally plus a falsified §3 sentence left `--check` at rc 0 —
+    # the arm compared a sentence nobody quotes.
+    markers = list(re.finditer(re.escape(TAKEAWAY_MARKER), text))
+    if not markers:
+        raise Unverifiable(
+            f"§3: the {TAKEAWAY_MARKER!r} paragraph is absent — the one summary a lane "
+            "quotes cannot be checked"
+        )
+    if len(markers) > 1:
         return [
-            f"§3: the {TAKEAWAY_MARKER!r} paragraph is missing — the one summary a "
-            "reader quotes must exist for its counts to be checked"
+            f"§3 carries {len(markers)} paragraphs starting {TAKEAWAY_MARKER!r} — the "
+            "guard cannot tell which one a lane reads, and a decoy can take the "
+            "match and report OK over the real one; keep exactly one"
         ]
+    idx = markers[0].start()
     end = text.find("\n\n", idx)
     paragraph = text[idx : end if end > 0 else len(text)]
     # The page is hard-wrapped, so a phrase can straddle a newline. Normalise
@@ -589,19 +624,30 @@ def check_citation_shapes(text: str) -> list[str]:
         # sits on both sides of a code span, so the mangled form does not look
         # mangled to a reader either.
         body = SPAN_TRAILING_RE.sub("", match.group(0)[1:-1])
-        if not _has_path_marker(body):
-            continue
-        if not (
+        if _has_path_marker(body) and (
             CITATION_SHAPE_RE.match(body) or CITATION_SPACED_SHAPE_RE.match(body)
-        ):
+        ) and not CITATION_RE.fullmatch(match.group(0)):
+            problems.append(
+                f"`{body}` is not a recognised citation — it ends in a line number "
+                "the resolver cannot read from this span, and §8 claims every "
+                "`path:line` here is checked"
+            )
             continue
+        # A citation EMBEDDED in a longer span is still a citation: the span-level
+        # test above only sees a body whose WHOLE text is `path:line`, so appending
+        # one word inside the backticks used to be enough to defuse a red
+        # (measured: `…:999999 (dead)`, `see …:999999 here`).
         if CITATION_RE.fullmatch(match.group(0)):
             continue
-        problems.append(
-            f"`{body}` ends in a line number but is not a recognised citation — "
-            "widen `CITATION_RE` or reword it, because §8 claims every "
-            "`path:line` here is checked"
-        )
+        for token in INNER_CITATION_RE.finditer(match.group(0)[1:-1]):
+            if not _has_path_marker(token.group("path")):
+                continue
+            problems.append(
+                f"`{match.group(0)[1:-1]}` is not a recognised citation — it "
+                f"carries the `path:line` {token.group(0)!r}, which the resolver "
+                "cannot read from this span; §8 claims every one here is checked"
+            )
+            break
     return problems
 
 
@@ -650,6 +696,8 @@ def check_citations(text: str, root: Path = REPO) -> list[str]:
     """
     problems: list[str] = []
     seen: set[str] = set()
+    n_resolved = 0
+    exempted = 0
     anchor: str | None = None
     for match in CITATION_RE.finditer(text):
         raw = match.group(0)[1:-1]
@@ -680,14 +728,28 @@ def check_citations(text: str, root: Path = REPO) -> list[str]:
             # such as `Makefile:12` is unmeasured — is named in §8 rather than
             # implied away.
             continue
-        if rel.startswith(("~", "/")):
+        if rel.startswith("~"):
             # A dated reading of something OUTSIDE this repository — §5's `~/.swarm`
-            # tree, or an absolute path on whichever box took it. §8 says those are
-            # not guarded, but the SHAPE is still recognised and counted here, so a
-            # typo'd RELATIVE path can never hide behind this exemption: it has to
-            # name `~` or `/` to get it.
+            # tree. §8 names this as a carve-out, and `exempted` is counted
+            # separately so a page made ENTIRELY of exempt citations falls through
+            # to the "measured nothing" floor below instead of reporting clean.
+            exempted += 1
             continue
-        target = root / rel
+        if rel.startswith("/"):
+            # An absolute path is NOT auto-exempt: rewriting every citation to
+            # `/tortoise/…` used to leave the page CLEAN with zero citations
+            # resolved (measured). Such a path is only evidence if it points INSIDE
+            # this tree; otherwise it is a dangling reference.
+            target = root / rel.lstrip("/")
+            if not target.is_file():
+                problems.append(
+                    f"citation {label}{origin}: {rel} is an absolute path outside "
+                    "this repository — evidence the repo does not contain is not "
+                    "evidence"
+                )
+                continue
+        else:
+            target = root / rel
         # ⛔ A `../..` path walks OUT of the tree, and pathlib would let an absolute
         # one through by DISCARDING `root` (absolute paths are exempted above by
         # design, so this arm is about relative escapes). An existence check alone
@@ -710,6 +772,7 @@ def check_citations(text: str, root: Path = REPO) -> list[str]:
         if not target.is_file():
             problems.append(f"citation {label}{origin}: {rel} does not exist in the tree")
             continue
+        n_resolved += 1
         total = _line_count(target)
         if total is None:
             problems.append(f"citation {label}{origin}: {rel} exists but cannot be read")
@@ -720,8 +783,11 @@ def check_citations(text: str, root: Path = REPO) -> list[str]:
                 f"citation {label}{origin}: line {span} is out "
                 f"of range for {rel} ({total} lines)"
             )
-    if not seen and not problems:
-        raise Unverifiable("no `path:line` citations found — the guard measured nothing")
+    if n_resolved == 0 and not problems:
+        raise Unverifiable(
+            "no `path:line` citation resolved to a file in this tree — the guard "
+            f"measured nothing ({len(seen)} citation(s) seen, {exempted} exempt)"
+        )
     return problems
 
 
@@ -855,6 +921,19 @@ def check_survivor_arithmetic(text: str) -> list[str]:
             f"{len(survivors)} of its {len(bullets)} bullet(s) name an OPEN issue "
             f"({', '.join('#' + i for i in survivors) or 'none'}) — the count is not "
             "derived from the bullets beside it"
+        )
+    # ⛔ THE BULLETS THAT ARE INVARIANT TO THE ARITHMETIC ARE ALSO PINNED (#11902
+    # review, P2). Both derived numbers are functions of the bullets that name an
+    # OPEN issue, so the CLOSED bullet could be DELETED with both counts unchanged
+    # — measured, rc 0. That bullet is `#2730`, whose entire job is "issue closure
+    # is not evidence of a fix", the §6 guidance a lane most needs; an arm that
+    # cannot notice its absence is a pin that only holds the half it measures.
+    closed_bullets = [issue for issue in bullets if issue not in open_ids]
+    if not closed_bullets:
+        problems.append(
+            "§6 survivor bullets: none of them names a CLOSED issue — the "
+            "'issue closure is not evidence of a fix' case has been dropped, and "
+            "both of the sentence's derived counts stay correct without it"
         )
     return problems
 
@@ -1130,6 +1209,44 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         "a survivor total that does not match the OPEN row",
         lambda t: t.replace("of the four survivors", "of the five survivors", 1),
         "says there are 5 survivors, but the OPEN row names 4 issue(s)",
+    ),
+    (
+        "a citation embedded in a longer span",
+        lambda t: t.replace(
+            "`tortoise/pipeline.py:16`", "`tortoise/pipeline.py:999999 (dead)`", 1
+        ),
+        "is not a recognised citation",
+    ),
+    (
+        "an absolute-path citation outside the tree",
+        lambda t: t.replace(
+            "`tortoise/pipeline.py:16`", "`/nope/tortoise/pipeline.py:16`", 1
+        ),
+        "absolute path outside",
+    ),
+    (
+        "an evidence cell pointing at a section that does not exist",
+        lambda t: t.replace("| §6 below, measured per issue |", "| §9 below, measured per issue |", 1),
+        "names no `path:line`, issue, command or §N",
+    ),
+    (
+        "a decoy paragraph that could take the tally match",
+        lambda t: t.replace(
+            "**Read §3 first if you are about to fix something.**",
+            "**The one thing to take away:** whatever the table says.\n\n"
+            "**Read §3 first if you are about to fix something.**",
+            1,
+        ),
+        "paragraphs starting",
+    ),
+    (
+        "the CLOSED survivor bullet deleted",
+        lambda t: t.replace(
+            "- **`#2730`** is CLOSED, but the problem map deliberately **excludes** it",
+            "- **`#2730` was dropped by a maintenance edit, but the problem map deliberately **excludes** it",
+            1,
+        ).replace("- **`#2730` was dropped", "- dropped", 1),
+        "none of them names a CLOSED issue",
     ),
 )
 
