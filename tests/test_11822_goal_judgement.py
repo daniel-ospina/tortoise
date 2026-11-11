@@ -31,6 +31,7 @@ from tortoise.goal_judgement import (
     DECISION_TABLE,
     GOAL_STATE_CACHE,
     JUDGEMENT_STATES,
+    Judgement,
     Reading,
     Target,
     compare,
@@ -40,6 +41,7 @@ from tortoise.goal_judgement import (
     latest_judgement,
     latest_readings,
     prior_for,
+    record_judgement,
 )
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -741,3 +743,224 @@ def test_a_point_that_lost_its_arrow_is_rewired_on_the_next_pass(sdk):
     assert again["written"] is False
     assert again["operator_id"], "the unchanged arm did not repair the arrow"
     assert len(_operators_of(sdk, again["point_id"])) == 1
+
+
+# ── 7. review round 2 — the shared terminal vocabulary, refusal safety,
+#      and the pins the round named as missing ─────────────────────────
+
+def test_a_retracted_judgement_is_not_the_current_state(sdk):
+    """The "live" filter must be the SHARED terminal vocabulary, not a local
+    `<> 'superseded'`.
+
+    A hand-rolled subset is the #2422/#3301 class. Measured before the fix: a
+    `retracted` `met` judgement was returned by `latest_judgement`, the unchanged
+    arm re-wrote `goalState='met'` FROM the retracted claim, and the next
+    differing pass raised out of `supersede_point`'s lifecycle guard — after its
+    point and baseline had landed — instead of judging.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    met = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                          target=target)
+    sdk.retract_point(met["point_id"])
+
+    assert latest_judgement(sdk, goal_id=goal["id"]) is None, (
+        "a retracted judgement is still served as the current state"
+    )
+    # the next pass must JUDGE rather than raise, and must not resurrect the cache
+    _reading(sdk, indicator, 12.0, at="2026-11-11T11:00:00Z")
+    unmet = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                            target=target)
+    assert unmet["written"] is True
+    assert unmet["superseded_id"] is None  # nothing to supersede: it is terminal
+    assert sdk.get_entity(goal["id"])["goalState"] == "unmet"
+
+
+def test_a_refused_supersede_leaves_no_second_live_claim(sdk, monkeypatch):
+    """A refused `supersede_point` must not leave TWO live judgements on one goal.
+
+    The lifecycle / claim-class guards (#2498 / #2351) raise before any mutation,
+    so the point this call just created is removed. Measured before the fix: the
+    pass raised, the next pass took the unchanged arm on the NEWEST live claim
+    (the orphan) and wired it, so one goal ended with two live judgements and two
+    IMPL operators — the double-count this module exists to remove.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                     target=target)
+
+    _reading(sdk, indicator, 12.0, at="2026-11-11T11:00:00Z")
+    real = sdk.supersede_point
+
+    def refuse(*a, **kw):
+        raise ValueError("refused by the lifecycle guard")
+
+    monkeypatch.setattr(sdk, "supersede_point", refuse)
+    with pytest.raises(ValueError):
+        judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                         target=target)
+    monkeypatch.setattr(sdk, "supersede_point", real)
+
+    live = [r for r in _judgement_points(sdk, goal["id"])
+            if r[1] not in {"superseded", "retracted"}]
+    assert len(live) == 1, f"a refused supersede left {len(live)} live judgements"
+
+
+def test_a_refused_baseline_leaves_no_judgement_point(sdk, monkeypatch):
+    """The `delete_point` compensation: if the prior cannot be written, the point
+    this call created is removed rather than left prior-less.
+
+    A prior-less `derived` Point carrying `judgementState`/`goalId` is served as
+    the current state, makes the unchanged arm answer `written: False` forever,
+    and raises `CalibrationError` for the WHOLE graph at the next
+    `compute_confidence()`.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+
+    sdk.set_point_baseline = lambda *a, **kw: (_ for _ in ()).throw(
+        RuntimeError("baseline refused"))
+    with pytest.raises(RuntimeError):
+        judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                         target=target)
+    assert _judgement_points(sdk, goal["id"]) == []
+
+
+def test_strength_actually_reaches_the_prior(sdk):
+    """`strength` is a documented knob — a caller "that wants a weaker voice
+    passes e.g. 0.6" — so the write path must use it.
+
+    Pinned because replacing `s = float(strength)` with the default left the whole
+    suite green: the parameter was only ever exercised by its REFUSAL arm.
+    """
+    assert prior_for("met", 0.6) == (6.0, 4.0)
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    res = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                          target=target, strength=0.6)
+    assert res["prior"] == {"alpha": 6.0, "beta": 4.0,
+                            "source": "system-default", "support": 0.6}
+
+
+def test_a_missing_reading_does_not_retire_a_live_judgement(sdk):
+    """A telemetry gap is not a state change.
+
+    Measured before the fix: `met` at goal 0.6502 -> one unreadable reading ->
+    `written: True, state: 'unknown'`, the `met` claim SUPERSEDED, and the goal
+    driven to 0.5000 — exactly the belief of a graph nobody ever judged, reached
+    by transmitting Beta(1,1) as 0.5 SUPPORT through IMPL. The cache path already
+    refuses to degrade on `unknown`; the claim path now does too.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    met = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                          target=target)
+    sdk.compute_confidence()
+    before = sdk.get_confidence(goal["id"], require_calibration=False)["mean"]
+
+    # an unreadable reading arrives
+    sdk.create_event("CI run (bad)", "measurement", value="n/a", unit="minutes",
+                     startedAt="2026-11-11T11:00:00Z", aboutObject=indicator["id"])
+    res = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                          target=target)
+    assert res["written"] is False
+    assert res["judged"]["state"] == "unknown"
+    assert res["point_id"] == met["point_id"]
+    sdk.compute_confidence()
+    after = sdk.get_confidence(goal["id"], require_calibration=False)["mean"]
+    assert after == pytest.approx(before), (
+        f"a missing reading moved the goal's belief {before} -> {after}"
+    )
+    assert sdk.get_entity(met["point_id"])["status"] == "live"
+
+
+def test_an_out_of_order_reading_drops_the_window_instant_not_the_supersession(sdk):
+    """A reading whose as-of instant predates the predecessor's window cannot open
+    the successor's window (§4.7: an inverted window is satisfiable by no query
+    instant), so the instant is dropped and the supersession still lands.
+
+    Unpinned before: replacing the fallback with `raise` left the suite green.
+
+    The predecessor needs a STORED ``validFrom`` for the check to fire, and this
+    writer does not put one on the claims it mints (§4.7's closed-vs-half-open
+    question is open at #7818) — but a graph built by another writer, a repair, or
+    an older path carries one, so the fallback is defensive code for a real shape
+    rather than for an unreachable one. Constructed here explicitly.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    met = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                           target=target)
+    # the predecessor's window is recorded by another writer
+    sdk.update_entity(met["point_id"], validFrom="2026-11-11T10:00:00Z")
+
+    late_judgement = Judgement(
+        state="unmet", reason="state-flipped", target=target,
+        reading=Reading(value=12.0, raw_value=12.0, reading_id="r-late",
+                        started_at="2026-11-11T09:30:00Z"),
+        comparison=False, dwell_satisfied=True, flipped=True,
+        previous_state="met",
+    )
+    late = record_judgement(sdk, goal_id=goal["id"], judgement=late_judgement,
+                            target=target, indicator_id=indicator["id"],
+                            previous_point_id=met["point_id"])
+    assert late["windowFrom"] == "successor", (
+        "an inverted window instant was NOT dropped — the supersession should "
+        "still land, on the successor's own start"
+    )
+    assert late["superseded_id"] == met["point_id"]
+    assert sdk.get_entity(met["point_id"])["status"] == "superseded"
+    assert sdk.get_entity(late["point_id"])["status"] == "live"
+
+
+def test_the_edge_is_scoped_to_the_goal_it_was_recorded_for(sdk, monkeypatch):
+    """"Has an operator" is not the question — "has an operator INTO THIS GOAL" is.
+
+    Measured before the fix: a point already wired into goal A, re-recorded for
+    goal B, was reported `written: False` with goal A's `operator_id`, while
+    `MATCH (op)-[:IMPL]->(B)` was empty — B's belief never moved and the result
+    said it was wired.
+    """
+    indicator, target_node, goal_a = _world(sdk, tag="a")
+    _, _, goal_b = _world(sdk, tag="b")
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    a = judge_and_record(sdk, goal_id=goal_a["id"], indicator_id=indicator["id"],
+                        target=target)
+    # goal B shares the indicator+target but has never been judged; scope the
+    # lookup onto A's live claim deliberately (the `previous_point_id` seam)
+    same = judge(sdk, goal_id=goal_b["id"], indicator_id=indicator["id"],
+                 target=target)
+    b = record_judgement(sdk, goal_id=goal_b["id"], judgement=same, target=target,
+                        indicator_id=indicator["id"],
+                        previous_point_id=a["point_id"])
+    unwired = sdk._get_proj().g.query(
+        "MATCH (p:Point)-[:INPUT]->(op:Point)-[:IMPL]->(g) WHERE g.id = $g "
+        "RETURN count(op)",
+        params={"g": goal_b["id"]}).result_set
+    assert unwired[0][0] >= 1, "goal B was never wired"
+    assert b["operator_id"], b
+    mean_b = sdk.compute_confidence()["confidences"][goal_b["id"]]["mean"]
+    assert mean_b > 0.5, f"goal B's belief did not move: {mean_b}"
+
+
+def test_the_unchanged_arm_does_not_claim_a_prior_it_never_wrote(sdk):
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    first = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                            target=target, strength=0.6)
+    assert first["prior"]["alpha"] == 6.0
+    again = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                            target=target)
+    assert again["written"] is False
+    assert again["prior"] is None, (
+        "the unchanged arm reported a prior it did not write"
+    )

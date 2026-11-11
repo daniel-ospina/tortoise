@@ -11,9 +11,11 @@ This module is that arrow, and nothing else:
     the judgement  ->  a `statement` Point, claimClass 'derived',
                        IMPL direction='->' into the goal
 
-Two shapes, and the split between them is the design of record
-(``docs/plans/2026-11-11-goal-measurement-and-reasoning.md`` §5, decided on
-#7860):
+Two shapes, and the split between them is the design of record — PR **#11923**
+(``docs/plans/2026-11-11-goal-measurement-and-reasoning.md``), **unmerged at this
+head**, so the §-references below are to that PR's copy; the decisions they record
+are on #7860, which is where a reader without that branch should look (§5 is the
+"declared decision, engine-owned effect" ruling):
 
 * **the decision is DECLARED** — :data:`DECISION_TABLE` is a finite, total table
   of the (comparison, dwell, previous state) cases and the state each yields.
@@ -97,6 +99,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+
+from .live import TERMINAL_EXCLUDED_STATUSES as _TERMINAL_EXCLUDED_STATUSES
 
 __all__ = [
     "COMPARATORS",
@@ -585,14 +589,18 @@ def latest_judgement(
 ) -> dict | None:
     """The newest LIVE judgement Point matching the given scope, or ``None``.
 
-    "Live" excludes ``superseded`` — a flip retires the previous judgement, so
-    the newest non-superseded point IS the current state. This is a read of the
-    CLAIM, never of ``goalState``: the cache is downstream of this, and asking it
-    what the state is would be the inversion this module exists to prevent.
+    "Live" is the SHARED terminal vocabulary (``live.TERMINAL_EXCLUDED_STATUSES``
+    plus the legacy ``outdated`` flag)
+
+    This is a read of the CLAIM, never of ``goalState``: the cache is downstream
+    of this, and asking it what the state is would be the inversion this module
+    exists to prevent.
     """
     clauses = ["p.judgementState IS NOT NULL",
-               "coalesce(p.status, 'live') <> 'superseded'"]
-    params: dict[str, Any] = {"lim": 1}
+               "(p.status IS NULL OR NOT (p.status IN $terminal))",
+               "coalesce(p.outdated, false) = false"]
+    params: dict[str, Any] = {"lim": 1,
+                              "terminal": sorted(_TERMINAL_EXCLUDED_STATUSES)}
     for key, val in (("goalId", goal_id), ("indicatorId", indicator_id),
                      ("targetId", target_id)):
         if val is not None:
@@ -718,12 +726,18 @@ def _ensure_judgement_edge(sdk: Any, point_id: str, goal_id: str) -> str | None:
       * a write that failed after its Point landed leaves a live judgement with
         no arrow at all, which the unchanged arm would then never repair.
 
-    So the edge is (re)created only when the point has none, and the result names
-    the operator the goal's belief actually flows through.
+    So the edge is (re)created only when the point has none INTO THIS GOAL — the
+    check is goal-scoped, because "has an operator" is not the question: a point
+    already wired into goal A and then recorded for goal B would otherwise be
+    reported as wired while goal B's belief never moves (measured: `written:
+    False`, an `operator_id` reaching goal A, and `MATCH (op)-[:IMPL]->(B)`
+    empty). The result names the operator the goal's belief actually flows
+    through.
     """
     rows = sdk._get_proj().g.query(
-        "MATCH (p:Point {id:$i})-[:INPUT]->(op) RETURN op.id LIMIT 5",
-        params={"i": point_id},
+        "MATCH (p:Point {id:$i})-[:INPUT]->(op:Point)-[:IMPL]->(g) "
+        "WHERE g.id = $goal RETURN op.id LIMIT 5",
+        params={"i": point_id, "goal": goal_id},
     ).result_set
     if rows:
         return rows[0][0]
@@ -795,6 +809,28 @@ def record_judgement(
             "could never hold one judgement per target."
         )
 
+    if judgement.state == "unknown":
+        # ⛔ A MISSING READING IS NOT A STATE CHANGE. It mints no claim, retires
+        # nothing and touches no cache: the last real measurement is still the
+        # best available answer and its window stays open. Writing an `unknown`
+        # judgement would instead (a) SUPERSEDE a live `met`, and (b) transmit
+        # Beta(1,1) — 0.5 support — through IMPL, driving the goal to exactly
+        # the belief of a graph nobody ever judged (measured: 0.6502 -> 0.5000
+        # on one unreadable reading). That is the degradation the cache path
+        # already refuses, so the claim path must refuse it too rather than be
+        # the one place a telemetry gap moves belief.
+        return {
+            "written": False,
+            "point_id": previous_point_id
+            or (latest_judgement(sdk, goal_id=goal_id, indicator_id=indicator_id,
+                                 target_id=target.target_id) or {}).get("id"),
+            "operator_id": None,
+            "superseded_id": None,
+            "goalState": None,
+            "judgement": {"state": judgement.state, "reason": judgement.reason},
+            "prior": None,
+        }
+
     if previous_point_id is None:
         prior_point = latest_judgement(sdk, goal_id=goal_id,
                                        indicator_id=indicator_id,
@@ -821,9 +857,10 @@ def record_judgement(
             "superseded_id": None,
             "goalState": cached,
             "judgement": {"state": judgement.state, "reason": judgement.reason},
-            "prior": {"alpha": alpha, "beta": beta,
-                      "source": JUDGEMENT_BASELINE_SOURCE,
-                      "support": alpha / (alpha + beta)},
+            # ⛔ `None`, not the would-be prior: this arm wrote NO baseline, and
+            # a provenance consumer logging 0.9 for a claim that holds Beta(6,4)
+            # records a number the graph does not hold.
+            "prior": None,
         }
 
     text = _judgement_content(subject or _subject_for(sdk, indicator_id, goal_id),
@@ -861,8 +898,15 @@ def record_judgement(
         sdk.set_point_baseline(
             point_id, alpha, beta, source=JUDGEMENT_BASELINE_SOURCE,
         )
-    except Exception:
-        sdk.delete_point(point_id)
+    except Exception as exc:
+        # Best-effort and NON-MASKING: `delete_point` can itself raise
+        # `WriteNotLandedError` when its journal append does not confirm, and a
+        # delete failure must not replace the reason the baseline was refused
+        # (it is chained instead, so both are visible).
+        try:
+            sdk.delete_point(point_id)
+        except Exception as cleanup_exc:  # pragma: no cover - infra failure
+            raise exc from cleanup_exc
         raise
 
     # The supersession TRANSFERS the predecessor's operator edges onto this
@@ -877,24 +921,46 @@ def record_judgement(
     window_from = "successor"
     if previous_point_id:
         # The window starts when the new fact became true — the reading's own
-        # as-of instant. An out-of-order reading (older than the predecessor's
-        # window start) is REFUSED by supersede_point as an inverted window, so
-        # the reading instant is dropped rather than the supersession lost; the
-        # fallback is the successor's own validFrom/createdAt, and the result
-        # says which happened.
+        # as-of instant (§4.7's contiguity intent: the old fact stops being true
+        # exactly when the new one became true).
+        #
+        # An instant that PRECEDES the predecessor's stored `validFrom` is refused
+        # by `supersede_point` as an inverted window (satisfiable by no query
+        # instant), so the instant is dropped rather than the supersession lost —
+        # the predecessor's own window end then comes from the successor's
+        # `validFrom`/`createdAt`, and `windowFrom` in the result says which
+        # happened. ⚠️ THIS WRITER DOES NOT STORE a `validFrom` on the claims it
+        # mints (§4.7's closed-vs-half-open question is open at #7818), so the
+        # refusal needs a predecessor whose window another writer recorded; that
+        # is a real shape (an older graph, a repair, a script), which is why the
+        # fallback is kept and pinned rather than deleted as unreachable.
         reading_at = (judgement.reading.started_at
                       if judgement.reading is not None else None)
-        if reading_at:
-            try:
-                sdk.supersede_point(previous_point_id, point_id,
-                                    valid_from=str(reading_at))
-                superseded_id, window_from = previous_point_id, "reading"
-            except ValueError:
+        try:
+            if reading_at:
+                try:
+                    sdk.supersede_point(previous_point_id, point_id,
+                                        valid_from=str(reading_at))
+                    superseded_id, window_from = previous_point_id, "reading"
+                except ValueError:
+                    sdk.supersede_point(previous_point_id, point_id)
+                    superseded_id = previous_point_id
+            else:
                 sdk.supersede_point(previous_point_id, point_id)
                 superseded_id = previous_point_id
-        else:
-            sdk.supersede_point(previous_point_id, point_id)
-            superseded_id = previous_point_id
+        except Exception as exc:
+            # ⛔ A REFUSED SUPERSESSION MUST NOT LEAVE A SECOND LIVE CLAIM. The
+            # lifecycle / claim-class guards (#2498, #2351) raise BEFORE any
+            # mutation, so removing the point this call just created restores the
+            # graph: leaving it live would give one goal two live judgements (the
+            # double-count this module exists to remove), and the next pass would
+            # take the unchanged arm on the NEWEST live claim and wire the orphan
+            # while the predecessor was never superseded.
+            try:
+                sdk.delete_point(point_id)
+            except Exception as cleanup_exc:  # pragma: no cover - infra failure
+                raise exc from cleanup_exc
+            raise
 
     operator_id = _ensure_judgement_edge(sdk, point_id, goal_id)
 
