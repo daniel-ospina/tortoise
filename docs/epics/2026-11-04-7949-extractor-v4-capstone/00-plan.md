@@ -167,7 +167,7 @@ closed on a cycle or an `implemented` row on an unbuilt precondition. Four rows 
 (#5087). ⇒ **none of the owner's five assertions has a row.** That is the gap stated as an artifact.
 
 **R6 · The DOOR is the v2 lane, and that corrects the brief.** `hosted_api._capture_lane()`
-(`tortoise/hosted_api.py:17898`) returns `"v2"` **unless** `TORTOISE_SESSION_EXTRACTOR == "m2"`, so
+(`tortoise/hosted_api.py:17901`) returns `"v2"` **unless** `TORTOISE_SESSION_EXTRACTOR == "m2"`, so
 fleet captures land in `_extract_session_v2` → `extract_session_v2` (`tortoise/extractor_v2.py`) — the
 **LLM v2 lane**, not `extractor.py`'s rule extractor (that is the opt-in `m2` lane,
 `_extract_session_llm`). ⚠️ **The brief's premise — "today the fleet writes through the legacy rule
@@ -423,7 +423,7 @@ fan-out respected; C8 holds.
 from `sdk.py`'s point-creation path at `:16892` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
 the four subject-edge family counts, and the **customer-visible** consequence
 (search `subject`, `get_org_structure`). The three candidate explanations — the binder never runs (note
-`subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:4820` and
+`subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:6252` and
 consumed at `sdk.py:9505`/`:9558` — ⚠️ another probe's docstring sits in the same region of `sdk.py`, which is why
 this pair is keyed by **symbol**), the slots are absent in the
 corpus, or the graph served is not the graph measured — are decided by evidence.
