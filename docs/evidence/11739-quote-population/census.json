@@ -1,10 +1,10 @@
 {
   "issue": "#11739",
   "provenance": {
-    "measured_at": "2026-11-11T05:59:24Z",
-    "probe_sha256": "b3ddc9c05538332ad2dba83f5cad86b133dbffad44a3803a76908065febd01e0",
+    "measured_at": "2026-11-11T06:12:31Z",
+    "probe_sha256": "054365b1814c77e0811d90af5c80f28457a6ebb3332753a86d3d4e9b1de49d53",
     "endpoint": "https://api.premiselabs.co/mcp/",
-    "head_sha": "66e4abfa6c74575518d70f2656295f24d10df7d0"
+    "head_sha": "18adb4e3d5c8cce09637974b022d2b83552aec87"
   },
   "question": "How often is a captured Point's `quote` non-empty?",
   "source": "hosted graph, read via tortoise_query (offset paging, total order)",
@@ -168,5 +168,5 @@
       }
     }
   },
-  "duration_s": 68.0
+  "duration_s": 68.8
 }
