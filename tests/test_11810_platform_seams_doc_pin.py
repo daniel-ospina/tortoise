@@ -46,20 +46,30 @@ this record is hard-wrapped, line 315 is 95 columns); r9 stripped whitespace and
 case but not PUNCTUATION, so a delimiter INSIDE the phrase walked through. Every
 one of these is the same words and the same claim.
 
-So `_normalised()` reduces text to its word sequence — anything that is not a
-letter or digit becomes a separator, and case is folded. That is what makes the
-class closed rather than enumerated: reflow, tab/`\r\n`/nbsp, zero-width space,
-case, hyphenation, and markdown emphasis anywhere in the phrase (whole-phrase
-`*"…"*`, or in-phrase `**cloud agent VM**`, `` `cloud agent VM` ``,
-`*cloud*`, `~~…~~`, `_…_`) all normalise to the same words. Measured RED on the
-absence arm, and the same change cures the presence arm's mirror defect — it
-used to false-RED a CORRECT quote whose `hosted` qualifier was emphasised.
+So `_normalised()` reduces text to its word sequence — HTML tags are stripped,
+HTML entities are decoded, anything else that is not a letter or digit becomes a
+separator, and case is folded. That closes every SEPARATOR-VALUED and
+ENTITY/TAG-VALUED spelling of the same words: reflow, tab/`\r\n`, literal nbsp,
+zero-width space, case, hyphenation, markdown emphasis anywhere in the phrase
+(whole-phrase `*"…"*`, or in-phrase `**cloud agent VM**`, `` `cloud agent VM` ``,
+`*cloud*`, `~~…~~`, `_…_`), and `&nbsp;` / `&#32;` / `&mdash;` / `<span>` / `<b>`
+— the entity and tag forms render as the identical sentence, so a pin that only
+blocked the literal characters would call the rendered artifact safe.
 
 WHAT IT STILL DOES NOT CATCH, stated so the docstring is not the next over-claim:
-a PARAPHRASE, a synonym, or a re-worded sentence (`A Cursor cloud agent runs no
-Tortoise hook at all`) is beyond any string guard. `test_capture_install.py`
-carries an enumerated list for that, and marks it as enumerated — that is the
-honest shape for prose, and #11812 holds the structural form.
+
+  * a PARAPHRASE, a synonym, a different word order, or a JOINED token
+    (`cloudagent`) — beyond any string guard. `test_capture_install.py` keeps an
+    ENUMERATED list for that and says so; #11812 holds the structural form.
+  * a HOMOGLYPH (`\u0441loud` rendering as `cloud`). That needs a confusables
+    table; it is out of proportion for a docs pin, so it is a recorded residual
+    rather than a fix. (Measured: entities/tags now caught, homoglyphs not.)
+  * this arm is deliberately OVER-BROAD in the safe direction: it bans the words
+    wherever they appear in any order-adjacent form, so an HONEST correction that
+    quotes the retracted wording to reject it — this record's own house style,
+    see line 309 — REDs. Reword such an entry instead of reproducing the phrase
+    verbatim. Likewise the presence arm answers "are these words in this file",
+    not "is this an actual quote", so it cannot tell a quote from prose.
 
 MUTATION (each verified RED at this head, restoring byte-identical):
   * restore the unscoped quote at `platform-seams.md:315`      → (1) RED
@@ -67,12 +77,14 @@ MUTATION (each verified RED at this head, restoring byte-identical):
   * re-add with a LINE BREAK / double space / capital           → (1) RED (r8)
   * re-add with in-phrase `**`, `` ` ``, `*`, `~~`, `_`         → (1) RED (r9)
   * re-add with a zero-width space or a hyphen                 → (1) RED (r9)
+  * re-add with `&nbsp;`/`&#32;`/`&mdash;`/`<span>`/`<b>`        → (1) RED (r10)
   * correct quote with `**hosted**` emphasised → now PASSES    → was RED (P3)
   * drop `hosted` from `tortoise/__main__.py`'s message         → (2) RED
   * delete the record's quoted sentence                         → (1) RED
 """
 from __future__ import annotations
 
+import html
 import os
 import re
 import subprocess
@@ -90,22 +102,27 @@ _PY = sys.executable
 
 
 def _normalised(text: str) -> str:
-    """The WORDS of `text`, for BOTH arms — punctuation, delimiters and case gone.
+    """The WORDS of `text`, for BOTH arms — markup, punctuation and case gone.
 
-    Everything that is not a letter or digit becomes a separator, and case is
-    folded, so the two sides are compared as word sequences. That is what makes
-    reflow, tab/`\\r\\n`/nbsp, zero-width space, hyphenation and markdown
-    emphasis INDISTINGUISHABLE from the plain words — including a delimiter in the
-    MIDDLE of the phrase, which a whitespace-only collapse still let through.
+    HTML tags are removed and HTML entities decoded BEFORE the word collapse, so
+    `&nbsp;`, `&#32;`, `&mdash;`, `<span>` and `<b>` — which RENDER as the same
+    sentence — cannot carry a banned phrase past the guard. Everything that is
+    then not a letter or digit becomes a separator, and case is folded, which
+    makes reflow, tab/`\\r\\n`/literal nbsp, zero-width space, hyphenation and
+    markdown emphasis INDISTINGUISHABLE from the plain words, including a
+    delimiter in the MIDDLE of the phrase.
 
-    It deliberately does NOT strip accents or fold synonyms: a paraphrase is out
-    of reach of any string guard, and pretending otherwise would be the same
-    over-claim in a new place.
+    What it deliberately does NOT do, so this docstring cannot become the next
+    over-claim: no accent folding, no synonym or word-order handling (a
+    paraphrase is out of reach of any string guard), and no HOMOGLYPH folding —
+    `\\u0441loud` renders as `cloud` but needs a confusables table, which is out of
+    proportion here and is a recorded residual.
 
     One function for both arms, so they cannot drift apart — the failure this
     file exists to catch, one level up.
     """
-    return re.sub(r"[\W_]+", " ", text.lower()).strip()
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"[\W_]+", " ", html.unescape(text).lower()).strip()
 
 
 def _install_cursor_stdout(tmp_path) -> str:
@@ -146,16 +163,16 @@ def test_the_record_quotes_the_HOSTED_scoped_fragment():
     normalised_doc = _normalised(doc)
     assert _normalised(_SHIPPED_FRAGMENT) in normalised_doc, (
         "the platform-seams record must quote the HOSTED-scoped message")
-    # …and the unscoped WORDS may not reappear at all, in ANY form. Three rounds
+    # …and the unscoped WORDS may not reappear at all, in ANY form. Four rounds
     # shipped a form-exact leg here and each false-passed the mutation it exists to
     # catch — r7 a whole-phrase re-emphasis (`*"…"*`), r8 a hard wrap inside the
     # phrase on this 95-column-wrapped record, r9 a delimiter in the MIDDLE of the
     # phrase (`**cloud agent VM**`, `` `cloud agent VM` ``, `*cloud*`, `~~…~~`,
-    # `_…_`, a zero-width space, a hyphen). Matching on the word sequence closes the
-    # class instead of enumerating it. The assertion stays over-broad in the SAFE
-    # direction only (it also bans a hypothetical accurate sentence carrying these
-    # words), and it cannot false-RED the correct quote — the unscoped word sequence
-    # is not a substring of the hosted one.
+    # `_…_`, a zero-width space, a hyphen), r10 render-identical markup
+    # (`&nbsp;`, `&#32;`, `&mdash;`, `<span>`, `<b>`). Matching on the word sequence
+    # closes the spelling class instead of enumerating it; the docstring's residual
+    # list names what it still cannot see (paraphrase, homoglyph) and the two places
+    # it is deliberately over-broad.
     assert _normalised(_UNSCOPED_FRAGMENT) not in normalised_doc, (
         "the record quotes the unscoped universal as though it were the message")
 
