@@ -34,6 +34,7 @@ from tortoise.goal_judgement import (
     Judgement,
     Reading,
     Target,
+    _assert_supersession_scope,
     _ensure_judgement_edge,
     _extra_operators,
     compare,
@@ -1305,3 +1306,138 @@ def test_a_double_counted_arrow_is_reported_not_hidden(sdk):
     assert set([again["operator_id"], *again["extraOperators"]]) == {
         res["operator_id"], dupe["id"]}
     assert again["extraOperators"], "a double-count was collapsed to []"
+
+
+# ── 9. round 4: the guard's no-op shape, the pure-path bool, and the two
+#      unpinned scope legs ─────────────────────────────────────────────────
+
+def test_a_bool_is_not_a_number_on_EITHER_path(sdk):
+    """`Reading` normalises through `_num`, so `compare()` agrees with the loader.
+
+    MEASURED before: `compare([Reading(value=True)], Target("<=", 10.0))` returned
+    `met` because `True` is an `int` in Python and only the GRAPH loader applied
+    `_num` — so a stored `create_event(value=True)` was a numeric "measurement" on
+    one path and a boolean on the other. Deleting `_num`'s bool exclusion left the
+    suite green because the only bool case never reached `_num` (it passed
+    `value=None`).
+    """
+    target = Target(comparator="<=", threshold=10.0)
+    for bad in (True, False, "nan", "inf", float("nan"), float("inf")):
+        reading = Reading(value=bad)
+        assert reading.available is False, f"{bad!r} was read as a number"
+        assert compare([reading], target).state == "unknown"
+
+    indicator, target_node, goal = _world(sdk)
+    real = Target.from_node(target_node)
+    sdk.create_event("CI run (bool)", "measurement", value=True, unit="minutes",
+                     startedAt="2026-11-11T10:00:00Z", aboutObject=indicator["id"])
+    res = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                           target=real)
+    assert res["judged"]["state"] == "unknown"
+    assert res["written"] is False
+
+
+def test_the_scope_guard_refuses_a_predecessor_that_is_not_a_judgement(sdk):
+    """A foreign claim has NO scope props, so a tolerant comparison is a no-op.
+
+    MEASURED before: a `derived` Point wired into goal B with no `goalId` was
+    superseded silently, its operator TRANSFERRED (#6180), and goal B's belief went
+    0.0 -> 0.6502 on a judgement that belongs to goal A.
+    """
+    indicator, target_node, goal_a = _world(sdk, tag="a")
+    _, _, goal_b = _world(sdk, tag="b")
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    foreign = sdk.create_point("statement", "a foreign conclusion",
+                               claim_class="derived")
+    sdk.set_point_baseline(foreign["id"], 9.0, 1.0)
+    sdk.create_operator("IMPL", foreign["id"], [goal_b["id"]], direction="->")
+
+    judged = judge(sdk, goal_id=goal_a["id"], indicator_id=indicator["id"],
+                   target=target)
+    with pytest.raises(ValueError) as exc:
+        record_judgement(sdk, goal_id=goal_a["id"], judgement=judged,
+                         target=target, indicator_id=indicator["id"],
+                         previous_point_id=foreign["id"])
+    assert "judgementState" in str(exc.value)
+    assert sdk.get_entity(foreign["id"])["status"] != "superseded"
+    assert _impl_into(sdk, foreign["id"], goal_b["id"]) == 1  # arrow not moved
+
+
+def test_the_scope_guard_checks_the_INDICATOR_leg(sdk):
+    """Same goal and target, different indicator → a different chain."""
+    indicator_a, target_node, goal = _world(sdk, tag="a")
+    indicator_b, _, _ = _world(sdk, tag="b")
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator_a, 9.0, at="2026-11-11T10:00:00Z")
+    a = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator_a["id"],
+                        target=target)
+    # a predecessor carrying indicator A, superseded from indicator B's chain
+    with pytest.raises(ValueError) as exc:
+        _assert_supersession_scope(sdk, a["point_id"], goal["id"],
+                                   indicator_b["id"], target.target_id)
+    assert "indicatorId" in str(exc.value)
+    assert sdk.get_entity(a["point_id"])["status"] == "live"
+
+
+def test_the_scope_guard_checks_the_TARGET_leg(sdk):
+    """D4 allows n targets per goal+indicator — they are not one chain."""
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    other_node = sdk.create_object("CI >= 30m", objectKind="target",
+                                   comparator=">=", threshold=30.0, dwell=1)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    a = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                        target=target)
+    with pytest.raises(ValueError) as exc:
+        _assert_supersession_scope(sdk, a["point_id"], goal["id"],
+                                   indicator["id"], other_node["id"])
+    assert "targetId" in str(exc.value)
+    assert sdk.get_entity(a["point_id"])["status"] == "live"
+
+
+def test_the_scope_guard_refuses_a_dimension_the_caller_did_not_declare(sdk):
+    """`indicator_id=None` must not be an escape from the check.
+
+    MEASURED before: an unscoped call superseded an indicator-scoped claim, the
+    next scoped pass found no prior and minted a SECOND live claim — 2 live
+    judgements and 2 IMPL operators into one goal (goal belief 0.6502 -> 0.5000).
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    a = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                        target=target)
+    with pytest.raises(ValueError) as exc:
+        _assert_supersession_scope(sdk, a["point_id"], goal["id"], None,
+                                   target.target_id)
+    assert "indicatorId" in str(exc.value)
+
+
+def test_a_failed_arrow_leaves_the_cache_agreeing_with_the_claim(sdk, monkeypatch):
+    """The cache is written BEFORE the arrow, on purpose.
+
+    A failed arrow is the one failure the unchanged arm repairs on the next pass
+    (it re-asserts the edge); a cache word left contradicting a live claim is what
+    a reader sees. MEASURED on a flip whose `update_entity` was refused, with the
+    reverse order: claim `unmet`, `goalState` still `met`, belief already moved —
+    and the caller only saw an exception. This pins the order.
+    """
+    import tortoise.goal_judgement as gj
+
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 12.0, at="2026-11-11T10:00:00Z")
+
+    def boom(*a, **kw):
+        raise RuntimeError("operator write refused")
+
+    monkeypatch.setattr(gj, "_ensure_judgement_edge", boom)
+    with pytest.raises(RuntimeError):
+        judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                         target=target)
+    monkeypatch.undo()
+    assert sdk.get_entity(goal["id"])["goalState"] == "unmet", (
+        "the cache write ran after the arrow, so a failed arrow left the cache "
+        "contradicting the live claim"
+    )

@@ -268,10 +268,30 @@ def _assert_supersession_scope(
     seam: goal A ended with zero live judgements and its belief still moving.
     """
     node = sdk.get_entity(previous_point_id) or {}
+    if node.get("judgementState") is None:
+        # ⛔ A predecessor this module does not own has NO scope props to compare,
+        # so an equality check that tolerates absence is a no-op exactly where it
+        # matters most. MEASURED: a foreign `derived` Point wired into goal B with
+        # no `goalId` was superseded silently, its operator TRANSFERRED (#6180),
+        # and goal B's belief went 0.0 -> 0.6502 on a judgement that belongs to
+        # goal A — while B's claim was retired with no successor. That is the
+        # failure this guard exists to prevent, so a predecessor must BE a
+        # judgement before its scope can be compared at all.
+        raise ValueError(
+            f"refusing to supersede {previous_point_id!r}: it carries no "
+            "`judgementState`, so it is not a judgement this module can scope. A "
+            "supersession transfers the predecessor's operator edges (#6180), so "
+            "retiring a foreign claim would re-point ITS belief onto this chain."
+        )
     for key, want in (("goalId", goal_id), ("indicatorId", indicator_id),
                       ("targetId", target_id)):
+        # ⛔ Presence AND equality, in BOTH directions: a predecessor that carries
+        # a dimension the caller did not declare (or declares one the predecessor
+        # lacks) is a different chain, and `want is not None` was an escape that
+        # let `indicator_id=None` skip the check entirely — measured to mint a
+        # SECOND live claim and double the goal's operators.
         have = node.get(key)
-        if want is not None and have is not None and have != want:
+        if have != want:
             raise ValueError(
                 f"refusing to supersede {previous_point_id!r}: its {key} is "
                 f"{have!r} but this judgement is scoped to {want!r}. A "
@@ -430,6 +450,18 @@ class Reading:
     reading_id: str | None = None
     unit: str | None = None
     started_at: str | None = None
+
+    def __post_init__(self) -> None:
+        # ⛔ THE VALUE IS NORMALISED HERE, so EVERY path agrees with `_num` — the
+        # pure `compare()` included. MEASURED before this: `compare([Reading(value=True)],
+        # Target("<=", 10.0))` returned `met`, because `True` is an `int` in Python
+        # and only the graph loader applied `_num`; a stored `create_event(value=True)`
+        # was therefore a numeric "measurement" on one path and a boolean on the
+        # other. `_num` refuses bool, strings that are not numbers, and
+        # non-finite values, so `available` is False for all of them.
+        normalised = _num(self.value)
+        if normalised != self.value:
+            object.__setattr__(self, "value", normalised)
 
     @property
     def available(self) -> bool:
@@ -1082,10 +1114,16 @@ def record_judgement(
                 raise exc from cleanup_exc
             raise
 
+    # The cache is written BEFORE the arrow, deliberately: a failed arrow is the
+    # one failure the unchanged arm repairs on the next pass (it re-asserts it),
+    # while a cache word left contradicting a live claim is what a reader sees —
+    # measured, an `update_entity` refusal on a flip left the claim `unmet` and
+    # `goalState` still `met`. Neither step has a compensating delete: the claim
+    # and its prior are correct, and removing them would destroy the judgement.
+    cached = _write_goal_state_cache(sdk, goal_id, judgement.state)
+
     operator_id = _ensure_judgement_edge(sdk, point_id, goal_id)
     extra_operators = _extra_operators(sdk, point_id, goal_id, operator_id)
-
-    cached = _write_goal_state_cache(sdk, goal_id, judgement.state)
 
     return {
         "written": True,
