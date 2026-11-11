@@ -11800,8 +11800,10 @@ durations:
   # against that pool's own size. ⛔ The CASE COUNT is deliberately NOT quoted (#11837 review, same
   # P2): a hand-written count re-stales on every case a later round adds, and this PR re-staled its
   # own three times (13 -> 14 -> 15). MEASURED LOCALLY as context only, never as the weight (a local
-  # reading is forbidden as a SHARD-LAYOUT input, #2818/#3419): the whole file is under 5 s wall on
-  # this host. What the weight covers: one pure function over a hand-built histogram, a fake
+  # reading is forbidden as a SHARD-LAYOUT input, #2818/#3419): the file's own arms are sub-second and
+  # its one child interpreter is ~1.5 s, while the SESSION total is load-bound — the same tree measured
+  # 11.5-12 s at load average 30 on the host that wrote this line, so re-measure instead of quoting this
+  # sentence. What the weight covers: one pure function over a hand-built histogram, a fake
   # graph/projection, ONE product-vocabulary import (`domain_loader.known_kinds`) that loads the pack
   # registry, and ONE child interpreter for the SDK-registration arm (no DB, no model, no network).
   test_capstone_a_rows_10982.py: 0.9  # #10982: file-scan + unit arms only (JSON/YAML/markdown parse, one git-free `check.run`, a fake projection); the same rule every neighbouring "new in #NNNN" row states. ⚠️ MEASURED LOCALLY as context, NOT as the weight: ~6 s for this file alone, so the flat 2.0 OVERSTATED it until this push-to-main sweep replaced it from junit — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.0
