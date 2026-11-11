@@ -84,7 +84,7 @@ import json
 import pytest
 
 # ⛔ NOT `pytest.importorskip("tortoise.sdk")` (review P3 on PR #11795): that
-# turns an unimportable SDK into FOURTEEN skips, and this file is the only
+# turns an unimportable SDK into SEVENTEEN skips, and this file is the only
 # behavioural pin the mention record has. Its declared sibling
 # (`test_3817_tags_rebuild_durability.py`) imports directly and fails loudly.
 from tortoise.api import EventAPI, provenance
