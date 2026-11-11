@@ -96,12 +96,12 @@ this re-cut keeps them *and* records which ones the tree has since overtaken.
 | **d** | Route all doors through `sdk.ingest` and the loss class cannot recur | **`sdk.ingest` itself lost Point extras on replay** — the canonical bundle contract inherited #2795 | **SUPERSEDED-BY-FIX** — replay restores Point extras; `content_hash` is now recomputed from replayed content, so a rebuild is self-healing | `tortoise/sdk.py:36042-36046` states the rebuild case is "NOT … any more — `projection/entities.py::_upsert_point_props` (#2795 D2) now RECOMPUTES `content_hash`"; pin `tests/test_ingest_rebuild_durability.py` |
 | **e** | The terminal outcome set `{won, lost, withdrawn, completed}` is fine | **Narrowed** — split the **outcome axis** from the **completion axis** (#2826 C9/C14) | **ADOPTED** — both axes are shipped properties, and the doc says so in those words | `tortoise/pipeline.py:16` ("`pipelineStageId` / `pipelineSlot` / `pipelineOutcome` … the separation #2826's C14 recommends"), `:66`; #2792 CLOSED COMPLETED 2026-10-15 |
 | **f** | `tortoise/semantic_extractor.py` exists | **False** — verified absent | **STILL-TRUE** | `ls tortoise/semantic_extractor.py` → *No such file or directory* at `f70d884b7` |
-| **g** | #2795's prop loss is a **journal** gap | **False.** The journal carries the full snapshot; the loss was the **replay fold** (`_upsert_point_props` never called `_persist_extra_props`). Fix = one code path. | **SUPERSEDED-BY-FIX** — that one code path was added | same evidence as **(c)**: `projection/entities.py:3115` |
-| **h** | The write-path benchmark exercises the **eval** lane, so it cannot see this class | **False.** It runs the **product** lane (`sdk.capture_session` → `_extract_session_v2`); it was blind because its graded vocabulary never asserted those props exist | **STILL-TRUE** (citation relocated — the 2026-09-10 `runner.py:570` no longer resolves) | `tests/eval/write_path/test_write_path_relation_lane.py:9` ("**capture commit** (`sdk.capture_session` → `_extract_session_v2`)") |
+| **g** | #2795's prop loss is a **journal** gap | **False.** The journal carries the full snapshot; the loss was the **replay fold** (`_upsert_point_props` never called `_persist_extra_props`). Fix = one code path. | **SUPERSEDED-BY-FIX** — that one code path was added | same evidence as **(c)**: `tortoise/projection/entities.py:3115` |
+| **h** | The write-path benchmark exercises the **eval** lane, so it cannot see this class | **False.** It runs the **product** lane (`sdk.capture_session` → `_extract_session_v2`); it was blind because its graded vocabulary never asserted those props exist | **STILL-TRUE** (citation relocated — the 2026-09-10 `runner.py` line citation no longer resolves at this head) | `tests/eval/write_path/test_write_path_relation_lane.py:9` ("**capture commit** (`sdk.capture_session` → `_extract_session_v2`)") |
 | **i** | The pack-fit brief forward-referenced filing M1 as `#2697` | **Wrong.** #2697 is a merged executor/envelope PR; M1 was filed as **#2714** | **STILL-TRUE**, and now spent — `#2714` CLOSED COMPLETED | `gh issue view 2714` → `CLOSED`; `gh pr view 2697` → `MERGED` "fix(executor): #1416 — robust envelope extraction" |
 | **j** | The pilot corpus is "sanitized" | **Unverified / inconsistent** — it carried customer-identifying names and a work email in provenance metadata. Treat as private regardless of the label. | **STILL-TRUE as a rule; MOOT-BY-LOSS as an object** — the corpus is no longer on this machine (§5), so nothing here can be re-measured. **The rule outlives the object: never commit corpus material to this public repo.** | `ls -d ~/.swarm` → *No such file or directory* |
 | **k** | #2820 estimated "~40 decisions scattered" | **Undercount.** #2826's verified count was **50 open** (17 owner-required, 33 engineering) | **DRIFTED** — the count is now a closed-book figure: #2826 was closed `NOT_PLANNED` 2026-09-17, so the register is a *snapshot*, not a live queue | `gh issue view 2826` → `CLOSED NOT_PLANNED @ 2026-09-17T20:54:28Z` |
-| **l** | A list of issues the ledger recorded as OPEN | Corrected 2026-09-10: #2748, #1695, #1418, #1535, #2313, #2083 are **closed** | **DRIFTED, and much further than one step** — of the 41 issues §4 indexed, **4 remain open**: `#2696`, `#2728`, `#2684`, `#2811` | §6 below, measured per issue |
+| **l** | A list of issues the ledger recorded as OPEN | Corrected 2026-09-10: #2748, #1695, #1418, #1535, #2313, #2083 are **closed** | **DRIFTED, and much further than one step** — of the 40 issues §4 indexed, **4 remain open**: `#2696`, `#2728`, `#2684`, `#2811` | §6 below, measured per issue |
 
 **The one thing to take away:** **(c)**, **(d)**, **(e)**, **(g)** and **(k)** are no
 longer true statements about the tree. The review's central correction — *"the Point
@@ -179,17 +179,17 @@ Three consequences, and they are the actionable part of this page:
 
 ---
 
-## 6. The issue index, re-measured: 4 of 41 open
+## 6. The issue index, re-measured: 4 of 40 open
 
-The ledger indexed 41 issues and 1 PR across §4.1/§4.2, with states read on 2026-09-10.
-Re-read per issue on 2026-11-12:
+The ledger indexed **40 issues and 2 PRs** across §4.1/§4.2, with states read on 2026-09-10.
+Re-read per issue on 2026-11-12 — 42 rows, and they reconcile:
 
 | State | Count | Which |
 |---|---|---|
 | **OPEN** | **4** | `#2696` (an epic, not a defect) · `#2728` (per-graph pack selection) · `#2684` (value-span slice) · `#2811` (answer normalizer) |
-| CLOSED COMPLETED | 30 | incl. `#2714`, `#2725`, `#2726`, `#2727`, `#2729`, `#2730`, `#2766`, `#2767`, `#2781`, `#2782`, `#2783`, `#2786`, `#2787`, `#2788`, `#2792`, `#2795`, `#2813`, `#2814`, `#2817`, `#2818`, `#2749`, `#2734`, `#2742`, `#2105`, `#1509`, `#1695`, `#1370`, `#1418`, `#1535`, `#2313` |
+| CLOSED COMPLETED | 31 | incl. `#2714`, `#2725`, `#2726`, `#2727`, `#2729`, `#2730`, `#2766`, `#2767`, `#2781`, `#2782`, `#2783`, `#2786`, `#2787`, `#2788`, `#2792`, `#2795`, `#2813`, `#2814`, `#2817`, `#2818`, `#2749`, `#2734`, `#2742`, `#2083`, `#2105`, `#1509`, `#1695`, `#1370`, `#1418`, `#1535`, `#2313` |
 | CLOSED other | 5 | `#2748` (`NOT_PLANNED`, fixed in effect) · `#2820` · `#2826` (`NOT_PLANNED`) · `#2296` · `#2790` |
-| MERGED (was a PR) | 2 | PR `#2747` (carried #2727+#2726) · `#2697` (never an issue — correction **(i)**) |
+| MERGED (both were PRs) | 2 | PR `#2747` · `#2697` — both are PRs, not issues; see correction **(i)** |
 
 **⚠️ of the four survivors, two are already re-measured elsewhere and must not be re-derived:**
 
@@ -213,7 +213,7 @@ that its own proposed `E ──► A,B ──► C ──► D` dependency order
    are answers the *code now embodies*. A "the Point fold drops props" finding is a false positive
    against the current tree.
 2. **Do not trust a `~/.swarm/…` citation.** It resolves on no machine in the fleet (§5).
-3. **Do not read the ledger's §4 state labels.** 37 of 41 have moved; two of the four survivors are
+3. **Do not read the ledger's §4 state labels.** 36 of 40 have moved; two of the four survivors are
    already re-measured.
 4. **Do carry forward the one thing that is still entirely true:** the review's §10 verification
    discipline — *runtime probes beat reading the diff*. It is why two of the loudest claims in this
