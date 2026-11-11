@@ -3872,17 +3872,20 @@ _EMITTER_PROSE_CLAIMS = (
 )
 
 
-def test_the_emitter_symbols_in_this_files_own_prose_resolve_and_no_line_cite_returns():
+def test_the_emitter_symbols_in_this_files_own_prose_resolve():
     """FAILS IF this gate's prose names an emitter symbol the emitter no longer has.
 
-    Three clauses, because the paragraphs make three claims: the sentence is still THERE, the
+    TWO clauses, because the paragraphs make two claims: the sentence is still THERE, and the
     symbols it names EXIST in the emitter (and the `door` pair in the order the sentence
-    asserts), and no `capstone_measure.py:<n>` number comes back — a number is read by no sweep
-    here, so it rots on the next insertion above it.
+    asserts). ⛔ It asserts NOTHING about line numbers, on purpose: the numbers these paragraphs
+    carry are pinned by `tests/test_7949_capstone_measure.py::_CROSS_FILE_PROBE_CITES`, which
+    reads each number OUT of this file and asserts the symbol on that line of the probe. An
+    earlier cut of this arm forbade the number outright, which contradicted that pin — no content
+    of this file could satisfy both, so one of the two was red at every head (#11837 review
+    round 4, P1-B). The number clause was deleted; the pin that actually reads the number stays.
 
-    Non-vacuity: the pre-#11837-fix text carried `capstone_measure.py:4336` / `4481` /
-    `4616`, so the number clause reds on it; and renaming either call in the emitter —
-    `require_door_entered` or `render_log` — reds the symbol clause instead of leaving the
+    Non-vacuity: deleting either sentence fragment reds clause 1, and renaming either call in the
+    emitter — `require_door_entered` or `render_log` — reds clause 2 instead of leaving the
     sentence asserting something the code no longer has.
     """
     emitter = (_REPO / "docs/evidence/7949-capstone/probes/capstone_measure.py"
@@ -3898,13 +3901,7 @@ def test_the_emitter_symbols_in_this_files_own_prose_resolve_and_no_line_cite_re
                 f"the sentence fragment {fragment!r} is gone from "
                 "tools/capstone_verdict_check.py — if the claim moved, re-point this pin; if it "
                 "was dropped, drop the pin with it (a pin on a deleted sentence proves nothing)")
-    # 2. …and the prose carries NO `file:line` into the emitter.
-    typed = sorted(set(re.findall(r"capstone_measure\.py:\d+", gate_text)))
-    if typed:
-        failures.append(
-            f"{typed} — a `file:line` into the emitter is read by NO sweep (that file is not in "
-            "`_BUNDLE_DOCS`), so the number rots on the next insertion above it. Name the SYMBOL")
-    # 3. …and every symbol it names resolves, in the order the sentence asserts.
+    # 2. …and every symbol it names resolves, in the order the sentence asserts.
     for fragment, symbols in _EMITTER_PROSE_CLAIMS:
         where = {symbol: [i for i, ln in enumerate(emitter) if symbol in ln]
                  for symbol in symbols}
