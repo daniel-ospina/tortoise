@@ -693,6 +693,7 @@ def _reconcile_failing_question(
         "raised": dict(raised),
         "marginal_bound": 0,
         "marginal_tokens": None,
+        "marginal_unmetered": False,
         "cap_exceeded": False,
         "bound_exceeded": False,
         "reader_surface_before": None,
@@ -805,13 +806,26 @@ def _reconcile_failing_question_pass(
         ret2.get("reader_surface@k"), k)
     stats["session_recall_after"] = (ret2.get("session_recall@k")
                                      or {}).get(str(k))
-    stats["marginal_tokens"] = window_recon.envelope_delta(
-        before, collector.peek_question(qid))
-    stats["cap_exceeded"] = stats["marginal_tokens"] > stats["cap"]
+    after = collector.peek_question(qid)
+    # ⛔ UNKNOWN SPEND IS NOT ZERO SPEND. `usage.py` keeps `usage_present`
+    # conservatively False (and counts `calls_without_usage`) when a provider
+    # response carried no usage block, precisely so unknown spend is never
+    # silently priced. A sum over such a bucket is a LOWER BOUND, so the
+    # cap/bound comparison cannot be certified from it: the flags below go
+    # NULL ("not measured"), not False ("within budget"), and the census
+    # reports the row as unmetered instead of counting it as a cheap pass.
+    stats["marginal_unmetered"] = (
+        window_recon.spend_is_unknown(before, "reader", "judge")
+        or window_recon.spend_is_unknown(after, "reader", "judge"))
+    stats["marginal_tokens"] = window_recon.envelope_delta(before, after)
+    stats["cap_exceeded"] = (None if stats["marginal_unmetered"]
+                             else stats["marginal_tokens"] > stats["cap"])
     # The bound is an ASSUMPTION (two pinned headrooms); this row is the
     # live test of it. An arm-ON run that raises it is evidence the bound is
     # too small — published rather than asserted.
-    stats["bound_exceeded"] = stats["marginal_tokens"] > stats["marginal_bound"]
+    stats["bound_exceeded"] = (
+        None if stats["marginal_unmetered"]
+        else stats["marginal_tokens"] > stats["marginal_bound"])
 
 
 # R3 (#1542): the embedder pinned for the eval pre-flight — now derived from
@@ -6699,9 +6713,13 @@ def outcomes_to_report(
                 "coverage_loop", "coverage_loop_stats",
                 # C3-4 (#2570, #2519 P3): the window-reconciliation arm
                 # marker + per-outcome labeled-variant census ride the
-                # Layer-1 projection (read via o.get — absent until the
-                # outcome carries them, and absent on an arm-OFF run); the
-                # publication layer's labeled-variant block consumes them.
+                # Layer-1 projection. NOTE the projection is UNCONDITIONAL,
+                # so on an arm-OFF outcome these two keys are PRESENT with the
+                # value None (as every other arm key in this tuple is) —
+                # `o.get` is what keeps a pre-feature checkpoint readable.
+                # The OUTCOME dict itself omits them entirely when the arm is
+                # off (see the conditional `**({...} if window_reconciliation
+                # else {})`); the projection is a fixed-shape payload.
                 "window_reconciliation", "window_reconciliation_stats",
                 # C4 (#2517/#2568, #2513): the source-session re-injection
                 # arm marker + per-outcome census ride the projection

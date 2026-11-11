@@ -20,6 +20,7 @@ The arm's honesty contract is the thing these tests exist to pin:
 """
 from __future__ import annotations
 
+import copy
 import sys
 from pathlib import Path
 
@@ -263,6 +264,38 @@ def test_a_raised_window_that_cannot_fit_the_cap_is_refused():
         bound=bound, cap=wr.DEFAULT_RECONCILIATION_TOKEN_CAP) is False
 
 
+def test_spend_is_unknown_reads_the_usage_present_flags():
+    """⛔ #11830 review P1: a bucket whose provider returned NO usage block
+    makes ``stage_tokens`` a LOWER BOUND. ``usage.py`` already keeps
+    ``usage_present`` conservatively False for exactly this, so the arm must
+    ask rather than price the unknown at 0."""
+    known = _envelope()
+    assert wr.spend_is_unknown(known, "reader", "judge") is False
+    # An unmeasured call in one bucket poisons the whole stage.
+    unknown = _envelope()
+    unknown["by_stage"]["judge"]["openrouter"]["m"]["usage_present"] = False
+    assert wr.spend_is_unknown(unknown, "judge") is True
+    assert wr.spend_is_unknown(unknown, "reader") is False
+    # The counter form is the same signal (``calls_without_usage`` > 0).
+    counted = _envelope()
+    counted["by_stage"]["reader"]["openrouter"]["m"][
+        "calls_without_usage"] = 2
+    assert wr.spend_is_unknown(counted, "reader") is True
+    # Absent/malformed envelopes know nothing is unknown.
+    assert wr.spend_is_unknown(None, "judge") is False
+    assert wr.spend_is_unknown({"by_stage": "nonsense"}, "judge") is False
+
+
+def test_a_sum_over_an_unknown_bucket_understates_the_spend():
+    """The lower-bound property the guard above exists for: the same
+    envelope reads the same token count whether or not it was measured."""
+    known = _envelope()
+    unknown = _envelope()
+    unknown["by_stage"]["reader"]["openrouter"]["m"]["usage_present"] = False
+    assert wr.stage_tokens(known, "reader") == wr.stage_tokens(unknown,
+                                                               "reader")
+
+
 # ── the collector snapshot the arm prices itself from ───────────────────
 
 def test_peek_question_is_non_destructive_and_drain_still_works():
@@ -298,9 +331,11 @@ def test_peek_question_missing_qid_is_none():
 # ── the re-run wiring (fakes; no graph, no LLM) ─────────────────────────
 
 class _FakeReader:
-    def __init__(self, answer: str = "42", extra_tokens: int = 0):
+    def __init__(self, answer: str = "42", extra_tokens: int = 0,
+                 usage_present: bool = True):
         self._answer = answer
         self._extra = extra_tokens
+        self._usage_present = usage_present
         self.calls: list[dict] = []
 
     def answer(self, *, context_hits, question, question_date,
@@ -308,16 +343,17 @@ class _FakeReader:
         self.calls.append({"context_hits": context_hits, "question": question,
                            "question_date": question_date,
                            "question_type": question_type})
-        if self._extra:
-            lme_usage.get_collector().record(
-                stage="reader", provider="openrouter", model_id="m",
-                usage={"prompt_tokens": self._extra}, usage_present=True)
+        lme_usage.get_collector().record(
+            stage="reader", provider="openrouter", model_id="m",
+            usage=({"prompt_tokens": self._extra} if self._extra else {}),
+            usage_present=self._usage_present)
         return self._answer
 
 
 class _FakeJudge:
-    def __init__(self, verdict: bool = True):
+    def __init__(self, verdict: bool = True, usage_present: bool = True):
         self._verdict = verdict
+        self._usage_present = usage_present
         self.calls: list[dict] = []
 
     def judge(self, *, question_type, question, answer, hypothesis,
@@ -327,7 +363,8 @@ class _FakeJudge:
         if self._verdict:
             lme_usage.get_collector().record(
                 stage="judge", provider="openrouter", model_id="m",
-                usage={"prompt_tokens": 5}, usage_present=True)
+                usage={"prompt_tokens": 5},
+                usage_present=self._usage_present)
         return self._verdict
 
 
@@ -513,6 +550,53 @@ def test_wiring_bound_exceeded_is_disclosed(monkeypatch):
     assert stats["cap_exceeded"] is False
 
 
+def test_wiring_unmetered_spend_is_not_certified_as_within_budget(
+        monkeypatch):
+    """⛔ #11830 review P1: an admitted pass whose reader/judge returned no
+    usage block spends an UNMEASURED amount. Publishing
+    ``cap_exceeded=False`` for it certifies 'within budget' from a lower
+    bound — so both flags go NULL (not measured) and the row is flagged."""
+    stats = _recon(monkeypatch, ret=_one_shot_ret(0.2), label=False,
+                   hypothesis="two",
+                   reader=_FakeReader(usage_present=False),
+                   judge=_FakeJudge(usage_present=False), cap=1_000_000)
+    assert stats["admitted"] is True
+    assert stats["marginal_unmetered"] is True
+    # ⛔ None, not False: False is the claim "we measured it and it fit".
+    assert stats["cap_exceeded"] is None
+    assert stats["bound_exceeded"] is None
+
+
+def test_wiring_a_measured_pass_is_certified_normally(monkeypatch):
+    """The negative control for the row above — a measured pass still gets a
+    real boolean verdict, so the guard cannot quietly disarm the census."""
+    stats = _recon(monkeypatch, ret=_one_shot_ret(0.2), label=False,
+                   hypothesis="two", cap=1_000_000)
+    assert stats["marginal_unmetered"] is False
+    assert stats["cap_exceeded"] is False
+    assert stats["bound_exceeded"] is False
+
+
+def test_wiring_never_mutates_the_one_shot_result_or_its_label(
+        monkeypatch):
+    """★ THE honesty contract, pinned THROUGH THE WIRING rather than at the
+    renderer (#11830 review P2): the official number derives from the
+    one-shot ``ret``/``label``/``hypothesis``, so the arm must leave every
+    one of them byte-identical. The variant values live only in
+    ``variant_*``"""
+    ret = _one_shot_ret(0.2, recalled=False)
+    ret_before = copy.deepcopy(ret)
+    hypothesis = "one"
+    stats = _recon(monkeypatch, ret=ret, label=False, hypothesis=hypothesis,
+                   cap=1_000_000)
+    assert stats["admitted"] is True
+    # The one-shot retrieval result is untouched (a raised pass has its own).
+    assert ret == ret_before
+    # The one-shot label/hypothesis are not the ones the arm produced.
+    assert stats["variant_label"] is True
+    assert stats["variant_hypothesis"] == "42"
+
+
 # ── containment: the optional pass may never decide the question's fate ──
 
 def test_wiring_a_failing_variant_pass_is_recorded_not_raised(monkeypatch):
@@ -603,7 +687,8 @@ def _variant_outcome(qid: str, one_shot: bool, variant: bool | None = None,
                      recall_before: float = 0.5,
                      recall_after: float = 0.5,
                      cap_exceeded: bool = False,
-                     marginal: int = 100) -> dict:
+                     marginal: int = 100,
+                     skip_reason: str | None = None) -> dict:
     out: dict = {
         "question_id": qid,
         "question_type": "multi-session",
@@ -619,6 +704,8 @@ def _variant_outcome(qid: str, one_shot: bool, variant: bool | None = None,
              "marginal_tokens": marginal}
     if variant is not None:
         stats["variant_label"] = variant
+    if skip_reason is not None:
+        stats["skip_reason"] = skip_reason
     out["window_reconciliation"] = True
     out["window_reconciliation_stats"] = stats
     return out
@@ -644,7 +731,8 @@ def test_variant_rows_count_the_cap_census_and_surface_delta():
     outcomes = [
         _variant_outcome("q1", one_shot=False, variant=True),
         _variant_outcome("q2", one_shot=False, admitted=False,
-                         variant=None, surface_after=None),
+                         variant=None, surface_after=None,
+                         skip_reason="token_cap"),
         _variant_outcome("q3", one_shot=False, variant=True,
                          cap_exceeded=True, marginal=99_000),
     ]
@@ -673,6 +761,37 @@ def test_variant_rows_counts_an_errored_pass_and_a_bound_overshoot():
     assert rows["n_errored"] == 1
     assert rows["n_graded"] == 1     # the errored pass contributes no verdict
     assert rows["bound_exceeded_n"] == 1
+
+
+def test_variant_rows_count_an_unmetered_pass_separately():
+    """⛔ #11830 review P1: an unmetered pass is NOT a cheap pass. Its lower
+    bound must not enter ``marginal_tokens_total``, and the census reports it
+    rather than letting it read as spend that fit the cap."""
+    measured = _variant_outcome("q1", one_shot=False, variant=True)
+    measured["window_reconciliation_stats"]["marginal_tokens"] = 900
+    unmetered = _variant_outcome("q2", one_shot=False, variant=True)
+    unmetered["window_reconciliation_stats"]["marginal_tokens"] = 0
+    unmetered["window_reconciliation_stats"]["marginal_unmetered"] = True
+    unmetered["window_reconciliation_stats"]["cap_exceeded"] = None
+    rows = wr.reconciliation_variant_rows([measured, unmetered], k=5)
+    assert rows["n_unmetered"] == 1
+    # The total is the MEASURED spend only — never the unknown priced at 0.
+    assert rows["marginal_tokens_total"] == 900
+    assert rows["cap_exceeded_n"] == 0
+
+
+def test_variant_rows_do_not_call_an_errored_pass_a_cap_skip():
+    """⛔ #11830 review P2: an errored pass is not the budget gate refusing.
+    ``skip_reason`` already distinguishes them; the census must too."""
+    errored = _variant_outcome("q1", one_shot=False, variant=None)
+    errored["window_reconciliation_stats"]["error"] = "RuntimeError: x"
+    errored["window_reconciliation_stats"]["skip_reason"] = "error"
+    capped = _variant_outcome("q2", one_shot=False, variant=None)
+    capped["window_reconciliation_stats"]["admitted"] = False
+    capped["window_reconciliation_stats"]["skip_reason"] = "token_cap"
+    rows = wr.reconciliation_variant_rows([errored, capped], k=5)
+    assert rows["n_skipped_token_cap"] == 1
+    assert rows["n_errored"] == 1
 
 
 def test_variant_rows_pool_drift_is_surfaced():

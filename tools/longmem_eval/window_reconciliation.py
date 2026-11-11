@@ -236,6 +236,11 @@ def stage_tokens(envelope: dict | None, *stages: str) -> int:
 
     Malformed/absent envelopes yield 0 (never an exception — the arm must
     not be able to break a run over a metering shape).
+
+    ⛔ A sum over a bucket whose provider returned NO usage block is a LOWER
+    BOUND, not a measurement. Any caller that compares this against a cap or
+    a budget MUST pair it with :func:`spend_is_unknown` — otherwise a pass
+    whose spend was never measured reads as free (see that function).
     """
     if not isinstance(envelope, dict):
         return 0
@@ -298,6 +303,42 @@ def envelope_delta(before: dict | None, after: dict | None) -> int:
     a collector that lost rows reports 0, not a credit)."""
     return max(0, stage_tokens(after, "reader", "judge")
                - stage_tokens(before, "reader", "judge"))
+
+
+def spend_is_unknown(envelope: dict | None, *stages: str) -> bool:
+    """Whether ANY call in the named stages lacked a usage block.
+
+    ``usage.py`` keeps ``usage_present`` conservatively False and counts
+    ``calls_without_usage`` when a provider response carried no usage block,
+    deliberately — its own contract is that *unknown spend is never silently
+    priced*. A token SUM over such a bucket is a lower bound on what was
+    spent, so a caller certifying "within budget" from :func:`stage_tokens`
+    without asking this reports an UNMEASURED pass as a free one.
+
+    Absent/malformed envelopes report ``False`` (nothing known to be
+    unknown); a caller that has no envelope at all must treat that case
+    itself.
+    """
+    if not isinstance(envelope, dict):
+        return False
+    by_stage = envelope.get("by_stage")
+    if not isinstance(by_stage, dict):
+        return False
+    for stage in stages:
+        providers = by_stage.get(stage)
+        if not isinstance(providers, dict):
+            continue
+        for models in providers.values():
+            if not isinstance(models, dict):
+                continue
+            for bucket in models.values():
+                if not isinstance(bucket, dict):
+                    continue
+                if bucket.get("usage_present") is False:
+                    return True
+                if bucket.get("calls_without_usage"):
+                    return True
+    return False
 
 
 def admit_reconciliation(*, bound: int, cap: int) -> bool:
@@ -400,7 +441,8 @@ def reconciliation_variant_rows(outcomes: list[dict], *,
     caps = [s.get("cap") for s in (_stats(o) for o in fired)
             if isinstance(s.get("cap"), int)]
     marginal = [s.get("marginal_tokens") for s in (_stats(o) for o in admitted)
-                if isinstance(s.get("marginal_tokens"), int)]
+                if isinstance(s.get("marginal_tokens"), int)
+                and s.get("marginal_unmetered") is not True]
 
     return {
         "label": ("LABELED VARIANT (NOT official, P3 #2570): stratified "
@@ -416,7 +458,8 @@ def reconciliation_variant_rows(outcomes: list[dict], *,
         "n_fired": len(fired),
         "n_admitted": len(admitted),
         "n_skipped_token_cap": sum(
-            1 for o in fired if _stats(o).get("admitted") is not True),
+            1 for o in fired
+            if _stats(o).get("skip_reason") == "token_cap"),
         "n_graded": len(pairs),
         "recovered": recovered,
         "lost": lost,
@@ -429,6 +472,13 @@ def reconciliation_variant_rows(outcomes: list[dict], *,
         "bound_exceeded_n": sum(
             1 for o in admitted if _stats(o).get("bound_exceeded") is True),
         "n_errored": sum(1 for o in fired if _stats(o).get("error")),
+        # A pass admitted on an envelope that reported a call with no usage
+        # block spends an UNMEASURED amount: its lower bound is not evidence
+        # of staying under the cap, so it is excluded from the total and
+        # counted here instead of being priced at face value.
+        "n_unmetered": sum(
+            1 for o in admitted
+            if _stats(o).get("marginal_unmetered") is True),
         "token_cap": caps[0] if caps else None,
         "marginal_tokens_total": (sum(marginal) if marginal else 0),
         f"reader_surface@{k}": {
@@ -442,4 +492,18 @@ def reconciliation_variant_rows(outcomes: list[dict], *,
             "session_recall@k only — the re-run never mutates the one-shot "
             "retrieval result, so no official number can be derived from "
             "this block"),
+        # ⛔ The RESULT is never mutated; the ENVIRONMENT is not fully
+        # isolated. The re-run's extra retrieval runs through the same
+        # run-global vector circuit breaker as the one-shot path
+        # (tortoise.search_engine._BREAKERS), so a raised pass can trip or
+        # heal it and thereby change which LATER questions are dropped as
+        # `dropped.breaker_open`. Stated here rather than left to the
+        # reader: the invariance is unconditional on the RESULT and
+        # conditional on a healthy vector leg for the POPULATION.
+        "population_invariant_residual": (
+            "the re-run shares the run-global vector circuit breaker, so "
+            "on a DEGRADED vector leg an arm-ON run can drop or un-drop "
+            "later one-shot questions (see the report's "
+            "dropped.breaker_open). The one-shot result is never mutated; "
+            "population identity across arms holds on a healthy leg."),
     }
