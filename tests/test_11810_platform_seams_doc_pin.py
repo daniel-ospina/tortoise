@@ -54,12 +54,16 @@ WHAT IT ASSERTS, in BOTH directions:
       false (the scripts register by absolute path and read `$HOME`). Pinned in
       both directions because r19 measured it pinned in NEITHER: re-instating the
       sentence left the whole file GREEN.
-  (2b) the record's TWO restatements of the **three hook sources** — project,
-      team and enterprise-managed — each still name all three. Item 2 of this PR
+  (2b) the record's restatements of the **three hook sources** — project, team
+      and enterprise-managed — each still name all three. Item 2 of this PR
       exists because #11806 named only the PROJECT-level source and that reads as
-      exclusive; r21 measured BOTH sites revertible to the one-source reading
-      with the whole file GREEN, and found the PR body already claiming a
-      `_HOOK_SOURCE_RESTATEMENTS` arm that did not exist. This is that arm.
+      exclusive; r21 measured two sites revertible to the one-source reading with
+      the whole file GREEN, and found the PR body already claiming a
+      `_HOOK_SOURCE_RESTATEMENTS` arm that did not exist. r22 then measured TWO
+      MORE such sites (the quoted evidence, and the record's own summary of it).
+      `_HOOK_SOURCE_RESTATEMENTS` now holds one site-unique needle per site, and
+      the claim "all of them" is checkable against that tuple rather than stated
+      as a number here.
 
 `_SHIPPED_FRAGMENT` is the single string both arms bind to, so the two cannot be
 corrected in opposite directions without this file noticing.
@@ -133,6 +137,12 @@ WHAT IT STILL DOES NOT CATCH, stated so the docstring is not the next over-claim
     ("PROJECT-level" alone) is exactly a shortening of this sequence — and the
     remedy is the same: reword the record together with its
     `_HOOK_SOURCE_RESTATEMENTS` row.
+  * (4)'s NEGATION guard is an ENUMERATED list, not a rule: it catches a negator
+    prefixed to a `_RETRACTION_CAUSE` needle in the five forms listed, and MISSES any
+    other wording of it ("fails to register by absolute path", "registers by a
+    relative path", a negation AFTER the needle). Measured (r22): the enumerated
+    forms are caught; a re-worded inversion is not. Same trade as the rest of this
+    file — a closed list that states its bound beats a clever parser nobody owns.
 
 MUTATION (each verified RED at this head, restoring byte-identical):
   * restore the unscoped quote at `platform-seams.md:315`      → (1) RED
@@ -184,6 +194,12 @@ MUTATION (each verified RED at this head, restoring byte-identical):
     `#2122` matrix row                                 → (2b) RED  (r21 P2)
   * delete `(plus team and enterprise-managed hooks on Enterprise — the page's
     own gate)` from §3                               → (2b) RED  (r21 P2)
+  * reduce the quoted evidence to `command-based project hooks.`
+                                                      → (2b) RED  (r22 P2)
+  * reduce §3's own summary to `(the page names project hooks there)`
+                                                      → (2b) RED  (r22 P2)
+  * prefix a negator to a `_RETRACTION_CAUSE` needle ("which do **not** register
+    by **absolute** path")                            → (4) RED  (r22 P3)
 """
 from __future__ import annotations
 
@@ -271,18 +287,41 @@ _RETRACTION_CAUSE: tuple[str, ...] = (
     "would not resolve on a worker",      # …so the command does not resolve there
 )
 
-#: (2b) — the THREE hook sources, at both places the record restates them.
+#: ⚠️ Each cause needle is a CONTIGUOUS word run, so a negator inserted BEFORE it is
+#: invisible to the presence arm: measured at r22, "which do **not** register by
+#: **absolute** path" / "and do **not** read their state from `$HOME`" left the whole
+#: file GREEN while the record asserted the OPPOSITE of `absolute_command=True` —
+#: the one claim arm (4) exists to protect. Enumerated, not general: each is the
+#: direct negation of a `_RETRACTION_CAUSE` needle, because a closed list is honest
+#: about what it covers and a cleverer rule would be a parser nobody maintains.
+#: A differently-worded negation is a recorded residual (see the module docstring).
+_RETRACTION_NEGATIONS: tuple[str, ...] = (
+    "do not register by absolute path",
+    "do not read their state from",
+    "does not register by absolute path",
+    "never register by absolute path",
+    "does not read their state from",
+)
+
+#: (2b) — the THREE hook sources, at EVERY site where the record restates them.
 #:
 #: Item 2 of this PR exists because #11806's correction named only the
-#: PROJECT-level source, and naming one of three reads as EXCLUSIVE. Both sites —
-#: the `#2122` matrix row and §3's consequence sentence — were unpinned: measured
-#: at r21, deleting the "plus team and enterprise-managed hooks on Enterprise"
-#: clause from EITHER one left the whole file GREEN, and the PR body meanwhile
-#: claimed this very arm existed. Site-unique needles, so a revert at one site
-#: cannot be masked by the other still naming all three.
+#: PROJECT-level source, and naming one of three reads as EXCLUSIVE. Four sites
+#: state all three, and EACH was measured revertible to the one-source reading with
+#: the whole file GREEN: two at r21 (the `#2122` matrix row and §3's consequence
+#: sentence, while the PR body meanwhile claimed this very arm existed), and two
+#: more at r22 (the quoted evidence itself, and the record's own summary of it —
+#: sites the r21 arm's "both places" claim had missed).
+#:
+#: Site-UNIQUE needles: a shared one would let a revert at one site hide behind
+#: another still naming all three. The tuple IS the completeness claim — there is
+#: deliberately no count here, so adding a site means adding a needle rather than
+#: editing a number that can drift.
 _HOOK_SOURCE_RESTATEMENTS: tuple[str, ...] = (
-    "project hooks plus team and enterprise managed hooks on enterprise",    # matrix row
-    "registration plus team and enterprise managed hooks on enterprise",     # §3 sentence
+    "project hooks plus team and enterprise managed hooks on enterprise",           # #2122 matrix row
+    "command based project hooks and on enterprise also run team and enterprise managed hooks",  # quoted evidence
+    "the page names project team and enterprise managed hooks there",               # record's own summary
+    "registration plus team and enterprise managed hooks on enterprise",            # §3 consequence
 )
 
 #: A tag's attributes AS MARKUP — `name=value`, quoted or bare. NOT `[^<>\n]*`:
@@ -535,7 +574,9 @@ def test_the_retracted_project_level_promise_cannot_come_back():
     Mutation: restore the retracted sentence anywhere in the record → the ABSENCE
     leg REDs (measured at this head). Drop ANY one of the four
     `_RETRACTION_CAUSE` needles — including deleting the whole evidence clause
-    while keeping the bare "cannot" → the PRESENCE leg REDs (measured)."""
+    while keeping the bare "cannot" → the PRESENCE leg REDs (measured). Insert a
+    negator BEFORE a cause needle ("which do **not** register by **absolute**
+    path") → the `_RETRACTION_NEGATIONS` ABSENCE leg REDs (measured, r22)."""
     doc = _PLATFORM_SEAMS_DOC.read_text(encoding="utf-8")
     assert _absent(_RETRACTED_PROMISE, doc), (
         "the record promises the seams again via a repo-committed PROJECT-level "
@@ -550,25 +591,32 @@ def test_the_retracted_project_level_promise_cannot_come_back():
             f"these seams ({needle!r} is gone) — a bare 'cannot' with no ground "
             f"reads as an arbitrary exclusion, and the next lane re-adds the "
             f"promise as an attractive route")
+    for negated in _RETRACTION_NEGATIONS:
+        assert _absent(negated, doc), (
+            f"the record NEGATES the ground the retraction rests on "
+            f"({negated!r}) — the shipped scripts DO register by absolute path "
+            f"and DO read state from $HOME, so this is the inverse of the code")
 
 
 def test_both_hook_source_restatements_name_all_three_sources():
-    """(2b) — item 2 of this PR, pinned at the two places the record restates it.
+    """(2b) — item 2 of this PR, at EVERY site where the record restates it.
 
     #11806's correction named only the PROJECT-level source, and naming one of
     three reads as EXCLUSIVE — which is the defect item 2 of this PR fixes, in the
-    message and in the record. Review r21 measured both record sites unpinned:
+    message and in the record. Review r21 measured two record sites unpinned:
     deleting the "plus team and enterprise-managed hooks on Enterprise" clause from
     EITHER the `#2122` matrix row or §3's consequence sentence left the whole file
     GREEN, while the PR body already claimed a `_HOOK_SOURCE_RESTATEMENTS` arm that
-    did not exist at this head. An over-claim of coverage in the body is the exact
-    thing this PR removes from the record, so it is fixed here rather than trimmed.
+    did not exist at this head. Review r22 then measured TWO MORE — the quoted
+    evidence, and the record's own summary of it — so r21's "both places" claim was
+    itself the over-claim it was fixing, one level down. That is why the tuple, not
+    a number, is the completeness claim.
 
-    Site-UNIQUE needles: a shared one would let a revert at one site hide behind the
-    other still naming all three.
+    Site-UNIQUE needles: a shared one would let a revert at one site hide behind
+    another still naming all three.
 
-    Mutation: delete the three-source clause at either site → this REDs (measured at
-    this head, one site at a time)."""
+    Mutation: delete the three-source clause at ANY site → this REDs (measured at
+    this head, one site at a time, all four)."""
     normalised_doc = _normalised(_PLATFORM_SEAMS_DOC.read_text(encoding="utf-8"))
     for needle in _HOOK_SOURCE_RESTATEMENTS:
         assert _normalised(needle) in normalised_doc, (
