@@ -552,16 +552,9 @@ def check_verdict_tally(text: str) -> list[str]:
     # left rc 0, while §1 gives those classes different handling rules ("do not
     # re-derive it" vs "treat the new behaviour as the norm" vs "do not assert it
     # either way"), so the sentence sent the reader to the wrong action.
-    # ⛔ EVERY mention of a letter counts, not the last (or first) one. Both maps
-    # held ONE verdict per letter — `before` overwrote, `following` setdefaulted — so
-    # `**(e)** is **DRIFTED**, and **(e)** is **ADOPTED**` returned `[]` (clean) while
-    # the sentence contradicted itself and the table, and the reverse order red: the
-    # outcome depended on which mention a partial sentence edit left second
-    # (measured). A stale duplicate is exactly what a half-applied rewrite leaves
-    # behind, and self-contradicting prose is what a reader is least likely to
-    # re-count. Sets per letter make every mention a claim the arm must reconcile.
-    before: dict[str, set[str]] = {}
-    following: dict[str, set[str]] = {}
+    attributed: dict[str, str] = {}
+    before: dict[str, str] = {}
+    following: dict[str, str] = {}
     previous = 0
     tokens = [
         tok
@@ -572,13 +565,13 @@ def check_verdict_tally(text: str) -> list[str]:
         for label in re.findall(
             r"\*\*\(([a-z])\)\*\*", non_still_sentence[previous : token.start()]
         ):
-            before.setdefault(label, set()).add(token.group(1))
+            before[label] = token.group(1)
         previous = token.start()
         stop = tokens[pos + 1].start() if pos + 1 < len(tokens) else len(non_still_sentence)
         for label in re.findall(
             r"\*\*\(([a-z])\)\*\*", non_still_sentence[token.end() : stop]
         ):
-            following.setdefault(label, set()).add(token.group(1))
+            following.setdefault(label, token.group(1))
 
     # ⛔ TWO LEGAL ORDERINGS, and the arm must accept BOTH without going blind.
     # Letters-first (`(c), (d) and (g) are **SUPERSEDED-BY-FIX**`) is the shipped
@@ -593,16 +586,50 @@ def check_verdict_tally(text: str) -> list[str]:
     # AND agrees with the table. A genuine swap still reds, because its class-first
     # reading covers only the few letters that happen to follow a class token, so it
     # is never adopted and the letters-first map is reported.
-    def _consistent(mapping: dict[str, set[str]]) -> bool:
+    def _consistent(mapping: dict[str, str]) -> bool:
         return set(non_still) <= set(mapping) and all(
-            mapping.get(label) == {verdicts.get(label)} for label in non_still
+            mapping.get(label) == verdicts.get(label) for label in non_still
         )
 
     attributed = following if _consistent(following) else before
+
+    # ⛔ AND EVERY UNAMBIGUOUS MENTION MUST AGREE. Both maps above hold ONE verdict
+    # per letter — `before` overwrites, `following` setdefaults — so within the map
+    # the arm adopts, the LAST (or first) mention silently wins: measured,
+    # `**(e)** is **DRIFTED**, and **(e)** is **ADOPTED**` returned `[]` (clean) while
+    # the sentence contradicted itself and the table, and the reversed order red, so
+    # the verdict depended on which mention a half-applied edit left second. A stale
+    # duplicate is exactly what a partial rewrite leaves behind.
+    #
+    # The check is deliberately ADDITIVE and SINGLETON-ONLY. Sets in the maps
+    # themselves are wrong: a class-first group (`**V**: (c), (d) and (g)`) makes the
+    # letters-first map's region span the preceding group, so a set there reports a
+    # swap the sentence does not make (measured: correct class-first prose went from
+    # clean to RED). A mention is therefore only trusted here when it is
+    # unambiguous on its own — one letter, one verdict, adjacent to each other — and
+    # the adopted map contributes its own assignment as one more mention. A
+    # contradicting repeat then makes the set two-valued and reds.
+    SINGLE_LETTER_FIRST = re.compile(
+        r"\*\*\(([a-z])\)\*\*\s*(?:are|is)\s*\*\*([A-Z][A-Z-]+)\*\*"
+    )
+    SINGLE_CLASS_FIRST = re.compile(
+        r"\*\*([A-Z][A-Z-]+)\*\*\s*:\s*\*\*\(([a-z])\)\*\*\s*(?:[;.,]|$)"
+    )
+    mentions: dict[str, set[str]] = {}
+    for single in SINGLE_LETTER_FIRST.finditer(non_still_sentence):
+        if single.group(2) in VERDICTS:
+            mentions.setdefault(single.group(1), set()).add(single.group(2))
+    for single in SINGLE_CLASS_FIRST.finditer(non_still_sentence):
+        if single.group(1) in VERDICTS:
+            mentions.setdefault(single.group(2), set()).add(single.group(1))
+    for label in non_still:
+        if attributed.get(label):
+            mentions.setdefault(label, set()).add(attributed[label])
+
     misattributed: dict[str, tuple[list[str], str | None]] = {
-        label: (sorted(attributed.get(label, set())), verdicts.get(label))
+        label: (sorted(mentions.get(label, set())), verdicts.get(label))
         for label in non_still
-        if attributed.get(label, set()) != {verdicts.get(label)}
+        if mentions.get(label, set()) != {verdicts.get(label)}
     }
     if misattributed:
         detail = "; ".join(
