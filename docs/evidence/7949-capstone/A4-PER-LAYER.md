@@ -51,10 +51,13 @@ single shared set would credit a mislabelled thing as coverage — the exact fai
 Object kinds are compared case-insensitively (`docs/ONTOLOGY.md` §5 mixes `Project`/`WorkItem`/`tag`);
 point and event
 kinds stay exact, and **both halves of the hosted write path agree with that**: `pointKind` through
-`hosted_api.py::valid_kind` (`if v not in known_kinds("pointKind")`) and `eventKind` through the commit
+`hosted_api.py::valid_kind` (`allowed = known_kinds("pointKind")` / `if v not in allowed:`) and
+`eventKind` through the commit
 door's Layer-1 event gate in `tortoise/commit_schema.py`, whose `payload.events` loop refuses
 `ev.eventKind not in vocab.event_kinds` — an exact, case-SENSITIVE membership test (measured on
-`compile_vocab().event_kinds`: `"AgentSession"` in, `"agentsession"` not). ⛔ `known_kinds("eventKind")`
+`compile_vocab().event_kinds`: `"AgentSession"` in, `"agentsession"` not; the door tests
+`vocab.event_kinds` from a per-graph `_gate_vocab` — `compile_vocab(installed_namespaces=installed)` —
+which is a subset of that default set, so the exactness is the same property on a narrower vocabulary). ⛔ `known_kinds("eventKind")`
 is **not** the instrument here (`grep -n known_kinds tortoise/hosted_api.py` returns two use sites and
 their two imports: the `pointKind` write check and the `list_points` read filter, nothing else) — naming
 that call would answer the wrong question
@@ -147,16 +150,19 @@ the issue's Scope question for **this** population: the typed minority is **deli
 kinds, not a residue of the rule classifier and not v2-lane drift.**
 
 ⛔ **It does not answer *"what are the 109"*, and this run does not re-measure it.** Those are two
-different populations and the numbers are not interchangeable: the 109 is an EARLIER reading of this
-same fleet graph (`00-align.md` · `00-plan.md`: hosted `live-v4`, 2026-11-04 — a *lane-brief reading
-with no committed artifact* (`01-align.md`, epic `#5087`) — `statement 15,534 · NULL 3,658 · typed 109`,
-on a population that has since grown to §3's fingerprint), decomposed by
-`#10982` as `constraint` 88 + `preference` 21 — and **neither kind is in this graph's typed set at all**
-(§3.1: `evidence`/`decision`/`diary`/`option`/`finding`/`jobToBeDone`/`useCase`), nor in the product's
-declared point vocabulary at this head (the CI twin pins exactly that at
-`tests/test_10988_a4_label_coverage.py`, the `constraint`/`preference` undeclared arm). So: the fleet
-graph's typed minority is caller-supplied (130 of 135); the provenance of the 109 is a `#10982` corpus
-question this census cannot see.
+different populations and the numbers are not interchangeable: the 109 comes from the 2026-11-04 reading
+of the hosted `live-v4` graph (`00-align.md` · `00-plan.md` — a *lane-brief reading with no committed
+artifact*, `01-align.md` of epic `#5087`) — `statement 15,534 · NULL 3,658 · typed 109`, decomposed by
+`#10982` as `constraint` 88 + `preference` 21. ⛔ **Neither kind is present on this graph today, and this
+artifact states the non-reconciliation rather than a cause for it:** §3.1's table is an UNFILTERED scan
+of every non-episodic, non-operator `Point`, so a `constraint`/`preference` Point on this graph would be
+listed there and none is — while the 11-04 reading had `NULL` 3,658 of ~19,301 Point kinds against
+**0 of 15,868** today. The populations do not line up, the two readings are not composable, and what
+happened to those 109 Points between them is the `#10982` corpus question this census cannot answer.
+Neither kind is in the product's declared point vocabulary at this head either (the CI twin pins exactly
+that at `tests/test_10988_a4_label_coverage.py`, the `constraint`/`preference` undeclared arm). So the
+fleet graph's typed minority is caller-supplied (130 of 135); the provenance of the 109 is a `#10982`
+corpus question, not a number this run may borrow.
 
 ## 4 · The CI contract twin
 
@@ -206,8 +212,10 @@ VACUOUS rather than passing for the wrong reason.
   NAMES** (`label_coverage()`'s `declared_absent`, the next bullet) — never a node list — so an unlabelled
   node is countable and **not nameable**: no node id exists anywhere in the A4 path.
   The identity is not delivered, and satisfying it needs an id-returning query the census does not issue.
-  On the thing/event layers there is not even a count (the first bullet); nothing there is delivered at
-  all. This is a gap against the plan's own wording, not a decision against it.
+  On the thing/event layers even that much does not exist: their POPULATIONS are measured (5379 Objects,
+  4670 Events, §3.2) and their label histograms and any node identity are not — so no failing leg there
+  is reportable at all, by count or by name. This is a gap against the plan's own wording, not a decision
+  against it.
 - The **`expected=` half** of A4's *"a declared kind absent"* leg reads `UNMEASURED` on every real run:
   `_a4_label_coverage` calls `label_coverage(...)` with no `expected=` set, so `expected_absent` carries
   the `UNMEASURED(...)` reason rather than a list of kinds. The information is not lost — `declared_absent`
