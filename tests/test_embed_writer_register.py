@@ -928,7 +928,16 @@ LABEL_EVIDENCE: dict[str, tuple[str, str, str, frozenset[str]]] = {
         '"MATCH (n:Point {id:$pid}) " + restore_guard', frozenset({"Point"})),
     "tortoise.sdk::_update_entity": (
         "tortoise/sdk.py", "_update_entity",
-        "for label, prop in _CANONICAL_ENTITY_ID_PROPS:",
+        # ⛔ Pin the tuple the function ITERATES, never the loop variable's NAME.
+        # The variable is named for the loop body; a lint rename (`prop` -> `_prop`,
+        # #11836) is explicitly safe at the code site — it derives the primary key
+        # THROUGH `_entity_identity_probes()` rather than naming the variable, so a
+        # rename cannot break the write. The old needle named the variable, so the
+        # rename reddened this row with "the store moved, so the declaration is
+        # stale" while the store had NOT moved and the declaration was still true.
+        # The same rename has already cost one incident (#11836, VGATE round 13); a
+        # guard that fires on it a second time is measuring the rename, not the store.
+        "in _CANONICAL_ENTITY_ID_PROPS:",
         frozenset({"Point", "Subject", "Object", "Source", "Event"})),
     # `#11641`: the two writers whose label used to be decided at RUNTIME, so row 2 could not
     # compare them to the served set. Each now OWNS the label at its own seam, and the needle is
