@@ -408,10 +408,10 @@ def test_object_kinds_are_compared_CASE_INSENSITIVELY_because_the_ontology_mixes
 def test_the_declared_vocabulary_is_IMPORTED_from_the_product_never_re_spelled():
     """FAILS IF a lane hardcodes a kind list instead of asking the product's own vocabulary.
 
-    `domain_loader.known_kinds(bucket)` is the predicate the hosted write validator runs
-    (`hosted_api.py::valid_kind`), so it is the product's answer; a second list here would drift in
-    one direction (blessing undeclared kinds) or the other (calling a pack's declared kind an
-    invention).
+    `domain_loader.known_kinds(bucket)` is the DECLARED vocabulary, imported — not the write
+    validator for every bucket (see `capstone_measure.py::_a4_declared_kinds`) — so it is the
+    product's answer; a second list here would drift in one direction (blessing undeclared kinds)
+    or the other (calling a pack's declared kind an invention).
     """
     probe = _probe()
     points = probe._a4_declared_kinds("pointKind")

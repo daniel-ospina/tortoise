@@ -3007,15 +3007,15 @@ def _a4_declared_kinds(kind_prop: str) -> frozenset[str]:
     product in one direction (blessing kinds nothing declares) or the other (reporting a
     pack-following write as an invention) — the same defect `tools/ax_write_eval.py` documents
     for its own vocabulary.
-    ⛔ It is NOT "the predicate the write validator runs" for every bucket, and this census must
-    not imply it: `hosted_api.py::valid_kind` runs `known_kinds("pointKind")` only (a point
-    request-model validator), the event layer's write gate is the commit door's
-    `compile_vocab().event_kinds` (exact, per-graph — `tortoise/commit_schema.py`), and
-    `entities[].kind` is persisted verbatim with **no** kind validator at all (`commit_schema.py`
-    Layer-1 scope: it gates `points[].pointKind` / `events[].eventKind` / `sources[].sourceKind`
-    and explicitly not `entities[].kind`). Importing the catalog answers "what is declared",
-    never "what the door would refuse" (#11837 P2). The doc that cites this function
-    (`A4-PER-LAYER.md` §2) states the same split, so the two must not disagree.
+    ⛔ It is NOT "the predicate the write validator runs" for every bucket: `valid_kind` runs
+    `known_kinds("pointKind")` only (a point request-model validator), the event layer's write
+    gate is the commit door's `compile_vocab().event_kinds` (exact, per-graph —
+    `tortoise/commit_schema.py`), and `entities[].kind` has **no vocabulary membership test**
+    (#5202) — the door's `#5475` leg refuses only an unapproved pack NAMESPACE, pre-write, and
+    a family-fallback repair spelling is dropped rather than written (`writable_kind`). So
+    importing the catalog answers "what is declared", not by itself what every door would
+    refuse (#11837 P2), and the doc that cites this function (`A4-PER-LAYER.md` §2) draws the
+    same point/event split, so the two must not disagree.
     """
     # ⛔ THE PRODUCT'S OWN REGISTRY IS BUILT AT IMPORT TIME, and importing only
     # `domain_loader` misses half of it: `tortoise.sdk` itself calls
@@ -3282,8 +3282,8 @@ def _a4_label_coverage(projection) -> dict:
     # query is a second population: on the LIVE fleet graph a write landing between the two reads
     # would publish one layer's population twice — `a4 claims population=<X>` beside
     # `a4 diagnostics claim_points=<Y>` — with every suite green (#11837 review). The attribution
-    # split below DOES issue its own `:Point` read (`n.content, n.pointKind`); that is a separate,
-    # third population, and the divergence it can cause is disclosed in §3.3 of A4-PER-LAYER.md.
+    # split below DOES issue its own `:Point` read (`n.content, n.pointKind`) — a separate read of
+    # the same population, whose divergence §3.3 reports as the one `unread` row.
     result.update(_a4_claim_diagnostics(projection, counts=counts_by_layer["claims"]))
     result["per_writer"] = _a4_writer_attribution(projection)
     return result
