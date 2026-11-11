@@ -3,7 +3,8 @@ Issue #6902 — Audit: confirm no production code depends on BFS propagate_shock
 
 This test file encodes the audit findings as assertions. It does NOT run against
 a live FalkorDB instance — it enumerates candidate references with `grep` and
-then decides what each one IS from `tokenize` — code, a definition, or prose.
+then decides what each one IS — code, a definition, or prose — from `tokenize`
+(the code/prose split) and `ast` (which statements are prose).
 Run with: python3 -m pytest tests/test_bfs_audit.py -v
 """
 
@@ -78,20 +79,34 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
             IndentationError):
         return None
 
-    # Prose strings: any statement whose whole value is a string literal.
-    prose_spans: list[tuple[int, int]] = []
+    # Prose strings: any statement whose whole value is a string literal. Kept as
+    # an exact (line, column) BOX, not a line range.
+    # ⛔ LINE-granularity is a fail-open: `"""Doc."""; x = getattr(m,
+    # "propagate_shock")` puts a live string-resolved dependency on a line the
+    # docstring owns, and a line test discards it — the audit then reports no
+    # dependency while one exists. Containment is therefore column-aware, so only
+    # a literal lying INSIDE the prose statement's box is prose; the string on the
+    # terminator line is code.
+    prose_boxes: list[tuple[int, int, int, int]] = []
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Expr)
             and isinstance(node.value, ast.Constant)
             and isinstance(node.value.value, str)
         ):
-            prose_spans.append(
-                (node.value.lineno, getattr(node.value, "end_lineno", None) or node.value.lineno)
-            )
+            value = node.value
+            prose_boxes.append((
+                value.lineno,
+                value.col_offset,
+                getattr(value, "end_lineno", None) or value.lineno,
+                value.end_col_offset if getattr(value, "end_col_offset", None) is not None else 0,
+            ))
 
-    def _is_prose_line(lineno: int) -> bool:
-        return any(start <= lineno <= end for start, end in prose_spans)
+    def _inside_prose(start: tuple[int, int], end: tuple[int, int]) -> bool:
+        return any(
+            (top, left) <= start and end <= (bottom, right)
+            for top, left, bottom, right in prose_boxes
+        )
 
     # Python 3.12 tokenizes an f-string as FSTRING_START/FSTRING_MIDDLE/…, so the
     # literal part of one is an FSTRING_MIDDLE token, not a STRING. Without this
@@ -102,9 +117,8 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
         if tok.type == tokenize.NAME and tok.string == name:
             lines.add(tok.start[0])
         elif (tok.type == tokenize.STRING or tok.type == fstring_middle) and name in tok.string:
-            span = range(tok.start[0], tok.end[0] + 1)
-            if not any(_is_prose_line(n) for n in span):
-                lines.update(span)
+            if not _inside_prose(tok.start, tok.end):
+                lines.update(range(tok.start[0], tok.end[0] + 1))
     return frozenset(lines)
 
 
@@ -170,7 +184,7 @@ def test_the_code_detector_sees_every_shape_it_claims(tmp_path):
         "nested_and_lambda": (
             "def f():\n    g = lambda v: propagate_shock(v)\n    return g\n", {2}),
         # ── an IMPORT alias: the only occurrence of the name is on the import
-        # line, and three earlier drafts each missed a this class of shape by
+        # line, and three earlier drafts each missed a shape by
         # enumerating AST node types instead of reading tokens. ──
         "aliased_import": (
             "from mod import propagate_shock as shock\n", {1}),
@@ -214,6 +228,12 @@ def test_the_code_detector_sees_every_shape_it_claims(tmp_path):
         # The prose span's END, not just its start: with implicit concatenation
         # tokenize emits TWO STRING tokens, but the AST is ONE Constant whose
         # span is the pair — so the name sits on a line AFTER the span's start.
+        # A live string-resolved dependency sharing a line with a docstring. A
+        # line-granular prose test discards it; column containment does not.
+        "docstring_then_string_same_line": (
+            'def f():\n    """Doc."""; x = getattr(m, "propagate_shock")\n', {2}),
+        "docstring_then_plain_string_same_line": (
+            'def f():\n    """Doc."""; y = "propagate_shock"\n', {2}),
         "implicit_concat_docstring": (
             'def f():\n    ("prose part one "\n     "propagate_shock mentioned here")\n', set()),
     }
