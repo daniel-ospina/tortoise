@@ -1674,3 +1674,137 @@ def test_pack_selection_gap_is_not_masked_by_a_co_occurring_gap(
         "the pack-set leg was MASKED by the earlier :TeamMeta leg — that is "
         "a chain, not additive legs, and it withholds the only remedy that "
         f"stops a removed pack being re-admitted: {messages}")
+
+
+class _NoMarkerRestore:
+    """Drops the `:PackSelection` restore write, passes every other query through.
+
+    Models the shape the ABSENT arms exist for: the restore wrote nothing (the
+    wipe removed the node and no replay pass recreates it), the read-back then
+    runs and HONESTLY observes nothing. The absence is therefore a measurement,
+    not an assumption — which is the only condition under which either reporter
+    may say "the graph now reads as UNCONFIGURED".
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def query(self, q, *a, **kw):
+        if "MERGE (s:" in q and "PackSelection" in q:
+            return _EMPTY
+        return self._inner.query(q, *a, **kw)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+class _EmptyResult:
+    """The `.result_set` shape a projection query returns, with no rows."""
+
+    def __init__(self):
+        self.result_set: list = []
+
+
+_EMPTY = _EmptyResult()
+
+
+def test_rebuild_all_reports_the_true_absence_it_observed(tmp_path, caplog,
+                                                          monkeypatch):
+    """The `rebuild_all` ABSENT arm must fire on an OBSERVED absence (#9752).
+
+    FAILING VALUE: `elif pack_selection_missing:` — the one branch that states
+    the actual #9752 harm ("the graph now reads as UNCONFIGURED, a pack the
+    admin had REMOVED is back in the approved set") — was pinned by NO test.
+    Measured at this head: rewriting it to `elif False:` leaves the whole file
+    GREEN (89 passed across the four rebuild suites, 34 in this one). A report
+    that can be deleted without reddening anything is not a report; it is dead
+    code with a log line, which is the class this PR exists to remove.
+
+    REACHABLE, not simulated: `rebuild_all` really runs. Only the restore
+    `MERGE (s:PackSelection)` is dropped, so the wipe's effect stands — the
+    marker is genuinely gone — and the post-restore verification really reads
+    the graph and really finds nothing. The two injected failures (the write
+    done for us, the read raising) both stay out of the way, which is what makes
+    this the TRUE-POSITIVE rung: an observed absence, distinguished from
+    UNVERIFIED by the read having SUCCEEDED.
+
+    MUTATION: `elif pack_selection_missing:` → `elif False:` reds this test and
+    nothing else; the wording assertion also pins the remedy an operator needs.
+    """
+    sdk, events = _mk_sdk(tmp_path)
+    _write_journal(events)
+    _configure(sdk, [{"namespace": "dev", "status": "active"}])
+    assert _resolved(sdk).configured is True, (
+        "fixture: the graph must start configured, or there is no marker to "
+        "lose and the arm under test is not reachable")
+
+    proj = _proj(sdk)
+    monkeypatch.setattr(proj, "g", _NoMarkerRestore(proj.g))
+
+    with caplog.at_level(logging.ERROR, logger="tortoise.projection"):
+        counts = proj.rebuild_all(str(events), confirm_destructive=True)
+
+    assert counts["pack_selection_expected"] == 1, (
+        f"the pre-wipe capture must have found the marker: {counts}")
+    assert counts["pack_selection_verified"] is True, (
+        "the verification READ must have succeeded — this rung is the observed "
+        f"absence, not the unconfirmable one: {counts}")
+    assert counts["pack_selection_restored"] == 0, (
+        f"a marker that was not observed must not count as restored: {counts}")
+    assert counts["pack_selection_gap"] == 1, (
+        f"the loss must be reported as a gap: {counts}")
+    assert counts["pack_selection_conflict"] is False, (
+        "the shape discriminator must separate a loss from a CONFLICT — a "
+        "consumer that asserts the absence consequence on the CONFLICT shape "
+        f"claims a loss nobody observed: {counts}")
+    msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("ABSENT" in m and "TRUE POSITIVE" in m for m in msgs), (
+        "the operator must be told this is an observed loss, not a silent "
+        f"success: {msgs}")
+    assert any("re-pin" in m.lower() for m in msgs), (
+        f"the report must carry the remedy (re-pin the pack set): {msgs}")
+
+
+def test_replay_log_reports_the_absence_arm_it_observed(tmp_path, caplog,
+                                                        monkeypatch):
+    """`_replay_log`'s ABSENT arm must fire on an OBSERVED absence (#9752).
+
+    FAILING VALUE: the `else:` under the read-back — the journal-replay path's
+    only statement that a lost marker reads as UNCONFIGURED — is unpinned.
+    Measured at this head: `logger.error(` → `logger.debug(` on that arm leaves
+    this file GREEN (34 passed), so the single operator-visible signal on the
+    journal-only path can be silenced by an edit nothing notices.
+
+    REACHABLE: `_replay_log` really runs over a real journal, `_capture_pack_selection`
+    really returns the marker, and only the restore `MERGE` is dropped — the
+    read-back then runs against a graph that truly has no marker, which is the
+    observed absence the arm's wording is allowed to describe.
+
+    MUTATION: silencing the arm (`logger.debug`) or removing the `else:` reds
+    this test; the "no success wording" assertion also pins that the run does
+    not claim the marker survived.
+    """
+    from tortoise import projection as pr
+    from tortoise.log import EventLog
+
+    sdk, events = _mk_sdk(tmp_path)
+    _write_journal(events)
+
+    captured = {"revision": 1, "packs": ["a"]}
+    monkeypatch.setattr(pr, "_capture_pack_selection",
+                        lambda _proj: [dict(captured)])
+    proj = _proj(sdk)
+    monkeypatch.setattr(proj, "g", _NoMarkerRestore(proj.g))
+
+    with caplog.at_level(logging.INFO, logger="tortoise.projection"):
+        proj._replay_log(EventLog(str(events / "events.jsonl")),
+                         confirm_destructive=True)
+
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("ABSENT" in m and "UNCONFIGURED" in m for m in msgs), (
+        "the replay path must report the absence it observed, and say what it "
+        f"means for the approved set: {msgs}")
+    assert any("re-pin" in m.lower() for m in msgs), (
+        f"the report must carry the remedy (re-pin the pack set): {msgs}")
+    assert not any("survive the wipe" in m for m in msgs), (
+        f"nothing may claim the marker survived: {msgs}")
