@@ -2084,6 +2084,108 @@ def test_the_width_rule_and_the_width_formula_agree_across_the_whole_range(sdk):
     assert "nan" not in text.lower(), "the uncertainty answer rendered a NaN: " + text
 
 
+def test_the_subgraph_display_agrees_with_every_other_surface(sdk):
+    """Cycle 17 P1: `SubgraphExpander` spelled its OWN presence test.
+
+    The display arm was
+    `coalesce(n.confidence, CASE WHEN alpha + beta > 0 THEN <mean> ELSE null END)`,
+    and on a NUMERIC-STRING pair FalkorDB CONCATENATES the sum — `'0.7' + '0.3'`
+    is `'0.70.3'`, which compares to 0 as NULL — so the arm was never taken and
+    `recall_subgraph` served `confidence: null` beside `ep_state: "measured"`
+    for a claim every other surface reports at 0.7. That pair (null value,
+    measured state) is the exact combination the sibling comment calls
+    impossible.
+    """
+    from tortoise.ranking import SubgraphExpander
+
+    proj = sdk._get_proj()
+    pid = sdk.create_point("statement", "a claim with string operands")["id"]
+    proj.g.query('MATCH (n:Point {id:$id}) SET n.posterior_alpha = "0.7", '
+                 'n.posterior_beta = "0.3", n.confidence = null',
+                 params={"id": pid})
+
+    # The mechanism first, so a regression here is diagnosed rather than
+    # guessed: FalkorDB concatenates `string + string`.
+    concat = proj.g.query('RETURN "0.7" + "0.3" AS s').result_set[0][0]
+    assert concat == "0.70.3", concat
+
+    expanded = SubgraphExpander(projection=proj).expand([pid], depth=1)
+    nodes = expanded.get("nodes") if isinstance(expanded, dict) else expanded
+    node = next(n for n in nodes if n.get("id") == pid)
+    assert node["ep_state"] == EP_STATE_MEASURED, node
+    assert node.get("confidence") == pytest.approx(0.7, abs=1e-3), (
+        "the subgraph display shows `confidence: null` beside "
+        f"`ep_state: measured` for a claim whose belief is 0.7: {node}")
+    ann = annotate_ep_batch(proj.g, [pid])[pid]
+    assert node.get("confidence") == pytest.approx(ann.confidence_mean or 0.0,
+                                                  abs=1e-3), (node, ann)
+
+
+def test_the_relationship_scan_survives_an_unreadable_operand(sdk):
+    """Cycle 17 P1: the contested arm's inline variance RAISED on the whole query.
+
+    FalkorDB raises on `string * string` / `bool * bool` ("Type mismatch:
+    expected Integer, Float, or Null but was String"), and the raise is not
+    per-row: `get_relationships_bounded` returned its fail-open seed with
+    `decoration_error` set, so EVERY requested point lost its relationships.
+    Three shapes this PR declares must read as ABSENT destroyed the decoration
+    instead — the opposite of the totality contract. The arm now calls the
+    shared `beta_variance_cypher`.
+    """
+    from tortoise.search_engine import get_relationships_bounded
+
+    proj = sdk._get_proj()
+    shapes = {
+        "numeric_string_pair": ('SET n.posterior_alpha = "0.7", '
+                                'n.posterior_beta = "0.3"'),
+        "boolean_pair": ("SET n.posterior_alpha = true, n.posterior_beta = 2.0"),
+        "nonnumeric_string": ('SET n.posterior_alpha = "abc", '
+                              'n.posterior_beta = 1.0'),
+    }
+    for label, setter in shapes.items():
+        pid = sdk.create_point("statement", f"ZQDECOR {label}")["id"]
+        proj.g.query(f"MATCH (n:Point {{id:$id}}) {setter}", params={"id": pid})
+        out = get_relationships_bounded(proj.g, [pid])
+        blob = str(out)
+        assert "Type mismatch" not in blob and "decoration_error" not in blob, (
+            f"{label}: the relationship scan raised on an operand the store "
+            f"cannot read as a number: {blob[:400]}")
+        assert pid in out, (label, out)
+
+
+def test_the_trends_answer_survives_a_numeric_string_operand(sdk):
+    """Cycle 17 P2: `_format_timeline` raised on the raw operands.
+
+    The `trends` template returns the RAW coalesced α/β so they can be shown,
+    and `f"{value:.1f}"` raises on a stored string — which `analyze()`'s
+    blanket handler renders as the ANSWER ("Formatting error: …") for a
+    question the graph can still answer. `_format_uncertain` had this guard;
+    `_format_timeline` had only the `conf` half of it.
+    """
+    from tortoise.analyze import _format_timeline
+
+    # The formatter, pinned directly: the row shape the `trends` template
+    # returns (id, content, conf, alpha, beta, createdAt) with the operands
+    # stored as STRINGS, which is what `ep_width_cypher` admits.
+    row = ("pid-1", "ZQTREND a widget claim", 0.7, "0.7", "0.3",
+           "2026-11-11T00:00:00Z")
+    text = _format_timeline([row])  # must not raise
+    assert "Formatting error" not in text, text
+    assert "α=0.7" in text and "β=0.3" in text, text
+
+    # …and an unreadable operand degrades instead of raising.
+    degraded = _format_timeline([("pid-2", "ZQ claim", 0.7, "abc", "0.3",
+                                 "2026-11-11T00:00:00Z")])
+    assert "abc" not in degraded, degraded
+    assert "no readable operands" in degraded, degraded
+
+    # Control: the all-numeric row still renders its operands, so the guard is
+    # not simply hiding the column.
+    control = _format_timeline([("pid-3", "ZQ claim", 0.5, 2.0, 2.0,
+                                "2026-11-11T00:00:00Z")])
+    assert "α=2.0" in control and "β=2.0" in control, control
+
+
 def test_a_numeric_string_operand_is_measured_on_both_twins(sdk):
     """Cycle 16: the presence predicate compared RAW, the formula coerced.
 

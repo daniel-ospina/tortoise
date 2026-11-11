@@ -5221,9 +5221,18 @@ def get_relationships_bounded(
                 # owner (`ep_has_belief_cypher` / `ep_pair_stored`).
                 f"       OR ({ep_measured_cypher('other')} "
                 f"           AND {ep_pair_stored_cypher('other')} "
-                "           AND (coalesce(other.posterior_alpha, other.ep_alpha, 1.0) * coalesce(other.posterior_beta, other.ep_beta, 1.0)) "
-                "               / ((coalesce(other.posterior_alpha, other.ep_alpha, 1.0) + coalesce(other.posterior_beta, other.ep_beta, 1.0)) ^ 2 "
-                "                  * (coalesce(other.posterior_alpha, other.ep_alpha, 1.0) + coalesce(other.posterior_beta, other.ep_beta, 1.0) + 1)) > $contested_threshold)) "
+                # #11702 cycle 17: the shared width formula, not a local
+                # re-derivation. FalkorDB RAISES on `string * string` /
+                # `bool * bool` ("Type mismatch: expected Integer, Float, or
+                # Null but was String"), and the raise is not per-row — it took
+                # the WHOLE query down, so `get_relationships_bounded` returned
+                # its fail-open seed with `decoration_error` set and EVERY
+                # requested point lost its relationships. Three shapes this PR
+                # declares must read as ABSENT destroyed the decoration
+                # instead. `beta_variance_cypher` carries the coercion, the
+                # sign guard and the band, so the two twins agree about
+                # whether the shape is readable at all.
+                f"           AND {beta_variance_cypher('coalesce(other.posterior_alpha, other.ep_alpha, 1.0)', 'coalesce(other.posterior_beta, other.ep_beta, 1.0)')} > $contested_threshold)) "
                 "RETURN op.id, type(r2) AS et, r2.idx AS other_idx, other.id, "
                 "  other.pointKind, other.status, "
                 "  coalesce(other.posterior_alpha, other.ep_alpha, 1.0), "

@@ -46,6 +46,7 @@ from .search_engine import (  # noqa: E402, RUF100
     ep_state_cypher,  # #11702: the present-state NAME on the wire
     ep_state_resolve,  # #11702: the ONE #2490 terminal fold for the state name
     numeric_operand,  # #11702: the ONE total numeric coercion (bool != number)
+    numeric_operand_cypher,  # …and its Cypher twin
 )
 from .live import (  # #2490: terminal rows are never contested; #2598: the draft predicate
     epistemic_disjunction,  # #7927: traversal-position widening
@@ -2390,22 +2391,20 @@ class SubgraphExpander:
             # surface's to report.
             "  CASE WHEN labels(n)[0] = 'Point' THEN "
             f"    CASE WHEN {ep_has_belief_cypher('n')} THEN "
-            "      coalesce(n.confidence, "
-            "        CASE WHEN (coalesce(n.posterior_alpha, n.ep_alpha, 0.0) "
-            "                   + coalesce(n.posterior_beta, n.ep_beta, 0.0)) > 0 "
-            # #11702: `toFloat` for the reason spelled out at
-            # GraphRanker._fetch_point_signals — an int α/β pair truncated
-            # this display mean to 0.00 beside an `ep_state` of `measured`,
-            # i.e. a measured 0.90 claim shown as 0.00 with a straight face.
-            # #11702 cycle 13: the shared Cypher mean (see GraphRanker) —
-            # this display value carried its own division, so the overflow
-            # shape this change made reachable answered 0.00 beside an
-            # `ep_state` of `measured`.
-            "             THEN "
+            # #11702 cycle 17: NO local presence test here. This arm used to
+            # spell its own (`coalesce(alpha,0.0) + coalesce(beta,0.0) > 0`),
+            # and on a NUMERIC-STRING pair FalkorDB CONCATENATES the sum
+            # (`'0.7' + '0.3'` is `'0.70.3'`), which compares to 0 as NULL — so
+            # the arm was never taken and `recall_subgraph` served
+            # `confidence: null` beside `ep_state: "measured"` for a claim
+            # every other surface reports at 0.7. The coerced mirror plus the
+            # shared mean needs no second rule: `belief_mean_cypher` returns
+            # null itself when the sum is degenerate, and
+            # `ep_has_belief_cypher` above has already decided presence.
+            "      coalesce(" + numeric_operand_cypher("n.confidence") + ", "
             "  " + belief_mean_cypher(
                 "coalesce(n.posterior_alpha, n.ep_alpha, 1.0)",
-                "coalesce(n.posterior_beta, n.ep_beta, 1.0)") + " "
-            "             ELSE null END) "
+                "coalesce(n.posterior_beta, n.ep_beta, 1.0)") + ") "
             "    ELSE null END "
             "  ELSE null END AS confidence, "
             f"  CASE WHEN labels(n)[0] = 'Point' THEN {ep_state_cypher('n')} "

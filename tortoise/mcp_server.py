@@ -4152,9 +4152,16 @@ def tortoise_suggest_entry_points(query: str, limit: int = 5,
         if isinstance(results, list) and results:
             return [{"id": r["id"], "name": r.get("content", ""),
                      "kind": r.get("point_kind", ""),
-                     # #11702: an ABSENT belief contributes no term — never a
-                     # `None` (which would raise here) and never a fabricated
-                     # value. The score is then the similarity half alone; the
+                     # #11702 cycle 17: stated exactly, because `.get(k, 0.0)`
+                     # and `(… or 0.0)` are the SAME for every reachable value
+                     # — this line is not a behaviour change and must not be
+                     # read as one. An absent belief contributes `0.0` to an
+                     # ADDITIVE score, which is the additive identity: the
+                     # score is then the similarity half alone, the same choice
+                     # `GraphRanker` makes when it drops the belief term. (The
+                     # MULTIPLICATIVE gate is where the identity is 1.0 and
+                     # absence must sort last — see `_claim_rank`.) The `or`
+                     # form is kept so a `None` can never reach `round()`; the
                      # hit's own ``ep.ep_state`` says why, and a caller that
                      # needs that disclosure reads it from `tortoise_search`
                      # (this tool's response contract is {id,name,kind,confidence}

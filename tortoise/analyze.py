@@ -379,7 +379,18 @@ def _format_timeline(rows: list) -> str:
         # exception in `analyze()` would turn into a silently empty answer).
         conf_txt = (f"conf={float(r[2]):.2f}"
                     if len(r) > 2 and r[2] is not None else "no belief")
-        lines.append(f"  [{ts}] \"{r[1][:80]}\" (α={r[3]:.1f}, β={r[4]:.1f}, {conf_txt})")
+        # #11702 cycle 17: the OPERANDS are coerced too. The template returns
+        # the raw coalesced columns, so a stored numeric-string pair reached
+        # `f"{...:.1f}"` and raised — which `analyze()`'s blanket handler
+        # renders as the ANSWER ("Formatting error: …") for a question the
+        # graph could still answer. Same guard as `conf` beside it.
+        alpha_txt = numeric_operand(r[3]) if len(r) > 3 else None
+        beta_txt = numeric_operand(r[4]) if len(r) > 4 else None
+        lines.append(
+            f"  [{ts}] \"{r[1][:80]}\" "
+            f"(α={alpha_txt:.1f}, β={beta_txt:.1f}, {conf_txt})"
+            if alpha_txt is not None and beta_txt is not None else
+            f"  [{ts}] \"{r[1][:80]}\" (no readable operands, {conf_txt})")
     return "\n".join(lines)
 
 
