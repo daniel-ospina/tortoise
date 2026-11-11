@@ -406,7 +406,7 @@ def test_each_layer_QUERIES_its_own_node_label_and_only_claims_carries_the_exclu
     for layer, label, prop in probe.A4_LAYERS:
         # The per-layer histogram is the only query the census emits that carries
         # `coalesce(n.<prop>, 'NULL')`: the writer split's nearest neighbour is
-        # `coalesce(n.pointKind, '')` (probe:3234), a DIFFERENT literal, so the filter cannot pick
+        # `coalesce(n.pointKind, '')` (probe:3242), a DIFFERENT literal, so the filter cannot pick
         # up a sibling's query.
         own = [q for q in emitted if f"coalesce(n.{prop}, 'NULL')" in q]
         assert own, (f"the census issued no histogram query for the {layer} layer", emitted)
@@ -747,7 +747,7 @@ def test_the_rendered_block_emits_EVERY_layer_with_its_own_denominator():
         assert (int(fields["unlabelled_null"]) + int(fields["unlabelled_undeclared"])
                 == int(fields["unlabelled"])), (layer, line[0])
         # ⛔ The declared-kind HISTOGRAM must not render EMPTY beside a non-zero `labelled`: the
-        # renderer falls back to `{}` (`capstone_measure.py:3594`), so an emptied dict printed
+        # renderer falls back to `{}` (`capstone_measure.py:3599`), so an emptied dict printed
         # `labelled=<n> labelled_by_declared_kind={}` — a self-contradicting line that every
         # key-presence assertion above still passes (measured, #11837 review round 12, P2).
         if int(fields["labelled"]) > 0:
@@ -804,11 +804,24 @@ def test_a_broken_layer_query_renders_a_NAMED_GAP_and_never_a_zero():
     # ⛔ `non_vacuity` is the row's ONLY boolean, and a boolean cannot take the reason-string
     # substitution the numerics take: the string is TRUTHY, so `non_vacuity` read as PASS on a
     # broken query — the inverse of the rule this arm exists to enforce (measured, #11837 review
-    # round 12, P2). It must be neither `True` nor a truthy placeholder.
+    # round 12, P2). It ships as `None`, which answers NEITHER reading (a three-valued field is read
+    # `is True` / `is False` / `is None`, exactly as `coverage` is); ⛔ pinned as `is None` rather
+    # than truthiness, because `not False` is `True` and a truthiness assert passes the ZERO SKELETON
+    # the row's own comment says must never be what a broken query returns (#11837 review round 13,
+    # P2).
     for layer in ("claims", "things", "events"):
-        assert a4[layer]["non_vacuity"] is not True, (
-            f"the {layer} layer reports non_vacuity={a4[layer]['non_vacuity']!r} on a BROKEN "
-            f"query — a truthy placeholder scores an infrastructure failure as non-vacuous: "
-            f"{a4[layer]}")
-        assert not a4[layer]["non_vacuity"], (
-            f"{layer}'s non_vacuity is truthy on a broken query: {a4[layer]}")
+        assert a4[layer]["non_vacuity"] is None, (
+            f"the {layer} layer reports non_vacuity={a4[layer]['non_vacuity']!r} on a BROKEN query — "
+            f"`True` scores an infrastructure failure as non-vacuous (false PASS) and `False` is the "
+            f"zero skeleton (a MEASURED ABSENCE): {a4[layer]}")
+    # ⛔ The DIAGNOSTICS are the other half of "the whole A4 row is the failure unit" asserted just
+    # above: a mutant that keeps the skeleton's numeric `0` for the top-level fields renders
+    # `claim_points=0 … error=UNMEASURED(…)` — a self-contradicting line scoring the row RED on a
+    # broken query — with every arm still green (#11837 review round 13, P2).
+    for key in ("claim_points", "excluded_capture_rows", "statement", "null", "typed",
+                "typed_share"):
+        assert str(a4[key]).startswith("UNMEASURED("), (
+            f"the A4 diagnostic `{key}` reads {a4[key]!r} on a BROKEN query — a numeric `0` under a "
+            f"key a real measurement occupies reads as a MEASURED ABSENCE: {a4[key]!r}")
+    assert str(a4["per_writer"]["typed_claims"]).startswith("UNMEASURED("), a4["per_writer"]
+    assert str(a4["per_writer"]["attributed"]).startswith("UNMEASURED("), a4["per_writer"]

@@ -3421,12 +3421,17 @@ def a_row_census(uri: str) -> dict:
             # ⛔ NOT the zero skeleton: a numeric `0` under a key a real measurement also occupies
             # reads as a MEASURED ABSENCE and scores the row RED on an infrastructure failure —
             # the exact number this block exists to not print (#10982 review cycle 2, finding 2).
-            # ⛔ A BOOLEAN is NOT substituted: the reason string is TRUTHY, so `non_vacuity` — the
-            # row's only boolean — would read as PASS on a broken query to any consumer that keys
-            # on the field's own name (`if not layers[l]["non_vacuity"]: RED`), the exact inverse
-            # of the numeric rule above (#11837 review round 12, P2). `None` is neither True nor
-            # False: it renders as a visible gap, it never satisfies a PASS test, and the reason is
-            # already carried by `block["error"]`.
+            # ⛔ A BOOLEAN is NOT substituted, and the reason is narrower than "it would read as
+            # PASS": the reason string is TRUTHY, so `non_vacuity` — the row's only boolean — would
+            # answer `True` to ANY reader, including one that tests the field by its own name
+            # (`if non_vacuity: pass`) — the exact inverse of the numeric rule above (#11837 review
+            # round 12, P2). `None` answers neither reading, so a three-valued field must be read
+            # three-valued (`is True` / `is False` / `is None`), exactly as `coverage` must be read
+            # `is None`. ⛔ A naive `if not non_vacuity: RED` therefore fires RED on an infrastructure
+            # failure — a FALSE FAILING RUN, which is the other half of the rule this block exists
+            # for, not a correctness claim for that consumer shape (#11837 review round 13, P3).
+            # The reason is carried by `block["error"]` and rendered beside the field, so a reader
+            # is never asked to infer it from the boolean.
             block: dict = {"error": reason}
             for key, value in empty.items():
                 if isinstance(value, dict):

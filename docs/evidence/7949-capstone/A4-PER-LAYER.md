@@ -40,7 +40,7 @@ its `NULL` denominator.
 | symbol | what it does |
 |---|---|
 | `A4_LAYERS` | the three layers with **their own** kind property — `pointKind` / `objectKind` / `eventKind`. One blended rate is the failure mode §2 W2c lists second: a failing thing/event layer hiding inside a green claim layer |
-| `label_coverage()` | **pure**, so the CI twin can drive it: `NULL` **and** the blank string are ONE absent state; `unlabelled = unlabelled_null + unlabelled_undeclared` exactly, so no present kind leaves the denominator; `declared_present` / `declared_absent` / `undeclared` / `by_kind`; `coverage` is `None` at a zero population (100 % of 0 is not coverage) and `non_vacuity` is `labelled >= 1` **per layer** — ⛔ the registered `a4_labelled_nodes: 1` floor reads the **thing/event** layers' value, never `claims`'s (which is emitted uniformly and is NOT the floor) |
+| `label_coverage()` | **pure**, so the CI twin can drive it: `NULL` **and** the blank string are ONE absent state; `unlabelled = unlabelled_null + unlabelled_undeclared` exactly, so no present kind leaves the denominator; `declared_present` / `declared_absent` / `undeclared` / `by_kind` / `labelled_by_declared_kind` (the last one is what the rendered layer block prints, and both histograms are pinned by INVARIANT rather than by key presence); `coverage` is `None` at a zero population (100 % of 0 is not coverage) and `non_vacuity` is `labelled >= 1` **per layer** — ⛔ the registered `a4_labelled_nodes: 1` floor reads the **thing/event** layers' value, never `claims`'s (which is emitted uniformly and is NOT the floor) |
 | `_a4_declared_kinds()` | the layer's declared vocabulary, **imported** (`domain_loader.known_kinds`) after `import tortoise.sdk`, because the SDK's own `register_kind` calls are half the vocabulary — §3 below is why that import is load-bearing |
 | `_a4_claim_diagnostics()` | the typed / `statement` / `NULL` shares over CLAIMS, keeping the `is_episodic`/`is_operator` exclusion (turn rows are written `pointKind='event'`; 159 of the committed corpus's 354 Points are turn rows) |
 | `_a4_writer_attribution()` | the per-writer split, by **reproduction** (see §3.3) |
@@ -182,7 +182,7 @@ corpus question, not a number this run may borrow.
 
 ## 4 · The CI contract twin
 
-`tests/test_10988_a4_label_coverage.py` — 17 offline, deterministic cases, each naming the mutation that
+`tests/test_10988_a4_label_coverage.py` — 18 offline, deterministic cases, each naming the mutation that
 reds it: `NULL` and the blank kind are one absent share; `unlabelled` decomposes exactly **and the
 RENDERED layer block carries both halves as their own numbers** (a renderer that prints only the total
 hands the `NULL` denominator back to the reader as a subtraction, which is the derivation
@@ -199,7 +199,14 @@ vocabulary (a point kind on a thing is not coverage);
 object kinds compare case-insensitively; the declared vocabulary includes the SDK's own registered kinds;
 `0 of 0` is not coverage and one labelled node clears the floor; `declared_absent` is reported and decides
 nothing while `expected_absent` names only the kinds a CORPUS expectation requires; the diagnostics
-survive; a broken layer query renders a NAMED gap rather than `population=0`.
+survive; a broken layer query renders a NAMED gap rather than `population=0`, and its
+`non_vacuity` ships as `None` — never a truthy reason string (which answers PASS) and never the
+skeleton's `False` (which is a MEASURED ABSENCE) — while the diagnostics carry the same reason
+rather than a numeric `0`; the two histograms are pinned by INVARIANT, not by key presence: the
+declared-kind histogram sums to `labelled`, `by_kind` sums to `population` minus the absent share,
+their key sets together are every present kind, and the RENDERED histogram is never empty beside a
+non-zero `labelled` (emptying either one left all 17 earlier cases green — measured, `#11837`
+review round 12, P2).
 
 ⛔ The retired framing is **not** in the pin set: nothing there compares a typed share to a bar.
 
