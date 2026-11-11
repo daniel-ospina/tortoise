@@ -706,7 +706,8 @@ def test_the_hosted_api_cite_notes_state_one_measurement_and_the_pivot():
     scorecard figures stop being arithmetic (below + above + the pivot target =
     the total), or the pivot cite stops being the ``LIFETIME_MEMORY_QUERY`` site.
     """
-    from tools.hosted_api_cite_census import census, pivot_is_the_lifetime_site
+    from tools.hosted_api_cite_census import (
+        DEFAULT_PIVOT, census, lifetime_query_sites, pivot_is_the_lifetime_site)
 
     scorecard = _src("tortoise/activation_scorecard.py")
     hosted = _src("tortoise/hosted_api.py")
@@ -735,6 +736,19 @@ def test_the_hosted_api_cite_notes_state_one_measurement_and_the_pivot():
         f"hosted_api.py:{_PIVOT} is no longer the LIFETIME_MEMORY_QUERY site — "
         "re-derive the pivot and both notes' figures with "
         "`uv run python tools/hosted_api_cite_census.py --pivot <line>`")
+
+    # ... and the TOOL's own fallback pivot agrees with it. No shipped path reads
+    # that constant (every one derives the site from the tree, and this test passes
+    # its own `_PIVOT`), which is exactly why its drift was invisible: at #11803's
+    # head the module's own documented `--pivot 23466` example reported
+    # `pivot is the LIFETIME_MEMORY_QUERY site: False` over a CORRECT tree, and
+    # `at the pivot 0` with the two figures split 13/443 instead of 12/443. Pinning
+    # it is the only thing that can red, because `--check`/`--refresh` re-derive.
+    assert DEFAULT_PIVOT == lifetime_query_sites()[0], (
+        f"the census tool's fallback pivot {DEFAULT_PIVOT} is not the site "
+        f"{lifetime_query_sites()} — nothing shipped reads it, but the module's "
+        "documented `--pivot` example and the keyword defaults do; re-derive it "
+        "in the same commit that moves the site")
 
     # the census command is the notes' stated remedy, so it must work and must not
     # collapse to nothing (that, and only that, about the population is pinned here)
