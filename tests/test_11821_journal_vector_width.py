@@ -178,10 +178,12 @@ def test_a_vector_that_UNDERFLOWS_float32_is_left_alone():
 
 def test_a_verbatim_vector_is_never_narrowed():
     """**THE PIN.** If P0 narrowed a caller-owned vector it would silently
-    change a value the journal promised to keep raw (#5004 round-7: the store
-    writes `CASE WHEN $embedding_verbatim THEN $embedding ELSE vecf32($embedding)`
-    in `projection/entities.py::_upsert_point_props` — so an `embedding_verbatim`
-    vector keeps the value nobody re-encoded, and neither may this seam).
+    change a value the journal promised to keep raw (#5004 round-7: the graph-only
+    id's only restorer is `projection.FalkorProjection._rebuild_all_replay`'s `embedding_verbatim`
+    guard — *"a CALLER-owned vector must keep its RAW form. `vecf32()` is the ONE
+    form it must not take"* — and the flag picks the storage form in
+    `projection/entities.py::_upsert_point_props`'s `CASE WHEN $embedding_verbatim
+    THEN $embedding ELSE vecf32($embedding)`).
 
     The fixture is deliberately OFF the float32 grid, and the test asserts that
     a narrowing WOULD change it — so the assertion below is a real one.
