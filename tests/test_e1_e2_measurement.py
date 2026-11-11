@@ -3466,6 +3466,20 @@ def test_a_docstring_mask_cannot_answer_for_the_e2b_population_constant():
     assert _module_string_constant_from_source(
         _PROBE_PATH.read_text(encoding="utf-8"),
         "_E2B_FLOOR_POPULATION") == "real_facts"
+    # ⛔ …and the value an IMPORT sees is the one that decides the operand. The
+    # structural reader above reads a STATEMENT, so a tree that assigns
+    # `"real_facts"` and then rebinds it (`globals().update(...)`, `exec`, an
+    # import-time alias) satisfies every text/AST pin in this file while
+    # `after_c[_E2B_FLOOR_POPULATION]` resolves to the census's `atomic_points`
+    # again — the #10989 fail-open reopened with the whole suite green. The probe
+    # module is already imported as `probe` above, so the authoritative value is
+    # one attribute read away and no new machinery is needed
+    # (#11833 review r4 P2-1).
+    assert probe._E2B_FLOOR_POPULATION == "real_facts", (
+        "the imported probe binds its E2b population to "
+        f"{probe._E2B_FLOOR_POPULATION!r}, not the surviving PLANTED "
+        "units (`real_facts`) — a rebind after the assignment satisfies the "
+        "structural pin while the floor is fed another population")
 
 
 def test_the_e2b_floor_is_FED_the_planted_population_and_the_line_says_so():
