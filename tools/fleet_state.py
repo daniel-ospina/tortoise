@@ -2350,7 +2350,7 @@ OPEN_ISSUES_LIMIT = 4000
 #: of the window to 2000 passed the suite GREEN while re-creating the #11872 outage:
 #: every board truncated, every issue with no attribution entry refusing
 #: `INCOMPLETE (exit 2)` (#11917; that revert reached main's shape once through a merge
-#: resolution on a PR that never touched this file, #11914).
+#: resolution on a PR that never touched this file, #11839).
 #:
 #: ⛔ UPDATE THIS IN THE SAME COMMIT THAT RESIZES THE WINDOW. It is the number the guard
 #: compares against, so a resize that forgets it leaves the guard measuring the previous

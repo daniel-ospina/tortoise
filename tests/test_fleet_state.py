@@ -2249,7 +2249,7 @@ def test_the_open_issue_window_clears_the_largest_verified_crossing(monkeypatch)
     board, which turns the pre-flight's *absent issue* surface into `INCOMPLETE
     (exit 2)` for every issue nobody has taken yet. That is not hypothetical: the
     revert reached main's shape once through a merge resolution on a PR that never
-    touched this file (#11914), and every check stayed green.
+    touched this file (#11839), and every check stayed green.
 
     ⛔ WHAT THIS GUARD CAN AND CANNOT PROVE — say it plainly, because the weaker
     claim is the true one. `issues_truncated = len(rows) >= OPEN_ISSUES_LIMIT`, so a
@@ -2270,7 +2270,7 @@ def test_the_open_issue_window_clears_the_largest_verified_crossing(monkeypatch)
         "saturates at it, truncating every board and refusing every absent issue"
     )
     # The boundary, from the saturated side: pin the window TO the crossing and the
-    # same-size read satURATES — that is the off-by-one a `>=` comparison would bless.
+    # same-size read saturates — that is the off-by-one a `>=` comparison would bless.
     monkeypatch.setattr(fs, "OPEN_ISSUES_LIMIT", fs.OPEN_ISSUES_WINDOW_RECORDED_CROSSING)
     saturated = _issues_build(monkeypatch, fs.OPEN_ISSUES_WINDOW_RECORDED_CROSSING)
     assert saturated["reconciliation"]["open_issues_truncated"] is True, (
