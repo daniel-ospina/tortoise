@@ -62,6 +62,12 @@ def test_no_propagate_shock_callers():
             callers["test_files"].append(line)  # test_6707_shock.py
         elif "/tortoise/" in path_part and "#" in line and "replaces" in line.lower():
             callers["comment/reference only"].append(line)
+        elif "/tortoise/" in path_part and "propagate_shock(" not in line:
+            # A MENTION is not a CALL (#11702): prose that names the function —
+            # e.g. the unreachability note inside `propagate_shock`'s own
+            # docstring — invokes nothing. Only a call form (`propagate_shock(`)
+            # can be a caller, and a bare word cannot.
+            callers["comment/reference only"].append(line)
         elif "/tortoise/" in path_part:
             callers["production_code"].append(line)
 
