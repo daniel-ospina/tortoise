@@ -37,13 +37,22 @@ the issue's indicator (4) asks for, and it is the invariant this module holds:
   * sub-minor precision is not represented — the raw text stays in
     ``verbatim`` (design OD4: drop, never round silently).
 
-This module never touches the graph; the read surface that feeds it (and the
-write-path acceptance of the field on ``create_entity``) rides the ``#4282``
-surface migration, per design §7.1. The persistence half is declared, not
-re-invented here: the projection's Point property list takes its declared money
-keys from ``MONEY_VALUE_FIELDS`` (``projection/entities.py``), so a Point
-carrying a value replays under the same open-set passthrough as an Object/Event
-without logging a false "not declared" drift warning.
+This module never touches the graph. The doors, as delivered rather than as
+planned (the earlier "rides the ``#4282`` surface migration" routing here was
+stale — #4282 closed without it):
+
+  * **acceptance** is the props passthrough ``create_entity``/``create_object``/
+    ``create_event``/``create_point`` already have (design §7.1 S2); the HTTP
+    commit ``Point`` stays ``extra="forbid"`` and takes NO money field (§7.1
+    S3, the owner's 2026-10-07 decision — the value is server-written);
+  * **refusal** is :func:`refuse_malformed_money`, called from the SDK's one
+    props intake (``_sanitize_props``), so a value the reader would refuse can
+    no longer be *written* in the first place;
+  * **persistence** is declared, not re-invented here: the projection's Point
+    property list takes its declared money keys from ``MONEY_VALUE_FIELDS``
+    (``projection/entities.py``), so a Point carrying a value replays under the
+    same open-set passthrough as an Object/Event without logging a false
+    "not declared" drift warning.
 """
 from __future__ import annotations
 
@@ -66,6 +75,7 @@ __all__ = [
     "ratio_bp",
     "ratio_meets",
     "read_money_value",
+    "refuse_malformed_money",
     "total_minor",
 ]
 
@@ -256,6 +266,47 @@ def read_money_value(record: Mapping[str, Any]) -> tuple[str, int, int] | None:
     exponent = _validate_currency_exponent(
         currency, _validate_exponent(record.get(MINOR_UNIT_EXPONENT)))
     return currency, amount, exponent
+
+
+def refuse_malformed_money(props: Mapping[str, Any], *,
+                           door: str = "") -> None:
+    """Refuse, at the WRITE boundary, a money value the READER would refuse.
+
+    Returns ``None`` when ``props`` carries no money at all — it inherits
+    :func:`read_money_value`'s engagement rule (neither ``amountMinor`` nor
+    ``currency`` present), so a non-money prop bag, and a bare ``verbatim`` /
+    ``asOf`` / ``minorUnitExponent`` that belongs to something else, are all
+    untouched. When money IS present it applies exactly the reader's checks:
+    an int minor-unit amount (never a float, never a bool), an active ISO 4217
+    currency, and an explicit ``minorUnitExponent`` the pinned table agrees
+    with.
+
+    WHY A WRITE GATE, given the read side already refuses (measured, #2782):
+    before this, all six malformed shapes were ACCEPTED by every props door and
+    only refused on the way out — ``create_object(..., amountMinor=25_000_000)``
+    with no currency, a float amount, ``JPY`` at exponent 2, a missing
+    ``minorUnitExponent``, a bare ``currency``, and an unknown code all landed
+    on the node. The cost is not a bad read: :func:`total_minor` iterates a
+    record set and REFUSES the whole sum on the first malformed member, so ONE
+    unvalidated write makes "how much is committed / released to date"
+    unanswerable for every well-formed amount beside it. Refusing at the door
+    keeps a graph's money sums readable — the property the value exists for.
+
+    ONE HOME for the rule: this delegates to :func:`read_money_value` rather
+    than re-deriving the checks, so the write boundary and the read boundary
+    cannot drift into disagreeing about what a money value is. Failure is a
+    hard refusal naming the field, never a strip-and-continue and never a
+    coercion — the same "never guess" posture as ``money_props`` itself.
+    """
+    try:
+        read_money_value(props)
+    except MoneyValueError as exc:
+        where = f" ({door})" if door else ""
+        raise MoneyValueError(
+            f"money value refused at the write boundary{where}: {exc}. "
+            "A value the reader refuses must not become durable state "
+            "(#2782, design OD2/OD4)."
+        ) from exc
 
 
 def total_minor(records: Iterable[Mapping[str, Any]]) -> dict[str, int]:

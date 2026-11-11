@@ -554,3 +554,135 @@ class TestTrancheReleaseScenario:
         assert part == RELEASED_MINOR
         assert ratio_bp(part, whole) == 7_500
         assert ratio_meets(part, whole, 7_500) is True
+
+
+# ── the write boundary: a value the reader refuses must not be writable ─────
+
+#: The six shapes MEASURED landing on a node before the write gate existed
+#: (#2782 re-measurement, 2026-11-10). Each one is refused by
+#: `money.read_money_value` — i.e. each was already unreadable the moment it was
+#: stored, which is what makes accepting it at write a durability bug rather
+#: than a validation nicety.
+MALFORMED_MONEY_SHAPES = [
+    ("amount-with-no-currency", {"amountMinor": COMMITTED_MINOR}),
+    ("float-amount", {"amountMinor": 25_000_000.5, "currency": "BRL",
+                      "minorUnitExponent": 2}),
+    ("mis-scaled-jpy", {"amountMinor": COMMITTED_MINOR, "currency": "JPY",
+                        "minorUnitExponent": 2}),
+    ("currency-with-no-exponent", {"amountMinor": COMMITTED_MINOR,
+                                   "currency": "BRL"}),
+    ("currency-alone", {"currency": "BRL"}),
+    ("unknown-currency-code", {"amountMinor": COMMITTED_MINOR,
+                               "currency": "XXX", "minorUnitExponent": 2}),
+]
+
+
+class TestWriteBoundary:
+    """#2782 — the money shape is enforced at the WRITE boundary too.
+
+    The 2026-11-10 re-measurement on this issue recorded that a caller "still
+    cannot *hand us* an amount" and that a half-specified one is "only refused
+    (or silently tolerated) at consume". The consume refusal is not harmless:
+    `total_minor` refuses the WHOLE sum on the first malformed member, so one
+    accepted malformed write makes "committed / released to date" unanswerable
+    for every well-formed amount beside it. These tests pin the refusal at the
+    door, and pin that the door is the reader's own rule (so the two cannot
+    drift)."""
+
+    @pytest.mark.parametrize("label,props",
+                             MALFORMED_MONEY_SHAPES,
+                             ids=[s[0] for s in MALFORMED_MONEY_SHAPES])
+    def test_an_unreadable_money_value_is_refused_at_write(
+            self, journaled_sdk, label, props):
+        sdk, _events = journaled_sdk
+        with pytest.raises(ValueError) as exc:
+            sdk.create_object(f"Tranche {label}", "venture:tranche", **props)
+        # the refusal names the write boundary and the field at fault — a
+        # caller cannot act on "invalid input"
+        assert "write boundary" in str(exc.value), str(exc.value)
+        assert any(k in str(exc.value) for k in
+                   ("amountMinor", "currency", "minorUnitExponent")), \
+            str(exc.value)
+        # and nothing landed: a refused write leaves no half-value behind
+        rows = sdk._get_proj().g.query(
+            "MATCH (n) WHERE n.amountMinor IS NOT NULL OR n.currency IS NOT NULL "
+            "RETURN count(n)").result_set
+        assert rows[0][0] == 0, "a refused money write still reached the graph"
+
+    @pytest.mark.parametrize("door", ["create_object", "create_event"])
+    def test_every_entity_door_shares_the_one_gate(self, journaled_sdk, door):
+        """The gate lives at the shared intake (`_sanitize_props`), not on one
+        label's door — so a second label cannot be the way in."""
+        sdk, _events = journaled_sdk
+        writer = getattr(sdk, door)
+        with pytest.raises(ValueError, match="write boundary"):
+            writer("Half a tranche", "venture:tranche",
+                   amountMinor=COMMITTED_MINOR)
+
+    def test_the_point_door_is_covered_too(self, journaled_sdk):
+        sdk, _events = journaled_sdk
+        with pytest.raises(ValueError, match="write boundary"):
+            sdk.create_point("statement", "tranche one is 250000 BRL",
+                             amountMinor=COMMITTED_MINOR)
+
+    def test_an_update_cannot_install_a_malformed_value_either(
+            self, journaled_sdk):
+        """A create-only gate is one verb away from useless: an update that adds
+        a half value is the same unreadable record."""
+        sdk, _events = journaled_sdk
+        created = sdk.create_object(
+            "Tranche U", "venture:tranche",
+            **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
+                          verbatim="R$ 250.000,00"))
+        with pytest.raises(ValueError, match="write boundary"):
+            sdk.update_entity(created["id"], currency="BRL")
+
+    def test_the_gate_is_the_readers_own_rule(self):
+        """One home: every shape the reader refuses is refused at the door, and
+        every shape the reader accepts is admitted — a second, hand-rolled list
+        here would be the drift this test exists to catch."""
+        from tortoise.money import refuse_malformed_money
+        for _label, props in MALFORMED_MONEY_SHAPES:
+            with pytest.raises(MoneyValueError):
+                read_money_value(props)          # the reader refuses it
+            with pytest.raises(MoneyValueError):
+                refuse_malformed_money(props)    # so the door must too
+        good = money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
+                           verbatim="R$ 250.000,00", as_of="2026-06-30")
+        assert read_money_value(good) == ("BRL", COMMITTED_MINOR, 2)
+        assert refuse_malformed_money(good) is None
+
+    @pytest.mark.parametrize("prop", [VERBATIM, AS_OF, MINOR_UNIT_EXPONENT])
+    def test_a_non_money_prop_is_not_collateral_damage(self, journaled_sdk,
+                                                       prop):
+        """`MONEY_VALUE_FIELDS` is the money GROUP, not five reserved names: a
+        sibling alone carries no amount, so it is not a money value — the gate
+        inherits the reader's engagement rule and must stay a no-op."""
+        sdk, _events = journaled_sdk
+        value = {VERBATIM: "some quoted text",
+                 AS_OF: "2026-06-30",
+                 MINOR_UNIT_EXPONENT: 2}[prop]
+        created = sdk.create_object(f"Object with {prop}", "venture:note",
+                                    **{prop: value})
+        assert sdk.get_entity(created["id"])[prop] == value
+
+    def test_a_malformed_value_can_no_longer_poison_the_sum(self,
+                                                            journaled_sdk):
+        """The reason the gate exists, end to end: the sum that the indicator-3
+        requirement rides stays answerable because the unreadable member cannot
+        be written."""
+        sdk, _events = journaled_sdk
+        sdk.create_object("Tranche P", "venture:tranche",
+                          **money_props(COMMITTED_MINOR, "BRL",
+                                        minor_unit_exponent=2,
+                                        verbatim="R$ 250.000,00"))
+        with pytest.raises(ValueError, match="write boundary"):
+            sdk.create_object("Tranche bad", "venture:tranche",
+                              amountMinor=RELEASED_MINOR)  # no currency
+        rows = sdk._get_proj().g.query(
+            "MATCH (n) WHERE n.amountMinor IS NOT NULL "
+            "RETURN n.amountMinor AS amountMinor, n.currency AS currency, "
+            "       n.minorUnitExponent AS minorUnitExponent").result_set
+        assert total_minor([{
+            AMOUNT_MINOR: r[0], CURRENCY: r[1], MINOR_UNIT_EXPONENT: r[2],
+        } for r in rows]) == {"BRL": COMMITTED_MINOR}

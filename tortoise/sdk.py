@@ -62,6 +62,11 @@ from .commit_ops import OBJECT_TERMINAL_STATUSES as _OBJECT_TERMINAL_STATUSES
 from .commit_ops import SUBJECT_STATUS_VALUES as _SUBJECT_STATUS_VALUES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from .ids import ulid
+# #2782: the money value's WRITE gate. `money` imports only `numeric_domain`
+# (no cycle), and it is already loaded via `value_normalizer` below — importing
+# the predicate here is what lets the one props intake refuse a value the
+# reader would refuse, instead of it becoming durable state.
+from .money import refuse_malformed_money
 # #2817: the S5 money derivation (prose → typed value). Module scope because the
 # capture seam's `warn_on` narrowing below is derived from the CLOSED
 # `DROP_REASONS` vocabulary at import time, so a renamed reason fails here
@@ -6555,6 +6560,22 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # not be silently clamped/rounded by FalkorDB on the way in.
     for _key, _value in props.items():
         _reject_unrepresentable_number(_key, _value)
+    # #2782: a MONEY value the reader would refuse must not be written either.
+    # The typed value's shape (int minor units + ISO 4217 currency + an
+    # exponent the pinned table agrees with) was enforced only on the way OUT,
+    # so all six malformed shapes were measured landing on a node through this
+    # intake — and because `money.total_minor` refuses the WHOLE sum on the
+    # first malformed member, one such write makes "committed / released to
+    # date" unanswerable for every well-formed amount beside it. The predicate
+    # is the reader's own (`money.read_money_value`), so the two boundaries
+    # cannot drift into disagreeing about what a money value is, and it is a
+    # no-op for a props bag that carries no money.
+    #
+    # Hard-reject, not strip-and-ignore: there is no legitimate caller intent —
+    # a half-specified or mis-scaled amount is a silent unit error, and
+    # dropping it would let the caller believe the amount took (the same reason
+    # `cache_tier` below is refused rather than dropped).
+    refuse_malformed_money(props, door="props")
     for key in ("sourcePath", "source_path"):
         if key in props:
             raise ValueError(
