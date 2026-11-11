@@ -5774,3 +5774,75 @@ def test_an_absent_claim_that_says_none_names_the_mirror():
         "the belief prose says `else None` for a row that has no persisted "
         "belief WITHOUT naming the readable mirror that supplies a value:\n  "
         + "\n  ".join(problems))
+
+
+#: The credibility word's own result, stated as a mean. ANY sentence that makes
+#: the word yield `0.75` is false for every shape the word can reach: on the
+#: #2199 default it ADDS one weak body (Beta(3.1,1) = 0.7561), alone it is
+#: Beta(1.1,1) = 0.5238, and where it loses it does so to an EXPLICIT declared
+#: pair — which is the only shape `0.75` actually belongs to. This class SHIPPED
+#: once and survived a review cycle: "A declared pair WINS over the credibility
+#: word: the same Beta(3,1) plus ``credibility='low'`` still reads 0.75,
+#: measured" — false for the shape its own preceding clause named (the #2199
+#: system default), and left standing ten lines above this module's note saying
+#: 0.7561. Like the guards above this is a tripwire over wordings the tree has
+#: used, not a grammar proof; it errs toward REFUSING a true sentence (a human
+#: then reads it), never toward passing a false one.
+_CRED_WORD_YIELDS_075 = re.compile(
+    r"credibility[^.;]{0,60}?\b(?:is|reads|lands\s+at|equals)\b"
+    r"[^.;]{0,25}?0\.75(?!\d)",
+    re.IGNORECASE,
+)
+
+
+def test_the_credibility_note_never_hands_the_word_the_defaults_075():
+    """`0.75` is the DEFAULT's mean and the EXPLICIT pair's — never the word's."""
+    problems = []
+    for rel in _BELIEF_PROSE:
+        for sentence in re.split(r"(?<=[.!?])\s+(?=\S)", _belief_prose(rel)):
+            if _CRED_WORD_YIELDS_075.search(sentence):
+                problems.append(f"{rel}: {sentence[:240]}")
+    assert not problems, (
+        "a belief-prose sentence makes the `credibility` word yield 0.75. "
+        "Measured: the word ADDS to the #2199 default (Beta(3.1,1) = 0.7561), "
+        "is Beta(1.1,1) = 0.5238 alone, and loses only to an EXPLICIT pair:\n  "
+        + "\n  ".join(problems))
+
+
+def test_the_credibility_word_adds_to_the_default_but_loses_to_a_pair(sdk):
+    """The shapes `volunteer.py`'s note names, MEASURED on this tree.
+
+    A later commit replaced the note's "0.7561 for that default plus an author
+    word" with "the same Beta(3,1) plus ``credibility='low'`` still reads 0.75",
+    calling 0.7561 a number nothing produces. That correction is itself false:
+    `sdk.create_point` ADDS the word's weak body to the #2199 provision
+    (`sdk.py`:14649-14660), so the born-live decide part reads Beta(3.1,1) =
+    0.7561 — the number `ep.py`:2368-2372 states and `tests/test_sdk_dedup.py`
+    pins on the dedup path. `0.75` belongs to the #2199 default with NO word,
+    and to an EXPLICIT pair, which the word never overwrites.
+    """
+    default = sdk.create_point("option", "cred word: default alone")["id"]
+    plus_word = sdk.create_point(
+        "option", "cred word: default plus word", credibility="low")["id"]
+    word_alone = sdk.create_point(
+        "option", "cred word: word alone", status="draft",
+        credibility="low")["id"]
+    content = "cred word: explicit pair"
+    pair = sdk.create_point("statement", content, dedup=True)["id"]
+    sdk.set_point_baseline(pair, 3, 1)
+    sdk.create_point("statement", content, dedup=True, credibility="low")
+
+    def served(pid: str):
+        return annotate_ep_batch(sdk._get_proj().g, [pid])[pid].confidence_mean
+
+    assert served(default) == pytest.approx(0.75, abs=1e-4), (
+        "the #2199 system default alone is Beta(3,1) -> 0.75")
+    assert served(plus_word) == pytest.approx(0.7561, abs=1e-4), (
+        "the word ADDS one weak body ON TOP of the #2199 default: 3.0 -> 3.1")
+    assert served(word_alone) == pytest.approx(0.5238, abs=1e-4), (
+        "with no #2199 default the word is the whole baseline: Beta(1.1,1)")
+    assert served(pair) == pytest.approx(0.75, abs=1e-4), (
+        "an EXPLICIT set_point_baseline pair is the one shape the word never "
+        "moves — dropping the word is why the note says it 'loses' here")
+    assert sdk.get_point(pair).get("credibility") is None, (
+        "the word is DROPPED against an explicit pair, so no label is stamped")

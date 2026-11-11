@@ -83,12 +83,16 @@ BLOCK_MAX_BYTES = 8 * 1024
 #     with ``ep_state: "absent"``;
 #   * a #2199 DECLARED baseline is ALSO unmeasured
 #     (``measured = bool(has_ep)``, search_engine.py:5500) yet answers its OWN
-#     declared prior mean — 0.75 for the Beta(3,1) system default, 0.5238 for
-#     an author ``credibility='low'`` word on a claim with no #2199 default —
-#     unless a readable ``n.confidence`` mirror supplies the value, which LEADS
-#     it. (A declared pair WINS over the credibility word: the same Beta(3,1)
-#     plus ``credibility='low'`` still reads 0.75, measured — the word only
-#     supplies a prior when no declared one exists.)
+#     declared prior mean — 0.75 for the Beta(3,1) system default, 0.7561 for
+#     that default PLUS an author ``credibility='low'`` word (the word ADDS one
+#     weak body on top of the provision: Beta(3.1,1), measured), 0.5238 for the
+#     word alone on a claim with no #2199 default — unless a readable
+#     ``n.confidence`` mirror supplies the value, which LEADS it. An EXPLICIT
+#     ``set_point_baseline(3, 1)`` is a DIFFERENT shape, and the only one where
+#     the pair wins: the word is dropped and that row stays 0.75 (measured). The
+#     word therefore supplies a prior when the baseline is the #2199 default or
+#     absent, and loses to a pair the author declared explicitly — pinned by
+#     ``test_the_credibility_word_adds_to_the_default_but_loses_to_a_pair``.
 #   * a DECLARED but DEGENERATE prior (a 0/0 pair, e.g.
 #     ``set_point_baseline(claim, 0, 0)``; a negative operand is refused by that
 #     writer, though a legacy row can still carry one) yields no mean at all and reads
