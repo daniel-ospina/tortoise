@@ -528,7 +528,16 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
                           and variance > CONTESTED_VARIANCE_THRESHOLD),
             "has_ep": measured,
             "measured": measured,
-            "baseline": baseline_set and not measured and not terminal,
+            # #11702 cycle 30: the flag follows the RESOLVED state, not
+            # `baseline_set` alone — the same rule `annotate_ep_batch` applies.
+            # A DECLARED but DEGENERATE prior (`set_point_baseline(claim, 0, 0)`)
+            # has no mean (0/0) and reads `absent` here, so claiming prior-only
+            # would contradict `ep_state` beside it AND disagree with the `ep`
+            # block for the same claim. `baseline` is documented as
+            # "confidence_mean IS the declared prior mean"; a consumer branching
+            # on that got `None`.
+            "baseline": (baseline_set and not measured and not terminal
+                         and state == EP_STATE_BASELINE),
         }
 
 

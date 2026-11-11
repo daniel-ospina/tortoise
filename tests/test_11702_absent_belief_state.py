@@ -310,6 +310,8 @@ def test_a_degenerate_declared_baseline_is_absent_and_not_prior_only(sdk):
     pid = sdk.create_point("statement", "a degenerate baseline")["id"]
     sdk.set_point_baseline(pid, 0.0, 0.0)
 
+    from tortoise.why import assemble_why_blocks
+
     ep = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
     assert ep.ep_state == EP_STATE_ABSENT, (
         f"a 0/0 prior has no mean, so the state is absent — got {ep.ep_state!r}")
@@ -317,6 +319,71 @@ def test_a_degenerate_declared_baseline_is_absent_and_not_prior_only(sdk):
     assert ep.baseline is False, (
         "baseline=True beside ep_state='absent' — prior-only claims a mean that "
         "does not exist for a degenerate (0, 0) prior")
+
+    # …and the `why` surface ships its OWN `baseline` key, built from the same
+    # rule. Pinning only `annotate_ep_batch` left it able to disagree with the
+    # `ep` block for one claim — which it did, until this round.
+    why_ep = assemble_why_blocks(sdk._get_proj(), [pid])[pid].get("ep") or {}
+    assert why_ep.get("ep_state") == EP_STATE_ABSENT, why_ep
+    assert why_ep.get("baseline") is False, (
+        f"the `why` block still calls a degenerate prior prior-only: {why_ep}")
+    assert why_ep.get("confidence_mean") is None, why_ep
+
+
+def test_a_literal_past_the_int_str_digit_cap_reads_like_its_short_spelling():
+    """Cycle 30 P2: `Fraction("<4301 digits>")` raises `ValueError` — CPython
+    caps int↔str conversion — and the `exact is None` fallback then DISCARDED
+    the literal and answered from the double, i.e. from exactly the rounding
+    `_f32_from_literal` exists to remove.
+
+    Two spellings of ONE value then disagreed, in both directions: the
+    1 + 2⁻²⁴ midpoint padded with trailing fractional zeros (value unchanged)
+    served `1.0` — maximum certainty — beside the store's `absent`, and an
+    overflow-band spelling served `None` beside the store's max. Trailing zeros
+    are the cheapest way for a stored operand to reach 4,300 characters, so the
+    padding is not exotic bookkeeping: it is the reachable spelling.
+
+    `_exact_literal_fraction` now reads decimals through `Decimal`, whose parse
+    has no digit cap (and `as_integer_ratio` never converts back to a string),
+    while hex stays on `int(digits, 16)` — exempt from the cap — and keeps its
+    exponent bound. So each padded literal must read exactly like its short
+    spelling, and like the value the store serves.
+    """
+    from tortoise.search_engine import numeric_operand
+
+    rows = {
+        # short spelling -> the float32 the store serves
+        "1.0000000596046448": 1.0000001192092896,        # above the 1+2⁻²⁴ midpoint
+        "1.000000059604644775390625": 1.0,               # the midpoint (tie → even)
+        "3.4028235677973366e+38": 3.4028234663852886e38,  # below the overflow mid
+        "5.877471754111438e-39": None,                   # a repr() of a subnormal
+        "0x1.0000010000000001p0": 1.0000001192092896,    # hex midpoint + 2⁻⁶⁴
+    }
+
+    def pad(lit: str, zeros: int = 4400) -> str:
+        mantissa, sep, exponent = lit.partition("p") if "p" in lit else lit.partition("e")
+        if "x" in mantissa.lower():
+            # A hex literal is already exempt from the cap; pad its mantissa so
+            # the row still proves the value is unchanged, not the code path.
+            head, _, frac = mantissa.partition(".")
+            mantissa = head + "." + (frac or "0") + "0" * zeros
+        else:
+            mantissa = (mantissa + "." if "." not in mantissa else mantissa) \
+                + "0" * zeros
+        return mantissa + sep + exponent
+
+    for short, expected in rows.items():
+        long = pad(short)
+        assert len(long) > 4300, (short, len(long))
+        assert numeric_operand(long) == numeric_operand(short), (
+            f"{short!r} and its {len(long)}-character spelling of the SAME value "
+            f"read differently: {numeric_operand(short)!r} vs "
+            f"{numeric_operand(long)!r} — the literal was discarded")
+        if expected is None:
+            assert numeric_operand(long) is None, (short, numeric_operand(long))
+        else:
+            assert _store_f32(numeric_operand(long)) == _store_f32(expected), (
+                short, numeric_operand(long), expected)
 
 
 # ── The property: an absent claim is not ORDERED as a 0.5 ──────────────────
