@@ -5322,8 +5322,8 @@ def test_update_entity_clearing_the_pair_clears_the_mirror(sdk, tmp_path):
 #    `set_point_baseline(3.0, 1.0)` + `update_point(confidence=0.9)`: the
 #    declared prior mean is 0.75 and the field reads 0.9. That sentence stood
 #    at `search_engine.py`:347 while the code nine hundred lines away said
-#    otherwise. `origin/main`'s belief prose carried NINE unqualified matches
-#    of it in total (`search_engine.py` 6, `why.py` 2, `volunteer.py` 1 — the
+#    otherwise. `origin/main`'s belief prose carried TEN unqualified matches
+#    (`search_engine.py` 6, `why.py` 2, `volunteer.py` 1, `sdk.py` 1 — the
 #    numbers this guard measures, not a count taken on trust), plus one
 #    `else ``None``` match below.
 # 2. The `… else the persisted prior mean (ep_alpha/beta), else ``None```
@@ -5397,7 +5397,15 @@ _MIRROR_NOUN = re.compile(r"\bmirror\b", re.IGNORECASE)
 #: A qualifier's VERB, searched just AFTER the mirror noun — the position every
 #: real site puts it in ("mirror LEADS", "mirror, if present, LEADS it",
 #: "mirror's value, which LEADS", "mirror supplies the value").
-_QUALIFIER_VERB = re.compile(r"\b(?:LEADS|leads|lead|supplies|supply)\b")
+#: `re.IGNORECASE` rather than an enumerated case list: a bare `LEADS|leads|lead`
+#: flagged the TRUE "…the mirror Leads it" (measured), and "takes precedence" /
+#: "overrides" / "wins" are true statements of the same rule that no case list
+#: reaches. False-FLAGGING a true sentence is the safe direction (it blocks a
+#: rewrite rather than passing an inversion) but it is still friction.
+_QUALIFIER_VERB = re.compile(
+    r"\b(?:leads?|suppl(?:y|ies)|takes\s+precedence|overrides|wins)\b",
+    re.IGNORECASE,
+)
 
 #: How far after the mirror noun its verb may sit ("mirror, if present, LEADS
 #: it" is 21 characters).
@@ -5408,10 +5416,14 @@ _QUALIFIER_VERB_WINDOW = 60
 #: clause followed by a LATER-clause inversion — "…unless a readable mirror
 #: supplies one; except that the mirror never LEADS it" — because each clause's
 #: mirror+verb pair is individually clean. Fail-closed on it.
-#: ⚠️ NAMED RESIDUAL: a tripwire on the class, not a parser. An inversion
-#: phrased around these shapes is not detected; the guard's claim is "the
-#: settled wordings of the rule do not invert silently", never "no English
-#: sentence can defeat it".
+#: ⚠️ NAMED RESIDUALS, both directions. This is a tripwire on the class, not a
+#: parser: (1) FALSE PASS — an inversion phrased around the shapes below is not
+#: detected; (2) FALSE BLOCK — a qualifier placed BEFORE the claim ("A readable
+#: mirror supplies the value; without one, confidence_mean IS the … PRIOR mean")
+#: is flagged, because the scan windows FORWARD from the claim. (2) blocks a
+#: rewrite rather than passing an inversion, which is the safe direction, and
+#: the guard's claim is "the settled wordings of the rule do not invert
+#: silently" — never "no English sentence can defeat it".
 _MIRROR_INVERSIONS = re.compile(
     r"mirror\s+(?:never|not|isn't|is\s+not|does\s*n[o']t|doesn't)\s+lead"
     r"|suppl(?:y|ies)\s+(?:no|nothing)\b"
@@ -5441,22 +5453,19 @@ _QUALIFIER_NEGATION_OK = re.compile(r"\bnot only\b", re.IGNORECASE)
 _QUALIFIER_OBJECT_NEGATIONS = re.compile(
     r"\b(nothing|none|no readable|no mirror)\b", re.IGNORECASE)
 
-#: Sentences that INVERT the rule outright. The case the positional windows
-#: cannot see is an AFFIRMATIVE form followed by a later-clause inversion —
-#: "…unless a readable mirror supplies one; except that the mirror never LEADS
-#: it" — because the negation sits outside both windows. A sentence carrying
-#: any of these is UNQUALIFIED however many affirmative forms it also contains
-#: (fail-closed on every defeat measured so far).
-#: ⚠️ NAMED RESIDUAL: this is a tripwire on the class, not a parser. An
-#: inversion phrased around these shapes is not detected — the guard's claim is
-#: "the settled wordings of the rule do not invert silently", never "no English
-#: sentence can defeat it".
-_MIRROR_INVERSIONS = re.compile(
-    r"mirror\s+(?:never|not|isn't|is\s+not|does\s*n[o']t|doesn't)\s+lead"
-    r"|suppl(?:y|ies)\s+(?:no|nothing)\b"
-    r"|mirror\s+is\s+(?:ignored|optional)"
-    r"|not\s+true\s+that\b"
-    r"|false\s+that\b",
+
+#: Restriction clauses that demote the mirror to a FALLBACK — the inverse of the
+#: shipped precedence. Checked in the ~60 characters after a clean mirror+verb
+#: pair, which is where every measured defeat puts them.
+_MIRROR_RESTRICTIONS = re.compile(
+    r"(?<!-)\bonly\b"
+    r"|\bfallback\b"
+    r"|\bnothing else\b"
+    r"|\bwhen no\b"
+    r"|\bafter the pair\b"
+    r"|\blast\b"
+    r"|\bignored\b"
+    r"|\bnot consulted\b",
     re.IGNORECASE,
 )
 
@@ -5546,6 +5555,15 @@ def _qualified(window: str) -> bool:
             continue
         after = sentence[verb.end():verb.end() + 16]
         if _QUALIFIER_OBJECT_NEGATIONS.search(after):
+            continue
+        # A RESTRICTION clause demotes the mirror to a fallback, which is the
+        # inverse of `elif mirror is not None: value = round(mirror, 4)`:
+        # "supplies a value ONLY WHEN nothing else does", "…LAST, AFTER THE
+        # PAIR", "…but is IGNORED for a declared baseline". Each has a clean
+        # mirror+verb pair, so only a look past the verb sees it.
+        # ⚠️ `(?<!-)only` is load-bearing: a bare `\bonly\b` matches
+        # "mirror-ONLY Point", which is the canonical TRUE wording.
+        if _MIRROR_RESTRICTIONS.search(sentence[verb.end():verb.end() + 60]):
             continue
         return True
     return False

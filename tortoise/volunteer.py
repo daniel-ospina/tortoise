@@ -82,8 +82,10 @@ BLOCK_MAX_BYTES = 8 * 1024
 #     ``n.confidence`` mirror beside it — answers ``confidence_mean: None``
 #     with ``ep_state: "absent"``;
 #   * a #2199 DECLARED baseline is ALSO unmeasured
-#     (``measured = bool(has_ep)``, search_engine.py:5490) yet answers 0.75
-#     (the Beta(3,1) system default) unless a readable ``n.confidence`` mirror
+#     (``measured = bool(has_ep)``, search_engine.py:5490) yet answers its OWN
+#     declared prior mean — 0.75 for the Beta(3,1) system default, 0.6667 for
+#     an author ``credibility='low'`` prior (``TIER_PRIORS``,
+#     source_credibility.py) — unless a readable ``n.confidence`` mirror
 #     supplies the value, which LEADS it, and
 #   * a mirror-only claim is also unmeasured yet reads the mirror's value.
 # Substituting a Beta(1,1) mean for the first shape is the defect that issue
