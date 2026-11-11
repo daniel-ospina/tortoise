@@ -839,19 +839,44 @@ def test_a_stray_table_row_with_no_separator_is_rejected(tmp_path, monkeypatch):
 def test_a_letter_stated_two_different_ways_is_rejected(tmp_path, monkeypatch):
     """FAILS if a contradicting duplicate mention is out-voted by the other one.
 
-    Both attribution maps held ONE verdict per letter (`before` overwrote,
-    `following` setdefaulted), so `**(e)** is **DRIFTED**, and **(e)** is
-    **ADOPTED**` returned `[]` (clean) while the sentence contradicted itself and the
-    table — and the reverse order red, so the outcome depended on which mention a
-    partial sentence edit left second (measured). A stale duplicate is exactly what
-    a half-applied rewrite leaves behind.
+    The attribution maps hold ONE verdict per letter (`before` overwrites,
+    `following` setdefaults), so the last (or first) mention silently won and
+    `**(e)** is **DRIFTED**, and **(e)** is **ADOPTED**` returned `[]` (clean) while
+    the sentence contradicted itself and the table (measured). The CONNECTORS here
+    are the ones a copula-only rule missed — `is also`, `was`, `remains` — each of
+    which is the same claim written in ordinary English, so each is asserted rather
+    than left to whatever the regex happens to accept.
+    """
+    original = "**(e)** is\n**ADOPTED**"
+    for connector in ("is", "is also", "was", "remains"):
+        _mutated(
+            tmp_path,
+            monkeypatch,
+            lambda t, c=connector: t.replace(
+                original,
+                f"**(e)** is **DRIFTED**, and **(e)** {c}\n**ADOPTED**",
+                1,
+            ),
+        )
+        problems = _doc_problems()
+        assert any("assigns a different verdict" in p for p in problems), (connector, problems)
+
+
+def test_a_duplicate_mention_in_letters_first_form_is_rejected(tmp_path, monkeypatch):
+    """FAILS if a contradicting repeat AFTER the group is dropped.
+
+    The repeat can also sit outside the group it contradicts —
+    `… are **SUPERSEDED-BY-FIX**, and **(c)** is also **DRIFTED**` — which is what a
+    half-applied edit to a letters-first sentence leaves behind (measured: clean
+    before the fix).
     """
     _mutated(
         tmp_path,
         monkeypatch,
         lambda t: t.replace(
-            "**(e)** is\n**ADOPTED**",
-            "**(e)** is **DRIFTED**, and **(e)** is\n**ADOPTED**",
+            "**(c)**, **(d)** and **(g)** are **SUPERSEDED-BY-FIX**",
+            "**(c)**, **(d)** and **(g)** are **SUPERSEDED-BY-FIX**, and **(c)** is "
+            "also **DRIFTED**",
             1,
         ),
     )
@@ -865,11 +890,9 @@ def test_a_class_first_group_with_a_later_mention_is_not_a_swap(tmp_path, monkey
     The first attempt at "every mention must agree" held SETS inside the two
     attribution maps, and that reds correct prose: a class-first group
     (`**SUPERSEDED-BY-FIX**: (c), (d) and (g)`) makes the letters-first map's region
-    span the preceding group, so the same letters pick up a second verdict that the
+    span the preceding group, so the same letters pick up a second verdict the
     sentence never asserts (measured: class-first prose that was clean on the parent
-    commit went RED). The rule is additive and singleton-only for exactly this
-    reason — a mention is trusted on its own only when one letter sits beside one
-    verdict.
+    commit went RED). The rule is adjacency-based for exactly this reason.
     """
     original = (
         "**(c)**, **(d)** and **(g)** are **SUPERSEDED-BY-FIX**, **(e)** is\n"
@@ -889,11 +912,9 @@ def test_a_class_first_group_with_a_later_mention_is_not_a_swap(tmp_path, monkey
 def test_a_contradicting_mention_before_the_group_is_rejected(tmp_path, monkeypatch):
     """FAILS if a contradicting mention outside the adopted map is dropped.
 
-    The adopted map is chosen whole, so a mention that lives in the OTHER reading was
-    silently discarded: `(e) is **DRIFTED**` followed by a class-first group that says
-    `**ADOPTED**: (e)` returned clean while the sentence asserted both (measured). The
-    singleton layer compares every unambiguous mention against the adopted map, so
-    the contradiction surfaces.
+    The adopted map is chosen whole, so a mention read only by the OTHER ordering was
+    discarded: `**(e)** is **DRIFTED**, ` before a class-first group that says
+    `**ADOPTED**: **(e)**` returned clean while the sentence asserted both (measured).
     """
     original = (
         "**(c)**, **(d)** and **(g)** are **SUPERSEDED-BY-FIX**, **(e)** is\n"
@@ -1511,6 +1532,17 @@ def _third_party_imports(source: str) -> tuple[list[str], list[str]]:
     pyyaml). A dynamic import whose target is NOT a literal cannot be resolved
     statically, so it is reported as unverifiable rather than assumed harmless: a
     guard that cannot see the target has not measured it.
+
+    ⚠️ KNOWN ESCAPES — measured, and named rather than left looking covered, because
+    that is the "comment claims coverage the walk does not have" class this scan
+    exists to close. These resolve to NOTHING here and are SILENT, not unverifiable:
+    an alias (`from importlib import import_module as im; im("yaml")`), a bound method
+    (`im = importlib.import_module; im("yaml")`), `getattr(importlib,
+    "import_module")("yaml")`, `importlib.__dict__["import_module"]("yaml")`, and
+    `__builtins__["__import__"]("yaml")`. Each is a plain Name/Attribute/Subscript/
+    Call node the walk already visits — it simply does not classify them, and closing
+    them needs a call graph rather than an AST walk. They are listed so the next
+    reader can tell a measured limit from an unseen one.
     """
     imported: set[str] = set()
     unverifiable: list[str] = []
@@ -1595,9 +1627,11 @@ def test_tool_is_stdlib_only():
     # if the checker grows a third-party import". `_third_party_imports` covers the
     # import statements AND a `__import__`/`import_module` call with a LITERAL target,
     # and reports a non-literal target as unverifiable instead of clearing it.
-    # ⚠️ Not reachable by any AST walk: a target assembled at runtime
-    # (`getattr(importlib, "import_" + "module")`, `eval`). This test does not claim
-    # it, and the `--self-test` leg below is a smoke probe, not a second opinion.
+    # ⚠️ The reaches it still misses are enumerated in that helper's docstring: an
+    # aliased module, a bound method, a subscripted `__dict__`, `getattr`, and
+    # `__builtins__[…]`. They ARE reachable — they are simply not classified — so they
+    # are named rather than implied away, and the `--self-test` leg below is a smoke
+    # probe, not a second opinion.
     third_party, unverifiable = _third_party_imports(source)
     assert third_party == [], (
         f"the checker must be stdlib-only (the `docs` job runs it beside a `pip "
