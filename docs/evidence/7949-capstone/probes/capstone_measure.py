@@ -3206,9 +3206,12 @@ def _a4_claim_diagnostics(projection, counts: dict[str, int] | None = None) -> d
 def _a4_writer_attribution(projection) -> dict:
     """Attribute the TYPED claim population to the writer that could have produced it.
 
-    ⛔ The graph carries NO writer stamp (`_POINT_HANDLED` in `projection/entities.py` declares
-    every persisted Point property and none names a producer), so this is not a stored fact and
-    the census must not pretend otherwise. What IS mechanical at this head:
+    ⛔ The graph carries ONE writer stamp — `authoredBy`, which `_POINT_HANDLED` in
+    `projection/entities.py` does declare and the write path persists (`SET
+    n.authoredBy=coalesce($ab, n.authoredBy)`, from the payload's own value; `docs_miner` stamps
+    `docs-miner` for itself) — and this census deliberately does NOT read it, because it is the
+    CALLER's claim about itself rather than a measurement of which lane wrote the KIND. So this is
+    not a stored fact and the census must not pretend otherwise. What IS mechanical at this head:
 
     * `extractor_v2` CANNOT be the source of a typed claim. Its write gate repairs every point kind
       outside the master vocabulary to `statement` (`extractor_v2.py:10419-10422`; `:10413` is the
@@ -3258,9 +3261,11 @@ def _a4_writer_attribution(projection) -> dict:
             "so no typed claim can come from that lane IN A DECLARED KIND (the gate compares "
             "case-insensitively and stores the kind verbatim, so a case-variant survives it)"),
         "provenance": unmeasured(
-            "a WRITER STAMP on the node — no Point property records its producer, so attribution "
-            "here is a reproduction test (the rule classifier re-derived over each node's "
-            "content), never a stored fact"),
+            "a WRITER STAMP on the node — ONE Point property does carry a writer (`authoredBy`, set in "
+            "projection/entities.py from the caller's own value and stamped `docs-miner` by the docs "
+            "miner), but it is the caller's claim about itself, not a measurement of which lane wrote "
+            "the kind, so attribution here is a reproduction test (the rule classifier re-derived "
+            "over each node's content), never a stored fact"),
     }
 
 

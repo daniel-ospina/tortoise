@@ -127,10 +127,12 @@ forbids.
 
 ### 3.3 The diagnostic — who wrote the typed claims
 
-Attribution is a **reproduction test, not a stored fact**: no Point property records its producer
-(`projection/entities.py`'s `_POINT_HANDLED` declares every persisted property and none names a writer),
-so the rule classifier `tortoise/extractor.py::_classify_point_kind` is re-derived over each node's own
-content and compared with the stored kind.
+Attribution is a **reproduction test, not a stored fact**: one Point property does carry a writer —
+`authoredBy`, persisted by `projection/entities.py` (`SET n.authoredBy=coalesce($ab, n.authoredBy)`, fed
+from the request's own `authoredBy`, and stamped `docs-miner` by `docs_miner` for its own writes) — and
+this census deliberately does not read it, because it is the CALLER's claim about itself rather than a
+measurement of which lane wrote the kind; so the rule classifier `tortoise/extractor.py::_classify_point_kind`
+is re-derived over each node's own content and compared with the stored kind.
 
 | writer bucket | count | by kind |
 |---|---|---|

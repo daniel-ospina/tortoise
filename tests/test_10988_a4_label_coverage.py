@@ -566,8 +566,9 @@ def test_the_claims_histogram_is_read_ONCE_and_both_published_numbers_share_it()
 def test_the_per_writer_split_attributes_by_REPRODUCTION_and_says_it_is_not_a_stamp():
     """FAILS IF attribution is presented as a stored fact, or as "some other lane".
 
-    No Point property records its producer (`projection/entities.py`'s `_POINT_HANDLED` names every
-    persisted property and none is a writer stamp), so the split is a REPRODUCTION test: the rule
+    No Point property is USED as a producer stamp here: the one that exists, `authoredBy`
+    (`projection/entities.py`'s `_POINT_HANDLED` does declare it and the write path persists it from
+    the payload), records the CALLER's own claim, so the split is a REPRODUCTION test: the rule
     classifier (`extractor.py::_classify_point_kind`) re-derived over each node's content. And
     `extractor_v2` cannot be the source of a typed claim at all — its write gate repairs every
     non-master point kind to `statement` (`extractor_v2.py:10419-10422`, the non-master arm;
@@ -614,7 +615,7 @@ def test_the_per_writer_split_attributes_by_REPRODUCTION_and_says_it_is_not_a_st
         f"({split['typed_claims']})")
     assert split["attributed"] < split["typed_claims"]
     assert str(split["provenance"]).startswith("UNMEASURED("), (
-        "attribution must not be presented as a stored fact — no writer stamp exists")
+        "attribution must not be presented as a stored fact — no producer stamp is read")
     assert "extractor_v2" in split["v2_lane_excluded_by_construction"]
 
 
