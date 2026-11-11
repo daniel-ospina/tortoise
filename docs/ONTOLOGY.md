@@ -1134,8 +1134,11 @@ dig_deeper kinds   supports | nand | superseded | tradeoff     # dig_deeper[k].k
 dig_deeper labels  read supports · read the counterargument (NAND)
                    · see what changed · weigh the alternatives  # derived from kind + target verb phrases (UXD 4)
 why-block sections why · conflicts · supersession · tradeoffs · dig_deeper · warnings   # enriched-item additive keys (W4 why-layer spec §3.1.1/§6.1)
-conflict severity  high | medium                                # deterministic from the counter-claim's persisted EP mean
+conflict severity  high | medium | null                         # deterministic from the counter-claim's persisted EP mean
                                                                # high ⟺ mean ≥ 0.6 (repo high-confidence bar); else medium
+                                                               # null ⟺ the counter-claim has NO persisted belief (#11702): there is
+                                                               # nothing to grade, so it sorts AFTER every graded severity instead of
+                                                               # taking `medium` on a fabricated neutral 0.5
 degraded_reason    timeout | assembly_error | breaker_open      # degradations only; clean empty = null + empty arrays (W4 why-layer spec §3.1.3)
 ```
 
