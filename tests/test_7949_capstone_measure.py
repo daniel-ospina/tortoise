@@ -4518,7 +4518,9 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     the `projection/*.py` ones the sibling pattern made visible (`#10108` added the
     sixth document). ⛔ NO TOTAL IS QUOTED HERE (#11837 review round 2, P2): this
     sentence said `47`, and the sweep reports `checked` 48 at the head that review
-    read — the 48th is this PR's own `extractor_v2.py:10419-10422` cite. A
+    read — this PR adds exactly one cite over that `47`, its own
+    `extractor_v2.py:10419-10422` (⛔ over `47`, not "the 48th": the sweep's doc order
+    puts the architecture doc last, so a probe cite is never the final one). A
     hand-written total re-stales on every cite a later round adds, which is the rule
     the `config/ci-surfaces.yml` durations rows already state, so read `checked` from
     the sweep instead of a number in this docstring.
