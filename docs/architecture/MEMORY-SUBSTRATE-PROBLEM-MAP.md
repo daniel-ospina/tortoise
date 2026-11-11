@@ -340,9 +340,9 @@ a box with no database the default conftest refuses the run outright
 (`default pytest requires TORTOISE_DB_URI (epic #1647 P4)` — one refusal per
 collected test, 58 at this head), which reads as the guard being broken rather
 than the target being absent. That number is a property of the RUN, not of the
-document and not of any commit, and nothing reads it (see the residuals below):
-it is re-derived with `--collect-only` rather than read off the page's
-`measured_at_commit`.
+document and not a fact about the commit the page names, and nothing reads it
+(see the residuals below): it is re-derived with `--collect-only` rather than
+read off the page's `measured_at_commit`.
 
 The checker re-measures, offline and without network access:
 

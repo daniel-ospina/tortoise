@@ -57,7 +57,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # `POST /v1/sessions` route, so it reuses `tests/test_hosted_api.py`'s
 # authenticated TestClient fixture — the established repo pattern (see
 # `tests/test_capture_phase_d_dedup.py`), not a second hand-rolled app harness.
-from tests.test_hosted_api import TEST_ORG_ID  # noqa: E402, RUF100
+from tests.test_hosted_api import TEST_ORG_ID
 from tests.test_hosted_api import client as client  # noqa: E402, RUF100, F401
 from tortoise import ranking as _ranking  # noqa: E402, RUF100
 from tortoise import search_engine as _se  # noqa: E402, RUF100
