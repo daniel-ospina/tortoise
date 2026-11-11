@@ -23,8 +23,9 @@ the shipped source read as an AST — the interpreter guard's exit code, which n
 runtime fixture can produce (1). That is 51 negative controls plus 6 positives:
 three read the shipped page whole
 (`test_the_recut_row_and_survivors_hold_their_status_by_ISSUE` is the fourth —
-added when fresh review measured that every other arm compares COUNTS, so a
-status swap between two rows was invisible to the whole file; see its docstring),
+added when fresh review measured that no arm read a row's status BY ISSUE, so a
+compensating status swap between two rows was invisible to the whole file; see
+its docstring),
 a fifth
 (`test_every_status_token_is_in_the_vocabulary`) reads the closed-vocabulary
 CONSTANT rather than the page — see below — and the sixth is the positive half of

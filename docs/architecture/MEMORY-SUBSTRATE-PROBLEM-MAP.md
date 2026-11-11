@@ -341,7 +341,7 @@ TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_problem_map_2820.py -q  # the
 The `TORTOISE_TEST_CARVE_OUT=1` is not decoration: this suite is DB-free, and on
 a box with no database the default conftest refuses the run outright
 (`default pytest requires TORTOISE_DB_URI (epic #1647 P4)` — one refusal per
-collected test, 58 at this head), which reads as the guard being broken rather
+collected test, 59 at this head), which reads as the guard being broken rather
 than the target being absent. That number is a property of the RUN, and nothing
 reads it (see the residuals below): it is re-derived with `--collect-only`
 rather than read off the page's `measured_at_commit`.
@@ -402,18 +402,23 @@ rounding:**
   and §8 carries neither date nor commit — the commit for the whole page is the
   frontmatter's `measured_at_commit`, restated in §10. Do not read §2 or §8 as
   self-dating.
-- **A status token SWAPPED between two rows this revision does not name.** Every
-  comparison in the pin file is a COUNT, so one row demoted to `OPEN` while
-  another is promoted holds §2's tally, the abstract, the index headline and the
-  WS-C cell — measured: reverting `#2782` to `OPEN` **with** `#2684` promoted to
-  `VERIFIED-FIXED` read CLEAN under `tools/problem_map_check.py --check` and
-  passed the whole suite before review caught it. The re-cut row and §8's four
-  survivors are therefore pinned **by issue**
+- **A status token SWAPPED so that every count site still agrees.** Before this
+  revision every comparison in the pin file was a COUNT, so one row demoted to
+  `OPEN` while another was promoted held §2's tally, the abstract, the index
+  headline and the WS-C cell — measured: reverting `#2782` to `OPEN` **with**
+  `#2684` promoted to `VERIFIED-FIXED` read CLEAN under
+  `tools/problem_map_check.py --check` and passed the whole suite before review
+  caught it. The re-cut row and §8's four survivors are therefore pinned **by
+  issue**
   (`tests/test_problem_map_2820.py::test_the_recut_row_and_survivors_hold_their_status_by_ISSUE`),
-  which reds that swap; the same swap between two of the other rows is still
-  invisible. Pinning all 26 is the only complete form and it is not taken on
-  here: it would make every future re-cut edit the pin file as well, and this
-  page's re-cuts are hand measurements. Named sets, not a claim of coverage.
+  which closes that class entirely: §8's OPEN set is exactly those four rows, so
+  any swap that holds the tally has to promote one of them and reds the pin.
+  What survives is a change carried **consistently** — demote an unnamed
+  `VERIFIED-FIXED` row to `OPEN` and correct §2, the abstract, the index headline
+  and the WS cell to match, and nothing reds, because for a status the page is
+  its own only witness. Pinning all 26 rows is the complete form and it is not
+  taken on here: it would make every future re-cut edit the pin file as well, and
+  this page's re-cuts are hand measurements. Named sets, not a claim of coverage.
 - **Anchor RELEVANCE.** The guard proves an anchor exists and is merged. It cannot
   prove the commit is *the fix* — a lane once cited a merge that mentioned nothing
   of the issue (this page carried exactly that defect until review caught it on
