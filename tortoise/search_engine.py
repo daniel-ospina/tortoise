@@ -346,7 +346,9 @@ def ep_prior_only_cypher(alias: str) -> str:
     confidence_mean is `None` + `ep_state: "absent"`, not a neutral 0.5.
     A prior-only claim's confidence_mean IS the declared PRIOR mean — EXCEPT
     that a readable ``n.confidence`` mirror LEADS it, so a declared Beta(3,1)
-    beside a stored 0.9 reads 0.9, not the prior mean 0.75.
+    beside a stored 0.9 reads 0.9, not the prior mean 0.75. A DEGENERATE
+    declared prior (0/0, or a negative operand) has NO mean at all: it reads
+    ``None`` + ``ep_state: "absent"``.
 
     Kept textually in step with the Python twin: for every combination of
     (posterior_alpha, ep_alpha, baseline_set) this helper is true iff
@@ -1395,14 +1397,19 @@ class EpBreakdown:
     # unless a readable ``n.confidence`` mirror supplies the value, which LEADS
     # both (so a declared Beta(3,1) beside a stored 0.9 reads 0.9).
     # It matches the number TortoiseEP.compute_confidence / sdk.get_confidence
-    # return for the same point WHENEVER one is persisted — with ONE stated
-    # exception, ``None`` here: those two still answer the Beta(1,1) prior mean
+    # return for the same point WHENEVER one is persisted — with TWO stated
+    # differences. (1) ``None`` here when nothing yields a mean and no readable
+    # mirror supplies one: those two still answer the Beta(1,1) prior mean
     # (0.5) for a claim with no persisted belief at all, because they are the
     # EP read under an explicit `require_calibration=False`, not a read/rank
     # surface. That divergence is deliberate and recorded in the #11702 decision
     # comment (issuecomment-6781252637) — it is the one place "no belief" still
     # answers 0.5, and it is
     # outside this field's contract rather than a second vocabulary for it.
+    # (2) A readable mirror that DISAGREES with the stored pair: this field
+    # serves the mirror, while those two read only the α/β operands
+    # (`ep.py`'s `_read_node` + `a/(a+b)`) and answer the pair mean — a
+    # posterior 1/1 beside a stored 0.9 reads 0.9 here and 0.5 there.
     # Historically this
     # field was the structural edge-ratio impl/(impl+nand); it is NOT that
     # quantity anymore — a claim EP converged at 0.88 with no incoming IMPL

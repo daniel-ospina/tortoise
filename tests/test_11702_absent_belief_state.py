@@ -5521,6 +5521,17 @@ _MIRROR_RESTRICTIONS = re.compile(
     re.IGNORECASE,
 )
 
+#: The OBJECT a qualifier verb must govern for the claim to be qualified: the
+#: mean/belief itself, not some other noun in the same sentence. See the call
+#: site — "leads the EVENT ordering" / "supplies the RANKING weight" are
+#: mirror+verb pairs that qualify nothing this guard is about.
+_QUALIFIER_OBJECT = re.compile(
+    r"\b(it|both|either|one|the\s+value|the\s+served\s+value|"
+    r"the\s+(?:declared\s+|prior\s+|persisted\s+)?mean|the\s+pair|"
+    r"confidence_mean|that\s+value)\b",
+    re.IGNORECASE,
+)
+
 #: Sites the scan MUST still find, per file. A tripwire that matches nothing
 #: passes vacuously — and this change's first draft already reworded
 #: `volunteer.py` out of its own arm (`reads its PRIOR mean` went from 1 match
@@ -5627,6 +5638,15 @@ def _qualified(window: str, claim_at: int = 0) -> bool:
             continue
         after = sentence[verb.end():verb.end() + 16]
         if _QUALIFIER_OBJECT_NEGATIONS.search(after):
+            continue
+        # The verb's OBJECT must be the mean/belief this claim is about. Without
+        # this a mirror+verb pair that qualifies a DIFFERENT noun satisfies the
+        # claim: "…IS the declared PRIOR mean; a readable mirror leads the EVENT
+        # ordering." and "…the n.confidence mirror supplies the RANKING weight."
+        # both passed (measured) — a false PASS in the one gate whose job is to
+        # refuse this class. `it`/`both`/`one` cover the shipped wordings
+        # ("LEADS it", "LEADS both", "supplies one").
+        if not _QUALIFIER_OBJECT.search(sentence[verb.end():verb.end() + 60]):
             continue
         # A RESTRICTION clause demotes the mirror to a fallback, which is the
         # inverse of `elif mirror is not None: value = round(mirror, 4)`:

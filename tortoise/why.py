@@ -455,7 +455,10 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
         # #3276: explicit measurement state — see EpBreakdown. baseline_set
         # (index 6) marks a LIVE prior-only claim (declared #2199 baseline, no
         # EP measurement): its confidence_mean is the PRIOR mean (a readable
-        # `n.confidence` mirror, if present, LEADS it), never a measured one.
+        # `n.confidence` mirror, if present, LEADS it), never a measured one —
+        # and a DEGENERATE declared prior (0/0, or a negative operand) has no
+        # mean at all, reading ``None`` + ``ep_state: "absent"`` (see the
+        # `baseline` note below).
         # A TERMINAL row is neither measured nor prior-only (its 0.5 is the
         # #2490 decayed posterior) — the terminal gate also clears `baseline`.
         baseline_set = bool(row[6]) if len(row) > 6 else False
