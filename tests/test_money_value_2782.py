@@ -1017,6 +1017,92 @@ class TestUpdateDoorCannotDeleteOrMisScale:
         assert _whole_sum(sdk) == {"BRL": COMMITTED_MINOR}
 
 
+
+class TestALegacyOptionalMemberDoesNotBrickTheRow:
+    """#11836 review Finding 1 (P1, measured): the merged-state view must carry
+    the SCALE triple from the node and the two OPTIONAL members only from the
+    CALLER.
+
+    ``verbatim``/``asOf`` describe provenance, not scale, and the read side is
+    deliberately lenient about them so rows written before this rule keep
+    reading (``_validate_present_optional_fields``: "pre-existing data keeps
+    reading"). Carrying the STORED ones into the graded view contradicted that
+    in the one population the leniency exists for: a node holding
+    ``asOf='Q3 2026'`` — accepted by the props passthrough before this change,
+    and still reproduced by ``rebuild_all`` because replay is deliberately
+    ungated — was REFUSED on ``update_entity(id, amountMinor=…)`` and on the
+    ordinary idempotent capture re-ingest, for a member the caller never
+    mentioned, with ``asOf=None`` as the only escape. A legacy row that cannot
+    be written is a false block, and the write door is not the place to
+    re-litigate a value it cannot see.
+    """
+
+    @pytest.mark.parametrize("door", UPDATE_DOORS)
+    def test_a_legacy_non_iso_as_of_does_not_block_an_ordinary_update(
+            self, journaled_sdk, door):
+        sdk, _events = journaled_sdk
+        node_id = _create_money_carrier(sdk, door)
+        # The pre-change shape: a valid scale triple beside a free-text date.
+        sdk._get_proj().g.query(
+            "MATCH (n {id:$id}) SET n.asOf = $asOf",
+            params={"id": node_id, "asOf": "Q3 2026"},
+        )
+        stored_asof = sdk._get_proj().g.query(
+            "MATCH (n {id:$id}) RETURN n.asOf",
+            params={"id": node_id}).result_set
+        assert stored_asof[0][0] == "Q3 2026"
+        # … and the value still reads, which is why the row exists.
+        assert _whole_sum(sdk) == {"BRL": COMMITTED_MINOR}
+
+        getattr(sdk, door)(node_id, amountMinor=COMMITTED_MINOR + 1)
+
+        node = _money_node(sdk, node_id)
+        assert node[AMOUNT_MINOR] == COMMITTED_MINOR + 1
+        assert node[CURRENCY] == "BRL"
+        assert node[MINOR_UNIT_EXPONENT] == 2
+        # the legacy member is untouched — ordinary `SET +=` semantics of an
+        # unnamed key, not this gate's business
+        after_asof = sdk._get_proj().g.query(
+            "MATCH (n {id:$id}) RETURN n.asOf",
+            params={"id": node_id}).result_set
+        assert after_asof[0][0] == "Q3 2026"
+
+    @pytest.mark.parametrize("door", UPDATE_DOORS)
+    def test_the_caller_s_own_as_of_is_still_graded(self, journaled_sdk, door):
+        """The other half: leniency about a STORED member must not become
+        leniency about the one the caller is writing NOW."""
+        sdk, _events = journaled_sdk
+        node_id = _create_money_carrier(sdk, door)
+        with pytest.raises(ValueError, match="write boundary"):
+            getattr(sdk, door)(node_id, amountMinor=COMMITTED_MINOR + 1,
+                               asOf="Q3 2026")
+        assert _money_node(sdk, node_id) == {
+            AMOUNT_MINOR: COMMITTED_MINOR, CURRENCY: "BRL",
+            MINOR_UNIT_EXPONENT: 2}
+        assert _whole_sum(sdk) == {"BRL": COMMITTED_MINOR}
+
+    def test_a_legacy_verbatim_does_not_block_the_idempotent_re_ingest(
+            self, journaled_sdk):
+        """The population the P1 actually bit: a capture re-ingest. The stored
+        ``verbatim`` is not a string; a re-run naming the same money must not
+        raise, or re-ingest stops being idempotent for that row."""
+        sdk, _events = journaled_sdk
+        pid = sdk.create_point(
+            "statement", "tranche one is 250000 BRL",
+            **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2))["id"]
+        sdk._get_proj().g.query(
+            "MATCH (n {id:$id}) SET n.verbatim = $verbatim",
+            params={"id": pid, "verbatim": 123},
+        )
+        twice = sdk.create_point(
+            "statement", "tranche one is 250000 BRL", dedup=True,
+            **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2))
+        assert twice["id"] == pid
+        node = _money_node(sdk, pid)
+        assert node[AMOUNT_MINOR] == COMMITTED_MINOR
+        assert node[CURRENCY] == "BRL"
+
+
 class TestTheUpdateArmOfThePredicate:
     """The rule itself, without a graph — so the boundary is readable in one
     place: an UPDATE is graded on the money state it LEAVES
@@ -1072,8 +1158,9 @@ class TestNonSanitizedSeams:
     ``_sanitize_props``, so the SDK intake's gate did not cover them.
 
     Finding 2 (``api.EventAPI``) landed the exact shape #2782 exists to refuse
-    durably on a node (``{amountMinor: 25_000_000, currency: None,
-    minorUnitExponent: None}``) through the seam the extractor, ``ingest``,
+    durably on a node (``amountMinor`` with no ``currency`` and no
+    ``minorUnitExponent`` beside it — the reader spells the two missing members
+    ``None``, the store holds no null key) through the seam the extractor, ``ingest``,
     ``docs_miner``, ``mining`` and the CLI all write through. Finding 3
     (``create_source``) reported ``ok`` while the closed ``:Source`` surface
     dropped the amount — and journalled it anyway.
@@ -1093,9 +1180,10 @@ class TestNonSanitizedSeams:
 
         #11836 review P1 (measured): the gate graded the flat record, so
         `add_point(content, provenance, amountMinor=25_000_000)` was ACCEPTED
-        and wrote `{amountMinor: 25000000, currency: None,
-        minorUnitExponent: None}` durably — and it survived `rebuild_all` —
-        while the same bag through `add_object` was refused. A gate that covers
+        and left `amountMinor` durable with no currency beside it — the reader
+        spells that `currency: None`, the store holds no null key — and it
+        survived `rebuild_all` — while the same bag through `add_object` was
+        refused. A gate that covers
         the flat doors and not the nesting one is a gate with a hole in the
         shape of the payload.
         """

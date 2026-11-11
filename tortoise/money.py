@@ -312,8 +312,23 @@ def money_view_after_update(stored: Mapping[str, Any],
 
     Only the declared money members are carried, so a caller's unrelated props
     never appear in the view (and can never be read as money).
+
+    ⛔ The two OPTIONAL members (``verbatim``/``asOf``) are carried ONLY from
+    the caller's bag, never from ``stored``, and that asymmetry is the whole
+    point rather than an oversight. They describe the value's PROVENANCE — the
+    exact source text and the date it was quoted — not its scale, and the read
+    side is deliberately lenient about them so rows written before this rule
+    keep reading (``_validate_present_optional_fields``: "pre-existing data
+    keeps reading"). Carrying a STORED ``asOf`` into the view made those very
+    rows unwritable instead: a node holding ``asOf='Q3 2026'`` (a shape the
+    props passthrough accepted before this change, and one ``rebuild_all``
+    still reproduces because replay is deliberately ungated) was refused on
+    ``update_entity(id, amountMinor=…)`` — and on the ordinary idempotent
+    capture re-ingest — for a member the caller never mentioned and cannot see
+    is invalid, leaving ``asOf=None`` as the only escape. Grading the
+    caller's OWN ``asOf`` still refuses a malformed one at the door.
     """
-    view = {key: stored[key] for key in MONEY_VALUE_FIELDS if key in stored}
+    view = {key: stored[key] for key in _MONEY_GROUP if key in stored}
     for key in MONEY_VALUE_FIELDS:
         if key not in props:
             continue
@@ -334,6 +349,10 @@ def _validate_present_optional_fields(view: Mapping[str, Any]) -> None:
     the reader: the read side stays lenient for rows written before this rule,
     so pre-existing data keeps reading instead of making a sum unanswerable
     twice over.
+
+    ⛔ And for the same reason they are graded on the CALLER's bag only:
+    :func:`money_view_after_update` does not carry a stored ``verbatim``/``asOf``
+    into the view, so an update never re-grades a legacy row's optional members.
     """
     if view.get(VERBATIM) is not None:
         _validate_verbatim(view[VERBATIM])

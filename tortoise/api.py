@@ -224,10 +224,14 @@ class EventAPI:
         # `_sanitize_props` (its own words: an internal ingest/mining/CLI
         # seam), so the SDK intake's money gate did not cover it — measured, an
         # `EventAPI(...).add_object(name, kind, amountMinor=25_000_000)` was
-        # ACCEPTED and wrote `{amountMinor: 25000000, currency: None,
-        # minorUnitExponent: None}` durably onto the node: the exact shape #2782
+        # ACCEPTED and left `amountMinor=25000000` durable on the node with no
+        # `currency` and no `minorUnitExponent` beside it: the exact shape #2782
         # exists to refuse, one transport over, through a producer the
-        # extractor, `ingest`, `docs_miner`, `mining` and the CLI all use.
+        # extractor, `ingest`, `docs_miner`, `mining` and the CLI all use. (The
+        # READER renders the two missing members as `None`; the STORE holds no
+        # null-valued property — `SET n += {currency: null}` REMOVES the key —
+        # so "`currency: None` on the node" is a readable state, not a stored
+        # one. #11836 review Finding 2, measured.)
         #
         # It runs BEFORE the append below for `_refuse_unapproved_kinds`' own
         # reason: the append is this seam's COMMIT POINT, so a refusal raised
@@ -243,8 +247,9 @@ class EventAPI:
         # only was INERT on the Point door. Two of the seam's doors do not splat
         # their props at the top level — `add_point` builds `p` and emits
         # `point=p`, `add_operator` nests its record the same way — so
-        # `add_point(..., amountMinor=25_000_000)` was ACCEPTED and wrote
-        # `{amountMinor: 25000000, currency: None}` durably, which is the exact
+        # `add_point(..., amountMinor=25_000_000)` was ACCEPTED and left
+        # `amountMinor` durable with no currency beside it (the reader spells
+        # that `currency: None`; the store holds no null key), which is the exact
         # shape this gate exists to refuse. The sibling kind gate two calls up
         # (`_refuse_unapproved_kinds` → `kind_spellings_in_payload`) already
         # states the rule: a gate that reads only the top level re-opens the
