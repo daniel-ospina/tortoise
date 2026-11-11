@@ -28,8 +28,12 @@ step 1's dependency (a) below.
 > destination either: writes are refused today, §9 Q1.)
 >
 > **Scope, so #7860 is not closed on this alone:** this is a capability design of record. It does **not**
-> deliver #7860's `ONTOLOGY.md` indicator vocabulary — `grep -c -i '\bindicator\b' docs/ONTOLOGY.md` is
-> still **0** at this head, so the issue's criteria 1 and 3 remain unmet and **#7860 stays open**.
+> deliver #7860's `ONTOLOGY.md` indicator vocabulary, so that issue's **criterion 1** (the vocabulary is
+> documented) and **criterion 3** (the kind is reachable from where the goal kind lives) both remain
+> unmet — each on its **own** datum, since one datum cannot show both: the grep
+> `grep -c -i '\bindicator\b' docs/ONTOLOGY.md` is still **0** at this head for criterion 1, and core
+> `CANONICAL_OBJECT_KINDS` omits `indicator` — it exists only as a `packs/dev` objectKind (§6) — for
+> criterion 3, which is a reachability fact the grep cannot show. **#7860 stays open.**
 
 ---
 
@@ -89,6 +93,12 @@ Measured at `32c0f39d4b` (with the two `search_engine.py` citations re-anchored 
 | 14 | all of it survives a rebuild | cross-cutting (replay) | 🟡 | journal uniform for supersede; read gates are not (**#11824**) |
 | 15 | "why is this goal green?" | cross-cutting (explain) | 🟡 | `why.py`; blind to Object/Event endpoints |
 
+**Totals, counted from the table above: 2 ✅ · 6 🟡 · 7 ⛔ of 15.** The table is the source of truth and
+the totals are derived from it, never the reverse: a downstream summary that restates different numbers
+is drifting and gets corrected against this table. Measured 2026-11-11: #11934's body restates it as
+`4 ✅ · 4 🟡 · 7 ⛔` and calls `weigh` *"the only healthy one"* — both contradict these rows (5 and 7 are
+the ✅ pair; row 13 is `weigh`'s bounded partial, #11823).
+
 **Read the "state" column, not the rows:** **no primitive is fully healthy.** `weigh` is the only one
 with no *absent* capability, and it carries one bounded partial — row 13, where a shallow pass reads as
 converged (#11823, step 4). `decide` does not exist, `detect` has two capabilities that do not exist
@@ -100,14 +110,18 @@ engines / 632 tests in 166 files, and its own verification comment **re-measured
 reproduces exactly, 5 as 5 semantic models / 6 functions, 4 engines as **2 engines / 4 entrypoints**, and
 `632 / 166` as **621 / 167**. The corrected set is used here; quote the verification comment, not the
 issue body, which still carries the superseded numbers). That is why this
-question has repeatedly collapsed into "how does EP get triggered" — EP is the only part that already
-works — but note that `weigh` is not unblemished either: row 13 is its own bounded partial.
+question has repeatedly collapsed into "how does EP get triggered" — `weigh` is the only primitive that
+works, and it carries one measured defect (#11823: a shallow pass reads as converged) that must be fixed
+before any reasoning claim rests on a posterior.
 
-**Rows 10 and 11 have no step of their own.** Both are 🟡 *decided, nothing enforces it* — row 10 is
-D4's 0..n shape, which is the shape step 1's table reads, and row 11 is D5's no-roll-up rule, which is a
-constraint on whatever computes achievement rather than a build item. Every ⛔ row has a step **except row
-3**, whose closure is step 1's dependency (b); these two do not, so a builder working §7 in order will not be told how to close them, and should not read their
-🟡 as scheduled.
+**Three 🟡 rows have no step of their own — rows 1, 10 and 11, and that is all of them.** The other
+three 🟡 rows are stepped (row 13 by step 4, row 14 by step 0's #11824 read gates, row 15 by step 5),
+so this list is exhaustive over the six 🟡 rows and is checkable against the table. None of the three is
+a build item: row 1's field list is #2782's and its `:Source` provenance half is ⛔, deferred by §8 to
+wave 5 of #11081; row 10 is D4's 0..n shape, which is the shape step 1's table reads; row 11 is D5's
+no-roll-up rule, a constraint on whatever computes achievement. Every ⛔ row has a step **except row 3**,
+whose closure is step 1's dependency (b). So a builder working §7 in order will not be told how to close
+these three, and should not read their 🟡 as scheduled.
 
 ---
 
@@ -204,8 +218,9 @@ change produces"*, read by one engine step. **It has no home for the general cas
 **Where the `indicator` kind lives — decided, not open.** #7860 records the owner decision (2026-10-13)
 *"promote `indicator` to a core Object kind — option (a)"*, carried as that issue's **D1**: *"`indicator` is
 a core Object kind; packs subclass it."* Today the kind exists only as a `packs/dev` objectKind scoped to
-DORA/DRIVE metrics — which is exactly why a product-strategy goal cannot reach it, the issue's acceptance
-criterion 3 — and the promotion is **not** a one-line doc edit: it collides with the `dev` pack. The table
+DORA/DRIVE metrics — `CANONICAL_OBJECT_KINDS` does not carry it — which is exactly why a
+product-strategy goal cannot reach it, and that is the issue's acceptance criterion 3. The promotion is
+**not** a one-line doc edit either: it collides with the `dev` pack. The table
 above describes the *shape*; the *home* is core.
 
 **On `direction of good`.** The indicator row copies #7860's **D2** (*"what is measured, its unit, direction
@@ -288,5 +303,5 @@ sitting on it — #2782 is the money-typed instance of that ruling, not an alter
 | — | D12 (confidence on non-claims) | **ruled: no** — recorded on #7860 |
 | — | D13 (what triggers the loop?) | **recommended on #7860 — NOT yet ruled**, and it sits under that issue's *"OPEN — the owner has two questions outstanding"*: *the judgement write is the trigger* (per D11), the only option where the trigger and the answer are the same write. **#11822's scope waits on the owner ruling this**, so the gate is still closed: #11822 must not be dispatched as if the trigger were settled. Marking that write does **not** make a deeper cascade converge (#11823) — this is the trigger, not the convergence fix |
 | — | where does the **effect** rule live? | **decided here: §5** (declared decision table; engine-owned effect; no general rule engine) — a design decision of this doc, relayed to #7860 |
-| O1 | does this doc deliver #7860's acceptance criteria? | **No.** It is a capability design of record: `grep -c -i '\bindicator\b' docs/ONTOLOGY.md` is still **0**, so criteria 1 and 3 remain unmet and **#7860 stays open** |
+| O1 | does this doc deliver #7860's acceptance criteria? | **No.** It is a capability design of record, so #7860's **criterion 1** (documented: `grep -c -i '\bindicator\b' docs/ONTOLOGY.md` is still **0**) and **criterion 3** (reachable from where the goal kind lives: `CANONICAL_OBJECT_KINDS` omits `indicator`, which exists only as a `packs/dev` objectKind, so a product-strategy goal still needs `dev` installed — §6) both remain unmet. ⚠️ The two carry **different** datums: the grep cannot show reachability, so it must not be cited for criterion 3. Both unmet, so **#7860 stays open** |
 | Q3 | the **§5** quotations (the ECA "rope for programmer" / "hired? fired? …" and the OMG DMN passages) name no pinned source — document, version or link. (The §6 SRE / QUDT / FHIR / ClearPoint quotations are **not** in this class: they are reproduced verbatim from #7860's D2/D3/D4.) | pin the §5 quotations before this doc is cited as evidence — they are reproduced from the design pass's research, not from a tracked document, and grep confirms neither string exists on #7860. One earlier quotation was withdrawn as unpinnable rather than left looking sourced |
