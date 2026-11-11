@@ -739,11 +739,14 @@ def test_the_hosted_api_cite_notes_state_one_measurement_and_the_pivot():
 
     # ... and the TOOL's own fallback pivot agrees with it. No shipped path reads
     # that constant (every one derives the site from the tree, and this test passes
-    # its own `_PIVOT`), which is exactly why its drift was invisible: at #11803's
-    # head the module's own documented `--pivot 23466` example reported
-    # `pivot is the LIFETIME_MEMORY_QUERY site: False` over a CORRECT tree, and
-    # `at the pivot 0` with the two figures split 13/443 instead of 12/443. Pinning
-    # it is the only thing that can red, because `--check`/`--refresh` re-derive.
+    # its own `_PIVOT`), which is exactly why its drift is invisible to every other
+    # check. The two wrongnesses start at different heads: `--pivot 23466` reports
+    # `site: False` from #11803 onward (the CALL moved to 23477 while the note still
+    # cited 23466), but its COUNT SPLIT only goes wrong once a re-derivation moves
+    # the notes and leaves the constant behind — at #11950's first commit
+    # `5d35cd58f6` the same invocation read `at the pivot 0` / `above 13` over a
+    # CORRECT tree (12 above / 1 at the pivot before it). Pinning it is the only
+    # thing that can red.
     assert DEFAULT_PIVOT == lifetime_query_sites()[0], (
         f"the census tool's fallback pivot {DEFAULT_PIVOT} is not the site "
         f"{lifetime_query_sites()} — nothing shipped reads it, but the module's "
