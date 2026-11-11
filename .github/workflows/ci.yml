@@ -877,8 +877,8 @@ jobs:
         # `measured_at_commit` ancestry claim (it reports UNVERIFIED/exit 2 rather
         # than blaming the document on a grafted graph). Its extra reason is
         # specific to what the page is: §3 is a CORRECTIONS log, and re-measuring
-        # it found five of its twelve rows already overtaken by the fixes they
-        # motivated, so a verdict outside the closed vocabulary or a `path:line`
+        # it found seven of its twelve rows no longer read as written, so a verdict
+        # outside the closed vocabulary or a `path:line`
         # that stopped resolving reads exactly like evidence to the next lane.
         # BOTH arms run, for the #11084 reason: `--self-test` is what proves the
         # rules still fire. Stdlib only, so it needs nothing from the `pip
