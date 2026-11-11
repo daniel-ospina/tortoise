@@ -31,7 +31,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise.ranking import (  # noqa: E402, I001, RUF100
-    GapsRanker, SubgraphExpander, NEUTRAL_CONFIDENCE,
+    GapsRanker, SubgraphExpander,
 )
 from tortoise.sdk import TortoiseSDK  # noqa: E402, RUF100
 
@@ -97,13 +97,18 @@ def test_incoming_nand_is_never_support():
     assert rr["contested"] is True  # contested surfaced, never hidden
 
 
-def test_gap_uncalibrated_confidence_neutral():
-    """Uncalibrated claims (no persisted α/β) get the documented neutral 0.5
-    — the STRUCTURE (load vs support) is what makes a gap, not the prior."""
+def test_gap_uncalibrated_confidence_absent():
+    """#11702 (flips this test's pre-#11702 pin): an uncalibrated claim has NO
+    belief — ``confidence`` is ``None`` with ``ep_state: "absent"``, never the
+    neutral 0.5 that was indistinguishable from a measured coin flip. The
+    STRUCTURE (load vs support) is what makes a gap, and the structural
+    ``score`` is untouched by this."""
     out = GapsRanker().rerank([{"id": "u", "gaps_outgoing_impl": 1}])
     rr = out[0]["gaps_ranking"]
-    assert rr["confidence"] == NEUTRAL_CONFIDENCE
-    assert rr["confidence_source"] == "neutral"
+    assert rr["confidence"] is None
+    assert rr["ep_state"] == "absent"
+    assert rr["confidence_source"] == "absent"
+    assert rr["score"] == 1.0  # structure, not belief
 
 
 # ── Unit: #2598 draft honesty on the gaps surface (no DB) ─────────────────
@@ -138,15 +143,17 @@ def test_gaps_measured_draft_keeps_its_measured_number():
 
 
 def test_gaps_live_rows_unchanged_by_the_draft_gate():
-    """No live row changes: no ``draft`` key, the same numeric confidence, the
-    same source. An uncalibrated LIVE claim keeps the documented #898 neutral
-    0.5 — a recorded decision this change does NOT reopen."""
+    """No live row gets a ``draft`` badge. #11702 SUPERSEDES the #898 neutral
+    0.5 this test used to pin: an uncalibrated LIVE claim now also reads
+    ``confidence: None`` + ``ep_state: "absent"``, because that 0.5 was
+    indistinguishable from a measured coin flip. The draft gate itself is
+    unchanged — the badge is what separates "staged" from "unmeasured"."""
     out = GapsRanker().rerank([
         {"id": "live", "status": "live", "gaps_outgoing_impl": 1},
     ])
     rr = out[0]["gaps_ranking"]
-    assert rr["confidence"] == NEUTRAL_CONFIDENCE
-    assert rr["confidence_source"] == "neutral"
+    assert rr["confidence"] is None
+    assert rr["ep_state"] == "absent"
     assert "draft" not in rr
 
 
@@ -270,7 +277,9 @@ def test_gaps_golden_set_integration():
         rr = by_id[g["gap"]]["gaps_ranking"]
         assert rr["load"] == 1 and rr["support"] == 0
         assert rr["score"] == pytest.approx(1.0)
-        assert rr["confidence_source"] == "neutral"  # uncalibrated
+        # #11702: uncalibrated ⇒ absent (no belief), still LIVE not staged.
+        assert rr["confidence"] is None
+        assert rr["ep_state"] == "absent"
         assert "draft" not in rr  # ...and LIVE, not staged
     finally:
         sdk.close()
@@ -315,10 +324,12 @@ def test_gaps_draft_recalled_after_live_uncomputed_end_to_end():
         assert draft_rr["confidence"] is None
         assert draft_rr["confidence_source"] == "uncomputed"
 
-        # Live rows are untouched: numeric neutral + no draft badge.
+        # #11702: a live row with no persisted belief is now ALSO absent —
+        # `None` + the state NAME, never the fabricated neutral 0.5. The draft
+        # badge stays the distinguishing marker ("staged", not "unmeasured").
         live_rr = by_id[live_gap["id"]]["gaps_ranking"]
-        assert live_rr["confidence"] == NEUTRAL_CONFIDENCE
-        assert live_rr["confidence_source"] == "neutral"
+        assert live_rr["confidence"] is None
+        assert live_rr["ep_state"] == "absent"
         assert "draft" not in live_rr
     finally:
         sdk.close()

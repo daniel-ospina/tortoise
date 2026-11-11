@@ -178,9 +178,12 @@ class TestDe2e5:
             entity_type="event",
         )
         boost = results[0]["graph_ranking"]["graph_boost"]
-        # Baseline for an event with zero aboutObject: 0.6·0 + 0.4·confidence.
+        # Baseline for an event with zero aboutObject AND no produced belief:
+        # #11702 drops the 0.4·confidence term instead of feeding it a
+        # fabricated 0.5, so the baseline is 0.0 (it was 0.4·0.5 = 0.2).
         assert _event_about_objects(sdk, e["eventId"]) == 0
-        expected = round(0.4 * 0.5, 4)  # no produced points → conf 0.5
+        assert results[0]["graph_ranking"]["ep_state"] == "absent"
+        expected = 0.0  # no aboutObject, no produced-point belief
         assert boost == expected, (
             f"Point-origin aboutObject must NOT inflate the session boost "
             f"(got {boost}, expected {expected})"

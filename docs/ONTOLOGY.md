@@ -1134,8 +1134,18 @@ dig_deeper kinds   supports | nand | superseded | tradeoff     # dig_deeper[k].k
 dig_deeper labels  read supports · read the counterargument (NAND)
                    · see what changed · weigh the alternatives  # derived from kind + target verb phrases (UXD 4)
 why-block sections why · conflicts · supersession · tradeoffs · dig_deeper · warnings   # enriched-item additive keys (W4 why-layer spec §3.1.1/§6.1)
-conflict severity  high | medium                                # deterministic from the counter-claim's persisted EP mean
+conflict severity  high | medium | null                         # deterministic from the counter-claim's persisted EP mean
                                                                # high ⟺ mean ≥ 0.6 (repo high-confidence bar); else medium
+                                                               # null ⟺ the counter-claim has NO persisted belief (#11702): there is
+                                                               # nothing to grade, so it sorts AFTER every graded severity instead of
+                                                               # taking `medium` on a fabricated neutral 0.5
+tradeoffs[].ep_weight  float | null                            # the alternative's persisted belief mean, or null when it has NO
+                                                               # persisted belief (#11702 — never the 0.5 the `coalesce(…, 1.0)`
+                                                               # default produced). The ONE precedence every surface shares
+                                                               # (`n.confidence` mirror first, then the persisted α/β mean), so this
+                                                               # value always equals the `ep` block's `confidence_mean` for the same
+                                                               # alternative. `null` sorts a tradeoff AFTER every weighed
+                                                               # alternative, and `mitigation`/`operator_id` may be null beside it
 degraded_reason    timeout | assembly_error | breaker_open      # degradations only; clean empty = null + empty arrays (W4 why-layer spec §3.1.3)
 ```
 

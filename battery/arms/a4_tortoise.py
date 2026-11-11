@@ -210,8 +210,10 @@ class A4TortoiseArm:
         writes would silently cap every later session (record -> None,
         no surfacing event) while each session is billed as measured.
 
-        Memory.confidence is the claim's EP posterior mean — never None on
-        the real path (uncalibrated rows fall back to neutral 0.5);
+        Memory.confidence is the claim's EP posterior mean, or `None` when the
+        claim carries NO belief (`ep.ep_state == "absent"`) — #11702 removed
+        the neutral-0.5 fallback, which made "no evidence" indistinguishable
+        from "measured coin flip" on this very surface;
         operator ids from the state read's nands/arguments attachments are
         emitted as operator-kind Memories so the WRITE closed set can carry
         operators for #901 mitigate routing.
@@ -253,9 +255,15 @@ class A4TortoiseArm:
                     continue
                 ep = row.get("ep") if isinstance(row.get("ep"), dict) else {}
                 mean = ep.get("confidence_mean")
-                confidence = (float(mean) if isinstance(mean, (int, float))
-                              else 0.5)
-                confidence = max(0.0, min(1.0, confidence))
+                # #11702: `ep_state: "absent"` means there is no belief to
+                # score, and `Memory.confidence` is `float | None` — so the
+                # row still SURFACES (it is a real claim the read returned) and
+                # carries `None`. The arm must not invent 0.5 (it cannot tell
+                # an unmeasured claim from a measured coin flip) and must not
+                # DROP the row either: dropping it empties a seed-mode surface
+                # made of belief-less claims, which is a different lie.
+                confidence = (max(0.0, min(1.0, float(mean)))
+                              if isinstance(mean, (int, float)) else None)
                 out.append(Memory(
                     id=rid, content=content, confidence=confidence,
                     kind=_CLAIM_MEMORY_KIND))

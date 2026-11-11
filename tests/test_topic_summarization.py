@@ -462,9 +462,12 @@ class TestUncalibratedNANDPair:
     def test_nand_pair_no_ep_data_not_disputed(self, sdk):
         """NAND-connected pair with NO persisted EP data → NOT disputed.
 
-        Uncalibrated points fall back to Beta(1,1) → variance 0.0833,
-        which exceeds the NAND_PAIR_VARIANCE_THRESHOLD (0.02). Without the
-        has_ep gate, this would be a false positive.
+        An uncalibrated point used to fall back to Beta(1,1) → variance
+        0.0833, which exceeds NAND_PAIR_VARIANCE_THRESHOLD (0.02), so the
+        ``has_ep`` gate was what kept it out of "disputed". Since #11702 the
+        width is 0.0 for a claim with no persisted belief (the coalesced
+        defaults no longer fabricate one), so the gate is belt-to-braces — and
+        the assertion below pins the new contract instead of the old width.
         """
         claim_a = sdk.create_point("statement", "Use tabs for indentation uncalibrated")
         claim_b = sdk.create_point("statement", "Use spaces for indentation uncalibrated")
@@ -484,9 +487,18 @@ class TestUncalibratedNANDPair:
         for pid in (aid, bid):
             assert breakdowns[pid].has_ep is False, \
                 f"Point {pid} should have has_ep=False (no EP data)"
-            # Beta(1,1) variance = 1/12 ≈ 0.0833
-            assert breakdowns[pid].variance > 0.08, \
-                f"Uncalibrated point {pid} should have Beta(1,1) variance"
+            # #11702: an uncalibrated claim has NO width at all. It used to
+            # report the Beta(1,1) maximum 1/12 (0.0833) — the coalesced
+            # `coalesce(…, 1.0)` defaults, which made a claim nothing measured
+            # read as "maximally uncertain". `ep_pair_stored` now zeroes it, so
+            # the `has_ep` gate below is belt-to-braces for this shape and the
+            # width assertion flips with the contract (the test's own point —
+            # "an uncalibrated pair must not be disputed" — is unchanged).
+            assert breakdowns[pid].ep_state == "absent", \
+                f"uncalibrated point {pid} must be ABSENT: {breakdowns[pid]}"
+            assert breakdowns[pid].variance == 0.0, \
+                f"uncalibrated point {pid} should carry no width: " \
+                f"{breakdowns[pid].variance}"
             assert breakdowns[pid].contested is False, \
                 f"Uncalibrated point {pid} should NOT be contested"
 

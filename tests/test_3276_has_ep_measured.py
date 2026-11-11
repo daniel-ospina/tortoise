@@ -148,9 +148,13 @@ class TestUnmeasuredBaselineDecision:
         finally:
             sdk.close()
 
-    def test_unmeasured_observation_is_neutral_not_baseline(self):
-        """The contrast case from the issue: unmeasured observation = 0.5,
-        has_ep False, and no baseline."""
+    def test_unmeasured_observation_is_absent_not_baseline(self):
+        """The contrast case from the issue: an unmeasured observation has no
+        belief at all — has_ep False, no baseline, and (#11702) a NULL
+        ``confidence_mean`` named ``ep_state: "absent"``. The 0.5 this used to
+        pin was the neutral Beta(1,1) mean, indistinguishable from a measured
+        symmetric coin flip; #3276's point still stands — it is not a BASELINE
+        prior either, and that is what the three state flags below pin."""
         sdk = _fresh_sdk()
         try:
             pid = sdk.create_point(
@@ -159,7 +163,8 @@ class TestUnmeasuredBaselineDecision:
             ep = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
             assert ep.has_ep is False and ep.measured is False and ep.baseline is False, ep
             assert ep.evidence.total == 0
-            assert ep.confidence_mean == pytest.approx(0.5, abs=1e-4)
+            assert ep.confidence_mean is None
+            assert ep.ep_state == "absent"
         finally:
             sdk.close()
 

@@ -8,6 +8,11 @@ from __future__ import annotations  # noqa: I001
 import re
 from typing import Any
 
+# #11702: the ONE Python belief reader — `belief_value`, which applies the
+# shared presence predicate AND the #2206 precedence — so this surface cannot
+# re-decide either for itself.
+from .search_engine import belief_value
+
 
 #: Root-lookup branches for _resolve_root (issue #327). Every branch is a
 #: labeled lookup so the planner uses Node By Index Scan instead of All Node
@@ -224,8 +229,30 @@ def entityProfile(
         if pointKind and node.get("pointKind") != pointKind:
             continue
         if confidenceMin is not None:
-            conf = node.get("confidence", 0.5)
-            if conf < confidenceMin:
+            # #11702: `node.get("confidence", 0.5)` fabricated the neutral
+            # Beta(1,1) mean for a claim with NO persisted belief, so a floor at
+            # or below 0.5 admitted it as if it carried neutral evidence — the
+            # same defect `min_confidence` on search/recall had.
+            #
+            # ⚠️ But the mirror is not the only place a belief is PERSISTED: a
+            # claim written by any path other than the EP flush carries
+            # posterior/prior α/β and NO `n.confidence` mirror (the population
+            # `_fetch_point_signals`' "a node the flush never reached" fallback
+            # exists for). Reading the mirror alone made a claim MEASURED at 0.9
+            # read `conf is None` and drop out of every floor — a recall
+            # regression, and a second presence rule on a read surface.
+            #
+            # `_persisted_belief` delegates to `search_engine.belief_value`, the
+            # ONE Python reader, so this surface cannot re-decide precedence or
+            # presence for itself (which is how `analyze` came to answer 1/4 for
+            # a half pair). An absent belief still has no number to clear a
+            # floor with: it is kept only by the no-op default (0.0 / None) and
+            # excluded by any real floor.
+            conf = _persisted_belief(node)
+            if conf is None:
+                if confidenceMin > 0.0:
+                    continue
+            elif conf < confidenceMin:
                 continue
         # Categorize
         if label == "point":
@@ -314,6 +341,46 @@ def tortoise_traverse(
 
 
 # ── Shared helper ──────────────────────────────────────
+
+def _persisted_belief(node: dict) -> float | None:
+    """The claim's PERSISTED belief mean, or ``None`` when it has none (#11702).
+
+    The repo-wide precedence, so this surface cannot disagree with the rankers
+    and the `ep` block about one claim:
+
+    * the served ``n.confidence`` MIRROR first (the EP flush writes it, and the
+      staleness is fixed at ALL THREE write paths — ``set_point_baseline``
+      refreshes it, the EP evidence pre-write clears it with the posterior, and
+      ``update_point`` clears it when it moves the pair);
+    * then the persisted pair mean. Each operand is coalesced on its OWN —
+      ``posterior_alpha or ep_alpha`` for α, ``posterior_beta or ep_beta`` for β
+      — exactly the precedence ``ep_has_belief_cypher``/``ep_state`` apply in
+      Cypher, so all three agree on every stored shape. ⛔ That means a HALF
+      posterior beside a complete prior DOES mix the pairs (α from the
+      posterior, β from the prior); it is the coalesce that is authoritative,
+      not a same-pair rule, and a reader must not "restore" one here.
+    * **absence is decided by the shared presence predicate**, never by the
+      value: no mirror and no complete α/β pair means there is nothing to
+      report, and a read must answer ``None`` rather than the Beta(1,1) ``0.5``
+      this used to fabricate.
+
+    A pair that is complete but sums to zero is ``absent`` — Beta(0, 0) is not a
+    distribution — so it answers ``None`` too, which is the same rule
+    ``ep_has_belief_cypher`` spells in Cypher.
+
+    ⛔ This function DELEGATES to :func:`search_engine.belief_value` rather than
+    implementing the rule: two implementations of "what is a belief" is the
+    defect class #11702 removes, and the next reader would have to keep them in
+    step by hand.
+    """
+    return belief_value(
+        confidence=node.get("confidence"),
+        posterior_alpha=node.get("posterior_alpha"),
+        posterior_beta=node.get("posterior_beta"),
+        ep_alpha=node.get("ep_alpha"),
+        ep_beta=node.get("ep_beta"),
+    )
+
 
 def _parse_node_with_identity(node: Any) -> tuple[dict, Any, str]:
     """Parse FalkorDB Node → ``(flat dict, identity value, identity key)``.

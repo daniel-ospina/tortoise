@@ -4131,8 +4131,14 @@ class TestSessionCaptureWriteVerb:
         # guard isolates the verbs.
         from tortoise.cypher_guard import unguarded_graph_class
 
+        # #11702: the read is now a fully-literal statement (it returns the RAW
+        # belief columns and lets the Python twin decide presence), so match on
+        # its own shape rather than on a predicate spelling — a stale needle
+        # here made the boom never fire and the test silently asserted the happy
+        # path (it failed as `ok != partial`).
         def _selective_boom(self, cypher, params=None, timeout=None):
-            if "posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL" in cypher:
+            if "coalesce(n.pointKind, 'statement')" in cypher and \
+                    "n.posterior_beta, n.ep_beta" in cypher:
                 raise RuntimeError("transient graph failure")
             # The guard's overridden verb delegates via super(), so the patched
             # vendor method still receives the call — the only thing that broke

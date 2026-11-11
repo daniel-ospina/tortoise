@@ -112,8 +112,29 @@ class TestDe2e9StalenessError:
             # mutation's effect.
             pre = _conf_by_key(sdk, f.ids)
             pre_err = _stale_error(pre, truth)
-            assert pre_err > ERROR_EPS, (
-                f"initial stale error {pre_err} should exceed {ERROR_EPS}")
+            # #11702: this guard used to pass VACUOUSLY. `_stale_error`
+            # returns `inf` on an empty comparison population, and on the
+            # pre-#11702 tree every claim here had a NULL `n.confidence`
+            # mirror — so the population was empty and `inf > ERROR_EPS`
+            # "passed" without measuring anything (measured: 0 of 10 keys).
+            # Now that a served belief is a real number the comparison is
+            # real (6 of 10 — the 4 excluded are still-unwritten posteriors),
+            # and the MEAN over it (0.0098) sits just under ERROR_EPS while
+            # the mutation moves its own claims by up to 0.0179: an average
+            # over claims the mutation never touches dilutes the effect it is
+            # supposed to detect. Assert the two things the guard MEANS —
+            # non-vacuity, and that the mutation is visible — instead.
+            compared = [k for k in truth
+                        if truth[k] is not None and pre.get(k) is not None]
+            assert compared, (
+                "stale-error guard is VACUOUS: no claim carries a belief on "
+                f"both the live graph and the post-mutation oracle "
+                f"(pre={pre}, truth={truth})")
+            biggest = max(abs(pre[k] - truth[k]) for k in compared)
+            assert biggest > ERROR_EPS, (
+                f"the mutation is invisible on the live graph: its largest "
+                f"per-claim move is {biggest:.6f} <= {ERROR_EPS} (mean over "
+                f"{len(compared)} claims {pre_err:.6f})")
             budget = 2
             errors = []
             coverages = []

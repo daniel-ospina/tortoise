@@ -89,10 +89,14 @@ def run_ep_liveness(namespace: str, scenario_id: str = "ct-001") -> dict[str, An
         return {
             "scenario_id": scenario_id,
             "target_id": target.id,
-            "baseline": float(baseline),
+            # #11702: an absent belief is `None`, not 0.5 — `float(None)`
+            # raised, so this harness crashed instead of reporting "the seed
+            # carried no belief to move". Keep the honest null and let
+            # `liveness_ok` read it as "no movement observed".
+            "baseline": float(baseline) if baseline is not None else None,
             "moved": float(moved) if moved is not None else None,
-            "delta": (float(moved) - float(baseline)) if moved is not None
-            else None,
+            "delta": (float(moved) - float(baseline))
+            if moved is not None and baseline is not None else None,
             "below_neutral": bool(moved is not None and moved < 0.50),
             "ep_outcome": out["outcome"],
             "ep_converged": bool(out["converged"]),
