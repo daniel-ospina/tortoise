@@ -593,35 +593,62 @@ def check_verdict_tally(text: str) -> list[str]:
 
     attributed = following if _consistent(following) else before
 
-    # ⛔ AND EVERY UNAMBIGUOUS MENTION MUST AGREE. Both maps above hold ONE verdict
-    # per letter — `before` overwrites, `following` setdefaults — so within the map
-    # the arm adopts, the LAST (or first) mention silently wins: measured,
-    # `**(e)** is **DRIFTED**, and **(e)** is **ADOPTED**` returned `[]` (clean) while
-    # the sentence contradicted itself and the table, and the reversed order red, so
-    # the verdict depended on which mention a half-applied edit left second. A stale
-    # duplicate is exactly what a partial rewrite leaves behind.
+    # ⛔ AND EVERY ADJACENT MENTION MUST AGREE. Both maps above hold ONE verdict per
+    # letter, so the LAST (or first) mention silently wins: measured, the sentence
+    # `… **(e)** is **DRIFTED**, and **(e)** is **ADOPTED** …` returned `[]` (clean)
+    # while it contradicted itself and the table, and only the reverse order red — the
+    # outcome depended on which mention a half-applied edit left second.
     #
-    # The check is deliberately ADDITIVE and SINGLETON-ONLY. Sets in the maps
-    # themselves are wrong: a class-first group (`**V**: (c), (d) and (g)`) makes the
-    # letters-first map's region span the preceding group, so a set there reports a
-    # swap the sentence does not make (measured: correct class-first prose went from
-    # clean to RED). A mention is therefore only trusted here when it is
-    # unambiguous on its own — one letter, one verdict, adjacent to each other — and
-    # the adopted map contributes its own assignment as one more mention. A
-    # contradicting repeat then makes the set two-valued and reds.
-    SINGLE_LETTER_FIRST = re.compile(
-        r"\*\*\(([a-z])\)\*\*\s*(?:are|is)\s*\*\*([A-Z][A-Z-]+)\*\*"
+    # A mention is read here by ADJACENCY, which is what keeps BOTH legal orderings
+    # working:
+    #   * a VERDICT token claims the nearest LETTER before it when only a copula or an
+    #     adverb sits between (`(l) are **DRIFTED**`, `(c) is also **DRIFTED**`).
+    #     A copula-ONLY rule was the first attempt and it opened a false pass:
+    #     `is also`/`was`/`remains` matched nothing, so the duplicate went unread
+    #     (measured);
+    #   * a VERDICT token claims the LETTER right after it when only a colon sits
+    #     between (`**ADOPTED**: **(e)**`) — the class-first form.
+    # A `;` between a letter and the token means the letter belongs to the PREVIOUS
+    # class-first group and is NOT claimed: without that guard a correct class-first
+    # page reds as a swap it never made (measured — the first attempt held SETS in
+    # the maps above and did exactly that).
+    COPULA_OR_ADVERB = re.compile(
+        r"[\s,]*(?:is|are|was|were|remains|stays|reads|stood)?[\s,]*"
+        r"(?:also|still)?[\s,]*"
     )
-    SINGLE_CLASS_FIRST = re.compile(
-        r"\*\*([A-Z][A-Z-]+)\*\*\s*:\s*\*\*\(([a-z])\)\*\*\s*(?:[;.,]|$)"
-    )
+    COLON_ONLY = re.compile(r"[\s:]*")
+    # ⛔ Tokenise the two kinds SEPARATELY rather than pairing the bold markers: the
+    # subject paragraph starts mid-bold (`take away:** **seven of …`), so a
+    # `\*\*([^*]+)\*\*` walk pairs the wrong markers and every letter lands in a
+    # connector instead of being seen (measured — the first version of this block
+    # returned clean because of exactly that).
+    LETTER_TOKEN = re.compile(r"\*\*\(([a-z])\)\*\*")
+    VERDICT_TOKEN = re.compile(r"\*\*([A-Z][A-Z-]+)\*\*")
+    letters = list(LETTER_TOKEN.finditer(non_still_sentence))
+    tokens = [t for t in VERDICT_TOKEN.finditer(non_still_sentence) if t.group(1) in VERDICTS]
     mentions: dict[str, set[str]] = {}
-    for single in SINGLE_LETTER_FIRST.finditer(non_still_sentence):
-        if single.group(2) in VERDICTS:
-            mentions.setdefault(single.group(1), set()).add(single.group(2))
-    for single in SINGLE_CLASS_FIRST.finditer(non_still_sentence):
-        if single.group(1) in VERDICTS:
-            mentions.setdefault(single.group(2), set()).add(single.group(1))
+    for token in tokens:
+        before = [lt for lt in letters if lt.end() <= token.start()]
+        if before:
+            nearest = before[-1]
+            # `… are **SUPERSEDED-BY-FIX**, **ADOPTED**: …` — a verdict token BETWEEN
+            # the letter and this one means the letter was already claimed by that
+            # token, so it is not this token's claim.
+            claimed_between = any(
+                other is not token and nearest.end() <= other.start() < token.start()
+                for other in tokens
+            )
+            if not claimed_between and COPULA_OR_ADVERB.fullmatch(
+                non_still_sentence[nearest.end() : token.start()]
+            ):
+                mentions.setdefault(nearest.group(1), set()).add(token.group(1))
+        after = [lt for lt in letters if lt.start() >= token.end()]
+        if after:
+            nearest = after[0]
+            if COLON_ONLY.fullmatch(non_still_sentence[token.end() : nearest.start()]):
+                mentions.setdefault(nearest.group(1), set()).add(token.group(1))
+    # The verdict the adopted map assigns is one more mention, so the agreement test
+    # is never weaker than the arm was before this block.
     for label in non_still:
         if attributed.get(label):
             mentions.setdefault(label, set()).add(attributed[label])
