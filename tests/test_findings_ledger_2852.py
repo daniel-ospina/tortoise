@@ -196,7 +196,7 @@ def test_mutation_population_is_pinned():
         "the registered population must EQUAL the floor it declares — a `>=` floor "
         "cannot see a one-arm shrink"
     )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 27, (
+    assert flc.MIN_SELF_TEST_MUTATIONS == 28, (
         "this line RECORDS the population (27 arms); removing one means editing the "
         "floor here too, which is the second place a shrink has to touch"
     )
@@ -917,25 +917,24 @@ def test_a_duplicate_in_a_later_sentence_is_rejected(tmp_path, monkeypatch):
     assert any("assigns a different verdict" in p for p in problems), problems
 
 
-def test_a_citation_with_a_non_colon_delimiter_is_refused(tmp_path, monkeypatch):
-    """FAILS if a citation is defused by rewriting its delimiter.
+def test_a_citation_separated_by_whitespace_is_refused(tmp_path, monkeypatch):
+    """FAILS if `path <LINE>` is skipped instead of refused.
 
-    §8 promises no citation shape is exempt, so a backticked token naming a real file
-    and ending in a line number must be REFUSED when the delimiter is not the `:` the
-    resolver reads. Measured before the fix: every spelling below left the page CLEAN,
-    including `tortoise/nope.py 16` (a file that does not exist) and
-    `tortoise/pipeline.py 999999` (past the end of a 979-line file).
+    \u00a78 promises the `path <LINE>` spelling is refused, and it is the ONE delimiter
+    spelling the refusal measures: every wider set refused correct prose when tried
+    against this repository's own `docs/` (measured \u2014 `_` parses
+    `tests/test_findings_ledger_2852.py`, `-` parses a dated slug, `/` parses plain paths
+    and dates, `#` parses `owner/repo#N` issue refs, `@` parses commit refs, `,` parses
+    calls), so those are NAMED carve-outs in \u00a78 rather than silent gaps. Refused
+    before the fix: `tortoise/pipeline.py 999999` (past the end of a 979-line file) and
+    `tortoise/nope.py 16` (a file that does not exist) both left the page CLEAN, so one
+    character of reformatting defused the red.
+
+    The exclusions are asserted here too, because each was a measured false accusation:
+    a backticked COMMAND with a numeric argument is a legal \u00a71 evidence form, and an
+    `owner/repo#N` issue ref is not a citation at all.
     """
-    for spelling in (
-        "tortoise/pipeline.py 999999",
-        "tortoise/pipeline.py#999999",
-        "tortoise/pipeline.py@999999",
-        "tortoise/pipeline.py-999999",
-        "tortoise/pipeline.py/999999",
-        "tortoise/pipeline.py,999999",
-        "tortoise/pipeline.py:L999999",
-        "tortoise/nope.py 16",
-    ):
+    for spelling in ("tortoise/pipeline.py 999999", "tortoise/nope.py 16"):
         with monkeypatch.context() as patch:
             _mutated(
                 tmp_path,
@@ -946,23 +945,26 @@ def test_a_citation_with_a_non_colon_delimiter_is_refused(tmp_path, monkeypatch)
             )
             problems = _doc_problems()
             assert any("not a recognised citation" in p for p in problems), (
-                f"a citation rewritten as {spelling!r} was accepted — one character "
+                f"a citation rewritten as {spelling!r} was accepted \u2014 one character "
                 f"of reformatting defused the red: {problems}"
             )
-    # The prose carve-outs must stay exactly as wide as they were.
-    for prose in ("localhost 6379", "fetch-depth 0"):
+    for not_a_citation in (
+        "uv run python tools/collision_preflight.py 2852 --repo .",
+        "daniel-ospina/tortoise#9363",
+        "localhost 6379",
+        "fetch-depth 0",
+    ):
         with monkeypatch.context() as patch:
             _mutated(
                 tmp_path,
                 patch,
-                lambda t, _s=prose: t.replace(
+                lambda t, _s=not_a_citation: t.replace(
                     "`tortoise/pipeline.py:16`", f"`{_s}`", 1
                 ),
             )
             assert not any(
                 "not a recognised citation" in p for p in _doc_problems()
-            ), f"{prose!r} is prose, not a citation"
-
+            ), f"{not_a_citation!r} must not be refused as a citation"
 
 def test_a_class_first_group_with_a_later_mention_is_not_a_swap(tmp_path, monkeypatch):
     """FAILS if the agreement rule turns a legitimate class-first tally red.
@@ -1036,6 +1038,57 @@ def test_a_contradicting_mention_before_the_group_is_rejected(tmp_path, monkeypa
     _mutated(tmp_path, monkeypatch, lambda t: t.replace(original, contradictory, 1))
     problems = _doc_problems()
     assert any("assigns a different verdict" in p for p in problems), problems
+
+
+def test_a_dated_reading_is_not_the_rows_current_verdict(tmp_path, monkeypatch):
+    """FAILS if a dated mention of a row reds the tally as a contradiction.
+
+    This page's idiom is a dated reading — "(d) was **STILL-TRUE** as written on
+    2026-09-10" — because §3's subject is what a 2026-09-10 ledger claimed versus what
+    the tree does now. Measured: appending that sentence to the takeaway paragraph red
+    the arm with "(d) stated STILL-TRUE+SUPERSEDED-BY-FIX" over a page whose table is
+    untouched, i.e. a false accusation on correct prose at the REQUIRED `docs` job. The
+    date marker is what separates a historical statement from a current one; removing
+    the `dated` guard in the checker reds this test.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace(
+            "**(b)**, **(k)** and **(l)** are **DRIFTED**.",
+            "**(b)**, **(k)** and **(l)** are **DRIFTED**. **(d)** was "
+            "**STILL-TRUE** as written on 2026-09-10.",
+            1,
+        ),
+    )
+    assert not any("assigns a different verdict" in p for p in _doc_problems()), (
+        "a dated reading of a row was read as the row's current verdict"
+    )
+
+
+def test_a_still_list_may_spell_its_own_complement(tmp_path, monkeypatch):
+    """FAILS if the STILL-TRUE list swallows the letters its negation governs.
+
+    Correct prose names both halves: "**(h)**, **(i)** and **(j)** still read as
+    written — **(c)**, **(d)**, **(e)** and **(g)** do not". Measured: the list was read
+    from the whole sentence, so the arm accused the page of naming
+    `['a','c','d','e','f','g','h','i','j']` when the table's STILL-TRUE rows are
+    `['a','f','h','i','j']` — a false accusation whose own message was false. The
+    guarded clause stops at the negation and the letters it governs.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace(
+            "**(h)**, **(i)** and **(j)** still read as written.",
+            "**(h)**, **(i)** and **(j)** still read as written — **(c)**, **(d)**, "
+            "**(e)** and **(g)** do not.",
+            1,
+        ),
+    )
+    assert not any("STILL-TRUE list names" in p for p in _doc_problems()), (
+        "a complement clause was read as part of the STILL-TRUE list"
+    )
 
 
 def test_citation_to_missing_file_is_rejected(tmp_path, monkeypatch):
