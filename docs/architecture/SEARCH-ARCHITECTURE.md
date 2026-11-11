@@ -305,7 +305,14 @@ directions (a *measured* 0.5 keeps its 0.5).
 - **`min_confidence`**: an absent claim fails any floor above `0.0` and is kept by the `0.0` default.
   `navigation.py`'s `confidenceMin` and the notification gate (`volunteer._eligible`) follow the same
   rule — the gate is stricter, requiring a belief at **every** floor: you do not interrupt about a
-  claim you have no belief about.
+  claim you have no belief about. **`confidenceMin` applies to EVERY family the profile lines up,
+  not only to Points**: an Object / Event / Subject neighbour (or a Source with no `documentKind`)
+  has no persisted belief either, so it is excluded by any floor above `0.0` — where the pre-#11702
+  `node.get("confidence", 0.5)` admitted it at any floor ≤ 0.5. That is this rule applied
+  *uniformly*, not a divergence from it: restoring the `0.5` "because it is not a Point" would be the
+  same fabrication one family over. Pinned (non-Point arms, including a non-Point that DOES carry a
+  `confidence` mirror and must still clear the floor) in
+  `tests/test_11702_absent_belief_state.py::test_entity_profile_floor_reads_a_posterior_only_belief`.
 - **PRESENCE is a property of the value's operands, not of a column existing.** A belief exists when the
   mirror (`n.confidence`) is set, **or** both coalesced operands are set and `α + β > 0`. So a stored
   `(0, 0)` pair (Beta(0, 0) is not a distribution) and a HALF pair (`posterior_beta` with no α, whose

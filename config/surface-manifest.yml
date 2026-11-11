@@ -435,7 +435,9 @@ response_fields:
   emitted_when: 'mode=gaps ONLY: the same three-token #11702 state as recall_ranking.ep_state, on the gaps ranker''s
     own rows (it reads its own signal query). An absent gap carries confidence null + ep_state "absent" and is
     ordered by STRUCTURE alone — the gaps score is load/(1+support), so a belief never participates in the gaps order and an absent gap is NOT demoted relative to a belief-carrying one (unlike recall_ranking, which has the
-    absent tier). This key is NOT an ordering guarantee on mode=gaps'
+    absent tier). This key is NOT an ordering guarantee on mode=gaps. The recall_ranking.ep_state draft exception
+    applies verbatim: a DRAFT row carrying a persisted prior emits confidence null (the #2598 staging gate) beside
+    ep_state "baseline" and confidence_source "uncomputed"'
   unchanged_when_off: NO — additive key on an existing payload. Not flag-gated
 - response: tortoise_search
   field: graph_ranking.confidence
