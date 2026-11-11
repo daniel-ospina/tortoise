@@ -195,7 +195,7 @@ change produces"*, read by one engine step. **It has no home for the general cas
 | `goal` | a qualitative commitment, with `goalState` (#7856) | the objective is the owner's, never a number |
 | `indicator` | the **definition**: what is measured, unit, direction of good, source, cadence | convergence: SRE's SLI, QUDT's quantity-kind (*"length is a quantity kind while the height of a rocket is a specific quantity of length"*), FHIR `ObservationDefinition` vs `Observation` |
 | `target` | comparator + threshold(s) (**+ `due`, proposed**), **linked to both** the goal and the indicator, 0..n | SRE: *"one SLI can feed more than one SLO (two marks on the same ruler). Some SLIs never get an SLO"* — only a reified target allows 0..n *and* two targets on one goal. The field list is #7860's **Layer 2** (`comparator`, `threshold`/`range`, `baseline`, `window`, `asOf`, `direction`, **plus a validity window (§4.7)** — seven fields), with `asOf` retired by **#11827**. ⚠️ `due` is **not** in that list — it enters only from the FHIR `Goal.target` comparables — so it is a **proposed field awaiting a decision**, not the decided shape. (D4 rules only that a target is a separate Object linked to both; it names no fields) |
-| reading | a `:Event` carrying the value + verbatim + `startedAt` | one reading = one value (history is table stakes in every comparable — ClearPoint sells "full history retained — no overwritten cells"); a reading carries no confidence and no NAND-ability |
+| reading | a `:Event` carrying the value + verbatim + `startedAt` | one reading = one value (history is table stakes in every comparable — ClearPoint sells "full history retained — no overwritten cells"); the reading's **value** is a structural field carrying no confidence and no NAND-ability. ⚠️ The `:Event` **node** is a different matter and does not share that property: `EPISTEMIC_LABELS` includes `Event` (`tortoise/live.py`), the EP flush expands once per label and writes `confidence`/`posterior_alpha` on each, and an Event can enter an operator as a factor input — which is exactly the half-state **#11825**/**#11826** record |
 
 **Where the `indicator` kind lives — decided, not open.** #7860 records the owner decision (2026-10-13)
 *"promote `indicator` to a core Object kind — option (a)"*, carried as that issue's **D1**: *"`indicator` is
@@ -244,14 +244,17 @@ puts in a field.
 | step | what | why here |
 |---|---|---|
 | **0** | the **replace** primitive works uniformly across entity kinds (**#11824**, **#11825**, **#11826**) | everything above it inherits its blind spots. This is a **prerequisite of the reasoning mechanism**, not ontology hygiene. Note #11824's decision **was** recorded (owner, 2026-11-11 — *"the target model, the order, and four corrections"*), so step 0 is dispatchable; that decision's own next step is a scoping issue per change, then implementation lanes |
-| **1** | the comparison as a declared decision table (**#11822**) | needs only the reading, the target, and a place to write the state. ⚠️ **Step 1's gate is also closed:** #7860's **D13 — "what triggers the loop?" — is not ruled** (it sits under that issue's *"OPEN — the owner has two questions outstanding"* with a recommendation only), and **#11822's scope waits on that ruling**. Do not dispatch #11822 on the strength of §5 alone |
+| **1** | the comparison as a declared decision table (**#11822**) | needs the reading, the target, and a place to write the state — **plus two dependencies this doc does not schedule as steps**. (a) **The `indicator` vocabulary is not in core** (§6): `CANONICAL_OBJECT_KINDS` in `tortoise/pack_registry.py` carries `strategy, plan, goal, target` and **not** `indicator`, so promoting it out of the `dev` pack is a precondition of this step, not a detail of it. (b) **The target's value shape**: §3 row 3 records that a core `target` carries no comparator field today, and `values:` is a pack-scoped key (`tortoise/pack_registry.py`), so a core kind cannot carry pack-declared value fields — the mechanism that puts §6's Layer-2 field list on a core kind is undecided. ⚠️ **Step 1's gate is also closed:** #7860's **D13 — "what triggers the loop?" — is not ruled** (it sits under that issue's *"OPEN — the owner has two questions outstanding"* with a recommendation only), and **#11822's scope waits on that ruling**. Do not dispatch #11822 on the strength of §5 alone |
 | **2** | invalidation when inputs change — target revised, definition changed, goal retired (**capabilities 8/9/12** — **#11926**) | the cases a complete table forces you to enumerate |
 | **3** | the effect-declaration surface generalised from `folds` (**§5 seam** — **#11927**) | only after 0, or a declared effect cannot retire the old state reliably |
 | **4** | deeper cascades without the silent stop (**#11823**) | measured: 6 levels then stop; 4-level cascades already work |
 | **5** | the explain path reaches Object/Event endpoints (**capability 15** — **#11928**) | usability, not correctness |
 
-**Nothing here is blocked on the value shape** (#2782) except the reading's field list, which that lane
-owns. The value's **placement** is not open: it is the owner's 2026-10-06 ruling in
+**Two things here are blocked on a value shape, not one.** The **reading's** field list is #2782's, which
+that lane owns. The **target's** is not yet anyone's: §3 row 3 records that a core `target` has no
+comparator field, §6 names the Layer-2 field list it must carry, and `values:` being pack-scoped
+(`tortoise/pack_registry.py`) means a core kind cannot take those fields from a pack declaration — so the
+mechanism is an open decision, and step 1 waits on it. The value's **placement** is not open: it is the owner's 2026-10-06 ruling in
 `docs/architecture/STORAGE-ARCHITECTURE.md` (structural field on the entity), and §6 shows the design
 sitting on it — #2782 is the money-typed instance of that ruling, not an alternative to it.
 
