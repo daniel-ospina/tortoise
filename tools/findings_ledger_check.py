@@ -161,6 +161,21 @@ CITATION_SPACED_SHAPE_RE = re.compile(r"^[^`]*:\s+\d+(?:-\d+)?$")
 #: Trailing characters a code span may carry that are NOT part of the citation.
 SPAN_TRAILING_RE = re.compile(r"[\s.,;:)\]]+$")
 
+#: `path/to/file.py 999999` — a citation whose DELIMITER is not `:`. Same class as
+#: the `path: 999999` form above, and the same reason: §8 promises no citation shape
+#: is exempt, so `… 16`, `…#16`, `…@16`, `…-16`, `…/16`, `…,16` and `…:L16` must be
+#: REFUSED rather than skipped. Measured: rewriting a resolving `path:16` to any of
+#: those left the page CLEAN — including over an out-of-range line and over a path
+#: that does not exist — so one character of reformatting defused the red that the
+#: resolver would otherwise have raised.
+#: The path must carry a known extension: the resolver's scope is `token:LINE`, and an
+#: extensionless token followed by a number (`localhost 6379`, `fetch-depth 0`) is
+#: prose. Requiring the extension keeps that carve-out exactly as wide as it was.
+CITATION_UNCOLONED_SHAPE_RE = re.compile(
+    r"[\w~/.+-][\w./+@-]*?\.(?:py|pyi|md|ya?ml|json|jsonl|sh|toml|cfg|ini|txt|ts|js|env|lock)"
+    r"(?:\s*(?:#|@|\||-|_|/|,|:\s?L)|\s+)\s*\d{1,7}(?!\d|\.\d)"
+)
+
 #: A `path:line` occurring ANYWHERE inside a backticked span. The span-level
 #: patterns above only see a span whose WHOLE body is a citation, so a legitimate
 #: `out of range` red could be defused by appending one word INSIDE the span
@@ -610,10 +625,13 @@ def check_verdict_tally(text: str) -> list[str]:
     #     false pass instead (`is also`/`was`/`remains` matched nothing);
     #   * a VERDICT token claims the LETTER right after it when only a colon sits
     #     between (`**ADOPTED**: **(e)**`) — the class-first form.
-    # ⚠️ What this does NOT reconcile is stated rather than implied: a contradicting
-    # repeat whose connector is outside the copula/adverb list (`(d) has become
-    # **ADOPTED**`, `(d) should be read as **ADOPTED**`) still passes CLEAN. The
-    # connector set is the boundary of the arm, not an incidental detail.
+    # ⚠️ What this does NOT reconcile is stated rather than implied, and the axis is
+    # POSITIONAL, not only lexical: a contradicting repeat that sits BEFORE the class
+    # group it belongs to passes CLEAN when its connector is outside the copula/adverb
+    # list (`**(d)** has become **ADOPTED**, **(c)**, **(d)** … are
+    # **SUPERSEDED-BY-FIX** …`), because the maps above keep one verdict per letter and
+    # the last assignment is the group's. The same connector AFTER the group reds. Both
+    # are measured; widening the word list alone closes neither.
     COPULA_OR_ADVERB = re.compile(
         r"[\s,]*(?:"
         r"(?:is|are|was|were|remains|stays|reads|stood)(?:[\s,]+(?:also|still))?"
@@ -628,21 +646,26 @@ def check_verdict_tally(text: str) -> list[str]:
     # returned clean because of exactly that).
     LETTER_TOKEN = re.compile(r"\*\*\(([a-z])\)\*\*")
     VERDICT_TOKEN = re.compile(r"\*\*([A-Z][A-Z-]+)\*\*")
-    letters = list(LETTER_TOKEN.finditer(non_still_sentence))
-    tokens = [t for t in VERDICT_TOKEN.finditer(non_still_sentence) if t.group(1) in VERDICTS]
+    # The mention scan covers the WHOLE paragraph, not only the sentence that carries
+    # the letter list: a contradicting repeat in the closing sentence or in the
+    # parenthetical one is still part of the "one thing to take away" a reader quotes,
+    # and reading only the letter-list sentence dropped it (measured: `… are
+    # **DRIFTED**. Note **(d)** is **ADOPTED**.` returned `[]`). Only labels the table
+    # calls non-STILL-TRUE can be misattributed, so the complement sentence
+    # contributes no claims and needs no special case.
+    letters = list(LETTER_TOKEN.finditer(paragraph))
+    tokens = [t for t in VERDICT_TOKEN.finditer(paragraph) if t.group(1) in VERDICTS]
     mentions: dict[str, set[str]] = {}
     for token in tokens:
         before = [lt for lt in letters if lt.end() <= token.start()]
         if before:
             nearest = before[-1]
-            if COPULA_OR_ADVERB.fullmatch(
-                non_still_sentence[nearest.end() : token.start()]
-            ):
+            if COPULA_OR_ADVERB.fullmatch(paragraph[nearest.end() : token.start()]):
                 mentions.setdefault(nearest.group(1), set()).add(token.group(1))
         after = [lt for lt in letters if lt.start() >= token.end()]
         if after:
             nearest = after[0]
-            if COLON_ONLY.fullmatch(non_still_sentence[token.end() : nearest.start()]):
+            if COLON_ONLY.fullmatch(paragraph[token.end() : nearest.start()]):
                 mentions.setdefault(nearest.group(1), set()).add(token.group(1))
     # The verdict the adopted map assigns is one more mention, so the agreement test
     # is never weaker than the arm was before this block.
@@ -713,6 +736,19 @@ def check_citation_shapes(text: str) -> list[str]:
         # sits on both sides of a code span, so the mangled form does not look
         # mangled to a reader either.
         body = SPAN_TRAILING_RE.sub("", match.group(0)[1:-1])
+        uncoloned = CITATION_UNCOLONED_SHAPE_RE.search(body)
+        if (
+            uncoloned
+            and not CITATION_RE.fullmatch(match.group(0))
+            and not INNER_CITATION_RE.search(body)
+        ):
+            problems.append(
+                f"`{body}` is not a recognised citation — it carries "
+                f"{uncoloned.group(0)!r}, which uses a delimiter the resolver does not "
+                "read; §8 claims every `path:line` here is checked, so an unreadable "
+                "shape must be refused rather than skipped"
+            )
+            continue
         if _has_path_marker(body) and (
             CITATION_SHAPE_RE.match(body) or CITATION_SPACED_SHAPE_RE.match(body)
         ) and not CITATION_RE.fullmatch(match.group(0)):
