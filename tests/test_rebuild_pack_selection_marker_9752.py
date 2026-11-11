@@ -944,6 +944,19 @@ def test_auto_health_recover_warns_on_the_pack_selection_gap(
                for r in caplog.records), (
         f"the auto-recovery consumer discarded the marker gap: "
         f"{[r.getMessage() for r in caplog.records]}")
+    # ⛔ Assert the RENDERED SHAPE, not just the shared template. Every arm uses
+    # the same "… NOT confirmed intact" frame, so the substring checks above stay
+    # green if `pack_selection_shape` is replaced by the pre-round-4 hardcoded
+    # absence tail — the exact collapse that was removed here (review round 6).
+    # The fixture plants a v6 sidecar with NO `pack_selection` section, i.e. the
+    # UNKNOWN shape, whose consequence must not claim a loss.
+    _msg = next(r.getMessage() for r in caplog.records
+                if ":PackSelection pack-set marker" in r.getMessage())
+    assert "pre-preservation/UNKNOWN" in _msg, (
+        "the rendered shape must be UNKNOWN for a sidecar that cannot say "
+        f"whether the marker existed: {_msg}")
+    assert "re-admitted" not in _msg, (
+        f"an UNKNOWN sidecar must not assert an observed loss: {_msg}")
 
 
 def test_pack_selection_gap_warns_in_the_recover_or_raise_caller(
@@ -969,6 +982,91 @@ def test_pack_selection_gap_warns_in_the_recover_or_raise_caller(
                for r in caplog.records), (
         f"the recovery caller discarded the pack-set gap: "
         f"{[r.getMessage() for r in caplog.records]}")
+    # Assert the RENDERED SHAPE too (review round 6): the template frame is
+    # shared by every arm, so the check above cannot tell the helper's answer
+    # from the pre-round-4 hardcoded absence tail. The fixture's v6 sidecar
+    # makes this the UNKNOWN shape.
+    _msg = next(r.getMessage() for r in caplog.records
+                if "recovery completed but the rebuilt graph's :PackSelection"
+                in r.getMessage())
+    assert "pre-preservation/UNKNOWN" in _msg, (
+        f"the rendered shape must be UNKNOWN here: {_msg}")
+    assert "re-admitted" not in _msg, (
+        f"an UNKNOWN sidecar must not assert an observed loss: {_msg}")
+
+
+def test_rebuild_all_honours_a_carried_pack_selection_unknown_flag(
+        tmp_path, caplog, monkeypatch):
+    """The carried UNKNOWN flag must LOAD and keep reporting the UNKNOWN.
+
+    FAILING VALUE: a CURRENT-version sidecar whose `pack_selection` section is
+    present-but-empty, carrying `pack_selection_unknown: True`, must be accepted
+    by the loader and must keep reporting the UNKNOWN. Both cheaper gates are
+    satisfied and cannot supply the signal (`leftover_version` is current, and
+    the section key IS present), so the inherited flag is the only carrier — and
+    without it a SECOND interruption reports a clean rebuild over a graph the
+    earlier wipe may have stripped, which is the silent "reads as never
+    configured" outcome #9752 exists to prevent.
+
+    ⚠️ CORRECTION to the round-6 finding that asked for this pin: it claimed
+    deleting the explicit re-ride (`if pack_selection_unknown:
+    payload["pack_selection_unknown"] = True`) leaves every suite green and
+    loses the signal on a third interruption. MEASURED FALSE on this head —
+    with that line removed the spy still sees
+    `{'pack_selection_unknown': True}` in the first payload written, because
+    the leftover payload is copied into the file this run writes. The carry is
+    therefore REDUNDANT (two carriers, not one), which is why no mutation of the
+    single line can red any test, and this pin asserts the OUTCOME — the flag is
+    present in the sidecar written by the retry — rather than pretending to
+    discriminate one of the two redundant carriers.
+    """
+    from tortoise import projection as pr
+    from tortoise.projection import (
+        _PREWIPE_SNAPSHOT_VERSION,
+        _PREWIPE_SNAPSHOT_META_KEYS,
+    )
+
+    written: list[dict] = []
+    _real_write = pr._write_prewipe_snapshot
+
+    def _spy(path, payload):
+        written.append(payload)
+        return _real_write(path, payload)
+
+    monkeypatch.setattr(pr, "_write_prewipe_snapshot", _spy)
+
+    sdk, events = _mk_sdk(tmp_path)
+    payload = _sidecar_payload(
+        batch_snapshot=[{"id": "b1"}], pack_selection=[])
+    payload["pack_selection_unknown"] = True
+    assert (payload["version"] == _PREWIPE_SNAPSHOT_VERSION
+            and payload["pack_selection"] == []), (
+        "the fixture must plant the CURRENT version with a present-but-empty "
+        "section, so only the inherited flag can produce the UNKNOWN")
+    assert "pack_selection_unknown" in _PREWIPE_SNAPSHOT_META_KEYS, (
+        "the flag must be a registered META key, or the loader refuses the file "
+        "as carrying a foreign section and a second interruption is "
+        "unrecoverable")
+    _plant(Path(_sidecar_path(events)), payload)
+
+    with caplog.at_level(logging.ERROR):
+        counts = _proj(sdk).rebuild_all(str(events), confirm_destructive=True)
+
+    assert counts["pack_selection_state_unknown"] is True, (
+        "the flag staged by an earlier interrupted run must be inherited — "
+        f"this run's sections cannot re-derive it: {counts}")
+    assert counts["pack_selection_gap"] == 1, counts
+    # ⛔ And it must be present in this run's own sidecar, or a THIRD
+    # interruption reads a v7 file whose section is present-but-empty →
+    # `pack_selection_unknown` False → no gap → a clean success over a graph the
+    # first wipe may have stripped. The carry is carried by TWO mechanisms (the
+    # copied leftover payload AND the explicit re-ride), so deleting either alone
+    # stays green — asserted here as an OUTCOME, deliberately.
+    assert written, "no pre-wipe sidecar was written — the spy missed"
+    assert written[0].get("pack_selection_unknown") is True, (
+        "the inherited UNKNOWN must travel into the sidecar THIS run writes, "
+        "so a second interruption is still honest about the marker's fate: "
+        f"{written[0].get('pack_selection_unknown')!r}")
 
 
 def test_cmd_rebuild_reports_the_pack_selection_marker(tmp_path, capsys,
@@ -1246,3 +1344,84 @@ def test_recover_or_raise_documents_the_pack_selection_leg():
     assert ":PackSelection" in doc and "#9752" in doc
     assert ":TeamMeta" in doc and "#5353" in doc
     assert "#4641" in doc
+
+
+def test_replay_log_reports_the_marker_shape_it_observed(tmp_path, caplog,
+                                                         monkeypatch):
+    """The journal-replay restore must report the shape it READ BACK (#9752).
+
+    FAILING VALUE: `_replay_log` used to restore the marker with a bare
+    `MERGE … ON CREATE SET` and then log "the graph's approved pack set and
+    `revision` survive the wipe" WITHOUT reading anything back — and, on a
+    raised write, log "the graph now reads as UNCONFIGURED". Both are
+    assertions about state this code never observed:
+
+    * `MERGE … ON CREATE SET` SKIPS its props when a marker already exists, so a
+      concurrent `set_graph_packs` landing in the wipe→write window leaves a
+      DIFFERENT marker — the rebuild then claims the CAPTURED revision survived
+      while the graph holds someone else's (possibly NEWER) pack set. The
+      accurate report is a CONFLICT, the shape `rebuild_all` reconciles for.
+    * a raised write is UNVERIFIED, not absent: the same MERGE would have
+      matched an existing marker, so advising a re-pin there can OVERWRITE a
+      newer decision.
+
+    This path is the ONE reporter with no sidecar and no reconciliation step, so
+    the log line is its entire report — and it was the last place asserting
+    unobserved state.
+
+    MUTATION-PROVEN: replacing the read-back with the old unconditional success
+    `logger.info` leaves the CONFLICT arm RED; replacing the UNVERIFIED wording
+    with the old "reads as UNCONFIGURED" leaves the raise arm RED.
+    """
+    from tortoise import projection as pr
+    from tortoise.log import EventLog
+
+    sdk, events = _mk_sdk(tmp_path)
+    _write_journal(events)
+
+    captured = {"revision": 1, "packs": ["a"]}
+    monkeypatch.setattr(pr, "_capture_pack_selection",
+                        lambda _proj: [dict(captured)])
+    proj = _proj(sdk)
+    _G = type(proj.g)
+    _orig_query = _G.query
+    mode = {"raise": False}
+
+    def _patched(obj, cypher, params=None, timeout=None):
+        if "MERGE (s:" in cypher:
+            if mode["raise"]:
+                raise RuntimeError("write refused")
+            # The concurrent write wins: the MERGE matches an existing marker,
+            # so its ON CREATE props are skipped and a DIFFERENT marker is live.
+            if isinstance(params, dict):
+                props = dict(params.get("props") or {})
+                props["revision"] = 7
+                params = {**params, "props": props}
+        return _orig_query(obj, cypher, params=params, timeout=timeout)
+
+    monkeypatch.setattr(_G, "query", _patched)
+
+    # Arm 1 — a concurrent write wins, so the captured marker did NOT land.
+    with caplog.at_level(logging.INFO, logger="tortoise.projection"):
+        proj._replay_log(EventLog(str(events / "events.jsonl")),
+                         confirm_destructive=True)
+
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("DIFFERENT :PackSelection marker is present" in m
+               and "revision 7" in m and "revision 1" in m for m in msgs), (
+        f"the replay reporter must name the CONFLICT it can see: {msgs}")
+    assert not any("survive the wipe" in m for m in msgs), (
+        "the replay reporter claimed the captured pack set survived while the "
+        f"graph holds a different marker: {msgs}")
+
+    # Arm 2 — the write raises: UNVERIFIED, never "reads as UNCONFIGURED".
+    mode["raise"] = True
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger="tortoise.projection"):
+        proj._replay_log(EventLog(str(events / "events.jsonl")),
+                         confirm_destructive=True)
+    errs = [r.getMessage() for r in caplog.records]
+    assert any("UNVERIFIED" in m and "NOT observed gone" in m for m in errs), (
+        f"a raised restore write must be reported as UNVERIFIED: {errs}")
+    assert not any("now reads as UNCONFIGURED" in m for m in errs), (
+        f"a raised write asserted an absence it never observed: {errs}")

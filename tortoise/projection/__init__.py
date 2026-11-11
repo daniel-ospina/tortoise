@@ -13710,28 +13710,91 @@ class FalkorProjection(
                 len(captured_selections),
             )
         if selection_marker is not None:
+            restored = True
             try:
                 self.g.query(
                     f"MERGE (s:{_PACK_SELECTION_LABEL}) "
                     "ON CREATE SET s += $props",
                     params={"props": selection_marker},
                 )
-                logger.info(
-                    "rebuild: restored the :PackSelection pack-set marker — "
-                    "the graph's approved pack set and `revision` survive the "
-                    "wipe (#9752)")
             except Exception as e:  # noqa: BLE001, RUF100
+                restored = False
+                # ⛔ NOT "reads as UNCONFIGURED": a raised write is UNVERIFIED,
+                # and the same `MERGE … ON CREATE SET` would have SKIPPED its
+                # props had a concurrent marker already existed — so asserting an
+                # absence here, and advising a re-pin, claims a state this code
+                # never observed (and the re-pin would overwrite a possibly
+                # NEWER live decision). `rebuild_all` reports this shape as a
+                # conflict; this path only has the log (#9752 review round 6).
                 logger.error(
                     "rebuild: could not restore the :PackSelection pack-set "
-                    "marker (%s: %s) — the graph now reads as UNCONFIGURED, "
-                    "so its packs are whatever the records/union fallback "
-                    "arms say and a pack an admin had REMOVED can be "
-                    "re-admitted with its `revision` reset. The graph itself "
-                    "is rebuilt; re-pin the pack set deliberately, or run "
-                    "`rebuild_all(log_dir)` which carries the marker durably "
-                    "(#9752)",
+                    "marker (%s: %s) — it is UNVERIFIED: not confirmed intact, "
+                    "and NOT observed gone. The `MERGE` may have matched a "
+                    "marker written after the wipe, in which case this graph's "
+                    "pack set is that one (possibly NEWER) and re-pinning "
+                    "would overwrite it. The graph itself is rebuilt; check the "
+                    "graph's approved pack set before re-pinning, or run "
+                    "`rebuild_all(log_dir)`, which carries the marker durably "
+                    "and reports which shape it found (#9752)",
                     type(e).__name__, e,
                 )
+            if restored:
+                # ⛔ Read it BACK. A bare `MERGE … ON CREATE SET` skips its props
+                # when a marker already exists, so a concurrent
+                # `set_graph_packs` in the wipe→write window leaves a DIFFERENT
+                # marker. Claiming "the approved pack set and `revision` survive"
+                # without comparing is exactly the unobserved assertion the rest
+                # of this change removed (review round 6) — `rebuild_all`
+                # reconciles immediately after its own write for this reason.
+                try:
+                    live_markers = [
+                        row[0] for row in self.g.query(
+                            f"MATCH (s:{_PACK_SELECTION_LABEL}) "
+                            "RETURN properties(s)").result_set
+                        if row and isinstance(row[0], dict)]
+                except Exception as e:  # noqa: BLE001, RUF100
+                    logger.warning(
+                        "rebuild: the :PackSelection marker restore wrote "
+                        "without raising, but the read-back FAILED (%s: %s) — "
+                        "the marker is UNVERIFIED: not confirmed intact, and "
+                        "NOT observed gone. Check the graph's approved pack "
+                        "set (#9752)",
+                        type(e).__name__, e,
+                    )
+                else:
+                    if any(live == selection_marker for live in live_markers):
+                        logger.info(
+                            "rebuild: restored the :PackSelection pack-set "
+                            "marker — the graph's approved pack set and "
+                            "`revision` survive the wipe (#9752)")
+                    elif live_markers:
+                        logger.warning(
+                            "rebuild: a DIFFERENT :PackSelection marker is "
+                            "present in the rebuilt graph (live revision %r, "
+                            "captured revision %r) — the captured marker was "
+                            "NOT applied, because a concurrent pack-set write "
+                            "landed between the wipe and this restore. This is "
+                            "a reported CONFLICT, not a loss: the graph IS "
+                            "configured and may hold a NEWER pack set — do not "
+                            "re-pin over it without checking which is intended "
+                            "(#9752)",
+                            live_markers[0].get("revision"),
+                            (selection_marker or {}).get("revision"),
+                        )
+                    else:
+                        # Observed absent AFTER a successful write and read: a
+                        # TRUE absence, so the loss wording is honest here.
+                        logger.error(
+                            "rebuild: the captured :PackSelection marker is "
+                            "ABSENT from the rebuilt graph after a restore "
+                            "that did not raise — so the graph now reads as "
+                            "UNCONFIGURED: its packs are whatever the "
+                            "records/union fallback arms say and a pack an "
+                            "admin had REMOVED can be re-admitted with its "
+                            "`revision` reset. The graph itself is rebuilt; "
+                            "re-pin the pack set deliberately, or run "
+                            "`rebuild_all(log_dir)` which carries the marker "
+                            "durably (#9752)")
 
     def _prewipe_graph_identity(self) -> dict:
         """The graph a pre-wipe sidecar describes, stamped into its payload.
