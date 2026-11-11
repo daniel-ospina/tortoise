@@ -340,10 +340,16 @@ def ep_measurement_state(*, posterior_alpha, ep_alpha,
 
 
 # ── #11702: ABSENT belief state has a NAME, and NO value ────────────────────
-# `ep_measurement_state` answers the internal question (did EP measure this?).
-# A read/rank surface needs a different, blunter answer: *is there a persisted
+# `ep_measurement_state` answers the internal predicate question — *is an α
+# column persisted?* (NOT "did EP measure this?": a direct
+# `update_point(posterior_alpha=…)` returns 'measured' with no EP pass
+# anywhere, so it is a storage shape, not an EP receipt).
+# A read/rank surface needs a different, blunter answer: *is there a READABLE
 # belief here at all?* — because for a claim that has none there is no number
-# to report, and inventing one is the defect #11702 names. The recorded rule is
+# to report, and inventing one is the defect #11702 names. The two questions
+# diverge on a persisted α that yields no mean (a half pair, a 0/0 pair): that
+# row is 'measured' as a PREDICATE and `absent` as a STATE.
+# The recorded rule is
 # `docs/architecture/SEARCH-ARCHITECTURE.md` §6.3: **absent state is `null`
 # with `ep_state: "absent"`, never 0.5 — a value the ranker refuses to order
 # on.**
