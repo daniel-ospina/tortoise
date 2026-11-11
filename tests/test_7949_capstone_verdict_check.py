@@ -3850,17 +3850,21 @@ def test_every_MEASUREMENT_key_the_emitter_writes_is_in_the_exemption_set():
 #: carry the claim (a markdown/code comment WRAPS, so the fragment is matched on any one line —
 #: the symbols and their order are what the assertion holds).
 #:
-#: ⛔ WHY A PIN AT ALL: `_BUNDLE_CITE` resolves `sdk|edges|extractor_v2` only, and
-#: `tests/test_7949_capstone_measure.py` sweeps `capstone_verdict_check.py` as a cite TARGET,
-#: never as a swept DOCUMENT — so anything these two paragraphs claim about the emitter was
-#: read by NOTHING. Measured on #11837's review (P2-1): the three `capstone_measure.py:<n>`
+#: ⛔ WHY A PIN AT ALL: `_BUNDLE_CITE` resolves `sdk|edges|extractor_v2` only, so the BUNDLE
+#: sweep never reads a `capstone_measure.py:<n>` cite — and `tests/test_7949_capstone_measure.py`
+#: sweeps `capstone_verdict_check.py` as a cite TARGET. That target sweep is what makes the
+#: difference this pin exists for: `_CROSS_FILE_PROBE_CITES` DOES read both paragraphs (it pulls
+#: the number out of the citing file and asserts the pair number → symbol), so the claim is not
+#: "read by nothing" — it is that NOTHING RE-DERIVES THE NUMBER at a new head, so the pair stays
+#: green only while the symbol happens to sit on the line the stale number still names. Measured
+#: on #11837's review (P2-1): the three `capstone_measure.py:<n>`
 #: cites were correct at the PR's merge-base, and the PR's own commit message claimed to have
 #: re-derived them while they had landed on unrelated code (an `e3_census` rule line, a comment
 #: inside `measured_arm()`, and prose inside an f-string) — the exact "a claim nothing re-checks
-#: can rot silently" defect this bundle exists to catch, in the gate's own source. The fix was
-#: to name SYMBOLS instead of lines; this pin keeps the symbols honest, and it REFUSES the line
-#: form coming back (a `file:line` into a 4,600-line probe re-stales on any insertion above it,
-#: which is how the three cites walked twice inside the PR that wrote them).
+#: can rot silently" defect this bundle exists to catch, in the gate's own source. ⛔ The cites
+#: therefore STAY (deleting them reds `_CROSS_FILE_PROBE_CITES`; symbol-only prose was round 2's
+#: mistake); what this pin adds is the half that pin cannot do — it keeps the SYMBOLS honest and
+#: in the ORDER the sentences assert, so a re-pointed number lands on the right code.
 _EMITTER_PROSE_CLAIMS = (
     # `_MEASUREMENT_RUN_KEYS`'s `a_row_census` entry: where the emitter WRITES that key.
     ("the A-row census is written INTO the run block by the emitter",
@@ -3872,18 +3876,19 @@ _EMITTER_PROSE_CLAIMS = (
 )
 
 
-def test_the_emitter_symbols_in_this_files_own_prose_resolve_and_no_line_cite_returns():
+def test_the_emitter_symbols_in_this_files_own_prose_RESOLVE_at_this_head():
     """FAILS IF this gate's prose names an emitter symbol the emitter no longer has.
 
-    Three clauses, because the paragraphs make three claims: the sentence is still THERE, the
-    symbols it names EXIST in the emitter (and the `door` pair in the order the sentence
-    asserts), and no `capstone_measure.py:<n>` number comes back — a number is read by no sweep
-    here, so it rots on the next insertion above it.
+    Two clauses, because the paragraphs make two checkable claims: the sentence is still THERE,
+    and the symbols it names EXIST in the emitter (the `door` pair in the order the sentence
+    asserts). ⛔ A THIRD clause requiring the `capstone_measure.py:<n>` cites to be ABSENT was
+    round 2's mistake and is deliberately gone: `_CROSS_FILE_PROBE_CITES` requires them,
+    so ``no content of tools/capstone_verdict_check.py could satisfy both pins`` (they were red
+    at every head, one or the other — #11837 review round 5, P1-2).
 
-    Non-vacuity: the pre-#11837-fix text carried `capstone_measure.py:4336` / `4481` /
-    `4616`, so the number clause reds on it; and renaming either call in the emitter —
-    `require_door_entered` or `render_log` — reds the symbol clause instead of leaving the
-    sentence asserting something the code no longer has.
+    Non-vacuity: renaming either call in the emitter — `require_door_entered` or `render_log` —
+    reds the symbol clause; swapping them reds the order clause; and deleting either sentence
+    reds the presence clause rather than passing over a claim that is no longer made.
     """
     emitter = (_REPO / "docs/evidence/7949-capstone/probes/capstone_measure.py"
                ).read_text(encoding="utf-8").splitlines()
@@ -3898,13 +3903,7 @@ def test_the_emitter_symbols_in_this_files_own_prose_resolve_and_no_line_cite_re
                 f"the sentence fragment {fragment!r} is gone from "
                 "tools/capstone_verdict_check.py — if the claim moved, re-point this pin; if it "
                 "was dropped, drop the pin with it (a pin on a deleted sentence proves nothing)")
-    # 2. …and the prose carries NO `file:line` into the emitter.
-    typed = sorted(set(re.findall(r"capstone_measure\.py:\d+", gate_text)))
-    if typed:
-        failures.append(
-            f"{typed} — a `file:line` into the emitter is read by NO sweep (that file is not in "
-            "`_BUNDLE_DOCS`), so the number rots on the next insertion above it. Name the SYMBOL")
-    # 3. …and every symbol it names resolves, in the order the sentence asserts.
+    # 2. …and every symbol it names resolves, in the order the sentence asserts.
     for fragment, symbols in _EMITTER_PROSE_CLAIMS:
         where = {symbol: [i for i, ln in enumerate(emitter) if symbol in ln]
                  for symbol in symbols}

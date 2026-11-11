@@ -152,7 +152,7 @@ def test_unlabelled_is_EXACTLY_the_null_plus_undeclared_share_and_nothing_escape
 #: The five point kinds `tortoise.sdk` registers through `domain_loader.register_kind` at IMPORT time
 #: (`sdk.py:217-227`). No `packs/*/manifest.yaml` declares them and none is in
 #: `CANONICAL_POINT_KINDS`, so the SDK import is the ONLY path that makes them declared.
-_SDK_REGISTERED_KINDS = ("diary", "option", "evidence", "criterion")
+_SDK_REGISTERED_KINDS = ("diary", "checkpoint-item", "option", "evidence", "criterion")
 
 
 def test_the_declared_vocabulary_includes_the_kinds_the_SDK_itself_registers():
@@ -160,8 +160,11 @@ def test_the_declared_vocabulary_includes_the_kinds_the_SDK_itself_registers():
 
     ⛔ MEASURED ON THE LIVE GRAPH 2026-11-11, which is why this arm exists: with only
     `domain_loader` imported, `evidence` (121 nodes) and `option` (2) read UNDECLARED — FOUR of
-    the fleet's six declared typed kinds, since `tortoise.sdk` registers them through
-    `register_kind` at import time. That is a FALSE failing run, and a refusal that names a false
+    the fleet's six declared typed kinds on that graph, since `tortoise.sdk` registers them through
+    `register_kind` at import time. `checkpoint-item` is the SDK's FIFTH registration (`sdk.py:218`)
+    and this arm covers it too: it is in neither `_BASE_KINDS` nor `CANONICAL_POINT_KINDS` and no
+    pack declares it, so `bare` is still empty with it in the set. That is a FALSE failing run, and
+    a refusal that names a false
     reason is the one failure mode a refusal must not have (`tools/ax_write_eval.py` records the
     same defect as `#9695` review P1).
 
@@ -183,16 +186,19 @@ def test_the_declared_vocabulary_includes_the_kinds_the_SDK_itself_registers():
         "spec = importlib.util.spec_from_file_location('cm_10988', sys.argv[1])\n"
         "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
         "declared = sorted(want & set(m._a4_declared_kinds('pointKind')))\n"
+        # the OTHER direction: the probe must not ADD anything the product does not declare
+        "extra = sorted(set(m._a4_declared_kinds('pointKind')) - set(known_kinds('pointKind')))\n"
         "print(bare)\n"
         "print(declared)\n"
+        "print(extra)\n"
     )
     out = subprocess.run(
         [sys.executable, "-c", code, str(PROBE)],
         cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=300)
     assert out.returncode == 0, (out.returncode, out.stdout[-800:], out.stderr[-1500:])
     lines = out.stdout.strip().splitlines()
-    assert len(lines) == 2, out.stdout
-    bare, declared = eval(lines[0]), eval(lines[1])  # noqa: S307 — two sorted str lists we printed
+    assert len(lines) == 3, out.stdout
+    bare, declared, extra = (eval(line) for line in lines)
     assert bare == [], (
         f"the product's BARE vocabulary already declares {bare} without the SDK import, so this arm "
         f"would be vacuous — find the real registration path before trusting the assertion below")
@@ -200,6 +206,15 @@ def test_the_declared_vocabulary_includes_the_kinds_the_SDK_itself_registers():
         f"`_a4_declared_kinds` must re-supply the SDK-registered kinds (got {declared}) — without "
         f"its in-function `import tortoise.sdk` a standalone census reports the fleet's own declared "
         f"typed kinds as inventions")
+    # ⛔ THE OTHER DIRECTION, which a round-2 rewrite of this arm lost (#11837 review round 3):
+    # `_a4_declared_kinds` must return the product's vocabulary and NOTHING MORE. Without this, a
+    # `| {"finding", "totallyMadeUpKind"}` on its return passes EVERY other case in this file —
+    # the `declared` assertion above is an intersection, so a superset satisfies it — and the
+    # measurement then reports `undeclared` 0 for `finding`, the one genuinely undeclared label
+    # `A4-PER-LAYER.md` §3.1 reports. A widened vocabulary manufactures coverage.
+    assert extra == [], (
+        f"`_a4_declared_kinds` declares kinds the product does not: {extra} — a census may not "
+        f"widen the vocabulary it measures against, or an invention reads as coverage")
 
 
 def test_the_three_layers_are_reported_SEPARATELY_and_never_blended():

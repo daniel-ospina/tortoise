@@ -3443,6 +3443,10 @@ def a_row_census(uri: str) -> dict:
     # `row()` maps exactly ONE level of the `empty` skeleton, so neither layout gives a per-field
     # gap for the one field that broke — and the renderer reads `a4.get(layer)` directly, so a
     # nesting level would need a renderer change to buy nothing.
+    # ⛔ The FLAT layout is also LOAD-BEARING for the pins, which is the durable half of the
+    # reason: `tests/test_10988_a4_label_coverage.py::test_a_broken_layer_query_renders_a_NAMED_GAP_and_never_a_zero`
+    # reads `a4["things"]["population"]` and asserts it holds a NAMED gap, and a nested layout
+    # turns that subscript into a `KeyError` before the assertion can see the gap at all.
     result["A4"] = row("A4", _a4_label_coverage,
                        {**{layer: _a4_empty_coverage(layer) for layer, _l, _k in A4_LAYERS},
                         "claim_points": 0, "excluded_capture_rows": 0, "statement": 0,

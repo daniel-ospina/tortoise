@@ -238,14 +238,18 @@ _MEASUREMENT_RUN_KEYS = (
     "e1_e2_artifact",
     "errors",
     "corpus_sha256",
-    # #10982: the A-row census is written INTO the run block by the emitter — the
-    # `"a_row_census": a_census` entry in `capstone_measure.py`'s run block, beside
-    # `e3_census`/`e4_receipt`. ⛔ NAMED BY SYMBOL, NOT BY LINE (#11837 review): a
-    # `file:line` into a 4,600-line probe re-stales on any insertion above it, and it
-    # re-staled TWICE inside the PR that added these rows while nothing reds —
-    # `capstone_measure.py` is not in `_BUNDLE_DOCS`, so no sweep reads these numbers.
-    # The symbol survives an insertion; the number did not. Omitting it
-    # here reopened the exact construction #10601 review round 2 closed: a
+    # #10982: the A-row census is written INTO the run block by the emitter
+    # (`capstone_measure.py:4365`), beside `e3_census`/`e4_receipt`. ⛔ THE NUMBER IS REQUIRED,
+    # not decoration (#11837 review, rounds 3–5): `tests/test_7949_capstone_measure.py`'s
+    # `_CROSS_FILE_PROBE_CITES` reads THIS cite out of THIS file and asserts the pair
+    # (number → symbol), so prose naming only the symbol reds it — `len(hits) == 1` finds
+    # zero. What no sweep re-derives is the number at a NEW head: this pair DOES read the
+    # number, it just never re-checks it, so the cite re-stales on any insertion above it
+    # (`capstone_measure.py` IS in `_BUNDLE_DOCS` — it is `_BUNDLE_CITE`'s
+    # `sdk|edges|extractor_v2` alternation, not the document list, that makes a
+    # `capstone_measure.py:<n>` cite invisible to the BUNDLE sweep). Re-derive it from the
+    # tree on every insertion — `grep -n '"a_row_census": a_census,'` — never eyeball it.
+    # Omitting it here reopened the exact construction #10601 review round 2 closed: a
     # `REFUSED` table with every other key nulled and a CLOSED blocker named was
     # EXEMPTED from V12 while `a_row_census` still held produced numbers
     # (`edges_total`, `by_type`, the `pointKind` histogram, the subject-family
@@ -269,8 +273,9 @@ _MEASUREMENT_RUN_KEYS = (
 #: one counted cell, ``door.captures`` (``door_witness()``'s ``entered``/``bypassed``),
 #: is a ROUTING witness and NO RECORD CAN VARY IT: ``main`` calls
 #: ``require_door_entered(runs)`` BEFORE it reaches ``render_log``
-#: — the `require_door_entered(runs)` call in `capstone_measure.py`'s ``main`` and the
-#: ``render_log(...)`` call that follows it, NAMED BY SYMBOL for the reason given above — and
+#: (``capstone_measure.py:4510`` vs ``:4645``) — the two CALLS in ``main``, never their `def`s,
+#: and those numbers re-derived from the tree (`grep -n` each symbol) on every insertion above
+#: them, for the reason `_MEASUREMENT_RUN_KEYS`'s `a_row_census` entry gives — and
 #: that function raises on any bypass,
 #: so ``bypassed`` is always ``[]`` and ``entered`` is always ``sessions`` re-counted.
 #: A constant carries no number of its own — ⛔ and NOT for the reason a witness like
