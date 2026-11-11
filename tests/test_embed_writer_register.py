@@ -1588,7 +1588,17 @@ def test_the_pinned_for_header_discriminates_binding_position() -> None:
     is a verdict the helper must give, and the two False rows that differ only in POSITION are the
     ones the pre-fix version got wrong.
     """
-    needle = "for label, prop in _CANONICAL_ENTITY_ID_PROPS:"
+    # ⛔ THE NEEDLE IS READ FROM THE DECLARATION, never re-typed here. A local literal let
+    # this test pass over a declaration that had been reduced to the binding-free substring
+    # `in _CANONICAL_ENTITY_ID_PROPS:` - which no `for`-header normalisation can touch - so
+    # `_needle_present` was bypassed for the one row it was written for and the SWAP row
+    # below would have gone GREEN with the whole file green (review r35 P3 #3, measured).
+    # The assert couples the two: reverting the declaration now REDs here.
+    needle = LABEL_EVIDENCE["tortoise.sdk::_update_entity"][2]
+    assert _PINNED_FOR_HEADER.search(needle), (
+        "the sdk::_update_entity needle must BE the `for ... in _CANONICAL_ENTITY_ID_PROPS:` "
+        "header, or `_needle_present` is bypassed and a binding swap passes unmeasured "
+        "(review r34 P3 #3 / r35 P3 #3)")
     for body, expected in (
         ("for label, _prop in _CANONICAL_ENTITY_ID_PROPS:", True),   # the rename #11836 made
         ("for label, prop in _CANONICAL_ENTITY_ID_PROPS:", True),    # the historical spelling

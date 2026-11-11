@@ -566,23 +566,38 @@ _ITEM_START = re.compile(r"^(?:\*\*)?\(?\d+[.)](?:\*\*)?\s")
 #: heading, so locating on this set would invent sites out of list furniture. The
 #: BOUNDARY must cover every shape the record uses, because a boundary narrower than the
 #: record's own vocabulary is the same fail-OPEN one shape later: review r34 P3 #1
-#: measured it — the record already spells list items as column-0 `*` bullets
+#: measured it for column-0 bullets — the record spells list items as `* …` at
 #: (`platform-seams.md:430`, `:433`, `:468`), so a sentence moved out of a numbered item
 #: into such a bullet stayed INSIDE the labelled block and all three restatement arms
 #: reported GREEN over exactly the defect this guard exists for.
+#: Review r35 P3 #1 measured the same failure one shape over, and it is the reason for
+#: the last two alternatives: the record ALSO spells its lists INDENTED (`   * …` at
+#: `:348`, `:352`, `:355`, `:358`) and carries table rows inside sections (`:408`,
+#: `:478`). Neither terminated a block, so a restatement moved into one still read as
+#: "in" the labelled item. The set below is measured BYTE-NEUTRAL on the current
+#: record — all seven located blocks are identical to what the narrower boundary
+#: returned, so widening it closes the mutation shapes without touching today's
+#: verdicts.
 _BLOCK_END = re.compile(
-    r"^(?:\*\*)?\(?\d+[.)](?:\*\*)?\s"   # 3. / 3) / **3.**  (the item markers)
-    r"|^\d+[a-z][.)]\s"                     # 3a. / 3a)        (alphanumeric sub-item)
-    r"|^[-*+]\s"                             # column-0 bullet
-    r"|^#{1,6}\s")                           # any heading
+    r"^(?:\*\*)?\(?\d+[.)](?:\*\*)?\s"              # 3. / 3) / **3.**  (item markers)
+    r"|^\d+[a-z][.)]\s"                                # 3a. / 3a)        (sub-item)
+    r"|^[-*+]\s"                                        # column-0 bullet
+    r"|^[ \t]+(?:[-*+]|\d+[.)]|\d+[a-z][.)])\s"          # INDENTED bullet / item (`   * …`)
+    r"|^\|"                                             # a table row inside an item
+    r"|^#{1,6}\s")                                       # any heading
 
 
 def _record_site_block(doc: str, site: str) -> str:
     """The record text `site` names — the contracts-table row, or one numbered item.
 
-    An item runs from its own first line (`2. **Heading …**`) to the next item marker
-    or heading, and is located by its BOLD HEADING's words, not by its NUMBER — a
-    renumbering therefore cannot make a label point at a neighbour.
+    An item runs from its own first line (`2. **Heading …**`) to the next marker in
+    `_BLOCK_END` — the next numbered item, alphanumeric sub-item, column-0 or INDENTED
+    bullet, table row, or heading — and is located by its BOLD HEADING's words, not by
+    its NUMBER — a renumbering therefore cannot make a label point at a neighbour.
+    (Read the boundary off `_BLOCK_END`, never off this sentence: a terminator described
+    more narrowly than the set the code stops on is how review r34 P3 #1 and r35 P3 #1
+    both shipped a fail-open, and r35 P3 #2 was this very line, still naming the pre-r34
+    terminator.)
 
     Returns "" when the site cannot be located, so a re-worded heading REDs the
     label guard. Returning the whole document instead would make every label pass
@@ -751,7 +766,11 @@ def test_every_restatement_site_label_names_the_item_that_states_it():
     item → RED here; with the boundary narrowed back to `_ITEM_START` + headings the
     same bullet is swallowed INTO the labelled block (measured: `MOVED SENTENCE` in
     the block → True pre-fix, False now), which is review r34 P3 #1's fail-open and
-    the reason the boundary is `_BLOCK_END`, a superset of the locator."""
+    the reason the boundary is `_BLOCK_END`, a superset of the locator. The SAME move
+    into an INDENTED bullet (`   * …`) or into a table row → RED here and True pre-fix
+    (review r35 P3 #1, measured both), which is why `_BLOCK_END` also carries those two
+    shapes — the record's own list vocabulary (`:348`, `:352`, `:355`, `:358`) and its
+    in-section tables (`:408`, `:478`)."""
     doc = _PLATFORM_SEAMS_DOC.read_text(encoding="utf-8")
     assert len(_RESTATEMENT_SITES) == len(_RESTATEMENTS), (
         "every `_RESTATEMENTS` row needs a site label — the legend's map is one "
