@@ -14,14 +14,14 @@ governingAgreement: "#7860"
 
 # Goal measurement and the reasoning loop
 
-**Issue of record:** #7860 · **Related:** #2782, #11822–#11827, #11081 (waves 1 and 6)
+**Issue of record:** #7860 · **Related:** #2782, #11822–#11827, #11926–#11928, #11081 (waves 1 and 6)
 
 > This is the design of record for a capability, not a status report. It states what the loop must do,
 > what each part does today (measured 2026-11-11), and the decisions that govern the build. The build
 > record belongs in a changelog; the decisions live on **#7860**, which its 2026-11-11 decision record
 > names as the **holding pen** — *"`docs/DECISION-LEDGER.md` does not exist yet (owner is setting it up
-> 2026-11-12) … When the ledger lands, these entries lift into it verbatim"* — because the graph write
-> is refused today (§9 Q1).
+> 2026-11-12) … When the ledger lands, these entries lift into it verbatim"*. (The graph is not the
+> destination either: writes are refused today, §9 Q1.)
 >
 > **Scope, so #7860 is not closed on this alone:** this is a capability design of record. It does **not**
 > deliver #7860's `ONTOLOGY.md` indicator vocabulary — `grep -c -i '\bindicator\b' docs/ONTOLOGY.md` is
@@ -204,10 +204,12 @@ gets a persistent prior (`set_point_baseline` is Point-only, #9063), automatic d
 (`_mark_dirty`'s reverse BFS is Point-seeded), and automatic supersession — **without reopening #9063**.
 
 `goalState` is a **cache of the state**, never an input to belief — and the two are disjoint with
-nothing reconciling them: `goalState` is a plain field, while a goal **Object** carries no belief of
-its own at all (`set_point_baseline` is Point-only, #9063), so any belief comes from a linked Point and
-can disagree with `goalState` silently. The divergence is asserted on #7860; **no measurement artifact
-for it is recorded in the tree**, so it is the first thing to instrument rather than a measured fact.
+nothing reconciling them: `goalState` is a plain field, while a goal **Object** has no **stored prior**
+of its own (`set_point_baseline` is Point-only, #9063) — its `confidence` is only the posterior EP writes
+onto it from linked claims (the flush sweeps `EPISTEMIC_LABELS`, which includes `Object`) — so the cached
+state and the propagated belief can disagree silently. The divergence is asserted on #7860; **no
+measurement artifact for it is recorded in the tree**, so it is the first thing to instrument rather than
+a measured fact.
 
 **Reconciled with the placement ruling (owner, 2026-10-06).** `docs/architecture/STORAGE-ARCHITECTURE.md`
 ruled that *a state/numeric value is a STRUCTURAL FIELD ON AN ENTITY, not a `Point`* — *"a belief can be
@@ -227,12 +229,12 @@ puts in a field.
 
 | step | what | why here |
 |---|---|---|
-| **0** | the **replace** primitive works uniformly across entity kinds (**#11824**, **#11825**, **#11826**) | everything above it inherits its blind spots. This is a **prerequisite of the reasoning mechanism**, not ontology hygiene. ⚠️ #11824 carries its own dispatch gate — *"do not dispatch implementation before that decision is recorded"* — so step 0 opens when that decision lands |
+| **0** | the **replace** primitive works uniformly across entity kinds (**#11824**, **#11825**, **#11826**) | everything above it inherits its blind spots. This is a **prerequisite of the reasoning mechanism**, not ontology hygiene. Note #11824's decision **was** recorded (owner, 2026-11-11 — *"the target model, the order, and four corrections"*), so step 0 is dispatchable; that decision's own next step is a scoping issue per change, then implementation lanes |
 | **1** | the comparison as a declared decision table (**#11822**) | needs only the reading, the target, and a place to write the state. ⚠️ **Step 1's gate is also closed:** #7860's **D13 — "what triggers the loop?" — is not ruled** (it sits under that issue's *"OPEN — the owner has two questions outstanding"* with a recommendation only), and **#11822's scope waits on that ruling**. Do not dispatch #11822 on the strength of §5 alone |
-| **2** | invalidation when inputs change — target revised, definition changed, goal retired (**capabilities 8/9/12**) | the cases a complete table forces you to enumerate |
-| **3** | the effect-declaration surface generalised from `folds` (**§5 seam**) | only after 0, or a declared effect cannot retire the old state reliably |
+| **2** | invalidation when inputs change — target revised, definition changed, goal retired (**capabilities 8/9/12** — **#11926**) | the cases a complete table forces you to enumerate |
+| **3** | the effect-declaration surface generalised from `folds` (**§5 seam** — **#11927**) | only after 0, or a declared effect cannot retire the old state reliably |
 | **4** | deeper cascades without the silent stop (**#11823**) | measured: 6 levels then stop; 4-level cascades already work |
-| **5** | the explain path reaches Object/Event endpoints (**capability 15**) | usability, not correctness |
+| **5** | the explain path reaches Object/Event endpoints (**capability 15** — **#11928**) | usability, not correctness |
 
 **Nothing here is blocked on the value shape** (#2782) except the reading's field list, which that lane
 owns. The value's **placement** is not open: it is the owner's 2026-10-06 ruling in
