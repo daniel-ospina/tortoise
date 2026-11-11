@@ -74,7 +74,14 @@ MAX_POINTERS_CAP = 5
 DEFAULT_MAX_POINTERS = 3
 DEFAULT_MIN_CONFIDENCE = 0.7
 BLOCK_MAX_BYTES = 8 * 1024
-NEUTRAL_CONFIDENCE = 0.5        # unmeasured posterior (Beta(1,1)) — repo convention
+# A FLOOR for the contested-relevance boost in `_eligible` (0.5), never an
+# absent-belief value. #11702 deleted the "repo convention" this constant used
+# to name: an unmeasured claim answers ``confidence_mean: None`` (state
+# ``absent``), and substituting a Beta(1,1) mean for it is the defect that
+# issue removes — see ``ranking.py``'s note where its own copy was deleted.
+# This 0.5 only bounds how far below the caller's floor a CONFLICT-RELEVANT
+# claim may sit while still being boosted; it is compared against a real mean.
+NEUTRAL_CONFIDENCE = 0.5
 SNIPPET_MAX = 160               # privacy-safe synopses (ux-research ≤ 160 chars)
 RESOLVE_POOL_MIN = 8            # bounded resolve pool floor
 RESOLVE_POOL_MAX = 24           # bounded resolve pool cap (never unbounded)

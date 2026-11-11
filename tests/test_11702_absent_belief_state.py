@@ -943,6 +943,46 @@ def test_most_uncertain_does_not_rank_a_mirror_only_claim_first(sdk):
         "— and the coalesce(…, 1.0) defaults gave it the maximum: " + answer)
 
 
+def test_ranker_belief_value_coerces_an_integer_alpha_beta_pair(sdk):
+    """One claim must not answer TWO numbers: 0.90 on `ep`, 0.00 on the rankers.
+
+    FalkorDB's `/` is INTEGER division on int operands (`RETURN 9/10` → `0`,
+    measured on falkordb/falkordb-server:v4.20.6), so a pair stored as ints —
+    `update_point(posterior_alpha=9, posterior_beta=1)`,
+    `set_point_baseline(2, 1)`, the legacy `tier_map` — truncated
+    `9/10 → 0` in the Cypher mean `coalesce(…, 1.0) / (… + …)` of
+    `GraphRanker._fetch_point_signals` and `SubgraphExpander._enrich`, while
+    `annotate_ep_batch` and `search_engine.belief_value` (both `toFloat`- or
+    Python-guarded) answered `0.90` for the SAME row. A measured 0.90 claim
+    reported as 0.00 is a fabricated value, not an absent one.
+
+    Discriminating power: pre-fix the two ranker assertions see `0.0`.
+    """
+    from tests._embedded import _wipe_or as wipe
+
+    proj = sdk._get_proj()
+    wipe(proj)
+    # Ints on purpose — the storage layer keeps them as ints.
+    proj.g.query("CREATE (:Point {id:'intpair', content:'integer pair claim', "
+                 "is_operator:false, status:'live', posterior_alpha:9, "
+                 "posterior_beta:1})")
+
+    # The reference answer, from the read that is already guarded.
+    ep = annotate_ep_batch(proj.g, ["intpair"])["intpair"]
+    assert ep.confidence_mean == pytest.approx(0.9), ep.confidence_mean
+
+    sig = GraphRanker(projection=proj)._fetch_signals(["intpair"], "point")["intpair"]
+    assert sig["confidence"] == pytest.approx(0.9), (
+        "graph_rankings truncated an integer 9/1 posterior to "
+        f"{sig['confidence']!r} while the ep block answered {ep.confidence_mean}")
+
+    node = next(n for n in SubgraphExpander(proj).expand(["intpair"], depth=1)["nodes"]
+                if n["id"] == "intpair")
+    assert node["confidence"] == pytest.approx(0.9), (
+        "the subgraph display mean truncated an integer 9/1 posterior to "
+        f"{node['confidence']!r}")
+
+
 def test_trends_prints_only_stored_alpha_beta(sdk):
     """`trends` prints α/β, so those numbers must be STORED, not defaults.
 

@@ -927,12 +927,21 @@ class GraphRanker:
             # which json.dumps writes as a bare `NaN` token onto the wire and
             # which no `sort()` orders consistently. Belt and braces: the two
             # guards must not be able to drift apart again.
+            #
+            # `toFloat` on BOTH operands is the SECOND guard, and it was
+            # missing HERE while `analyze`/`annotate_ep_batch`/`belief_value`
+            # all carried it: FalkorDB `/` is INTEGER division on int operands
+            # (`RETURN 9/10` → `0`), so a pair stored as ints —
+            # `update_point(posterior_alpha=9, posterior_beta=1)`,
+            # `set_point_baseline(2, 1)`, the legacy `tier_map` — answered
+            # `0.0` on this ranker where the `ep` block answered `0.90`.
+            # Measured: the same claim, one read 0.9 and one 0.0.
             "    coalesce(n.confidence, "
             "      CASE WHEN (coalesce(n.posterior_alpha, n.ep_alpha, 0.0) "
             "                 + coalesce(n.posterior_beta, n.ep_beta, 0.0)) > 0 "
-            "           THEN coalesce(n.posterior_alpha, n.ep_alpha, 1.0) "
-            "                / (coalesce(n.posterior_alpha, n.ep_alpha, 1.0) "
-            "                   + coalesce(n.posterior_beta, n.ep_beta, 1.0)) "
+            "           THEN toFloat(coalesce(n.posterior_alpha, n.ep_alpha, 1.0)) "
+            "                / (toFloat(coalesce(n.posterior_alpha, n.ep_alpha, 1.0)) "
+            "                   + toFloat(coalesce(n.posterior_beta, n.ep_beta, 1.0))) "
             "           ELSE null END) "
             "  ELSE null END AS conf, degree, n.createdAt AS created, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
@@ -1434,10 +1443,12 @@ class StateRanker:
         embedded = result.get("state_confidence")
         if isinstance(embedded, (int, float)):
             return float(embedded), result.get("state_confidence_source", "posterior")
-        if signals:
-            # The read ANSWERED for this row and carried no number: absent.
-            return None, EP_STATE_ABSENT
-        # No signal at all: no belief was read for this row, and none is claimed.
+        # No readable belief for this row — whether the batch read ANSWERED and
+        # carried no number, or never ran at all: the row has no value to order
+        # on and nothing is claimed for it, so both cases are `absent`. (#11702:
+        # this used to be two identical returns behind an `if signals:` that
+        # distinguished nothing — a distinction the code does not make, and one
+        # a later lane could have "restored" into a presence rule.)
         return None, EP_STATE_ABSENT
 
     def _fetch_point_signals(self, ids: list[str]) -> dict[str, dict]:
@@ -1467,8 +1478,8 @@ class StateRanker:
             # about (a mirror-only node — a pre-#852 legacy graph — must not
             # read as ABSENT just because its α/β columns are missing).
             f"  {ep_has_belief_cypher('n')} AS has_prior, "
-            # #11702: the mirror rides the tail (index 8), the RAW posterior
-            # columns after it (9/10) so the VALUE can follow the ONE
+            # #11702: the mirror rides the tail (index 8), the RAW α columns
+            # after it (9 = posterior_alpha, 10 = ep_alpha) so the VALUE can follow the ONE
             # precedence every surface uses — the `n.confidence` MIRROR first
             # (the #2206 served belief), α/β as the fallback for a node the
             # flush never reached. Preferring α/β (the earlier text here) made
@@ -2277,9 +2288,13 @@ class SubgraphExpander:
             "      coalesce(n.confidence, "
             "        CASE WHEN (coalesce(n.posterior_alpha, n.ep_alpha, 0.0) "
             "                   + coalesce(n.posterior_beta, n.ep_beta, 0.0)) > 0 "
-            "             THEN coalesce(n.posterior_alpha, n.ep_alpha, 1.0) "
-            "                  / (coalesce(n.posterior_alpha, n.ep_alpha, 1.0) "
-            "                     + coalesce(n.posterior_beta, n.ep_beta, 1.0)) "
+            # #11702: `toFloat` for the reason spelled out at
+            # GraphRanker._fetch_point_signals — an int α/β pair truncated
+            # this display mean to 0.00 beside an `ep_state` of `measured`,
+            # i.e. a measured 0.90 claim shown as 0.00 with a straight face.
+            "             THEN toFloat(coalesce(n.posterior_alpha, n.ep_alpha, 1.0)) "
+            "                  / (toFloat(coalesce(n.posterior_alpha, n.ep_alpha, 1.0)) "
+            "                     + toFloat(coalesce(n.posterior_beta, n.ep_beta, 1.0))) "
             "             ELSE null END) "
             "    ELSE null END "
             "  ELSE null END AS confidence, "

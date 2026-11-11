@@ -350,10 +350,13 @@ def _persisted_belief(node: dict) -> float | None:
 
     * the served ``n.confidence`` MIRROR first (the EP flush writes it, and the
       staleness is fixed at the write paths);
-    * then the stored posterior mean, then the stored prior mean — with α and β
-      taken from the SAME pair (posterior first, else the ``ep_*`` prior),
-      exactly the precedence ``ep_state`` applies; never α from one pair with β
-      from the other;
+    * then the persisted pair mean. Each operand is coalesced on its OWN —
+      ``posterior_alpha or ep_alpha`` for α, ``posterior_beta or ep_beta`` for β
+      — exactly the precedence ``ep_has_belief_cypher``/``ep_state`` apply in
+      Cypher, so all three agree on every stored shape. ⛔ That means a HALF
+      posterior beside a complete prior DOES mix the pairs (α from the
+      posterior, β from the prior); it is the coalesce that is authoritative,
+      not a same-pair rule, and a reader must not "restore" one here.
     * **absence is decided by the shared presence predicate**, never by the
       value: no mirror and no complete α/β pair means there is nothing to
       report, and a read must answer ``None`` rather than the Beta(1,1) ``0.5``
