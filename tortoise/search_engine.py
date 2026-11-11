@@ -501,11 +501,62 @@ def _f32_neighbour(value: float, step: int) -> float:
     return struct.unpack("<f", struct.pack("<I", bits + step))[0]
 
 
-def _f32_from_decimal(raw: str, val: float):
-    """Correctly-rounded decimal → float32, the way `strtof` rounds (#11702).
+#: The PARTS of a hex-float literal, for EXACT reconstruction as a `Fraction`.
+#: `_HEX_FLOAT_LITERAL` decides whether the store reads the spelling; this one
+#: only decomposes a literal that is already admitted, so it cannot widen the
+#: grammar.
+_HEX_LITERAL_PARTS = re.compile(
+    r"[ \t]*(?P<sign>[+-]?)0[xX](?P<int>[0-9a-fA-F]*)"
+    r"(?:\.(?P<frac>[0-9a-fA-F]*))?(?:[pP](?P<exp>[+-]?[0-9]+))?\Z",
+    re.ASCII)
+
+#: How far a hex literal's binary exponent may run before exact reconstruction is
+#: skipped. The midpoint branch needs a FINITE float32 target, so a literal with
+#: an exponent this large is nowhere near it; the bound exists so a malformed
+#: literal cannot ask for `Fraction(2) ** 10**9`.
+_EXACT_FRACTION_MAX_EXP = 4096
+
+
+def _exact_literal_fraction(raw: str):
+    """The literal's EXACT value as a `Fraction`, or None (#11702).
+
+    `Fraction("1.0000000596046448")` reads a DECIMAL literal exactly, which is
+    what the midpoint rule needs. `Fraction` cannot read a HEX float, though —
+    it raises `ValueError` — so a hex literal used to fall through to the
+    DOUBLE's rounding, which is the SAME double rounding this module removes one
+    layer up. `float.fromhex` keeps 53 bits, so a hex literal whose exact value
+    has more rounds ONTO the float32 midpoint and the tie-break then followed
+    the wrong side: measured, `"0x1.0000010000000001p0"` is 1 + 2⁻²⁴ + 2⁻⁶⁴, the
+    store serves `1.000000119…` (outside the [0, 1] band ⇒ ABSENT) while Python
+    read `1.0` (present at MAXIMUM certainty) — a presence split at the band
+    edge, from a shape stored data can hold.
+    """
+    text = raw.strip()
+    match = _HEX_LITERAL_PARTS.match(text)
+    if match is None:
+        try:
+            return Fraction(text)
+        except (ValueError, ZeroDivisionError):
+            return None
+    digits = (match.group("int") or "") + (match.group("frac") or "")
+    if not digits:
+        return None
+    exponent = int(match.group("exp") or 0)
+    if abs(exponent) > _EXACT_FRACTION_MAX_EXP:
+        return None
+    value = Fraction(int(digits, 16), 16 ** len(match.group("frac") or ""))
+    if exponent >= 0:
+        value *= Fraction(2 ** exponent)
+    else:
+        value /= Fraction(2 ** -exponent)
+    return -value if match.group("sign") == "-" else value
+
+
+def _f32_from_literal(raw: str, val: float):
+    """Correctly-rounded literal → float32, the way `strtof` rounds (#11702).
 
     ⛔ **This is not the same as rounding the DOUBLE.** `float(raw)` is a
-    correctly-rounded decimal → *float64*, and rounding THAT to float32 is a
+    correctly-rounded literal → *float64*, and rounding THAT to float32 is a
     DOUBLE rounding: at a literal that lands exactly on a float32 midpoint the
     two disagree, and they disagree in opposite directions
     (`"1.0000000596046448"` is 1 + 2⁻²⁴ exactly; `strtof` rounds it UP to
@@ -517,7 +568,10 @@ def _f32_from_decimal(raw: str, val: float):
 
     So the double is used as the fast path, and ONLY when it sits exactly on a
     float32 midpoint is the direction decided from the literal itself, with
-    `Fraction` arithmetic on the decimal (exact, no second rounding).
+    `Fraction` arithmetic (exact, no second rounding). **Hex literals are
+    covered by the same rule** — `_exact_literal_fraction` reconstructs them
+    too, because this applies to every spelling the store parses and a hex
+    literal carries more precision than the double that `float.fromhex` keeps.
     """
     rounded = _float32(val)
     if rounded is None or rounded == val:
@@ -526,15 +580,22 @@ def _f32_from_decimal(raw: str, val: float):
     neighbour = _f32_neighbour(rounded, step)
     if abs(val - rounded) != abs(neighbour - val):
         return rounded                      # not a midpoint: already correct
-    try:
-        exact = Fraction(raw.strip())
-    except (ValueError, ZeroDivisionError):  # pragma: no cover — grammar-pinned
+    exact = _exact_literal_fraction(raw)
+    if exact is None:                       # pragma: no cover — grammar-pinned
         return rounded
-    # Halfway exactly → the DECIMAL decides. (A tie at the midpoint itself is
-    # impossible for a value that is a midpoint of two floats and also equal to
-    # their average, so this is never a coin flip.)
-    return neighbour if abs(exact) > abs(Fraction(rounded) + (
-        Fraction(neighbour) - Fraction(rounded)) / 2) else rounded
+    # Halfway exactly → the LITERAL decides, and the SIDE is not a detail: the
+    # two candidates are `rounded` and its neighbour on the side `val` lies, and
+    # `_float32`'s tie-break can put `rounded` on EITHER one. A literal that is
+    # exactly the midpoint is a genuine tie and `rounded` already carries
+    # round-half-to-even; one the DOUBLE rounded ONTO the midpoint from above
+    # (`0x1.0000030000000001p0` = midpoint + 2⁻⁶⁴) is above it and the store
+    # rounds UP — the candidate that happens to be `rounded` there.
+    low, high = (rounded, neighbour) if rounded < neighbour else (
+        neighbour, rounded)
+    midpoint = (Fraction(low) + Fraction(high)) / 2
+    if exact == midpoint:
+        return rounded
+    return high if exact > midpoint else low
 
 
 def _string_operand(raw: str, val: float):
@@ -575,8 +636,16 @@ def _string_operand(raw: str, val: float):
     whole exact-subnormal window — 23 exponents wide — on a value the store
     serves: the `ep` block answered `absent` while every ranker answered
     `measured` with the number, and that number moved the ORDER.
+
+    ⛔ **The MIDPOINT edge is decided from the literal, for hex as well as
+    decimal** (`_f32_from_literal` → `_exact_literal_fraction`). It has to be:
+    `float.fromhex` keeps only 53 bits, so a hex literal with more precision than
+    that lands ON a float32 midpoint after the double rounding and the tie-break
+    then followed the wrong side — measured, `"0x1.0000010000000001p0"` read
+    `1.0` here while the store served `1.000000119…`, i.e. present at maximum
+    certainty beside the store's ABSENT.
     """
-    rounded = _f32_from_decimal(raw, val)
+    rounded = _f32_from_literal(raw, val)
     if rounded is None:
         return None
     if abs(rounded) > _FLOAT32_MAX:     # belt and braces; pack guarantees it

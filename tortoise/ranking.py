@@ -79,16 +79,26 @@ UNCOMPUTED_CONFIDENCE_SOURCE = "uncomputed"
 #: it (`"measured"`), and ``"posterior"``/``"neutral"`` would claim a
 #: measurement that was never read; this token says the one true thing: the row
 #: has a belief we could not decode.
-#: NO STORED SHAPE REACHES IT TODAY. The one that did — a belief OPERAND written
-#: as a hex-float literal (``posterior_alpha = "0x1p4"``), which FalkorDB's
-#: ``toFloatOrNull`` reads as ``16.0`` while the pinned Python grammar refused
-#: it, so the shared presence predicate said a belief existed and no value was
-#: available to this process — is CLOSED (cycle 26): ``numeric_operand`` reads
-#: the same spelling with ``float.fromhex``, so both twins report the same
-#: value. The MIRROR spelling (``n.confidence = "0x1p4"``) never reached it
-#: either: a served belief is a probability, so the band rejects ``16.0`` on
-#: BOTH twins and that row is ``absent``, which is what ``_confidence_of``
-#: reports for it.
+#: NO STORED SHAPE THIS REPO HAS MEASURED REACHES IT — and the qualifier is
+#: load-bearing, because the unconditional version of this sentence was wrong
+#: TWICE. The class is "a spelling the store reads and this process does not",
+#: and it was declared closed at cycle 26 for one shape:
+#:
+#: * the OPERAND spelling (``posterior_alpha = "0x1p4"``), which FalkorDB's
+#:   ``toFloatOrNull`` reads as ``16.0`` while the pinned Python grammar refused
+#:   it — ``numeric_operand`` now reads it with ``float.fromhex``;
+#: * cycle 27 then found an exact float32 SUBNORMAL (``0x1p-127``) refused by a
+#:   decimal-shaped underflow rule — fixed, and pinned from both sides;
+#: * cycle 28 found the MIDPOINT fallback: ``float.fromhex`` keeps 53 bits, so a
+#:   hex literal with more precision lands on a float32 midpoint and the
+#:   tie-break followed the double — ``n.confidence = "0x1.0000010000000001p0"``
+#:   read ``present at 1.0`` here and ABSENT in the store.
+#:
+#: Each fix is a MEASUREMENT over the spellings pinned in
+#: ``tests/test_11702_absent_belief_state.py``, not a proof; the MIRROR spelling
+#: (``n.confidence = "0x1p4"``) never reached the token at all — a served belief
+#: is a probability, so the band rejects ``16.0`` on BOTH twins and that row is
+#: ``absent``, which is what ``_confidence_of`` reports for it.
 #: The token is kept because it is a WIRE VALUE (published in
 #: ``config/surface-manifest.yml`` and ``docs/product/mcp-sdk-surface.md``) and
 #: because a future stored shape this process cannot decode must be able to say
@@ -1393,12 +1403,14 @@ class StateRanker:
             # `_confidence_of` and must not deny the state beside it (the
             # reviewed head emitted `"absent"` beside `"measured"`).
             # `test_confidence_source_never_contradicts_the_ep_state_beside_it`
-            # pins the agreement for all seven stored shapes — and, since cycle
-            # 26 closed the hex-float OPERAND residual at the source, the null
-            # beside a non-absent state is no longer produced by any stored
-            # shape: the arm below is DEFENSIVE. It is kept, and named, so a
-            # future undecodable spelling reports `"unreadable"` instead of
-            # denying a belief the row is known to have.
+            # pins the agreement for all ten stored shapes — and no stored shape
+            # this repo has MEASURED produces the null beside a non-absent state
+            # (cycles 26–28 each closed one: the hex OPERAND spelling, the exact
+            # SUBnormal, and the hex MIDPOINT rounding), so the arm below is
+            # DEFENSIVE. "Measured" is the whole claim — the unconditional
+            # version of it was falsified twice — so a future undecodable
+            # spelling reports `"unreadable"` instead of denying a belief the
+            # row is known to have.
             ep_state = sig.get("ep_state")
             if ep_state is None:
                 ep_state = (EP_STATE_ABSENT if confidence is None
@@ -1513,9 +1525,10 @@ class StateRanker:
         claim and ``"neutral"`` when a PERSISTED prior (not a measurement)
         answered — those two are real values. A non-absent state with no
         readable value answers ``(None, UNREADABLE_CONFIDENCE_SOURCE)``
-        instead, so the null is named rather than denied; no stored shape is
-        known to produce it since cycle 26 taught both coercions the same
-        spellings, so that arm is DEFENSIVE. There are therefore two nulls —
+        instead, so the null is named rather than denied; no stored shape this
+        repo has MEASURED produces it (cycles 26–28 taught both coercions the
+        same spellings — hex OPERAND, exact subnormal, hex midpoint), so that
+        arm is DEFENSIVE. There are therefore two nulls —
         ``absent`` (nothing is persisted) and ``unreadable`` (a belief exists) —
         and they are not the same fact.
         """
@@ -1525,10 +1538,13 @@ class StateRanker:
             # VALUE is collapsed to the absent SOURCE only when the state is
             # absent. Collapsing on the value alone is a second presence rule
             # — and it is wrong for any shape where the store and this
-            # process disagree about readability (one did until cycle 26 taught
-            # the Python coercion the spellings the store reads — an OPERAND
-            # written as `"0x1p4"`, which `toFloatOrNull` read as 16.0 and the
-            # pinned Python grammar refused; a hex-float MIRROR never was this
+            # process disagree about readability (three did, each found by a
+            # measurement after the previous one was declared closed — cycles
+            # 26–28: an OPERAND written as `"0x1p4"`, which `toFloatOrNull`
+            # read as 16.0 and the pinned Python grammar refused; an exact
+            # float32 subnormal, refused by a decimal-shaped underflow rule; and
+            # a hex literal past a float32 midpoint that the 53-bit double
+            # rounded onto the midpoint; a hex-float MIRROR never was this
             # shape, since the served-belief band rejects it on BOTH twins):
             # the row then said `confidence_source: "absent"` beside
             # `ep_state: "baseline"`, i.e. two keys of one response
@@ -1670,15 +1686,20 @@ class StateRanker:
                     conf = round(_beta_mean(alpha, beta), 6)
                 else:
                     # DEFENSIVE, not `unreachable` in the sense this arm used
-                    # to claim. It was reachable by exactly one shape: an
-                    # OPERAND written as a hex-float spelling
-                    # (`posterior_alpha: "0x1p4"` → 16.0), which the presence
-                    # predicate read while `numeric_operand`'s pinned grammar
-                    # refused it. Cycle 26 closed that — `numeric_operand` reads
-                    # the same spelling — so no stored shape is known to land
-                    # here. (A hex-float MIRROR is not this shape either: the
-                    # served-belief band rejects 16.0 on both twins.) If one
-                    # does, the state stays true and
+                    # to claim. It was reachable by three shapes, each closed
+                    # after a measurement: an OPERAND written as a hex-float
+                    # spelling (`posterior_alpha: "0x1p4"` → 16.0, which the
+                    # presence predicate read while `numeric_operand`'s pinned
+                    # grammar refused it); an exact float32 SUBNORMAL
+                    # (`0x1p-127`, refused by a decimal-shaped underflow rule);
+                    # and a hex literal past a float32 MIDPOINT
+                    # (`n.confidence = "0x1.0000010000000001p0"`, where the
+                    # 53-bit double landed on the midpoint and the band then
+                    # admitted 1.0). All three are pinned in
+                    # `test_the_twins_parse_the_same_string_language`. (A
+                    # hex-float MIRROR at 16.0 is not one of them: the
+                    # served-belief band rejects it on both twins.) If a fourth
+                    # does land here, the state stays true and
                     # `confidence_source: "unreadable"` names the missing
                     # value (`_confidence_of` derives it from the state, never
                     # from this `None`), instead of denying a belief the row
@@ -1983,9 +2004,10 @@ class GapsRanker:
                 # Taken from the SIGNAL when the graph was queried — the same
                 # field StateRanker reads — and NOT re-derived from the value:
                 # the signal decides presence itself, so a None value implies
-                # the absent state EXCEPT for the unreadable-spelling arm (a
-                # hex-float OPERAND, the shape cycle 26 closed; the token stays
-                # as a defensive label), where the state is true and
+                # the absent state EXCEPT for the unreadable-spelling arm (the
+                # shapes cycles 26–28 closed: the hex OPERAND spelling, the
+                # exact subnormal, the hex midpoint; the token stays as a
+                # defensive label), where the state is true and
                 # `confidence_source: "unreadable"` explains the null.
                 # Deriving the state here
                 # instead would be a second presence rule — the defect class
@@ -2045,8 +2067,9 @@ class GapsRanker:
         which made a never-measured gap carry a fabricated confidence.) A gap
         that has a belief whose stored spelling this process cannot decode
         reports ``(None, UNREADABLE_CONFIDENCE_SOURCE)`` instead — never
-        ``absent`` beside a non-absent state (the arm is DEFENSIVE: cycle 26
-        closed the one shape that reached it, see
+        ``absent`` beside a non-absent state (the arm is DEFENSIVE: cycles 26–28
+        closed the shapes that reached it — the hex OPERAND, the exact
+        subnormal, the hex midpoint; see
         :data:`UNREADABLE_CONFIDENCE_SOURCE`). For a
         DRAFT the caller replaces both with null/``"uncomputed"`` (#2598) —
         this method reports the read, the staging gate lives in
@@ -2057,8 +2080,9 @@ class GapsRanker:
             # a `None` value is the absent source only when the state is
             # absent. A non-absent state with no readable value answers
             # `"unreadable"`, never `"absent"` beside
-            # `ep_state: "baseline"` — the arm is DEFENSIVE, because cycle 26
-            # closed the hex-float OPERAND shape that used to reach it.
+            # `ep_state: "baseline"` — the arm is DEFENSIVE, because cycles
+            # 26–28 closed the shapes that used to reach it (the hex-float
+            # OPERAND, the exact subnormal, the hex midpoint).
             state = signals.get("ep_state")
             if state == EP_STATE_ABSENT:
                 return None, EP_STATE_ABSENT
@@ -2254,13 +2278,13 @@ class GapsRanker:
                     # division and were missed.
                     conf = round(_beta_mean(alpha, beta), 6)
                 else:
-                    # DEFENSIVE (see StateRanker's arm): the shape that used
-                    # to reach it was a hex-float OPERAND the Cypher presence
-                    # predicate read while the Python grammar could not —
-                    # closed in cycle 26, where the two coercions were taught
-                    # the same spelling. If a shape lands here, the value is
-                    # null, the state stays true, and the source says
-                    # `"unreadable"`.
+                    # DEFENSIVE (see StateRanker's arm): the shapes that used to
+                    # reach it were spellings the Cypher presence predicate read
+                    # while the Python grammar could not — closed in cycles
+                    # 26–28, where the two coercions were taught the same
+                    # spelling, the same subnormal edge and the same midpoint
+                    # rule. If a shape lands here, the value is null, the state
+                    # stays true, and the source says `"unreadable"`.
                     conf = None
                 state = (EP_STATE_MEASURED if measured_raw
                          else EP_STATE_BASELINE)
