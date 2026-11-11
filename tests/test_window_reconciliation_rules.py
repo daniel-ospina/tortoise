@@ -1173,6 +1173,55 @@ def test_run_evaluation_forwards_the_arm_and_cap_to_the_fingerprint():
             f"comparison would not.")
 
 
+def test_run_evaluation_binds_the_census_horizon_to_the_runs_primary_k():
+    """⛔ #11830 round-9 finding: THE ONE LINE THAT KEEPS THE HORIZON TRUE.
+
+    ``reconciliation_variant_rows`` now publishes ``pool_drift_k`` from the
+    ``k`` stamped on each outcome, so the published horizon is exactly
+    whatever ``run_evaluation`` binds here. Every renderer-side row stays
+    green if this expression degrades to the pre-fix constant — measured:
+    ``k=ks[0]`` → ``k=5`` at the call site left **186 tests green** across
+    this file and the six regression files, because the wiring rows call
+    ``_reconcile_failing_question`` directly and therefore pin the
+    PARAMETER, never the call site's expression.
+
+    On ``--k 10,20`` that mutant publishes ``pool_drift_k: 5`` for a census
+    taken at 10 — the false provenance claim the field exists to prevent.
+    Parsed from the source, for the same reason the sibling forward test is:
+    ``run_evaluation`` needs a graph, an SDK and a provider to reach this
+    call, and the property under test is *which expression is passed*.
+    """
+    import ast
+    from pathlib import Path
+
+    src = Path(runner.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fn = next(n for n in tree.body
+              if isinstance(n, ast.FunctionDef)
+              and n.name == "run_evaluation")
+    calls = [n for n in ast.walk(fn)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name)
+             and n.func.id == "_reconcile_failing_question"]
+    assert len(calls) == 1, (
+        f"run_evaluation calls _reconcile_failing_question {len(calls)} "
+        f"times — the census-horizon pin names exactly one call site; a new "
+        f"one needs an explicit decision about the k it binds")
+    passed = {kw.arg: kw.value for kw in calls[0].keywords}
+    assert "k" in passed, (
+        "run_evaluation no longer passes k= to _reconcile_failing_question — "
+        "the arm would stamp its default (5) as the census horizon")
+    # ⛔ EXACT expression, not a truthiness check: ``ks[0]`` is the run's
+    # PRIMARY k (``_parse_ks`` sorts, so it is ``min k``); a hard-coded 5 is
+    # the pre-fix bug and must not survive a refactor that keeps the keyword.
+    assert ast.unparse(passed["k"]) == "ks[0]", (
+        f"run_evaluation binds the census horizon as "
+        f"`{ast.unparse(passed['k'])}`, not `ks[0]` — every `pool_drift_k` "
+        f"would then name a horizon the drift was not read at. If the ks "
+        f"expression legitimately changed, update this pin to the new exact "
+        f"form; do not loosen it to a truthiness test.")
+
+
 def _fingerprint(**over):
     kwargs = dict(
         reader_model="mock-reader", judge_model="mock-judge", ks=(5,),
