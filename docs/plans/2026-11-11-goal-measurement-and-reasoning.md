@@ -18,8 +18,10 @@ governingAgreement: "#7860"
 
 > This is the design of record for a capability, not a status report. It states what the loop must do,
 > what each part does today (measured 2026-11-11), and the decisions that govern the build. The build
-> record belongs in a changelog; the rulings belong in the graph (the owner's decision, 2026-11-11 —
-> Tortoise replaces a markdown decision ledger).
+> record belongs in a changelog; the decisions live on **#7860**, which its 2026-11-11 decision record
+> names as the **holding pen** — *"`docs/DECISION-LEDGER.md` does not exist yet (owner is setting it up
+> 2026-11-12) … When the ledger lands, these entries lift into it verbatim"* — because the graph write
+> is refused today (§9 Q1).
 
 ---
 
@@ -81,9 +83,11 @@ Measured at `32c0f39d4b` (with the two `search_engine.py` citations re-anchored 
 
 **Read the "state" column, not the rows:** of four primitives, one is healthy (`weigh`), one does not
 exist (`decide`), and one is the largest source of inconsistency in the codebase (`replace`: 11
-terminal-vocabulary declarations, 5 fold implementations, 4 replay engines with independent end-state
-models, 632 test functions across 166 files pinning the asymmetry — **all five figures are #11824's
-audit**, whose inclusion rules are published there, not this document's own count). That is why this
+terminal-vocabulary declarations, 5 fold implementations, 2 replay engines behind 4 entrypoints, and 621
+test functions across 167 files pinning the asymmetry — all four are #11824's figures, and #11824's own
+verification comment **re-measured and corrected** them: 11 reproduces exactly, 5 as 5 semantic models /
+6 functions, 4 engines as **2 engines / 4 entrypoints**, `632 / 166` as **621 / 167**. Quote the
+verification comment, not the issue body, which still carries the superseded numbers). That is why this
 question has repeatedly collapsed into "how does EP get triggered" — EP is the only part that already
 works.
 
@@ -97,8 +101,12 @@ what the whole loop depends on.
 - **A measurement is true for its moment.** Last week's 12.4 minutes did not stop being true. Readings
   therefore **append**; nothing supersedes them.
 - **A state is true only until replaced.** "The CI sub-goal is met" stops counting the moment it is not.
-  States therefore **replace**, with a validity window — which is precisely what `supersede_point`
-  already does (*the old fact stops being true exactly when the new fact became true*, `ONTOLOGY.md` §4.7).
+  States therefore **replace**, with a validity window — the window `supersede_point` writes: *the
+  **contiguous Graphiti (Zep) window intent: the old fact stops being true when the new one starts being
+  true*** (`ONTOLOGY.md` §4.7, quoted verbatim). Note what that section itself pins: exact contiguity
+  needs a **dated** successor (`validFrom`), an undated one makes the windows **overlap**, and which
+  reading of the closed interval is canonical is an **open decision it tracks** (#7818) — so this is the
+  window's intent, not a claim that every supersede lands on a shared instant.
 
 Two independent bodies of practice draw the same line:
 
@@ -180,12 +188,15 @@ for it is recorded in the tree**, so it is the first thing to instrument rather 
 
 **Reconciled with the placement ruling (owner, 2026-10-06).** `docs/architecture/STORAGE-ARCHITECTURE.md`
 ruled that *a state/numeric value is a STRUCTURAL FIELD ON AN ENTITY, not a `Point`* — *"a belief can be
-argued with, an attribute cannot"* — with its own carve-out for the case here: *"where a sentence
-ASSERTS a figure … that assertion is a belief and may be a `Point`."* This design uses both senses
-deliberately and they do not collide: the **reading's value** is a structural field on the `:Event` (no
-confidence, no NAND-ability, no embedding), while the **derived state** — *"the CI sub-goal is met"* —
-is an assertion about the goal, so it is a claim, and a claim is a `Point`. Nothing is reified into a
-node that the ruling puts in a field.
+argued with, an attribute cannot"*. It also records a **narrower, separate** exception — *"where a
+sentence ASSERTS a figure … that assertion is a belief and may be a `Point`"*, which it calls *"the
+separate, smaller prose question, not this placement"* — so that carve-out is not what this design rests
+on, and is not invoked here. The design sits on the ruling's own line instead: the **reading's value** is
+a structural field on the `:Event` (no confidence, no NAND-ability, no embedding), while the **derived
+state** — *"the CI sub-goal is met"* — is an assertion the machine must be able to argue with, so it is
+a claim; #7860's **D11** is that decision (*the judgement is a `statement` Point, `claimClass:
+'derived'`*), not a re-reading of the placement ruling. Nothing is reified into a node that the ruling
+puts in a field.
 
 ---
 
@@ -226,5 +237,5 @@ sitting on it — #2782 is the money-typed instance of that ruling, not an alter
 | Q1 | the graph is the decision record, but writes are refused — `Team points limit reached (25000)` | raise the cap or prune (owner call) |
 | Q2 | does this sequencing (0 → 1 → 2 → 3) hold? | yes: step 0 is a prerequisite, not a side quest |
 | — | D12 (confidence on non-claims) | **ruled: no** — recorded on #7860 |
-| — | D13 (what triggers the loop?) | **ruled on #7860: the judgement write is the trigger** — the only option where the trigger and the answer are the same write. #11822's scope waits on it. Marking that write does **not** make a deeper cascade converge (#11823), so this is the trigger, not the convergence fix |
+| — | D13 (what triggers the loop?) | **recommended on #7860 — NOT yet ruled**, and it sits under that issue's *"OPEN — the owner has two questions outstanding"*: *the judgement write is the trigger* (per D11), the only option where the trigger and the answer are the same write. **#11822's scope waits on the owner ruling this**, so the gate is still closed: #11822 must not be dispatched as if the trigger were settled. Marking that write does **not** make a deeper cascade converge (#11823) — this is the trigger, not the convergence fix |
 | — | where does the **effect** rule live? | **decided here: §5** (declared decision table; engine-owned effect; no general rule engine) |
