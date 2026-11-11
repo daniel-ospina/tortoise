@@ -318,7 +318,7 @@ def test_set_point_baseline_refuses_a_non_numeric_operand(sdk):
     proj = sdk._get_proj()
     pid = sdk.create_point("statement", "ZQBASELINE guard probe")["id"]
 
-    for bad in (True, [0.7], "0.7", {"a": 1}):
+    for bad in (True, [0.7], "0.7", {"a": 1}, 1j):
         with pytest.raises(ValueError):
             sdk.set_point_baseline(pid, bad, 0.5)
         stored = proj.g.query(
@@ -399,6 +399,82 @@ def test_the_subgraph_labels_a_terminal_claim_the_same_way_the_ep_block_does(sdk
     assert node["ep_state"] == ep.get("ep_state"), (
         f"the response contradicts itself: subgraph {node['ep_state']!r} vs "
         f"the ep block {ep.get('ep_state')!r}")
+
+
+def test_a_legacy_string_operand_outside_float32_is_absent_on_every_surface(sdk):
+    """Cycle 22 P1: the string branch of the coercion answered a NUMBER for a
+    literal the store cannot read.
+
+    `numeric_operand`'s numeric branch applies `math.isfinite`; the STRING branch
+    — added a cycle earlier to pin the shared grammar — did not, so
+    `float("1e400")` came back ``inf`` while ``toFloat("1e400")`` is null. One
+    legacy `n.confidence='1e400'` therefore read `baseline / inf` in the `ep`
+    block and `absent` in all three rankers and the subgraph, and
+    `json.dumps(asdict(EpBreakdown(confidence_mean=inf)), allow_nan=False)` —
+    what Starlette's JSONResponse does — raises, i.e. a 500 on the agent-facing
+    surfaces rather than a wrong number.
+
+    The rule is the store's, measured: `strtof` accepts float32's NORMAL range
+    and nothing else (`toFloat("1e-38")` and `toFloat("1e-320")` are null, while
+    `"1.2e-38"` reads), with any zero accepted.
+    """
+
+    from tortoise.search_engine import numeric_operand
+
+    proj = sdk._get_proj()
+    # TWO literals, because two guards answer for them and each needs its own
+    # probe: `'1e400'` overflows the DOUBLE (caught by the finiteness guard) and
+    # `'1e-320'` is a perfectly finite double that the store's float32 parse
+    # underflows to null (caught only by the range guard). A test that used just
+    # the first stayed green when the second guard was disabled — measured.
+    for literal in ("1e400", "1e-320"):
+        assert numeric_operand(literal) is None, (
+            f"the Python twin still answers {numeric_operand(literal)!r} for "
+            f"{literal!r}, which the store reports as absent")
+    pid = sdk.create_point("statement", "ZQERANGE an out-of-range mirror")["id"]
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.confidence = '1e-320'",
+                 params={"id": pid})
+    _assert_absent_everywhere(proj, pid)
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.confidence = '1e400'",
+                 params={"id": pid})
+    _assert_absent_everywhere(proj, pid)
+
+
+def _assert_absent_everywhere(proj, pid):
+    """One claim, every surface: absent, and the `ep` block must not carry inf."""
+    import json
+    from dataclasses import asdict
+
+    from tortoise.analyze import analyze
+    from tortoise.ranking import GapsRanker, GraphRanker, StateRanker, SubgraphExpander
+    from tortoise.why import assemble_why_blocks
+
+    ann = annotate_ep_batch(proj.g, [pid])[pid]
+    assert ann.ep_state == EP_STATE_ABSENT, ann
+    assert ann.confidence_mean is None, ann
+    # …and the wire can carry it: the whole point of the None.
+    json.dumps(asdict(ann), allow_nan=False)
+
+    ep = assemble_why_blocks(proj, [pid])[pid].get("ep") or {}
+    assert ep.get("ep_state") == EP_STATE_ABSENT, ep
+    node = next(n for n in SubgraphExpander(projection=proj).expand(
+        [pid], depth=1)["nodes"] if n.get("id") == pid)
+    assert node["ep_state"] == EP_STATE_ABSENT, node
+    # All three rankers' own reads: StateRanker and GraphRanker through their
+    # point-signal batches, GapsRanker through the confidence batch it grades on.
+    for sigs in (
+        StateRanker(projection=proj)._fetch_point_signals([pid]),
+        GraphRanker(projection=proj)._fetch_signals([pid], "point"),
+        GapsRanker(projection=proj)._fetch_confidence_signals(
+            [pid], labels=["Point"]),
+    ):
+        sig = sigs[pid]
+        assert sig.get("confidence") is None, sig
+    answers = analyze("what are we most uncertain about?", proj=proj)
+    # The rendered ANSWER, not the response dict — the dict echoes the Cypher
+    # template, and the template's own comments legitimately say "inf".
+    assert "inf" not in answers["answer"].lower(), answers["answer"][:400]
+    assert "formatting error" not in answers["answer"].lower(), answers["answer"]
 
 
 def test_the_object_aggregate_reports_absent_without_a_mean_over_nothing(sdk):
@@ -2712,6 +2788,10 @@ def test_a_belief_value_the_store_cannot_read_is_refused_at_the_write(sdk):
         ("confidence", True),
         ("confidence", "abc"),
         ("confidence", "0.7"),
+        # Cycle 22 P3: `numbers.Number` admitted this, and the domain has no arm
+        # for it, so the write was ACCEPTED and the store's degraded-value path
+        # (#7369) wrote null — "succeeded" with nothing stored.
+        ("confidence", 1j),
     ):
         with pytest.raises(ValueError) as exc:
             sdk.update_point(pid, **{prop: bad})
@@ -2723,6 +2803,10 @@ def test_a_belief_value_the_store_cannot_read_is_refused_at_the_write(sdk):
         with pytest.raises(ValueError) as exc:
             sdk.update_point(pid, **{prop: bad})
         assert "not a finite number" in str(exc.value), (prop, bad, str(exc.value))
+        # Cycle 22 P3: the domain's remedy ("store it as a string") is refused
+        # by the belief guard, so the message must say so — otherwise the caller
+        # follows it and hits a second error.
+        assert "does not apply" in str(exc.value), (prop, bad, str(exc.value))
         # …and nothing was written.
         stored = proj.g.query(
             f"MATCH (n:Point {{id:$id}}) RETURN n.{prop}",
@@ -2839,6 +2923,25 @@ def test_the_twins_parse_the_same_string_language(sdk):
         "3.4028235e38": 3.4028235e38,  # float32 MAX itself is readable
         "1.1754944e-38": 1.1754944e-38,  # min normal is readable
         "1e-37": 1e-37,
+        # Cycle 22 P1: the store parses a string with `strtof`, so the window
+        # is float32's NORMAL range and everything outside it answers null.
+        # Before this, Python answered inf/0.0 for these and the `ep` block
+        # reported `measured` beside `absent` in every ranker — and `inf` then
+        # made the response body unserialisable (`json.dumps(allow_nan=False)`).
+        "1e38": 1e38,
+        "1.2e-38": 1.2e-38,
+        "1e-38": None,
+        "1e-320": None,
+        "1e400": None,
+        "-1e400": None,
+        "0e400": 0.0,
+        "-0.0": -0.0,
+        # The rounding edges the two rules decide DIFFERENTLY, and they are the
+        # reason `_string_operand` packs to float32 rather than comparing to the
+        # max outright: `'3.40282355e38'` is above float32 max but rounds DOWN
+        # to it, and the store reads it — while `'1.1754943e-38'` is below
+        # min-normal, rounds UP to it, and the store nulls it.
+        "3.40282355e38": 3.40282355e38,
     }
     for raw, expected in shapes.items():
         proj.g.query("MATCH (n:Point {id:$id}) SET n.posterior_alpha = $a, "

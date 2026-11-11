@@ -401,6 +401,24 @@ NUMERIC_OPERAND_CYPHER_TEMPLATE = (
 #: `Infinity`/`nan` spellings parse there too; the first stays a recorded
 #: residual (see `numeric_operand`), the second is nulled by the finiteness
 #: guard in `numeric_operand_cypher`.
+#: The float32 NORMAL range a STRING operand must land in to be readable in
+#: Cypher: `toFloat`/`toFloatOrNull` parse a string as a float32 and answer null
+#: rather than a number when the correctly-rounded result would not be a normal
+#: float32 — that is what `strtof` does, and `ERANGE` is what makes it null.
+#: Measured on 4.20.6, both twins side by side:
+#:
+#: * over range → null: `"3.4028236e38"`, `"1e39"`, `"1e308"`, `"1e309"`,
+#:   `"1e400"`;
+#: * in range → value: `"3.4028235e38"` (max), and `"3.40282355e38"`, which
+#:   ROUNDS DOWN to max — hence `struct` packing in `_string_operand` rather
+#:   than a plain double comparison, which would call that literal absent here
+#:   and readable there;
+#: * under range → null: `"1e-38"`, `"1e-40"`, `"1e-320"`, `"1.4e-45"`, and
+#:   `"1.1754943e-38"` — below min-normal even though it rounds UP to it, so
+#:   the exact magnitude is tested, not the rounded one;
+#: * in range → value: `"1.1754944e-38"` (min normal), `"1.2e-38"`, `"1e-37"`.
+_FLOAT32_MIN_NORMAL = 1.1754943508222875e-38
+_FLOAT32_MAX = 3.4028234663852886e38
 _FLOAT_LITERAL = re.compile(r"\s*[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)"
                             r"(?:[eE][+-]?[0-9]+)?\Z")
 
@@ -438,23 +456,6 @@ def numeric_operand_cypher(operand: str) -> str:
             f"THEN {coerced} ELSE null END")
 
 
-#: The float32 NORMAL range a STRING operand must land in to be readable in
-#: Cypher: `toFloat`/`toFloatOrNull` parse a string as a float32 and answer null
-#: rather than a number when the correctly-rounded result would not be a normal
-#: float32. Measured on 4.20.6, both twins side by side:
-#:
-#: * over range → null: `"3.4028236e38"`, `"1e39"`, `"1e308"`, `"1e309"`;
-#: * in range → value: `"3.4028235e38"` (max), and `"3.40282355e38"`, which
-#:   ROUNDS DOWN to max — hence `struct` packing below rather than a plain
-#:   double comparison, which would call that literal absent on one twin only;
-#: * under range → null: `"1e-38"`, `"1e-40"`, `"1.4e-45"`, and
-#:   `"1.1754943e-38"` — below min-normal even though it rounds UP to it, so
-#:   the exact magnitude is tested, not the rounded one;
-#: * in range → value: `"1.1754944e-38"` (min normal), `"1e-37"`.
-_F32_MAX = 3.4028234663852886e+38
-_F32_MIN_NORMAL = 1.1754943508222875e-38
-
-
 def _string_operand(val: float):
     """The float `toFloat` reads for a decimal string, or None (#11702).
 
@@ -463,6 +464,14 @@ def _string_operand(val: float):
     `"1e309"` was `absent` in every Cypher surface and `measured / inf` in
     Python — `annotate_ep_batch` served `inf`, the rankers sorted it FIRST, and
     `json.dumps(..., allow_nan=False)` turned the hosted read into a 500.
+
+    The overflow edge is decided by the ROUNDED float32, because that is what
+    `strtof` decides: a literal just above float32 max but below its rounding
+    midpoint lands on max and READS (`"3.40282355e38"`, measured). A plain
+    `abs(val) <= _FLOAT32_MAX` would call that absent only here. The underflow
+    edge is decided by the EXACT magnitude, for the mirror reason: a literal
+    just below min-normal rounds UP to it and yet is null there
+    (`"1.1754943e-38"`, measured).
 
     The VALUE returned is the double, not the float32 `toFloat` would serve
     (`0.7` vs `0.699999988079071`): that value divergence is pre-existing,
@@ -475,12 +484,12 @@ def _string_operand(val: float):
     except (OverflowError, ValueError):
         # A double beyond float32 range: `toFloat` answers null, not inf.
         return None
-    if not math.isfinite(rounded):
+    if not math.isfinite(rounded):      # `nan`/`inf` never survive the pack
         return None
-    if val != 0.0 and abs(val) < _F32_MIN_NORMAL:
+    if abs(rounded) > _FLOAT32_MAX:     # belt and braces; pack guarantees it
+        return None
+    if val != 0.0 and abs(val) < _FLOAT32_MIN_NORMAL:
         # Subnormal / underflow: `strtof` sets ERANGE, so the engine nulls it.
-        return None
-    if abs(rounded) > _F32_MAX:      # belt and braces; pack already guarantees it
         return None
     return val
 
@@ -499,10 +508,30 @@ def numeric_operand(raw):
     NaN/inf are also None: `json.dumps` emits them as bare tokens, and neither
     is a belief (see `belief_value`).
 
-    A STRING operand is additionally bounded to the float32 range that
-    `toFloat` itself enforces (see `_string_operand`) — magnitude, not just
-    grammar, because `toFloat` parses a string as a float32 and answers null
-    where Python's double loop would happily return a number.
+    ⛔ **A string operand must also land where the store can READ it** — and the
+    store parses a string with ``strtof``, i.e. into a **float32**, setting
+    ``ERANGE`` (and answering ``null``) for anything outside float32's NORMAL
+    range. Measured against the live engine:
+
+    ==================  ==================  ====================
+    literal             ``toFloat``        floats the store
+    ==================  ==================  ====================
+    ``'0.6'``           ``0.60000002384``   reads (as float32)
+    ``'1e38'``          ``9.9999996803e37`` reads
+    ``'1e-38'``         ``null``            refuses (subnormal)
+    ``'1e-320'``        ``null``            refuses (underflow)
+    ``'1e308'``         ``null``            refuses (overflow)
+    ``'1e400'``         ``null``            refuses (overflow)
+    ==================  ==================  ====================
+
+    So the branch used to answer a NUMBER (**``inf``** for ``'1e400'``, ``0.0``
+    for ``'1e-400'``) for a literal the engine calls ABSENT — and ``inf`` then
+    propagated into ``EpBreakdown.confidence_mean``, which ``asdict`` +
+    ``json.dumps(allow_nan=False)`` (Starlette's ``JSONResponse``) turns into a
+    500 on the agent-facing surfaces. The window is the one `_string_operand`
+    applies; inside it the DOUBLE is returned, deliberately — the float32
+    narrowing of an in-range literal (``0.6`` → ``0.6000000238``) is a recorded
+    residual (#11841), not a twin split to close here.
     """
     if raw is None or isinstance(raw, bool):
         return None
