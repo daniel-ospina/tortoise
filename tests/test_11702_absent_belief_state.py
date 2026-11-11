@@ -1008,6 +1008,18 @@ def test_the_subgraph_labels_a_terminal_claim_the_same_way_the_ep_block_does(sdk
     assert node["ep_state"] == ep.get("ep_state"), (
         f"the response contradicts itself: subgraph {node['ep_state']!r} vs "
         f"the ep block {ep.get('ep_state')!r}")
+    # …and the ROW the derivation table states for a terminal claim that HAD a
+    # posterior: `has_ep`/`baseline` are both False (the #2490 gate clears the
+    # first, the resolved state clears the second) and the value is the decayed
+    # posterior — 0.5 here, because (1.0, 1.0) IS Beta(1,1). Pinned here because
+    # those three columns are computed in `annotate_ep_batch` and no unit-level
+    # row can reach them.
+    eps = annotate_ep_batch(proj.g, [pid])[pid]
+    assert eps.ep_state == EP_STATE_BASELINE, eps
+    assert eps.has_ep is False and eps.measured is False, eps
+    assert eps.baseline is False, eps
+    assert eps.confidence_mean == pytest.approx(0.5, abs=1e-6), (
+        f"a terminal claim's decayed posterior is a VALUE (0.5 here): {eps}")
 
 
 def test_a_legacy_string_operand_outside_float32_is_absent_on_every_surface(sdk):

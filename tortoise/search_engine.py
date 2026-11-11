@@ -294,20 +294,27 @@ class SearchScores:
 # R1 VALUE (``confidence_mean`` / :func:`belief_value`) — the `n.confidence`
 #    MIRROR when it is a readable probability; else α/(α+β) when BOTH operands
 #    are readable, non-negative and sum to > 0; else ``None``. The mirror LEADS,
-#    so every shape that has one has a value.
+#    so every shape with a READABLE mirror has a value (`16.0`, `-1.0`, `"abc"`
+#    and `true` are NOT readable — see :func:`belief_mirror`).
 # R2 STATE (:attr:`ep_state` / :func:`ep_state`) — ``absent`` if and only if R1
 #    answers ``None``; otherwise ``measured`` when :func:`ep_measured_cypher` is
-#    true (an α column is persisted and it is not a #2199 declared baseline),
-#    else ``baseline``. THEN the #2490 fold, :func:`ep_state_resolve` — see
-#    below, it is applied AFTER the persisted columns are read.
+#    true, else ``baseline``. ⛔ The predicate, spelled out because a paraphrase
+#    of it has been wrong more than once: `posterior_alpha IS NOT NULL OR
+#    (ep_alpha IS NOT NULL AND NOT baseline_set)` — `baseline_set` gates the
+#    `ep_alpha` ARM only, so a claim with BOTH a declared baseline and a
+#    persisted `posterior_alpha` is ``measured``. THEN the #2490 fold,
+#    :func:`ep_state_resolve` — see below, it is applied AFTER the persisted
+#    columns are read.
 # R3 FLAGS — ``has_ep``/``measured`` = :func:`ep_measured_cypher` on the stored
 #    columns, forced False for a terminal claim (#2490). ``baseline`` (the
-#    :class:`EpBreakdown` FIELD, not :func:`ep_baseline_cypher`) = ``baseline_set``
-#    AND NOT measured AND NOT terminal AND the RESOLVED state is ``baseline`` —
-#    so it is False beside ``absent``, False for a declared baseline made
-#    degenerate (0/0). It is TRUE for a declared baseline that carries a
-#    mirror — the flag says "prior-only", R1 still says which NUMBER leads —
-#    so it is a statement about the α predicate, never about the value.
+#    :class:`EpBreakdown` FIELD, not :func:`ep_baseline_cypher`) =
+#    ``baseline_set`` AND NOT measured AND NOT terminal AND the RESOLVED state
+#    is ``baseline``. That formula IS the contract — read it, and do not
+#    paraphrase it into a claim about one cause: it folds in the α predicate
+#    (`NOT measured`), the #2490 gate (`NOT terminal`) and R1's presence rule
+#    (the resolved state), so the flag is False beside ``absent``, False for a
+#    declared baseline made degenerate (0/0), and False for a declared baseline
+#    that is terminal or whose stored α makes the state ``measured``.
 #
 # ⛔ The #2490 FOLD is a step, not a column: a ``measured`` state on a claim the
 # caller did not measure (terminal) becomes ``baseline``, because the decayed
@@ -317,9 +324,11 @@ class SearchScores:
 # row is ``baseline`` with 0.5.
 #
 # Worked examples of the corner shapes, derived from R1–R3 (NOT additional
-# rules). `has_ep`/`baseline` are the two flags;
-# ``tests/test_11702_absent_belief_state.py`` pins these rows, so if this table
-# and that file ever disagree, the file is right:
+# rules). `has_ep`/`baseline` are the two :class:`EpBreakdown` flags — computed
+# by :func:`annotate_ep_batch`, so the store-level tests are what pin those two
+# columns, while the unit-level table test pins predicate/state/mean.
+# ``tests/test_11702_absent_belief_state.py`` pins every row; if this table and
+# that file ever disagree, the file is right:
 #
 #   shape (stored columns / caller)     has_ep  baseline  ep_state   mean
 #   nothing persisted                   False   False     absent     None
@@ -361,7 +370,10 @@ def ep_prior_only_cypher(alias: str) -> str:
     baseline with NO EP measurement. NOT the same as "unmeasured" — an
     unmeasured claim carries no persisted prior at all (and since #11702 its
     confidence_mean is `None` + `ep_state: "absent"`, not a neutral 0.5),
-    while a prior-only claim's confidence_mean IS the declared PRIOR mean.
+    while a prior-only claim's confidence_mean is the declared PRIOR mean — or
+    the MIRROR's value when the claim also carries a readable `n.confidence`,
+    because R1 leads (stated above `ep_measured_cypher`). The predicate above
+    is about the STORED columns; it never promises which number wins.
 
     Kept textually in step with the Python twin: for every combination of
     (posterior_alpha, ep_alpha, baseline_set) this helper is true iff
@@ -5519,11 +5531,12 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                         if (pair_stored and alpha_num is not None
                             and beta_num is not None) else 0.0)
             breakdowns[pid] = EpBreakdown(
-                # #11702: `None` when nothing YIELDS a mean (nothing persisted, a
-                # half pair, a 0/0 pair, an unreadable operand — each only where
-                # no mirror supplies the belief, since the mirror leads) — never
-                # the neutral 0.5, which is what made "no evidence" and "a
-                # measured coin flip" the same number here.
+                # #11702: `None` exactly when R1 yields no value — no READABLE
+                # mirror, and no α/β pair this process can read as a belief (both
+                # operands present, numeric, non-negative, summing to > 0). State
+                # the RULE rather than a list of shapes: the list is what kept
+                # going stale here. Never the neutral 0.5, which is what made
+                # "no evidence" and "a measured coin flip" the same number.
                 confidence_mean=value,
                 ep_state=state,
                 evidence=EpEvidence(impl_count=impl, nand_count=nand, total=total),
