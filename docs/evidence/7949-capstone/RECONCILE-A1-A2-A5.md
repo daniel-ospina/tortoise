@@ -95,7 +95,7 @@ record said nothing called.** `#11237`'s write path landed as **`#11548`** (`e49
 S5 Job 1 remainder — the relations channel gets a write path (`#11237`)*): a new module
 `tortoise/relation_write.py` is the consumer `#10999` did not have, called from
 `TortoiseSDK._extract_session_v2` at `tortoise/sdk.py:17805` (`relation_write = apply_relation_edges(` —
-the `from tortoise.relation_write import apply_relation_edges` is the line above it, `:17689`, and the
+the `from tortoise.relation_write import apply_relation_edges` is the line above it, `:17804`, and the
 binding below is the result), fed **only** by
 the typed record (`out["relations"]`) and never by the story text (`#10000`). Two measurements, both
 taken on this merge:
