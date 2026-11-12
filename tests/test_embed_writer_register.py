@@ -409,6 +409,84 @@ def test_the_live_guard_has_teeth_on_an_INJECTED_writer(tmp_path):
             register.classify(key)
 
 
+#: One scratch module per KIND discovery can emit, with the population verdict the guard's own
+#: scope (`NEEDS_A_DECLARATION`) must give it. Data, so the pin reads as the criterion it measures.
+DECLARATION_OWED_BY_KIND: dict[str, tuple[str, bool, str]] = {
+    "unresolved_write": (
+        'def w(tx):\n    tx.query("SET n.embedding = $e")\n',
+        True,
+        "a writer whose embedding store is real and whose chain is outside the vocabulary",
+    ),
+    "ungated": (
+        "def w(rows, tx):\n"
+        '    tx.query("SET n.embedding = $e")\n'
+        "    return compute_session_embedding(rows)\n",
+        True,
+        "a vector produced through an ungated primitive AND stored — the row-1 gap itself",
+    ),
+    "gated": (
+        "def w(text):\n    return encode_for_row(text, 384)\n",
+        False,
+        "the gate DECIDES this writer's write, so a declaration would be a claim about a path the "
+        "rule already covers",
+    ),
+    "producer": (
+        "def w(rows):\n    return encode_for_store(rows)\n",
+        False,
+        "it computes a vector another (declared) writer stores; declaring it would double-count",
+    ),
+    "duplicate": (
+        'def w(tx):\n    tx.query("SET n.embedding = $e")\n'
+        '\ndef w(tx2):\n    tx2.query("SET n.embedding = $e")\n',
+        False,
+        "a `duplicate` row is an UNRESOLVED kind the register cannot classify — a different defect, "
+        "pinned by `test_every_writer_the_instrument_finds_outside_the_gate_is_declared`'s own arm",
+    ),
+}
+
+
+def test_NEEDS_A_DECLARATION_is_the_scope_the_guard_is_scored_on(tmp_path):
+    """`#11274`: the guard's SCOPE, pinned — dropping a kind must RED, not shrink the work.
+
+    `test_every_writer_the_instrument_finds_outside_the_gate_is_declared` iterates
+    `_writers_outside_the_gate()`, which filters discovery's map by `NEEDS_A_DECLARATION`. So that
+    tuple IS the guard's scope, and a narrower one reds nothing: it just scores fewer writers.
+    ⛔ Measured before this pin: deleting `"unresolved_write"` from it left every test in this file
+    green — the whole suite would have certified a guard measuring 9 of the population.
+    (`#11274`'s own acceptance names this mutation, so the absence of the pin is what the issue's
+    verification bullet had not yet bought.)
+
+    Both DIRECTIONS are driven, each against the real discovery filter on a scratch module — the
+    membership assertions are not enough on their own, because a kind could be in the tuple while
+    discovery never emits it (a dead name), or emitted by discovery and not in the tuple (a hole).
+    """
+    assert set(NEEDS_A_DECLARATION) == {"unresolved_write", "ungated"}, (
+        f"the guard's scope is {NEEDS_A_DECLARATION!r} — this tuple is the population every "
+        "'an undeclared writer cannot bypass silently' claim is scored on, so a change here is a "
+        "CLAIM change: state it in the register and re-derive the guard with it"
+    )
+    owed: set[str] = set()
+    for kind, (body, expected, why) in DECLARATION_OWED_BY_KIND.items():
+        found = probe._embedding_writers(_scratch_root(tmp_path, kind, body))
+        assert found, f"the {kind!r} scratch module produced no writer at all: {why}"
+        for key, entry in found.items():
+            scored = entry["kind"] in NEEDS_A_DECLARATION
+            assert scored is expected, (
+                f"{kind}: discovery classed {key} as {entry['kind']!r} and the guard scores that "
+                f"kind {scored}, expected {expected} — {why}")
+            if scored:
+                owed.add(key)
+    assert owed, "no kind reached the guard's population — the pin proves nothing"
+
+    # …and the population the guard DERIVES on the real tree is the one it scores, not a subset of
+    # its own kinds: every declared writer outside the gate is IN it, and no `gated` writer is.
+    outside = _writers_outside_the_gate()
+    assert outside == {k for k, e in probe.embedding_writers().items()
+                       if e["kind"] in NEEDS_A_DECLARATION}, sorted(outside)
+    assert outside, "the outside-gate population is empty — re-measure the guard, do not pass it"
+    assert not {k for k in outside if register.is_declared(k) is False}, sorted(outside)
+
+
 def test_the_exported_ROUTE_seams_are_the_ones_the_class_claims_are_used():
     """`RECOGNISED_PRODUCER_SEAMS` is the class's definition AS DATA, and the entries agree.
 
@@ -834,6 +912,19 @@ def test_every_declaration_cites_a_seam_and_an_owning_issue():
                 f"{key} cites `{module}::{symbol}`, but {path.relative_to(REPO_ROOT)} does not "
                 "define it — the seam moved and the declaration's evidence went with it"
             )
+        # ⛔ `#11274`: the citation must include the writer's OWN module, not only a sibling it
+        # happens to reach. A reason made ONLY of other-module citations resolves fine and says
+        # nothing about the writer's own body — which is the half every other pin in this file reads.
+        # Asserted per ENTRY (at least one citation resolves to the key's own module), because a
+        # legitimate reason cites helpers elsewhere too (`_update_entity` cites
+        # `_CANONICAL_ENTITY_ID_PROPS` in `tortoise.projection`).
+        own = _resolve_module(key.split("::", 1)[0])
+        assert own is not None and own in {
+            _resolve_module(module) for module, _symbol in cited
+        }, (
+            f"{key} cites {[f'{m}::{s}' for m, s in cited]} and NONE of them is the writer's own "
+            f"module — the entry's evidence must be reachable from the writer it declares"
+        )
     # ⛔ The RESOLVER itself is pinned (round-18 review). `.py`-before-package ordering made a
     # dotted citation of a PACKAGE collide with a same-named deprecated SHIM
     # (`tortoise/projection.py` re-exports `tortoise/projection/__init__.py`), so
