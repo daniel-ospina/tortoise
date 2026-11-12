@@ -358,6 +358,15 @@ _ALIASABLE_CALL_NAMES: frozenset[str] = (
 #: `from thirdparty.lib import encode_for_row` then `encode_for_row(text)` is `gated` — the flip this
 #: rationale describes is still one UN-ALIASED import away. Named in `UNDECIDABLE_WRITE_SHAPES`
 #: ("literal seam spelling …") rather than papered over.
+#: ⛔ AND THE TWO SPELLINGS ARE NOT SYMMETRIC ACROSS NAMES (`#12020`, measured). The names in this
+#: map split by what CREDIT does to the writer:
+#:   • `SEAM_CALL` — credit makes the writer `gated`, which is OUTSIDE `NEEDS_A_DECLARATION`. So an
+#:     over-credit HIDES it: dropping a doubtful alias is the safe direction.
+#:   • a clause builder / `UNGATED_CALLS` — the alias is the ONLY discovery signal (the text pass
+#:     cannot see an aliased call), so dropping a doubtful alias makes the writer INVISIBLE
+#:     (measured `{}`), which is the empty-map fail-open this module exists to close. There,
+#:     over-credit is the safe direction.
+#: `_is_alias_home` is the one place that encodes the split; both readers use it.
 _ALIAS_HOMES: dict[str, frozenset[str]] = {
     "set_embedding_clause": frozenset({"tortoise.vector_write", "vector_write"}),
     "clear_then_set_prefix": frozenset({"tortoise.vector_write", "vector_write"}),
@@ -379,10 +388,29 @@ def _accepted_homes(alias_name: str, level: int) -> frozenset[str]:
     different function (`unresolved_write` on `main`). That is the same two-copies leak this file
     already records for `_own_scope_bindings` (rounds 4/5), so the predicate is shared rather than
     restated.
+
+    ⛔ THE LEVEL RULE BELONGS TO `SEAM_CALL` ONLY (`#12020`, measured — and applying it to every name
+    was a REGRESSION that deleted writers). The names in `_ALIAS_HOMES` split by what CREDIT does:
+
+      • `SEAM_CALL` — credit makes the writer `gated`, which is OUTSIDE `NEEDS_A_DECLARATION`, so an
+        over-credit HIDES it. Dropping a doubtful alias is the safe direction, so the bare spelling
+        is accepted only for a RELATIVE import (`level > 0`) and an absolute one must name the
+        package.
+      • a clause builder / `UNGATED_CALLS` — the alias is the ONLY discovery signal (the text pass
+        cannot see an aliased call), so dropping a doubtful one makes the writer INVISIBLE. Measured
+        `{}` for `from vector_write import set_embedding_clause as _set` where the level rule was
+        applied uniformly and `unresolved_write` without it. There, over-credit is the safe
+        direction and BOTH spellings are accepted, exactly as before.
+
+    ⚠️ And it does NOT resolve package DEPTH: a subpackage's `from .embeddings import …` lands in
+    `<pkg>.embeddings`, not `tortoise.embeddings`, and this predicate cannot tell — the walker is
+    handed a root, not the importing module's package. Latent (measured `gated`; no
+    `tortoise/**/embeddings.py` exists) and filed rather than guessed at here.
     """
-    return frozenset(
-        home for home in _ALIAS_HOMES.get(alias_name, frozenset())
-        if ("." not in home) == bool(level))
+    homes = _ALIAS_HOMES.get(alias_name, frozenset())
+    if alias_name != SEAM_CALL:
+        return homes
+    return frozenset(home for home in homes if ("." not in home) == bool(level))
 
 #: Write shapes discovery CANNOT decide, with the reason — named so the
 #: register's claim can be scoped to the mechanism rather than wider than it
@@ -590,7 +618,8 @@ def _imports_that_REBIND(root_children) -> set[str]:
             for alias in sub.names:
                 if alias.name == "*":
                     continue
-                resolves = module in _accepted_homes(alias.name, sub.level)
+                resolves = (alias.name in _ALIASABLE_CALL_NAMES
+                            and module in _accepted_homes(alias.name, sub.level))
                 if not resolves:
                     rebound.add(alias.asname or alias.name)
     return rebound
@@ -721,6 +750,29 @@ def _import_aliases(*roots: ast.AST, own_scope_only: bool) -> dict[str, str]:
                     continue  # a same-named function from somewhere else is not this seam
                 found[alias.asname or alias.name] = alias.name
     return found
+
+
+def _is_alias_home(name: str, module: str, level: int) -> bool:
+    """Whether an `ImportFrom` binds `name` to THAT name's real home (`#12020`).
+
+    The one predicate both readers use, because the two directions are not the same for every name
+    (see `_ALIAS_HOMES`). `level` is `ast.ImportFrom.level`: `0` = absolute, `> 0` = relative.
+
+    * `SEAM_CALL` — crediting it makes the writer `gated`, which is OUTSIDE `NEEDS_A_DECLARATION`,
+      so an over-credit HIDES the writer. There the BARE spelling is the home only for a RELATIVE
+      import; an absolute import must name the package. ⛔ A SUBPACKAGE's `from .embeddings import …`
+      also lands nowhere near `tortoise.embeddings`, and this does NOT resolve package depth — the
+      walker is handed a root, not the importing module's package. That shape is LATENT (measured
+      `gated` — the dangerous direction — with no subpackage doing it today: no `tortoise/**/embeddings.py`
+      exists) and is filed rather than fixed here, because resolving it needs the file's package,
+      which this walk does not carry.
+    * everything else — the alias is the ONLY discovery signal, so dropping a doubtful one makes the
+      writer INVISIBLE. Over-credit is the safe direction: both spellings are accepted, as before.
+    """
+    homes = _ALIAS_HOMES.get(name, frozenset())
+    if name != SEAM_CALL:
+        return module in homes
+    return module in {home for home in homes if ("." not in home) == bool(level)}
 
 
 def _locally_bound(node) -> set[str]:

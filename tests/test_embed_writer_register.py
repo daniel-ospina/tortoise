@@ -3700,6 +3700,20 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
         "`level == 0` means the package must be spelled out, so this is a different function and "
         "the writer owes a declaration",
     ),
+    # ⛔ The SPLIT the fix encodes, pinned: the level rule applies to the SEAM (where credit is
+    # dangerous), NOT to a clause builder (where the alias is the only discovery signal and dropping
+    # it makes the writer INVISIBLE). Without this row, a future "consistency" cleanup that applied
+    # the level rule uniformly would pass the seam rows and silently delete builders from the census.
+    "foreign_ABSOLUTE_builder_alias_must_STAY_discovered": (
+        "from vector_write import set_embedding_clause as _set\n"
+        "\n"
+        "def w(proj):\n"
+        '    proj.g.query("MATCH (n:Point) SET n += $p", {"p": _set("n")})\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "a builder alias whose import module merely shares the bare home spelling: for a BUILDER "
+        "the alias is the only discovery signal, so over-crediting is the SAFE direction — dropping "
+        "it measured `{}` (writer absent) where the parent had `unresolved_write`",
+    ),
     "honest_RELATIVE_import_with_the_bare_home_spelling": (
         "from .embeddings import encode_for_row as _enc\n"
         "from tortoise.vector_write import set_embedding_clause\n"
