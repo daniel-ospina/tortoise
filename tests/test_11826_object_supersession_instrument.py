@@ -2557,6 +2557,11 @@ def test_a_shaped_neutral_row_is_not_told_to_move_the_edge(sdk):
     assert "move this IMPL edge off" not in fix, (
         "a neutral edge transfers nothing even after the move: " + fix)
     assert "DELETE it instead — §3.1's disposition here is DROP" in fix, fix
+    # ⛔ Neither the ambiguity prefix nor the chain tail: both are written for a
+    # RE-POINT, and this string says DELETE (#12210 review, P3).
+    assert "re-point onto the intended one by ID" not in fix, fix
+    assert "target THAT, not the immediate successor" not in fix, fix
+    assert "target a CLAIM successor" not in fix, fix
     assert "EP never reaches the direction test for this endpoint" not in fix, (
         "once the shape is cleared EP DOES reach the direction test: " + fix)
 
@@ -2585,3 +2590,31 @@ def test_a_shaped_row_does_not_name_a_refused_successor(sdk):
         "the named successor is refused by EP, so it cannot be the destination: "
         + fix)
     assert "NOT the one it names ('PolicyV2')" in fix, fix
+
+
+def test_a_neutral_shaped_row_gets_no_chain_tail(sdk):
+    """The shape arm's ``tail`` is re-point advice, and a neutral row says DELETE.
+
+    ``_chain_tail`` appends "target THAT, not the immediate successor" / "target a
+    CLAIM successor", and the ambiguity ``prefix`` says "re-point onto the intended
+    one by ID" — both order a transfer a neutral edge cannot perform. Measured on a
+    neutral shaped row with a third link in the chain (#12210 review, P3).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    _obj(sdk, "PolicyV3")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"], direction="-")
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _supersede_object(sdk, "PolicyV2", "PolicyV3")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "DELETE it instead — §3.1's disposition here is DROP" in fix, fix
+    for advice in ("target THAT, not the immediate successor",
+                   "target a CLAIM successor", "re-point onto the intended one"):
+        assert advice not in fix, (
+            f"{advice!r} is re-point advice on a row whose instruction is DELETE: "
+            + fix)

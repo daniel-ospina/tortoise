@@ -1804,7 +1804,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # shaped active endpoint: clearing the shape alone restored NO belief and
             # the re-pointed neutral edge carried none either (bare prior,
             # ``effective_n 2.0``, versus a real transfer on the flowing control).
-            return prefix + (
+            # ⛔ NO ``prefix``/``tail`` on a NEUTRAL row, for the reason the neutral
+            # DIRECT arm records: both are written for a RE-POINT ("so re-point onto
+            # the intended one by ID", "target THAT, not the immediate successor") and
+            # this string now says DELETE (#12210 review, P3).
+            return (("" if neutral else prefix) + (
                 "No edge rewrite ALONE repairs this: EP builds NO factor in either "
                 "arm (the operator arm needs the :Point LABEL and "
                 "(``is_operator = true`` or an ``op_type``), the direct-edge arm "
@@ -1821,7 +1825,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                   "FLAG alone restores nothing while the edge still ends at the "
                   "superseded Object (measured: ``confidences {}``, and the row "
                   "comes back exactly as it was where the shape came from "
-                  "``op_type``, because the flag was already false)" + tail)
+                  "``op_type``, because the flag was already false)"
+                + ("" if neutral else tail)))
         if not s["is_operator"]:
             # ⛔ The NEUTRAL test belongs HERE too, not only below: it used to sit
             # after this branch, so a `-` direct edge got "re-point it onto the
