@@ -543,9 +543,11 @@ _GH_EXEC = (
     re.compile(r"""["']gh["']\s*[),\]]"""),
     re.compile(r"\bGH_BIN\b"),  # resolved, then exec'd
 )
-#: A harness is not what a workflow runs IN ANGER, and three of them legitimately
-#: exercise `gh` (they install a STUB on PATH). They are excluded by NAME, not by
-#: which glob they came from, so the exclusion cannot drift with the directory.
+#: A harness is not what a workflow runs IN ANGER; the ones that legitimately exercise
+#: `gh` install a STUB on PATH. TWO do today (`ai-review-gate.test.sh`,
+#: `deploy-api-alert.test.sh` — re-derived by matching `_GH_EXEC` against every file this
+#: predicate excludes, so the number is measured, not remembered). They are excluded by
+#: NAME, not by which glob they came from, so the exclusion cannot drift with the directory.
 _NOT_A_HARNESS = re.compile(r"\.test\.|^test_")
 #: Everywhere a script that shells out to `gh` can live. `graph-scripts/` was missing and
 #: is a real home for one (`e2e_live_reconcile.py` runs in `e2e-live-reconcile`).
@@ -614,17 +616,40 @@ def _gh_executing_scripts() -> frozenset[str]:
 
 
 def _jobs(path: Path) -> list[tuple[str, list[str]]]:
-    """(job name, its lines) for every job in a workflow file."""
+    """(job name, its lines) for every job in a workflow file.
+
+    ⛔ BOUNDED TO THE `jobs:` BLOCK, and that bound is load-bearing rather than tidy. An
+    earlier version collected EVERY two-space key in the file, which included the children
+    of `on:` — so `push:`, `schedule:` and each `pull_request:` entry came back as a "job"
+    (measured: 171 entries for 92 real jobs across the 41 workflows). A trigger block is a
+    silently-scanned pseudo-job carrying a `paths:` list, which really does name workflow
+    and helper-script paths, so the name arm flagged `welcome-e2e-monitor.yml::push` as a
+    `gh` hazard. That was harmless only because a trigger block has no `runs-on` and the
+    coverage scan skips it — a coincidence, not a guarantee.
+
+    The `jobs:` bound closes that, and with it a latent FAIL-OPEN the unbounded version
+    also had: a job header written with a trailing comment (`  build:  # note`) or a quoted
+    id (`  "build":`) did not match, so the job was invisible — and if it was the first
+    two-space key in its file, its whole body was dropped from the scan. Tolerating both
+    spellings is enough; nothing in the tree uses either today.
+    """
     lines = path.read_text().splitlines()
-    starts = [
-        (i, m.group(1))
-        for i, line in enumerate(lines)
-        if (m := re.match(r"^  ([A-Za-z0-9_.-]+):\s*$", line))
-    ]
+    header = re.compile(r'^  (?:"([^"]+)"|\'([^\']+)\'|([A-Za-z0-9_.-]+)):\s*(?:#.*)?$')
+    start = next((i for i, line in enumerate(lines) if re.match(r"^jobs:\s*(?:#.*)?$", line)), None)
+    if start is None:
+        return []
+    starts: list[tuple[int, str]] = []
+    for i in range(start + 1, len(lines)):
+        line = lines[i]
+        if line and not line[0].isspace() and not line.startswith("#"):
+            break  # the next top-level key: the `jobs:` block ended
+        m = header.match(line)
+        if m:
+            starts.append((i, next(g for g in m.groups() if g is not None)))
     out = []
-    for n, (start, name) in enumerate(starts):
+    for n, (at, name) in enumerate(starts):
         end = starts[n + 1][0] if n + 1 < len(starts) else len(lines)
-        out.append((name, lines[start:end]))
+        out.append((name, lines[at:end]))
     return out
 
 
@@ -693,10 +718,15 @@ def _poolable_label(text: str) -> bool:
     unresolvable value must be "assume it can reach the pool".
 
     This is the same rule the installer already applies from the other side:
-    `tools/install-ci-runner-x64.sh:377-378` skips `${{ … }}` — its comment reads
-    "a matrix expression (`${{ … }}`) is not a label; it is resolved per job at run
-    time" — but that reader resolves labels against the ONLINE runner list instead.
-    This scan has no such second source, so it cannot skip: it must fail closed.
+    `tools/install-ci-runner-x64.sh:759-764` REFUSES an expression rather than skipping it —
+    "A matrix expression (`runs-on: ${{ matrix.os }}`) is the same case for a different
+    reason: its label set is not static, so there is nothing to verdict" — and the refusal
+    is `exit 4`, never a silent 0. (An earlier version of this paragraph cited `:377-378`
+    and quoted a sentence that exists nowhere in that file: `:377-378` are `# label algebra`
+    and `# Host-derived labels` comments. It also called the behaviour "skips", the
+    opposite of what the script does.) The installer resolves labels against the ONLINE
+    runner list instead; this scan has no such second source, so it cannot verdict: it must
+    fail closed.
 
     RESIDUAL — shapes this reader still does not see, all returning False (the same
     silent skip, one shape further out): a YAML ALIAS (`runs-on: *pool_labels`), a
@@ -710,9 +740,10 @@ def _poolable_label(text: str) -> bool:
     inline arm text-searches the whole rest of the line, while the BLOCK one stops at
     `group:` — no `- ` item matches, the item loop breaks, and the job comes back
     invisible although `ubuntu-24.04` is named one line below in `labels:`. None is
-    used in the tree today — all 86 `runs-on:` keys are single-line values (one of
-    them, `ci.yml:1534`, an inline FLOW list the inline arm answers), so the miss is
-    latent, not live — and they are named here so the next author writing one of them
+    used in the tree today — all 88 `runs-on:` keys carry their value on the key's own line
+    (86 plain scalars, one inline FLOW list at `ci.yml:1609` that the inline arm answers, and
+    one expression at `python-ci.yml:745`), so the miss is latent, not live — and they are
+    named here so the next author writing one of them
     knows the scan is a text reader rather than a YAML parser, and adds the shape
     instead of assuming coverage.
     """
@@ -747,12 +778,33 @@ _MESSAGE_CMDS = ("echo", "printf")
 #: argument without executing it (`>&2`, `>/dev/null`), and a PIPE IS NOT — a pipe hands
 #: the text to the next command, which is exactly how `echo 'bash h.sh' | bash` runs the
 #: helper.
+#:
+#: ⛔ THE REDIRECT TARGET IS OPTIONAL, and that is not sloppiness. `_blank_quoted` replaces
+#: every quoted span with a space, so a QUOTED target erases itself:
+#: `echo "…helper…" >> "$GITHUB_STEP_SUMMARY"` blanks to `echo   >>  `. A target class of
+#: `[^\s;|&<>]+` then had nothing to consume, the anchored match failed, and the line fell
+#: through to the raw search — so the most idiomatic redirect in this tree (`>>` to the job
+#: summary, 10 live uses) turned PROSE into a HAZARD while its UNQUOTED twin
+#: (`> /dev/null`) stayed inert. A bare `>` with no target left is a bash SYNTAX ERROR, so
+#: treating it as a redirect that consumed nothing is the safe reading, not a hole.
 _INERT_MESSAGE = re.compile(
     r"^\s*(?:-\s+)?(?:run:\s*)?(?:" + "|".join(_MESSAGE_CMDS) + r")"
     r"(?:\s+-[A-Za-z]+)*"  # the message command's own flags (`-e`, `-n`)
-    r"(?:\s*(?:\d?>>?|\d?>&|&>>?)\s*[^\s;|&<>]+)*"  # redirects only — never a pipe
+    r"(?:\s*(?:\d?>>?|\d?>&|&>>?)\s*[^\s;|&<>]*)*"  # redirects only — never a pipe
     r"\s*$"
 )
+
+#: A TRAILING COMMENT is not code. bash starts one at a `#` that begins a WORD (preceded by
+#: whitespace or start of line); `echo foo#bar` prints `foo#bar`. Stripped from the BLANKED
+#: text only — the raw arm still sees everything — so `echo "…helper…"  # note` stays inert
+#: instead of falling through to the raw search and reporting its own comment prose.
+_TRAILING_COMMENT = re.compile(r"(?:^|\s)#.*$", re.DOTALL)
+
+#: bash's two WORD-joining rules, applied to a line so a SPLIT name is still visible to the
+#: contiguous-name matcher (see `_gh_hazards`): delete the quote characters, and unescape
+#: `\X`. Run only on lines that are NOT inert, so a message's own prose quotes are untouched.
+_UNQUOTED = re.compile(r"[\"']")
+_UNESCAPED = re.compile(r"\\(.)")
 
 #: The quote characters bash treats as span delimiters.
 _QUOTE_CHARS = frozenset({"'", '"'})
@@ -911,7 +963,7 @@ def _message_line_is_inert(line: str) -> bool:
     constant and this line pays for `echo "$(bash h.sh)"` staying closed. The direction
     is the acceptable one: over-reporting asks a healthy job for a contract step, which
     is visibly repairable; under-reporting hides an undeclared `gh` helper, which is the
-    defect the gate exists for. MEASURED for live cost: across all 41 workflows / 171 jobs
+    defect the gate exists for. MEASURED for live cost: across all 41 workflows / 92 jobs
     this arm and #12149's landed walker produce ZERO differing verdicts — no live instance
     exists in the tree today. Pinned in both directions by
     `test_the_nested_substitution_residual_is_over_report_not_a_miss`; if one ever
@@ -943,7 +995,7 @@ def _message_line_is_inert(line: str) -> bool:
         return False
     if _MESSAGE_WORD.match(line) is None:
         return False
-    return _INERT_MESSAGE.match(_blank_quoted(line)) is not None
+    return _INERT_MESSAGE.match(_TRAILING_COMMENT.sub("", _blank_quoted(line))) is not None
 
 
 def _gh_hazards(body: list[str], scripts: frozenset[str]) -> list[str]:
@@ -952,7 +1004,7 @@ def _gh_hazards(body: list[str], scripts: frozenset[str]) -> list[str]:
     # `python3 -m pytest tests/test_ci_timing.py` look like a `gh` user (the helper
     # name `ci_timing.py` sits inside the test module's name), and the remedy it
     # demands — `ensure gh` — FAILS CLOSED, so on a no-egress pool runner it would
-    # red a healthy job. 15 such test modules exist (#9939 review).
+    # red a healthy job. 32 such test modules exist today (#9939 review).
     script_ref = (
         re.compile(
             r"(?<![\w.-])(?:" + "|".join(re.escape(s) for s in sorted(scripts)) + r")(?![\w.-])"
@@ -969,8 +1021,35 @@ def _gh_hazards(body: list[str], scripts: frozenset[str]) -> list[str]:
         # read from quote-stripped text (a `gh` in an operator message is prose), while a
         # helper-script NAME is read from the RAW line unless the WHOLE line can only
         # print, in which case quote-stripped text is used instead.
-        name_text = code if _message_line_is_inert(line) else line
-        if _GH_CMD.search(code) or (script_ref is not None and script_ref.search(name_text)):
+        #
+        # ⛔ AND THE RAW LINE IS NOT ENOUGH, because bash WORD-SPLICES. `script_ref` matches a
+        # CONTIGUOUS name, but bash joins adjacent quote-delimited fragments and unescapes
+        # `\X`, so all three of these RUN the helper while no literal `tools/ci_timing.py`
+        # appears in the line (measured against a stub that ran under `bash -c`, and identical
+        # on the walker this PR replaces — so this is a PRE-EXISTING fail-open, not one the
+        # change introduces):
+        #
+        #     bash tools"/ci_timing."py     -> bash tools/ci_timing.py
+        #     bash 'tools/ci_'timing.py    -> bash tools/ci_timing.py
+        #     bash tools/ci_tim\ing.py     -> bash tools/ci_timing.py
+        #
+        # The two views below are exactly bash's two joining rules applied to the same line,
+        # so a spliced name is visible without a parser: delete the quote characters (bash
+        # deletes them and keeps the words adjacent), and unescape `\X` (bash does the same).
+        # Neither view can INVENT a name the line does not already spell out in order, so this
+        # adds no false-positive class beyond the raw arm's own.
+        #
+        # STATED RESIDUAL — a name assembled through a VARIABLE is out of reach of any name
+        # matcher and stays out: `for f in ci_timing; do bash tools/$f.py; done`,
+        # `H=tools/ci_timing; bash $H.py`. Both RUN the helper and both return no hit. Closing
+        # that needs dataflow, not a regex; named here so nobody reads this arm as complete.
+        if _message_line_is_inert(line):
+            name_views: tuple[str, ...] = (code,)
+        else:
+            name_views = (line, _UNQUOTED.sub("", line), _UNESCAPED.sub(r"\1", line))
+        if _GH_CMD.search(code) or (
+            script_ref is not None and any(script_ref.search(v) for v in name_views)
+        ):
             hits.append(stripped)
     return hits
 
@@ -1023,6 +1102,35 @@ def test_every_pool_eligible_gh_job_is_declared():
 _ENV_DEFAULTED_GH = ("branch_reaper.py", "run_reaper.py", "e2e_live_reconcile.py")
 
 
+def test_the_job_splitter_returns_exactly_the_jobs_yaml_declares():
+    """`_jobs` must enumerate JOBS, not every two-space key in the file.
+
+    ⛔ WITHOUT THIS PIN THE BOUND IS UNENFORCED, and it is load-bearing twice over. The
+    unbounded version also collected the children of `on:` — so `push:`, `schedule:` and each
+    `pull_request:` entry came back as a "job" (measured: 171 entries for 92 real jobs across
+    the 41 workflows). Those pseudo-jobs carry a `paths:` list that really does name workflow
+    and helper-script paths, so the name arm flagged `welcome-e2e-monitor.yml::push` as a `gh`
+    hazard — harmless only because a trigger block has no `runs-on`, which is a coincidence and
+    not a guarantee. In the other direction a job header with a trailing comment or a quoted id
+    did not match at all, so the job (and, if it came first, its whole body) left the scan
+    silently.
+
+    Comparing against `yaml.safe_load` is the point: it is an INDEPENDENT reader, so this
+    cannot pass by agreeing with `_jobs`' own mistakes.
+    """
+    wrong = []
+    for path in sorted(WORKFLOWS.glob("*.yml")):
+        declared = set((yaml.safe_load(path.read_text()) or {}).get("jobs") or {})
+        split = [name for name, _ in _jobs(path)]
+        if set(split) != declared or len(split) != len(declared):
+            wrong.append(f"{path.name}: _jobs={sorted(split)} declared={sorted(declared)}")
+    assert not wrong, (
+        "_jobs no longer agrees with the `jobs:` block these files declare — a pseudo-job (an "
+        "`on:` trigger child) is being scanned as a job, or a real job is being dropped from "
+        "the scan: " + "; ".join(wrong)
+    )
+
+
 def test_the_gh_script_derivation_has_no_visible_blind_spot():
     """Re-measure the idiom claim against the tree — do not trust its docstring."""
     scripts = _gh_executing_scripts()
@@ -1055,9 +1163,29 @@ def test_a_test_module_named_like_a_helper_is_not_a_gh_hazard():
     scripts = _gh_executing_scripts()
     assert _gh_hazards(["        run: python3 -m pytest tests/test_ci_timing.py -q"], scripts) == []
     assert _gh_hazards(["        run: bash .github/scripts/ci_timing.test.sh"], scripts) == []
+    # ⛔ THE TRAILING HALF OF THE BOUNDARY, which the rows above do NOT arm. `test_ci_timing.py`
+    # is also caught by the LEADING lookbehind (the `_` before the stem), so deleting
+    # `(?![\w.-])` from the compiled pattern left this suite green — the docstring's "the helper
+    # name must not be part of a longer path component" was half-armored. These rows violate
+    # only the TRAILING arm, so they red exactly when it goes.
+    assert _gh_hazards(["        run: python3 tools/ci_timing.py.bak"], scripts) == []
+    assert _gh_hazards(["        run: python3 tools/ci_timing.pyc"], scripts) == []
     # …while a REAL invocation of the helper is still a hazard, in both shapes.
     assert _gh_hazards(["        run: python3 tools/ci_timing.py --refresh-durations"], scripts)
     assert _gh_hazards(['        run: python3 "$GITHUB_WORKSPACE/tools/ci_timing.py"'], scripts)
+    # ⛔ A NAME SPLIT BY QUOTING OR ESCAPING IS STILL A NAME (see `_gh_hazards`). bash
+    # WORD-SPLICES, so each of these executes `tools/ci_timing.py` while no contiguous
+    # spelling of it appears in the line — measured against a stub that ran under `bash -c`.
+    # This was a PRE-EXISTING fail-open, identical on the walker this PR replaces.
+    for spliced in (
+        '        run: bash tools"/ci_timing."py',
+        "        run: bash 'tools/ci_'timing.py",
+        "        run: bash tools/ci_tim\\ing.py",
+    ):
+        assert _gh_hazards([spliced], scripts), spliced
+    # …and the DECLARED residual stays a residual: a name assembled through a variable is out
+    # of reach of a name matcher. Asserted so the limitation is measured, not folklore.
+    assert _gh_hazards(["        run: H=tools/ci_timing; bash $H.py"], scripts) == []
 
 
 def test_an_operator_message_naming_a_helper_is_not_a_gh_hazard():
@@ -1221,12 +1349,30 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     assert _gh_hazards([f"            printf 'run tools/{helper} by hand\\n'"], scripts) == []
     assert _gh_hazards([f'            echo "a & b: run tools/{helper} by hand"'], scripts) == []
     assert _gh_hazards([f'            echo "a; b: run tools/{helper} by hand"'], scripts) == []
+    # ⛔ `|` AND `||` ARE PINNED TOO, and the omission was measured as a real hole rather than
+    # noticed by reading. #12149's final commit added these two rows after a fresh review; the
+    # rebase onto that head dropped them, and the drop was INVISIBLE — injecting the plausible
+    # narrowing `if "|" in line: return False` into `_message_line_is_inert` left this suite
+    # green while the same class of regression reds #12149's. A message whose PROSE carries a
+    # pipe is the exact false block #12133 is about, so the rows are load-bearing.
+    assert _gh_hazards([f'            echo "a | b: run tools/{helper} by hand"'], scripts) == []
+    assert _gh_hazards([f'            echo "a || b: run tools/{helper} by hand"'], scripts) == []
     assert _gh_hazards([f'            echo -e "run tools/{helper}\n"'], scripts) == []
     # …and a trailing REDIRECT is inert, because a redirect consumes its argument without
     # executing it. This is the part of #12157 the conservative rule can close for free.
     assert _gh_hazards([f'            echo "run tools/{helper}" >&2'], scripts) == []
     assert _gh_hazards([f'            echo "run tools/{helper}" > /dev/null'], scripts) == []
     assert _gh_hazards([f'            echo "run tools/{helper}" 2>&1'], scripts) == []
+    # …and so is a QUOTED target, which `_blank_quoted` erases to a space — the shape that made
+    # `>> "$GITHUB_STEP_SUMMARY"` (10 live uses in this tree) read as a hazard while its
+    # unquoted twin stayed inert. And a trailing COMMENT is not code.
+    assert (
+        _gh_hazards([f'            echo "run tools/{helper}" >> "$GITHUB_STEP_SUMMARY"'], scripts)
+        == []
+    )
+    assert _gh_hazards([f'            echo "run tools/{helper}" > "/dev/null"'], scripts) == []
+    assert _gh_hazards([f'            echo "run tools/{helper}"  # see #12133'], scripts) == []
+    assert _gh_hazards([f"            echo 'run tools/{helper}' # note"], scripts) == []
     # …but a PIPE is never inert: that is a CONSUMER, not a redirect, which is exactly
     # how `echo 'bash h.sh' | bash` runs the helper.
     assert _gh_hazards([f'            echo "run tools/{helper}" | cat'], scripts)
@@ -1344,7 +1490,7 @@ _NESTED_SUBSTITUTION_PROSE = (
 
 
 def test_the_nested_substitution_residual_is_over_report_not_a_miss():
-    """The ONE row #12149 kept inert and this arm declares as an over-report.
+    """The TWO rows #12149 kept inert and this arm declares as an over-report.
 
     ⛔ THIS IS A DECLARED RESIDUAL IN THE FAIL-CLOSED DIRECTION, PINNED RATHER THAN
     GLOSSED — both nested-prose lines above are reported as hazards here, and #12149's
@@ -1358,7 +1504,7 @@ def test_the_nested_substitution_residual_is_over_report_not_a_miss():
     WHY IT IS THE ACCEPTABLE DIRECTION: over-reporting asks a healthy job to add a
     contract step, which is visibly repairable; under-reporting leaves an undeclared `gh`
     helper invisible, which is the defect the gate exists for. MEASURED, so neither the
-    cost nor the benefit is hypothetical: across all 41 workflows / 171 jobs this arm
+    cost nor the benefit is hypothetical: across all 41 workflows / 92 jobs this arm
     and #12149's landed walker produce ZERO differing verdicts (23 jobs hit under both),
     so there is no live instance of this residual in the tree today — it costs nothing
     here and buys the closed classes above.
@@ -1368,6 +1514,18 @@ def test_the_nested_substitution_residual_is_over_report_not_a_miss():
     re-opens `echo "$(bash h.sh)"`.
     """
     scripts = _gh_executing_scripts()
+    # ⛔ THE BAIL IS PINNED DIRECTLY, because the rows below do NOT pin it. Measured: with
+    # `if "$(" in line or "`" in line: return False` DELETED, both nested rows still answer
+    # HAZARD — their blanked residue (`echo  $(pwd) ` / `echo  %s $(date) `) already fails the
+    # anchored question on its own, so an assertion on those rows alone stays green while the
+    # bail is gone. The message below blanks to a BARE `echo`, which is inert exactly when the
+    # bail is present and only then.
+    assert _message_line_is_inert('        run: echo "$(date)"') is False, (
+        "the `$(`-anywhere bail is gone: this line blanks to a bare `echo` and would now be "
+        'read as prose, re-opening `echo "$(bash h.sh)"`'
+    )
+    assert _message_line_is_inert('        run: echo "`date`"') is False
+    assert _message_line_is_inert('        run: echo "generated at build time"') is True
     for line in _NESTED_SUBSTITUTION_PROSE:
         assert _gh_hazards([line], scripts), (
             "the residual changed direction: this line is now INERT, which means the "
