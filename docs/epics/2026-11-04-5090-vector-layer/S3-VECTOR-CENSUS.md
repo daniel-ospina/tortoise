@@ -342,7 +342,8 @@ pytest-lane catcher: a duplicated literal key in `WRITER_CENSUS`/`CENSUS_EVIDENC
 before any code can see it, so only `ruff`'s `F601` caught `#11996`'s pair, post-merge), and two by
 `#12265`'s generalisation of the same pin
 (`test_the_duplicate_key_detector_catches_a_duplicate` and
-`test_no_module_declares_the_same_dict_key_twice` — the falsifier and the repo-wide scan that make a
+`test_no_module_declares_the_same_dict_key_twice` — the falsifier and the scan over `tortoise/`,
+`tools/` and `tests/` (254 tracked `.py` files sit outside those roots) that make a
 silently-shadowed declaration key a PYTEST red on any tree that holds both rows, including the MERGE
 tree, where the duplicate is actually born and where `main-lint.yml`'s ruff gate (`#2174`) only reds
 it after the fact; the scan also found the live `# noqa: F601` duplicate in

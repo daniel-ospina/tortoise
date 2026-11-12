@@ -8242,34 +8242,61 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
             "harmless no-op (#9314, measured on #11996)")
 # ── #12265 (root: #9314) — a duplicated declaration key is a SILENT loser ────
 #
-# `#11996` landed two duplicate `"tortoise.sdk::create_source"` rows in this
-# file's census dicts and a third in `tortoise/embed_writer_register.py`. The two
-# DICT rows were silently resolved by Python's last-wins semantics — the earlier
-# entry, the one a review had pinned, simply stopped existing, and every test
-# stayed green. ⛔ The duplicate was born AT THE MERGE, not inside either PR: each
-# PR's own tree held ONE row (`#12016` landed at 20:43Z; `#11996`'s base predated
-# it), so no run of either PR could see two. `main-lint.yml`'s ruff gate (`#2174`,
-# `on: push: branches: [main]`) then red the pushed tree — `F601` twice, 16 minutes
-# after the merge — and that lint job was the whole detection this class had. The
-# register's own copy raised `DuplicateWriterDeclaration` at IMPORT, which is loud
-# but is a different shape (a list of tuples, checked by `load()` — see
+# `#11996` landed two duplicate `"tortoise.sdk::create_source"` rows in
+# `tools/dod_5090_probe.py`'s census dicts and a third in
+# `tortoise/embed_writer_register.py`. The two DICT rows were silently resolved by
+# Python's last-wins semantics — the earlier entry, the one a review had pinned,
+# simply stopped existing, and no test went red FOR THEM (the register's third copy
+# is what red the tree, at import — below). ⛔ The duplicate was born AT THE MERGE,
+# not inside either PR: each PR's own tree held ONE row (`#12016` landed at 20:43Z;
+# `#11996`'s base predated it), so no run of either PR could see two.
+# `main-lint.yml`'s ruff gate (`#2174`, `on: push: branches: [main]`) then red the
+# pushed tree — `F601` twice, 16 minutes after the merge — and that lint job was the
+# whole detection this class had. The register's own copy raised
+# `DuplicateWriterDeclaration` at IMPORT, which is loud but is a different shape (a
+# list of tuples, checked by `load()` — see
 # `tests/test_embed_writer_register.py::test_a_duplicate_key_raises`).
 #
 # So this is the DICT half: one scan, run wherever a tree holds both rows.
 
-#: Roots whose dict literals gate behaviour by MEMBERSHIP — a name in
-#: `WRITER_CENSUS`/`CENSUS_EVIDENCE` is exempt from (or owes evidence to) the
-#: unresolved-writer verdict, and a duplicated key makes the loser DEAD. The scan
-#: is repo-wide over these roots on purpose: the class is not specific to this
-#: file, and naming files here would re-open the hole the moment a declaration
-#: moves into one that was not named.
+#: Roots the declaration dicts live under today. ⛔ NOT the whole repo: 254 tracked
+#: `.py` files sit outside these three (`battery/`, `graph-scripts/`, `docs/`, `eval/`,
+#: `validation/`, `integrations/`, `.github/`), so a duplicate key THERE is still
+#: lint-only. Stated rather than called "repo-wide" because the difference is what a
+#: reader would rely on.
 #:
-#: ⛔ IT IS NOT FREE, measured: 1,970 modules, `ast.parse` alone 12.6 s, and this
-#: test is ~20 s of `tests/test_dod_5090_probe.py`'s ~110 s run. Recorded so the
-#: next reader does not assume it is cheap — and so a future budget discussion has
-#: the figure. There is no sound cheap pre-filter: narrowing the roots narrows the
-#: guard, which is the hole the scan exists to close.
+#: The scan covers a name whose membership changes a verdict. It is repo-wide WITHIN
+#: these roots on purpose: the class is not specific to the probe, and naming files
+#: here would re-open the hole the moment a declaration moves into one not named.
+#:
+#: ⛔ IT IS NOT FREE, measured: 1,970 modules, `ast.parse` alone 12.2 s, and this
+#: test is ~24 s of `tests/test_dod_5090_probe.py`'s ~107 s run. Recorded so the next
+#: reader does not assume it is cheap — and so a future budget discussion has the
+#: figure. There is no sound cheap pre-filter: narrowing the roots narrows the guard,
+#: which is the hole the scan exists to close.
 _DUP_KEY_ROOTS = ("tortoise", "tools", "tests")
+
+
+def _constant_key_value(node: ast.expr) -> tuple[bool, object]:
+    """`(True, value)` when the key is a literal Python can hash — else `(False, None)`.
+
+    Recurses through a TUPLE literal, because `{(1, 2): …}` is a real declaration
+    shape (`ruff`'s `F601` catches it, and it is used 390 times under these roots) and
+    a `Constant`-only test would silently skip it — a hole in a guard that sells
+    itself as closing holes. Element values are compared by Python's own `==`/hash,
+    so `(1, 2)` and `(True, 2)` are ONE key, exactly as a dict treats them.
+    """
+    if isinstance(node, ast.Constant):
+        return True, node.value
+    if isinstance(node, ast.Tuple):
+        values = []
+        for element in node.elts:
+            ok, value = _constant_key_value(element)
+            if not ok:
+                return False, None
+            values.append(value)
+        return True, tuple(values)
+    return False, None
 
 
 def _duplicate_constant_key_sites(
@@ -8283,18 +8310,19 @@ def _duplicate_constant_key_sites(
     miss a real shadow — the exact class this guard exists for (found in this
     guard's own first draft by a fresh review).
 
-    Only CONSTANT keys can be compared without evaluating anything: a computed key
+    Only LITERAL keys can be compared without evaluating anything: a computed key
     (`f"{x}"`) is not a declaration this can read, and guessing would report a
     duplicate that is not one. `**splat` in a literal parses as a `None` entry in
     `node.keys`, not a Constant, so it is skipped rather than mistaken for the key
-    `None`.
+    `None`; `_constant_key_value` recurses through tuple literals so `{(1, 2): …}`
+    (390 uses under these roots) is compared too.
 
-    ⚠️ Scope, stated so this is not mistaken for a total: a SIGNED literal key
-    (`{-1: 'a', -1: 'b'}`) parses as `UnaryOp(USub, Constant)`, not a Constant, so
-    it sits outside this population (measured: zero such dict keys under the three
-    scanned roots today). `filename` is threaded into `ast.parse` so an
-    unparseable module names ITSELF instead of `<unknown>` — the same "a hole is a
-    hole, not a zero" rule this file's predicate-count test states.
+    ⚠️ Still outside this population, stated so it is not mistaken for a total: a
+    SIGNED literal key (`{-1: 'a', -1: 'b'}`) parses as `UnaryOp(USub, Constant)`
+    (measured: zero such dict keys under the three roots today), and so does a tuple
+    containing one. `filename` is threaded into `ast.parse` so an unparseable module
+    names ITSELF instead of `<unknown>` — the same "a hole is a hole, not a zero" rule
+    this file's predicate-count test states.
     """
     sites: list[tuple[int, int, str]] = []
     for node in ast.walk(ast.parse(source, filename=filename)):
@@ -8302,12 +8330,15 @@ def _duplicate_constant_key_sites(
             continue
         seen: dict[object, int] = {}
         for key in node.keys:
-            if not isinstance(key, ast.Constant):
+            if key is None:  # `**splat`, not a key literal
                 continue
-            if key.value in seen:
-                sites.append((seen[key.value], key.lineno, repr(key.value)))
+            ok, value = _constant_key_value(key)
+            if not ok:
+                continue
+            if value in seen:
+                sites.append((seen[value], key.lineno, repr(value)))
             else:
-                seen[key.value] = key.lineno
+                seen[value] = key.lineno
     return sites
 
 
@@ -8341,16 +8372,28 @@ def test_the_duplicate_key_detector_catches_a_duplicate():
     # `**splat` is not the key `None`.
     assert _duplicate_constant_key_sites("D = {b'a': 1, 'a': 2}\n") == []
     assert _duplicate_constant_key_sites("D = {None: 1, **x}\n") == []
+    # A TUPLE-literal key is compared too (390 uses under the scanned roots), and
+    # element values follow dict equality: `(1, 2)` and `(True, 2)` are ONE key.
+    assert _duplicate_constant_key_sites("D = {(1, 2): 'a', (1, 2): 'b'}\n") == [
+        (1, 1, "(1, 2)")]
+    assert _duplicate_constant_key_sites("D = {(1, 2): 'a', (True, 2): 'b'}\n") == [
+        (1, 1, "(True, 2)")]
+    # …while a 1-tuple is NOT the bare key, and a non-literal element is skipped.
+    assert _duplicate_constant_key_sites("D = {(1,): 'a', 1: 'b'}\n") == []
+    assert _duplicate_constant_key_sites("D = {(K, 2): 'a', (K, 2): 'b'}\n") == []
 
 
 def test_no_module_declares_the_same_dict_key_twice():
     """#12265: a duplicated literal key silently disables the entry that loses.
 
-    Measured at `origin/main` `9828250732`: three sites — two in this file
-    (`WRITER_CENSUS`, `CENSUS_EVIDENCE`) and one in `tests/test_commit_schema.py`
-    (a fixture `op_type` that last-wins discarded, silenced with `# noqa: F601`).
-    This assertion is the lane-independent catch `#9314` asks for: it reds in the
-    pytest shard, not only where lint runs.
+    Measured at `origin/main` `9828250732`: three sites — two in
+    `tools/dod_5090_probe.py` (`WRITER_CENSUS`, `CENSUS_EVIDENCE`) and one in
+    `tests/test_commit_schema.py` (a fixture `op_type` that last-wins discarded,
+    silenced with `# noqa: F601`). This assertion is the lane-independent catch
+    `#9314` asks for: it reds in the pytest shard, not only where lint runs.
+
+    ⛔ Its coverage is the three roots `_DUP_KEY_ROOTS` names, not the whole repo —
+    see that constant: 254 tracked `.py` files sit outside them.
     """
     violations: list[str] = []
     scanned = 0
@@ -8362,8 +8405,6 @@ def test_no_module_declares_the_same_dict_key_twice():
     for name in _DUP_KEY_ROOTS:
         for path in sorted((root / name).rglob("*.py")):
             rel = path.relative_to(root)
-            if ".worktrees" in rel.parts:
-                continue
             scanned += 1
             for first, duplicate, key in _duplicate_constant_key_sites(
                     path.read_text(encoding="utf-8"), str(rel)):
