@@ -777,6 +777,19 @@ def test_graph_pool_capacity_is_fail_closed_not_a_silent_empty(
     # ``tests/test_control_plane_offload_3498.py`` uses for this pool.
     monkeypatch.setattr(ha_mod, "graph_offload_timeout_s", lambda: 0.05)
 
+    # ⛔ The construction must still be RUNNING when the bound fires — that is
+    # the whole row — and a fixed ``time.sleep`` only *hoped* so. On a loaded
+    # runner the loop can be descheduled past both the bound and the sleep, and
+    # the row then observes the construction's RESULT instead of the capacity
+    # refusal it pins: measured on `test (h)` at PR #11936, red first as an
+    # unhandled ``TimeoutError`` and, once the seam stopped mislabelling that
+    # domain error as a bound miss (#11961), as a 500 "Search failed" — the
+    # store arm, from a pool that was never saturated. Holding the submission
+    # open until this test releases it makes the ordering a guarantee: the bound
+    # fires against a submission that is provably in flight, and the worker
+    # finishes only after the response is in hand.
+    release = threading.Event()
+
     def _slow_data_plane(real):
         def _wrapped(*args, **kwargs):
             # The REGISTRY plane (auth, membership, invite lookups) is not what
@@ -785,7 +798,7 @@ def test_graph_pool_capacity_is_fail_closed_not_a_silent_empty(
             # construction.
             if kwargs.get("namespace") == "registry":
                 return real(*args, **kwargs)
-            time.sleep(0.4)
+            release.wait(10.0)
             return _BrokenSDK()
         return _wrapped
 
@@ -794,7 +807,13 @@ def test_graph_pool_capacity_is_fail_closed_not_a_silent_empty(
     monkeypatch.setattr(ha_mod, "_make_sdk",
                         _slow_data_plane(ha_mod._make_sdk))
 
-    response = client.get(url)
+    # Released in a ``finally`` so a failing request still frees the worker: the
+    # submission is abandoned (never cancelled) at the bound, and it would keep
+    # holding its graph-lane slot for the full 10 s wait otherwise.
+    try:
+        response = client.get(url)
+    finally:
+        release.set()
 
     assert response.status_code == 503, (
         f"[{label}] a graph-pool bound miss returned {response.status_code} "
