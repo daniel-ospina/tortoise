@@ -1013,6 +1013,12 @@ ONTOLOGY = REPO_ROOT / "docs/ONTOLOGY.md"
 # one, and pinning the header's home to `ONTOLOGY.md` would fail on a document
 # that is correct.
 ONTOLOGY_CHANGELOG = REPO_ROOT / "docs/ONTOLOGY-CHANGELOG.md"
+
+# What the §4.3 approval-citation pin accepts as a comment id. The token must be
+# ADJACENT to the digits: an earlier cut allowed up to 12 non-digits in between,
+# which read the ISSUE number in the rejected shape below as a comment citation.
+_CITATION_RE = re.compile(r"#issuecomment-(\d{6,})|comment(?:-id)?\s*[:`]?\s*(\d{6,})")
+_REJECTED_CITATION_SHAPE = "See the discussion comments 118245"
 PLAN = REPO_ROOT / "docs/plans/2026-08-25-1714-memory-capture-onboarding.md"
 
 
@@ -1388,11 +1394,16 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     # non-digits between them, which accepted *"the discussion comments 118245"*
     # — an ISSUE number read as a comment citation, i.e. fail-open on exactly the
     # "approval with no readable home" shape this pin refuses.
-    cited = [
-        permalink or inline
-        for permalink, inline in re.findall(
-            r"#issuecomment-(\d{6,})|comment(?:-id)?\s*[:`]?\s*(\d{6,})", block)
-    ]
+    # ⛔ AND THE DETECTOR IS PINNED SEPARATELY, because the real changelog cannot
+    # pin it: the newest block yields the same single id under the old pattern and
+    # the new one, so reverting this fix would leave the file green (measured — a
+    # review round found exactly that). The rejected shape is asserted directly,
+    # and so is the reason: a comment id must be adjacent to its token.
+    assert _CITATION_RE.findall(_REJECTED_CITATION_SHAPE) == [], (
+        "the citation detector reads an ISSUE number as a comment id — the token "
+        "must be adjacent to the digits, not merely near them")
+    cited = [permalink or inline
+             for permalink, inline in _CITATION_RE.findall(block)]
     assert cited, (
         "the newest changelog block records the §4.3 clause but carries no comment "
         "id in an accepted form, so its owner approval has no home a reader can "
