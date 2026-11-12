@@ -207,17 +207,19 @@ not a tenth spelling — it is the one a text guard cannot reach:
 - **The directory arm reads a text, and a text can be laundered.** The destination
   is taken as the last POSITIONAL path token of the owning verb's command
   segment, with redirect targets and `-`-prefixed options skipped. FIVE residuals
-  are stated rather than claimed closed: an option whose VALUE carries a path
-  (`rsync … --log-file="$SCRATCH/x.log"`, `-e "ssh -o X=/a"`), a base quoted
-  separately from its token (`"$b"/16/bin/`, `"${b}"/17/bin/`), a quoted
-  command word (`sh -c 'rsync …'`), a destination reached through an EXPANSION
-  or an assigned variable (`d="$b/16/bin"; rsync -a "$b/17/bin/" "$d/"` — the
-  last path never matches the token pattern, so the arm is not reached at all),
-  and a versioned path under a VARIABLE base, which cannot be resolved
-  (`d=$RUNNER_TEMP/tools; rsync -a "$d/17/bin/" "$d/16/bin/"`) and is therefore
-  REFUSED even though its literal spelling is spared — the fail-closed direction,
-  and the reason the pin's own base arrives in a variable.
-  Each can still move the last-path reading past the real target. The task's own
+  are stated rather than claimed closed, and each spares or refuses for its OWN
+  mechanism — they are not one: an option whose VALUE carries a path
+  (`rsync … --log-file="$SCRATCH/x.log"`, `-e "ssh -o X=/a"`) moves the
+  last-path reading past the real target; a base quoted separately from its token
+  (`"$b"/16/bin/`, `"${b}"/17/bin/`) is never MATCHED, so the last-path
+  machinery is not reached at all; a quoted command word (`sh -c 'rsync …'`) puts
+  both mentions in COMMAND position, so the arm is skipped; a destination reached
+  through an EXPANSION or an assigned variable (`d="$b/16/bin"; rsync -a
+  "$b/17/bin/" "$d/"`) names no token the pattern can read, so again the arm is
+  not reached; and a versioned path under a VARIABLE base is the OPPOSITE
+  direction — it is REFUSED (`d=$RUNNER_TEMP/tools; sudo chmod -R a+rX
+  "$d/16/bin"` red, the same act on the literal path green), which is
+  fail-closed and kept because a variable base cannot be resolved. The task's own
   `pg_dump --version` assertion is the observation that does not depend on this
   text at all; this row is the static half, and it fails closed on every spelling
   it can read.
@@ -709,8 +711,13 @@ CLIENT_DIR_RE = re.compile(r"/usr/lib/postgresql/(?P<token>[^/\s]+)/bin")
 #: refused as a client rewrite — `install -d -m 755 "$RUNNER_TEMP/tools/16/bin"`,
 #: `chown -R runner:runner "$RUNNER_TEMP/tools/16/bin"` and
 #: `cp -a "$RUNNER_TEMP/tools/17/bin" "$RUNNER_TEMP/tools/16/bin"` all RED where
-#: main is green. A variable is kept because the pin's own dir arrives that way
-#: (`b=/usr/lib/postgresql`), and the guard cannot resolve it.
+#: main is green. A variable is kept because the guard cannot resolve it and a
+#: plausible edit could route the pin's dir through one — **not** because this
+#: workflow does: it spells `echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"`
+#: literally today (`git grep 'b=/usr/lib/postgresql' .github/workflows/` = 0),
+#: and this file's own fixtures are the variable-base spelling (#12069 review
+#: round 23). Its cost is stated with the other residuals: a versioned path under
+#: a variable base is REFUSED, its literal spelling spared.
 CLIENT_DIR_ANY_BASE_RE = re.compile(
     r"(?:\$\{?\w+\}?|/[\w./-]*(?:postgresql|postgres|pg)[\w./-]*)"
     r"/(?P<token>\d+|\*|\$\{?\w+\}?)/bin"
@@ -1149,7 +1156,12 @@ def _replaces_a_client_binary(line: str) -> bool:
         return True
     verb = BINARY_MUTATION_RE.search(line)
     if not verb:
-        return False
+        # ⛔ AN EXTRACTOR NAMES ITS DESTINATION BY FLAG, NOT BY VERB (#12069 review
+        # round 23, measured). `tar`/`unzip` are deliberately absent from
+        # `BINARY_MUTATION_RE` (round 9: `tar -czf …` and `unzip -l …` are READS),
+        # so a standalone `sudo unzip -o pg17.zip -d "$b/16/bin"` never reached the
+        # directory arm at all — it returned here, before the arm could run.
+        return _extractor_replaces_a_client_dir(line)
     # ⛔ A DIRECTORY-LEVEL replacement names no binary (#12069 review round 19,
     # measured GREEN): `sudo rsync -a "$b/17/bin/" "$b/16/bin/"` overwrites
     # every client in the pinned dir and passed the name-based rule below. A
@@ -1185,7 +1197,16 @@ def _replaces_a_client_binary(line: str) -> bool:
                 continue
             owner = _owning_verb(line, dir_match.start())
             if owner is None:
-                # No mutating verb of its OWN segment names this directory.
+                # No RECOGNISED mutating verb of its own segment names this
+                # directory. An EXTRACTOR's destination flag still writes INTO
+                # it, and extractor verbs are deliberately absent from
+                # `BINARY_MUTATION_RE` (round 9: `tar -czf …` / `unzip -l …` are
+                # reads). Measured before this arm: a compound spelling
+                # (`cp … && tar -xf pg17.tgz -C "$b/16/bin"`) was refused only as
+                # a side effect of the first-verb bug round 23 removes, so it
+                # became GREEN here (#12069 review round 23).
+                if _extractor_destination_covers(line, dir_match.start(), dir_match.end()):
+                    return True
                 continue
             if owner.group(0).strip() in _DESTINATION_VERBS and not _is_last_path_token(
                 line, dir_match.start(), dir_match.end(), owner
@@ -1262,6 +1283,51 @@ _REDIRECT_RE = re.compile(r"\d*>>?\s*\S+")
 #: round 22, measured GREEN): with the operand order inverted, the trailing source
 #: had `-t`'s value looked like an option and the real target was skipped.
 _TARGET_OPTION_RE = re.compile(r"(?:^|\s)(?:-t|--target-directory)(?:=|\s)\s*(?P<value>[^\s]+)")
+
+#: Extractors write INTO a directory named by a FLAG, and the verbs themselves are
+#: deliberately NOT in `BINARY_MUTATION_RE` — round 9 dropped them because
+#: `tar -czf "$RUNNER_TEMP/out.tgz" …` and `unzip -l …` are READS, and a whitelist
+#: that reds a correct tree is worse than a shorter one. The destination flag is
+#: still a destination (#12069 review round 23, measured):
+#:
+#:     sudo tar -xf pg17.tgz -C "$b/16/bin"     — overwrites every client
+#:     sudo unzip -o pg17.zip -d "$b/16/bin"
+#:
+#: `_owning_verb` answers None for both (no recognised verb in the segment), so
+#: they are graded by this instead of by the mutation list. `-l`/`-czf` name no
+#: destination and stay green.
+_EXTRACTOR_DESTINATION_RE = re.compile(
+    r"\b(?:tar|unzip|dpkg-deb|cpio)\b[^;&|]*?\s(?:-C|-d|-x|-D)(?:\s+|=)\s*(?P<value>[^\s;&|]+)"
+)
+
+
+def _extractor_destination_covers(line: str, start: int, end: int) -> bool:
+    """Is `[start, end)` the directory an EXTRACTOR's flag writes INTO?"""
+
+    seg_start, seg_end = _segment_bounds(line, start)
+    for match in _EXTRACTOR_DESTINATION_RE.finditer(line, seg_start, seg_end):
+        if start >= match.start("value") and end <= match.end("value"):
+            return True
+    return False
+
+
+def _extractor_replaces_a_client_dir(line: str) -> bool:
+    """Does an EXTRACTOR flag on this line write into a client directory?
+
+    The standalone half of the extractor rule (#12069 review round 23, measured):
+    with no mutating verb on the line, `_replaces_a_client_binary` used to return
+    False before the directory arm could run, so `sudo unzip -o pg17.zip -d
+    "$b/16/bin"` was GREEN. The `$GITHUB_PATH`/`$GITHUB_ENV` exclusion is the
+    directory arm's, so the two cannot disagree.
+    """
+
+    if "GITHUB_PATH" in line or "GITHUB_ENV" in line:
+        return False
+    return any(
+        not _is_command_position(line, match.start())
+        and _extractor_destination_covers(line, match.start(), match.end())
+        for match in CLIENT_DIR_ANY_BASE_RE.finditer(line)
+    )
 
 
 def _segment_bounds(line: str, pos: int) -> tuple[int, int]:
@@ -4736,8 +4802,42 @@ BINARY_MUTATION_POLARITY = [
         'sudo rsync -a "$d/17/bin/" "$d/16/bin/"',
         True,
         "ACCEPTED OVER-REFUSAL: a variable base cannot be resolved, so a versioned "
-        "SCRATCH dir is refused while its literal spelling is spared — fail-closed, "
-        "and the pin's own base arrives in a variable (#12069 round 23, stated)",
+        "SCRATCH dir is refused while its literal spelling is spared — fail-closed"
+        " (#12069 round 23, stated)",
+    ),
+    (
+        'sudo chmod -R a+rX "$d/16/bin"',
+        True,
+        "the same over-refusal on a READ: a variable base is refused wherever the "
+        "verb sits, because the guard cannot tell it from the pin (#12069 round 23)",
+    ),
+    (
+        'sudo chmod -R a+rX "$RUNNER_TEMP/tools/16/bin"',
+        False,
+        "CONTROL: the same act on a LITERAL scratch base stays green — the round-22 "
+        "narrowing, still intact (#12069 round 23)",
+    ),
+    (
+        'sudo cp x y && sudo tar -xf pg17.tgz -C "$b/16/bin"',
+        True,
+        "#12069 round-23 P2: an EXTRACTOR's destination flag writes every client, "
+        "and `tar` is not in `BINARY_MUTATION_RE` — spared until this arm (measured)",
+    ),
+    (
+        'sudo unzip -o pg17.zip -d "$b/16/bin"',
+        True,
+        "#12069 round-23 P2: same act through `unzip -d`",
+    ),
+    (
+        'tar -czf "$RUNNER_TEMP/pg_dump-output.tgz" "$b/16/bin"',
+        False,
+        "CONTROL: archiving the pinned dir FROM it is a READ, which is why the "
+        "extractors were dropped from the mutation list (#12069 round 9)",
+    ),
+    (
+        'unzip -l "$b/16/bin/keep.zip"',
+        False,
+        "CONTROL: `-l` names no destination — the extractor arm must not red a list",
     ),
     (
         'sudo sh -c "cat $b/17/bin/pg_dump > $b/16/bin/pg_dump"',
@@ -5057,7 +5157,6 @@ def test_the_path_window_ends_at_the_LAST_leg_not_the_first(job: dict) -> None:
 
     with pytest.raises(AssertionError, match="sets `env: PATH`"):
         test_no_step_rewrites_the_client_path_to_another_major(mutated)
-
 
 
 def test_a_step_env_outside_the_pin_leg_window_is_not_an_offender() -> None:
