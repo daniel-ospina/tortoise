@@ -714,6 +714,23 @@ def test_the_briefs_restatements_all_recompute(report, control):
     assert f"hybrid, {caps} captures" in text, (
         f"§1's caption does not state the pooled denominator ({caps} captures)")
 
+    # ── §2's DRIFT INTERVAL, derived from each artifact's own clock: each run
+    # harvests at t0 and records `measured_at` at the END, so the harvest time is
+    # `measured_at − corpus.elapsed_s`. Round 5 found the fixed 427 s and 390 s
+    # unguarded — computable, therefore pinnable.
+    from datetime import datetime, timedelta
+
+    def _harvest_at(art):
+        return (datetime.strptime(art["measured_at"], "%Y-%m-%dT%H:%M:%SZ")
+                - timedelta(seconds=art["corpus"]["elapsed_s"]))
+
+    gap_s = int(round((_harvest_at(control) - _harvest_at(report)).total_seconds()))
+    assert f"the two harvests {gap_s} s apart" in text, (
+        f"§2 does not state the recomputed harvest-to-harvest interval ({gap_s} s)")
+    assert f"the hybrid sweep alone took {report['corpus']['elapsed_s']:.0f} s" in text, (
+        "§2 does not state the hybrid sweep's own wall clock, which is why the "
+        "interval cannot be the report gap")
+
     # ── §3's miss COUNT, which §3.1's crowding statistic is computed over.
     assert f"The {len(misses)} recorded hybrid k=3 misses" in text, (
         "§3 does not state the number of misses its crowding mean is taken over "
@@ -1070,6 +1087,32 @@ def test_main_writes_the_input_accounting_into_the_artifact_it_emits(tmp_path, m
             return self._proj
 
         def tortoise_fts_query(self, *a, **kw):
+            # Every query for the FIRST name the arm asks about returns a hit, so
+            # the sample has BOTH a hit and a miss. With every query empty,
+            # `in_window == 0` and `exact_misses_total == recorded` under ANY
+            # formula — which is what made round 4's version of this assertion
+            # non-discriminating.
+            if not a or a[0] == "warm":
+                return []
+            q = a[0]
+            self._target = getattr(self, "_target", q)
+            if q != self._target:
+                return []
+            # ⚠️ The hit must carry the id `run()` MINTED for this name: the
+            # harness compares by identity, never by name (`_norm` folds case and
+            # whitespace, so a name match can credit a different node). A fixed
+            # "obj-1" lands in `attached` and never in `in_window` — this stub's
+            # name-shaped hit was written against the other lane's comparison and
+            # the premise assertion below is what caught the merge.
+            # `window()` sanitises the name before the leg sees it, so the match
+            # is made in the SAME sanitised form production queries with. The
+            # sanitiser is imported inside `run()`, so it is not a module
+            # attribute — import the same function here.
+            from tortoise.extractor_v2 import _sanitise_query_text as _san
+            for obj_id, name in self._proj._stored:
+                if _san(name) == q:
+                    return [{"id": obj_id, "content": name,
+                             "kind": "point", "point_kind": "core:other"}]
             return []
 
         def close(self):
@@ -1078,16 +1121,16 @@ def test_main_writes_the_input_accounting_into_the_artifact_it_emits(tmp_path, m
     import tortoise.sdk as sdk_mod
     monkeypatch.setattr(sdk_mod, "TortoiseSDK", _Sdk, raising=True)
     monkeypatch.setattr(mod, "_has_embedder", lambda: False, raising=True)
+    # `run()` refuses a non-`docker://`/`redis://` URI BEFORE the stub SDK is ever
+    # constructed, so this behavioural test would otherwise fail for a reason that
+    # has nothing to do with what it asserts — it only passed under `test_lane.py`,
+    # which exports a URI, and red under the URI-less embedded carve-out that the
+    # brief advertises as an equivalent command. The gate checks the SCHEME only and
+    # nothing connects: the port is deliberately dead and every query goes to `_Sdk`.
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "docker://:@127.0.0.1:1/tortoise_test_matrix")
 
     out = tmp_path / "report.json"
-    # `run()` REFUSES a URI that is not docker:// or redis:// before it ever reaches
-    # the stub SDK (exit 3, "the product cannot use"), so the seam `_drive` stubs
-    # must be stubbed here too — otherwise this test only passes under
-    # `test_lane.py run` (which exports a URI) and reds under the URI-less
-    # embedded carve-out that the brief advertises as an equivalent command.
-    # Nothing connects: the SDK is faked below.
-    monkeypatch.setenv("TORTOISE_DB_URI",
-                       "docker://:falkordb@localhost:6379/recall_unit")
     rc = mod.main(["--sessions-dir", str(corpus), "--population", "6",
                    "--sample", "2", "--captures", "1", "--out", str(out)])
     assert rc == 0, f"main() returned {rc}"
@@ -1105,6 +1148,15 @@ def test_main_writes_the_input_accounting_into_the_artifact_it_emits(tmp_path, m
         "with no cap the two must be EQUAL; a re-introduced cap makes recorded < "
         "total, which is the report of the regression (see "
         "test_the_artifact_records_every_miss_so_a_cap_cannot_return)")
+    # The premise of the next assertion: at least one hit, or "total == recorded"
+    # holds for every formula and asserts nothing.
+    assert rep["arms"]["exact"]["3"]["in_window"] >= 1, rep["arms"]["exact"]["3"]
+    # The FORMULA, not a tautology: misses must be counted against the whole
+    # sample, not against the 200-cap list the artifact kept.
+    assert rep["arms"]["exact_misses_total"] == (
+        rep["corpus"]["sample"] - rep["arms"]["exact"]["3"]["in_window"]), (
+        "exact_misses_total must be sample − in_window, not len(sample) nor "
+        "len(exact_misses)")
 
 
 def test_the_artifact_records_every_miss_so_a_cap_cannot_return(tool_mod, monkeypatch,

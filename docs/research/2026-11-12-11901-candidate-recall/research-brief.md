@@ -59,7 +59,9 @@ skipped. The write-back was attempted and refused — §10.
 Three consequences decide the shape of the measurement, and none of them was on the issue:
 
 1. **`limit=3` is not "3 candidates".** `search_graph` unions the rows of *every* derived query into one set.
-   **Measured at the `max_queries=15` budget** (hybrid, 20 captures — the whole sweep, not the k=3 case):
+   **Measured at the `max_queries=15` budget** (hybrid, 20 captures — the whole sweep, not the k=3 case; ⚠️ and each
+group is **15 consecutive names from ONE class block**, because the sample is built class by class, so these are not
+mixed-kind captures and the union is measured on the most self-similar groups the sample can form):
 
    | per-query `limit` | mean candidates | min | max |
    |---|---|---|---|
@@ -136,8 +138,8 @@ to quote for any one class.
 is written by the fleet's own capture hook: the two committed artifacts harvested **102,898** (hybrid) and
 **103,087** (control) distinct definite descriptions, a 0.18 % drift between two runs whose **harvests** were
 **~7 minutes** apart — not the ~60 s between their two REPORT writes: each run harvests before its sweep, so
-`measured_at − elapsed_s` puts the harvests at 14:12:22.6Z and 14:19:29.6Z (**427 s**), which the 390 s hybrid
-sweep makes necessary.
+`measured_at − elapsed_s` puts **the two harvests 427 s apart** (14:12:22.6Z and 14:19:29.6Z), and **the hybrid
+sweep alone took 390 s**, so the gap cannot be the report gap.
 
 ⛔ **That 0.18 % is the gap between THOSE two runs, not a bound on between-run variation, and this corpus is NOT
 append-only in effect.** Re-running `harvest()` over the same nine files ~2 h later (16:37Z, 16:41Z and 16:41Z,
@@ -153,8 +155,9 @@ and the directory holds no sealed or rotated file. So the loss pre-dates that wi
 the named directory cannot reproduce the artifacts' population at all** — either today's file was rewritten between
 14:19Z and 16:37Z (an event no longer observable) or the artifacts' bytes came from a corpus other than the one
 they name; nothing in the artifact distinguishes the two. ⚠️ **The instrument can now make that distinction in a
-future run:** `harvest()` reports its own input accounting into `corpus.input` (`lines`, `parse_errors`,
-`records_without_text`), added after this measurement — so a re-run can separate *the corpus lost names* from *the
+future run:** `harvest()` reports its own input accounting into `corpus.input` (`lines`, `files`,
+`parse_errors`, `records_without_text` — `files` is the harvest's OWN count, so
+`corpus.files` and `corpus.input.files` are one number, not two globs), added after this measurement — so a re-run can separate *the corpus lost names* from *the
 harness stopped parsing records*. The two committed artifacts predate that field and carry none.
 A re-run also cannot be paired with them at all yet: pairing needs the sampled population written out
 (`--population-file`), which this harness does not do — so §3.1 is between-run by construction, not by choice.
