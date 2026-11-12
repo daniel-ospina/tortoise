@@ -380,10 +380,14 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   so the page could say *seven of the twelve no longer read as written* beside *only `**(a)**` still
   read as written* — 7 + 1 against a table of twelve — at rc 0 (measured). Both arms count only a
   sentence that carries a **letter LIST** of two or more single letters — comma-joined
-  (`b, c, d`) or a pair (`b and c`), with each letter written bold, code, italic or bare, and every
-  form bounded to the twelve letters §3's table can name — and the letter EXTRACTOR additionally
-  reads a member its own separator introduces (`and`, `or`, `also`, `plus`), which is what reaches
-  `… **(j)**, also c`; a single parenthetical letter in prose is not a list, and a
+  (`b, c, d`) or a pair (`b and c`), each letter written bare, bold, code or italic, every form
+  bounded to the twelve letters §3's table can name. Markup around the PARENTHESES does not
+  decide candidacy (`**(c)**` and `(c)` are the same item), which is what stops a `**` from being
+  the difference between a red and a green; the two paren-less spellings this page and repo also use
+  (code, italic) are read as items too. The letter EXTRACTOR additionally reads a member its own
+  separator introduces (`and`, `or`, `also`, `plus`), which is what reaches `… **(j)**, also c`.
+  A single parenthetical letter in prose is **not** a list — `row (c) still read as written` is a
+  sentence, not a tally — and a
   sentence that merely QUOTES the phrase has no list to disagree with the table, so counting it reded
   a clarifying edit (measured) — the false-accusation class the neighbouring citation arms exist to
   avoid. Requiring **markup** rather than a list was itself fail-open, measured: a de-bolded stale
