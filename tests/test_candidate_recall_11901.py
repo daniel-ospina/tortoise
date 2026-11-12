@@ -605,6 +605,21 @@ def test_the_briefs_restatements_all_recompute(report, control):
     assert f"measured {report['arms']['pooled']['15']['set_sum'] / report['arms']['pooled']['15']['captures']:.1f}" in text, (
         "§7-1 does not state the recomputed pooled k=15 mean")
 
+    # ── §7-1: the width's effect on PHASE 1 — the sentence the whole
+    # "widening is not the lever" argument rests on (round 7, F1).
+    assert f"attach rate by {pct(v['3']['attached'], pairs)}" in text, (
+        "§7-1 does not state the recomputed phase-1 attach rate")
+    # ── §7-2b: the fold's reach over IN-WINDOW separator variants (a different
+    # denominator from the arm above) and §7-2d's article-class share.
+    sep3_share = _sum_cls(report, ("hyphen-to-space", "space-to-hyphen"), "3")
+    assert (f"{_pct_cell(0)} % → "
+            f"{_pct_cell(100 * sep3_share['attached_folded'] / sep3_share['in_window'])} % "
+            f"of in-window separator variants") in text, (
+        "§7-2b does not state the recomputed in-window separator recovery")
+    article = report["arms"]["variant_by_class"]["article-drop"]["3"]["pairs"]
+    assert f"({article}/{pairs})" in text, (
+        f"§7-2d does not state the article class's share of the {pairs} pairs")
+
     # ── §7-2a: how many variants phase 2 is handed.
     assert (f"handed {pct(v['3']['in_window'], pairs)} of those variants") in text, (
         "§7-2a does not state the recomputed share phase 2 receives")
