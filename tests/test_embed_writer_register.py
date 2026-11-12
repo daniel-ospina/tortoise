@@ -1140,6 +1140,14 @@ def test_every_declared_label_re_derives_at_this_head() -> None:
     direction (no label the writer's own store clause targets is missing) by deriving it from the
     alias that clause passes — the half a hand-written set cannot close on its own (`#11530`).
     """
+    # ⛔ A STRUCTURAL claim is data (`#11954`), so an entry that outlives its row, or an emptied
+    # table, must red here rather than quietly widening the statement arm back to a substring.
+    assert ITERATED_STORE_CLAIM, "no row carries an iterated-store claim — #11954's arm is unowned"
+    stale = sorted(set(ITERATED_STORE_CLAIM) - set(LABEL_EVIDENCE))
+    assert not stale, f"ITERATED_STORE_CLAIM names rows that no longer exist: {stale}"
+    unoffered = sorted(set(BOUND_LABEL_EVIDENCE | ASSEMBLED_LABEL_EVIDENCE)
+                       - set(LABEL_EVIDENCE))
+    assert not unoffered, f"a claim-kind table names rows that no longer exist: {unoffered}"
     labelled = {key for key, entry in EMBED_WRITER_CLASSES.items()
                 if not isinstance(entry.stores, str)}
     assert labelled, "no declaration names a label — row 2 would resolve nothing"
@@ -1272,6 +1280,29 @@ def test_a_RETARGETED_loop_and_a_moved_store_both_FAIL_the_row():
         "the mutation did not preserve the needle — the arm below would red for the wrong reason")
     assert violation(retargeted) is not None, (
         "a RE-TARGETED loop still satisfies the row: this is the #11954 defect, unfixed")
+
+    # (1b) THE STRUCTURAL ARM'S OWN FALSIFIER. The `if` below carries the needle AND a store of
+    # its own, so arm (1)'s statement test is satisfied — this is the mutant a count arm and a
+    # statement arm both PASS, and the reason `#11954` asks for the AST: no loop iterates the
+    # canonical constant any more, so the declaration's labels are no longer derived from anything.
+    store_in_the_membership_test = source.replace(
+        loop,
+        "            if label in _CANONICAL_ENTITY_ID_PROPS:\n"
+        '                proj.g.query(f"MATCH (n:{label} {{id:$id}}) SET n += $p ")\n'
+        "            for label, _prop in _SOME_OTHER_PROPS:\n",
+        1,
+    )
+    assert store_in_the_membership_test != source
+    # ⛔ MEASURED, so the two arms cannot drift apart silently: WITHOUT the structural claim this
+    # very mutant PASSES the row (the membership test it left behind carries a store), and WITH it
+    # the row reds. That is the whole justification for the second arm, asserted rather than argued.
+    assert _evidence_violation(
+        store_in_the_membership_test, symbol, needle) is None, (
+        "the mutant is not the statement-arm-only blind spot this arm exists for — the needle is not "
+        "carried by a storing statement, so arm (1) alone would already red it")
+    assert violation(store_in_the_membership_test) is not None, (
+        "a re-targeted loop PLUS a store inside the surviving membership test satisfies the row: "
+        "the statement arm alone cannot see this, the iterated-store arm must")
 
     # (2) A GENUINE store move: the loop still iterates the canonical constant, and the map-merges
     # the declaration is derived from are no longer inside it. Nothing about the needle changed —
@@ -1788,6 +1819,9 @@ def _constants_named_by(node: ast.AST, constants: dict[str, str]) -> list[str]:
 #: never the `NULL` wipe, which removes the property), plus the map-merge (`SET n += $p`) the generic
 #: update door stores through: no alias rule can attribute that one, but it is unambiguously a
 #: store, and it is the shape `tortoise.sdk::_update_entity` declares its labels from.
+#: ⚠️ Residual, stated: this reads the carrier's SOURCE SLICE, so a string literal inside the carrier
+#: that quotes a store counts as one. Closing that needs AST-level clause detection, the same class
+#: of limit `_declared_symbol_bodies` records for trailing comments.
 _STORE_CARRIER = re.compile(
     r"set_embedding_clause\(|clear_then_set_prefix\("
     r"|\b\w+\.embedding\s*=(?!\s*NULL)|\bSET\s+\w+\s*\+="
