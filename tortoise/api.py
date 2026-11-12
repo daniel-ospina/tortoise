@@ -707,22 +707,35 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
     therefore validated against the values the writer can emit, and refused
     fail-closed on everything else.
 
-    ⛔ THE ENUMERATION IS SCOPED TO THIS CHANNEL, and the SIBLING funnel is
-    still open — measured by #12059's review at `7c8226148d` (merged to `main`
-    after this branch's first head) and closed by neither that commit nor this
-    one:
+    ⛔ THE ENUMERATION IS SCOPED TO THIS CHANNEL. `sdk._emit_event` carries no
+    `_verify_record_vector_width` call at all (the module holds exactly two call
+    sites, both here), so the SDK funnel declares no width of its own to
+    enumerate — it is guarded by the marker-family refusal the public props
+    doors run instead, and that half is CLOSED. #11858, merged as #12113
+    (`18d43e0462`) and so present only AFTER this branch's first head, refuses
+    the whole family over `create_source`'s ASSEMBLED `ev`
+    (`sdk._SERVER_MANAGED_EMBEDDING_MARKERS`). Measured at THIS head, with its
+    own control:
 
         TortoiseSDK.create_source("https://example.invalid/f16-probe", "web",
                                   embedding_width="f16")
-          -> OK, journalled {"type": "SourceCreated", "embedding_width": "f16",
-                             ...} with no `embedding` key anywhere
+          -> ValueError: ['embedding_width'] are server-managed embedding
+             journal fields and cannot be set by hand
+        TortoiseSDK.create_source(..., embedding=[0.1, 0.2],
+                                  embedding_width="f32")
+          -> ValueError  (the guard reads `ev`, so a width BESIDE A VECTOR —
+             the state this funnel's `f32` arm exists for — is refused too)
+        TortoiseSDK.create_source("https://example.invalid/control", "web")
+          -> OK                                         (the control)
 
-    `sdk._emit_event` carries no `_verify_record_vector_width` call at all (the
-    module holds exactly two call sites, both here), so a declared width over NO
-    vector — the state the refusal above exists for — still lands through the
-    SDK funnel. That is #11948's unguarded-door class on the OTHER funnel, and
-    #11858 names its `_emit_event` `id=`/`**extra` branch. Recorded here so the
-    enumeration above is not read as a claim about every writer in the package.
+    `_emit_event` keeps no such guard BY DESIGN, and this note may not be read
+    as licensing one: `update_point` rides `embedding_verbatim` INTO its
+    `PointRevised` record legitimately, setting it from the vector it was given
+    (#5004 round-8), so a blanket refusal over `_emit_event`'s props would
+    false-block a sanctioned writer — the reason `_SERVER_MANAGED_EMBEDDING_MARKERS`
+    is refused at INTAKE and at the one door that bypasses intake, never at the
+    funnel. Recorded here so the enumeration above is not read as a claim about
+    every writer in the package.
     """
     if not isinstance(record, dict):
         return
