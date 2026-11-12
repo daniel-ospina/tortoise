@@ -4815,3 +4815,66 @@ class TestThe12120ReviewRound18:
                 f"twin arms do: {shapes} (skips: {skips!r})")
         finally:
             sdk.close()
+
+    def test_an_id_less_holder_is_not_a_gone_entity(self, sdk_factory):
+        """One gone-survivor carrier + one ID-LESS holder = TWO entities.
+
+        `_ref_is_one_gone_entity` decides "one entity" from the ids that survive its
+        own filter, so a holder with no `id` (or an id no group claims) is silently
+        dropped and two holders read as one dangling survivor — which downgrades
+        `main`'s `ambiguous-name` record to `unaddressable-name` and hides the
+        duplicate name. Measured pre-fix: `unaddressable-name`; post-fix:
+        `ambiguous-name` (the record a merge pass can act on).
+        """
+        from tortoise.entity_identity import (
+            clear_non_folded_entries,
+            non_folded_entries,
+        )
+
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("New Widget", "document")
+            # The legacy id-less holder `_upsert_object` never mints, plus a
+            # carrier of an entity whose survivor is gone.
+            g.query(
+                "CREATE (o:Object {name:'Widget', canonical_name:'widget', "
+                "objectKind:'document', status:'live'}) "
+                "CREATE (c:Object {id:'r18-carrier', name:'Widget', "
+                "canonical_name:'widget', objectKind:'document', "
+                "status:'live', resolved_from:'r18-gone'})")
+            clear_non_folded_entries()
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Widget", "supersedes_by": "New Widget",
+                 "evidence": "test"}])
+            assert applied == 0, (applied, skips, msgs)
+            shapes = [e.shape for e in non_folded_entries()
+                      if e.name == "Widget"]
+            assert shapes == ["ambiguous-name"], (
+                "an id-less holder was dropped from the entity count, so two "
+                f"entities were reported as one dangling survivor: {shapes} "
+                f"(skips: {skips!r})")
+        finally:
+            sdk.close()
+
+    def test_a_three_column_group_is_read_not_indexed(self):
+        """`_ref_candidates` must READ a 3-column group, never index off its end.
+
+        The REF probes pass the 5-column shape, whose columns 1 and 3 are id and
+        status; the successor probe's `_SUCCESSOR_PROJECTION` is
+        `(id, name, status)`, and indexing THAT with the defaults raises
+        `IndexError` out of `apply_supersessions` — an exception where this module
+        twice states a REFUSAL is required. The parameters exist for that caller
+        (none in-tree yet), so they are pinned directly, both directions.
+        """
+        from tortoise.commit_ops import _ref_candidates
+
+        group = (None, "gone-r18", [("three-a", "Same", "live"),
+                                    ("three-b", "Same", "live")])
+        with pytest.raises(IndexError):
+            _ref_candidates([group], "Object")
+        rows, widened = _ref_candidates([group], "Object", id_idx=0,
+                                        status_idx=2)
+        assert [r[0] for r in rows] == ["three-a", "three-b"], rows
+        assert widened == {"three-a": "gone-r18",
+                           "three-b": "gone-r18"}, widened
