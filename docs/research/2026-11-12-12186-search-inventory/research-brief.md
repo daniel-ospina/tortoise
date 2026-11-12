@@ -377,18 +377,21 @@ Primary sources fetched (`web_fetch` / raw): `docs.falkordb.com/cypher/indexing/
 
 **Research-skill PREFLIGHT lines** (the skill's required slots — §0 states round 1's, as a table):
 
-`Search tool:` rung 1 — `mcp__seo-intelligence__perplexity_search` (~$0.005/query) — queries:
-**9 attempted / 9 returned**; rung 2 not used; rung 3 (`web_fetch`, free) for every primary source above.
-`Graph:` **unread — no query ran.** No `/v1/search` query was made against the hosted graph (§7.9 item 1
-is the same limitation), so the Step 0.0b slot is `unread`, **not** `nothing held`: a zero here is a
-statement about no query, and the skill refuses `nothing held` at any count when no query ran.
-Write-back: **not written — the write-back is owed**, not done: this lane made no graph call at all, so
-neither a session nor a point with edges exists for §7; `#12186` and this brief are the durable record
-until a lane with a reachable tenant mints `IMPL → #12186` + its NAND edges.
+`Search tool:` rung 1 — `mcp__seo-intelligence__perplexity_search` (~$0.005/query; the MCP search tool
+exposes no model parameter, so none can be named) — queries: **9 attempted / 9 returned**; rung 2 not used;
+rung 3 (`web_fetch`, free) for every primary source above.
+`Graph:` **0 hit(s) over 0 queries — unread — no query ran** | wrote: **not written — no graph call was
+attempted** (no reachable tenant for these populations, §7.9 item 1; `/v1/search` never issued) → nothing to
+report | failed: **none (no query attempted)**.
+
+The slot above is the skill's own vocabulary, not a substitute: `unread — no query ran` is the honest value
+for a box that cannot reach the graph, and it is **not** `nothing held` — the skill refuses that value at any
+query count when no query ran, so a zero here says nothing about what the graph holds.
 
 ⚠️ **Locators drift, and a pin is not a citation.** Round 1's `sdk.py:39588-39606` for the BM25 arm's wiring
 is **`:40737-40835`** at this head — the file grew **1,184** lines in one day of merges (`1f28d107cf` =
-51,075 → `9828250732` = 52,259; the cited block itself shifted +1,150). Every locator below
+51,075 → `9828250732` = 52,259; `_prf_supersedes_the_arm` moved `39585 → 40737`, **+1,152**, and the arm's
+enclosing block now runs to `:40835`). Every locator below
 is re-derived at `9828250732`; a lane reading this doc at a later head must re-derive, not copy.
 
 ## 7.1 C2 SETTLED — the product lane runs TF-IDF, that is the vendor's own name for it, and BM25 is one gate away
@@ -425,13 +428,17 @@ block** (`:20785-20788`) — so the index is on vendor defaults: default languag
 
 | site | claim | verdict |
 |---|---|---|
-| `tortoise/sparse.py:13-14` | RediSearch's *"TFIDF scorer"* ranks by term-overlap, *"which is the BM25-style rank behavior the epic's scope prescribes"* | ⛔ **wrong on the mapping.** TF-IDF is not BM25-style: it has **no document-length normalisation**, and its idf is the classical `log(N/df)` form rather than BM25's probabilistic `log((N−df+0.5)/(df+0.5))` — so a length-heavy or rare-term profile scores differently under the two. The vendor calls it TF-IDF; so should we. |
+| `tortoise/sparse.py:13-14` | RediSearch's *"TFIDF scorer"* ranks by term-overlap, *"which is the BM25-style rank behavior the epic's scope prescribes"* | ⛔ **wrong on the mapping.** TF-IDF is not BM25-style: it has **no document-length normalisation** (that is Redis's separate `TFIDF.DOCNORM`), and its idf is the vendor's own documented `log2(1 + total_docs / docs_with_term(term))` rather than BM25's probabilistic form (`ln(1 + (N−n+0.5)/(n+0.5))`, whose `+1` inside the log is what keeps the score non-negative). So a length-heavy profile scores differently under the two. The vendor calls it TF-IDF; so should we. |
 | `tortoise/bm25.py:7-10` | quotes `sparse.py` (`:5`), then reports the **measurement**: on the embedded (falkordblite) lane the shipped scorer *"behaves like a per-matched-term count whose weight is NOT driven by rarity and whose score is NOT driven by document length"* | ✅ the measurement is the authority for **that lane only**: the *embedded* scorer prices **neither idf nor length**. ⚠️ It does **not** characterise the hosted `db.idx.fulltext` leg — `SEARCH-ARCHITECTURE.md:250-251` itself records that leg as unmeasured — so the hosted leg's idf/length behaviour is an **open measurement**, not a finding of this row. |
 | `SEARCH-ARCHITECTURE.md:§6.2` (`:163`, `:241-246`, `:268-269`) | *"The FalkorDB leg is RediSearch's TF-IDF scorer"* (`:163`), the 8–23 nDCG@10 gap is *"measured against a BM25 implementation"* (`:246`), **how far our hosted leg sits from that baseline is unmeasured** (`:246`), and *"the text index **stays** until **M3** measures…"* (`:268-269`) | ✅ **correct, and more careful than its own epic row** |
 
 ⇒ **The epic's C2 row title, "BM25 instead of TF-IDF", is literally accurate for the product lane.** Round 1
-corrected the status (which was right) but also proposed dropping the title reading because *"we run BM25 on
-the embedded lane"* — that is true **only on the embedded lane**, and it is not the lane the product runs.
+corrected the status (which was right) but also proposed dropping the **"build BM25"** reading — its §4 C2
+row's own words: *"Drop the "build BM25" reading — a lane dispatched on the epic's text would duplicate
+`tortoise/bm25.py`"* — on the grounds that *"we run BM25 on the embedded lane"*. That grounding is true
+**only on the embedded lane**, and it is not the lane the product runs. ⚠️ Round 1's *"the title reads as a
+gap to fill"* and this section's *"the title is literally accurate"* answer different questions (what a lane
+would **do**, vs what the title **describes**), so they are compatible: keep the title, correct the instinct.
 
 ### The bound round 1 stated but never explained: the arm is embedded-only for a latency reason, not a decision
 
@@ -542,9 +549,11 @@ temporal filter **in parallel**, fuses by reciprocal rank fusion, then **reranks
 neural cross-encoder** ([ACL 2026 demo abstract](https://aclanthology.org/2026.acl-demo.27/);
 [arXiv:2512.12818 **full text** §4.2.3](https://arxiv.org/html/2512.12818v1) *"Reciprocal Rank Fusion
 (RRF)"* → [§4.2.4](https://arxiv.org/html/2512.12818v1) *"Neural Cross-Encoder Reranking"* — the four
-channels are §4.2.1–§4.2.2, the paper's own order is RRF **then** cross-encoder). ⚠️ **The abstract carries
-neither claim** — it states the four *networks* and the 83.6 %/83.2 %/91.4 % figures — so the ordering has to
-be cited to §4.2, not to the abstract and not to a third-party summary of it. Edges are **weighted
+channels are the four subsections of **§4.2.2**, and the paper's own order is RRF **then** cross-encoder).
+⚠️ **Neither abstract carries the ordering** — the **ACL demo** abstract states the four *networks* and the
+83.6 %/83.2 %/91.4 % figures, the **arXiv** abstract states four networks and 83.6 %/91.4 % (no 83.2 %, no
+Gemini-3 Pro) — so the ordering has to be cited to §4.2, not to either abstract and not to a third-party
+summary of them. Edges are **weighted
 by decay or similarity** to bias traversal. Two things follow for us: **(i)** the graph's job is to *produce
 candidates a vector leg cannot reach*, not to score pairs; **(ii)** the cross-encoder sits **after** fusion —
 which is the order C1 and A6 need, and which our `rrf_fusion` + `ask_lane_rerank` already implement in the
@@ -637,7 +646,7 @@ vector.
 | **4** | A3: *"name + context has **no context to embed**"* | `Object.title` exists and is written (`entities.py:1902`, `:5069`). The **fill rate** is unmeasured; `description`/`summary` = 0 rows is a different statistic. | A3 becomes **one census** away from an answer, and its remaining work moves to B1. |
 | **5** | *(round-2 brief premise, and the epic's phrasing)* `#11901` carries an **explicit DECLINE** of widening the window | The record says *"**not decided, and deliberately not changed**"*, and the DoD box is **unchecked** (`#11901` comment `6826507139`). The first comment's *"do not widen now"* was **superseded** by that comment. | Round 1 stated it correctly (*"declined neither"*). ⛔ **The window question is still UN-OWNED** — no child carries the paired decision — and a lane reading "declined" would think it closed. |
 | **6** | A2: *"419 real surface variants"* — ⚠️ **not a round-1 quotation: this wording appears in neither round 1's doc nor the epic's body** (which says *"0 of 419 spelling variants"*). It is a **wording guard**, kept in this table so the distinction is not lost, not a falsification of anything round 1 wrote. | The population is **GENERATED** from real names, not observed (`#11901` comment `6836274599`, the relay). | Any sentence that calls the 419 a population of *real* variants overstates it; round 1's own word (`variants`) is correct. |
-| **7** | Mem0's April-2026 algorithm is documented by **an arXiv paper** | There is **no April-2026 paper**. `arXiv:2504.19413` is **2025** (ECAI 2025) and **predates** the April-2026 algorithm; Mem0's own page says so explicitly: *"this report also covers Mem0's April 2026 … update, which **post-dates** the original ECAI 2025 paper and isn't reflected in its published numbers"* ([mem0.ai/blog/state-of-ai-agent-memory-2026](https://mem0.ai/blog/state-of-ai-agent-memory-2026)). | Cite the **README + blog + code** for the April-2026 algorithm, and the **2025 paper** only for what the 2025 paper measured. The two must not be merged into one citation. |
+| **7** | *(brief premise, not a round-1 quotation — §5 item 1 already keeps the two citations apart: the **arXiv paper** is 2025/ECAI, the **2026 report** is the April-2026 numbers)* Mem0's April-2026 algorithm is documented by **an arXiv paper** | There is **no April-2026 paper**. `arXiv:2504.19413` is **2025** (ECAI 2025) and **predates** the April-2026 algorithm; Mem0's own page says so explicitly: *"this report also covers Mem0's April 2026 … update, which **post-dates** the original ECAI 2025 paper and isn't reflected in its published numbers"* ([mem0.ai/blog/state-of-ai-agent-memory-2026](https://mem0.ai/blog/state-of-ai-agent-memory-2026)). | Cite the **README + blog + code** for the April-2026 algorithm, and the **2025 paper** only for what the 2025 paper measured. The two must not be merged into one citation. |
 
 ## 7.6 EXPANDED — the performers round 1 never read, to mechanism level
 
@@ -667,10 +676,11 @@ verbatim: *"Entity ids change: they are now derived from `Entity.id_for(node.nam
 `Entity.id_for(node.id)`, so two chunks mentioning the same entity name converge on one node, while several
 distinct nodes sharing a name inside a single extracted graph keep deterministic chunk-scoped ids instead of
 collapsing together"* — i.e. same-name nodes inside one extracted graph get **chunk-scoped** ids rather than
-merging. ⚠️ The sentence this brief first quoted in quotation marks (*"identity … derived from its `name`
-(normalized to lowercase, with spaces turned into underscores and apostrophes stripped)"*) is the **code
-docstring's** wording (`cognee/infrastructure/engine/models/DataPoint.py:187-216`), not docs prose — it is
-cited there, not quoted from the docs.
+merging. ⚠️ The sentence this brief first quoted in quotation marks (*identity derived from the `name`,
+lowercased, spaces → underscores, apostrophes stripped*) is **a paraphrase**, not a quotation: it composes
+`_normalize_identity_value`'s docstring (`cognee/infrastructure/engine/models/DataPoint.py:188`, *"Normalize
+a single identity value (lower-case, spaces→_, strip apostrophes)"*) with `id_for`'s behaviour (`:200-216`).
+It is cited there, not quoted from the docs.
 Optional **OWL ontology validation** canonicalises LLM-derived names to
 URI-derived forms via `difflib.get_close_matches()` at a **0.80** cutoff and injects `rdfs:subClassOf` /
 `owl:ObjectProperty` structure. An opt-in `PROVENANCE_TRACKING` audit ledger appends *"an audit-ledger entry
@@ -890,8 +900,9 @@ still surface. ⚠️ **Deliberately NOT Mem0's construction:** copying the pool
    Honcho, Supermemory and Mem0 were read to **primary sources** this lane (vendor docs, repo code, README).
    **Hindsight is a split reading and is not claimed as primary throughout**: the arXiv **abstract** + the
    ACL demo abstract were read, **and** the paper's full text §4.2.3–§4.2.4 for the RRF → cross-encoder
-   order; the headline figures (83.6 % @20B, 91.4 % with Gemini-3 Pro) are the **abstract's**, not a
-   re-run. ⚠️ A summary site (`emergentmind`) was in the first pass of this claim and is **not** a
+   order; the headline figures are **the abstracts'**, not a re-run — 83.6 % @20B and 91.4 % are in both, the
+   **83.2 %** is the ACL demo abstract's only (which is also where "with Gemini-3 Pro" is spelled out). ⚠️ A
+   summary site (`emergentmind`) was in the first pass of this claim and is **not** a
    primary source — §7.2 now cites §4.2 directly, and no claim in §7 rests on the summary.
 6. **The 8–23 nDCG@10 Postgres-full-text-vs-BM25 gap** is inherited from `SEARCH-ARCHITECTURE.md:§6.2`; this
    lane did not re-read the underlying measurement. It does not need to: §7.1's C2 resolution does not rest
