@@ -220,9 +220,9 @@ The narrowing is **not a reopening of §2.0**: the carve-out's own test is *"rec
 
 *The properties are journaled on `ObjectRegistered` / `SubjectAdded` snapshots; `embedding` on both is **DERIVED** — the writer recomputes `encode_for_store(name)` and never reads `ev.get("embedding")` (`_upsert_object`/`_upsert_subject`, `projection/entities.py`), so it is class 2 (not carried, deterministically recomputable from the carried `name` — §2.1 rule 2), the same shape as `Point.content_hash`. The `Object` lifecycle-fold fields are split in §2.6: `supersededBy` is journal-carried verbatim (**PRIMARY**), `status` is a projection-owned **cache** (**DERIVED**), and `supersededAt` is **PRIMARY** — carried by the event's envelope `ts`, which the live fold must pass (§2.6).*
 
-#### 2.5 Epistemic — `Point` · operators/edges (98 names · 73 P · 17 D · 8 U)
+#### 2.5 Epistemic — `Point` · operators/edges (97 names · 72 P · 17 D · 8 U)
 
-`Point` (79: 60 P / 13 D / 6 U) · edges/operators (19: 13 P / 4 D / 2 U).
+`Point` (78: 59 P / 13 D / 6 U) · edges/operators (19: 13 P / 4 D / 2 U).
 
 *This is where the EP scalars live: `ep_alpha`, `ep_beta`, `ep_dirty`, `ep_dirty_at`, `posterior_alpha`, `posterior_beta`, `confidence`, `c_cal`, `lastDreamedAt`, and the four BP `msg_*`/`back_msg_*` slots — all DERIVED per the carve-out. `content_hash` is DERIVED (a pure function of `content`; deliberately stripped from the journal). The 8 UNRESOLVED are resolved in §2.7.*
 
@@ -255,7 +255,7 @@ The prior pass left 8 names unresolved because their polarity was contestable. A
 
 **The `IMPL.confidence` / `weight` tension is resolved by *home*, not by polarity:** the *edge attribute* is the caller's input (PRIMARY, on the edge); *EP confidence* is the propagated belief (DERIVED, on the operator). They are different fields with the same word; the schema must not collapse them.
 
-**Final counts:** **221 names → 192 PRIMARY · 29 DERIVED/VOLATILE · 0 UNRESOLVED** — the `#7955` figures below (216 names → 187 P) plus the **5 P rows `#2782` adds** (the money value): **187 + 5 = 192 P**, names **216 + 5 = 221**, D/V and U unchanged; the pass's own numbers stay attributed to it rather than folded. Arithmetic: the 2026-10-10 pass recorded **185 / 23 / 8**, and **three measured classes are corrected in review — `Object.status` is a projection-owned cache (§2.6), and `Object.embedding`/`Subject.embedding` are recomputed from the carried `name` (§2.4), so they move P→D: 185 − 3 = 182 P · 23 + 3 = 26 D/V · 8 U.** The eight resolutions then move **5 to PRIMARY** (`updatedAt` (P\*), `baseline_source`, `temporal_reviewed` (P\*), `IMPL.confidence`, `IMPL.weight`) and **3 to DERIVED/VOLATILE** (`version`, `inherited_at`, `baseline_set`): **182 + 5 = 187 P**, **26 + 3 = 29 D/V**, **8 − 8 = 0 U**.
+**Final counts:** **220 names → 191 PRIMARY · 29 DERIVED/VOLATILE · 0 UNRESOLVED** — the `#7955` figures below (216 names → 187 P) plus the **5 P rows `#2782` adds** (the money value) less the **1 P row `#11827` retires** (`asOf`, a second spelling of the carrier's valid-time start): **187 + 5 − 1 = 191 P**, names **216 + 5 − 1 = 220**, D/V and U unchanged; the pass's own numbers stay attributed to it rather than folded. Arithmetic: the 2026-10-10 pass recorded **185 / 23 / 8**, and **three measured classes are corrected in review — `Object.status` is a projection-owned cache (§2.6), and `Object.embedding`/`Subject.embedding` are recomputed from the carried `name` (§2.4), so they move P→D: 185 − 3 = 182 P · 23 + 3 = 26 D/V · 8 U.** The eight resolutions then move **5 to PRIMARY** (`updatedAt` (P\*), `baseline_source`, `temporal_reviewed` (P\*), `IMPL.confidence`, `IMPL.weight`) and **3 to DERIVED/VOLATILE** (`version`, `inherited_at`, `baseline_set`): **182 + 5 = 187 P**, **26 + 3 = 29 D/V**, **8 − 8 = 0 U**.
 
 ### 2.8 The `baseline_*` correction to §17.5 (as delivered)
 
@@ -446,7 +446,7 @@ The full per-property table (**216 rows from the `#7955` pass, plus the 5 `#2782
 
 ### Epistemic — `Point`
 
-## Point (node) — 79 properties (PRIMARY 60 · DERIVED/VOLATILE 13 · UNRESOLVED 6)
+## Point (node) — 78 properties (PRIMARY 59 · DERIVED/VOLATILE 13 · UNRESOLVED 6)
 
 | property | class | evidence (writer) | journal carrier | notes |
 |---|---|---|---|---|
@@ -490,7 +490,6 @@ The full per-property table (**216 rows from the `#7955` pass, plus the 5 `#2782
 | `currency` | P | `_POINT_DECLARED_PROPS` via `tortoise.money.MONEY_VALUE_FIELDS` (#2782) | PointAdded.point.currency (open-set passthrough) | ISO 4217 alpha-3, explicit PER AMOUNT — never a graph default |
 | `minorUnitExponent` | P | `_POINT_DECLARED_PROPS` via `tortoise.money.MONEY_VALUE_FIELDS` (#2782) | PointAdded.point.minorUnitExponent (open-set passthrough) | exponent travels with the amount so a reader never assumes a table |
 | `verbatim` | P | `_POINT_DECLARED_PROPS` via `tortoise.money.MONEY_VALUE_FIELDS` (#2782) | PointAdded.point.verbatim (open-set passthrough) | the exact source text the value was read from (drop, never round) |
-| `asOf` | P | `_POINT_DECLARED_PROPS` via `tortoise.money.MONEY_VALUE_FIELDS` (#2782) | PointAdded.point.asOf (open-set passthrough) | ISO `YYYY-MM-DD` assertion/validity date, distinct from `when` |
 | `annotator_bias` | P | `_POINT_DECLARED_PROPS` (#3689); OperatorAnnotated.bias | PointAdded.point.annotator_bias; OperatorAnnotated |  |
 | `annotator_precision` | P | `_POINT_DECLARED_PROPS` (#3689) | PointAdded.point.annotator_precision; OperatorAnnotated.precision |  |
 | `annotator_consistency` | P | `_POINT_DECLARED_PROPS` (#3689) | PointAdded.point.annotator_consistency; OperatorAnnotated.consistency |  |
@@ -530,7 +529,7 @@ The full per-property table (**216 rows from the `#7955` pass, plus the 5 `#2782
 | `_graph_id` | D | `_POINT_DENY` / projection replay bookkeeping | never a payload prop | replay bookkeeping |
 | `reason` | D | `_POINT_DENY` (D4) | deny-listed | dropped by design |
 
-> **Where the money value lives — the Point-only asymmetry is DELIBERATE (#2782).** The five rows above are `Point` properties **and** typed columns on `public.point` (`amount_minor bigint`, `currency text`, `minor_unit_exponent integer`, `verbatim text`, `as_of text`; `supabase/migrations/20261018000001_record_point_money_value_2782.sql`). On `Object` and `Event` the same five keys are still carried in the **open-set `props` JSONB tail** — no typed column, no integer enforcement — so `tortoise/money.py`'s rule ("a value is a flat field on the entity that owns it") holds semantically while the *record* is stricter for one label only. That gap is **recorded here, not hidden**: typed columns for `public.object`/`public.event` are separate work, not a step this row set forgot. ⚠️ **A reader must not conclude from the absence of rows in the `Object` (§Semantic) and `Event` (§Episodic) sections that the money shape is Point-specific** — it is not; only the column half is.
+> **Where the money value lives — the Point-only asymmetry is DELIBERATE (#2782).** The rows above are `Point` properties **and** typed columns on `public.point` (`amount_minor bigint`, `currency text`, `minor_unit_exponent integer`, `verbatim text`; `supabase/migrations/20261018000001_record_point_money_value_2782.sql`). On `Object` and `Event` the same keys are still carried in the **open-set `props` JSONB tail** — no typed column, no integer enforcement — so `tortoise/money.py`'s rule ("a value is a flat field on the entity that owns it") holds semantically while the *record* is stricter for one label only. That gap is **recorded here, not hidden**: typed columns for `public.object`/`public.event` are separate work, not a step this row set forgot. ⚠️ **A reader must not conclude from the absence of rows in the `Object` (§Semantic) and `Event` (§Episodic) sections that the money shape is Point-specific** — it is not; only the column half is. ⛔ **`asOf` is RETIRED (#11827)** and the `as_of` column that held it is dropped by `supabase/migrations/20261110000001_record_point_retire_as_of_11827.sql`: a value carries no temporal slot of its own, its instant is the carrier's `validFrom` (`ONTOLOGY.md` §4.7). A legacy node keeps the graph property (inert, unread, still declared so replay does not warn) and the value is recoverable from the journal (`PointAdded.point.asOf`). ⚠️ **The percent shape's `basisPoints` (#11915) is deliberately NOT a row here and gets no typed column**: it is carried in the open-set `props` JSONB tail like the rest of the tail, because nothing reads a percent back from the record (money earned its columns from the `SUM`/`RATIO` requirement, §17.5's deciding test). Recorded rather than implied away — a typed `basis_points` column is a follow-on if a record-side reader ever appears.
 
 ### Epistemic — operators / edges
 
