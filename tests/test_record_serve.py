@@ -745,6 +745,72 @@ def test_the_DECLINED_prose_in_the_RECORD_is_not_an_invention():
     assert set(doc_diff.invented) == {"summary"}, doc_diff.as_dict()
 
 
+def test_a_LEGACY_unserved_vector_is_CACHE_HELD_not_a_projection_gap():
+    """`#11747` review, finding 2 — the declared drop is declared to the PARITY rule.
+
+    ⛔ THE DESIGN DECISION, recorded here because the review asked for it in the
+    open. `#11747` stops the projection storing a vector on a label no query leg
+    serves, and it does so in the ROW→PROPERTY map (`node_from_row`) — the map
+    `read_node` answers from — so that a record read cannot advertise a vector the
+    cache refuses (the "live ≠ rebuild" divergence that read exists to prevent).
+    The cost is that the record ANSWER no longer holds the name, so a LEGACY cache
+    node that still carries it became an asymmetry this rule had no explanation
+    for: MEASURED pre-fix, `clean=False, unexplained_missing={'embedding': …}` —
+    a PROJECTION GAP, whose only sanctioned repair is a re-projection that can no
+    longer add the field. A permanent red on a correct pair, and one that
+    contradicted `record_reconcile` on the same node (`graph_only`).
+
+    So the drop stays on the read door and the arm is added here — never the other
+    way around: moving the drop off the read door would restore exactly the
+    divergence the drop exists to remove.
+
+    Both directions, on the §9.1/D1 pattern (a raw record row that still carries
+    the vector is DECLARED, not an invention), and both CONTROLS keep it honest:
+    a name outside the class still reddens, and on a SERVED label the same
+    asymmetry is still a gap — nothing is blanket-forgiven.
+    """
+    from tortoise.cache_projection import (
+        node_from_row,
+        unserved_vector_declined_properties,
+    )
+
+    row = {"id": "s-1", "props": {"embedding": [0.1, 0.2]}}
+    record_answer = dict(node_from_row("Session", row).props)
+    assert "embedding" not in record_answer, sorted(record_answer)
+    assert unserved_vector_declined_properties("Session") == {"embedding"}
+
+    # (1) the LEGACY cache node — the vector is still there, the record answer is
+    # not. Pre-fix this pair read `clean=False`.
+    diff = rs.parity_difference({**record_answer, "embedding": [0.1, 0.2]},
+                                record_answer, label="Session")
+    assert diff.clean, diff.as_dict()
+    assert set(diff.explained_missing) == {"embedding"}, diff.as_dict()
+
+    # (2) MIRRORED: a RAW record row that still carries the vector is declared,
+    # not an invention.
+    raw = rs.parity_difference(record_answer,
+                              {**record_answer, "embedding": [0.1, 0.2]},
+                              label="Session")
+    assert raw.clean, raw.as_dict()
+    assert set(raw.explained_missing) == {"embedding"}, raw.as_dict()
+
+    # (3a) CONTROL — a name outside the declared class still reddens.
+    other = rs.parity_difference({**record_answer, "aFieldTheCacheKept": 1},
+                                 record_answer, label="Session")
+    assert set(other.unexplained_missing) == {"aFieldTheCacheKept"}, other.as_dict()
+
+    # (3b) CONTROL — on a SERVED label the identical asymmetry IS a projection
+    # gap: the projection can and must store that vector, so the arm must not
+    # forgive it.
+    assert unserved_vector_declined_properties("Point") == frozenset()
+    point_answer = dict(node_from_row(
+        "Point", {"id": "p-1", "embedding": [0.1, 0.2]}).props)
+    assert "embedding" in point_answer, sorted(point_answer)
+    without = {k: v for k, v in point_answer.items() if k != "embedding"}
+    gap = rs.parity_difference(point_answer, without, label="Point")
+    assert set(gap.unexplained_missing) == {"embedding"}, gap.as_dict()
+
+
 def test_a_record_served_read_carries_no_derived_name():
     conn = _FakeConn(rows=[_row(content_hash="abc", ep_dirty=True)])
     props = rs.read_point(conn, org_id="org_t", graph_id="g_t", point_id="p-1")

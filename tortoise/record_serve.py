@@ -1164,17 +1164,17 @@ def parity_difference(cache_props: Mapping[str, Any],
     function so the rule has ONE home: the tests call it, and an audit of a
     production pair can call it without re-deciding what "the same" means.
 
-    Four explanations, and every one of them comes from a declaration the other
+    Five explanations, and every one of them comes from a declaration the other
     halves of the epic already made — none is re-listed here. (The clause after
     them — *"nothing else"* — is the ABSENCE rule that closes the list, not a
-    fifth explanation: it says what an UNEXPLAINED difference does.) ⛔ It was
+    sixth explanation: it says what an UNEXPLAINED difference does.) ⛔ It was
     TWO before #10853, the THIRD arrived with the narrowing that made it
-    necessary (#10867 review ISSUE 1), and the FOURTH with `#10394`: an
-    asymmetry absent from this list is not explained by omission, it is a RED,
-    so a declared asymmetry that this rule did not know about turned a
-    sanctioned decline into the same signal as a projection gap — *"a signal
-    indistinguishable from noise is not observability"*, the class this same
-    change treats as P1 elsewhere.
+    necessary (#10867 review ISSUE 1), the FOURTH with `#10394`, and the FIFTH
+    with `#11747`: an asymmetry absent from this list is not explained by
+    omission, it is a RED, so a declared asymmetry that this rule did not know
+    about turned a sanctioned decline into the same signal as a projection gap —
+    *"a signal indistinguishable from noise is not observability"*, the class
+    this same change treats as P1 elsewhere.
 
     * **the EP carve-out** — a field absent from the record whose name the SCHEMA
       refuses (``cache_projection._refused(table)``: ``confidence``,
@@ -1214,14 +1214,26 @@ def parity_difference(cache_props: Mapping[str, Any],
         direction reads ``invented: {story_arc}`` — *"the record path made up a
         field"* — whose only sanctioned repair is likewise a re-projection, on
         the very pair this deny exists to separate.
+    * **the unserved-vector drop (`#11747`)** — for a ``label`` in
+      ``cache_projection.UNSERVED_VECTOR_LABELS`` (today: ``Session`` only, the
+      one record table with no ``run_vector_query`` path), the vector properties
+      (``cache_projection.unserved_vector_declined_properties``) are dropped from
+      the RECORD ANSWER ``node_from_row`` builds — the map ``read_node`` answers
+      from — so a LEGACY cache node that still carries one is CACHE-HELD, not a
+      projection gap. ⛔ Without this arm the profile that `#11747` is about
+      reports ``unexplained_missing: {'embedding': …}``, whose only sanctioned
+      repair is a re-projection that can no longer add the field: a permanent
+      red on a correct pair, and one that contradicted ``record_reconcile`` on
+      the same node (``graph_only``). Declared in both directions, on the
+      §9.1/D1 pattern above, for the same reason.
     * **nothing else.** A field the cache answers and the record does not, with no
       explanation, is a projection gap — and it reddens. A field the record
       answers and the cache does not is an invention — and it reddens too, UNLESS
       it is a not-projectable column, a DECLINED name (the §9.1/D1 pair above),
-      or a fold default. The four explanations above are the ONLY sanctioned
-      asymmetries, and because all four are enumerated they cannot be used to
-      hide a gap. ⚠️ THREE of the four
-      are mirrored into the ``invented`` direction (the decline and the
+      a dropped unserved vector, or a fold default. The five explanations above
+      are the ONLY sanctioned asymmetries, and because all five are enumerated
+      they cannot be used to hide a gap. ⚠️ FOUR of the five are mirrored into
+      the ``invented`` direction (the decline, the unserved vector, and the
       not-projectable set explicitly, and a FOLD DEFAULT via its own
       ``_is_fold_default`` skip — so that arm needs no branch for it); the
       CARVE-OUT is not, so a raw record row still
@@ -1273,6 +1285,11 @@ def parity_difference(cache_props: Mapping[str, Any],
     is OPERATIVE on the sanctioned path — the measured false GREEN the
     ``invented``-loop comment below describes (filed as ``#11233``).
 
+    ⚠️ The `#11747` unserved-vector arm has the same property for the same
+    reason: the vector is removed FROM THAT MAP by :func:`node_from_row` on every
+    row of an unserved label, so its absence is the map's own shape and never a
+    value the two sides disagreed about.
+
     ⚠️ A field BOTH sides carry is always compared, refused name or not. That is
     what keeps a caller's own re-derivation honest: the served endpoint puts a
     recomputed ``content_hash`` back into its response, and a wrong recomputation
@@ -1286,6 +1303,7 @@ def parity_difference(cache_props: Mapping[str, Any],
         episodic_source_declined_properties,
         is_episodic_source_node,
         placement_spellings,
+        unserved_vector_declined_properties,
     )
 
     table = NODE_TABLES.get(label)
@@ -1311,6 +1329,20 @@ def parity_difference(cache_props: Mapping[str, Any],
     declined = (episodic_source_declined_properties()
                 if label == "Source" and is_episodic_source_node(cache_props)
                 else frozenset())
+    # `#11747`'s declared drop, read from the projection's ONE declaration. A
+    # vector on a label no query leg serves is REFUSED by the projection
+    # (`UNSERVED_VECTOR_LABELS`: it is dropped from the record answer in
+    # `node_from_row` and from the statement in `node_statement`), so a LEGACY
+    # cache node that still carries one is CACHE-HELD — not a projection gap.
+    # ⛔ The arm is REQUIRED, and it is the "declared, not silent" half of that
+    # drop: without it this rule reports `unexplained_missing: {'embedding': …}`
+    # on exactly the population `#11747` is about, and a projection gap's only
+    # sanctioned repair is a re-projection — which can no longer add the field,
+    # so the red would be PERMANENT until a wipe-and-rebuild, while
+    # `record_reconcile` reports the same pair as `graph_only`. Two instruments
+    # disagreeing about one node is the asymmetry this enumeration exists to
+    # refuse. Resolved ONCE per comparison, like the decline above.
+    declined_vectors = unserved_vector_declined_properties(label)
 
     def _is_fold_default(field_name: str, value: Any) -> bool:
         return field_name in defaults and value == defaults[field_name]
@@ -1324,12 +1356,15 @@ def parity_difference(cache_props: Mapping[str, Any],
                 or _is_fold_default(field_name, value)):
             explained[field_name] = value
             continue
-        if field_name in declined:
+        if field_name in declined or field_name in declined_vectors:
             # §9.1/D1 decline (#10853): the record keeps the prose, the
             # projection does not materialise it, and a cache node that still
             # carries it is CACHE-HELD — never a projection gap. Not
             # "cache-owned": the record holds it (§17.5's term is for what the
             # record cannot hold; see `graph_only_total`'s retraction).
+            # `#11747`'s unserved-vector drop is the SAME shape, one class over:
+            # the record answer declines the vector (it can never be read), so a
+            # legacy cache node holding it is cache-held, not a gap.
             explained[field_name] = value
             continue
         unexplained[field_name] = value
@@ -1387,6 +1422,15 @@ def parity_difference(cache_props: Mapping[str, Any],
         # this change introduces, and the fix is a different decision (the record
         # is not even supposed to carry those names).
         if field_name in not_projectable or field_name in declined:
+            explained[field_name] = value
+            continue
+        # `#11747` — the MIRROR of the unserved-vector drop, for a caller that
+        # hands RAW record rows (an audit that opened the record with its own
+        # SQL): the projection declines to store the vector, so the record row
+        # carrying it is DECLARED, not invented. `invented`'s only sanctioned
+        # repair is likewise a re-projection, i.e. re-opening the door the drop
+        # exists to keep shut.
+        if field_name in declined_vectors:
             explained[field_name] = value
             continue
         # A fold `ON CREATE` default fills a field the record row is SILENT
