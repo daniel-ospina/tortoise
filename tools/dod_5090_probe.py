@@ -1147,8 +1147,9 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
     # first (Python's last-wins dict semantics — the LATER row wins and the earlier one is
     # dead; an active override, not a harmless no-op). `ruff`'s F601 is the only LINTER that
     # catches it, and it caught this one only post-merge on `main` — the pytest lane could
-    # not, until `#9314`'s pin below. Provenance and the carrier rationale are merged into
-    # this row so neither reading is lost.
+    # not, until `#9314`'s pin
+    # (`tests/test_dod_5090_probe.py::test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently`).
+    # Provenance and the carrier rationale are merged into this row so neither reading is lost.
     "tortoise.sdk::create_source": (
         CENSUS_EXEMPT,
         "`tortoise/sdk.py::create_source` — the `#11858` guard's OWN message is the only "
@@ -1330,7 +1331,7 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
         # Needle 1 is the REFUSAL's own prose — the whole reason this name enrols, and the
         # only `_EMBED_WRITE` match in the body: delete the `raise` and it goes, taking the
         # population entry with it. Needle 2 is the guard's CONDITION
-        # (`_caller_markers = sorted(set(ev) & …)`, three lines above the `raise`) and is
+        # (`_caller_markers = sorted(set(ev) & …)`, two lines above the `raise`) and is
         # INDEPENDENT of it — it survives a raise-only deletion, so the two do not travel
         # together. ⛔ Re-derive both rather than assuming: re-deriving is re-deriving the
         # instrument's match, and a stale exemption must not outlive what it exempts.

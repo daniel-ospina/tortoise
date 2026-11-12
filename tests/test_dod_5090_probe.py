@@ -8193,8 +8193,8 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
     LAST binding and the earlier row is dead: the RUNTIME object cannot report the
     duplicate, because it never saw one (`census_evidence_violations()` compares
     key SETS, which are already collapsed). `#11996` landed exactly that pair in
-    both dicts, and `main` was red only from `ruff`'s `F601` — post-merge, on the
-    merge ref every open PR inherits.
+    both dicts, and these DICT duplicates were caught only by `ruff`'s `F601` —
+    post-merge, on the merge ref every open PR inherits.
 
     So this pin is re-derived from the SOURCE AST and runs in the pytest lane,
     which is the half the lint job cannot cover. `load()` in
@@ -8204,7 +8204,7 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
     ⛔ `main` was red from TWO causes at `9828250732`, and this pin closes the
     second: the register's duplicate raised at import (so this whole file could not
     even collect), while the dict duplicates here were caught only by `ruff`'s
-    `F601` after the merge.
+    `F601` after the merge — never in the pytest lane.
     """
     src = (probe.REPO_ROOT / "tools/dod_5090_probe.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
