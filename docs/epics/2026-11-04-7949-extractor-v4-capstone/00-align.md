@@ -220,7 +220,7 @@ shipped table says RED.
 Two recorded decisions and one closed-but-unsettled metric sit under the owner's assertions. This epic
 **routes** them; it does not decide them.
 
-1. **REOPEN — D3 `statement`-only** (`docs/ONTOLOGY.md:969-978`, option B 2026-08-12, `#1022` MERGED) vs A4
+1. **REOPEN — D3 `statement`-only** (`docs/ONTOLOGY.md:975-984`, option B 2026-08-12, `#1022` MERGED) vs A4
    ("0.6 % typed is the ceiling the capstone must beat"). Fork: (a) A4 overrides D3 → `OVERRIDES:` on
    `#1022` + `ONTOLOGY.md` §5 and C7 gains a target; (b) A4 was aimed at `#4432`'s docs-vs-code drift → C7
    attributes the 109 and follows whichever of `#4432`'s options the owner picks.

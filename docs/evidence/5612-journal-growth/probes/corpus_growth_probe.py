@@ -165,6 +165,9 @@ def main() -> int:
     print("  growth over it understates the vector's own cost. The +202 B in the")
     print("  decomposition is the POINT-payload copies the stamp inserts, where")
     print("  production writes them — not a second charge for the baseline keys.")
+    print("  (The LIVE seam adds a 26 B fourth key, `embedding_width`, since")
+    print("  #11821, so the POST-change decomposition charges 228 B; this block is")
+    print("  the pre-change 8,606 B split and keeps its 202 B.)")
     print()
 
     with tempfile.TemporaryDirectory() as tmp:

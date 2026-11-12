@@ -4628,7 +4628,14 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
                     f"cite :{number} — a bare continuation is invisible to "
                     f"_BUNDLE_CITE, so this pin is the only thing reading it")
                 continue
-            got = sources[source_key][int(number) - 1]
+            got = sources[source_key]
+            if int(number) > len(got):
+                failures.append(
+                    f"{source_label}:{number} (cited by {doc_label}) is PAST THE END "
+                    f"of {source_label} ({len(got)} lines) — the cite names a line "
+                    f"the file does not have, or this row's SOURCE key is wrong")
+                continue
+            got = got[int(number) - 1]
             if isinstance(anchor, tuple):
                 if got.strip() != anchor[1]:
                     failures.append(
@@ -5055,32 +5062,45 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # whole sentence's three numbers, so a re-derivation of one cannot leave
         # its neighbours behind the way it did at `a08f7bce3d`.
         ("RECONCILE-A1-A2-A5.md", "`TortoiseSDK._extract_session_v2` at", (
-            ("17922", "relation_write = apply_relation_edges("),
+            ("17974", "relation_write = apply_relation_edges("),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
-            ("17921", "from tortoise.relation_write import apply_relation_edges"),
+            ("17973", "from tortoise.relation_write import apply_relation_edges"),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
-            ("17909", "# `#10999` made the channel TRANSPORT ONLY"),
+            ("17961", "# `#10999` made the channel TRANSPORT ONLY"),
         ), "sdk"),
-        # `subject_binding_available`'s DEFINITION, in both documents that state it
-        # — a row per document, because a row scopes to one FILE and the pair was
-        # re-pointed in one while the definition stayed wrong in both.
+        # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
+        # documents that state them — a row per document, because a row scopes to
+        # one FILE and the consume pair was re-pointed in one document while the
+        # definition stayed wrong in both.
         ("00-plan.md", "is a **fail-OPEN** probe, defined at", (
             ("6588", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
+        ("00-plan.md", "consumed at `sdk.py:", (
+            ("9540", "subject_binding_available,"),
+            ("9593", "and not subject_binding_available(graph):"),
+        ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
             ("6588", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
+        # ...and that same row's CONSUME pair names `sdk.py`, so it takes its own
+        # row: a row carries ONE source key, and a mis-keyed cite must red with a
+        # message rather than an IndexError (the guard below now says so).
+        ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
+            ("9540", "subject_binding_available,"),
+            ("9593", "and not subject_binding_available(graph):"),
+        ), "sdk"),
         # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
         # names the call), keyed by the quoted form the sentence prints.
         ("00-plan.md", "point-creation path at", (
-            ("17569", "bind_point_subjects(proj, self, point_id=pid,"),
+            ("17621", "bind_point_subjects(proj, self, point_id=pid,"),
         ), "sdk"),
     )
-    assert len(rows) >= 6, (
+    assert len(rows) >= 8, (
         f"only {len(rows)} rows — an emptied table would pass vacuously, and these "
-        "are the six cites the review found wrong on the pre-fix documents")
+        "are the cites the review found wrong on the pre-fix documents plus the "
+        "consume pair that sat beside them")
     sources = {name: path.read_text(encoding="utf-8").splitlines()
                for name, path in _EPIC_CITE_SOURCES.items()}
     failures = _pin_row_failures(rows, _EPIC_CITE_DOCS, sources)

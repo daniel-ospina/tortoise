@@ -4215,6 +4215,35 @@ surfaces:
   # NOT carve_out-registered: it is DB-free and runs on any lane, and a
   # measurement that only ran on one lane would stop being checkable.
   - test_journal_growth.py
+  # #11821 P0: the journal's vector WIDTH (`tortoise/embeddings.py::
+  # stamp_journal_embedding` / `shortest_float32_vector`), the compact-separator
+  # write in `tortoise/log.py::EventLog.append`, and the #11821 P0 stamp at the
+  # `EventRecorded` door — carried by `tortoise/sdk.py::_emit_event`'s
+  # `id=`/`**extra` branch, which is the ONE stamp for that door since #11835
+  # review finding 2 removed the dead second one from
+  # `_journal_event_raw_write` (the row below still drives that door end to
+  # end). It landed
+  # with NO row here, so `tools/ci_selection.py --integrity` redded (`manifest
+  # drift: ['test_11821_journal_vector_width.py']`) and `manifest-integrity` —
+  # which IS in `python-ci-gate.needs` — held the merge red while the pins ran in
+  # NO lane. Same class and same remedy as `test_journal_growth.py` above.
+  # ⛔ DUAL-REGISTERED with `eval` (below), because being a SOURCE_PATTERNS entry
+  # is precisely why THIS row cannot cover the seam: `tortoise/embeddings.py` is
+  # an EXACT `SOURCE_PATTERNS["eval"]` match and a named-surface match REPLACES
+  # the `core` fallback (#2938), so an `embeddings.py`-only diff — the module
+  # that defines `shortest_float32_vector`, `stamp_journal_embedding`, the width
+  # stamp and all three marker constants, and the landing site of P2's base64
+  # payload — selects `['eval']` and ran NONE of these pins while
+  # `manifest-integrity` stayed green (the file IS classified; that gate answers
+  # a different question). Exactly the #1349/#3332/#3616 silent-drop class, and
+  # the same remedy its sibling `test_journal_embedding_5004.py` already uses.
+  # Hermetic in the sense that matters here — `numpy` and `tmp_path` only, no
+  # external DB, no live graph service, no network — so it is
+  # deliberately NOT carve_out-registered: the pins are fail-closed format claims
+  # that must run on every lane. The single most load-bearing one is
+  # `test_a_verbatim_vector_is_never_narrowed` (the #5004 round-7 promise that a
+  # caller-owned vector keeps its raw form).
+  - test_11821_journal_vector_width.py
   - test_test_lane_tool.py
   # #11385 (review P1): the S4 re-emit tax's instrument (`tools/s4_reeemit_tax.py`)
   # and its evidence bundle. Same class as `test_journal_growth.py` above — a
@@ -8412,7 +8441,25 @@ surfaces:
   # #5004: dual with `core` (sdk/capture loop) — this test pins
   # `tortoise/embeddings.py` (stamp_journal_embedding / embedding_identity /
   # the normalization & width guards), which this surface owns.
+  # #11821 P0: dual with `core` for the SAME reason — `shortest_float32_vector`,
+  # `stamp_journal_embedding`, `_stamp_journal_vector_width` and the three width
+  # constants all live in `tortoise/embeddings.py`, which is an EXACT
+  # `SOURCE_PATTERNS["eval"]` entry. A named-surface match REPLACES the `core`
+  # fallback (#2938), so without this arm an `embeddings.py`-only PR — P2's
+  # base64 float32 payload lands there next — selects `['eval']` and runs NONE
+  # of `test_11821_journal_vector_width.py`'s width pins while
+  # `manifest-integrity` stays green. (Deliberately NOT an integer: the count
+  # was written as thirty-five, then two later commits added pins and left it
+  # stale. Re-derive or don't state it.)
   - test_journal_embedding_5004.py
+  - test_11821_journal_vector_width.py
+  # #11835 review (P2): the SIBLING defect, measured in the same selection run —
+  # `test_journal_growth.py` pins the byte budget this change moved (9,176 ->
+  # 5,423 / 4,689 B, a function of what `tortoise/embeddings.py` writes), and it
+  # was `core`-only, so `--changed-files tortoise/embeddings.py` selected
+  # `['eval']` and did NOT run it. Same silent-drop class as the row above, and
+  # the same remedy: dual with `eval`, which OWNS that module.
+  - test_journal_growth.py
   - test_update_point_content_embedding_4208.py  # #4208: dual with `core` — the fix routes through `tortoise/embeddings.py`'s `encode_for_store`, which this surface owns
   - test_embed_gate_5008.py  # #5008: dual with `core` — `encode_for_row` (the EMBED gate's submission seam) lives in `tortoise/embeddings.py`, which this surface owns; without this arm an embeddings.py-only diff would leave the gate unguarded
   - test_embed_decision_step_11086.py  # #11086: dual with `core` — the S6a step's submission seam (`encode_for_row`) and the width/degrade path it rides live in `tortoise/embeddings.py`, which this surface owns; an embeddings.py-only diff would otherwise leave the EMBED step's ordering unguarded
