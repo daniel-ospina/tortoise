@@ -424,9 +424,18 @@ PER_PAGE = 100
 #: total 5-10"; measured at round 8 the repo carried 8 PR-event `in_progress` runs (5 measured
 #: executing, 3 frozen) out of 11 `in_progress` in total — i.e. the budget is AT the population,
 #: not above it. That is fine and was designed for: when it binds, the OLDEST runs are the
-#: probed ones (the population a long-standing frozen run lives in) and a surplus degrades the
-#: verdict through the `PR-UNWITNESSED` clause rather than silently restoring the old census.
-#: Do not read the number as a capacity claim — read the degradation as the guarantee.
+#: probed ones (the population a long-standing frozen run lives in), so the runs that are
+#: MISSED are the newest — and a missed run keeps the pre-#12037 census for itself.
+#:
+#: ⛔ THAT IS NOT "A SURPLUS ALWAYS DEGRADES THE VERDICT" (#12037 review round 9, correcting
+#: round 8's own wording, which claimed the surplus was covered by the clause). The clause fires
+#: only when EVERY counted run is unmeasured. MEASURED with the budget binding: 10 PR-event
+#: `in_progress` runs, 8 probed as one executing + seven idle, 2 never probed, one PR run waiting
+#: 1000 s → `pr_running=3, pr_running_unmeasured=2, OK, congests_pr is False`. The two missed
+#: runs are silently counted as executing, exactly as round 3's comment on the degradation says
+#: they are; the degradation is the guarantee only for the all-unmeasured census. Read the
+#: number as a budget, the degradation as a clamp on the WORST case, and `pr_running_unmeasured`
+#: as the visible size of the residual — not as three separate guarantees.
 #:
 #: And the 600 s arithmetic above is this WORKFLOW's budget only: the second consumer,
 #: `ci_check_repair.read_queue_health`, calls `read_health(repo)` with these defaults inside a
@@ -1505,9 +1514,14 @@ def classify_queue(
             f"checks cannot answer inside that wait. Largest share: "
             f"'{global_leader or 'unknown'}' ({global_max} of {len(queued)}); "
             f"trim-safe offender present: {bool(set(non_pr_tally) & TRIM_SAFE)} — "
-            f"no run was trimmed for this reading: this state is reached only while "
-            f"a PR-event run is executing, and the governor's block sits BELOW that "
-            f"clause, so this reading reaches no governor block. In any case its candidates "
+            # ⛔ NOT "while a PR-event run is executing" (#12037 review round 9): this
+            # clause is reached on `pr_running > 0`, and that count may be unmeasured runs,
+            # so the old phrase re-asserted — 300 characters after the sentence corrected it
+            # — the very measurement the correction says was not made. State the CONDITION
+            # the governor sits below, which is all this argument needs.
+            f"no run was trimmed for this reading: the governor's block sits BELOW this "
+            f"state's condition (`pr_running > 0`), so this reading reaches no governor "
+            f"block. In any case its candidates "
             f"are a trim-safe OFFENDER's queued runs, and a queued PR run is never a "
             f"candidate (a cancellation this invocation made BEFORE this reading is "
             f"reported in 'cancelled', not here)"

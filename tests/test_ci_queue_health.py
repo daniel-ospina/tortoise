@@ -1894,7 +1894,14 @@ def test_the_no_action_clause_names_the_bound_that_actually_binds():
     assert health.verdict == Q.PR_BACKLOGGED
     assert health.trimmable == ()
     joined = " ".join(health.reasons)
-    assert "the governor's block sits BELOW that clause" in joined
+    # The bound is the clause order; the phrase must name the CONDITION the block sits
+    # below, not the act of a run executing (round-9 P2: "while a PR-event run is
+    # executing" re-asserted a measurement 300 characters after the same sentence
+    # corrected it, and this clause is reached on `pr_running > 0`, which may be
+    # unmeasured runs).
+    assert "the governor's block sits BELOW this state's condition" in joined
+    assert "`pr_running > 0`" in joined
+    assert "while a PR-event run is executing" not in joined
     # scoped to the READING, never to the invocation: the same payload can carry
     # cancellations this run made before this reading (`cancelled`), so an
     # invocation-scoped "no trim was ever considered" contradicts the artifact.
@@ -3218,6 +3225,58 @@ def test_the_unwitnessed_annotation_selects_the_CAUSE_and_its_own_lever():
         "the wait cause must not be handed the census lever"
     )
 
+    # 4. ⛔ AND THE CONSTRUCTION IS EXECUTED, NOT SPELL-CHECKED (#12037 review round 9).
+    # Every string assertion above is satisfied by a file whose SELECTOR IS INVERTED —
+    # flipping `-eq 1` to `-eq 0`, or the `|| echo 0` fallback to `1`, inverts the
+    # cause→lever mapping on every real reading while changing no string this test reads
+    # (both survived the suite). The only way to pin polarity is to RUN the branch. The
+    # tool's hardcoded path is rewritten to a fixture so a concurrent run's
+    # `/tmp/ci-queue-health.json` is never touched, and `$state` is defined because the
+    # branch prints it.
+    import subprocess
+    import tempfile
+
+    lines = arm.splitlines()
+    sel_i = next(i for i, ln in enumerate(lines) if "census_n=" in ln)
+    # the matching `fi` for the `if [` that follows the assignment
+    if_i = next(i for i, ln in enumerate(lines[sel_i:], start=sel_i)
+                if re.match(r'^\s*if \[ ', ln))
+    indent = len(lines[if_i]) - len(lines[if_i].lstrip())
+    end_i = next(i for i, ln in enumerate(lines[if_i:], start=if_i)
+                 if ln.strip() == "fi" and len(ln) - len(ln.lstrip()) == indent)
+    branch = "\n".join(ln.strip() for ln in lines[sel_i:end_i + 1])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        fixture = Path(tmp) / "ci-queue-health.json"
+        script = branch.replace("/tmp/ci-queue-health.json", str(fixture))
+
+        def rendered(payload):
+            if payload is None:
+                fixture.unlink(missing_ok=True)
+            else:
+                fixture.write_text(payload)
+            out = subprocess.run(
+                ["bash", "-c", 'state="CI: TEST"\n' + script],
+                capture_output=True, text=True, check=True,
+            )
+            return out.stdout
+
+        # a census cause selects the census lever, and MUST refute the wait one
+        census_out = rendered('{"pr_running_census_unwitnessed": true}')
+        assert "--max-job-probes" in census_out, census_out
+        assert "NOT --max-pages" in census_out, census_out
+
+        # every other cause — flag false, key absent, payload absent, payload unparseable —
+        # selects the WAIT lever and must never mention the census one
+        for payload in ('{"pr_running_census_unwitnessed": false}',
+                        '{"verdict": "PR-UNWITNESSED"}',
+                        "{}",
+                        "not json",
+                        None):
+            out = rendered(payload)
+            assert "--max-pages" in out, (payload, out)
+            assert "--max-job-probes" not in out, (payload, out)
+
 
 def test_an_unmeasured_NON_PR_run_cannot_degrade_a_measured_reading():
     """Round-8 M4: `pr_running_unmeasured` is scoped to PR-event runs, and nothing pinned it.
@@ -3278,6 +3337,26 @@ def test_every_reason_line_that_says_executing_is_as_strong_as_its_evidence():
     flood_claim = next(r for r in not_a_flood.reasons if r.startswith("not a flood"))
     assert "is REPORTED executing" in flood_claim, flood_claim
     assert "are executing" not in flood_claim
+
+    # ⛔ AND THE HELPER'S PREDICATE IS EQUALITY, NOT "> 0" (#12037 review round 9, nit). The
+    # over-cautious direction — any unmeasured run making the whole census read "NONE of them
+    # was measured" — survives every other test, and it puts a false claim beside the
+    # `1 run(s) UNMEASURED` note. One measured run + one unmeasured must keep the STRONG
+    # claim, because a proved-executing run is exactly what "executing" needs.
+    mixed = [
+        Q.QueuedRun(id=14, name="Python CI", event="pull_request",
+                    created_at=(NOW - timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    has_live_job=True),
+        run(15, "Python CI", event="pull_request", age_seconds=40),   # unmeasured
+    ]
+    partial = classify(
+        [*flood_queued(12), run(1, "python-ci", event="pull_request", age_seconds=1000)],
+        in_progress=mixed,
+        probe_attempted=True,
+    )
+    partial_claim = next(r for r in partial.reasons if r.startswith("not a flood"))
+    assert "PR CI IS executing (2 run(s))" in partial_claim, partial_claim
+    assert "NONE of them was measured" not in partial_claim
 
     # ... and a MEASURED census keeps the strong claim on both arms
     executing = [Q.QueuedRun(id=13, name="Python CI", event="pull_request",
