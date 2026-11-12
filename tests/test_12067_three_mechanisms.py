@@ -1184,17 +1184,50 @@ def test_the_mechanism_mismatch_message_names_the_THIRD_mechanism(sdk):
     # The declared mechanism it names must be the one that actually contradicted.
     assert "NAND declaration" in text or "declared NAND" in text.replace(
         "declares 'NAND'", "declared NAND"), text
-    # ⛔ …and WHICH SIDE MOVES must be right (#12067 review round 7, P2).
+    # ⛔ …and WHICH SIDE MOVES must be right (#12067 review rounds 7 and 8, P2).
     # `phi_coherence(ca, cb)` prices the DEPENDENT off the CONDITION, so an unmet
-    # condition drags the DEPENDENT down; the first wording said it lowers the
-    # CONDITION, which is false of the default `->` reading and contradicts
-    # ONTOLOGY. Measured on the factor path: `->` leaves the condition at
-    # 0.050000 and lowers the dependent 0.9091 → 0.8264.
+    # condition drags the DEPENDENT down while the condition does not move; the
+    # first wording said it lowers the CONDITION, which is false of the default
+    # `->` reading and contradicts ONTOLOGY.
     assert "DEPENDENT" in text, text
     assert "LOWERS the condition" not in text, text
-    # …and the contrast's polarity follows the DECLARED meaning: a NAND meaning
-    # expects the target to LOWER, so "would have it RAISE" is backwards for it.
-    assert "would have it LOWER the target's" in text, text
+    # …and the contrast's polarity follows the DECLARED mechanism: a NAND
+    # declaration expects the target to LOWER, so "would have it RAISE" is
+    # backwards for it — and this call declared NAND.
+    assert "would have it LOWER the TARGET" in text, text
+
+
+def test_the_disclosure_does_not_invent_a_meaning_the_PACK_leg_never_supplied(sdk):
+    """⛔ A WARNING THAT DESCRIBES AN INPUT THE CALL DID NOT CONTAIN (#12067
+    review round 8, P2).
+
+    The coherence arm first derived the contradicted mechanism from
+    `_meaning_mechanisms`, which is EMPTY whenever the contradiction came from
+    the PACK leg (that walk only reads packs when a `label` is given, and a pack
+    relation contradicts with no `semantics` at all). So
+    `create_operator("coherence", a, [b], label="competesWith")` — a pack
+    relation declared `mechanism: NAND` — was told:
+
+        "A coherence wire carrying a IMPL meaning … where the IMPL meaning would
+         have it RAISE the target's"
+
+    three times wrong: the mechanism that contradicted is NAND, the polarity it
+    names is the opposite of the declaration that fired, and "a … meaning" points
+    at an argument the call never contained. The sibling IMPL/NAND arms already
+    avoid this via `_from_meaning`; the third arm now reads the CONTRADICTION and
+    picks its preamble the same way.
+    """
+    a, b = _points(sdk)
+    warned = sdk.create_operator("coherence", a, [b], label="competesWith")
+    msgs = [w for w in (warned.get("warnings") or [])
+            if w.get("code") == "mechanism_mismatch"]
+    assert msgs, warned.get("warnings")
+    text = msgs[0]["message"]
+    assert "a IMPL" not in text and "IMPL meaning" not in text, text
+    # A pack leg is addressed as a DECLARATION, not as a meaning it never carried.
+    assert "fed a relation declared NAND" in text, text
+    # …and no declaration means the target should be RAISED here.
+    assert "RAISE" not in text, text
 
 
 # ── ROUND 4 continued: the two P1s the third round's fix left behind ──────

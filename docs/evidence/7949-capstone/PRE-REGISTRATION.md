@@ -2294,7 +2294,7 @@ to answer.
   extent `:11857-11879` (23 lines, `def` to `return items` — unchanged in size, so the extent is
   still the 23 lines §10.19 measured), the two `if items:` gates at `:14276`/`:14429`
   (the S2 pass and the post-S4 pass), the two fail-open `except` arms at `:14289`/`:14440`,
-  the two result blocks at `:14640` (closing `:14644`) and `:14650` (closing `:14654`), and
+  the two result blocks at `:14640` (closing `:14646`) and `:14650` (closing `:14654`), and
   `_run_vet_pass`'s S2.2 call at `:16834` and its post-S4 union call at `:14405`.
 - **Verified by content, not by arithmetic.** Each line was opened at this head, not shifted:
   `:11857` is `def _collect_classify_items(embed_list: dict) -> list[dict]:` and `:11879` is

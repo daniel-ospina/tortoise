@@ -24351,36 +24351,51 @@ class TortoiseSDK:
                         "target's confidence where the declaration says it must "
                         "LOWER it")
                 elif op_type == "coherence":
-                    # ⛔ THE THIRD MECHANISM HAS ITS OWN ARM (#12067 review round
-                    # 5, P2), and the ARM'S OWN SENTENCE has to be true of the
-                    # potential (#12067 review round 7, P2). The two branches
-                    # below name NAND, so a coherence wire fell into the NAND
-                    # examples — an agent-facing warning that said "A NAND wire
-                    # carrying an IMPL meaning" about a COHERENCE wire, wrong
-                    # twice (the wire is not NAND, and this one was declared
-                    # NAND). An agent acting on it would rewrite a correct
-                    # coherence wire into a NAND one.
+                    # ⛔ THE THIRD MECHANISM HAS ITS OWN ARM (#12067 review rounds
+                    # 5 and 7, P2). The two branches below name NAND, so a
+                    # coherence wire fell into the NAND examples — an agent-facing
+                    # warning that said "A NAND wire carrying an IMPL meaning"
+                    # about a COHERENCE wire, wrong twice (the wire is not NAND,
+                    # and this one was declared NAND). An agent acting on it would
+                    # rewrite a correct coherence wire into a NAND one.
                     #
                     # ⛔ WHICH SIDE MOVES: `phi_coherence(ca, cb)` prices the
                     # DEPENDENT (slot 1) off the necessary CONDITION (slot 0), so
-                    # an unmet condition DRAGS THE DEPENDENT DOWN — measured on
-                    # the factor path: `->` leaves the condition at 0.050000 and
-                    # lowers the dependent 0.9091 → 0.8264, and `<-` lowers the
-                    # dependent again (0.0500 → 0.0472). The first cut of this
-                    # message said it "LOWERS the condition's confidence", which
-                    # is false of the default reading and contradicts ONTOLOGY
-                    # ("an unmet condition propagates loss to the dependent").
-                    # The polarity of the CONTRAST depends on the declared
-                    # meaning too: an IMPL meaning expects a RAISE, a NAND
-                    # meaning expects a LOWER, so one clause cannot serve both.
-                    _other = "NAND" if "NAND" in _meaning_mechanisms else "IMPL"
+                    # an unmet condition DRAGS THE DEPENDENT DOWN while the
+                    # condition itself does not move at all. Measured on
+                    # `TortoiseEP._update_factor` at the DEFAULT weight `w=1.0`
+                    # with priors 0.050000 (condition) / 0.909091 (dependent):
+                    #   `->`  dependent 0.909091 → 0.901401, condition 0.050000
+                    #   `<-`  dependent → 0.909000, condition 0.050000 → 0.049614
+                    # and a grid over (condition, dependent) raises the dependent
+                    # in ZERO cells. The first cut of this message said it "LOWERS
+                    # the condition's confidence", which is false of the default
+                    # `->` reading and contradicts ONTOLOGY ("an unmet condition
+                    # propagates loss to the dependent").
+                    #
+                    # ⛔ WHICH MECHANISM IT NAMES, and how it addresses the call:
+                    # the contradicted mechanism comes from the CONTRADICTION
+                    # (`contradictions[0][0]`), never from the meaning probe —
+                    # that probe is EMPTY for the pack leg, so the first cut fell
+                    # back to "IMPL" and told a caller whose pack declares `NAND`
+                    # that its wire carried "a IMPL meaning … would have it RAISE
+                    # the target's": the wrong mechanism, the wrong polarity for
+                    # the declaration that actually contradicted, and an argument
+                    # the call never contained (#12067 review round 8, P2).
+                    # `_from_meaning` also picks the PREAMBLE, exactly as the
+                    # sibling arms do: a meaning leg is "carrying a {m} meaning",
+                    # a pack leg is "fed a relation declared {m}".
+                    _other = contradictions[0][0]
+                    _preamble = (f"carrying a {_other} meaning"
+                                 if _from_meaning
+                                 else f"fed a relation declared {_other}")
                     _expected = ("RAISE" if _other == "IMPL" else "LOWER")
                     _inversion = (
-                        f"A coherence wire carrying a {_other} meaning prices a "
-                        f"NECESSARY CONDITION — an unmet condition LOWERS the "
-                        f"DEPENDENT (the second input) and never raises it, "
-                        f"where the {_other} meaning would have it {_expected} "
-                        f"the target's")
+                        f"A coherence wire {_preamble} prices a NECESSARY "
+                        f"CONDITION — an unmet condition LOWERS the DEPENDENT "
+                        f"(the second input) and never raises it, where the "
+                        f"declared {_other} mechanism would have it {_expected} "
+                        f"the TARGET")
                 elif _from_meaning:
                     _inversion = (
                         "A NAND wire carrying an IMPL meaning (e.g. 'supports') "
