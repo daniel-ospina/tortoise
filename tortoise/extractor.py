@@ -1024,6 +1024,47 @@ class EntityStage(_SemanticStage):
         return entities
 
 
+def _referentiality_hold(surface: str) -> tuple[str, str] | None:
+    """#12094 — ASK the referentiality cue ``#11021`` landed; never a second gate.
+
+    ``extractor_v2``'s Subject candidates ride ``entities[]``, which
+    ``route_mentions`` (S2.2) filters through ``referentiality.judge`` before
+    the S5 entity loop can mint them. This module is the OTHER extractor
+    generation, and its ``subjects`` section (``extract_entities`` below) had
+    no equivalent predicate at all: every name the stage returned went
+    straight to ``api.add_subject``, the explicit registration door
+    (``#3590`` D1) that mints when no live holder exists.
+
+    So a pronoun or a discourse-generic head that the model returned as a
+    subject became a durable ``:Subject`` on the document path. The repair is
+    NOT a new rule set — it is calling the SAME leaf, under the SAME flag, so
+    the two generations cannot disagree about a surface:
+
+    * ``referentiality.judge`` owns the cue and its flag
+      (``TORTOISE_REFERENTIALITY``, **OFF** by default per ``#5087`` plan R1 —
+      *unmeasured ⇒ fail open*), so an unarmed run here is byte-identical to
+      the pre-#12094 behaviour, exactly as ``route_mentions`` promises;
+    * the identifier-only class (``#4118``, a path) is deliberately NOT asked
+      here. ``value_gate`` owns it and is ON by default, so wiring it on this
+      path would ship an unmeasured discard to a live document ingest and can
+      drop a must-keep surface (``config/ci-surfaces.yml`` is the row
+      ``#11021``'s 12-row arm exists to protect). That is a different
+      decision, on a different path, and it is not this issue's.
+
+    ``the owner`` / ``the founder`` / ``the user`` are NOT held by this
+    predicate and must not become so: ``#2453``/``#4899`` measured them as real
+    entities with no antecedent, and ``referentiality``'s own docstring
+    records that no surface rule separates them from a definite description
+    (``the parity harness``) — that difference is meaning, and it belongs to
+    the arbiter (``s2_decision_seam``), never to this cue. Pinned by
+    ``tests/test_12094_subject_referentiality.py``.
+    """
+    from tortoise import referentiality
+    if not referentiality.enabled():
+        return None
+    return referentiality.judge(surface)
+
+
 class LLMExtractor:
     """Cheap point model + large relation model, same Extractor interface as the
     mock. Spans/quotes come from the deterministic segmenter, so provenance
@@ -1241,8 +1282,22 @@ class LLMExtractor:
         Emits SubjectAdded/ObjectAdded events via the API. Deduplicates by name
         within a run (idempotent across runs via IngestKey in begin_ingest).
 
+        #12094: a SUBJECT candidate the referentiality cue holds (a pronoun, a
+        pure deictic, a discourse-generic head — ``referentiality.judge``, the
+        SAME leaf ``#11021`` put in front of ``entities[]``) is NOT minted. It
+        is reported in ``held_subjects`` with its rule, its section and the
+        span it addressed. The cue is flag-gated OFF by default, so an unarmed
+        run is unchanged.
+
         Returns: {"subjects": N, "objects": M, "subject_names": [...],
-                  "entities": [names...], "failed_sections": [titles...]}
+                  "entities": [names...], "failed_sections": [titles...],
+                  "subjects_minted": N, "subjects_held": H,
+                  "held_subjects": [...], "subjects_held_by_rule": {...},
+                  "mentions": None}
+
+        ``mentions`` is ``None`` on purpose, not an empty list: this stage has
+        no claim Point to carry a mention record (DM1 / ``#11021``), so the
+        honest answer is "unanswerable here", never "nothing to report".
 
         ``subject_names`` (#4938) are the names that actually produced a
         ``SubjectAdded`` — the document path wires its ``aboutSubject`` edges
@@ -1284,6 +1339,10 @@ class LLMExtractor:
         all_entity_names: set[str] = set()
         n_subjects, n_objects = 0, 0
         failed: list[str] = []
+        # #12094: surfaces the referentiality cue HELD — never minted, never
+        # dropped, and reported with the section (this stage's claim unit) and
+        # the phrase's offset inside it. See the census in the return value.
+        held_subjects: list[dict] = []
 
         for title, body, span in sections:  # noqa: B007
             try:
@@ -1299,6 +1358,24 @@ class LLMExtractor:
             for s in entities.get("subjects", []):
                 name = s["name"].strip()
                 if not name or name in seen_subjects:
+                    continue
+                # #12094: the referentiality selection ``entities[]`` already
+                # has. A held surface is recorded (I2: never a silent drop) and
+                # NOT minted; it is also kept out of `subject_names`, so the
+                # document wires no `aboutSubject` edge to a Subject that does
+                # not exist and `_create_about_edges`' Subject-stub fallback
+                # cannot resurrect it (#4938).
+                _verdict = _referentiality_hold(name)
+                if _verdict is not None:
+                    _offset = body.find(name)
+                    held_subjects.append({
+                        "surface": name,
+                        "rule_id": _verdict[0],
+                        "reason": _verdict[1],
+                        "section": title,
+                        "span": list(span),
+                        "phrase_offset": _offset if _offset >= 0 else None,
+                    })
                     continue
                 try:
                     # #9572: forward the kind ONLY when the model named one — a
@@ -1344,6 +1421,27 @@ class LLMExtractor:
         return {
             "subjects": n_subjects,
             "objects": n_objects,
+            # ── #12094: the census, in THREE named buckets, never one number ──
+            # `subjects` above is retained (= minted) so every existing caller
+            # and test keeps its contract; the pair below is what makes the
+            # disposition readable rather than inferable.
+            #
+            # ⛔ There is no `mentioned` bucket HERE and that is not an
+            # omission: DM1 (``#11021``) puts a mention record on the claim
+            # Point that used it, and at this stage no Point exists yet —
+            # ``_DocumentPointStage`` runs in a separate pass. So a held
+            # surface on this path is a HOLD with a section span, NOT a
+            # mention, and ``mentions`` is ``None`` ("this instrument cannot
+            # answer") rather than ``[]`` ("nothing to report"), which would
+            # read as clean. Pinned by the census test.
+            "subjects_minted": n_subjects,
+            "subjects_held": len(held_subjects),
+            "held_subjects": held_subjects,
+            "subjects_held_by_rule": {
+                rule: sum(1 for h in held_subjects if h["rule_id"] == rule)
+                for rule in sorted({h["rule_id"] for h in held_subjects})
+            },
+            "mentions": None,
             # #4938: the created Subject names, so the document path can wire
             # (document Source)-[:aboutSubject]->(Subject) from the Subjects
             # this run actually minted — never from an uncreated name, which
