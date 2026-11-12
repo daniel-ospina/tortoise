@@ -2662,7 +2662,9 @@ to answer.
   the four-spelling hierarchy fold; `edges.py:717-726`, `create_edge`'s own predicate set, which
   admits the composition spelling and refuses its sibling), and §7 carries the fold again at the
   `a1_relation_family_fold` site. The sixth re-derivation — the record projection's own
-  copy of that fold map (`record_projection.py:4996-4997`) — has **no live carrier**: its only
+  copy of that fold map (`record_projection.py:4996-4999` — all four spellings, not the opening
+  two: this is the record's only pointer to that map, so a later edit to `contains` or `wraps`
+  must be inside the range) — has **no live carrier**: its only
   occurrence in this record is §10.11's history entry, which keeps the number it measured
   (`record_projection.py:4771-4779`). Its current value therefore lives **here and nowhere
   else**, which is a property of this record a reader should not have to discover by grep.
