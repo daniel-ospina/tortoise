@@ -94,16 +94,19 @@ def _run_text(step: dict) -> str:
 
 
 def _pin_step(steps: list[dict]) -> tuple[int, dict]:
-    """The one step that installs a PostgreSQL client package.
+    """The one step that INSTALLS a PostgreSQL client package.
 
-    Read from the step's CODE: a comment naming the package is inert shell, and
-    letting it select the step both mis-identifies the pin and, when two steps
-    are matched, reports "a second installer" over a step that installs nothing.
+    Selected by the INSTALL line, read from the step's CODE: a comment (its own
+    line OR a trailing one) naming the package is inert shell, and letting it
+    select the step both mis-identifies the pin and, when two steps match,
+    reports "a second installer" over a step that installs nothing (MEASURED,
+    review of `7dc1da573a`: `echo ok  # postgresql-client-16 is pinned below`
+    selected a second step and failed all six assertions with that message).
     """
     hits = [
         (index, step)
         for index, step in enumerate(steps)
-        if CLIENT_PKG_RE.search(_code_only(_run_text(step)))
+        if CLIENT_INSTALL_RE.search(_code_only(_run_text(step)))
     ]
     assert len(hits) == 1, (
         "expected exactly ONE PostgreSQL-client pin step in "
@@ -211,7 +214,13 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     # EXPRESSION that evaluates false is out of a text guard's reach; the constant
     # spellings are caught here.
     job_if = job.get("if")
-    assert job_if not in (False, "false", "${{ false }}"), (
+    # Normalised, not blacklisted: `${{false}}`, `${{ false}}` and `${{false }}`
+    # are the SAME constant and parse to four distinct strings (MEASURED, review
+    # of `7dc1da573a`: only the space-padded spelling was caught).
+    _job_if_inner = re.sub(
+        r"^\s*\$\{\{\s*|\s*\}\}\s*$", "", str(job_if)
+    ).strip().lower()
+    assert _job_if_inner not in ("false", "0"), (
         f"`{JOB}` is switched OFF (`if: {job_if!r}`) — a skipped job pins nothing, "
         "and the pin is never consulted"
     )
@@ -318,7 +327,7 @@ def test_the_pin_runs_before_the_record_leg(job: dict) -> None:
     leg_indexes = [
         index
         for index, step in enumerate(steps)
-        if "test_9567_record_capstone.py" in _run_text(step)
+        if "test_9567_record_capstone.py" in _code_only(_run_text(step))
     ]
     assert leg_indexes, "the record capstone (D8) is not in any run step of this job"
     assert pin_index < min(leg_indexes), (
@@ -365,19 +374,27 @@ def _code_only(text: str) -> str:
 #: the exact rewrite this guard promises to accept false-red as "does not
 #: `exit 1`" — the most misleading possible failure.
 _IF_PRECONDITION_RE = re.compile(
-    r"^if\s+!\s*(?:sudo\s+)?apt-cache\s+(?:show|policy)\s+['\"]?"
-    r"postgresql-client-(?P<major>\d+)['\"]?[^;]*;\s*then(?P<body>.*?)^fi\s*$",
+    # The header's own indent is captured and its closer must land there: an `if !`
+    # block wrapped and indented one level for a reason (a `-z` guard, a `then`
+    # block) is the SAME armed guard, and a column-0 anchor red-ed it (MEASURED,
+    # review of `7dc1da573a`) — the false block this comment block promises not
+    # to produce.
+    r"^(?P<ind>[ \t]*)if\s+!\s*(?:sudo\s+)?apt-cache\s+(?:show|policy)\s+['\"]?"
+    r"postgresql-client-(?P<major>\d+)['\"]?[^;]*;\s*then(?P<body>.*?)^(?P=ind)fi[ \t]*$",
     re.DOTALL | re.MULTILINE,
 )
 _OR_PRECONDITION_RE = re.compile(
     r"(?:sudo\s+)?apt-cache\s+(?:show|policy)\s+['\"]?"
-    r"postgresql-client-(?P<major>\d+)['\"]?[^|\n]*\|\|\s*[({]"
-    # The failing branch as a BOUNDED WINDOW of following lines, never up to a
-    # matched brace: the shipped message contains `( )` and `{ }` of its own, so
-    # brace-matching truncates the body and then reports the guard as missing —
-    # the most misleading failure this file could produce.
-    r"(?P<body>(?:[^\n]*\n){0,5}[^\n]*)",
-    re.MULTILINE,
+    r"postgresql-client-(?P<major>\d+)['\"]?[^|\n]*\|\|\s*[({][ \t]*\n"
+    # The failing branch runs to the GROUP's OWN closing line, never to a
+    # line-count window: a 5-line window truncated the shipped body (7 lines deep)
+    # and reported "does not `exit 1`" over a group that exits 1 (MEASURED, review
+    # of `7dc1da573a`). The closer is LINE-ANCHORED, so the `{…}`/`(…)` characters
+    # INSIDE the shipped message still cannot close it early — which is what the
+    # window was protecting against.
+    r"(?P<body>(?:(?!^[ \t]*[})][ \t]*$).)*)"
+    r"^[ \t]*[})][ \t]*$",
+    re.DOTALL | re.MULTILINE,
 )
 
 _PARAM_EXPANSION_RE = re.compile(r"\$\{[^}]*\}")
@@ -636,8 +653,14 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     """
     _, pin = _pin_step(_steps(job))
     lines = _run_text(pin).splitlines()
+    # COMMENT-ONLY lines are masked, never dropped: the indices must stay aligned
+    # with `lines`, which is EXECUTED below. A comment that mentions
+    # `apt-get install` was taken as the install, so the prefix, truncated at
+    # `set -euo pipefail`, reported the precondition missing (MEASURED, review of
+    # `7dc1da573a`).
+    masked = ["" if _COMMENT_ONLY_RE.match(line) else line for line in lines]
     install_at = next(
-        (i for i, line in enumerate(lines) if re.search(r"apt-get\s+install", line)),
+        (i for i, line in enumerate(masked) if re.search(r"apt-get\s+install", line)),
         None,
     )
     assert install_at is not None, "the pin has no `apt-get install` line to run up to"
