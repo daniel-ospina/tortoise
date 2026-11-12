@@ -109,11 +109,15 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > failure mode is the one already tracked here: that study of five stores found *"no system enforces revocation by
 > default"* — the mark exists and retrieval ignores it, our #11825/#11826 exactly.
 >
-> ⚠️ **OWED, and deliberately not in this entry:** the vocabulary has no word for *no longer current, replacement not yet known* —
-> the state the extractor's own owner-ruled policy needs (*"mark stale now, supersede on re-inference"*, `stale ≠ wrong`). That gap
-> is why the `status='superseded'`-without-carrier shape came into use, and why refusing it read as an over-block. `stale` is the
-> candidate word; adding it is an ontology EXPANSION and needs the owner's approval of its exact wording under the 2026-11-11 ruling,
-> so it is not part of this change.
+> ⚠️ **THE GAP IS REAL AND NO WORD IS WARRANTED YET — `stale` was considered and WITHDRAWN.** The vocabulary has no word for
+> *no longer current, replacement not yet known*, the state the extractor's owner-ruled policy needs (*"mark stale now, supersede on
+> re-inference"*, `stale ≠ wrong`). That gap is why the `status='superseded'`-without-carrier shape came into use, and why refusing
+> it read as an over-block. But **nothing in the shipped system can produce that state**: `invalidate_point(id, corrected_by_id)`
+> requires the corrector, and §4.1 records that the `outdated` flag and the `CORRECTS` edge *"do not distinguish the two"* — so a
+> `stale` word would have no writer, no reader and no behaviour `archived` lacks. Nor would anything consume the difference: both
+> are terminal, so both leave retrieval and belief, and **nothing revives a terminal entity**. Policy B therefore stays
+> **unimplemented**, and when it is built it needs a word *then*, with a producer and a revival path — its own change, not this one.
+> The successorless route today is **`archived`**, which is why the clause above is buildable without an expansion.
 >
 > **Still unbuilt, deliberately:** the guard that enforces this vocabulary, including the AX three-part
 > refusals (`status='outdated'` naming both `archived` and `superseded`; one refusal shape across
