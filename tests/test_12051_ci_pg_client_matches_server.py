@@ -1013,9 +1013,11 @@ def _run_commands(step: dict) -> str:
     became `b=/usr/lib/postgresql; echo "` — the rsync never reached any rule, and
     the step was GREEN. `_strip_trailing_comment` walks the line and cuts at a `#`
     that BEGINS A WORD — column 0, or after unquoted, unescaped whitespace or one
-    of the list operators `; & | (` (bash: "A word begins at the beginning of a
-    line, after unquoted whitespace, or after an operator"; `<`/`>` are
-    redirections and are NOT in the class). It also knows that a
+    of the list operators `; & | (` — plus, deliberately, NOT `<`/`>`: bash DOES
+    begin a comment word after a redirection operator (`echo hi >#f` is a syntax
+    error because `#f` was eaten as a comment), but omitting them here is a
+    fail-CLOSED narrowing — an ambiguous `#` keeps the tail live, so the guard
+    still sees the command instead of erasing it. It also knows that a
     substitution/assignment `)` is a word part while a GROUP-closing one is an
     operator, and that a backslash escapes its partner inside double quotes
     (#12271 / #12279 review, each measured).
@@ -5827,9 +5829,9 @@ def test_a_quoted_hash_does_not_erase_the_live_command_after_it() -> None:
         assert replacement in survived, (
             f"a quoted `#` ({quoted}) erased the live command after it: "
             f"`_run_commands` returned {survived!r}. A `#` inside quotes is data, "
-            "not a comment — the shell starts one at column 0, after unquoted "
-            "whitespace, after an unquoted operator, or after a group-closing `)`; "
-            "never inside a quoted span."
+            "not a comment — it starts one at column 0, after unquoted whitespace, "
+            "after unquoted whitespace/operator or a confirmed group-closing `)`, "
+            "and never inside a quoted span."
         )
         assert any(_replaces_a_client_binary(line) for line in _executed_lines(None, step)), (
             f"the replacement after a quoted `#` ({quoted}) is not refused — the "
@@ -5873,7 +5875,21 @@ def test_a_substitution_closer_is_not_a_comment_boundary() -> None:
     """
 
     replacement = 'sudo rsync -a "$b/17/bin/" "$b/16/bin/"'
-    for opener in ("echo $(date)#12051", "echo $((1+1))#X", "echo <(true)#X", "echo >(true)#X"):
+    # ⛔ AND A `)` THAT BASH DOES NOT READ AS A PAREN CLOSER MUST NOT POP A FRAME
+    # (#12279 REVIEW 2, P0, measured RED→GREEN). Every construct above is
+    # paren-BALANCED, so a `case` pattern terminator (`case a in a)`) or a `${x%)}`
+    # modifier — neither of which ends a word — used to pop the `$(` frame, after
+    # which the substitution's real `)` closed nothing and the `#` was read as a
+    # comment that erased the live line.
+    for opener in (
+        "echo $(date)#12051",
+        "echo $((1+1))#X",
+        "echo <(true)#X",
+        "echo >(true)#X",
+        "echo $(case a in a) echo hi;; esac)#note",
+        "echo $(case \"$M\" in full) echo hi;; *) echo lo;; esac)#note",
+        "echo $(echo ${x%)})#note",
+    ):
         step = {"run": f"b=/usr/lib/postgresql; {opener}; {replacement}"}
         assert replacement in _run_commands(step), (
             f"a substitution closer before `#` ({opener}) was read as a comment "
@@ -6799,7 +6815,19 @@ def _strip_trailing_comment(line: str) -> str:
             index += 1
             continue
         if char == ")":
-            boundary = (stack.pop() if stack else "group") == "group"
+            # ⛔ ONLY A CONFIRMED GROUP FRAME IS CLOSED (#12279 REVIEW 2, P0,
+            # measured RED→GREEN). A `)` that bash does NOT read as a paren closer
+            # — a `case` pattern terminator (`case a in a)`), a `${x%)}` modifier,
+            # a stray closer — used to POP a substitution frame, so the real `)`
+            # then closed nothing and the following `#` was read as a comment and
+            # erased the live line. `$(`/`=()` frames are therefore left on the
+            # stack: an unconfirmable `)` is not a boundary (fail closed — the tail
+            # stays live and the arms still see it).
+            if stack and stack[-1] == "group":
+                stack.pop()
+                boundary = True
+            else:
+                boundary = False
             index += 1
             continue
         boundary = char in COMMENT_START_CHARS
