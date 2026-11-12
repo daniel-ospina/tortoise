@@ -452,14 +452,41 @@ class TestTheBeliefSeam:
                 state={"status": status})
         assert _props(sdk, eid) == before
 
-    def test_emit_belief_refuses_the_flat_restatus_spelling(self, sdk):
-        """`restatus` is the flat spelling of the same value — both reach the node."""
-        eid = _event(sdk, name="BeliefStateFlat")
+    def test_the_chokepoint_refuses_the_same_state_op(self, sdk):
+        """Review cycle 6, P1 — the door-only placement left `_emit` open.
+
+        The `EventRecorded` half is guarded at BOTH this door and the `_emit`
+        chokepoint, precisely because "a door list is not a boundary". The
+        state-op half was guarded only at the door, and a measurement showed the
+        identical record reaching the fold with `_emit(…, label="Event",
+        op="restatus", state={"status": "superseded"})` and storing it.
+        """
+        eid = _event(sdk, name="BeliefChokepoint")
+        before = _props(sdk, eid)
         with pytest.raises(ValueError, match=":Event"):
-            self._api(sdk).emit_belief(
-                "EntityMutated", id=eid, label=":Event", op="restatus",
-                restatus="archived")
-        assert "status" not in _props(sdk, eid)
+            self._api(sdk)._emit(
+                "EntityMutated", id=eid, label="Event", op="restatus",
+                state={"status": "superseded"})
+        assert _props(sdk, eid) == before
+
+    def test_a_non_state_op_is_left_to_the_folds_own_verdict(self, sdk):
+        """Review cycle 6, P2 — `op="delete"` writes no status, so no refusal.
+
+        The fold reads `state` only for `_ENTITY_MUTATION_STATE_OPS`, so refusing
+        a `delete` record that happens to carry a `state` map is an over-block
+        with a WRONG diagnosis: the message would say a status is "not writable"
+        when no status was ever going to be written.
+        """
+        eid = _event(sdk, name="BeliefDeleteOp")
+        self._api(sdk).emit_belief(
+            "EntityMutated", id=eid, label="Event", op="delete",
+            state={"status": "superseded"})
+        # The fold's delete arm ran (the node is gone) and no refusal was raised
+        # on the way — the record was left to the arm that owns it.
+        rows = sdk._get_proj().g.query(
+            "MATCH (e:Event {eventId:$e}) RETURN count(e)",
+            params={"e": eid}).result_set
+        assert rows[0][0] == 0, "the delete op should have removed the node"
 
     def test_emit_belief_refuses_a_terminal_flag_in_a_state_op(self, sdk):
         eid = _event(sdk, name="BeliefStateFlag")
@@ -516,6 +543,36 @@ class TestTheBundleValidationDoor:
         assert sdk._validate_bundle({
             "entities": [{"ref": "o1", "type": "object", "name": "PolicyV2",
                           "objectKind": "policy", "status": "superseded"}],
+        }) == []
+
+    @pytest.mark.parametrize("status", [42, 3.5, True])
+    def test_a_persistable_non_string_status_is_a_phase_1_violation(
+            self, sdk, status):
+        """Review cycle 6, P1 — the TYPE dimension of the same door.
+
+        `refuse_terminal_event_state` refuses a PERSISTABLE non-string status,
+        because an int glides through the vocabulary test and stores a status no
+        reader can name. Phase 1 did not mirror that dimension, so this bundle
+        passed validation and raised in step 3 with the point already committed
+        (`phase1: []` then `ValueError`, point count 0 → 1).
+        """
+        bundle = {
+            "points": [{"content": "must-not-commit"}],
+            "entities": [{"ref": "e1", "type": "event", "name": "BadType",
+                          "eventKind": "deployment", "status": status}],
+        }
+        violations = sdk._validate_bundle(bundle)
+        assert violations, (
+            f"status={status!r} passed Phase 1 — ingest would then raise "
+            "mid-write with the point already committed")
+        assert any("STRING" in v["message"] for v in violations)
+
+    @pytest.mark.parametrize("status", [{"a": 1}, {1, 2}, b"raw"])
+    def test_a_non_persistable_status_is_accepted_and_dropped(self, sdk, status):
+        """The other half of the door's rule (#7925): it is never stored."""
+        assert sdk._validate_bundle({
+            "entities": [{"ref": "e1", "type": "event", "name": "Drop",
+                          "eventKind": "deployment", "status": status}],
         }) == []
 
     def test_every_connection_shape_still_gets_a_diagnosis(self, sdk):

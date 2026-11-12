@@ -130,6 +130,7 @@ from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
 from .live import status_as_reported  # #9974 R1 absent-status rendering (shared with live.py)
 from .live import refuse_terminal_event_state  # #11825 an :Event carries no lifecycle state
+from .live import _event_state_would_be_stored  # #11825 persistable-non-string mirror
 from .raw_state import (  # #3998: the absent-raw state
     WRITABLE_RAW_STATES,
     raw_entry,
@@ -27431,8 +27432,32 @@ class TortoiseSDK:
                 item, _item_flatten_depth(item, "entities"))
             if not _declares_status:
                 continue
-            if not (isinstance(own_status, str)
-                    and is_terminal_status(own_status)):
+            # ⛔ The TYPE dimension is part of this arm (review cycle 6, P1).
+            # `refuse_terminal_event_state` refuses a PERSISTABLE non-string
+            # status (an int glided through the membership test and stored a
+            # status no vocabulary can name) while a NON-persistable one is
+            # accepted-and-dropped, because the projection's persistable-value
+            # filter drops it before the `SET` (#7925's over-rejection class).
+            # Without this mirror a bundle carrying `status: 42` passed Phase 1
+            # and raised in step 3 with the point already committed — the same
+            # partial-mutation class, in the dimension this arm had not swept
+            # (measured: `phase1: []` then `ValueError`, point count 0 → 1).
+            if not isinstance(own_status, str):
+                if not _event_state_would_be_stored(own_status):
+                    continue
+                violations.append({
+                    "section": "entities", "index": i,
+                    "message": f"ingest: entities[{i}] declares status "
+                               f"{own_status!r} for an :Event — `status` on "
+                               f"the node is a STRING drawn from the "
+                               f"vocabulary, or `None` to clear it, so the "
+                               f"bundle is rejected at validation rather "
+                               f"than mid-write. WHAT TO DO: pass a string "
+                               f"(the door accepts `scheduled`/`draft`/"
+                               f"`live`), or drop `status`.",
+                })
+                continue
+            if not is_terminal_status(own_status):
                 continue
             violations.append({
                 "section": "entities", "index": i,

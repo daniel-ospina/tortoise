@@ -35,7 +35,7 @@ from .money import refuse_malformed_money_in_payload
 from .percent import refuse_malformed_percent_in_payload
 
 # #7951 §17.1: the live-write scope the journal-first doors open around the fold.
-from .projection import _live_write_scope, fold
+from .projection import _ENTITY_MUTATION_STATE_OPS, _live_write_scope, fold
 
 # #5140: the `documents` METER KEY's defender for THIS producer. `quota` is a
 # leaf module (stdlib-only at import time), so this adds no cycle.
@@ -724,6 +724,40 @@ class EventAPI:
                 refuse_terminal_event_state(
                     _inner if isinstance(_inner, dict) else _map,
                     door=f"the `{type_}` envelope")
+        # ── #11825 (review cycle 3, P1; moved to this chokepoint in cycle 6) ──
+        # The FIFTH shape — a STATE OP on an `:Event`. Gating on
+        # `type_ == "EventRecorded"` left the seam open one record type over. A
+        # caller can hand a record the canonical state-op shape for ANY label:
+        # `_emit("EntityMutated", id=<event id>, label="Event", op="restatus",
+        # state={"status": "superseded"})` is exactly what
+        # `projection._journal_entity_mutation` emits, the fold reads it through
+        # `state["status"]` → `restatus` (`cache_projection`, `EventMutated`
+        # arm), and it stored a terminal `:Event` status with no refusal.
+        # ⛔ HERE, not only at `emit_belief`: this is the seam the
+        # `EventRecorded` refusal above already argues is "what makes the answer
+        # independent of a door list", and a cycle-6 measurement showed the one
+        # record type over slipping past a door-only guard —
+        # `_emit("EntityMutated", …, label="Event", op="restatus",
+        # state={"status": "superseded"})` was ACCEPTED and the node carried
+        # `status: 'superseded'`. `emit_belief` calls this same predicate too, so
+        # the forwarding door still gets a refusal that NAMES it before the
+        # best-effort `except` can swallow anything (a deterministic payload
+        # refusal inside that `try` would be a silently DROPPED record).
+        # ⛔ Scoped to EVENT targets and to STATE OPS, deliberately. A state op on
+        # a Point / Subject / Object / Source is accepted by its own door, and
+        # `op` must be one the fold's `_ENTITY_MUTATION_STATE_OPS` reads `state`
+        # for — a `delete`/unknown-op record writes no status at all, so refusing
+        # it would be an over-block with a WRONG diagnosis (measured, cycle 6).
+        # The label is read through the same tolerances the writers use —
+        # `Event`, `:Event`, any case — so a caller cannot slip past it by
+        # spelling the label differently from the fold's.
+        _op = payload.get("op")
+        if str(payload.get("label") or "").strip().lstrip(":").lower() \
+                == "event" and _op in _ENTITY_MUTATION_STATE_OPS:
+            _state = payload.get("state")
+            refuse_terminal_event_state(
+                _state if isinstance(_state, dict) else {},
+                door=f"the `{type_}` envelope")
         if record:
             if len(record) > 1:
                 raise TypeError(
@@ -1033,15 +1067,26 @@ class EventAPI:
         # label is read through the same tolerances the writers use — `Event`,
         # `:Event`, any case — so a caller cannot slip past it by spelling the
         # label differently from the fold's.
-        elif str(payload.get("label") or "").strip().lstrip(":").lower() == "event":
+        # ⛔ HERE, not only at `_emit`: the same predicate now also sits on the
+        # `_emit` chokepoint (see the state-op block there), because a cycle-6
+        # measurement showed the door-only placement let the identical record
+        # reach the fold through `_emit` directly. This call is what gives the
+        # caller a refusal that NAMES the door they used, before the
+        # best-effort `except` below can swallow it — a deterministic payload
+        # refusal swallowed there is the same record silently DROPPED (the F2
+        # divergence this docstring already records three times). Scoped to the
+        # label and to the ops the fold actually reads `state` for; it does NOT
+        # read a flat `restatus` payload key, because the fold does not: it reads
+        # `state` only (`SET n += $s` over `ev["state"]`), and no producer in the
+        # tree emits that spelling (the only `"restatus"` string in the tree is
+        # the `op` VALUE). A check on a key nothing writes would be a guard
+        # against a spelling no reader reads (measured, cycle 6 P2).
+        elif str(payload.get("label") or "").strip().lstrip(":").lower() == "event" \
+                and payload.get("op") in _ENTITY_MUTATION_STATE_OPS:
             _state = payload.get("state")
-            _event_state = dict(_state) if isinstance(_state, dict) else {}
-            # `restatus` is the flat spelling of the same value; both reach the
-            # node, so both are checked (a caller may use either).
-            if isinstance(payload.get("restatus"), str):
-                _event_state.setdefault("status", payload["restatus"])
             refuse_terminal_event_state(
-                _event_state, door="EventAPI.emit_belief")
+                _state if isinstance(_state, dict) else {},
+                door="EventAPI.emit_belief")
         try:
             self._emit(type_, **payload)
         except Exception as exc:  # noqa: BLE001, RUF100
