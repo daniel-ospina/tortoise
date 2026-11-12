@@ -276,13 +276,13 @@ def _table_rows(text: str) -> list[list[str]]:
 
 
 def test_the_brief_quotes_the_recall_the_artifact_holds(report, control):
-    """§3's two tables, cell by cell, against BOTH artifacts.
+    """§3's two tables, ROW BY ROW, against BOTH artifacts — every column.
 
     ⛔ Position-blind substring checks are not a guard: a row carrying ANOTHER
-    row's number still matches. Each assertion pins the k LABEL and the figure
-    together, and the control's table is checked too — the first version of this
-    test read only the hybrid artifact and would have passed over a wrong
-    control (review round 2, F4).
+    row's number still matches, and a per-cell check with no k label lets a k=15
+    value be pasted into the k=3 cell. Each assertion below is a whole squashed
+    row — k, recall, past-this-k, absent-at-15 and rows_zero together — and the
+    control's table is checked too (round 2, F4; round 3, F4).
     """
     text = _squash(BRIEF.read_text())
     for art, label in ((report, "hybrid"), (control, "keyword-only")):
@@ -290,10 +290,19 @@ def test_the_brief_quotes_the_recall_the_artifact_holds(report, control):
         for k in ("3", "5", "10", "15"):
             row = art["arms"]["exact"][k]
             pct = 100 * row["in_window"] / n
-            assert f"| {k} | {row['in_window']}/{n} = {pct:.1f} %" in text, (
-                f"{label} k={k}: the brief does not carry "
-                f"`| {k} | {row['in_window']}/{n} = {pct:.1f} %`")
-        assert row["miss_absent_at_max_k"] == art["arms"]["exact"]["15"]["miss_absent_at_max_k"]
+            want = (f"| {k} | {row['in_window']}/{n} = {pct:.1f} % | "
+                    f"{row['miss_past_k']} | {row['miss_absent_at_max_k']} | "
+                    f"{row['rows_zero']} |")
+            assert want in text, f"{label} k={k}: the brief does not carry `{want}`"
+    # §3's prose figures on the same misses, recomputed from the k=3 row.
+    h3 = report["arms"]["exact"]["3"]
+    absent = h3["miss_absent_at_max_k"]
+    past = h3["miss_past_k"]
+    total = past + absent
+    assert f"{past} of {total} misses ({100 * past / total:.1f} %)" in text, (
+        f"§3 does not state that the width fixes {past} of {total} misses")
+    assert f"{absent} misses ({100 * absent / report['corpus']['sample']:.1f} % of the sample)" in text, (
+        f"§3 does not state the {absent} misses absent even at k=15")
 
 
 def test_the_brief_quotes_the_class_rates_and_the_mean_rank(report, control):
@@ -308,14 +317,82 @@ def test_the_brief_quotes_the_class_rates_and_the_mean_rank(report, control):
     mean_rank = hyb3["rank_sum"] / hyb3["in_window"]
     assert f"{mean_rank:.1f} at k=3" in text, (
         f"the brief does not state the k=3 mean rank ({mean_rank:.1f})")
-    for cls in ("definite", "ident", "path"):
-        fts = control["arms"]["exact_by_class"][cls]["3"]
-        hyb = report["arms"]["exact_by_class"][cls]["3"]
-        for art, row in (("keyword-only", fts), ("hybrid", hyb)):
-            pct = 100 * row["in_window"] / row["n"]
-            assert f"{row['in_window']} = {pct:.1f} %" in text, (
-                f"§3.1 {art}/{cls}: the brief does not state "
-                f"{row['in_window']} = {pct:.1f} %")
+    labels = {"definite": "definite description",
+              "ident": "identifier (`#n`, `snake_case`)",
+              "path": "path"}
+    for cls, label in labels.items():
+        f = control["arms"]["exact_by_class"][cls]["3"]
+        h = report["arms"]["exact_by_class"][cls]["3"]
+        h15 = report["arms"]["exact_by_class"][cls]["15"]
+        pf, ph, p15 = (100 * f["in_window"] / f["n"],
+                       100 * h["in_window"] / h["n"],
+                       100 * h15["in_window"] / h15["n"])
+        delta = ph - pf
+        sign = "\u2212" if delta < 0 else "+"
+        # The WHOLE row, including the derived delta and the k=15 column:
+        # a k=3 cell that happens to equal its own k=15 cell is otherwise
+        # indistinguishable from a correctly-filled one.
+        want = (f"| {label} | {h['n']} | {f['in_window']} = {pf:.1f} % | "
+                f"{h['in_window']} = {ph:.1f} % | {sign}{abs(delta):.1f} pts | "
+                f"{h15['in_window']} = {_pct_cell(p15)} % |")
+        assert want in text, f"§3.1 {cls}: the brief does not carry `{want}`"
+
+
+def test_the_brief_quotes_the_variant_rates_the_artifact_holds(report, control):
+    """§4's two tables — the hybrid arm row by row, and the control's prose.
+
+    Round 3 deleted the only guard over `arms.variant[*]["in_window"]`, so a
+    re-derived artifact could swap the control's in-window column into the
+    hybrid table and 17/17 would still pass while §4/§5/§7 and the PR body
+    asserted the old figure.
+    """
+    text = _squash(BRIEF.read_text())
+    pairs = report["arms"]["variant"]["3"]["pairs"]
+    for k in ("3", "5", "10", "15"):
+        v = report["arms"]["variant"][k]
+        want = (f"| {k} | {pairs} | {v['in_window']} = "
+                f"{100 * v['in_window'] / pairs:.1f} % | "
+                f"{v['attached']} = {100 * v['attached'] / pairs:.1f} % | "
+                f"{v['attached_folded']} = {100 * v['attached_folded'] / pairs:.1f} % |")
+        assert want in text, f"§4 hybrid k={k}: the brief does not carry `{want}`"
+        assert v["pairs"] == pairs
+    c3, c15 = control["arms"]["variant"]["3"], control["arms"]["variant"]["15"]
+    c_pairs = c3["pairs"]
+    assert (f"in-window {c3['in_window']} ({100 * c3['in_window'] / c_pairs:.1f} %) → "
+            f"{c15['in_window']} ({100 * c15['in_window'] / c_pairs:.1f} %)") in text, (
+        "§4's control sentence does not state the control's own in-window rates")
+    # The brief aggregates the two separator directions into one row; the
+    # artifact keeps them apart because the fold only helps one of them
+    # (`space→hyphen` is 101/180 in window, `hyphen→space` is 13/13).
+    sep3 = _sum_cls(report, ("hyphen-to-space", "space-to-hyphen"), "3")
+    sep15 = _sum_cls(report, ("hyphen-to-space", "space-to-hyphen"), "15")
+    labels = {"article-drop": "article dropped (`the plan doc` → `plan doc`)",
+              "basename-only": "path basename only",
+              "hash-dropped": "`#` dropped (`#11901` → `11901`)"}
+    rows = [(labels[c], report["arms"]["variant_by_class"][c]["3"],
+             report["arms"]["variant_by_class"][c]["15"]) for c in labels]
+    rows.append(("separator (`the admin-merge rail` ⇄ `the admin merge rail`)",
+                 sep3, sep15))
+    for label, b3, b15 in rows:
+        want = (f"| {label} | {b3['pairs']} | {b3['in_window']} → "
+                f"{b15['in_window']} | {b3['attached']} → {b15['attached']} | "
+                f"{b3['attached_folded']} → {b15['attached_folded']} |")
+        assert want in text, f"§4 decomposition {label!r}: the brief does not carry `{want}`"
+
+
+def _pct_cell(pct: float) -> str:
+    """"100" not "100.0" — the brief writes a whole percentage without a decimal."""
+    return f"{pct:.1f}".replace(".0", "") if abs(pct - round(pct)) < 0.05 else f"{pct:.1f}"
+
+
+def _sum_cls(report, classes, k):
+    """Sum a set of variant classes at one width, for a row the brief aggregates."""
+    out = {}
+    for cls in classes:
+        row = report["arms"]["variant_by_class"][cls][k]
+        for key, val in row.items():
+            out[key] = out.get(key, 0) + val
+    return out
 
 
 def _squash(text: str) -> str:
@@ -328,14 +405,19 @@ def _squash(text: str) -> str:
 
 
 def test_the_brief_quotes_the_pooled_set_the_artifact_holds(report):
-    pooled = report["arms"]["pooled"]["3"]
-    mean = pooled["set_sum"] / pooled["captures"]
+    """§1's pooled table, every width — the union is the real candidate list.
+
+    Round 3 caught the PR body quoting the CONTROL's k=5 mean (43.9) as a
+    hybrid measurement, which no test could see because only k=3 was pinned.
+    The table now carries all four widths and each row is pinned with its k.
+    """
     text = _squash(BRIEF.read_text())
-    assert f"mean {mean:.1f} candidates" in text, (
-        f"the brief does not state the pooled mean ({mean:.1f})")
-    assert f"min {pooled['set_min']}, max {pooled['set_max']}" in text, (
-        f"the brief does not state the pooled range "
-        f"({pooled['set_min']}–{pooled['set_max']})")
+    for k in ("3", "5", "10", "15"):
+        pooled = report["arms"]["pooled"][k]
+        mean = pooled["set_sum"] / pooled["captures"]
+        assert (f"| {k} | {mean:.1f} | {pooled['set_min']} | {pooled['set_max']} |") in text, (
+            f"§1 pooled k={k}: the brief does not carry "
+            f"`| {k} | {mean:.1f} | {pooled['set_min']} | {pooled['set_max']} |`")
 
 
 def test_the_brief_keeps_its_two_standing_negatives():

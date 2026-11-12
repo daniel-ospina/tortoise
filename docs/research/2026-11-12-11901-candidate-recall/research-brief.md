@@ -54,9 +54,17 @@ skipped. The write-back was attempted and refused — §10.
 Three consequences decide the shape of the measurement, and none of them was on the issue:
 
 1. **`limit=3` is not "3 candidates".** `search_graph` unions the rows of *every* derived query into one set.
-   **Measured at the `max_queries=15` budget: mean 40.4 candidates (min 31, max 44)** hybrid, and **170.8
-   (min 100, max 198)** at `limit=15`. The issue's comparison — *"our window is 3, Zep's is 15"* — compares a
-   per-query width against a candidate-list length. The right comparison is **~40 vs 15**.
+   **Measured at the `max_queries=15` budget** (hybrid, 20 captures — the whole sweep, not the k=3 case):
+
+   | per-query `limit` | mean candidates | min | max |
+   |---|---|---|---|
+   | **3** | **40.4** | 31 | 44 |
+   | 5 | 64.3 | 46 | 72 |
+   | 10 | 121.2 | 80 | 138 |
+   | 15 | 170.8 | 100 | 198 |
+
+   The issue's comparison — *"our window is 3, Zep's is 15"* — compares a per-query width against a candidate-list
+   length. The right comparison is **~40 vs 15**.
 2. **The phase-1 matcher is exact**, so a candidate can be *inside* the window and still unusable. Retrieval and
    phase-1 matching fail differently and are measured separately (§3, §4).
 3. **Phase 2 exists, is instructed to do exactly this job** (*"Resolve ONLY confident aliases: same referent,
@@ -69,7 +77,9 @@ Three consequences decide the shape of the measurement, and none of them was on 
 ## 2. Method, and what is real
 
 The harness runs the real code path: names harvested from this box's **real capture corpus**
-(`~/.tortoise/session-events`, 9 daily files, 8,218 real sessions, 45.3 M characters) into a **real FalkorDB**
+(`~/.tortoise/session-events`, 9 daily files, 8,218 real session records, 45.3 M characters — **as of the
+measurement run**; the corpus is live, so re-measure rather than trusting these three, which the artifact does not
+carry) into a **real FalkorDB**
 through the real projection (`_upsert_object`, id-keyed per `#3590`), queried by `sdk.tortoise_fts_query` with the
 exact flags `_fts_rows` passes (`include_terminal=True`, `_record_reads=False`, `_valid_time_rerank=False`) and
 production's own query sanitisation.
@@ -147,7 +157,7 @@ controlled effect size.
 |---|---|---|---|---|---|
 | definite description | 180 | 137 = 76.1 % | **113 = 62.8 %** | **−13.3 pts** | 116 = 64.4 % |
 | identifier (`#n`, `snake_case`) | 90 | 19 = 21.1 % | **42 = 46.7 %** | **+25.6 pts** | 73 = 81.1 % |
-| path | 30 | 10 = 33.3 % | **29 = 96.7 %** | **+63.4 pts** | 30 = 100 % |
+| path | 30 | 10 = 33.3 % | **29 = 96.7 %** | **+63.3 pts** | 30 = 100 % |
 
 **The dense leg helps identifiers and paths enormously and makes the definite-description class worse.** That is
 not a surprise in hindsight — it is §12.2c's own recorded warning, now measured: *"62.3 % of those names are bare
@@ -263,7 +273,7 @@ regression; the measurement says the window is not even the right first lever.
     `_norm`** (whose other consumers assume its narrow contract): **0 % → 100 %** of in-window separator variants,
     **0 % → 27.2 %** of all variants, and **+0.7 pts** available from widening `k`. Mode-independent (§4).
   - **(2c) The class split in §3.1** — the dense leg *worsens* the definite-description class by 13.3 points while
-    improving identifiers by 25.6 and paths by 63.4. That is a fusion/weighting question (RRF competing
+    improving identifiers by 25.6 and paths by 63.3. That is a fusion/weighting question (RRF competing
     near-synonyms), not a width question, and it is where §12.2c's *resolution key* claim needs its own
     measurement.
   - **(2d) The article class** (179/419) — reached by neither the window nor a punctuation fold. Phase 2 or the

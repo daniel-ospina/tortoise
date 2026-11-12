@@ -191,7 +191,8 @@ def build_population(harvested: dict[str, collections.Counter], n: int) -> list[
     pop: list[dict] = []
     for cls, quota in quotas.items():
         ranked = sorted(harvested[cls].items(), key=lambda kv: (-kv[1], kv[0]))[:quota]
-        pop.extend({"name": name, "cls": cls, "turns": turns} for name, turns in ranked)
+        pop.extend({"name": name, "cls": cls, "records": records}
+               for name, records in ranked)
     return pop
 
 
