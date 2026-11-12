@@ -1605,6 +1605,23 @@ LOOP_HEAD_OPEN_RE = re.compile(
 LOOP_DO_RE = re.compile(r"^[ \t]*do[ \t]*$")
 LOOP_END_RE = re.compile(r"^[ \t]*done\b")
 
+#: Net loop nesting opened on one line (`do` minus `done`), QUOTED TEXT IGNORED —
+#: a message that says "done" opens and closes nothing.
+LOOP_DO_RE_WORD = re.compile(r"\bdo\b")
+LOOP_DONE_RE_WORD = re.compile(r"\bdone\b")
+
+
+def _loop_nesting_delta(line: str) -> int:
+    """How many loop bodies this line opens (`do`) minus closes (`done`).
+
+    Used to collect a loop's WHOLE body: an inner `done` closes the inner loop, not
+    the outer one (#12069 review 14, P1). Quoted text is masked first, so
+    `echo "done"` moves nothing.
+    """
+
+    masked = _mask_quotes(_without_comment(line))
+    return len(LOOP_DO_RE_WORD.findall(masked)) - len(LOOP_DONE_RE_WORD.findall(masked))
+
 #: `${NAME}` -> `$NAME`. `COMMAND_WORD_RE` treats `{`/`}` as command SEPARATORS,
 #: so a braced variable's command word came out empty and the `f"${{{loop_var}}}"`
 #: acceptance in `scan()` was DEAD CODE — a correct pin writing
@@ -1985,11 +2002,11 @@ def _selects_on_var(body: list[str], var: str) -> bool:
 #
 #     if [ "$major"   != "16" ]; then
 #
-# made `_compared_variable()` return `None`, switched the derivation gate off,
+# made `_compared_variables()` return nothing, switched the derivation gate off,
 # and left the exact fail-open it exists for GREEN (measured `217 passed`). The
 # window is whitespace-and-quote tolerant now, with no length bound.
 COMPARED_VARIABLE_RE = re.compile(
-    r"\$\{?(?P<var>[A-Za-z_]\w*)\}?[\"']?\s*![\t ]*="
+    r"\$\{?(?P<var>[A-Za-z_]\w*)\}?[\"']?\s*![\t ]*=[\t ]*(?P<rhs>[^;&|\)\]]*)"
 )
 
 #: `NAME=value` at the START of a line (with an optional `export`).
@@ -2011,11 +2028,239 @@ ASSIGNMENT_ANYWHERE_RE = re.compile(
 )
 
 
-def _compared_variable(code: str) -> str | None:
-    """The variable the armed `!= <literal>` comparison decides on, if any."""
 
-    match = COMPARED_VARIABLE_RE.search(code)
-    return match.group("var") if match else None
+def _compared_variables(lines: list[str]) -> list[tuple[str, str]]:
+    """`(variable, operand)` for every armed `!=` CONDITION in `lines`, in order.
+
+    ⛔ THE FIRST MATCH IS NOT THE DECISION (#12069 review 11, P1). `scan()` used
+    to take `COMPARED_VARIABLE_RE.search()` over the WHOLE code and gate only on
+    that one variable, so one ordinary, unrelated comparison placed ahead of the
+    real one took the slot and switched the derivation gate off, crediting
+    `pg_restore` from a comparison only `pg_dump` ever had:
+
+        for tool in pg_dump pg_restore; do
+          version="$("$tool" --version)"
+          if [ "$RUNNER_OS" != "Linux" ]; then … fi          # unrelated, comes first
+          major="$(pg_dump --version | sed -E 's/…/\\1/')"   # DERIVED FROM pg_dump
+          if [ "$major" != "16" ]; then … fi
+        done
+
+    — measured `235 passed` (the identical body WITHOUT the `RUNNER_OS` line is
+    RED). `RUNNER_OS` is not assigned in the body, so the gate skipped entirely.
+
+    ⛔ ENUMERATING IS NOT ENOUGH ON ITS OWN (#12069 review 12, P1). The first cut
+    of this fix enumerated the RAW code and treated ANY comparison that derived
+    from the loop variable as the decision, so a body that compared `$version`
+    anywhere — a printed `echo "::error::$tool: $version != 16.x"`, a
+    `[ "$version" != "" ]` sanity check, a comparison in a LATER job — vetoed the
+    gate and re-credited `pg_restore`, WIDER than the cut it replaced (which gave
+    `{pg_dump}`). Two bounds close it, both already used by `_selects_on_var`:
+
+      * SCOPE — the caller passes THIS loop body (`graded`), never the whole code,
+        so a comparison in another job cannot disarm this loop;
+      * CLAUSE — only clauses `_comparison_clauses()` GRADES count, so a `!=`
+        PRINTED in a message is not a comparison at all.
+
+    ⛔ AND THE OPERAND IS RETURNED, NOT JUST THE VARIABLE (#12069 review 13, P1).
+    Whether a comparison is the pin's DECISION depends on what it is compared
+    AGAINST; a cut that instead asked how the variable was ASSIGNED read
+    `arch="$(uname -m)"` beside a derived `major` as the decision and discredited
+    a correct body (measured `[]`, where the cut before it credited both).
+    `_decides_off_the_loop` grades the operand.
+
+    RESIDUALS, recorded rather than hidden. (1) Only the `!=` spelling, and only
+    with the VARIABLE on the left: `[ ! "$major" = "16" ]`,
+    `[ 16 != "$major" ]` and `[ "$major" -ne 16 ]` are comparisons this gate does
+    not see (all pre-existing, all unchanged here — the pin step writes
+    `"$major" != "16"`). (2) A body whose ONLY comparison is against a non-numeric
+    operand (`[ "$major" != "" ]`) is not read as deciding on a major at all.
+    """
+
+    pairs: list[tuple[str, str]] = []
+    depth = 0
+    # \u26d4 STRIP COMMENTS BEFORE JOINING (#12069 review 16, P1). Joining first
+    # meant a COMMENT whose text carried an unbalanced `[[` inflated the test depth
+    # (`_logical_lines` reads the RAW line), every following line was glued onto it,
+    # and the strip then threw that whole buffer away — the body's real comparisons
+    # vanished and both tools were credited (measured). Shell comments are stripped
+    # per physical line, then continuations are joined.
+    for line in _logical_lines([_without_comment(raw) for raw in lines]):
+        clauses, depth = _comparison_clauses(line, depth=depth)
+        for clause in clauses:
+            for match in COMPARED_VARIABLE_RE.finditer(clause):
+                pairs.append(
+                    (match.group("var"), _comparison_operand(match.group("rhs")))
+                )
+    return pairs
+
+
+#: A `#` that BEGINS A WORD opens a comment: at the start of the line, or after
+#: whitespace or a command separator. \u26d4 `(?:^|[ \t])` MISSED `;#`, `)#`, `&#`, `|#`
+#: (#12069 review 16, P1) — all valid shell comments — and the comment was then read
+#: as CODE: its `done` truncated the body before the real comparison, or its `do`
+#: ran the body past its own loop. `{` is deliberately NOT in the class: it opens
+#: `${#arr[@]}`, which is not a comment.
+COMMENT_START_RE = re.compile(r"(?:^|[ \t;&|()])#")
+
+
+def _without_comment(line: str) -> str:
+    """`line` with any trailing `#` comment removed, quoted text preserved.
+
+    ⛔ COMMENT TEXT IS NOT CODE (#12069 review 15, P1). `_comparison_clauses`
+    splits a clause at `;`, so a comment written as
+
+        # simple; if [ "$version" != "16" ] it is fine
+
+    was graded as a CONDITION — and because `$version` derives from `$tool`, the
+    derived-decision exemption then disarmed the gate for the WHOLE body. The
+    same text also moved `_loop_nesting_delta`: `# once done, exit` truncated the
+    body before the real comparison (measured `['pg_dump', 'pg_restore']` where the
+    cut before the comment fix refused).
+    """
+
+    masked = _mask_quotes(line)
+    match = COMMENT_START_RE.search(masked)
+    if match is None:
+        return line
+    return line[: match.start()]
+
+
+def _logical_lines(lines: list[str]) -> list[str]:
+    """Join a comparison CONTINUED over a line break into one logical line.
+
+    ⛔ A COMPARISON IS NOT ALWAYS ON ONE LINE (#12069 review 15, P1).
+    `_compared_variables` grades line by line, so
+
+        if [[ "$major"
+                != "16" ]]; then
+
+    — the same continuation the round-7 rows pin for a SELECTION — carried `$major`
+    and `!=` in DIFFERENT clauses and the comparison vanished (measured
+    `['pg_dump', 'pg_restore']` where the cut before this read refused). A line
+    whose `[[ ]]` is still open, or which ends with a backslash, continues.
+    """
+
+    joined: list[str] = []
+    buffer = ""
+    depth = 0
+    for line in lines:
+        stripped = line.strip()
+        # \u26d4 DROP THE CONTINUATION MARKER (#12069 review 16, P2). Keeping it in the
+        # buffer left `if [ "$major" \\ != "16" ]` — a comparison broken BEFORE the
+        # operator — unmatched, so the gate was disarmed (measured).
+        continues = stripped.endswith("\\")
+        if continues:
+            stripped = stripped[:-1].rstrip()
+        buffer = f"{buffer} {stripped}" if buffer else stripped
+        depth = max(0, depth + _test_depth(stripped))
+        if depth > 0 or continues:
+            continue
+        joined.append(buffer)
+        buffer = ""
+    if buffer:
+        joined.append(buffer)
+    return joined
+
+
+def _comparison_operand(text: str) -> str:
+    """The right-hand side of a comparison, stripped of quoting and closers.
+
+    The argument is the group CAPTURED AFTER the operator, not a whole clause:
+    `"16" ]` -> `16`; `16 ]; then` -> `16`; `"$server" ]` -> `$server`;
+    `" 16" ]` -> `16`; `"x86_64" ]` -> `x86_64`; `"" ]` -> `` (empty).
+
+    \u26d4 SPLIT ON WHITESPACE FIRST IS A FAIL-OPEN (#12069 review 14, P1). A
+    quoted operand was cut at its own space, so `" 16"` came out as `"` — not a
+    number — and the gate was disarmed. The token is cut QUOTE-AWARE: a quoted
+    span is taken whole and only then unquoted.
+    """
+
+    # A BACKSLASH-CONTINUED OPERAND ARRIVES WITH A LEADING `\` (#12069 review 15,
+    # P1): `if [ "$major" != \` + newline + `"16" ]` is one comparison, and the
+    # joined text puts the continuation marker in front of the operand.
+    stripped = text.lstrip("\\").strip()
+    quoted = _QUOTED_RE.match(stripped)
+    if quoted:
+        return quoted.group(0).strip("\"'").strip()
+    return re.split(r"[\s\]\)]", stripped, maxsplit=1)[0].strip("\"'").strip()
+
+
+def _comparison_is_the_pin(operand: str, derived_from_loop: set[str]) -> bool:
+    """Is this comparison against something a CLIENT MAJOR could be compared to?
+
+    A major is compared against a NUMBER (`"16"`, `16`) or against a VARIABLE
+    that holds one. Everything else is an ordinary check that narrows nothing:
+
+      * a non-numeric literal — `"x86_64"`, `"/dev/null"`, `"Linux"`, `""` —
+        cannot be a major comparison, so a body that also checks the runner's
+        architecture or its output path is not deciding the pin with it
+        (#12069 review 13, P1: reading `arch="$(uname -m)"` as the decision
+        discredited a CORRECT body, measured `[]`);
+      * `0` — the return-code idiom (`[ "$rc" != 0 ]`), never a major;
+      * a variable that DERIVES from the loop variable — the expected value is on
+        the other side, so `[ "$want" != "$major" ]` decides on `$major`, and
+        `$major` is the loop's own value;
+      * a command substitution or an arithmetic expansion — an expression rather
+        than the literal-or-variable shape the pin is written in.
+    """
+
+    if operand.startswith("$"):
+        # A command substitution / arithmetic expansion (`$(…)`, `$((…))`), a
+        # backtick expression or `$?`/`$#` names no plain variable — the match
+        # fails and it is read as an EXPRESSION, not the literal-or-variable shape
+        # the pin is written in.
+        name = re.match(r"\$\{?([A-Za-z_]\w*)", operand)
+        if name is None:
+            return False
+        return name.group(1) not in derived_from_loop
+    if set(operand) == {"0"}:
+        return False
+    # \u26d4 `isdigit()` IS TOO NARROW TO BE SAFE (#12069 review 14, P1). It accepted
+    # `16` and rejected `16.4`, `16.x`, `16*`, `+16` — every other spelling of the
+    # SAME hard-coded pin — leaving the gate disarmed where the pre-fix cut refused
+    # (measured `['pg_dump', 'pg_restore']` vs `['pg_dump']`). `16.x` is the
+    # spelling this very module uses for a version, so the narrow test was the
+    # fail-open direction. Anything that STARTS like a number is treated as a
+    # possible major; only the `0` return-code idiom and non-numeric text are not.
+    return re.match(r"[+\-]?[0-9]", operand) is not None
+
+
+def _decides_off_the_loop(body: list[str], var: str) -> bool:
+    """Does this loop BODY decide on a value that does NOT come from `$var`?
+
+    The gate the pin needs: crediting `$tool --version` asserts only that the body
+    INVOKES the tool, so the value the branch compares must be shown to descend
+    from the loop variable. It is deliberately narrow, because every widening of
+    it has red a correct workflow at least once (#12069 rounds 9-19): the shape
+    refused is a compared variable that this body ASSIGNS, that does NOT derive
+    from `$var`, and whose comparison is against a major NUMBER or a variable
+    (`_comparison_is_the_pin`).
+    """
+
+    compared = _compared_variables(body)
+    if not compared:
+        return False
+    assigned_here = {
+        match.group("lhs")
+        for line in body
+        for match in ASSIGNMENT_ANYWHERE_RE.finditer(line)
+    }
+    derived_from_loop = _derived_variables(body, {var})
+    pin_checks = [
+        (name, operand)
+        for name, operand in compared
+        if _comparison_is_the_pin(operand, derived_from_loop)
+    ]
+    # \u26d4 THE DECISION ON THE LOOP VARIABLE WINS (#12069 review 14, P2). Firing on
+    # ANY assigned-in-body variable compared to a number red a CORRECT body that
+    # carries a second numeric guard — `PG_MAJOR="${PG_MAJOR:-16}"; if [ "$PG_MAJOR"
+    # != "16" ]`, or a retry counter — beside a `major` that DOES derive
+    # (measured `[]` where the pre-fix cut credited both). A comparison of a
+    # loop-derived value against a major-shaped operand IS the pin's decision, so
+    # no other pin check in the same body can outrank it.
+    if any(name in derived_from_loop for name, _ in pin_checks):
+        return False
+    return any(name in assigned_here for name, _ in pin_checks)
 
 
 def _derived_variables(body: list[str], sources: set[str]) -> set[str]:
@@ -2142,16 +2387,35 @@ def _version_checked_tools(code: str) -> set[str]:
         # above cannot see it.
         inline_truncated = _inline_truncates(rest, closes_here)
         if rest.strip() and closes_here:
+            # ⛔ THE ONE-LINE FORM IS GRADED TOO (#12069 review 13, P2). This
+            # branch returned before the derivation gate, so the SAME body written
+            # on the `do` line — `for tool in pg_dump pg_restore; do version=
+            # "$("$tool" --version)"; major="$(pg_dump --version | …)"; if [
+            # "$major" != "16" ]; then exit 1; fi; done` — credited BOTH tools
+            # where the multi-line spelling credits `pg_dump` only (measured, and
+            # identical before this commit, so it is a pre-existing hole this gate
+            # now closes rather than one it introduces).
             scan(
                 rest,
                 var,
                 set()
-                if inline_truncated or _selects_on_var([rest], var)
+                if inline_truncated
+                or _selects_on_var([rest], var)
+                or _decides_off_the_loop([rest], var)
                 else names,
             )
             continue  # closed on its own line: no body to follow
+        # \u26d4 AN INNER LOOP'S `done` DOES NOT END THIS BODY (#12069 review 14, P1).
+        # Collection used to stop at the FIRST line starting with `done`, so a body
+        # whose real comparison follows an inner loop —
+        # `for attempt in 1 2 3; do major="$(pg_dump --version | …)"; break; done;
+        # if [ "$major" != "16" ]; then exit 1; fi` — was graded with NO comparison
+        # at all and credited both tools, where the pre-fix cut refused (measured).
+        # The body runs to the `done` that closes THIS loop.
+        nesting = 0
         for body_line in lines[body_start:]:
-            if LOOP_END_RE.match(body_line):
+            nesting += _loop_nesting_delta(body_line)
+            if nesting < 0:
                 break
             body.append(body_line)
         # ⛔ A SELECTING BODY COVERS NONE OF THE HEADER'S NAMES (#12069 review P2).
@@ -2182,23 +2446,10 @@ def _version_checked_tools(code: str) -> set[str]:
         # the loop variable, follows `NAME=…$…` edges, and must reach the compared
         # variable. Applied only when the code HAS such a comparison, so a layout
         # that asserts per tool without one is unaffected.
-        compared = _compared_variable(code)
-        # ⛔ ONLY A COMPARISON THIS BODY DECIDES ON. The gate applies when the
-        # compared variable is ASSIGNED in this body — i.e. the body derives the
-        # number it then tests. An unrelated `!= <digit>` elsewhere (`[ "$rc" !=
-        # 0 ]`) narrows nothing, and reading it as a narrowing is the false-RED
-        # direction this file has already paid for five times.
-        assigned_here = {
-            match.group("lhs")
-            for line in graded
-            for match in ASSIGNMENT_ANYWHERE_RE.finditer(line)
-        }
-        if (
-            credited
-            and compared is not None
-            and compared in assigned_here
-            and compared not in _derived_variables(graded, {var})
-        ):
+        # ⛔ A COMPARISON ON A VALUE THAT DOES NOT COME FROM `$var` CREDITS NOTHING
+        # — over ALL of them, never just the first one (see
+        # `_decides_off_the_loop`, which carries the three fail-opens this has had).
+        if credited and _decides_off_the_loop(graded, var):
             credited = set()
         if rest.strip():
             scan(rest, var, credited)
@@ -3381,6 +3632,325 @@ VERSION_CHECK_POLARITY = [
         '  if [ "$rc" != 0 ]; then exit 1; fi\ndone',
         {"pg_dump", "pg_restore"},
         "CONTROL: a comparison on an unrelated variable narrows nothing",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  if [ "$RUNNER_OS" != "Linux" ]; then echo only-linux; fi\n'
+        "  major=\"$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  if [ "$major" != "16" ]; then exit 1; fi\ndone',
+        {"pg_dump"},
+        "#12069 review 11: an unrelated `!=` AHEAD of the real comparison must not "
+        "take the derivation gate's slot",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  rc=0\n'
+        '  if [ "$rc" != 0 ]; then exit 1; fi\n'
+        "  major=\"$(printf '%s\\n' \"$version\" | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  if [ "$major" != "16" ]; then exit 1; fi\ndone',
+        {"pg_dump", "pg_restore"},
+        "CONTROL: a variable ASSIGNED here (from a literal) is still not the "
+        "decision when the compared major DOES derive from the loop variable",
+    ),
+    # ⛔ THE OPERAND DECIDES, NOT HOW THE VARIABLE WAS ASSIGNED (#12069 review
+    # 13). The cut before this one asked whether a compared variable was
+    # COMPUTED, which read an ordinary `arch="$(uname -m)"` check beside a
+    # derived `major` as the decision and discredited a CORRECT body (measured
+    # `[]`), while `want="${PG_MAJOR:-16}"` beside a derived `$major` did the same
+    # (also measured `[]`). Both are pinned here as BOTH-credit controls, and the
+    # operand form of the real fail-open is pinned too.
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  major="$(printf \'%s\\n\' "$version" | sed -E \'s/[^0-9]*([0-9]+)\\..*/\\1/\')"\n'
+        '  if [ "$major" != "16" ]; then exit 1; fi\n'
+        '  arch="$(uname -m)"\n'
+        '  if [ "$arch" != "x86_64" ]; then echo need-x86; exit 1; fi\ndone',
+        {"pg_dump", "pg_restore"},
+        "CONTROL: an ARCHITECTURE check beside the real decision narrows nothing",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  major="$(printf \'%s\\n\' "$version" | sed -E \'s/[^0-9]*([0-9]+)\\..*/\\1/\')"\n'
+        '  want="${PG_MAJOR:-16}"\n'
+        '  if [ "$want" != "$major" ]; then exit 1; fi\ndone',
+        {"pg_dump", "pg_restore"},
+        "CONTROL: the expected value on the LEFT still decides on `$major`, which "
+        "is the loop's own value",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  server="${PG_MAJOR}"\n'
+        "  major=\"$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  if [ "$major" != "$server" ]; then exit 1; fi\ndone',
+        {"pg_dump"},
+        "the operand form of the fail-open: a hard-coded major compared against a "
+        "VARIABLE is still a decision off the loop",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do version="$("$tool" --version)"; '
+        "major=\"$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\""
+        '; if [ "$major" != "16" ]; then exit 1; fi; done',
+        {"pg_dump"},
+        "#12069 review 13: the ONE-LINE closed loop is graded too — it used to "
+        "return before the derivation gate and credit both",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do version="$("$tool" --version)"; '
+        "major=\"$(printf '%s\\n' \"$version\" | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\""
+        '; if [ "$major" != "16" ]; then exit 1; fi; done',
+        {"pg_dump", "pg_restore"},
+        "CONTROL: the same one-line form that DOES derive keeps its credit",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        "  major=\"$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  if [ "$major" != " 16" ]; then exit 1; fi\ndone',
+        {"pg_dump"},
+        "#12069 review 14: the operand is tokenised QUOTE-AWARE — a quoted ` 16` "
+        "is the same literal, and a whitespace-first split read it as `\"`",
+    ),
+    # ⛔ THE OPERAND'S SPELLING AND THE BODY'S SHAPE (#12069 review 14, P1/P2). The
+    # operand arm accepted only `isdigit()`, so `16.4`, `16.x`, `16*`, `+16` and
+    # `" 16"` — every other spelling of the SAME hard-coded pin — left the gate
+    # disarmed; and collection stopped at the first `done`, so a comparison after
+    # an inner loop was never graded at all. Both are pinned below, with the
+    # false-RED arm (a second numeric guard beside a real derived decision) too.
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        "  major=\"$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  if [ "$major" != "16.x" ]; then exit 1; fi\ndone',
+        {"pg_dump"},
+        "#12069 review 14: the pin written as `16.x` is still a hard-coded major — "
+        "a narrow digit-only operand test disarmed the gate here",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        "  major=\"$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  for attempt in 1 2 3; do\n'
+        '    break\n'
+        '  done\n'
+        '  if [ "$major" != "16" ]; then exit 1; fi\ndone',
+        {"pg_dump"},
+        "#12069 review 14: an INNER loop's `done` does not end the body — the "
+        "comparison after it must still be graded",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  major="$(printf \'%s\\n\' "$version" | sed -E \'s/[^0-9]*([0-9]+)\\..*/\\1/\')"\n'
+        '  if [ "$major" != "16" ]; then exit 1; fi\n'
+        '  PG_MAJOR="${PG_MAJOR:-16}"\n'
+        '  if [ "$PG_MAJOR" != "16" ]; then exit 1; fi\ndone',
+        {"pg_dump", "pg_restore"},
+        "CONTROL: a SECOND numeric guard must not outrank a decision that already "
+        "derives from the loop variable",
+    ),
+    # ⛔ TEXT THAT IS NOT CODE, AND A COMPARISON THAT SPANS A BREAK (#12069 review
+    # 15, P1/P2). The clause reader grades clauses, so a COMMENT containing `;` and
+    # a comparison was graded as a condition and its `$tool`-derived variable
+    # disarmed the gate; the do/done counter read the words in comments too, so
+    # `# once done, exit` truncated the body before the real comparison; and a
+    # comparison SPLIT over a line break carried its halves into different clauses.
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  # once done, exit\n'
+        "  major=\"$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  if [ "$major" != "16" ]; then exit 1; fi\ndone',
+        {"pg_dump"},
+        "#12069 review 15: a COMMENT saying `done` must not truncate the body",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  # simple; if [ "$version" != "16" ] it is fine\n'
+        "  major=\"$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  if [ "$major" != "16" ]; then exit 1; fi\ndone',
+        {"pg_dump"},
+        "#12069 review 15: a comparison written in a COMMENT is not a comparison — "
+        "it must not veto the gate through the derived-decision exemption",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  # do it\n'
+        '  major="$(printf \'%s\\n\' "$version" | sed -E \'s/[^0-9]*([0-9]+)\\..*/\\1/\')"\n'
+        '  if [ "$major" != "16" ]; then exit 1; fi\ndone',
+        {"pg_dump", "pg_restore"},
+        "CONTROL: a comment saying `do` must not run the body past its own loop",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        "  major=\"$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  if [[ "$major"\n'
+        '        != "16" ]]; then exit 1; fi\ndone',
+        {"pg_dump"},
+        "#12069 review 15: a comparison CONTINUED over a line break is still one "
+        "comparison — the halves must not land in different clauses",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        "  major=\"$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  if [ "$major" != \\\n'
+        '       "16" ]; then exit 1; fi\ndone',
+        {"pg_dump"},
+        "#12069 review 15: the BACKSLASH continuation spelling of the same",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  rc=0\n'
+        '  if [ "$rc" != 0 ]; then exit 1; fi\ndone',
+        {"pg_dump", "pg_restore"},
+        "CONTROL: the `0` return-code idiom is not a major — with nothing derived "
+        "in the body it must still credit both",
+    ),
+    # ⛔ COMMENT DETECTION AND CONTINUATION MARKERS (#12069 review 16). A `#` that
+    # begins a WORD (`;#`, `)#`, `&#`) opens a comment too, and stripping must
+    # happen BEFORE continuations are joined — otherwise a comment carrying an
+    # unbalanced `[[` glues every following line into a buffer that is then thrown
+    # away, and the body's real comparisons vanish.
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  # the bash [[ form is what we need here\n'
+        "  major=\"$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  if [ "$major" != "16" ]; then exit 1; fi\ndone',
+        {"pg_dump"},
+        "#12069 review 16: a COMMENT with an unbalanced `[[` must not swallow the "
+        "body — comments are stripped before continuations are joined",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  x=1;# once done, exit\n'
+        "  major=\"$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  if [ "$major" != "16" ]; then exit 1; fi\ndone',
+        {"pg_dump"},
+        "#12069 review 16: `;#` opens a comment — the word `done` inside it must not "
+        "end the body",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  x=1;# do it\n'
+        '  major="$(printf \'%s\\n\' "$version" | sed -E \'s/[^0-9]*([0-9]+)\\..*/\\1/\')"\n'
+        '  if [ "$major" != "16" ]; then exit 1; fi\ndone',
+        {"pg_dump", "pg_restore"},
+        "CONTROL: the same `;#` comment saying `do` must not run the body past its "
+        "own loop",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        "  major=\"$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  if [ "$major" \\\n'
+        '       != "16" ]; then exit 1; fi\ndone',
+        {"pg_dump"},
+        "#12069 review 16: the continuation marker is DROPPED when joining — a "
+        "comparison broken before the operator must still be read",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        "  major=\"$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  if [ "$major" != +16 ]; then exit 1; fi\ndone',
+        {"pg_dump"},
+        "#12069 review 16: a SIGNED operand is still a hard-coded major",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  echo "done (see docs)"\n'
+        "  major=\"$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  if [ "$major" != "16" ]; then exit 1; fi\ndone',
+        {"pg_dump"},
+        "#12069 review 16: `echo \"done\"` opens and closes nothing — quoted text "
+        "is masked before the do/done count",
+    ),
+    # ⛔ THE COMPLEMENT OF THE ROW ABOVE (#12069 review 12, P1). Enumerating every
+    # `!=` was not enough: treating ANY comparison on a `$tool`-derived variable as
+    # the decision let a printed message, a sanity check or a LATER JOB veto the
+    # gate. Each row below was measured WIDER than the cut before it.
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        "  major=\"$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  if [ "$major" != "16" ]; then exit 1; fi\n'
+        '  echo "::error::$tool: $version != 16.x"\ndone',
+        {"pg_dump"},
+        "#12069 review 12: a comparison PRINTED in a message is not a comparison — "
+        "it must not veto the derivation gate",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        "  major=\"$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  if [ "$major" != "16" ]; then exit 1; fi\n'
+        '  if [ "$version" != "" ]; then echo ok; fi\ndone',
+        {"pg_dump"},
+        "#12069 review 12: a sanity check on the DERIVED version does not make the "
+        "hard-coded major a decision about the loop variable",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        "  major=\"$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  if [ "$major" != "16" ]; then exit 1; fi\ndone\n'
+        'if [ "$version" != "" ]; then echo x; fi',
+        {"pg_dump"},
+        "#12069 review 12: a comparison in a LATER JOB cannot disarm this loop's "
+        "derivation gate — the scan is scoped to the loop body",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  echo "note: $version != 16.0"\n'
+        "  major=\"$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  if [ "$major" != "16" ]; then exit 1; fi\ndone',
+        {"pg_dump"},
+        "#12069 review 12: a printed comparison AHEAD of the real one is still not "
+        "the decision (the first-match cut credited both here)",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  if [ "$version" != "" ]; then echo ok; fi\n'
+        "  major=\"$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  if [ "$major" != "16" ]; then exit 1; fi\ndone',
+        {"pg_dump"},
+        "#12069 review 12: a COMPUTED value that does not derive from the loop "
+        "variable is still a decision off the loop, even beside a derived check",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  major=16\n'
+        '  if [ "$major" != "16" ]; then exit 1; fi\ndone',
+        set(),
+        "#12069 review 12: a CONSTANT compared against itself is not a decision "
+        "either — the gate stays armed (fail-closed), as it was before",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  major="${version#*) }"; major="${major%%.*}"\n'
+        '  tmp="$(mktemp -d)"\n'
+        '  echo "scratch $tmp != 16"\n'
+        '  if [ "$major" != "16" ]; then exit 1; fi\ndone',
+        {"pg_dump", "pg_restore"},
+        "#12069 review 12: the same shape in the FALSE-RED direction — a computed "
+        "value that is only PRINTED must not red a body whose real check derives",
     ),
     (
         'for tool in pg_dump pg_restore; do\n'
