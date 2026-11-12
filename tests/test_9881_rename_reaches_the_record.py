@@ -85,8 +85,19 @@ from tortoise.sdk import TortoiseSDK
 #: space). A rename record carrying only `name` is a shape this producer no
 #: longer emits.
 def _producer_rename(oid: str, new_name: str, label: str = "Object") -> dict:
-    applied = {"name": new_name,
-               "canonical_name": normalize_entity_name(new_name)}
+    # The producer's own guards, mirrored (`sdk._update_entity`, #12120): the fold
+    # is applied only to a NAME-BEARING write, and only when the fold is
+    # non-empty — a blank or whitespace name never yields
+    # `{"canonical_name": ""}` in a real record, so this helper must not either.
+    # A blank name is not a rename at all in the producer, so this helper — which
+    # builds a rename RECORD — refuses one rather than inventing the shape.
+    assert new_name.strip(), (
+        "a rename record is only produced for a non-blank name; a blank write "
+        "is not a rename (#12120)")
+    applied = {"name": new_name}
+    folded = normalize_entity_name(new_name)
+    if folded:
+        applied["canonical_name"] = folded
     return {"type": "EntityMutated", "ts": "2026-11-06T00:00:00Z",
             "id": oid, "op": classify_entity_mutation_op(applied),
             "label": label, "state": applied}
@@ -228,10 +239,11 @@ def _journal_records(path) -> list[dict]:
 def _object_rows(conn, tenant: tuple[str, str]) -> list[tuple]:
     # `canonical_name` is selected DELIBERATELY (#12120 round-5 finding 1): the
     # replay leg compares these rows, and without the fold in the projection a
-    # record that withheld it still compared EQUAL — live and replay both holding
-    # a STALE fold (`'acme'` against the graph's `'acmerenamed'`), so leg (d)
-    # proved the row MOVED but not that the fold was right. With it here the leg
-    # discriminates the key it is cited for.
+    # record that withheld it still compared EQUAL — leg (d) proved the row MOVED
+    # but not that the fold was right. Measured: replay's row kept the stale fold
+    # 'acme' while live held 'acmerenamed', and the two rows compared equal on
+    # `id, node_key, name`. With the fold here the leg discriminates the key it is
+    # cited for.
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, node_key, name, canonical_name FROM public.object "
@@ -253,8 +265,9 @@ def test_the_public_rename_door_moves_the_records_name_live_and_on_replay(
     * the write goes through the SDK's public `update_entity`, with the record
       ARMED as the application role and the tenant carried by the writer's own
       `use_record_tenant` (no probe module, no monkeypatched writer);
-    * the assertion is on the RECORD ROW — `select id, node_key, name` — so the
-      re-keyed key (`node_key = id`) and the moved column are both read back;
+    * the assertion is on the RECORD ROW — `select id, node_key, name,
+      canonical_name` — so the re-keyed key (`node_key = id`), the moved column,
+      and the fold it is compared on are all read back;
     * the REPLAY leg replays the same journal onto a tenant no other leg has
       used and requires the SAME row, which is what makes this "rebuild ==
       live" instead of "live wrote something".
