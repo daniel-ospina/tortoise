@@ -5134,8 +5134,35 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # anchor text also sits under `core:` and its mirror, so without it a
         # re-derivation onto either stays green while the document's `carve_out:`
         # claim goes false (measured: 5854 and 8173 both drove this row GREEN).
+        # ⛔ THIS NUMBER IS NOT A CONSTANT OF THE EPIC — it is wherever the last
+        # merge above the entry left it, and it is re-derived at the head this PR
+        # lands on, never copied forward from a run that was green earlier.
+        #
+        # The history, because it is why this row carries this much prose:
+        # `#12035` re-derived the document here (9635 -> 9714) and its own +3 kept
+        # the entry and the document in step at 9714. Later merges then moved the
+        # entry out from under the document without touching it: `#12061` +7
+        # (9714 -> 9721), `#12056` +54 (-> 9775), `#11977` +35 (-> 9810). A parallel
+        # batch then re-derived the DOCUMENT to 9823 while the entry kept moving — so
+        # at main `edcac493a5` line 9823 reads `- test_flip_gate.py`, a different file
+        # 83 lines above the entry, and the pin was RED on main and on every diff that
+        # selects this file (a `config/*` diff takes `core`).
+        #
+        # Re-derive, never copy: read the number the DOCUMENT claims, then measure
+        #   awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}' config/ci-surfaces.yml
+        # and the section bounds
+        #   grep -nE '^(carve_out|uri_requiring):' config/ci-surfaces.yml
+        # At this head (rebase onto main `edcac493a5`): entry 9906, `carve_out:`
+        # opens 9780, `uri_requiring:` 10104 — so 9906 is inside the section, and
+        # the identical text also sits at 6056 and 8422, which is what the 5th
+        # element exists to refuse. ⚠️ Both of those are INDENTED sub-keys
+        # (`core:` 2235, `sdk:` 8188) of `surfaces:`, so the resolver's
+        # nearest-column-zero-key rule reports the PARENT: a cite onto 8422 refuses
+        # with `sits in section 'surfaces:', not 'carve_out:'` — measured, so a
+        # re-derivation onto it does not get told `sdk:` and conclude the guard is
+        # broken.
         ("03-test-design.md", "`carve_out:` holds **one**", (
-            ("9823", "- test_pack_logic_writeprobe_11083.py"),
+            ("9906", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
