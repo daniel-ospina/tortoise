@@ -480,8 +480,13 @@ same step with the same tail is the investigation.
     There is deliberately **no** "repair the frozen run" remedy here, and that is not an
     omission: a frozen run — `in_progress` with every job `completed` **and its own
     `updated_at` motionless for `JOB_SETTLE_SECONDS` (300 s)** — is the *proof* that EXCLUDES
-    it from `pr_running` (see the `excluded` sentence), so it can never make the census
-    unmeasured. ⛔ The stillness half is load-bearing: this repo's test matrix is DYNAMIC
+    it from `pr_running` (see the `excluded` sentence) once it has been PROBED, so a probed
+    frozen run can never make the census unmeasured. ⛔ "Once probed" is load-bearing and
+    was missing: the budget is spent oldest-first over `DEFAULT_MAX_JOB_PROBES` runs, so once
+    more runs are frozen than the budget allows, the surplus is never probed, keeps
+    `has_live_job = None`, and DOES land in `pr_running_unmeasured` (as `_unprobed`) — the
+    population the bullet above resolves by raising `--max-job-probes`.
+    ⛔ The stillness half is load-bearing: this repo's test matrix is DYNAMIC
     (`python-ci.yml` instantiates `test`/`test-slow`/`test-carve-out` from
     `fromJSON(needs.changes.outputs.*_matrix)`), so between the parent job finishing and the
     shards being created the jobs endpoint answers with ONE `completed` row while the run is

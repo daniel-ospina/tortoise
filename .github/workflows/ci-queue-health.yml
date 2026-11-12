@@ -83,9 +83,11 @@ name: ci-queue-health
 # an all-`completed` run whose last update just moved is COUNTED (unmeasured), not
 # excluded. `repair` is not a lever either way, but ⛔ FOR TWO DIFFERENT REASONS and they
 # must not be merged: the 409 evidence ("not in progress" / "has not been queued yet") is
-# scoped to the FROZEN population, while a settle-downgraded run is one that "is about to
-# execute its whole matrix" — /cancel on THAT would be ACCEPTED and destructive, so it is
-# the one thing here an operator must not be told is a closed avenue.
+# scoped to the FROZEN population, while a run whose stillness is merely UNPROVEN may still
+# be working — the DYNAMIC matrix's pre-expansion window, a run that has just finished
+# every job, or one whose stamp cannot be read or is future-dated (`_settled_still` answers
+# False for all four) — and /cancel on THAT would be ACCEPTED, so it is the one thing here
+# an operator must not be told is a closed avenue.
 # Neither can block a merge, because a
 # `schedule`-event run is a NON-CODE event: the merge rail's own `NON_CODE_EVENTS`
 # set excludes `schedule|issues|issue_comment` from the merge decision, so a red

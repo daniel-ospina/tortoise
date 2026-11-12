@@ -2419,7 +2419,12 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
                 return False
             left = max(hay.rfind(".", 0, i), hay.rfind("!", 0, i),
                        hay.rfind("?", 0, i), i - 300)
-            right = _terminator(i + len(needle))
+            # ⛔ START AT THE NEEDLE'S LAST CHARACTER, not one past it. `_terminator` is
+            # inclusive, so searching from `i + len(needle)` skipped a terminator that IS the
+            # needle's final character — and then found the NEXT sentence's, so the passage
+            # spanned two sentences: a one-sentence lookahead, the exact thing the docstring
+            # above says was measured to disarm the real revert (review P1).
+            right = _terminator(i + len(needle) - 1)
             if right == -1:
                 right = len(hay) - 1
             passage = hay[left + 2:right + 1] if left >= 0 else hay[:right + 1]
@@ -2539,9 +2544,12 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     # `hits()` does, by context. These are the CORRECT shapes the guard must let through, all
     # of them forms an editor actually writes at the sites this rule lives on (a same-sentence
     # "only when … has also been still" qualifier, a widened subject, a comma where the
-    # retracted sentence had a full stop). ⛔ On its own this leg is satisfiable VACUOUSLY —
-    # every entry carries stillness, so any hit on one is disarmed — which is why `pre_fix`
-    # below carries the teeth.
+    # retracted sentence had a full stop). ⛔ On its own this leg is satisfiable VACUOUSLY,
+    # which is why `pre_fix` below carries the teeth. ⛔ AND NOT EVERY ENTRY HERE EMBEDS A
+    # NEEDLE SPAN (review NIT): measured, only a minority do, because most correct rewrites
+    # QUALIFY the span away rather than quote it. The entries that do not embed one are still
+    # worth keeping — they are the shapes a NARROWED needle would newly match — but they
+    # exercise nothing today, so the discriminator's real cover is the assertion below.
     correct = [
         "PR-event runs whose EVERY job had completed, and which are therefore NOT counted "
         "in `pr_running` (#12037) only once its `updated_at` has been still for "
@@ -2619,7 +2627,37 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # the two test headers
         "`False` is a PROOF (every job of the run is `completed`, so it is executing nothing)",
         "now READ: every job is `completed`, so none of them is executing anything",
+        # ⛔ THE MERGED-CLOSED-AVENUE CLAIM, as it SHIPPED in BOTH workflow blocks at
+        # `6c05aeb903` (review NIT: without these two entries the "either state" needles
+        # were relied on by nothing, so deleting them was silent).
+        "`repair` is not a lever either way: neither /cancel nor /force-cancel accepts "
+        "a run in either state (409), so naming it would send an operator to a closed avenue.",
+        "neither /cancel nor /force-cancel accepts a repair in either state, so naming one "
+        "would point an operator at a closed avenue.",
+        # ... and the cause COUNT at `6c05aeb903` (the module field doc). ⛔ THE SHIPPED
+        # SENTENCE ITSELF IS DISARMED BY DESIGN: it goes on to name `JOB_SETTLE_SECONDS`, so
+        # the second-half discriminator treats it as a corrected two-half sentence. This entry
+        # is the shortest TRUE instance of the claim, which is what pins that the needle can
+        # still fire — a count re-added without a stillness clause is exactly the revert the
+        # needle exists for.
+        "disproved — three causes, one bucket: the jobs could NOT be read.",
+        # ⛔ A RE-TYPED REVERT, not a shipped quote: `flat()` turns the shipped
+        # "all-jobs" / newline / "-completed" into "all-jobs -completed", so a revert that
+        # re-types it without the break would otherwise be caught by no needle at all
+        # (review NIT: this needle had no exercise). Marked here so the leg stays honest
+        # about what it covers.
+        "all-jobs-completed is the PROOF that EXCLUDES a run from `pr_running` (see the "
+        "`excluded` sentence), so it can never contribute to an unmeasured census",
     ]
+    # ⛔ EVERY NEEDLE MUST BE EXERCISED IN THE DETECTION DIRECTION (review NIT). Without
+    # this, a needle relied on by no `pre_fix` entry can be deleted or typo'd with the suite
+    # green — which is how the never-shipped needle above survived four rounds.
+    exercised = {p for p in retracted if any(hits(flat(s), flat(p)) for s in pre_fix)}
+    unexercised = [p for p in retracted if p not in exercised]
+    assert not unexercised, (
+        "these needles catch NO shipped sentence, so nothing would notice their removal — "
+        f"add the shipped phrasing to `pre_fix` or delete the needle: {unexercised!r}"
+    )
     for phrase in pre_fix:
         want = flat(phrase)
         caught = [p for p in retracted if hits(want, flat(p))]
