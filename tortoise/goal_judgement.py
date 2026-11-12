@@ -268,6 +268,20 @@ def _assert_supersession_scope(
     seam: goal A ended with zero live judgements and its belief still moving.
     """
     node = sdk.get_entity(previous_point_id) or {}
+    if not node:
+        # ⛔ A MISSING predecessor is not a FOREIGN one, and the distinction is
+        # what a caller acts on: `get_entity` answers `{}` for an id no node
+        # backs, so folding it into the `judgementState` refusal below told a
+        # caller with a typo'd or stale id that the point EXISTS and is merely
+        # not a judgement — a false statement about the graph, pointing the
+        # investigation at the wrong thing. Pre-diff this input fell through to
+        # `supersede_point`, which named the missing point.
+        raise ValueError(
+            f"refusing to supersede {previous_point_id!r}: no entity has that id. "
+            "A supersession transfers the predecessor's operator edges (#6180), "
+            "so a predecessor that does not exist can be neither scoped nor "
+            "retired."
+        )
     if node.get("judgementState") is None:
         # ⛔ A predecessor this module does not own has NO scope props to compare,
         # so an equality check that tolerates absence is a no-op exactly where it

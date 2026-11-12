@@ -1510,6 +1510,116 @@ def test_a_refused_cache_write_does_not_cost_the_arrow(sdk, monkeypatch):
     )
 
 
+def test_a_refused_cache_write_does_not_cost_the_arrow_on_the_UNCHANGED_arm(
+        sdk, monkeypatch):
+    """The SECOND call site needs its own pin.
+
+    The unchanged arm is the one that RE-ASSERTS a missing arrow — the
+    self-healing path — and it writes the cache first too. With the two writes
+    merely SEQUENCED, a refused cache write here skips the re-assertion, so the
+    repair never happens and the goal keeps a live claim with no belief path
+    forever. MEASURED: reverting only THIS call site to the sequenced form leaves
+    every other pin in this file green, which is why it is pinned directly —
+    pass 1 loses its arrow, pass 2 is unchanged and loses its cache write, and
+    the arrow must exist anyway.
+    """
+    import tortoise.goal_judgement as gj
+
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 12.0, at="2026-11-11T10:00:00Z")
+
+    def boom_arrow(*a, **kw):
+        raise RuntimeError("operator write refused")
+
+    # pass 1: the arrow write fails, so the judgement lands WITHOUT a belief edge
+    monkeypatch.setattr(gj, "_ensure_judgement_edge", boom_arrow)
+    with pytest.raises(RuntimeError, match="operator write refused"):
+        judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                         target=target)
+    monkeypatch.undo()
+    live = latest_judgement(sdk, goal_id=goal["id"],
+                            indicator_id=indicator["id"],
+                            target_id=target.target_id)
+    assert live is not None
+    assert _impl_into(sdk, live["id"], goal["id"]) == 0, (
+        "pass 1 must leave the edge MISSING, or the self-healing arm below is "
+        "not the arm under test"
+    )
+
+    # pass 2 is UNCHANGED (same state), so it takes the self-healing arm — and
+    # that arm's cache write is refused. The arrow must still be re-asserted.
+    def boom_cache(*a, **kw):
+        raise RuntimeError("update_entity refused")
+
+    monkeypatch.setattr(gj, "_write_goal_state_cache", boom_cache)
+    with pytest.raises(RuntimeError, match="update_entity refused"):
+        judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                         target=target)
+    monkeypatch.undo()
+    assert _impl_into(sdk, live["id"], goal["id"]) == 1, (
+        "a refused cache write on the unchanged arm skipped the arrow "
+        "re-assertion that arm exists to perform"
+    )
+
+
+def test_both_writes_failing_keeps_both_traces(sdk, monkeypatch):
+    """When the cache AND the arrow are refused, neither reason may be lost.
+
+    The helper raises the CACHE error `from` the arrow error on purpose: the
+    cache refusal came first, and the arrow refusal is the more actionable one,
+    so a caller must be able to see both. Dropping the `from` leaves this file
+    fully green, so the contract is pinned here.
+    """
+    import tortoise.goal_judgement as gj
+
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 12.0, at="2026-11-11T10:00:00Z")
+
+    def boom_cache(*a, **kw):
+        raise RuntimeError("CACHE refused")
+
+    def boom_arrow(*a, **kw):
+        raise RuntimeError("ARROW refused")
+
+    monkeypatch.setattr(gj, "_write_goal_state_cache", boom_cache)
+    monkeypatch.setattr(gj, "_ensure_judgement_edge", boom_arrow)
+    with pytest.raises(RuntimeError, match="CACHE refused") as exc:
+        judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                         target=target)
+    assert isinstance(exc.value.__cause__, RuntimeError), (
+        "the arrow refusal was lost: without it the caller cannot tell that the "
+        "arrow was tried at all"
+    )
+    assert "ARROW refused" in str(exc.value.__cause__)
+
+
+def test_a_missing_predecessor_is_refused_as_missing(sdk):
+    """A MISSING predecessor must not be reported as a foreign one.
+
+    `get_entity` answers `{}` for an id no node backs, so the `judgementState`
+    refusal used to tell a caller with a typo'd or stale id that the point EXISTS
+    and is merely not a judgement — a false statement about the graph, pointing
+    the investigation at the wrong thing. Pre-diff this input fell through to
+    `supersede_point`, which named the missing point.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    judged = judge(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                   target=target)
+    with pytest.raises(ValueError) as exc:
+        record_judgement(sdk, goal_id=goal["id"], judgement=judged,
+                         target=target, indicator_id=indicator["id"],
+                         previous_point_id="no-such-point-11922")
+    message = str(exc.value)
+    assert "no entity has that id" in message
+    assert "judgementState" not in message, (
+        "a missing predecessor was reported with the FOREIGN-claim wording"
+    )
+
+
 def test_the_DERIVED_path_also_asserts_the_scope(sdk):
     """The guard must run on the resolved predecessor, not only the explicit seam.
 
