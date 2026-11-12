@@ -1722,13 +1722,31 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
             f"this module calls the `D2 — A` block the {word.lower()} of the two "
             f"v3.33 entries somewhere; measured, it is the "
             f"{'first' if lands_first else 'second'}")
-    named_issue = re.search(r"issue\s+#(\d+)", flat_doc, re.I)
-    assert named_issue, (
-        "the SCOPE paragraph must name the ISSUE the landing block records — "
-        "\"issue #<n>\" in any wording — so this pin can check it")
-    assert f"issue #{named_issue.group(1)}" in lands_d2[0].split("\n", 1)[0], (
-        f"the SCOPE paragraph names issue #{named_issue.group(1)}, but the block it "
-        "points at records " + repr(lands_d2[0].split("\n", 1)[0][:100]))
+    # ⛔ AN ISSUE STATED BESIDE THE BLOCK'S PATH must be the issue that block
+    # records. The claim this checks is the `(issue #<n>)` the prose puts NEXT TO
+    # the path it cites — not the first `issue #<n>` anywhere in the docstring, and
+    # not a sentence-boundary read (measured: a first match refused a TRUE sentence
+    # about the OTHER v3.33 entry's issue and let a WRONG issue beside the path pass
+    # behind it; a sentence split could not see the claim at all, because the
+    # issue sits inside a parenthetical that the splitter broke on).
+    path_refs = [m.start() for m in
+                 re.finditer(r"docs/ONTOLOGY-CHANGELOG\.md:\d+", doc)]
+    assert path_refs, (
+        "the SCOPE paragraph must cite the block by "
+        "`docs/ONTOLOGY-CHANGELOG.md:<line>`, so the block's identity has a home "
+        "this pin can read")
+    claims = []
+    for pos in path_refs:
+        window = re.sub(r"\s+", " ", doc[max(0, pos - 80):pos + 160])
+        claims += re.findall(r"issue\s+#(\d+)", window, re.I)
+    assert claims, (
+        "the SCOPE paragraph must name the ISSUE that block records, BESIDE the "
+        "path it cites — \"… `ONTOLOGY-CHANGELOG.md:<line>` (issue #<n>) …\"")
+    lander_issue_line = lands_d2[0].split("\n", 1)[0]
+    for named in claims:
+        assert f"issue #{named}" in lander_issue_line, (
+            f"the SCOPE paragraph names issue #{named} beside the block's path, but "
+            "the block it points at records " + repr(lander_issue_line[:100]))
     # ⛔ EVERY PERMALINK IN THE MODULE'S PROSE must belong to the block the prose
     # points at — scoped to DOCSTRINGS so the synthetic ids in code comments (the
     # negative-test fixtures) do not join the sweep. The pin's own docstring cited
@@ -1748,7 +1766,7 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
         "the evidence is the defect this pin exists to stop")
     named_permalinks = set(re.findall(r"#issuecomment-(\d{6,})", doc))
     assert named_permalinks, (
-        "the SCOPE paragraph must name the permalink it relies on")
+        "the sibling docstring must name the permalink it relies on")
     assert named_permalinks <= set(
         re.findall(r"#issuecomment-(\d{6,})", lands_d2[0])), (
         f"the SCOPE paragraph cites {sorted(named_permalinks)} but the block it "
