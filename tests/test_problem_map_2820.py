@@ -200,14 +200,15 @@ def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
     counts the count arm asserts. They are a second copy of the same hand
     measurement, not an independent source: a re-cut that moves the page and
     these literals together is caught by nothing here. The tracker records whether
-    the TICKET was closed, and the page's §1 shows that says nothing about a row
-    either way (two tracker-CLOSED issues are OPEN rows there, one tracker-OPEN
-    issue is fixed), while `tools/problem_map_check.py` deliberately refuses to
-    read GitHub, so re-derive these from the tree on every re-cut; a re-cut that
-    only makes this file green has proven nothing about the statuses. The two
-    halves are not equally dark: a moved STATUS is uncaught, while a moved COUNT
-    reds six arms whose FIXTURES encode the shipped numbers ("fixture no longer
-    finds §2's OPEN row") — detected as breakage, never confirmed.
+    the TICKET was closed, and three of the page's §1 rows show that says nothing
+    about a row either way (two tracker-CLOSED issues are OPEN rows there, one
+    tracker-OPEN issue is fixed), while `tools/problem_map_check.py` deliberately
+    refuses to read GitHub and re-derives none of this from the tree, so re-derive
+    these on every re-cut; a re-cut that only makes this file green has proven
+    nothing about the statuses. The two halves are not equally dark: a moved
+    STATUS is uncaught, while a moved COUNT reds six arms whose FIXTURES encode
+    the shipped numbers ("fixture no longer finds §2's OPEN row") — detected as
+    breakage, never confirmed.
     """
     rows, _ = pmc.parse_rows(DOC.read_text(encoding="utf-8"))
     status = {r.issue: r.status for r in rows}

@@ -416,19 +416,19 @@ rounding:**
   (The §8 prose that also names them is NOT compared — see the prose-counts
   residual below — so the guarantee rests on the `OPEN` count plus the pin, not
   on §8's sentence.)
-  **What survives is the pin's own provenance.** Those expected values — the four
-  statuses in that arm and the `22`/`4` literals the count arm asserts — are a
-  second copy of the same hand measurement, not an independent source, so a re-cut
-  that moves the page and the pin together is not caught by anything here. The
-  tracker records whether the *ticket* was closed, and §1's four rows show that
-  says nothing about the row in either direction — two of them are CLOSED in the
-  tracker over a defect this page calls `OPEN`, one is `OPEN` over a fixed defect.
-  The guard reads neither, so re-derive those literals from the tree on every
-  re-cut; a re-cut that only makes the suite green has proven nothing about the
-  statuses. The two halves are not equally dark, though: a moved **status** is
-  uncaught, while a moved **count** reds six arms whose FIXTURES encode the
-  shipped numbers (`fixture no longer finds §2's OPEN row`) — detected as
-  breakage, never confirmed.
+  Those expected values — the four statuses in that arm and the `22`/`4` literals
+  the count arm asserts — are a second copy of the same hand measurement, not an
+  independent source, so a re-cut that moves the page and the pin together is not
+  caught by anything here. The tracker records whether the *ticket* was closed,
+  and three of §1's four rows show that says nothing about the row in either
+  direction — two are CLOSED in the tracker over a defect this page calls `OPEN`,
+  one is `OPEN` over a fixed defect. `tools/problem_map_check.py` deliberately
+  refuses to read GitHub and re-derives none of this from the tree, so re-derive
+  those literals from the tree on every re-cut; a re-cut that only makes the
+  suite green has proven nothing about the statuses. The two halves are not
+  equally dark, though: a moved **status** is uncaught, while a moved **count**
+  reds six arms whose FIXTURES encode the shipped numbers (`fixture no longer
+  finds §2's OPEN row`) — detected as breakage, never confirmed.
 - **Anchor RELEVANCE.** The guard proves an anchor exists and is merged. It cannot
   prove the commit is *the fix* — a lane once cited a merge that mentioned nothing
   of the issue (this page carried exactly that defect until review caught it on
