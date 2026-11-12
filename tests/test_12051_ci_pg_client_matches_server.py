@@ -5728,15 +5728,18 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     # OPERAND PATHS are replaced. Pinning one verbatim text
     # (`grep -qE -e '<pattern>' … 2>/dev/null`) false-redded a single `-e`, a `-F`, and a
     # trailing-slash path as "Re-derive the substitution" — the guard telling the maintainer to
-    # do work already done. ⚠️ RECURSION IS NOT ONE OF THOSE FREEDOMS: the committed probe
-    # names the apt-READABLE operands explicitly (`/etc/apt/sources.list`,
-    # `sources.list.d/*.list`, `sources.list.d/*.sources`), so it never sees the BACKUP names
-    # apt ignores (`pgdg.list.save`, `pgdg.list.distUpgrade` — ordinary apt/dpkg operations).
-    # `-r` ALONE IS NOT THE DEFECT — MEASURED here: adding `-r` to that operand list left the
-    # file at `285 passed`, because the operands are still the globs. What reds is pointing the
-    # probe at the DIRECTORY (`sources.list.d/`), which is what makes a backup count: MEASURED
-    # `1 failed` — the ignored-shape loop below. So it is the OPERAND SHAPE, not the flag, that
-    # the suite pins; describing this probe as "recursive" was the stale claim.
+    # do work already done. ⚠️ AND THIS PROBE IS NOT RECURSIVE: it names the apt-READABLE files
+    # explicitly (`/etc/apt/sources.list`, `sources.list.d/*.list`, `sources.list.d/*.sources`),
+    # which is how it excludes the BACKUP names apt ignores (`pgdg.list.save`,
+    # `pgdg.list.distUpgrade` — created by ordinary apt/dpkg operations, and the shapes the
+    # ignored-shape rows below plant). Reading the DIRECTORY recursively is what would count a
+    # backup. ⚠️ THE FLAG ALONE IS NOT THE FACT EITHER — MEASURED: adding `-r` to these same
+    # operand globs left the file at `285 passed`, because the operands are still files. (For the
+    # record, swapping the globs for the directory operand reds too, but for an UNRELATED reason:
+    # `fixed_probe` below rewrites the glob operands, so an unrewritten probe reads the HOST's
+    # apt config and the REUSE arm reds on its own stub — not the ignored-shape rows. That is why
+    # this comment states the operands as a FACT rather than citing that mutation as its
+    # evidence.) So the stale claim was calling the probe "recursive" at all.
     probe_lines = [
         line
         for line in code_only(prefix).splitlines()

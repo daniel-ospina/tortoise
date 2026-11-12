@@ -298,15 +298,15 @@ only leg whose pin is about speed, and the mitigation buys it nothing (above):
   put an unexpected box here is #10289.
 
   The step also undoes its own apt configuration: it writes its OWN files —
-  `/etc/apt/sources.list.d/tortoise-12051-pgdg.list` and `/etc/apt/keyrings/tortoise-12051-pgdg.asc` —
-  and an `EXIT` trap removes exactly those plus the `mktemp`'d key file. ⚠️ STEP-PRIVATE ON PURPOSE:
-  keying removal on "did it pre-exist" inverted it (an operator `pgdg.list` lost the key that signed
-  it). ⚠️ A box that ALREADY configures PGDG is reused, not duplicated (a second stanza with a
-  different `Signed-By` makes apt refuse the whole list) and its stanza is TRUSTED AS-IS. An
-  unreadable `Signed-By` reds the `apt-get update` guard, NOT the ORIGIN check, and nothing
-  self-heals — that box stays red until its own stanza is repaired. The trap exists because the job
-  is POOL-ELIGIBLE: a leftover sources file outliving its keyring turns the next job's `apt-get
-  update` into the very soft failure the ORIGIN check exists to catch.
+  `/etc/apt/sources.list.d/tortoise-12051-pgdg.list` and `/etc/apt/keyrings/tortoise-12051-pgdg.asc` — and an
+  `EXIT` trap removes exactly those plus the `mktemp`'d key file. ⚠️ STEP-PRIVATE ON PURPOSE: keying removal
+  on "did it pre-exist" inverted it (an operator `pgdg.list` lost its key). ⚠️ TWO LIMITS, because the trap is
+  not a restore: it removes apt CONFIGURATION only, so the installed `postgresql-client-16` and its dependency
+  closure STAY on the box, and a later job keeps a pg16 client available; and a box that ALREADY configures
+  PGDG is reused, not duplicated (a second stanza with a different `Signed-By` makes apt refuse the whole
+  list). That stanza is TRUSTED AS-IS: an unreadable `Signed-By` reds the `apt-get update` guard, NOT the
+  ORIGIN check, and nothing self-heals — the box stays red until repaired. The trap exists because the job is
+  POOL-ELIGIBLE: a leftover sources file changes apt resolution for every later job on the box.
 
 These are **accepted costs of the temporary mitigation, stated as costs**, and all nine revert with
 it. If the mitigation becomes permanent, the scoping fix is to put the starved required legs on a
