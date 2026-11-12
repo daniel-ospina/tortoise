@@ -7043,9 +7043,14 @@ def _strip_trailing_comment(line: str) -> str:
     A `#` starts a comment only where a WORD can begin, and this function is the
     SINGLE OWNER of the complete rule: column 0; after unquoted, unescaped
     whitespace or a character of `COMMENT_START_CHARS`; after a CONFIRMED
-    group-closing `)`; and after the openers that begin a word (`$(`, `<(`, `>(`,
-    `=(` — their closers ARE a boundary; an extglob or arithmetic opener's are
-    not). ⛔ THE ENUMERATION LIVES HERE, NOT IN TWO PLACES (#12279 REVIEW 5, P3):
+    group-closing `)`; and after the OPENERS that begin a word (`$(`, `<(`, `>(`,
+    `=(` — those openers are a boundary, and their closers are NOT; an extglob or
+    arithmetic opener's closer is not one either). ⛔ THE ENUMERATION LIVES HERE,
+    NOT IN TWO PLACES (#12279 REVIEW 5, P3) — AND IT MUST NOT STATE THE INVERSE
+    (#12279 REVIEW 7, P3): it said the sub/assignment closers "ARE a boundary",
+    which is the opposite of the implemented and measured rule, so implementing
+    that sentence would restore the very P1 this change fixed (`echo $(date)#note`
+    is ONE word in bash — it prints `<epoch>#note` and the next command runs).
     an earlier version named only `COMMENT_START_CHARS`, which omits EVERY `)`
     boundary — an implementation written from that sentence alone would fail this
     module's own `(true)#` row. Never inside a single- or double-quoted span, so
