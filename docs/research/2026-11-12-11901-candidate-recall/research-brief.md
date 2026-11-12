@@ -137,15 +137,22 @@ is written by the fleet's own capture hook: the two committed artifacts harveste
 **103,087** (control) distinct definite descriptions, a 0.18 % drift between two runs ~60 s apart.
 
 ⛔ **That 0.18 % is the gap between THOSE two runs, not a bound on between-run variation, and this corpus is NOT
-append-only in effect.** Re-running the committed `harvest()` over the same nine files ~2 h later (16:37Z and
-16:41Z, twice, independently) returned **91,725 / 91,774 / 91,601** distinct definite descriptions — **−10.8 %**
-— *fewer* than the artifacts, which appends alone cannot produce (ident −6.5 %, path −7.3 % as well). The obvious
-mechanisms were then RULED OUT by measurement rather than assumed: the eight older day-files are frozen at their
-day-end mtimes, today's file is append-only (**+60 distinct definite names in 180 s**, 1,155 → 1,165 lines),
-`tortoise/session_events_drain.py` is not running, and the directory holds no sealed or rotated file. So the loss
-pre-dates that window, and **the current contents of the named directory cannot reproduce the artifacts' population
-at all** — either today's file was rewritten between 14:19Z and 16:37Z (an event no longer observable) or the
-artifacts' bytes came from a corpus other than the one they name; nothing in the artifact distinguishes the two.
+append-only in effect.** Re-running `harvest()` over the same nine files ~2 h later (16:37Z, 16:41Z and 16:41Z,
+three independent runs) returned **91,725 / 91,774 / 91,601** distinct definite descriptions — **−10.8 % to
+−11.0 %** — *fewer* than the artifacts, which appends alone cannot produce (ident −6.5 %, path −7.3 % as well).
+⚠️ **0.17 pt of that gap is the HARNESS, not the corpus:** `058b32053e` added the whitespace-collapse in
+`harvest()` after the artifacts were written, and the pre-collapse rule re-run over today's directory returns
+**91,918** vs the current rule's **91,744** — so the corpus residue is the remaining ~11 pt, and the comparison is
+between two harvest rules as well as two moments. The remaining mechanisms were then RULED OUT by measurement
+rather than assumed: the eight older day-files are frozen at their day-end mtimes, today's file is append-only
+(**+60 distinct definite names in 180 s**, 1,155 → 1,165 lines), `tortoise/session_events_drain.py` is not running,
+and the directory holds no sealed or rotated file. So the loss pre-dates that window, and **the current contents of
+the named directory cannot reproduce the artifacts' population at all** — either today's file was rewritten between
+14:19Z and 16:37Z (an event no longer observable) or the artifacts' bytes came from a corpus other than the one
+they name; nothing in the artifact distinguishes the two. ⚠️ **The instrument can now make that distinction in a
+future run:** `harvest()` reports its own input accounting into `corpus.input` (`lines`, `parse_errors`,
+`records_without_text`), added after this measurement — so a re-run can separate *the corpus lost names* from *the
+harness stopped parsing records*. The two committed artifacts predate that field and carry none.
 The artifacts carry their own `corpus.harvested_distinct`, so the drift is at least visible — and it is why
 **§3.1's class deltas are BETWEEN-RUN, not paired**: treat them as directional evidence, not a controlled effect
 size, and see the consequence in §3.1.
@@ -408,7 +415,7 @@ from the evidence.
 
 ⚠️ **Run them the way the repo requires** — the module needs no *graph*, but every `pytest` run in this repo
 needs the lane's DB seam (epic #1647 P4), so a bare `uv run pytest tests/test_candidate_recall_11901.py` reports
-**errors** from `tests/_embedded.py` (one per collected test — 22 of them at this head), not a failure of these
+**errors** from `tests/_embedded.py` (one per collected test — 26 of them at this head), not a failure of these
 tests:
 
 ```bash
@@ -422,14 +429,15 @@ TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_candidate_recall_11901.py -q
 harness has a prior-off arm — and is pinned as text); §3's prose derivatives (past-this-k, absent-at-15, the
 identifier share, the crowding mean and median); §6's and §7's restatements (the recall pair, the pooled mean, the
 fold's two denominators, the width residual, the class deltas, the wall clock); §2's between-run drift (the
-`corpus.harvested_distinct` pair and the percentage between them); §3's keyword-only miss split and k=5 mean rank;
-and §8's `rows_zero` claim. Each
+`corpus.harvested_distinct` pair and the percentage between them); §2's corpus SHAPE as the artifacts record it
+(`corpus.files` and `corpus.population`); §3's keyword-only miss split and k=5 mean rank; and §8's `rows_zero` claim.
+Each
 §3 row is anchored to **its own** section — a swap of the two tables' bodies reds, which it did not before review
-round 8. **Not
-pinned:** §2's corpus census (file count, record count, characters — the artifact carries only the first, and the
-corpus is live), §2.2's graph/digest, and `retrieval.window_modes` / `retrieval.uniform_windows`, which the committed
-artifacts predate. Three unpinned sentences are the
-honest state; an unpinned TABLE is not.
+round 8. **Not pinned, and cannot be:** everything §2 says about the corpus CHANGING — its re-run figures
+(91,725 / 91,774 / 91,601) are dated readings of a directory that moves under them, and the record/character totals
+an earlier draft quoted are not in the artifact at all — plus §2.2's graph/digest, `retrieval.window_modes` /
+`retrieval.uniform_windows` and `corpus.input`, which the committed artifacts predate. Those are unpinned
+SENTENCES; an unpinned TABLE is not.
 
 ## 10. Write-back
 
