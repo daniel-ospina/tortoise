@@ -798,6 +798,8 @@ class TestSecondReviewRoundBounded:
         verdict = sdk.approve_merge("sub-c", action="reject")
         assert not verdict.get("already_reviewed"), (
             f"a pair nobody had reviewed answered 'already reviewed': {verdict}")
+        assert verdict.get("target_id") == "sub-b", (
+            f"the reject did not name the pair it decided: {verdict}")
         after = {(r["candidate_id"], r["existing_id"]) for r in
                  sdk.list_dedup_candidates(candidate_type="entity")}
         assert ("sub-c", "sub-b") not in after, (
@@ -838,6 +840,57 @@ class TestSecondReviewRoundBounded:
             "RETURN count(r)").result_set[0][0]
         assert wired >= 1, (
             "roleHolder did not resolve the merged name onto its survivor")
+
+    def test_a_VARIANT_merge_resolves_on_the_read_path_too(self, sdk_factory):
+        """P2: the collapse was gated on `len(by_name) > 1` (#12047 round 8).
+
+        An exact-twin merge leaves BOTH nodes matching the raw name, so the gate
+        fired and the read collapsed. A VARIANT merge (the fuzzy band — most of
+        the queue) leaves the retired carrier as the only row matching its own
+        spelling: `len == 1`, the gate never fired, and the read returned the
+        CARRIER while every write hopped to the survivor. An approval filed under
+        the merged-away spelling then attached to the retired node.
+        """
+        sdk = sdk_factory()
+        _create_raw(sdk, "Subject", "sub-a", "Bob Smyth", "subjectKind",
+                    "naturalPerson", ts="2026-01-01")
+        _create_raw(sdk, "Subject", "sub-b", "Bob Smith", "subjectKind",
+                    "naturalPerson", ts="2026-01-02")
+        row = next(r for r in sdk.list_dedup_candidates(candidate_type="entity")
+                   if r["candidate_id"] == "sub-b")
+        assert row["existing_id"] == "sub-a", row
+        sdk.approve_merge("sub-b", action="merge")
+        g = sdk._get_proj().g
+        assert resolve_entity_id(
+            g, "Subject", "Bob Smith",
+            name_props=("name", "canonical_name")) == "sub-a", (
+            "the read path resolved the merged-away spelling onto the retired carrier")
+        assert sdk.create_subject("Bob Smith")["id"] == "sub-a", (
+            "the write path and the read path disagree about a merged spelling")
+
+    def test_the_fold_resolver_also_collapses_a_merged_carrier(self, sdk_factory):
+        """P3: `resolve_fold_name` was a THIRD uncollapsed by-name resolver (round 8).
+
+        For an exact twin it saw TWO holders and took the NON-EXEMPT
+        `ambiguous-entity-name` shape, which fails `rebuild_all` — so the queue's
+        own repair made the journal un-rebuildable.
+        """
+        from tortoise.entity_identity import resolve_fold_name
+
+        sdk = sdk_factory()
+        _create_raw(sdk, "Object", "obj-a", "Acme Owner", "objectKind",
+                    "organization", ts="2026-01-01")
+        _create_raw(sdk, "Object", "obj-b", "Acme Owner", "objectKind",
+                    "organization", ts="2026-01-02")
+        row = next(r for r in sdk.list_dedup_candidates(candidate_type="entity")
+                   if r["candidate_id"] == "obj-b")
+        assert row["existing_id"] == "obj-a", row
+        sdk.approve_merge("obj-b", action="merge")
+        g = sdk._get_proj().g
+        assert resolve_fold_name(g, "Object", "Acme Owner") == "obj-a", (
+            "the fold resolver still counts the merged-away carrier")
+        assert resolve_fold_name(g, "Object", "Acme Owner", mention=True) == "obj-a", (
+            "a mention of a merged name must fold onto the survivor too")
 
     def test_a_merge_does_not_rewrite_the_candidate_s_caller_key(self, sdk_factory):
         """P2: the survivor's `canonical_name` was fill-only; the candidate's was not.

@@ -23831,15 +23831,27 @@ class TortoiseSDK:
           no edge is moved.** Returns ``{candidate_id, action, candidate_type:
           'entity', survived_id, aliases, method, similarity}``.
         * ``reject`` → ``dedup_reviewed='reject'``, ``reviewed=true``,
-          ``DedupeRejected``; nothing is written onto the survivor.
+          ``DedupeRejected``; nothing is written onto the survivor. The verdict
+          is SET-VALUED: every survivor this candidate was rejected against is
+          kept in ``dedup_rejected_targets`` (the scalar ``dedup_target_id`` is
+          the legacy single-verdict fallback), so rejecting a second pair does
+          not un-suppress the first. Returns the ``target_id`` it decided
+          against.
 
         ⛔ The pair is RECOMPUTED (the queue is a read surface and stores no
         pair), so a merge applies to the resolver's *current* best unambiguous
         match. Two equally-good survivors REFUSE — a merge never picks one for
         the reviewer (route-then-refuse, #3590 R8).
 
-        Idempotent per branch: a repeat of the SAME action on the same candidate
-        returns ``already_reviewed`` without a second event.
+        Idempotency is PER PAIR, not per candidate: a repeat returns
+        ``already_reviewed`` without a second event when the pair it would
+        decide is one already answered (or when no pair remains). ⚠️ When the
+        candidate still has ANOTHER reviewable survivor, a repeat of ``reject``
+        is a NEW decision against that next pair — by design, since ``reject``
+        means "this candidate is not a duplicate of the pair I am shown" — so a
+        caller retrying a timed-out reject can consume the next queued pair.
+        The result names the pair it decided (``target_id``) so the record is
+        never ambiguous about what was answered.
         """
         if action not in ("merge", "reject"):
             raise ValueError(f"action must be 'merge' or 'reject', got {action!r}")
@@ -24037,7 +24049,7 @@ class TortoiseSDK:
                                **write)
             return {"candidate_id": candidate_id, "action": "reject",
                     "candidate_type": "entity", "wired": False,
-                    "deferred_to_promotion": False, "target_id": None}
+                    "deferred_to_promotion": False, "target_id": target_id}
         # ⛔ A MERGE never takes the lenient path: it needs the survivor the queue
         # showed, so `EntityScanUnavailable` (a truncated window) propagates and
         # the caller is told to re-list, rather than folding into a guessed node.

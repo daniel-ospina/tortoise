@@ -636,7 +636,16 @@ def resolve_fold_name(g, label: str, name: str, *,
     ``test_the_event_api_door_is_the_recorded_producer_that_loses_its_mentions``
     pins the door-level loss.
     """
-    holders = live_name_holder_ids(g, label, name)
+    # ⛔ #12047 review F2 (round 8): this THIRD by-name resolver must collapse
+    # too. It read the raw holders only, so a merge of a VARIANT spelling left
+    # the retired carrier as this name's sole id-carrying holder and the fold
+    # resolved the name onto the node the system says is no longer the entity;
+    # for the exact-twin case it saw TWO holders and took the NON-EXEMPT
+    # `ambiguous-entity-name` shape, which fails `rebuild_all` — i.e. the queue's
+    # own repair made the journal un-rebuildable. One collapse, applied on every
+    # resolver, is the rule the round-7 commit states.
+    holders = _collapse_resolved_holders(
+        g, label, live_name_holder_ids(g, label, name))
     ids = [str(h) for h in holders if h]
     if len(holders) == 1 and ids:
         return ids[0]
@@ -1009,20 +1018,21 @@ def resolve_entity_id(g, label: str, value: str | None, *,
             return _require_unique_id(g, label, id_hits[0],
                                       addressing=addressing)
         return id_hits[0]
-    by_name = live_name_holder_ids(g, label, value,
-                                  case_insensitive=case_insensitive_name,
-                                  name_props=name_props)
-    if len(by_name) > 1:
-        # ⛔ A MERGED-AWAY carrier is not an independent holder (#12047 review
-        # F2). `apply_entity_merge` is non-destructive, so a merged pair keeps
-        # BOTH nodes matching the raw name; counting rows here made a name the
-        # merge had just unified answer `AmbiguousEntityName` on every by-name
-        # read — including `resolve_role_holder`, the `roleHolder` verb this PR
-        # adds, and the exact-duplicate case the queue marks `auto_mergeable`.
-        # That is the same "the verb that REPAIRS a name is the verb that
-        # POISONS it" defect round-4 finding 1 fixed on the CREATE path; the
-        # two paths now share ONE collapse so they cannot disagree again.
-        by_name = _collapse_resolved_holders(g, label, by_name)
+    # ⛔ A MERGED-AWAY carrier is not an independent holder (#12047 review F2,
+    # COMPLETED in round 8): the collapse must run UNCONDITIONALLY. Gating it on
+    # `len(by_name) > 1` fixed only the EXACT-TWIN merge — where both nodes keep
+    # the same raw name, so the read returns two rows. For a VARIANT-spelling
+    # merge (the fuzzy band, i.e. most of the queue) the retired carrier is the
+    # only row matching its own raw name: `len == 1`, the gate never fired, and
+    # this returned the CARRIER while `resolve_or_mint` hopped to the survivor —
+    # so a write that resolves by name (an approval's approver, a `roleHolder`)
+    # landed on the retired node and the survivor never saw it. A single holder
+    # collapses to its own survivor, so the ambiguity refusal is unchanged.
+    by_name = _collapse_resolved_holders(
+        g, label,
+        live_name_holder_ids(g, label, value,
+                             case_insensitive=case_insensitive_name,
+                             name_props=name_props))
     if len(by_name) > 1:
         # ⛔ `record_misses=False` suppresses the RECORD, never the refusal: an
         # ambiguous lookup is a real answer, and returning None would let a
