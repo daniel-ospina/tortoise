@@ -89,7 +89,11 @@ PUBLISH_TRANSITION = WEBSITE / "apps" / "blog-admin" / "src" / "lib" / "publish-
 POSTS_LIST = WEBSITE / "apps" / "blog-admin" / "src" / "pages" / "PostsList.tsx"
 POST_EDITOR = WEBSITE / "apps" / "blog-admin" / "src" / "pages" / "PostEditor.tsx"
 
-SITE = "https://tortoise.premiselabs.co"
+# The blog's canonical origin (#11765: flipped from the product host, which is now a
+# permanent 301 — epic #11762). The handler derives the URL and `keyLocation` from
+# `SITE_URL` in `website/functions/blog/_lib.ts`, so this is the one place the origin
+# appears here and every assertion below derives from it.
+SITE = "https://premiselabs.co"
 
 _DRIVER = """
 const handler = await import(process.argv[2]);

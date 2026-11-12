@@ -4,7 +4,8 @@ Covers the epic's high-level E2E scenarios that are verifiable against a
 deployed surface:
 
   E2E-1  /blog + /blog/<slug> server-rendered (200, content present, SEO head)
-  E2E-7  host isolation — premiselabs.co /blog* → 301 tortoise host;
+  E2E-7  host isolation — the blog is served on its CANONICAL origin
+         (premiselabs.co) and the product host 301s /blog* to it in one hop;
          /blogpost /blog-extra NOT redirected
   E2E-11 /blog/feed.xml + /blog/sitemap.xml valid XML (published-only)
   E2E-12 /admin/* → 302 /auth?next=<path> (no session; no content leaked;
@@ -78,7 +79,23 @@ TORTISE = os.environ.get("TORTISE_HOST", "http://127.0.0.1:8788").rstrip("/")
 # server (APP_HOST=http://127.0.0.1:8788), in which case the host split does not
 # exist and the cross-host leg is skipped (see `_SEPARATE_HOSTS`).
 APP = os.environ.get("APP_HOST", "https://app.premiselabs.co").rstrip("/")
-_SEPARATE_HOSTS = APP != TORTISE
+
+# ⛔ RE-DERIVED EXPLICITLY (#11765). This used to read `APP != TORTISE`, which was
+# a trap: TORTISE is being retired as the blog's origin, so any lane that repointed
+# it (or that pointed BASE_URL at it) would silently change whether the three
+# ADMIN-GATE probes below run or skip — a gate changing its own population without
+# anyone touching it. The property those probes actually need is "APP is a DIFFERENT
+# server from the ones this suite drives", because a local run points every host at
+# one wrangler server, whose `/admin` branch redirects to the hardcoded APP_ORIGIN
+# and therefore does NOT serve the gate. Expressed against BOTH other origins, that
+# stays true no matter which host this epic decides to serve the blog from.
+_SEPARATE_HOSTS = APP not in (COMPANY, TORTISE)
+
+# The blog's own cross-host property, kept separate on purpose: it asks whether the
+# CANONICAL origin and the retired one are different servers, which is what makes the
+# 301 leg assertable at all. A local run points both at 127.0.0.1:8788, where the same
+# URL cannot be both 200 and a 301, so that leg self-skips.
+_BLOG_HOSTS_DIFFER = COMPANY != TORTISE
 if os.environ.get("ALLOW_PROD") != "1" and any(
     h.startswith("https://") for h in (COMPANY, TORTISE, APP)
 ):
@@ -136,45 +153,95 @@ def test_blog_article_ssr() -> None:
 
 
 def test_host_isolation_blog() -> None:
-    """E2E-7: company host 301s /blog* to the tortoise host; prefix
-    false-positives NOT redirected."""
+    """E2E-7: /blog is served on its CANONICAL origin (the company host) and the
+    retired product host 301s to it — prefix false-positives NOT redirected.
+
+    ⛔ THE DIRECTION IS THE EPIC'S DECISION, NOT A MEASUREMENT (#11762, owner
+    2026-11-10): the blog is content marketing, so it lives at
+    ``premiselabs.co/blog`` and ``tortoise.premiselabs.co`` is a PERMANENT 301 to
+    it. This asserts the DESTINATION state rather than accepting whichever way the
+    redirect currently points — a test that accepts either direction cannot fail
+    when the move is undone, which is the fail-open shape the epic's own review
+    flagged in a legacy-URL probe. The consequence, stated so the red is never a
+    mystery: while the redirect INVERSION (#11763) is unmerged, or if this lands
+    before it, this test reds — and that red is TRUE, because a canonical naming a
+    URL that 301s back to the page is a loop, not a move.
+    """
+
+    def _expect_one_hop(src: str, path: str, target_suffix: str) -> None:
+        r = SESSION.get(f"{src}{path}", timeout=20, allow_redirects=False)
+        assert r.status_code == 301, f"{src}{path} → {r.status_code} (expected 301)"
+        location = r.headers.get("location", "")
+        assert location == f"{COMPANY}{target_suffix}", (
+            f"{src}{path} must 301 to {COMPANY}{target_suffix} in ONE hop — got {location!r}"
+        )
+
+    # The canonical origin SERVES the path. A 301 here would mean the move has not
+    # happened; a 404 would mean it was pointed at a target that does not exist (the
+    # 301→404 failure #11762 records).
     for path in ("/blog", "/blog/", "/blog/any-slug"):
         r = SESSION.get(f"{COMPANY}{path}", timeout=20, allow_redirects=False)
-        assert r.status_code == 301, f"{path} → {r.status_code}"
-        assert r.headers.get("location", "").startswith(f"{TORTISE}/blog"), (
-            f"{path} location: {r.headers.get('location')}"
+        assert r.status_code == 200, (
+            f"{COMPANY}{path} → {r.status_code}; the blog's canonical origin serves it "
+            "(#11762 decision), so this is not a redirect source"
         )
-    for path in ("/blogpost", "/blog-extra", "/blogpost/x"):
-        r = SESSION.get(f"{COMPANY}{path}", timeout=20, allow_redirects=False)
-        assert not r.is_redirect and "location" not in r.headers, (
-            f"{path} should NOT redirect (got {r.status_code})"
-        )
+
+    # The retired host sends every /blog path to the canonical one. Trailing slashes
+    # are normalised by the middleware (`/blog/` → `/blog`), which is why the expected
+    # target is spelled per path rather than concatenated.
+    if _BLOG_HOSTS_DIFFER:
+        for path, suffix in (("/blog", "/blog"), ("/blog/", "/blog"), ("/blog/any-slug", "/blog/any-slug")):
+            _expect_one_hop(TORTISE, path, suffix)
+
+    # Direction-independent, and asserted on EVERY origin: the prefix rule is exact,
+    # so these must never be redirected. This is the half that protects unrelated
+    # pages from the /blog rule, and it is the half a sloppy inversion breaks.
+    for origin in {COMPANY, TORTISE}:
+        for path in ("/blogpost", "/blog-extra", "/blogpost/x"):
+            r = SESSION.get(f"{origin}{path}", timeout=20, allow_redirects=False)
+            assert not r.is_redirect and "location" not in r.headers, (
+                f"{origin}{path} should NOT redirect (got {r.status_code})"
+            )
 
 
 def test_blog_feed_and_sitemap() -> None:
-    """E2E-11: feed + sitemap are valid XML (published-only URLs)."""
-    feed = SESSION.get(f"{TORTISE}/blog/feed.xml", timeout=20)
+    """E2E-11: feed + sitemap are valid XML (published-only URLs).
+
+    Fetched on the CANONICAL origin (#11765) — the retired host only 301s now, so
+    asserting there would grade the redirect, not the document.
+    """
+    feed = SESSION.get(f"{COMPANY}/blog/feed.xml", timeout=20)
     assert feed.status_code == 200
     assert "application/rss+xml" in feed.headers.get("content-type", "")
     root = ET.fromstring(feed.text)  # raises on malformed XML
     items = root.findall(".//item")
     for item in items:
         link = item.findtext("link") or ""
-        assert link.startswith(f"{TORTISE}/blog/"), f"feed link not absolute: {link}"
+        assert link.startswith(f"{COMPANY}/blog/"), f"feed link not absolute on the canonical host: {link}"
+        guid = item.findtext("guid") or ""
+        # A guid on the RETIRED host is a new item to every reader that re-subscribes.
+        assert guid.startswith(f"{COMPANY}/blog/"), f"feed guid not on the canonical host: {guid}"
 
-    sitemap = SESSION.get(f"{TORTISE}/blog/sitemap.xml", timeout=20)
+    sitemap = SESSION.get(f"{COMPANY}/blog/sitemap.xml", timeout=20)
     assert sitemap.status_code == 200
     sm = ET.fromstring(sitemap.text)
     ns = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
     urls = [u.findtext(f"{ns}loc") or "" for u in sm.findall(f"{ns}url")]
-    assert any(u.startswith(f"{TORTISE}/blog") for u in urls), "sitemap has no blog URLs"
+    assert urls, "the blog sitemap lists at least one URL"
+    assert all(u.startswith(f"{COMPANY}/blog") for u in urls), (
+        f"every sitemap loc is on the canonical host — got {urls}"
+    )
 
 
 def test_robots_txt_lists_blog_sitemap() -> None:
     """robots.txt cross-submission includes the blog sitemap."""
-    r = SESSION.get(f"{TORTISE}/robots.txt", timeout=20)
+    r = SESSION.get(f"{COMPANY}/robots.txt", timeout=20)
     assert r.status_code == 200
-    assert f"{TORTISE}/blog/sitemap.xml" in r.text
+    # The HOST of the named sitemap is #11766's to change; this asserts the path is
+    # cross-submitted at all, and is deliberately host-agnostic because a robots.txt
+    # that names the sitemap on either origin still points at a document that
+    # resolves (the retired host 301s to the canonical one).
+    assert "/blog/sitemap.xml" in r.text
 
 
 @pytest.mark.skipif(
