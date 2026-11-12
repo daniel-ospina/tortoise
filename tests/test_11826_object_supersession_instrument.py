@@ -1395,6 +1395,11 @@ def test_a_shaped_endpoint_with_no_successor_gets_no_edge_rewrite(sdk):
         "the detail says no factor exists in either arm, so an edge rewrite cannot "
         "help: " + fix)
     assert "no edge rewrite ALONE repairs this" in fix, fix
+    # ⛔ …and the LEADING instruction must carry the shape step, or it orders the
+    # re-point this clause denies: measured — follow the bare re-point and the row goes
+    # QUIET over ``confidences {}``; adding the shape call restores it
+    # (``effective_n 2.5255``) (#12210 review, P2).
+    assert "AND re-point the edge onto it" in fix, fix
     # ⛔ The shape belongs to the ACTIVE endpoint, never to the superseded anchor: a
     # call on the anchor sets the flag on a node that never carried it, so APPLY the
     # emitted call and re-measure rather than string-matching it (#12111 review).
@@ -3569,3 +3574,62 @@ def test_one_row_quotes_one_measurement_for_one_operation(sdk):
     assert len(figures) <= 1, (
         "one operation, one measured figure — got " + repr(figures) + " in: "
         + issue.detail + " / " + issue.fix)
+
+
+def test_a_neither_arm_draft_fix_does_not_claim_the_edge_write_alone_repairs(sdk):
+    """On a neither-arm row the promotion is a PRECONDITION; the edge write alone builds nothing.
+
+    Measured: promote the draft and move the edge with the endpoint still shaped →
+    `iterations 0`, `confidences {}`; adding `is_operator=false, op_type=None` →
+    `effective_n 2.5255` on both endpoints (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="draft")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "PRECONDITION" in fix, fix
+    assert "builds the factor after the promotion" not in fix, (
+        "the edge write alone builds nothing while the endpoint is shaped: " + fix)
+
+
+def test_a_neither_arm_successorless_repair_restores_the_belief(sdk):
+    """Perform the emitted instruction end to end; the belief must come back.
+
+    Measured on `shaped Subject → IMPL → V1` with no `supersededBy`: naming a live
+    successor and moving the edge WITHOUT clearing the shape leaves `confidences {}`
+    and the row QUIET; the same plus the shape call restores `effective_n 2.5255`
+    (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2-successor")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded'", {"i": v1["id"]})
+    assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.supersededBy",
+              {"i": v1["id"]}) == [[None]]
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "AND re-point the edge onto it" in fix, fix
+    assert f"tortoise_update_entity('{actor['id']}', " in fix, fix
+
+    # Perform exactly what the string orders.
+    sdk.update_entity(v1["id"], supersededBy="PolicyV2-successor")
+    sdk.update_entity(actor["id"], is_operator=False, op_type=None)
+    sdk.create_direct_edge("IMPL", actor["id"], v2["id"])
+    _q(sdk, "MATCH (a {id:$a})-[r:IMPL]->(o:Object {id:$v}) DELETE r",
+       {"a": actor["id"], "v": v1["id"]})
+
+    run = sdk.compute_confidence(anchors=[actor["id"]], require_calibration=False)
+    assert run["confidences"], (
+        "the emitted repair must restore the belief: " + fix + " → " + repr(run))
+    assert _issues(sdk, "superseded_object_active_edges") == []
