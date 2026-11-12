@@ -721,7 +721,11 @@ def resolve_fold_name(g, label: str, name: str, *,
     #
     # The RAW arm stays FIRST so nothing that resolves today changes; the
     # writer's union is the fallback when it returns nothing (the
-    # speculative-probe-then-retry shape `resolve_role_holder` already uses).
+    # raw-arm-then-union-fallback shape; `resolve_role_holder` used a
+    # speculative-probe-then-RETRY here until #12047 round 4 replaced it with one
+    # call over the writer's union — a retry over `name`/`canonical_name` cannot
+    # see the variant spelling a merge records in `aliases`, so it is NOT the
+    # shape to copy).
     holders = _collapse_resolved_holders(
         g, label, live_name_holder_ids(g, label, name))
     if not holders:
