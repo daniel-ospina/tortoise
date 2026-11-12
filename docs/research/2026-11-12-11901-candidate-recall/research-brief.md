@@ -229,8 +229,12 @@ phase 1 only.** Production also runs the phase-2 LLM over these same candidates 
 **not measured here** and §7 names it as the next work.
 
 **Variant rules (declared, in `variants()`):** one pair per name per applicable rule — article-drop for every
-`the …` name, **both** separator directions for every name carrying a separator, basename-only for every path,
-`#`-drop for every `#n`. ⛔ **The class mix is the harness's, not an observed incidence.** The transformations are
+`the …` name, **hyphen→space for every name carrying a hyphen**, **space→hyphen only for a `definite` name** (the
+class gated at `variants()`), basename-only for every path,
+`#`-drop for every `#n`. ⚠️ That gate is inert on today's population — the harvest regexes for the `ident` and
+`path` classes admit no spaces — so the 193 separator pairs are unchanged; it is stated because a reader
+deriving the rules from this sentence must not implement a rule set the harness does not run. ⛔ **The class mix is
+the harness's, not an observed incidence.** The transformations are
 ones `_norm` provably does not fold, but nothing here measures how often a capture actually emits each shape — so a
 share of the 419 pairs (e.g. *"27.2 % of all variants"*) is a share of **these rules' output**, never of duplicate
 captures in production traffic. The 193 separator pairs illustrate it exactly: they are the rule firing on every
@@ -399,11 +403,14 @@ TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_candidate_recall_11901.py -q
 §3, §3.1, §4 (both the arm table and the decomposition) and §5 (§5's first row is the DEFINITIONAL baseline — no
 harness has a prior-off arm — and is pinned as text); §3's prose derivatives (past-this-k, absent-at-15, the
 identifier share, the crowding mean and median); §6's and §7's restatements (the recall pair, the pooled mean, the
-fold's two denominators, the width residual, the class deltas, the wall clock); and §8's `rows_zero` claim. Each
+fold's two denominators, the width residual, the class deltas, the wall clock); §2's between-run drift (the
+`corpus.harvested_distinct` pair and the percentage between them); §3's keyword-only miss split and k=5 mean rank;
+and §8's `rows_zero` claim. Each
 §3 row is anchored to **its own** section — a swap of the two tables' bodies reds, which it did not before review
 round 8. **Not
 pinned:** §2's corpus census (file count, record count, characters — the artifact carries only the first, and the
-corpus is live), and §2.2's graph/digest, which the committed artifacts predate. Two unpinned sentences are the
+corpus is live), §2.2's graph/digest, and `retrieval.window_modes` / `retrieval.uniform_windows`, which the committed
+artifacts predate. Three unpinned sentences are the
 honest state; an unpinned TABLE is not.
 
 ## 10. Write-back

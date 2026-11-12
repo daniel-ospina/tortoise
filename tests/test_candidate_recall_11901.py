@@ -72,8 +72,20 @@ def test_both_artifacts_declare_which_retrieval_mode_ran(report, control, tool_m
     assert report["retrieval"]["legs_seen"].get("vector") is True
     assert control["retrieval"]["has_embedder"] is False
     mod = tool_mod
+
+    # ⛔ `--allow-mixed-modes` is a DOCUMENTED escape hatch that records a mixture
+    # AS a mixture (the note then reads "MIXED: see window_modes"). The expected
+    # note therefore has two arms: an artifact written through the hatch is not
+    # "a note that contradicts its legs", and pinning only `_mode_note` here
+    # reported a FALSE diagnosis of the hatch (review round 9, P2).
+    def _expected_note(art: dict) -> str:
+        r = art["retrieval"]
+        if r.get("uniform_windows") is False:
+            return "MIXED: see window_modes"
+        return mod._mode_note(r["has_embedder"], r["legs_seen"])
+
     assert (control["retrieval"]["note"]
-            == mod._mode_note(False, control["retrieval"]["legs_seen"])), (
+            == _expected_note(control)), (
         "the control's note is not the one its own legs imply")
     # ⛔ The hybrid artifact's note must be the one its OWN legs imply: a note
     # that contradicts `has_embedder`/`legs_seen` is the false label
@@ -84,9 +96,9 @@ def test_both_artifacts_declare_which_retrieval_mode_ran(report, control, tool_m
     # first version pinned the literal "hybrid", which made a correct two-line
     # change fail with a FALSE diagnosis — review round 6, F3).
     note = report["retrieval"]
-    assert note["note"] == mod._mode_note(note["has_embedder"], note["legs_seen"]), (
+    assert note["note"] == _expected_note(report), (
         f"the hybrid artifact's note contradicts the legs it declares: "
-        f"{note['note']!r} vs {mod._mode_note(note['has_embedder'], note['legs_seen'])!r}")
+        f"{note['note']!r} vs {_expected_note(report)!r}")
     for name, art in (("hybrid", report), ("control", control)):
         vector = bool(art["retrieval"]["legs_seen"].get("vector"))
         if art["retrieval"]["has_embedder"] and vector:
@@ -220,10 +232,24 @@ def test_the_sample_allocation_sums_to_the_requested_size_and_starves_no_class()
     spec.loader.exec_module(mod)
     pop = ([{"cls": "definite"}] * 600 + [{"cls": "ident"}] * 300
            + [{"cls": "path"}] * 100)
-    for sample in (270, 300, 450):
+    # ⛔ The sizes below are NOT all multiples of the 600/300/100 mix. 270/300/450
+    # divide exactly (162/81/27, 180/90/30, 270/135/45), so independent rounding
+    # already sums correctly and the largest-remainder pass is never reached — a
+    # review round DELETED that pass and this test stayed green (22 passed) while
+    # `--sample 6` came out {definite: 3, ident: 1, path: 0}: sum 4, not 6. The
+    # SUM is what the remainder pass guarantees, so the non-multiples discriminate.
+    #
+    # Non-starvation is a SEPARATE promise and it only binds once a class can have
+    # a member at all: at `--sample 6` the proportional shares are 3.6 / 1.8 / 0.6
+    # and an honest allocation gives `path: 0` (sum still 6) — `run()` REFUSES that
+    # sample instead of sampling it (the "starves a class" guard, exit 2). So the
+    # `>= 10` bound is where `path`'s 10 % share is worth a whole member, not a
+    # weakened assertion.
+    for sample in (6, 7, 19, 299, 270, 300, 450):
         shares = mod._allocate_shares(sample, pop)
         assert sum(shares.values()) == sample, (sample, shares)
-        assert all(v > 0 for v in shares.values()), (sample, shares)
+        if sample >= 10:
+            assert all(v > 0 for v in shares.values()), (sample, shares)
     # …and the interleave keeps every class in every full group of 15, which is
     # what makes the pooled arm a capture-shaped set rather than a class slice.
     shares = mod._allocate_shares(300, pop)
@@ -644,6 +670,33 @@ def test_the_briefs_restatements_all_recompute(report, control):
     assert f"(median {median:g})" in text, (
         f"§3 does not state the recomputed crowding median ({median:g})")
 
+    # ── §3: the keyword-only miss split and the k=5 mean rank. Both DERIVED
+    # (28 + 106 = 134; rank_sum / in_window), and both were unpinned until a
+    # review round mutated them with a green suite — the "derived figure, not the
+    # stored one" class the k=3 mean-rank guard above already closed for ONE of
+    # the two ranks.
+    ck3 = control["arms"]["exact"]["3"]
+    kw_past, kw_absent = ck3["miss_past_k"], ck3["miss_absent_at_max_k"]
+    assert (f"Keyword-only: {kw_past} of {kw_past + kw_absent}, "
+            f"with {kw_absent} absent at 15") in text, (
+        "§3 does not state the recomputed keyword-only miss split "
+        f"({kw_past} + {kw_absent})")
+    h5 = report["arms"]["exact"]["5"]
+    mean_rank5 = h5["rank_sum"] / h5["in_window"]
+    assert f"{mean_rank5:.1f} at k=5" in text, (
+        f"§3 does not state the k=5 mean rank ({mean_rank5:.1f})")
+
+    # ── §2: the between-run drift. `corpus.harvested_distinct` IS in the
+    # artifact, so this pair and the percentage derived from it are pinnable —
+    # they were simply never pinned.
+    d_hyb = report["corpus"]["harvested_distinct"]["definite"]
+    d_ctl = control["corpus"]["harvested_distinct"]["definite"]
+    drift = 100 * (d_ctl - d_hyb) / d_hyb
+    assert f"{d_hyb:,} (hybrid) and {d_ctl:,} (control)" in text, (
+        f"§2 does not state the harvested_distinct pair ({d_hyb:,} / {d_ctl:,})")
+    assert f"a {drift:.2f} % drift" in text, (
+        f"§2 does not state the recomputed between-run drift ({drift:.2f} %)")
+
     # ── §6: the headline restated in the external-findings section.
     exact = report["arms"]["exact"]
     n = report["corpus"]["sample"]
@@ -728,3 +781,111 @@ def test_the_brief_keeps_its_two_standing_negatives():
     # The KEEP ruling is quoted, never re-opened.
     assert "No pass may remove those embeddings" in text
     assert "reopen" in text
+
+
+# ── the two REFUSALS ─────────────────────────────────────────────────────────
+# Both guards are the deliverable's load-bearing safety property, and a review
+# round proved NEITHER was pinned: deleting the population-match refusal
+# (`stale = []`) and replacing the per-window `require_hybrid_read` verdict with
+# the loose `legs_seen` predicate both left the suite green (22 passed) — i.e. a
+# regression to exactly the #8919 graph-reuse class or the #3005/#2952
+# false-label class would have shipped under a suite that claims to pin them.
+# These two tests drive `main()` so they fail if the refusal, the exit code, or
+# the no-artifact-on-refusal property is removed.
+
+
+class _FakeQuery:
+    def __init__(self, rows):
+        self.result_set = rows
+
+
+class _FakeProj:
+    """The projection surface `run()` uses: `_upsert_object` and `g.query`."""
+
+    def __init__(self, stored_names):
+        self._stored = stored_names
+        self.g = self
+
+    def query(self, *_a, **_k):
+        return _FakeQuery([(f"obj-11901{i:06d}", n)
+                           for i, n in enumerate(self._stored)])
+
+    def _upsert_object(self, _row):
+        return None
+
+
+def _drive(tool_mod, monkeypatch, tmp_path, *, stored_names, trace_maker, argv=None):
+    """Run `main()` against a fake SDK; return (exit code, out path)."""
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "docker://:falkordb@localhost:6379/recall_unit")
+    pop = [{"cls": "definite", "name": "the alpha"},
+           {"cls": "ident", "name": "AB-12"},
+           {"cls": "path", "name": "src/beta.py"}]
+    monkeypatch.setattr(tool_mod, "harvest",
+                        lambda _d: {"definite": {"the alpha": 1},
+                                    "ident": {"AB-12": 1},
+                                    "path": {"src/beta.py": 1}})
+    monkeypatch.setattr(tool_mod, "build_population", lambda _h, _n: pop)
+
+    class _FakeSDK:
+        def __init__(self, **_kw):
+            self._proj = _FakeProj(stored_names)
+
+        def _get_proj(self):
+            return self._proj
+
+        def tortoise_fts_query(self, _q, **kw):
+            trace = kw.get("leg_trace")
+            if trace is not None:
+                trace.append(trace_maker())
+            return []
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("tortoise.sdk.TortoiseSDK", _FakeSDK)
+    out = tmp_path / "artifact.json"
+    rc = tool_mod.main(argv or ["--population", "3", "--sample", "3",
+                                "--captures", "2", "--out", str(out)])
+    return rc, out
+
+
+def test_a_reused_graph_is_refused_and_no_artifact_is_written(tool_mod, monkeypatch,
+                                                             tmp_path):
+    """`o.name` is an ON CREATE write (#8919): a stale name UNDERSTATES recall.
+
+    The graph is not re-provable after the fact, so the run must refuse rather
+    than measure a population that did not land. Mutation that must red this:
+    `stale = []` in `run()`.
+    """
+    rc, out = _drive(
+        tool_mod, monkeypatch, tmp_path,
+        # the ids are the ones `run()` mints, but the NAMES are a previous run's
+        stored_names=["the BETA", "CD-99", "src/gamma.py"],
+        trace_maker=lambda: {"leg": "vector", "ran": True, "degraded": False})
+    assert rc == 3, f"a population that did not land was not refused (rc={rc})"
+    assert not out.exists(), "an artifact was written from a population that did not land"
+
+
+def test_a_mixed_mode_run_is_refused_and_no_artifact_is_written(tool_mod, monkeypatch,
+                                                               tmp_path):
+    """A mixture published as one mode is the #2952/#3005 false label.
+
+    The trace alternates healthy and breaker-open vector legs, so `legs_seen`
+    (OR-ed over the sweep) says `hybrid` for the whole run while the STRICT
+    per-window verdict is a mixture. Mutation that must red this: replacing
+    `require_hybrid_read(trace)` with the `legs_seen` predicate in `run()`.
+    """
+    state = {"n": 0}
+
+    def _trace():
+        state["n"] += 1
+        if state["n"] % 2:
+            return {"leg": "vector", "ran": True, "degraded": False}
+        return {"leg": "vector", "ran": False, "reason": "breaker_open"}
+
+    rc, out = _drive(tool_mod, monkeypatch, tmp_path,
+                     stored_names=["the alpha", "AB-12", "src/beta.py"],
+                     trace_maker=_trace)
+    assert rc == 3, f"a mixed-mode run was not refused (rc={rc})"
+    assert not out.exists(), "an artifact labelled as one mode was written from a mixture"
