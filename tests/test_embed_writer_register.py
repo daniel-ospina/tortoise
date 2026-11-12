@@ -862,13 +862,22 @@ def test_the_never_run_call_entry_NAMES_every_spelling_it_was_measured_on():
         ("probe blindness note", probe._named_callees.__doc__ or ""),
     ):
         low = raw.lower()
-        for anchor in ("never-run call", "never runs"):
-            assert anchor in low, (
-                f"the {where} no longer carries {anchor!r} — the clause this pin reads has moved or "
-                f"been removed, so the pin would otherwise cover less than it claims; re-anchor it "
-                f"deliberately in the same change")
-        named = low.index("never-run call")
-        start = low.rindex("never runs", 0, named)  # the enumeration's own opening
+        # ⛔ ANCHOR by the ENUMERATION, not by the marker's first hit: `never-run call` now appears
+        # more than once in the register docstring (a summary sentence names it too), and anchoring
+        # on the first occurrence made this pin raise instead of red once that sentence landed.
+        # The clause is the occurrence that has the enumeration's opening ("... never RUNS")
+        # before it.
+        found: list[tuple[int, int]] = []
+        for match in re.finditer("never-run call", low):
+            try:
+                found.append((low.rindex("never runs", 0, match.start()), match.start()))
+            except ValueError:
+                continue
+        assert len(found) == 1, (
+            f"the {where} must carry exactly ONE never-run clause (enumeration + marker); found "
+            f"{len(found)} — re-anchor this pin deliberately rather than letting it cover less "
+            f"than it claims")
+        start, named = found[0]
         stop = raw.find("\n\n", named)
         clause = re.sub(r"\s+", " ", raw[start:stop if stop != -1 else named + 900].lower())
         for fragment in spelling_fragments:
