@@ -2318,8 +2318,10 @@ surfaces:
   # ⚠️ If a PEER PR lands this same repair first, these rows become the duplicate
   # the #11210/#11211/#11222 recurrence is about — `--integrity` reds on
   # `duplicate entry … .surfaces.core[]`. Then DELETE the extra row; do not add
-  # a third.
-  - test_pricing_storage_dimensions.py
+  # a third. ⛔ THAT IS WHAT HAPPENED: #12005, #12023 and a third lane all landed
+  # this row in `core`, so `main` carried it THREE times (`duplicate entry …
+  # .surfaces.core[]`) — the surviving row is the one further up this block,
+  # and the two below were deleted. Keep it at one.
   - test_10000_narrative_record_home.py
   - test_10017_cache_tier.py
   - test_10017_purge_guard.py
@@ -7317,7 +7319,6 @@ surfaces:
   # (the shared `sdk_factory` fixture is URI-aware), so it needs no `carve_out:` row and
   # no `TEST_NO_REDIRECT_STEMS` entry.
   - test_11822_goal_judgement.py
-  - test_pricing_storage_dimensions.py  # #11837: the `core` half of the DUAL-REGISTRATION — `tortoise/pricing.py` matches no SOURCE_PATTERNS row, so its subjects select `core` and the `api` row alone never runs it there (#4495 precedent)
   ep:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #11855: the ranker half of the unreadable-operand pins. `GraphRanker` and
@@ -11173,7 +11174,6 @@ durations:
   test_open_kinds.py: 0.4  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 0.3
   test_postmerge_verdict.py: 0.3  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.4
   test_pricing_tiers.py: 0.2
-  test_pricing_storage_dimensions.py: 2.0  # new in #11758/#11981 — the flat `DEFAULT_FAST_WEIGHT`, exactly like its `test_percent_value_11915.py` sibling and for the same #3419/#2788/#3400/#4348 reason: a file a PR ADDS cannot carry a junit reading yet (the `durations` refresher samples push-to-main runs only), and the weight is a SHARD-LAYOUT input, so no local timing is substituted here. ⚠️ MEASURED LOCALLY as CONTEXT for a human, never as the weight: **31 passed in 5.6 s** whole-file through this worktree's interpreter with `TORTOISE_TEST_CARVE_OUT=1` — hermetic (the pricing artifact, the registry names and the overage arithmetic; no DB, no network, no model call), so this row is a declared CEILING rather than a lower bound and `tools/ci_timing.py --refresh-durations` should replace it with the measured ~0.2 from the first push-to-main sweep. ⛔ The declaration is NOT hand-lowered to the local reading: `tools/ci_selection.py --integrity` is the authority on the denominator either way.
   test_references_edge.py: 0.5  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 0.6
   test_remove_context_migration.py: 0.9  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 0.5
   test_search_engine_nameerror.py: 1.0  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.8
