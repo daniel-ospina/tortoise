@@ -49,6 +49,7 @@ from tortoise.embeddings import (
     stamp_journal_embedding,
 )
 from tortoise.log import EventLog
+from tortoise.percent import PercentValueError
 
 #: The pinned embedder's width (`EMBEDDING_DIM`); the corpus measurement's shape.
 WIDTH = 384
@@ -1338,10 +1339,20 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
     # sibling door raised on the identical payload. Pinned at BOTH doors for
     # the reason the money and kind rows are: the enumeration rots, the pin
     # does not.
-    with pytest.raises(Exception, match="percent|basisPoints|ratio"):
+    with pytest.raises(PercentValueError, match="percent value refused"):
         api.emit_belief("ConfidenceChanged", id="node-1", basisPoints=20000)
-    with pytest.raises(Exception, match="percent|basisPoints|ratio"):
+    with pytest.raises(PercentValueError, match="percent value refused"):
         api.add_object("an object", "skill", id="obj-pct", basisPoints=20000)
+    # …and the two STORAGE-FORM markers a caller can put on the positional
+    # record, which the seam never mints and only READS: `embedding_preserved`
+    # suppresses the model/text-hash attestation, `embedding_verbatim` flips the
+    # replay's storage form. Measured before the guard: the record below landed
+    # with a bogus `embedding_model` beside it, i.e. a forged account of origin.
+    for marker in ("embedding_preserved", "embedding_verbatim"):
+        with pytest.raises(ValueError, match="server-minted storage-form marker"):
+            api._emit("PointAdded", {
+                "id": f"forged-{marker}", "content": "c",
+                "embedding": [0.1], marker: True})
     assert not journal.exists() or not journal.read_text().strip(), (
         "the refusal must not leave a half-record behind")
 

@@ -82,6 +82,31 @@ _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
     "embedding_text_hash",
 })
 
+#: The marker family's two STORAGE-FORM keys — the ones no seam call ever
+#: MINTS, only reads. `stamp_journal_embedding` writes `embedding_width`
+#: (`_stamp_journal_vector_width`) and, on a creating record only, the identity
+#: triple; `is_verbatim`/`embeddings.py:539` READ these two, and a payload can
+#: only acquire them from a caller. A caller-set `embedding_preserved` makes the
+#: seam SKIP the model/text-hash attestation R1 exists to keep, and a
+#: caller-set `embedding_verbatim` flips the replay's storage form — both are
+#: forged journal FACTS with no node to correct them on.
+#:
+#: So they are REFUSED on `_emit`'s POSITIONAL record, while the width is
+#: VERIFIED and the identity triple is left alone (a creating `_point`
+#: legitimately stamps it). `#11948`-review finding at `ceae1cfcf4`: the
+#: comment there said "the marker family is verified", which was true of ONE
+#: key out of six — measured, `_emit("PointAdded", {..., "embedding_preserved":
+#: True, "embedding_model": "not-a-real-model"})` journalled the lie.
+#:
+#: ⛔ NOT refused on the `point=` channel: `sdk.py`'s evidence-fold snapshot
+#: sets `embedding_preserved` there by design (`_emit_event("PointAdded", {...},
+#: point=snapshot)`), so the two channels need different answers — which is why
+#: this is a separate set rather than `_SERVER_MANAGED_EMBEDDING_KEYS`.
+_POSITIONAL_UNMINTED_MARKERS = frozenset({
+    "embedding_verbatim",
+    "embedding_preserved",
+})
+
 #: The envelope's RECORD-SHAPED payload keys — the shape a record door BUILDS
 #: (`add_point` / `add_operator`), which is why a KEY of this name may never
 #: arrive from a caller.
@@ -181,6 +206,34 @@ _ENVELOPE_KEYS_AT_PASSTHROUGH = _ENVELOPE_KEYS | {
     "corrects",
     "actor",
 }
+
+
+def _refuse_unminted_positional_markers(record: dict, type_: str) -> None:
+    """Refuse a STORAGE-FORM marker a caller put on `_emit`'s positional record.
+
+    The width is verified rather than refused (the seam mints it — see
+    `_verify_record_vector_width`); these two it never mints, only reads
+    (`embeddings.is_verbatim`, the `creating` arm of `stamp_journal_embedding`).
+    A value here can therefore only be a caller's, and either one is a forged
+    journal fact: `embedding_verbatim` flips the replay's storage form, and
+    `embedding_preserved` makes the seam SKIP the `embedding_model`/revision/
+    text-hash attestation that R1 exists to keep — so the record would report a
+    vector of unknown origin as attested, and no node exists to correct it on
+    (`_POINT_HANDLED`: these never become properties).
+
+    Deliberately silent on the identity triple (`embedding_model`,
+    `embedding_revision`, `embedding_text_hash`): a creating `_point` stamps
+    those, so this channel cannot distinguish the seam's value from a caller's.
+    That residual is `add_point`'s to refuse (its `_forged_keys` already does),
+    and it is stated here rather than hidden behind a blanket claim.
+    """
+    forged = sorted(k for k in record if k in _POSITIONAL_UNMINTED_MARKERS)
+    if forged:
+        raise ValueError(
+            f"the `{type_}` record door does not take "
+            f"{' or '.join(f'`{k}`' for k in forged)} from a caller: it is a "
+            "server-minted storage-form marker (a caller-set one would forge "
+            "the record's own account of where its vector came from)")
 
 
 def _verify_record_vector_width(record: dict, type_: str) -> None:
@@ -521,16 +574,25 @@ class EventAPI:
         # nothing to replay: `point` and the envelope names are REFUSED, and a
         # declared vector width is VERIFIED.
         #
-        # ⛔ THE MARKER FAMILY IS VERIFIED, NOT REFUSED, and that distinction is
-        # measured: `_point`'s own `stamp_journal_embedding` writes
-        # `embedding_width` into this very record, so refusing
-        # `_SERVER_MANAGED_EMBEDDING_KEYS` here would red every vector-bearing
-        # `PointAdded`/`OperatorAdded`. The harm the marker rule exists to
-        # prevent is a marker that LIES — a declared `f32` over values it does
-        # not describe — and `_verify_record_vector_width` asks the seam's own
-        # question instead: a truthful declaration lands, a lie is refused, and
-        # undecidable input keeps the pre-guard posture (a WRITE never fails on
-        # an import).
+        # ⛔ THE MARKER FAMILY IS THREE GROUPS ON THIS CHANNEL, NOT ONE, and the
+        # comment that said "verified, not refused" described ONE key out of six
+        # (the review finding at `ceae1cfcf4`, measured). Precisely:
+        #   • the WIDTH is VERIFIED — `_point`'s own `stamp_journal_embedding`
+        #     writes it into this very record, so refusing it would red every
+        #     vector-bearing `PointAdded`/`OperatorAdded`; the harm is a marker
+        #     that LIES (a declared `f32` over values it does not describe), and
+        #     `_verify_record_vector_width` asks the seam's own question: a
+        #     truthful declaration lands, a lie is refused, undecidable input
+        #     keeps the pre-guard posture (a WRITE never fails on an import);
+        #   • the two STORAGE-FORM keys are REFUSED —
+        #     `_POSITIONAL_UNMINTED_MARKERS`, because no seam call mints them, so
+        #     a value there can only be a caller's (and `embedding_preserved`
+        #     silently suppresses the R1 attestation);
+        #   • the IDENTITY triple is NEITHER — a creating `_point` legitimately
+        #     stamps it, so this channel cannot tell the seam's value from a
+        #     caller's. Stated as the residual it is rather than folded into a
+        #     blanket claim: on this channel an identity is undecidable, and the
+        #     door that refuses a caller's version of it is `add_point`.
         _refuse_caller_named_record_keys(payload, f"the `{type_}` envelope")
         if record:
             if len(record) > 1:
@@ -544,10 +606,11 @@ class EventAPI:
             # `event_id=` here re-types or re-attributes the replayed record.
             _refuse_caller_named_envelope_keys(
                 record[0], f"the `{type_}` record door")
-            # ⛔ And the MARKER family is VERIFIED here rather than refused —
-            # see `_verify_record_vector_width` for why a refusal is the wrong
-            # shape on this channel (the record doors legitimately carry the
-            # markers; each stamps its own payload through the seam).
+            # ⛔ The storage-form half of the marker family is REFUSED (no seam
+            # call mints it), THEN the width is VERIFIED (the seam does mint
+            # that one), and the identity triple is left to the doors that can
+            # judge it — see the three-group note above the commit point.
+            _refuse_unminted_positional_markers(record[0], type_)
             _verify_record_vector_width(record[0], type_)
             payload["point"] = record[0]
         # #7951 — THE JOURNAL ORDERING CONTRACT: **journal first, then
