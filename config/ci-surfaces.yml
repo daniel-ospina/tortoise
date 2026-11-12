@@ -7418,7 +7418,7 @@ surfaces:
   # `live.py`-only diff resolves here through the `tortoise/` fallback; `core` is also
   # selected beside `api` (`api.py` is a `CORE_ALSO` entry) and is superseded by the
   # full matrix on any `sdk.py` diff (`SHARED_MODULES`) — so this single row covers
-  # every diff that can break the guard. (The `#11822` note above says api/sdk
+  # every diff that can break the guard. (The `#11822` note above says `sdk`/`ep`
   # registration is worthless; that holds for `goal_judgement.py`, which matches no
   # row and is not `CORE_ALSO` — do not generalise it to a guard whose call sites
   # live in `api.py`.)
