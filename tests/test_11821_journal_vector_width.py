@@ -1389,9 +1389,14 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
     assert "sourceVersionTransit" not in _UNCALLERABLE_RECORD_KEYS
     assert {"extractedFromAll", "sourceVersion", "sourceVersions"} <= (
         _UNCALLERABLE_RECORD_KEYS)
-    # The fold key is the READER's constant, not a second spelling of it: pin the
-    # identity, so a rename at the consumer cannot leave this guard refusing a
-    # name nobody reads (fail-open drift).
+    # The fold key is the READER's constant, not a second spelling of it.
+    # ⛔ This assert alone does NOT prove it: api.py IMPORTS the symbol, so a
+    # rename at the consumer moves both sides together and the assert stays
+    # green. What actually pins the identity is the loop below, whose literal
+    # "evidence_fold" — the name the projection READS — would red on a consumer
+    # rename. This row is a cheap spelling check; the loop is the pin. (Review
+    # note at #11996: the comment here used to attribute that guarantee to
+    # this line.)
     assert EVIDENCE_FOLD_KEY in _UNCALLERABLE_RECORD_KEYS
     # …and `emit_belief` must RAISE these rather than drop them: its refusal is
     # armed before the best-effort arm, which is the whole point of #11948 F2.
@@ -1627,3 +1632,70 @@ def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
         f"blanket refusal on the positional channel would break the door, got {widths}")
     assert records[1]["point"]["embedding"] == [0.1, 0.2], (
         "the door's vector must reach the journal untouched")
+
+
+def test_a_declared_width_the_seam_never_mints_is_refused_not_ignored(tmp_path):
+    """#11948 F1: `_emit`'s positional record ENUMERATES the declared width.
+
+    The guard used to compare against `f32` and return for everything else, so
+    every OTHER declaration was worse than unverified — it was UNEXAMINED, on
+    the one channel built to be unreachable from any door. Measured at
+    `cb868c43ff` (the head this row was added at), through the private channel:
+
+        _emit("PointAdded", {"id": "p", "content": "c",
+                             "embedding": [0.1], "embedding_width": "f16"})
+          -> journalled with `embedding_width: "f16"`   ← same for "f32 ",
+             "F32", "garbage" and a non-string declaration
+
+    That is not "undecidable input" (which keeps the pre-guard posture): it is a
+    definite claim `stamp_journal_embedding` can never produce — it writes
+    exactly `f32` or `f64` — and it becomes a durable journal FACT that a later
+    width/base64 migration trusts. The seam's mint enumeration is closed, so the
+    declaration is refused; the production widths are untouched.
+
+    Falsifier: restore `if declared is None or declared != _F32: return` and
+    every row below reads `DID NOT RAISE`.
+    """
+    from tortoise.api import EventAPI, provenance
+    from tortoise.log import EventLog
+
+    events = tmp_path / "unenumerated-width"
+    events.mkdir(parents=True)
+    journal = events / "events.jsonl"
+    api = EventAPI(EventLog(journal), initiated_by="extractor", projection=None)
+
+    # 1. Every declaration the seam cannot mint is REFUSED — not journalled.
+    for bogus in ("f16", "f32 ", "F32", "garbage", "", "f64 "):
+        with pytest.raises(ValueError, match="is not a width this seam mints"):
+            api._emit("PointAdded", {"id": f"p-{bogus!r}", "content": "c",
+                                     "embedding": [0.1, 0.2],
+                                     JOURNAL_VECTOR_WIDTH_KEY: bogus})
+
+    # 1b. …and a NON-STRING declaration is refused as the same refusal, not as
+    #     a `TypeError` escaping the membership test.
+    for bogus in (["f32"], {"f32"}, 32, True):
+        with pytest.raises(ValueError, match="is not a width this seam mints"):
+            api._emit("PointAdded", {"id": "p-nonstr", "content": "c",
+                                     "embedding": [0.1, 0.2],
+                                     JOURNAL_VECTOR_WIDTH_KEY: bogus})
+
+    # 2. The refusal precedes the COMMIT POINT: nothing above reached the log.
+    assert not journal.exists() or not journal.read_text().strip(), (
+        "a refused declaration was journalled anyway — the guard must run "
+        "before `self.log.append`, or the claim is already durable")
+
+    # 3. The seam's OWN two widths are still accepted, so the enumeration did
+    #    not become a blanket refusal of the channel.
+    api._emit("PointAdded", {"id": "p-f64", "content": "c",
+                             "embedding": [0.1, 0.2],
+                             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64})
+    api.add_point("a real point", provenance("src:2", [0, 4], "q"),
+                  embedding=[0.1, 0.2])
+    records = [json.loads(ln) for ln in
+               journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    widths = [r["point"].get(JOURNAL_VECTOR_WIDTH_KEY) for r in records]
+    assert widths == ["f64", "f64"], (
+        "a declared `f64` and the door's own stamp must both still land — the "
+        f"enumeration refuses only what the seam cannot mint, got {widths}")
+    assert all(r["point"].get("embedding") == [0.1, 0.2] for r in records), (
+        "the accepted records' vectors must reach the journal untouched")

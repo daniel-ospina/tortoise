@@ -158,8 +158,9 @@ _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
 #: `_SERVER_MANAGED_EMBEDDING_KEYS`, while on the POSITIONAL channel nothing did
 #: — measured at `main` (`31b29c3c`), both were accepted and journalled there,
 #: because that arm runs only the record-keys and envelope guards plus
-#: `_verify_record_vector_width`, which returns unless a declared ``f32``
-#: contradicts the values. So these two entries ADD that half. The other four
+#: `_verify_record_vector_width`, which enumerates the declared width against
+#: the two the seam mints (refusing anything else) before it compares a `f32`
+#: to the values. So these two entries ADD that half. The other four
 #: members of the older set are VERIFIED (`embedding_width`) or deliberately left
 #: to `add_point` (the identity triple), which is why folding the sets together
 #: would assert a treatment those four do not get.
@@ -283,8 +284,11 @@ _ENVELOPE_KEYS_AT_PASSTHROUGH = _ENVELOPE_KEYS | {
 def _refuse_uncallerable_record_keys(fields: dict, type_: str, channel: str) -> None:
     """Refuse the record facts a caller cannot supply to `_emit`, on either channel.
 
-    The width is VERIFIED rather than refused (the seam mints it — see
-    `_verify_record_vector_width`). The keys in `_UNCALLERABLE_RECORD_KEYS` are
+    The width is not refused but ENUMERATED AND VERIFIED (the seam mints it —
+    see `_verify_record_vector_width`): a declaration outside the seam's own two
+    widths (`f32`, `f64`) is refused, a declared `f32` is then checked against
+    the values, and a declared `f64` is always truthful. The keys in
+    `_UNCALLERABLE_RECORD_KEYS` are
     refused on BOTH channels — the positional record AND the keyword payload —
     and each for its OWN reason rather than under one "marker family" banner:
     stating them as one family is what made the previous comment false. See that
@@ -362,17 +366,47 @@ def _verify_record_vector_width(record: dict, type_: str) -> None:
     its shortest-round-trip text (the idempotent case) or ARE on the float32
     grid (the case it would narrow). A declared ``f64`` is always truthful — it
     only forgoes narrowing, which the raw form is entitled to.
+
+    ⛔ AND THE DECLARATION ITSELF IS ENUMERATED, not merely compared to ``f32``.
+    Comparing to ``f32`` alone left every OTHER declaration worse than
+    unverified — it was UNEXAMINED, and on the one channel built to be
+    unreachable from any door that meant a caller could mint a durable journal
+    fact the seam never produces (``f16``, ``"f32 "``, ``"F32"``, ``"garbage"``
+    all landed at #11948's review). That is not "undecidable input": it is a
+    definite claim, and a width/base64 migration trusts it. The seam mints
+    exactly two widths (``stamp_journal_embedding`` writes ``f32`` or ``f64``),
+    so the set is closed: a declaration outside it is refused, and a
+    non-``str`` declaration cannot be one of them either. This is the enumeration
+    the comparables converge on — a declared width is validated against the
+    values the writer can emit, fail-closed on everything else.
     """
     if not isinstance(record, dict):
         return
     try:
         from .embeddings import JOURNAL_VECTOR_WIDTH_F32 as _F32
+        from .embeddings import JOURNAL_VECTOR_WIDTH_F64 as _F64
         from .embeddings import JOURNAL_VECTOR_WIDTH_KEY as _KEY
         from .embeddings import _is_shortest_f32_text, shortest_float32_vector
     except Exception:  # noqa: BLE001, RUF100 — #5148
         return
     declared = record.get(_KEY)
-    if declared is None or declared != _F32:
+    if declared is None:
+        return
+    # ⛔ THE SEAM'S OWN ENUMERATION (#11948 review): a width the seam cannot mint
+    # is not a claim to verify — it is a claim nothing here can produce, so it
+    # is refused rather than carried into the journal. `isinstance` first, so an
+    # unhashable declaration raises the refusal below instead of a `TypeError`
+    # from the membership test.
+    if not isinstance(declared, str) or declared not in (_F32, _F64):
+        raise ValueError(
+            f"{_KEY}={declared!r} is not a width this seam mints: "
+            f"`stamp_journal_embedding` writes only {_F32!r} or {_F64!r}, so a "
+            f"`{type_}` record may not declare {declared!r}. A declared width is "
+            "a server-managed journal field, and a durable claim nothing here "
+            "can produce is trusted by the next width/base64 migration (#5004 "
+            "round-7).")
+    if declared != _F32:
+        # ``f64`` — always truthful: it only forgoes narrowing.
         return
     values = record.get("embedding")
     try:
@@ -667,13 +701,18 @@ class EventAPI:
         # the comment that said "the marker family is verified, not refused"
         # described ONE key out of six (the review finding at `ceae1cfcf4`,
         # measured). Precisely:
-        #   • the WIDTH is VERIFIED — `_point`'s own `stamp_journal_embedding`
-        #     writes it into this very record, so refusing it would red every
-        #     vector-bearing `PointAdded`/`OperatorAdded`; the harm is a marker
-        #     that LIES (a declared `f32` over values it does not describe), and
-        #     `_verify_record_vector_width` asks the seam's own question: a
-        #     truthful declaration lands, a lie is refused, undecidable input
-        #     keeps the pre-guard posture (a WRITE never fails on an import);
+        #   • the WIDTH is ENUMERATED, then VERIFIED — `_point`'s own
+        #     `stamp_journal_embedding` writes it into this very record, so
+        #     refusing the two widths it mints would red every vector-bearing
+        #     `PointAdded`/`OperatorAdded`; the harm is a marker that LIES (a
+        #     declared `f32` over values it does not describe), and
+        #     `_verify_record_vector_width` asks the seam's own questions: a
+        #     declaration outside {`f32`, `f64`} is refused because the seam can
+        #     never have produced it, then a declared `f32` is checked against
+        #     the values (a truthful one lands, a lie is refused) and a declared
+        #     `f64` passes as truthful. Undecidable VALUES keep the pre-guard
+        #     posture (a WRITE never fails on an import); a declaration is never
+        #     undecidable, because the seam's mint enumeration is closed;
         #   • the UNCALLERABLE facts are REFUSED on BOTH channels —
         #     `_UNCALLERABLE_RECORD_KEYS`: no seam call here mints them, so a
         #     value can only be a caller's. They are not one family and each
