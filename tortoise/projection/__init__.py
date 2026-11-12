@@ -19321,6 +19321,25 @@ class FalkorProjection(
                 and (r.tgt_label, r.tgt_key) not in refused)
 
         plan = record_plan(nodes, relations)  # raises BEFORE any wipe
+        # ⛔ `#11747` review, finding 1 — the DROP is REPORTED, never silent.
+        # `node_statement` refuses a vector on a label no query leg serves (it
+        # could never be read), so a rebuild over a record whose rows carry one
+        # DELETES a vector a previous cache held. Read off the PLAN's statements
+        # (`record_plan` is pure, so this is measured before the wipe and costs no
+        # read), and carried out in the returned report beside the write counts —
+        # the same shape `tortoise.hosted_backup.restore_graph` uses for the
+        # identical drop, so an operator cannot mistake this run for a clean one.
+        dropped_vectors = plan.dropped_vectors()
+        dropped_vector_total = sum(dropped_vectors.values())
+        if dropped_vector_total:
+            # Logged as well as returned, exactly as `hosted_backup` does: a caller
+            # that reads only `nodes_written`/`relations_written` would otherwise
+            # lose real vectors with nothing in the log.
+            logger.warning(
+                "rebuild_from_record: dropped %d vector(s) on unserved label(s) "
+                "%s — a vector there has no query path, so the cache must not "
+                "hold one (#11747)",
+                dropped_vector_total, sorted(dropped_vectors))
 
         self._assert_destructive_confirmed(confirm_destructive,
                                           "rebuild_from_record")
@@ -19415,6 +19434,13 @@ class FalkorProjection(
             # restore shortfall" decision — without it an operator comparing
             # `nodes_written` with `nodes_selected` cannot see WHY they differ.
             "refused_keys": sorted(refused),
+            # `#11747`: the vectors this run REFUSED to store, by label. A
+            # rebuilt cache is otherwise indistinguishable from one that lost
+            # nothing — and these vectors have no query path, so a re-run cannot
+            # bring them back either: the record row is the only carrier, and it
+            # is what the drop was applied to.
+            "dropped_vectors": dropped_vector_total,
+            "dropped_vector_labels": sorted(dropped_vectors),
             "statements": statements,
             "record_nodes": len(view.nodes),
             "record_relations": len(view.relations),

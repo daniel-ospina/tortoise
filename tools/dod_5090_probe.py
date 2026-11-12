@@ -2085,14 +2085,40 @@ def cache_projection_store_labels() -> dict:
     the clause by construction: the answer is read off ``stmt.params``, where a
     vector appears only when a store clause was emitted for it.
 
-    ⛔ BOTH DOORS ARE PROBED, and neither is assumed: a vector reaches this
+    ⛔ BOTH RECORD DOORS ARE PROBED, and neither is assumed: a vector reaches this
     writer through the record's ``embedding`` COLUMN (point/event/source/… carry
     one) or through the row's open-set ``props`` TAIL — which is the ONLY door on
     `public.session`, whose `chk_session_props_no_derived` refuses nothing at all
     (`NOT (props ?| ARRAY[]::text[])`). A shape that REFUSES the name is a
-    measurement of that door, not a hole; a label where NEITHER shape could be
+    measurement of that door, not a hole; a label where NO door could be
     built is reported as unmeasured, which holds the row rather than answering
     for it.
+
+    ⛔ THE PLANTED PROPERTY NAME IS DERIVED, never the literal `"embedding"`
+    (`#11747` review, finding 3). Both doors are planted with
+    :func:`tortoise.cache_projection.stored_vector_props` — the seam designed to be
+    widened — so the day a second vector property joins it, this probe plants
+    that one too. A literal here would leave an unserved store of the new
+    property in NO ``stmt.params`` the probe inspects, and row 2 would keep
+    printing `stored-without-a-query-path: none` — the same "second copy of the
+    set" this change removes on the served side.
+
+    ⛔ THE WHOLE PER-LABEL DERIVATION IS INSIDE THE FAIL-CLOSED ENVELOPE
+    (`#11747` review, finding 4). It used to wrap only the imports and the two
+    door-builds, so a label in `cp.NODE_TABLES` that
+    `cp.KEY_PROPERTY` does not know made this function RAISE `KeyError` — taking
+    the whole DoD report down instead of holding row 2 at `PARTIAL`, which is what
+    this function's own contract says an unbuildable shape does. A `KeyError` here
+    is a MEASUREMENT FAILURE, and it is recorded as one.
+
+    ⛔ THREE DOORS, not two (`#11747` review, finding 5). The two RECORD doors
+    above both enter through :func:`~tortoise.cache_projection.node_from_row`, and
+    `record_plan` is public: a caller may hand it a `RecordNode` it built itself,
+    which never passes the row→property map. That path is guarded ONLY by
+    :func:`~tortoise.cache_projection.node_statement`'s own check, so it is
+    probed as its own door — otherwise this row's claim (*"every label a write
+    path embeds is one the query path serves"*) would be measurably narrower than
+    stated, and deleting that one check would leave the row `MET`.
 
     Returns ``{"labels": frozenset[str], "unmeasured": {label: why}, "error": str|None}``
     — ``error`` means the projection could not be imported at all, so nothing
@@ -2101,36 +2127,53 @@ def cache_projection_store_labels() -> dict:
     try:
         from tortoise import cache_projection as cp
         from tortoise import record_projection as rp
-    except Exception as e:  # noqa: BLE001 — an unimportable projection is UNMEASURED
+    except Exception as e:  # an unimportable projection is UNMEASURED
         return {"labels": frozenset(), "unmeasured": {},
                 "error": f"{type(e).__name__}: {e}"}
     stored: set[str] = set()
     unmeasured: dict[str, str] = {}
-    vector = list(_CACHE_PROJECTION_PROBE_VECTOR)
     for label in sorted(cp.NODE_TABLES):
-        # The record's own key column for this label (the schema's contract key).
-        key_column = rp.snake(cp.KEY_PROPERTY[label])
-        key = f"dod-5090-probe-{rp.snake(label)}"
-        shapes = (
-            # (1) the `props` TAIL — the open set every table carries.
-            {key_column: key, "props": {"embedding": vector}},
-            # (2) the record's `embedding` COLUMN, where the table has one.
-            {key_column: key, "embedding": vector},
+        try:
+            # The record's own key column for this label (the schema's contract key).
+            key_column = rp.snake(cp.KEY_PROPERTY[label])
+            key = f"dod-5090-probe-{rp.snake(label)}"
+            # DERIVED, not the literal: whatever this projection stores, planted.
+            vector_props = sorted(cp.stored_vector_props())
+        except Exception as e:
+            unmeasured[label] = f"{type(e).__name__}: {e}"
+            continue
+        vector = list(_CACHE_PROJECTION_PROBE_VECTOR)
+        planted = {prop: vector for prop in vector_props}
+        # (1) the `props` TAIL — the open set every table carries. (2) the record's
+        # `embedding` COLUMN, where the table has one. Both through `node_from_row`.
+        record_rows = (
+            ("props tail", {key_column: key, "props": dict(planted)}),
+            ("embedding column", {key_column: key, **planted}),
         )
-        measured = False
+        statements: list[tuple[str, object]] = []
         errors: list[str] = []
-        for row in shapes:
+        for door, row in record_rows:
             try:
-                stmt = cp.node_statement(cp.node_from_row(label, row))
-            except Exception as e:  # noqa: BLE001 — a refusal is one door's answer
-                errors.append(f"{type(e).__name__}: {e}")
-                continue
-            measured = True
-            if any(prop in stmt.params for prop in cp.stored_vector_props()):
+                statements.append((door, cp.node_statement(cp.node_from_row(label, row))))
+            except Exception as e:  # a refusal is one door's answer
+                errors.append(f"{door}: {type(e).__name__}: {e}")
+        # (3) the DIRECT writer door — `node_from_row` is out of the path entirely.
+        try:
+            statements.append((
+                "direct writer",
+                cp.node_statement(cp.RecordNode(
+                    label=label, key=key,
+                    props={key_column: key, **planted}))))
+        except Exception as e:
+            errors.append(f"direct writer: {type(e).__name__}: {e}")
+        if not statements:
+            # NOTHING could be built: hold the row rather than answering for it.
+            unmeasured[label] = "; ".join(errors)
+            continue
+        for _door, stmt in statements:
+            if any(prop in stmt.params for prop in vector_props):
                 stored.add(label)
                 break
-        if not measured:
-            unmeasured[label] = "; ".join(errors)
     return {"labels": frozenset(stored), "unmeasured": unmeasured, "error": None}
 
 
@@ -2229,8 +2272,11 @@ def score_path_bullet() -> Row:
     # `embedding_writers()` and a `:Session` vector reached the graph with this row reading
     # `MET`. `cache_projection_store_labels()` measures it by running the writer instead of
     # reading it, and its labels join the SAME served-set comparison as the derived ones:
-    # `Session` is not in `served`, so its presence in `labels` makes `orphans` non-empty
-    # and this row `NOT MET` — the falsifier for a re-introduced write.
+    # `Session` is not in `served`, so its presence in `projection["labels"]` makes `orphans`
+    # non-empty and this row `NOT MET` — the falsifier for a re-introduced write.
+    # ⚠️ `projection["labels"]`, NOT the `labels` map above (`#11747` review, finding 5):
+    # `labels` is the writer DERIVATION's map and never contains `Session`, so a reader
+    # tracing where `Session` enters this comparison would be sent to a map it is not in.
     projection = cache_projection_store_labels()
     served = served_labels()
     # ⛔ `unknown` is row 2's OWN hold set, and it is computed AFTER resolution: a writer the

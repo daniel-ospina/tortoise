@@ -479,6 +479,79 @@ def test_re_introducing_the_session_vector_flips_row_two_to_NOT_MET(monkeypatch)
     assert "stored-without-a-query-path: ['Session']" in row.observed
 
 
+def test_deleting_ONLY_the_writers_check_still_reds_row_two(monkeypatch):
+    """The falsifier for the SECOND gate (`#11747` review, finding 5).
+
+    ⛔ The pin ABOVE empties `UNSERVED_VECTOR_LABELS`, which disables BOTH gates at once — and
+    because the probe only entered through `node_from_row`, deleting `node_statement`'s check
+    ALONE left row 2 `MET`. That check is the ONLY guard on the directly-built `RecordNode`
+    door (`record_plan` is public), so a row that cannot see that door claims more than it
+    measures.
+
+    So this pin removes just the WRITER's check and keeps the row→property drop intact (pinned
+    on the wrapper below, because both gates read the one declaration). `Session` can then reach
+    the measured set only through a node the CALLER built itself — which is why the row going
+    RED here proves the probe measures that door at all, and why removing the direct door from
+    `cache_projection_store_labels()` makes this test fail rather than pass.
+    """
+    import tortoise.cache_projection as cp
+
+    real_unserved = cp.UNSERVED_VECTOR_LABELS
+    real_from_row = cp.node_from_row
+    assert "Session" in real_unserved, sorted(real_unserved)
+
+    def _from_row_with_its_drop_intact(label, row):
+        """`node_from_row` with the gate PINNED, so only the writer's is removed."""
+        node = real_from_row(label, row)
+        if label not in real_unserved:
+            return node
+        props = dict(node.props)
+        dropped = dict(node.dropped_vectors)
+        for prop in sorted(cp.stored_vector_props()):
+            if props.pop(prop, None) is not None:
+                dropped[prop] = "pinned by this test"
+        return cp.RecordNode(label=label, key=node.key, props=props,
+                             dropped_vectors=dropped)
+
+    monkeypatch.setattr(cp, "node_from_row", _from_row_with_its_drop_intact)
+    monkeypatch.setattr(cp, "UNSERVED_VECTOR_LABELS", frozenset())
+
+    measured = probe.cache_projection_store_labels()
+    assert measured["error"] is None, measured["error"]
+    assert "Session" in measured["labels"], (
+        "the DIRECT writer door is unmeasured: with `node_statement`'s check deleted and the "
+        "row→property drop intact, a `:Session` vector can only be seen through a node the "
+        f"caller built itself. Measured: {sorted(measured['labels'])}")
+    row = probe.score_path_bullet()
+    assert row.verdict == "NOT MET", row.observed
+    assert "stored-without-a-query-path: ['Session']" in row.observed
+
+
+def test_a_record_label_without_a_key_HOLDS_the_row_instead_of_crashing(monkeypatch):
+    """`#11747` review, finding 4 — the per-label derivation is inside the envelope.
+
+    ⛔ MEASURED pre-fix: only the imports and the two door-builds were wrapped, so a label in
+    `cp.NODE_TABLES` that `cp.KEY_PROPERTY` does not know made the WHOLE DoD report raise
+    `KeyError` — instead of holding row 2 at `PARTIAL`, which is what this function's own
+    contract says an unbuildable shape does ("a label where NEITHER shape could be built is
+    reported as unmeasured"). Before `#11747` row 2 could not be taken down by a projection-side
+    `KeyError` at all.
+    """
+    import tortoise.cache_projection as cp
+
+    monkeypatch.setitem(cp.NODE_TABLES, "NoSuchRecordLabel", "no_such_record_label")
+
+    measured = probe.cache_projection_store_labels()
+    assert measured["error"] is None, measured["error"]
+    assert "NoSuchRecordLabel" in measured["unmeasured"], measured
+    assert "KeyError" in measured["unmeasured"]["NoSuchRecordLabel"], measured["unmeasured"]
+    # …and the ROW holds rather than reporting a verdict it could not measure.
+    assert probe.score_path_bullet().verdict == "PARTIAL"
+    # The other labels are still measured: a hold on one must not blind the rest.
+    assert "Session" not in measured["labels"]
+    assert measured["labels"], "nothing measured at all — the pin above would be vacuous"
+
+
 #: ── `#11492`: row 2 resolves labels from the SAME product register row 1 reads ──────────────
 #: The issue required the reading to be DECIDED, not assumed: the register classified writers but
 #: carried NO label (Case B), and the label is not derivable per writer either (15 of the 20
@@ -7112,11 +7185,11 @@ def test_the_census_doc_collects_what_the_file_collects():
     `--collect-only`, so adding a test reds this row until the figure is re-cut.
     The passed/skipped **split** is deliberately NOT pinned — it moves with the
     interpreter and the LANE, so pinning it would red on a box rather than on a
-    defect. Measured at this tree: the docker lane reads `165 passed, 1 skipped`
+    defect. Measured at this tree: the docker lane reads `169 passed, 1 skipped`
     (the skip is the `<3.12` re-derive) and the carve-out lane reads
-    `164 passed, 2 skipped` (that skip plus `tests/_live_utils.py`'s live-graph
+    `168 passed, 2 skipped` (that skip plus `tests/_live_utils.py`'s live-graph
     fixture, which only a lane with a `TORTOISE_DB_URI` satisfies). Both splits add
-    to the `168` re-derived below, which is why the doc states its split as
+    to the `170` re-derived below, which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
     """
     root = Path(probe.__file__).resolve().parent.parent

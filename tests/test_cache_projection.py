@@ -1003,8 +1003,8 @@ def test_the_unserved_vector_label_class_is_derived_from_the_query_vocabulary():
 
     served = {entity_label(t) for t in VALID_ENTITY_TYPES}
     assert cp.served_vector_labels() == served
-    assert cp.UNSERVED_VECTOR_LABELS == frozenset(cp.NODE_TABLES) - served
-    assert cp.UNSERVED_VECTOR_LABELS == {"Session"}
+    assert frozenset(cp.NODE_TABLES) - served == cp.UNSERVED_VECTOR_LABELS
+    assert sorted(cp.UNSERVED_VECTOR_LABELS) == ["Session"]
 
 
 @pytest.mark.parametrize("label", ["Point", "Event", "Source"])
@@ -1048,6 +1048,71 @@ def test_the_vector_gate_withholds_nothing_on_a_served_label(seed):
             continue
         assert stmt.dropped_vectors == {}, (
             f"{label} is served by run_vector_query — nothing may be withheld for it")
+
+
+def test_a_DROPPED_vector_does_not_leave_the_verbatim_marker_behind():
+    """`#11747` review, finding 6b — a marker must not outlive the value it describes.
+
+    `embedding_verbatim: true` is a PRIMARY claim about the STORAGE FORM of the
+    vector. A `:Session` whose tail carried BOTH the vector and the marker used to
+    store the marker and no vector — measured
+    ``params['props'] == {'id':…, 'turn_count':…, 'embedding_verbatim': True}``
+    with no ``embedding`` clause and no ``n.embedding``: a property asserting a
+    storage form for a value the same statement withheld.
+
+    ⚠️ Non-vacuity in BOTH directions: a node that never had a vector keeps the
+    marker exactly as before (that behaviour is deliberate — a record-sourced
+    cache must not be POORER than the record).
+    """
+    from tortoise.stored_form import VERBATIM_MARKER
+
+    unserved = sorted(cp.UNSERVED_VECTOR_LABELS)
+    assert unserved, "no unserved label to measure — the pin below would be vacuous"
+    for label in unserved:
+        node = _node(label, {"props": {"embedding": [0.5, 0.25],
+                                      VERBATIM_MARKER: True}})
+        assert "embedding" in node.dropped_vectors, (label, node.dropped_vectors)
+        stmt = cp.node_statement(node)
+        assert VERBATIM_MARKER not in stmt.params["props"], (
+            f"{label}: the marker survived the vector it describes — "
+            f"{stmt.params['props']}")
+    # The unchanged half: a marker with no vector to describe is still carried.
+    marker_only = _node("Point", {"props": {VERBATIM_MARKER: True}})
+    assert cp.node_statement(marker_only).params["props"][VERBATIM_MARKER] is True
+
+
+def test_the_PLAN_reports_the_vectors_it_refuses():
+    """`#11747` review, finding 1 — the drop is NAMEABLE on the plan, not only per statement.
+
+    `Statement.dropped_vectors` had no reader in production, so a
+    `rebuild_from_record` over a tenant whose session rows carry a vector DELETED
+    those vectors and printed a clean, complete projection with no mention of it.
+    The plan is where the writer's own statement sits beside the node it was built
+    from, so it is where the drop becomes a count a caller can report.
+
+    ⛔ Read off the STATEMENTS: `node_statement` can refuse a directly-built
+    `RecordNode` that never went through `node_from_row`, and a node-side read
+    would miss exactly that case.
+    """
+    from_server = _node("Session", {"props": {"embedding": [0.5, 0.25]}})
+    built_directly = cp.RecordNode(
+        label="Session", key="s-direct",
+        props={"id": "s-direct", "embedding": [0.5, 0.25]})
+    clean = _node("Point", {"embedding": [0.5, 0.25]})
+
+    plan = cp.record_plan([from_server, built_directly, clean])
+    assert plan.dropped_vectors() == {"Session": 2}, (
+        "both doors must be counted: "
+        f"{plan.dropped_vectors()}")
+    # And a plan that withholds nothing says so.
+    assert cp.record_plan([clean]).dropped_vectors() == {}
+    # The report carries it where an operator reads the run's result.
+    report = cp.ProjectionReport(nodes_written=3, dropped_vectors=2,
+                                 dropped_vector_labels=("Session",))
+    assert "2 vector(s) DROPPED" in report.render(), report.render()
+    assert "Session" in report.render(), report.render()
+    assert "DROPPED" not in cp.ProjectionReport(nodes_written=3).render(), (
+        "a projection that withheld nothing must not print a drop clause")
 
 
 def test_is_verbatim_is_an_or_across_the_sides_it_is_given():

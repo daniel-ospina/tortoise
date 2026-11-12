@@ -257,6 +257,7 @@ __all__ = [
     "PACKAGED_PLACEMENT_TABLE",
     "PLACEMENT_DOC",
     "RELATION_TABLE",
+    "UNSERVED_VECTOR_LABELS",
     "AmbiguousRecordColumn",
     "CacheProjectionError",
     "LifecycleEvent",
@@ -292,11 +293,11 @@ __all__ = [
     "read_lifecycle_events",
     "read_record_view",
     "record_plan",
-    "UNSERVED_VECTOR_LABELS",
     "relation_from_row",
     "relation_statement",
     "served_vector_labels",
     "stored_vector_props",
+    "unserved_vector_declined_properties",
 ]
 
 #: label → record table (the layer tables `#7968` built).
@@ -309,22 +310,38 @@ NODE_TABLES: dict[str, str] = {
     "Session": "session",
 }
 
+#: The served vocabulary, computed ONCE at import.
+#:
+#: ⛔ Read from :mod:`tortoise.security`, never restated here. That module is the
+#: single home of both halves `run_vector_query` applies: it validates the
+#: caller's ``entity_type`` against ``VALID_ENTITY_TYPES`` and then translates it
+#: with :func:`~tortoise.security.entity_label`. A second copy of the set in this
+#: module is exactly how a writer and the query leg start disagreeing about which
+#: labels exist — the disagreement `#5090` DoD row 2 scores.
+#:
+#: ⚠️ A MODULE-SCOPE constant computed from an import, and that is deliberate.
+#: This docstring used to argue the other way ("rather than a cached constant")
+#: while :data:`UNSERVED_VECTOR_LABELS` below did exactly this in the same module
+#: — a self-contradiction the `#11747` review measured. Both inputs
+#: (``VALID_ENTITY_TYPES``, ``entity_label``) are module-level DECLARATIONS, not
+#: file reads, and both are already imported at this module's top, so there is no
+#: import-order dependency to attach; computing it once means the served set and
+#: :data:`UNSERVED_VECTOR_LABELS` cannot be derived from two different reads of
+#: one vocabulary.
+_SERVED_VECTOR_LABELS: frozenset[str] = frozenset(
+    entity_label(t) for t in VALID_ENTITY_TYPES)
+
+
 def served_vector_labels() -> frozenset[str]:
     """The labels the VECTOR query leg can reach — the runner's own vocabulary.
 
-    ⛔ Read from :mod:`tortoise.security`, never restated here. That module is
-    the single home of both halves `run_vector_query` applies: it validates the
-    caller's ``entity_type`` against ``VALID_ENTITY_TYPES`` and then translates
-    it with :func:`~tortoise.security.entity_label`. A second copy of the set in
-    this module is exactly how a writer and the query leg start disagreeing
-    about which labels exist — the disagreement `#5090` DoD row 2 scores.
-
-    Ordinary ``frozenset`` rather than a cached constant because the vocabulary
-    is a module-level declaration, not a file read: the cost is six dict lookups
-    and the alternative (a module-scope constant computed from an import) is the
-    same thing with an import-order dependency attached.
+    The SEAM a caller reads, so the name a probe or a parity rule depends on
+    survives a change in how the set is stored — the same pattern this module's
+    :func:`stored_vector_props` uses for the same reason (#8615). The VALUE is
+    :data:`_SERVED_VECTOR_LABELS`, computed once at import; see the note there
+    for why that is the honest shape rather than a per-call derivation.
     """
-    return frozenset(entity_label(t) for t in VALID_ENTITY_TYPES)
+    return _SERVED_VECTOR_LABELS
 
 
 #: ⛔ `#11747` — the labels this projection can be handed a vector for and MUST
@@ -354,7 +371,47 @@ def served_vector_labels() -> frozenset[str]:
 #: :func:`node_statement` carries the report on
 #: :attr:`Statement.dropped_vectors`, so the drop is nameable at runtime and
 #: never silent (this module's own rule for every column it declines).
+#:
+#: ⛔ AND IT IS DECLARED TO THE PARITY RULE (`#11747` review, finding 2 — a design
+#: decision, settled here in the open). The drop moves the RECORD ANSWER
+#: (:func:`node_from_row`, which `record_serve.read_node` answers from by
+#: contract), so a LEGACY cache node that still carries the vector is a pair
+#: `record_serve.parity_difference` must explain: without an arm it reports a
+#: PROJECTION GAP whose only sanctioned repair is a re-projection — which can no
+#: longer add the field, so the red would be permanent until a wipe-and-rebuild,
+#: and `record_reconcile` reports the same pair as `graph_only`. The arm lives in
+#: :func:`unserved_vector_declined_properties` so there is ONE declaration, and the
+#: decision recorded is: **the drop stays on the read door and the parity rule
+#: declares it.** The alternative — moving the drop off the read door — would let
+#: a record read advertise a vector the cache refuses, which is the "live ≠
+#: rebuild" divergence that read exists to prevent.
 UNSERVED_VECTOR_LABELS: frozenset[str] = frozenset(NODE_TABLES) - served_vector_labels()
+
+
+def unserved_vector_declined_properties(label: str) -> frozenset[str]:
+    """The vector properties `label`'s RECORD ANSWER declines to carry — `#11747`.
+
+    Empty for a served label; :func:`stored_vector_props` for one in
+    :data:`UNSERVED_VECTOR_LABELS`. This is the ONE declaration behind two
+    readers: :func:`node_from_row` (which performs the drop, so the record read
+    and the rebuild agree) and
+    :func:`tortoise.record_serve.parity_difference` (which must EXPLAIN a legacy
+    cache node that still holds the name, or the pair reddens as a projection
+    gap that no re-projection can close).
+
+    ⚠️ Both DIRECTIONS of the parity comparison read it: the cache holding a
+    vector the record answer declines is declared (CACHE-HELD, not a gap), and a
+    raw record row that still carries it is declared too — the mirror the
+    §9.1/D1 decline already applies for the same reason.
+    """
+    return STORED_VECTOR_PROPS if label in UNSERVED_VECTOR_LABELS else frozenset()
+
+
+def _unserved_vector_reason(label: str) -> str:
+    """WHY a vector on ``label`` is refused — one spelling for both doors."""
+    return (f"{label} is not a label run_vector_query serves "
+            f"(served: {sorted(served_vector_labels())}) — a vector stored "
+            f"there has no query path")
 
 #: The relations table — every edge is a row (ONTOLOGY §8 reification).
 RELATION_TABLE = "relation"
@@ -2569,11 +2626,7 @@ def node_from_row(label: str, row: Mapping[str, Any]) -> RecordNode:
         for prop in sorted(STORED_VECTOR_PROPS):
             if props.pop(prop, None) is None:
                 continue
-            dropped[prop] = (
-                f"{label} is not a label run_vector_query serves "
-                f"(served: {sorted(served_vector_labels())}) — a vector stored "
-                f"there has no query path"
-            )
+            dropped[prop] = _unserved_vector_reason(label)
     return RecordNode(label=label, key=raw, props=props, dropped_vectors=dropped)
 
 
@@ -3397,22 +3450,28 @@ def node_statement(node: RecordNode) -> Statement:
             # ⛔ #11747 — the label is one no query leg reaches, so the vector
             # could never be read. Dropped, and REPORTED on the statement, never
             # written silently (see :data:`UNSERVED_VECTOR_LABELS`).
-            dropped[prop] = (
-                f"{node.label} is not a label run_vector_query serves "
-                f"(served: {sorted(served_vector_labels())}) — a vector stored "
-                f"there has no query path"
-            )
+            dropped[prop] = _unserved_vector_reason(node.label)
             continue
         form = f"${prop}" if verbatim else f"vecf32(${prop})"
         cypher += f", n.{prop} = {form}"
         params[prop] = vector
-    if verbatim:
+    if verbatim and not dropped:
         # The marker is PRIMARY and the graph writes it as its own clause
         # (`projection/entities.py`), so it is carried in BOTH branches — with
         # and without a vector. Dropping it here would make a record-sourced
         # cache POORER than the record, and the marker is the authority on the
         # storage FORM: a caller-owned float64 vector would lose its flag and
         # the next journaled re-emit would narrow it through `vecf32` (#5004).
+        #
+        # ⛔ `#11747` review — ``and not dropped`` is the exception, and it is
+        # not a narrowing of the rule above: when the vector itself was DROPPED
+        # (here, or upstream in :func:`node_from_row`, whose drop log this map
+        # is seeded from) there is no value left for the marker to describe. The
+        # measured bug was a `:Session` whose tail carried BOTH `embedding` and
+        # the marker: the node stored `embedding_verbatim: true` with no vector
+        # and no `n.embedding` clause — a property ASSERTING a storage form for
+        # a value the same statement withheld. A node that never had a vector
+        # (`dropped` empty) keeps the marker exactly as before.
         props[VERBATIM_MARKER] = True
     return Statement(cypher=cypher, params=params, dropped_vectors=dropped)
 
@@ -3475,6 +3534,25 @@ class ProjectionPlan:
     def node_keys(self) -> set[tuple[str, str]]:
         return {(n.label, n.key) for n in self.nodes}
 
+    def dropped_vectors(self) -> dict[str, int]:
+        """`{label: count}` of vector properties this plan REFUSES to store — `#11747`.
+
+        ⛔ Read from the STATEMENTS, not from the nodes: :func:`node_statement` is
+        the door that can refuse a directly-built :class:`RecordNode` (a caller may
+        build one and hand it to :func:`record_plan`), so a node-side read would
+        miss exactly the case the writer's own check exists for. The two tuples are
+        parallel by construction — :func:`record_plan` appends one node statement
+        per node and then the relation statements — and ``zip`` stops at
+        ``self.nodes``, so a relation statement can never be read as a node's.
+        """
+        counts: dict[str, int] = {}
+        for node, stmt in zip(self.nodes, self.statements, strict=False):
+            if not stmt.dropped_vectors:
+                continue
+            counts[node.label] = (counts.get(node.label, 0)
+                                  + len(stmt.dropped_vectors))
+        return counts
+
 
 def record_plan(nodes: Iterable[RecordNode],
                 relations: Iterable[RecordRelation] = ()) -> ProjectionPlan:
@@ -3500,6 +3578,14 @@ class ProjectionReport:
     coverage: str = COVERAGE_COMPLETE
     declaration_keys: int = 0
     scope: str = ""
+    #: `#11747` — vectors the plan REFUSED to store, and the labels they were on.
+    #: On the REPORT beside the write counts (the shape
+    #: :func:`tortoise.hosted_backup.restore_graph` already uses for the identical
+    #: drop), because the drop happens on a path an operator asked for: a rebuild
+    #: that deletes vectors a previous cache held would otherwise print the same
+    #: clean line as a rebuild that lost nothing.
+    dropped_vectors: int = 0
+    dropped_vector_labels: tuple[str, ...] = ()
 
     def render(self) -> str:
         return (
@@ -3507,6 +3593,9 @@ class ProjectionReport:
             f"{self.relations_written} relation(s) written; coverage="
             f"{self.coverage} over {self.declaration_keys} declared key(s)"
             + (f" (scope {self.scope})" if self.scope else "")
+            + (f"; {self.dropped_vectors} vector(s) DROPPED on unserved "
+               f"label(s) {list(self.dropped_vector_labels)} — a vector there "
+               f"has no query path" if self.dropped_vectors else "")
         )
 
 
