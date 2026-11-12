@@ -496,10 +496,12 @@ def _unserved_vector_reason(label: str) -> str:
 #:     for a disposable TEST graph, and for embedded mode (which needs the per-call
 #:     token).
 #: (3) So the honest statement is: on a production cache NO shipped route clears this
-#:     residue. An operator who needs it clears the property explicitly
-#:     (`MATCH ()-[r:TYPE]->() REMOVE r.embedding`) or re-reads the cache from the
-#:     record; this note reports the residue rather than promising it away — an earlier
-#:     draft of it offered the root cause of the problem as the cure.
+#:     residue — the ONE route that would, (2)'s full `record-restore`, is exactly the
+#:     route (2) has just shown is refused on a production graph, so it is not offered
+#:     here as a remedy. An operator who needs it clears the property explicitly
+#:     (`MATCH ()-[r:TYPE]->() REMOVE r.embedding`); this note reports the residue rather
+#:     than promising it away — an earlier draft of it offered the root cause of the
+#:     problem as the cure, and one draft offered (2)'s refused route as a remedy.
 #: Nothing on the read side reports the residue either — `record_serve` has no
 #: relation read at all (`NOT_SERVED`), `parity_difference` is label-scoped and
 #: `record_reconcile` compares nodes — so it is stated here rather than left to be

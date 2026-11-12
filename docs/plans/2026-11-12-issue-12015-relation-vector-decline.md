@@ -87,8 +87,9 @@ cache — §0.5c of `06-cache-projection.md` is the owner of the wording, this i
 2. a full `record-restore` DOES clear it, but `_assert_test_graph` (L2) refuses a server
    graph not named `test_*`/`tortoise_test`, which is every production cache — it is a
    remedy for a disposable TEST graph and for embedded mode (per-call token);
-3. so on a production cache the operator clears the property explicitly
-   (`MATCH ()-[r:TYPE]->() REMOVE r.embedding`) or re-reads the cache from the record.
+3. so on a production cache the operator's only remedy is the explicit property clear
+   (`MATCH ()-[r:TYPE]->() REMOVE r.embedding`) — the wholesale route is (2)'s
+   `record-restore`, and (2) is why it is refused on a production graph rather than a remedy.
 
 Nothing on the read side reports it — `record_serve` has no relation read (`NOT_SERVED`),
 `parity_difference` is label-scoped, `record_reconcile` compares nodes. Same residue as

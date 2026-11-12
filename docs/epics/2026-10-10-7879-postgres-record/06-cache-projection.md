@@ -278,9 +278,11 @@ wrong twice here, `#12015` review):
    L2's `_assert_test_graph` refuses a server graph whose name does not start
    `test_`/`tortoise_test`, which is every production cache. It is a remedy for a
    disposable test graph and for embedded mode (which needs the per-call token).
-3. So on a production cache **no shipped route clears this residue**. An operator clears
-   the property explicitly (`MATCH ()-[r:TYPE]->() REMOVE r.embedding`) or re-reads the
-   cache from the record. The residue is reported, not promised away — the same shape
+3. So on a production cache **no shipped route clears this residue** — the one route that
+   would, (2)'s full `record-restore`, is exactly the route (2) shows is refused on a
+   production graph, so it is not a remedy here. An operator clears the property
+   explicitly (`MATCH ()-[r:TYPE]->() REMOVE r.embedding`). The residue is reported, not
+   promised away — the same shape
    §0.5b carries for nodes, where the module says "its write is additive … anything
    else needs an explicit property clear".
 
