@@ -1143,6 +1143,11 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "are prose — the DOCSTRING reproducing the measured `_emit(...)` calls and the body "
         "comments recording later measured cases — because `_EMBED_WRITE` reads raw source, as "
         "it does for `tortoise.projection::_prewipe_synthetic_write_scope`'s"),
+    # ⛔ ONE entry per name: a second literal key for the same name SILENTLY OVERRIDES the
+    # first (Python's last-wins dict semantics — the LATER row wins and the earlier one is
+    # dead; an active override, not a harmless no-op) — `ruff`'s F601 is the only thing that
+    # catches it, and it caught this one only post-merge on `main` (#9314: pytest does not).
+    # Provenance and the carrier rationale are merged into this row so neither reading is lost.
     "tortoise.sdk::create_source": (
         CENSUS_EXEMPT,
         "`tortoise/sdk.py::create_source` — the `#11858` guard's OWN message is the only "
@@ -1154,7 +1159,11 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "it names no label of its own (`NO_LIVE_VECTOR` in `tortoise/embed_writer_register`). "
         "⛔ Arrived at `origin/main` in `18d43e0462` (`#12113`) WITHOUT a census entry, so the "
         "probe was red on `main` before this branch touched it (measured: 5 failures whose "
-        "only unclassified name is this one)"),
+        "only unclassified name is this one). Exempt as a CARRIER on `#5004`, the same "
+        "disposition `tortoise.api::add_point` carries — the store is DELEGATED to "
+        "`tortoise/projection/entities.py::_upsert_source`, whose passthrough legitimately "
+        "stores `s.embedding` for the vector retrieval leg to read — NOT because no store is "
+        "reachable through it"),
     "tortoise.api::_int_is_float_exact": (
         CENSUS_EXEMPT,
         "`tortoise/api.py::_int_is_float_exact` — a pure PREDICATE (`float(value) == value`, "
@@ -1290,18 +1299,6 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "chain — the same direction, and for the same reason, as "
         "`_journal_event_raw_write`: its record IS what the rebuild reads the "
         "vector back from (`#8488`), not a store reached around the gate"),
-    "tortoise.sdk::create_source": (
-        CENSUS_EXEMPT,
-        "`tortoise/sdk.py::create_source` — the instrument's match is an operator-facing "
-        "REFUSAL message, not a write clause: the only `embedding=` in the body is the "
-        "`#11858` guard's own sentence, which names the keyword to say the "
-        "`_SERVER_MANAGED_EMBEDDING_MARKERS` family may NOT be set by hand. The door "
-        "computes no vector of its own: a caller-supplied `embedding` is CARRIED into "
-        "`_create_entity`'s `:Source` write — the `#5004` caller-vector contract, the same "
-        "disposition `tortoise.api::add_point` carries, and the reason "
-        "`tortoise/projection/entities.py::_upsert_source`'s passthrough legitimately stores "
-        "`s.embedding` for the vector retrieval leg to read. Exempt as a CARRIER — NOT "
-        "because no store is reachable through it"),
     "tortoise.sdk::ingest_corpus": (
         CENSUS_RECOGNISED,
         "`tortoise/sdk.py::ingest_corpus` — `self._session_embedding(...)` + "
@@ -1329,7 +1326,13 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("tortoise/api.py", "add_point",
          'p["embedding"] = fields["embedding"]'),),
     "tortoise.sdk::create_source": (
-        # The quoted refusal sentence itself — the whole reason this name enrols.
+        # Needle 1 is the REFUSAL's own prose — the whole reason this name enrols, and the
+        # only `_EMBED_WRITE` match in the body: delete the `raise` and it goes, taking the
+        # population entry with it. Needle 2 is the guard's CONDITION
+        # (`_caller_markers = sorted(set(ev) & …)`, three lines above the `raise`) and is
+        # INDEPENDENT of it — it survives a raise-only deletion, so the two do not travel
+        # together. ⛔ Re-derive both rather than assuming: re-deriving is re-deriving the
+        # instrument's match, and a stale exemption must not outlive what it exempts.
         ("tortoise/sdk.py", "create_source",
          "pass `embedding=` and it declares the truth"),
         # …and the guard that makes the class true (it refuses MARKERS; it writes none).
@@ -1419,15 +1422,6 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     "tortoise.sdk::_write_capture_turns": (
         ("tortoise/sdk.py", "_write_capture_turns",
          '_turn_snapshot["embedding"] ='),),
-    "tortoise.sdk::create_source": (
-        # ⛔ The needle is the REFUSAL's own prose, which is what `_EMBED_WRITE` reads:
-        # re-deriving it is re-deriving the instrument's match. Deleting the guard (the
-        # `raise`) takes the needle AND the population entry away together, so a stale
-        # exemption cannot outlive what it exempts.
-        ("tortoise/sdk.py", "create_source",
-         "pass `embedding=` and it declares the truth"),
-        ("tortoise/sdk.py", "create_source",
-         "_SERVER_MANAGED_EMBEDDING_MARKERS"),),
     "tortoise.sdk::ingest_corpus": (
         ("tortoise/sdk.py", "ingest_corpus", "self._session_embedding("),
         ("tortoise/sdk.py", "ingest_corpus", "set_embedding_clause("),),
