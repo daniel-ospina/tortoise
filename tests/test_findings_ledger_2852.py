@@ -24,15 +24,17 @@ jobs and were easy to conflate (an earlier revision of this paragraph did):
 
 - the `tier1` row is what selects this module on a **docs-only** diff. Both
   `docs/` and `tools/` are dropped by `_keep_changed()`, so `select()` takes its
-  docs-only early return and emits `tier1` only: measured `surfaces: []`, 88 test
+  docs-only early return and emits `tier1` only: measured `surfaces: []`, 89 test
   files, this module present;
 - the `CORE_ALSO` entry in `tools/ci_selection.py` is what a **`tools/`-only**
   diff resolves to the full `core` surface instead of that same tier-1 smoke:
-  measured `surfaces: ['core']`, 813 test files. It is not what keeps this module
-  selected there — the `tier1` row already does, at 88 files (measured with the
-  entry removed: `surfaces: []`, 88 files, module present).
+  measured `surfaces: ['core']`, 819 test files. It is not what keeps this module
+  selected there — the `tier1` row already does, at 89 files (measured with the
+  entry removed: `surfaces: []`, 89 files, module present).
 
-Both the classification row and the selection arms are asserted by
+Both counts move with `main`, so re-derive them (`select()` in-process, as this
+paragraph did) rather than carrying them; the SURFACES above are what the pins
+assert. Both the classification row and the selection arms are asserted by
 `test_test_file_is_registered_in_ci_surfaces` /
 `test_test_file_is_selected_on_the_diffs_it_guards`.
 """
