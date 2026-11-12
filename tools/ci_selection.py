@@ -504,6 +504,18 @@ SOURCE_PATTERNS = {
                    # it. Without this row, a dashboard reorg that deletes or renames it
                    # merges with the guard ABSENT and then REDs the next `robots.txt` diff.
                    "website/apps/dashboard/public/sitemap.xml",
+                   # ⛔ THE ADVERTISEMENT IS A GUARD INPUT TOO — the same silent-drop class,
+                   # one row further out. Both tree-side guards now read this file for the
+                   # app sitemap's ONLY remaining `Sitemap:` line
+                   # (`test_every_advertised_sitemap_is_servable_from_this_tree`,
+                   # `test_every_sitemap_in_the_tree_is_advertised`), so deleting that line
+                   # is exactly the mutation those guards exist to red. Unnamed, the file
+                   # selected NO surface and the diff that deleted it merged with the guard
+                   # ABSENT — measured before this row:
+                   # `select(['website/apps/dashboard/public/robots.txt'])` -> surfaces=[],
+                   # guard not in `test_files`; after: surfaces=['onboarding'], guard present.
+                   # The sitemap row above does not cover it — they are different files.
+                   "website/apps/dashboard/public/robots.txt",
                    # #3673: the served skill documents and the installer belong to
                    # this surface. The parity contract between
                    # `tortoise/onboarding/SKILL.md` and its served mirror is

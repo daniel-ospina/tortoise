@@ -1513,12 +1513,23 @@ def test_the_crawler_surface_selects_the_guard_that_reads_it():
     # cross-submission there would be reading a claim about a shape this repo no longer ships.
     crawler |= {
         str(p.relative_to(REPO))
-        for p in (REPO / "website").glob("apps/*/public/sitemap*.xml")
+        for pattern in (
+            "apps/*/public/sitemap*.xml",
+            # ⛔ The app project's own `robots.txt` is a GUARD INPUT: since #11766 the
+            # marketing index may not name a foreign host, so this file carries the app
+            # sitemap's ONLY remaining `Sitemap:` line and BOTH tree-side guards read it.
+            # A glob that derived only the sitemaps would leave the file `select()`-able by
+            # nothing, so a PR deleting that line would merge with the guard ABSENT — the
+            # guard failing to run on the one mutation it was written for.
+            "apps/*/public/robots.txt",
+        )
+        for p in (REPO / "website").glob(pattern)
     }
     assert {
         "website/sitemap-company.xml",
         "website/sitemap-product.xml",
         "website/apps/dashboard/public/sitemap.xml",
+        "website/apps/dashboard/public/robots.txt",
     } <= crawler, (
         f"the sitemap population collapsed (found {sorted(crawler)}) — a glob stopped "
         "matching a file this surface exists to cover")

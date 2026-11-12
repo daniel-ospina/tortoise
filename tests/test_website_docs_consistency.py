@@ -1565,6 +1565,13 @@ def test_every_guard_input_is_selectable_by_ci() -> None:
             "website/functions/blog/[[path]].ts",
             "tortoise/quadrature.py",
             "tortoise/commit_schema.py",
+            # #11766 review P1: the app origin's sitemap can no longer be advertised by the
+            # marketing `robots.txt` (its index may not name a foreign host), so its ONLY
+            # remaining `Sitemap:` line lives here and BOTH guards in this module read it.
+            # Deleting that line is precisely the mutation they exist to red — but until
+            # this path was a pattern, the file selected NO surface, so that diff merged
+            # with the guard absent: a false PASS, not a missing convenience.
+            "website/apps/dashboard/public/robots.txt",
         )
         if not _guard_reachable_for(path)
     ]
