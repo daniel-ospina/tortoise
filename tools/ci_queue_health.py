@@ -1205,8 +1205,8 @@ def classify_queue(
             )
         if pr_running_unmeasured:
             notes.append(
-                f"{pr_running_unmeasured} run(s) UNMEASURED (no jobs read), "
-                "counted as executing"
+                f"{pr_running_unmeasured} run(s) UNMEASURED (jobs not read, or not "
+                "provably complete), counted as executing"
             )
         reasons.append("; ".join(notes))
 
@@ -1228,6 +1228,46 @@ def classify_queue(
                 "feed is NEWEST-FIRST, so the oldest queued runs (the ones the age "
                 "clause needs) were never read; no PR-event run is executing, so "
                 "starvation is neither witnessed nor disproved — not reported as OK"
+            )
+        # ⛔ A `pr_running` MADE ENTIRELY OF UNMEASURED RUNS IS NOT A MEASUREMENT, AND `OK`
+        # MUST NOT REST ON IT (#12037 review round 3). The probe BUDGET
+        # (`DEFAULT_MAX_JOB_PROBES`) is spent OLDEST-FIRST, and frozen runs are the old ones,
+        # so once more runs are frozen than the budget allows, the surplus is never probed —
+        # it keeps `has_live_job = None`, stays inside `pr_running`, and puts the census back
+        # where it was before this change. MEASURED on the pure core with one PR run waiting
+        # 1000 s: 8 frozen runs → `pr_running=0, PR-STARVED, congests_pr=True`; 9 frozen runs
+        # → `pr_running=1, OK, congests_pr=False` — i.e. exactly the two consequences this
+        # change exists to remove, reintroduced by the budget and handing a destructive caller
+        # the authorisation. Raising the constant would only move the horizon.
+        #
+        # So the verdict degrades instead: when EVERY run counted in `pr_running` is
+        # unmeasured, the count is the old status-string census and cannot certify health. It
+        # is still useful as a LOWER BOUND (`pr_running >= pr_running_unmeasured`), which is why
+        # this is a degradation and not a `MeasureError`. When at least one counted run was
+        # READ as executing, `pr_running > 0` is a measurement and `PR-BACKLOGGED` stands.
+        #
+        # ⛔ AND IT ONLY APPLIES WHEN THE PROBE IS ACTUALLY IN USE FOR THIS READING. `None`
+        # means both "probed and unmeasurable" and "no probe was attempted", and conflating
+        # the two made this degradation fire for every caller that constructs `QueuedRun`s
+        # without probing — a behaviour change to a function documented as pure, which the
+        # defect does not ask for. `probes_in_use` separates the facts: if SOMETHING in this
+        # reading was measured, an unmeasured run is a real gap; if NOTHING was, the reading is
+        # in the pre-#12037 mode and is treated as such (no worse than the baseline it replaces,
+        # and it is the mode every legacy caller is in).
+        probes_in_use = any(run.has_live_job is not None for run in pr_in_progress)
+        if (
+            verdict == OK
+            and probes_in_use
+            and pr_running > 0
+            and pr_running == pr_running_unmeasured
+        ):
+            verdict = PR_UNWITNESSED
+            reasons.append(
+                f"PR-UNWITNESSED: all {pr_running} run(s) counted in pr_running were UNMEASURED "
+                "(the probe budget did not reach them, or their jobs could not be read), so "
+                "the count is the pre-#12037 status-string census, not a census of executing "
+                "work; with no run PROVED to be executing, health is neither witnessed nor "
+                "disproved — not reported as OK, and no destructive caller may read it as clear"
             )
         base: dict[str, Any] = {
             "verdict": verdict,
@@ -1629,10 +1669,15 @@ def read_run_live_job(
         answer ``False`` and read a run that is about to execute as proved idle. ``latest``
         is what makes that list EMPTY, so the abstention above can fire.
 
-    So it is not decoration: switching this to ``filter=all`` (a plausible edit —
-    ``docs/ops/ci-wall-clock.md`` spells that form for step history) turns a fresh re-run
-    into ``has_live_job=False``, subtracts it from `pr_running`, and can make ``PR-STARVED``
-    reachable on a queue that IS being served — the destructive direction.
+    So it is not decoration: `latest` is what makes that list EMPTY, so the abstention above
+    can fire. ⚠️ AND `filter=all` WOULD NO LONGER MISLEAD THIS PROBE, BECAUSE OF THE ATTEMPT
+    CHECK BELOW — that check is the real guard, and the parameter is the cheap first line.
+    Stated exactly, since this rationale has now been wrong three times: under `filter=all` a
+    fresh re-run returns its previous attempt's completed jobs, but with ``attempt`` supplied
+    those rows fail the `run_attempt` test and the probe ABSTAINS (``None``) rather than
+    answering ``False``. Switching to `all` is still wrong — it throws away the empty-list
+    signal and makes every re-run abstain — but it is no longer the destructive direction, and
+    a reader must not be told otherwise.
 
     ⛔ AND THE ATTEMPT IS CHECKED FROM THE PAYLOAD, NOT TRUSTED FROM THE QUERY STRING.
     GitHub's `Job` schema carries ``run_attempt`` ("Attempt number of the associated
@@ -1646,6 +1691,10 @@ def read_run_live_job(
     ``per_page`` is clamped to ``PER_PAGE``: the endpoint never returns more than 100, so a
     larger value would make a genuinely FULL page look SHORT and let the completeness rule
     below accept it as a complete read.
+    ``attempt`` is OPTIONAL AND PASSING IT IS THE SAFE MODE. When it is ``None`` the attempt
+    check is skipped, which is the weaker read this change exists to strengthen: `read_health`
+    always supplies `run.run_attempt`, and a caller that omits it gets the pre-#12037 level of
+    trust. Kept optional so the probe stays unit-testable in isolation.
     """
     per_page = max(1, min(per_page, PER_PAGE))
     try:
@@ -1672,7 +1721,9 @@ def read_run_live_job(
         return None
     if attempt is not None:
         job_attempts = [job.get("run_attempt") for job in jobs if isinstance(job, Mapping)]
-        if any(not isinstance(a, int) or a != attempt for a in job_attempts):
+        # `type(x) is int`, not `isinstance`: `isinstance(True, int)` is True, so a JSON
+        # `"run_attempt": true` would otherwise match attempt 1 and prove a run idle.
+        if any(type(a) is not int or a != attempt for a in job_attempts):
             # Jobs from another attempt (or rows that cannot be matched): this payload
             # cannot speak for the CURRENT attempt, so it proves nothing either way.
             return None
@@ -1684,15 +1735,19 @@ def read_run_live_job(
     # cancel-then-rerun. Completeness is therefore accepted from EITHER signal, and the
     # absence of a usable one abstains.
     total = data.get("total_count")
-    if isinstance(total, int):
+    if type(total) is int:
         return False if total <= len(statuses) else None
-    # No usable `total_count` (absent, or serialised as a string): a SHORT page is still a
-    # complete read — the endpoint never returns more than `per_page` — so it proves the
-    # same thing, while a FULL page may be a cut list and must abstain. An earlier revision
-    # tested only `isinstance(total, int)`, so a missing or string-valued count fell through
-    # to ``False`` on a page that could have been one of several (review finding,
-    # 2026-11-12; reproducible with 100 completed jobs and no `total_count`, and with
-    # `total_count` as the string "250").
+    # No usable `total_count` (absent, a string, a bool — `type(x) is int` rejects
+    # `True`, which `isinstance` would accept as 1): a SHORT page is still a complete read —
+    # the endpoint never returns more than `per_page` — so it proves the same thing, while a
+    # FULL page may be a cut list and must abstain. An earlier revision tested only
+    # `isinstance(total, int)`, so a missing or string-valued count fell through to ``False``
+    # on a page that could have been one of several (review finding, 2026-11-12; reproducible
+    # with 100 completed jobs and no `total_count`, and with `total_count` as the string
+    # "250"). ⚠️ When `total_count` IS an int it is AUTHORITATIVE and is not cross-checked
+    # against page fullness: a count that under-reports the rows actually returned would
+    # still prove idleness. That is an API contract this module relies on, not a signal it
+    # can independently verify.
     return False if len(statuses) < per_page else None
 
 
@@ -1735,6 +1790,16 @@ def read_health(
     consumer of this module.
     """
     queued, queued_truncated = read_runs(repo, "queued", max_pages)
+    # ⛔ THE BUDGET IS VALIDATED, NOT ASSUMED. `main()` catches only `MeasureError`, so a
+    # non-int here would surface as a bare `TypeError` from the slice at the last line of this
+    # function and kill the reading with NO state line — the failure mode the budget's own
+    # comment exists to prevent. Turning it into `MeasureError` gives exit 2 and a message.
+    try:
+        probes = max(0, int(max_job_probes))
+    except (TypeError, ValueError) as exc:
+        raise MeasureError(
+            f"max_job_probes must be an integer, got {max_job_probes!r}"
+        ) from exc
     running, running_truncated = read_runs(repo, "in_progress", max_pages)
     # ⛔ THE IN-PROGRESS LEG IS PROBED AT JOB LEVEL, NOT TRUSTED FROM `status` (#12037).
     # `pr_running` is a census of EXECUTING work — every clause keyed on it treats it as
@@ -1775,7 +1840,7 @@ def read_health(
     )
     probed = {
         run.id: read_run_live_job(repo, run.id, attempt=run.run_attempt)
-        for run in probe_order[: max(0, max_job_probes)]
+        for run in probe_order[:probes]
     }
     running = [
         replace(run, has_live_job=probed[run.id]) if run.id in probed else run

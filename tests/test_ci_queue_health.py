@@ -2662,3 +2662,149 @@ def test_the_probe_url_is_capped_at_the_endpoint_page_size(monkeypatch):
     url = " ".join(seen[0])
     assert f"per_page={Q.PER_PAGE}" in url, url
     assert "per_page=500" not in url
+
+
+# --- review round 3 findings (2026-11-12) -------------------------------------
+#
+# The P1 here was created BY the round-2 fix, which is why it has its own section: the probe
+# budget is spent OLDEST-FIRST and frozen runs are the old ones, so once more runs are frozen
+# than the budget allows, the surplus is never probed, stays counted, and the census goes back
+# to the pre-fix status string. Raising the constant only moves the horizon; the structural
+# answer is that a count made entirely of unmeasured runs cannot certify health.
+
+
+def _frozen(n, *, probed):
+    """`n` frozen PR runs; the first `probed` of them carry the probe's proof."""
+    return [
+        Q.QueuedRun(
+            id=9000 + i,
+            name="ai-review-gate",
+            event="pull_request_target",
+            created_at=(NOW - timedelta(seconds=7 * 86400)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            has_live_job=(False if i < probed else None),
+        )
+        for i in range(n)
+    ]
+
+
+def test_a_census_of_only_unmeasured_runs_cannot_certify_health():
+    """THE ROUND-3 P1: `frozen > budget` put the pre-fix fail-open back.
+
+    Measured on the pre-fix-of-this-fix code, with one PR run waiting 1000 s — inside the
+    dangerous (180 s, 5400 s) window the issue is about:
+
+        frozen=8  -> pr_running=0, PR-STARVED,  congests_pr=True
+        frozen=9  -> pr_running=1, OK,          congests_pr=False   <- the defect, returned
+
+    At 9 the surplus run is never probed, so `pr_running` is 1 from the status string alone,
+    which pushes the wait clause to 5400 s and hands a destructive caller the authorisation.
+    Now the verdict degrades instead: no run was PROVED to be executing, so health is neither
+    witnessed nor disproved.
+    """
+    queued = [run(1, "python-ci", event="pull_request", age_seconds=1000)]
+
+    within_budget = classify(queued, in_progress=_frozen(8, probed=8))
+    assert within_budget.pr_running == 0
+    assert within_budget.verdict == Q.PR_STARVED
+    assert within_budget.congests_pr is True
+
+    over_budget = classify(queued, in_progress=_frozen(9, probed=8))
+    assert over_budget.pr_running == 1
+    assert over_budget.pr_running_unmeasured == 1
+    assert over_budget.verdict == Q.PR_UNWITNESSED, "not OK — nothing was proved executing"
+    assert over_budget.congests_pr is None, "a destructive caller must not read this as clear"
+    assert any("UNMEASURED" in r for r in over_budget.reasons)
+
+    worse = classify(queued, in_progress=_frozen(12, probed=8))
+    assert worse.pr_running == worse.pr_running_unmeasured == 4
+    assert worse.verdict == Q.PR_UNWITNESSED
+
+
+def test_one_proved_executing_run_keeps_the_reading_usable():
+    """The counter-arm: a MEASURED executing run means `pr_running > 0` is a measurement.
+
+    Without this the degradation would swallow `PR-BACKLOGGED` — the state that says PR CI IS
+    being served and the backlog behind it is too deep, which is the honest verdict when some
+    probe actually saw a live job.
+    """
+    queued = [run(1, "python-ci", event="pull_request", age_seconds=6000)]
+    measured = [
+        *_frozen(9, probed=8),
+        Q.QueuedRun(id=9999, name="Python CI", event="pull_request",
+                    created_at=(NOW - timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    has_live_job=True),
+    ]
+    health = classify(queued, in_progress=measured)
+    assert health.pr_running == 2          # one proved executing + one unmeasured
+    assert health.verdict == Q.PR_BACKLOGGED, "the 6000 s wait is past the 5400 s budget"
+
+
+def test_a_reading_where_nothing_was_probed_keeps_the_pre_fix_contract():
+    """`None` also means "no probe was attempted", and that mode must not change behaviour.
+
+    Conflating it with "probed and unmeasurable" degraded `OK` for every caller constructing
+    `QueuedRun`s without probing — a behaviour change to a function documented as pure, which
+    no reading of the defect asks for. If NOTHING in the reading was measured, this is the
+    pre-#12037 mode and it behaves as it always did.
+    """
+    queued = [run(1, "python-ci", event="pull_request", age_seconds=6000)]
+    never_probed = [run(2, "Python CI", event="pull_request", age_seconds=30)]  # all None
+    health = classify(queued, in_progress=never_probed)
+    assert health.pr_running == 1
+    assert health.pr_running_unmeasured == 1
+    assert health.verdict == Q.PR_BACKLOGGED, "legacy callers keep the old reading"
+
+
+def test_read_health_WIRES_the_run_attempt_into_the_probe(monkeypatch):
+    """Round-3 P2: the attempt proof was unproven at its own WIRING.
+
+    Mutating `attempt=run.run_attempt` to `attempt=1`, or dropping the kwarg entirely, was
+    invisible to the suite — the probe tests call the function directly, so the round-2 proof
+    was proven as a FUNCTION and unproven as a WIRING, which is the only path that faces a real
+    payload. This test records the argument `read_health` actually passes.
+    """
+    seen: list[tuple[int, int | None]] = []
+    rows = [
+        {"id": 501, "name": "python-ci", "event": "pull_request",
+         "created_at": "2026-10-19T03:00:00Z", "run_attempt": 3},
+        {"id": 502, "name": "python-ci", "event": "pull_request",
+         "created_at": "2026-10-19T03:05:00Z"},   # no attempt -> coerced to 1
+    ]
+    monkeypatch.setattr(
+        Q, "read_runs", lambda repo, status, max_pages=5: (rows if status == "in_progress" else [], False)
+    )
+
+    def fake_probe(repo, rid, attempt=None):
+        seen.append((rid, attempt))
+        return None
+
+    monkeypatch.setattr(Q, "read_run_live_job", fake_probe)
+    Q.read_health("o/r", NOW)
+
+    assert sorted(seen) == [(501, 3), (502, 1)], seen
+
+
+def test_an_invalid_probe_budget_is_a_measured_error_not_a_crash(monkeypatch):
+    """A non-int budget must not produce a bare `TypeError` (which kills the reading silently).
+
+    `main()` catches only `MeasureError`, so a `TypeError` here would exit with a traceback and
+    no state line — the failure the budget's own rationale exists to prevent.
+    """
+    monkeypatch.setattr(Q, "read_runs", lambda repo, status, max_pages=5: ([], False))
+    for bad in (None, "eight", object()):
+        with pytest.raises(Q.MeasureError) as exc:
+            Q.read_health("o/r", NOW, max_job_probes=bad)
+        assert "max_job_probes" in str(exc.value)
+
+
+def test_a_bool_is_not_accepted_as_an_attempt_or_a_job_count(monkeypatch):
+    """`isinstance(True, int)` is True, so a JSON `true` would otherwise mean attempt 1."""
+    payload = {"total_count": 1, "jobs": [{"status": "completed", "run_attempt": True}]}
+    monkeypatch.setattr(Q, "gh_json", lambda args, timeout=None, p=payload: p)
+    assert Q.read_run_live_job("o/r", 1, attempt=1) is None, "a bool must not match attempt 1"
+
+    payload = {"total_count": True, "jobs": [{"status": "completed", "run_attempt": 1}]}
+    monkeypatch.setattr(Q, "gh_json", lambda args, timeout=None, p=payload: p)
+    # A bool `total_count` is not a usable count; the short page still settles it, so the
+    # answer comes from the page-length signal instead of a `true == 1` coincidence.
+    assert Q.read_run_live_job("o/r", 1, attempt=1) is False
