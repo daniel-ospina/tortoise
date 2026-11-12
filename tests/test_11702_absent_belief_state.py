@@ -5813,10 +5813,14 @@ _CRED_WORD_YIELDS_075 = re.compile(
 #: fixer will "correct" a sentence that is already right — the
 #: false-correction failure this file documents for the mirror guards.
 #:
-#: `is no` is admitted but a bare `no` is NOT, for the reason `_NEGATED` gives:
-#: bare `no` is a determiner, and "no mere flag" is not a negation. The copula
-#: form is: measured, "``credibility=`` is no 0.75 — it is 0.5238 alone" fired
-#: before this alternative existed, which is a false block on correct prose.
+#: `is no <NUMBER>` is admitted but a bare `no` is NOT, for the reason
+#: `_NEGATED` gives: bare `no` is a determiner, and "no mere flag" is not a
+#: negation. The copula form is: measured, "``credibility=`` is no 0.75 — it is
+#: 0.5238 alone" fired before this alternative existed, which is a false block on
+#: correct prose. ⚠️ The alternative is NUMBER-BOUND for a measured reason: a
+#: bare `is\s+no` reproduced exactly the false pass the determiner rule exists to
+#: avoid — "the credibility word is no mere flag and reads 0.75" was exempted
+#: (measured, review cycle 9, P2). `is no 0.75` / `is no 75%` stay exempt.
 #:
 #: The demoters are a WORD LIST and therefore incomplete by construction:
 #: `ignored` / `discarded` / `overwritten` / `superseded` were added after they
@@ -5841,7 +5845,9 @@ _CRED_WORD_YIELDS_075 = re.compile(
 #: directions are pinned in the control test so a later tightening is MEASURED
 #: rather than guessed.
 _CRED_WORD_EXEMPT = re.compile(
-    r"\b(?:not|never|isn'?t|no\s+longer|is\s+no)\b|\bdropped\b|\bdrops\b"
+    r"\b(?:not|never|isn'?t|no\s+longer)\b"
+    r"|\bis\s+no\s+(?:0?\.|75\s*%)"
+    r"|\bdropped\b|\bdrops\b"
     r"|\bloses\b|\blost\b|\bignored\b|\bdiscarded\b|\boverwritten\b"
     r"|\bsuperseded\b",
     re.IGNORECASE)
@@ -5926,21 +5932,29 @@ def _cred_word_yields_075(text: str) -> list[str]:
     that boundary, and they pull in opposite directions, which is why it is
     spelled out:
 
-    • Clause-START matters, and the reach-back is pinned on a sentence the
-      regex ACTUALLY matches: "it is not the case that the credibility word
-      reads 0.75" is quiet with the reach-back and fires the instant it is
-      removed. ⚠️ The sentence a previous revision cited here — "it is NOT the
+    • The span must START BEFORE the token, and that is pinned on a sentence
+      the regex ACTUALLY matches: "it is not the case that the credibility word
+      reads 0.75" is quiet with a reach-back and fires the instant it is
+      removed (measured). ⚠️ HOW FAR BACK it starts is INERT: `final_clause`
+      re-derives the boundary from the last `_CLAUSE_BREAK` before the number,
+      so `cut = 0` and `cut = <clause start>` yield an identical slice for
+      every input (measured: `span = text[:match.end()]` keeps every pin green).
+      Do NOT restate this as "clause-start matters" — the position is not what
+      is pinned, and an earlier revision claimed it was (review cycle 9, P2).
+      ⚠️ The sentence a previous revision cited here — "it is NOT the
       credibility word that reads 0.75" — never matched the regex at all (`that`
-      stops the pre-verb window), so it pinned nothing: removing the reach-back
-      left the suite green (review cycle 5, P1). A pin must be re-measured
-      whenever the window changes.
-    • Clause-START alone is not enough: with the whole span read, a negator of
-      a DIFFERENT predicate exempted a real false claim — "the credibility
-      word is not just an added body: it reads 0.75" passed silently.
-    • Sentence scope is WRONG, and measurably so: `volunteer.py`'s sentence
-      holds "NO LONGER true of every unmeasured point" in an earlier clause,
-      so a sentence-scoped exemption would exempt the very mutation the
-      control test exists to catch.
+      stops the pre-verb window), so it pinned nothing (review cycle 5, P1).
+      A pin must be re-measured whenever the window changes.
+    • Reading the WHOLE SPAN is not enough either: a negator of a DIFFERENT
+      predicate then exempts a real false claim — "the credibility word is not
+      just an added body: it reads 0.75" passed silently — which is why the
+      exemption is scoped to the FINAL clause.
+    • A WHOLE-SENTENCE exemption is WRONG, and measurably so: `volunteer.py`'s
+      sentence holds "NO LONGER true of every unmeasured point" in an earlier
+      clause, so a sentence-scoped exemption would exempt the very mutation the
+      control test exists to catch. That is a different mechanism from the
+      reach-back above (the reach-back only extends the span; the final clause
+      still decides), and conflating the two is what the cycle-9 finding was.
     """
     hits = []
     for match in _CRED_WORD_YIELDS_075.finditer(text):
@@ -6072,6 +6086,15 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             # it had no pin, so deleting it from the alternation left the suite
             # green (review cycle 7, P2).
             "the credibility word equals 0.75",
+            # …a copula `no` in front of a NON-number must not exempt: it is the
+            # determiner the bare-`no` rule excludes, one word over
+            # (review cycle 9, P2 — measured quiet before the alternative was
+            # number-bound).
+            "the credibility word is no mere flag and reads 0.75",
+            # …and the POST-VERB window's LENGTH is load-bearing: this gap is
+            # 20 characters, so narrowing `{0,25}` to 10 or less reds here
+            # (review cycle 9, P2 — the boundary was unpinned).
+            "the credibility word reads exactly the default 0.75",
             # …the other spellings of the SAME claim (review cycle 3, P2).
             "the credibility word reads .75",
             "the credibility word is 75%",
@@ -6134,6 +6157,13 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             # comma to reach "reads 0.75" (cycle 7, P2).
             "the credibility word is one body, so 0.75 stays the default's "
             "mean",
+            # ⛔ KNOWN FALSE PASS, pinned as a BOUNDARY, not as correctness: a
+            # pre-verb COMMA stops the window, so this false attribution is not
+            # reported today. It is here so that widening the pre-verb class to
+            # cross a comma (which would add false-block surface, this guard's
+            # expensive direction) has to move a row rather than pass unnoticed
+            # (review cycle 9, P2 — the comma stop was unpinned).
+            "the credibility word, as noted, is 0.75",
             # …and the ANCHOR: compound identifiers are a DIFFERENT object. T2 is
             # `(3.0, 1.0)` in `source_credibility.py`, mean 0.7500, so these are
             # TRUE and must never be reported (cycle 7, P1).
@@ -6326,7 +6356,17 @@ def test_the_credibility_word_adds_to_the_default_but_loses_to_a_pair(sdk):
     content = "cred word: explicit pair"
     pair = sdk.create_point("statement", content, dedup=True)["id"]
     sdk.set_point_baseline(pair, 3, 1)
-    sdk.create_point("statement", content, dedup=True, credibility="low")
+    # ⛔ ASSERT THE FOLD, do not assume it. The row's claim is that the word is
+    # DROPPED against the explicit pair; if the dedup identity ever stopped
+    # matching, this call would mint a SECOND point at Beta(1.1,1) and `pair`
+    # would be untouched — so both assertions below would pass while the row
+    # covered nothing (review cycle 9, P2).
+    again = sdk.create_point("statement", content, dedup=True,
+                             credibility="low")
+    assert again["id"] == pair, (
+        "the credentialed call did not fold onto the explicit-pair point, so "
+        "the 'word is dropped' row is asserting about a point the word was "
+        "never offered to")
 
     def served(pid: str):
         return annotate_ep_batch(sdk._get_proj().g, [pid])[pid].confidence_mean
