@@ -45,10 +45,15 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
        node types instead and each enumeration silently missed a shape the old
        matcher had caught (first a callee, then a bare decorator, then an aliased
        import) — a token cannot be in the wrong position.
-    2. every string literal CONTAINING the name, unless that string is prose —
-       which covers the name resolved dynamically from a string
-       (``getattr(m, "propagate_shock")``, ``globals()["propagate_shock"]``,
-       ``eval("propagate_shock(1)")``). This over-includes a non-prose string
+    2. every ``str`` **or** ``bytes`` literal whose VALUE contains the name,
+       unless that string is prose — which covers the name resolved dynamically
+       from a string (``getattr(m, "propagate_shock")``,
+       ``globals()["propagate_shock"]``, ``eval("propagate_shock(1)")``, and
+       ``getattr(m, b"propagate_shock".decode())``). The value is read from the
+       AST, never from the literal's source text: implicit concatenation
+       (``"propagate_" "shock"``), an escape (``"propagate_shoc\\x6b"``) and the
+       same split across lines all fold to one ``ast.Constant`` whose value is the
+       name, while no single TOKEN holds it. This over-includes a non-prose string
        that only talks about the function (a log line). Deliberate and declared:
        the pre-fix matcher counted those too, and the one thing this change must
        not do is hand back a quieter guard.
@@ -62,77 +67,106 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
     by SHAPE, never by its wording — matching the wording is the defect class this
     file just removed.
 
-    ``None`` means a Python source file (``.py`` or ``.pyi`` — a stub declares
-    identifiers too) could not be read or parsed, and the caller reads it as
-    "every line is code": a degraded read can only make the audit STRICTER.
-    Any OTHER suffix under ``tortoise/`` answers the empty set rather than failing
-    to parse — prose in a ``.md`` or ``.sql`` file is prose, and reading it as a
-    caller is the false positive this change removes. (It is not that such a file
-    can hold no identifiers; it is that we do not read it as Python.)
+    ``None`` means a file could not be read (any suffix), or a Python source
+    file (``.py`` or ``.pyi`` — a stub declares identifiers too) could not be
+    PARSED, and the caller reads it as "every line is code": a degraded read can
+    only make the audit STRICTER.
+
+    ⛔ A NON-Python suffix is NOT prose, and answering the empty set for one is a
+    QUIETER guard than the matcher this replaced. ``tortoise/`` ships 16
+    executable non-Python files today (7 ``.sh`` hooks, 6 ``.ts``, 3 ``.mjs``),
+    and a hook embedding
+    ``python3 -c 'from tortoise.projection.propagation import propagate_shock'``
+    is a live dependency; the pre-fix matcher had no suffix notion at all, so it
+    counted every such line. With no tokens to ask, the answer is therefore the
+    LOUD one: on a non-Python file, a line that names it is code. Declared
+    over-inclusion — a documentation mention under ``tortoise/`` reads as code
+    too — in the same safe direction as the non-docstring-string residual above.
     """
     if path.suffix not in (".py", ".pyi"):
-        return frozenset()
+        try:
+            # ⛔ BYTES, not `read_text`: text mode applies UNIVERSAL NEWLINES (a
+            # lone `\r` becomes `\n`), so the file's own line breaks are gone
+            # before any split can honour grep's numbering.
+            text = path.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+        # No parser to ask, so the word boundary is the whole rule: it is a word
+        # scan, never a syntax guess, and it errs LOUD on anything it cannot
+        # place.
+        word = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])")
+        # Split on `\n` ALONE, because the caller's line number comes from
+        # `grep -rn`, and grep counts only `\n`: on a file carrying a lone `\r`
+        # (old-Mac line endings) any other split numbers the hit one line too
+        # high, and the audit then reports the file as prose. The reference space
+        # here is grep's, not a parser's.
+        return frozenset(
+            i
+            for i, line in enumerate(text.split("\n"), start=1)
+            if word.search(line)
+        )
     try:
-        src = path.read_text(encoding="utf-8")
+        # ⛔ BYTES + ONE LINE MODEL, for the same reason the non-Python arm above
+        # reads bytes: `read_text` applies UNIVERSAL NEWLINES, so a lone `\r`
+        # silently becomes a line break the PARSER sees and `grep -rn` does not —
+        # and the CALLER's line number is grep's.
+        #
+        # `\r\n` is folded to `\n` (a line break in BOTH views, so numbering is
+        # preserved). A lone `\r` is NOT substituted away: replacing it with a space
+        # merges the two physical lines, and a `#` comment on the first then runs to
+        # EOF and swallows a real dependency — measured, `b"x = 1  # comment\rpropagate_shock()\r"`
+        # read as prose. Instead a file that still holds a lone `\r` is a DEGRADED
+        # read: grep and the parser disagree about its lines, so it cannot be
+        # certified clean and `None` routes every line to `production_code`.
+        raw = path.read_bytes().decode("utf-8").replace("\r\n", "\n")
+        if "\r" in raw:
+            return None
+        src = raw
         tree = ast.parse(src, filename=str(path))
         tokens = list(tokenize.generate_tokens(io.StringIO(src).readline))
     except (OSError, UnicodeDecodeError, SyntaxError, ValueError, tokenize.TokenError,
             IndentationError):
         return None
 
-    # ⛔ ONE COORDINATE SPACE. `ast` reports `col_offset`/`end_col_offset` as
-    # UTF-8 BYTE offsets (CPython ASDL: "col_offset is the byte offset in the utf8
-    # string the parser uses"), while `tokenize.generate_tokens` over a `str`
-    # reports CHARACTER columns. Comparing the two directly makes the prose box's
-    # right edge drift right by one column per extra UTF-8 byte, so a docstring
-    # holding enough non-ASCII swallows a literal that really lies after its
-    # closing quotes — a live `getattr(m, "...")` on the terminator line read as
-    # prose, i.e. the same fail-open the box exists to close. The bytes are
-    # converted to characters here, at the only place that reads AST columns.
-    # `by.splitlines()` is avoided deliberately: it also splits on `\v`, `\f`,
-    # `\x85`, `\u2028`/`\u2029`, which the parser does NOT treat as line ends, so
-    # indices could shift. Split on exactly the parser's own line endings.
-    src_lines = re.split(r"\r\n|\r|\n", src)
+    # ⛔ ONE COORDINATE SPACE, BY CONSTRUCTION — and NO conversion. Both boxes
+    # compared below (the prose statement's, and the mentioning constant's) come
+    # from `ast`, whose `col_offset`/`end_col_offset` are UTF-8 BYTE offsets
+    # (CPython ASDL: "col_offset is the byte offset in the utf8 string the parser
+    # uses"). Byte-vs-byte is unit-consistent and monotonic within a line, so
+    # containment is decided correctly for non-ASCII content with no converter in
+    # the middle. An earlier revision compared a TOKEN's character column against
+    # an AST byte column and needed one; the string branch now reads the tree, so
+    # that converter had become INERT (measured: removing it left every row green
+    # and every verdict identical over 100+ non-ASCII shapes). It is deleted rather
+    # than kept with a comment claiming work it no longer does; the two single-line
+    # em-dash rows deleted alongside it are documented at their old site below.
+    prose_boxes: list[tuple[int, int, int, int]] = []
 
-    def _char_col(lineno: int, byte_col: int) -> int | None:
-        """The CHARACTER column of a UTF-8 ``byte_col`` on ``lineno``.
-
-        AST offsets always land on a character boundary; ``errors="ignore"`` only
-        keeps the conversion total (it can never drop a whole character).
-
-        ``None`` means the line is outside the parser's own line model, so the
-        column cannot be placed at all. A box that cannot be placed is DROPPED by
-        the caller, never built in the byte unit: dropping an exemption makes the
-        prose read as CODE (the loud direction), while returning ``byte_col`` here
-        would restore the exact fail-open this conversion removes.
-        """
-        if not 1 <= lineno <= len(src_lines):
+    def _box(node: ast.AST) -> tuple[int, int, int, int] | None:
+        """The (top, left, bottom, right) box of an AST node, in AST columns."""
+        right_line = getattr(node, "end_lineno", None) or node.lineno
+        right_col = getattr(node, "end_col_offset", None)
+        if right_col is None:
             return None
-        return len(src_lines[lineno - 1].encode("utf-8")[:byte_col].decode("utf-8", "ignore"))
+        return (node.lineno, node.col_offset, right_line, right_col)
 
-    # Prose strings: any statement whose whole value is a string literal. Kept as
-    # an exact (line, column) BOX, not a line range.
+    # Prose strings: any statement whose whole value is a string literal, as an
+    # exact BOX rather than a line range.
     # ⛔ LINE-granularity is a fail-open: `"""Doc."""; x = getattr(m,
     # "propagate_shock")` puts a live string-resolved dependency on a line the
     # docstring owns, and a line test discards it — the audit then reports no
-    # dependency while one exists. Containment is therefore column-aware, so only
-    # a literal lying INSIDE the prose statement's box is prose; the string on the
-    # terminator line is code.
-    prose_boxes: list[tuple[int, int, int, int]] = []
+    # dependency while one exists. Containment is column-aware, so only a literal
+    # lying INSIDE the prose statement's box is prose; the string after the
+    # closing quotes is code.
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Expr)
             and isinstance(node.value, ast.Constant)
             and isinstance(node.value.value, str)
         ):
-            value = node.value
-            right_line = getattr(value, "end_lineno", None) or value.lineno
-            right_col = getattr(value, "end_col_offset", None)
-            left = _char_col(value.lineno, value.col_offset)
-            right = _char_col(right_line, right_col) if right_col is not None else 0
-            if left is None or right is None:
-                continue
-            prose_boxes.append((value.lineno, left, right_line, right))
+            box = _box(node.value)
+            if box is not None:
+                prose_boxes.append(box)
 
     def _inside_prose(start: tuple[int, int], end: tuple[int, int]) -> bool:
         return any(
@@ -140,20 +174,50 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
             for top, left, bottom, right in prose_boxes
         )
 
-    # Python 3.12 tokenizes an f-string as FSTRING_START/FSTRING_MIDDLE/…, so the
-    # literal part of one is an FSTRING_MIDDLE token, not a STRING. Without this
-    # an f-string mention would be the one non-prose string that reads as prose.
-    fstring_middle = getattr(tokenize, "FSTRING_MIDDLE", None)
     lines: set[int] = set()
+
+    # ⛔ THE STRING BRANCH READS THE LITERAL'S **VALUE**, NEVER ITS SOURCE TEXT.
+    # Matching the raw token text is a fail-open in shapes whose source spelling
+    # differs from the value the runtime resolves: implicit concatenation
+    # `getattr(m, "propagate_" "shock")` (tokenize emits TWO STRING tokens, neither
+    # holding the name), an escape `"propagate_shoc\x6b"`, and the same
+    # concatenation split ACROSS lines. The AST holds the folded value in all of
+    # them — `ast.Constant.value == "propagate_shock"` — so the check is asked of
+    # the value, and the box that decides prose-vs-code is the CONSTANT's box (the
+    # whole folded literal in the multi-line case), not a token's.
+    #
+    # ⛔ AND IT COVERS `bytes`, because a bytes literal reaches the same runtime
+    # name through `.decode()`: `getattr(m, b"propagate_shock".decode())`. A
+    # `str`-only test drops that, and the pre-fix matcher CAUGHT it (the token's
+    # source text holds the name) — so str-only would be a quieter guard than the
+    # one this change replaced, in exactly the direction it forbids.
+    #
+    # An f-string's literal parts need no special case under this rule: a
+    # `JoinedStr` holds them as `ast.Constant` nodes, so they are seen here (3.12's
+    # FSTRING_MIDDLE token type is a tokenizer detail, not a fact about the tree).
+    needle = name.encode("utf-8")
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes))):
+            continue
+        value = node.value
+        if not (name in value if isinstance(value, str) else needle in value):
+            continue
+        box = _box(node)
+        if box is None:
+            continue
+        # A prose statement's OWN value is inside its own box, so this single
+        # containment test excludes it — no parent lookup, no second rule.
+        if _inside_prose(box[:2], box[2:]):
+            continue
+        lines.update(range(box[0], box[2] + 1))
+
+    # ⛔ THE NAME BRANCH READS TOKENS, not the tree: a token cannot be in the wrong
+    # syntactic position, so a call, a callee passed as a value, a bare decorator,
+    # an `import … as` alias and a reference on a later line of a multi-line
+    # expression are all the same one answer.
     for tok in tokens:
         if tok.type == tokenize.NAME and tok.string == name:
             lines.add(tok.start[0])
-        elif (
-            (tok.type == tokenize.STRING or tok.type == fstring_middle)
-            and name in tok.string
-            and not _inside_prose(tok.start, tok.end)
-        ):
-            lines.update(range(tok.start[0], tok.end[0] + 1))
     return frozenset(lines)
 
 
@@ -162,8 +226,8 @@ def _classify_tortoise_hit(path: Path, lineno: int) -> str:
 
     Split out of :func:`test_no_propagate_shock_callers` so the CALLER's own arm
     is reachable by a test. The audit's consequence of a DEGRADED read lives
-    here — ``_code_lines_naming`` returning ``None`` means "this file could not
-    be read'', and a guard that cannot read a file must not call it clean, so
+    here — ``_code_lines_naming`` returning ``None`` means this file could not
+    be read, and a guard that cannot read a file must not call it clean, so
     ``None`` is routed to ``production_code``.
 
     ⛔ Pinned by :func:`test_an_unreadable_file_is_routed_to_production_code`, not
@@ -235,6 +299,21 @@ def test_the_code_detector_sees_every_shape_it_claims(tmp_path):
             'value = builtins.getattr(m, "propagate_shock")(1)\n', {1}),
         "string_subscript_dynamic": ('value = globals()["propagate_shock"](1)\n', {1}),
         "string_in_eval": ('value = eval("propagate_shock(1)")\n', {1}),
+        # ⛔ The literal's SOURCE SPELLING is not its VALUE. These three resolve to
+        # the name at runtime while NO single TOKEN holds it, so a token-text test
+        # reads them as prose: implicit concatenation, an escape, and the same
+        # concatenation split across lines (the AST Constant then spans both).
+        "string_implicit_concat": (
+            'value = getattr(m, "propagate_" "shock")(1)\n', {1}),
+        "string_escape": ('value = getattr(m, "propagate_shoc\\x6b")(1)\n', {1}),
+        "string_dunder_all_concat": ('__all__ = ["propagate_" "shock"]\n', {1}),
+        # ⛔ `bytes`: the same runtime name through `.decode()`. A str-only value
+        # test drops it and the pre-fix matcher caught it, so this row is the
+        # difference between a guard that gets louder and one that gets quieter.
+        "bytes_getattr": ('value = getattr(m, b"propagate_shock".decode())(1)\n', {1}),
+        "bytes_implicit_concat": ('value = getattr(m, b"propagate_" b"shock".decode())\n', {1}),
+        "string_implicit_concat_multiline": (
+            'value = getattr(\n    m,\n    "propagate_"\n    "shock",\n)(1)\n', {3, 4}),
         # ── multi-line callee: the name is NOT on `node.lineno` ──
         "chained_multiline": (
             "value = (\n    _BASE\n    .strip()\n    .propagate_shock(1)\n)\n", {4}),
@@ -251,16 +330,13 @@ def test_the_code_detector_sees_every_shape_it_claims(tmp_path):
         "docstring": ('def f():\n    """propagate_shock is deprecated."""\n', set()),
         "docstring_multiline": (
             'def f():\n    """S2 VET \u2014 the pass\n\n    propagate_shock PERSISTS the\n    blend; it is never invoked.\n    """\n', set()),
-        # ⛔ This row is the whole "a NON-ASCII docstring's prose mention is prose"
-        # claim, and it is the ONLY one: two earlier rows
-        # (`long_non_ascii_docstring_mention_on_closing_line`,
-        # `docstring_non_ascii_mention_on_closing_line`) asserted they pinned the
-        # byte/char drift "where the box's right edge is tested", but their mention
-        # sits on an INTERIOR line, so containment compares (4, col) <= (5, …) and
-        # the columns never decide — both were green under every unit, including
-        # the pre-fix mutant. A row that cannot fail is not a pin, so they were
-        # dropped and this one stays for the plain regression it names. The unit
-        # itself is pinned by the `_non_ascii` rows below.
+        # ⛔ `class_docstring` below is ASCII on purpose: columns are AST BYTE
+        # offsets on BOTH sides of the containment test by construction, so a
+        # non-ASCII row decides nothing an ASCII row does not. Two `_non_ascii`
+        # rows were deleted here after measuring that they could not fail (see the
+        # coordinate-space note in `_code_lines_naming`); they were the same
+        # "a row that cannot fail is not a pin" class as the two rows dropped
+        # before them.
         "class_docstring": ('class C:\n    """propagate_shock is deprecated."""\n', set()),
         "module_docstring": ('"""propagate_shock is deprecated."""\nvalue = 1\n', set()),
         # PEP 257's TOLERATED forms, which a "first statement of a def" rule misses:
@@ -279,24 +355,18 @@ def test_the_code_detector_sees_every_shape_it_claims(tmp_path):
             'def f():\n    """Doc."""; x = getattr(m, "propagate_shock")\n', {2}),
         "docstring_then_plain_string_same_line": (
             'def f():\n    """Doc."""; y = "propagate_shock"\n', {2}),
-        # ⛔ The SAME two shapes with a NON-ASCII docstring. `ast` columns are
-        # UTF-8 bytes and `tokenize` columns are characters, so an ASCII-only row
-        # cannot see an off-by-N-bytes comparison: the prose box's right edge
-        # drifts right by one column per extra byte and swallows the literal that
-        # follows the closing quotes. 18 em dashes = 54 UTF-8 bytes but 18
-        # characters, i.e. a 36-column drift on one line — the pre-fix box ends at
-        # column 64 against a true end of 28, so the literal at column 45 is
-        # inside it. First fail-open measured at 17 em dashes (34 columns of
-        # drift); every row here is above that wedge.
-        "docstring_then_string_same_line_non_ascii": (
-            'def f():\n    """' + "\u2014" * 18 + '"""; x = getattr(m, "propagate_shock")\n', {2}),
-        "docstring_then_plain_string_same_line_non_ascii": (
-            'def f():\n    """' + "\u2014" * 18 + '"""; y = "propagate_shock"\n', {2}),
-        # ⛔ …and the same fail-open on a MULTI-line docstring, whose box is the one
-        # a single-line-only conversion never exercises: a regression that
-        # converted the columns only when the span's start and end share a line
-        # passes EVERY single-line row above and still reads this live dependency
-        # as prose (measured: `[]` against the correct `{3}`).
+        # Columns are AST BYTE offsets on both sides of the containment test, by
+        # construction, so non-ASCII content needs no separate unit row: an
+        # ASCII-only row decides the same thing. (Two such rows were deleted here
+        # after measuring that they could not fail — see the coordinate-space note
+        # in `_code_lines_naming`.)
+        # ⛔ COLUMN CONTAINMENT ACROSS A MULTI-LINE PROSE BOX: the docstring opens on
+        # line 2 and closes on line 3, and a LIVE dependency shares its terminator
+        # line. Making containment LINE-granular reds this row (`[]` against the
+        # correct `{3}` — measured), which is what it pins; it is the row that does
+        # that job, so do not delete it as "an em-dash row". The prose box's SPAN is
+        # pinned elsewhere — `docstring_multiline` and `test_no_propagate_shock_callers`
+        # both red when the box is collapsed to its start line (measured).
         "multiline_non_ascii_docstring_then_string_same_line": (
             'def f():\n    """\u2014 the pass\n    ' + "\u2014" * 18
             + '"""; x = getattr(m, "propagate_shock")\n', {3}),
@@ -313,19 +383,60 @@ def test_the_code_detector_sees_every_shape_it_claims(tmp_path):
             assert got == frozenset(), f"{label}: prose read as code \u2014 {sorted(got)}"
 
 
-def test_the_code_detector_ignores_prose_outside_python_files(tmp_path):
-    """A `.md`/`.sql` file under `tortoise/` cannot carry a Python identifier, so
-    its mention is prose. Reading it as a caller was a declared-shape violation:
-    it never parses, so it fell to the `None` arm and the whole file counted.
+def test_a_non_python_file_is_read_as_code_not_as_prose(tmp_path):
+    """A NON-Python file under `tortoise/` that names the helper is CODE.
 
-    `.pyi` is the OPPOSITE case — a stub is Python source — and is pinned by
-    :func:`test_a_stub_file_is_read_as_python_not_as_prose`. Do not add it here.
+    `tortoise/` ships executable non-Python files — `.sh` hooks, `.ts`/`.mjs`
+    plugin sources — and a hook that shells out to
+    ``python3 -c 'from tortoise.projection.propagation import propagate_shock'``
+    is a live dependency. The pre-fix matcher counted every such line (it had no
+    suffix notion), so a suffix gate answering the empty set would be a QUIETER
+    guard than the one it replaced, for a file class that exists in the tree.
+    With no tokens to ask, the answer is the loud one.
+
+    Declared over-inclusion: a documentation mention under `tortoise/` also reads
+    as code here. That is the safe direction — it can only red the audit, never
+    green it.
+
+    `.pyi` is a DIFFERENT case — a stub is Python source and is parsed as such —
+    and is pinned by :func:`test_a_stub_file_is_read_as_python_not_as_prose`.
     """
-    for suffix in (".md", ".sql", ".txt", ".yml"):
+    for suffix in (".md", ".sql", ".txt", ".yml", ".sh", ".ts", ".mjs", ".json"):
         path = tmp_path / f"notes{suffix}"
-        path.write_text("The deprecated helper propagate_shock is documented here.\n",
-                        encoding="utf-8")
-        assert _code_lines_naming(path, "propagate_shock") == frozenset(), suffix
+        path.write_text(
+            "intro line\nThe deprecated helper propagate_shock is documented here.\n",
+            encoding="utf-8")
+        assert _code_lines_naming(path, "propagate_shock") == frozenset({2}), suffix
+
+    # The shape that actually loses coverage if non-Python files are read as
+    # prose: a shell hook embedding the import.
+    hook = tmp_path / "session-end.sh"
+    hook.write_text(
+        "#!/bin/sh\npython3 -c '\n"
+        "from tortoise.projection.propagation import propagate_shock\n'\n",
+        encoding="utf-8")
+    assert _code_lines_naming(hook, "propagate_shock") == frozenset({3})
+
+    # A non-Python file that never names it answers the empty set.
+    quiet = tmp_path / "quiet.md"
+    quiet.write_text("nothing relevant here\n", encoding="utf-8")
+    assert _code_lines_naming(quiet, "propagate_shock") == frozenset()
+
+    # ...and an UNREADABLE non-Python file is a degraded read, not a clean one.
+    assert _code_lines_naming(tmp_path / "absent.sh", "propagate_shock") is None
+
+    # ⛔ LINE NUMBERS ARE GREP'S, not a parser's: `grep -rn` counts only `\n`, so a
+    # file carrying a lone `\r` must be numbered the same way. Splitting on `\r`
+    # too numbers the hit one line too high, the caller's grep line then misses it,
+    # and a file that names the helper is reported as prose.
+    cr = tmp_path / "mac.md"
+    cr.write_bytes(b"prose line 1\rline2: propagate_shock is imported by the hook\r")
+    assert _code_lines_naming(cr, "propagate_shock") == frozenset({1}), "grep numbers this line 1"
+
+    # The word scan must not match a LONGER identifier that merely contains it.
+    longer = tmp_path / "longer.md"
+    longer.write_text("xpropagate_shocky and propagate_shocked\n", encoding="utf-8")
+    assert _code_lines_naming(longer, "propagate_shock") == frozenset()
 
 
 def test_a_stub_file_is_read_as_python_not_as_prose(tmp_path):
@@ -388,6 +499,26 @@ def test_the_code_detector_is_fail_closed(tmp_path):
     binary = tmp_path / "binary.py"
     binary.write_bytes(b"\xff\xfe\x00propagate_shock")
     assert _code_lines_naming(binary, "propagate_shock") is None
+
+    # ⛔ A `.py` whose only line separator is a lone `\r` cannot be placed in grep's
+    # line model at all: `grep -n` sees ONE line, the parser sees many, and the
+    # caller's number is grep's. A degraded read, never a prose verdict.
+    cr_only = tmp_path / "cr_only.py"
+    cr_only.write_bytes(b"x = 1\rpropagate_shock()\r")
+    assert _code_lines_naming(cr_only, "propagate_shock") is None
+
+    # ...while CRLF folds to `\n`, a line break in BOTH views, so numbering survives.
+    crlf = tmp_path / "crlf.py"
+    crlf.write_bytes(b"x = 1\r\npropagate_shock()\r\n")
+    assert _code_lines_naming(crlf, "propagate_shock") == frozenset({2})
+
+    # ⛔ The shape a `\r`→space substitution would MERGE into one line, where the
+    # `#` comment then runs to EOF and swallows the naming line: the audit would
+    # report prose while a real dependency sits there (measured before this row
+    # existed). A lone `\r` is never substituted away — the file is not certifiable.
+    swallowed = tmp_path / "swallowed.py"
+    swallowed.write_bytes(b"x = 1  # comment\rpropagate_shock()\r")
+    assert _code_lines_naming(swallowed, "propagate_shock") is None
 
 
 # ── 1. propagate_shock callers ────────────────────────────────────

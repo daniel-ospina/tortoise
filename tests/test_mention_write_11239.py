@@ -853,8 +853,9 @@ def test_the_first_creation_folds_the_writers_bytes_not_the_payload_spelling(env
     exists for (`_upsert_point_props` / `stated_json_record_prop` share it).
 
     `EventAPI.add_point` is the door that journals the list spelling
-    (`api.py` `_emit("PointAdded", point=p)` with no store-value filter), so it
-    is also the door that reaches this arm on a FIRST creation.
+    (`api.py` passes its record to `_emit` positionally, rendered as
+    `point`, with no store-value filter), so it is also the door that reaches
+    this arm on a FIRST creation.
 
     Mutant it reds on: nesting the loop back inside `if isinstance(_prev, dict)`
     (the pre-fix shape) — the fold then yields the payload list, not the scalar.

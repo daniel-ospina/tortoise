@@ -464,9 +464,9 @@ def refuse_malformed_money_in_payload(payload, *, door: str = "") -> None:
     one flat bag the way the SDK doors do: it passes the RECORD it is about to
     journal, and WHERE the money keys sit depends on the door —
     ``ObjectRegistered`` / ``EventRecorded`` splat them at the top level, but
-    ``PointAdded`` nests the whole record under ``point=`` (``add_point`` builds
-    ``p`` and emits ``point=p``); ``EventRecorded`` also carries ``uses[]``
-    items. A gate that read only the top level was measured INERT on the Point
+    ``PointAdded`` nests the whole record under ``point`` (``add_point`` builds
+    ``p`` and passes it to ``_emit`` as the record payload, which the funnel
+    renders as ``point``); ``EventRecorded`` also carries ``uses[]`` items. A gate that read only the top level was measured INERT on the Point
     door — the door ``extractor`` / ``ingest`` / ``docs_miner`` / ``mining`` /
     the CLI all write through — so ``add_point(..., amountMinor=…)`` landed
     ``amountMinor`` with no currency beside it and made :func:`total_minor`
@@ -488,6 +488,12 @@ def refuse_malformed_money_in_payload(payload, *, door: str = "") -> None:
     Widening engagement here would refuse legitimate writes — that is what the
     review's "presence-based" candidate was withdrawn for.
 
+    ⚠️ SHAPE IS THE ONE OTHER TRIGGER, and it is not a money rule: a payload
+    nested deeper than :data:`_MONEY_PAYLOAD_MAX_DEPTH` is refused whether or
+    not it carries money at all (see the depth refusal below), so "gated only
+    if it carries an ``amountMinor``/``currency``" describes the money REFUSAL,
+    not every refusal this walk can raise (#11836 review P3).
+
     ⚠️ FAILURE DIRECTION — REFUSE, not admit, for the family it matches: a
     nested mapping that carries a non-null ``amountMinor``/``currency`` for a
     non-money purpose would be refused too, because the bag alone cannot say
@@ -498,10 +504,9 @@ def refuse_malformed_money_in_payload(payload, *, door: str = "") -> None:
     refusal is about one, so a writer that hits it can act on it.
 
     ⚠️ THE DEPTH REFUSAL IS NOT ABOUT A MONEY VALUE, and its message must not
-    pretend otherwise: the walk refuses a payload it could not finish reading
-    EVEN WHEN that payload carries no money at all (#11836 review P3). It says
-    what it measured (the depth) and what it could not do (see inside), never a
-    member it never found.
+    pretend otherwise: it fires on the SHAPE stated above, so it can refuse a
+    payload that carries no money at all. It says what it measured (the depth)
+    and what it could not do (see inside), never a member it never found.
     """
     seen: set[int] = set()
     stack: list[tuple[object, int]] = [(payload, 0)]
