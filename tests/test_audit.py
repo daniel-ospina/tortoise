@@ -1,14 +1,16 @@
 """Issue #348 — audit tool (SDK audit() + CLI `tortoise audit` + MCP tortoise_audit).
 
-Covers eight of the nine audit checks POSITIVELY (point-level legacy missing_
+Covers eight of the eleven audit checks POSITIVELY (point-level legacy missing_
 sourceKind, missing_sourceDate, superseded_no_edge via CORRECTS,
 superseded_active_edges, naive-IMPL word-boundary heuristic,
 mitigation_recommended via mitigated_by, legacy mitigates edges, Source-level
-missing_sourceKind_source), and pins the ninth — inverted_validity_window — as a
+missing_sourceKind_source), and pins inverted_validity_window as a
 ZERO count on correctly-wired graphs. Its positive coverage lives in
 tests/test_5361_inverted_window_audit.py, so the claim made here is the absence
 half only: a zero-count assertion passes when a check is missing entirely and
-cannot stand in for the check existing. Also covers uncapped counts vs
+cannot stand in for the check existing. The two OBJECT-anchored supersession
+checks (#11826 — `superseded_object_active_edges`, `superseded_by_unresolvable`)
+are covered POSITIVELY in tests/test_11826_object_supersession_instrument.py. Also covers uncapped counts vs
 capped samples, pointKind scoping, exit-code semantics, both surfaces (CLI
 wraps the SDK audit() method; MCP handler + registry entry), and the negative
 case (correctly-wired graphs via the real SDK write paths are NOT flagged).

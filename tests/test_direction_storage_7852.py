@@ -220,7 +220,10 @@ def test_defaults_are_unchanged(sdk):
     stays the literal `bidirectional`."""
     a, b = _point(sdk, "a"), _point(sdk, "b")
     impl = sdk.create_operator("IMPL", a["id"], [b["id"]])
-    nand = sdk.create_operator("NAND", a["id"], [b["id"]], direction=None)
+    # A fresh pair for the NAND probe: one pair carries at most one mechanism
+    # (#12067's closed set), and this test is about the DIRECTION default.
+    c = _point(sdk, "c")
+    nand = sdk.create_operator("NAND", a["id"], [c["id"]], direction=None)
     assert _operator_stored(sdk, impl["id"]) == "bidirectional"
     assert _operator_stored(sdk, nand["id"]) == "unidirectional"
 
