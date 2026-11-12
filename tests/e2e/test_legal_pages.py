@@ -598,6 +598,26 @@ def _body_text_clean(page: Page) -> str:
     return _clean(page.evaluate("document.body.innerText"))
 
 
+def _is_project_host(host: str) -> bool:
+    """Is `host` one of OUR origins? `_PROJECT_OWNED_HOSTS` (defined below with the
+    crawl it belongs to), any Cloudflare preview, and the local preview origin the
+    suite actually runs against.
+
+    A DOT BOUNDARY, not `str.endswith(hosts)`: `notpremiselabs.co` ends with
+    `premiselabs.co` and is NOT ours.
+    """
+    h = (host or "").lower()
+    if not h:
+        return False
+    if h in ("localhost", "127.0.0.1"):
+        return True
+    return (
+        h in _PROJECT_OWNED_HOSTS
+        or any(h.endswith("." + owned) for owned in _PROJECT_OWNED_HOSTS)
+        or h.endswith(".pages.dev")
+    )
+
+
 def _href_matches_path(hrefs, wanted: str) -> bool:
     """Does any href point at `wanted`, in any of the shapes #11762/#11764 creates?
 
@@ -605,12 +625,27 @@ def _href_matches_path(hrefs, wanted: str) -> bool:
     are the SAME document; which spelling is correct depends on the origin serving
     the page. Path suffix accepts all three without accepting a different page.
 
-    Named for the SHAPE, not for the footer: the signup acceptance line needs the
-    same verdict (`test_signup_acceptance_dom_structure`), because the app origin
-    cannot spell these paths root-relative either.
+    Named for the SHAPE, not for the footer: the signup ACCEPTANCE line asks the
+    same question (`test_signup_acceptance_dom_structure`), because the app origin
+    cannot spell these paths root-relative either (#11764, measured).
+
+    ⛔ An ABSOLUTE href must be on a project-owned origin, and only `http(s)` is a
+    link shape at all. Path suffix ALONE accepted `https://evil.example/tos` and
+    `javascript:alert(1)//tos` (whose split path is `/tos`), which on the acceptance
+    line means a user agreeing to a stranger's terms while this gate reports green
+    — a false PASS on the one assertion here with legal consequence, and the exact
+    class the footer half was never asked about.
     """
     for href in hrefs:
-        path = urlsplit(href).path if "//" in href else href
+        parts = urlsplit(href)
+        if parts.scheme or parts.netloc:  # absolute, or protocol-relative `//host/path`
+            if parts.scheme not in ("", "http", "https"):
+                continue  # `javascript:`, `data:` — not a destination
+            if not _is_project_host(parts.hostname or ""):
+                continue  # somebody else's origin
+            path = parts.path
+        else:  # root-relative
+            path = href
         if path == wanted or path.endswith(wanted):
             return True
     return False
@@ -1232,14 +1267,19 @@ def test_signup_acceptance_same_viewport(page: Page, viewport: tuple[int, int]) 
 def test_signup_acceptance_dom_structure(page: Page) -> None:
     """DOM parentage (P1-2): .legal-accept is a SIBLING of .providers,
     PRECEDES <form id="email-form"> in document order, and is NOT a
-    descendant of the form. Links resolve to the /tos and /privacy PATHS.
+    descendant of the form. Links resolve to the /tos and /privacy PATHS, on a
+    PROJECT-OWNED origin.
 
     Matched by PATH (#11762/#11764), never by the literal relative string: this
     page is served by the APP origin, where a root-relative `/tos` answered 404
     (measured, #11764), so the acceptance line names the marketing origin
     absolutely — `https://premiselabs.co/tos`. Equality against "/tos" was the
     pre-#11764 spelling and reddened the suite the moment the href became
-    correct."""
+    correct.
+
+    The ORIGIN half is not decoration: this is the line where a user agrees to
+    terms, so `https://evil.example/tos` must fail here even though a path-suffix
+    match would accept it (`_href_matches_path` refuses it)."""
     _goto(page, _app_url("/signup"))
 
     struct = page.evaluate(
