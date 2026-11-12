@@ -44,13 +44,14 @@ NOW = datetime(2026, 10, 19, 3, 30, 0, tzinfo=UTC)
 
 
 def run(rid, name, event="issue_comment", age_seconds=600, created_at=None,
-        *, attempt=1, started_age_seconds=None):
+        *, attempt=1, started_age_seconds=None, has_live_job=None):
     stamp = created_at or (NOW - timedelta(seconds=age_seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
     started = ("" if started_age_seconds is None
                else (NOW - timedelta(seconds=started_age_seconds)).strftime(
                    "%Y-%m-%dT%H:%M:%SZ"))
     return Q.QueuedRun(id=rid, name=name, event=event, created_at=stamp,
-                       run_attempt=attempt, run_started_at=started)
+                       run_attempt=attempt, run_started_at=started,
+                       has_live_job=has_live_job)
 
 
 def flood_queued(count=12, name="finding-provenance", age_seconds=600, start=1000,
@@ -2114,3 +2115,290 @@ def test_the_only_ok_outside_the_seam_has_no_wait_to_measure():
     assert health.verdict == Q.OK
     assert health.pr_queued == 0
     assert health.oldest_pr_queued_age_seconds is None
+
+
+# --- #12037: `pr_running` is a census of EXECUTING work, not of a status string ---
+#
+# THE DEFECT. Three runs on this repo read `status: in_progress` continuously from
+# 2026-11-05 while every job in each had already `completed`, and NEITHER repair
+# endpoint accepts them — `/cancel` and `/force-cancel` both answer 409, with reasons
+# that contradict each other ("not in progress" vs "has not been queued yet"). So the
+# run `status` is a frozen read no agent can clear. Because they are PR-event runs they
+# were counted in `pr_running` forever, and two clauses keyed on that number went
+# quietly wrong in the fail-open direction:
+#
+#   * `PR-STARVED` requires `pr_running == 0`, which could never hold again — an inert
+#     enforcer advertising a state it could not produce; and
+#   * with `pr_running > 0` the wait sensitivity moves from `min_age_seconds` (180 s) to
+#     `max_pr_wait_seconds` (5400 s), so a queue starved for 30× longer than the floor
+#     certified itself `OK`.
+#
+# THE FIX. `pr_running` counts only runs whose jobs were READ and not all found
+# terminal. The discrimination matters as much as the exclusion: `False` is a PROOF
+# (every job of the run is `completed`, so it is executing nothing), while an
+# unmeasured run abstains toward EXECUTING — under-counting manufactures `PR-STARVED`,
+# a `STARVING_VERDICT` that authorises a destructive cancel-then-rerun.
+
+GHOSTS = (42066648922, 42063693940, 42062549845)
+
+
+def ghost_runs():
+    """The three measured frozen runs: PR-event, `in_progress`, every job completed."""
+    return [run(rid, "ai-review-gate", event="pull_request_target", age_seconds=7 * 86400,
+                has_live_job=False)
+            for rid in GHOSTS]
+
+
+def test_the_issue_reproduction_frozen_runs_no_longer_make_a_starved_queue_read_OK():
+    """The exact reproduction from #12037, as a two-branch discrimination.
+
+    One PR run queued 300 s — inside the 180 s floor, far inside the 5400 s budget.
+    The ONLY difference between the two readings is whether the three frozen runs are
+    treated as executing, and `has_live_job=None` IS the pre-fix code path (an
+    unmeasured run keeps counting), so this is a discrimination against the real old
+    behaviour rather than a re-assertion of the new one.
+    """
+    queued = [run(999001, "python-ci", event="pull_request", age_seconds=300)]
+
+    # A — the status string trusted: the frozen runs count as executing PR work.
+    pre_fix = classify(
+        queued,
+        in_progress=[dataclasses.replace(g, has_live_job=None) for g in ghost_runs()],
+    )
+    assert pre_fix.verdict == Q.OK, "the pre-fix reading this issue measured"
+    assert pre_fix.pr_running == 3, "three dead runs counted as executing PR CI"
+
+    # B — the same queue, the same three runs, now READ: every job is `completed`, so
+    # none of them is executing anything, and the queue is starved.
+    measured = classify(queued, in_progress=ghost_runs())
+    assert measured.pr_running == 0
+    assert measured.pr_running_excluded == GHOSTS
+    assert measured.verdict == Q.PR_STARVED
+    assert measured.oldest_pr_queued_age_seconds == 300
+    assert "PR-STARVED" in measured.state_line
+
+
+def test_pr_starved_is_reachable_again_while_frozen_runs_sit_in_the_in_progress_leg():
+    """`PR-STARVED`'s clause was INERT: `pr_running == 0` could never hold again.
+
+    This is the sharper claim than "a dead run is miscounted". While any frozen run
+    exists, the pre-fix census returned `pr_running >= 1` for every reading, so the
+    clause requiring `pr_running == 0` was unreachable in production — a state the
+    module advertises and could not produce. With the census fixed the state fires on
+    a queue that genuinely has nothing executing.
+    """
+    queued = starving_pr_runs(20)
+    ghosts = ghost_runs()
+
+    health = classify(queued, in_progress=ghosts)
+    assert health.verdict == Q.PR_STARVED
+    assert health.pr_running == 0
+    assert health.state_line == (
+        "CI: PR-STARVED(queued=20, pr_running=0, pr_queued=20, pr_pending=0, "
+        "oldest=1200s)"
+    )
+    # The state line carries the WHOLE correction: three runs are in the
+    # in-progress leg and it reports zero executing, because zero are.
+    assert health.in_progress_total == 3
+
+
+def test_a_genuinely_executing_run_is_not_excluded_by_the_census():
+    """The over-exclusion guard: a RUNNING run must still suppress PR-STARVED.
+
+    The fail-closed direction runs the other way too — the census exists to drop runs
+    proved idle, not to make the starvation verdict easier to reach. A run with a
+    non-terminal job is executing, so the queue is `PR-BACKLOGGED` at worst and the
+    destructive `STARVING_VERDICTS` path is not authorised.
+    """
+    executing = [run(4242, "Python CI", event="pull_request", age_seconds=60,
+                     has_live_job=True)]
+    health = classify(starving_pr_runs(20), in_progress=executing)
+    assert health.pr_running == 1
+    assert health.pr_running_excluded == ()
+    assert health.verdict == Q.OK
+    assert health.verdict not in Q.STARVING_VERDICTS
+
+
+def test_an_unmeasured_run_still_counts_as_executing():
+    """`None` ABSTAINS TOWARD EXECUTING — the direction the destructive gate needs.
+
+    An unread jobs surface must never manufacture `PR-STARVED`: that verdict is in
+    `STARVING_VERDICTS` and `ci_check_repair` turns it into a per-PR cancel-then-rerun,
+    so an unreadable jobs read cancelling a genuinely running run would be a worse
+    defect than the false `OK` being fixed. Pre-fix behaviour is reproduced exactly,
+    and the abstention is counted so it is visible rather than silently equal to a
+    measurement.
+    """
+    unmeasured = [run(777, "Python CI", event="pull_request", age_seconds=60,
+                      has_live_job=None)]
+    health = classify(starving_pr_runs(20), in_progress=unmeasured)
+    assert health.pr_running == 1
+    assert health.pr_running_unmeasured == 1
+    assert health.pr_running_excluded == ()
+    assert health.verdict == Q.OK
+    assert health.verdict not in Q.STARVING_VERDICTS
+    assert any("UNMEASURED" in reason for reason in health.reasons)
+
+
+def test_the_default_projection_is_the_pre_fix_census():
+    """A `QueuedRun` built without the evidence field keeps counting — deliberately.
+
+    The default is `None`, not `False`: every caller that does not probe jobs (and
+    every existing test) must keep the old reading, so the change can only ever
+    subtract on evidence. A `False` default would silently exclude every run any
+    un-updated caller passes in, i.e. manufacture starvation for third-party callers.
+    """
+    assert Q.QueuedRun(id=1, name="x", event="pull_request",
+                       created_at="2026-10-19T03:00:00Z").has_live_job is None
+    assert Q.QueuedRun(id=1, name="x", event="pull_request",
+                       created_at="2026-10-19T03:00:00Z").is_executing is True
+
+
+def test_the_reason_line_names_the_runs_it_read_out_of_pr_running():
+    """The exclusion is declared, not silent — with the ids.
+
+    A count that silently dropped runs would be unfalsifiable from the fleet's one
+    sampled string. Absent when nothing was excluded, so a fully-measured queue keeps
+    its existing output byte-for-byte.
+    """
+    health = classify([run(999001, "python-ci", event="pull_request", age_seconds=300)],
+                      in_progress=ghost_runs())
+    joined = " ".join(health.reasons)
+    assert "pr_running excluded 3 run(s) whose every job is completed" in joined
+    for rid in GHOSTS:
+        assert str(rid) in joined
+
+    clean = classify([run(999001, "python-ci", event="pull_request", age_seconds=300)],
+                     in_progress=[run(5, "Python CI", event="pull_request",
+                                      has_live_job=True)])
+    assert not any("pr_running excluded" in reason for reason in clean.reasons), (
+        "a queue where every in-progress run was measured must not grow a new line"
+    )
+
+
+def test_to_dict_carries_the_census_evidence():
+    """JSON consumers get the two facts behind `pr_running`, additively."""
+    payload = classify(starving_pr_runs(20), in_progress=ghost_runs()).to_dict()
+    assert payload["pr_running"] == 0
+    assert payload["pr_running_excluded"] == list(GHOSTS)
+    assert payload["pr_running_unmeasured"] == 0
+    assert payload["in_progress_total"] == 3
+
+
+# --- read_run_live_job: the job-level evidence itself -------------------------
+
+
+def _jobs(*statuses, total_count=None):
+    return {"total_count": len(statuses) if total_count is None else total_count,
+            "jobs": [{"name": f"job-{i}", "status": s} for i, s in enumerate(statuses)]}
+
+
+def test_live_job_false_only_when_every_job_is_completed(monkeypatch):
+    """`False` is a PROOF of non-execution — the frozen-run shape, measured."""
+    monkeypatch.setattr(Q, "gh_json", lambda args: _jobs("completed", "completed"))
+    assert Q.read_run_live_job("o/r", 42066648922) is False
+
+
+def test_live_job_true_on_any_non_terminal_job(monkeypatch):
+    """One live job is enough, whatever its flavour — `waiting` is approval-parked."""
+    for status in ("queued", "in_progress", "waiting", "pending", "requested"):
+        monkeypatch.setattr(Q, "gh_json", lambda args, s=status: _jobs("completed", s))
+        assert Q.read_run_live_job("o/r", 1) is True, status
+
+
+def test_live_job_abstains_when_the_jobs_read_fails(monkeypatch):
+    """A transient jobs failure is NOT an unmeasurable queue (never raises)."""
+    def boom(args):
+        raise Q.MeasureError("HTTP 502")
+
+    monkeypatch.setattr(Q, "gh_json", boom)
+    assert Q.read_run_live_job("o/r", 1) is None
+
+
+@pytest.mark.parametrize("payload", [
+    {"total_count": 0, "jobs": []},      # no job created yet — no evidence either way
+    {"total_count": 3, "jobs": []},      # empty page
+    "not-a-mapping",                     # malformed payload
+    {"total_count": 1, "jobs": [{"n": 1}]},  # a row with no status: could be the live one
+])
+def test_live_job_abstains_when_the_evidence_is_absent_or_malformed(monkeypatch, payload):
+    monkeypatch.setattr(Q, "gh_json", lambda args: payload)
+    assert Q.read_run_live_job("o/r", 1) is None
+
+
+def test_live_job_abstains_on_a_page_capped_list_it_could_not_see_all_of(monkeypatch):
+    """`total_count` > the page means unseen pages could hold the live job."""
+    monkeypatch.setattr(
+        Q, "gh_json", lambda args: _jobs("completed", "completed", total_count=250)
+    )
+    assert Q.read_run_live_job("o/r", 1) is None
+
+
+def test_a_live_job_on_a_capped_page_still_answers_true(monkeypatch):
+    """Paging cannot make the probe abstain in the direction that matters.
+
+    Paging only hides jobs we did not read, so a live job already seen settles the
+    question: abstaining here would discard a positive observation.
+    """
+    monkeypatch.setattr(
+        Q, "gh_json", lambda args: _jobs("in_progress", total_count=250)
+    )
+    assert Q.read_run_live_job("o/r", 1) is True
+
+
+def test_read_health_probes_only_pr_event_runs(monkeypatch):
+    """The probe is spent on the population `pr_running` counts, and no other.
+
+    A non-PR in-progress run contributes nothing to the census, so probing it would
+    spend a request per run during a flood (measured `in_progress=9`) on a fact no
+    clause reads.
+    """
+    probed = []
+
+    def fake_read_runs(repo, status, max_pages=5):
+        if status == "in_progress":
+            return [
+                {"id": 11, "name": "python-ci", "event": "pull_request",
+                 "created_at": "2026-10-19T03:00:00Z"},
+                {"id": 12, "name": "finding-provenance", "event": "issue_comment",
+                 "created_at": "2026-10-19T03:00:00Z"},
+            ], False
+        return [], False
+
+    monkeypatch.setattr(Q, "read_runs", fake_read_runs)
+    monkeypatch.setattr(
+        Q, "read_run_live_job", lambda repo, rid: (probed.append(rid), False)[1]
+    )
+    health = Q.read_health("o/r", NOW)
+    assert probed == [11]
+    assert health.pr_running == 0
+    assert health.pr_running_excluded == (11,)
+    assert health.in_progress_total == 2, "the non-PR run is still counted as in-progress"
+
+
+def test_live_job_reads_only_the_latest_attempt(monkeypatch):
+    """The probe SPELLS `filter=latest` instead of relying on the API's default.
+
+    ⚠️ CORRECTED: an earlier revision of this test said the parameter was what stopped a
+    fresh attempt-2 from being read through its completed attempt-1 jobs. GitHub's OpenAPI
+    description declares `filter` with `default: "latest"`, so the parameter does not change
+    behaviour — it PINS a behaviour this repo's thresholds were measured against, and the
+    assertion is kept so the choice stays visible to whoever next edits the URL.
+
+    The attempt-mixing hazard is answered by the EMPTY-LIST rule, which this test also
+    covers: a run whose current attempt has created no jobs yet returns an empty list (under
+    either `filter` value) and the probe abstains rather than reading it as terminated.
+    """
+    seen = []
+
+    def fake_gh_json(args):
+        seen.append(args)
+        # The attempt-1 jobs are gone from the latest view: nothing yet for attempt 2.
+        return {"total_count": 0, "jobs": []}
+
+    monkeypatch.setattr(Q, "gh_json", fake_gh_json)
+    assert Q.read_run_live_job("o/r", 43160143520) is None
+    assert len(seen) == 1
+    job_url = " ".join(seen[0])
+    assert "jobs?filter=latest" in job_url
+    assert "43160143520/jobs" in job_url

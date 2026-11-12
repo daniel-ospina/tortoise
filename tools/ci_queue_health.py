@@ -251,7 +251,7 @@ import os
 import shutil
 import subprocess
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -414,10 +414,52 @@ class QueuedRun:
     #: When the CURRENT attempt started (`run_started_at`), attempt-scoped. Empty
     #: when GitHub has not stamped it — which is a fact, not a zero.
     run_started_at: str = ""
+    #: DOES THIS RUN HAVE A JOB THAT HAS NOT COMPLETED? — the job-level evidence that
+    #: a run's own `status` string is not (#12037).
+    #:
+    #: ⛔ THE STATUS STRING IS UNRECONCILED, SO IT CANNOT BE THE WITNESS. Three runs on
+    #: this repo read `status: in_progress` continuously from 2026-11-05 while every job
+    #: in each of them had been `completed` days earlier — and NO repair endpoint
+    #: accepts them: `/cancel` and `/force-cancel` both answer 409, and the two
+    #: refusals name DIFFERENT states ("not in progress" vs "has not been queued
+    #: yet"), which is itself the evidence that the run `status` is a frozen read no
+    #: agent action can clear. The jobs surface is the evidence that DOES move.
+    #:
+    #: Three-valued ON PURPOSE, and the asymmetry is the safety argument:
+    #:
+    #:   * ``False`` — the jobs were READ, there was at least one, and EVERY one is
+    #:     `completed`. That is a PROOF of non-execution: a run with no non-terminal job
+    #:     is running nothing, whatever its `status` says. Only a positive observation
+    #:     may downgrade a run.
+    #:   * ``True`` — at least one non-terminal job. Executing.
+    #:   * ``None`` — NOT MEASURED: a failed jobs read, an empty jobs list, or a list
+    #:     whose `total_count` exceeds what one page returned. Abstains toward
+    #:     EXECUTING, i.e. toward the pre-#12037 status-string reading that every caller
+    #:     constructing a `QueuedRun` without this field still gets.
+    #:
+    #: The abstention is the fail-closed direction and it is deliberate: UNDER-counting
+    #: `pr_running` manufactures `PR-STARVED`, a member of `STARVING_VERDICTS` that is
+    #: threaded into `ci_check_repair` as a per-PR STARVED claim — i.e. it AUTHORISES a
+    #: destructive cancel-then-rerun. A refinement whose uncertainty could cancel a
+    #: genuinely executing run would be a worse defect than the false `OK` it removes.
+    #: An unmeasured run therefore never subtracts, and the number of them is reported
+    #: (`QueueHealth.pr_running_unmeasured`) so the abstention is visible instead of
+    #: being silently identical to a measurement.
+    has_live_job: bool | None = None
 
     @property
     def is_pr(self) -> bool:
         return self.event in PR_EVENTS
+
+    @property
+    def is_executing(self) -> bool:
+        """Is this run EXECUTING work, or merely reporting `in_progress` (#12037)?
+
+        ``False`` only on the positive proof (`has_live_job is False`); an unmeasured
+        run counts as executing, so this property can never be the thing that
+        manufactures a starvation verdict. See `has_live_job`.
+        """
+        return self.has_live_job is not False
 
     def wait_age_seconds(self, now: datetime | None = None) -> float | None:
         """Seconds since the run's CURRENT ATTEMPT started, or ``None`` if UNMEASURABLE.
@@ -514,6 +556,17 @@ class QueueHealth:
     #: can tell "the queue is busy with other work" from "the run I am about to repair
     #: is itself the congestion" (#10641 review P1).
     wait_witness_ids: tuple[int, ...] = ()
+    #: Ids of the PR-event runs read as `in_progress` whose EVERY job had completed, and
+    #: which are therefore NOT counted in `pr_running` (#12037). A run GitHub has stopped
+    #: driving used to be counted as executing work, which made `PR-STARVED` unreachable
+    #: (`pr_running == 0` could never hold) and moved the wait sensitivity from 180 s to
+    #: 5400 s, so a starved queue printed `OK`. These are the runs that produced that.
+    pr_running_excluded: tuple[int, ...] = ()
+    #: PR-event runs read as `in_progress` whose jobs could NOT be read, and which are
+    #: still counted as executing. Abstaining toward executing is what keeps an unread
+    #: jobs surface from manufacturing `PR-STARVED` — a `STARVING_VERDICT` that authorises
+    #: a destructive cancel-then-rerun. Reported so the abstention is visible.
+    pr_running_unmeasured: int = 0
     #: Why the verdict is what it is, in one clause per clause of the rule, so a
     #: reader can check the decision instead of trusting it.
     reasons: tuple[str, ...] = ()
@@ -816,6 +869,14 @@ class QueueHealth:
             "dominant_queued": self.dominant_queued,
             "global_max_queued": self.global_max_queued,
             "pr_running": self.pr_running,
+            # ⛔ THE TWO FACTS BEHIND `pr_running` (#12037), emitted so a consumer can
+            # tell a census of EXECUTING runs from one that trusted the `status` string:
+            # the runs read out because EVERY job of them was `completed` (a proof of
+            # non-execution), and how many could not be read and are still counted as
+            # executing (the abstention that keeps an unread jobs surface from
+            # manufacturing a `STARVING_VERDICT`).
+            "pr_running_excluded": list(self.pr_running_excluded),
+            "pr_running_unmeasured": self.pr_running_unmeasured,
             "pr_queued": self.pr_queued,
             # The other leg of the wait population, emitted so a consumer can see that
             # the clearance was not taken from the `status=queued` feed alone (#10641
@@ -933,7 +994,27 @@ def classify_queue(
     abstaining) keeps a real backlog self-clearing instead of escalating exit 1
     forever.
     """
-    pr_running = sum(1 for run in in_progress if run.is_pr)
+    # ⛔ `pr_running` COUNTS RUNS THAT ARE EXECUTING, NOT RUNS WHOSE `status` STRING
+    # SAYS `in_progress` (#12037). Every clause keyed on this number
+    # (`starved_wait`'s `pr_running == 0`, `backlogged_wait`'s `pr_running > 0`, the
+    # FLOOD clause, and `witness_threshold`) reads it as a census of EXECUTING work, and
+    # a run GitHub has stopped driving is not executing — it is a frozen read. Two
+    # consequences followed from counting it, both fail-open:
+    #   * `PR-STARVED` was UNREACHABLE while any frozen run existed, because its clause
+    #     requires `pr_running == 0` — an inert enforcer advertising a state it could
+    #     never produce; and
+    #   * a starved queue read `OK`, because `pr_running > 0` moves the sensitivity from
+    #     `min_age_seconds` (180 s) to `max_pr_wait_seconds` (5400 s), so any wait in
+    #     (180 s, 90 min) was certified healthy. That is the #10237 shape ("a clean bill
+    #     of health for a required check answering in hours") driven by DEAD runs rather
+    #     than an idle pool.
+    # The exclusion is a PROOF, never a heuristic (`is_executing`): a run counts out
+    # only when its jobs were read and every one had completed. An unmeasured run keeps
+    # counting, so this can never manufacture a starvation verdict.
+    pr_in_progress = [run for run in in_progress if run.is_pr]
+    pr_running = sum(1 for run in pr_in_progress if run.is_executing)
+    pr_running_excluded = tuple(run.id for run in pr_in_progress if run.has_live_job is False)
+    pr_running_unmeasured = sum(1 for run in pr_in_progress if run.has_live_job is None)
     pr_queued_runs = [run for run in queued if run.is_pr]
     # The other leg of the wait population — see the docstring. `waiting` is
     # deliberately NOT read here: `ci_check_repair._APPROVAL_PARKED_STATUSES` treats
@@ -1064,6 +1145,23 @@ def classify_queue(
         f"pr_running={pr_running} pr_queued={len(pr_queued_runs)} "
         f"pr_pending={len(pr_pending_runs)}",
     ]
+    # ⛔ A COUNT THAT EXCLUDED OR ABSTAINED ON A RUN MUST SAY SO (#12037). Silence here
+    # would leave the two facts that change every clause above invisible: which runs were
+    # read out of `pr_running` and PROVED not to be executing, and how many were never
+    # measured and are therefore still counted as executing. Emitted only when either is
+    # non-empty, so a queue whose every in-progress run was measured keeps its existing
+    # output byte-for-byte.
+    if pr_running_excluded or pr_running_unmeasured:
+        excluded_note = (
+            f"pr_running excluded {len(pr_running_excluded)} run(s) whose every job "
+            f"is completed {list(pr_running_excluded)}"
+        )
+        if pr_running_unmeasured:
+            excluded_note += (
+                f"; {pr_running_unmeasured} run(s) UNMEASURED (no jobs read), "
+                "counted as executing"
+            )
+        reasons.append(excluded_note)
 
     def health(verdict: str, **override: Any) -> QueueHealth:
         # A TRUNCATED FEED CANNOT CERTIFY HEALTH. The runs endpoint is newest-first
@@ -1092,6 +1190,15 @@ def classify_queue(
             "dominant_queued": offender_queued,
             "global_max_queued": global_max,
             "pr_running": pr_running,
+            # ⛔ THE TWO FACTS BEHIND `pr_running` (#12037), emitted so a consumer can
+            # tell a census of EXECUTING runs from one that merely trusted the `status`
+            # string. `pr_running_excluded` names the runs whose every job was READ as
+            # `completed` — a run GitHub has stopped driving — and they are subtracted
+            # from `pr_running`. `pr_running_unmeasured` counts runs whose jobs could not
+            # be read; they remain IN `pr_running` (abstaining toward executing, so an
+            # unread jobs surface can never manufacture a starvation verdict).
+            "pr_running_excluded": pr_running_excluded,
+            "pr_running_unmeasured": pr_running_unmeasured,
             "pr_queued": len(pr_queued_runs),
             # The OTHER leg of the wait population: queued-adjacent PR runs the
             # `status=queued` feed cannot contain, read separately and counted so the
@@ -1421,6 +1528,79 @@ def read_runs(repo: str, status: str, max_pages: int = DEFAULT_MAX_PAGES) -> tup
     return collected, total > len(collected)
 
 
+def read_run_live_job(repo: str, run_id: int, *, per_page: int = PER_PAGE) -> bool | None:
+    """Does run ``run_id`` still have a job that has not COMPLETED? (#12037)
+
+    The evidence a run's `status` string cannot give. A run whose every job is
+    `completed` is running NOTHING, no matter what `status` reports — measured on three
+    runs frozen at `in_progress` since 2026-11-05 while their only job completed the same
+    day, and unrepairable: `/cancel` and `/force-cancel` both answer 409 with
+    contradictory reasons.
+
+    Returns ``True`` (a non-terminal job exists), ``False`` (jobs READ, non-empty, all
+    `completed` — a proof of non-execution), or ``None`` when NOT MEASURED. ``None`` is
+    returned for every way the question goes unanswered, and it is the caller's job to
+    abstain toward EXECUTING rather than toward starvation:
+
+      * the jobs read FAILED (``MeasureError``, a hang, a bad payload, auth) — swallowed
+        here on purpose: one run's jobs surface is a refinement of one count, and raising
+        would turn a transient 5xx into an unmeasurable QUEUE (exit 2) for every consumer.
+        Degrading to ``None`` reproduces the pre-#12037 reading exactly, which is
+        declared, not silent;
+      * the jobs list is EMPTY — no evidence either way, and a run between status
+        transitions may legitimately have created none yet;
+      * the list was PAGE-CAPPED (``total_count`` exceeds what one page returned) and
+        every job on the page had completed — the unseen pages could hold a live one.
+
+    A non-terminal job on the page is enough to answer ``True`` regardless of paging,
+    which is why paging cannot make this abstain in the direction that matters.
+
+    ⚠️ ``filter=latest`` IS EXPLICIT ON PURPOSE, AND IT IS **NOT** THE LOAD-BEARING PART
+    OF THIS READ. An earlier revision of this docstring claimed the endpoint returns every
+    attempt's jobs by default and that the parameter was therefore what prevented a fresh
+    attempt-2 from being read through its completed attempt-1 jobs. **That claim was wrong
+    and is corrected here rather than reworded:** GitHub's OpenAPI description for "List
+    jobs for a workflow run" declares ``filter`` with ``default: "latest"``, so the
+    parameter pins a behaviour the API already has. It is kept because an API default is
+    not a contract this repo's thresholds were measured against, and spelling it costs one
+    query token — but nobody should delete it believing the default is ``all``, nor keep it
+    believing it prevents attempt mixing.
+
+    The attempt-mixing hazard the old comment described is REAL and is answered by the
+    EMPTY-LIST rule above, not by the parameter: a run whose current attempt has created no
+    jobs yet returns an empty list — under either value of ``filter`` — and this probe
+    abstains (``None``) instead of reading it as "every job completed". That is the rule
+    that keeps a run about to execute from being counted out.
+    """
+    try:
+        data = gh_json(
+            [
+                "api",
+                f"repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page={per_page}",
+            ]
+        )
+    except MeasureError:
+        return None
+    if not isinstance(data, Mapping):
+        return None
+    jobs = data.get("jobs")
+    if not isinstance(jobs, list) or not jobs:
+        return None
+    statuses = [str(job.get("status") or "") for job in jobs if isinstance(job, Mapping)]
+    if len(statuses) != len(jobs) or not all(statuses):
+        # A malformed or status-less row could be the live one — abstain rather than
+        # assume. (`"" != "completed"` would otherwise read as a LIVE job and count a
+        # run we never actually read, which is the one direction this probe must not
+        # take: it would hide the frozen-run exclusion behind a malformed payload.)
+        return None
+    if any(status != "completed" for status in statuses):
+        return True
+    total = data.get("total_count")
+    if isinstance(total, int) and total > len(statuses):
+        return None
+    return False
+
+
 def read_health(
     repo: str = REPO_DEFAULT,
     now: datetime | None = None,
@@ -1446,16 +1626,39 @@ def read_health(
     fetching it is the same two-valued overstatement this PR removes elsewhere —
     `requested` was claimed and unread (#10641 review P2). `waiting` is not read — it
     is approval-parked, neither a queue wait nor a cancel target.
+
+    ⛔ AND THE IN-PROGRESS LEG IS PROBED ONE RUN AT A TIME AT JOB LEVEL (#12037). The
+    run `status` string is not reconciled with its jobs (three runs read `in_progress` for
+    a week after their only job completed, and no endpoint accepts a repair), so
+    `pr_running` — which every clause treats as a census of EXECUTING work — is derived
+    from whether a run still has a non-terminal job. This is the ONE read here whose
+    failure does NOT raise: a jobs probe refines one count rather than measuring the
+    queue, so an unread run abstains toward EXECUTING (`has_live_job is None`), which is
+    exactly the pre-#12037 reading and is reported as `pr_running_unmeasured`. Raising
+    would let one transient 5xx turn a readable queue into `UNKNOWN`/exit 2 for every
+    consumer of this module.
     """
     queued, queued_truncated = read_runs(repo, "queued", max_pages)
     running, running_truncated = read_runs(repo, "in_progress", max_pages)
+    # ⛔ THE IN-PROGRESS LEG IS PROBED AT JOB LEVEL, NOT TRUSTED FROM `status` (#12037).
+    # `pr_running` is a census of EXECUTING work — every clause keyed on it treats it as
+    # one — and the run `status` string is demonstrably not reconciled with the jobs. The
+    # probe is spent ONLY on PR-event runs: they are the only population `pr_running`
+    # counts, and an in-progress read can be wide during a flood (measured `in_progress=9`)
+    # so probing non-PR runs would spend requests on a fact no clause consumes.
+    running = [
+        replace(run, has_live_job=read_run_live_job(repo, run.id))
+        if run.is_pr
+        else run
+        for run in _project(running)
+    ]
     # The legs the `status=queued` filter cannot contain. A failure here raises, like
     # every other read: an unmeasured queue is not a healthy one.
     pending, pending_truncated = read_runs(repo, "pending", max_pages)
     requested, requested_truncated = read_runs(repo, "requested", max_pages)
     return classify_queue(
         _project(queued),
-        _project(running),
+        running,
         now,
         min_dominant_queued=min_dominant_queued,
         min_age_seconds=min_age_seconds,
