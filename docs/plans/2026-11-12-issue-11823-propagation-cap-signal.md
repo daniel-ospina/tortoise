@@ -161,7 +161,8 @@ not a fix (D2-5).
    population, where the ratio is 0/2 = 0.0, in range. That measurement's 2-chain carries NO baseline,
    which is what leaves the wider numerator at 10; baseline its head the way the suite helper `_chain`
    does and the same arithmetic reads 11 over 2 — 5.5 / -9.0 — with 1/2 = 0.5 here instead. Both
-   variants are in range, which is the point (#12138 §2); see R10 below). A second query spelling is legitimate
+   variants' *ratios* are in range (the scope-mix pairs themselves are not, which is the point —
+   #12138 §2); see R10 below). A second query spelling is legitimate
    here precisely because it asks a different question; the extraction in step 1 exists only so
    `_reachable_claim_count` keeps ONE copy of ITS predicate.
    - `operator_less_claims = graph_live_claims - points_edged`, where `points_edged` is the live

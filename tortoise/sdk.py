@@ -33569,7 +33569,8 @@ class TortoiseSDK:
         # `affected` by `graph_ep_reachable` is WRONG: on a pass with
         # affected=3, window_reachable=4, graph_ep_reachable=8 the record
         # carries `coverage=0.75` while that division reads 0.375 for a pass
-        # that consumed its whole window.
+        # that consumed its whole window (an ILLUSTRATION of the misreading, not
+        # a pinned fixture — the measured case is the test cited below).
         #
         # ⛔ And it is not a CONSERVATIVE denominator either: the graph
         # population can be SMALLER than the window's, because operator-less
@@ -33701,8 +33702,9 @@ class TortoiseSDK:
           measurement's 2-chain carries NO baseline, which is what leaves the
           wider numerator at 10; baseline its head the way the suite helper
           ``_chain`` does and the same arithmetic reads 11 over 2 — ``5.5`` /
-          ``-9.0`` — with ``1/2 = 0.5`` here instead. Both variants are in
-          range, which is the point; #12138 §2.) The two directions
+          ``-9.0`` — with ``1/2 = 0.5`` here instead. Both variants' *ratios* are
+          in range (the scope-mix pairs themselves are not, which is the point);
+          #12138 §2.) The two directions
           and the two populations are distinct; only the scope mix produces the
           5.0 / -8.0 pair.
         - ``belief_present`` — the SAME population, counted through the shared
