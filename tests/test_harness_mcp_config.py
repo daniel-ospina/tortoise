@@ -1600,7 +1600,12 @@ class TestDocsPageAndSkillConfig:
             "SKILL.md lost §2's terminator — the slice would run to EOF and the "
             "assertions below could be satisfied from any later section")
         note = skill.split(marker, 1)[1].split(terminator, 1)[0]
-        carrier = "https://tortoise.premiselabs.co/docs#chatgpt"
+        # #11767: the note was re-aimed to the CANONICAL company origin, so this
+        # pin moves with it. It was missed when the sibling owner
+        # (`tests/test_onboarding_variants.py`) was re-aimed, which is why the suite
+        # was red on a required lane (`onboarding`) — the pin chain is split across
+        # two files and only one half was updated.
+        carrier = "https://premiselabs.co/docs#chatgpt"
         assert carrier in note, (
             "§2's note must name the live ChatGPT carrier (the public docs page)")
         # Reachability: the note SENDS a user to that URL, so pin that the path

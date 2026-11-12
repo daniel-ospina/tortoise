@@ -19,6 +19,14 @@ The siblings named on #11767 are pinned too: the CORS allowlist that must KEEP
 the retired origin with a recorded removal trigger, the two Supabase edge
 functions whose public allowlists already carry both hosts, and the appeal URL
 whose host moved while its dead `#appeal` fragment did not (#11939).
+
+⛔ #11767's items 4 and 5 are IN THIS FILE'S SURFACE but NOT re-aimed by the PR
+that added it: the dashboard landing pages (`invite-accept`, `welcome`, `signup`),
+the blog-origin pair, and the dashboard's docs links still spell the retired
+origin. Each is in `RETIRED_HOST_ALLOWLIST` with an EXACT occurrence count, the
+measured 301 that makes it a hop rather than a break, and the child that owns the
+re-aim — so this guard cannot report GREEN over a file it never opened, and a
+sweep that removes one of those literals must remove its recorded reason too.
 """
 from __future__ import annotations
 
@@ -168,7 +176,61 @@ RETIRED_HOST_ALLOWLIST = {
     "supabase/config.toml": (
         1,
         "LOCAL-DEV OAuth redirect allowlist only; the hosted project's Auth URL "
-        "config is dashboard state nothing in this repo can read"),}
+        "config is dashboard state nothing in this repo can read"),
+    # ⛔ #11767 items 4 AND 5 — NOT re-aimed by this PR, and recorded here so the
+    # guard COVERS these files instead of silently skipping them (fresh-context
+    # review, P1: with a hand-list, the sweep could not fail for the ONE page the
+    # emailed invite token lands on). Every URL built from these answers a
+    # PERMANENT 301 on the retired host (each measured 2026-11-12 below), so each
+    # is a hop, not a break — which is why deferring is safe and why it must stay
+    # VISIBLE: a sweep that deletes one of these must delete its reason too, and
+    # the deferred re-aim is tracked on #11767 rather than lost behind a green run.
+    "website/apps/dashboard/public/invite-accept.html": (
+        3,
+        "#11767 item 5 — the page the emailed INVITE TOKEN lands on still links "
+        "`/docs`, `/tos` and `/privacy` on the retired host (301 -> the canonical "
+        "origin, measured 2026-11-12). Re-aiming it belongs in the same commit as "
+        "#11764's canonical sweep, so the invite link and its landing page move "
+        "together instead of the link racing ahead of the page."),
+    "website/apps/dashboard/public/welcome.html": (
+        1,
+        "#11767 item 5 — the Product link is the retired host "
+        "(301 -> premiselabs.co/tortoise). Deferred with invite-accept.html."),
+    "website/apps/dashboard/public/signup.html": (
+        2,
+        "#11767 item 5 — `rel=canonical` names the retired `/auth` "
+        "(301 -> app.premiselabs.co/auth) and the Product link is the retired "
+        "host. Deferred with invite-accept.html (#11764)."),
+    "website/apps/dashboard/functions/blog/api/[[path]].ts": (
+        1,
+        "#11767 item 4 — DEFAULT_BLOG_ORIGIN is still the retired host "
+        "(301 -> premiselabs.co/tortoise). Moving the blog origin is the blog "
+        "child's surface (#11764/#11765): the canonical blog lives at "
+        "premiselabs.co/blog and its Function routing moves with it."),
+    "website/apps/blog-admin/src/lib/blog-api.ts": (
+        1,
+        "#11767 item 4 — the admin client's blog origin; same deferral as the "
+        "blog Function above (301 measured on the retired host)."),
+    "website/apps/dashboard/src/wizardPrompts.js": (
+        3,
+        "#11767 item 5-adjacent — the copy-pasteable wizard prompts still hand the "
+        "user `https://tortoise.premiselabs.co/docs` "
+        "(301 -> premiselabs.co/tortoise/docs). Deferred with the dashboard sweep; "
+        "the docs target is the one #11764 settles."),
+    "website/apps/dashboard/src/harnesses.js": (
+        1,
+        "DOCS_ORIGIN constant (301 -> premiselabs.co/tortoise/docs). Same "
+        "deferral (#11764). ⚠️ This file ALSO carries a BARE-host mention at :277 "
+        "that this counter does not see, because the guard counts the full "
+        "origin — a bare-host sweep is a different guard."),
+    "website/apps/dashboard/src/overviewEmptyAction.js": (
+        2,
+        "SDK_DOCS_HREF and ONBOARDING_FUNNEL_HREF (both 301). Same deferral "
+        "(#11764)."),
+    "website/apps/dashboard/src/billingCta.js": (
+        1,
+        "COMPARE_PLANS_URL `/#pricing-section` (301 -> premiselabs.co/tortoise). "
+        "Same deferral (#11764)."),}
 
 #: Every runtime file THIS PR touched. An emitted occurrence of the retired
 #: origin in these that is not in the allowlist above fails.
@@ -198,6 +260,18 @@ RUNTIME_FILES = (
     "supabase/functions/waitlist-subscribe/handle.ts",
     "supabase/functions/deck-view/handle.ts",
     "supabase/config.toml",
+    # #11767 items 4 and 5 — dashboard/blog surfaces whose retired-origin literals
+    # are RECORDED above rather than re-aimed here. In the surface so the guard
+    # can fail on them; every entry carries a measured 301 and a deferral note.
+    "website/apps/dashboard/public/invite-accept.html",
+    "website/apps/dashboard/public/welcome.html",
+    "website/apps/dashboard/public/signup.html",
+    "website/apps/dashboard/functions/blog/api/[[path]].ts",
+    "website/apps/blog-admin/src/lib/blog-api.ts",
+    "website/apps/dashboard/src/wizardPrompts.js",
+    "website/apps/dashboard/src/harnesses.js",
+    "website/apps/dashboard/src/overviewEmptyAction.js",
+    "website/apps/dashboard/src/billingCta.js",
 )
 
 
