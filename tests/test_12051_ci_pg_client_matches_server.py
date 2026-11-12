@@ -5460,125 +5460,6 @@ def _shell_function_body(code: str, name: str) -> str | None:
     return None
 
 
-def _flag_comes_from_a_positive_probe(code: str, path: str, flag: str) -> bool:
-    """`code` sets `flag=1` under a POSITIVE `-e <path>` test that GATES it.
-
-    Reads the construct, not a spelling. Accepted: `[ -e P ]`, `[[ -e P ]]` and
-    `test -e P`, gated by `then` or `&&`, with the assignment on the same line or in
-    the construct's body. Refused, because each INVERTS the fact and makes the trap
-    delete a path it does not own:
-
-      · `[ -e P ] || F=1` — P present ⇒ test succeeds ⇒ `F` stays 0 ⇒ the trap
-        removes the operator's file; P absent ⇒ `F=1` ⇒ the step's own source is left
-        on the pool box. Both documented defects, and MEASURED GREEN under the plain
-        `[^\n]*?` window this replaces (review cycle 16).
-      · `[ -e P ]; F=1` — no gate at all, so the flag is 1 unconditionally.
-      · `[ ! -e P ] && F=1` — the negated test does not match here at all.
-      · `if [ -e P ]; then :; else F=1; fi` — the assignment is in the ELSE arm, so
-        the flag is 1 exactly when the path was ABSENT: the inversion by another
-        spelling. MEASURED GREEN under the first cut of this reader (review cycle 17).
-      · `if [ -e P ]; then :; fi` followed by `F=1` on the next line — the same
-        gutted gate as `[ -e P ]; F=1`, reached by letting the window cross the `fi`.
-
-    ⛔ WHY NOT A WINDOW. A `[^\n]*?` between the test and the assignment is satisfied
-    by the CONSTRUCT UNLESS the construct is the thing read: MEASURED (review cycle 16),
-    the trap is ONE line carrying both flags, so a window after `"${had_sources…}"`
-    reached `"${had_keyring:-0}" = 0` and accepted `= 1`, `!= 0` and `-n` — a
-    fail-open in the very row that exists to stop the trap deleting an operator's file.
-    The bound is the construct: the credited text is the **then**-arm (or the `&&`
-    operand) ONLY, terminated at `fi`/`else`/`elif`, so neither an `else`-arm
-    assignment nor one after the construct can be credited.
-    """
-    p, f = re.escape(path), re.escape(flag)
-    for test in re.finditer(
-        rf"(?:\[\[\s*-e\s+{p}\s*\]\]|\[\s*-e\s+{p}\s*\]|test\s+-e\s+{p})",
-        code,
-    ):
-        # ⛔ A NEGATION OUTSIDE THE BRACKETS IS NOT A POSITIVE PROBE. `if ! [ -e P ];
-        # then F=1; fi` and `! [ -e P ] && F=1` set the flag exactly when the path was
-        # ABSENT, so the trap deletes the operator's file — MEASURED GREEN (review cycle
-        # 19), and REFUSED by the pre-diff substring check. The `!` is tested on the
-        # text BEFORE the probe; `[ ! -e P ]` and `[[ ! -e P ]]` already miss the
-        # alternation above, so this covers the form they cannot.
-        if re.search(r"!\s*$", code[: test.start()]):
-            continue
-        window = code[test.end():]
-        # ⛔ THE ARM, NOT A LINE COUNT. The earlier cut bounded the body with a
-        # newline-`fi` search plus a two-line fallback, which (a) let an assignment in
-        # the construct's `else` arm be credited and (b) walked past a `fi` that shares
-        # the construct's line — and the REAL probe is exactly that one-line shape
-        # (`if [ -e P ]; then F=1; fi`), so both escapes were reachable (review cycle 17).
-        then_gate = re.match(r"\s*;?\s*then\b", window)
-        if then_gate is not None:
-            arm = window[then_gate.end():]
-            stop = re.search(r";\s*fi\b|\n\s*fi\b|;\s*else\b|\n\s*else\b|\belif\b", arm)
-            if stop is not None:
-                arm = arm[: stop.start()]
-            else:
-                arm = arm.splitlines()[0] if arm.splitlines() else ""
-        else:
-            # ⛔ A LINE CONTINUATION IS NOT A DIFFERENT PROBE. `[ -e P ] \` newline
-            # `&& F=1` is the same gate, refused before this bound (review cycle 19).
-            and_gate = re.match(r"\s*(?:\\\s*\n\s*)?&&", window)
-            if and_gate is None:
-                continue
-            arm = window[and_gate.end():]
-            stop = re.search(r"[;\n]", arm)
-            arm = arm[: stop.start()] if stop else arm
-        assignment = re.search(rf"(?<![\w.]){f}=1\b", arm)
-        if assignment is None:
-            continue
-        # ⛔ A CONDITIONED ASSIGNMENT IS NOT THE FLAG. `false && F=1` (or `|| F=1`)
-        # inside the then-arm leaves the flag 0 when the path EXISTS, so the trap still
-        # deletes the operator's file — MEASURED GREEN before this guard (review cycle 18),
-        # and REFUSED by the pre-diff substring check it replaced.
-        if "||" in arm[: assignment.start()] or "&&" in arm[: assignment.start()]:
-            continue
-        return True
-    return False
-
-
-def _guard_owns_path(trap: str, flag: str, path: str) -> bool:
-    """The `rm -f <path>` sits inside the clause guarded by THIS flag's own `= 0` test.
-
-    ⛔ ONE CLAUSE, NOT TWO SEPARATE FACTS. Checking the guard per flag and the removal
-    per path independently is satisfied by a trap whose two guards are SWAPPED: with
-    an operator's sources file present, the sources `rm` gated on `had_keyring` deletes
-    a path it does not own — the exact harm this row names — and the suite stayed GREEN
-    (MEASURED, review cycle 17). The association is the assertion.
-    Returns: the clause bound stops at `fi`/`else`/`elif`, and the removal must name
-    the SAME path — so neither an `else`-arm removal nor a swapped guard passes.
-    """
-    f, p = re.escape(flag), re.escape(path)
-    for opener in re.finditer(r"\bif\b", trap):
-        clause = trap[opener.end():]
-        stop = re.search(
-            r";\s*fi\b|\n\s*fi\b|\bfi\b|;\s*else\b|\n\s*else\b|\belif\b", clause
-        )
-        if stop is None:
-            continue
-        clause = clause[: stop.start()]
-        test = re.search(
-            rf"(?:\[|\[\[)\s*\"?\$\{{?{f}\b(?:[:-][^}}\n]*)?\}}?\"?\s*"
-            rf"(?:==|=|-eq)\s*[\"']?0[\"']?\s*(?:\]|\]\])",
-            clause,
-        )
-        if test is None:
-            continue
-        # ⛔ THE WHOLE `rm` SPELLING, NOT ONE FLAG CLUSTER. `-rf`, `-f --` and a
-        # `sudo` prefix are the same removal; pinning `-f ` alone refused them with a
-        # message false about what the file said (MEASURED, review cycle 18).
-        # ⛔ AND A REMOVAL THAT CANNOT RUN IS NOT A REMOVAL: `false && rm -f P` inside
-        # the right clause leaves the step's own file on a pool box once its keyring is
-        # gone (MEASURED, review cycle 19). The real shape's `|| true` sits AFTER the
-        # `rm`, so only the PREFIX is tested.
-        tail = clause[test.end():]
-        removal = re.search(rf"rm\s+(?:-[a-zA-Z]+\s+)*(?:--\s+)?\S*{p}", tail)
-        if removal is not None and not re.search(r"&&|\|\|", tail[: removal.start()]):
-            return True
-    return False
-
-
 def _cleanup_trap(code: str) -> str:
     """The registered `EXIT`/`0` trap, resolved through a named function.
 
@@ -5724,26 +5605,32 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     claiming hermeticity must not need. MEASURED: on a box without that file the
     absent arm dies at the source line and reports the guard as silent.
 
-    TEN arm call sites (ELEVEN runs — the ignored-shape check runs twice) over the step's
-    FIVE named pre-install branches: the os-release
-    SOURCE, the key fetch, the codename, `apt-get update`, and the ORIGIN check
-    (THREE arms: an `apt-cache` that fails, an index that loaded but does not name
-    apt.postgresql.org, and the control that reaches past) — plus the STREAM-DRAIN
-    arm (`match_then_noise`: a producer that keeps writing after the match, the only
-    shape that can show the `grep -q` + `pipefail` SIGPIPE red) and the REUSE arm
-    (`already`: an operator PGDG stanza is present and the key host is unreachable,
-    so the step must neither add a second stanza nor fetch a key it will not use).
+    ELEVEN arm call sites (FOURTEEN runs — the `configured` loop drives THREE ignored
+    shapes and the `reused` loop TWO readable ones) over the step's FIVE named
+    pre-install branches: the os-release SOURCE, the key fetch, the codename,
+    `apt-get update`, and the ORIGIN check (THREE arms: an `apt-cache` that fails, an
+    index that loaded but does not name apt.postgresql.org, and the control that
+    reaches past) — plus the STREAM-DRAIN arm (`match_then_noise`: a producer that
+    keeps writing after the match, the only shape that can show the `grep -q` +
+    `pipefail` SIGPIPE red) and the REUSE arm (`already`: an operator PGDG stanza is
+    present and the key host is unreachable, so the step must neither add a second
+    stanza nor fetch a key it will not use).
     The step carries SEVEN `::error::` pairs, so a whole-output search is satisfied
     by any of them (MEASURED, review cycle 9: two gutted `exit 1`s left the suite
     GREEN).
-    ⚠️ Which arms assert WHAT, stated rather than generalised: the key-fetch,
+    ⚠️ Which arms assert WHAT, stated rather than generalised — and re-cut when the
+    arm count moves, because this paragraph has been stale before: the key-fetch,
     `apt-get update`, os-release SOURCE and ORIGIN-fires arms name their own
-    branch's text AND assert the next branch's is ABSENT; the `apt-cache`-fails
-    arm and the ORIGIN arm assert a generic `::error::` (no earlier branch can
-    fire in them, so their discrimination is the absence of the
-    `REACHED_PAST_PRECONDITION` marker), and the no-codename arm is discriminated
-    by the absence of the shell's `set -u` backstop (`unbound variable`) rather
-    than by a neighbour's message. Plus TWO branches no arm executes: the install guard
+    branch's text AND assert the next branch's is ABSENT. THREE arms also carry a
+    bare `::error::` check — `not_pgdg`, `no_codename` and the `apt-cache`-fails arm
+    — but the first two sit on top of their own attributed assertion, so the
+    `apt-cache`-fails arm is the one whose discrimination RESTS on the bare check
+    (no earlier branch can fire in it: its `apt_get` stub returns 0, os-release is
+    present and the codename is bound), and `no_codename` is additionally
+    discriminated by the absence of the shell's `set -u` backstop (`unbound
+    variable`) rather than by a neighbour's message; `present` and `match_then_noise`
+    are CONTROLS and assert the marker's PRESENCE. Plus TWO branches no arm executes:
+    the install guard
     (unreachable by construction — this arm stops AT the install line; it is pinned
     in text by `test_the_client_comes_from_pgdg_not_the_distro_archive`) and the
     version branch (pinned in text by this file's `FAIL_CLOSED_BRANCH_RE` reader).
