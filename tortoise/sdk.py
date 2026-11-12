@@ -32806,12 +32806,17 @@ class TortoiseSDK:
         # population (no IMPL|NAND edge at all) and `unclassified` is edged but
         # unreachable (#12116 C-P2). Equalities, not clamps.
         operator_less = graph_live - points_edged
-        # No clamp: the numbers are reported as measured. A future mixed
-        # population must show up as `no_belief < 0` / a `belief_coverage_pct`
-        # outside [0, 1] — a VISIBLE defect — rather than being silently
-        # corrected into a plausible "fully covered" (#12116 review C-P3: a
-        # clamp is the opposite of the asserted invariant the comment claimed).
-        # `tests/test_11823_*` asserts the ranges instead.
+        # No clamp: the numbers are reported as measured, rather than being
+        # silently corrected into a plausible "fully covered" (#12116 review
+        # C-P3: a clamp is the opposite of the asserted invariant the comment
+        # claimed). ⛔ #12138 §2 — the asserted RANGES are a ONE-DIRECTIONAL
+        # control, and this comment said otherwise: a NARROWER denominator (or a
+        # label-blind numerator) can push `no_belief` negative or the ratio above
+        # 1.0, which the ranges CATCH; a WIDER denominator with `belief_present`
+        # fixed LOWERS the ratio and RAISES `no_belief`, both in range, so the
+        # ranges CANNOT see it — that direction is pinned only by
+        # `test_counts_match_an_independent_query`, which counts the denominator
+        # with its own queries.
         no_belief = reachable - belief_present
         unclassified = points_edged - reachable
         return {
@@ -34295,7 +34300,8 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         # The anchors are dream_all's own scan (drafts included; the closure
-        # seed applies the live predicate).
+        # SEED applies the draft-only filter, not the full liveness one — see
+        # `_window_closure`'s deliberate-asymmetry note, #12138 §7).
         rows = proj.g.query(
             "MATCH (n:Point) "
             "WHERE (n.is_operator IS NULL OR n.is_operator = false) "

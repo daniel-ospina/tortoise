@@ -490,11 +490,14 @@ _UNRESOLVED = {
     # dropped with the note "the function no longer touches the handle" — that
     # note is FALSE and is corrected here. It STILL reaches the handle on every
     # call: a full non-operator `:Point` id scan (`MATCH (n:Point) WHERE
-    # <non-operator> RETURN n.id` — DRAFTS INCLUDED, the closure seed applies the
-    # live predicate), then `_window_closure(anchors, max_hops)` and
-    # `_edged_claim_ids()`. What actually changed when the edged query was hoisted
-    # out is narrower: its OWN statement is now the literal anchor scan
-    # (resolvable, i.e. provably a read), while the unresolved edged predicate
+    # <non-operator> RETURN n.id` — DRAFTS INCLUDED; the closure SEED then drops
+    # them with the DRAFT-ONLY filter, `_window_closure`'s deliberate asymmetry:
+    # terminal/outdated window claims stay seeds on purpose, and `_live_only` is
+    # applied per hop, NOT at the seed — #12138 §7), then
+    # `_window_closure(anchors, max_hops)` and `_edged_claim_ids()`. What actually
+    # changed when the edged query was hoisted out is narrower: its OWN statement
+    # is now the literal anchor scan (resolvable, i.e. provably a read), while the
+    # unresolved edged predicate
     # lives in `_edged_claim_ids` (the row BELOW this note). So the row moved
     # because the UNRESOLVED TEXT moved, not because the handle reach went away —
     # a write-door audit reading the old note would conclude this function does

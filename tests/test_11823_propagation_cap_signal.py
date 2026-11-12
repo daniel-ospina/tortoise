@@ -382,6 +382,13 @@ def test_an_operator_less_pass_does_not_report_full_coverage(sdk):
     p = _prop(sdk)
     last = p["last_pass"]
     assert last["affected"] >= 1               # the pass really ran over them
+    # ⛔ #12138 §1 — PIN the exact reach the comment in `sdk.py` cites
+    # (`affected=5, window_reachable=5, graph_ep_reachable=3`). Without these two
+    # numbers that citation is unpinned: a fixture edit would silently falsify the
+    # "the graph denominator can be SMALLER than the window's" evidence while every
+    # test stayed green.
+    assert last["affected"] == 5
+    assert last["window_reachable"] == 5
     assert p["ep_reachable_claims"] == 3
     assert p["operator_less_claims"] == 5
     assert p["unclassified_claims"] == 0
