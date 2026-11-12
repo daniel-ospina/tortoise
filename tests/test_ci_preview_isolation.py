@@ -293,8 +293,9 @@ def _refusal_arm(env: dict[str, str], name: str, pid: int) -> str:
             "the LIVENESS leg refused (`pid_running`). ⚠️ THE WITNESS DOES NOT SAY WHICH "
             "OF THAT ARM'S THREE CAUSES FIRED — `kill -0` failing gives ESRCH (gone) or "
             "EPERM (unsignalable), and a `Z` state letter is the third — so this names "
-            "the candidates and not a culprit: the decoy EXITED at exec (a renamed "
-            "multi-call binary cannot run under its new name — the fixture's), or a "
+            "the candidates and not a culprit: the interpreter running under that "
+            "argv[0] died (its own `-c` code, or the box killed it — a thrashing "
+            "runner OOM-killing a decoy is #12039's own wording for this case), or a "
             "peer job's machine-global reap killed it (#10283's actual defect, i.e. a "
             "REAL finding). ⚠️ A pid the read could not SEE is NOT one of them and "
             "lands on the start-time arm instead: `pid_state` returns empty, "
@@ -328,13 +329,16 @@ def _recorded(result: subprocess.CompletedProcess, pid: int, env: dict[str, str]
     """The assertion message for a `record` refusal: the arm, then the current state.
 
     `timeout` is read from the caller rather than assumed — a message that claims a
-    deadline the poll never spent sends the next reader to the wrong conclusion — and
-    the pid's state NOW is labelled as an observation, because attributing a refusal
+    deadline the poll never spent sends the next reader to the wrong conclusion — so a
+    caller that did NOT poll passes `timeout=0.0`, which omits the duration instead of
+    rendering `for 0s`. The default matches `_record_when_running`'s.
+    The pid's state NOW is labelled as an observation, because attributing a refusal
     to what the pid looks like afterwards is how a fixture death gets blamed on the
     SUT (or the reverse).
     """
+    spent = f" for {timeout:g}s" if timeout else ""
     return (
-        f"`record` refused pid {pid} for {timeout:g}s: {result.stderr.strip()!r} — "
+        f"`record` refused pid {pid}{spent}: {result.stderr.strip()!r} — "
         f"the SUT's own arm: {_refusal_arm(env, name, pid)}; observed NOW: {_pid_now(pid)} "
         "(#12039: the refusing arm is the SUT's witness, not a later guess)"
     )
@@ -625,9 +629,9 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
         [str(peer_workerd), "-c",
          "import ctypes, time\n"
          "try:\n"
-         "    ctypes.CDLL('libc.so.6').prctl(15, b'workerd', 0, 0, 0)\n"
-         "except OSError:\n"
-         "    pass\n"              # not Linux: argv[0] still carries the name
+         "    ctypes.CDLL(None).prctl(15, b'workerd', 0, 0, 0)\n"
+         "except (OSError, AttributeError):\n"
+         "    pass\n"              # no prctl (macOS): argv[0] still carries the name
          "time.sleep(120)\n"],
         tmp_path, executable=sys.executable,
     )
@@ -635,8 +639,13 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
     # The decoy must really BE a `workerd` process, or this test proves nothing about the
     # name `pkill workerd` matched (#12039 replaced the symlinked `sleep` with an
     # interpreter under that argv[0] + `prctl`, so the pin moves from "the symlink exists"
-    # to "the process is named workerd"). `ps -o comm=` is what `pkill` reads; guarded to
-    # Linux because `prctl` does not exist elsewhere and comm then stays the interpreter's.
+    # to "the process is named workerd"). `ps -o comm=` is what `pkill` reads.
+    #
+    # ⛔ `ctypes.CDLL(None)` RESOLVES `prctl` FROM THE LIBC PYTHON ALREADY LOADED, so no
+    # soname is assumed — hardcoding `libc.so.6` would fail on musl, where `/proc` DOES
+    # exist, and the pin below would then red a fixture on a box where the SUT is fine
+    # (the class this PR exists to remove). The `/proc` guard is a Linux test, because
+    # `prctl` is Linux-only and comm stays the interpreter's elsewhere.
     #
     # ⛔ A BOUNDED POLL, because `prctl` is NOT part of the `execve` `_await_exec` waits
     # for: it runs later, inside the child's `-c` code, ~13-22 ms after exec on this box
@@ -1035,7 +1044,10 @@ def test_the_refusal_message_names_the_arm_the_SUT_recorded(tmp_path: Path, stat
     assert sut_refusal.returncode == 4, (
         f"the harness cannot measure: the SUT must refuse a dead pid (rc 4): {sut_refusal.stderr}"
     )
-    liveness = _recorded(sut_refusal, 999999, state)
+    # ⛔ NO POLL HAPPENED FOR THESE FOUR, so the message must not claim a deadline
+    # (`timeout=0.0`): one result came from a single `record` invocation and three are
+    # fabricated outright.
+    liveness = _recorded(sut_refusal, 999999, state, timeout=0.0)
     assert "LIVENESS leg refused" in liveness, (
         "the SUT's own witness no longer parses — its wording moved and every arm is now "
         f"attributed to nothing: {liveness}"
@@ -1052,12 +1064,12 @@ def test_the_refusal_message_names_the_arm_the_SUT_recorded(tmp_path: Path, stat
     # on disk — reading it unqualified reports a confident arm for a refusal that never
     # happened.
     (state_dir / "app.refused").write_text("refused 4242 not-running\n")
-    stale = _recorded(dead, 4243, state)
+    stale = _recorded(dead, 4243, state, timeout=0.0)
     assert "names pid 4242" in stale and "arm is unrecorded for this pid" in stale, stale
     assert "LIVENESS leg refused" not in stale, stale
 
     (state_dir / "app.refused").write_text("refused 4242 no-start-time\n")
-    starttime = _recorded(dead, 4242, state)
+    starttime = _recorded(dead, 4242, state, timeout=0.0)
     assert "START-TIME leg refused" in starttime, starttime
     assert "retryable arm" in starttime, starttime
     assert "the candidates and not a culprit" not in starttime, (
@@ -1066,7 +1078,7 @@ def test_the_refusal_message_names_the_arm_the_SUT_recorded(tmp_path: Path, stat
     )
 
     (state_dir / "app.refused").unlink()
-    unrecorded = _recorded(dead, 4242, state)
+    unrecorded = _recorded(dead, 4242, state, timeout=0.0)
     assert "arm is unrecorded" in unrecorded, unrecorded
 
     # The current-state observation is a separate sentence and must not raise on a pid
