@@ -2303,7 +2303,11 @@ surfaces:
   #   (lines 2282, 2322) … (lines 2282, 7320)
   # so the REQUIRED `manifest-integrity` leg went RED on `main` again — minutes
   # after the commits meant to repair it. Every row-adding commit is in the table
-  # above; the head that reds is 04:54Z. The lanes that repaired the drift are the
+  # above, and its THIRD row is already red: `379de48fdd` (04:45:40Z) adds the
+  # second `core` row while carrying ONE `durations:` key, so it fails on the
+  # `duplicate entry` ALONE; `d088425a7c` (04:46:16Z) adds a third row and the
+  # duplicate key. `7f7ac34a6b` (04:54Z) is the head both messages above were
+  # measured on, NOT the first red one. The lanes that repaired the drift are the
   # ones that re-created it — three `core` rows from three lanes (#12023, #11965,
   # #12005) — the #11210/#11211/#11222 recurrence this file records
   # beside `test_pack_hierarchy_11001.py` (three lanes, three rows) and again
