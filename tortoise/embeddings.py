@@ -19,6 +19,7 @@ import contextvars
 import logging
 import math
 import os
+import struct
 import threading
 import time
 
@@ -33,6 +34,7 @@ from .heavy_imports import (  # #5718: the ONE heavy-import lock + its helpers
     import_torch,
 )
 from .ids import content_hash
+from .stored_form import is_verbatim
 
 
 def _embedder_warmup_enabled() -> bool:
@@ -313,6 +315,128 @@ def ensure_embed_threads() -> None:
         logger.debug("embedder thread pin not re-asserted on this thread: %s", e)
 
 
+#: The payload key that records the WIDTH a journalled vector's text was
+#: written at (#11821 P0). ``f32`` means "every element is stored at the
+#: float32 the embedder produced, printed as the shortest decimal that rounds
+#: back to it"; ``f64`` means "left at its own width" — a caller-owned
+#: (``embedding_verbatim``) or PRESERVED (``embedding_preserved``) vector, which
+#: this seam must never narrow (#5004 round-7: a caller vector keeps its RAW
+#: form).
+#:
+#: ⛔ ABSENT MEANS "PRE-CHANGE / FOREIGN RECORD", never an error. Every journal
+#: written before #11821 carries a widened float64 list and no marker, and a
+#: reader must keep replaying it exactly as it always did — the marker is a
+#: recorded FACT about the text, not a precondition for reading it.
+#:
+#: It is a DESCRIPTION of the payload, exactly like ``embedding_model`` /
+#: ``embedding_revision`` / ``embedding_text_hash`` / ``embedding_preserved``:
+#: never a node property, never a record column, and refused from callers in
+#: every one of the homes those declarations live in
+#: (`projection.entities._POINT_HANDLED` — which is where
+#: `embedding_model`/`embedding_revision`/`embedding_text_hash` and
+#: `embedding_preserved` actually sit (`:2375`, `:2390`), NOT `_META_KEYS` —
+#: `projection.entities._META_KEYS`, `record_projection`'s record-meta set,
+#: `consistency._EXCLUSION_REASONS`, `mcp_server._SERVER_MANAGED_PROPS`,
+#: `sdk._sanitize_props`, `api.EventAPI.add_point`'s forged-key refusal, and
+#: `record_projection.TURNS_SNAPSHOT_OPTIONAL_KEYS` for the carrier — eight in
+#: all, each pinned somewhere that can redden).
+JOURNAL_VECTOR_WIDTH_KEY = "embedding_width"
+#: The vector is stored at the embedder's own float32, shortest round-trip text.
+JOURNAL_VECTOR_WIDTH_F32 = "f32"
+#: The vector is stored at whatever width its owner wrote — untouched.
+JOURNAL_VECTOR_WIDTH_F64 = "f64"
+
+
+def shortest_float32_vector(vector: list[float]) -> list[float] | None:
+    """``vector`` as the float64s whose text is the shortest float32 round trip.
+
+    #11821 P0: the journal wrote 21.9 chars/float because the embedder's
+    **float32** output was widened to float64 and printed at float64's shortest
+    repr (17 significant digits). The extra digits are a property of the
+    conversion, not of the vector — so the value is stored at the precision it
+    was produced at, and the TEXT is what gets smaller.
+
+    WHY THE VALUE IS QUANTISED, and not just the text (the decisive reason):
+    :func:`json.dumps` prints ``float.__repr__``, and there is no hook for it —
+    the C and Python encoders both call it directly, so a ``float`` subclass's
+    ``__repr__`` is IGNORED (measured: ``json.dumps([F(0.1)])`` → ``[0.1]``, not
+    the subclass's text). Formatting at the printer would therefore need a
+    private-API encoder AND would leave the payload holding 17-digit values
+    while the journal holds 9 — so a LIVE write and a REPLAY of the same record
+    would put different numbers in the record's ``embedding`` jsonb. Quantising
+    here keeps the invariant exact instead of "equal at the store's width":
+    ``json.loads(journal_text)["embedding"] == payload["embedding"]``, bit for bit.
+
+    The returned floats are the float64s whose ``repr`` IS the shortest decimal
+    that rounds back to the same float32, so every consumer sees:
+
+    * the same float32 bits as the input (``struct``/``vecf32`` equality), and
+    * a decimal text ~44 % shorter (measured on the pinned 384-d corpus:
+      across #11821 P0: 8,414 B → 4,689 B, 21.9 → 12.2 chars/float (value + separators).
+
+    ⛔ **NOT interchangeable with `stored_form.narrow_to_stored_width`**, and a
+    reader must not swap one for the other. Both agree on the float32; they
+    differ on what they RETURN. `narrow_to_stored_width` returns the binary
+    widening — `0.1` → `0.10000000149011612`, 17 digits, what the engine holds
+    — and it is the right answer for a COMPARISON between the record and the
+    cache (#8615). This returns the SHORTEST DECIMAL for that float32 — `0.1`
+    — which is the right answer for the journal's TEXT, and is deliberately
+    OFF the float32 grid as a float64 (it must narrow to it).
+
+    ``None`` means **this vector is NOT OURS to narrow**, and the caller must
+    then leave the values ALONE and declare the width ``f64``. That is ONE
+    question with three shapes, and they are one test — *is every element
+    already a float32?*:
+
+    * **over-range** (``1e300``) → the cast saturates to ``inf``;
+    * **under-range** (``1e-300``) → the cast collapses to ``0.0``, destroying
+      an element and recording the zero as the embedder's own;
+    * **off-grid in range** (``0.1234567890123``, ``16777217.0`` which would
+      silently lose a unit, ``1e-50``) → the cast rounds somebody's digits away.
+
+    A value that IS a float32 subnormal (``float(np.float32(1e-45))``) is on the
+    grid and DOES narrow; the literal ``1e-45`` (and ``0.1``, whose widening is
+    ``0.10000000149011612``) is not, so hand over the widening, not the literal.
+
+    ⛔ THE GRID CHECK IS THE OWNERSHIP TEST, and that is why it is primary. A
+    vector a caller supplied reaches this seam WITHOUT `embedding_verbatim` on at
+    least one path — `EventAPI.add_point(fields=…)` refuses that marker as a
+    forged key and never mints it (the only marker that door mints is the WIDTH)
+    — so "the marker is absent" is not evidence that the vector is ours. "Off the
+    embedder's float32 grid" is:
+    `encode_batch_for_store` returns ``vec.tolist()`` of a float32 array, so
+    nothing our embedder emits can be off it.
+    """
+    values = [float(x) for x in vector]
+    if not values:
+        return []
+    # Range FIRST, in plain Python: the numpyd cast below would otherwise emit
+    # a `RuntimeWarning` ("overflow encountered in cast") — and the natural
+    # suppression (`warnings.catch_warnings`) mutates PROCESS-GLOBAL filter
+    # state on a path the SDK documents as concurrently written (#5612), where
+    # two interleaved blocks can leave an `ignore` entry behind for the life of
+    # the process. Refusing before the cast needs no suppression at all.
+    f32_max = float(np.finfo(np.float32).max)
+    if any(abs(value) > f32_max for value in values):
+        return None
+    # …then: is every element EXACTLY what a float32 widens to? (`nan` fails
+    # here, since `nan != nan`.) This is the ownership test, not a tolerance.
+    as_f32 = np.asarray(values, dtype=np.float32)
+    if not np.array_equal(as_f32.astype(np.float64),
+                          np.asarray(values, dtype=np.float64)):
+        return None
+    # `str` of a numpy float32 is the shortest decimal that round-trips to that
+    # float32 (Dragon4 `unique=True` printing), and `float()` of it is therefore
+    # the float64 whose own `repr` is that same short text — one step, no search.
+    candidates = [float(str(np.float32(value))) for value in values]
+    # Fail CLOSED on a numpy printing contract change (a shorter render that no
+    # longer round-trips would silently narrow to a DIFFERENT float32): the
+    # candidates must still be the same float32 as the input.
+    if not np.array_equal(np.asarray(candidates, dtype=np.float32), as_f32):
+        return None
+    return candidates
+
+
 def stamp_journal_embedding(payload: dict, *, creating: bool) -> dict:
     """#5004: normalise and stamp a point payload's embedding + its identity.
 
@@ -347,6 +471,18 @@ def stamp_journal_embedding(payload: dict, *, creating: bool) -> dict:
     vector — but stamps NO identity, because that vector may predate a model
     change and the record cannot attest its origin. The creating record owns
     the attestation.
+
+    **THE VECTOR'S WIDTH IS DECLARED HERE (#11821 P0).** The embedder emits
+    **float32**; widening it to float64 and printing float64's shortest repr is
+    a property of the CONVERSION, not more information (`float64(f32(x))`
+    stores nothing the model produced), and it cost 21.9 chars/float — 8,414 B
+    of a 9,176 B creating record. So a vector this seam knows is OURS is stored
+    at float32 (see :func:`_stamp_journal_vector_width` and
+    :func:`shortest_float32_vector`) and the payload says which width it got,
+    in :data:`JOURNAL_VECTOR_WIDTH_KEY`. A CALLER-owned or PRESERVED vector is
+    never narrowed — it declares ``f64`` and keeps its raw form (#5004
+    round-7) — and a record written before this change carries no marker at
+    all, which readers must keep accepting.
 
     Mutates and returns *payload*. A vector that cannot be normalised to a
     finite numeric list is replaced with ``None`` (the field stays OWNED) with
@@ -391,8 +527,9 @@ def stamp_journal_embedding(payload: dict, *, creating: bool) -> dict:
                 return payload
             vec.append(f)
     payload["embedding"] = vec
+    _stamp_journal_vector_width(payload)
     if (vec is not None and creating
-            and not payload.get("embedding_verbatim")
+            and not is_verbatim(payload)
             # #5004 round-3: a re-capture that did NOT encode a vector (the
             # embedder was unavailable) PRESERVES the node's existing one. The
             # vector may have been computed by a DIFFERENT model, so attesting
@@ -426,6 +563,178 @@ def stamp_journal_embedding(payload: dict, *, creating: bool) -> dict:
     return payload
 
 
+def _is_shortest_f32_text(vector) -> bool:
+    """Is ``vector`` already in THIS seam's own ``f32`` output form?
+
+    #11835 review (P0): the idempotence arm above returned on the `f32` MARKER
+    alone, so any payload carrying a stale marker kept it whatever its text
+    said. This is the verification that makes the arm's claim true: it asks the
+    text, not the marker, whether the values are the ``f32`` form — i.e. the
+    shortest decimals that round back to the float32 each element widens to.
+
+    Three answers, and only one of them is ``True``:
+
+    * a non-numeric SEQUENCE (a ``str``, ``bytes`` or ``dict``) or an element
+      that is not a finite number → ``False``: the seam never writes one, so no
+      width it declared can describe it;
+    * an element float32 cannot HOLD → ``False``: the narrowing never produces
+      one (the check is ``struct.pack``, not a comparison with
+      ``finfo(float32).max`` — see the comment on it);
+    * every element the shortest float32 round trip of its own bits →
+      ``True``.
+
+    ``False`` is a FAIL-CLOSED answer everywhere it is used: the caller
+    re-decides the width from the values, and an un-narrowable vector comes
+    back ``f64`` with its values untouched — never a declaration its text does
+    not earn.
+    """
+    # Refused for the same reason `stamp_journal_embedding` refuses them a few
+    # lines up (``isinstance(raw, (str, bytes, dict))`` →
+    # `_drop_journalled_embedding`): a `str` is a sequence of CHARACTERS and a
+    # `dict` a sequence of KEYS, and `bytes` is an iterable of INTS
+    # `[1.0, 2.0]` — reading any of them as numbers would answer "is every
+    # element a float32" about the wrong thing, in the PERMISSIVE direction.
+    if isinstance(vector, (str, bytes, dict)):
+        return False
+    try:
+        values = [float(x) for x in vector]
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not values:
+        # An empty vector is representable at every width, and the narrowing
+        # leaves it empty — `shortest_float32_vector` agrees (`[]`).
+        return True
+    for value in values:
+        if not math.isfinite(value):
+            return False
+        # ⛔ THE RANGE GATE IS `struct.pack`, NOT A COMPARISON WITH THE BINARY
+        # MAXIMUM. Two reasons, both measured: (1) the numpy float32 cast
+        # returns `inf` outside the range and emits a `RuntimeWarning`, which
+        # cannot be suppressed without mutating process-global filter state
+        # (see :func:`shortest_float32_vector` on why that is refused) — where
+        # `struct.pack` raises instead; (2) the largest float32's shortest
+        # DECIMAL (`3.4028235e38`) is GREATER than
+        # `finfo(float32).max` (`3.4028234663852886e38`) as a float64, so a
+        # binary-max gate rejects this seam's OWN output for that one value,
+        # falls through, and flips its declaration back to `f64` — re-opening
+        # the idempotence bug this arm exists to close.
+        try:
+            struct.pack("<f", value)
+        except OverflowError:
+            return False
+    # Widen each element to the float32 it names (in range, so the cast cannot
+    # warn), then ask the module's own quantiser for the canonical text of
+    # those bits. Equality with the payload is the whole test — and it keeps
+    # ONE definition of "the shortest float32 form" (this function is a
+    # READER of the quantiser, not a second spelling of it).
+    widened = [float(np.float32(value)) for value in values]
+    return shortest_float32_vector(widened) == values
+
+
+def _stamp_journal_vector_width(payload: dict) -> None:
+    """#11821 P0: narrow an OWN vector to float32 and DECLARE the width.
+
+    Runs inside :func:`stamp_journal_embedding`, after the vector has been
+    normalised to a finite numeric list and BEFORE the attestation branch — the
+    object it mutates is the payload the journal will serialise and the replay
+    will decode, so live and replay read one set of values.
+
+    THREE OUTCOMES, and each one is a decision rather than a fallthrough:
+
+    1. **No vector** (``None``, or the key absent — a foreign record) → no
+       marker. There is nothing whose width could be declared.
+    2. **A caller-owned or PRESERVED vector** (``embedding_verbatim`` /
+       ``embedding_preserved``) → ``f64``, values UNTOUCHED. This is #5004
+       round-7's rule read at the width rather than at the engine
+       (``projection.FalkorProjection._rebuild_all_replay``'s ``embedding_verbatim`` restore
+       guard: *"a CALLER-owned vector must keep its RAW form. `vecf32()` is the
+       ONE form it must not take"* — the graph-only id's only restorer), and the
+       storage form the same flag picks
+       (``projection/entities.py::_upsert_point_props``: ``CASE WHEN
+       $embedding_verbatim THEN $embedding ELSE vecf32($embedding)``, flag set by
+       ``TortoiseSDK.create_point``'s ``_create_map["embedding_verbatim"]``).
+       So a caller-owned vector is one the store must not re-encode — and this
+       stamp must not either. That is
+       the reason the marker exists at all: without it a later
+       base64/width migration could narrow exactly the population the journal
+       promised to keep raw, silently. The marker is stamped HERE, in the same
+       PR as the narrowing, so that population is never unnamed.
+    3. **A vector our embedder produced** → narrowed (see
+       :func:`shortest_float32_vector`) and declared ``f32``.
+
+    Which is correct for a NON-creating snapshot too (``PointPromoted`` &c.):
+    the store writes ``vecf32($embedding)`` for every non-verbatim vector
+    (`stored_form.node_statement`), so a non-verbatim vector the writer hands
+    over is ALREADY on the float32 grid — narrowing it keeps the float32 bits
+    the store holds AND shortens the text. Only the width's own declaration
+    moves.
+
+    ⛔ IT IS NOT A NO-OP ON THE VALUE (#11835 review round 3, F1). The
+    payload's float64 is REWRITTEN to the shortest decimal for those bits —
+    `0.001230153371579945` (the store's widening) becomes `0.0012301534` — which
+    is deliberately OFF the grid as a float64, exactly as
+    :func:`shortest_float32_vector` says. So the journal's record and the node's
+    `vecf32` widening still DIFFER as float64, and the record↔cache comparison
+    must keep narrowing the truth side (`stored_form.narrow_to_stored_width` —
+    `consistency._as_f32`, #8615). **That narrowing is not redundant; deleting it
+    reports `field_mismatches` for every faithfully replayed vector.**
+    """
+    raw = payload.get("embedding")
+    if raw is None:
+        payload.pop(JOURNAL_VECTOR_WIDTH_KEY, None)
+        return
+    # The VERBATIM half is read through `stored_form.is_verbatim`, the module
+    # that owns "may this vector be narrowed?" for the store — so this function
+    # is a READER of that decision, not a second spelling of it. The second arm
+    # is genuinely this seam's own: `embedding_preserved` marks a vector copied
+    # from a PREVIOUS capture (which may be anyone's), and the turn carrier does
+    # not carry the verbatim marker, so it is the only signal there.
+    if is_verbatim(payload) or payload.get("embedding_preserved"):
+        payload[JOURNAL_VECTOR_WIDTH_KEY] = JOURNAL_VECTOR_WIDTH_F64
+        return
+    # IDEMPOTENT (#11835 review, P3) — and VERIFIED, never trusted
+    # (#11835 review, P0). Re-deciding an ALREADY-NARROWED vector would find
+    # its values OFF the float32 grid (they are the round-tripping decimals, not
+    # the widened float32s) and flip the declaration to `f64` while leaving the
+    # values unchanged: a payload stating a width its text does not have, which
+    # is the one thing the marker exists to prevent. Measured before the guard:
+    # stamp twice -> `f32` then `f64`, values byte-identical.
+    #
+    # ⛔ BUT THE MARKER ALONE IS NOT PROOF, and the earlier justification of
+    # this arm ("callers are refused `f32` at every home, so a payload that
+    # already declares it holds THIS function's own output") is FALSE.
+    # `_forged` refuses a caller who PASSES the marker; it cannot see a marker
+    # left STALE by a vector replaced after the stamp was written. `EventAPI`
+    # had exactly such a home — `_point` stamped its server vector, then
+    # `p.update(fields)` swapped in the caller's, then this seam re-stamped —
+    # and it now pops the marker between the swap and the re-stamp
+    # (`api.add_point`, #11835 review F2). ⛔ THIS ARM MUST NOT DEPEND ON EVERY
+    # SUCH DOOR REMEMBERING TO: `_emit_event`'s `id=`/`**extra` branch takes a
+    # record whose `embedding_width` is not in `_RESERVED_ENVELOPE_PROPS` or
+    # `_RESERVED_EMIT_CALL_PROPS`, so a caller-named marker still arrived here
+    # intact and was honoured over off-grid values (measured at 5e590ab625, and
+    # closed by this verification). So the arm asks the only question that makes
+    # its claim true, of the text actually in the payload: is this already the
+    # shortest float32 round-trip of its own bits? If it is, nothing to do
+    # (idempotence). If it is not, the marker does not describe this text — fall
+    # THROUGH and re-decide it from the values.
+    #
+    # The verbatim arm is checked FIRST on purpose: a preserved vector must
+    # always re-declare `f64`, even if a stale `f32` rode in beside it.
+    if (payload.get(JOURNAL_VECTOR_WIDTH_KEY) == JOURNAL_VECTOR_WIDTH_F32
+            and _is_shortest_f32_text(raw)):
+        return
+    narrowed = shortest_float32_vector(raw)
+    if narrowed is None:
+        # Not representable at float32 (an out-of-range or hand-edited value):
+        # leave it exactly as written and say so. A `None` here is never
+        # "narrow it anyway" — it is "this is not ours to narrow".
+        payload[JOURNAL_VECTOR_WIDTH_KEY] = JOURNAL_VECTOR_WIDTH_F64
+        return
+    payload["embedding"] = narrowed
+    payload[JOURNAL_VECTOR_WIDTH_KEY] = JOURNAL_VECTOR_WIDTH_F32
+
+
 def _drop_journalled_embedding(payload: dict, why: str) -> None:
     """Drop an unusable vector to an OWNED `None` and SAY SO.
 
@@ -438,6 +747,9 @@ def _drop_journalled_embedding(payload: dict, why: str) -> None:
     payload.pop("embedding_text_hash", None)
     payload.pop("embedding_model", None)
     payload.pop("embedding_revision", None)
+    # #11821: no vector, no width. Leaving a stale marker beside an OWNED
+    # `None` would describe a payload that has nothing to describe.
+    payload.pop(JOURNAL_VECTOR_WIDTH_KEY, None)
     logger.warning(
         "journal: dropping an unusable embedding on Point %s (%s) — the field "
         "stays journal-owned as None, so the replay will NOT invent a vector "
