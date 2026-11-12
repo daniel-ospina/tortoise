@@ -2147,12 +2147,16 @@ def test_tool_is_stdlib_only():
 def test_a_tilde_citation_outside_the_swarm_tree_is_refused(tmp_path, monkeypatch):
     """FAILS if a `~`-rooted citation anywhere is exempted from the resolver.
 
-    §8's carve-out is ONE dated tree — §5's `~/.swarm` inventory — but the arm
-    exempted every `~` path, so prefixing any citation with one character defused
-    every red this resolver can raise: measured, `~tortoise/nope.py:16` (a path
-    that does not exist) and `~tortoise/pipeline.py:999999` (a line past the end of
-    its file) both returned `[]`. A citation the guard cannot open must not be
-    counted as checked.
+    The arm exempted every `~` path, so prefixing any citation with one character
+    defused every red this resolver can raise: measured, `~tortoise/nope.py:16` (a
+    path that does not exist) and `~tortoise/pipeline.py:999999` (a line past the
+    end of its file) both returned `[]`. A citation the guard cannot open must not
+    be counted as checked.
+
+    ⛔ The carve-out is now EMPTY, not narrowed to `~/.swarm/`. Narrowing was tried
+    (and measured to still exempt a `~/.swarm/…:3` citation of a file §5 records as
+    **gone** — the one class this page exists to stop a lane re-citing), so §8 no
+    longer declares any `~` carve-out and every `~`-rooted citation is refused.
     """
     for spelling in ("~tortoise/nope_module.py:16", "~tortoise/pipeline.py:999999"):
         with monkeypatch.context() as patch:
@@ -2164,18 +2168,23 @@ def test_a_tilde_citation_outside_the_swarm_tree_is_refused(tmp_path, monkeypatc
                 ),
             )
             problems = _doc_problems()
-            assert any("`~`-rooted outside" in p for p in problems), (
-                f"{spelling!r} is `~`-rooted outside `~/.swarm/` and must be refused, "
+            assert any("does not exist in the tree" in p for p in problems), (
+                f"{spelling!r} is `~`-rooted and must be refused, "
                 f"not exempted: {problems}"
             )
 
 
-def test_a_tilde_citation_inside_the_swarm_tree_stays_exempt(tmp_path, monkeypatch):
-    """FAILS if narrowing the carve-out also reds the citation §8 declares exempt.
+def test_a_tilde_citation_into_the_lost_swarm_tree_is_refused(tmp_path, monkeypatch):
+    """FAILS if the `~/.swarm/`-only exemption ever comes back.
 
-    The other direction of the test above: §5 is a dated reading of a tree outside
-    this repository, so its citation cannot be resolved and must stay counted-but-
-    exempt rather than becoming a red the required `docs` job cannot fix.
+    This is the NARROWED version of the fail-open, and it is the tempting one: §5's
+    inventory names `~/.swarm/issue-triage-2026-09-09.md`, so exempting that tree
+    looks like protecting a legitimate §5 reading. It is not — §5 records that tree
+    as **gone from every machine measured**, which makes a `~/.swarm/…:LINE`
+    citation an assertion of evidence nobody can open: exactly the "declares what it
+    cannot store" class this page exists to catch, and the reason its own first
+    consequence says such a citation is a BROKEN citation. The name with no line
+    number is a table cell, not a citation, and stays untouched.
     """
     with monkeypatch.context() as patch:
         _mutated(
@@ -2188,9 +2197,7 @@ def test_a_tilde_citation_inside_the_swarm_tree_stays_exempt(tmp_path, monkeypat
             ),
         )
         problems = _doc_problems()
-        assert not any("`~`-rooted outside" in p for p in problems), problems
-        assert not any("does not exist in the tree" in p for p in problems), problems
-
+        assert any("does not exist in the tree" in p for p in problems), problems
 
 def test_a_two_digit_section_reference_must_name_a_real_heading(tmp_path, monkeypatch):
     """FAILS if `§N` is read as a single digit.
