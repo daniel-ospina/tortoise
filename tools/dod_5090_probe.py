@@ -489,8 +489,8 @@ def _imports_that_REBIND(root_children) -> set[str]:
 
     Only a binding that does not resolve is counted, so the honest `function_level_alias` shape —
     the import in the writer's own scope whose whole point is that it binds the call — is left
-    alone. `import … as Y` always binds a MODULE (never the seam function), so every its alias
-    counts.
+    alone. `import … as Y` always binds a MODULE (never the seam function), so every one of its
+    aliases counts.
     """
     rebound: set[str] = set()
     for sub in root_children:
