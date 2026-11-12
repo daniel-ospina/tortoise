@@ -6103,7 +6103,10 @@ def _mirror_refusal_reason(sentence: str) -> str:
                "clause as a mirror mention")
     _missing = ("names a mirror but NOT as the value's source — it uses no "
                 "`mirror's value` or `mirror supplies` construct (see "
-                "`_MIRROR_SOURCE`)")
+                "`_MIRROR_SOURCE`); add one ONLY if the mirror really is the "
+                "value's source — this guard does not read the VERB's sense, so "
+                "a construct added to an inverted sentence CERTIFIES it "
+                "(residual 3a)")
     if _MIRROR_SOURCE.search(sentence):
         return _denial
     # ⛔ A sentence can be refused by BOTH legs — no source construct AND a
@@ -6319,8 +6322,8 @@ def _problem_line(rel: str, hit: str) -> str:
     A function rather than an inline f-string so the wiring itself is pinnable.
     Every other leg of this guard has a row that reds when it is removed; the
     sentence→cause wiring had none, so it could be reverted (a merge conflict
-    resolved in `main`'s favour, say) leaving 125 green and a fixer with a bare
-    sentence and no cause — the exact state `_mirror_refusal_reason` exists to
+    resolved in `main`'s favour, say) leaving the suite green and a fixer with a
+    bare sentence and no cause — the exact state `_mirror_refusal_reason` exists to
     prevent (review, measured).
     """
     return f"{rel}: …{hit[:180]}… — it {_mirror_refusal_reason(hit)}"
@@ -6998,15 +7001,28 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
         "`mirror`/`mirrors`")
     # The sentence→cause WIRING is a leg of its own: the allow-list trade-off
     # is justified by the message, so the message must be pinned, not merely
-    # present (review: reverting the f-string left 125 green).
+    # present (review: reverting the f-string left the suite green — one test
+    # reds, which is what makes the revert visible; the file collects 127 tests
+    # as of the #11964 rebase, so "126 still green" is the current figure).
     assert "— it names no" in _problem_line(
         "tortoise/x.py", "Its confidence_mean IS the PRIOR mean.")
     assert "— it names a mirror but NOT as the value's source" in _problem_line(
         "tortoise/x.py",
         "Its confidence_mean IS the PRIOR mean; the mirror loses to the pair.")
+    # ⛔ …and the remedy must WARN that the construct is only valid where the
+    # relation is TRUE. Measured: following the shape remedy literally on
+    # `…; the mirror loses to the pair.` — one of the rows above — produces
+    # `… the mirror's value loses to the pair.`, which this file pins as a known
+    # FALSE PASS (residual 3a). A diagnosis that walks the fixer from a refusal
+    # into a false pass is the failure the whole function exists to prevent, so
+    # the caveat is pinned rather than left to prose.
+    assert "ONLY if the mirror really is the value's source" in _mirror_refusal_reason(
+        "Its confidence_mean IS the PRIOR mean; the mirror loses to the pair."), \
+        "the shape remedy must warn that it is only valid where the relation holds"
     # …and the WIRING: `_unqualified_claims` must actually route through that
     # helper. Asserting the helper alone leaves the call site free to be
-    # reverted to a bare f-string with 125 still green (review, measured), which
+    # reverted to a bare f-string with every other test still green (review,
+    # measured), which
     # is how the "the message makes the trade-off pay" justification could
     # disappear silently. Drive it with one injected sentence.
     monkeypatch.setattr(
