@@ -2340,7 +2340,8 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     novel paraphrase — a NEW wrong wording, or a revert that keeps the wrong claim but
     rephrases it, is not caught. Widening the match is not free either: once case and
     backticks are ignored every needle must stay long enough to be unambiguous ("by being
-    probed" alone would now collide with the corrected "reachable only BY being probed"),
+    probed" alone would collide with the pre-fix sentence's own "identified *by being
+    probed*" clause),
     which is why the doc needles below carry their clause and not a fragment. It is a
     regression guard, not a proof of the prose.
     """
@@ -2382,13 +2383,16 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     #: ⛔ AND THIS TUPLE IS ITSELF A WORDING RULE, so it is stated as one. A correct qualifier
     #: reds unless it names stillness with one of these tokens IN THE SAME SENTENCE: measured, a
     #: correct edit phrased "unless its stamp has stopped moving" or "while the run has been
-    #: QUIET for 300 s" redded. So the tuple carries the stillness vocabulary these docs
-    #: actually use, not only the module's identifier.
+    #: QUIET for 300 s" redded. So the tuple carries the stillness PHRASING A CORRECTED EDIT MAY
+    #: USE — not "the vocabulary these docs use", which was measured false and is the wrong
+    #: test: bare `quiet` and `stops moving` occur in these files with OTHER referents (a quiet
+    #: repo, a quiet queue, a count that stops moving), so they are `… FOR` here, on the same
+    #: reasoning that rejects bare `still` below.
     #: `still for` rather than bare `still`: "still counted" is ordinary prose in THIS module
     #: (an abstained run is "still counted as executing"), so the loose token would disarm real
     #: hits — measured.
-    SECOND_HALF = ("updated_at", "job_settle_seconds", "still for", "motionless", "quiet",
-                   "stopped moving", "stops moving", "settle window", "has been still")
+    SECOND_HALF = ("updated_at", "job_settle_seconds", "still for", "motionless",
+                   "quiet for", "stopped moving", "has been still", "settle window")
 
     def hits(hay: str, needle: str) -> bool:
         """Does ``needle`` occur where the second half is NOT also stated nearby?
@@ -2531,9 +2535,14 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # to the CLAIM, not to the bare count: "three causes, one bucket" alone is a true
         # statement about `PR-UNWITNESSED` and reds on legitimate prose.
         "disproved — three causes, one bucket",
-        # the count form that shipped MOST RECENTLY (review P2): it shipped from c0c53f8c
-        # through 77cae6056 — ten revisions — and a revert to it was silent while only the
-        # "three causes" form was pinned.
+        # the count forms that shipped, BOTH of them (review P2). "disproved — FOUR causes, one
+        # bucket: the probe BUDGET never reached the run; …" shipped at c0c53f8c and 7b9636cd;
+        # "disproved. FOUR causes, ONE bucket — and the causes span three layers" replaced it at
+        # 7c535d2f and survived through 77cae6056. The numeral-only needle catches the earlier
+        # form, whose FULL sentence is disarmed by design (it goes on to name the stillness
+        # half, so the discriminator reads it as corrected — the same treatment the `three
+        # causes` entry gets).
+        "disproved — FOUR causes, one bucket",
         "disproved. FOUR causes, ONE bucket — and the causes span three layers",
     ]
     flats = {name: flat(text) for name, text in scanned.items()}
@@ -2601,6 +2610,20 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         "own `updated_at` has been still for `JOB_SETTLE_SECONDS`",
         "now READ and SETTLED (their `updated_at` is 7 days old, so both halves of the "
         "exclusion proof hold), so none of them is executing anything",
+        # ⛔ THESE FOUR PIN THE WIDENED VOCABULARY ITSELF. Each embeds a needle that exists
+        # in `retracted` AND is disarmed ONLY by one of the tokens added for it, so deleting
+        # that token — a change that can only WEAKEN detection, and so is invisible in the
+        # dangerous direction — reds here instead of passing silently. Verified by deleting
+        # each token in turn.
+        "False is a PROOF (every job of the run is completed, so it is executing nothing) "
+        "because its stamp is motionless",
+        "now READ: every job is completed, so none of them is executing anything, and the "
+        "queue has been quiet for 300 s",
+        "the runs read out because EVERY job of them was completed (a proof of "
+        "non-execution), and how many, now that we are inside the settle window",
+        "all-jobs-completed is the PROOF that EXCLUDES a run from pr_running (see the "
+        "excluded sentence), so it can never contribute to an unmeasured census once its "
+        "stamp has stopped moving",
     ]
     disarming = []
     for phrase in correct:
@@ -2629,8 +2652,12 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     # phrasings that actually SHIPPED — pre-fix on `origin/main` for 13 of them, plus TWO
     # sentences that shipped only mid-branch at `6c05aeb903` (the merged closed-avenue claim,
     # later retracted), ONE truncation of a shipped sentence to its shortest true instance,
-    # and ONE declared RE-TYPED variant. Several guarded sites carry more than one entry, so
-    # this is not one-per-site.
+    # ONE declared RE-TYPED variant, and TWO branch-only count forms. ⛔ AND THE COVERAGE IS
+    # NOT TOTAL, which is named here rather than left to be discovered: a shipped count
+    # sentence that itself goes on to name the stillness half is DISARMED by design (the
+    # discriminator reads it as a corrected restatement), so only its truncated numeral form
+    # is catchable — see the count entry's comment. Several guarded sites carry more than one
+    # entry, so this is not one-per-site.
     pre_fix = [
         # to_dict + the two field docs + classify_queue's comment + its returned-dict twin
         "the runs read out because EVERY job of them was `completed` (a proof of "
@@ -2677,10 +2704,12 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # still fire — a count re-added without a stillness clause is exactly the revert the
         # needle exists for.
         "disproved — three causes, one bucket: the jobs could NOT be read.",
-        # the same claim with the numeral it grew to. ⛔ Its provenance is the BRANCH, not
-        # `origin/main`: main never carried either numeral, but the branch carried this one for
-        # ten revisions — so it is a shipped retracted claim, and the dead-needle check is right
-        # to demand it here.
+        # the same claim with the numerals the branch carried. ⛔ Provenance is the BRANCH, not
+        # `origin/main`: main never carried a numeral, but the branch carried this one from
+        # c0c53f8c (as "the probe BUDGET never reached the run; the jobs could NOT be read") and
+        # then from 7c535d2f to 77cae6056 in the form below — so it is a shipped retracted
+        # claim, and the dead-needle check is right to demand it here.
+        "disproved — FOUR causes, one bucket: the probe BUDGET",
         "disproved. FOUR causes, ONE bucket — and the causes span three layers,",
         # ⛔ A RE-TYPED REVERT, not a shipped quote: `flat()` turns the shipped
         # "all-jobs" / newline / "-completed" into "all-jobs -completed", so a revert that

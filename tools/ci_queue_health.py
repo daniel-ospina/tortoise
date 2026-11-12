@@ -694,11 +694,12 @@ class QueueHealth:
     #: cause comes from) is owned by `pr_running_unmeasured_unprobed` below; the set itself is
     #: deliberately not re-enumerated here. ⛔ NO COUNT OF THE WHOLE ROUTE SET IS GIVEN,
     #: deliberately: this comment has carried one (as "three causes" and then as "FOUR
-    #: causes, ONE bucket", both shipped) and each was a route short. The one count below is
-    #: the SUB-RULE that grew — completeness, which now has three routes (an int
+    #: causes, ONE bucket", both shipped) and each was a route short. The one count KEPT is
+    #: the completeness SUB-RULE in `read_run_live_job`'s Returns block — three routes: an int
     #: `total_count` above the page, a PRESENT-but-not-an-int count, and no count on a full
-    #: page) — and it is named only because that is the growth that falsified the last
-    #: numerals. Layers are not routes: three layers is stable, a route count is not. The
+    #: page — named only because that is the growth which falsified the last numerals. (It is
+    #: NOT the count in `pr_running_census_unwitnessed`'s comment, which is about something
+    #: else; this sentence used to say "the one count below" and pointed a reader there.) Layers are not routes: three layers is stable, a route count is not. The
     #: callee's routes are in `read_run_live_job`'s Returns block (and the caller's two
     #: layers — the settle gate and the budget split — are in `read_health`); re-derive
     #: from those, never from here. (`has_live_job`'s bullet above spans all three layers and
