@@ -327,15 +327,27 @@ def job() -> dict:
         defaults: {run: {shell: "bash -c 'export PATH=/usr/lib/postgresql/17/bin:$PATH; exec bash {0}'"}}
 
     GREEN with the leg on pg17 (measured, #12051 review round 10) — while the same
-    shell at JOB scope correctly red. The job's own `defaults` still win over the
-    workflow's, exactly as at runtime.
+    shell at JOB scope correctly red.
+
+    The fold is PER KEY, because GitHub's override is per NAME — "When more than
+    one default setting is defined with the same name, GitHub uses the most
+    specific default setting" (`actions/defaults-override`). An all-or-nothing
+    fold let a job that sets only `defaults.run.working-directory` MASK the
+    workflow's `shell`, which still `exec bash {0}`-wraps this job's `run:` steps
+    at runtime: the same injector stayed GREEN behind two benign-looking edits
+    (measured, round 11). A job key that is present wins; an absent one does not
+    hide the workflow's.
     """
 
     workflow = yaml.safe_load(PYTHON_CI.read_text())
     assert JOB in workflow["jobs"], f"{JOB} is the record's only armed Postgres job"
     resolved = dict(workflow["jobs"][JOB])
-    if "defaults" not in resolved and workflow.get("defaults"):
-        resolved["defaults"] = workflow["defaults"]
+    job_defaults = resolved.get("defaults") or {}
+    resolved["defaults"] = job_defaults
+    job_run = job_defaults.get("run") or {}
+    job_defaults["run"] = job_run
+    for key, value in ((workflow.get("defaults") or {}).get("run") or {}).items():
+        job_run.setdefault(key, value)
     return resolved
 
 
@@ -522,11 +534,23 @@ def _replaces_a_client_binary(line: str) -> bool:
     return bool(BINARY_NAME_RE.search(line, verb.end()))
 
 
-#: `if:` values that cannot SKIP the step. `success()` is the default, and
-#: `always()` runs even when a previous step failed — strictly safer than absent.
-#: Round 10 measured `always()` being refused, with a message asserting a false
-#: condition the step does not have.
-NON_SKIPPING_IF = frozenset({"success()", "always()", "${{ success() }}", "${{ always() }}"})
+#: `if:` conditions that CANNOT SKIP the step, normalised (no `${{ }}`, single
+#: spaces). `success()` is the default; `always()` and its two aliases run the
+#: step whenever the job is running at all — all strictly SAFER than an absent
+#: `if:`, so refusing them reds a correct tree with a message asserting a false
+#: condition. Round 10 measured `always()` itself; round 11 measured
+#: `!cancelled()` and `success() || failure()`, which are the same condition
+#: spelled the way GitHub's own docs spell it.
+NON_SKIPPING_IF = frozenset(
+    {"success()", "always()", "!cancelled()", "success() || failure()"}
+)
+
+
+def _normalise_if(value: object) -> str:
+    """`${{ X }}` / `X` / extra whitespace collapse to one comparable spelling."""
+
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    return re.sub(r"^\$\{\{\s*|\s*\}\}$", "", text).strip()
 
 
 def _conditional_skip(step: dict) -> str | None:
@@ -534,9 +558,52 @@ def _conditional_skip(step: dict) -> str | None:
 
     if step.get("continue-on-error"):
         return f"continue-on-error: {step['continue-on-error']!r}"
-    if "if" in step and step["if"] is not True and step["if"] not in NON_SKIPPING_IF:
+    if (
+        "if" in step
+        and step["if"] is not True
+        and _normalise_if(step["if"]) not in NON_SKIPPING_IF
+    ):
         return f"if: {step['if']!r}"
     return None
+
+
+#: The two clients the record drill resolves from PATH (`record_backup.py`
+#: defaults each to its bare name).
+TOOLS = ("pg_dump", "pg_restore")
+
+LOOP_HEAD_RE = re.compile(r"^[ \t]*for[ \t]+(?P<var>[A-Za-z_]\w*)[ \t]+in[ \t]+(?P<names>[^;]*);?[ \t]*do[ \t]*$")
+
+
+def _version_checked_tools(code: str) -> set[str]:
+    """Which client tools this code actually VERSION-CHECKS (#12051 round 11).
+
+    A bare substring test over the step is satisfied by a `for` HEADER alone, so
+    a pin that names both tools on the header and then checks only one of them
+    (`version="$(pg_dump --version)"`) read as covering both — pg_restore was
+    never checked and every row stayed green (measured). Coverage therefore
+    requires the version command to USE whatever the loop iterates, or a
+    per-tool `<tool> --version` line.
+    """
+
+    checked: set[str] = set()
+    lines = code.splitlines()
+    for index, line in enumerate(lines):
+        head = LOOP_HEAD_RE.match(line)
+        if head:
+            names = {
+                name
+                for name in re.findall(r"[A-Za-z_][\w-]*", head.group("names"))
+                if name in TOOLS
+            }
+            body = "\n".join(lines[index + 1 :])
+            iterate = re.escape(head.group("var"))
+            if re.search(rf'"?\$\{{?{iterate}\}}?"?[ \t]+--version', body):
+                checked |= names
+            continue
+        for tool in TOOLS:
+            if re.search(rf"\b{tool}\b[^\n]*--version", line):
+                checked.add(tool)
+    return checked
 
 
 def _pin_step(steps: list[dict]) -> tuple[int, dict]:
@@ -991,11 +1058,17 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
         )
 
     asserted = "\n".join(_run_commands(steps[index]) for index, _ in hits)
-    for tool in ("pg_dump", "pg_restore"):
-        assert tool in asserted, (
-            f"the pin must assert `{tool} --version`: the drill resolves BOTH "
+    checked = _version_checked_tools(asserted)
+    for tool in TOOLS:
+        assert tool in checked, (
+            f"the pin never VERSION-CHECKS `{tool}`: the drill resolves BOTH "
             "from PATH, and pinning only one leaves the other on the image's "
-            "client"
+            "client. A `for tool in …; do` HEAD that NAMES the tool does not "
+            "count — the body has to invoke the loop variable (measured, round "
+            "11: `version=\"$(pg_dump --version)\"` under the unchanged header "
+            "`for tool in pg_dump pg_restore; do` stayed GREEN with pg_restore "
+            "never checked). Accepted forms: that loop with `\"$tool\" "
+            "--version` in its body, or a `<tool> --version` line per tool."
         )
 
 
@@ -1096,6 +1169,62 @@ REFUSAL_POLARITY: list[tuple[str, str, bool, str]] = [
     ),
     ("real-loop-head", "for tool in pg_dump pg_restore; do", False, "the real loop head"),
 ]
+
+
+#: (code, tools that code ACTUALLY version-checks, why) — the pin for
+#: `_version_checked_tools`. A bare `for tool in …; do` HEADER used to satisfy the
+#: tool assertion on its own, so a body that hard-coded one tool read as covering
+#: both (measured, #12051 review round 11). Both directions are pinned here, in
+#: the repo, because a table that lives only in a review transcript evaporates
+#: with the branch.
+VERSION_CHECK_POLARITY = [
+    (
+        'for tool in pg_dump pg_restore; do\n  version="$("$tool" --version)"\ndone',
+        {"pg_dump", "pg_restore"},
+        "the real loop: the body uses the loop variable, so both are checked",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n  version="$(pg_dump --version)"\ndone',
+        {"pg_dump"},
+        "header names both, body hard-codes one: pg_restore is NEVER checked",
+    ),
+    (
+        'echo "checking pg_restore too"\nfor tool in pg_dump; do\n  version="$("$tool" --version)"\ndone',
+        {"pg_dump"},
+        "a MENTION of the tool is not a check of it",
+    ),
+    (
+        'pg_dump --version\npg_restore --version',
+        {"pg_dump", "pg_restore"},
+        "the accepted no-loop shape: one version command per tool",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n  echo "$tool"\ndone',
+        set(),
+        "the loop variable is echoed, never version-checked",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("code", "checked", "why"),
+    VERSION_CHECK_POLARITY,
+    ids=[case.replace(" ", "-")[:28] for case, _, _ in VERSION_CHECK_POLARITY],
+)
+def test_a_bare_loop_header_does_not_assert_the_tool(
+    code: str, checked: set[str], why: str
+) -> None:
+    """The tool coverage is what the code CHECKS, not what it mentions (#12051).
+
+    `assert tool in asserted` was a substring over the step, so the loop HEADER
+    alone satisfied it: `version="$(pg_dump --version)"` under an unchanged
+    `for tool in pg_dump pg_restore; do` left every row green while `pg_restore`
+    was never checked — the exact defect class rounds 4 and 7 fixed for
+    `::error::` / `exit 1`, one screen up. Each case is pinned in both
+    directions so a future widening cannot silently restore it.
+    """
+
+    assert _version_checked_tools(code) == checked, f"{why} (measured, round 11)"
 
 
 @pytest.mark.parametrize(
