@@ -414,22 +414,25 @@ RUNTIME_FILES = (
 
 #: The members the guard opens and expects to find ZERO occurrences of the retired
 #: origin in — and therefore the population a tidy-up is most tempted to DELETE,
-#: because a zero looks like a leftover. Two reasons sit in this one group; the
-#: difference matters when editing it:
+#: because a zero looks like a leftover. Two roles sit in this one group:
 #:
-#:   * `website/functions/blog/_lib.ts`, `invite-accept.html`, `welcome.html`,
-#:     `wizardPrompts.js` — each CARRIED a retired-origin literal, was re-aimed to 0
-#:     (#12058, #11764), and had its allowlist row deleted. The file STAYS in the
-#:     surface so a literal coming back REDS the count check instead of leaving the
-#:     surface silently.
-#:   * `tortoise/email_notify.py`, `tortoise/abuse.py`, the two onboarding
-#:     `SKILL.md` copies and `.env.example` — in the surface for a different pin
-#:     (`test_documents_humans_copy_do_not_name_the_retired_host`), so their measured
-#:     count is 0 by construction rather than by a re-aim.
+#:   * six RUNTIME EMITTERS — `tortoise/email_notify.py` (the invite link's base),
+#:     `tortoise/abuse.py` (the appeal URL), `website/functions/blog/_lib.ts` (the
+#:     blog origin), and the three dashboard landing surfaces
+#:     `invite-accept.html`, `welcome.html`, `wizardPrompts.js`. The sweep has taken
+#:     each to zero occurrences; the file STAYS in the surface so a literal coming
+#:     back REDS the count check instead of leaving the surface silently.
+#:   * three DOCUMENTS a human copies — the two onboarding `SKILL.md` copies and
+#:     `.env.example` — which `test_documents_humans_copy_do_not_name_the_retired
+#:     _host` (above) pins by name and which must never name the retired host in any
+#:     form.
 #:
-#: ⛔ COUNT THE TREE, NOT THIS COMMENT — the four/five split above is the reason each
-#: member is here, and the group as a whole is the set that measures 0 today
-#: (measured 2026-11-12 on `4b1d6cd0`).
+#: ⛔ THIS COMMENT RECORDS A MEASUREMENT, NOT A HISTORY. What is asserted, and what
+#: `test_the_runtime_surface_is_the_whole_population_it_claims` re-measures on every
+#: run, is: these nine paths are members of `RUNTIME_FILES`, and each carries 0
+#: occurrences of `RETIRED_ORIGIN` today. It deliberately makes no claim about which
+#: commit took a given file to zero — that split is not in this file and a claim
+#: nobody re-measures is the class this module exists to refuse.
 EXPECTED_ZERO_COUNT_FILES = frozenset({
     "tortoise/email_notify.py",
     "tortoise/abuse.py",
@@ -530,9 +533,9 @@ def test_the_runtime_surface_is_the_whole_population_it_claims():
     opens and stays GREEN when a file the guard used to open LEAVES. A member at 0
     occurrences carries no row, so it sits in neither side of that relation — and
     deleting its line was a one-line diff that left all 16 tests GREEN over a file
-    the guard had stopped opening: the exact false PASS the module docstring twice
-    promises cannot happen ("this guard cannot report GREEN over a file it never
-    opened"), on the very file whose docstring argues the point.
+    the guard had stopped opening: the exact false PASS the module docstring above
+    refuses ("this guard cannot report GREEN over a file it never opened"), on the
+    very file whose docstring argues the point.
 
     Both directions now red: an unexpected member moves the count, and a deleted
     zero-count member drops out of `EXPECTED_ZERO_COUNT_FILES` and is NAMED. The
@@ -554,6 +557,21 @@ def test_the_runtime_surface_is_the_whole_population_it_claims():
         "row, so no count check can see them leave the surface — but they must stay "
         f"IN it: {missing}. Deleting the line stops the guard OPENING the file, so "
         "a literal coming back would no longer RED: that is #12144's false PASS."
+    )
+    # ⛔ THE GROUP IS RE-MEASURED, NOT JUST DECLARED. Containment alone lets the
+    # constant silently stop being true: put a literal BACK in a member and add an
+    # allowlist row for it, and every other check here passes while this group still
+    # claims a zero it no longer measures.
+    counts = {rel: (REPO / rel).read_text(encoding="utf-8").count(RETIRED_ORIGIN)
+              for rel in sorted(EXPECTED_ZERO_COUNT_FILES)}
+    stale = [(rel, n) for rel, n in counts.items() if n]
+    assert not stale, (
+        "these files are declared ZERO-count in EXPECTED_ZERO_COUNT_FILES but the "
+        f"tree now carries {RETIRED_ORIGIN} in them: {stale}. A literal coming back "
+        "is what the count check exists to catch — if it came back ON PURPOSE, take "
+        "an allowlist row with its reason AND move the path out of "
+        "EXPECTED_ZERO_COUNT_FILES in the same commit, so the group stops claiming "
+        "a zero it no longer measures."
     )
     assert len(RUNTIME_FILES) == 23, (
         f"the runtime surface has {len(RUNTIME_FILES)} members, not 23 — a member "
