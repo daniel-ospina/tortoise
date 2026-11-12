@@ -24476,16 +24476,19 @@ class TortoiseSDK:
                     # ⛔ WHICH SIDE MOVES: `phi_coherence(ca, cb)` prices the
                     # DEPENDENT (slot 1) off the necessary CONDITION (slot 0), so
                     # an unmet condition DRAGS THE DEPENDENT DOWN while the
-                    # condition itself does not move at all. Measured on
-                    # `TortoiseEP._update_factor` at the DEFAULT weight `w=1.0`
-                    # with priors 0.050000 (condition) / 0.909091 (dependent):
-                    #   `->`  dependent 0.909091 → 0.901401, condition 0.050000
-                    #   `<-`  dependent → 0.909000, condition 0.050000 → 0.049614
-                    # and a grid over (condition, dependent) raises the dependent
-                    # in ZERO cells. The first cut of this message said it "LOWERS
-                    # the condition's confidence", which is false of the default
-                    # `->` reading and contradicts ONTOLOGY ("an unmet condition
-                    # propagates loss to the dependent").
+                    # CONDITION is never the side that moves. Measured on
+                    # `TortoiseEP._update_factor` (`n_quad` 8/16/21/41 all
+                    # identical) at the DEFAULT weight `w=1.0`, priors
+                    # Beta(0.5, 9.5) = 0.050000 (condition) and Beta(10, 1) =
+                    # 0.909091 (dependent), message written to the side named:
+                    #   `->`  dependent 0.909091 → 0.902168; condition UNMOVED
+                    #   `<-`  condition 0.050000 → 0.049614; dependent UNMOVED
+                    #   `<->` both, each from its own corner (see `ep.py`)
+                    # — i.e. one direction lowers ONE side and the other lowers
+                    # the OTHER, which is why the sentence may not say "lowers
+                    # the condition" as a general claim. The first cut did, which
+                    # contradicts ONTOLOGY ("an unmet condition propagates loss to
+                    # the dependent") and is false of the default `->` reading.
                     #
                     # ⛔ WHICH MECHANISM IT NAMES, and how it addresses the call:
                     # the contradicted mechanism comes from the CONTRADICTION
