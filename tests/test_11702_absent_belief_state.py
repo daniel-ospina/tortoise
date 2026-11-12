@@ -6031,8 +6031,14 @@ def test_no_gloss_reads_has_ep_as_proof_of_an_ep_pass():
 # measured the shapes it names. Both are pinned here.
 #
 # The prose half is a tripwire over wordings the tree has used, not a grammar
-# proof: it errs toward REFUSING a true sentence (a human then reads it), never
-# toward passing a false one.
+# proof. ⚠️ BOTH limits are named because this note said the opposite and that
+# was false (measured): it fires only on the four ASSERTED verb forms
+# (`is`/`reads`/`lands at`/`equals`) WITHIN ONE SENTENCE, so "On the #2199
+# default the word YIELDS 0.75", "…GIVES 0.75", "…SCORES 0.75",
+# "credibility=low MEANS 0.75" and "The word: 0.75" all PASS it — each a false
+# attribution. It errs toward REFUSING a true sentence (a human then reads it),
+# and it does NOT promise to catch every false one; a rewritten attribution
+# needs a new verb in the list, which is the maintenance this tripwire needs.
 _CRED_WORD_YIELDS_075 = re.compile(
     r"credibility[^.;]{0,60}?\b(?:is|reads|lands\s+at|equals)\b"
     r"[^.;]{0,25}?0\.75(?!\d)",
@@ -6066,9 +6072,12 @@ def test_the_credibility_guard_fires_on_the_wording_it_exists_to_catch():
     """Non-vacuity for the guard above: the sentence that SHIPPED is caught.
 
     The guard is only worth having if the exact wording it was written for
-    reddens it. Both spellings below stood in `volunteer.py`'s note on this
-    branch (the second was introduced by a commit whose stated purpose was
-    correcting the first).
+    reddens it. Provenance corrected (measured — the earlier note here claimed
+    both: it is not true): the FIRST sentence shipped in `volunteer.py`'s note
+    (`734b75b20b`, removed by `ea19933128`). The SECOND never shipped in any
+    commit this repo holds — `git log --all --reflog -S"lands at" --
+    tortoise/volunteer.py` is empty — it is a REWORDING of the same false
+    attribution kept as a second spelling the guard must also catch.
     """
     for shipped in (
             "A declared pair WINS over the credibility word: the same "
@@ -6108,7 +6117,16 @@ def test_the_credibility_word_adds_to_the_default_but_loses_to_a_pair(sdk):
     content = "cred word: explicit pair"
     pair = sdk.create_point("statement", content, dedup=True)["id"]
     sdk.set_point_baseline(pair, 3, 1)
-    sdk.create_point("statement", content, dedup=True, credibility="low")
+    deduped = sdk.create_point("statement", content, dedup=True, credibility="low")
+    # ⛔ PIN THE DEDUP HIT. Without this, a regression in content-hash dedup
+    # applies the word to a NEW point instead of `pair`, and every assertion
+    # below still passes — `pair` keeps its 0.75 and its null label, so the
+    # "the word LOSES to an explicit pair" half of this test would assert
+    # nothing at all. Latent today (the hit lands); unpinned it is a future
+    # vacuous pass.
+    assert deduped["id"] == pair, (
+        "content-hash dedup must hit, or the `pair` arm below exercises nothing "
+        f"(got a new point {deduped['id']} instead of {pair})")
 
     def served(pid: str):
         return annotate_ep_batch(sdk._get_proj().g, [pid])[pid].confidence_mean
