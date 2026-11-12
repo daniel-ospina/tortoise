@@ -109,6 +109,24 @@ not a tenth spelling — it is the one a text guard cannot reach:
   job because it applies here too). A `shell:` reached through a
   reusable workflow (`uses: ./.github/workflows/x.yml`) is outside this
   file and outside this guard.
+  ⛔ A `shell:` THAT NEVER REACHES `{0}` IS REFUSED (#12069 review, residual).
+  The runner substitutes the step's script for `{0}`, so
+  `shell: bash -c 'exit 0; exec bash {0}'` never executes the `run:` at all —
+  the pin would be PRESENT and INERT, the same false PASS `CONSTANT_GUARD_RE`
+  refuses, one surface over (measured GREEN before this rule).
+  `_unreachable_guards()` also took no `job` and read `run:` only; it now reads
+  `_executed_lines()`. A wrapper that inverts the script some other way (one that
+  ignores its argument) is still invisible.
+- **The runner IMAGE is part of the artifact** (#12080, ported). The pin assumes
+  the image's archive carries `postgresql-client-<major>`, and that is not free:
+  on 2026-11-12 `ubuntu-latest` became `ubuntu-26.04`, which ships only the 18
+  client, so the install died `E: Unable to locate package` before the version
+  assertion could run. `KNOWN_GOOD_IMAGE_MAJOR` is a table of MEASURED pairs, the
+  job must name one of them, and the in-step precondition must probe the package
+  BEFORE the install — with a committed behavioural test
+  (`test_the_precondition_actually_fires_when_the_package_is_absent`) that
+  EXECUTES the committed prefix under stubbed `sudo`/`apt-cache`, because no text
+  assertion can tell an armed guard from a present-but-dead one.
 - **`env:` and `$GITHUB_ENV` are read at file scope only (#12069 review P1).**
   `env:` was previously not read AT ALL — a job- (or workflow-) level
   `env: PATH: /usr/bin:/bin` left the whole file green while the leg resolved
@@ -120,6 +138,12 @@ not a tenth spelling — it is the one a text guard cannot reach:
   by an INVOKED script (`run: bash x.sh`), by a composite action this job calls,
   or by a reusable workflow this job calls — the invoked-script blind spot
   above, in one more mechanism.
+- **A loop body's STATEMENT level is what counts.** A version check under a
+  nested `if`/`case`/`for`/`while` selects WHICH names it covers and credits none
+  of them (`_selects_on_var`), and a statement-level `break`/`continue` stops the
+  body, so nothing after it is credited (#12069 review, residual: `break` before
+  the check reported every header name while nothing was version-checked,
+  measured GREEN).
 - **A loop whose list is a VARIABLE is refused, not resolved.** Any `$` in the
   list (`for tool in $TOOLS`, `${TOOLS:-a b}`) names nothing this guard can
   count, so the row reds with a message naming the accepted form (the literal
@@ -158,6 +182,7 @@ the part that observes reality.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -239,6 +264,102 @@ BINARY_MUTATION_RE = re.compile(
 #: compensating control) from reading as replacements — both measured RED, round
 #: 10. The call site also reads the name only AFTER the verb.
 BINARY_NAME_RE = re.compile(r"\b(?:pg_dump|pg_restore|pg_ctl|pg_wrapper)(?![\w.])")
+
+#: A (release -> PostgreSQL client major) fact table, PROVEN and not assumed.
+#: Which client a release's archive carries IS #12051 round 2: `ubuntu-latest`
+#: moved to `ubuntu-26.04`, whose archive ships `postgresql-client-18` and NO 16,
+#: so the pin died `E: Unable to locate package` (exit 100) before a single test
+#: ran and every leg below it skipped. A new release must be MEASURED and added
+#: here before it is adopted — this map is the record of a measurement, not a
+#: shape check. (Ported from #12080, whose lane fixed the same job from the other
+#: side; this file's rules and that lane's are one guard now.)
+KNOWN_GOOD_IMAGE_MAJOR = {
+    # `docker run --rm ubuntu:24.04 apt-cache policy postgresql-client-16`
+    #   -> Candidate: 16.15-0ubuntu0.24.04.1
+    "ubuntu-24.04": 16,
+}
+
+#: The package-resolvability precondition, in either shell shape that actually
+#: fails closed: an `if !` guard around the probe, or the probe short-circuiting
+#: into a `{ … }` / `( … )` group. FACTS are extracted (probe verb either way,
+#: quoted or not); the SPELLING is deliberately not pinned, because equivalent
+#: rewrites are the same behaviour and a guard that reds them is a false block.
+_IF_PRECONDITION_RE = re.compile(
+    r"^if\s+!\s*(?:sudo\s+)?apt-cache\s+(?:show|policy)\s+['\"]?"
+    r"postgresql-client-(?P<major>\d+)['\"]?[^;]*;\s*then(?P<body>.*?)^fi\s*$",
+    re.DOTALL | re.MULTILINE,
+)
+_OR_PRECONDITION_RE = re.compile(
+    r"(?:sudo\s+)?apt-cache\s+(?:show|policy)\s+['\"]?"
+    r"postgresql-client-(?P<major>\d+)['\"]?[^|\n]*\|\|\s*[({]"
+    # The failing branch as a BOUNDED WINDOW of following lines, never up to a
+    # matched brace: the shipped message contains `( )` and `{ }` of its own, so
+    # brace-matching truncates the body and then reports the guard as missing —
+    # the most misleading failure this file could produce.
+    r"(?P<body>(?:[^\n]*\n){0,5}[^\n]*)",
+    re.MULTILINE,
+)
+
+#: `${…}` expansions, erased before block matching: the shipped failure message
+#: contains `${ImageOS:-unknown}` and `${RUNNER_NAME:-unknown}`, and a `}` inside
+#: a message string truncates a `.*?\}` body match — so the very rewrite this
+#: file promises to accept would red as "does not `exit 1`". Erasing an expansion
+#: is control-flow-neutral: it never opens or closes a block.
+_PARAM_EXPANSION_RE = re.compile(r"\$\{[^}]*\}")
+
+#: A commented-out line is inert shell that reads EXACTLY like live code.
+_COMMENT_ONLY_RE = re.compile(r"^\s*#")
+
+
+def _code_only(text: str) -> str:
+    """The step's shell with comment-only lines dropped."""
+
+    return "\n".join(
+        line for line in text.splitlines() if not _COMMENT_ONLY_RE.match(line)
+    )
+
+
+def _normalised_code(text: str) -> str:
+    """Comment-stripped shell with `${…}` expansions erased (see above)."""
+
+    return _PARAM_EXPANSION_RE.sub("", _code_only(text))
+
+
+def _precondition(code: str) -> re.Match[str]:
+    """The package-resolvability precondition, matched as a BLOCK, not a token.
+
+    A bare `"apt-cache show" in text` is satisfied by a commented-out line and by
+    a block that is present but unreachable, so the caller passes
+    `_normalised_code(...)`. Reachability itself is NOT provable from text — that
+    is what `test_the_precondition_actually_fires_when_the_package_is_absent`
+    EXECUTES the committed step for.
+    """
+
+    match = _IF_PRECONDITION_RE.search(code) or _OR_PRECONDITION_RE.search(code)
+    assert match, (
+        "the pin does not precondition on the package being RESOLVABLE, so an "
+        "image whose archive lacks the major reds as `E: Unable to locate "
+        "package` (exit 100) — an opaque failure that reads as a typo in this "
+        "step, which is how the 2026-11-12 image move hid behind a "
+        "#12051-shaped red. Read from the step's CODE (comment lines stripped), "
+        "because a substring pin is satisfied by commenting the body out."
+    )
+    return match
+
+
+def _runs_on_labels(job: dict) -> list[str]:
+    """`runs-on` as a label list — a one-element list is the same request."""
+
+    runs_on = job.get("runs-on")
+    if isinstance(runs_on, str):
+        return [runs_on]
+    assert isinstance(runs_on, list), (
+        f"`{JOB}` must name its image(s) literally; found runs-on={runs_on!r}. An "
+        "expression makes the client major depend on what the expression "
+        "resolved to, which no assertion in this file can see."
+    )
+    return [str(label) for label in runs_on]
+
 
 #: The `$GITHUB_PATH` write as ONE unit: the versioned dir IS the value written.
 #: `echo <dir> >> "$GITHUB_PATH"` — read the major from the
@@ -344,6 +465,15 @@ FAIL_CLOSED_STOP_RE = re.compile(r"^[ \t]*exit 1[ \t]*$", re.MULTILINE)
 #: this enclosing block). The armed-branch row is therefore a text guard with a
 #: named residual, not a proof; the in-job `pg_dump --version` assertion is what
 #: makes a surviving blind spot visible in the log.
+#: A `shell:` whose command string TERMINATES before it reaches `{0}` — the
+#: placeholder the runner substitutes the step's script into (#12069 review,
+#: residual). `shell: bash -c 'exit 0; exec bash {0}'` therefore runs `exit 0` and
+#: never executes the `run:` script at all, so a pin (or its fail-closed branch)
+#: wrapped in it is PRESENT and INERT — the same false PASS `CONSTANT_GUARD_RE`
+#: exists to refuse, one surface over. Requiring `{0}` on the line keeps this
+#: precise: the ordinary `shell: bash` names no placeholder and no `exit`.
+SHELL_NEVER_REACHES_SCRIPT_RE = re.compile(r"\bexit\b[^;]*;.*\{0\}")
+
 CONSTANT_GUARD_RE = re.compile(
     r"^[ \t]*(?:"
     r"(?:if|elif|while)[ \t]+(?:false|![ \t]*true)"
@@ -574,7 +704,9 @@ def _leg_indexes(steps: list[dict]) -> list[int]:
     ]
 
 
-def _unreachable_guards(steps: list[dict], start: int, end: int) -> list[str]:
+def _unreachable_guards(
+    steps: list[dict], start: int, end: int, job: dict | None = None
+) -> list[str]:
     """Lines in `[start, end)` that cannot run, as `step N: <line>`.
 
     The two rows that assert a construct is LIVE — the `$GITHUB_PATH` prepend and
@@ -603,8 +735,19 @@ def _unreachable_guards(steps: list[dict], start: int, end: int) -> list[str]:
     for index in range(start, end):
         if not 0 <= index < len(steps):
             continue
-        for line in _run_commands(steps[index]).splitlines():
-            if CONSTANT_GUARD_RE.match(line) or DEAD_CHAIN_RE.search(line):
+        # ⛔ EVERY EXECUTED LINE, NOT `run:` ONLY (#12069 review, residual). This
+        # scan took no `job`, so the `shell:` a step executes through was outside
+        # its population — and `shell: bash -c 'exit 0; exec bash {0}'` makes the
+        # step's `run:` INERT while every row here stayed green (measured: the pin
+        # never installed, never prepended, never asserted). `_executed_lines` is
+        # the population the client-dir rule already reads.
+        for line in _executed_lines(job, steps[index]):
+            if SHELL_NEVER_REACHES_SCRIPT_RE.search(line):
+                found.append(
+                    f"step {index}: the `shell:` terminates before the step's "
+                    f"script runs: {line.strip()}"
+                )
+            elif CONSTANT_GUARD_RE.match(line) or DEAD_CHAIN_RE.search(line):
                 found.append(f"step {index}: {line.strip()}")
             elif SUBSHELL_OPEN_RE.match(line) or SUBSHELL_CLOSE_RE.match(line):
                 # ⛔ A SUBSHELL IS NOT A SCOPE, IT IS A STATUS (#12051 review round
@@ -863,6 +1006,12 @@ LOOP_HEAD_OPEN_RE = re.compile(
 )
 LOOP_DO_RE = re.compile(r"^[ \t]*do[ \t]*$")
 LOOP_END_RE = re.compile(r"^[ \t]*done\b")
+#: A block that OPENS/CLOSES inside a loop body, and a statement that stops the
+#: rest of the body from running. Used only to find the body's STATEMENT level —
+#: a `break` under a nested `if` is not one (#12069 review, residual).
+LOOP_OPEN_RE = re.compile(r"^[ \t]*(?:if|for|while|until|select|case)\b")
+LOOP_CLOSE_RE = re.compile(r"^[ \t]*(?:fi|done|esac)\b")
+LOOP_EARLY_EXIT_RE = re.compile(r"^[ \t]*(?:break|continue)\b")
 
 #: `${NAME}` -> `$NAME`. `COMMAND_WORD_RE` treats `{`/`}` as command SEPARATORS,
 #: so a braced variable's command word came out empty and the `f"${{{loop_var}}}"`
@@ -1016,9 +1165,28 @@ def _version_checked_tools(code: str) -> set[str]:
             scan(rest, var, names)
             if re.search(r"(?:^|[;&])[ \t]*done\b", rest):
                 continue  # closed on its own line: no body to follow
+        depth = 0
         for body_line in lines[body_start:]:
-            if LOOP_END_RE.match(body_line):
+            if LOOP_CLOSE_RE.match(body_line):
+                if depth == 0:
+                    break  # the loop's own `done`
+                depth -= 1
+                body.append(body_line)
+                continue
+            if depth == 0 and LOOP_EARLY_EXIT_RE.match(body_line):
+                # ⛔ NOTHING AFTER A STATEMENT-LEVEL `break` RUNS (#12069 review,
+                # residual). A body of `break` + `"$tool" --version` reported the
+                # header's whole name list while nothing was version-checked —
+                # measured GREEN, the same "credits a check that does not happen"
+                # defect `_selects_on_var` closes for a selection. Only a
+                # statement-level one stops the body; a `break` inside a nested
+                # block runs only under that block's condition, which this guard
+                # cannot read, so it is left to `_selects_on_var`'s polarity.
                 break
+            if depth == 0 and LOOP_OPEN_RE.match(body_line):
+                depth += 1
+                body.append(body_line)
+                continue
             body.append(body_line)
         # ⛔ A SELECTING BODY COVERS NONE OF THE HEADER'S NAMES (#12069 review P2).
         credited = set() if _selects_on_var(body, var) else names
@@ -1236,6 +1404,170 @@ def test_the_two_provisioned_servers_are_one_major(job: dict) -> None:
     )
 
 
+def test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(job: dict) -> None:
+    """The IMAGE is part of the artifact: it decides which client the archive has.
+
+    The pin assumes the image's archive CARRIES `postgresql-client-<major>`, and
+    that assumption is not free: MEASURED 2026-11-12 (job `131022562781`, head
+    `58b5a417ba`), `ubuntu-latest` had migrated to `Image: ubuntu-26.04`, whose
+    archive ships `postgresql-client-18` and no 16 — so the install died
+    `E: Unable to locate package` (exit 100) BEFORE the version assertion could
+    run, both servers were provisioned in vain, and every leg below skipped. A
+    floating label lets the runner image change the drill's client major with no
+    diff, which is the class this file closes.
+
+    The (release -> major) pair is asserted rather than the label's SHAPE,
+    because `ubuntu-26.04` is just as version-pinned as `ubuntu-24.04` and is the
+    release that broke. Ported from #12080, which fixed the same job from the
+    other side.
+    """
+
+    server_major = _postgres_image_majors(job)[0]
+    labels = _runs_on_labels(job)
+
+    assert "ubuntu-latest" not in labels, (
+        "`ubuntu-latest` is a MOVING label and it moved: on 2026-11-12 it became "
+        "ubuntu-26.04, whose archive has no `postgresql-client-16`, so this job "
+        "reds before a single test runs (#12051). Name the release."
+    )
+    assert len(labels) == 1 and labels[0].startswith("ubuntu-"), (
+        f"`{JOB}` asks for {labels!r}. This pin needs ONE named hosted image: the "
+        "drill's PostgreSQL client major comes from that image's archive, so any "
+        "second label (e.g. `self-hosted`) makes the client an inherited fact of "
+        "whichever box answers — the exact inheritance #12051 removed. The "
+        "in-step precondition fails closed on such a box; this assertion is the "
+        "contract."
+    )
+    label = labels[0]
+    assert label in KNOWN_GOOD_IMAGE_MAJOR, (
+        f"`{JOB}` runs on {label!r}, whose PostgreSQL client major has not been "
+        "measured. PROVE it — `apt-cache policy "
+        f"postgresql-client-{server_major}` on that image — and add the pair to "
+        "KNOWN_GOOD_IMAGE_MAJOR. The image supplies the drill's client, so "
+        "adopting one unmeasured is how #12051 round 2 shipped."
+    )
+    assert KNOWN_GOOD_IMAGE_MAJOR[label] == server_major, (
+        f"`{JOB}`'s two servers are pg{server_major}, but {label} carries a "
+        f"pg{KNOWN_GOOD_IMAGE_MAJOR[label]} client: the archive would be dumped "
+        "by a client whose major differs from the restore target (#12051)."
+    )
+
+    _, pin = _pin_step(_steps(job))
+    code = _normalised_code(_run_text(pin))
+    precondition = _precondition(code)
+    assert int(precondition.group("major")) == server_major, (
+        "the precondition probes postgresql-client-"
+        f"{precondition.group('major')} but the servers are pg{server_major}"
+    )
+    body = precondition.group("body")
+    assert "::error::" in body, (
+        "the precondition fails silently: an absent package must be reported as "
+        "its OWN named failure, not as the archive's opaque apt error"
+    )
+    assert re.search(r"\bexit\s+1\s*(?:;|\}|\)|$)", body), (
+        "the precondition does not `exit 1`, so a missing client would fall "
+        "through to the install and surface as exit 100 again."
+    )
+
+    # ⛔ ORDER IS PART OF THE FIX. A precondition placed AFTER the install is
+    # inert: the install has already died with the opaque `exit 100` this block
+    # exists to replace.
+    assert code.index("apt-cache") < code.index("apt-get install"), (
+        "the package precondition runs AFTER `apt-get install`, so it can never "
+        "fire: the install dies first with `E: Unable to locate package`"
+    )
+
+
+def test_the_precondition_actually_fires_when_the_package_is_absent(
+    job: dict, tmp_path: Path
+) -> None:
+    """REACHABILITY, executed — text cannot tell an armed guard from a dead one.
+
+    Every other assertion in this file reads the step's text, and text does not
+    distinguish "the guard is armed" from "the guard is present but unreachable".
+    MEASURED, all of these satisfied text assertions alone:
+      · `... >/dev/null 2>&1 || true; then` — the probe's status thrown away
+      · `exit 1` moved inside `if false; then … fi` — the token is still there
+      · the whole block wrapped in `if [ -n "${NEVER_SET:-}" ]; then … fi` — the
+        DISARMING spelling, which REDs this test (absent stub → rc=0,
+        `REACHED_PAST_PRECONDITION` printed, no `::error::`).
+
+    ⚠️ NOT in that list: the same wrapper spelled `-z`. `[ -z "" ]` is TRUE, so
+    the wrapper's body still runs and the guard stays ARMED — a blind spot in
+    this docstring's framing, not a bypass.
+
+    So this test RUNS the committed step's prefix — verbatim, from `run:`, up to
+    (not including) the `apt-get install` line — under `bash`, with `sudo`,
+    `apt-get` and `apt-cache` stubbed. Hermetic: no network, no apt, no sudo. The
+    failing-stub run must STOP with a named `::error::`; the succeeding-stub run
+    must NOT stop, or the job would red on every image that carries the client.
+    Ported from #12080.
+    """
+
+    _, pin = _pin_step(_steps(job))
+    lines = _run_text(pin).splitlines()
+    install_at = next(
+        (i for i, line in enumerate(lines) if re.search(r"apt-get\s+install", line)),
+        None,
+    )
+    assert install_at is not None, "the pin has no `apt-get install` line to run up to"
+    prefix = "\n".join(lines[:install_at]).rstrip()
+    assert "apt-cache" in prefix, (
+        "the precondition is not before the install in the committed step, so "
+        "there is nothing to execute ahead of it (the order assertion above "
+        "should already have caught this)"
+    )
+
+    def run_with(stub: str) -> subprocess.CompletedProcess[str]:
+        script = tmp_path / "precondition.sh"
+        # ⛔ `sudo` and `apt-get` are stubbed TOO. Without them the prefix runs the
+        # HOST's real `sudo apt-cache` / `sudo apt-get update`: on a box where
+        # sudo is passwordless and the package is known to apt the probe
+        # SUCCEEDS, the failure branch is never taken, and the test reports a
+        # disarmed guard that is actually armed — while reading the host's
+        # package index.
+        script.write_text(
+            'sudo() { "$@"; }\n'
+            "apt-get() { return 0; }\n"
+            f"{stub}\n{prefix}\n"
+            "echo REACHED_PAST_PRECONDITION\n",
+            encoding="utf-8",
+        )
+        return subprocess.run(
+            ["bash", str(script)], capture_output=True, text=True, timeout=60
+        )
+
+    absent = run_with(
+        'apt-cache() { echo "E: Unable to locate package" >&2; return 100; }'
+    )
+    combined = absent.stdout + absent.stderr
+    assert absent.returncode != 0, (
+        "with `apt-cache` FAILING the committed precondition did not stop the "
+        "step, so it is unreachable or disarmed (`|| true`, an `exit 1` inside a "
+        "dead branch, or a wrapper that never runs). On a real image without the "
+        f"client this reaches `apt-get install` and dies with exit 100. Output: {combined!r}"
+    )
+    assert "::error::" in combined, (
+        "the precondition stopped the step without naming the defect, so the red "
+        f"reads as an apt typo rather than as an image that lost the client: {combined!r}"
+    )
+    assert "REACHED_PAST_PRECONDITION" not in combined, (
+        "the prefix kept going after the precondition stopped it: "
+        f"{combined!r}"
+    )
+
+    present = run_with('apt-cache() { echo "postgresql-client-16:"; return 0; }')
+    combined_ok = present.stdout + present.stderr
+    assert present.returncode == 0, (
+        "with `apt-cache` SUCCEEDING the committed precondition still stopped the "
+        f"step, so every image that carries the client would red: {combined_ok!r}"
+    )
+    assert "REACHED_PAST_PRECONDITION" in combined_ok, (
+        "with `apt-cache` succeeding the prefix did not reach the install: "
+        f"{combined_ok!r}"
+    )
+
+
 def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> None:
     """`postgresql-client-<major>` AND `/usr/lib/postgresql/<major>/bin` ON `$GITHUB_PATH`.
 
@@ -1284,7 +1616,7 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     # `if false; then … fi` around the prepend satisfied all of them while the
     # write never executed — measured, five rows GREEN, leg on the inherited
     # client. Reachability is asserted before the construct.
-    unreachable = _unreachable_guards(steps, pin_index, leg_start)
+    unreachable = _unreachable_guards(steps, pin_index, leg_start, job)
     assert not unreachable, (
         "a step between the client install and the record leg cannot RUN the "
         f"code it is graded on: {unreachable!r}. A guard whose condition is a "
@@ -1552,7 +1884,7 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
 
     # INERT-BUT-PRESENT first: an enclosing constant-condition block leaves every
     # structural assertion below satisfied and the branch unable to fire.
-    unreachable = _unreachable_guards(steps, pin_index, leg_start)
+    unreachable = _unreachable_guards(steps, pin_index, leg_start, job)
     assert not unreachable, (
         "a step between the client install and the record leg cannot RUN the "
         f"code it is graded on: {unreachable!r}. `if false; then … fi` around "
@@ -1834,6 +2166,20 @@ VERSION_CHECK_POLARITY = [
         'pg_dump --version\npg_restore --version',
         {"pg_dump", "pg_restore"},
         "the accepted no-loop shape: one version command per tool",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  break\n'
+        '  version="$("$tool" --version)"\ndone',
+        set(),
+        "nothing after a statement-level `break` runs, so nothing is checked",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  if [ -z "$1" ]; then break; fi\n'
+        '  version="$("$tool" --version)"\ndone',
+        {"pg_dump", "pg_restore"},
+        "CONTROL: a `break` inside a nested block is not statement-level",
     ),
     (
         'for tool in pg_dump pg_restore; do\n  echo "$tool"\ndone',
@@ -2349,6 +2695,43 @@ def test_the_shell_a_step_executes_through_is_scanned() -> None:
         "a `$GITHUB_PATH` write spelled in `shell:` is an unclassifiable mention, "
         "which is an offender at or after the pin"
     )
+
+
+#: (`shell:`, is it refused as unable to run the step's script, why) — the pin for
+#: the `SHELL_NEVER_REACHES_SCRIPT_RE` half of `_unreachable_guards`. The runner
+#: substitutes the step's script for `{0}`; a command that terminates before it
+#: never executes the `run:` the other rows grade (#12069 review, residual).
+SHELL_INERT_POLARITY = [
+    (
+        "bash -c 'exit 0; exec bash {0}'",
+        True,
+        "`exit 0` runs before the script, so the step's `run:` never executes",
+    ),
+    ("bash -c 'exit 1; exec bash {0}'", True, "a non-zero exit is just as inert"),
+    ("bash -c 'echo hi; exec bash {0}'", False, "CONTROL: reaches `{0}`"),
+    ("bash -c 'exec bash {0}'", False, "CONTROL: hands straight to `{0}`"),
+    ("bash", False, "CONTROL: the ordinary shell names no placeholder"),
+]
+
+
+@pytest.mark.parametrize(
+    ("shell", "refused", "why"),
+    SHELL_INERT_POLARITY,
+    ids=[f"shell-{i}" for i in range(len(SHELL_INERT_POLARITY))],
+)
+def test_a_shell_that_never_reaches_the_script_is_refused(
+    shell: str, refused: bool, why: str
+) -> None:
+    """A `shell:` that terminates before `{0}` makes every `run:` line INERT.
+
+    `_unreachable_guards()` took no `job` and read `run:` only, so this surface
+    was outside its population: `shell: bash -c 'exit 0; exec bash {0}'` over the
+    pin step left every row green with the client never installed, never
+    prepended and never asserted (measured, #12069 review residual).
+    """
+
+    found = _unreachable_guards([{"shell": shell, "run": "echo hi"}], 0, 1)
+    assert bool(found) is refused, f"{why} (measured, #12069 review): {shell!r}"
 
 
 def test_an_image_digest_does_not_hide_its_major() -> None:
