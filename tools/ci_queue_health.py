@@ -77,9 +77,9 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               here, which is a clean bill of health for a CI that is not running.)
   PR-UNWITNESSED
               per REPO — the PR WORK WAS NOT WITNESSED, for one of three reasons:
-              (a) the FEED WAS CUT AT ITS PAGE CAP, so the older runs — the end
-              the age clause needs — were never read (and no PR-event run is
-              executing); (b) a WAITING PR-EVENT RUN's current-attempt age is unmeasurable
+              (a) a FEED WAS CUT AT ITS PAGE CAP, so the older runs — the end the age
+              clause needs — were never read (the QUEUED feed only when no PR-event run is
+              executing; a ``pending``/``requested`` leg at any time); (b) a WAITING PR-EVENT RUN's current-attempt age is unmeasurable
               (see QueuedRun.wait_age_seconds — not just its created_at); or (c) the
               RUNNING CENSUS IS UNWITNESSED — every run counted in ``pr_running``
               was UNMEASURED (the jobs probe could not read it, or the probe budget
@@ -276,12 +276,12 @@ PR_STARVED = "PR-STARVED"
 #: PR_STARVED (which means nothing of the PR work is executing at all): the two are
 #: true of different queues, and neither may be inferred from the other.
 PR_BACKLOGGED = "PR-BACKLOGGED"
-#: A truncated feed with no PR-event run executing, a WAITING PR-event run
-#: (queued/pending/requested) whose CURRENT-ATTEMPT age cannot be measured, OR a running
-#: census made entirely of unmeasured runs: the PR work is neither witnessed nor DISPROVED,
-#: so this is not ``OK``. ⛔ The age rule has ONE owner — `QueuedRun.wait_age_seconds` — and
-#: it abstains on unreadable stamps AND on an ``attempt >= 2`` run with no start stamp, so a
-#: readable ``created_at`` does not rule that cause out; do not restate the routes here.
+#: A cut feed (the QUEUED leg only when no PR-event run is executing; a
+#: ``pending``/``requested`` leg cut at any time), a WAITING PR-event run with an
+#: unmeasurable CURRENT-ATTEMPT age (ONE owner: `QueuedRun.wait_age_seconds`, so a
+#: readable ``created_at`` does not rule it out), OR a running census made entirely of
+#: unmeasured runs: the PR work is neither witnessed nor DISPROVED, so this is not ``OK``.
+#: ⛔ Do not restate the routes here — they belong to that method alone.
 #: See the
 #: truncation note in the module docstring — the runs endpoint is newest-first and
 #: cannot be asked for the oldest end, so a capped read loses exactly the runs the age
@@ -687,7 +687,9 @@ class QueueHealth:
     pr_running_unmeasured: int = 0
     #: DID `pr_running` DEGRADE TO `PR-UNWITNESSED` FOR LACK OF MEASUREMENT? (#12037
     #: review round 5) `PR-UNWITNESSED` has three causes on three different dimensions —
-    #: a page-capped feed, an unreadable `created_at`, and this one — and they take
+    #: a cut feed, an unmeasurable CURRENT-ATTEMPT age (one owner:
+    #: `QueuedRun.wait_age_seconds` — a readable `created_at` does not rule it out), and
+    #: this one — and they take
     #: different levers. A consumer that re-derives the cause from
     #: `pr_running == pr_running_unmeasured > 0` gets the OVERLAP wrong: a reading whose
     #: WAIT was not witnessed can also have a fully unmeasured census, and the census
@@ -1576,8 +1578,9 @@ def classify_queue(
             # (It is stated ONCE. An earlier revision of this patch emitted it above the
             # comment too, and a duplicated key in a dict literal is legal Python — the
             # later value silently wins, so a mutation of the first copy tested nothing.)
-            # `PR-UNWITNESSED` has THREE causes on different dimensions — a page-capped
-            # feed, an unreadable `created_at`, and this one (an unwitnessed RUNNING
+            # `PR-UNWITNESSED` has THREE causes on different dimensions — a cut feed, an
+            # unmeasurable CURRENT-ATTEMPT age (see `QueuedRun.wait_age_seconds`), and this
+            # one (an unwitnessed RUNNING
             # CENSUS) — and they take different levers. A consumer that re-derives the
             # cause from the numbers gets it wrong on the OVERLAP: a reading with an
             # unreadable timestamp AND a fully unmeasured census has

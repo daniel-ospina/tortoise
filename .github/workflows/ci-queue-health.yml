@@ -64,10 +64,12 @@ name: ci-queue-health
 # below reads `cancelled` from the payload and says which case it is.
 # `PR-UNWITNESSED` is also an `::warning` at exit 0: it names what was NOT measured
 # instead of inferring health. Its THREE causes are different dimensions, and the
-# annotation must not prescribe one cause's lever for another's: (a) the feed was
+# annotation must not prescribe one cause's lever for another's: (a) a feed was
 # cut at its page cap, so the oldest queued runs — the end the age clause needs —
-# were never read (lever: --max-pages); (b) the queued PR runs carry no readable
-# `created_at`, so the wait cannot be measured at all; (c) the RUNNING CENSUS is
+# were never read (lever: --max-pages; the queued leg only when no PR-event run is
+# executing, a `pending`/`requested` leg at any time); (b) a WAITING PR-event run
+# has no measurable CURRENT-ATTEMPT age (one owner: `QueuedRun.wait_age_seconds`,
+# so a readable `created_at` does not rule it out), so the wait cannot be measured at all; (c) the RUNNING CENSUS is
 # unwitnessed — every run counted in `pr_running` was unmeasured, which is #12037's
 # own defect returned by the probe budget. That sub-cause has TWO forms with
 # opposite levers (round 13), and the payload reports which applies:
@@ -332,7 +334,8 @@ jobs:
             # `PR-UNWITNESSED` has three causes on different dimensions and they take
             # different levers. Round 4 keyed this on `pr_running == pr_running_unmeasured >
             # 0`, which is wrong on the OVERLAP: a reading whose WAIT was not witnessed (a
-            # queued PR run with no readable `created_at`) can ALSO have a fully unmeasured
+            # waiting PR-event run with no measurable CURRENT-ATTEMPT age — see
+            # `QueuedRun.wait_age_seconds`) can ALSO have a fully unmeasured
             # census, and the numbers cannot tell which cause produced the verdict — so the
             # annotation prescribed the census lever (frozen runs / --max-job-probes) for a
             # wait defect, dropping the lever that fixes it (#12037 review round 5). The
