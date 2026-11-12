@@ -586,7 +586,10 @@ _COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp,
 #: 6): `[_set for _set in rows]` binds `_set` for the element only, so counting it as a writer-scope
 #: binding dropped the writer's module alias and — for a clause-builder alias — the writer itself:
 #: measured `{}` for a body whose control is `unresolved_write`, and `_shadowed_names` already
-#: skipped comprehension subtrees for exactly this reason. One tuple, so the two walks cannot drift.
+#: skipped comprehension subtrees for exactly this reason. ⛔ One tuple, so `_walk_own_scope` and
+#: `_comprehension_walrus_targets` cannot drift — but `_shadowed_names` is NOT a reader of it (it
+#: spells its own scope test by hand), and that gap is how round 8 cycle 7 found two asymmetries
+#: between the walks: `ast.Lambda` added by hand HERE, the PEP 572 containing-scope rule absent THERE.
 _NEW_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
                     *_COMPREHENSION_NODES)
 
@@ -740,9 +743,13 @@ def _alias_credit_rank(name: str) -> int:
     the resolution must not depend on source order, so the higher rank wins.
     ⛔ The SAME rank also arbitrates the MODULE↔WRITER merge in `_embedding_writers`
     (`#12020` round 8 cycle 5), where the two candidates are not siblings in one map and neither is
-    necessarily LIVE — so a DEAD higher-rank binding beats a LIVE lower-rank one. That is
-    deliberate: every rank above `SEAM_CALL` keeps the writer inside `NEEDS_A_DECLARATION`, while
-    liveness is not knowable statically (`if TYPE_CHECKING:` is the idiom that made the point).
+    necessarily LIVE — so a DEAD higher-rank binding beats a LIVE lower-rank one. Liveness is not
+    statically knowable (`if TYPE_CHECKING:` is the idiom that made the point), so the rank decides.
+    ⛔ What that buys, stated as measured rather than as a bound (round 8 cycle 7, P3): rank 0 always
+    loses, so no collision can HIDE a writer behind `gated`. Ranks 1 and 2 are never worse than
+    that — but they are not always inside `NEEDS_A_DECLARATION`: an `UNGATED_CALLS` winner carries
+    `ungated` (inside) when the writer also writes, and `producer` (outside) when it does not,
+    which is a lateral move out of `gated` rather than a hide.
 
     * 2 — `WRITE_CLAUSE_BUILDERS`: the alias is the ONLY discovery signal, so the writer is
       discovered and owes a declaration.
@@ -4654,6 +4661,15 @@ def _sdk_methods_on_vector_leg(
                 # the lambda, leaving the enclosing binding untouched. A lambda binds no NAME here,
                 # so there is nothing to add before `continue`.
                 if isinstance(n, ast.Lambda):
+                    # ⛔ …but its DEFAULTS are evaluated in the ENCLOSING scope, so a walrus there DOES
+                    # bind here (`symtable`: `f = lambda v=(_p := 1): v` puts `_p` in the METHOD's
+                    # locals, and the lambda's in `v` only). Skipping the whole node made this walk
+                    # disagree with the mention walk, which already walks lambda defaults
+                    # unwidened — and it traded the correct verdict for the body case (round 8
+                    # cycle 7, P3: the default spelling was shadowed before the body fix and was
+                    # published as a reach after it). Walk the enclosing-scope half, THEN stop.
+                    stack_s.extend(n.args.defaults)
+                    stack_s.extend(d for d in n.args.kw_defaults if d is not None)
                     continue
                 if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
                     shadowed.add(n.id)

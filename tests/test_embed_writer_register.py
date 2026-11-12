@@ -4427,8 +4427,9 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
     # `BUILDER_then_a_GATE` was ALREADY `unresolved_write` — the reversed-order CONTROL, red only
     # under the opposite "prefer the gate" wrong fix, which is what its own note says; the two
     # `UNGATED…SEAM` arms were `gated` under the builder-only rule; and the two cross-scope arms
-    # were `gated`/`ungated` while the module and writer maps were merged UNRANKED (the `producer`
-    # demotion needs the variant WITHOUT its own write clause, pinned separately below).
+    # were `gated`/`ungated` while the module and writer maps were merged UNRANKED. The `producer`
+    # variant needs the writer to carry NO write clause of its own, and it is pinned as its own arm
+    # (round 8 cycle 7, P3: an earlier wording said "pinned separately below" before it existed).
 
     # ⛔ `#12020` round 8 cycle 4 (P1) — the collision rule was BUILDER-ONLY, so a `SEAM_CALL` vs
     # `UNGATED_CALLS` collision (neither is a builder) still fell through to first-seen, which is
@@ -4454,6 +4455,17 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
         {"tortoise.m::w": "unresolved_write"},
         "the rank rule lived only INSIDE one map, so this measured `gated` — the dead gate import "
         "won the merge and hid a writer whose live binding is the builder",
+    ),
+    "a_WRITER-SCOPE_ungated_import_over_a_module_BUILDER_with_NO_write_clause_demotes_to_producer": (
+        "from tortoise.vector_write import set_embedding_clause as _set\n"
+        "\n"
+        "def w(text):\n"
+        "    if False:\n"
+        "        from tortoise.embeddings import encode_for_store as _set\n"
+        '    return _set(text, 384)\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "the cross-scope merge with NO own write clause: unranked, the dead ungated import won and "
+        "the writer measured `producer` — OUTSIDE `NEEDS_A_DECLARATION`, i.e. a hide",
     ),
     "a_dead_WRITER-SCOPE_ungated_import_does_not_beat_a_live_MODULE_builder_alias": (
         "from tortoise.vector_write import set_embedding_clause as _set\n"

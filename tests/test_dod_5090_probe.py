@@ -4907,6 +4907,13 @@ def _byref_sdk_source() -> str:
         "    def walrus_inside_a_LAMBDA_does_not_shade_the_body(self):\n"
         "        f = lambda: (_review_pool := 1)\n"
         "        return _safe(_review_pool)\n"
+        # ⛔ …but a lambda's DEFAULTS are evaluated in the ENCLOSING scope, so a walrus there DOES
+        # bind in the method (`symtable`: this method's locals include `_review_pool`, the lambda's
+        # do not) — the mention after it is not a reach. Pinned because the body fix skipped the
+        # whole `ast.Lambda` node and silently turned this arm into an over-report.
+        "    def walrus_in_a_LAMBDA_DEFAULT_named_like_an_entrant(self):\n"
+        "        f = lambda v=(_review_pool := 1): v\n"
+        "        return _safe(_review_pool)\n"
         # ── `#11397` review: `*. __class__` is only the ENCLOSING class when the base is an
         # in-module receiver; a foreign object's class is not this module's method.
         "    def foreign_dunder_class_receiver(self, other):\n"
@@ -5115,6 +5122,8 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
                       "nested_def_name_named_like_an_entrant",
                       "match_pattern_named_like_an_entrant",
                       "del_binding_named_like_an_entrant",
+                      # ⛔ and a lambda DEFAULT binds in the METHOD (`symtable`), unlike its BODY.
+                      "walrus_in_a_LAMBDA_DEFAULT_named_like_an_entrant",
                       # …and the boundary of the `cls` receiver: a plain parameter named `cls`
                       # on a method whose FIRST argument is `self` is a foreign object, not the
                       # class — only the classmethod's own first parameter is the class receiver.
