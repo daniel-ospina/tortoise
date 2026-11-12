@@ -1212,6 +1212,16 @@ def self_test_passes(text: str) -> tuple[tuple[str, str, bool], ...]:
     The second shape is the #11415 arm: a mutator or a rule that can only reach
     column-0 rows reports UNTESTABLE (or misses) on it, which is exactly how the
     hole survived 21 column-0-only mutations.
+
+    ⛔ The shapes are the SAME DOCUMENT, so their BASELINE verdicts must be equal,
+    and `self_test` checks that before it trusts either run (fresh review of PR
+    #12016, P2). Without that comparison the second shape fails OPEN for an
+    arm that fires only on column-0 rows: the arm's regressions become part of the
+    indented copy's BASELINE, and every `"violation"`-expecting mutation is then
+    satisfied by a violation the baseline already carried. Measured: reverting the
+    R5 presence arm to `line.startswith("|")` left `--self-test` green on both
+    shapes while `check()` red `R5 <seam>: missing from the §5/§6 crosswalk` on an
+    indented map — a guard that cannot see the class it was added for.
     """
     return (
         ("shipped map", text, True),
@@ -1352,10 +1362,35 @@ def self_test(text: str) -> int:
             file=sys.stderr,
         )
         return 1
+
+    def _baseline(candidate: str) -> list[str] | None:
+        try:
+            return check(candidate)[0]
+        except Refusal:
+            return None
+
+    # ⛔ Every shape is the SAME document, so it must earn the SAME baseline verdict.
+    # This is the arm that catches an indentation-blind RULE (as opposed to a
+    # mutator): such a rule adds violations to the indented copy's baseline, where
+    # every "violation"-expected mutation would otherwise be satisfied by them.
+    shipped_baseline = _baseline(text)
     total = len(SELF_TEST_MUTATIONS)
     failures = 0
     untestable = 0
     for label, candidate, verbose in passes:
+        candidate_baseline = _baseline(candidate)
+        if candidate_baseline != shipped_baseline:
+            print(
+                f"self-test: the {label} shape grades "
+                f"{len(candidate_baseline or [])} violation(s) where the shipped map "
+                f"grades {len(shipped_baseline or [])} — the shapes are the SAME "
+                "document, so a rule that reaches only column-0 rows is firing here "
+                "(and every mutation's expected violation would be satisfied by that "
+                "baseline instead of by the mutation)",
+                file=sys.stderr,
+            )
+            failures += 1
+            continue
         pass_failures, pass_untestable = _run_mutation_pass(candidate, label, verbose=verbose)
         failures += pass_failures
         untestable += pass_untestable
