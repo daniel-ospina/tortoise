@@ -1483,12 +1483,28 @@ def self_test(text: str) -> int:
             )
             return 1
         if _baseline(collision) != shipped_baseline:
+            # ⛔ DISTINGUISH THE TWO CAUSES (fresh review of PR #12016, P3). A width
+            # that did not move is reported above, so by here the copy IS a different
+            # document at a different indent in BOTH directions — which means a
+            # baseline delta can no longer be the width's fault. It is an ARM that
+            # reaches only column-0 rows: re-indenting the same rows made the arm fire
+            # `R5 …: names no surface` where the column-0 map graded nothing. The
+            # earlier wording blamed `_second_shape_indent` for exactly that, sending a
+            # maintainer who reverted the R5 presence arm to the (correct) chooser
+            # instead of to their own arm — the "refuses correctly but wrongly about
+            # reality" class. Naming the newly-graded violations makes the culprit
+            # readable without a bisect.
+            collision_baseline = _baseline(collision)
+            newly_fired = [v for v in (collision_baseline or [])
+                           if v not in (shipped_baseline or [])]
             print(
                 f"self-test: a document whose rows already sit at "
                 f"{SELF_TEST_INDENT} space(s) grades "
-                f"{len(_baseline(collision) or [])} violation(s) where the shipped "
-                f"map grades {len(shipped_baseline or [])} — same document, so the "
-                "width chosen for the second shape is not neutral",
+                f"{len(collision_baseline or [])} violation(s) where the shipped "
+                f"map grades {len(shipped_baseline or [])} — the SAME document, only "
+                "re-indented, so a RULE that reaches only column-0 rows is firing "
+                f"here (NOT the width: it moved to {collided_width} and the copy is "
+                f"not byte-identical). Newly graded: {newly_fired[:3]}",
                 file=sys.stderr,
             )
             return 1
