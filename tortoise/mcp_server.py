@@ -5168,8 +5168,10 @@ def tortoise_analyze(question: str,
     if isinstance(result, dict) and isinstance(result.get("answer"), str):
         result["answer"] = _scrub_analyze_answer(result["answer"])
     # W4 (#2101): additive why-layer enrichment — the additive keys ride the
-    # ``why`` entries for the Point ids surfaced in ``raw`` (flag-gated;
-    # absent with the flag OFF — the response stays byte-identical).
+    # ``why`` entries for the epistemic ids surfaced in ``raw`` (flag-gated;
+    # absent with the flag OFF — the response stays byte-identical). #11928:
+    # the anchors are the four labels, not ``:Point`` only — do NOT narrow them
+    # back to "the Point ids", which is the #7927 partial-widening shape.
     # Zero-LLM, bounded batch reads, fail-open (no key on assembly error).
     if isinstance(result, dict) and result.get("raw"):
         try:

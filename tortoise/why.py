@@ -194,9 +194,11 @@ def _assemble_supports(rows: list, by_id: dict[str, dict], *,
                        rank: dict[tuple[str, str], tuple[str, str]]
                        | None = None) -> None:
     """Fold support-chain rows into the blocks. Collect ALL candidates per
-    point (dedup by point id), then sort by (weight desc, point_id) and
-    truncate to the ≤3 cap — the selected subset is the strongest ≤3 and
-    the ordering is deterministic regardless of Cypher row order.
+    point (dedup by the INTERNAL node id — see the ⛔ below; the emitted
+    ``point_id`` is a display identity and is NOT unique), then sort by
+    ``(weight is None, -weight, point_id, internal_id)`` and truncate to the ≤3
+    cap — the selected subset is the strongest ≤3 and the ordering is TOTAL, so
+    it does not depend on Cypher row order.
 
     ``seen`` is the fusion map, OWNED BY THE CALLER and SHARED BY BOTH LEGS
     (``pid -> {internal node id: entry}``): a point with BOTH operator-mediated
@@ -315,9 +317,11 @@ def _assemble_supports(rows: list, by_id: dict[str, dict], *,
 
 
 def _assemble_conflicts(rows: list, by_id: dict[str, dict]) -> None:
-    """Fold NAND rows into the blocks (dedup by nander id). Collect ALL
+    """Fold NAND rows into the blocks (dedup by the INTERNAL nander id, never
+    the emitted display id — two distinct nodes can share one). Collect ALL
     candidates, then deterministic selection: highest severity first (high
-    > medium), then point_id — truncated to the ≤2 cap. The TARGET's ep
+    > medium), then point_id, then the internal id (the TOTAL tie-break) —
+    truncated to the ≤2 cap. The TARGET's ep
     read lives in a dedicated batch query (_EP_CYPHER) so it survives for
     EVERY point — including points with zero active NANDers (this query
     only returns rows for points that HAVE NANDers)."""
