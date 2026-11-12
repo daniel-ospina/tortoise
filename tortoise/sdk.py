@@ -16973,9 +16973,19 @@ class TortoiseSDK:
                             proj, pid, resolved, sdk=self)
                         if not fold_report["ok"]:
                             dedup = DEDUP_NEW
+                            # ⚠️ The module sets `undeclared` on EVERY arm so a
+                            # refusal can disclose it — and this branch used to
+                            # print only `blocked`, so the open set went quiet in
+                            # exactly the case the module's own comment cites (an
+                            # operator deciding whether to force the fold).
+                            kept = ""
+                            if fold_report["undeclared"]:
+                                kept = ("; it also holds field(s) this fold "
+                                        "cannot carry: "
+                                        + ", ".join(fold_report["undeclared"]))
                             warnings.append(
                                 f"repeated claim '{content[:60]}' kept "
-                                f"distinct — {fold_report['blocked']}")
+                                f"distinct — {fold_report['blocked']}{kept}")
                         else:
                             proj.g.query(
                                 "MATCH (n:Point {id:$id}) DETACH DELETE n",

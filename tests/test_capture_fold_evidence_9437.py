@@ -407,7 +407,8 @@ class _FakeGraph:
 
     def __init__(self, *, dup_row=_DUP_ROW, edges=(), carried=(0, None),
                  canon_row=_CANON_ROW, raise_on=frozenset(),
-                 dup_props=None, inbound=(), canon_rows=None):
+                 dup_props=None, inbound=(), canon_rows=None,
+                 dup_status=None, dup_is_operator=None):
         self.dup_row = dup_row
         self.edges = list(edges)
         self.carried = carried
@@ -418,6 +419,10 @@ class _FakeGraph:
         self.inbound = list(inbound)
         #: Two-or-more rows for the canonical id (`_canonical_view` refuses).
         self.canon_rows = canon_rows
+        #: The duplicate's `status` / `is_operator` — the two fields the read
+        #: gained when they stopped being silently structural.
+        self.dup_status = dup_status
+        self.dup_is_operator = dup_is_operator
         self.raise_on = set(raise_on)
         #: The DUPLICATE's whole property map — the `properties(d)` column the
         #: open-set report reads. Kept OUT of the shared row tuples so every
@@ -425,12 +430,29 @@ class _FakeGraph:
         #: came back", which must read as an empty open set, not as a loss.
         self.dup_props = dup_props
 
+    @staticmethod
+    def _to_query_row(row, status, is_operator):
+        """The fixture's 12-tuple → the QUERY's column order.
+
+        `_COLUMNS` is the fixture order (evidence×10, confidence, pointKind);
+        the Cypher selects evidence×10, `status`, `is_operator`, confidence,
+        pointKind (and `properties(d)` for the duplicate). Keeping the fixtures
+        at the shorter shape means a test can write `_CANON_ROW` without
+        knowing the query's column count — but the fake must translate, or a
+        column added to the SELECT silently shifts every field one place (which
+        is what `internal_error: not enough values to unpack` measured).
+        """
+        base = tuple(row)
+        assert len(base) == 12, f"fixture row is {len(base)} wide, expected 12"
+        return (*base[:10], status, is_operator, *base[10:])
+
     def apply_slot(self, props: dict) -> None:
         """Simulate `update_point` landing: the read-back must SEE it."""
         row = list(self.canon_row)
         for key, value in props.items():
             if key in self._COLUMNS:
-                row[self._COLUMNS.index(key)] = value
+                idx = self._COLUMNS.index(key)
+                row[idx + 2 if idx >= 10 else idx] = value
         self.canon_row = tuple(row)
 
     def query(self, q, **kw):
@@ -459,14 +481,18 @@ class _FakeGraph:
             # `properties(d)` is the row's LAST column; the canonical read does
             # not select it, so the two branches differ by exactly that.
             return SimpleNamespace(
-                result_set=[(*self.dup_row, self.dup_props)])
+                result_set=[(*self._to_query_row(
+                    self.dup_row, self.dup_status, self.dup_is_operator),
+                    self.dup_props)])
         if "c.extractedFrom" in q:
             # `canon_row=None` is the "canonical cannot be read" arm;
             # `canon_rows` covers the id-carried-by-two-nodes arm.
             if self.canon_rows is not None:
-                return SimpleNamespace(result_set=list(self.canon_rows))
+                return SimpleNamespace(result_set=[
+                    self._to_query_row(r, None, None) for r in self.canon_rows])
             return SimpleNamespace(
-                result_set=[] if self.canon_row is None else [self.canon_row])
+                result_set=[] if self.canon_row is None else [
+                    self._to_query_row(self.canon_row, None, None)])
         if "head(collect(r.confidence))" in q:
             target = (kw.get("params") or {}).get("target")
             if isinstance(self.carried, dict):
@@ -1156,3 +1182,109 @@ def test_every_arm_returns_the_same_key_set(monkeypatch):
         _FakeProj(_FakeGraph()), "pt_dup", "pt_canon")
     assert failing["ok"] is False and failing["reason"] == "internal_error", failing
     assert set(failing) == expected, sorted(set(failing) ^ expected)
+
+
+# ── 12) round 9: the provenance exemption, both date spellings, both reads ──
+
+
+def test_a_provenance_edge_that_is_not_one_of_the_rows_refs_refuses():
+    """The `extractedFrom` exemption is CONDITIONAL: it covers an outbound edge
+    whose target IS one of the row's own refs — the case the field check
+    (`uncarried_source_ref`) actually establishes.
+
+    RED before round 9: the exemption was applied to every `extractedFrom` edge
+    and `continue`d BEFORE the ref check could see it, so an edge pointing at a
+    source the row's field does not name was destroyed on an `ok=True` fold.
+    """
+    graph = _FakeGraph(edges=[("extractedFrom", "Source", "session:STALE", None)])
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "unexpected_edge", out
+    assert "extractedFrom (outbound)" in out["blocked"], out
+
+
+def test_a_provenance_edge_on_the_canonicals_own_ref_is_exempt():
+    """…and the exemption still holds for the case it exists for: the edge IS the
+    projection of a ref the canonical already carries."""
+    graph = _FakeGraph(edges=[("extractedFrom", "Source", "session:s", None)])
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is True, out
+    assert out["carried"] == 0, out
+
+
+def test_an_inbound_provenance_edge_refuses():
+    """The exemption was copied onto the INBOUND axis, where its ground cannot
+    hold at all: an inbound edge is not the projection of any field on the
+    duplicate, so nothing verified it and the delete orphaned it silently."""
+    graph = _FakeGraph(inbound=[("extractedFrom", "Source")])
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "unexpected_edge", out
+    assert "extractedFrom (inbound)" in out["blocked"], out
+
+
+def test_a_duplicate_holding_both_date_spellings_reports_the_conflict():
+    """`when` and `validFrom` are ONE slot — on the duplicate's side too. A row
+    holding BOTH with different values used to collapse to `when` before any
+    comparison, so the second value was neither carried, nor a residual, nor
+    undeclared (both spellings are declared), and the receipt could say the node
+    had no evidence of its own over a date that died with it.
+    """
+    row = ("session:s", [], None, None, None, None, None,
+           "2026-08-01", "2026-08-02", None, None, None)   # when + validFrom
+    graph = _FakeGraph(dup_row=row, dup_props={"when": "2026-08-01",
+                                               "validFrom": "2026-08-02"})
+    sdk = _FakeSDK(on_update=graph.apply_slot)
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon", sdk=sdk)
+    assert out["ok"] is True, out
+    assert any("validFrom (as when)" in r for r in out["residual"]), out
+    # the value the field names still travels; the OTHER spelling is disclosed
+    assert sdk.calls == [{"id": "pt_canon", "validFrom": "2026-08-01"}], sdk.calls
+
+
+def test_the_canonical_read_normalises_a_string_ref_list_too():
+    """`_canonical_view`'s ref loop was the un-fixed copy of the one hardened in
+    `read_fold_evidence`: a string `extractedFromAll` was iterated
+    CHARACTER-WISE, so the fold refused with the false claim that the canonical
+    did not carry a ref that is exactly what it held."""
+    graph = _FakeGraph()
+    graph.canon_row = ("session:s", "session:s", None, None, None, None, None,
+                       None, None, None, None, None)
+    view = capture_fold._canonical_view(_FakeProj(graph), "pt_canon")
+    assert view is not None
+    assert view["refs"] == {"session:s"}, view["refs"]
+
+
+def test_a_source_link_refuses_as_unaddressable_and_a_point_link_is_carried():
+    """The two §3.2 triples no test constructed end to end: `aboutSource` targets
+    a `:Source`, which is `url`-keyed and carries NO id, so it must refuse as
+    `unaddressable` rather than claim a carry; `aboutAction` (Point→Point) is
+    carriable and counts as present."""
+    src = _FakeGraph(edges=[("aboutSource", "Source", "", None)])
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(src), "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "unaddressable", out
+    assert "aboutSource" in out["blocked"], out
+
+    act = _FakeGraph(edges=[("aboutAction", "Point", "pt_target", None)],
+                     carried=(1, None))
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(act), "pt_dup", "pt_canon")
+    assert out["ok"] is True and out["carried"] == 1, out
+
+
+def test_a_refused_fold_still_names_the_open_set_on_the_captures_receipt(
+        sdk, monkeypatch):
+    """The module sets `undeclared` on every arm so a REFUSAL can disclose it,
+    and the seam printed only `blocked` — so the open set went quiet in exactly
+    the case its own comment cites."""
+    extracted, meta = _extract(
+        sdk, monkeypatch,
+        evidence={"author": "second-producer"},
+        dup_source="session:other")          # the canonical cannot carry it
+    assert [e["dedup"] for e in extracted] == ["new", "new"], extracted
+    assert any("kept distinct" in w for w in meta["warnings"]), meta["warnings"]
+    assert any("cannot carry: author" in w for w in meta["warnings"]), \
+        meta["warnings"]

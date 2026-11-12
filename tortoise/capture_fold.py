@@ -227,10 +227,16 @@ _CARRIABLE_ATTACHMENT_LABELS = {
 #: Point holds it as `extractedFrom`/`extractedFromAll` too — the ref check
 #: (`uncarried_source_ref`) refuses the fold when the canonical does not already
 #: carry the duplicate's ref, so the edge itself needs no carry and the delete
-#: removes a link whose meaning the canonical already has. This is NOT a licence
-#: to ignore every structural rel: it is the measured set on a capture Point at
-#: this head (`extractedFrom` is the only one), and an eighth/unknown class still
-#: refuses as `unexpected_edge`.
+#: removes a link whose meaning the canonical already has.
+#:
+#: ⚠️ The exemption is CONDITIONAL and OUTBOUND-ONLY: it applies to an outbound
+#: edge whose target id/url is one of the row's own refs — the case the field
+#: check actually covers. An exemption applied to every `extractedFrom` edge (the
+#: earlier, symmetric shape) skipped the edge BEFORE the ref check could see it,
+#: so (a) an edge pointing at a source the row's field does not name was destroyed
+#: on an `ok=True` fold, and (b) the same line was copied onto the inbound axis,
+#: where the ground cannot hold at all — an inbound edge is not the projection of
+#: any field on the duplicate. Both are `unexpected_edge` refusals now.
 _PROVENANCE_RELS = ("extractedFrom",)
 
 #: Outbound `about*` edges whose predicate has NO permitted Point-source triple.
@@ -282,15 +288,23 @@ _SINGLE_SLOTS = (
 #: report existed the receipt said "no per-occurrence evidence of its own to
 #: carry" over a duplicate whose `author`/`source` prop was about to be
 #: destroyed (measured), which is the same silence this module exists to close.
-_REPORTED_FIELDS = ("confidence", "pointKind", "eventId")
+_REPORTED_FIELDS = ("confidence", "pointKind", "eventId", "status",
+                    "is_operator")
 
 #: The props the fold neither carries nor reports because they are the ROW's
 #: identity or the projection's own bookkeeping rather than the occurrence's
 #: evidence: `id` addresses the row, `content`/`content_hash` are the dedup key
 #: the FOLD ITSELF is about, `createdAt` is first-writer history and `updatedAt`
-#: moves on any later write, `is_operator` is structural (`sdk` refuses an
-#: operator-wired duplicate before this module is reached), and `status` is the
-#: lifecycle slot §4.3 owns.
+#: moves on any later write.
+#:
+#: ⚠️ `is_operator` and `status` used to sit here on the ground that "`sdk`
+#: refuses an operator-wired duplicate before this module is reached" — which is
+#: a different fact: that probe refuses a duplicate WIRED TO an operator, and says
+#: nothing about a duplicate whose OWN flag is set (`sdk`'s capture statements
+#: never set it, so a producer would have to). A retracted duplicate's `status`
+#: was the same hole: crossed in silence because the field was declared
+#: structural. Both are now in `_REPORTED_FIELDS`, so a difference is a residual —
+#: reported, never written (they are the canonical's own state).
 #:
 #: ⚠️ `content` is NOT "equal by construction" — that ground would be false on the
 #: `rephrase_linked` arm, where the two texts DIFFER by design (`rephrase_hit`
@@ -306,7 +320,7 @@ _REPORTED_FIELDS = ("confidence", "pointKind", "eventId")
 #: `test_a_clean_capture_point_reports_no_undeclared_props` is what reds when
 #: this list has drifted behind the projection's own writes.
 _STRUCTURAL_PROPS = ("id", "content", "content_hash", "createdAt",
-                     "updatedAt", "is_operator", "status")
+                     "updatedAt")
 
 #: Everything the duplicate read DECLARES it knows: the occurrence address, the
 #: single slots in BOTH spellings (a producer stores `when` or `validFrom`, and
@@ -377,6 +391,10 @@ class FoldEvidence:
     #: name: the open set #2795 permits is exactly the set a fold cannot see,
     #: and naming it is the difference between a loss and a silent loss.
     undeclared: tuple[str, ...] = ()
+    #: Slots the DUPLICATE itself holds twice with different values (one slot,
+    #: two spellings — `when`/`validFrom`). Reported as residuals by the carry:
+    #: the fold cannot carry both and must not cross the difference in silence.
+    slot_conflicts: tuple[str, ...] = ()
     #: `(rel, direction)` for every edge the duplicate carries OUTSIDE
     #: `_FOLD_ATTACHMENT_RELS` (`direction` is `"out"` or `"in"`). The delete
     #: takes EVERY edge, so an unfiltered read is the only way to know nothing
@@ -393,6 +411,31 @@ class FoldEvidence:
     ambiguous: bool = False
 
 
+def _refs_from(scalar_ref: Any, all_refs: Any) -> set[str] | None:
+    """The provenance refs a row holds, from ONE normaliser.
+
+    ⚠️ A string is a SEQUENCE, so `*(all_refs or ())` iterated a malformed
+    `extractedFromAll="session:a#t2"` CHARACTER-WISE — the duplicate read refused
+    the fold over the ref `':'`, and the canonical read (same loop, unguarded)
+    made the receipt claim the canonical did not carry a ref that is exactly what
+    it held. Fail-closed both times, and wrong both times. A str is the ONE ref it
+    is; anything else that is not a list/tuple is not a ref list at all (``None``
+    = the row cannot be read).
+
+    ONE function because the two reads must agree: a normaliser applied to only
+    one of them is how the second copy of a bug survives a fix.
+    """
+    if isinstance(all_refs, str):
+        all_refs = [all_refs]
+    elif all_refs is not None and not isinstance(all_refs, (list, tuple)):
+        return None
+    refs: set[str] = set()
+    for ref in (scalar_ref, *(all_refs or ())):
+        if isinstance(ref, str) and ref.strip():
+            refs.add(ref.strip())
+    return refs
+
+
 #: The evidence columns, in ONE place: the duplicate's read and the canonical's
 #: read must select the same list in the same order, or the occupancy checks
 #: compare different columns.
@@ -401,7 +444,7 @@ _EVIDENCE_SELECT = (
     "RETURN {alias}.extractedFrom, {alias}.extractedFromAll, {alias}.quote, "
     "       {alias}.span_start, {alias}.span_end, {alias}.source_turn_id, "
     "       {alias}.search_keys, {alias}.when, {alias}.validFrom, "
-    "       {alias}.eventId")
+    "       {alias}.eventId, {alias}.status, {alias}.is_operator")
 
 
 def assert_evidence_vocabulary() -> None:
@@ -457,22 +500,11 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         # for one. Refuse rather than authorise a delete over rows it never saw.
         return FoldEvidence(ambiguous=True)
     (scalar_ref, all_refs, quote, span_start, span_end, source_turn_id,
-     search_keys, when, validfrom, _event_id, _confidence,
-     _point_kind, _props) = rows[0]
-    refs: set[str] = set()
-    # ⚠️ A string is a SEQUENCE, so `*(all_refs or ())` iterated a malformed
-    # `extractedFromAll="session:other"` CHARACTER-WISE and refused the fold over
-    # the source reference `':'` — fail-closed, but the token and the named ref
-    # were both wrong (the mis-attribution `malformed_address` exists to refuse).
-    # A str is read as the ONE ref it is; anything else that is not a list/tuple
-    # is not a ref list at all and is refused above, not expanded.
-    if isinstance(all_refs, str):
-        all_refs = [all_refs]
-    elif all_refs is not None and not isinstance(all_refs, (list, tuple)):
+     search_keys, when, validfrom, _event_id, _status, _is_operator,
+     _confidence, _point_kind, _props) = rows[0]
+    refs = _refs_from(scalar_ref, all_refs)
+    if refs is None:
         return None
-    for ref in (scalar_ref, *(all_refs or ())):
-        if isinstance(ref, str) and ref.strip():
-            refs.add(ref.strip())
     # The open set: what the node carries that this module does not read. Read
     # from the node itself (`properties(d)`), never derived from the producer's
     # payload — the payload is the superset the projection SELECTS from. A read
@@ -489,6 +521,17 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         # string is a value the producer wrote, not an absence to fill.
         if value is not None:
             scalar[key] = value
+    # ⚠️ ONE slot, TWO spellings — on the DUPLICATE side too. `when` and
+    # `validFrom` are one date, and a row holding BOTH with different values used
+    # to collapse to `when` before any comparison, so the second value was
+    # neither carried, nor a residual, nor undeclared (both spellings are
+    # declared): the receipt then said the duplicate had "no per-occurrence
+    # evidence of its own to carry" over a date that died with it. The canonical
+    # side of this defect was closed earlier; this is the same rule applied to
+    # the node the fold DELETES.
+    slot_conflicts: list[str] = []
+    if (when is not None and validfrom is not None and when != validfrom):
+        slot_conflicts.append("validFrom (as when) — the duplicate held both")
 
     # The span is an ADDRESS, and "half an address" is only ONE of the ways a
     # duplicate's own evidence can be unwritable. `validate_span` is the ONE home
@@ -515,7 +558,12 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         # `unexpected_edge` refusal instead of an orphaning delete.
         edges = proj.g.query(
             "MATCH (d:Point {id:$dup})-[r]->(t) "
-            "RETURN type(r), head(labels(t)), coalesce(t.id, ''), r.confidence",
+            # `url` as well as `id`: a provenance edge targets a `:Source`, which
+            # is `url`-keyed and carries NO id (`projection._mint_source_stub`),
+            # so `coalesce(t.id,'')` would hand the provenance check an empty
+            # string and refuse every capture Point's own `extractedFrom` edge.
+            "RETURN type(r), head(labels(t)), coalesce(t.id, t.url, ''), "
+            "r.confidence",
             params={"dup": dup_id}).result_set
     except Exception:
         return None
@@ -525,8 +573,15 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
     for rel, label, target_id, confidence in edges:
         if not isinstance(rel, str) or not isinstance(label, str):
             return None
-        if rel in _PROVENANCE_RELS:
-            continue                      # verified as a FIELD, not carried
+        if rel in _PROVENANCE_RELS and target_id.strip() in refs:
+            # The ONE case the field check covers: this edge IS the projection of
+            # a ref the row also holds, and `uncarried_source_ref` has already
+            # established the canonical carries it. An exemption applied to every
+            # `extractedFrom` edge instead (the earlier shape) skipped the edge
+            # BEFORE the ref check could see it, so an edge pointing at a source
+            # the row's own field does not name was destroyed on an `ok=True`
+            # fold with the receipt claiming no evidence at all.
+            continue
         if rel not in _FOLD_ATTACHMENT_RELS:
             unexpected.append((rel, "out"))
             continue
@@ -554,16 +609,24 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
     inbound: list[tuple[str, str]] = []
     for rel, source_label in inbound_rows:
         if isinstance(rel, str) and isinstance(source_label, str):
-            if rel in _PROVENANCE_RELS:
-                continue
+            # ⚠️ NO provenance exemption on this axis: an INBOUND edge is not the
+            # projection of any field on the duplicate, so the "verified as a
+            # field" ground cannot hold — and it was copied here anyway.
             if rel in _FOLD_ATTACHMENT_RELS:
                 inbound.append((rel, source_label))
             else:
                 unexpected.append((rel, "in"))
 
     _observed = {"confidence": _confidence, "pointKind": _point_kind,
-                 "eventId": _event_id}
-    support = {k: v for k, v in _observed.items() if k in _REPORTED_FIELDS}
+                 "eventId": _event_id, "status": _status,
+                 "is_operator": _is_operator}
+    # ⚠️ `is_operator` False is the DEFAULT, not evidence of its own: reporting
+    # it would put a residual on every fold where the canonical does not carry
+    # the flag at all. Only a truthy flag is a fact worth comparing (a status,
+    # by contrast, is reported whenever the duplicate holds one).
+    support = {k: v for k, v in _observed.items()
+               if k in _REPORTED_FIELDS
+               and v is not None and (k != "is_operator" or v)}
     return FoldEvidence(
         attachments=tuple(attachments),
         unaddressable=tuple(unaddressable),
@@ -572,6 +635,7 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         malformed_address=malformed_address,
         inbound=tuple(inbound),
         support={k: v for k, v in support.items() if v is not None},
+        slot_conflicts=tuple(slot_conflicts),
         undeclared=undeclared_props,
         unexpected_edges=tuple(unexpected),
     )
@@ -598,12 +662,11 @@ def _canonical_view(proj: Any, canonical_id: str) -> dict | None:
     if not rows or len(rows) > 1:
         return None
     (scalar_ref, all_refs, quote, span_start, span_end, source_turn_id,
-     search_keys, when, validfrom, _event_id, _confidence,
-     _point_kind) = rows[0]
-    refs: set[str] = set()
-    for ref in (scalar_ref, *(all_refs or ())):
-        if isinstance(ref, str) and ref.strip():
-            refs.add(ref.strip())
+     search_keys, when, validfrom, _event_id, _status, _is_operator,
+     _confidence, _point_kind) = rows[0]
+    refs = _refs_from(scalar_ref, all_refs)
+    if refs is None:
+        return None
     return {
         "refs": refs,
         "quote": quote, "span_start": span_start, "span_end": span_end,
@@ -611,6 +674,7 @@ def _canonical_view(proj: Any, canonical_id: str) -> dict | None:
         "when": when, "validFrom": validfrom,
         "confidence": _confidence, "pointKind": _point_kind,
         "eventId": _event_id,
+        "status": _status, "is_operator": _is_operator,
     }
 
 
@@ -752,6 +816,9 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
     # reported it only on success would go quiet in exactly the case where the
     # operator is deciding whether to force the fold.
     out["undeclared"] = list(evidence.undeclared)
+    # The duplicate's OWN one-slot-two-values conflicts: reported, never carried,
+    # and set here so a refusal discloses them too.
+    out["residual"].extend(evidence.slot_conflicts)
     # 0) An edge class this module does not know. The delete takes EVERY edge, so
     #    an unfiltered read is the only way to know none was orphaned; the
     #    refusal is the same posture as a writer-less `about*` predicate.
@@ -797,8 +864,9 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
         out["reason"] = "uncarried_source_ref"
         out["blocked"] = ("its source reference "
                           f"{missing[0]!r} is not one the canonical carries, "
-                          "and a source field cannot be written onto a "
-                          "committed row by a fold")
+                          "and `extractedFrom` is ONE slot holding the "
+                          "canonical's own source — writing the duplicate's "
+                          "would clobber it, not add it")
         return out
 
     # 3) The duplicate's own span evidence may be an address `validate_span`

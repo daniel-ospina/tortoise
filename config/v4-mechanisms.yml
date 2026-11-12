@@ -381,7 +381,8 @@ mechanisms:
       binder's `confidence` where the link is new), fills its free
       per-occurrence slots in one atomic write, keeps the canonical's own where
       the slot is taken and REPORTS the difference (including `confidence`,
-      `pointKind` and `eventId`), REPORTS BY NAME any prop the duplicate holds
+      `pointKind`, `eventId`, `status` and a truthy `is_operator`), REPORTS BY
+      NAME any prop the duplicate holds
       that this module does not declare (`undeclared` — #2795's open set: it
       cannot carry what it has no slot for, so the receipt says what the delete
       took instead of claiming the node had no evidence), and REFUSES the fold
