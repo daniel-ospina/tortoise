@@ -541,6 +541,18 @@ def _step_defusers(lines: list[str], at: int) -> list[str]:
 
     The bound is the `run:` line's own indent, so it follows the block rather than assuming
     the repo's 8 spaces.
+
+    ⛔ DECLARED MISS — A GUARD SUPPLIED THROUGH A YAML MERGE KEY. This is a TEXTUAL reader,
+    so `- <<: *guarded` (with the anchored mapping carrying `if:`) reads key `<<`, matches no
+    defuser, and the step reports clean in BOTH arms. GitHub Actions does not support merge
+    keys (`actions/runner#1182`), so the shape cannot run in CI, which is why it is declared
+    here rather than modelled; a live instance would need one and there is none (measured: 0
+    anchors, aliases or merge keys across the 41 workflows). The neighbouring spellings are
+    NOT silent: an alias standing in for a whole step (`- *guarded`) carries no literal
+    `run:` line, so it fails CLOSED (flagged as "no `run:` in command position", coverage
+    False), and an alias as a VALUE (`if: *x`) leaves the literal key readable. Pinned as a
+    declared miss by `test_a_merge_key_guard_is_a_declared_miss`, so closing it reds a pin
+    and must update this paragraph.
     """
     start, end = _step_bounds(lines, at)
     key_indent = len(lines[at]) - len(lines[at].lstrip())
@@ -631,13 +643,23 @@ def _contract_violations(block: str, scripts: frozenset[str]) -> list[str]:
             "exit 127, which reads as a test failure (#9018)"
         ]
     lines = block.splitlines()
-    at = next((i for i, line in enumerate(lines) if _CONTRACT_RUN_RE.match(line)), None)
-    if at is None:
+    matches = [i for i, line in enumerate(lines) if _CONTRACT_RUN_RE.match(line)]
+    if not matches:
         return [
             f"has no `run:` in command position that is `{CONTRACT_STEP}` — the step may "
             "be commented out, printed rather than executed, or spelled in a form this "
             "reader does not model (a `run: |` block, `./`, an `env` prefix)"
         ]
+    # ⛔ THE STEP THIS ARM JUDGES IS THE FIRST **UNGUARDED** OCCURRENCE, and that is what
+    # keeps it in step with `_live_contract_step` (#12167 review round 3). Taking the FIRST
+    # occurrence unconditionally made the two arms disagree on a job that carries the
+    # contract step twice — a guarded attempt followed by a live one — where coverage said
+    # "covered" (correctly: the job does provision `gh`) and this arm red-flagged the job
+    # for a step that is not the one doing the work. Measured: `['the contract step carries
+    # a `if:`', …]` against `True`. A GUARDED-ONLY job still reds, and it is judged on the
+    # occurrence that would otherwise count.
+    free = [i for i in matches if not _step_defusers(lines, i)]
+    at = free[0] if free else matches[0]
     out = []
     early = _gh_hazards(lines[:at], scripts)
     if early:
@@ -646,11 +668,12 @@ def _contract_violations(block: str, scripts: frozenset[str]) -> list[str]:
             f"the derived helpers — so it can still die with 127: {early}. "
             f"`{CONTRACT_STEP}` must come first (#9018)"
         )
-    for key in _step_defusers(lines, at):
-        out.append(
-            f"the contract step carries a `{key}:`, so it may never run and the "
-            "job can reach `gh` with no runner-tool contract at all (#9018)"
-        )
+    if not free:
+        for key in _step_defusers(lines, at):
+            out.append(
+                f"the contract step carries a `{key}:`, so it may never run and the "
+                "job can reach `gh` with no runner-tool contract at all (#9018)"
+            )
     return out
 
 
@@ -813,6 +836,61 @@ def test_a_guarded_contract_step_is_not_compliant():
         assert _live_contract_step(after_steps.splitlines()) is True, (
             "the coverage arm treated a job-level guard as the step's, so the job was suppressed"
         )
+    # ⛔ TWO CONTRACT STEPS: THE ARMS MUST AGREE ON WHICH ONE THEY JUDGE (#12167 review
+    # round 3). `_contract_violations` took the FIRST occurrence unconditionally, so a job
+    # carrying a guarded `ensure gh` attempt followed by a live one was red-flagged for the
+    # step that does no work, while coverage — correctly — called the job covered. Measured:
+    # `['the contract step carries a `if:`', …]` against `True`. A job that provisions `gh`
+    # is compliant; only a job whose EVERY contract step is guarded violates.
+    twice = (
+        "  job:\n    steps:\n      - name: contract\n        if: always()\n"
+        + body
+        + f"      - name: retry\n{body}"
+    )
+    assert _live_contract_step(twice.splitlines()) is True
+    assert _contract_violations(twice, scripts) == [], (
+        "a job with a guarded contract attempt AND a live one still red-flagged — the "
+        "ordering arm judged the first occurrence instead of the one that provisions `gh`"
+    )
+    both_guarded = (
+        "  job:\n    steps:\n      - name: contract\n        if: always()\n"
+        + body
+        + f"      - name: retry\n        continue-on-error: true\n{body}"
+    )
+    assert _live_contract_step(both_guarded.splitlines()) is False
+    assert _contract_violations(both_guarded, scripts), (
+        "a job whose EVERY contract step is guarded reported compliant"
+    )
+
+
+def test_a_merge_key_guard_is_a_declared_miss():
+    """A guard hidden behind `<<:` is NOT modelled — declared, not silently missed.
+
+    ⛔ PINNED AS A MISS: if this reds, someone either modelled merge keys (good — update the
+    DECLARED MISS paragraph in `_step_defusers`) or broke the literal-key path (bad). GitHub
+    Actions does not support merge keys (`actions/runner#1182`), so the shape cannot run in
+    CI and there is no live instance to close it against; what this pin buys is that the
+    residual is written down where the reader is, the way this file treats every other
+    residual it does not close.
+
+    The neighbouring spellings are NOT silent, and the contrast is the point: an alias
+    standing in for a whole step has no literal `run:` line, so it fails CLOSED.
+    """
+    scripts = _gh_executing_scripts()
+    body = f"        run: bash .github/scripts/{CONTRACT_STEP}\n"
+    merged = "  job:\n    steps:\n      - <<: *guarded\n" + body
+    assert _step_defusers(merged.splitlines(), 3) == [], (
+        "a merge key now yields a defuser — model it and delete this pin, or explain the "
+        "key you think you read"
+    )
+    assert _live_contract_step(merged.splitlines()) is True
+    # …while an alias AS THE WHOLE STEP fails CLOSED: no literal `run:` line, so nothing is
+    # covered and the job is reported.
+    aliased = "  job:\n    steps:\n      - *guarded\n"
+    assert _live_contract_step(aliased.splitlines()) is False
+    assert _contract_violations(aliased, scripts), (
+        "an aliased step covered a job without a readable `run:` line"
+    )
 
     # …and the SAME scan must not reach OUTSIDE the step. A bare `-` marker (the step's first
     # key on the next line) did not match `^      - `, so `step_start` stayed 0 and the JOB's
@@ -939,10 +1017,11 @@ def test_every_gh_using_pool_job_carries_the_contract_step(workflow, job):
 #: `gh` at COMMAND position. Deliberately narrow: it must not fire on `GH_TOKEN`,
 #: on a filename, or on prose (`gh` inside a comment is skipped by the caller).
 #:
-#: ⛔ THE LIST IS THE WHOLE COMMAND SET, and that is a correction. It named 12 of the 28
-#: subcommands `gh --help` publishes, so `gh cache delete --all`, `gh gist create`,
-#: `gh attestation verify`, `gh ruleset list`, `gh alias set`, `gh extension install`,
-#: `gh org list` and `gh ssh-key list` were all really executed and all read CLEAN
+#: ⛔ THE LIST IS THE WHOLE COMMAND SET, and that is a correction. It named 12 of the 33
+#: subcommands `gh --help` publishes (`gh 2.102.0`: CORE 12 + GITHUB ACTIONS 3 + ADDITIONAL
+#: 18, alias section excluded), so **eight of the 21 it omitted** really executed and read
+#: CLEAN: `gh cache delete --all`, `gh gist create`, `gh attestation verify`, `gh ruleset
+#: list`, `gh alias set`, `gh extension install`, `gh org list`, `gh ssh-key list`
 #: (execution proven by a stub `gh` on PATH, and each name confirmed real by
 #: `gh <name> --help` exiting 0). `test_every_gh_subcommand_is_recognised` re-derives the
 #: set from the installed `gh` so a NEW subcommand cannot silently join the blind spot.
