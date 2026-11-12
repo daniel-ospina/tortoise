@@ -1351,8 +1351,9 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
     # the reason the money and kind rows are: the enumeration rots, the pin
     # does not.
     # `match` takes a REGEX, so the alternation is intentionally un-escaped — the
-    # `r` prefix is what RUF043 asks for (it flags metacharacters in a non-raw
-    # pattern). The compiled pattern is byte-identical either way.
+    # `r` prefix is what RUF043 asks for (it flags metacharacters in a pattern that
+    # is neither raw nor escaped). Byte-identical either way: the literal holds no
+    # backslash, so the raw prefix cannot reinterpret anything.
     with pytest.raises(Exception, match=r"percent|basisPoints|ratio"):
         api.emit_belief("ConfidenceChanged", id="node-1", basisPoints=20000)
     with pytest.raises(Exception, match=r"percent|basisPoints|ratio"):
