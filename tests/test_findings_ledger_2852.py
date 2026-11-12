@@ -210,6 +210,14 @@ def test_mutation_population_is_pinned():
     (measured at `6413d5e8`). The `#L` permalink arm one branch above was fixed for
     this same shape in an earlier round; this is the arm that was left behind.
 
+    The third #11902 review round added TWO, both for the same defect one arm over from
+    the letter lists: the two FIGURES §3 states in words ("N of the M rows no longer read
+    as written", "N of the M were") were compared with `expected in paragraph`, so a
+    decoy sentence satisfied the comparison while the sentence a lane quotes went stale —
+    measured with a falsified count beside a list-free decoy, and a falsified overtaken
+    figure beside a compliant one. A derived figure must live in exactly ONE sentence,
+    which is the rule the letter lists already carried.
+
     ⛔ NO SENTENCE IN THIS PARAGRAPH NAMES AN ARM BY A NUMBER — ordinal OR bare. An arm
     position is a count: it moves whenever an arm is inserted above it, and nothing tests
     it (the terminal count below IS tested, against `len(MUTATIONS)`, which is why it can
@@ -245,8 +253,8 @@ def test_mutation_population_is_pinned():
         "the registered population must EQUAL the floor it declares — a `>=` floor "
         "cannot see a one-arm shrink"
     )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 39, (
-        "this line RECORDS the population (39 arms); removing one means editing the "
+    assert flc.MIN_SELF_TEST_MUTATIONS == 41, (
+        "this line RECORDS the population (41 arms); removing one means editing the "
         "floor here too, which is the second place a shrink has to touch"
     )
 
