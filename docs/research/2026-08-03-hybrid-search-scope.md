@@ -39,7 +39,7 @@
 | Index observability/monitoring | Platform monitoring concern | Future issue |
 | Existing Point embedding backfill | Migration script for pre-existing Points | Future issue |
 | GraphRAG integration | Separate epic | Future epic |
-| Legacy `search()` API removal | Removed in Phase 0 — archived to `tortoise/archived/search_legacy.py`. 2 call sites affected. | — (intentional, confirmed during planning) |
+| Legacy `search()` API removal | Removed in Phase 0 — archived to `archive/modules/pre-mechanism-legacy-search/search_legacy.py` (moved there in #11609; it was `tortoise/archived/`). 2 call sites affected. | — (intentional, confirmed during planning) |
 
 ### Boundary Rationale
 

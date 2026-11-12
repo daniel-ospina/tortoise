@@ -1,0 +1,911 @@
+#!/usr/bin/env python3
+"""The surface archive — where code removed from the product lives (#11609).
+
+THE RULE THIS IMPLEMENTS
+    IN THE TARGET SET  →  kept, as the product surface
+    EVERYTHING ELSE    →  REMOVED from the product, and the CODE ARCHIVED so it is
+                          recoverable and inspectable (kept in the repo, NOT importable,
+                          NOT exposed)
+
+Owner ruling, 2026-11-17 verbatim in substance (comment `6831894340` on #11609):
+*"we simply ended with the target ones and nothing more. anything outside the target gets
+removed (archived code so not available, we archive it in case we made a mistake and want
+to check what we had but ultimately outside the product because we don't want it)."*
+
+WHY A TOP-LEVEL `archive/` AND NOT A SUBPACKAGE
+    `tortoise/` IS the shipped product package (`[tool.setuptools.packages.find]
+    include = ["tortoise*", …]`). Code under it is
+    importable as `tortoise.<mod>` and lands in the wheel. An archive that lives there
+    would be a symbol that still resolves — the opposite of "not available". A top-level
+    `archive/` is outside the package namespace, outside `packages.find`, outside
+    `mypy tortoise/`, and it is where a reader looks first. That is the whole design.
+
+HOW THIS COMPOSES WITH THE TWO EXISTING RETIREMENT MECHANISMS — AND WHAT IT REPLACES
+    Three departures exist, and they are DIFFERENT, so this does not collapse them:
+
+    1. `tortoise/tool_registry.py::RETIRED_USE_INSTEAD` — MCP **retired-forward**. The
+       name leaves the *advertised* surface but is STILL SERVED: a caller of a retired
+       name resolves and is handed the replacement call (#3883). It is a service to a
+       caller, so it is *inside* the product and is **not** archived.
+    2. `tortoise/sdk_retired.py::RETIRED_SDK_METHODS` / `REMOVED_SDK_METHODS` — the SDK's
+       fail-closed record (#3836 (c)). There is no alias layer: a retired name raises
+       `AttributeError` naming its replacement; a REMOVED name raises with no hint
+       because no replacement exists. This map stays authoritative for *the failure*.
+    3. **The archive (this file).** The code itself, frozen and readable, with no name
+       left on the surface at all. The archive is what makes a removal *recoverable*
+       rather than *lost*.
+
+    So the archive **COMPOSES**; it replaces neither:
+      · an archived MCP tool must NOT be in `RETIRED_USE_INSTEAD` (archived means the
+        name does not resolve; a forward entry means it does) — enforced below;
+      · an archived SDK method MUST be recorded in `RETIRED_SDK_METHODS` or
+        `REMOVED_SDK_METHODS`, so a caller of it still fails CLEANLY and the departure is
+        accounted for — enforced below. The archive adds the code; the map keeps the
+        failure.
+    The existing 23 `RETIRED_USE_INSTEAD` entries are therefore NOT in this archive's
+    scope. They are off the *advertised* count (72) already, and
+    `docs/product/canonical-mcp-tools.md` records (2026-10-27 amendment) that removing
+    the forward entries "is a separate decision" — so archiving them here would be a
+    different ruling, not this one.
+
+WHAT IS ENFORCED (both `check` and `tests/test_archive.py`)
+    · every archived symbol is GONE from the live surface — no live registry tool, no
+      public `TortoiseSDK` method (the "archive must not be a slow leak back" rule);
+    · every manifest entry has a file and every file under `archive/` is in the manifest
+      (no unindexed code, no dangling index row);
+    · each archived module's `ARCHIVED_*` constants match its manifest row, and every
+      frozen block's **sha256** matches the manifest (the copy is the source that was
+      removed — not a stub, and not something a later edit drifted);
+    · `archive/` is not reachable through the PRODUCT package: no `tortoise/archive`
+      path, `importlib.util.find_spec("tortoise.archive") is None`, no `__init__.py`
+      anywhere under `archive/`, and `packages.find` does not match it (so it is not in
+      the wheel);
+    · `archive/INDEX.md` is a regenerated view of `MANIFEST.json` — a stale index is a
+      violation.
+
+    ⛔ WHAT IS — AND IS NOT — ENFORCED ABOUT IMPORTABILITY. The enforced property is
+    "not importable from the PUBLIC PACKAGE": nothing under `tortoise/`, nothing in the
+    wheel. ⚠️ From a repo checkout, `import archive` DOES resolve as a PEP 420 namespace
+    package (verified: `find_spec("archive").submodule_search_locations` is the tree), and
+    asserting otherwise would be false — so that is stated rather than implied. Reading a
+    frozen file in place is fine; IMPORTING it is not a supported path (the files are
+    frozen source, not maintained modules) and nothing in the product ever does.
+
+Usage
+    uv run python tools/archive_surface.py check
+    uv run python tools/archive_surface.py index              # regenerate INDEX.md
+    uv run python tools/archive_surface.py index --check      # assert it is current
+    uv run python tools/archive_surface.py archive mcp-tool <tool> --batch <slug> --reason <text>
+    uv run python tools/archive_surface.py archive sdk-method <method> --batch <slug> --reason <text>
+    uv run python tools/archive_surface.py archive module <dotted.module> --batch <slug> --reason <text>
+
+    Run `archive` BEFORE deleting the symbol from its source file: it reads the source as
+    it stands at HEAD and records that commit, so the restore recipe is exact.
+
+Exit 0 = clean. Exit 1 = violations (printed one per line). Exit 2 = usage/refusal.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import hashlib
+import importlib.util
+import json
+import re
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/archive_surface.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/archive_surface.py check`"
+    )
+
+ROOT = Path(__file__).resolve().parent.parent
+ARCHIVE_DIR = ROOT / "archive"
+MANIFEST_PATH = ARCHIVE_DIR / "MANIFEST.json"
+INDEX_PATH = ARCHIVE_DIR / "INDEX.md"
+
+SCHEMA = 1
+MCP_TOOL = "mcp-tool"
+SDK_METHOD = "sdk-method"
+MODULE = "module"
+KINDS = (MCP_TOOL, SDK_METHOD, MODULE)
+
+SUBDIR = {MCP_TOOL: "mcp-tools", SDK_METHOD: "sdk-methods", MODULE: "modules"}
+#: Where each kind is frozen FROM. `module` is the one kind whose source path is not
+#: fixed — it is the module's own file — so it carries its source in the symbol.
+SOURCE_OF = {
+    MCP_TOOL: "tortoise/tool_registry.py",
+    SDK_METHOD: "tortoise/sdk.py",
+    MODULE: "tortoise/archived/",
+}
+METADATA_KEYS = ("ARCHIVED_KIND", "ARCHIVED_SYMBOL", "ARCHIVED_BATCH", "ARCHIVED_FROM")
+
+#: A batch slug becomes a DIRECTORY name under `archive/`, so it is validated rather than
+#: trusted: a `--batch ../../tortoise` would otherwise write archived code back INSIDE the
+#: shipped package (measured: it did), where it is importable and ships in the wheel — the
+#: exact outcome the archive exists to prevent.
+_BATCH_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+#: The header banner every archived module must carry for each frozen source block. Its
+#: presence is what distinguishes a real archive from a file that merely repeats the
+#: metadata (a body lost in a merge reads green otherwise — measured).
+VERBATIM_BANNER = "# ── verbatim from "
+
+#: The index's section titles and summary words per kind.
+INDEX_LABEL = {
+    MCP_TOOL: ("MCP tools", "tool", "MCP tools"),
+    SDK_METHOD: ("SDK methods", "method", "SDK methods"),
+    MODULE: ("Modules", "module", "modules"),
+}
+
+
+# ── the manifest ────────────────────────────────────────────────────────────────
+
+class ArchiveRefused(Exception):
+    """The archive cannot be read or written — a refusal, never a silent skip."""
+
+
+def load_manifest(path: Path | None = None) -> dict:
+    """Read `archive/MANIFEST.json`. Missing file is EMPTY, not an error (first run)."""
+    path = Path(path or MANIFEST_PATH)
+    if not path.exists():
+        return {"schema": SCHEMA, "entries": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ArchiveRefused(f"could not read {path}: {type(exc).__name__}: {exc}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("entries"), list):
+        raise ArchiveRefused(f"{path} is not an archive manifest (expected an `entries` list)")
+    return data
+
+
+def _sorted_entries(entries: list[dict]) -> list[dict]:
+    return sorted(entries, key=lambda e: (str(e.get("kind")), str(e.get("symbol"))))
+
+
+def save_manifest(data: dict, path: Path | None = None) -> None:
+    path = Path(path or MANIFEST_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {**data, "schema": SCHEMA, "entries": _sorted_entries(list(data["entries"]))}
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+# ── the live surface (executed, never parsed) ───────────────────────────────────
+
+def live_surface() -> dict:
+    """The live surface and the two retirement maps, imported rather than read as text."""
+    try:
+        from tortoise.sdk import TortoiseSDK
+        from tortoise.sdk_retired import REMOVED_SDK_METHODS, RETIRED_SDK_METHODS
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD, TOOL_REGISTRY
+    except Exception as exc:  # pragma: no cover - import failure is an environment fault
+        raise ArchiveRefused(
+            f"could not import the live surface: {type(exc).__name__}: {exc}"
+        ) from exc
+    return {
+        "tools": {entry.name for entry in TOOL_REGISTRY},
+        "methods": {
+            name
+            for name in dir(TortoiseSDK)
+            if not name.startswith("_") and callable(getattr(TortoiseSDK, name))
+        },
+        "forward": set(RETIRED_USE_INSTEAD),
+        "sdk_retired": set(RETIRED_SDK_METHODS) | set(REMOVED_SDK_METHODS),
+        # Every module the package tree carries (`tortoise/**/*.py`), repo-relative. An
+        # archived `module` symbol must not appear here: a file under `tortoise/` is
+        # importable and ships in the wheel.
+        "modules": {
+            path.relative_to(ROOT).as_posix()
+            for path in (ROOT / "tortoise").rglob("*.py")
+        },
+    }
+
+
+# ── violations: the surface half (pure — no filesystem) ─────────────────────────
+
+def surface_violations(entries: list[dict], surface: dict) -> list[str]:
+    """Every way an archived symbol can be back on the live surface, or mis-recorded.
+
+    Pure on purpose: `tests/test_archive.py` calls it with a synthetic surface to prove
+    the detector FIRES. A gate nobody has seen fire is indistinguishable from one that
+    cannot.
+    """
+    tools = surface["tools"]
+    methods = surface["methods"]
+    forward = surface["forward"]
+    sdk_retired = surface["sdk_retired"]
+    installed_modules = surface.get("modules", set())
+    out: list[str] = []
+    for entry in entries:
+        kind = entry.get("kind")
+        symbol = str(entry.get("symbol") or "")
+        if kind not in KINDS:
+            out.append(f"{symbol or '<no symbol>'}: unknown kind {kind!r} (expected one of {KINDS})")
+            continue
+        if kind == MCP_TOOL:
+            if symbol in tools:
+                out.append(
+                    f"{symbol}: REAPPEARED on the live MCP surface — an archived tool must not "
+                    "be in TOOL_REGISTRY (archive/README.md, 'not available')"
+                )
+            if symbol in forward:
+                out.append(
+                    f"{symbol}: is a RETIRED_USE_INSTEAD forward entry — a forward entry is "
+                    "STILL SERVED, so it is inside the product and must not be archived; "
+                    "these are different mechanisms and must not hold the same name"
+                )
+        elif kind == SDK_METHOD:
+            if symbol in methods:
+                out.append(
+                    f"{symbol}: REAPPEARED as a public TortoiseSDK method — an archived method "
+                    "must not be importable from the product package"
+                )
+            if symbol not in sdk_retired:
+                out.append(
+                    f"{symbol}: archived but absent from RETIRED_SDK_METHODS / "
+                    "REMOVED_SDK_METHODS — a caller would then hit a bare AttributeError "
+                    "instead of the recorded departure, so the removal is not accounted for"
+                )
+        else:
+            # A whole module archived from INSIDE the package. Its file must be GONE from the
+            # package tree: `tortoise/archived/x.py` is importable as `tortoise.archived.x` and
+            # ships in the wheel, which is the opposite of "not available".
+            base = symbol.replace(".", "/")
+            for candidate in (f"{base}.py", f"{base}/__init__.py", f"{base}.pyi"):
+                if candidate in installed_modules:
+                    out.append(
+                        f"{symbol}: REAPPEARED as an importable module in the shipped package "
+                        f"({candidate}) — archived code must not ship"
+                    )
+                    break
+    return out
+
+
+# ── violations: the files half ─────────────────────────────────────────────────
+
+def _module_metadata(path: Path) -> dict:
+    """The `ARCHIVED_*` module-level constants of an archived module."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError) as exc:
+        raise ArchiveRefused(f"{path} does not parse as Python: {exc}") from exc
+    found: dict = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name) and target.id in METADATA_KEYS:
+                try:
+                    found[target.id] = ast.literal_eval(node.value)
+                except ValueError as exc:
+                    raise ArchiveRefused(
+                        f"{path}: {target.id} is not a literal — the archive metadata is read "
+                        "by the gate and must be a constant"
+                    ) from exc
+    return found
+
+
+def frozen_blocks(text: str) -> list[tuple[str, str]]:
+    """Split an archived file into `(source path, frozen body)` pairs.
+
+    The writer emits one `VERBATIM_BANNER` line per frozen block, a blank line, the block
+    verbatim, then a blank line. Parsing the SAME shape back is what makes the body
+    verifiable: a file that keeps only its banner and its metadata would otherwise read as
+    an archive while holding no code (measured — a banner-presence check alone passed).
+    """
+    blocks: list[tuple[str, str]] = []
+    path: str | None = None
+    body: list[str] = []
+    for line in text.splitlines():
+        if line.startswith(VERBATIM_BANNER):
+            if path is not None:
+                blocks.append((path, "\n".join(body).strip("\n")))
+            path = line[len(VERBATIM_BANNER):].removesuffix(" ──").strip()
+            body = []
+            continue
+        if path is not None:
+            body.append(line)
+    if path is not None:
+        blocks.append((path, "\n".join(body).strip("\n")))
+    return blocks
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def file_violations(entries: list[dict], archive_dir: Path | None = None,
+                    root: Path | None = None) -> list[str]:
+    """Every way the files on disk and the manifest index disagree."""
+    root = Path(root or ROOT)
+    archive_dir = Path(archive_dir or root / "archive")
+    out: list[str] = []
+    indexed: set[str] = set()
+    for entry in entries:
+        symbol = str(entry.get("symbol") or "")
+        rel = str(entry.get("file") or "")
+        if not rel:
+            out.append(f"{symbol}: manifest row carries no `file`")
+            continue
+        path = root / rel
+        indexed.add(rel)
+        # Containment: a manifest row must name a file INSIDE `archive/`. A `..` component
+        # (`archive/mcp-tools/../../tortoise/x.py`) resolves into the shipped package, where
+        # the file is importable, and the orphan scan below cannot see it — measured.
+        if not rel.startswith("archive/") or ".." in Path(rel).parts:
+            out.append(
+                f"{symbol}: `file`={rel!r} is not a path inside archive/ — archived code must "
+                "live under archive/, never inside the shipped package"
+            )
+            continue
+        if not path.exists():
+            out.append(f"{symbol}: manifest names {rel}, which does not exist")
+            continue
+        text = path.read_text(encoding="utf-8")
+        meta = _module_metadata(path)
+        for key, field in (
+            ("ARCHIVED_KIND", "kind"),
+            ("ARCHIVED_SYMBOL", "symbol"),
+            ("ARCHIVED_BATCH", "batch"),
+            ("ARCHIVED_FROM", "archived_from"),
+        ):
+            if meta.get(key) != entry.get(field):
+                out.append(
+                    f"{symbol}: {rel} says {key}={meta.get(key)!r} but the manifest says "
+                    f"{field}={entry.get(field)!r} — the index and the archived code drifted"
+                )
+        # The file must actually CARRY the frozen source, and it must be the SAME source:
+        # a body lost in a merge, or hand-edited after the fact, would otherwise read green
+        # and "recoverable" would be false. So the blocks are re-parsed and hashed against
+        # the manifest, not merely counted.
+        blocks = frozen_blocks(text)
+        if not blocks:
+            out.append(
+                f"{symbol}: {rel} carries no `{VERBATIM_BANNER.strip()}` block — the frozen "
+                "source is missing, so this is metadata without an archive"
+            )
+        else:
+            empty = [path for path, body in blocks if not body.strip()]
+            if empty:
+                out.append(
+                    f"{symbol}: {rel} has an EMPTY frozen block for {', '.join(empty)} — the "
+                    "banner is there but the code is not"
+                )
+            recorded = entry.get("blocks")
+            if not isinstance(recorded, list) or len(recorded) != len(blocks):
+                out.append(
+                    f"{symbol}: {rel} carries {len(blocks)} frozen block(s) but the manifest "
+                    f"records {len(recorded) if isinstance(recorded, list) else 'none'} — the "
+                    "index cannot say what this file holds"
+                )
+            else:
+                for (path, body), row in zip(blocks, recorded, strict=True):
+                    if row.get("path") != path or row.get("sha256") != _sha256(body):
+                        out.append(
+                            f"{symbol}: {rel}'s block from {path} does not match the manifest's "
+                            "sha256 — the archived code drifted away from the source that was "
+                            "removed, so restoring it would restore something else"
+                        )
+        anchor = str(entry.get("archived_at") or "")
+        if not _SHA_RE.match(anchor) or anchor == "0" * 40:
+            out.append(
+                f"{symbol}: `archived_at`={entry.get('archived_at')!r} is not a full commit "
+                "sha (or is the all-zero placeholder) — the restore anchor was not recorded "
+                "(a guess is not a record)"
+            )
+        if not entry.get("reason"):
+            out.append(f"{symbol}: no `reason` — a reader cannot tell why it was removed")
+
+    if archive_dir.exists():
+        for path in sorted(archive_dir.rglob("*.py")):
+            rel = str(path.relative_to(root))
+            if rel not in indexed:
+                out.append(f"{rel}: archived code that no manifest row indexes — orphan")
+        for path in sorted(archive_dir.rglob("__init__.py")):
+            rel = str(path.relative_to(root))
+            out.append(
+                f"{rel}: archive/ must carry no `__init__.py` — the archive is a READABLE "
+                "SOURCE TREE, not an importable package"
+            )
+    return out
+
+
+def package_violations(root: Path | None = None) -> list[str]:
+    """Every way `archive/` could become reachable through the product package."""
+    root = Path(root or ROOT)
+    out: list[str] = []
+    if (root / "tortoise" / "archive").exists():
+        out.append(
+            "tortoise/archive exists — code under the shipped package is importable as "
+            "`tortoise.<mod>`; archived code must live outside it"
+        )
+    if (root / "tortoise" / "archived").exists():
+        out.append(
+            "tortoise/archived exists — this is the PRE-MECHANISM archive location, inside the "
+            "shipped package and therefore importable. Archived code belongs in the top-level "
+            "`archive/` tree (`archive/README.md`); migrate the module and delete the directory"
+        )
+    if importlib.util.find_spec("tortoise.archive") is not None:
+        out.append("`import tortoise.archive` resolves — archived code must not be importable")
+    try:
+        pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:  # pragma: no cover - config fault
+        raise ArchiveRefused(f"could not read pyproject.toml: {exc}") from exc
+    include = (pyproject.get("tool", {}).get("setuptools", {}).get("packages", {})
+               .get("find", {}).get("include", []))
+    if any(pat.startswith("archive") or pat == "*" for pat in include):
+        out.append(
+            f"pyproject.toml `packages.find.include` matches the archive ({include}) — an "
+            "archived module would ship in the wheel, so it would be importable after install"
+        )
+    return out
+
+
+def manifest_violations(manifest: dict, archive_dir: Path | None = None) -> list[str]:
+    """The manifest file itself: present, the right schema, and no symbol archived twice."""
+    archive_dir = Path(archive_dir or MANIFEST_PATH.parent)
+    path = archive_dir / "MANIFEST.json"
+    if not path.exists():
+        return [f"{path.name}: no `archive/MANIFEST.json` — the archive has no record of itself"]
+    out: list[str] = []
+    if manifest.get("schema") != SCHEMA:
+        out.append(
+            f"archive manifest schema {manifest.get('schema')!r} != {SCHEMA} — a reader cannot "
+            "know how to read the rows"
+        )
+    seen: set[tuple[str, str]] = set()
+    for entry in manifest.get("entries") or []:
+        key = (str(entry.get("kind")), str(entry.get("symbol")))
+        if key in seen:
+            out.append(f"{key[1]}: indexed twice ({key[0]}) — a symbol is archived once")
+        seen.add(key)
+    return out
+
+
+def index_violations(entries: list[dict], root: Path | None = None) -> list[str]:
+    """The committed `INDEX.md` must equal the regenerated view of the manifest."""
+    root = Path(root or ROOT)
+    path = root / "archive" / "INDEX.md"
+    expected = render_index({"schema": SCHEMA, "entries": entries})
+    if not path.exists():
+        return [f"{path.relative_to(root)}: missing — run `tools/archive_surface.py index`"]
+    actual = path.read_text(encoding="utf-8")
+    if actual != expected:
+        return [
+            f"{path.relative_to(root)}: STALE — it is a generated view of MANIFEST.json; "
+            "run `uv run python tools/archive_surface.py index`"
+        ]
+    return []
+
+
+def check(root: Path | None = None) -> list[str]:
+    """Every violation, or an empty list when the archive is consistent."""
+    root = Path(root or ROOT)
+    manifest = load_manifest(root / "archive" / "MANIFEST.json")
+    entries = manifest["entries"]
+    problems: list[str] = []
+    problems += manifest_violations(manifest, root / "archive")
+    problems += file_violations(entries, root / "archive", root)
+    problems += surface_violations(entries, live_surface())
+    problems += package_violations(root)
+    problems += index_violations(entries, root)
+    return problems
+
+
+# ── the rendered index ────────────────────────────────────────────────────────
+
+def render_index(manifest: dict) -> str:
+    entries = _sorted_entries(list(manifest.get("entries") or []))
+    by_kind = {kind: [e for e in entries if e.get("kind") == kind] for kind in KINDS}
+    summary = " · ".join(
+        f"{len(by_kind[kind])} archived {INDEX_LABEL[kind][2]}" for kind in KINDS
+    )
+    lines = [
+        "# Archive index — code removed from the product surface",
+        "",
+        "> **Generated** by `uv run python tools/archive_surface.py index`. Do not edit by hand.",
+        "> The machine-readable record is [`MANIFEST.json`](MANIFEST.json); this file is its",
+        "> readable view, and `tools/archive_surface.py check` fails when the two disagree.",
+        "",
+        "An archived symbol is **out of the product**: it is not importable from `tortoise`, it",
+        "is not served on the MCP surface, and no retired-forward name points at it. The code",
+        "is kept here so a removal can be inspected and — if it was a mistake — read back.",
+        "The mechanism and its rules: [`README.md`](README.md).",
+        "",
+        f"**{summary}.**",
+        "",
+    ]
+    for kind in KINDS:
+        title, label, _plural = INDEX_LABEL[kind]
+        rows = by_kind[kind]
+        lines += [f"## {title} ({len(rows)})", ""]
+        if not rows:
+            lines += ["_None archived yet._", ""]
+            continue
+        lines += [
+            f"| archived {label} | batch | reason | archived from |",
+            "|---|---|---|---|",
+        ]
+        for entry in rows:
+            lines.append(
+                "| `{symbol}` | {batch} | {reason} | `{src}` @ `{sha}` |".format(
+                    symbol=entry.get("symbol"),
+                    batch=entry.get("batch"),
+                    reason=str(entry.get("reason", "")).replace("|", "\\|"),
+                    src=entry.get("archived_from"),
+                    sha=str(entry.get("archived_at") or "")[:12],
+                )
+            )
+        lines.append("")
+    while lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines) + "\n"
+
+
+def write_index(root: Path | None = None) -> Path:
+    root = Path(root or ROOT)
+    manifest = load_manifest(root / "archive" / "MANIFEST.json")
+    path = root / "archive" / "INDEX.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_index(manifest), encoding="utf-8")
+    return path
+
+
+# ── writing an archive entry ──────────────────────────────────────────────────
+
+def _head_sha(root: Path) -> str:
+    """The commit the code is being frozen FROM — the restore anchor.
+
+    REFUSES rather than returning a placeholder: an archive that cannot name its own
+    commit is not a record, and `"unknown"` would render a restore row that reads as a
+    citation while citing nothing.
+    """
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ArchiveRefused(
+            f"could not read HEAD in {root} ({type(exc).__name__}) — the archive must record the "
+            "commit it was frozen from, so run it in a git checkout"
+        ) from exc
+    if not _SHA_RE.match(sha):
+        raise ArchiveRefused(f"`git rev-parse HEAD` returned {sha!r}, not a commit sha")
+    return sha
+
+
+def _mcp_source(root: Path, tool: str) -> list[tuple[str, str]]:
+    """The `ToolDefinition` literal for *tool*, plus any handler that names it.
+
+    Handlers are found by AST rather than by a naming convention: an MCP handler is a
+    function in `mcp_server.py` whose body mentions the tool name, and that is the code a
+    reader needs in order to see what a removed tool DID.
+    """
+    registry = (root / "tortoise" / "tool_registry.py").read_text(encoding="utf-8")
+    tree = ast.parse(registry)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Name) and func.id == "ToolDefinition"):
+            continue
+        for keyword in node.keywords:
+            if (
+                keyword.arg == "name"
+                and isinstance(keyword.value, ast.Constant)
+                and keyword.value.value == tool
+            ):
+                segment = ast.get_source_segment(registry, node)
+                if segment is None:  # pragma: no cover - ast invariant
+                    raise ArchiveRefused(f"could not extract the ToolDefinition for {tool}")
+                return [("tortoise/tool_registry.py", segment)]
+    raise ArchiveRefused(
+        f"{tool} has no `ToolDefinition` in tortoise/tool_registry.py — nothing to archive. "
+        "Retired-forward entries live in RETIRED_USE_INSTEAD and are NOT archived."
+    )
+
+
+def _mcp_handlers(root: Path, tool: str) -> list[tuple[str, str]]:
+    """The `mcp_server.py` function(s) that IMPLEMENT *tool*.
+
+    Two shapes exist in this repo and both must be captured, because the archive's promise
+    is that a reader can see what a removed tool DID:
+
+    * the handler is named after the tool — `def tortoise_create_point(...)` (101 such
+      top-level defs at #11609);
+    * the handler is a shared helper whose body mentions the tool name as a string.
+
+    ⛔ Matching only the second shape captured **8 of 72** live tools, and for those 8 it
+    captured an unrelated helper (`tortoise_delete` -> `_arguments_say_preview`) while
+    missing `def tortoise_delete` entirely (measured, review cycle 1). A name match is the
+    primary rule; the string scan stays for the dispatch-style handlers.
+    """
+    path = root / "tortoise" / "mcp_server.py"
+    if not path.exists():  # pragma: no cover - layout invariant
+        return []
+    source = path.read_text(encoding="utf-8")
+    found: list[tuple[str, str]] = []
+    for node in ast.parse(source).body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name == tool or any(
+            isinstance(child, ast.Constant) and child.value == tool
+            for child in ast.walk(node)
+        ):
+            segment = ast.get_source_segment(source, node)
+            if segment:
+                found.append(("tortoise/mcp_server.py", segment))
+    return found
+
+
+def _module_source(root: Path, symbol: str) -> list[tuple[str, str]]:
+    """A whole module frozen verbatim. *symbol* is the dotted module path.
+
+    This is the kind for code that was archived INSIDE the package before this mechanism
+    existed (`tortoise/archived/search_legacy.py`) — an importable, shipped module, which is
+    the opposite of "not available".
+    """
+    rel = symbol.replace(".", "/") + ".py"
+    path = root / rel
+    if not path.exists():
+        raise ArchiveRefused(f"module {symbol} has no file at {rel} — nothing to archive")
+    try:
+        source = path.read_text(encoding="utf-8")
+        ast.parse(source, filename=str(path))
+    except (OSError, SyntaxError) as exc:
+        raise ArchiveRefused(f"could not read {rel}: {exc}") from exc
+    return [(rel, source)]
+
+
+def _sdk_source(root: Path, method: str) -> list[tuple[str, str]]:
+    path = root / "tortoise" / "sdk.py"
+    source = path.read_text(encoding="utf-8")
+    for node in ast.parse(source).body:
+        if not (isinstance(node, ast.ClassDef) and node.name == "TortoiseSDK"):
+            continue
+        for child in node.body:
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == method:
+                segment = ast.get_source_segment(source, child)
+                if segment is None:  # pragma: no cover - ast invariant
+                    raise ArchiveRefused(f"could not extract {method} from tortoise/sdk.py")
+                return [(str(path.relative_to(root)), segment)]
+    raise ArchiveRefused(
+        f"{method} is not a method of TortoiseSDK in tortoise/sdk.py — nothing to archive"
+    )
+
+
+def render_archive_file(
+    kind: str,
+    symbol: str,
+    batch: str,
+    reason: str,
+    archived_from: str,
+    sha: str,
+    blocks: list[tuple[str, str]],
+) -> tuple[str, list[dict]]:
+    """Render one archived file, and the `blocks` digest list for its manifest row.
+
+    One function for both, so a repair produces a byte-identical file: `check` re-parses
+    and re-hashes the blocks, so a render that differed by a byte would red for no reason.
+    """
+    header = [
+        f"# Archived {kind} `{symbol}` — REMOVED from the product surface (#11609).",
+        "#",
+        f"# batch:   {batch}",
+        f"# reason:  {reason}",
+        f"# source:  {archived_from} @ {sha}",
+        "#",
+        "# This file IS the source of record. To restore: copy each block below back into the",
+        "# file named in ITS OWN `verbatim from <path>` banner (one symbol can span more than",
+        "# one file), then run `uv run python tools/archive_surface.py check` (which fails",
+        "# while `archive/` and the live surface disagree).",
+        "#",
+        "# ⛔ NOT part of the product: not importable from `tortoise`, not served over MCP, and",
+        "#    not pointed at by any retired-forward name. Do not import this file.",
+        "",
+        f'ARCHIVED_KIND = {kind!r}',
+        f'ARCHIVED_SYMBOL = {symbol!r}',
+        f'ARCHIVED_BATCH = {batch!r}',
+        f'ARCHIVED_FROM = {archived_from!r}',
+        f'ARCHIVED_AT = {sha!r}',
+        "",
+    ]
+    body: list[str] = []
+    frozen: list[dict] = []
+    for source_path, segment in blocks:
+        text_block = segment.rstrip()
+        body += [
+            f"{VERBATIM_BANNER}{source_path} ──",
+            "",
+            text_block,
+            "",
+        ]
+        # The digest is what lets `check` tell "the frozen source" from "a file that used to
+        # hold it": a banner-presence check alone passed on a body that had been emptied.
+        frozen.append({
+            "path": source_path,
+            "sha256": _sha256(text_block.strip("\n")),
+        })
+    return "\n".join(header + body), frozen
+
+
+def _require_sources_match_head(root: Path, paths: list[str]) -> None:
+    """Refuse to freeze source that HEAD does not hold.
+
+    The anchor is the commit; the body is read from the WORKING TREE. If a source file has
+    uncommitted changes, the archived body is not what the recorded commit contains, so the
+    restore instruction ("copy this back and it is as it was") would be false. Commit the
+    source first, then archive — the order this enforces.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "status", "--porcelain", "--", *paths],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:  # pragma: no cover - env
+        raise ArchiveRefused(
+            f"cannot confirm {paths} match HEAD ({exc}) — refusing to freeze source whose "
+            "commit cannot be verified"
+        ) from exc
+    dirty = [ln[3:] for ln in proc.stdout.splitlines() if ln.strip()]
+    if dirty:
+        raise ArchiveRefused(
+            "refusing to freeze source with uncommitted changes to "
+            f"{', '.join(dirty)} — commit it first, so the archived body is what the "
+            "recorded commit holds"
+        )
+
+
+def archive_symbol(
+    kind: str,
+    symbol: str,
+    batch: str,
+    reason: str,
+    root: Path | None = None,
+) -> dict:
+    """Freeze *symbol* into `archive/` and append its manifest row. Does NOT delete it.
+
+    The caller deletes the symbol from its source file in the same batch; running this
+    first is what makes the recorded commit and the extracted source exact.
+    """
+    root = Path(root or ROOT)
+    if kind not in KINDS:
+        raise ArchiveRefused(f"unknown kind {kind!r} — expected one of {KINDS}")
+    if not batch or not reason:
+        raise ArchiveRefused("a batch slug and a reason are required: they are what a reader has")
+    if not _BATCH_RE.match(batch):
+        raise ArchiveRefused(
+            f"batch {batch!r} is not a slug — a batch becomes a DIRECTORY name under archive/, "
+            "so it must match [a-z0-9][a-z0-9._-]* (no path separators, no `..`)"
+        )
+    if any(ch in reason for ch in "\n\r\x00") or any(ord(ch) < 32 for ch in reason):
+        raise ArchiveRefused(
+            "`reason` must be ONE line: it is written into the archived file's header and into "
+            "the generated index table, so a newline escapes the comment block"
+        )
+    if not symbol or "/" in symbol or ".." in symbol:
+        raise ArchiveRefused(f"symbol {symbol!r} is not a bare symbol/module name")
+    symbol_file = symbol.replace(".", "/")
+    if any(part.startswith((".", "_")) and part == ".." for part in symbol_file.split("/")):
+        raise ArchiveRefused(f"symbol {symbol!r} carries a path traversal component")
+
+    manifest_path = root / "archive" / "MANIFEST.json"
+    manifest = load_manifest(manifest_path)
+    if any(e.get("kind") == kind and e.get("symbol") == symbol for e in manifest["entries"]):
+        raise ArchiveRefused(f"{symbol} is already archived ({kind})")
+
+    if kind == MCP_TOOL:
+        blocks = _mcp_source(root, symbol) + _mcp_handlers(root, symbol)
+    elif kind == SDK_METHOD:
+        blocks = _sdk_source(root, symbol)
+    else:
+        blocks = _module_source(root, symbol)
+
+    archived_from = blocks[0][0] if kind == MODULE else SOURCE_OF[kind]
+    sha = _head_sha(root)
+    _require_sources_match_head(root, sorted({p for p, _ in blocks}))
+    rel = f"archive/{SUBDIR[kind]}/{batch}/{symbol_file.rsplit('/', 1)[-1]}.py"
+    path = root / rel
+    # Containment, belt-and-braces after the slug/symbol validation: resolve and refuse
+    # anything that escapes `archive/` (a traversal here writes into the shipped package).
+    resolved = path.resolve()
+    if not resolved.is_relative_to((root / "archive").resolve()):
+        raise ArchiveRefused(f"{rel} resolves outside archive/ — refusing to write it")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text, frozen = render_archive_file(
+        kind, symbol, batch, reason, archived_from, sha, blocks
+    )
+    path.write_text(text, encoding="utf-8")
+
+    entry = {
+        "kind": kind,
+        "symbol": symbol,
+        "batch": batch,
+        "reason": reason,
+        "file": rel,
+        "archived_from": archived_from,
+        "archived_at": sha,
+        "sources": [p for p, _ in blocks],
+        "blocks": frozen,
+    }
+    manifest["entries"].append(entry)
+    save_manifest(manifest, manifest_path)
+    write_index(root)
+    return entry
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv if argv is None else argv)
+    parser = argparse.ArgumentParser(
+        prog="archive_surface.py", description="The surface archive (#11609)."
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("check", help="assert the archive is consistent (exit 1 on violations)")
+
+    index_parser = sub.add_parser("index", help="regenerate archive/INDEX.md")
+    index_parser.add_argument("--check", action="store_true", help="assert it is current")
+
+    archive_parser = sub.add_parser("archive", help="freeze a symbol into the archive")
+    archive_parser.add_argument("kind", choices=KINDS)
+    archive_parser.add_argument("symbol")
+    archive_parser.add_argument("--batch", required=True)
+    archive_parser.add_argument("--reason", required=True)
+
+    args = parser.parse_args(argv[1:])
+
+    try:
+        if args.cmd == "check":
+            problems = check()
+            if problems:
+                print(f"ARCHIVE NOT CONSISTENT — {len(problems)} violation(s):")
+                for problem in problems:
+                    print(f"  ✗ {problem}")
+                return 1
+            manifest = load_manifest()
+            entries = manifest["entries"]
+            counts = ", ".join(
+                f"{sum(1 for e in entries if e['kind'] == kind)} {INDEX_LABEL[kind][2]}"
+                for kind in KINDS
+            )
+            print(f"OK — archive consistent: {len(entries)} entries ({counts}).")
+            return 0
+        if args.cmd == "index":
+            if args.check:
+                problems = index_violations(load_manifest()["entries"])
+                if problems:
+                    for problem in problems:
+                        print(f"  ✗ {problem}")
+                    return 1
+                print("OK — archive/INDEX.md is current.")
+                return 0
+            path = write_index()
+            print(f"wrote {path.relative_to(ROOT)}")
+            return 0
+        if args.cmd == "archive":
+            entry = archive_symbol(args.kind, args.symbol, args.batch, args.reason)
+            print(f"archived {entry['kind']} {entry['symbol']} -> {entry['file']}")
+            print(f"  now delete it from {entry['archived_from']} in this batch")
+            return 0
+    except ArchiveRefused as exc:
+        print(f"REFUSED {exc}", file=sys.stderr)
+        return 2
+    return 2  # pragma: no cover - argparse makes this unreachable
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
