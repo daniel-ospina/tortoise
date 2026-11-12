@@ -5081,14 +5081,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # one FILE and the consume pair was re-pointed in one document while the
         # definition stayed wrong in both.
         ("00-plan.md", "is a **fail-OPEN** probe, defined at", (
-            ("6588", "def subject_binding_available(graph) -> bool:"),
+            ("6607", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
             ("9540", "subject_binding_available,"),
             ("9593", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("6588", "def subject_binding_available(graph) -> bool:"),
+            ("6607", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         # ...and that same row's CONSUME pair names `sdk.py`, so it takes its own
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
@@ -5104,7 +5104,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ), "sdk"),
         # The manifest's own `carve_out:` entry, cited from the artifact table.
         ("03-test-design.md", "`carve_out:` holds **one**", (
-            ("9554", "- test_pack_logic_writeprobe_11083.py"),
+            ("9589", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces"),
     )
     assert len(rows) >= 9, (
