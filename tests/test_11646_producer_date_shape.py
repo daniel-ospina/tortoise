@@ -997,6 +997,13 @@ def test_a_failing_zone_child_names_its_stderr_not_just_its_argv():
     Reverting the helper to ``check=True`` raises ``CalledProcessError``
     instead of ``AssertionError``, so this test reds. That is the point: the
     failure text IS the deliverable here, and it must not regress silently.
+
+    ⛔ The message assertions below cut pytest's appendix off FIRST (#11871
+    review round 1). pytest appends its assertion-rewrite explanation to a
+    failed rewritten ``assert``, and that explanation renders the operand
+    reprs — including ``CompletedProcess(... stderr='…')`` — so a bare
+    ``marker in str(excinfo.value)`` is satisfied by PYTEST, not by the helper,
+    and stayed green even with the helper's message gutted (measured).
     """
     marker = "ModuleNotFoundError: No module named 'pydantic'"
     broken = (
@@ -1012,8 +1019,23 @@ def test_a_failing_zone_child_names_its_stderr_not_just_its_argv():
             "UTC",
         )
     message = str(excinfo.value)
-    # the exit status is still reported…
     assert "child exited 1" in message, message
-    # …and the datum that names the cause is carried, not discarded
-    assert marker in message, message
+    # ⛔ Cut pytest's appendix off FIRST. pytest appends its assertion-rewrite
+    # explanation to the helper's failed ``assert``, and that explanation renders
+    # the operand reprs — ``CompletedProcess(..., stderr="ModuleNotFound…")`` —
+    # so a bare ``marker in message`` is satisfied by PYTEST rather than by the
+    # helper. Measured (#11871 review round 1): with the helper's ``proc.stderr``
+    # line deleted, the bare form still reported True and the pin stayed GREEN.
+    # The sentinel is the appendix's own rewritten source line.
+    helper_half = message.split("assert 1 == 0", 1)[0]
+    assert len(helper_half) < len(message), "appendix sentinel not found"
+    # ``stderr:`` (COLON) is the helper's label; the appendix prints
+    # ``stderr=`` (EQUALS). Do NOT assert exact adjacency across the ``\n``:
+    # pytest indents continuation lines, so ``"stderr:\n" + marker`` is not a
+    # substring of the value pytest hands back (measured).
+    assert "stderr:" in helper_half, helper_half
+    # …and the PAYLOAD must be in the helper's own stderr section, not merely
+    # somewhere earlier (argv echoes the child script) or later (the appendix).
+    after_label = helper_half.split("stderr:", 1)[1]
+    assert marker in after_label, after_label
     assert "TZ=UTC" in message, message
