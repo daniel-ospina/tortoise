@@ -365,6 +365,20 @@ COMMAND_FILE_TARGET_RE = re.compile(
 UNREADABLE_TARGET_RE = re.compile(r"[`$]")
 
 
+def _inside_quotes(text: str, position: int) -> bool:
+    """Is `position` inside a single- or double-quoted span?
+
+    Escaped characters are removed first so a backslash-escaped quote does not
+    toggle the state. Both quote kinds are counted independently — the shell treats
+    them independently too — and a mismatch only ever makes this answer more
+    conservative, never less: it decides whether a `>` is a PRINTED character or an
+    OPERATOR, and the safe answer for an unreadable case is "inside".
+    """
+
+    prefix = re.sub(r"\\[\s\S]", "", text[:position])
+    return prefix.count('"') % 2 == 1 or prefix.count("'") % 2 == 1
+
+
 def _redirects_into_a_client_binary(line: str) -> bool:
     """Does this line WRITE OVER a client binary by REDIRECTION? (#12069 P1)
 
@@ -392,29 +406,36 @@ def _redirects_into_a_client_binary(line: str) -> bool:
     is one line.
     """
     for match in REDIRECT_TARGET_RE.finditer(line):
+        # ⛔ IS THE `>` ITSELF INSIDE A QUOTED MESSAGE? (#12069 review 12, measured
+        # FAIL-OPEN). The previous cut inferred that from the SHAPE of what followed
+        # the captured word, so appending two characters defeated the whole rule:
+        #
+        #     : > /usr/lib/postgresql/16/bin/pg_dump""        EVERY ROW GREEN
+        #
+        # — the literal, perfectly classifiable target fell into the "inside a
+        # message" branch and was never graded, while the same line without the `""`
+        # was refused. Quoting is a property of the LINE BEFORE the operator, which
+        # is cheap to read exactly, so it is read exactly.
+        if _inside_quotes(line, match.start()):
+            continue
         target = match.group("target")
         # ⛔ THE TARGET WORD CAN CONTINUE PAST WHAT WAS CAPTURED (#12069 review
         # round 4, measured). The charclass excludes quotes, so `"$d/"/pg_dump`
         # captures `$d/` and `"$d/pg_dum"p` captures `$d/pg_dum` — the LEFTOVER is
         # what the shell concatenates into the real filename, and it was never
         # read. Both wrote `/usr/lib/postgresql/16/bin/pg_dump` with `205 passed`.
-        # A closing quote belongs to the captured word; anything word-like after
-        # it (or after an unquoted target) means the basename we graded is not the
-        # name being written, so the target is unclassifiable and refused.
+        # The continuation is CONCATENATED and graded as the REAL word, so a
+        # harmless spelling is not refused for it (#12069 review 12): a
+        # `"$SCRATCH/schema"` + `.sql` write is `schema.sql`, nowhere near a client
+        # binary, and refusing it was a false RED with an untrue message.
         tail = line[match.end():]
         closing = match.group("quote")
         if closing and tail.startswith(closing):
             tail = tail[1:]
-        elif (
-            not closing
-            and tail.startswith(("'", '"'))
-            # A `>` that sits INSIDE a quoted message: the captured word ends at
-            # the string's closing quote and the real redirect (if any) is later
-            # on the same line, graded on its own iteration. Only a quote followed
-            # by word-like characters continues the target here.
-            and not re.match(r"['\"][\w.$`/]", tail)
-        ):
-            continue
+            continuation = re.match(r"[^\s;&|)'\"]+", tail)
+            if continuation:
+                target += continuation.group(0)
+                tail = tail[continuation.end():]
         if tail and tail[0] not in " \t;&|)":
             return True
         if target.endswith("/"):
@@ -846,7 +867,43 @@ def _replaces_a_client_binary(line: str) -> bool:
     verb = BINARY_MUTATION_RE.search(line)
     if not verb:
         return False
-    return bool(BINARY_NAME_RE.search(line, verb.end()))
+    # ⛔ A NAME IN COMMAND POSITION IS BEING RUN, NOT WRITTEN (#12069 review 12,
+    # measured). `BINARY_NAME_RE.search(line, verb.end())` accepted a name ANYWHERE
+    # after the verb, so a mutating verb earlier on the line was enough — and with
+    # `psql`/`pg_isready` in the population this red a plainly correct step with an
+    # untrue message, `REPLACES a client binary`:
+    #
+    #     rm -f /tmp/seed.sql && psql -f /tmp/seed.sql      refused
+    #     rm -f /tmp/x; pg_isready -h localhost             refused
+    #
+    # A write names its target as an OPERAND (`cp … psql`, `tee …/pg_dump`); a
+    # command word after a list separator is the COMMAND. Only the former is an
+    # offence.
+    for match in BINARY_NAME_RE.finditer(line, verb.end()):
+        if not _is_command_position(line, match.start()):
+            return True
+    return False
+
+
+def _is_command_position(line: str, start: int) -> bool:
+    """Is the word at `start` the COMMAND of its list element, not an operand?
+
+    True at the start of the line, after any list separator, and after a wrapper
+    that takes its own operand (`sudo`/`env`/`command`/`exec`/`timeout`/`nice`/
+    `xargs`) — in every one of those the word is EXECUTED. Anywhere else it is what
+    a mutating verb is acting on.
+    """
+
+    prefix = line[:start].rstrip()
+    if not prefix or prefix[-1] in ";&|({":
+        return True
+    return bool(
+        re.search(
+            r"(?:^|[;&|({])\s*(?:sudo|env|command|exec|timeout|nice|xargs)\s+"
+            r"[\w${}/.-]*\s*$",
+            prefix,
+        )
+    )
 
 
 #: A subshell opens here and is not closed on the same line — whatever runs inside
@@ -3517,6 +3574,51 @@ BINARY_MUTATION_POLARITY = [
         "dpkg -l postgresql-client-16 | tail -2",
         False,
         "CONTROL: a read-only diagnostic",
+    ),
+    (
+        ': > /usr/lib/postgresql/16/bin/pg_dump""',
+        True,
+        "#12069 round-12: two empty quotes must not hide the write from the rule",
+    ),
+    (
+        ': > /usr/lib/postgresql/16/bin/pg_dump',
+        True,
+        "CONTROL: the same write without the `\"\"` was always refused",
+    ),
+    (
+        'echo "14 > 16" >> "$SCRATCH/report.txt"',
+        False,
+        "#12069 round-12: a `>` PRINTED in a message is not a redirect",
+    ),
+    (
+        'echo "note: > /usr/lib/postgresql/16/bin/pg_dump" >> "$SCRATCH/log"',
+        False,
+        "#12069 round-12: a path printed inside a message writes nothing",
+    ),
+    (
+        'echo x > "$SCRATCH/schema".sql',
+        False,
+        "#12069 round-12: the word continues past the quote — this is `schema.sql`",
+    ),
+    (
+        ': > "$b/"/pg_dump',
+        True,
+        "#12069 round-12: the continuation is the binary — concatenate, then grade",
+    ),
+    (
+        'rm -f /tmp/seed.sql && psql -f /tmp/seed.sql',
+        False,
+        "#12069 round-12: `psql` in COMMAND position is RUN, not written",
+    ),
+    (
+        "rm -f /tmp/x; pg_isready -h localhost",
+        False,
+        "#12069 round-12: the same for `pg_isready` after a separator",
+    ),
+    (
+        "chmod -x psql",
+        True,
+        "CONTROL: an operand in command-operand position IS a write",
     ),
 ]
 
