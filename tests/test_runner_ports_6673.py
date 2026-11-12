@@ -592,18 +592,21 @@ SEAM_FILES_WITH_ALLOWED_LITERALS = {
         # the `docker run -p` publish spec and `127.0.0.1:6379/<graph>` exactly
         # the `docker://` URI tail, so the BARE literals would each have
         # exempted a real dial on the same line — the failure this guard
-        # exists to catch. No site in `tests/test_test_lane_tool.py` reaches a
-        # LANE port. Its real network use is `_ping_over_host` against loopback
-        # (`:1697` port 1, `:1721` an ephemeral listener), and docker is
-        # intercepted before any socket: `_docker` is stubbed at the calling
-        # sites, and where its REAL body runs (`:2362`, `:2381`, `:2399`,
-        # `:2934`) its own `subprocess.run` is stubbed instead. The one child
-        # that runs the TOOL (`:2899`) is pointed at
-        # `DOCKER_HOST=tcp://127.0.0.1:1`, so the declared `6379` URI is only
-        # ever WRITTEN into that script, never dialled; the file's other real
-        # children (`git init` decoys `:2199`/`:2225`, sleepers `:4922`/`:5553`)
-        # spawn no docker. So the narrow spelling costs nothing and keeps a
+        # exists to catch. So the narrow spelling costs nothing and keeps a
         # future lane port red.
+        #
+        # The exemption is justified WITHOUT characterising the file's internals
+        # (earlier drafts of this block enumerated which `_docker` calls are
+        # stubbed and which child processes exist; every such enumeration was
+        # false in some particular, because the file is ~5,500 lines of
+        # deliberately-real stubs-and-real-children pairs). The proof is the
+        # guard's OWN census, which is stable: it finds exactly SEVEN
+        # lane-port-bearing lines in the file, and those seven ARE the seven
+        # entries below. So no other line in that file — no `_docker`
+        # invocation, no subprocess, no fixture — carries a lane port, which is
+        # the whole of what this row needs to assert. (The file's own TCP use is
+        # `_ping_over_host` against loopback, `:1697` port 1 and `:1721` an
+        # ephemeral listener; both carry no lane-port literal.)
         '"falkordb-16379",      # the orchestration graph instance',
         'for shared in ("falkordb", "falkordb-16379"',
         '_remove_and_describe("falkordb-16379")',
