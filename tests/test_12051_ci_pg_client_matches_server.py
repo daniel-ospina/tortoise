@@ -787,11 +787,16 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     instead of silently restoring the host dependency.
 
     Five arms over the step's FOUR named pre-install branches — the key fetch, the
-    codename, `apt-get update`, and the probe — plus the version branch, which no arm
-    executes (its reachability is a stated limit, see `_version_branch`). A branch
-    nothing executes is the unguarded-claim class this file exists to refuse, so every
-    NEW branch added one: this sentence is the audit of that, and it is re-cut whenever
-    the arm count moves rather than left to drift.
+    codename, `apt-get update`, and the probe — plus TWO branches no arm executes: the
+    install guard (unreachable by construction, since this arm stops AT the install line;
+    it is pinned in text by `test_the_client_comes_from_pgdg_not_the_distro_archive`) and
+    the version branch (its reachability is a stated limit, see `_version_branch`).
+    A branch nothing executes is the unguarded-claim class this file exists to refuse, so
+    this sentence is the AUDIT of that: it names every branch and says which ones are
+    executed, and it is re-cut whenever the branch or arm count moves rather than left to
+    drift. (It was already stale once — review cycle 6 of `5ed3b1950b` — which is why the
+    install guard is named here explicitly rather than folded into "the version branch is
+    the only unexecuted one".)
     """
     _, pin = _pin_step(_steps(job))
     lines = _run_text(pin).splitlines()
@@ -808,9 +813,15 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     )
 
     os_release = tmp_path / "os-release"
-    substituted = prefix.count(". /etc/os-release")
+    # ⛔ COUNT ON THE CODE, SUBSTITUTE IN THE PREFIX. The prefix is run VERBATIM (that is the
+    # point of this arm), so it carries comments too — and a comment that merely MENTIONS
+    # `. /etc/os-release` made a raw count see two sources and red an armed step (MEASURED,
+    # review cycle 6 of `5ed3b1950b`: the guard's own explanatory comment tripped it). The
+    # executable occurrence is the one in CODE; substituting in the raw prefix as well is
+    # harmless because a comment's copy is inert either way.
+    substituted = _code_only(prefix).count(". /etc/os-release")
     assert substituted == 1, (
-        "the prefix is expected to source `/etc/os-release` exactly once so this "
+        "the prefix's CODE is expected to source `/etc/os-release` exactly once so this "
         "test can point it at a fixture; found "
         f"{substituted}. Re-derive the substitution rather than letting the arm "
         "fall back to reading the HOST's file"

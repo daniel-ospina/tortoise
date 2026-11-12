@@ -4753,11 +4753,14 @@ jobs:
           if [ -n "${ImageOS:-}" ]; then
             identity="$identity hosted-image=${ImageOS}/${ImageVersion:-unknown}"
           fi
-          # ⛔ FIVE WAYS THIS STEP CAN FAIL TO GET A pg16 CLIENT, AND EACH ONE IS NAMED.
-          # Under `set -e`/`set -u` every one of them would otherwise surface as apt's, curl's
-          # or the shell's own text — which reads as a typo in THIS step rather than as the
-          # client's SOURCE failing under a drill whose artifact depends on the client's major
-          # (#12051). They are guarded SEPARATELY because they have different remedies:
+          # ⛔ FIVE NAMED FAILURE CLASSES. This is an enumeration OF THE GUARDS, not a claim
+          # that nothing else can fail: the keyring WRITES above and `. /etc/os-release` are
+          # left to `set -e`, because each of them fails CLOSED already and re-wrapping every
+          # write would be ceremony rather than a better diagnostic (a `No space left on
+          # device` on the keyring write, or a `sudo` needing a password on a pool box, still
+          # exits non-zero — it is just not named). What IS named below is every class where
+          # the underlying cause is the ARTIFACT'S CONTRACT rather than the box's health, since
+          # those are the ones that read as a typo in this step:
           #   1. the signing key cannot be FETCHED (egress/DNS/503) — guarded at the fetch;
           #   2. the box carries no VERSION_CODENAME, so there is no suite to name — guarded below;
           #   3. the repo does not RESOLVE once added (suite name, key, archive) — `apt-get update`;
@@ -4801,7 +4804,7 @@ jobs:
             # 100 at `apt-get update`, i.e. the guard ABOVE. So #10289 routing drift cannot
             # land here, and the old `--repair-labels` remedy here was advice that could
             # not change apt's answer.
-            echo "::error::a PGDG suite RESOLVED but carries no postgresql-client-16 for this codename [$identity] — apt-get update succeeded and the probe still found nothing, so this is the PACKAGE, not the repo. BOTH provisioned servers are pg16, so this job cannot run here (#12051): either the pin and the two 'pgvector/pgvector:pg16' servers must move together, or '${VERSION_CODENAME:-this release}' is one PGDG no longer publishes PG16 for (it keeps a rolling window of versions). Check 'apt-cache policy postgresql-client-16' and the suite derived from /etc/os-release."
+            echo "::error::a PGDG suite RESOLVED but carries no postgresql-client-16 for this codename [$identity] — apt-get update succeeded and the probe still found nothing, so this is the PACKAGE, not the repo. BOTH provisioned servers are pg16, so this job cannot run here (#12051): either the pin and the two 'pgvector/pgvector:pg16' servers must move together, or '${VERSION_CODENAME:-this release}' is a codename PGDG publishes no PG16 package for. Check 'apt-cache policy postgresql-client-16' and the suite derived from /etc/os-release."
             exit 1
           fi
           if ! sudo apt-get install -y --no-install-recommends postgresql-client-16; then
