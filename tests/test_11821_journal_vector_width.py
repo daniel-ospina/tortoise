@@ -1647,6 +1647,25 @@ def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
                   {"id": "p-dropped", "content": "c",
                    JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32},
                   embedding="abc")
+
+    # 8. ⛔ THE SAME JUNK CARRIED ON THE RECORD, which is the shape the arms
+    #    above MISS (#12000 round-10 re-review, F1' — measured). The post-stamp
+    #    belt only inspects the ENVELOPE's own `embedding`, so a junk vector
+    #    inside `record` never meets it — and the grid arm alone called
+    #    `shortest_float32_vector(values)`, which reads its argument as
+    #    `[float(x) for x in vector]`: a `str` is a sequence of CHARACTERS
+    #    (`"123"` → `[1.0, 2.0, 3.0]`), `bytes` a sequence of INTS, a `dict` a
+    #    sequence of KEYS (`{"0": 0.1}` → `[0.0]`) — all ON the grid, so the
+    #    arm answered "truthful" about the wrong object. Measured at
+    #    `0a86cb5a87`: both journalled, and the FOLD stored the junk as the
+    #    Point's vector under `f32`. `_is_shortest_f32_text` refuses exactly
+    #    these three types for exactly this reason; the grid arm now does too.
+    for _junk in ("123", {"0": 0.1}, b"12"):
+        with pytest.raises(ValueError, match="is not what the values say"):
+            api._emit("PointAdded",
+                      {"id": "p-record-junk", "content": "c",
+                       "embedding": _junk,
+                       JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32})
     assert [json.loads(ln) for ln in
             journal.read_text(encoding="utf-8").splitlines() if ln.strip()] == records, (
         "every refusal precedes the commit point — the journal is unchanged")

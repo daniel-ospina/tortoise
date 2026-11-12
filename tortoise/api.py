@@ -260,14 +260,24 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
     `embedding_text_hash`) ride this channel UNCHECKED, and that is a deliberate
     LIMIT rather than coverage (#12000 round-10 review, F2 — measured: a record
     carrying `embedding_verbatim: True` is accepted, and the fold then stores
-    the vector RAW instead of `vecf32`). They are OWNERSHIP claims about where
-    the vector came from, not a function of its values: `embedding_verbatim`
-    legitimately rides a RE-EMITTED record (`tortoise/sdk.py` — a re-emit
-    carries the node property), so refusing it here would break that path, and
-    no predicate on the values can derive it. The width is the one member of the
-    family that IS a pure function of the values, which is why it is the one
-    this channel verifies. Anything claiming the whole family is verified here
-    is wrong.
+    the vector RAW instead of `vecf32`).
+
+    Two different reasons, and the difference is measurable (#12000 re-review,
+    F2' — the first draft of this paragraph cited the SDK's re-emit as the
+    reason, which is the wrong producer because that path never reaches this
+    funnel):
+
+    * `embedding_model` / `embedding_revision` / `embedding_text_hash` ARE
+      minted on this channel — `_point`'s ``creating=True`` stamp writes all
+      three into the record — so refusing the family here would red every
+      vector-bearing ``PointAdded``;
+    * `embedding_verbatim` / `embedding_preserved` are never minted here and no
+      predicate on the values can derive them: they are ownership claims about
+      where a vector came from, not a function of its values.
+
+    The width is the one member of the family that IS a pure function of the
+    values, which is why it is the one this channel verifies. Anything claiming
+    the whole family is verified here is wrong.
 
     ⛔ THE PREDICATE IS "would the seam also have said `f32`", NOT a re-stamp.
     An earlier draft copied the record WITHOUT the declared width and re-ran
@@ -321,10 +331,31 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
         #
         # So: a vector the seam can only DROP is a vector no width describes,
         # and a declared `f32` over it is refused.
-        try:
-            truthful = shortest_float32_vector(values) is not None
-        except Exception:  # noqa: BLE001, RUF100
+        #
+        # ⛔ AND THE SAME ITERABLE GUARD THE FIRST ARM CARRIES, because the grid
+        # helper does NOT have it (#12000 round-10 re-review, F1' — measured):
+        # `shortest_float32_vector` reads its argument as
+        # `[float(x) for x in vector]`, so a `str` is a sequence of CHARACTERS,
+        # `bytes` a sequence of INTS and a `dict` a sequence of KEYS —
+        # `"123"` becomes `[1.0, 2.0, 3.0]` and `{"0": 0.1}` becomes `[0.0]`,
+        # both ON the grid, so the arm answered "truthful" about the wrong
+        # object, in the PERMISSIVE direction. `_is_shortest_f32_text` refuses
+        # exactly these three types for exactly this reason; the grid arm must
+        # too. Measured at `0a86cb5a87`, with the junk on the RECORD (where the
+        # post-stamp belt cannot see it, because the stamp only touches the
+        # envelope's own `embedding`):
+        #
+        #     _emit("PointAdded", {"id": "p", "content": "c",
+        #                          "embedding": "123",
+        #                          "embedding_width": "f32"})
+        #       -> journalled, and the FOLD stored point.embedding = '123'
+        if isinstance(values, (str, bytes, dict)):
             truthful = False
+        else:
+            try:
+                truthful = shortest_float32_vector(values) is not None
+            except Exception:  # noqa: BLE001, RUF100
+                truthful = False
     if not truthful:
         raise ValueError(
             f"{_KEY}={declared!r} is not what the values say: this payload's "
