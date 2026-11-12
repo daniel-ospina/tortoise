@@ -1067,10 +1067,17 @@ def _referentiality_hold(surface: str) -> tuple[str, str] | None:
     ``test_the_point_about_entities_door_is_declined_and_still_mints``, so a
     later fix here fails loudly and reads this paragraph first.
 
-    * ``referentiality.judge`` owns the cue and its flag
+    * the ``referentiality`` module owns the cue AND its flag, and they are TWO
+      objects: ``judge`` is the LEAF and ``enabled()`` is the flag check
       (``TORTOISE_REFERENTIALITY``, **OFF** by default per ``#5087`` plan R1 —
-      *unmeasured ⇒ fail open*), so an unarmed run here makes the SAME MINT
-      DECISIONS as the pre-#12094 code. ⛔ Not the same return value: the census
+      *unmeasured ⇒ fail open*). ⛔ ``judge`` does NOT consult the flag — measured:
+      with the variable unset, ``enabled()`` is ``False`` while ``judge("it")``
+      still returns ``('referentiality.pronoun', …)`` — so the check that makes an
+      unarmed run make the SAME MINT DECISIONS as the pre-#12094 code is the
+      ``enabled()`` call at THIS call site, not anything inside ``judge``. Say it
+      that way, because the other reading is the one a future caller cites when
+      skipping the check and arming the cue on an unarmed run. ⛔ Not the same
+      return value either: the census
       keys below (``subjects_minted`` … ``mentions``) are present
       unconditionally, which is why this docstring says *mint decisions* rather
       than borrowing ``route_mentions``' "byte-identical" promise — that
@@ -1089,9 +1096,9 @@ def _referentiality_hold(surface: str) -> tuple[str, str] | None:
     * the identifier-only class (``#4118``, a path) is deliberately NOT asked
       here: wiring it on this path would ship an unmeasured discard to a live
       document ingest and can drop a must-keep surface
-      (``config/ci-surfaces.yml`` is the row ``#11021``'s 12-row arm exists to
-      protect). That is a different decision, on a different path, and it is
-      not this issue's.
+      (``config/ci-surfaces.yml`` is one of the surfaces ``#11021``'s must-keep
+      arm exists to protect). That is a different decision, on a different path,
+      and it is not this issue's.
 
       ⛔ **Nothing DISCARDS this class on THIS path — stated as measured, not
       inferred.** The cue DOES consult ``value_gate``: ``judge`` calls
@@ -1456,7 +1463,8 @@ class LLMExtractor:
         # the phrase's offset inside it. See the census in the return value.
         # ⛔ OCCURRENCE-level: one record per (surface, section), so a surface the
         # model returns in two sections yields two records. The COUNTERS below are
-        # SURFACE-level (``_held_surfaces``) so they are comparable with
+        # SURFACE-level (``_held_only``, the filtered view of ``held_surfaces``)
+        # so they are comparable with
         # ``subjects_minted``, which is name-deduplicated — a census whose buckets
         # count different units invites a caller to add them up.
         held_subjects: list[dict] = []
