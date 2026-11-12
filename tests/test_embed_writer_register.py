@@ -939,9 +939,16 @@ LABEL_EVIDENCE: dict[str, tuple[str, str, str, frozenset[str]]] = {
     # (`#11836`, VGATE round 13). So a guard that reds on the rename is measuring
     # the rename, not the store — and its message ("the store moved") is a wrong
     # diagnosis of a declaration that is still true.
+    #
+    # ⛔ THE NEEDLE IS THE `for` HEADER, not the binding-free substring
+    # (`in _CANONICAL_ENTITY_ID_PROPS:`). Both are true of the body, but only the header
+    # makes `_needle_present` reachable for this row: the helper normalises a header's
+    # SECOND binding, and a needle with no header in it is compared verbatim, so the
+    # binding-position discrimination documented at `_needle_present` (`for _prop, label
+    # in …` is RED) was never consulted for this declaration (review r34 P3 #3).
     "tortoise.sdk::_update_entity": (
         "tortoise/sdk.py", "_update_entity",
-        "in _CANONICAL_ENTITY_ID_PROPS:",
+        "for label, prop in _CANONICAL_ENTITY_ID_PROPS:",
         frozenset({"Point", "Subject", "Object", "Source", "Event"})),
     # `#11641`: the two writers whose label used to be decided at RUNTIME, so row 2 could not
     # compare them to the served set. Each now OWNS the label at its own seam, and the needle is
@@ -1032,9 +1039,24 @@ def test_every_declared_label_re_derives_at_this_head() -> None:
                     _without_comments(text) for text in _constants_named_by(node, constants)
                 ))
         assert bodies, f"{key} cites {rel}::{symbol}, which that file does not define"
-        assert any(needle in body for body in bodies), (
+        # Two predicates, evaluated ONCE over every body: `present` is what the pin decides, and
+        # `renamed` exists only so the failure names the right cause.
+        present = any(_needle_present(needle, body) for body in bodies)
+        renamed = any(_renamed_loop_present(needle, body) for body in bodies)
+        assert present, (
             f"{key} declares stores={declared} but {rel}::{symbol} no longer carries {needle!r} — "
-            "the store moved, so the declaration is stale"
+            + (
+                # ⛔ A RENAMED binding is not a MOVED store. Without this arm the failure said "the
+                # store moved, so the declaration is stale" over a declaration that was still true —
+                # the wrong diagnosis `#11936` was filed about (`review r44 P3 #1`, measured:
+                # `for entity_label, prop in …` reds this assert with nothing moved).
+                "the loop over _CANONICAL_ENTITY_ID_PROPS is still there but a BINDING was renamed, "
+                "so the DECLARATION IS STILL TRUE — re-pin the needle's binding names (this is "
+                "fail-closed on purpose: the helper cannot see which name the store below uses, "
+                "and normalising both would absorb a real binding SWAP)"
+                if renamed
+                else "the store moved, so the declaration is stale"
+            )
         )
     # …and the label CONSTANTS those clauses are built from must still name EXACTLY the same
     # labels — in BOTH directions. ⛔ The one-directional form ("each declared label still
@@ -1526,6 +1548,118 @@ def _without_comments(text: str) -> str:
     """
     return "\n".join(
         line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
+#: A pinned `for` header that walks `_CANONICAL_ENTITY_ID_PROPS`, with the SECOND binding
+#: parameterised and the FIRST pinned verbatim. ⛔ The needle for `sdk::_update_entity` (
+#: `for label, prop in _CANONICAL_ENTITY_ID_PROPS:`) pins the LOOP over the canonical labels, and a
+#: binding name is not part of that claim — the loop's keys are derived through
+#: `_entity_identity_probes()`, so `#11836` (`ccf5c4036c09`) renamed the second binding
+#: `prop` -> `_prop` because the value stopped being read, and the exact-text comparison reddened
+#: `test` on `main` for EVERY PR with no store having moved (measured: shard `g` of run
+#: 43046031520, `1 failed, 2721 passed`). That is a false block — the one direction this pin must
+#: not have. It cannot produce the opposite error: the header still has to be there, over the SAME
+#: constant, inside the SAME symbol, so a loop that moved to another constant (or disappeared) is
+#: still RED — verified by mutation, not asserted here.
+#: ⛔ Only the SECOND name is free because only the SECOND name is unread: `label` is the variable
+#: the store below targets, so it is pinned VERBATIM. Parameterising both (the first version of
+#: this helper) erased binding POSITION — `for _prop, label in …`, a store-attribution defect,
+#: matched the placeholder exactly as the correct header did (review r30 P3 #2, measured:
+#: `_needle_present` returned True for the swap). The role of the first binding is now
+#: discriminated by construction, and `test_the_pinned_for_header_discriminates_binding_position`
+#: pins both directions.
+#: ⚠️ STATED BOUND — only a two-binding `for ... in <constant>:` header is parameterised, and only
+#: in its second position; every other needle is still compared as the exact source text it cites.
+_PINNED_FOR_HEADER = re.compile(
+    r"for\s+(\w+)\s*,\s*_?\w+\s+in\s+_CANONICAL_ENTITY_ID_PROPS:")
+_PINNED_FOR_HEADER_PLACEHOLDER = (
+    r"for \1, <binding> in _CANONICAL_ENTITY_ID_PROPS:")
+
+
+def _needle_present(needle: str, body: str) -> bool:
+    """Whether `needle` is stated in `body`, ignoring only the SECOND `for` binding's NAME.
+
+    Byte-for-byte everywhere else, deliberately: this pin's value is that it reds on a REWORDED or
+    MOVED store clause, and a loose match would buy that back at the cost of a false PASS. Only the
+    second binding's name of a `_CANONICAL_ENTITY_ID_PROPS` header is normalised, in the body and in
+    the needle alike, so the historical needle text (`for label, prop in …`) still matches a header
+    that binds `_prop` — and a future rename of that unread binding needs no edit to the declaration
+    above. Binding POSITION is not normalised: `for _prop, label in …` is RED, because `label` is what
+    the store below targets and a swap would store on the id-prop names (`review r30 P3 #2`).
+    A rename of the FIRST binding is RED too — a deliberate false block, see the note on
+    `_PINNED_FOR_HEADER`; `_renamed_loop_present` is what keeps its DIAGNOSIS right.
+    """
+    return (_PINNED_FOR_HEADER.sub(_PINNED_FOR_HEADER_PLACEHOLDER, needle)
+            in _PINNED_FOR_HEADER.sub(_PINNED_FOR_HEADER_PLACEHOLDER, body))
+
+
+#: Any two-binding header over the SAME constant — the shape `_renamed_loop_present` looks for.
+_ANY_BINDING_FOR_HEADER = re.compile(
+    r"for\s+(\w+)\s*,\s*_?(\w+)\s+in\s+_CANONICAL_ENTITY_ID_PROPS:")
+
+
+def _renamed_loop_present(needle: str, body: str) -> bool:
+    """Whether `body` has the needle's loop over the SAME constant with RENAMED bindings.
+
+    Diagnostics only — it never changes what passes. A first-binding rename cannot be normalised
+    without erasing the SWAP detection the pin exists for, so the pin keeps blocking it and this
+    makes the block REPORT THE RIGHT CAUSE: `review r44 P3 #1` measured that the failure said
+    "the store moved, so the declaration is stale" over a declaration that was still true, which is
+    the wrong-diagnosis defect `#11936` was filed about.
+
+    The SWAP (`for _prop, label in …`) is deliberately NOT reported as a rename: its second binding
+    is the needle's FIRST, so the store is attributed to the id-prop — a real defect, and it must
+    keep the store-moved message.
+    """
+    if not _PINNED_FOR_HEADER.search(needle):
+        return False
+    first = _PINNED_FOR_HEADER.search(needle).group(1)
+    for match in _ANY_BINDING_FOR_HEADER.finditer(body):
+        if match.group(1) != first and match.group(2) != first:
+            return True
+    return False
+
+
+def test_the_pinned_for_header_discriminates_binding_position() -> None:
+    """`#11492`'s loosening must not absorb a BINDING SWAP — review r30 P3 #2.
+
+    `_needle_present` parameterises a `for … in _CANONICAL_ENTITY_ID_PROPS:` header so that a rename
+    of the second, UNREAD binding (`prop` → `_prop`, `#11836`) no longer reds `test` on main. The
+    first version of that loosening parameterised BOTH names, which erased binding POSITION: a
+    `for _prop, label in …` swap — a store-attribution defect, because `label` is what the store
+    below targets — matched exactly as the correct header did (measured FALSE PASS on the pre-fix
+    helper). Only the second position is free now, so this pins both directions: every tuple below
+    is a verdict the helper must give, and the two False rows that differ only in POSITION are the
+    ones the pre-fix version got wrong.
+    """
+    # ⛔ THE NEEDLE IS READ FROM THE DECLARATION, never re-typed here. A local literal let
+    # this test pass over a declaration that had been reduced to the binding-free substring
+    # `in _CANONICAL_ENTITY_ID_PROPS:` - which no `for`-header normalisation can touch - so
+    # `_needle_present` was bypassed for the one row it was written for and the SWAP row
+    # below would have gone GREEN with the whole file green (review r35 P3 #3, measured).
+    # The assert couples the two: reverting the declaration now REDs here.
+    needle = LABEL_EVIDENCE["tortoise.sdk::_update_entity"][2]
+    assert _PINNED_FOR_HEADER.search(needle), (
+        "the sdk::_update_entity needle must BE the `for ... in _CANONICAL_ENTITY_ID_PROPS:` "
+        "header, or `_needle_present` is bypassed and a binding swap passes unmeasured "
+        "(review r34 P3 #3 / r35 P3 #3)")
+    for body, expected in (
+        ("for label, _prop in _CANONICAL_ENTITY_ID_PROPS:", True),   # the rename #11836 made
+        ("for label, prop in _CANONICAL_ENTITY_ID_PROPS:", True),    # the historical spelling
+        ("for _prop, label in _CANONICAL_ENTITY_ID_PROPS:", False),  # the SWAP — not a rename
+        # A FIRST-binding RENAME, and the one FAIL-CLOSED row in this table: the declaration is
+        # still true and the store did not move, but the helper cannot see which name the store uses
+        # below, so it blocks. Kept as a row so the trade is recorded rather than inferred, and so
+        # `_renamed_loop_present` (which makes the failure say "renamed", not "moved") has a body it
+        # is exercised against (`review r44 P3 #1`).
+        ("for entity_label, prop in _CANONICAL_ENTITY_ID_PROPS:", False),  # renamed, not moved
+        ("for key, label in _CANONICAL_ENTITY_ID_PROPS:", False),    # the TARGET re-bound
+        ("for label, _prop in _SOME_OTHER_CONSTANT:", False),        # the store MOVED
+        ("for x in _CANONICAL_ENTITY_ID_PROPS:", False),             # the loop is gone
+    ):
+        assert _needle_present(needle, body) is expected, (
+            f"_needle_present({needle!r}, {body!r}) should be {expected} — the pin either misses a "
+            f"moved store or absorbs an edit a store-move can hide behind")
 
 
 def _constants_named_by(node: ast.AST, constants: dict[str, str]) -> list[str]:

@@ -741,24 +741,40 @@ def test_the_hosted_api_cite_notes_state_one_measurement_and_the_pivot():
         "re-derive the pivot and both notes' figures with "
         "`uv run python tools/hosted_api_cite_census.py --pivot <line>`")
 
-    # ... and the TOOL's own fallback pivot agrees with it. No shipped path reads
-    # that constant (every one derives the site from the tree, and this test passes
-    # its own `_PIVOT`), which is exactly why its drift is invisible to every other
-    # check. The two wrongnesses start at different heads: `--pivot 23466` reports
-    # `site: False` from #11803 onward (the CALL moved to 23477 while the note still
-    # cited 23466), but its COUNT SPLIT only goes wrong once a re-derivation moves
-    # the notes and leaves the constant behind — at #11950's first commit
-    # `5d35cd58f6` the same invocation read `at the pivot 0` / `above 13` over a
-    # CORRECT tree (12 above / 1 at the pivot before it). Pinning it is the only
-    # thing that can red.
+    # ...and the tool's own FALLBACK must agree with it, on its DEFAULT argument.
+    # Why this exists (#11891 review r43, P3; independently found on main as
+    # #11950's review finding): `tools/hosted_api_cite_census.py`'s `DEFAULT_PIVOT`
+    # is the ONE pivot spelling NO verb can see — `--check` and `--refresh` both
+    # derive the pivot from the tree and pass it explicitly, and the three
+    # scorecard spellings are pinned by `_PIVOT_SPELLINGS` below — so a sweep that
+    # updates the notes and stops leaves it behind and every verb stays green.
+    # That already happened TWICE (`23131 -> 23466`, then `23466 -> 23477`). The
+    # two wrongnesses start at DIFFERENT heads: `--pivot 23466` reports
+    # `site: False` from #11803 onward (the CALL moved while the note still cited
+    # 23466), but its COUNT SPLIT only goes wrong once a re-derivation moves the
+    # notes and leaves the constant behind — at #11950's first commit `5d35cd58f6`
+    # the same invocation read `at the pivot 0` / `above 13` over a CORRECT tree
+    # (12 above / 1 at the pivot before it). Pinning it is the only thing that can
+    # red, and the zero-argument call pins the DEFAULT.
+    # TWO assertions, deliberately: they fail differently and each names a different
+    # repair. The equality compares the FALLBACK against the site DERIVED from the tree
+    # (so a moved site reds even when the constant was bumped to the wrong number); the
+    # zero-argument call pins the default's own EXECUTION — `query(LIFETIME_MEMORY_QUERY)`
+    # on that exact line, with no ±N window, so an import line cannot satisfy it.
     assert lifetime_query_sites()[0] == DEFAULT_PIVOT, (
-        f"the census tool's fallback pivot {DEFAULT_PIVOT} is not the site "
+        f"the census tool's fallback pivot {DEFAULT_PIVOT} is not the derived site "
         f"{lifetime_query_sites()} — nothing shipped reads it, but `census()` and "
         "`pivot_is_the_lifetime_site()` default to it; re-derive it in the same "
-        "commit that moves the site. ⚠ The module docstring's `--pivot <line>` "
-        "EXAMPLE is hand-written and NOT covered by this pin (measured: mutating "
-        "it to `--pivot 99999` leaves `--check` at exit 0) — move it too, or the "
-        "documented command reports `site: False` over a correct tree")
+        "commit that moves the site")
+    assert pivot_is_the_lifetime_site(), (
+        "tools/hosted_api_cite_census.DEFAULT_PIVOT no longer agrees with the "
+        "LIFETIME_MEMORY_QUERY site at this head, so every caller that omits the "
+        "pivot splits the census at a line the notes do not name — `--check` and "
+        "`--refresh` CANNOT catch this, so bump it by hand in the SAME edit as the "
+        "notes (#11891). ⚠ The module docstring's `--pivot` EXAMPLE is hand-written "
+        "and NOT covered by this pin (measured: mutating it to `--pivot 99999` "
+        "leaves `--check` at exit 0) — it is a placeholder for that reason; do not "
+        "type a literal back into it")
 
     # the census command is the notes' stated remedy, so it must work and must not
     # collapse to nothing (that, and only that, about the population is pinned here)

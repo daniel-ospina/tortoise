@@ -3,8 +3,10 @@ Issue #6902 — Audit: confirm no production code depends on BFS propagate_shock
 
 This test file encodes the audit findings as assertions. It does NOT run against
 a live FalkorDB instance — it enumerates candidate references with `grep` and
-then decides what each one IS — code, a definition, or prose — from `tokenize`
-(the code/prose split) and `ast` (which statements are prose).
+then decides what each one IS — code, a definition, or prose — TWO ways that are
+independent on purpose: `tokenize` (the code/prose split) and `ast` (which
+statements are prose, and WHICH references exist at all). Both must clear a hit
+before it counts as prose, so a file the other cannot read is still a caller.
 Run with: python3 -m pytest tests/test_bfs_audit.py -v
 """
 
@@ -175,6 +177,130 @@ def _classify_tortoise_hit(path: Path, lineno: int) -> str:
     if call_lines is None or lineno in call_lines:
         return "production_code"
     return "prose only"
+
+
+def _propagate_shock_reference_sites() -> dict[str, set[int]]:
+    """`{absolute path: {line numbers}}` where `tortoise/` code REFERS to `propagate_shock`.
+
+    ⛔ The grep below cannot tell a CALL from PROSE that names the function, and this
+    audit's claim is about callers. `#11702` (`e7394a9ad7`) added a docstring note in
+    `tortoise/projection/propagation.py:70,73` ("`propagate_shock` PERSISTS the blend …",
+    "`propagate_shock` is never invoked") and the classifier's only comment exemption
+    keyed on the word "replaces", so both lines were bucketed as PRODUCTION CALLERS —
+    `test (c)` of run 43070177052 was RED at `d0347aaa` over a tree that calls nothing
+    (reproduced on `origin/main` `372f926cd9`, which touches neither file).
+
+    So the AST decides what is a reference and the grep keeps documenting the matches.
+    This walks REFERENCES, not just `Call` nodes: a `Call`-only test names the callee
+    syntactically, so it cannot see an indirection, and an indirection is exactly the
+    shape a lane "restoring" this path would use (`#11702`'s note at
+    `tortoise/projection/propagation.py` says the fabrication risk is at the WRITE,
+    where no read-side guard can see it). Every shape below is one reference:
+
+      * `propagate_shock(…)`, `self.propagate_shock(…)`, `obj.propagate_shock`
+        — a `Name`/`Attribute` whose id/attr is `propagate_shock`;
+      * `from … import propagate_shock as _shock; _shock(…)` — the module's import
+        aliases are resolved FIRST, so the alias' use is a reference too;
+      * `HANDLERS = {"shock": propagate_shock}` — a bare `Name` in a dict/argument,
+        which a `Call`-only test classified as "reference only".
+
+    Excluded by construction: the deprecated ``def propagate_shock`` (a `FunctionDef`
+    name, not a reference), an `import` binding (an `ast.alias`, not a `Name`), and all
+    prose — a docstring is a `Constant` node and a comment is not parsed at all.
+
+    ⚠️ STATED BOUND — indirection through a STRING (`getattr(x, "propagate_shock")`,
+    a Cypher building the name) is not a `Name`/`Attribute` and is not seen here. That
+    is a bound, not a claim of completeness: the shapes above are the ones a restoring
+    lane actually writes, and `test_no_propagate_shock_callers` asserts on THIS set
+    rather than on grep lines, so a reference on a line that never spells the name
+    (the aliased call) can no longer pass.
+
+    ⚠️ SECOND STATED BOUND — only `.py` files under `tortoise/` are PARSED, because a
+    non-Python file has no AST, so a name in ANY non-`.py` file under `tortoise/` is judged
+    by its grep line alone and treated as a PRODUCTION reference rather than demoted to
+    prose (review r36 P3 #2 / r37 P3 #2). That is wider than the shipped hook/plugin
+    sources it was written for — `tortoise/` also carries `.md`, `.json`, `.yaml` — so a
+    DOC edit that mentions the function REDs here. It fails closed, which is the right
+    direction for a deprecated name; narrowing it to an extension allow-list would make
+    the demotion set a thing nobody maintains.
+    """
+    sites: dict[str, set[int]] = {}
+    for path in sorted((ROOT / "tortoise").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        aliases: set[str] = {"propagate_shock"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                aliases.update(a.asname or a.name for a in node.names
+                               if a.name == "propagate_shock")
+        for node in ast.walk(tree):
+            is_shock_attr = isinstance(node, ast.Attribute) and node.attr == "propagate_shock"
+            is_alias_name = isinstance(node, ast.Name) and node.id in aliases
+            if is_shock_attr or is_alias_name:
+                sites.setdefault(str(path), set()).add(node.lineno)
+    return sites
+
+
+def _propagate_shock_prose_sites() -> dict[str, set[int]]:
+    """`{path: {lineno}}` of grep lines the AST POSITIVELY confirms are prose.
+
+    This is the only evidence that may demote a `/tortoise/` grep line to
+    "comment/reference only", and it is deliberately computed WITHOUT consulting
+    `_propagate_shock_reference_sites`: a demotion has to be EARNED by the parser, not
+    assumed because the reference scan came back quiet. Two positions count, and only
+    two:
+
+    * a `#` comment; and
+    * a line a STRING-LITERAL STATEMENT fully covers — a docstring, i.e. a bare string
+      expression (`ast.Expr` wrapping a `Constant`), never a string that is an argument
+      or a value.
+
+    ⚠️ Why the second is docstrings ONLY (review r35 P2 / r36 P2). Admitting every string
+    constant demoted the STRING-indirection shapes this file's own docstring lists as
+    invisible to the AST — `getattr(p, "propagate_shock")(g)`, a `{"shock": …}`
+    dispatch table, a Cypher string naming the function. Those became invisible to BOTH
+    arms (the reference scan by its stated bound, `production_code` by the demotion) and
+    printed success over a real caller that `origin/main` REDS on. Measured on a temp
+    root, base vs here: `getattr`, dict-dispatch and Cypher all RED at base and GREEN
+    with the wide rule; docstring and `#` comment are the two the fix intends.
+
+    ⚠️ Why the whole line must be covered. A literal that merely TOUCHES a line does not
+    make that line prose: `D = "propagate_shock"; propagate_shock(1)` is one physical
+    line carrying a real call, so demoting by line number alone would hide it
+    (review r36 P3). The column offsets below decide coverage exactly.
+
+    Fail-CLOSED in both directions: an empty or broken scan demotes nothing, so every
+    line stays in `production_code` and the assert reds. A non-`.py` production file
+    (`tortoise/cursor-hooks/*.sh`, `openclaw-plugin/index.mjs`) has no AST, so it can
+    never be in this map and is never demoted.
+    """
+    prose: dict[str, set[int]] = {}
+    for path in sorted((ROOT / "tortoise").rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        lines = text.splitlines()
+        found: set[int] = set()
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)):
+                continue
+            literal = node.value
+            if "propagate_shock" not in literal.value:
+                continue
+            first, last = literal.lineno, literal.end_lineno or literal.lineno
+            for lineno in range(first, last + 1):
+                line = lines[lineno - 1]
+                covers_start = (lineno > first
+                                or not line[:literal.col_offset].strip())
+                covers_end = (lineno < last
+                              or not line[literal.end_col_offset:].strip())
+                if covers_start and covers_end:
+                    found.add(lineno)
+        for lineno, line in enumerate(lines, 1):
+            if line.lstrip().startswith("#") and "propagate_shock" in line:
+                found.add(lineno)
+        if found:
+            prose[str(path)] = found
+    return prose
 
 
 def _grep(pattern: str, *dirs: str) -> list[str]:
@@ -400,6 +526,12 @@ def test_no_propagate_shock_callers():
         l for l in all_refs  # noqa: E741
         if "__pycache__" not in l and "test_bfs_audit.py" not in l and "test_e2e_extraction_ep.py" not in l
     ]
+    # `{path: {lineno}}` of real references — the ONLY evidence of a production caller.
+    # See `_propagate_shock_reference_sites` for the false RED this replaced and for
+    # why it walks references rather than `Call` nodes only (an aliased call spells
+    # `_shock`, so no grep line would ever reach the bucket below).
+    refs = _propagate_shock_reference_sites()
+    prose = _propagate_shock_prose_sites()
 
     callers: dict[str, list[str]] = {
         "definition (deprecated)": [],
@@ -425,11 +557,33 @@ def test_no_propagate_shock_callers():
         elif "/graph-scripts/" in path_part:
             callers["test_files"].append(line)  # test_6707_shock.py
         elif "/tortoise/" in path_part:
-            # Is this line CODE, or only prose about the function?
-            bucket = _classify_tortoise_hit(ROOT / path_part, int(line.split(":", 2)[1]))
-            callers[bucket].append(line)
+            # TWO independent judgements, and BOTH must clear the hit before it
+            # counts as prose. Neither is the other's fallback: `_classify_tortoise_hit`
+            # reads the TOKENS (so a name mentioned inside a non-prose string — a
+            # `getattr(x, "propagate_shock")`, a Cypher that builds the name — is still
+            # a caller), while `_propagate_shock_prose_sites` reads the AST (so a docstring
+            # is prose by SHAPE, never by its wording, and an aliased call is a reference
+            # even though no grep line spells the name). A hit is demoted only when the
+            # parser positively calls that line prose; anything unreadable stays code.
+            lineno = int(line.split(":", 2)[1])
+            token_bucket = _classify_tortoise_hit(ROOT / path_part, lineno)
+            ast_says_prose = lineno in prose.get(path_part, set())
+            if token_bucket == "prose only" and ast_says_prose:
+                callers["prose only"].append(line)
+            else:
+                callers["production_code"].append(line)
 
-    # The only "production" reference is a comment: no actual call
+    # ⛔ ASSERTED OVER THE AST SET, not over the grep lines: an indirection spells a
+    # different word (`from … import propagate_shock as _shock; _shock(g, x)`), so the
+    # line carrying the call is never a grep match and could never reach the bucket
+    # above. This is the assertion that makes the alias visible.
+    unseen = {p: sorted(lines) for p, lines in refs.items() if lines}
+    assert not unseen, (
+        "PRODUCTION CODE REFERENCES propagate_shock (AST reference sites):\n"
+        + "\n".join(f"{p}:{','.join(map(str, ls))}" for p, ls in sorted(unseen.items()))
+    )
+
+    # The only remaining "production" reference is prose: no call, no wiring.
     assert len(callers["production_code"]) == 0, (
         f"PRODUCTION CODE REFERENCES propagate_shock:\n" + "\n".join(callers["production_code"])  # noqa: F541
     )

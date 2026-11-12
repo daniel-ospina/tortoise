@@ -10,9 +10,16 @@ census has one command:
 
     uv run python tools/hosted_api_cite_census.py            # human-readable
     uv run python tools/hosted_api_cite_census.py --json     # for a script
-    uv run python tools/hosted_api_cite_census.py --pivot 23477
+    uv run python tools/hosted_api_cite_census.py --pivot <line>   # override the DERIVED pivot
     uv run python tools/hosted_api_cite_census.py --check    # exit 1 when a note is stale
     uv run python tools/hosted_api_cite_census.py --refresh  # re-state every figure in place
+
+The `--pivot` value is DERIVED from the tree on every shipped path
+(`lifetime_query_sites()[0]`), which is why that example is a placeholder and not a
+number: a literal typed into prose is a figure nobody re-takes, and it goes stale the
+moment an edit above the site moves it. `DEFAULT_PIVOT` exists only as the fallback
+for a caller that passes nothing, and it is the ONE spelling `--check`/`--refresh`
+cannot see (#11891) — bump it by hand in the same edit as the notes.
 
 ⛔ `--refresh`, never a hand-paste: copying four figures out of a printout into two
 prose notes by hand is the operation that produced the wrong count twice. One
@@ -90,6 +97,15 @@ CITE_RE = r"hosted_api\.py:[0-9]+"
 #:     `site: False` and nothing reddened.
 #: Because no shipped path reads it, nothing could see that, so it is now PINNED:
 #: `tests/test_demo_session_read_exclusion_8290.py` asserts it equals the site.
+#: ⛔ THAT THIRD MOVE IS THE PATTERN REPEATING, so read it before you re-derive:
+#: `--check` and `--refresh` both derive the pivot from the tree and pass it
+#: EXPLICITLY, so neither can see this constant — a re-derivation sweep that
+#: updates the two notes and stops leaves this fallback behind, and every caller
+#: that omits the pivot then splits the census at a line the notes no longer
+#: name (`above_pivot` 13 / `at_pivot` 0 instead of 12 / 1). Bump it in the SAME
+#: edit as the notes, by hand, and confirm with
+#: `pivot_is_the_lifetime_site()` on its DEFAULT argument — `--check` staying
+#: green does not mean this line moved.
 DEFAULT_PIVOT = 23477
 
 _SCORECARD = "tortoise/activation_scorecard.py"
