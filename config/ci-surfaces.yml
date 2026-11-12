@@ -7545,9 +7545,22 @@ surfaces:
   # `tortoise/` fallback to this surface alone (measured:
   # `select(['tortoise/extractor.py'])` → `surfaces ['core']`). ⛔ NOT `tier1`:
   # unlike its #11021 sibling it reads NO committed `docs/` artifact — every
-  # case builds a throwaway EMBEDDED `FalkorProjection`/`EventLog` under
-  # `tmp_path` and drives a scripted stage, so no DB server, no network, no
-  # model call. Pinned here rather than left to the `pytest` walk because an
+  # case drives a scripted stage, so no network, no `gh`, and no model call.
+  # ⛔ WHERE ITS GRAPH ACTUALLY LIVES, stated because this rationale claimed
+  # "no DB server" and that is false in `core` (#12102 review P3, re-measured
+  # at the fix head): the module constructs `FalkorProjection(_tmp("t.db"))`
+  # with an EXPLICIT absolute path, and its stem is in NEITHER `carve_out:`
+  # below NOR `TEST_NO_REDIRECT_STEMS` (`tests/_embedded.py`) — so the
+  # URI-aware test redirect (`tortoise/projection/__init__.py`'s class-level
+  # #1647 D-1=A arm: explicit path + `TORTOISE_TEST_MODE=1` from
+  # `tests/conftest.py` + a supported `TORTOISE_DB_URI` + a caller stem not
+  # exempt) FIRES, and `core` being the docker fast leg it means one DERIVED
+  # `test_t_<hash>` graph per case on the server. Embedded/no-server describes
+  # the URI-less carve-out arm ONLY. Both lanes are correct and the file needs
+  # no change — ⛔ do NOT "match" this row by adding the stem to
+  # `carve_out:`/`TEST_NO_REDIRECT_STEMS`: that would flip a docker-leg file to
+  # embedded in `core` and is the #1647 P4 regression, not a fix. Pinned
+  # here rather than left to the `pytest` walk because an
   # unregistered file is a case NO shard is told to run (the #3400/#4348
   # silent-drop class).
   - test_12094_subject_referentiality.py

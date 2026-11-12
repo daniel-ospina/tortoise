@@ -1042,6 +1042,24 @@ def _s7_document_entities(text, source_id, api, args, extractor=None):
         print(f"warning: S7 entity extraction failed for {len(failed)} "
               f"section(s) ({', '.join(failed)}) — their Subjects are "
               f"omitted; the minted Subjects are still wired")
+    # #12094 (I2: never a silent drop) — the OTHER disposition this stage
+    # reports, and the one that had no way out. `extract_entities` builds a
+    # `held_subjects` census, but nothing downstream reads it: this function
+    # returns only `subject_names`, which is precisely the list a held surface
+    # is kept OUT of (#4938's aboutSubject wiring must not point at a Subject
+    # that does not exist). So on an armed (`TORTOISE_REFERENTIALITY=1`) run
+    # the hold was discarded at this boundary with zero trace — and #5087 plan
+    # R1 makes the MEASUREMENT the gate to ever arming the cue, so a run whose
+    # holds are unobservable cannot produce the number that decision needs.
+    # Mirrors the `failed_sections` warning above: a count, the rule breakdown
+    # that says WHY each surface was held, and where the full record lives.
+    held = ent_stats.get("subjects_held") or 0
+    if held:
+        by_rule = ent_stats.get("subjects_held_by_rule") or {}
+        print(f"warning: S7 held {held} subject surface(s) as non-referents "
+              f"({', '.join(f'{rule} ×{n}' for rule, n in by_rule.items())}) "
+              f"— not minted, and not wired to this document; their rule, "
+              f"section and span are on `held_subjects` in the census")
     return ent_stats["subject_names"]
 
 

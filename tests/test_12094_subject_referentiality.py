@@ -384,3 +384,90 @@ def test_the_census_counts_surfaces_while_the_records_count_occurrences(monkeypa
     assert {h["section"] for h in result["held_subjects"]} == {
         "Product Strategy", "Open Questions"}
     assert sum(result["subjects_held_by_rule"].values()) == result["subjects_held"]
+
+
+# ── 9. the hold reaches the ONLY production caller (#12102 review P2) ───────
+
+class _DispositionExtractor:
+    """Returns a fixed census — the caller boundary is what is under test.
+
+    ``_s7_document_entities`` takes ``extractor=`` for injection, so the
+    production caller can be driven with no LLM and no graph: the question is
+    only whether the disposition ``extract_entities`` computed leaves this
+    function, not whether it was computed correctly (section 1 pins that).
+    """
+
+    def __init__(self, **census):
+        self.census = census
+
+    def extract_entities(self, text, source_id, api, **kwargs):
+        return self.census
+
+
+def _ingest_args(**overrides):
+    """The three attributes `_s7_document_entities` reads off the CLI args."""
+    base = {"semantic_extract": True, "capture_metadata": False, "domain": None}
+    base.update(overrides)
+    return type("Args", (), base)()
+
+
+def test_the_held_subject_census_reaches_the_only_production_caller(capsys):
+    """#12102 review P2: a hold that never leaves `extract_entities` is a DROP.
+
+    The PR's central safety claim is *"recorded with its rule, its section and
+    the claim span it addressed (I2: never a silent drop)"*. Section 1 above
+    pins that ``extract_entities`` RETURNS the record; this one pins that the
+    only production caller (`tortoise/ingest.py::_s7_document_entities`, whose
+    own return value is `subject_names` — exactly the list a held surface is
+    kept out of) does not throw it away.
+
+    Pre-fix this printed nothing about holds, so the assertion below fails on
+    the code before the fix: on a live armed ``ingest.py`` run a held Subject
+    was discarded with zero observable trace. That matters concretely, because
+    ``#5087`` plan R1 makes the *measurement* the gate to ever arming the cue,
+    and this is the path that would produce it.
+    """
+    from tortoise import ingest as ingest_mod
+
+    held = [{"surface": "it", "rule_id": referentiality.RULE_PRONOUN,
+             "reason": "pronoun with no antecedent", "section": "Product Strategy",
+             "span": [0, 2], "phrase_offset": 4}]
+    fake = _DispositionExtractor(
+        subjects=1, objects=0, subject_names=["FalkorDB"], failed_sections=[],
+        subjects_minted=1, subjects_held=1, held_subjects=held,
+        subjects_held_by_rule={referentiality.RULE_PRONOUN: 1}, mentions=None)
+
+    wired = ingest_mod._s7_document_entities(
+        DOC, "strategy.md", None, _ingest_args(), extractor=fake)
+
+    out = capsys.readouterr().out
+    assert wired == ["FalkorDB"], (
+        "the caller still returns only the MINTED names — a held surface must "
+        f"never reach `_create_about_edges` (got {wired})")
+    assert "held 1 subject surface" in out, (
+        "a held Subject left the extractor with no trace at the caller: the "
+        f"disposition never reaches a run's output (#12094 I2). stdout was {out!r}")
+    assert referentiality.RULE_PRONOUN in out, (
+        f"the warning must carry the rule breakdown, so the hold is diagnosable; got {out!r}")
+
+
+def test_an_unarmed_run_says_nothing_about_holds(capsys):
+    """The new line must not appear on a run that held nothing.
+
+    ``#5087`` plan R1: an unarmed run is byte-identical. A warning printed
+    unconditionally would be a new line on every default ingest, so the
+    presence of the message is pinned in BOTH directions.
+    """
+    from tortoise import ingest as ingest_mod
+
+    fake = _DispositionExtractor(
+        subjects=1, objects=0, subject_names=["FalkorDB"], failed_sections=[],
+        subjects_minted=1, subjects_held=0, held_subjects=[],
+        subjects_held_by_rule={}, mentions=None)
+
+    ingest_mod._s7_document_entities(
+        DOC, "strategy.md", None, _ingest_args(), extractor=fake)
+
+    out = capsys.readouterr().out
+    assert "held" not in out.lower(), (
+        f"nothing was held, so nothing may be reported as held; stdout was {out!r}")
