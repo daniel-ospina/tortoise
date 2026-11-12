@@ -1224,7 +1224,7 @@ def test_the_s8_citation_carve_outs_stay_skippable(tmp_path, monkeypatch):
     `path-LINE`, `path_LINE`, `path/LINE`, `path,LINE`, `path:L LINE`, `path N --flag`,
     and an HTTP-status line — because every one of them refused correct prose from this
     repository's own `docs/` when it was measured (801 files — re-derive with
-    `git ls-tree -r --name-only HEAD docs/ | grep -c '\.md$'`; a hand-typed population rots
+    `git ls-tree -r --name-only HEAD docs/ | grep -c '\\.md$'`; a hand-typed population rots
     the same way the span counts did). Nothing pinned that list,
     so it could drift from the code with every test green; that is how the whitespace
     RANGE form (`path 16-18`) and `path N --flag` went unnoticed. This test is the
@@ -2736,7 +2736,7 @@ def test_a_letter_added_to_either_tally_list_is_compared_in_every_spelling(
     `, and a, f too` (or `, and **a** too`) named two STILL-TRUE rows as overtaken and
     left `--check` at rc 0. Only the parenthesised spelling was ever compared.
 
-    ⛔ The complement side read `\*\*\(([a-z])\)\*\*` alone, though the candidate gate
+    ⛔ The complement side read `\\*\\*\\(([a-z])\\)\\*\\*` alone, though the candidate gate
     accepts four spellings, so `… **(j)**, also c still read as written` asserted that
     a SUPERSEDED-BY-FIX row still read as written, at rc 0.
 
