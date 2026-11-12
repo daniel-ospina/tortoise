@@ -1758,8 +1758,8 @@ def _empty_evidence_cells(text: str) -> str:
 MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
     (
         "an invented verdict",
-        lambda t: t.replace("| **STILL-TRUE** | `tortoise/sdk.py:17045`",
-                            "| **PROBABLY-TRUE** | `tortoise/sdk.py:17045`", 1)
+        lambda t: t.replace("| **STILL-TRUE** | `tortoise/sdk.py:17109`",
+                            "| **PROBABLY-TRUE** | `tortoise/sdk.py:17109`", 1)
                   .replace("**STILL-TRUE**", "**PROBABLY-TRUE**", 1),
         "closed vocabulary",
     ),
@@ -1785,8 +1785,8 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         # at `[]` with the invented verdict `FIXED-IT` in the page.
         lambda t: t.replace(
             "\n## 4. The artefact index",
-            "\n| **Z** | A stray row | `tortoise/sdk.py:17045` | **FIXED-IT** | "
-            "`tortoise/sdk.py:17045` |\n\n## 4. The artefact index",
+            "\n| **Z** | A stray row | `tortoise/sdk.py:17109` | **FIXED-IT** | "
+            "`tortoise/sdk.py:17109` |\n\n## 4. The artefact index",
             1,
         ),
         "outside its single table",
@@ -1824,8 +1824,9 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         # `_persist_extra_props`'s call site by 16 lines, so row (c)'s shorthand
         # moved to `:3144` and this fixture stopped matching — the arm reported
         # "did not change the document" rather than going quiet, which is how it was
-        # caught. Retarget, never delete.
-        lambda t: t.replace("`:3144`", "`:999999`", 1),
+        # caught. `e4703a286a` shifted it again (+18, to `:3162`) and the same
+        # report caught it a second time. Retarget, never delete.
+        lambda t: t.replace("`:3162`", "`:999999`", 1),
         "out of range",
     ),
     (
