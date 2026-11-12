@@ -1018,9 +1018,16 @@ def _run_commands(step: dict) -> str:
     that BEGINS A WORD — column 0, or after unquoted, unescaped whitespace or one
     of the list operators `; & | (` — plus, deliberately, NOT `<`/`>`: bash DOES
     begin a comment word after a redirection operator (`echo hi >#f` is a syntax
-    error because `#f` was eaten as a comment), but omitting them here is a
-    fail-CLOSED narrowing — an ambiguous `#` keeps the tail live, so the guard
-    still sees the command instead of erasing it. It also knows that a
+    error because `#f` was eaten as a comment), but a FLAT class cannot tell that
+    context from the ones where the `#` is DATA — inside `(( ))` / `$(( ))` a `<`/`>`
+    is a COMPARISON and inside `${…}` it is literal, so
+    `a=1; (( a >#0 )); cp -a "$b/17/bin/." "$b/16/bin/"` and
+    `echo ${x:->#y}; cp -a …` keep the tail live and bash runs the replacement
+    (measured: `main` and the pushed head both refuse; a class carrying `>` returned
+    GREEN). Omitting them is therefore a fail-CLOSED narrowing — an ambiguous `#`
+    keeps the tail live, so the guard still sees the command instead of erasing it —
+    and `test_an_arithmetic_or_parameter_redirect_is_not_a_comment_boundary` pins
+    that direction: re-adding `<`/`>` to the class reds it. It also knows that a
     substitution/assignment `)` is a word part while a GROUP-closing one is an
     operator, and that a backslash escapes its partner inside double quotes
     (#12271 / #12279 review, each measured).
@@ -1417,6 +1424,61 @@ _TARGET_OPTION_VERBS = frozenset({"cp", "mv", "ln", "install"})
 #: stopped at the first terminator, went RED→GREEN on the escaped spelling.
 _EXEC_PRIMARY_WORDS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 
+#: Characters bash treats as ENDING a word, so a word they are GLUED to is still
+#: that word (#12279 review P1, measured FAIL-OPEN). A `find` terminator written
+#: where a `find` is almost always written — inside a command substitution — is
+#: tokenised with the closing `)` attached:
+#:
+#:     X=$(find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" ';')     -- GREEN
+#:     X=$(find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" \;)      -- GREEN
+#:     out=`find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" ';'`    -- GREEN
+#:
+#: Bash executes every one of those replacements (measured: the destination's
+#: `NEW` body lands in `$b/16/bin/`), because `)` / a closing backtick is an
+#: OPERATOR that ends the `';'` word. Compared verbatim the token is `';')`, which
+#: is not in the terminator set — so it became the LAST OPERAND and the whole
+#: replacement went GREEN. This is the same class as the unquoted-`';'` hole this
+#: change closes, one carriage over: the terminator was compared as TEXT rather
+#: than as the WORD it is.
+#: ⛔ `}` IS NOT IN THE SET (#12279 review round 2, measured): the brace spelling bash
+#: accepts is `{ find … ';';}` — a quoted terminator, then the `;` LIST separator,
+#: then `}` — and `_segment_bounds` already cuts the segment at that unquoted `;`,
+#: so nothing needs a `}` rstrip. The only token a `}` rstrip would change is
+#: `';'}` / `';'};`, which bash REJECTS (`bash -n` → `syntax error: unexpected end
+#: of file`), so the character covered no valid spelling while its comment claimed
+#: it did — the same "a comment that attributes coverage to the wrong mechanism"
+#: class this change exists to remove.
+_TERMINATOR_TRAILING_OPERATORS = ")]`"
+
+
+def _bare_terminator(text: str) -> str:
+    """The `find`/`xargs` terminator WORD in `text`, or `text` when it is not one.
+
+    ONE RULE, NOT TWO (the principle this change applies to the comment strippers):
+    a terminator glued to a closing operator is the same terminator, and both
+    readers — the operand scan and `_is_command_position`'s walk-back — ask this
+    function rather than re-deriving it.
+
+    ⛔ ONE MATCHED QUOTE PAIR, NOT `.strip()` (#12279 review round 2, P3 — measured
+    FAIL-OPEN at the first cut AND at the pushed head). `str.strip("\\"'")` removes
+    ANY RUN of leading/trailing quote characters, so a QUOTED OPERAND whose content
+    is itself a quoted `;` collapses to a terminator:
+
+        find "$b/17/bin" -type f -exec cp {} '";"' "$b/16/bin/" ';'
+
+    `'\";\"'` → `;`, so the scan ended at the third operand, `awaiting_exec` went
+    True, the real DESTINATION was never read, and the complete replacement was
+    GREEN while bash copies it (measured: the destination's `NEW` body lands). The
+    token is the literal argument `";"` to find, i.e. NOT a terminator. Only an
+    enclosing pair is a quoting, so only an enclosing pair is removed.
+    """
+
+    word = text.rstrip(_TERMINATOR_TRAILING_OPERATORS)
+    if len(word) >= 2 and word[0] == word[-1] and word[0] in "\"'":
+        word = word[1:-1]
+    return word
+
+
 #: The options that take NO separate value. ⛔ THE LIST IS INVERTED ON PURPOSE
 #: (#12173 review round 32, measured FAIL-OPEN TWICE). Three consecutive repairs
 #: each traded one hole for another because the scan guessed which options TAKE a
@@ -1714,7 +1776,7 @@ def _is_last_path_token(line: str, start: int, end: int, verb: re.Match[str]) ->
         # are valid `find` terminators, but compared verbatim they were not in the
         # set — so the terminator became the LAST OPERAND and the destination was
         # no longer "last", sparing the whole replacement (GREEN).
-        if primary and bare in {"+", "\\;", ";"}:
+        if primary and _bare_terminator(text) in {"+", "\\;", ";"}:
             primary_span[primary] = (primary_span[primary][0], token_end + seg_start)
             awaiting_exec = True
             expect_value = False
@@ -1804,7 +1866,7 @@ def _is_command_position(line: str, start: int) -> bool:
         # false RED; and skipping the client-dir mention on
         # `cp -a src ';' "$b/16/bin/"` made it a false GREEN. Gated on the segment's
         # own head word, which is the only place the token really terminates.
-        if token.strip("\"'") in {";", "\\;"} and _in_find_segment(line, start):
+        if _bare_terminator(token) in {";", "\\;"} and _in_find_segment(line, start):
             return True
         # ⛔ THE VERB WORD, NOT THE RAW TOKEN (#12069 review round 27, measured
         # FAIL-OPEN). `BINARY_MUTATION_RE` starts with `\b`, so it can never match
@@ -2871,6 +2933,23 @@ def _compared_variables(lines: list[str]) -> list[tuple[str, str]]:
 #: ⚠️ `)` is DELIBERATELY ABSENT: it is an operator only when it closes a GROUP, so
 #: it cannot live in a flat class — `_strip_trailing_comment` tracks it on a stack
 #: (#12271 PLAN-VERIFY P1: `echo $(date)#note` is one word, not a comment).
+#: ⛔ `<` AND `>` ARE DELIBERATELY ABSENT, and this is a MEASURED decision, not an
+#: oversight (#12279 review round 2, P1 — the first cut of this very comment put them
+#: in and ERASED a live line). At COMMAND level bash treats `>`/`<` as operators, so
+#: `bash -c 'echo A >#foo'` is a syntax error *because* `#foo` is a comment — but a
+#: flat class cannot tell that from the contexts where a `#` after `>` is DATA:
+#:
+#:     a=1; (( a >#0 )); cp -a "$b/17/bin/." "$b/16/bin/"   # `(( ))`: comparison
+#:     echo ${x:->#y}; cp -a "$b/17/bin/." "$b/16/bin/"     # `${…}`: literal
+#:
+#: Both were measured: bash REPLACES the client dir, and a class containing `>`
+#: stripped at the `#` and returned GREEN — a RED→GREEN regression (main and the
+#: pushed head both refuse). That is the same reason `)` cannot live in a flat
+#: class, so the omission stays and its cost is stated: a `>#`/`2>#` TOMBSTONE is not
+#: stripped, so it survives into the scan and can only cause a false RED (category
+#: B), never a bypass.
+#: `test_an_arithmetic_or_parameter_redirect_is_not_a_comment_boundary` pins the
+#: fail-OPEN direction of that trade: re-adding `<`/`>` to this class reds it.
 COMMENT_START_CHARS = " \t;&|("
 
 
@@ -5807,6 +5886,50 @@ BINARY_MUTATION_POLARITY = [
         False,
         "#12279 P0 CONTROL: the same tokens on a READ stay GREEN",
     ),
+    # ⛔ A TERMINATOR GLUED TO A CLOSING OPERATOR IS STILL THE TERMINATOR (#12279
+    # REVIEW P1, measured FAIL-OPEN). `find` is nearly always written inside a
+    # command substitution, where the `)` is attached to the terminator token, so
+    # the verbatim compare saw `';')` / `\;)` / `` ';'` `` and made it the LAST
+    # OPERAND — the destination stopped being last and the whole replacement went
+    # GREEN. Bash executes all three (measured: the destination's `NEW` body
+    # lands). `_bare_terminator` is the single rule both readers ask.
+    (
+        'X=$(find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" \';\')',
+        True,
+        "#12279 P1: a quoted terminator glued to the substitution's `)` still refuses",
+    ),
+    (
+        'X=$(find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" \\;)',
+        True,
+        "#12279 P1: an escaped terminator glued to `)` still refuses",
+    ),
+    (
+        'out=`find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" \';\'`',
+        True,
+        "#12279 P1: a quoted terminator glued to a closing backtick still refuses",
+    ),
+    (
+        '(find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" \';\')',
+        True,
+        "#12279 P1: a quoted terminator glued to a subshell `)` still refuses",
+    ),
+    (
+        'find "$b/16/bin" -type f -exec ls -l {} \';\')',
+        False,
+        "#12279 P1 CONTROL: the same glue on a READ stays GREEN — the fix must not "
+        "blanket-refuse every glued terminator",
+    ),
+    # ⛔ ONE MATCHED QUOTE PAIR, NOT `.strip()` (#12279 review round 2, P3 — measured
+    # FAIL-OPEN at the pushed head). `str.strip("'\"")` removed EVERY leading and
+    # trailing quote character, so an OPERAND that merely CONTAINS a quoted `;`
+    # collapsed to a terminator: `'";"'` → `;`. The scan then ended at that operand,
+    # the real destination was never read, and the complete replacement went GREEN
+    # while bash copies it (measured: the destination's `NEW` body lands).
+    (
+        'find "$b/17/bin" -type f -exec cp {} \'\";\"\' "$b/16/bin/" \';\'',
+        True,
+        "#12279 P3: an operand whose content is a quoted `;` is not a terminator",
+    ),
 ]
 
 
@@ -5856,6 +5979,50 @@ def test_a_quoted_hash_does_not_erase_the_live_command_after_it() -> None:
             f"a real trailing comment after {prefix!r} survived `_run_commands`: a "
             "commented-out act reads identically to a live one, which is the "
             "tombstone this strips"
+        )
+
+def test_an_arithmetic_or_parameter_redirect_is_not_a_comment_boundary() -> None:
+    """A `#` after a redirect is DATA inside `(( ))` / `$(( ))` / `${…}` (#12279).
+
+    MEASURED FAIL-OPEN, and introduced by the first cut of this review round: putting
+    `<`/`>` into the flat `COMMENT_START_CHARS` made a `#` after ANY of them start a
+    comment, but those are redirect operators only at COMMAND level — inside `(( ))`
+    they are comparisons and inside `${…}` they are literal, so the `#` is part of the
+    word and bash runs whatever follows it. Both shapes below REPLACE the pinned
+    client dir in bash (measured) and were ERASED to GREEN by that class, where
+    `origin/main` and the pushed head both refuse. So the two characters stay OUT and
+    the cost is the fail-CLOSED one (a `>#` tombstone survives into the scan and can
+    only cause a false RED) — this test pins the direction that would otherwise have
+    no cover, because re-adding `<`/`>` to the class reds it.
+    """
+
+    # ⛔ `<`/`>` ARE **NOT** IN THE CLASS, AND THAT IS THE FIX (#12279 review round 2,
+    # P1 — the first cut of this round added them and opened a RED→GREEN hole). At
+    # COMMAND level bash treats a redirect as an operator, so `bash -c 'echo A >#foo'`
+    # is a syntax error *because* `#foo` is a comment — but inside `(( ))` / `$(( ))`
+    # `>` is a COMPARISON and inside `${…}` it is literal, and there the `#` is DATA:
+    #
+    #     a=1; (( a >#0 )); cp -a "$b/17/bin/." "$b/16/bin/"    -- bash REPLACES
+    #     echo ${x:->#y}; cp -a "$b/17/bin/." "$b/16/bin/"      -- bash REPLACES
+    #
+    # measured: with `>` in the class both lines were ERASED at the `#` and returned
+    # GREEN, where `main` and the pushed head both refuse. A `#` after a `>` is
+    # therefore NOT an operator boundary in a FLAT class, for the same reason `)`
+    # is not — so it stays out and the fail-CLOSED cost is accepted (a `>#`
+    # tombstone survives into the scan and can only cause a false RED). This test is
+    # the direction that has no cover otherwise: re-adding `<`/`>` reds it.
+    replacement = 'sudo rsync -a "$b/17/bin/" "$b/16/bin/"'
+    for opener in ("a=1; (( a >#0 ))", "a=1; (( a <#0 ))", "echo ${x:->#y}", "echo ${x:-<#y}"):
+        step = {"run": f"b=/usr/lib/postgresql; {opener}; {replacement}"}
+        survived = _run_commands(step)
+        assert replacement in survived, (
+            f"a `#` after a redirect INSIDE {opener!r} erased the live command after "
+            f"it: {survived!r}. Inside `(( ))`/`$(( ))` a `<`/`>` is a comparison and "
+            "inside `${…}` it is literal, so the `#` is DATA — measured in bash, which "
+            "runs the replacement. That is why `<`/`>` cannot join a flat class."
+        )
+        assert any(_replaces_a_client_binary(line) for line in _executed_lines(None, step)), (
+            f"the replacement after {opener!r} is not refused"
         )
 
 
@@ -6740,10 +6907,14 @@ def _strip_trailing_comment(line: str) -> str:
     """`line` up to its first UNQUOTED `#` that opens a trailing comment.
 
     A `#` starts a comment only where a WORD can begin — column 0, or after
-    unquoted, unescaped whitespace or one of `; & | (` — and never inside a
-    single- or double-quoted span, so `echo "::error::…#12051 …"` is ONE string,
-    not a message followed by a comment (the issue number itself lives behind a
-    `#`, and truncating there would hide the text under test).
+    unquoted, unescaped whitespace or a character of `COMMENT_START_CHARS` — and
+    never inside a single- or double-quoted span, so `echo "::error::…#12051 …"` is
+    ONE string, not a message followed by a comment (the issue number itself lives
+    behind a `#`, and truncating there would hide the text under test).
+    ⛔ THE CLASS IS NAMED, NOT RESTATED (#12279 review round 2, P3): this sentence
+    used to list `; & | (` literally, so it went stale the moment the class changed —
+    the same "two hand-kept copies of one rule" drift that let the first cut of this
+    round put `<>` in the constant while the prose still described the old class.
 
     ⛔ THE NARROW RULE IS HISTORY, NOT THE SPEC (#12279 REVIEW P2). An earlier
     version cut at "column 0 or after whitespace" only, which `#12069 review 16`
