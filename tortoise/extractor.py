@@ -1568,9 +1568,15 @@ class LLMExtractor:
                     _offset = _match.start() if _match is not None else None
                     # ⚠️ COORDINATE BASE (#12102 review P3): `_offset` indexes
                     # THIS SECTION'S STRIPPED BODY (`body`, leading whitespace
-                    # removed), while `span` below is DOCUMENT coordinates
-                    # `[content_start, content_end]`. The two fields of this
-                    # one record therefore cannot be combined: do NOT compute
+                    # removed), while `span` below is `[content_start,
+                    # content_end]` over `_document_sections`' text — which is
+                    # `_strip_frontmatter(transcript)` with fenced code rewritten,
+                    # NOT the original document. So it is not "document
+                    # coordinates" either: measured, a document carrying a 4-line
+                    # frontmatter puts its body at index 8 there and 35 in the
+                    # original, and an opening fence is rewritten 3 chars → 5.
+                    # The two fields of this one record therefore cannot be
+                    # combined: do NOT compute
                     # the document index as `span[0] + phrase_offset`. The gap is
                     # NOT a constant — it is the WIDTH OF THE STRIPPED PREFIX:
                     # measured 0 for a flush-left body and -3 for a body indented
