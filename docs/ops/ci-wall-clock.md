@@ -440,10 +440,10 @@ same step with the same tail is the investigation.
   document's own §1 measurement (max first-job wait 81.9 min → 90 min), so it fires past the
   measured-normal population rather than on it. `PR-UNWITNESSED` is reported rather than `OK`
   whenever the PR work is neither witnessed nor disproved. It has THREE causes on different
-  dimensions and FOUR triggers — the three below, plus a cut `pending`/`requested` leg, which
-  is unwitnessed by the same argument as a cut queued feed and takes the same lever (it just is
-  not a *fourth* cause; the two `pending`/`requested` legs collapse into ONE trigger, which is
-  why the count is four and not five). The wait-age cause — NOT "the unreadable-
+  dimensions and FOUR triggers — and the triggers are NOT one per cause: the cut-feed cause
+  below is TWO of them (a cut `queued`/`running` feed, which needs `pr_running == 0`, and a
+  cut `pending`/`requested` leg, which needs no such qualifier — the two `pending`/
+  `requested` legs themselves collapse into ONE trigger). The wait-age cause — NOT "the unreadable-
   `created_at` cause", which is only ONE of its three routes (unreadable stamps account for
   TWO: that one and `run_started_at`; the third is an `attempt >= 2` run with NO start stamp)
   — applies to the WHOLE waiting population (`queued + pending + requested`), not to the

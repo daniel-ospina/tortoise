@@ -1196,7 +1196,7 @@ def test_congests_pr_is_three_valued_so_a_cancel_cannot_consume_silence():
 def test_an_ok_with_nothing_queued_cannot_certify_the_queue_clear():
     """⭐⭐ P1 (review): `OK(pr_queued=0)` is the clause that says it is NOT health.
 
-    `classify_queue`'s `no PR-event run is QUEUED` clause appends a reason line that
+    `classify_queue`'s `no PR-event run is waiting` clause appends a reason line that
     states the fact itself — *"starvation of PR CI was not witnessed (an idle fleet
     looks the same)"* — and still emits `OK`. A destructive gate may not read that as
     "the queue is clear": this module's feed is filtered at the API to `status=queued`
@@ -1211,7 +1211,7 @@ def test_an_ok_with_nothing_queued_cannot_certify_the_queue_clear():
     Discriminating power: this test reddens the moment `congests_pr` drops its
     `pr_wait_measured` clause — `OK and not truncated` alone answers `False`.
     """
-    # The explicit `no PR-event run is QUEUED` clause (offender at/over the dominance
+    # The explicit `no PR-event run is waiting` clause (offender at/over the dominance
     # floor, no PR run queued) ...
     quiet = classify(flood_queued(12))
     assert quiet.verdict == Q.OK
@@ -1291,7 +1291,7 @@ def test_a_PENDING_ONLY_wait_past_the_budget_cannot_clear_the_gate():
     """⭐⭐ P1 (review): the `pending` leg fed the AGES but never reached the CLAUSES.
 
     `oldest_pr_age` is a max over `wait_runs` (queued + pending), but `starved_wait`,
-    `backlogged_wait` and the `no PR-event run is QUEUED` clause all still required
+    `backlogged_wait` and the `no PR-event run is waiting` clause all still required
     `pr_queued_runs`. In the ONE shape where those populations differ — a NON-EMPTY
     `pending` leg with an EMPTY queued PR leg — the wait was measured, reported in
     `oldest_pr_queued_age_seconds` past `pr_wait_budget_seconds`, and then dropped
@@ -1485,8 +1485,15 @@ def test_a_CUT_pending_leg_cannot_certify_the_queue_clear():
     A capped `pending` read drops its OLDEST runs — the feed is newest-first — i.e.
     exactly the run the wait budget applies to, so it cannot certify anything. `OK`
     degrades to `PR-UNWITNESSED` (same class as an unparseable timestamp) and the gate
-    answers `None`. Discriminating: dropping `pending_truncated` from
-    `pr_wait_measured` restores `OK / False`.
+    answers `None`.
+
+    ⛔ THE DISCRIMINATING MUTATION CHANGED WHEN THE REFUSAL MOVED (round 18). It used to
+    be "drop `pending_truncated` from `pr_wait_measured`", which restored `OK / False`
+    while that was the ONLY owner. `health()` is now a second, independent owner, so that
+    mutation leaves the verdict at `PR-UNWITNESSED` and only reds the `pr_wait_measured`
+    assertion (measured). What this test discriminates now is the `health()` arm: delete
+    it and the verdict returns to `OK`; the `pr_wait_measured` arm is still needed and is
+    pinned by its own assertion, so the two are independent witnesses rather than one.
     """
     health = classify(flood_queued(4) + starving_pr_runs(1, age_seconds=60),
                       in_progress=[run(1, "Python CI", event="pull_request",
@@ -2147,11 +2154,14 @@ def test_an_unmeasured_pr_wait_while_pr_ci_executes_is_not_ok():
 
 
 def test_the_only_ok_outside_the_seam_has_no_wait_to_measure():
-    """The narrowed guarantee: no queued PR run means no PR wait at all.
+    """The narrowed guarantee: no PR-event run waiting in ANY read leg means no wait.
 
     `healthy()` is the single seam every `OK` returns through EXCEPT this clause,
-    and this clause is harmless by construction — with no queued PR-event run there
-    is no wait that could be past a budget. Pinned so a future clause cannot slip a
+    and this clause is harmless by construction — with no PR-event run waiting in ANY
+    of the read legs (`queued`, `pending`, `requested`) there is no wait that could be
+    past a budget. ⛔ NOT "no QUEUED run": the clause keys on `wait_runs`, which is the
+    union of both wait legs, and a pending-only wait at 5700 s IS past the budget
+    (measured: `PR-STARVED`, `oldest=5700.0`). Pinned so a future clause cannot slip a
     durable `OK` in beside it without this test changing.
     """
     health = classify(flood_queued(12))
