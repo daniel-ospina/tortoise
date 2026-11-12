@@ -33,8 +33,7 @@ casualty: `mastra.ai/blog/how-observational-memory-reached-sota-on-beam` → **H
 
 ---
 
-## 1. The finding that changes the epic: three levers are already built, and one of them is the
-lever nobody listed
+## 1. The finding that changes the epic: three levers are already built, and one of them is the lever nobody listed
 
 Verified against the tree at `1f28d107cf`, not against the epic's status column.
 
