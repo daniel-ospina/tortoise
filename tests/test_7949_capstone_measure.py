@@ -4305,6 +4305,21 @@ _BUNDLE_RULES = (
      ("contains", '"vet": {"enabled"')),
     ("the extractor entry point", "extractor_v2",
      ("extract_session_v2",), ("def extract_session_v2(",), "def", None),
+    # #10988: A4's per-layer census attributes the typed claim population partly by
+    # ELIMINATION — `extractor_v2`'s write gate repairs every point kind not in the
+    # master vocabulary to `statement`, so no typed claim came from that lane. The cite
+    # names the repair, so a refactor that moves it reds here instead of silently
+    # widening the claim.
+    # ⛔ A RANGE (`10419-10422`), so the rule is `span` WITH an end spec: on `line`
+    # `_bundle_missing` reads `source_lines[start - 1]` and never touches `end`, which
+    # is the same unchecked-end defect that function's own comment names for `span`
+    # ("A RANGE's end is a claim too"). The end here is the REPAIR ITSELF — the branch's
+    # `pkind = _POINT_FALLBACK["kind"]`, one of two byte-identical lines in this gate,
+    # so the anchor is the `elif` and the end token is what closes the block.
+    ("the v2 write gate's statement repair (A4's attribution)", "extractor_v2",
+     ("write gate repairs every point kind",),
+     ('elif pkind.lower() not in {k.lower() for k in master["points"]}:',), "span",
+     ("contains", 'pkind = _POINT_FALLBACK["kind"]')),
     # The S2.1 FINDING in `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`: the
     # call that hands extraction the raw alongside the story. A RANGE, because
     # the claim is the ARGUMENTS — `edus=edus` sits one line below the call and
@@ -4499,10 +4514,16 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     and `projection/entities.py`) across `README.md`, both probes, the E-row audit
     (`E1-E5-PROOFS.md`), the `docs/00_index.md` rows that are the bundle's entry
     point, and the `docs/architecture/
-    EXTRACTOR-V4-ARCHITECTURE.md` S2.1 FINDING row this bundle owns — 47 cites at
-    this head, five of them the `projection/*.py` ones the sibling pattern made
-    visible (`#10108` added the sixth document; the count is MEASURED, and it
-    moves with the documents, so re-read `checked` rather than trusting this line).
+    EXTRACTOR-V4-ARCHITECTURE.md` S2.1 FINDING row this bundle owns — five of them
+    the `projection/*.py` ones the sibling pattern made visible (`#10108` added the
+    sixth document). ⛔ NO TOTAL IS QUOTED HERE (#11837 review round 2, P2): this
+    sentence said `47`, and the sweep reports `checked` 48 at the head that review
+    read — this PR adds exactly one cite over that `47`, its own
+    `extractor_v2.py:10419-10422` (⛔ over `47`, not "the 48th": the sweep's doc order
+    puts the architecture doc last, so a probe cite is never the final one). A
+    hand-written total re-stales on every cite a later round adds, which is the rule
+    the `config/ci-surfaces.yml` durations rows already state, so read `checked` from
+    the sweep instead of a number in this docstring.
 
     The architecture doc was the LAST unread one, and it hid a false PASS: its D3
     cite (`run_s2(...)` passing `edus=edus`) was re-derived onto `:7804` — a
@@ -4560,6 +4581,98 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
         " — the bundle's cites for those symbols moved or were dropped; re-derive them")
     assert checked >= 20, (
         f"only {checked} live cites were resolved — the sweep is not reading the bundle")
+
+
+def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2"):
+    """Resolve `(doc, phrase, ((number, anchor), …), [source])` rows; return failures.
+
+    ONE implementation, because two copies of this resolution rule would be two
+    contracts and the one that drifts is the one that stops being true (the same
+    reason `_SYMBOL_CITATION` has one definition). The row SHAPE is shared; the
+    `docs` / `sources` maps are the caller's, because they encode WHICH relation
+    the caller is pinning, not how a row is checked:
+
+      * `test_the_bare_continuation_cites_name_what_they_say` passes the bundle's
+        own six documents and the `extractor_v2`-keyed sources, because a bare
+        `` `:NNNN` `` continuation is invisible to `_BUNDLE_CITE`;
+      * `test_the_epic_bundle_cites_the_branch_rederived_resolve` passes the epic
+        bundle's `00-plan.md` / `03-test-design.md` and `RECONCILE-A1-A2-A5.md`,
+        which `_BUNDLE_DOCS` does not contain at all — no sweep read their
+        numbers in ANY form, bare or named (#11837 review).
+
+    A row scopes to exactly ONE line of the document, found by `phrase` — so the
+    clause checked is the SENTENCE's, never a markdown line number (which would
+    rot exactly as fast as the cites do), and an ambiguous phrase is a failure
+    rather than a silent bind to the easier of two matches.
+    """
+    failures: list[str] = []
+    for row in rows:
+        doc_label, phrase, cites = row[0], row[1], row[2]
+        # a row may name its SOURCE; `default_source` is the caller's default
+        source_key = row[3] if len(row) > 3 else default_source
+        # ...and it may name the SECTION its cited line must fall INSIDE. Without
+        # this, a number re-derived onto a byte-identical entry in a DIFFERENT
+        # section stays GREEN while the document's claim goes false: measured on
+        # the `03-test-design.md` `carve_out:` row, whose anchor line also exists
+        # under `core:` and its mirror, so "the anchor is on this line" alone
+        # cannot tell the three apart (#11837 review, P3).
+        section = row[4] if len(row) > 4 else None
+        # ⛔ The label is the SOURCE's real path, not `<key>.py` (#11837 review P3):
+        # `ci_surfaces` maps to `config/ci-surfaces.yml`, so the fabricated
+        # `ci_surfaces.py` named a file that does not exist in the very failure
+        # message that says a cite points past the end of one.
+        source_label = (
+            _EPIC_CITE_SOURCES[source_key].relative_to(_REPO).as_posix()
+            if source_key in _EPIC_CITE_SOURCES
+            else f"{source_key}.py"
+        )
+        lines = docs[doc_label].read_text(encoding="utf-8").splitlines()
+        hits = [ln for ln in lines if phrase in ln]
+        if len(hits) != 1:
+            failures.append(
+                f"{doc_label}: the scoping phrase {phrase!r} occurs {len(hits)} "
+                f"time(s) — this pin needs exactly one line to scope the cite "
+                f"to, so re-word the pin's phrase rather than letting it bind "
+                f"the easier of two matches")
+            continue
+        line = hits[0]
+        for number, anchor in cites:
+            if f":{number}" not in line and f"-{number}" not in line:
+                failures.append(
+                    f"{doc_label}: the sentence containing {phrase!r} does not "
+                    f"cite :{number} — a bare continuation is invisible to "
+                    f"_BUNDLE_CITE, so this pin is the only thing reading it")
+                continue
+            source_lines = sources[source_key]
+            if int(number) > len(source_lines):
+                failures.append(
+                    f"{source_label}:{number} (cited by {doc_label}) is PAST THE END "
+                    f"of {source_label} ({len(source_lines)} lines) — the cite names a line "
+                    f"the file does not have, or this row's SOURCE key is wrong")
+                continue
+            got = source_lines[int(number) - 1]
+            if section is not None:
+                # the nearest preceding COLUMN-ZERO `key:` is the cited line's
+                # section; a row that names one is refused when they disagree.
+                nearest = next(
+                    (ln.strip() for ln in reversed(source_lines[:int(number) - 1])
+                     if re.fullmatch(r"[a-z_][a-z0-9_]*:", ln)), None)
+                if nearest != section:
+                    failures.append(
+                        f"{source_label}:{number} (cited by {doc_label}) sits in "
+                        f"section {nearest!r}, not {section!r} — an identical entry "
+                        f"in another section satisfies the anchor text alone")
+                    continue
+            if isinstance(anchor, tuple):
+                if got.strip() != anchor[1]:
+                    failures.append(
+                        f"{source_label}:{number} (cited by {doc_label}) reads "
+                        f"{got.strip()!r}, not exactly {anchor[1]!r}")
+            elif anchor not in got:
+                failures.append(
+                    f"{source_label}:{number} (cited by {doc_label}) reads "
+                    f"{got.strip()!r}, which carries no {anchor!r}")
+    return failures
 
 
 def test_the_bare_continuation_cites_name_what_they_say():
@@ -4657,6 +4770,15 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("14235", "except Exception as e:  # never block capture (P1)"),
             ("14386", "except Exception as e:  # never block capture (P1)"),
         )),
+        # ⛔ #10988's `:10413` (A4's attribution). The cite is a BARE continuation —
+        # `extractor_v2.py:10419-10422`; `:10413` is the EMPTY-kind default only — so
+        # `_BUNDLE_CITE`, which requires a cite to NAME ITS FILE, cannot see it. Without
+        # this row the sentence's `:10413` half has no reader at all, and the claim it
+        # makes (that an empty `pointKind` — not the vocabulary repair — is what the
+        # `or "statement"` default serves) is exactly the half a re-derivation would move.
+        ("probes/capstone_measure.py", "`:10413` is the", (
+            ("10413", 'pkind = str(p.get("pointKind", "")).strip() or "statement"'),
+        )),
         # `_IDLE_CITES["vet"]`: the early return and the surface it emits
         ("probes/capstone_measure.py", "its vet surface", (
             ("13770", "if not edus:"),
@@ -4741,8 +4863,12 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("192", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
-        ("E1-E5-PROOFS.md", "_step_accounting` (`:745`) refuses a GREEN row whose", (
-            ("745", "def _step_accounting("),
+        # The number is asserted, never remembered: this PR's own `+6` above the
+        # accounting block moved the def from `:745` to `:751`, and its last commit
+        # re-derived the DOCUMENT's cite while leaving this row on the old number —
+        # so the pin reddened against a document that was already right (#11837).
+        ("E1-E5-PROOFS.md", "_step_accounting` (`:751`) refuses a GREEN row whose", (
+            ("751", "def _step_accounting("),
         ), "capstone_verdict_check"),
         # ⛔ A SECOND DOCUMENT PRINTS THE SAME DECLARATION (#10601 review round 2).
         # `docs/00_index.md`'s capstone row cites this gate too, and it moved
@@ -4888,39 +5014,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
     sources = {name: path.read_text(encoding="utf-8").splitlines()
                for name, path in (*_BUNDLE_SOURCES.items(),
                                   *_BUNDLE_TOOL_SOURCES.items())}
-    failures: list[str] = []
-    for row in rows:
-        doc_label, phrase, cites = row[0], row[1], row[2]
-        # a row may name its SOURCE; the bundle's own three are the default
-        source_key = row[3] if len(row) > 3 else "extractor_v2"
-        source_label = f"{source_key}.py"
-        lines = docs[doc_label].read_text(encoding="utf-8").splitlines()
-        hits = [ln for ln in lines if phrase in ln]
-        if len(hits) != 1:
-            failures.append(
-                f"{doc_label}: the scoping phrase {phrase!r} occurs {len(hits)} "
-                f"time(s) — this pin needs exactly one line to scope the cite "
-                f"to, so re-word the pin's phrase rather than letting it bind "
-                f"the easier of two matches")
-            continue
-        line = hits[0]
-        for number, anchor in cites:
-            if f":{number}" not in line and f"-{number}" not in line:
-                failures.append(
-                    f"{doc_label}: the sentence containing {phrase!r} does not "
-                    f"cite :{number} — a bare continuation is invisible to "
-                    f"_BUNDLE_CITE, so this pin is the only thing reading it")
-                continue
-            got = sources[source_key][int(number) - 1]
-            if isinstance(anchor, tuple):
-                if got.strip() != anchor[1]:
-                    failures.append(
-                        f"{source_label}:{number} (cited by {doc_label}) reads "
-                        f"{got.strip()!r}, not exactly {anchor[1]!r}")
-            elif anchor not in got:
-                failures.append(
-                    f"{source_label}:{number} (cited by {doc_label}) reads "
-                    f"{got.strip()!r}, which carries no {anchor!r}")
+    failures = _pin_row_failures(rows, docs, sources)
     for doc_label, quoted, source_key in quotes:
         source_label = f"{source_key}.py"
         doc_text = " ".join(docs[doc_label].read_text(encoding="utf-8").split())
@@ -4937,6 +5031,124 @@ def test_the_bare_continuation_cites_name_what_they_say():
     assert not failures, (
         "a bare `:NNNN` continuation names code it does not name — re-derive the "
         "number from the tree before changing this pin:\n  " + "\n  ".join(failures))
+
+
+#: The epic bundle's documents and the two sources its re-derived cites name.
+#: ⛔ NEITHER side is in the bundle sweep: `_BUNDLE_DOCS` carries the bundle's own six
+#: documents, so `00-plan.md`, `03-test-design.md` and `RECONCILE-A1-A2-A5.md` were
+#: swept by NOTHING, and `search_engine.py` is in neither `_BUNDLE_SOURCES` nor
+#: `_BUNDLE_TOOL_SOURCES`. Every number below was verified by READING, which is why
+#: four of them were still wrong when the commit that re-derived them landed.
+_EPIC_CITE_DOCS = {
+    "RECONCILE-A1-A2-A5.md":
+        _REPO / "docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md",
+    "00-plan.md":
+        _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md",
+    "03-test-design.md":
+        _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+}
+_EPIC_CITE_SOURCES = {
+    "sdk": _REPO / "tortoise/sdk.py",
+    "search_engine": _REPO / "tortoise/search_engine.py",
+    # `03-test-design.md` cites the manifest's OWN `carve_out:` entry by number.
+    # ⛔ Registered because #11837 moved it TWICE without a reader: restoring the
+    # `core:` line a merge dropped (+6 above it) shifted the entry 9548 -> 9554
+    # while the document went on naming 9548, which is the row above — a cite a
+    # change moves is exactly the cite no hand-recheck keeps.
+    "ci_surfaces": _REPO / "config/ci-surfaces.yml",
+}
+
+
+def test_the_epic_bundle_cites_the_branch_rederived_resolve():
+    """The cites this branch re-pointed OUTSIDE every sweep — resolve them here.
+
+    ⛔ WHY (#11837 review at `a08f7bce3d`, 2×P1 + 2×P2). The commit that re-derived
+    this bundle's cites re-pointed the CALL and the CONSUME pair and left their
+    neighbours on the previous merge's numbers, in the same sentences it edited:
+
+      * `RECONCILE-A1-A2-A5.md`'s `relation_write` sentence names the call correctly
+        and says the import is "the line above it, `:17804`" — the import is `:17921`
+        (the call moved and the import moved WITH it), and `:17804` is
+        `content[:80],` in an unrelated helper. The commit's own arithmetic
+        (`17922 - 1`) proves the miss.
+      * `` `subject_binding_available` ``'s DEFINITION is `:6588`
+        (`def subject_binding_available(graph) -> bool:`); `:6509` is the operator
+        loop inside `get_relationships_bounded`. Both documents state the
+        definition — `00-plan.md` and `03-test-design.md` — and both kept `:6509`
+        while the CONSUME pair beside them was re-pointed.
+      * `00-plan.md`'s `bind_point_subjects` cite named `:16892` (a comment: `# real
+        relation of THIS occurrence and folding would be`); the call is `:17569`.
+
+    Nothing could see any of them: they are not in `_BUNDLE_DOCS` at all, so not
+    even the `unmatched` arm fired. Non-vacuity: every row below FAILS on the
+    pre-fix documents (the number is on the sentence's line and the cited line
+    carries other code), and the helper reds with the line's actual text.
+
+    ⚠️ WHAT THIS DOES NOT CLOSE, stated rather than left to a reader: this pins the
+    cites these findings named, not every number in the three documents. That
+    broader sweep is the bundle's D5 residual (`05-verify.md`: "the sweep is still
+    incomplete"). Pinning the named ones is what makes the NEXT insertion above
+    them red instead of silent.
+    """
+    rows = (
+        # The call, the import one line above it, and the CONSUMER docstring — the
+        # whole sentence's three numbers, so a re-derivation of one cannot leave
+        # its neighbours behind the way it did at `a08f7bce3d`.
+        ("RECONCILE-A1-A2-A5.md", "`TortoiseSDK._extract_session_v2` at", (
+            ("17974", "relation_write = apply_relation_edges("),
+        ), "sdk"),
+        ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
+            ("17973", "from tortoise.relation_write import apply_relation_edges"),
+        ), "sdk"),
+        ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
+            ("17961", "# `#10999` made the channel TRANSPORT ONLY"),
+        ), "sdk"),
+        # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
+        # documents that state them — a row per document, because a row scopes to
+        # one FILE and the consume pair was re-pointed in one document while the
+        # definition stayed wrong in both.
+        ("00-plan.md", "is a **fail-OPEN** probe, defined at", (
+            ("6607", "def subject_binding_available(graph) -> bool:"),
+        ), "search_engine"),
+        ("00-plan.md", "consumed at `sdk.py:", (
+            ("9540", "subject_binding_available,"),
+            ("9593", "and not subject_binding_available(graph):"),
+        ), "sdk"),
+        ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
+            ("6607", "def subject_binding_available(graph) -> bool:"),
+        ), "search_engine"),
+        # ...and that same row's CONSUME pair names `sdk.py`, so it takes its own
+        # row: a row carries ONE source key, and a mis-keyed cite must red with a
+        # message rather than an IndexError (the guard below now says so).
+        ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
+            ("9540", "subject_binding_available,"),
+            ("9593", "and not subject_binding_available(graph):"),
+        ), "sdk"),
+        # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
+        # names the call), keyed by the quoted form the sentence prints.
+        ("00-plan.md", "point-creation path at", (
+            ("17621", "bind_point_subjects(proj, self, point_id=pid,"),
+        ), "sdk"),
+        # The manifest's own `carve_out:` entry, cited from the artifact table.
+        # ⛔ The 5th element is the SECTION the cite must fall inside: this exact
+        # anchor text also sits under `core:` and its mirror, so without it a
+        # re-derivation onto either stays green while the document's `carve_out:`
+        # claim goes false (measured: 5854 and 8173 both drove this row GREEN).
+        ("03-test-design.md", "`carve_out:` holds **one**", (
+            ("9635", "- test_pack_logic_writeprobe_11083.py"),
+        ), "ci_surfaces", "carve_out:"),
+    )
+    assert len(rows) >= 9, (
+        f"only {len(rows)} rows — an emptied table would pass vacuously, and these "
+        "are the cites the review found wrong on the pre-fix documents plus the "
+        "consume pair that sat beside them")
+    sources = {name: path.read_text(encoding="utf-8").splitlines()
+               for name, path in _EPIC_CITE_SOURCES.items()}
+    failures = _pin_row_failures(rows, _EPIC_CITE_DOCS, sources)
+    assert not failures, (
+        "an epic-bundle cite names code it does not name, in a document no sweep "
+        "reads — re-derive the number from the tree before changing this pin:\n  "
+        + "\n  ".join(failures))
 
 
 def test_a_cite_that_names_a_directory_names_a_file_that_exists():

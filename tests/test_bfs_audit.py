@@ -221,8 +221,13 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
     return frozenset(lines)
 
 
-def _classify_tortoise_hit(path: Path, lineno: int) -> str:
-    """Which bucket a `grep` hit inside ``tortoise/`` belongs in.
+def _classify_code_hit(path: Path, lineno: int) -> str:
+    """Which bucket a `grep` hit inside a SOURCE root belongs in.
+
+    Callers: the `/tortoise/` arm and the `/validation/` arm (#11991) — the
+    decision is path-agnostic, because `_code_lines_naming` parses whatever file
+    the grep line names; only the ROOT decides whether a hit is interesting, and
+    both roots are grep'd on purpose.
 
     Split out of :func:`test_no_propagate_shock_callers` so the CALLER's own arm
     is reachable by a test. The audit's consequence of a DEGRADED read lives
@@ -239,6 +244,48 @@ def _classify_tortoise_hit(path: Path, lineno: int) -> str:
     if call_lines is None or lineno in call_lines:
         return "production_code"
     return "prose only"
+
+
+def _propagate_shock_bucket(line: str) -> str:
+    """Which bucket ONE `grep -rn propagate_shock` line belongs in (#11991).
+
+    ⛔ EVERY line must come back with a bucket. The audit's only assertion is
+    ``len(production_code) == 0``, so a line matching NO arm is counted NOWHERE
+    and the equality holds no matter what that line says — a root the audit
+    itself chose to grep (`validation/`) was handled by no arm, so a restored
+    call under it was invisible to the metric the audit exists to compute. That
+    is the quieter-guard direction #11803/#11903 removed for `/tortoise/`, one
+    arm narrower.
+
+    Two rules close it, both fail-CLOSED:
+
+    * `validation/` is classified by PARSE like any other source root, not
+      bucketed as a test file by directory. `validate_tortoise_ep.py` is a real
+      validation runner, and a blanket "test_files" arm would hide a restored
+      call there.
+    * the unmatched arm returns `production_code`, the same polarity
+      ``_classify_code_hit`` uses for a read it cannot complete. A future root
+      added to the grep list therefore REDS the audit until someone decides its
+      bucket, instead of silently widening the blind spot.
+    """
+    path_part = line.split(":")[0]
+    lineno = int(line.split(":", 2)[1])
+
+    # #378: projection.py was split into the projection/ package — the
+    # deprecated definition now lives in projection/propagation.py.
+    if ("projection.py" in path_part or "projection/" in path_part) \
+            and "def propagate_shock" in line:
+        return "definition (deprecated)"
+    if "/tests/" in path_part:
+        return "test_files"
+    if "graph-scripts/fix_" in path_part:
+        return "fixup_scripts (historical)"
+    if "/graph-scripts/" in path_part:
+        return "test_files"  # test_6707_shock.py
+    if "/tortoise/" in path_part or "/validation/" in path_part:
+        # Is this line CODE, or only prose about the function?
+        return _classify_code_hit(ROOT / path_part, lineno)
+    return "production_code"
 
 
 def _grep(pattern: str, *dirs: str) -> list[str]:
@@ -473,16 +520,16 @@ def test_an_unreadable_file_is_routed_to_production_code(monkeypatch):
     """
     this = sys.modules[__name__]
     monkeypatch.setattr(this, "_code_lines_naming", lambda _p, _n: None)
-    assert _classify_tortoise_hit(Path("tortoise/unreadable.py"), 1) == "production_code"
+    assert _classify_code_hit(Path("tortoise/unreadable.py"), 1) == "production_code"
 
     # ...and the other side of the same branch: a parsed file with no code hit.
     monkeypatch.setattr(this, "_code_lines_naming", lambda _p, _n: frozenset())
-    assert _classify_tortoise_hit(Path("tortoise/parsed.py"), 1) == "prose only"
+    assert _classify_code_hit(Path("tortoise/parsed.py"), 1) == "prose only"
 
     # ...and a parsed file where THIS line carries the name.
     monkeypatch.setattr(this, "_code_lines_naming", lambda _p, _n: frozenset({7}))
-    assert _classify_tortoise_hit(Path("tortoise/parsed.py"), 7) == "production_code"
-    assert _classify_tortoise_hit(Path("tortoise/parsed.py"), 8) == "prose only"
+    assert _classify_code_hit(Path("tortoise/parsed.py"), 7) == "production_code"
+    assert _classify_code_hit(Path("tortoise/parsed.py"), 8) == "prose only"
 
 
 def test_the_code_detector_is_fail_closed(tmp_path):
@@ -523,6 +570,54 @@ def test_the_code_detector_is_fail_closed(tmp_path):
 
 # ── 1. propagate_shock callers ────────────────────────────────────
 
+def test_a_validation_hit_is_classified_not_dropped(tmp_path):
+    """`validation/` is grep'd, so a hit there must land in a BUCKET (#11991).
+
+    ⛔ The audit's whole assertion is `len(callers["production_code"]) == 0`, and
+    a line that matches NO arm is appended to no bucket — so the equality holds
+    no matter WHAT that line says. `validation/` was in the grep list while the
+    routing chain handled only `/tests/`, `graph-scripts/`, `/graph-scripts/`
+    and `/tortoise/`: a `propagate_shock(` call under `validation/` was invisible
+    to the metric the audit exists to compute, which is the same
+    quieter-guard direction #11803/#11903 removed for `/tortoise/`.
+
+    Pinned through the ROUTING function, not the corpus: the corpus carries no
+    `validation/` hit outside the explicitly-excluded EP test, so the corpus
+    alone cannot fail and a row that cannot fail is not a pin. `validation/` is
+    classified by PARSE like any other source root — a code hit there is
+    PRODUCTION (the audit must go RED), and only non-code prose is quiet.
+    """
+    validation = tmp_path / "validation"
+    validation.mkdir()
+
+    code = validation / "validate_tortoise_ep.py"
+    code.write_text("from x import propagate_shock\npropagate_shock(1)\n", encoding="utf-8")
+    prose = validation / "notes.py"
+    prose.write_text('"""EP replaces BFS; propagate_shock is never called."""\n', encoding="utf-8")
+
+    assert _propagate_shock_bucket(f"{code}:2:propagate_shock(1)") == "production_code"
+    assert _propagate_shock_bucket(f"{prose}:1:propagate_shock is never called") == "prose only"
+
+
+def test_a_hit_under_a_root_with_no_arm_is_production_code_not_dropped(tmp_path):
+    """No line may fall through the routing chain (#11991).
+
+    ⛔ The pre-fix loop ended at the `/tortoise/` arm, so ANY other root drained
+    silently — the audit grep'd a directory it could not account for. The
+    unmatched arm now returns `production_code`, the same fail-closed polarity
+    `_classify_code_hit` uses for a read it cannot complete: a hit nobody can
+    classify is not a hit nobody has to answer for. A future root added to the
+    grep list therefore REDS the audit until someone decides its bucket, instead
+    of quietly widening the blind spot.
+    """
+    elsewhere = tmp_path / "docs"
+    elsewhere.mkdir()
+    doc = elsewhere / "design.py"
+    doc.write_text("propagate_shock(1)\n", encoding="utf-8")
+
+    assert _propagate_shock_bucket(f"{doc}:1:propagate_shock(1)") == "production_code"
+
+
 def test_no_propagate_shock_callers():
     """Assert: propagate_shock.calls only in deprecated definition + tests + scripts."""
     # All references to propagate_shock (the word)
@@ -541,24 +636,7 @@ def test_no_propagate_shock_callers():
     }
 
     for line in filtered:
-        path_part = line.split(":")[0]
-        full_path = ROOT / path_part  # noqa: F841
-
-        # #378: projection.py was split into the projection/ package — the
-        # deprecated definition now lives in projection/propagation.py.
-        if ("projection.py" in path_part or "projection/" in path_part) \
-                and "def propagate_shock" in line:
-            callers["definition (deprecated)"].append(line)
-        elif "/tests/" in path_part:
-            callers["test_files"].append(line)
-        elif "graph-scripts/fix_" in path_part:
-            callers["fixup_scripts (historical)"].append(line)
-        elif "/graph-scripts/" in path_part:
-            callers["test_files"].append(line)  # test_6707_shock.py
-        elif "/tortoise/" in path_part:
-            # Is this line CODE, or only prose about the function?
-            bucket = _classify_tortoise_hit(ROOT / path_part, int(line.split(":", 2)[1]))
-            callers[bucket].append(line)
+        callers[_propagate_shock_bucket(line)].append(line)
 
     # The only "production" reference is a comment: no actual call
     assert len(callers["production_code"]) == 0, (
