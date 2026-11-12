@@ -1198,7 +1198,7 @@ def test_an_owner_repo_issue_ref_counts_as_evidence(tmp_path, monkeypatch):
     §8 calls that spelling "the form this repo writes everywhere", and §1 accepts "an
     issue" without prescribing a spelling — but the bare-`#N` pattern refused it as
     "names no `path:line`, issue, command or §N", i.e. a false accusation on correct
-    evidence at the REQUIRED `docs` job. Widening it back to `` `#\d+` `` reds this test.
+    evidence at the REQUIRED `docs` job. Widening it back to the bare issue-ref pattern reds this test.
     """
     def issue_ref_only_evidence(text: str) -> str:
         """Row (a)'s whole evidence cell becomes one `owner/repo#N` reference."""
@@ -1214,6 +1214,75 @@ def test_an_owner_repo_issue_ref_counts_as_evidence(tmp_path, monkeypatch):
     assert not any("evidence cell" in p for p in _doc_problems()), (
         "an `owner/repo#N` issue ref was refused as an evidence cell"
     )
+
+
+def test_a_host_port_is_not_a_citation(tmp_path, monkeypatch):
+    """FAILS if a dotted `host:port` is resolved as a `path:line`.
+
+    §8 promises a host:port in prose does not red this context. `_has_path_marker`
+    sees the dot in `127.0.0.1` or `api.example.com` and called it a path, so the
+    resolver reported "127.0.0.1 does not exist in the tree" — measured for
+    `127.0.0.1:6379`, `0.0.0.0:8000`, `api.example.com:443` and `db.internal:5432`
+    (bare `localhost:6379` was already green because it has no dot). The carve-out is
+    a dotted HOST plus a port, which is why it cannot swallow
+    `tortoise/pipeline.py:16`; removing `_is_host_port` from the resolver reds this.
+    """
+    for host_port in (
+        "127.0.0.1:6379",
+        "0.0.0.0:8000",
+        "api.example.com:443",
+        "db.internal:5432",
+    ):
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, _s=host_port: t.replace(
+                    "`tortoise/pipeline.py:16`", f"`{_s}`", 1
+                ),
+            )
+            assert not any(
+                p.startswith("citation ") or "not a recognised citation" in p
+                for p in _doc_problems()
+            ), f"{host_port!r} is a host:port, not a citation: {_doc_problems()}"
+
+
+def test_a_leading_date_makes_a_reading_historical(tmp_path, monkeypatch):
+    """FAILS if a dated reading reds when the date comes BEFORE the claim.
+
+    "As of 2026-09-10 **(d)** was **STILL-TRUE**" and "**(d)** was **STILL-TRUE** as
+    written on 2026-09-10" are the same historical statement. The guard first read only
+    the trailing form and red the leading one with a false accusation (measured); the
+    date-side test now looks on both sides, and `Note **(d)** is **ADOPTED**.` — no
+    date at all — still reds.
+    """
+    takeaway = "**The one thing to take away:**"
+
+    def append(sentence: str) -> str:
+        text = DOC.read_text(encoding="utf-8")
+        start = text.index(takeaway)
+        end = text.index("\n\n", start)
+        return text[:end] + " " + sentence + text[end:]
+
+    for dated in (
+        "As of 2026-09-10 **(d)** was **STILL-TRUE**.",
+        "**(d)** was **STILL-TRUE** as written on 2026-09-10.",
+        "**(d)** was **STILL-TRUE** on the 2026-09-10 ledger.",
+    ):
+        with monkeypatch.context() as patch:
+            _mutated(tmp_path, patch, lambda t, _s=dated: append(_s))
+            assert not any(
+                "assigns a different verdict" in p for p in _doc_problems()
+            ), f"{dated!r} is a dated reading, not a contradiction"
+    with monkeypatch.context() as patch:
+        _mutated(
+            tmp_path,
+            patch,
+            lambda t: append("Note **(d)** is **ADOPTED**."),
+        )
+        assert any(
+            "assigns a different verdict" in p for p in _doc_problems()
+        ), "an undated contradicting mention must still red"
 
 
 def test_citation_to_missing_file_is_rejected(tmp_path, monkeypatch):
