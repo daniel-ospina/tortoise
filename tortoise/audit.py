@@ -943,6 +943,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             "sup_refused": ((_sup_flag is not False) if _is_operator
                             else (_sup_flag is not False
                                   or sup_op_type is not None)),
+            # ⛔ …and the RAW flag beside it, because the two lanes do not agree on
+            # an ``op_type``-ONLY node: BOTH refuse a flag that is not ``false``,
+            # only the direct lane refuses `op_type` (``_non_op``). A sentence that
+            # names "either lane" may therefore only be emitted for the flag.
+            "sup_flag_shaped": _sup_flag is not False,
             # ⛔ ONE flow test for both strings: a neutral row carries nothing in
             # either direction, so successor advice ("promote it to live", "target a
             # CLAIM successor") prescribes a transfer such an edge cannot perform.
@@ -1563,16 +1568,33 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "it restores none either, because a neutral edge carries nothing in "
                 "either direction. But " + anchor + " over a stale edge that is "
                 "still there, which is leftover wiring to clean up")
-        if s["sup_refused"]:
-            # ⛔ No belief to lose: EP refuses an operator-shaped input/anchor on
-            # both lanes, so this edge never carried anything (measured: 2 → 0 on
-            # the SHAPE update alone, before any supersession).
+        if s["sup_flag_shaped"]:
+            # ⛔ No belief to lose: BOTH lanes refuse a flag that is not ``false``
+            # (``_non_operator`` and ``_non_op`` agree here), so this edge never
+            # carried anything (measured: 2 → 0 on the SHAPE update alone, before
+            # any supersession).
             return lead + (
                 "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING: EP refuses this "
                 "endpoint (it is operator-shaped) on either lane, so no confidence "
                 "was ever carried through this edge — " + anchor + " over a stale "
                 "edge. The edge must still be deleted, and the support it was "
                 "supposed to carry wired through a :Point operator")
+        if s["sup_refused"]:
+            # ⛔ ``op_type``-ONLY, on the DIRECT lane: ``_non_op`` refuses it, but
+            # ``ep.py``'s ``_non_operator`` ADMITS it on the operator lane
+            # ("Adding an ``op_type IS NULL`` conjunct here … would exclude the
+            # hybrid", ``ep.py:98-149``; measured: 2 confidences, no skips). So the
+            # both-lane wording above was false here AND contradicted the repair it
+            # recommends — wiring the support through a :Point operator (#12111
+            # round 20).
+            return lead + (
+                "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING: EP's DIRECT-edge "
+                "arm refuses this endpoint (``is_operator`` is not ``false``, or an "
+                "``op_type`` is set), so no confidence was ever carried through this "
+                "edge — " + anchor + " over a stale edge. The edge must still be "
+                "deleted, and the support it was supposed to carry is best wired "
+                "through a :Point operator, which ADMITS a node carrying only an "
+                "``op_type`` (measured: two confidences, no skipped-factor record)")
         if not s["is_operator"]:
             return lead + (
                 "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING: this is a DIRECT "

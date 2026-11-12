@@ -642,7 +642,13 @@ def test_a_shaped_and_neutral_endpoint_gets_the_shape_clause_not_the_neutral_one
         "the shape clause is the one that explains this row: " + fix)
     assert "clearing the shape alone restores nothing" in fix, fix
     assert "EP never reaches the direction test for this endpoint" in fix, fix
-    assert "no belief — and re-pointing or deleting it restores none" not in fix, (
+    # ⛔ The needle must be the text the NEUTRAL arm actually emits, or the
+    # assertion cannot fail (it pinned a phrasing no arm ever produced; measured on
+    # a genuinely neutral row, where the neutral clause IS emitted and the old
+    # needle was absent — #12111 round 20).
+    assert "archiving loses no belief, and re-pointing or deleting it restores none" \
+        not in fix, fix
+    assert "transfers NO confidence by design" not in fix, (
         "the neutral clause attributes the silence to a direction EP never reads "
         "here: " + fix)
 
@@ -2397,3 +2403,33 @@ def test_an_ambiguous_successor_name_is_not_called_refused(sdk):
         "the row cannot say WHICH of the two EP refuses: " + issue.fix)
     assert "the disposition for this edge is DROP" not in issue.fix, (
         "an ambiguous name keeps the carry/drop triage: " + issue.fix)
+
+
+def test_an_op_type_only_ANCHOR_is_refused_by_the_direct_arm_only(sdk):
+    """The archive clause may say "either lane" only for the FLAG.
+
+    EP's ``_non_operator`` (operator input) ADMITS an ``op_type``-only node; the
+    direct lane's ``_non_op`` refuses it. So on a DIRECT row whose superseded anchor
+    carries only an ``op_type``, "EP refuses this endpoint on either lane, so no
+    confidence was ever carried" is false AND it contradicted the repair the same
+    string recommends (wire the support through a :Point operator, which admits it).
+    Measured: an operator over an ``op_type``-only input builds two confidences with
+    no skipped-factor record (#12111 review round 20).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1", op_type="IMPL")
+    assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.is_operator, o.op_type",
+              {"i": v1["id"]}) == [[None, "IMPL"]], "fixture drifted"
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    # (That the operator lane ADMITS exactly this node is measured in
+    # ``test_an_op_type_only_SUPERSEDED_input_IS_stripped_by_the_operator_lane``:
+    # two confidences, no skipped-factor record, before the supersession.)
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='PolicyGone'", {"i": v1["id"]})
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    assert "on either lane" not in issue.fix, (
+        "the operator lane admits this node, so only the direct arm refuses it: "
+        + issue.fix)
+    assert "direct" in issue.fix.lower(), issue.fix
