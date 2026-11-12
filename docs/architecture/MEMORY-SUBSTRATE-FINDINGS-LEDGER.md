@@ -419,6 +419,17 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   what stops a `**` from being the difference between a red and a green; code, italic and
   uppercase spellings are read too, and the letter EXTRACTOR reads every spelling the candidate
   test accepts, so a sentence cannot qualify on its markup and then contribute no letters.
+  ⛔ THAT WAS TRUE OF THE EXTRACTOR AND FALSE OF THREE ARMS BESIDE IT — closed at #11902's
+  round-4 review, and recorded here because it is the same defect class this bullet describes.
+  The verdict-ATTRIBUTION scan, the MENTION scan and the negated-COMPLEMENT strip each carried
+  their own `\*\*\(([a-z])\)\*\*`, i.e. `**(x)**` only, while the extractor and §8 accept four
+  spellings. Measured on this page: `Note (d) is **ADOPTED**.` beside the `(d)` SUPERSEDED-BY-FIX
+  row read CLEAN (a contradicting verdict nobody saw), the class-first spelling the checker's own
+  comment blesses was REFUSED as a swap of all seven rows, and the documented
+  negated complement (a `— <letters> do not.` clause, letters in code or italic) was
+  COUNTED into the STILL-TRUE list. One constant
+  (`_LETTER_ALT_MARKED`) now feeds all four readers, so the spellings cannot drift apart again —
+  which is the only reason a sentence's markup could decide its verdict.
   A single parenthetical letter in prose is **not** a list — `row (c) still read as written` is a
   sentence, not a tally — and a
   sentence that merely QUOTES the phrase has no list to disagree with the table, so counting it reded
