@@ -348,8 +348,10 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   `~` carve-out until #11902's review measured it **fail-open**: the exemption skipped both spellings,
   so an out-of-range `~/`-rooted citation read CLEAN and the only floor under it was "nothing resolved
   at all" — and the carve-out's stated justification was itself false, since no revision of this page
-  has ever carried a `~`-rooted `path:line` or permalink (measured over all 37 commits that touch it:
-  zero matches in either spelling). The exemption protected nothing and defused a real red, so it is
+  has ever carried a `~`-rooted `path:line` or permalink (measured over every commit that touches it
+  — re-run `git rev-list --count HEAD -- docs/architecture/MEMORY-SUBSTRATE-FINDINGS-LEDGER.md`,
+  which read 35 when this was written and grows with each edit to this page, so it is a command and
+  not a constant: zero matches in either spelling, in every revision). The exemption protected nothing and defused a real red, so it is
   gone rather than narrowed;
 - the **§3 headline tally** is derived too. The "N of the twelve rows no longer read as written"
   count, the letter list beside it, and the four-of-the-seven "overtaken" figure are all recomputed
