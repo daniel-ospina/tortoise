@@ -563,18 +563,41 @@ assert_contains "$BLANK_BODY" "held no excerpt-able text" "and says the report h
 assert_not_contains "$BLANK_BODY" "could not be byte-squeezed" "and does NOT claim a squeeze it never attempted"
 assert_not_contains "$BLANK_BODY" '```' "and pastes NO fenced block when there is nothing to paste"
 
-# ── case 17d: an EXISTING but UNREADABLE report must not abort the alert ────
-# `-e` admits a path that exists and cannot be read (a directory), where `-s` used to
-# skip the whole section and report "not readable". The read is guarded, so the body
-# says the report yielded no excerpt AND the ledger issue is still filed — without the
-# guard, `tail` fails under `set -e` and the alert exits 1 having filed NOTHING (the
-# exact #12077 class, at the line round 2 moved the read back onto).
+# ── case 17d: the READ GUARD — an existing but unreadable report must not abort ─────
+# NOTE THE MECHANISM (corrected, pass-5 review): a DIRECTORY is `-s`-TRUE on this fs, so
+# this case would have reached the read even before the `-e`/`-p` widening. What it pins is
+# the guarded READ (`|| raw_tail=""`): without it `tail` fails under `set -euo pipefail`
+# and the alert exits 1 having filed NOTHING — the exact #12077 class, at the line round 2
+# moved the read back onto. The widening's OWN behaviour is pinned by 17e (0-byte report)
+# and 17f (FIFO).
 mkdir -p "$FIX/report-dir"
 reset_case
 run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/report-dir"
 assert_eq "$RC" "0" "case 17d: an existing but UNREADABLE report does not abort the alert"
 assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "held no excerpt-able text" "case 17d: and the body says the report yielded no excerpt"
 assert_eq "$(count_creates)" "1" "case 17d: and the ledger issue was still filed"
+
+# ── case 17e: a 0-byte report is READABLE and EMPTY, and must be described so ───────
+# Under the old `[ -s … ]` guard a 0-byte report was described as "the gate's report file
+# was **not readable**" — false: it is readable and empty. `-e` is what changes that, so
+# this case is what pins the widening (a directory does not: it is `-s`-true).
+: > "$FIX/report-empty.txt"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/report-empty.txt"
+assert_eq "$RC" "0" "case 17e: a 0-byte report files the alert"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "held no excerpt-able text" "case 17e: and is described as holding no excerpt"
+assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "was not readable" "case 17e: and NOT as 'not readable' — it IS readable, it is empty"
+assert_eq "$(count_creates)" "1" "case 17e: and the ledger issue was filed"
+
+# ── case 17f: a FIFO must not HANG the alert ────────────────────────────────────────
+# `-e` alone admits a FIFO (st_size 0), and `tail -c` then blocks in open(2) until a writer
+# appears: measured SIGTERM at 6 s, no ledger entry and no exit status. No caller produces
+# one; this pin is what keeps the next caller from turning a decorative excerpt into a hang.
+mkfifo "$FIX/report-fifo"
+reset_case
+timeout 20 "$HELPER" --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/report-fifo" >/dev/null 2>&1
+assert_eq "$?" "0" "case 17f: a FIFO report does not hang the alert (a hang returns 124 here)"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "was not readable" "case 17f: and a FIFO is refused as not readable, which is true of it"
 
 # A job with no declared note still alerts, with an honest generic sentence
 # rather than a wrong one (the workflow's site set is pinned by pytest).

@@ -278,7 +278,12 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
       echo "must never run DDL or \`migration repair\` against production; a blanket repair hides"
       echo "real drift, #1001)."
       echo
-      if [ -n "$DRIFT_REPORT_FILE" ] && [ -e "$DRIFT_REPORT_FILE" ]; then
+      # `-e` so a 0-byte report is not described as "not readable" (it is readable and
+      # empty — it lands in the "no excerpt-able text" arm), and `! -p` so a FIFO cannot
+      # enter the read: `tail` would block in open(2) until a writer appears, hanging the
+      # alert with no ledger entry and no exit status (measured: SIGTERM at 6 s). No caller
+      # produces a FIFO; the condition keeps the next one honest rather than silent.
+      if [ -n "$DRIFT_REPORT_FILE" ] && [ -e "$DRIFT_REPORT_FILE" ] && [ ! -p "$DRIFT_REPORT_FILE" ]; then
         # Bounded: an issue body is not a log dump. ⛔ TAKE THE **TAIL**, not the
         # head: the gate prints its context — remote-ahead, non-conforming files,
         # the warn-class preamble — BEFORE the actionable block, and ends with
