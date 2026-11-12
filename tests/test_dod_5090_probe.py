@@ -8259,22 +8259,42 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
 #
 # So this is the DICT half: one scan, run wherever a tree holds both rows.
 
-#: Roots the declaration dicts live under today. ⛔ NOT the whole repo: 254 tracked
-#: `.py` files sit outside these three (`battery/`, `graph-scripts/`, `docs/`, `eval/`,
-#: `validation/`, `integrations/`, `.github/`), so a duplicate key THERE is still
-#: lint-only. Stated rather than called "repo-wide" because the difference is what a
-#: reader would rely on.
+#: Roots the declaration dicts live under today. ⛔ NOT the whole repo: `battery/`,
+#: `graph-scripts/`, `docs/`, `eval/` and several smaller roots sit outside these three,
+#: so this scan does not reach a duplicate declared there. Stated rather than called
+#: "repo-wide" because the difference is what a reader would rely on.
 #:
-#: The scan covers a name whose membership changes a verdict. It is repo-wide WITHIN
-#: these roots on purpose: the class is not specific to the probe, and naming files
-#: here would re-open the hole the moment a declaration moves into one not named.
+#: ⛔ Outside these roots a duplicate is not reliably caught by LINT either: `ruff`'s
+#: `F601` lands on the repeated (surviving) key, and a `noqa` marker naming `F601` on
+#: that line suppresses it — which is exactly the live shape this change found and
+#: removed in `tests/test_commit_schema.py`. So "lint would still catch it there" is
+#: false for the one shape we have actually observed.
 #:
-#: ⛔ IT IS NOT FREE, measured: 1,970 modules, `ast.parse` alone 12.2 s, and this
-#: test is ~24 s of `tests/test_dod_5090_probe.py`'s ~107 s run. Recorded so the next
-#: reader does not assume it is cheap — and so a future budget discussion has the
-#: figure. There is no sound cheap pre-filter: narrowing the roots narrows the guard,
-#: which is the hole the scan exists to close.
+#: ⛔ DELIBERATELY NO FILE COUNT, here or for the roots outside. A count is a
+#: measurement of the tree it was taken on: a draft of this comment said "254", and
+#: by the time the text landed the tree held **255** outside these roots, in
+#: directories the enumeration had also missed — the drift class this very comment is
+#: about. The population an assertion should pin is the one it ENFORCES (`_MIN_MODULES`
+#: below), not a figure in prose.
+#:
+#: It is one scan over ALL three roots on purpose: the class is not specific to the
+#: probe, and naming files here would re-open the hole the moment a declaration moves
+#: into one not named.
+#:
+#: ⛔ IT IS NOT FREE, measured on this tree: 1,971 modules (`tortoise/` 285,
+#: `tools/` 195, `tests/` 1,491), **19.1 s** of `ast.parse`+walk, inside a file whose
+#: own run is ~2 min. Recorded so the next reader does not assume it is cheap — and so
+#: a future budget discussion has a figure. There is no sound cheap pre-filter:
+#: narrowing the roots narrows the guard, which is the hole the scan exists to close.
 _DUP_KEY_ROOTS = ("tortoise", "tools", "tests")
+
+#: Per-root FLOOR for the scan's own non-vacuity check, deliberately per root and not
+#: as an aggregate: measured 285 / 195 / 1,491 on the tree above, so an aggregate floor
+#: (>1,000) still passes if the `tortoise/` AND `tools/` walks silently yield nothing —
+#: and `tools/` is exactly where this class's original instance lived. Set well under
+#: what each root holds so ordinary churn does not red it, but non-zero, so a renamed or
+#: vanished root fails instead of quietly narrowing the guard.
+_MIN_MODULES = {"tortoise": 100, "tools": 50, "tests": 500}
 
 
 def _constant_key_value(node: ast.expr) -> tuple[bool, object]:
@@ -8393,24 +8413,36 @@ def test_no_module_declares_the_same_dict_key_twice():
     `#9314` asks for: it reds in the pytest shard, not only where lint runs.
 
     ⛔ Its coverage is the three roots `_DUP_KEY_ROOTS` names, not the whole repo —
-    see that constant: 254 tracked `.py` files sit outside them.
+    see that constant: `battery/`, `graph-scripts/`, `docs/`, `eval/` and the smaller
+    roots sit outside them.
     """
     violations: list[str] = []
-    scanned = 0
+    per_root: dict[str, int] = {}
     # ⛔ THE REPO ROOT COMES FROM THE FILE, NOT THE CWD (#12265 review):
     # `Path(root).rglob` resolves against the invocation directory, so a run from
     # `tests/` scanned 0 modules and red this guard on a CORRECT tree. Every other
     # repo-root read in this module uses `probe.REPO_ROOT` for the same reason.
     root = Path(probe.__file__).resolve().parent.parent
     for name in _DUP_KEY_ROOTS:
+        scanned_here = 0
         for path in sorted((root / name).rglob("*.py")):
             rel = path.relative_to(root)
-            scanned += 1
+            scanned_here += 1
             for first, duplicate, key in _duplicate_constant_key_sites(
                     path.read_text(encoding="utf-8"), str(rel)):
                 violations.append(f"{rel}:{duplicate} re-declares key {key} (first at :{first})")
-    # A scan that read nothing would satisfy the assertion below vacuously.
-    assert scanned > 1000, f"the duplicate-key scan covered only {scanned} module(s)"
+        per_root[name] = scanned_here
+    # A scan that read nothing would satisfy the assertion below vacuously — and it
+    # must be checked PER ROOT: rglob returns zero silently on a root that was
+    # renamed or removed, and an aggregate floor lets two empty roots hide behind
+    # the third. `tools/` is where this class's original instance lived, so losing
+    # that walk while still counting `tests/` is the regression that matters most.
+    for name, floor in _MIN_MODULES.items():
+        assert per_root[name] >= floor, (
+            f"the duplicate-key scan read {per_root[name]} module(s) under {name}/, below "
+            f"its floor of {floor} — the root was renamed, removed, or its walk broke, "
+            "so the guard is now narrower than it claims. Re-derive the floor (or fix "
+            f"the root) rather than lowering it. Full counts: {per_root}")
     assert not violations, (
         "a dict literal declares the same key twice, so the entry that loses the "
         "last-wins race is DEAD while every test stays green (#12265, root #9314). "

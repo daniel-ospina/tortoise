@@ -659,8 +659,8 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # attached to the entry no reader was using. (`ruff`'s `F601` points at the
     # SURVIVOR — the repeated key — so following "which one did ruff flag" finds the
     # row that won; the loser has to be read out of the dict by hand, which is what
-    # `tests/test_dod_5090_probe.py`'s duplicate-key scan now does this over
-    # the three roots the declaration dicts live under.) The
+    # `tests/test_dod_5090_probe.py`'s duplicate-key scan now does across `tortoise/`,
+    # `tools/` and `tests/`.) The
     # #9219 rationale it carried is preserved
     # verbatim at that entry, which is the one that matches this file's single
     # mutation site (the `_run_indexer` restoration record).
