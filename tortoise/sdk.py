@@ -32104,7 +32104,63 @@ class TortoiseSDK:
                 self._dream_metrics.get("per_mode_counts", {})),
             "region_attempts": state["retry_attempts"],
             "warm_skipped_updates": state["warm_skipped_updates"],
+            # #11823 — the propagation cap, made visible. `coverage_pct` above
+            # is STAMP coverage over a population EP cannot reach; this block
+            # is the graph-scoped answer to "how many claims have no belief"
+            # plus the reach of the last pass in THIS process. It is an
+            # additive field on a plain dict (no key-set is pinned here), and
+            # it is on this surface for the same reason #3139 put
+            # `last_belief_write_count` here: the pass result's key-set IS
+            # pinned (I1, #6211), so belief observability lives on health.
+            "propagation": self._propagation_health(),
         }
+
+    def _propagation_health(self) -> dict:
+        """#11823 — the `propagation` block of `dream_health_check()`.
+
+        ``last_pass`` is `None` with a named reason when no pass ran in THIS
+        process, never a reassuring zero: the hosted door builds a
+        per-request SDK (`hosted_api.py::dream_health`), so its metrics are
+        empty by construction. The graph-scoped half is always available — it
+        is read from the graph, not from process state.
+        """
+        out: dict = {
+            "graph_live_claims": None,
+            "ep_reachable_claims": None,
+            "belief_present": None,
+            "no_belief": None,
+            "belief_coverage_pct": None,
+            "stamped": None,
+            "operator_less_claims": None,
+            "unavailable": None,
+            "last_pass": None,
+            "last_pass_reason": None,
+        }
+        try:
+            out.update(self._propagation_counts())
+        except Exception as exc:  # noqa: BLE001, RUF100
+            # "0 claims" and "could not read it" must never collapse
+            # (`BOUNDED-OPERATION-CONTRACT.md` §1a) — a failed read reports WHY
+            # and leaves the counts NULL rather than zeroed.
+            out["unavailable"] = f"{type(exc).__name__}: {exc}"
+        reach = self._dream_metrics.get("last_pass_reach")
+        if not reach:
+            out["last_pass_reason"] = (
+                "no_pass_in_this_process"
+                if not self._dream_metrics.get("last_pass_mode")
+                else "reach_not_recorded")
+            return out
+        last = dict(reach)
+        # "6 of 20, 14 uncovered": the pass's own reach against the graph
+        # population. `max(0, ...)` because `_trivial_stamp` unions
+        # operator-less stamps into the pass's `affected`, which can exceed the
+        # EP-reachable population.
+        reachable = out.get("ep_reachable_claims")
+        if reachable is not None:
+            last["uncovered"] = max(0, int(reachable) - int(last["affected"]))
+            last["graph_ep_reachable"] = int(reachable)
+        out["last_pass"] = last
+        return out
 
     def _metrics_coverage(self) -> float:
         """Coverage % = fraction of live non-operator claims with a
@@ -32128,6 +32184,124 @@ class TortoiseSDK:
             return (n_stamped / n_total) if n_total else 0.0
         except Exception:
             return 0.0
+
+    def _propagation_counts(self) -> dict:
+        """#11823 — the graph-scoped population a propagation pass does NOT choose.
+
+        `dream()`'s own `coverage` divides by the pass's radius
+        (``affected / len(_window_closure(window, max_hops))``, ``_dream_local``
+        and ``_dream_stale_first``), so it reads ≈1.0 for ANY pass that
+        consumed its window — it cannot distinguish "the cascade converged"
+        from "I stopped at level 6". And `_metrics_coverage` counts
+        ``lastDreamedAt`` STAMPS, which are written for a population EP can
+        never compute (`_trivial_stamp`). Neither can answer "how many claims
+        have no belief".
+
+        This returns the two numbers that can, and they are defined on ONE
+        population each so the arithmetic cannot mix scopes (#11823 review):
+
+        - ``ep_reachable_claims`` — live non-operator ``:Point``s with >=1
+          ``IMPL|NAND`` edge to a live epistemic endpoint. Its OWN
+          ``count(DISTINCT n)``, never ``_edged_claim_ids()``: that query is
+          label-blind (``epistemic_disjunction`` admits Point|Subject|Object|
+          Event), so reusing it here would put a ``:Point`` numerator over a
+          wider denominator and yield ``belief_coverage_pct > 1`` and a
+          NEGATIVE ``no_belief`` (measured: 5.0 / -8.0).
+        - ``belief_present`` — the SAME population, counted through the shared
+          presence predicate (`ep_has_belief_cypher`, #11702) rather than a
+          private ``IS NOT NULL``: a stored (0,0) pair is not a belief and a
+          declared baseline prior is (`analyze.py`: "The presence gate is
+          `ep_has_belief_cypher`, the SHARED predicate — never a private sum").
+        - ``graph_live_claims`` / ``stamped`` — the ``:Point`` population the
+          existing stamp-coverage ratio uses.
+        - ``operator_less_claims`` — its OWN ``NOT (n)-[:IMPL|NAND]-()`` count:
+          the `_trivial_stamp`/``scanned_count`` population EP can never cover.
+          NOT ``graph_live_claims - ep_reachable_claims``: that subtraction is
+          wrong three ways (label-blind denominator, far-endpoint draft
+          filter, and Points edged only to a draft — which `_trivial_stamp`
+          does not stamp either).
+
+        ⚠️ ``ep_reachable_claims`` INCLUDES anchor-less epistemic components
+        (`:Subject-[:IMPL]->:Object`, #7902) that a ``:Point``-anchored pass can
+        never clear, so ``no_belief`` may be non-zero on a converged graph. That
+        is a true statement (no belief is stored), and this instrument may
+        over-report — it must never under-report.
+
+        Raises on a read failure: the caller reports ``unavailable`` rather
+        than letting 0 mean both "no claims" and "could not read"
+        (`docs/architecture/BOUNDED-OPERATION-CONTRACT.md` §1a).
+        """
+        from .search_engine import ep_has_belief_cypher  # #11702 shared gate
+        proj = self._get_proj()
+        live = "(n.status IS NULL OR n.status <> 'draft')"
+        live_m = "(m.status IS NULL OR m.status <> 'draft')"
+        non_op = "(n.is_operator IS NULL OR n.is_operator = false)"
+        # One query: the denominator AND the belief count over that SAME set.
+        reach_rows = proj.g.query(
+            "MATCH (n:Point)-[r:IMPL|NAND]-(m) "
+            f"WHERE {non_op} AND {live} AND {live_m} "
+            f"AND ({epistemic_disjunction('m')}) "
+            f"WITH DISTINCT n, ({ep_has_belief_cypher('n')}) AS has_belief "
+            "RETURN count(n), sum(CASE WHEN has_belief THEN 1 ELSE 0 END)"
+        ).result_set
+        reachable = int(reach_rows[0][0] or 0) if reach_rows else 0
+        belief_present = int(reach_rows[0][1] or 0) if reach_rows else 0
+        # Second query: the :Point population the stamp ratio uses.
+        base_rows = proj.g.query(
+            "MATCH (n:Point) "
+            f"WHERE {non_op} AND {live} "
+            "RETURN count(n), "
+            "  sum(CASE WHEN n.lastDreamedAt IS NOT NULL THEN 1 ELSE 0 END)"
+        ).result_set
+        graph_live = int(base_rows[0][0] or 0) if base_rows else 0
+        stamped = int(base_rows[0][1] or 0) if base_rows else 0
+        # Third query: the operator-less population, as its OWN count. A
+        # `NOT (n)-[:IMPL|NAND]-()` inside a `sum(CASE ...)` is rejected by the
+        # engine ("expected Boolean or Null but was List", measured) — so it
+        # cannot ride the aggregate above.
+        less_rows = proj.g.query(
+            "MATCH (n:Point) "
+            f"WHERE {non_op} AND {live} "
+            "AND NOT (n)-[:IMPL|NAND]-() "
+            "RETURN count(n)"
+        ).result_set
+        operator_less = int(less_rows[0][0] or 0) if less_rows else 0
+        # Invariants, asserted rather than assumed (a mixed population can make
+        # either negative — #11823 review measured -8.0 on a live fixture).
+        belief_present = min(max(belief_present, 0), reachable)
+        no_belief = reachable - belief_present
+        return {
+            "graph_live_claims": graph_live,
+            "ep_reachable_claims": reachable,
+            "belief_present": belief_present,
+            "no_belief": no_belief,
+            "belief_coverage_pct": (
+                (belief_present / reachable) if reachable else 0.0),
+            "stamped": stamped,
+            "operator_less_claims": operator_less,
+        }
+
+    def _record_pass_reach(self, mode: str, max_hops: int | None,
+                           affected: int, window_reachable: int) -> None:
+        """#11823 — record the reach of the pass that just ran.
+
+        Called from EVERY pass arm, including the two that return before
+        `_record_dream_metrics` (``budget=0`` → `_dream_noop`, and the
+        no-dirty-roots return) and BEFORE `_guard_dream_progress` (which
+        records metrics and then RAISES on the silent no-op — the worst reach
+        there is, and the exact pass this instrument exists to expose). Keying
+        "did a pass run" on ``last_pass_mode is None`` would report
+        "no pass ran" for passes that ran and reached nothing.
+
+        No graph read: the closure/`affected` values are already computed by
+        the caller.
+        """
+        self._dream_metrics["last_pass_reach"] = {
+            "mode": mode,
+            "max_hops": max_hops,
+            "affected": int(affected),
+            "window_reachable": int(window_reachable),
+        }
 
     def _record_dream_metrics(self, result: dict, mode: str) -> None:
         """Per-pass observability record (C7) — called by the dream adapters."""
@@ -32913,7 +33087,7 @@ class TortoiseSDK:
             self._ensure_calibrated("dream")
         if budget is not None and budget <= 0:
             # I1: budget=0 → no-op result, not an error. No EP, no stamps.
-            return self._dream_noop(resolved)
+            return self._dream_noop(resolved, max_hops)
         dreamer = self._get_dreamer()
         if resolved == "local":
             return self._dream_local(dreamer, max_hops, stamp_dreamed_at,
@@ -32972,13 +33146,16 @@ class TortoiseSDK:
             return "full"
         return "local"
 
-    def _dream_noop(self, mode: str) -> dict:
+    def _dream_noop(self, mode: str, max_hops: int | None = None) -> dict:
         """budget ≤ 0 → no-op result with the mode's EXACT key-set (I1:
         "budget=0 → no-op result (not an error)"). No EP, no stamps;
         converged flags are vacuously True (matches dream_window's budget=0
         contract)."""
         # #3139: an explicit budget=0 is a legitimate no-op — report why.
         self._dream_metrics["last_pass_no_op_reason"] = "budget_zero"
+        # #11823: the pass RAN and reached nothing — record that, so the health
+        # surface does not report "no_pass_in_this_process" for it.
+        self._record_pass_reach(mode, max_hops, 0, 0)
         # #3139 (review P2): this pass wrote no belief state, so the belief
         # count must not survive from a previous pass — a field documented as
         # "beliefs written by the LAST pass" reporting a stale non-zero value
@@ -33187,6 +33364,9 @@ class TortoiseSDK:
             # one (a stale ``truncated: True`` would tell a caller to distrust
             # a topology nothing capped).
             dreamer._last_selection_stats = {}
+            # #11823: a pass DID run (and reached nothing) — record it as such,
+            # else the health surface reports "no_pass_in_this_process" for it.
+            self._record_pass_reach("local", max_hops, 0, 0)
             return {"mode": "local", "iterations": 0, "converged": True,
                     "affected_claims": [], "budget_used": 0, "coverage": 0.0}
 
@@ -33208,6 +33388,12 @@ class TortoiseSDK:
             before_run=_gate if require_calibration else None,
         )
         affected = set(result.get("affected_claims", []))
+        # #11823: record the pass's reach BEFORE the no-op guard — the guard
+        # itself records metrics and then RAISES on the silent no-op, and that
+        # pass's reach (nothing) is exactly what the instrument exists to
+        # expose. No extra query: the closure is needed below anyway.
+        reachable = self._window_closure(anchors, max_hops)
+        self._record_pass_reach("local", max_hops, len(affected), len(reachable))
         # #3139: fail closed BEFORE any dirty-root mutation — a silent no-op
         # that swept its own backlog would leave the graph permanently stale.
         self._guard_dream_progress(dreamer, "local", result, window=anchors)
@@ -33273,6 +33459,10 @@ class TortoiseSDK:
                                      warm_start=warm_start)
         window = getattr(dreamer, "_last_window", []) or []
         affected = set(result.get("affected_claims", []))
+        # #11823: reach recorded before the no-op guard (see _dream_local).
+        reachable = self._window_closure(window, max_hops)
+        self._record_pass_reach("stale-first", max_hops, len(affected),
+                                len(reachable))
         # #3139: fail closed before the dirty-root sweep (see _dream_local).
         self._guard_dream_progress(dreamer, "stale-first", result,
                                    window=window)
@@ -33320,6 +33510,12 @@ class TortoiseSDK:
         )
         # #1338: scheduler-internal — not part of the pinned I1 full key-set.
         result.pop("truncated", None)
+        # #11823: reach recorded before the no-op guard (see _dream_local).
+        # Full's denominator is the same reachable-claim count `coverage` uses.
+        reachable = self._reachable_claim_count(max_hops)
+        self._record_pass_reach("full", max_hops,
+                                int(result.get("total_affected", 0) or 0),
+                                int(reachable))
         # #3139: fail closed before the dirty-root sweep — a full pass that
         # scanned zero anchors over a populated graph must not report success.
         self._guard_dream_progress(dreamer, "full", result, window=None)
@@ -33341,7 +33537,6 @@ class TortoiseSDK:
             self._sweep_dirty_roots(
                 affected, run_ep=getattr(dreamer, "_last_run_ep_version", None))
             self._prune_nonexistent_dirty_roots()
-        reachable = self._reachable_claim_count(max_hops)
         coverage = ((result["total_affected"] / reachable)
                     if reachable else 0.0)
         result["coverage"] = coverage
@@ -33561,8 +33756,24 @@ class TortoiseSDK:
         if not anchors:
             return 0
         closure = self._window_closure(anchors, max_hops)
-        # The EP-run universe: claims with ≥1 IMPL|NAND edge, any epistemic
-        # label on either endpoint (#7902).
+        # #11823: the edged set lives in its own helper (one spelling of the
+        # predicate); the closure intersection stays HERE, so this function's
+        # behaviour is unchanged by the extraction.
+        edged = self._edged_claim_ids()
+        return len(closure & edged)
+
+    def _edged_claim_ids(self) -> set[str]:
+        """The EP-run universe: claims with ≥1 ``IMPL|NAND`` edge, any epistemic
+        label on either endpoint (#7902).
+
+        ⚠️ #11823: this query is **label-blind** — ``epistemic_disjunction``
+        admits ``Point|Subject|Object|Event`` — so it is NOT the denominator for
+        a ``:Point``-scoped belief count. Mixing the two populations yields
+        ``belief_coverage_pct > 1`` and a negative ``no_belief``; the health
+        block's own denominator is a separate, ``:Point``-scoped
+        ``count(DISTINCT n)`` in :meth:`_propagation_counts`.
+        """
+        proj = self._get_proj()
         edged_rows = proj.g.query(
             "MATCH (n)-[r:IMPL|NAND]-(m) "
             f"WHERE {epistemic_disjunction('n')} "
@@ -33572,8 +33783,7 @@ class TortoiseSDK:
             "AND (m.status IS NULL OR m.status <> 'draft') "
             "RETURN DISTINCT n.id"
         ).result_set
-        edged = {r[0] for r in edged_rows}
-        return len(closure & edged)
+        return {r[0] for r in edged_rows}
 
     def _select_subgraph(self, anchors: list[str], max_hops: int = 1,
                          rel_filter: str = "IMPL|NAND",
