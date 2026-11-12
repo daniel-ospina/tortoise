@@ -1658,6 +1658,32 @@ def check_verdict_tally(text: str) -> list[str]:
         governed_span = after_phrase[: negation.start()]
         sole_item = bool(_SOLE_ITEM_RE.fullmatch(governed_span.strip()))
         governed_letters = _listed_letters(governed_span, lone_marked=sole_item)
+    # ⛔ AND THE GROUP IS OFTEN ITS OWN SENTENCE (#11902 review, round 10 P2). The page's
+    # ellipsis closes the complement AT the phrase and spells the governed group separately —
+    # `… still read as written. — **(i)** and **(j)** do not.`, or wedged between the
+    # non-still tally and the still one — and such a fragment carries NEITHER tally phrase,
+    # so no phrase-driven arm above sees it: measured, it read CLEAN in BOTH positions while
+    # the identical text inside the sentence reds. So every sentence in the paragraph is
+    # asked one question: is everything before its negation verb NOTHING BUT letter items
+    # and separators? If yes it is the governed group and is validated; anything carrying a
+    # real word (`Rows (i) and (j) do not apply here.`) is prose and is never accused.
+    for candidate in sentences:
+        verb = re.search(r"\b(?:do|does|did) not\b|\bno longer\b", candidate)
+        if not verb or candidate is still_sentence:
+            continue
+        head = candidate[: verb.start()]
+        if not head.strip():
+            continue
+        residue = re.sub(_LETTER_ITEM_ANY, " ", head, flags=re.IGNORECASE)
+        residue = re.sub(
+            r"\b(?:and|or|also|plus|as\s+well\s+as|followed\s+by|namely)\b"
+            r"|[^\w\s]",
+            " ",
+            residue,
+            flags=re.IGNORECASE,
+        )
+        if not residue.split():
+            governed_letters |= _listed_letters(head, lone_marked=False)
     wrong_governed = sorted(governed_letters & set(still_true))
     if wrong_governed:
         problems.append(

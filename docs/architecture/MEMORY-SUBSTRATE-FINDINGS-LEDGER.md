@@ -406,6 +406,14 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   Excluding every sentence containing `no longer` made that governor unreachable, so the natural
   spelling of a STALE second sentence (`…, while the rest no longer do.`) rode out of the "exactly
   one" rule while the CORRECT complement written the same way red (both measured, both fixed).
+  ⛔ **AND THE GROUP IS OFTEN ITS OWN SENTENCE.** The page's ellipsis closes the complement at the
+  phrase and spells the governed group separately (`… still read as written. — **(c)** and **(d)** do
+  not.`), sometimes wedged between the non-still tally and the still one. Such a fragment carries
+  NEITHER tally phrase, so every phrase-driven arm looked past it: measured, a fragment naming
+  STILL-TRUE rows read CLEAN in both positions while the identical text inside the sentence red. So
+  every sentence in the paragraph is asked one question — is everything before its negation verb
+  nothing but letter items and separators? Yes ⇒ governed group, validated; a real word in that span
+  (`Rows (i) and (j) do not apply here.`) ⇒ prose, never accused.
   ⚠️ **Residual, stated:** the
   "exactly one" rule is scoped to the tally's own paragraph, so a second complementary or "no longer"
   sentence **two newlines below** it is not counted. Widening it to the whole page is not available

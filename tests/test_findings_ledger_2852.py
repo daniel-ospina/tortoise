@@ -3855,6 +3855,50 @@ def test_a_shorthand_cannot_resolve_across_a_section_boundary(tmp_path, monkeypa
     assert any("shorthand with no preceding" in p for p in problems), problems
 
 
+def test_a_governed_group_in_its_own_sentence_is_validated(tmp_path, monkeypatch):
+    """FAILS open if the page's ELLIPSIS hides the governed complement.
+
+    The documented shape writes the governed group as its own sentence
+    (`… still read as written. — **(c)** and **(d)** do not.`). Such a fragment carries
+    NEITHER tally phrase, so every phrase-driven arm — the still list, the non-still
+    list, the governed span and the stray-tally arm — looked past it: measured at
+    `c5990249c0`, a fragment naming STILL-TRUE rows read CLEAN in both positions, while
+    the identical text inside the sentence reds.
+
+    The rule is the one the governed-span arm already uses, applied to every sentence in
+    the paragraph: everything before the negation verb must be NOTHING BUT letter items
+    and separators. Anything carrying a real word is prose and is never accused — the
+    control here is `Rows (i) and (j) do not apply here.`
+    """
+    tail = "are **DRIFTED**. Only"
+    complement = "still read as written. (Four"
+    contradicting = (
+        "are **DRIFTED**. — **(i)** and **(j)** do not. Only",
+        "still read as written. — **(i)** and **(j)** do not. (Four",
+        "are **DRIFTED**. — **(i)** and **(j)** no longer do. Only",
+    )
+    for spelled in contradicting:
+        src = tail if spelled.startswith("are ") else complement
+        with monkeypatch.context() as patch:
+            _mutated(tmp_path, patch, lambda t, a=src, b=spelled: t.replace(a, b, 1))
+            problems = _doc_problems()
+            assert any("negated complement" in p for p in problems), (
+                f"a standalone governed fragment must be validated: {spelled!r} "
+                f"left {problems}"
+            )
+    for spelled in (
+        "are **DRIFTED**. — **(c)** and **(d)** do not. Only",
+        "are **DRIFTED**. Rows (i) and (j) do not apply here. Only",
+    ):
+        with monkeypatch.context() as patch:
+            _mutated(tmp_path, patch, lambda t, b=spelled: t.replace(tail, b, 1))
+            problems = _doc_problems()
+            assert not any("negated complement" in p for p in problems), (
+                f"correct prose and a legitimate fragment must stay CLEAN: {spelled!r} "
+                f"left {problems}"
+            )
+
+
 def test_a_second_tally_cannot_hide_one_blank_line_away(tmp_path, monkeypatch):
     """FAILS open if a tally outside the takeaway PARAGRAPH goes unread.
 
