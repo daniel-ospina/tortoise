@@ -94,7 +94,7 @@ _ENV_NAME = re.compile(r"TORTOISE_[A-Z0-9_]+")
 
 #: Round 9 of the #10983 review, and the reason this list keeps growing: an
 #: wide: `sparse.py:226` reads ``TORTOISE_IDENTIFIER_TOKENS`` (default ON) and
-#: `projection/entities.py:1478` gates the alias derivation on it
+#: `projection/entities.py:1480` gates the alias derivation on it
 #: (`point_identifier_aliases`), reached from the write path the acceptance
 #: takes (`sdk.capture_session` -> `_extract_session_v2` -> `create_point`), so
 #: it REWRITES `search_keys` on every ``:Point`` the run writes. MEASURED on the

@@ -3,9 +3,9 @@
 The memory-substrate problem map (`docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md`)
 answers *"is this still broken?"* for 26 named defects. The issue it re-cuts went
 stale for eight weeks — its body read as 26 problems waiting while the tree had
-fixed 21 — so the map is only worth having if something can tell when its answers
-age out. This file pins the guard that makes its machine-checkable half
-falsifiable.
+already fixed 21 of them (22 now that #2782 is re-cut) — so the map is only worth
+having if something can tell when its answers age out. This file pins the guard
+that makes its machine-checkable half falsifiable.
 
 No network, no DB, no `gh`: the TRACKER half of the map is deliberately not
 guarded (a status is a dated fact — §9 of the document says so), so nothing here
@@ -23,8 +23,11 @@ the shipped source read as an AST — the interpreter guard's exit code, which n
 runtime fixture can produce (1). That is 51 negative controls plus 6 positives:
 three read the shipped page whole
 (`test_the_recut_row_and_survivors_hold_their_status_by_ISSUE` is the fourth —
-added when fresh review measured that every other arm compares COUNTS, so a
-status swap between two rows was invisible to the whole file; see its docstring),
+added when fresh review measured that no arm ASSERTED a row's status by issue, so
+a compensating status swap between two rows was invisible to the whole file as a
+claim — one arm carries a per-issue status literal only as a mutation fixture's
+premise, where it reds as a broken fixture rather than a status finding; see its
+docstring),
 a fifth
 (`test_every_status_token_is_in_the_vocabulary`) reads the closed-vocabulary
 CONSTANT rather than the page — see below — and the sixth is the positive half of
@@ -169,22 +172,73 @@ def test_the_taxonomy_counts_are_what_the_summary_declares():
 
 
 def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
-    """Fails when two rows SWAP statuses — a compensating edit no count can see.
+    """Fails when any of the five pinned rows changes status — swap OR unilateral.
 
-    Reachable, and measured at the head that added this arm: every other
-    comparison in this file is a COUNT — §2's tally, the abstract headline, the
-    index headline, the WS-C cell — so an edit that holds the tally and moves
-    the claim is invisible to all of them. Reverting §2's `#2782` to `OPEN`
+    Reachable, and measured at the PARENT head `65991398a1ed`, where this arm did
+    not exist (the file collects 58 there): BEFORE THIS ARM no
+    arm ASSERTED a row's status by issue — the arms that read the page compare
+    COUNTS (§2's tally, the abstract, the WS-C cell) or check a row's presence,
+    its pin, its status vocabulary and its anchors — so an edit that held the
+    tally and moved the claim was invisible to all of them as a CLAIM. Some arms
+    do carry a per-issue literal, but as a MUTATION FIXTURE's premise rather than
+    an assertion: `_rewrite_row(..., 2813, "| VERIFIED-FIXED |", …)` fails with
+    "row #2813 does not contain '| VERIFIED-FIXED |'", i.e. as a broken fixture,
+    not as a status finding. Those premises are therefore not the REASON such a
+    swap is caught: `#2813` is a WS-A row while all four `OPEN` rows sit in
+    WS-B/C/D, so a tally-holding swap touching it has to promote one of the four
+    the pin names — which reds this arm. Correct BOTH affected workstream cells
+    (WS-A's down, the promoted row's up) and `problem_map_check --check` stays
+    clean — its tally checks cannot see a swap that leaves them consistent. The
+    pytest tally ARMS are a different matter and do NOT stay green: the WS-B
+    cell's literal is a fixture PREMISE (`**7 of 8 rows fixed**` ->
+    `**8 of 8 rows fixed**`, guarded by `assert mutated != text`), so moving it
+    makes that arm fail on the missing premise — "fixture no longer finds WS-B's
+    count", breakage, not confirmation. Leave either cell stale and the checker
+    reds on a COUNT rather than on the swap ("summary says 7 of 8 WS-B row(s)
+    fixed; the table has 8 VERIFIED-FIXED"). Neither red is this arm confirming
+    the swap, and neither is a reason to read the checker's clean run as
+    coverage.
+    What the premises add is the case this arm cannot
+    see: a UNILATERAL move on a row the pin does NOT name, whose counts are all
+    corrected, where `problem_map_check --check` reads CLEAN and the reds are
+    breakage — these premises, and the arms whose fixtures encode the shipped
+    counts.
+    Reverting §2's `#2782` to `OPEN`
     **and** promoting `#2684` to `VERIFIED-FIXED` (one row each way, so §2 stays
     22/4/0, the total 26, WS-C 4 of 6, and both headlines intact) left
-    `tools/problem_map_check.py --check` **CLEAN** and this suite **58 passed** —
-    green over a page whose re-cut, the reason this revision exists, had been
-    undone. The count literals also expire: they must be re-derived on the next
-    re-cut, so a count-only guarantee lapses with the next count move.
+    `tools/problem_map_check.py --check` with **no drift** (CLEAN where history is
+    available, UNVERIFIED in a shallow clone). The SUITE half split when this arm
+    landed, and the two readings are what make the arm load-bearing rather than
+    redundant: at the PARENT head `65991398a1ed` the mutant read **58 passed** —
+    the file's whole collected count, so the suite was GREEN over an undone
+    re-cut; at THIS head it reads **1 failed, 58 passed**, the one failure being
+    THIS arm, while every OTHER arm in the file still passes over the swap.
+    Those two `58`s are NOT the same number — above it is 58 collected with
+    nothing red, here it is 59 collected less this one failure — and neither
+    is the weight. The count literals
+    also expire: they must be re-derived on the next re-cut, so a count-only
+    guarantee lapses with the next count move.
 
     So the two sets the page's prose asserts BY NAME are pinned by issue: the
-    row this re-cut is about, and the four survivors §8 counts. A count is the
-    only thing most of this file checks; a status is a per-row fact.
+    row this re-cut is about, and the four survivors §8 counts. A count is what
+    most of this file checks; a status is a per-row fact.
+
+    ⛔ These expectations are LITERALS — the five status literals asserted below
+    and the `22`/`4` counts the count arm asserts. They are a second copy of the
+    same hand
+    measurement, not an independent source: a re-cut that moves the page and
+    these literals together is caught by nothing here. The tracker records whether
+    the TICKET was closed, and three of the page's §1 rows show that says nothing
+    about a row either way (two tracker-CLOSED issues are OPEN rows there, one
+    tracker-OPEN issue is fixed), while `tools/problem_map_check.py` deliberately
+    refuses to read GitHub and re-derives none of this from the tree, so re-derive
+    these on every re-cut; a re-cut that only makes this file green has proven
+    nothing about the statuses. The pin asserts statuses by issue for five rows —
+    the re-cut row and §8's four survivors — so ANY status move touching one of
+    them reds it as a status finding, whatever the counts say. Outside those
+    five, a unilateral move with every count corrected reads CLEAN under
+    `--check` and reds only as breakage: a fixture premise that happens to name
+    that row's cells, or an arm whose fixture encodes the shipped counts.
     """
     rows, _ = pmc.parse_rows(DOC.read_text(encoding="utf-8"))
     status = {r.issue: r.status for r in rows}
@@ -449,7 +503,7 @@ def test_an_UNKNOWN_workstream_label_is_reported_not_a_KeyError(tmp_path):
     control above swaps two labels, which preserves the label set `{A,B,C,D,E}`,
     so it exercises the count-by-label BINDING and never reaches this branch.
     Measured with the branch deleted: this control FAILS with `KeyError: 'WS-F'`
-    escaping `run()` while the other 57 pass — so the mutant is caught here and
+    escaping `run()` while the other 58 pass — so the mutant is caught here and
     nowhere else.
     """
     copy = _doc_copy(tmp_path)

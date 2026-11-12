@@ -280,6 +280,16 @@ _ENVELOPE_KEYS_AT_PASSTHROUGH = _ENVELOPE_KEYS | {
     "actor",
 }
 
+#: …and the envelope name a RECORD must never carry: `projection_version`.
+#: The doors set it themselves as a KEYWORD (`add_point` / `add_operator` pass
+#: `projection_version=2`), so a value inside the RECORD is always a caller's —
+#: and it is the one envelope key `_norm`'s splice acts on semantically rather
+#: than as identity: the fold reads the record's value and skips the `#49`
+#: context strip a v2 stop-write exists to perform (#11835 review round 9, P3).
+#: Kept OUT of `_ENVELOPE_KEYS` on purpose — the RECORD doors pass it as a
+#: keyword (`add_point` / `add_operator` both pass `projection_version=2`), so a
+#: shared refusal would refuse their own call; only the RECORD channel refuses it.
+_RECORD_ENVELOPE_EXTRA = frozenset({"projection_version"})
 
 def _refuse_uncallerable_record_keys(fields: dict, type_: str, channel: str) -> None:
     """Refuse the record facts a caller cannot supply to `_emit`, on either channel.
@@ -319,19 +329,29 @@ def _refuse_uncallerable_record_keys(fields: dict, type_: str, channel: str) -> 
             "provenance, or its replay)")
 
 
-def _verify_record_vector_width(record: dict, type_: str) -> None:
+def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None:
     """A width declared on `_emit`'s POSITIONAL record must be the SEAM's answer.
 
-    ⛔ NOT a refusal of the family, and that distinction is measured: the record
-    doors legitimately carry the markers, because each stamps its own payload
+    ⛔ THIS FUNCTION VERIFIES AND REFUSES NOTHING. Which keys that leaves to the
+    idempotent arm is measured, not assumed — the record doors legitimately
+    carry the WIDTH and the IDENTITY triple, because each stamps its own payload
     through `stamp_journal_embedding` (``_point`` with ``creating=True``;
     ``add_point`` with ``creating=False`` after popping a stale width). Refusing
-    `_SERVER_MANAGED_EMBEDDING_KEYS` on this channel breaks every vector-bearing
+    any of those four on this channel breaks every vector-bearing
     ``PointAdded`` — the reviewer who found the gap proposed exactly that, and
     it reds the whole width suite. (``add_operator``'s record is the one that
     carries neither: `_point` builds a vector only on the operator-less,
     non-empty-content path, so there is no marker on it to verify or to lie —
     see the header above.)
+
+    ⛔ AND THE OTHER TWO ARE *REFUSED*, NOT VERIFIED — `embedding_verbatim` and
+    `embedding_preserved` are in `_UNCALLERABLE_RECORD_KEYS` and are refused on
+    this channel by `_refuse_uncallerable_record_keys`, because no seam call
+    here mints either (measured: `_point` stamps the width and the identity
+    triple only) while both are ownership claims no predicate on the values can
+    derive. Stating this here matters: the paragraph above, read alone, invites
+    the reading that the whole marker family rides this channel — which is the
+    over-claim this file has now had to correct three times, one level out.
 
     So this VERIFIES instead. The harm the marker rule exists to prevent is a
     marker that LIES — a declared ``f32`` over values it does not describe,
@@ -350,10 +370,59 @@ def _verify_record_vector_width(record: dict, type_: str) -> None:
              declared `f32`   ← the marker LIE, on the one channel built to be
                                 unreachable from any door
 
+    ⛔ THE VALUES ARE READ FROM THE MERGED VIEW, NOT FROM THE RECORD ALONE, and
+    that is the second half of this guard (#11835 review round 9, P1 — measured).
+    The replay's `_norm` is ``{**envelope, **record}`` — the record WINS per
+    key — so the fold reads the width from the record and the VECTOR from
+    wherever it is. Reading both out of `record` therefore verifies the wrong
+    pair: a record declaring ``f32`` while its `embedding` rides the keyword
+    payload passed here as "no vector to check" and journalled a lying marker
+    the fold then honoured, and the seam's own stamp wrote the truthful
+    ``f64`` onto the ENVELOPE in the same line (two contradictory declarations
+    in one record). Measured before this fix:
+
+        _emit("PointAdded", {"id": "p", "content": "c",
+                             "embedding_width": "f32"},
+              embedding=[0.1234567890123, 1/3])
+          -> journalled; envelope width `f64`, record width `f32`,
+             fold reads `f32` over [0.1234567890123, 0.3333333333333333]
+
+    So the merged view is what gets verified, and a declared ``f32`` with NO
+    decidable vector anywhere is a REFUSAL rather than the undecidable case:
+    `_stamp_journal_vector_width` POPS the key when there is no vector
+    (`tortoise/embeddings.py`), so "width over no vector" is a state the
+    contract says cannot exist.
+
     Undecidable input (a non-numeric ``embedding``, an unimportable seam —
     #5148: an import must never fail a WRITE) is treated as NO MISMATCH, i.e.
     exactly the behaviour before this guard; the guard only ever turns a lie
     into a refusal, never a write into an I/O failure.
+
+    ⛔ WHAT THIS VERIFIES, EXACTLY: the WIDTH, and only when it is declared
+    ``f32``. The other five server-managed marker keys
+    (`_SERVER_MANAGED_EMBEDDING_KEYS`: `embedding_verbatim`,
+    `embedding_preserved`, `embedding_model`, `embedding_revision`,
+    `embedding_text_hash`) ride this channel UNCHECKED, and that is a deliberate
+    LIMIT rather than coverage (#12000 round-10 review, F2 — measured: a record
+    carrying `embedding_verbatim: True` is accepted, and the fold then stores
+    the vector RAW instead of `vecf32`).
+
+    Two different reasons, and the difference is measurable (#12000 re-review,
+    F2' — the first draft of this paragraph cited the SDK's re-emit as the
+    reason, which is the wrong producer because that path never reaches this
+    funnel):
+
+    * `embedding_model` / `embedding_revision` / `embedding_text_hash` ARE
+      minted on this channel — `_point`'s ``creating=True`` stamp writes all
+      three into the record — so refusing the family here would red every
+      vector-bearing ``PointAdded``;
+    * `embedding_verbatim` / `embedding_preserved` are never minted here and no
+      predicate on the values can derive them: they are ownership claims about
+      where a vector came from, not a function of its values.
+
+    The width is the one member of the family that IS a pure function of the
+    values, which is why it is the one this channel verifies. Anything claiming
+    the whole family is verified here is wrong.
 
     ⛔ THE PREDICATE IS "would the seam also have said `f32`", NOT a re-stamp.
     An earlier draft copied the record WITHOUT the declared width and re-ran
@@ -408,12 +477,67 @@ def _verify_record_vector_width(record: dict, type_: str) -> None:
     if declared != _F32:
         # ``f64`` — always truthful: it only forgoes narrowing.
         return
-    values = record.get("embedding")
+    # `_norm` splices the record OVER the envelope on replay (`{**ev,
+    # **ev["point"]}`), so this is the pair the FOLD sees.
+    values = {**payload, **record}.get("embedding")
+    if values is None:
+        raise ValueError(
+            f"{_KEY}={declared!r} is declared over NO vector: `{type_}`'s "
+            f"record carries no `embedding` and neither does its envelope, and "
+            f"a width without a vector is a state the journal contract says "
+            f"cannot exist (the seam POPS the key when there is no vector).")
     try:
-        truthful = (_is_shortest_f32_text(values)
-                    or shortest_float32_vector(values) is not None)
+        truthful = _is_shortest_f32_text(values)
     except Exception:  # noqa: BLE001, RUF100 — undecidable input keeps the old posture
         return
+    if not truthful:
+        # ⛔ The grid question is its OWN `try`, and a raise here is a REFUSAL,
+        # not an abstention (#12000 round-10 review, F1 — measured).
+        # `_is_shortest_f32_text` is fail-CLOSED on non-numeric input (a `str`,
+        # `bytes`, `dict`, a scalar, a NaN) and returns `False`; asking
+        # `shortest_float32_vector` about the same input can RAISE, and a
+        # shared `except: return` therefore read "the seam cannot decide" over
+        # a value the seam can describe exactly: it will DROP it. Measured at
+        # `bf1957fb9`:
+        #
+        #     _emit("PointAdded", {"id": "p", "content": "c",
+        #                          "embedding_width": "f32"},
+        #           embedding="abc")   -> journalled, fold reads f32 over 'abc'
+        #
+        # So: a vector the seam can only DROP is a vector no width describes,
+        # and a declared `f32` over it is refused.
+        #
+        # ⛔ AND THE SAME ITERABLE GUARD THE FIRST ARM CARRIES, because the grid
+        # helper does NOT have it (#12000 round-10 re-review, F1' — measured):
+        # `shortest_float32_vector` reads its argument as
+        # `[float(x) for x in vector]`, so a `str` is a sequence of CHARACTERS,
+        # `bytes` a sequence of INTS and a `dict` a sequence of KEYS —
+        # `"123"` becomes `[1.0, 2.0, 3.0]` and `{"0": 0.1}` becomes `[0.0]`,
+        # both ON the grid, so the arm answered "truthful" about the wrong
+        # object, in the PERMISSIVE direction. `_is_shortest_f32_text` refuses
+        # exactly these three types for exactly this reason; the grid arm must
+        # too. Measured at `0a86cb5a87`, with the junk on the RECORD — where the
+        # post-stamp belt DID run and DID see it (it is handed `event["point"]`
+        # as the record, and the merged view lets the record win), and let it
+        # through because it ran the SAME permissive predicate this arm did:
+        #
+        #     _emit("PointAdded", {"id": "p", "content": "c",
+        #                          "embedding": "123",
+        #                          "embedding_width": "f32"})
+        #       -> journalled, and the FOLD stored point.embedding = '123'
+        #
+        # ⛔ The belt is NOT a duplicate of this arm and must not be read as one
+        # (#12000 cycle-3 review, P3): an empty vector passes HERE (it is
+        # representable at every width) and only the belt refuses it once the
+        # stamp has made it absent. Both arms need the guard, and neither covers
+        # a different CHANNEL — they cover the same pair at two moments.
+        if isinstance(values, (str, bytes, dict)):
+            truthful = False
+        else:
+            try:
+                truthful = shortest_float32_vector(values) is not None
+            except Exception:  # noqa: BLE001, RUF100
+                truthful = False
     if not truthful:
         raise ValueError(
             f"{_KEY}={declared!r} is not what the values say: this payload's "
@@ -446,7 +570,7 @@ def _refuse_caller_named_record_keys(keys, door: str) -> None:
             "`add_operator`) instead of naming it here.")
 
 
-def _refuse_caller_named_envelope_keys(keys, door: str) -> None:
+def _refuse_caller_named_envelope_keys(keys, door: str, *, record: bool = False) -> None:
     """Refuse a caller key that collides with the journal ENVELOPE.
 
     #11948: the envelope is the FUNNEL's to build. A payload key that shares a
@@ -456,8 +580,16 @@ def _refuse_caller_named_envelope_keys(keys, door: str) -> None:
     `initiated_by`, `agent_id`, `actor_user_id`, `corrects`). Nothing else in
     the write path re-checks the record's type, so a caller-typed record is
     folded by the replay as whatever it claims to be.
+
+    `record=True` adds the one envelope name that is a CALLER value on this
+    channel only (see `_RECORD_ENVELOPE_EXTRA`): the doors pass
+    `projection_version` as a keyword, so seeing it INSIDE the record means the
+    caller put it there and the replay will read it in preference to the
+    door's — defeating the v2 stop-write's context strip.
     """
-    named = sorted(set(keys) & _ENVELOPE_KEYS_AT_PASSTHROUGH)
+    forbidden = (_ENVELOPE_KEYS_AT_PASSTHROUGH | _RECORD_ENVELOPE_EXTRA
+                 if record else _ENVELOPE_KEYS_AT_PASSTHROUGH)
+    named = sorted(set(keys) & forbidden)
     if named:
         raise ValueError(
             f"{named} are journal ENVELOPE fields, which {door} does not own: "
@@ -742,14 +874,31 @@ class EventAPI:
             # over the envelope on replay, so a caller keyed `type=` / `ts=` /
             # `event_id=` here re-types or re-attributes the replayed record.
             _refuse_caller_named_envelope_keys(
-                record[0], f"the `{type_}` record door")
-            # ⛔ The uncallerable facts are REFUSED (no seam call here mints
-            # them), THEN the width is VERIFIED (the seam does mint that one),
-            # and the identity triple is left to the doors that can judge it —
-            # see the three-group note above the commit point.
+                record[0], f"the `{type_}` record door", record=True)
+            # ⛔ The UNCALLERABLE facts are REFUSED on this channel too — no seam
+            # call here mints them, so a value can only be a caller's. This is
+            # the channel an earlier comment left open by describing the family
+            # as "verified, not refused": that was true of the WIDTH alone. The
+            # other six are NOT a function of the values, so no verification can
+            # exist for them — `embedding_verbatim` / `embedding_preserved` are
+            # ownership claims (the first ALSO writes a declared node property,
+            # `projection/entities.py:2386`), `evidence_fold` is the replay's
+            # recreate anchor, `embeddingText` the text↔vector identity, and the
+            # three source-ref keys provenance the `:Source` resolution asserts.
+            # ⛔ AND THE KEYWORD CHANNEL IS NOT THE SAFER ONE, which is why both
+            # arms exist: a flat record's top-level `evidence_fold` is read by
+            # `projection.record_is_evidence_fold`, and `_norm` splices a nested
+            # record over the envelope so it is read identically on replay.
             _refuse_uncallerable_record_keys(
                 record[0], type_, "record door")
-            _verify_record_vector_width(record[0], type_)
+            # …THEN the width is VERIFIED, because the seam DOES mint that one
+            # (`_point`'s `stamp_journal_embedding`). Its limit is stated where
+            # it is implemented, and the IDENTITY triple
+            # (`embedding_model` / `_revision` / `_text_hash`) is the residual
+            # this channel cannot decide — a creating `_point` legitimately
+            # stamps it, so the door that refuses a caller's version is
+            # `add_point` (its `_forged_keys`).
+            _verify_record_vector_width(record[0], type_, payload)
             payload["point"] = record[0]
         # #7951 — THE JOURNAL ORDERING CONTRACT: **journal first, then
         # project.** The full contract (and the failure-mode argument) lives at
@@ -834,6 +983,20 @@ class EventAPI:
                 stamp_journal_embedding = None
             if stamp_journal_embedding is not None:
                 event = stamp_journal_embedding(event, creating=False)
+        # ⛔ RE-VERIFY AFTER THE STAMP: the stamp can CHANGE the pair the fold
+        # reads. `_drop_journalled_embedding` sets the vector to an owned `None`
+        # and POPS the width from the dict it was given, so a record declaring
+        # `f32` beside a vector the seam drops would leave `f32` over `None` —
+        # the exact state the no-vector refusal forbids, reached one call later
+        # (#12000 round-10 review, F1b — measured with `embedding="abc"` on the
+        # payload: journalled `env.embedding=None env.width=None
+        # record.width='f32'`). The pre-stamp check now refuses the non-numeric
+        # vector that produced that instance, so this is the belt to that brace:
+        # any FUTURE drop path lands here too, before the commit point.
+        if isinstance(event.get("point"), dict):
+            _verify_record_vector_width(
+                event["point"], type_,
+                {k: v for k, v in event.items() if k != "point"})
         # #5475 (residual): the approved-pack gate, BEFORE the commit point.
         # Every EventAPI mutation funnels through here, so gating here is what
         # closes the seam for the doors it has today AND for a door added

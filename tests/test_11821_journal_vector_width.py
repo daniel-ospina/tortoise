@@ -1124,7 +1124,19 @@ def test_the_record_channel_cannot_carry_an_envelope_name(tmp_path):
                        ("initiated_by", "somebody"),
                        ("agent_id", "agent-9"),
                        ("actor_user_id", "user-9"),
-                       ("event_id", "forged-event")):
+                       ("event_id", "forged-event"),
+                       # ⛔ `projection_version` is the one envelope name that is
+                       # NOT identity but BEHAVIOUR: the fold reads it and skips
+                       # the `#49` context strip. The doors pass it as a KEYWORD
+                       # (`projection_version=2`), so a value inside the RECORD
+                       # is always the caller's and `_norm`'s splice makes it
+                       # win. Measured at `59fc1deb15`: `add_point(...,
+                       # projection_version=0, context={...})` journalled `2` on
+                       # the envelope, `0` in the record, and the fold kept the
+                       # context — the caller defeating the v2 stop-write. Kept
+                       # out of the shared set on purpose: a passthrough door
+                       # may legitimately pass it as a keyword.
+                       ("projection_version", 0)):
         with pytest.raises(ValueError, match="ENVELOPE"):
             api.add_point("hello", provenance("src:7", [0, 5], "q"),
                           **{key: value})
@@ -1632,6 +1644,114 @@ def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
         f"blanket refusal on the positional channel would break the door, got {widths}")
     assert records[1]["point"]["embedding"] == [0.1, 0.2], (
         "the door's vector must reach the journal untouched")
+
+    # 4. ⛔ THE VALUES ARE THE MERGED VIEW'S, NOT THE RECORD'S (#11835 review
+    #    round 9, P1 — measured). `_norm` splices the record OVER the envelope,
+    #    so the fold reads the width from the record and the vector from
+    #    wherever it happens to be. A record that declares `f32` while its
+    #    vector rides the KEYWORD payload (which `add_event` documents as
+    #    allowed, so the funnel must cope) passed the record-only read as "no
+    #    vector to check" and journalled a marker the fold then honoured —
+    #    while the seam's own stamp wrote the truthful `f64` on the envelope in
+    #    the SAME line. Two contradictory declarations, one record.
+    with pytest.raises(ValueError, match="is not what the values say"):
+        api._emit("PointAdded",
+                  {"id": "p-split", "content": "c",
+                   JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32},
+                  embedding=[0.1234567890123, 1 / 3])
+
+    # 5. …and a declared width over NO vector anywhere is refused rather than
+    #    the undecidable case: `_stamp_journal_vector_width` POPS the key when
+    #    there is no vector, so "width over no vector" is a state the contract
+    #    says cannot exist.
+    with pytest.raises(ValueError, match="declared over NO vector"):
+        api._emit("PointAdded",
+                  {"id": "p-nowidth", "content": "c",
+                   JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32})
+    assert [json.loads(ln) for ln in
+            journal.read_text(encoding="utf-8").splitlines() if ln.strip()] == records, (
+        "both refusals precede the commit point — the journal must be unchanged")
+
+    # 6. The merged view agrees when the vector is on the ENVELOPE and the
+    #    record declares the width the seam would also declare for it.
+    api._emit("PointAdded", {"id": "p-split-ok", "content": "c",
+                             JOURNAL_VECTOR_WIDTH_KEY: "f64"},
+              embedding=[0.1, 0.2])
+    records = [json.loads(ln) for ln in
+               journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(records) == 3 and records[-1]["point"]["embedding_width"] == "f64", (
+        "a truthful declaration over the envelope's vector must still land")
+
+    # 7. ⛔ A VECTOR THE SEAM CAN ONLY DROP IS A VECTOR NO WIDTH DESCRIBES
+    #    (#12000 round-10 review, F1 — measured). `_is_shortest_f32_text` is
+    #    fail-CLOSED on non-numeric input and returns False; asking
+    #    `shortest_float32_vector` about the same input RAISES, and a shared
+    #    `except: return` read that as "the seam cannot decide" — over a value
+    #    the seam describes exactly, by dropping it. Measured at `bf1957fb9`:
+    #
+    #        _emit("PointAdded", {"id": "p", "content": "c", KEY: "f32"},
+    #              embedding="abc")  -> journalled, fold reads f32 over 'abc'
+    #
+    #    …and in the same call the seam then dropped that vector and popped its
+    #    own width, leaving the record's `f32` over `None`: the exact state
+    #    arm 5 above refuses, reached one call later. Both are refused now.
+    for _bad in ("abc", 7, {"0": 0.1}, [float("nan")]):
+        with pytest.raises(
+                ValueError,
+                match=r"is not what the values say|declared over NO vector"):
+            api._emit("PointAdded", {"id": "p-junk", "content": "c",
+                                    JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32},
+                      embedding=_bad)
+    # …and the post-stamp re-check: a record declaring `f32` cannot survive a
+    # payload whose vector the seam DROPS. The non-numeric shapes above are the
+    # reachable ones today, so this asserts the ordering, not a second path.
+    with pytest.raises(ValueError):
+        api._emit("PointAdded",
+                  {"id": "p-dropped", "content": "c",
+                   JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32},
+                  embedding="abc")
+
+    # ⛔ …AND THE BELT HAS ITS OWN ROW, which is the one shape that reds when it
+    #    is removed (#12000 mutation pass, agent-infra#3442 — measured: with the
+    #    post-stamp call disabled, every other arm above still passes, because
+    #    they are all refused by the PRE-stamp check). An EMPTY vector is the
+    #    case that separates them: `_is_shortest_f32_text([])` is `True`
+    #    ("representable at every width" — `tortoise/embeddings.py`), so the
+    #    pre-stamp arm passes it truthfully, the seam then DROPS it to an owned
+    #    `None`, and the belt is what refuses the resulting `f32` over `None`.
+    #    Without this row the belt is unexercised — a guard with no attributable
+    #    mutant, which is how five PRs in one night were reviewed clean over
+    #    restored bugs.
+    with pytest.raises(ValueError, match="declared over NO vector"):
+        api._emit("PointAdded",
+                  {"id": "p-empty", "content": "c",
+                   JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32},
+                  embedding=[])
+
+    # 8. ⛔ THE SAME JUNK CARRIED ON THE RECORD, which is the shape the arms
+    #    above MISS (#12000 round-10 re-review, F1' — measured). This is NOT a
+    #    channel the belt cannot see: the belt is handed `event["point"]` as the
+    #    record and the merged view lets the record win, so it ran on this
+    #    vector too and let it through because it ran the SAME permissive
+    #    predicate (that is the defect arm 8 fixes, and the reason the two arms
+    #    are not duplicates of each other). The grid arm called
+    #    `shortest_float32_vector(values)`, which reads its argument as
+    #    `[float(x) for x in vector]`: a `str` is a sequence of CHARACTERS
+    #    (`"123"` → `[1.0, 2.0, 3.0]`), `bytes` a sequence of INTS, a `dict` a
+    #    sequence of KEYS (`{"0": 0.1}` → `[0.0]`) — all ON the grid, so the
+    #    arm answered "truthful" about the wrong object. Measured at
+    #    `0a86cb5a87`: both journalled, and the FOLD stored the junk as the
+    #    Point's vector under `f32`. `_is_shortest_f32_text` refuses exactly
+    #    these three types for exactly this reason; the grid arm now does too.
+    for _junk in ("123", {"0": 0.1}, b"12"):
+        with pytest.raises(ValueError, match="is not what the values say"):
+            api._emit("PointAdded",
+                      {"id": "p-record-junk", "content": "c",
+                       "embedding": _junk,
+                       JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32})
+    assert [json.loads(ln) for ln in
+            journal.read_text(encoding="utf-8").splitlines() if ln.strip()] == records, (
+        "every refusal precedes the commit point — the journal is unchanged")
 
 
 def test_a_declared_width_the_seam_never_mints_is_refused_not_ignored(tmp_path):
