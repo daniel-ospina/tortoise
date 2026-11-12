@@ -2425,6 +2425,39 @@ def test_a_quoted_letter_list_is_still_a_candidate(tmp_path, monkeypatch):
         ), f"a QUOTED letter list is still a letter list: {problems}"
 
 
+def test_a_quoted_figure_is_not_a_second_assertion(tmp_path, monkeypatch):
+    """FAILS if either FIGURE arm counts a sentence that only QUOTES the phrase.
+
+    The letter arms have always stripped quoted spans before the phrase test — a sentence
+    that names the words is not asserting them. Both FIGURE arms did not: they tested
+    `FIGURE_RE.search(s)` / `OVERTAKEN_FIGURE_RE.search(s)` on the RAW sentence, so
+    `They wrote "seven of the twelve rows no longer read as written" verbatim.` counted as
+    a second statement of the figure and red the page with "2 sentence(s) state a figure"
+    over prose that asserts nothing (measured, both arms). That is a false accusation
+    about the page's own subject matter, which is the class these arms must not create.
+
+    ⛔ Both alternatives are pinned separately: a single decoy exercising only one arm
+    leaves the other deletable with the suite green.
+    """
+    anchor = "is the exact defect #2795 D2 fixed. "
+    for decoy, marker in (
+        (
+            'They wrote "seven of the twelve rows no longer read as written" verbatim. ',
+            "rows no longer read as written",
+        ),
+        (
+            'They wrote "four of the seven were overtaken" verbatim. ',
+            "overtaken figure",
+        ),
+    ):
+        with monkeypatch.context() as patch:
+            _mutated(tmp_path, patch, lambda t, d=decoy: t.replace(anchor, f"{anchor}{d}", 1))
+            problems = _doc_problems()
+            assert not any(marker in p and "sentence(s)" in p for p in problems), (
+                f"a QUOTED figure asserts nothing and must not count: {problems}"
+            )
+
+
 def test_every_spelling_of_a_second_tally_sentence_is_refused(tmp_path, monkeypatch):
     """FAILS if any ONE spelling of a letter list is not a tally candidate.
 
