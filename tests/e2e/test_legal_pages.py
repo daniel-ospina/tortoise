@@ -598,12 +598,16 @@ def _body_text_clean(page: Page) -> str:
     return _clean(page.evaluate("document.body.innerText"))
 
 
-def _footer_href_matches(hrefs, wanted: str) -> bool:
-    """Does any footer href point at `wanted`, in any of the shapes #11762 creates?
+def _href_matches_path(hrefs, wanted: str) -> bool:
+    """Does any href point at `wanted`, in any of the shapes #11762/#11764 creates?
 
     `/license`, `/tortoise/license` and `https://premiselabs.co/tortoise/license`
     are the SAME document; which spelling is correct depends on the origin serving
     the page. Path suffix accepts all three without accepting a different page.
+
+    Named for the SHAPE, not for the footer: the signup acceptance line needs the
+    same verdict (`test_signup_acceptance_dom_structure`), because the app origin
+    cannot spell these paths root-relative either.
     """
     for href in hrefs:
         path = urlsplit(href).path if "//" in href else href
@@ -617,7 +621,7 @@ def _footer_links_present(content: str) -> None:
     legal/security hrefs appear in the served document."""
     hrefs = re.findall(r'href="([^"]+)"', content)
     for href in FOOTER_LINK_HREFS:
-        assert _footer_href_matches(hrefs, href), f"footer link {href} missing"
+        assert _href_matches_path(hrefs, href), f"footer link {href} missing"
 
 
 def _has_blog_entry(content: str) -> bool:
@@ -813,7 +817,7 @@ def test_footer_legal_links_on_all_site_pages(page: Page) -> None:
             "el => [...el.querySelectorAll('a[href]')].map(a => a.getAttribute('href'))"
         )
         for href in FOOTER_LINK_HREFS:
-            assert _footer_href_matches(hrefs, href), (
+            assert _href_matches_path(hrefs, href), (
                 f"footer link {href} missing on {url} (footer hrefs: {hrefs})")
 
 
@@ -1228,7 +1232,14 @@ def test_signup_acceptance_same_viewport(page: Page, viewport: tuple[int, int]) 
 def test_signup_acceptance_dom_structure(page: Page) -> None:
     """DOM parentage (P1-2): .legal-accept is a SIBLING of .providers,
     PRECEDES <form id="email-form"> in document order, and is NOT a
-    descendant of the form. Links resolve to /tos and /privacy."""
+    descendant of the form. Links resolve to the /tos and /privacy PATHS.
+
+    Matched by PATH (#11762/#11764), never by the literal relative string: this
+    page is served by the APP origin, where a root-relative `/tos` answered 404
+    (measured, #11764), so the acceptance line names the marketing origin
+    absolutely — `https://premiselabs.co/tos`. Equality against "/tos" was the
+    pre-#11764 spelling and reddened the suite the moment the href became
+    correct."""
     _goto(page, _app_url("/signup"))
 
     struct = page.evaluate(
@@ -1251,7 +1262,9 @@ def test_signup_acceptance_dom_structure(page: Page) -> None:
     hrefs = page.evaluate(
         """() => [...document.querySelectorAll('.legal-accept a')].map(a => a.getAttribute('href'))"""
     )
-    assert "/tos" in hrefs and "/privacy" in hrefs, f"legal-accept links wrong: {hrefs}"
+    for wanted in ("/tos", "/privacy"):
+        assert _href_matches_path(hrefs, wanted), (
+            f"legal-accept links wrong ({wanted} absent): {hrefs}")
 
 
 def test_mock_email_signup_created_signs_in_and_redirects(page: Page) -> None:

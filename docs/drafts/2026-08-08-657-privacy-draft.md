@@ -102,7 +102,7 @@ recorded decision whose reopen is tracked on #9486.
 
 ## Scope of this policy
 
-This Privacy Policy describes how personal data is processed in connection with the **hosted Tortoise service** operated by Premise Labs at `tortoise.premiselabs.co` (and its API at `api.premiselabs.co`).
+This Privacy Policy describes how personal data is processed in connection with the **hosted Tortoise service** operated by Premise Labs at `premiselabs.co/tortoise` (and its API at `api.premiselabs.co`).
 
 This policy does **not** apply to self-hosted deployments of the Tortoise software. In a self-hosted deployment, the operator of that deployment is the data controller for any personal data processed there, and that operator's own policies apply.
 
@@ -234,7 +234,7 @@ Where rights under different laws overlap or conflict, the applicable law govern
 
 ## 9. Data Processing Agreement (outline ⑨)
 
-A copy of the Data Processing Agreement (DPA) is available at <https://tortoise.premiselabs.co/dpa>.
+A copy of the Data Processing Agreement (DPA) is available at <https://premiselabs.co/dpa>.
 
 Under GDPR Art. 28(3), a DPA is required whenever a processor relationship exists — regardless of deal size, including for free-tier users. The DPA applies to the processor relationships described in §10 and takes effect when personal data is submitted to the service.
 
