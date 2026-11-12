@@ -158,7 +158,9 @@ not a fix (D2-5).
    baselined islands fixture — numerator 10 over denominator 2, which only this scope mix produces;
    ⛔ #12138 §2 corrected this sentence's "wider denominator" label, which named the OTHER mistake —
    the one the asserted ranges cannot see, and it credited the pair to `_edged_claim_ids`' own
-   population, where it is 0/2 = 0.0, in range; see R10 below). A second query spelling is legitimate
+   population, where the ratio is 1/2 = 0.5 on this fixture's 2-chain (the suite helper baselines
+   its last claim, so one of the two edged claims carries a belief; 0/2 = 0.0 only for an
+   UN-baselined chain — #12138 §2), in range either way; see R10 below). A second query spelling is legitimate
    here precisely because it asks a different question; the extraction in step 1 exists only so
    `_reachable_claim_count` keeps ONE copy of ITS predicate.
    - `operator_less_claims = graph_live_claims - points_edged`, where `points_edged` is the live
