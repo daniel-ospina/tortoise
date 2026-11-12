@@ -539,6 +539,7 @@ def test_a_blank_prose_cell_is_rejected(tmp_path, monkeypatch, cell, column, abs
         "&#x20;",
         '<script>x</script foo=">**STILL-TRUE**">',  # an ATTRIBUTED close tag closes nothing
         "<script><!--<script></script>-->lorem</script>",  # DOUBLE-escaped: the inner close is not one
+        "<script>[b](</script>)VISIBLE</script>",  # a RECOGNISED link re-emits its destination
         "<template><!-- </template>VISIBLE -->",  # PARSED but hidden: a comment's close is not one
         "[<br>](https://x)",  # a LINK LABEL renders; the destination does not
         "[<span></span>](https://x)",
