@@ -5728,6 +5728,22 @@ _NEGATED = re.compile(r"\b(?:not|never)\b|\bisn't\b", re.IGNORECASE)
 _CLAUSE_BREAK = re.compile(
     r"—|–|:|;|(?<=[.!?])\s|\bbut\b|\brather\b", re.IGNORECASE)
 
+#: A sentence that names the mirror and then DENIES its precedence: a negator
+#: between the mirror noun and the verb `lead` (`the mirror never leads it`, `a
+#: mirror does not lead`, `the mirror does not always lead`). Presence alone is
+#: not a qualifier — a mention used to INVERT the rule is worse than no mention,
+#: because it reads as the qualifier while asserting its opposite. Kept narrow on
+#: purpose: the negator must sit AFTER the noun and before `lead`, so the
+#: legitimate conditional forms (`no readable mirror supplies one`, `unless a
+#: readable n.confidence mirror exists`) are untouched, and an elided object
+#: (`R1 leads`, `(it LEADS)`) is still a qualifier. Measured over the five
+#: contract modules: 0 sentences refused; the PR #11922 cycle-1 inversion is
+#: refused.
+_MIRROR_LEAD_NEGATED = re.compile(
+    r"\bmirror\b[^.;]{0,80}?\b(?:not|never|isn't|doesn't|do\s+not|does\s+not)\b"
+    r"(?:\s+\w+){0,2}\s+\blead",
+    re.IGNORECASE)
+
 
 def _belief_prose(rel: str) -> str:
     """One normalised string for a module: comment markers gone, whitespace
@@ -5747,8 +5763,26 @@ def _sentences(rel: str) -> list[str]:
 def _unqualified_claims_on(sentence: str, patterns) -> list[str]:
     """The mirror-guard's predicate on ONE sentence (the reusable core of
     `_unqualified_claims`, so the control test exercises the real logic rather
-    than a regex object in isolation)."""
-    if "mirror" in sentence.lower():
+    than a regex object in isolation).
+
+    A mirror MENTION qualifies the sentence **unless the mention is negated**.
+    Bare presence is what the guard shipped with, and it is a false PASS for the
+    inversion this class exists to catch — PR #11922 cycle 1 measured it:
+
+        "A prior-only claim's confidence_mean IS the declared PRIOR mean;
+         the mirror never leads it."                      CERTIFIED by presence
+
+    That is the *opposite* of `elif mirror is not None: value = round(mirror, 4)`,
+    asserted in the one sentence the guard is supposed to make honest. The
+    negation test is deliberately NARROW (a negator between the mirror noun and
+    the verb `lead`) so it adds refusals without re-creating the acceptance
+    grammar that failed: it does not demand an explicit object (`R1 leads` is
+    fine), it does not veto `nothing` in an enumeration of the absent shapes, and
+    it does not read `no readable mirror` (a legitimate *conditional* qualifier)
+    as an inversion. Direction of error: REFUSE a true sentence — a human reads
+    it — never certify a false one.
+    """
+    if "mirror" in sentence.lower() and not _MIRROR_LEAD_NEGATED.search(sentence):
         return []
     return [sentence] if any(p.search(sentence) for p in patterns) else []
 
@@ -5845,6 +5879,27 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
         "Its confidence_mean is the PRIOR mean, and it clears the floor.",
         _PRIOR_MEAN_CLAIM_PATTERNS), \
         "the mirror-guard never reports an unqualified sentence"
+    # …and the mirror MENTION must be an AFFIRMATION of its precedence. Bare
+    # presence certified the inversion (`mirror never leads it`) in PR #11922
+    # cycle 1 — a sentence that reads as the qualifier while asserting its
+    # opposite. The affine forms must all still qualify (they are the shapes
+    # `main` actually writes, including the elided object `R1 leads`).
+    assert _unqualified_claims_on(
+        "A prior-only claim's confidence_mean IS the declared PRIOR mean; the "
+        "mirror never leads it.", _PRIOR_MEAN_CLAIM_PATTERNS), \
+        "a NEGATED mirror mention must not qualify the claim"
+    for affirming in (
+            "its confidence_mean IS the declared PRIOR mean — or the readable "
+            "n.confidence mirror's value, which LEADS it.",
+            "its confidence_mean IS the declared PRIOR mean — or the mirror's "
+            "value when the claim also carries a readable n.confidence, "
+            "because R1 leads (stated above).",
+            "its confidence_mean IS the declared prior mean — or the readable "
+            "n.confidence mirror's value, which LEADS it (R1 in search_engine).",
+            "its confidence_mean IS the declared PRIOR mean — unless a readable "
+            "n.confidence mirror supplies the value, which LEADS it."):
+        assert not _unqualified_claims_on(affirming, _PRIOR_MEAN_CLAIM_PATTERNS), \
+            f"an AFFIRMING mirror mention must qualify the claim: {affirming!r}"
     # The absent-claim guard must survive the REWORDINGS of the same false
     # prediction, not just the one that shipped it.
     for spelling in (
