@@ -2181,8 +2181,18 @@ class PackRegistry:
 
             # Collect all pack-declared kinds (used by relation, subclassOf,
             # kindDefs, and extraction validation)
+            #
+            # ⛔ ONLY STRINGS — an unhashable element (`objectKinds: [[widget]]`)
+            # passed every container arm and then raised `TypeError: unhashable
+            # type: 'list'` straight out of `_validate`, which its own contract
+            # forbids ("Return errors list"); `load_all`'s except turned it into
+            # `✗ acme: unhashable type: 'list'` — no field, no index (round-14
+            # review P2, measured). The element loop above already refuses a
+            # non-string with a NAMED message, so this filter stops the set-build
+            # from outrunning it.
             for kf in KIND_FIELDS:
-                all_pack_kinds.update(ont.get(kf, []))
+                all_pack_kinds.update(
+                    k for k in (ont.get(kf) or []) if isinstance(k, str))
 
             # Pre-built core kind set for relation validation
             ALL_CORE_KINDS = CORE_KINDS
@@ -2480,15 +2490,22 @@ class PackRegistry:
                         errors.append(
                             f"kindDefs '{kind}': 'extractable' must be a boolean"
                         )
+                    # ⛔ isinstance FIRST — `storeAs: [[1]]` raised `TypeError:
+                    # unhashable type: 'list'` out of `_validate` (measured,
+                    # round-16 review residual; the same class as the four
+                    # membership tests below, which now guard it).
                     if ("storeAs" in spec
-                            and spec["storeAs"] not in VALID_STORE_AS):
+                            and (not isinstance(spec["storeAs"], str)
+                                 or spec["storeAs"] not in VALID_STORE_AS)):
                         errors.append(
                             f"kindDefs '{kind}': 'storeAs' must be one of "
                             f"{', '.join(sorted(VALID_STORE_AS))}, "
                             f"got {spec['storeAs']!r}"
                         )
                     if ("enforcement" in spec
-                            and spec["enforcement"] not in VALID_ENFORCEMENT_LEVELS):
+                            and (not isinstance(spec["enforcement"], str)
+                                 or spec["enforcement"]
+                                 not in VALID_ENFORCEMENT_LEVELS)):
                         errors.append(
                             f"kindDefs '{kind}': 'enforcement' must be one of "
                             f"{', '.join(sorted(VALID_ENFORCEMENT_LEVELS))}, "
@@ -2565,7 +2582,9 @@ class PackRegistry:
                             f"list of kind names"
                         )
                     if ("enforcement" in chain
-                            and chain["enforcement"] not in VALID_ENFORCEMENT_LEVELS):
+                            and (not isinstance(chain["enforcement"], str)
+                                 or chain["enforcement"]
+                                 not in VALID_ENFORCEMENT_LEVELS)):
                         errors.append(
                             f"chains: '{cid or i}': 'enforcement' must be one of "
                             f"{', '.join(sorted(VALID_ENFORCEMENT_LEVELS))}"
@@ -2627,7 +2646,9 @@ class PackRegistry:
                             f"(allowed: default, kinds, relations, chains)"
                         )
                 if ("default" in enforcement
-                        and enforcement["default"] not in VALID_ENFORCEMENT_LEVELS):
+                        and (not isinstance(enforcement["default"], str)
+                             or enforcement["default"]
+                             not in VALID_ENFORCEMENT_LEVELS)):
                     errors.append(
                         f"extraction.enforcement.default must be one of "
                         f"{', '.join(sorted(VALID_ENFORCEMENT_LEVELS))}, "
@@ -2651,7 +2672,8 @@ class PackRegistry:
                         )
                         continue
                     for key, level in mapping.items():
-                        if level not in VALID_ENFORCEMENT_LEVELS:
+                        if (not isinstance(level, str)
+                                or level not in VALID_ENFORCEMENT_LEVELS):
                             errors.append(
                                 f"extraction.enforcement.{section}: level for "
                                 f"'{key}' must be one of "
@@ -2927,6 +2949,16 @@ class PackRegistry:
                     )
                     continue
                 for target in targets:
+                    if not isinstance(target, str):
+                        # `equivalentTo: {widget: [1]}` raised `TypeError:
+                        # argument of type 'int' is not iterable` out of
+                        # `_validate` — the neighbouring subclassOf loop already
+                        # guards this shape (round-14 review P3, measured).
+                        errors.append(
+                            f"equivalentTo: target for '{kind}' must be a "
+                            f"'namespace:kind' string — got "
+                            f"{type(target).__name__}")
+                        continue
                     if ":" not in target:
                         errors.append(
                             f"equivalentTo: '{target}' must use 'namespace:kind' format"
