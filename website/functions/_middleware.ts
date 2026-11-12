@@ -246,6 +246,22 @@ export const onRequest: PagesFunction = async (context) => {
   // and belongs to `_redirects` — the product host's block adds it explicitly.
   const PRODUCT_ROOT = new Set(["/product", "/product.html"]);
 
+  // ── ONE definition of a product URL's canonical form ──────────────────
+  // No leading/trailing slashes, no `.html`. Both hosts derive from THIS, because
+  // the product host hands the request to the company host while the company host
+  // serves it: if the two normalised differently, one of them would become a
+  // second hop — and a hop chain is how a migration loses equity silently. A
+  // non-canonical `/tortoise` spelling therefore costs exactly one redirect, and
+  // an unknown one is a 404 rather than a 301 onto a 404.
+  const productRest = (pathname: string) =>
+    pathname
+      .slice(PRODUCT_PREFIX.length)
+      .replace(/^\/+/, "")
+      .replace(/\/+$/, "")
+      .replace(/\.html$/, "");
+  const productCanonical = (rest: string) =>
+    rest === "" ? PRODUCT_PREFIX : `${PRODUCT_PREFIX}/${rest}`;
+
   const COMPANY_HOSTS = new Set(["premiselabs.co"]);
   // Trailing-slash-stripped pathname, the form every path set below is keyed on.
   const path = url.pathname.replace(/\/+$/, "") || "/";
@@ -510,7 +526,16 @@ export const onRequest: PagesFunction = async (context) => {
       return toCompany(PRODUCT_PREFIX);
     }
     if (path === PRODUCT_PREFIX || path.startsWith(PRODUCT_PREFIX + "/")) {
-      return toCompany(path);
+      // Normalise HERE, not only on the company host: forwarding the raw path
+      // would make every non-canonical spelling a SECOND hop
+      // (`/tortoise/docs.html` → `…/tortoise/docs.html` → `…/tortoise/docs`) and
+      // would turn an unknown one into a 301 onto a 404 — the two things this
+      // block's own comment above says it must not do.
+      const rest = productRest(path);
+      if (rest !== "" && !PRODUCT_PAGES.has(`/${rest}`)) {
+        return new Response("Not Found", { status: 404, headers: HSTS });
+      }
+      return toCompany(productCanonical(rest));
     }
     // The legacy alias lands on an app-origin page; one hop, never under the
     // product prefix (see SIGNIN_ALIAS above).
@@ -541,11 +566,7 @@ export const onRequest: PagesFunction = async (context) => {
   // dev alike), so the legal E2E suite can exercise the product URL against a
   // dev server without a production DNS preflight.
   if (url.pathname === PRODUCT_PREFIX || url.pathname.startsWith(PRODUCT_PREFIX + "/")) {
-    const rest = url.pathname
-      .slice(PRODUCT_PREFIX.length)
-      .replace(/^\/+/, "")
-      .replace(/\/+$/, "")
-      .replace(/\.html$/, "");
+    const rest = productRest(url.pathname);
     // ⛔ ONLY the product set is servable under the prefix. Without this gate the
     // rewrite would serve ANY top-level page at a product URL — `/tortoise/index`
     // would answer the COMPANY homepage and `/tortoise/product` would be a second
@@ -569,7 +590,7 @@ export const onRequest: PagesFunction = async (context) => {
     // single middleware hop today). A 301 onto the canonical form is safe because
     // no row of the map targets a `.html` or trailing-slash URL, and
     // `/tortoise/<page>` is a 200 in this same deploy.
-    const canonical = rest === "" ? PRODUCT_PREFIX : `${PRODUCT_PREFIX}/${rest}`;
+    const canonical = productCanonical(rest);
     if (url.pathname !== canonical) {
       return new Response(null, {
         status: 301,

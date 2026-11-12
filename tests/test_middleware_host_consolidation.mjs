@@ -231,6 +231,25 @@ async function assertOneHop(src, { expectStatus = 301, expectLocation = null, ex
     });
   }
 
+  // ⛔ The product host must hand off the CANONICAL form in ONE hop. Forwarding
+  // the raw path chains (`/tortoise/docs.html` -> `.../tortoise/docs.html` ->
+  // `.../tortoise/docs`) and turns an unknown path into a 301 onto a 404 — and
+  // both hosts derive the canonical form from ONE helper so they cannot drift.
+  for (const [from, to] of [
+    ["/tortoise/docs.html", "/tortoise/docs"],
+    ["/tortoise//docs", "/tortoise/docs"],
+    ["/tortoise/docs/", "/tortoise/docs"],
+  ]) {
+    await assertOneHop(`https://${PRODUCT}${from}`, {
+      expectLocation: `https://${COMPANY}${to}`,
+    });
+  }
+  for (const from of ["/tortoise/nope", "/tortoise/index"]) {
+    const { status, location } = await hit(`https://${PRODUCT}${from}`);
+    assertEq(status, 404, `${from} on the product host is a 404, never a 301 onto a 404`);
+    assertEq(location, null, `${from} on the product host emits no Location`);
+  }
+
   // The blog prefix keeps its exact-prefix semantics: /blogpost and /blog-extra
   // must NOT match (E2E-7), so they stay un-redirected on the product host.
   for (const from of ["/blog", "/blog/", "/blog/types-of-agent-memory"]) {

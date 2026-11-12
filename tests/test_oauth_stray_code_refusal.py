@@ -411,7 +411,7 @@ def test_the_pinned_redirect_surfaces_are_exempt_and_keep_their_status_and_query
     live behaviours, not hypotheticals: a refusal on `/admin` breaks the operator
     console, on `/signup` breaks the signup funnel, and on `/auth` turns a stale
     bookmark or a pre-cutover email link into the dead end #4328's rationale
-    (`_middleware.ts:403-409`) exists to avoid. `tests/test_admin_origin_redirect.py`
+    (`_middleware.ts:419-425`) exists to avoid. `tests/test_admin_origin_redirect.py`
     drives the same paths but never with `?code=`, so it cannot see an over-block here.
 
     So these assert the PRE-EXISTING answer (the pinned 30x, query preserved),
@@ -444,7 +444,7 @@ def test_an_app_only_page_forwards_on_the_company_host_and_the_BACKSTOP_refuses_
     company-host `/signup?code=…` keeps its #4054 301 to `app.premiselabs.co`
     instead of being refused — the signup funnel. (b) On a host the
     consolidation block does not handle, the same path is exempt from the
-    PRIMARY guard and reaches the BACKSTOP at `_middleware.ts:477-487`, which
+    PRIMARY guard and reaches the BACKSTOP at `_middleware.ts:493-503`, which
     refuses it. PR #10514 review, finding 1: deleting the whole 789-character
     backstop block changed **0** of the suite's 17 cases, so the branch the
     comment credits with order-independence was deletable machinery.
