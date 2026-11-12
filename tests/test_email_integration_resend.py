@@ -168,7 +168,7 @@ def test_invite_email_delivers(monkeypatch):
     resp = _send_and_track(
         TEST_DELIVERED,
         "Tortoise invite delivery check",
-        email_notify._invite_html("Acme Labs", "member", "https://tortoise.premiselabs.co/invite-accept.html?token=dtest"),
+        email_notify._invite_html("Acme Labs", "member", "https://app.premiselabs.co/invite-accept?token=dtest"),
     )
     message_id = resp.get("id")
     assert message_id, f"provider accepted but no message id: {resp}"
@@ -184,7 +184,7 @@ def test_bounced_address_reports_bounced():
     resp = _send_and_track(
         TEST_BOUNCED,
         "Tortoise bounce check",
-        email_notify._invite_html("Acme", "member", "https://tortoise.premiselabs.co/invite-accept.html?token=btest"),
+        email_notify._invite_html("Acme", "member", "https://app.premiselabs.co/invite-accept?token=btest"),
     )
     message_id = resp.get("id")
     assert message_id
@@ -261,13 +261,16 @@ def test_invite_link_resolves():
     construction + the recorded page contract on every PR/push; this probe is
     what re-records the cassette's assumptions against reality.
 
-    Follows redirects: the site serves a permanent redirect from
-    ``/invite-accept.html`` on the static-Pages host to the extensionless
-    ``/invite-accept`` route on the app host (the landing deploy moved it).
-    The contract is that a recipient clicking the emailed link reaches a
-    working accept page, so a redirect to a 200 page satisfies it; the
-    referrer header is checked on the FINAL response (the page the browser
-    actually lands on).
+    Follows redirects — but after #11767 the link NORMALLY follows none: the
+    builder emits the app origin's terminal form (``app.premiselabs.co``
+    ``/invite-accept?token=…``), measured 2026-11-12 answering ``200`` directly,
+    while the ``.html`` form is what answers ``308``. ``follow_redirects=True``
+    is kept on purpose, so a link already sent before the flip — the retired
+    host's ``301`` chain — is still exercised by the same probe instead of
+    failing on a hop the recipient's mail client will take anyway. The contract
+    is that a recipient clicking the emailed link reaches a working accept page,
+    so a redirect to a 200 page satisfies it; the referrer header is checked on
+    the FINAL response (the page the browser actually lands on).
     """
     if os.environ.get("ALLOW_PROD") != "1":
         pytest.skip("ALLOW_PROD=1 required for a production link assertion")
