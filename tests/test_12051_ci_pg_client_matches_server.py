@@ -286,19 +286,47 @@ REDIRECT_TARGET_RE = re.compile(
 )
 
 
+#: The runner's own COMMAND FILES are the only redirect targets whose basename
+#: is a bare expansion that is not an offence: each is governed by its own
+#: classified-write rule (`$GITHUB_PATH` by the prepend unit, `$GITHUB_ENV` by
+#: `GITHUB_ENV_MENTION_RE`), so an exemption here cannot hide a write.
+COMMAND_FILE_TARGET_RE = re.compile(r"^\$\{?(?:GITHUB_PATH|GITHUB_ENV)\}?$")
+
+
 def _redirects_into_a_client_binary(line: str) -> bool:
     """Does this line WRITE OVER a client binary by REDIRECTION? (#12069 P1)
 
-    A redirection needs no verb, so the rule above cannot see it. The target must
-    be a client BINARY NAME or a path under a versioned client `bin/` — the
-    pinned directory itself, which nothing legitimate writes into. Read from
-    every redirect on the line, not the first: `a > ok b > …/pg_dump` is one line.
+    A redirection needs no verb, so the rule above cannot see it. A target is an
+    offence when it is a client BINARY NAME, a path under a versioned client
+    `bin/` — the pinned directory itself, which nothing legitimate writes into —
+    or a BARE EXPANSION this guard cannot classify (`f=…/pg_dump; : > "$f"`).
+
+    ⛔ THE VARIABLE TARGET IS NOT OPTIONAL (#12069 review round 2, measured):
+    grading only the LITERAL target left the whole class open, which is exactly
+    the fail-open rounds 6-8 closed for `$GITHUB_PATH`:
+
+        f=/usr/lib/postgresql/16/bin/pg_dump; : > "$f"            185 passed
+        : > "$(printf /usr/lib/postgresql/16/bin/pg_dump)"         185 passed
+
+    The polarity is this file's own doctrine for a loop whose list is a VARIABLE
+    — refuse what cannot be read rather than credit it. The exemption is the two
+    runner COMMAND FILES, each already governed by its own classified-write rule;
+    the shipped job's other redirect targets have literal basenames
+    (`/dev/null`, `$SCRATCH/pytest.log`, `$SCRATCH/pytest-rc`), so this refuses
+    the unclassifiable target and changes nothing about the real workflow
+    (measured: 187 passed before and after, and `$GITHUB_PATH` still green).
+
+    Read from EVERY redirect on the line, not the first: `a > ok b > …/pg_dump`
+    is one line.
     """
     for match in REDIRECT_TARGET_RE.finditer(line):
         target = match.group("target")
-        if BINARY_NAME_RE.fullmatch(target.rsplit("/", 1)[-1]):
+        basename = target.rsplit("/", 1)[-1]
+        if BINARY_NAME_RE.fullmatch(basename):
             return True
         if CLIENT_DIR_RE.search(target):
+            return True
+        if basename.startswith("$") and not COMMAND_FILE_TARGET_RE.match(basename):
             return True
     return False
 
@@ -2139,7 +2167,14 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
         | {
             f"step {index} REPLACES a client binary: {line!r}"
             for index, step in enumerate(steps)
-            if index >= pin_index
+            # ⛔ NOT WINDOWED FROM THE PIN (#12069 review round 2, measured). The
+            # PATH rows share that window because a PRE-PIN write is outranked by
+            # the later prepend — a binary REWRITE is not: `apt-get install
+            # postgresql-client-16` on a box that already has the package is a
+            # NO-OP, so a rewrite above the pin survives it. Measured: appending
+            # `: > /usr/lib/postgresql/16/bin/pg_dump` to the pre-pin install
+            # step's `run:` left `187 passed`. The pin's own install line stays
+            # excluded by `CLIENT_PKG_RE` inside `_replaces_a_client_binary`.
             for line in _executed_lines(job, step)
             if _replaces_a_client_binary(line)
         }
@@ -3939,6 +3974,17 @@ REDIRECT_POLARITY = [
     ('echo "$SCRATCH" > "$RUNNER_TEMP/pg_dump.log"', False, "a log file, not a binary"),
     ("cmd >/dev/null 2>&1", False, "discarding output is not a write into a client dir"),
     ('echo "14 > 16" >> "$SCRATCH/report.txt"', False, "`>` inside a message string"),
+    # ⛔ THE TARGET AXIS (#12069 review round 2, measured): grading only the
+    # LITERAL target left `f=…/pg_dump; : > "$f"` GREEN — the same fail-open
+    # rounds 6-8 closed for `$GITHUB_PATH`. A bare expansion is refused, not
+    # resolved; the two runner COMMAND FILES are exempt because each already has
+    # its own classified-write rule.
+    ('f=/usr/lib/postgresql/16/bin/pg_dump; : > "$f"', True, "a variable target is unclassifiable"),
+    ('f=/x/pg_dump; printf x > "${f}"', True, "the braced spelling is the same target"),
+    (': > "$(printf /usr/lib/postgresql/16/bin/pg_dump)"', True, "a command-substituted target"),
+    ('echo "X=1" >> "${GITHUB_ENV}"', False, "the second command file has its own rule"),
+    ('bash x.sh > "$SCRATCH/pytest-rc"', False, "a literal basename under a variable dir"),
+    ('cmd > "$RUNNER_TEMP/v.txt"', False, "the guard's own recommended redirect"),
 ]
 
 
