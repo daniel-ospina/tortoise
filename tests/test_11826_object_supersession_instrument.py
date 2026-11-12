@@ -483,6 +483,14 @@ def test_a_successorless_neutral_operator_loses_no_belief_by_archiving(sdk):
     # the safe direction until the aggregation is redesigned.
     assert issues[0].severity == "high", issues[0].severity
     assert "ONTOLOGY §3.1's per-edge triage" in fix, fix
+    # ⛔ ...and the INSTRUCTION must not order the repair the triage forbids: this
+    # arm is a different string from the resolvable one, and it carried the
+    # re-point with no neutral guard — measured, following it produced exactly the
+    # state §3.1's DROP forbids, and the next audit (now resolvable) said DELETE
+    # (#12111 review round 22).
+    assert "re-point the input onto it" not in fix, (
+        "a neutral edge transfers nothing, so the instruction is DELETE: " + fix)
+    assert "delete this edge: §3.1's disposition here is DROP" in fix, fix
     # ...and the triage must NOT offer a carry this operator cannot perform.
     assert "may CARRY to the successor" not in fix, (
         "a neutral operator carries nothing, so §3.1's disposition here is DROP: "
@@ -2470,3 +2478,27 @@ def test_a_dead_SOURCE_is_not_an_active_edge(sdk):
         f"ARCHIVE, not here: {[i.detail for i in rows]}")
     assert audit_graph(sdk._get_proj()).check_counts[
         "superseded_object_active_edges"] == 0
+
+
+def test_a_successorless_neutral_direct_edge_is_not_told_to_rewire(sdk):
+    """The successorless DIRECT arm must drop "write the equivalent edge" on a neutral row.
+
+    ``create_direct_edge(..., direction='-')`` transfers nothing, so an equivalent
+    edge onto a successor transfers nothing either: the repair is the delete, which
+    is what the appended §3.1 triage already said. Measured (#12111 round 22).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"], direction="-")
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded', "
+            "o.supersededBy = 'PolicyGone'", {"i": v1["id"]})
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "No :Object answers the successor name" in fix, fix
+    assert "write the equivalent edge onto that successor" not in fix, (
+        "a neutral edge's equivalent is equally inert: " + fix)
+    assert "equivalent edge onto that successor transfers nothing" in fix or \
+        "delete it: it is neutral" in fix, fix
+    assert "may CARRY to the successor" not in fix, fix

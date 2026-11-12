@@ -1690,13 +1690,33 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # input, and this check's carrier probe is ``:Object``-scoped. State the
             # fact it measured and name that escape, rather than sending the reader
             # to mint a second successor.
+            # ⛔ The NEUTRAL guard belongs on THIS arm too: a neutral edge carries
+            # nothing in either direction (``ep.py``'s ``if not (fwd or bwd)``
+            # returns before any transfer), so "then re-point the input onto it"
+            # ordered the reader to perform exactly the repair this same string's
+            # archive clause and its appended §3.1 triage forbid ("the disposition
+            # here is DROP"). Measured on a ``semantics='related'`` operator and on a
+            # ``direction='-'`` direct edge: following the leading instruction
+            # produced the state the triage forbids, and the next audit — now
+            # resolvable — told the reader to DELETE, so two rounds of advice
+            # disagreed (#12111 review round 22).
+            neutral = s["neutral_row"]
             fix = (
                 f"No :Object answers the successor name this one carries, so there "
-                f"is no Object to re-point this {s['edge_type']} input onto: name "
-                f"the successor — tortoise_update_entity({q}, {{'supersededBy': "
-                f"'<the successor name>'}}) — then re-point the input onto it and "
-                f"delete the edge into {q}. If a Subject or Point carries that "
-                f"name, re-point onto THAT node instead and delete this edge. "
+                f"is no Object to re-point this {s['edge_type']} "
+                f"{'edge' if neutral else 'input'} onto: name the successor — "
+                f"tortoise_update_entity({q}, {{'supersededBy': "
+                f"'<the successor name>'}}) — then "
+                + ("delete this edge: §3.1's disposition here is DROP, and a "
+                   "re-point would keep the same inert connection, because a neutral "
+                   "edge transfers no confidence in either direction"
+                   if neutral else
+                   f"re-point the input onto it and delete the edge into {q}")
+                + ". If a Subject or Point carries that name, "
+                + ("delete the edge and wire the support through a node EP reads, "
+                   "not by re-attaching it" if neutral else
+                   "re-point onto THAT node instead and delete this edge")
+                + ". "
                 # ⛔ ONE source for the archive clause (``_archive_clause``): the
                 # mechanism is a property of the ROW — a DIRECT edge assembles no
                 # factor at all, a NEUTRAL operator loses nothing, an OPERATOR
@@ -1727,8 +1747,13 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                         "because the flag was already false)")
             elif not s["is_operator"]:
                 fix += ("; and this is a DIRECT edge, so there is no factor to "
-                        "re-point — write the equivalent edge onto that successor "
-                        "and delete this one")
+                        "re-point — "
+                        + ("delete it: it is neutral (``direction='-'``), so an "
+                           "equivalent edge onto that successor transfers nothing "
+                           "either and §3.1's disposition is DROP"
+                           if neutral else
+                           "write the equivalent edge onto that successor and "
+                           "delete this one"))
             return fix
         prefix = ""
         if s["carrier_count"] > 1:
