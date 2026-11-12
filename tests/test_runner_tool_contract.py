@@ -743,13 +743,19 @@ def _poolable_label(text: str) -> bool:
 _SHELL_SEP = re.compile(r"&&|\|\||;&|;|&|\|")
 
 #: The command word a command starts with, after YAML's `- ` / `run:` decoration.
-#: ⛔ A leading `then`/`else` is SHELL KEYWORD, not the command word (#12088). A segment split
-#: on `;` from `if …; then echo "…"` begins with `then`, so without this the message reads as a
-#: command named `then` and the helper name inside the message becomes a HAZARD — the exact
-#: #12133 false positive this gate exists to remove, whose demanded remedy (`ensure gh`) fails
-#: closed on a no-egress pool box. Carried from the sibling lane's `_MESSAGE_CMD`; main's reader
-#: dropped it and `test_the_message_exclusion_cannot_hide_a_real_invocation` now pins both shapes.
-_SEGMENT_CMD = re.compile(r"^(?:-\s+)?(?:run:\s*)?(?:(?:then|else)\s+)?([A-Za-z_][\w.-]*)")
+#: ⛔ A leading SHELL KEYWORD is not the command word (#12088). A segment split on `;` from
+#: `if …; then echo "…"` or `for d in …; do echo "…"` begins with the keyword, so without this
+#: the message reads as a command named `then`/`do` and the helper name inside it becomes a
+#: HAZARD — the exact #12133 false positive this gate exists to remove, whose demanded remedy
+#: (`ensure gh`) fails closed on a no-egress pool box. Both a `then`-prefixed and a `do`-prefixed
+#: row are pinned, in both directions, by `test_the_message_exclusion_cannot_hide_a_real_invocation`.
+#: Skipping a keyword can only change the answer when the command AFTER it is a message command,
+#: and a substitution inside that message is still read positionally — so this cannot hide a real
+#: call site, which is the direction that would matter.
+_SEGMENT_KEYWORDS = "then|else|do|elif|if|while|until"
+_SEGMENT_CMD = re.compile(
+    r"^(?:-\s+)?(?:run:\s*)?(?:\{\s*|(?:" + _SEGMENT_KEYWORDS + r")\s+)?([A-Za-z_][\w.-]*)"
+)
 
 #: Commands that EMIT a message rather than EXECUTE their arguments.
 _MESSAGE_CMDS = frozenset({"echo", "printf"})
@@ -1163,27 +1169,40 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
         [f"            python3 tools/{helper} --emit  # then echo done"], scripts
     ), "a trailing comment that mentions `echo` must not turn a real invocation into a message"
 
-    # ── `then`/`else` are SHELL KEYWORDS, not the command word (#12088) ─────────────────────
-    # A segment split on `;` from `if …; then echo "…"` starts with `then`, so a command-word
-    # reader that does not skip the keyword names the command `then`, and the helper named in
-    # the message becomes a HAZARD. That is the #12133 false positive again — measured on this
-    # implementation before `_SEGMENT_CMD` accepted the keyword: both rows below answered
-    # `hazard` while the sibling lane's `_MESSAGE_CMD` answered `[]`.
-    assert (
-        _gh_hazards([f'            then echo "run tools/{helper} by hand"'], scripts) == []
-    )
-    assert (
-        _gh_hazards(
-            [f'            else echo "please run tools/{helper} --repair-labels by hand"'],
-            scripts,
-        )
-        == []
-    )
-    # …and accepting the keyword must not open the hole it was skipped for: a real command
-    # AFTER a `then`-message is still a call site (the `;` separates them).
-    assert _gh_hazards([f"            then echo x; bash tools/{helper}"], scripts)
-    # …nor may the keyword launder a substitution inside the message.
-    assert _gh_hazards([f'            else echo "$(python3 tools/{helper})"'], scripts)
+    # ── SHELL KEYWORDS are not the command word (#12088) ───────────────────────────────────
+    # A segment split on `;` from `if …; then echo "…"` / `for d in …; do echo "…"` begins with
+    # the KEYWORD, so a command-word reader that does not skip it names the command `then`/`do`
+    # and the helper named in the message becomes a HAZARD. That is the #12133 false positive
+    # again — a remediation message is exactly what a loop or a branch tends to emit, and the
+    # remedy the assertion then demands (`ensure gh`) FAILS CLOSED on a no-egress pool box.
+    # Measured on this implementation before `_SEGMENT_CMD` skipped the keyword:** every row
+    # below answered `hazard`, while the sibling lane's `_MESSAGE_CMD` answered `[]` for the
+    # `then`/`else` pair and never covered the loop/keyword forms at all.
+    keyword_inert = [
+        f'            then echo "run tools/{helper} by hand"',
+        f'            else echo "please run tools/{helper} --repair-labels by hand"',
+        f'            for d in a b; do echo "run tools/{helper} by hand"; done',
+        f'            while true; do echo "run tools/{helper} by hand"; done',
+        f'            until false; do echo "run tools/{helper} by hand"; done',
+        f'            elif echo "run tools/{helper} by hand"',
+        f'            if echo "run tools/{helper} by hand"',
+        f'            {{ echo "run tools/{helper} by hand"; }}',
+    ]
+    for row in keyword_inert:
+        assert _gh_hazards([row], scripts) == [], f"a printed message behind a keyword: {row!r}"
+
+    # ⛔ AND SKIPPING A KEYWORD MUST NOT HIDE A REAL CALL SITE — the fail-open direction, which
+    # is the one that would matter. Each row really invokes the helper behind the same keyword.
+    keyword_hazards = [
+        f"            then echo x; bash tools/{helper}",
+        f'            else echo "$(python3 tools/{helper})"',
+        f"            for f in a; do bash tools/{helper}; done",
+        f"            while true; do bash tools/{helper}; done",
+        f"            if bash tools/{helper}; then x; fi",
+        f"            {{ bash tools/{helper}; }}",
+    ]
+    for row in keyword_hazards:
+        assert _gh_hazards([row], scripts), f"a real invocation behind a keyword: {row!r}"
 
     # …and the inert shapes that motivated the fix stay inert — including prose that
     # CONTAINS a separator, which must not split the message into a raw segment.

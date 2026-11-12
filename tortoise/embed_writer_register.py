@@ -980,15 +980,25 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
         "tortoise.sdk::create_source",
         WriterClass(
             EXEMPT,
-            "`tortoise/sdk.py::create_source` — the match is the ValueError MESSAGE STRING of the "
-            "`#11858` guard, which INSTRUCTS the caller to `pass embedding= and it declares the "
-            "truth`. That guard REFUSES the `_SERVER_MANAGED_EMBEDDING_MARKERS` family over `ev` "
-            "before the node write, so the door is a REFUSAL, not a producer — it is the one props "
-            "write that never reaches `_sanitize_props` (`_skip_sanitize=True`), which is why the "
-            "refusal had to be placed here. The node store is `_upsert_source`'s fold, which names "
-            "no `embedding` at all",
-            "#11858",
-            stores=NO_LIVE_VECTOR,  # the only `_EMBED_WRITE` match is the refusal's own message
+            "`tortoise/sdk.py::create_source` — a CARRIER, and ⛔ NOT an absence of a write. "
+            "Its props bag is splatted into `ev` and reaches the node through "
+            "`_create_entity(_skip_sanitize=True)` → `_upsert_source` → "
+            "`_persist_extra_props(…, allow_keys=_SOURCE_EXTRA_PROPS)`, and that allowlist "
+            "ADMITS `embedding` (`tortoise/projection/entities.py`, the `#3998` D30 caller "
+            "surface) — so a CALLER-supplied `embedding` IS stored on the `:Source` node "
+            "verbatim, which is the recorded `#5004` carrier decision (PR `#3018` review P2), "
+            "the same contract `tortoise.api::add_point` declares. `:Source` is a SERVED label "
+            "(`run_vector_query`'s vocabulary), so that vector IS reachable — this is not "
+            "`#5090` row 2's unreachable-store defect, and reading the entry as one is exactly "
+            "the misreading this paragraph exists to stop. The `#11858`/`#12113` guard added "
+            "here refuses the `_SERVER_MANAGED_EMBEDDING_MARKERS` family (width / verbatim / "
+            "preserved / model / revision / text-hash / `embeddingText`), NOT `embedding` "
+            "itself, and its ValueError message is the body's ONLY `_EMBED_WRITE` match. "
+            "`NO_LIVE_VECTOR` is correct for the OTHER reason the field's own clause gives: the "
+            "store is not in this writer's body, it is the FOLD's whole-map `SET n += $extra`, "
+            "which no clause scan can see",
+            "#5004",
+            stores=NO_LIVE_VECTOR,  # the store is the FOLD's whole-map merge, not this body
         ),
     ),
     (

@@ -1254,19 +1254,21 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "vector back from (`#8488`), not a store reached around the gate"),
     "tortoise.sdk::create_source": (
         CENSUS_EXEMPT,
-        "`tortoise/sdk.py::create_source` — the instrument's ONLY match is the "
-        "ValueError MESSAGE STRING at the `#11858` guard, which INSTRUCTS the "
-        "caller to `pass embedding= and it declares the truth`. `_EMBED_WRITE` "
-        "reads raw source, so an instruction to the caller enrols the function; "
-        "the body writes no vector of any kind. The guard `#11858`/`#12113` "
-        "added REFUSES the `_SERVER_MANAGED_EMBEDDING_MARKERS` family over `ev` "
-        "BEFORE the node write, so this door is the opposite of a leak — it is "
-        "the one props write that never reaches `_sanitize_props`, which is why "
-        "the refusal had to be placed here. The node store is `_upsert_source`'s "
-        "fold, and that function holds no `_EMBED_WRITE` match (measured at this "
-        "head), nor does `create_source` itself reach the gated embed seam. "
-        "Exempt as a REFUSAL's PROSE — the same class as `tortoise.api::_emit` "
-        "and `tortoise.projection::_apply_one`"),
+        "`tortoise/sdk.py::create_source` — a CARRIER, and ⛔ NOT an absence of a write. Its "
+        "props bag is splatted into `ev` and reaches the node through "
+        "`_create_entity(_skip_sanitize=True)` → `_upsert_source` → "
+        "`_persist_extra_props(…, allow_keys=_SOURCE_EXTRA_PROPS)`, and that allowlist ADMITS "
+        "`embedding` (the `#3998` D30 caller surface) — so a CALLER-supplied `embedding` IS "
+        "stored on the `:Source` node verbatim, the recorded `#5004` carrier decision (PR "
+        "`#3018` review P2). `:Source` is a SERVED label, so that vector IS reachable: this "
+        "is not `#5090` row 2's unreachable-store defect, and the instrument cannot see the "
+        "store because the FOLD writes the whole map (`SET n += $extra`) — a DATA FLOW, not a "
+        "syntax match. The body's ONLY `_EMBED_WRITE` match is the ValueError MESSAGE of the "
+        "`#11858`/`#12113` guard, which REFUSES the `_SERVER_MANAGED_EMBEDDING_MARKERS` family "
+        "(width / verbatim / preserved / model / revision / text-hash / `embeddingText`) — "
+        "NOT `embedding` itself — and instructs the caller to `pass embedding=`. Exempt as a "
+        "`#5004` CARRIER, the same way `tortoise.api::add_point` is; the prose is why the "
+        "instrument enrolled it, not why it is exempt"),
     "tortoise.sdk::ingest_corpus": (
         CENSUS_RECOGNISED,
         "`tortoise/sdk.py::ingest_corpus` — `self._session_embedding(...)` + "

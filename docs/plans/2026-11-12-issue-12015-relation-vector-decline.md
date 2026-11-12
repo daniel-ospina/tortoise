@@ -158,7 +158,11 @@ uv run python tools/test_lane.py run -- tests/test_cache_projection_live.py \
     tests/test_record_serve.py tests/test_reconciliation.py \
     tests/test_record_reconcile_trigger.py tests/test_11641_runtime_vector_label.py \
     tests/test_embed_writer_register.py -q
-→ 324 passed, 3 skipped
-
-uv run ruff check tortoise/ tools/ tests/   → clean
+→ 338 passed, 3 skipped
 ```
+
+⛔ Both figures are readings of a TREE, not properties of this change, so each is bound to the
+head beside it: block 1's `317 / 1` and block 2's `338 / 3` were re-measured at `6a0f08cd2d`
+(the rebase onto `origin/main` `edcac493a5`). Block 2 read `324 / 3` before that rebase and main
+has added 14 tests under it since — re-derive at the head you are reading rather than carrying
+either number forward. `uv run ruff check` is green at the same head.
