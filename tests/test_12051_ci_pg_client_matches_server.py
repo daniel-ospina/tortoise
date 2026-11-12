@@ -170,8 +170,45 @@ not a tenth spelling — it is the one a text guard cannot reach:
   all: `: > /usr/lib/postgresql/16/bin/pg_dump` rewrote the pinned binary with
   every row green until #12069 review P1, and ``>`/`>>`/`| tee` into a client
   binary or a client `bin/` is now refused however the producer is spelled.
+  ⛔ A DIRECTORY-LEVEL replacement is graded by its TOKEN rather than a binary
+  name (`CLIENT_DIR_ANY_BASE_RE`), because `rsync -a "$b/17/bin/" "$b/16/bin/"`
+  names no binary and replaced every client in the pinned dir with every row
+  green (#12069 review round 19). Two consequences are stated rather than
+  hidden: the mention is graded on the DESTINATION for a copy-like verb, so a
+  `chmod`/`install -d`/`rm` naming the pinned dir is still refused (the same
+  polarity the binary arm states for those verbs), and a copy whose client dir
+  is the LAST path is refused even when it is a read of a same-major dir.
+- **A replacement one component UP is not caught.** The token arm needs the
+  `/bin` component, so `sudo rsync -a "$b/17/" "$b/16/"` — which swaps `lib/`
+  and the whole base, and is strictly worse for #12051 than the `bin/` form —
+  stays green. It is pre-existing, it is the same class as the form this guard
+  now closes, and it is stated here rather than silently assumed away: the
+  guard grades the `bin/` directory because that is where `PATH` points.
+  Widening the token to the literal `/usr/lib/postgresql/<token>` form is the
+  follow-up if the base-swap shape is ever seen in the workflow.
 - **The extraction's arithmetic** (`sed -E 's/.*/16/'`) cannot be proven; the
   in-job assertion is what makes a constant visible.
+- **A leg invoked only through a WRAPPER SCRIPT is not recognised.** `_leg_indexes`
+  requires a `pytest` word in the same step, so a step whose whole body is
+  `bash .github/scripts/pytest-attribution.sh tests/test_9567_record_capstone.py`
+  is not the leg and the guard reds with its own message
+  (`the record capstone (D8) is not in any run step of this job`). That is the
+  fail-closed direction — the real leg invokes pytest inline, in the same step as
+  the attribution wrapper — and it is stated here rather than left as an
+  expected shape. A step that only COLLECTS (`--collect-only`, `--co`) is not a
+  leg either, which is what stops a listing step collapsing the graded window
+  (scoped to the line that names the capstone, so a leg may still collect
+  something else in the same step).
+- **The directory arm reads a text, and a text can be laundered.** The destination
+  is taken as the last POSITIONAL path token of the verb's command segment, with
+  redirect targets and `-`-prefixed options skipped. Three residuals are stated
+  rather than claimed closed: an option whose VALUE carries a path
+  (`rsync … --log-file="$SCRATCH/x.log"`, `-e "ssh -o X=/a"`), a base quoted
+  separately from its token (`"$b"/16/bin/`, `"${b}"/17/bin/`), and a quoted
+  command word (`sh -c 'rsync …'`) can each still move the last-path reading past
+  the real target. The task's own `pg_dump --version` assertion is the
+  observation that does not depend on this text at all; this row is the static
+  half, and it fails closed on every spelling it can read.
 
 So: a green run means "no plausible spelling of the regression is in this
 text", not "the job provably installs and uses pg16". The job's own assertion is
@@ -640,6 +677,33 @@ GITHUB_PATH_MENTION_RE = re.compile(r"\bGITHUB_PATH\b")
 #: a major is an offender in its own right, exactly like an unclassifiable write.
 CLIENT_DIR_RE = re.compile(r"/usr/lib/postgresql/(?P<token>[^/\s]+)/bin")
 
+#: A client dir reached through ANY base — the DIRECTORY-level replacement
+#: (#12069 review round 19, measured GREEN at `282 passed`).
+#: `CLIENT_DIR_RE` above requires the literal `/usr/lib/postgresql/` base, so the
+#: same directory reached through an assigned base was invisible to it, and the
+#: mutating-verb rule needs a BINARY NAME after the verb:
+#:
+#:     b=/usr/lib/postgresql
+#:     sudo rsync -a "$b/17/bin/" "$b/16/bin/"
+#:
+#: replaces every client binary in the pinned dir with PG17's — the full #12051
+#: regression — and names no binary at all, so every row stayed green. A
+#: directory-level replacement is the same act one path component up, so the
+#: TOKEN is the evidence here, not a name. The token must be digits, a glob or a
+#: variable, which keeps an ordinary `rm -rf "$RUNNER_TEMP/tools/bin"` (token
+#: `tools`) green: the rule widens the BASE, never the token's meaning.
+#: ⛔ THE BASE MUST BE A VARIABLE OR NAME POSTGRES (#12069 review round 22,
+#: measured). With any path accepted, an unrelated versioned scratch dir was
+#: refused as a client rewrite — `install -d -m 755 "$RUNNER_TEMP/tools/16/bin"`,
+#: `chown -R runner:runner "$RUNNER_TEMP/tools/16/bin"` and
+#: `cp -a "$RUNNER_TEMP/tools/17/bin" "$RUNNER_TEMP/tools/16/bin"` all RED where
+#: main is green. A variable is kept because the pin's own dir arrives that way
+#: (`b=/usr/lib/postgresql`), and the guard cannot resolve it.
+CLIENT_DIR_ANY_BASE_RE = re.compile(
+    r"(?:\$\{?\w+\}?|/[\w./-]*(?:postgresql|postgres|pg)[\w./-]*)"
+    r"/(?P<token>\d+|\*|\$\{?\w+\}?)/bin"
+)
+
 #: The fail-closed branch as ONE unit (#12051 review rounds 4, 6 and 7): the
 #: `if` line that compares `$major`, its body, and its `fi`. "`::error::` and
 #: `exit 1` appear somewhere in the step" is NOT the claim — `if false && [
@@ -919,14 +983,62 @@ def _classify_path_write(line: str) -> int | None:
     return int(match.group("major")) if match else None
 
 
-def _leg_indexes(steps: list[dict]) -> list[int]:
-    """Steps that run the D8 record capstone — the leg the pin must precede."""
+#: The D8 leg's file — the step that RUNS it must come after the pin.
+CAPSTONE_FILE = "test_9567_record_capstone.py"
 
-    return [
-        index
-        for index, step in enumerate(steps)
-        if "test_9567_record_capstone.py" in _run_commands(step)
-    ]
+#: A line that RUNS the suite, not one that merely names it (#12069 review round
+#: 19). `pytest` bare, `python -m pytest`, any `python3.12` spelling, `py.test`.
+LEG_INVOCATION_RE = re.compile(
+    r"(?:^|[\s;&|(`])(?:(?:python|py)[\d.]*\s+-m\s+(?:pytest|py\.test)|pytest|py\.test)\b"
+)
+
+#: A step that only COLLECTS is not running the leg (#12069 review round 21).
+#: `pytest … --collect-only` satisfies `LEG_INVOCATION_RE` while executing none of
+#: the tests, so counting it as the leg is the decoy that collapses the window
+#: (and that reds the pin-precedes-leg row with a step number that names a step
+#: which runs nothing). Excluding it at the definition kills the whole class at
+#: every call site instead of patching each one's window bound.
+COLLECT_ONLY_RE = re.compile(r"--collect-only|--co\b")
+
+
+def _leg_indexes(steps: list[dict]) -> list[int]:
+    """Steps that RUN the D8 record capstone — the leg the pin must precede.
+
+    ⛔ A STEP THAT MERELY NAMES THE FILE IS NOT THE LEG (#12069 review round 19,
+    measured GREEN at `282 passed`). This matched the FILENAME anywhere in the
+    step's commands, so an unrelated step inserted before the real leg —
+
+        - name: announce
+          run: echo "about to run tests/test_9567_record_capstone.py"
+
+    — became `min(_leg_indexes(steps))`. That index is the WINDOW END for the
+    `env:`/`PATH` rules (`_path_assignments_that_drop_the_pin`,
+    `_env_path_replacements`), so the real leg's `env: PATH: /usr/bin:/bin` fell
+    outside every window and the job stayed green with the pin bypassed —
+    measured GREEN, including `_env_path_replacements`'s own discriminating case.
+    A leg must INVOKE the suite: the filename AND a pytest invocation in ONE step.
+    The whole-file comment at the DRILL provision step never counts, because
+    `_run_commands` strips comments before this reads them.
+    """
+
+    found: list[int] = []
+    for index, step in enumerate(steps):
+        # ⛔ SCOPED TO THE LINE, NOT THE STEP (#12069 review round 22, measured).
+        # A step-level collect-only exclusion disqualified a REAL leg that also
+        # collected something else (`python -m pytest … --collect-only -q` on a
+        # different file in the same step) and reported the untrue "the record
+        # capstone (D8) is not in any run step of this job". The exclusion
+        # belongs to the invocation that names the capstone.
+        for line in _run_commands(step).splitlines():
+            if CAPSTONE_FILE not in line:
+                continue
+            if not LEG_INVOCATION_RE.search(line):
+                continue
+            if COLLECT_ONLY_RE.search(line):
+                continue
+            found.append(index)
+            break
+    return found
 
 
 def _unreachable_guards(
@@ -1013,6 +1125,33 @@ def _replaces_a_client_binary(line: str) -> bool:
     verb = BINARY_MUTATION_RE.search(line)
     if not verb:
         return False
+    # ⛔ A DIRECTORY-LEVEL replacement names no binary (#12069 review round 19,
+    # measured GREEN): `sudo rsync -a "$b/17/bin/" "$b/16/bin/"` overwrites
+    # every client in the pinned dir and passed the name-based rule below. A
+    # `$GITHUB_PATH`/`$GITHUB_ENV` write is deliberately NOT graded here — it is
+    # a PATH append, which the pin and job-wide rows already own, and grading it
+    # twice would move the row a correct tree is refused on.
+    #
+    # ⛔ AND THE DIRECTION MATTERS (#12069 review round 20, measured). The first
+    # cut refused the directory wherever it appeared, so READING the pinned dir
+    # was refused as a rewrite — `cp -a "$b/16/bin" "$RUNNER_TEMP/client-snapshot"`
+    # went RED, having been GREEN. Only a client dir in the DESTINATION position is
+    # being replaced: for a copy-like verb the destination is the LAST path on the
+    # line, so a mention that still has a path after it is a SOURCE being read.
+    # Verbs with no direction (`chmod`, `rm`, `sed`, `dd`, `tee`) keep refusing
+    # the mention wherever it sits, which is the same polarity the binary arm has
+    # always stated for them.
+    if "GITHUB_PATH" not in line and "GITHUB_ENV" not in line:
+        verb_word = verb.group(0).strip()
+        for dir_match in CLIENT_DIR_ANY_BASE_RE.finditer(line, verb.end()):
+            if _is_command_position(line, dir_match.start()):
+                continue
+            if verb_word in _DESTINATION_VERBS and not _is_last_path_token(
+                line, dir_match.start(), dir_match.end(), verb.start()
+            ):
+                # A path follows on the line: this mention is the SOURCE.
+                continue
+            return True
     # ⛔ A NAME IN COMMAND POSITION IS BEING RUN, NOT WRITTEN (#12069 review 12,
     # measured). `BINARY_NAME_RE.search(line, verb.end())` accepted a name ANYWHERE
     # after the verb, so a mutating verb earlier on the line was enough — and with
@@ -1044,6 +1183,87 @@ _OPERAND_TAKING_WORDS = frozenset(
         "shred", "unlink", "patch", "tar", "unzip",
     }
 )
+
+
+#: Verbs whose LAST path operand is the WRITE TARGET, so a client dir named as
+#: an earlier operand is a SOURCE being READ (#12069 review round 20, measured).
+#: `cp -a "$b/16/bin" "$RUNNER_TEMP/snapshot"` is a harmless read; the same
+#: verb with the client dir LAST is the replacement. Verbs absent from this set
+#: (`chmod`, `rm`, `sed`, `dd`, `tee`) have no direction and keep the binary
+#: arm's stated polarity: the mention is refused wherever it sits.
+_DESTINATION_VERBS = frozenset({"cp", "rsync", "mv", "ln", "install"})
+
+
+#: A whitespace-delimited token that names a path (contains a `/`).
+_PATH_TOKEN_RE = re.compile(r"[^\s]+")
+
+#: Shell list separators — a command SEGMENT ends at one of these.
+_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||[;|&]")
+
+#: A REDIRECT and its target (`2>/dev/null`, `>/dev/null`, `>> log`). The target is
+#: NOT an operand of the verb, so it must never decide the verb's direction.
+_REDIRECT_RE = re.compile(r"\d*>>?\s*\S+")
+
+#: `cp -t DIR` / `--target-directory=DIR` NAMES the destination (#12069 review
+#: round 22, measured GREEN): with the operand order inverted, the trailing source
+#: had `-t`'s value looked like an option and the real target was skipped.
+_TARGET_OPTION_RE = re.compile(r"(?:^|\s)(?:-t|--target-directory)(?:=|\s)\s*(?P<value>[^\s]+)")
+
+
+def _is_last_path_token(line: str, start: int, end: int, verb_start: int) -> bool:
+    """Is `[start, end)` the DESTINATION of the verb that starts at `verb_start`?
+
+    The destination of a copy-like verb is the last path operand OF ITS OWN
+    COMMAND SEGMENT. Two traps, both measured (#12069 review rounds 20-21):
+
+    · comparing against "the last path token on the LINE" read a TARGET as a
+      source whenever anything path-bearing followed the command —
+      `sudo rsync -a "$b/17/bin/" "$b/16/bin/" 2>/dev/null` was GREEN, as were
+      `… | tee "$SCRATCH/pin.log"`, `… && ls -l "$b/16/bin"` and the
+      backslash-continued form (continuations are joined before this reads).
+      So the search is bounded to the SEGMENT that owns the verb;
+    · a REDIRECT target is not an operand at all, so it is removed before the
+      last token is taken — otherwise `2>/dev/null` is the "destination".
+
+    A first cut tested "no `/` after the match", which the trailing slash in
+    `"$b/16/bin/"` defeated; a second took the last token of the whole line,
+    which any trailing path defeated. This one reads the verb's own segment.
+    """
+
+    seg_start = 0
+    seg_end = len(line)
+    for sep in _SEGMENT_SPLIT_RE.finditer(line):
+        if sep.start() <= verb_start:
+            seg_start = sep.end()
+        else:
+            seg_end = sep.start()
+            break
+
+    segment = line[seg_start:seg_end]
+
+    # `-t DIR` / `--target-directory=DIR` states the destination outright.
+    target = _TARGET_OPTION_RE.search(segment)
+    if target is not None:
+        v_start = target.start("value") + seg_start
+        v_end = target.end("value") + seg_start
+        return start >= v_start and end <= v_end
+
+    # Blank the redirect targets (same length, so offsets stay absolute).
+    segment = _REDIRECT_RE.sub(lambda m: " " * len(m.group(0)), segment)
+
+    last: tuple[int, int] | None = None
+    for token in _PATH_TOKEN_RE.finditer(segment):
+        text = token.group(0)
+        # ⛔ AN OPTION IS NOT AN OPERAND (#12069 review round 22, measured):
+        # `--exclude-from=/etc/rsync-exclude` and `--log-file="$SCRATCH/x.log"`
+        # carry a path in an option VALUE and were taken as the destination.
+        if text.startswith("-"):
+            continue
+        if "/" in text:
+            last = (token.start() + seg_start, token.end() + seg_start)
+    if last is None:
+        return True
+    return start >= last[0] and end <= last[1]
 
 
 def _is_command_position(line: str, start: int) -> bool:
@@ -2746,7 +2966,7 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     text = _run_commands(pin)
     leg_indexes = _leg_indexes(steps)
     assert leg_indexes, "the record capstone (D8) is not in any run step of this job"
-    leg_start = min(leg_indexes)
+    leg_start = max(leg_indexes)
 
     # ⛔ A PREPEND INSIDE A CONSTANT-CONDITION BLOCK IS PRESENT AND INERT (#12051
     # review round 8). Every rule below reads a line as a unit, so an enclosing
@@ -2864,7 +3084,24 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
     pin_index, _ = _pin_step(steps)
     # The window's upper bound is the step that RUNS the leg: a PATH set after a
     # leg that already ran cannot move it (#12069 round-15 review 2).
-    leg_start = min(_leg_indexes(steps))
+    # ⛔ THE PATH WINDOW ENDS AT the LAST step that runs the leg, not the first
+    # one that looks like it (#12069 review round 20, measured GREEN). Taking the
+    # MINIMUM is the fail-open direction: a step that merely RESEMBLES the leg —
+    # `- run: python -m pytest tests/test_9567_record_capstone.py --collect-only -q`
+    # inserted before the real one — satisfies both `CAPSTONE_FILE` and
+    # `LEG_INVOCATION_RE`, becomes the window end, and the real leg's
+    # `env: PATH: /usr/bin:/bin` then falls outside the graded range with every
+    # row green. Grading a SUPERSET costs only a false RED for a PATH change made
+    # after the leg already ran, which cannot move that leg anyway. `min()` is
+    # kept only where the claim really is "the pin PRECEDES the leg".
+    # ⛔ AND ASSERT FIRST (#12069 review round 21): `max()` of an empty sequence
+    # raises `ValueError: max() iterable argument is empty`, so a leg invoked
+    # through a wrapper script (`run: bash .github/scripts/…-attribution.sh
+    # tests/test_9567_record_capstone.py`, which carries no `pytest` word) died
+    # with an opaque traceback instead of this guard's own message.
+    leg_indexes = _leg_indexes(steps)
+    assert leg_indexes, "the record capstone (D8) is not in any run step of this job"
+    leg_window_end = max(leg_indexes)
 
     mentions = _github_path_writes(steps, job)
     assert mentions, (
@@ -2909,11 +3146,11 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
     # `run:` correctly red — plus the same for the `_runner_file_commands` glob and
     # at workflow-level `defaults.run.shell`.
     replacements = sorted(
-        set(_path_assignments_that_drop_the_pin(steps, pin_index, server_major, job, leg_start))
+        set(_path_assignments_that_drop_the_pin(steps, pin_index, server_major, job, leg_window_end))
         # ⛔ `env:` AND `$GITHUB_ENV` MOVE THE SAME PATH (#12069 review P1). Both
         # were unread, so both restored #12051 with every row green. STEP scope is
         # windowed from the pin, like `_path_assignments_that_drop_the_pin` above.
-        | set(_env_path_replacements(steps, server_major, job, pin_index, leg_start))
+        | set(_env_path_replacements(steps, server_major, job, pin_index, leg_window_end))
         | {
             f"step {index} mentions `$GITHUB_ENV`: {line!r}"
             for index, step in enumerate(steps)
@@ -3028,7 +3265,7 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
     server_major = _postgres_image_majors(job)[0]
     leg_indexes = _leg_indexes(steps)
     assert leg_indexes, "the record capstone (D8) is not in any run step of this job"
-    leg_start = min(leg_indexes)
+    leg_start = max(leg_indexes)
 
     # INERT-BUT-PRESENT first: an enclosing constant-condition block leaves every
     # structural assertion below satisfied and the branch unable to fire.
@@ -4289,6 +4526,78 @@ BINARY_MUTATION_POLARITY = [
         "`rsync` is the ordinary tree-copy verb (#12069 review, P1)",
     ),
     (
+        'b=/usr/lib/postgresql\nsudo rsync -a "$b/17/bin/" "$b/16/bin/"',
+        True,
+        "#12069 round-19 P1: a DIRECTORY-level replacement names no binary — "
+        "it overwrites every client in the pinned dir (measured GREEN, 282 passed)",
+    ),
+    (
+        'sudo cp -a "$b/17/bin/." "$b/16/bin/"',
+        True,
+        "#12069 round-19 P1: `cp -a` of the dir CONTENTS, same act",
+    ),
+    (
+        'sudo ln -sfn "$b/17/bin" "$b/16/bin"',
+        True,
+        "#12069 round-19 P1: the pinned dir BECOMES the other major's binaries",
+    ),
+    (
+        'sudo mv "$b/17/bin" "$b/16/bin"',
+        True,
+        "#12069 round-19 P1: `mv` of the dir, measured GREEN before the fix",
+    ),
+    (
+        'rm -rf "$RUNNER_TEMP/tools/bin"',
+        False,
+        "CONTROL: the widened BASE must not widen the TOKEN — `tools` is not a "
+        "major, a glob or a variable, so this ordinary tidy stays green",
+    ),
+    (
+        'sudo rsync -a "$RUNNER_TEMP/artifacts/" "$RUNNER_TEMP/out/"',
+        False,
+        "CONTROL: a directory copy that names no versioned client dir",
+    ),
+    (
+        'rm -f /tmp/x && /usr/lib/postgresql/17/bin/pg_dump --version',
+        False,
+        "CONTROL: a client dir in COMMAND position is RUN, not written — the "
+        "same polarity as the binary-name arm",
+    ),
+    (
+        'cp -a "$b/16/bin" "$RUNNER_TEMP/client-snapshot"',
+        False,
+        "CONTROL: READING the pinned dir into a temp dir is not a replacement — "
+        "the client dir is the SOURCE, not the destination (#12069 round 20: "
+        "this was a false RED before the direction check)",
+    ),
+    (
+        'rsync -a "$b/17/bin/" "$RUNNER_TEMP/pg17-snapshot"',
+        False,
+        "CONTROL: copying ANOTHER major's dir OUT is a read, not a rewrite",
+    ),
+    (
+        'sudo rsync -a "$b/17/bin/" "$b/16/bin/"',
+        True,
+        "the DIRECTION that matters: the pinned dir is LAST, i.e. the target",
+    ),
+    (
+        'sudo rsync -a "$b/17/bin/" "$b/16/bin/" 2>/dev/null',
+        True,
+        "#12069 round-21 P1: a trailing redirect target must not launder the "
+        "destination — the last-path-token test is bounded to the verb's SEGMENT "
+        "with redirect targets removed (measured GREEN before this)",
+    ),
+    (
+        'sudo rsync -a "$b/17/bin/" "$b/16/bin/" 2>&1 | tee "$SCRATCH/pin.log"',
+        True,
+        "#12069 round-21 P1: a LATER command in a pipe must not launder it either",
+    ),
+    (
+        'sudo rsync -a "$b/17/bin/" "$b/16/bin/" && ls -l "$b/16/bin"',
+        True,
+        "#12069 round-21 P1: nor a later command's path argument after `&&`",
+    ),
+    (
         'sudo sh -c "cat $b/17/bin/pg_dump > $b/16/bin/pg_dump"',
         True,
         "`cat >` is the same act as the `tee` the list already carried",
@@ -4489,11 +4798,20 @@ def test_every_rewrite_rule_is_wired_into_the_row(job: dict) -> None:
     """
 
     replaced = copy.deepcopy(job)
+    # ⛔ THE FOREIGN MAJOR IS DERIVED, NOT SPELLED (#12069 review round 19). With
+    # `17` hard-coded as "another major" and the pin at 16, a CONSISTENT bump of
+    # the whole job to 17 turned this fixture into a same-major write: the row
+    # correctly raised nothing and the test failed `DID NOT RAISE` — a false RED
+    # with a message describing a correct tree. Deriving it keeps the fixture
+    # foreign whatever major the workflow currently pins.
+    server_major = _postgres_image_majors(job)[0]
+    foreign_major = server_major + 1
     leg = next(
         s for s in _steps(replaced) if "Postgres legs" in str(s.get("name") or "")
     )
     leg["run"] = (
-        'b=/usr/lib/postgresql\nsudo rsync -a "$b/17/bin/pg_dump" "$b/16/bin/pg_dump"\n'
+        "b=/usr/lib/postgresql\n"
+        f'sudo rsync -a "$b/{foreign_major}/bin/pg_dump" "$b/{server_major}/bin/pg_dump"\n'
         + leg["run"]
     )
     with pytest.raises(AssertionError, match="REPLACES a client binary"):
@@ -4504,9 +4822,9 @@ def test_every_rewrite_rule_is_wired_into_the_row(job: dict) -> None:
         s for s in _steps(named) if "Postgres legs" in str(s.get("name") or "")
     )
     leg["run"] = (
-        'export PATH="/usr/lib/postgresql/17/bin:$PATH"\n' + leg["run"]
+        f'export PATH="/usr/lib/postgresql/{foreign_major}/bin:$PATH"\n' + leg["run"]
     )
-    with pytest.raises(AssertionError, match="names pg17"):
+    with pytest.raises(AssertionError, match=f"names pg{foreign_major}"):
         test_no_step_rewrites_the_client_path_to_another_major(named)
 
     command_file = copy.deepcopy(job)
@@ -4519,6 +4837,33 @@ def test_every_rewrite_rule_is_wired_into_the_row(job: dict) -> None:
     )
     with pytest.raises(AssertionError, match="runner's own command file"):
         test_no_step_rewrites_the_client_path_to_another_major(command_file)
+
+
+def test_a_step_that_only_NAMES_the_capstone_is_not_the_leg() -> None:
+    """A mention is not an invocation (#12069 review round 19, measured GREEN).
+
+    `_leg_indexes` matched the FILENAME anywhere in a step's commands, and its
+    result is the WINDOW END for the `env:`/`PATH` rules. So an unrelated step
+    that merely echoed the capstone's name became `min(_leg_indexes(...))`, the
+    real leg fell outside every window, and the leg's own
+    `env: PATH: /usr/bin:/bin` (which replaces the pinned PATH outright) was
+    never graded — measured GREEN across the whole job.
+    """
+
+    steps = [
+        {
+            "name": "announce",
+            "run": 'echo "about to run tests/test_9567_record_capstone.py"',
+        },
+        {
+            "name": "leg",
+            "run": "python -m pytest tests/test_9567_record_capstone.py",
+        },
+    ]
+    assert _leg_indexes(steps) == [1], (
+        "a step that only NAMES the capstone was read as the leg, which collapses "
+        "the window the `env:`/`PATH` rows are graded over"
+    )
 
 
 def test_a_step_env_outside_the_pin_leg_window_is_not_an_offender() -> None:
@@ -5256,12 +5601,22 @@ def test_a_continued_install_line_still_reads_as_the_install(job: dict) -> None:
     """
 
     continued = copy.deepcopy(job)
+    # ⛔ THE PACKAGE MAJOR IS DERIVED, NOT SPELLED (#12069 review round 19). The
+    # fixture used to replace the literal `postgresql-client-16`; once the whole
+    # job is bumped to 17 that replace is a NO-OP, so the very next assertion
+    # failed with "the fixture did not wrap the install line" — a message that
+    # blames the workflow for a correct edit.
+    server_major = _postgres_image_majors(continued)[0]
     pin_index, _ = _pin_step(_steps(continued))
     step = continued["steps"][pin_index]
-    step["run"] = step["run"].replace(
-        "sudo apt-get install -y --no-install-recommends postgresql-client-16",
+    plain = (
         "sudo apt-get install -y --no-install-recommends "
-        + chr(92) + chr(10) + "    postgresql-client-16",
+        f"postgresql-client-{server_major}"
+    )
+    step["run"] = step["run"].replace(
+        plain,
+        "sudo apt-get install -y --no-install-recommends "
+        + chr(92) + chr(10) + f"    postgresql-client-{server_major}",
     )
     assert chr(92) + chr(10) in step["run"], "the fixture did not wrap the install line"
     test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(continued)
