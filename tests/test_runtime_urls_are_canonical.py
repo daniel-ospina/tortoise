@@ -27,11 +27,13 @@ whose host moved while its dead `#appeal` fragment did not (#11939).
 
 ⛔ #11767's items 4 and 5 are IN THIS FILE'S SURFACE: the dashboard landing
 pages, the blog origin, and the dashboard's docs links used to spell the retired
-origin. Each is in `RETIRED_HOST_ALLOWLIST` with an EXACT occurrence count, the
-TERMINATOR its own row records — a 301 hop, or a 200 where the retired host
-serves the bytes IN PLACE and there is no hop to save — and the issue that owns
-the re-aim, so this guard cannot report GREEN over a file it never opened, and a
-sweep that removes one of those literals must remove its recorded reason too.
+origin. Each is in `RETIRED_HOST_ALLOWLIST` with an EXACT occurrence count, its
+TERMINATOR — a 301 onto a canonical origin (the DEFAULT `/blog*` 301 for five of
+them, so those five name no status: it is stated once, in the census below), or
+NOT REDIRECTED AT ALL, where the retired host answers in place — and the issue
+that owns the re-aim, so this guard cannot report GREEN over a file it never
+opened, and a sweep that removes one of those literals must remove its recorded
+reason too.
 
 ⛔ THE COUNTS MOVED UNDER THIS PR, AND THAT IS THE POINT OF AN EXACT COUNT. main's
 #12058 ("serve the product at premiselabs.co/tortoise", which is what CLOSED
@@ -229,12 +231,14 @@ RETIRED_HOST_ALLOWLIST = {
     # guard COVERS these files instead of silently skipping them (fresh-context
     # review, P1: with a hand-list, the sweep could not fail for the ONE page the
     # emailed invite token lands on). The retired host handles every URL built
-    # from these without a break, by one of TWO terminators (each measured
-    # 2026-11-12 below, and each row says which): a 301 onto a canonical origin,
-    # or SERVED IN PLACE with no redirect at all. ⛔ Not "every one 301s" — a
-    # literal whose row records 200 is a different sweep with a different risk
-    # (see (a)/(b) below). That is why deferring is safe and why it must stay
-    # VISIBLE: a sweep that deletes one of these must delete its reason too, and
+    # from these without a break, by one of TWO terminators: a 301 onto a
+    # canonical origin — the DEFAULT `/blog*` 301 for five of them, which those
+    # five rows do not restate, so the census below is where it is stated — or
+    # NOT REDIRECTED AT ALL, where the retired host answers the request in place.
+    # ⛔ Not "every one 301s": a literal whose row names no redirect is a
+    # different sweep with a different risk (see (a)/(b) below). That is why
+    # deferring is safe and why it must stay VISIBLE: a sweep that deletes one of
+    # these must delete its reason too, and
     # the deferred re-aim is tracked on #12057 rather than lost behind a green run.
     # ⛔ `invite-accept.html`, `welcome.html` and `wizardPrompts.js` had rows here and
     # no longer do: main's #12058 re-aimed all three to 0 while this PR was open
@@ -423,12 +427,22 @@ RUNTIME_FILES = (
     "supabase/config.toml",
     # #11767 items 4 and 5 — dashboard/blog surfaces whose retired-origin literals
     # are RECORDED above rather than re-aimed here. In the surface so the guard
-    # can fail on them; every DEFERRAL row carries its measured terminator (a 301
-    # hop, or a 200 served where there is no hop to save), named inline wherever it
-    # is anything but the default 301 onto premiselabs.co — the four non-website
-    # KEEP rows are CORS/Host allowlists, not links, so there is no terminator to
-    # record for them and nothing is deferred on them (see :46-50). Every DEFERRAL
-    # row carries its deferral note.
+    # can fail on them; every DEFERRAL row names its terminator WHEREVER it is
+    # anything but the DEFAULT 301 onto premiselabs.co — the `/blog*` branch at
+    # `website/functions/_middleware.ts` :520 (`toCompany`, a 301), which is why
+    # the five rows that rely on it carry no status of their own. What is
+    # NOT redirected is named as such rather than by a status: `harnesses.js`'s
+    # `/skills/<name>.skill` answers 200 on both hosts (identical bytes), while
+    # `/blog/api/*` is excluded from the 301 (`:334-336`) and answers the route's
+    # OWN status (404, no `Location`, for the paths probed) — so "a 200" is the
+    # `/skills` row's measurement, not a property of the class.
+    # The four non-website KEEP rows — `hosted_api.py`'s live CORS allowlist, the
+    # two Supabase edge-function public allowlists, and `supabase/config.toml`'s
+    # local-dev OAuth redirect allowlist (a redirect DESTINATION list, not a CORS
+    # list — the module header's own "four non-deferral KEEP rows" note names all
+    # four) — invent no terminator because none of them is a link this repo emits,
+    # and nothing is deferred on them.
+    # Every DEFERRAL row carries its deferral note.
     "website/apps/dashboard/public/invite-accept.html",
     "website/apps/dashboard/public/welcome.html",
     "website/apps/dashboard/public/signup.html",
