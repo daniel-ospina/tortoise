@@ -2,8 +2,9 @@
 <!-- premiselabs.co — company page sitemap (company marketing site + the
      public contact page, which is an outside-product surface and therefore
      canonicals here, not on the tortoise host — #2409).
-     Same-host URLs only (Google requirement); discovered via robots.txt
-     cross-submission. -->
+     Same-host URLs only (Google requirement); discovered through the index
+     `robots.txt` advertises (website/sitemap.xml) — since #11766 there is no second
+     host to cross-submit to. -->
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
     <loc>https://premiselabs.co/</loc>
