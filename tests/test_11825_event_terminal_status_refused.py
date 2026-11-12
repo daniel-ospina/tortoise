@@ -384,6 +384,26 @@ class TestTheLifecycleDoors:
         sdk.retract_point(pid)
         assert self._state(sdk, pid) == "retracted"
 
+    def test_an_event_that_only_shares_the_id_does_not_block_the_point(
+            self, sdk):
+        """The probe is `:Point:Event`, i.e. the nodes THIS door writes.
+
+        `add_event(<a point's id>)` mints a SEPARATE `:Event` keyed by that id
+        (review cycle 12, measured). Probing with the update door's OR-form
+        refused the point's retraction with "carries the :Event label" while the
+        node the door writes was a plain `:Point` and stayed `live` — a refusal
+        justified by a node it could not reach.
+        """
+        from tortoise.log import EventLog
+        from tortoise.api import EventAPI
+
+        pid = sdk.create_point("statement", "SharedId")["id"]
+        api = EventAPI(EventLog(os.path.join(sdk._test_root, "ev.jsonl")),
+                       initiated_by="user", projection=sdk._get_proj())
+        api.add_event(pid, "deployment")
+        sdk.retract_point(pid)
+        assert self._state(sdk, pid) == "retracted"
+
 
 # ── The third door: EventAPI.add_event ──────────────────────────────────────
 
@@ -1064,6 +1084,47 @@ class TestTheBundleValidationDoor:
         assert sdk._validate_bundle(renders_as_event) == [], (
             "Phase 1 refused an :Object because of a __str__ the writer never calls")
 
+    def test_the_writer_resolves_the_type_by_content_too(self, sdk):
+        """Review cycle 12, P1 — the WRITER's own read called the subclass's `strip`.
+
+        `_item_type_text` fixed the arms; `ingest` step 3 still ran
+        `(item.pop("type") or "").strip().lower()`, a virtual dispatch. So
+        `class LieStrip(str): def strip(self): return "event"` with content
+        `object` was an `:Object` to Phase 1 and an `:Event` to the writer:
+        measured, `_validate_bundle` returned `[]` and `ingest` raised with one
+        point ALREADY committed — the half-commit this issue closes, reached
+        through the one read the round did not convert. Both directions.
+        """
+        class LieStrip(str):
+            def strip(self, *a, **k):
+                return "event"
+
+        class LieStripReverse(str):
+            def strip(self, *a, **k):
+                return "object"
+
+        before = sdk._get_proj().g.query(
+            "MATCH (n:Point) RETURN count(n)").result_set[0][0]
+        bundle = {"points": [{"content": "writer-strip"}],
+                  "entities": [{"type": LieStrip("object"), "name": "StripObj",
+                                "objectKind": "policy",
+                                "status": "superseded"}]}
+        assert sdk._validate_bundle(bundle) == [], (
+            "Phase 1 and the writer must read the same content")
+        sdk.ingest(bundle)
+        after = sdk._get_proj().g.query(
+            "MATCH (n:Point) RETURN count(n)").result_set[0][0]
+        assert after == before + 1, "the :Object ingest did not land"
+
+        refused = {"points": [{"content": "must-not-commit"}],
+                   "entities": [{"type": LieStripReverse("event"),
+                                 "name": "StripEvt",
+                                 "eventKind": "deployment",
+                                 "status": "superseded"}]}
+        assert sdk._validate_bundle(refused), (
+            "content 'event' with a `strip()` that says 'object' passed Phase 1 "
+            "- T5 says a terminal status on an :Event is not writable")
+
     def test_every_phase_1_arm_resolves_the_type_by_content(self, sdk):
         """Review cycle 10, P1 — the rule is per-ARM, and four arms still used `str()`.
 
@@ -1114,6 +1175,48 @@ class TestTheBundleValidationDoor:
             else:
                 assert violations == [], (
                     f"{why}: Phase 1 refused an :Object the writer files by content")
+
+    def test_the_endpoint_arms_resolve_the_type_by_content(self, sdk):
+        """Review cycle 12, P2 — the arm with NO pin was the endpoint arm.
+
+        Reverting all three `_check_endpoints` reads to `str(item.get("type")
+        or "").strip().lower()` left the suite green (measured), because nothing
+        exercised an endpoint whose item type RENDERS differently from its
+        content. Both directions are pinned here: a lie renderer must not cause
+        a false "must be a ... endpoint" refusal, and a `strip()` overrider must
+        not let a bundle pass Phase 1 that the writer then routes elsewhere.
+        """
+        class Lie(str):
+            def __str__(self):
+                return "harmless"
+
+        class LieStrip(str):
+            def strip(self, *a, **k):
+                return "event"
+
+        bundle = {
+            "points": [{"ref": "p1", "content": "endpoint claim"}],
+            "entities": [{"ref": "s1", "type": Lie("subject"),
+                          "name": "EndpointSubject",
+                          "subjectKind": "organization"}],
+            "connections": [{"from": "s1", "to": "p1",
+                             "operator": "IMPL"}],
+        }
+        assert sdk._validate_bundle(bundle) == [], (
+            "the endpoint arm refused a Subject endpoint over a __str__ the "
+            "writer never calls")
+
+        strip_bundle = {
+            "points": [{"ref": "p1", "content": "endpoint claim"}],
+            "entities": [{"ref": "s1", "type": LieStrip("subject"),
+                          "name": "StripSubject",
+                          "subjectKind": "organization",
+                          "status": "dead"}],
+            "connections": [{"from": "s1", "to": "p1",
+                             "operator": "IMPL"}],
+        }
+        assert sdk._validate_bundle(strip_bundle), (
+            "a `strip()` override routed the item past Phase 1")
 
     def test_a_non_terminal_event_item_is_not_a_violation(self, sdk):
         """No over-block: the door accepts `scheduled`, so Phase 1 must too."""

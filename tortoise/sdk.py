@@ -8189,6 +8189,29 @@ def _endpoint_is_terminal(info: dict) -> bool:
     )
 
 
+def _type_text(value: object) -> str:
+    """An item's `type` or a door's `type=` argument: content, lowercased.
+
+    ⛔ ONE primitive for BOTH sides of the seam, because the two were reading the
+    same value by different rules and `#11825` review cycle 12 measured the
+    consequence: `class LieStrip(str)` whose `strip()` returns `"event"` with
+    content `"object"` was an `:Object` to every Phase-1 arm (which ask
+    ``_item_type_text``) and an `:Event` to `ingest` (whose read called the
+    SUBCLASS's `strip`) — so the bundle passed validation and step 3 raised
+    with the point already committed.
+
+    ⛔ Why the explicit `str.*` calls: ``str.__str__(value)`` returns a PLAIN
+    ``str`` carrying the CONTENT (verified: no ``__str__`` override is consulted),
+    and the base ``strip``/``lower`` are then called explicitly rather than as
+    bound methods, so an override of EITHER cannot change the answer. Calling
+    ``value.strip()`` was the defect — it is a virtual dispatch, not the writer's
+    rule.
+    """
+    if not isinstance(value, str):
+        return ""
+    return str.lower(str.strip(str.__str__(value)))
+
+
 def _item_type_text(item: dict) -> str:
     """The item's `type` as its WRITER reads it: content, lowercased.
 
@@ -8201,8 +8224,7 @@ def _item_type_text(item: dict) -> str:
     raised with the point items already committed — the #2422/#7925
     partial-mutation class, measured for four arms at review cycle 10.
     """
-    value = item.get("type")
-    return (str.__str__(value) if isinstance(value, str) else "").strip().lower()
+    return _type_text(item.get("type"))
 
 
 _ENTITY_ITEM_LABELS = {"subject": "Subject", "object": "Object",
@@ -21031,9 +21053,18 @@ class TortoiseSDK:
         # the one caller that passes `False` (`update_point`) writes a window or
         # a non-terminal prop through its own policy, so an `:Event` carrying one
         # is not this refusal's business.
+        # ⛔ The probe is `:Point:Event`, NOT the update door's OR-form, and the
+        # difference is deliberate (#11825 review cycle 12 P2): THIS guard's write
+        # surface is `MATCH (n:Point {id:$id})` (`LIFECYCLE_FANOUT_QUERY` is
+        # :Point-scoped too), so only a node carrying BOTH labels is one this door
+        # would terminalize. Measured over-block with the OR-form: `add_event(<a
+        # point's id>)` mints a SEPARATE `:Event` keyed by that id, and
+        # `retract_point(<the point>)` was then refused — "carries the :Event label"
+        # — while the `:Point` node it would write stayed `live`, with journal
+        # delta 0. `_update_entity` keeps the OR-form because ITS write reaches
+        # both nodes.
         if refuse_terminal and self._get_proj().g.query(
-                "MATCH (e:Event) WHERE e.eventId = $id OR e.id = $id "
-                "RETURN count(e)",
+                "MATCH (n:Point:Event {id:$id}) RETURN count(n)",
                 params={"id": point_id},
         ).result_set[0][0]:
             raise ValueError(
@@ -26040,8 +26071,7 @@ class TortoiseSDK:
                     "message": f"ingest: sources[{index}] requires 'sourceKind'",
                 })
         elif section == "entities":
-            _etype_v = item.get("type")
-            etype = (_etype_v if isinstance(_etype_v, str) else "").strip().lower()
+            etype = _type_text(item.get("type"))
             if not etype:
                 violations.append({
                     "section": section, "index": index,
@@ -29622,7 +29652,7 @@ class TortoiseSDK:
                 raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             item = dict(item)
             ref = item.pop("ref", None)
-            etype = (item.pop("type", None) or "").strip().lower()
+            etype = _type_text(item.pop("type", None))
             name = item.pop("name", None)
             # Entity props that wire edges may address earlier bundle items
             # by local ref (points + entities are registered by now).
@@ -46387,7 +46417,7 @@ class TortoiseSDK:
             raise ValueError(
                 "'_server_id' is a server-managed field and cannot be set "
                 "via props.")
-        t = (type or "").strip().lower()
+        t = _type_text(type)
         # ── #9964: the KIND decides the layer, then REPORT the disagreement ───
         # One authority answers which layer a kind is declared on; a kind that
         # belongs exclusively to the other entity layer ROUTES this write there
