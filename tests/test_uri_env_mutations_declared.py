@@ -156,9 +156,16 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # the three is this guard's vacuity vector (a docker-half test silently
     # running embedded); each is a deliberate env control:
     #   :283  `test_search_graph_unions_the_derived_queries_into_one_id_keyed_dict`
-    #         drives the REAL `extractor_v2.search_graph` against a STUB client,
-    #         so the delenv (DELIBERATE_EMBEDDED_LANE) is what keeps a real SDK
-    #         from being constructed on the ambient lane — no DB is touched.
+    #         drives the REAL `extractor_v2.search_graph` against a STUB client
+    #         (`StubSDK()` at :302 — no SDK is constructed and no DB is touched),
+    #         and the two env controls at :283/:284 pin the env-derived label:
+    #         with the URI gone and `TORTOISE_API_URL` set, `resolve_backend_mode`
+    #         returns `hosted`, never `embedded` — so the delenv's job is to keep
+    #         an AMBIENT docker/redis URI from winning that function's FIRST
+    #         branch (uri -> `real`) and making the assertion depend on the box.
+    #         Intent: the env control IS the point (the `DELIBERATE_URI`
+    #         deliberately-unreachable probe class) — the test forces a LABEL,
+    #         not a lane, which is why it is not `DELIBERATE_EMBEDDED_LANE`.
     #   :875  the shared `_drive()` helper (DELIBERATE_URI): `main()` refuses a
     #         non-`docker://`/`redis://` URI BEFORE the fake SDK is built, so
     #         the scheme gate needs a docker-shaped value; the SDK is faked.
