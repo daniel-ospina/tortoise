@@ -1575,6 +1575,22 @@ surfaces:
   # never select it on a `tortoise/pricing.py`-only PR — the same reason
   # `test_write_op_reachability.py` sits in both (#4495). A main-red repaired
   # here, not a new suite: the file is main's, only the registration is added.
+  # #12003: the two purchasable STORAGE dimensions (#11758) — the decision record
+  # pinned against `product/pricing.json` and its e2e served copy, the loader
+  # (`tortoise/pricing.py::tier_limits`), the overage arithmetic
+  # (`tortoise/metering.py::storage_overage_cost_usd`) and the allowance-gate keys.
+  # Registered on `api` because `tortoise/metering.py` is an exact `api`
+  # SOURCE_PATTERN; the file's OTHER three subjects (`tortoise/pricing.py`,
+  # `tortoise/cost_dimensions.py`, `tortoise/allowance_gate.py`) match no
+  # SOURCE_PATTERN and fall to `core` — measured, not assumed:
+  # `--changed-files tortoise/pricing.py` -> `['core']`. A named-surface match
+  # REPLACES the `core` fallback (#2938), so this `api` row alone would never run
+  # the suite on a `pricing.py`-only diff (3 of its 4 subjects select `core`);
+  # the `core` block's entry carries that arm, the per-commit row history and the
+  # #12006 artifact-coverage gap — read it there rather than restating it here.
+  # Hermetic — the committed artifact plus `tmp_path` mutations and
+  # `pricing.reload()`, no DB/graph/network/model — so it is deliberately NOT
+  # carve_out-registered.
   - test_pricing_storage_dimensions.py
   - test_probe_reset_inflight_4608.py  # #4608: a probe reset/rebuild must not close a handle an in-flight probe still queries (hosted_api + selfhost)
   - test_provisioning_edge_function.py
@@ -2247,37 +2263,79 @@ surfaces:
   # `manifest drift: ['test_pricing_storage_dimensions.py']`, and the REQUIRED
   # `manifest-integrity` leg (a `python-ci-gate.needs` entry) red on
   # `refs/pull/N/merge` — measured on #12002, `COMPLETED FAILURE` with the merge
-  # blocked. ⚠️ That is HISTORY, not the current tree: #11837 (`3557a476e1`)
-  # registered the file on `main` first, in the `api` block, and `--integrity`
-  # on `main` is green. So this row is not a main-red repair any more — it is the
-  # `core` arm main still does not carry, and the `api` block's row (not a second
-  # one here) is what covers `metering.py`. Two rows, one per surface: a second
-  # `api` row is a `duplicate entry` and reds the gate it was added to green.
-  # Same class as the `test_percent_value_11915.py` row directly above — which is
-  # what #11978 was filed for 42 minutes before this drift landed (issue
+  # blocked. Same class as the `test_percent_value_11915.py` row directly above —
+  # which is what #11978 was filed for 42 minutes before this drift landed (issue
   # 2026-11-12T00:47:22Z, `a3d20763ab` 01:29:58Z), not hours.
+  #
+  # ⛔ THIS ROW IS THE SURVIVOR OF FOUR, and the history above is why. #11837
+  # (`3557a476e1`) registered the file with the `api` row beside
+  # `test_pricing_tiers.py` and NO `core` row; #12023 (`51a5dc2bf4`) added the
+  # first `core` row (its "DUAL-REGISTRATION" one-liner), #11965 (`379de48fdd`)
+  # added a second plus the first `durations:` row, and #12005 (`d088425a7c`) a
+  # third plus a second `durations:` row. Measured per commit — `api`/`core`
+  # surface rows, then `durations:` keys, for this one file:
+  #   `3557a476e1` 1/0, 0 · `51a5dc2bf4` 1/1, 0 · `379de48fdd` 1/2, 1 ·
+  #   `d088425a7c` 1/3, 2 (= `origin/main` before this PR)
+  # and #12003's own commit added a FOURTH `core` row and a THIRD `durations:`
+  # row on top of that. Measured on `origin/main` at `7f7ac34a6b` — on `main`,
+  # NOT on this branch — `--integrity` exits 1 with
+  #   x duplicate mapping key 'test_pricing_storage_dimensions.py': line 11176
+  #     repeats line 9984 — a YAML loader keeps only the LAST value
+  # and, with that mapping-key copy removed, the surfaces walk adds
+  #   duplicate entry 'test_pricing_storage_dimensions.py' at .surfaces.core[]
+  #   (lines 2282, 2322) … (lines 2282, 7320)
+  # so the REQUIRED `manifest-integrity` leg went RED on `main` again — minutes
+  # after the commits meant to repair it: #12023 (`51a5dc2bf4`, 2026-11-12T04:45Z)
+  # and #12005 (`d088425a7c`, 04:46Z) each added a `core` row believing `main`
+  # lacked one, and the head that reds is 04:54Z. The two lanes that repaired the
+  # drift are the ones that re-created it — the #11210/#11211/#11222 recurrence
+  # this file records beside `test_pack_hierarchy_11001.py` (three lanes, three
+  # rows) and again beside `test_percent_value_11915.py`.
+  #
+  # ⛔ #12035 (`a7139b663d`) landed the DEDUP FIRST — it deleted the extra `core`
+  # rows and the second `durations:` key, and `--integrity` is green from there —
+  # but it did NOT fix the record, so it left the prose behind a now-ABSENT row:
+  # the `#11758/#11981` block that used to sit beside `test_allowance_gate.py`
+  # survives with no row under it, still asserting "THIS ROW REPAIRS `main`, NOT
+  # THIS PR" and "The surviving `core` row is the one above, beside
+  # `test_8447_c3_ingest_door.py`" — which is `- test_allowance_gate.py`, not any
+  # row for this suite. #12003's remaining work is therefore the RECORD, not the
+  # dedup: delete that orphan, fold its still-true measurements in HERE, and
+  # correct the counts. ⚠️ Do not read this note as #12003 having repaired `main`;
+  # #12035 did, and this PR would have been an empty sibling had it landed first.
+  # The four `core` rows were SEMANTICALLY identical registrations (one carried a
+  # trailing `# #11837: …` note rather than being byte-identical, and its content
+  # is restated here, so nothing is lost), so WHICH one survives is not meaningful
+  # and ONE row is. `--integrity` is green at that state, measured.
+  #
+  # The `api` block's row (not a second one here) is what covers `metering.py`.
+  # Two rows, one per surface: a second `api` row is a `duplicate entry` and reds
+  # the gate it was added to green.
   # `core` because THREE of this file's FOUR subjects select no named surface:
   # measured `--changed tortoise/pricing.py` -> ['core'],
   # `--changed tortoise/allowance_gate.py` -> ['core'] and
   # `--changed tortoise/cost_dimensions.py` -> ['core'] (that one is imported
   # DIRECTLY by the suite, not only through `pricing.storage_dimensions`). The
   # FOURTH (`tortoise/metering.py`) DOES select `api`, where #11837 already
-  # registered it — which is why this PR adds THIS row only (NOT the six-surface
-  # census `test_cost_dimensions.py` carries: this file pins two dimensions, not
-  # a sweep over every tracked `.py`).
+  # registered it — which is why THIS row covers the `core` half only (NOT the
+  # six-surface census `test_cost_dimensions.py` carries: this file pins two
+  # dimensions, not a sweep over every tracked `.py`).
   # Hermetic: 31 cases, no DB, no graph, no network, no model call, no `gh`.
   # ⚠️ COVERAGE GAP — NOT created here, NOT closed here (#12006): this suite also
   # reads `product/pricing.json`, and a diff touching ONLY that artifact selects
   # no surface at all (measured `--changed-files product/pricing.json` ->
-  # surfaces [], 88 tier-1 files, this suite absent) because `product/` is a
+  # surfaces [], 89 tier-1 files, this suite absent — ⛔ 89 is a DATED anchor: it
+  # read 88 at `a3d20763ab` and moved to 89 when #11837 (`3557a476e1`) landed
+  # `tests/test_10988_a4_label_coverage.py`, so re-derive it in one `select()`
+  # call rather than reading it as a constant) because `product/` is a
   # `NON_PYTHON_PREFIXES` entry. Those four modules are what THIS row buys;
   # the artifact leg needs the #12006 decision, so do not read this row as
   # covering the rates.
   # ⛔ ONE ROW PER SURFACE, and re-measure before adding one (`grep -n
   # '^  - test_pricing_storage_dimensions.py' config/ci-surfaces.yml` must print
-  # exactly TWO lines, one under `api` and one under `core`): the note below
-  # records three lanes that each repaired this same drift and left three copies
-  # of one row, and this file has already been red on a `duplicate entry` in
+  # exactly TWO lines, one under `api` and one under `core`): the note ABOVE
+  # records FOUR lanes that each repaired this same drift and left four copies
+  # of one row (removed by #12003), and this file has already been red on a `duplicate entry` in
   # `.surfaces.api[]` for exactly that reason.
   - test_pricing_storage_dimensions.py
   # ⛔ `test_pack_hierarchy_11001.py` is registered ONCE, further down this list
@@ -2297,33 +2355,6 @@ surfaces:
   # guards is an exact `api` match, the other is a `core` fallback, and both
   # diffs must select the evidence.
   - test_allowance_gate.py
-  # #11758/#11981: the two purchasable storage dimensions (stored data, hot
-  # capacity) pinned against the cost-dimension registry, the pricing artifact,
-  # `tier_limits()` and the overage arithmetic. THREE of its four subjects —
-  # `tortoise/pricing.py`, `tortoise/allowance_gate.py` and
-  # `tortoise/cost_dimensions.py` — match NO `SOURCE_PATTERNS` entry and are not
-  # SHARED_MODULEs, so each falls through to the `core` fallback (measured:
-  # `select(['tortoise/pricing.py'])` -> surfaces ['core']). The fourth,
-  # `tortoise/metering.py`, IS an exact `api` match, so this row alone would miss
-  # every `metering.py`-only diff — the `api` arm beside `test_allowance_gate.py`
-  # covers that half, and BOTH arms are required.
-  #
-  # ⛔ THIS ROW REPAIRS `main`, NOT THIS PR. #11981 squash-merged at `a3d20763ab`
-  # WITHOUT registering the file it added, so the REQUIRED `manifest-integrity`
-  # leg went red on `main` itself — and, because that job runs on the PR MERGE
-  # ref, red on every PR's merge ref too (measured on `origin/main @ e4703a286a`:
-  # `ci_selection.py --integrity` -> `manifest drift:
-  # ['test_pricing_storage_dimensions.py']`). An unlisted file is the #1262
-  # drift class: the suite runs in NO leg while the required leg is red.
-  # ⚠️ If a PEER PR lands this same repair first, these rows become the duplicate
-  # the #11210/#11211/#11222 recurrence is about — `--integrity` reds on
-  # `duplicate entry … .surfaces.core[]`. Then DELETE the extra row; do not add
-  # a third.
-  # ⛔ DEDUPED 2026-11-12: three lanes repaired this same `#11981` drift concurrently
-  # (`#12005`, `#12023`) and left THREE `core` rows plus a SECOND `durations:` key —
-  # `--integrity` reds on a duplicate row and on a duplicate key, so the tree was
-  # redder than the drift it repaired. The surviving `core` row is the one above,
-  # beside `test_8447_c3_ingest_door.py`; the extra `durations:` copy is gone too.
   - test_10000_narrative_record_home.py
   - test_10017_cache_tier.py
   - test_10017_purge_guard.py
