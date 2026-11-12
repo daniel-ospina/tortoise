@@ -554,9 +554,10 @@ SEAM_FILES_WITH_ALLOWED_LITERALS = {
         # cannot be replaced by a name-only check.
         #
         # Nothing here DIALS a lane port. Each literal below is a fixture:
-        #   * `falkordb-16379` — a PROTECTED shared-instance NAME the tool
-        #     refuses to manage or remove (`PROTECTED_NAMES`); the `-16379` is
-        #     part of the NAME, not a port this file connects to.
+        #   * `falkordb-16379` (THREE sites, declared per STATEMENT — see
+        #     below) — a PROTECTED shared-instance NAME the tool refuses to
+        #     manage or remove (`PROTECTED_NAMES`); the `-16379` is part of the
+        #     NAME, not a port this file connects to.
         #   * `127.0.0.1:16390->6379` — a canned `docker ps` port mapping the
         #     parser is asserted to read back (16390 is the lane's own port).
         #   * `127.0.0.1:6379/stale_shared_lane` — a stale-URI PRECONDITION the
@@ -567,10 +568,17 @@ SEAM_FILES_WITH_ALLOWED_LITERALS = {
         #   * `resolves 16379 and a lane's` — the text of an ASSERTION MESSAGE
         #     naming the fallback the export exists to pre-empt.
         #
-        # The NAME entry is QUOTED on purpose: the matcher is a substring test
-        # over the whole source line, so a bare name would exempt any future
-        # line that merely mentions the container — including one that dials it.
-        '"falkordb-16379"',
+        # Each of the three NAME entries is a full STATEMENT, never the bare
+        # name and never the name merely quoted: the matcher is a SUBSTRING
+        # test over the stripped source line, so `'"falkordb-16379"'` would
+        # also have exempted a future `_docker("exec", "falkordb-16379", ...)`
+        # — every site in this file spells the name double-quoted, so quoting
+        # narrows it against nothing. Declaring the statements is what keeps a
+        # future DIAL site a red instead of an exemption, which is the whole
+        # job of this file (same shape as `test_wipe_server.py` above).
+        '"falkordb-16379",      # the orchestration graph instance',
+        'for shared in ("falkordb", "falkordb-16379"',
+        '_remove_and_describe("falkordb-16379")',
         "127.0.0.1:16390->6379",
         "127.0.0.1:6379/stale_shared_lane",
         "127.0.0.1:16399:6379",
@@ -599,7 +607,7 @@ def _quoted_program(value: str) -> bool:
     (#10150 round-10 review): a fixture that WRITES such a program and then
     EXECUTES it is out of scope — this predicate cannot tell that from a
     fixture the census merely parses, and it answers "quoted program" for
-    both. No site in the tree does it today (the guard's own 23-entry allow
+    both. No site in the tree does it today (the guard's own 25-entry allow
     list was re-run: none goes inert); closing it needs the write/exec edge,
     not a better string test.
     """
