@@ -239,10 +239,12 @@ RETIRED_HOST_ALLOWLIST = {
 #: said exactly that and it was false. The issue also enumerates five app pages
 #: and API modules that still emit the retired origin and are DEFERRED here, not
 #: swept. Counts measured at this head, so the deferral cannot be read as a clean
-#: sweep:
+#: sweep. BASIS: EMITTING occurrences (an `href`/const a browser or server would
+#: follow) — a PROSE comment that merely names the host is not counted, which is
+#: why `[[path]].ts` is 1 and not 2 (line 12 is a comment, line 49 emits):
 #:   website/apps/dashboard/functions/blog/api/[[path]].ts   1  DEFAULT_BLOG_ORIGIN
 #:   website/apps/blog-admin/src/lib/blog-api.ts             1  author-image URL
-#:   website/apps/dashboard/public/invite-accept.html        2  nav /docs + /tos
+#:   website/apps/dashboard/public/invite-accept.html        3  nav /docs + footer /tos + /privacy
 #:   website/apps/dashboard/public/welcome.html              1  nav /
 #:   website/apps/dashboard/public/signup.html               2  canonical /auth + nav /
 #: None is a broken link (every one still 301s onto the canonical host); they are
@@ -418,10 +420,21 @@ def test_mcp_cors_allowlist_records_why_the_retired_origin_stays():
         "the trigger must name the path that keeps this host live — `/contact` "
         "answers 200 there, so 'a scriptless 404 and nothing else' is not the reason "
         "the entry is safe to keep")
-    assert any("200" in ln and "script" in ln for ln in contact_lines), (
+    assert any("200" in ln and "<script" in ln for ln in contact_lines), (
         "the `/contact` line must carry the MEASUREMENT that makes it matter (it "
         "answers 200 and serves a page with a <script>). Naming the path alone is "
         "the same token-level pin that stayed green over the retracted premise")
+    # `"script" in "no script"` is True, so a NEGATED line — the shape of the
+    # retracted premise itself, and the shape `/404 -> 200 (no script)` in the
+    # same block already uses — would satisfy a bare token pin while INVERTING the
+    # fact. (Measured: replacing the `/contact` line's wording with "no script"
+    # left the pin green.) So the negation is refused explicitly.
+    for negated in ("no script", "no <script>", "scriptless", "without a script"):
+        assert not any("/contact" in ln and negated in ln.lower()
+                       for ln in contact_lines), (
+            f"the `/contact` line negates its own measurement ({negated!r}) — it "
+            "answers 200 and serves a page WITH a <script>, so the negated line is "
+            "the retracted argument wearing the tokens the pin looks for")
     for retracted in ("only remaining document", "only non-redirect HTML"):
         assert retracted not in block, (
             f"the retracted premise is back ({retracted!r}): the host serves more "
