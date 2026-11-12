@@ -807,10 +807,17 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # not admit an operator-shaped node as a factor input (#9269,
         # ``_non_operator``) — the same strip a draft gets — so re-pointing onto one
         # leaves the factor degenerate and a re-audit would read CLEAN (measured).
-        # It keys on the RAW FLAG, not the flag-OR-``op_type`` predicate ``active``
-        # uses: an ``op_type``-only Object IS admitted (measured, ``skipped: []``).
+        # ⛔ It keys on the SHAPE (flag OR ``op_type``), like ``active`` — NOT the
+        # raw flag. An ``op_type``-only Object IS admitted by EP's OPERATOR-INPUT
+        # arm (``_non_operator``; measured ``skipped: []``), but the DIRECT-edge arm
+        # uses the stricter ``_non_op`` — ``(is_operator IS NULL OR is_operator =
+        # false) AND op_type IS NULL`` — so it is REFUSED there. Keying on the flag
+        # alone told a flowing DIRECT row to re-point onto such a successor:
+        # measured, confidences went 2 → 0 and a re-audit read CLEAN, i.e. the
+        # instrument prescribed the lost-belief shape it exists to report.
         "     head(collect(coalesce(carrier.is_operator, false))) "
-        "AS carrier_is_operator\n"
+        "AS carrier_is_operator, "
+        "     head(collect(carrier.op_type)) AS carrier_op_type\n"
         # ⛔ ONE HOP OF LOOKAHEAD, because "the successor is itself terminal" is NOT
         # the same fact as "there is a live head to re-point onto": the Object lane can
         # terminalize without a supersession (so the successor names no successor at
@@ -824,7 +831,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # live head.
         "AND id(nxt) <> id(sup) AND id(nxt) <> carrier_id\n"
         "WITH sup, r, active, carrier_count, carrier_id, carrier_status, "
-        "     carrier_sb, carrier_is_operator, carrier_outdated, "
+        "     carrier_sb, carrier_is_operator, carrier_op_type, carrier_outdated, "
         "     count(nxt) AS next_count, "
         "     head(collect(nxt.status)) AS next_status, "
         "     head(collect(coalesce(nxt.outdated, false))) AS next_outdated, "
@@ -835,7 +842,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # prescribed re-point left the factor producing NO belief (confidences
         # empty) while a re-audit read CLEAN. Reachable through the sanctioned fold
         # lane — ``apply_supersessions`` admits a DRAFT successor.
-        "     head(collect(coalesce(nxt.is_operator, false))) AS next_is_operator\n"
+        "     head(collect(coalesce(nxt.is_operator, false))) AS next_is_operator, "
+        # ⛔ The same SHAPE rule one hop out: EP's DIRECT-edge arm refuses an
+        # ``op_type``-only node, so a successor that carries only that is not a head
+        # a direct edge can be re-pointed onto (see the carrier note above).
+        "     head(collect(nxt.op_type)) AS next_op_type\n"
         # ``r.idx`` and the OPERATOR's ``direction`` are projected because the repair
         # differs in the idx-0 source slot (ep.py's ``source_stripped`` hazard),
         # ``op_type`` because EP's operator predicate is the flag OR ``op_type``
@@ -865,8 +876,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         "labels(active), "
         f"{epistemic_identity('active')}, active.id, carrier_count, "
         "carrier_id, carrier_status, carrier_sb, carrier_is_operator, "
-        "carrier_outdated, next_count, next_status, next_outdated, "
-        "next_is_operator "
+        "carrier_op_type, carrier_outdated, next_count, next_status, "
+        "next_outdated, next_is_operator, next_op_type "
         f"LIMIT {SAMPLE_LIMIT}",
     )
 
@@ -885,8 +896,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         (sup_id, sup_name, sup_sb, edge_type, idx, is_op_flag, op_type,
          direction, edge_direction, active_labels, active_id, _active_nid,
          carrier_count, _carrier_id, carrier_status, carrier_sb,
-         carrier_is_operator, carrier_outdated, next_count, next_status,
-         next_outdated, next_is_operator) = row
+         carrier_is_operator, carrier_op_type, carrier_outdated, next_count,
+         next_status, next_outdated, next_is_operator, next_op_type) = row
         _is_operator = ("Point" in (active_labels or [])
                         and (is_op_flag is True or op_type is not None))
         return {
@@ -930,7 +941,13 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             "carrier_sb": carrier_sb,
             # ``coalesce(..., false)``: operator-SHAPED means anything EP's
             # ``_non_operator`` refuses, i.e. NOT the boolean ``false``.
-            "carrier_is_operator": carrier_is_operator is not False,
+            # ⛔ SHAPE, not the raw flag: EP's DIRECT-edge arm uses the stricter
+            # ``_non_op`` (flag false/NULL AND ``op_type`` NULL), so an
+            # ``op_type``-only node is REFUSED there even though the operator-input
+            # arm admits it. Asserting only the flag told a flowing direct row to
+            # re-point onto one (measured: confidences 2 → 0, re-audit CLEAN).
+            "carrier_is_operator": (carrier_is_operator is not False
+                                    or carrier_op_type is not None),
             # ⛔ DERIVED through the shared predicate, not read off ``status``: EP's
             # terminal test is the status vocabulary OR the legacy ``outdated`` flag
             # — and that comparison is strict too, so the mirror is handed a real
@@ -942,7 +959,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             "next_outdated": next_outdated is True,
             "next_terminal": is_terminal_status(next_status,
                                                 next_outdated is True),
-            "next_is_operator": next_is_operator is not False,
+            "next_is_operator": (next_is_operator is not False
+                                 or next_op_type is not None),
         }
 
     def _dropped_input(s: dict) -> str:
@@ -983,8 +1001,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "moves no belief either way")
         if not s["is_operator"]:
             # ⛔ Every caller is an "EP will not read it" arm (an operator-shaped or
-            # draft successor, or a neutral edge), so the honest sentence is that the
-            # belief this edge DID carry is NOT moved by the repair named — measured:
+            # draft successor — a neutral edge returns at the rung above and never
+            # reaches this one), so the honest sentence is that the belief this edge
+            # DID carry is NOT moved by the repair named — measured:
             # a direct edge re-pointed onto an operator-shaped successor leaves
             # ``confidences {}`` (and onto a live claim successor restores two).
             return ("the direct edge carried belief into the superseded endpoint "
@@ -1134,7 +1153,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # NEITHER arm — see the ``shape`` note in ``_4b_state``.
             detail += (
                 " — the Object lane moved no edges on supersession, and EP builds NO "
-                "factor for this endpoint in EITHER arm: the operator arm requires "
+                "factor for this endpoint in EITHER arm: the operator arm needs "
+                "``is_operator = true`` or an ``op_type`` (the :Point label alone "
+                "is not enough — ``is_operator='false'`` on a :Point is a door and "
+                "matches neither), "
                 "the :Point label, and the direct-edge arm refuses an "
                 "operator-shaped endpoint. So the claim never counted this support "
                 "and no skipped-factor record exists (#9269/#11826)")
@@ -1452,7 +1474,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 # changes nothing and a re-audit reads CLEAN over a claim whose
                 # support was never there.
                 fix += ("; and no edge rewrite repairs this — EP builds NO factor "
-                        "in EITHER arm (the operator arm needs the :Point label, the "
+                        "in EITHER arm (the operator arm needs ``is_operator = true`` or "
+                        "an ``op_type``, the "
                         "direct-edge arm refuses an operator-shaped endpoint). "
                         "Clearing the shape is NOT sufficient on its own — this edge "
                         "still ends at the superseded Object, so what restores the "
@@ -1487,7 +1510,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # ``q`` would set the flag on a node that never carried it.
             return prefix + (
                 "No edge rewrite ALONE repairs this: EP builds NO factor in either "
-                "arm (the operator arm needs the :Point label, the direct-edge arm "
+                "arm (the operator arm needs ``is_operator = true`` or an "
+                "``op_type``, the direct-edge arm "
                 "refuses an operator-shaped endpoint). The flag is only HALF the "
                 f"repair — {_shape_repair} AND move this "
                 f"{s['edge_type']} edge off {q} onto the successor ({successor}) — "
@@ -1504,12 +1528,22 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # the RELATIONSHIP.
             fwd_d, bwd_d = direction_flows(s["direction"])
             if not (fwd_d or bwd_d):
-                return prefix + (
-                    f"Delete this {s['edge_type']} edge off {q} — it is "
+                # ⛔ No ``prefix`` and no ``tail`` here: both are written for a
+                # RE-POINT. The ambiguity prefix ends "so re-point onto the intended
+                # one by ID", and ``_chain_tail`` appends "target a CLAIM successor" /
+                # "promote it to live as well" — advice about a transfer this
+                # instruction does not perform, and false on a neutral row (a
+                # re-pointed neutral edge still transfers nothing: the direction lives
+                # on the RELATIONSHIP).
+                ambiguous = (
+                    f" ({_quoted(s['sup_sb'])} is carried by {s['carrier_count']} "
+                    "Objects, but the successor's identity does not change this "
+                    "repair)" if s["carrier_count"] > 1 else "")
+                return (
+                    f"Delete this {s['edge_type']} edge off {q}{ambiguous} — it is "
                     f"{_quoted(s['direction'])} (neutral), so it carried no belief "
                     f"to preserve and §3.1's disposition is DROP; re-pointing it "
-                    f"onto the successor only keeps the same inert connection."
-                    + tail)
+                    f"onto the successor only keeps the same inert connection.")
             return prefix + (
                 f"Re-point this {s['edge_type']} edge off {q} onto the successor "
                 f"({successor}): it is a DIRECT edge, so there is no factor to "

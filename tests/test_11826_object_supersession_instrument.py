@@ -610,6 +610,77 @@ def test_a_direct_edge_into_a_shaped_successor_keeps_its_belief_claim(sdk):
     assert "so the re-point moves that belief onto the successor" not in fix, fix
 
 
+def test_a_shaped_and_neutral_endpoint_gets_the_shape_clause_not_the_neutral_one(sdk):
+    """A shaped endpoint is in NEITHER EP arm, and the DIRECTION is irrelevant there.
+
+    ``_archive_clause`` used to test the neutral branch first, so this row — a shaped
+    endpoint whose edge is ``'-'`` — was told the silence comes from the direction and
+    lost the ":Point operator" guidance, while its own ``detail`` says EP never
+    consults the direction for that endpoint. The clause order is the one
+    ``_active_edge_detail`` and ``_triage`` use (SHAPE first), so the row cannot get
+    an explanation from a mechanism EP does not reach.
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"], direction="-")
+    sdk.update_entity(actor["id"], is_operator=True)
+    # Shaped AND neutral, successorless → the archive clause is emitted.
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded', "
+            "o.supersededBy = 'PolicyGone'", {"i": v1["id"]})
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    detail, fix = issues[0].detail, issues[0].fix
+    assert "in EITHER arm" in detail, detail
+    assert "in EITHER arm" in fix, (
+        "the shape clause is the one that explains this row: " + fix)
+    assert "clearing the shape alone restores nothing" in fix, fix
+    assert "EP never reaches the direction test for this endpoint" in fix, fix
+    assert "no belief — and re-pointing or deleting it restores none" not in fix, (
+        "the neutral clause attributes the silence to a direction EP never reads "
+        "here: " + fix)
+
+
+def test_an_op_type_only_successor_is_refused_by_the_direct_arm(sdk):
+    """EP's DIRECT arm uses the stricter ``_non_op``: flag false/NULL AND no op_type.
+
+    An ``op_type``-only Object IS admitted by the operator-input arm (``_non_operator``)
+    and REFUSED by the direct-edge arm, so keying "operator-shaped" on the raw flag
+    told a flowing DIRECT row to re-point onto such a successor. Measured: confidences
+    went 2 → 0 and a re-audit read CLEAN — the instrument prescribing the lost-belief
+    shape it exists to report.
+    """
+    o = _obj(sdk, "PolicyV1")
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    sdk.create_direct_edge("IMPL", p["id"], o["id"])
+    before = sdk.compute_confidence(anchors=[p["id"]], require_calibration=False)
+    assert before.get("confidences"), (
+        "fixture drifted: a flowing direct edge builds no belief: "
+        + repr(before.get("confidences")))
+    # Only ``op_type`` — the flag stays NULL, so the raw-flag test called it a claim.
+    _obj(sdk, "PolicyV2", op_type="IMPL")
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == o["id"]]
+    assert issues
+    fix = issues[0].fix
+    assert "OPERATOR-SHAPED" in fix, (
+        "an op_type-only successor is operator-shaped for EP's direct arm: " + fix)
+    assert "target a CLAIM successor" in fix, fix
+
+    # ...and the engine agrees the prescribed re-point loses the belief.
+    sdk.create_direct_edge("IMPL", p["id"], _q(
+        sdk, "MATCH (o:Object {name:'PolicyV2'}) RETURN o.id", {})[0][0])
+    _q(sdk, "MATCH (:Point {id:$p})-[r:IMPL]->(:Object {id:$o}) DELETE r",
+       {"p": p["id"], "o": o["id"]})
+    after = sdk.compute_confidence(anchors=[p["id"]], require_calibration=False)
+    assert after.get("confidences") == {}, (
+        "EP apparently does read this successor through the direct arm — then the "
+        f"warning is over-cautious: {after.get('confidences')}")
+
+
 def test_a_supersession_chain_points_the_repair_at_the_live_head(sdk):
     """Re-pointing onto an immediate successor that is ITSELF superseded clears the
     finding and leaves the input anchored to another EP-dead node.
