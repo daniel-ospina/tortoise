@@ -1519,20 +1519,6 @@ surfaces:
   # `tortoise/activation_scorecard.py`'s LIMITATIONS text).
   - test_mcp_refusal_telemetry_9084.py
   - test_metering.py
-  # #11758/#11981: the purchasable storage dimensions' overage arithmetic. The
-  # `api` arm is LOAD-BEARING because `tortoise/metering.py` is an exact `api`
-  # SOURCE_PATTERN: a `metering.py`-only diff resolves `['api']`, and a
-  # named-surface match REPLACES the `core` fallback (#2938), so the `core` arm
-  # alone would leave these pins asleep on it. The OTHER arithmetic source,
-  # `tortoise/pricing.py`, matches NO SOURCE_PATTERNS row and falls through to
-  # `core` — measured, not assumed: `tools/ci_selection.py --changed-files
-  # tortoise/pricing.py` -> `['core']` — which is what the `core` arm covers.
-  # Both arms are pinned by
-  # `tests/test_ci_selection.py::test_a_metering_only_diff_runs_the_storage_dimension_pins`
-  # and its `..._pricing_...` sibling; do not drop either. (#11837 registered the
-  # file on `main` while this lane was open — this `api` arm is the one that
-  # survives that rebase; the old duplicate is gone.)
-  - test_pricing_storage_dimensions.py
   - test_metering_capture_usage_reader.py  # #4051: the extractor's token counters had a WRITER and no READER — this pins `metering.get_capture_usage` (both substrates: the registry Cypher read and the Supabase control-plane read, the latter being the PRODUCTION ledger post-#669, where a wrong column would otherwise degrade silently to the zero view for every tenant) + the repo-wide "no call site" scope pin that keeps the reader off every request path. Registered on `api` because two of its three sources (`tortoise/metering.py`, `tortoise/supabase_control.py`) are exact `api` SOURCE_PATTERNS, AND on `core` because the THIRD (`tortoise/cost_dimensions.py`) matches no SOURCE_PATTERN and falls to `core` — measured, not assumed: `tools/ci_selection.py --changed-files tortoise/cost_dimensions.py` -> `['core']`. A named-surface match REPLACES the `core` fallback (#2938), so the `api` arm alone leaves a core-only diff running NEITHER this file nor any other of its pins — and a core-only diff is exactly the regression shape this PR fixes (the binding re-pointed back at a write-op reader). See the `core` arm.
   - test_oauth_consent_page_step4.py  # #3524 §9 step 4: the consent page STOPS signing people in. Owns the whole page surface now — the unauthenticated 302 bounce (with the complete authorize URL recoverable), the return target run through signup.html's REAL `APP_RETURN_ROUTES` under node, byte-exact `state`, the attempt-key carriage read from the page's own URL, the mint call, the token-bound `/oauth/consent` POST, and a bound token redeeming to a live code. It REPLACED test_oauth_consent_pkce.py wholesale (deleted with the inline client it pinned). DUAL-REGISTERED with `onboarding`: it reads `website/apps/dashboard/functions/**` (the mint's route files and the TS `ATTEMPT_KEY_PARAM` authority) and `public/signup.html`.
   - test_oauth_consent_bff_routes.py  # #3524 steps 1+3: the BFF mint + bounce routes and the TS<->Python token contract
@@ -1589,6 +1575,13 @@ surfaces:
   # never select it on a `tortoise/pricing.py`-only PR — the same reason
   # `test_write_op_reachability.py` sits in both (#4495). A main-red repaired
   # here, not a new suite: the file is main's, only the registration is added.
+  # LOAD-BEARING in the OTHER direction: `tortoise/metering.py` IS an exact `api`
+  # SOURCE_PATTERN, so a `metering.py`-only diff resolves `['api']` and a
+  # named-surface match REPLACES the `core` fallback (#2938) — the `core` arm
+  # alone would leave these pins asleep on it. Both arms are pinned by
+  # `tests/test_ci_selection.py::test_a_metering_only_diff_runs_the_storage_dimension_pins`
+  # and its `test_a_pricing_only_diff_runs_the_storage_dimension_pins` sibling;
+  # do not drop either.
   - test_pricing_storage_dimensions.py
   - test_probe_reset_inflight_4608.py  # #4608: a probe reset/rebuild must not close a handle an in-flight probe still queries (hosted_api + selfhost)
   - test_provisioning_edge_function.py
@@ -2234,29 +2227,6 @@ surfaces:
   # has no business running on a battery-only diff.
   - test_11739_quote_population_probe.py
 
-  # #11758/#11981: the two purchasable storage dimensions — `graph_storage`
-  # (`hot capacity`) and `postgres_storage` (`stored data`) — and the `solo` $19
-  # tier that first sells them. The pins drive
-  # `metering.storage_overage_cost_usd`, whose rates, allowances and purchasability
-  # gate come from `product/pricing.json` (`pricing.storage_dimensions` /
-  # `storage_limits` / `storage_overage_rate` / `has_overage`, the last via
-  # `_overage_eligible`); `pricing.BYTES_PER_GB` is a CODE CONSTANT, and the pins
-  # assert it EQUAL to `billing.storage.bytes_per_gb`, so an artifact-only edit of
-  # that field still reds them. They also cross-check the unit
-  # `cost_dimensions.by_name` declares and the keys `allowance_gate.ALLOWANCE_KEYS`
-  # owns — neither of those two prices anything. Hermetic — no DB, no graph, no
-  # network. DUAL-REGISTERED with `api`: the
-  # pins read sources in BOTH the `api` and `core` surfaces, and neither arm is
-  # redundant — `tortoise/metering.py` is an exact `api` SOURCE_PATTERN (a
-  # metering.py-only diff resolves `['api']`, where a named-surface match REPLACES
-  # this `core` fallback, #2938), while `tortoise/pricing.py` matches no
-  # SOURCE_PATTERN and falls to `core` (measured: `--changed-files
-  # tortoise/pricing.py` -> `['core']`). Dropping either arm leaves the overage
-  # arithmetic asleep on one leg. Both are pinned by
-  # `tests/test_ci_selection.py`. Same shape as
-  # `test_metering_capture_usage_reader.py`.
-  - test_pricing_storage_dimensions.py
-
   # #11855: pins the BLAST RADIUS of an unreadable belief operand — a batch
   # containing a legacy `List`-valued α still returns every requested row, and
   # the healthy row keeps its own value. Dual-registered: this `core` arm is for
@@ -2302,6 +2272,15 @@ surfaces:
   # registered it — which is why this PR adds THIS row only (NOT the six-surface
   # census `test_cost_dimensions.py` carries: this file pins two dimensions, not
   # a sweep over every tracked `.py`).
+  # What they ASSERT beyond the `api`/`core` split: the rates, allowances and
+  # purchasability they read come from `product/pricing.json`
+  # (`pricing.storage_dimensions` / `storage_limits` / `storage_overage_rate` /
+  # `has_overage`, the last via `_overage_eligible`); `pricing.BYTES_PER_GB` is a
+  # CODE CONSTANT the pins assert EQUAL to the artifact's
+  # `billing.storage.bytes_per_gb`; and they cross-check the unit
+  # `cost_dimensions.by_name` declares against the keys
+  # `allowance_gate.ALLOWANCE_KEYS` owns. Same shape as
+  # `test_metering_capture_usage_reader.py`.
   # Hermetic: 31 cases, no DB, no graph, no network, no model call, no `gh`.
   # ⚠️ COVERAGE GAP — NOT created here, NOT closed here (#12006): this suite also
   # reads `product/pricing.json`, and a diff touching ONLY that artifact selects
