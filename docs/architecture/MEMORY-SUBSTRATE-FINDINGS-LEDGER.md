@@ -78,10 +78,11 @@ Pattern 4 is the one the review got **most wrong when it was written**, and the
 correction is worth keeping visible: the review's initial instinct was to treat
 "fixed vs flexible" as an unresolved *argument*. It was instead an unresolved
 *design*, and the two-tier answer (canonical meanings in core, tenant-owned
-labels/order in the graph) is what shipped — `tortoise/pipeline.py:5-14` states the two
-*It has two tiers* split, and `tortoise/pipeline.py:16` is that decision in code
-(`pipelineStageId` / `pipelineSlot` / `pipelineOutcome` are the core-side meanings, the
-graph-owned stage names are the other tier). See correction **(e)**.
+labels/order in the graph) is what shipped — `tortoise/pipeline.py:4-14` states the two-tier split
+("It has two tiers" at `:4`, the two tier bullets at `:7`-`:14`), and `tortoise/pipeline.py:16`
+is that decision in code — the props sentence that opens there (`pipelineStageId` / `pipelineSlot` /
+`pipelineOutcome`, continuing on `:17`) carries the core-side meanings, and the graph-owned
+stage names are the other tier. See correction **(e)**.
 
 ---
 
@@ -129,7 +130,7 @@ code while the brief itself never did.
 | Artefact (2026-09-09/10) | Best home reachable at `f70d884b7` | What survives where |
 |---|---|---|
 | `research/2026-09-09-write-path-contract.md` (464 l) | **In-repo plan doc** — `docs/plans/2026-09-10-write-contract-five-doors.md` (WS-A design v5) + condensed comment on #2820 | The **argument** survives as an in-repo design; the 33-row source table and §9/§11/§13 do not |
-| `research/2026-09-09-entity-attachment.md` (258 l) | **In-repo successor** — `docs/research/2026-09-24-2730-entity-attachment/research-brief.md`, which explicitly *reconciles* the predecessor (PR #8639) | The ladder and the code facts were re-derived in-repo; the **out-of-repo predecessor's** external precedent list (X1–X10) survives only condensed on #2730 |
+| `research/2026-09-09-entity-attachment.md` (258 l) | **In-repo successor** — `docs/research/2026-09-24-2730-entity-attachment/research-brief.md`, which explicitly *reconciles* the predecessor (#5158 delivered the brief; PR #8639 completed its alias-resolution rung) | The ladder and the code facts were re-derived in-repo; the **out-of-repo predecessor's** external precedent list (X1–X10) survives only condensed on #2730 |
 | `research/2026-09-09-numeric-storage-audit.md` (286 l) | **Cited by** `docs/plans/2026-09-10-ws-c-numeric-normalization.md:558-559` + condensed comment on #2782 | The per-layer storage table and the rebuild transcript are lost; the conclusions are baked into the WS-C design |
 | `research/2026-09-09-typed-values-and-lifecycles.md` (298 l) | **Cited by** the same WS-C plan, `:558-559` + condensed comment on #2792 | Same shape — conclusions baked in, evidence lost |
 | `research/2026-09-09-ontology-naming-review.md` (200 l) | Condensed comment on #2725 only | **No copy of its content in-repo** — its only `docs/` hit is this page's own row |

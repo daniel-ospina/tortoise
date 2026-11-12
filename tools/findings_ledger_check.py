@@ -361,10 +361,15 @@ VOCAB_HEADER_RE = re.compile(r"^\|\s*Verdict\s*\|", re.IGNORECASE)
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-#: ⛔ IT IS AN EQUALITY, NOT A FLOOR THAT CAN SLIDE DOWN: 41 as of the figure arms
-#: (`a falsified §3 count beside a list-free decoy`, `a falsified overtaken figure
-#: beside a compliant decoy`), which closed the paragraph-scoped presence test. Bump
-#: it with any arm added or removed — the population is what the pin compares.
+#: ⛔ IT IS AN EQUALITY, NOT A FLOOR THAT CAN SLIDE DOWN. Bump it with any arm
+#: added or removed — the population is what the pin compares, and the sentence
+#: naming it must move with the number or this file disagrees with itself (#11902
+#: review P3: it read `41` beside a constant of 44). The three arms this figure
+#: stands at 44 on top of are the §3 claim/correction content floor (a blanked
+#: claim column, a blanked correction column, a correction that copies its claim)
+#: added after the figure arms (`a falsified §3 count beside a list-free decoy`,
+#: `a falsified overtaken figure beside a compliant decoy`), which closed the
+#: paragraph-scoped presence test.
 MIN_SELF_TEST_MUTATIONS = 44
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
