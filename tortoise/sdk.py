@@ -5166,14 +5166,14 @@ def _with_folded_entity_name(name: str, props: dict) -> dict:
     name and compare it to a STORED key — without it there is no key to compare
     at all, and the rung could only find a near-duplicate by reading every
     entity and folding it in Python, once per write (the 44k re-file the issue
-    exists to unblock would then be quadratic). ⚠️ It is a stored-key equality,
-    not an indexed one: ``canonical_name`` is NOT (yet) in
-    ``projection._RANGE_INDEX_LABEL_PROPS`` — ``Subject``/``Object`` carry
-    ``id``/``name`` only — and this docstring used to claim "an indexed equality",
-    which the declaration did not support (review). Adding the index is a
-    separate, measurable change (both `_RANGE_INDEX_LABEL_PROPS` and
-    `_REQUIRED_RANGE_INDEXES`, per `tests/test_5407_index_label_parity.py`) and is
-    recorded as a follow-up rather than smuggled into this repair.
+    exists to unblock would then be quadratic). ⚠️ It is an INDEXED equality:
+    ``canonical_name`` is in
+    ``projection._RANGE_INDEX_LABEL_PROPS`` for both ``Subject`` and ``Object``,
+    and in ``projection._REQUIRED_RANGE_INDEXES`` so a plan cannot silently drop
+    it (parity pinned by `tests/test_5407_index_label_parity.py`; #12047 N5). An
+    earlier revision of this docstring described it as a stored-key-only
+    equality and deferred the index as a follow-up; the index has since shipped
+    with the declaration, so the deferral text was stale.
     ``canonical_name`` is the slot
     ``entity_identity._NAME_PROPERTIES`` already treats as an addressable name
     spelling (“the SECOND spelling an Object may be addressed by (``mining``'s
@@ -23968,10 +23968,18 @@ class TortoiseSDK:
                     "candidate_type": "entity", "already_reviewed": True,
                     "survived_id": props.get("resolved_from"),
                     "target_id": props.get("resolved_from")}
-        if reviewed:
+        if reviewed and action == "reject":
             # A verdict is a decision, not a toggle: flip-flopping one candidate
             # between merge and reject would leave the survivor's alias written
-            # by the merge and the node rejected by the second call.
+            # by the merge and the node rejected by the second call. A reject on
+            # top of ANY prior verdict is that flip, so it is refused here.
+            # ⛔ The MERGE half is decided AFTER the pair is re-derived (#12047
+            # review F1): the queue's suppression filter is PAIR-scoped
+            # (`_pair_reviewed`), so a candidate rejected against one survivor is
+            # legitimately re-offered against another — and a candidate-scoped
+            # refusal here made every such row permanently un-actionable while
+            # the queue kept displaying it (reject answered `already_reviewed`,
+            # merge raised). See the pair-scoped guard below.
             raise ValueError(
                 f"Entity {candidate_id!r} was already reviewed as {reviewed!r} — "
                 f"refusing to overwrite that verdict with {action!r}")
@@ -24023,6 +24031,21 @@ class TortoiseSDK:
                 f"Entity {candidate_id!r} has no ambiguity pair on the current "
                 f"graph — nothing to merge (re-list the queue to see the "
                 f"candidates that exist now)")
+        if reviewed:
+            # #12047 review F1: the flip refusal is PAIR-scoped, like the filter
+            # that decides what the queue offers. A `reject` records the survivor
+            # it was decided against (`dedup_target_id`) and suppresses ONLY that
+            # combination, so the scan re-offers the candidate against a
+            # DIFFERENT survivor — a different question, not a flip. Refuse only
+            # when this merge would overwrite the verdict on the SAME pair, or
+            # when the rejection named no survivor (it was decided against an
+            # ambiguous set, so no specific pair carries the verdict).
+            prior_target = props.get("dedup_target_id")
+            if prior_target is None or str(prior_target) == str(pair["survivor_id"]):
+                raise ValueError(
+                    f"Entity {candidate_id!r} was already reviewed as {reviewed!r} "
+                    f"against {prior_target!r} — refusing to overwrite that "
+                    f"verdict with 'merge' onto the same survivor")
         result = apply_entity_merge(
             self, candidate_id, pair["survivor_id"],
             method=pair["method"], similarity=pair["similarity"])

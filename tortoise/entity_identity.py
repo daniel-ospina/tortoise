@@ -730,6 +730,15 @@ def _name_holder_ids(g, label: str, name: str, *,
         for prop in props:
             col = f"toLower(n.{prop})" if case_insensitive else f"n.{prop}"
             arms.append(f"{col} = ${key}")
+    if not arms:
+        # #12047 review F4: "no spelling to match" is a ZERO-ROW answer, never a
+        # degenerate predicate. `spellings` drops falsy names, so a blank `name`
+        # with no `also`/`alias_of` left `arms` empty and the query became
+        # `WHERE ()` — a raw driver error out of a READ surface that used to
+        # answer "no holder" (the pre-change `_name_predicate` always emitted
+        # `n.name = $name`). `scan_entities` refuses an empty label set for the
+        # same reason: a degenerate read must never masquerade as a measurement.
+        return []
     rows = g.query(
         f"MATCH (n:{label}) "
         f"WHERE ({' OR '.join(arms)}) "

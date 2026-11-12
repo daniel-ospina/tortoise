@@ -725,6 +725,19 @@ class TestSecondReviewRoundBounded:
             f"the real sub-b/sub-c duplicate is missing from the queue: {got}")
         assert ("sub-c", "sub-a") not in got, (
             "the reviewed combination must stay suppressed")
+        # #12047 review F1: the re-offered row above is only useful if it is
+        # ACTIONABLE. `_pair_reviewed` suppresses the reviewed COMBINATION, so
+        # the queue legitimately re-offers the candidate against a DIFFERENT
+        # survivor — and the merge's flip-refusal used to be CANDIDATE-scoped,
+        # so this exact state left the row permanently displayed and permanently
+        # un-actionable (reject answered `already_reviewed`, merge raised).
+        merged = sdk.approve_merge("sub-c", action="merge")
+        assert merged["survived_id"] == "sub-b", merged
+        folded = sdk._get_proj().g.query(
+            "MATCH (s:Subject {id:'sub-c'}) RETURN s.resolved_from"
+        ).result_set[0][0]
+        assert folded == "sub-b", (
+            f"the merge folded into {folded!r}, not the survivor the queue showed")
 
     def test_a_merge_does_not_rewrite_the_candidate_s_caller_key(self, sdk_factory):
         """P2: the survivor's `canonical_name` was fill-only; the candidate's was not.
@@ -825,9 +838,18 @@ class TestSecondReviewRoundBounded:
         """
         sdk = sdk_factory()
         sdk.create_subject("Daniel", "naturalPerson")
-        role = sdk.create_subject("owner", roleHolder="Daniel",
-                                  subjectKind=" role ")
-        assert role["id"]
+        # ⛔ `create_entity` directly, NOT the `create_subject` alias (#12047
+        # review F5): the alias normalises its `subjectKind` PARAMETER
+        # (`subjectKind = named_kind(subjectKind)`) before the prop ever reaches
+        # the door, so the gate was only ever exercised with an
+        # already-normalised value and the branch this test exists for went
+        # unverified.
+        created = sdk.create_entity("subject", "owner", subjectKind=" role ",
+                                    roleHolder="Daniel")
+        # `create_entity` returns `{"node": …}`; the legacy aliases unwrap it via
+        # `_flat_entity_result`. This test deliberately uses the RAW door (the
+        # point of it), so it unwraps explicitly.
+        assert created["node"]["id"]
         assert sdk._get_proj().g.query(
             "MATCH (:Subject)-[r:holdsRole]->(:Subject) RETURN count(r)"
         ).result_set[0][0] == 1
