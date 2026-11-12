@@ -585,7 +585,9 @@ def _leg_indexes(steps: list[dict]) -> list[int]:
     ]
 
 
-def _unreachable_guards(steps: list[dict], start: int, end: int) -> list[str]:
+def _unreachable_guards(
+    steps: list[dict], start: int, end: int, job: dict | None = None
+) -> list[str]:
     """Lines in `[start, end)` that cannot run, as `step N: <line>`.
 
     The two rows that assert a construct is LIVE — the `$GITHUB_PATH` prepend and
@@ -597,8 +599,12 @@ def _unreachable_guards(steps: list[dict], start: int, end: int) -> list[str]:
     client — i.e. #12051 restored in one line, with this guard's own message
     insisting it had not been.
 
-    Read through `_run_commands()` like every other line-unit search here, so a
-    tombstone comment naming a constant guard is inert text, not an offender.
+    Read through `_executed_lines()` — the step's `shell:` argv AND its `run:`
+    script (round 17) — like every other line-unit search here, so a tombstone
+    comment naming a constant guard is inert text, not an offender. Reading the
+    shell is what makes an inert `shell:` visible at all: `bash -c 'exit 0; exec
+    bash {0}'` passes every structural row because the `run:` text is untouched,
+    and `_inert_shell_reason()` is the rule that refuses it.
 
     ⛔ THE CONTRACT IS "THE BODY NEVER RUNS", NOT "THE LINE NAMES A CONSTANT"
     (#12069 review): a `while true; do … break; done` retry loop RUNS, and so does
@@ -614,7 +620,10 @@ def _unreachable_guards(steps: list[dict], start: int, end: int) -> list[str]:
     for index in range(start, end):
         if not 0 <= index < len(steps):
             continue
-        for line in _run_commands(steps[index]).splitlines():
+        inert_shell = _inert_shell_reason(job, steps[index])
+        if inert_shell:
+            found.append(f"step {index}: {inert_shell}")
+        for line in _executed_lines(job, steps[index]):
             if CONSTANT_GUARD_RE.match(line) or DEAD_CHAIN_RE.search(line):
                 found.append(f"step {index}: {line.strip()}")
             elif SUBSHELL_OPEN_RE.match(line) or SUBSHELL_CLOSE_RE.match(line):
@@ -655,6 +664,97 @@ def _replaces_a_client_binary(line: str) -> bool:
 SUBSHELL_OPEN_RE = re.compile(r"^[ \t]*\((?!.*\))[ \t]*$")
 #: …and closes with its status DISCARDED (`) || true`, `) ;`, `) && …`).
 SUBSHELL_CLOSE_RE = re.compile(r"^[ \t]*\)[ \t]*(?:\|\||;|&&)")
+
+#: A command that ENDS the shell it is typed in, when it appears BEFORE the
+#: runner's `{0}` script in the `shell:` string. Quotes are separators here too:
+#: the runner hands this text to `bash -c`, where `'exit 0'` IS the statement —
+#: and a text guard that tried to tell a quoted mention from a command would be
+#: reading meaning it cannot prove, so the narrow refusal wins.
+TERMINATING_COMMAND_RE = re.compile(
+    r"(?:^|[;&|()\s'\"])(?P<word>exit|return)(?=[\s;&|()'\"]|$)"
+)
+
+
+def _inert_shell_reason(job: dict | None, step: dict) -> str | None:
+    """The `shell:` that never runs the step's script, or None (#12069 round 17).
+
+    ⛔ A STEP'S `shell:` IS EXECUTED BEFORE THE SCRIPT IT CARRIES (#12069 review
+    round 17, measured GREEN). The runner substitutes `{0}` with the step's script
+    path and runs the WHOLE string, so
+
+        shell: bash -c 'exit 0; exec bash {0}'
+        run: |            # unchanged — and never executed
+          …the entire client pin…
+
+    makes the pin inert — never installed, never prepended, never asserted — while
+    every row here reads the untouched `run:` text and stays green. Measured on
+    the merged workflow: `140 passed`, the client never checked. This is the
+    `_run_commands()`-only sibling of the round-13/14 `shell:` findings: those two
+    scans learned to READ the shell; nothing asked whether it reaches the script.
+
+    ACCEPTED: any shell whose text before `{0}` has no `exit`/`return` — including
+    `bash -c 'echo hi; exec bash {0}'` (a statement before the exec is harmless)
+    and a bare `bash` (the runner appends the script when `{0}` is absent).
+    REFUSED: `exit`/`return` in statement position before the script, in any of the
+    spellings measured below and pinned in `INERT_SHELL_POLARITY`.
+
+    STATED LIMIT: this reads ONE spelling class (a terminator before `{0}`); a
+    shell that blocks forever, or one that execs a DIFFERENT script under a name
+    it computes, is not decidable from text. The in-job `pg_dump --version`
+    assertion is what makes a surviving blind spot visible in the log.
+    """
+
+    shell = _effective_shell(job, step)
+    if not shell.strip():
+        return None
+    before = shell.split("{0}", 1)[0]
+    match = TERMINATING_COMMAND_RE.search(before)
+    if not match:
+        return None
+    return (
+        f"`shell:` runs `{match.group('word')}` BEFORE the step's own script "
+        f"({shell.strip()!r}), so the `run:` block never executes — the whole "
+        "step is inert (never installed, prepended, or asserted) while its text "
+        "satisfies every row here (#12069 review round 17)"
+    )
+
+
+#: A statement that LEAVES the current iteration from the loop body's TOP LEVEL.
+#: It runs before anything below it, so the body it precedes is text the shell
+#: never reaches.
+LOOP_TRUNCATING_RE = re.compile(r"^[ \t]*(?:break|continue)[ \t]*(?:;.*)?$")
+
+
+def _truncated_at_top_level(body: list[str]) -> bool:
+    """Does this loop body LEAVE the iteration at its top level (#12069 round 17)?
+
+    ⛔ NOTHING RUNS BELOW A BARE `break` (#12069 review round 17, measured GREEN):
+
+        for tool in pg_dump pg_restore; do
+          break
+          version="$("$tool" --version)"
+        done
+
+    credits BOTH tools while nothing is version-checked. `_selects_on_var` closes
+    the SELECTION half of the same defect class, but a bare `break` mentions no
+    loop variable, so it is not a selection and that scan does not see it.
+
+    A `break`/`continue` inside a NESTED block stays accepted (control row): it
+    runs only when that block's condition holds, so the pass that reaches the
+    condition still runs the body above it. Only lines at the body's MINIMUM
+    indent — the top level — are refused.
+    """
+
+    significant = [
+        line for line in body if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if not significant:
+        return False
+    top = min(len(line) - len(line.lstrip()) for line in significant)
+    return any(
+        len(line) - len(line.lstrip()) == top and LOOP_TRUNCATING_RE.match(line)
+        for line in significant
+    )
 
 #: `if:` conditions that CANNOT SKIP the step, normalised (no `${{ }}`, single
 #: spaces). `success()` is the default; `always()` and its two aliases run the
@@ -818,6 +918,51 @@ def _asserting_loop_line_spans(code: str) -> list[tuple[int, int]]:
             spans.append((index, end))
         index = end + 1
     return spans
+
+
+#: The body of a ONE-LINE loop (`for …; do break; …; done`) is on its header line,
+#: so a top-level `break`/`continue` there is a whole-line statement only after the
+#: terminating `do`.
+INLINE_LOOP_TRUNCATING_RE = re.compile(r"(?:^|[;&])[ \t]*(?:break|continue)\b")
+
+
+def _truncated_loop_bodies(code: str) -> list[str]:
+    """The multi-tool loops whose top level LEAVES the iteration before its checks.
+
+    ⛔ A STATEMENT-LEVEL `break` IS NOT A SELECTION (#12069 review round 17,
+    measured GREEN):
+
+        for tool in pg_dump pg_restore; do
+          break
+          version="$("$tool" --version)"
+        done
+
+    left `140 passed` with neither client version-checked — a bare `break` names
+    no loop variable, so `_selects_on_var` (which closes the SELECTION half of this
+    defect class) cannot see it, and `_version_checked_tools` credits the header's
+    names from a body the shell never reaches. This function is the NAMED refusal;
+    `_version_checked_tools` also credits nothing for such a body, so the two rows
+    cannot disagree about what runs.
+
+    Scoped to loops that name more than one tool (`_asserting_loop_line_spans`),
+    which is where the credit is a claim about COVERAGE; a single-tool loop is
+    caught by the credit rule in `_version_checked_tools`.
+    """
+
+    lines = code.splitlines()
+    offenders: list[str] = []
+    for start, end in _asserting_loop_line_spans(code):
+        header = lines[start]
+        if start == end:
+            inline = LOOP_HEAD_INLINE_RE.match(header)
+            rest = (inline.groupdict().get("rest") or "") if inline else ""
+            if INLINE_LOOP_TRUNCATING_RE.search(rest):
+                offenders.append(header.strip())
+            continue
+        body = [line for line in lines[start + 1 : end] if not LOOP_DO_RE.match(line)]
+        if _truncated_at_top_level(body):
+            offenders.append(header.strip())
+    return offenders
 
 
 def _unasserted_client_checks(code: str) -> list[int]:
@@ -1171,8 +1316,20 @@ def _version_checked_tools(code: str) -> set[str]:
         #     for tool in pg_dump pg_restore; do [ "$tool" = pg_restore ] && continue
         # `rest` is part of the body for the selection question too.
         closes_here = bool(re.search(r"(?:^|[;&])[ \t]*done\b", rest))
+        # ⛔ AND A TOP-LEVEL `break`/`continue` ON THE `do` LINE CREDITS NOTHING
+        # (#12069 round 17): `for tool in pg_dump pg_restore; do break; "$tool"
+        # --version; done` credits both names from a `--version` the shell never
+        # reaches. A bare `break` names no loop variable, so the selection rule
+        # above cannot see it.
+        inline_truncated = bool(INLINE_LOOP_TRUNCATING_RE.search(rest))
         if rest.strip() and closes_here:
-            scan(rest, var, set() if _selects_on_var([rest], var) else names)
+            scan(
+                rest,
+                var,
+                set()
+                if inline_truncated or _selects_on_var([rest], var)
+                else names,
+            )
             continue  # closed on its own line: no body to follow
         for body_line in lines[body_start:]:
             if LOOP_END_RE.match(body_line):
@@ -1180,7 +1337,14 @@ def _version_checked_tools(code: str) -> set[str]:
             body.append(body_line)
         # ⛔ A SELECTING BODY COVERS NONE OF THE HEADER'S NAMES (#12069 review P2).
         graded = ([rest] if rest.strip() else []) + body
-        credited = set() if _selects_on_var(graded, var) else names
+        # ⛔ A TOP-LEVEL `break`/`continue` CREDITS NOTHING (#12069 review round
+        # 17): it leaves the iteration before the body below it runs, so the
+        # `--version` invocation is text the shell never reaches. Same polarity as
+        # a selecting body — a body that does not run its checks covers none of
+        # the header's names — and `_truncated_loop_bodies()` names the cause
+        # where this row would otherwise only report the tool as unchecked.
+        truncated = inline_truncated or _truncated_at_top_level(body)
+        credited = set() if truncated or _selects_on_var(graded, var) else names
         if rest.strip():
             scan(rest, var, credited)
         for body_line in body:
@@ -1483,7 +1647,7 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     # `if false; then … fi` around the prepend satisfied all of them while the
     # write never executed — measured, five rows GREEN, leg on the inherited
     # client. Reachability is asserted before the construct.
-    unreachable = _unreachable_guards(steps, pin_index, leg_start)
+    unreachable = _unreachable_guards(steps, pin_index, leg_start, job)
     assert not unreachable, (
         "a step between the client install and the record leg cannot RUN the "
         f"code it is graded on: {unreachable!r}. A guard whose condition is a "
@@ -1755,7 +1919,7 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
 
     # INERT-BUT-PRESENT first: an enclosing constant-condition block leaves every
     # structural assertion below satisfied and the branch unable to fire.
-    unreachable = _unreachable_guards(steps, pin_index, leg_start)
+    unreachable = _unreachable_guards(steps, pin_index, leg_start, job)
     assert not unreachable, (
         "a step between the client install and the record leg cannot RUN the "
         f"code it is graded on: {unreachable!r}. `if false; then … fi` around "
@@ -1844,6 +2008,16 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
         )
 
     asserted = "\n".join(_run_commands(steps[index]) for index, _ in hits)
+    truncated = _truncated_loop_bodies(asserted)
+    assert not truncated, (
+        "a version-check loop LEAVES its iteration at the top level before its "
+        f"checks run: {truncated!r}. A `break`/`continue` on the body's own "
+        "indent runs before everything below it, so the `\"$tool\" --version` line "
+        "is text the shell never reaches while this row credits every name the "
+        "header lists (measured GREEN, #12069 review round 17: `140 passed` with "
+        "neither client version-checked). Put the condition inside a nested "
+        "block if an early exit is intended, or delete it"
+    )
     checked = _version_checked_tools(asserted)
     for tool in TOOLS:
         assert tool in checked, (
@@ -2803,6 +2977,157 @@ def test_the_refusal_polarity_is_never_runs(line: str, must_be_refused: bool, wh
         "(#12069 review)"
     )
 
+
+
+#: ⛔ A PIN THAT ONLY RUNS ONE DIRECTION IS NOT A PIN (#12069 review round 17).
+#: The two rules below close the last measured fail-opens in this file — a `shell:`
+#: that never reaches the script, and a loop body that leaves before its checks —
+#: and BOTH are refused only in the spelling class measured. Each accepted row is a
+#: CONTROL: a guard that reds `bash -e {0}` or a nested `break` has replaced a false
+#: PASS with a false RED, which is the same defect class.
+INERT_SHELL_POLARITY: list[tuple[str, bool, str]] = [
+    (
+        "bash -c 'exit 0; exec bash {0}'",
+        True,
+        "the measured fail-open: the step's whole `run:` block never executes",
+    ),
+    (
+        "bash -c 'return 1; exec bash {0}'",
+        True,
+        "a `return` ends the shell the same way an `exit` does",
+    ),
+    (
+        "env PATH=/usr/bin:/bin bash -c 'exit 0; exec bash {0}'",
+        True,
+        "an envelope command does not make the terminator harmless",
+    ),
+    (
+        "bash -c 'echo hi; exec bash {0}'",
+        False,
+        "control: a statement before the exec still reaches the script",
+    ),
+    ("bash -e {0}", False, "control: the ordinary form"),
+    ("bash", False, "control: no inline script, the runner appends the script"),
+    ("bash -c 'exec bash {0}'", False, "control: the correct explicit form"),
+    (
+        "bash {0} || exit 1",
+        False,
+        "control: a terminator AFTER the script is not before it",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "shell, must_be_refused, why",
+    INERT_SHELL_POLARITY,
+    ids=[str(c).replace(" ", "_")[:34] for c, _, _ in INERT_SHELL_POLARITY],
+)
+def test_a_shell_that_cannot_reach_the_script_is_refused(
+    shell: str, must_be_refused: bool, why: str
+) -> None:
+    """A `shell:` that ends before `{0}` makes the whole step inert.
+
+    ⛔ THE SCRIPT RUNS THROUGH THE SHELL, NOT AFTER IT (#12069 review round 17).
+    The runner substitutes `{0}` and runs the WHOLE string, so `bash -c 'exit 0;
+    exec bash {0}'` never runs the step's `run:` block — the client is never
+    installed, the PATH is never prepended, the major is never asserted — while
+    every structural row reads the untouched `run:` text. Measured on the merged
+    workflow at `603a9fa4fe`: `140 passed`, the client never checked.
+
+    STATED LIMIT: this reads a TERMINATOR before `{0}`. A shell that blocks
+    forever, or that execs a different script under a name it computes, is not
+    decidable from text; the in-job `pg_dump --version` assertion is what makes a
+    surviving blind spot visible in the log.
+    """
+
+    refused = _inert_shell_reason(None, {"shell": shell}) is not None
+
+    assert refused is must_be_refused, (
+        f"`shell: {shell}` must be "
+        f"{'REFUSED as inert' if must_be_refused else 'ALLOWED as reaching the script'} "
+        f"({why}), but the scan {'refused' if refused else 'allowed'} it. "
+        "`TERMINATING_COMMAND_RE` reads the shell text BEFORE `{0}` and refuses "
+        "only an `exit`/`return` in statement position there — an ordinary "
+        "statement (`echo hi; exec bash {0}`) and a terminator AFTER the script "
+        "are both accepted, because both still run it (#12069 review round 17)"
+    )
+
+
+#: The same both-directions rule for the loop-body refusal. A nested
+#: `break`/`continue` is a CONTROL: it runs only under that block's condition, so
+#: the body above it still runs on the pass that reaches the condition. Refusing it
+#: would red a correct workflow — and widening the rule to "any break anywhere" is
+#: how the first cut of the enclosing-guard scan produced five false REDs.
+TRUNCATING_LOOP_POLARITY: list[tuple[str, bool, str]] = [
+    (
+        'for tool in pg_dump pg_restore; do\n  break\n  "$tool" --version\ndone',
+        True,
+        "the measured fail-open: the check below the break never runs",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n  continue\n  "$tool" --version\ndone',
+        True,
+        "`continue` leaves the iteration the same way `break` leaves the loop",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do break; "$tool" --version; done',
+        True,
+        "the one-line spelling is the same statement",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  if [ "$QUICK" = 1 ]; then\n    break\n  fi\n'
+        '  "$tool" --version\ndone',
+        False,
+        "control: a nested break runs only when its condition holds",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n  "$tool" --version\ndone',
+        False,
+        "control: the ordinary asserting loop",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do "$tool" --version; done',
+        False,
+        "control: the one-line asserting loop",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "code, must_be_refused, why",
+    TRUNCATING_LOOP_POLARITY,
+    ids=[str(c).strip().splitlines()[0].replace(" ", "_")[:34] for c, _, _ in TRUNCATING_LOOP_POLARITY],
+)
+def test_a_loop_that_leaves_before_its_checks_is_refused(
+    code: str, must_be_refused: bool, why: str
+) -> None:
+    """A top-level `break`/`continue` credits nothing, and says so by name.
+
+    ⛔ A BARE `break` IS NOT A SELECTION (#12069 review round 17, measured GREEN):
+    it mentions no loop variable, so `_selects_on_var` does not see it, and
+    `_version_checked_tools` credited every name the header listed while neither
+    client was version-checked (`140 passed` on the merged workflow).
+
+    Both halves are asserted here: `_version_checked_tools` must credit NOTHING for
+    such a body, and `_truncated_loop_bodies` must NAME it — a row that only says
+    "pg_dump is unchecked" sends the next lane looking at the header.
+    """
+
+    refused = bool(_truncated_loop_bodies(code))
+    assert refused is must_be_refused, (
+        f"this loop must be "
+        f"{'REFUSED as leaving before its checks' if must_be_refused else 'ALLOWED'} "
+        f"({why}), but the scan {'refused' if refused else 'allowed'} it. "
+        "`_truncated_at_top_level` refuses only a `break`/`continue` on the body's "
+        "OWN indent — a nested one runs conditionally and stays accepted"
+    )
+    if must_be_refused:
+        assert _version_checked_tools(code) == set(), (
+            "a truncated loop body must credit NOTHING: "
+            f"{sorted(_version_checked_tools(code))!r} were credited from lines the "
+            "shell never reaches (measured #12069 review round 17)"
+        )
 
 
 # --------------------------------------------------------------------------
