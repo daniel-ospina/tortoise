@@ -36,12 +36,15 @@ that owns the re-aim. ⛔ BOUNDED TWICE, and both bounds matter: the ten DEFERRA
 carry a terminator, while the four non-deferral KEEP rows (CORS and redirect
 allowlists, not links) have none to carry; and files OUTSIDE `RUNTIME_FILES` still
 spell the host with no row at all — the `blog/api/notify-publish` POST in
-`.github/workflows/deploy-pages.yml`, and the `author_image_url` literals in
-`supabase/migrations/*` — because this guard counts what the RUNTIME emits in its
-own surface, not every occurrence in the tree. Every file that reads 0 has
+`.github/workflows/deploy-pages.yml`, the `author_image_url` literals in
+`supabase/migrations/*`, and the served, crawler-facing `website/sitemap-product.xml`,
+`website/sitemap.xml` and `website/robots.txt` — whose `<loc>` and `Sitemap:` entries a
+sweep must re-aim too (`tests/test_website_docs_consistency.py`'s `SITE_HOSTS` lists the
+retired host as LEGITIMATE, so a retired-host `<loc>` passes there) — because this guard
+counts what the RUNTIME emits in its own surface, not every occurrence in the tree. Every file that reads 0 has
 NO row and stays in `RUNTIME_FILES` — the four that lost a row (three to main's
-#12058 while this PR was open, `website/functions/blog/_lib.ts` to this PR's own
-repoint) and the five that never carried one — so a literal coming back REDS the guard instead
+#12058 while this PR was open, `website/functions/blog/_lib.ts` to #11977's repoint
+of its `navHtml` hrefs) and the five that never carried one — so a literal coming back REDS the guard instead
 of leaving the surface, and neither group is a leftover — which is why this guard
 cannot report GREEN over a file it never opened, and why a sweep that removes one of
 those literals must remove its recorded reason too.
