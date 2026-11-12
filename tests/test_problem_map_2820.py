@@ -187,11 +187,17 @@ def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
     swap is caught: `#2813` is a WS-A row while all four `OPEN` rows sit in
     WS-B/C/D, so a tally-holding swap touching it has to promote one of the four
     the pin names — which reds this arm. Correct BOTH affected workstream cells
-    (WS-A's down, the promoted row's up) and the tally arms stay green — they
-    cannot see a swap that leaves them consistent. Leave either cell stale and
-    they red on a COUNT rather than on the swap ("summary says 7 of 8 WS-B
-    row(s) fixed; the table has 8 VERIFIED-FIXED"); and a cell whose literal a
-    fixture quotes, moved, breaks that fixture — breakage, not confirmation.
+    (WS-A's down, the promoted row's up) and `problem_map_check --check` stays
+    clean — its tally checks cannot see a swap that leaves them consistent. The
+    pytest tally ARMS are a different matter and do NOT stay green: the WS-B
+    cell's literal is a fixture PREMISE (`**7 of 8 rows fixed**` ->
+    `**8 of 8 rows fixed**`, guarded by `assert mutated != text`), so moving it
+    makes that arm fail on the missing premise — "fixture no longer finds WS-B's
+    count", breakage, not confirmation. Leave either cell stale and the checker
+    reds on a COUNT rather than on the swap ("summary says 7 of 8 WS-B row(s)
+    fixed; the table has 8 VERIFIED-FIXED"). Neither red is this arm confirming
+    the swap, and neither is a reason to read the checker's clean run as
+    coverage.
     What the premises add is the case this arm cannot
     see: a UNILATERAL move on a row the pin does NOT name, whose counts are all
     corrected, where `problem_map_check --check` reads CLEAN and the reds are
