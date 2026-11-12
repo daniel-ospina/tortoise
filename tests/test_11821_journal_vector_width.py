@@ -2000,7 +2000,10 @@ def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
     #    there is no vector, so a width with no vector is a state the seam can
     #    never have minted — which is why the refusal now precedes the `f64`
     #    return. Falsifier: move it back below that return and the `f64` row
-    #    below reads `DID NOT RAISE`.
+    #    below reds on the MESSAGE, not on `DID NOT RAISE` — the `f64` arm's own
+    #    seam probe refuses the absent vector FIRST, with "can only DROP"
+    #    (measured, review round 20). The ordering is still pinned; the message
+    #    is what changes.
     for _declared in (JOURNAL_VECTOR_WIDTH_F32, JOURNAL_VECTOR_WIDTH_F64):
         with pytest.raises(ValueError, match="declared over NO vector"):
             api._emit("PointAdded",
@@ -2018,8 +2021,13 @@ def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
     #     early return, so half the declaration surface was unchecked: a
     #     caller-declared `f64` over no vector was ACCEPTED and journalled, a
     #     durable width no door can produce. Measured at `25127b61b6` before the
-    #     fix — this row is the pin, and deleting the moved check reds it while
-    #     every `f32` row above still passes.
+    #     fix — this row is the pin. ⛔ AND THE MUTANT'S OBSERVABLE IS THE MESSAGE:
+    #     move the check back below the `declared != _F32` return and THIS row reds
+    #     on "can only DROP" (the `f64` arm's seam probe refusing the absent vector
+    #     first), NOT on a missing refusal; delete the whole pre-stamp block and it
+    #     is an `f32` row above that reds, on "is not what the values say"
+    #     (measured, review round 20 — "reds it while every `f32` row above still
+    #     passes" was false on both halves).
     with pytest.raises(ValueError, match="declared over NO vector"):
         api._emit("PointAdded",
                   {"id": "p-nowidth-f64", "content": "c",
