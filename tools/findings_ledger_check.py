@@ -803,17 +803,21 @@ def check_verdict_tally(text: str) -> list[str]:
     # de-bolded or backticked stale list ride out of the count. All three measured.
     # A single stray parenthetical `(c)` in prose is still NOT a list, which is what
     # keeps a sentence that merely QUOTES the phrase out of the count.
-    #: One letter, marked up the four ways this repo writes them: bold `**(a)**`,
-    #: code `\`a\``, italic `*a*`, and bare `(a)` / `a`.
-    #: One letter, in the four spellings this repo writes them.
-    MARKED = r"(?:\*\*\([a-l]\)\*\*`|`\(?[a-l]\)?`|\*\([a-l]\)\*)"
+    #: One letter. ⛔ MARKUP AROUND THE PARENTHESES DOES NOT DECIDE CANDIDACY, and that
+    #: is why there is no separate `**(a)**` branch: `PAREN` already matches the `(a)`
+    #: inside it, so a bolded letter and a bare one are the same item — which is also
+    #: what stops a `**` around a letter from being the difference between a red and a
+    #: green (the fail-open this filter was widened for). What MARKED adds is the
+    #: PAREN-LESS spellings the page and this repo also use: code `` `a` `` and italic
+    #: `*a*`. ⛔ A SINGLE bare `(c)` is still not a candidate — `row (c) still read as
+    #: written` is ordinary prose, and making it one red a legitimate sentence (found by
+    #: review, measured) — so PAREN is a LIST ITEM only, never a standalone match.
+    MARKED = r"(?:`\(?[a-l]\)?`|\*\(?[a-l]\)?\*)"
+    PAREN = r"\([a-l]\)"  # a parenthesised letter — a LIST ITEM only
     BARE = r"\b[a-l]\b"
-    ITEM = r"(?:" + MARKED + r"|" + BARE + r")"
+    ITEM = r"(?:" + MARKED + r"|" + PAREN + r"|" + BARE + r")"
     letter_sentence = re.compile(
-        # a MARKED single letter is always a candidate: `**(a)**` alone is a tally
-        # sentence that names one row, which the letter/attribution arms must read.
         MARKED
-        + r"|\([a-l]\)"  # a bare parenthesised letter: (a)
         + r"|" + ITEM + r"(?:\s*,\s*" + ITEM + r")+"  # a list: b, c, d
         + r"|" + ITEM + r"\s+and\s+" + ITEM  # a two-item list: b and c
     )

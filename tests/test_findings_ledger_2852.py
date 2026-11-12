@@ -2379,9 +2379,11 @@ def test_a_sentence_quoting_the_tally_phrases_is_not_counted(tmp_path, monkeypat
     appending `(The phrase "still read as written" names the complement.)` produced
     `§3 carries 2 sentences saying 'still read as written'` while a single sentence
     asserted anything. A candidate must also carry a LETTER LIST — two or more single letters, comma-joined
-    or in a pair, each written bold, code, italic or bare, every form bounded to the
+    or in a pair, each written bare, bold, code or italic, every form bounded to the
     page's alphabet `a`–`l`; requiring MARKUP rather than a list was itself fail-open
-    (measured). A sentence with
+    (measured), and markup around the PARENTHESES does not decide candidacy either
+    (`**(c)**` and `(c)` are one item). A single parenthetical letter in prose is not
+    a list. A sentence with
     no letter list in it cannot disagree with the table.
     """
     for quote in (
@@ -2440,8 +2442,12 @@ def test_every_spelling_of_a_second_tally_sentence_is_refused(tmp_path, monkeypa
     carries a list, and then the case passes for the wrong reason (measured).
     """
     decoys = (
-        # a comma run, in each markup
+        # a comma run, in each markup. ⛔ The BOLD case must be a run with no `and`,
+        # or the pair form can carry it and the bold branch is deletable GREEN
+        # (measured: dropping `\*\*\([a-l]\)\*\*` from MARKED left this test
+        # passing until the decoy below became bold-only).
         "Six of the twelve rows no longer read as written: b, c, d, e, g and k.",
+        "Six of the twelve rows no longer read as written: **(b)**, **(c)**, **(g)**.",
         "Six of the twelve rows no longer read as written: **(b)**, **(c)** and **(g)**.",
         "Six of the twelve rows no longer read as written: `b`, `c` and `g`.",
         "Six of the twelve rows no longer read as written: *(b)*, *(c)* and *(g)*.",
