@@ -2679,13 +2679,6 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # reds CORRECT prose — measured. The shipped doc wording is caught by the
         # clause-anchored needle above and the workflow's by "accepts a repair in either
         # state", so nothing that shipped loses coverage.
-        # ⛔ THE TWO CORRECTED CAUSE-NAMING COMMENTS (#12166 review rounds 18-19). Both shipped
-        # on `origin/main`, both were corrected in this PR, and both reverts measured GREEN —
-        # the `must_state` presence pins are satisfied by the module DOCSTRING, so a comment
-        # site was free to revert while the file contradicted itself. Pinned by CONTENT rather
-        # than by site: `retracted` is what catches a claim that came BACK wherever it lands.
-        "unmeasured, the count is the old status-string census",
-        "is set by `read_health` inside its `verdict == OK`-gated clause",
     ]
     flats = {name: flat(text) for name, text in scanned.items()}
     # The guard's own docstring quotes several of these to describe them, so the test file
@@ -2850,12 +2843,11 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     # settle constant at all — see the `unconditional` leg below, which reaches all
     # three). Several guarded sites carry more than one entry, so this is not one-per-site.
     pre_fix = [
-        # ⛔ THE TWO SHIPPED CAUSE-NAMING COMMENTS (#12166 review rounds 18-19). Their needles
-        # sit at the END of `retracted`, and each needs a shipped instance here or the
-        # dead-needle leg reds — that leg is what stops a needle being written to describe a
-        # sentence that never shipped, which is the failure it caught four rounds ago.
-        "unmeasured, the count is the old status-string census and cannot certify health",
-        "is set by `read_health` inside its `verdict == OK`-gated clause",
+        # ⛔ THE TWO SHIPPED CAUSE-NAMING COMMENTS (review rounds 18-20) are NOT here: they belong
+        # in `unconditional` below, because they are CAUSE-NAMING claims rather than stillness
+        # claims — `hits()` disarms a `retracted` hit whose sentence names stillness, and these
+        # sentences are native to a paragraph that names `JOB_SETTLE_SECONDS` (measured: both
+        # re-typed with a stillness qualifier passed `retracted` GREEN).
         # to_dict + the two field docs + classify_queue's comment + its returned-dict twin
         "the runs read out because EVERY job of them was `completed` (a proof of "
         "non-execution), and how many could not be read and are still counted as executing",
@@ -2922,6 +2914,14 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         "disproved — three causes, one bucket",
         "disproved — FOUR causes, one bucket",
         "disproved. FOUR causes, ONE bucket",
+        # ⛔ AND THE TWO SHIPPED CAUSE-NAMING COMMENTS (review rounds 18-20). Content-checked
+        # without the discriminator for the same reason as the count claims: the retraction is
+        # that the CAUSE is mis-named, which no stillness qualifier repairs. Provenance is
+        # `origin/main`, where both shipped and this PR corrected them. Clause-level, NOT
+        # sentence-prefixed: a re-typed form that inserts a qualifier before the wrong cause
+        # (measured — review round 20's own falsification) must still match.
+        "the count is the old status-string census",
+        "is set by `read_health` inside its `verdict == OK`-gated clause",
     ]
     for phrase in unconditional:
         needle = flat(phrase)
@@ -2980,6 +2980,12 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # budget" while naming a NON-budget lever two sentences later. Reverting the whole
         # passage to that text measured GREEN at this head, i.e. the correction had no leg.
         ("workflow", "layers (the callee's read, the CALLER's settle gate, and the probe BUDGET)"),
+        # ⛔ THREE MORE CORRECTED CLAIMS THAT MEASURED GREEN ON REVERT (review round 20) — an
+        # EMITTED reason line, a caller-side comment, and the ops doc's trigger count. Each is
+        # pinned at the wording this PR ships, so the shipped (false) form removes the phrase.
+        ("module", "a feed was cut at the page cap"),
+        ("module", "it moved a waiting-run defect onto running runs"),
+        ("doc", "dimensions and FOUR triggers"),
         # ⛔ AND THE MODULE DOCSTRING'S cause (c), the same defect one surface over (#12166
         # review round 15). It named the three routes and then concluded "so that count is the
         # pre-#12037 status-string census" — which contradicts the route list in the SAME
