@@ -1125,17 +1125,31 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 f"'<the successor name>'}}) — then re-point the input onto it and "
                 f"delete the edge into {q}. If a Subject or Point carries that "
                 f"name, re-point onto THAT node instead and delete this edge. "
-                + ("Archiving it instead does NOT clear this: EP builds no factor "
-                   "for that endpoint in EITHER arm, so archiving only drops it out "
-                   "of this anchor — the claim's support has to be wired through a "
-                   ":Point operator (or the shape cleared) regardless"
+                # ⛔ THREE mechanisms, so the "archiving does not clear this" clause
+                # has to be three-way: a shaped non-:Point endpoint gets NEITHER arm
+                # (no factor at all), a genuine direct edge is excluded BEFORE
+                # evaluation (no factor, no record), and an OPERATOR still builds the
+                # factor and records the strip. One sentence for all three left the
+                # operator arm asserting a mechanism it does not have — measured:
+                # skipped_factors reason 'degenerate' appears in exactly that arm.
+                + (("Archiving it instead does NOT clear this: EP builds no factor "
+                    "for that endpoint in EITHER arm, so archiving only drops it out "
+                    "of this anchor — the claim's support has to be wired through a "
+                    ":Point operator (or the shape cleared) regardless")
                    if (s["shape"] and not s["is_operator"]) else
-                   f"Archiving it instead — tortoise_update_entity({q}, {{'status': "
-                   f"'archived'}}) — does NOT clear this: the direct-edge row is "
-                   f"excluded BEFORE evaluation while the endpoint is terminal, so no "
-                   f"factor is built and no skipped-factor record appears either way. "
-                   f"The edge must still be deleted or re-pointed onto whatever now "
-                   f"carries the claim"))
+                   (f"Archiving it instead — tortoise_update_entity({q}, {{'status': "
+                    f"'archived'}}) — does NOT clear this: EP still builds the factor "
+                    f"and strips that terminal input, recording the skip (reason "
+                    f"'degenerate', or 'source_stripped' when this edge is its idx-0 "
+                    f"source), so the edge must still be deleted or re-pointed onto "
+                    f"whatever now carries the claim")
+                   if s["is_operator"] else
+                   (f"Archiving it instead — tortoise_update_entity({q}, {{'status': "
+                    f"'archived'}}) — does NOT clear this: the direct-edge row is "
+                    f"excluded BEFORE evaluation while the endpoint is terminal, so "
+                    f"no factor is built and no skipped-factor record appears either "
+                    f"way. The edge must still be deleted or re-pointed onto "
+                    f"whatever now carries the claim")))
             if s["shape"] and not s["is_operator"]:
                 # ⛔ The SAME neither-arm fact the resolvable path states, in the
                 # successorless one: a shaped non-``:Point`` endpoint is in neither

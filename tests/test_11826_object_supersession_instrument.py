@@ -265,8 +265,14 @@ def test_a_successorless_supersede_still_gets_a_performable_repair(sdk):
     # ⛔ AND ``archived`` is a TRAP the string must warn about, not a repair it may
     # recommend: archiving clears this check's anchor while EP strips the input
     # exactly as before, so a re-audit reads CLEAN over a still-degenerate factor.
-    # Both halves are measured here so the warning cannot rot.
+    # Both halves are measured here so the warning cannot rot. ⛔ The arm is an
+    # OPERATOR: EP builds the factor and records the strip, so the clause must say
+    # that — not the direct-edge "excluded BEFORE evaluation" wording, which is true
+    # one mechanism over (#12111 review).
     assert "does NOT clear this" in issue.fix, issue.fix
+    assert "EP still builds the factor" in issue.fix, issue.fix
+    assert "no skipped-factor record appears either way" not in issue.fix, \
+        "the operator arm DOES record a skip: " + issue.fix
     sdk.update_entity(v1["id"], status="archived")
     assert _issues(sdk, "superseded_object_active_edges") == [], \
         "archiving did not clear the finding — the string's warning is now wrong"
