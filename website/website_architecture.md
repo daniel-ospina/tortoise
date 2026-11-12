@@ -329,30 +329,32 @@ dashboard.
 
 | Asset | Host | Notes |
 | --- | --- | --- |
-| `website/robots.txt` | both premise-labs hosts | Google **cross-submission**: lists all four sitemap locations; each `<urlset>` sitemap contains only same-host URLs (protocol requirement) |
-| `website/sitemap.xml` | both premise-labs hosts | **the conventional `/sitemap.xml` entry point** (#11615): a `<sitemapindex>` naming the four below, so a crawler that probes the standard path finds them without reading `robots.txt` first. ⚠️ Host-agnostic on purpose — a **recorded deviation** from the protocol's same-site rule for index files; see the rule note below |
+| `website/robots.txt` | `premiselabs.co` | advertises the **index** (`/sitemap.xml`), which names the three same-host children — the shape Google documents for an index. ⛔ `app.premiselabs.co/sitemap.xml` is **not** listed: that sitemap belongs to the separate `tortoise-dashboard` Pages project and is advertised by that project's own `apps/dashboard/public/robots.txt` (#11766) |
+| `website/sitemap.xml` | `premiselabs.co` | **the conventional `/sitemap.xml` entry point** (#11615): a `<sitemapindex>` naming the three below, every `<loc>` on this host — the protocol's same-site rule for index files is **satisfied**, so the deviation record this row used to carry is deleted rather than reworded (#11766; it asserted the defect #11623 named) |
 | `website/sitemap-company.xml` | `premiselabs.co` | two URLs (`/`, `/contact`) — company page + contact form (the contact URL was added by #4705 and this row said "single URL" until 2026-11-09) |
-| `website/sitemap-product.xml` | `tortoise.premiselabs.co` | `/`, `/docs`, `/faq`, `/self-hosted`, `/security`, the 4 legal pages (note: the auth URLs are NOT in this sitemap — `/signin` 301s to `/auth`, and `/auth` itself moved to the app origin in #4054) |
-| `website/_redirects` | both premise-labs hosts | trailing-slash 301s → extensionless canonicals; `/index.html → /`; `/sitemap_index.xml → /sitemap.xml` (the second convention tools probe, #11615); `.html` dedupe for non-auth pages |
-| `website/apps/dashboard/public/{robots.txt,sitemap.xml}` | `app.premiselabs.co` | Vite copies `public/` → `dist/` at build time; `dist/` is itself a build artifact (untracked since #3775 — built by `deploy.sh`, `deploy-pages.yml` and the `dashboard-js-tests` CI job before it is served), so `public/` is the only committed copy |
+| `website/sitemap-product.xml` | `premiselabs.co` | nine URLs, one per 200: `/tortoise` (the product page), then `docs`, `faq`, `self-hosted`, `security`, `license` **under** the prefix, and `/privacy`, `/tos`, `/dpa` at the company **root** (`LEGAL_AT_ROOT` — those govern the business, not the product). ⛔ `/tortoise/privacy` is a **404**, measured 2026-11-12, so it is not merely a redirect to avoid. The auth URLs are not in this sitemap: `/signin` 301s to `/auth`, and `/auth` itself lives on the app origin (#4054) |
+| `website/_redirects` | `premiselabs.co` | trailing-slash 301s → extensionless canonicals; `/index.html → /`; `/sitemap_index.xml → /sitemap.xml` (the second convention tools probe, #11615); `.html` dedupe for non-auth pages |
+| `website/apps/dashboard/public/{robots.txt,sitemap.xml}` | `app.premiselabs.co` | Vite copies `public/` → `dist/` at build time; `dist/` is itself a build artifact (untracked since #3775 — built by `deploy.sh`, `deploy-pages.yml` and the `dashboard-js-tests` CI job before it is served), so `public/` is the only committed copy. This project advertises its own sitemap; the marketing index must not (#11766) |
 
 Rules:
-> **OVERRIDES:** the Sitemaps protocol's same-site rule for index files (`sitemaps.org`, *Using
-> Sitemap index files*: an index "can only specify Sitemaps that are found on the same site … not on
-> … `http://yourhost.yoursite.com`" — a subdomain is the spec's own counterexample) — this project
-> publishes ONE host-agnostic `website/sitemap.xml` from both premise-labs hosts rather than a
-> per-host index, because the four sitemaps are already cross-submitted from `robots.txt` on both
-> hosts and a per-host index cannot be expressed by a single static file. Google waives the rule for
-> cross-submitted sitemaps; a strictly-enforcing crawler still finds all four through `robots.txt`.
-> Tracked as a per-host index in #11624.
+> **The sitemap index is same-host, and needs no deviation record.** Until #11766 `website/sitemap.xml`
+> named children on three hosts while being served from all of them, which the Sitemaps protocol
+> forbids for index files (`sitemaps.org`, *Using Sitemap index files*: an index "can only specify
+> Sitemaps that are found on the same site as the Sitemap index file … not on …
+> `http://yourhost.yoursite.com`" — a subdomain is the spec's own counterexample), and that row
+> carried an `OVERRIDES:` line to say the departure was deliberate. Epic #11762 moved the product and
+> the blog onto the one marketing host, so the **departure is gone**: every child is on
+> `premiselabs.co`, the app origin's sitemap is its own project's business, and
+> `test_every_sitemap_index_loc_is_on_the_indexes_own_host` holds the property (the host itself is
+> read from the middleware's `COMPANY_ORIGIN`, so it cannot drift from where the pages are served).
 >
 > ⚠️ **Part of this SEO contract is OPEN (#3521):** `/auth` (and `/signup`) now 301 to the app
 > origin, so treating them as `tortoise.*` canonicals would hand Google a redirect. The **sitemap**
-> side is already done — `website/sitemap-product.xml` omits `/auth` — but the **canonical / robots**
-> side is tracked by #3521 and NOT yet done (`public/signup.html` still carries
-> `<link rel="canonical" href="https://tortoise.premiselabs.co/auth">`, and `robots.txt`'s comment
-> still lists auth on the tortoise host). The rest of this section describes the pre-#4054 contract
-> for those URLs.
+> side is already done — `website/sitemap-product.xml` omits `/auth` — and since #11766 neither the
+> sitemap nor `robots.txt` names an auth surface at all, but the **canonical** side is tracked by
+> #3521 and NOT yet done (`public/signup.html` still carries
+> `<link rel="canonical" href="https://tortoise.premiselabs.co/auth">`). The rest of this section
+> describes the pre-#4054 contract for those URLs.
 
 - **Host consolidation (the core fix, REPLACED by epic #11762):** the 2026-08-17 pass made the
   product surface canonical on `tortoise.premiselabs.co` and 301'd the company host's copies there.
@@ -375,13 +377,15 @@ Rules:
   canonical product URL: `/product`, `/product.html` and (on the product host) `/index.html` 301 →
   `premiselabs.co/tortoise`. They are duplicates of the root rewrite, not separate pages. The raw
   `.html` spellings of the product set normalize onto the extensionless form so the chain is one hop.
-- **Search Console submission:** add all four sitemap URLs from robots.txt as separate properties (the four sitemaps cover three hosts — `tortoise.premiselabs.co` carries the product AND the blog sitemap).
+- **Search Console submission:** submit `https://premiselabs.co/sitemap.xml` — the index names the
+  three same-host children, so they are submitted with it. The app origin's sitemap stays submitted
+  from its own property, as it always was — the marketing index no longer names it (#11766).
 
 ## 6.6 Blog surface (2026-08-27)
 
 - **Public:** `/blog` (index: card grid, tag filter, SSR) + `/blog/:slug` (article, SSR) via `website/functions/blog/[[path]].ts` — markdown→sanitized HTML, full SEO head (title/meta/OG/Twitter/JSON-LD BlogPosting + BreadcrumbList), canonical, consent.js + PostHog snippet, ASSETS fallback for static assets.
 - **Agent API:** `website/functions/blog/api/posts/[[path]].ts` (#1795) — `X-Agent-Key` (sha256 vs `blog_agent_keys`); POST (default `draft` → review queue; `published` on explicit owner instruction, audited) + PATCH own posts; rate-limited.
-- **SEO:** dynamic `sitemap.xml` (published only) + RSS `feed.xml` (published only); a `/blog` + `/blog/…` rule in middleware 301s the **product** host to `premiselabs.co/blog` (`/blog/api/*` excluded — a 301 would turn a POST into a GET and drop the body; exact path-SEGMENT prefix, so `/blogpost` must not match). The blog is SERVED on the company host since #11762; robots.txt cross-submission now lists the blog sitemap.
+- **SEO:** dynamic `sitemap.xml` (published only) + RSS `feed.xml` (published only); a `/blog` + `/blog/…` rule in middleware 301s the **product** host to `premiselabs.co/blog` (`/blog/api/*` excluded — a 301 would turn a POST into a GET and drop the body; exact path-SEGMENT prefix, so `/blogpost` must not match). The blog is SERVED on the company host since #11762, so its sitemap is one of the three `robots.txt` advertises on that host (#11766).
 - **Content:** Supabase `blog_posts`/`blog_agent_keys`/`blog_admins` (migration `20260827000001_blog_cms.sql`); admin SPA (ElDato editor port, #1798) served by the admin gate at `/admin` on the app origin — hash-routed (`#/`, `#/new`, `#/edit/:id`, `#/audit`), and for any `/admin/*` CLIENT route the gate falls through to `/admin/index.html` (real assets under `/admin/assets/…` pass through the asset router first); images in `blog-images` bucket.
 - **Epic:** docs/epics/2026-08-27-tortoise-blog-cms/.
 

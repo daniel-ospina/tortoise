@@ -2607,6 +2607,32 @@ HOST_ROOT_PAGE = {
 # Mirrored from `functions/_middleware.ts` like `HOST_ROOT_PAGE`, and pinned by the
 # same middleware-reading test below plus `test_the_product_prefix_resolves_to_the_served_document`.
 PRODUCT_PREFIX = "tortoise"
+# The pages the middleware serves UNDER that prefix — `PRODUCT_PAGES` in
+# `functions/_middleware.ts`, by extensionless name. ⛔ THE PREFIX IS NOT A DIRECTORY
+# MIRROR: the middleware 404s any other name under it, so a <loc> like
+# `/tortoise/privacy` resolves to `website/privacy.html` on disk and is a DEAD URL live
+# (measured 2026-11-12: `/tortoise/privacy` → 404, while `/privacy` → 200 — the legal
+# pages that govern the BUSINESS stay at the company root, `LEGAL_AT_ROOT`). Mirrored
+# like `PRODUCT_PREFIX`, and pinned to the middleware's own set by
+# `test_the_product_prefix_resolves_to_the_served_document`, so this list cannot be
+# widened here to make a wrong <loc> pass.
+PRODUCT_PAGE_NAMES = frozenset({
+    "docs",
+    "faq",
+    "security",
+    "self-hosted",
+    "license",
+    # noindex one-pagers: still real pages on this project, still served under the
+    # prefix, and therefore still resolvable here (the sitemap walk, not the indexer's
+    # opinion, is what this maps).
+    "design-partners-intro",
+    "investors",
+})
+# The ONE marketing host (epic #11762) and the host of every sitemap advertisement since
+# #11766. Mirrored from `functions/_middleware.ts`'s `COMPANY_ORIGIN` and PINNED to it by
+# `test_every_sitemap_index_loc_is_on_the_indexes_own_host`: a hand-written copy would
+# drift from the host the pages are served on, which is exactly how #11623 happened.
+MARKETING_ORIGIN = "https://premiselabs.co"
 
 
 def _xml_locs(path: Path) -> list[str]:
@@ -2675,10 +2701,15 @@ def _published_sitemaps(root: Path) -> list[Path]:
     ]
 
 
-def _robots_sitemap_urls() -> list[str]:
-    """The `Sitemap:` lines robots.txt advertises, in file order."""
+def _robots_sitemap_urls(path: Path = ROBOTS_TXT) -> list[str]:
+    """The `Sitemap:` lines a robots.txt advertises, in file order.
+
+    `path` defaults to THIS project's file; the app origin ships its own robots.txt in a
+    separate Pages project (#11766), and that file is the reason its sitemap is still
+    discoverable once the marketing index stopped naming a foreign host.
+    """
     urls = []
-    for line in _read(ROBOTS_TXT).splitlines():
+    for line in _read(path).splitlines():
         line = line.split("#", 1)[0].strip()
         if line.lower().startswith("sitemap:"):
             urls.append(line.split(":", 1)[1].strip())
@@ -2739,6 +2770,17 @@ def _document_for_loc(url: str) -> Path | None:
         candidate = WEBSITE / name if name else None
         return candidate if candidate and candidate.is_file() else None
     cleaned = _served_relative(path)
+    # ⛔ THE PREFIX IS GATED BY THE MIDDLEWARE, NOT BY THE FILESYSTEM. `/tortoise/x`
+    # resolves for ANY `x` whose document exists, but the middleware 404s every name
+    # outside `PRODUCT_PAGES` — so without this gate a <loc> for `/tortoise/privacy`
+    # (a real file, a DEAD URL live: 404 measured 2026-11-12) passes every sitemap walk
+    # in this file. That is a false PASS of exactly the class child 4 exists to close.
+    cleaned_path = path.strip("/")
+    under_prefix = (
+        cleaned_path == PRODUCT_PREFIX or cleaned_path.startswith(PRODUCT_PREFIX + "/")
+    )
+    if under_prefix and cleaned_path != PRODUCT_PREFIX and cleaned not in PRODUCT_PAGE_NAMES:
+        return None
     for candidate in (WEBSITE / cleaned, WEBSITE / f"{cleaned}.html"):
         if candidate.is_file():
             return candidate
@@ -2760,6 +2802,33 @@ def test_the_product_prefix_resolves_to_the_served_document() -> None:
     # An unknown page under the prefix is NOT silently the root: that would let a
     # sitemap advertise /tortoise/nope and pass.
     assert _document_for_loc("https://premiselabs.co/tortoise/nope") is None
+    # ⛔ A FILE ON DISK IS NOT A SERVED URL UNDER THE PREFIX. The middleware 404s every
+    # name outside `PRODUCT_PAGES`, and the legal pages that govern the BUSINESS stay at
+    # the company ROOT (`LEGAL_AT_ROOT`) — measured live 2026-11-12: `/privacy` → 200,
+    # `/tortoise/privacy` → 404. Without this pair, a sitemap could advertise the dead
+    # spelling and every walk in this file stays green.
+    assert _document_for_loc("https://premiselabs.co/privacy") == WEBSITE / "privacy.html"
+    assert _document_for_loc("https://premiselabs.co/tortoise/privacy") is None
+    # …and the mirror above must BE the middleware's own set, or widening it here is how
+    # a wrong <loc> starts passing. Read from the source, comments dropped first, so a
+    # commented-out page cannot count as servable.
+    middleware = _read(WEBSITE / "functions" / "_middleware.ts")
+    code = "\n".join(
+        line for line in middleware.splitlines() if not line.lstrip().startswith("//")
+    )
+    declared = re.search(r"const PRODUCT_PAGES = new Set\(\[(.*?)\]\)", code, re.S)
+    assert declared, (
+        "_middleware.ts no longer declares `const PRODUCT_PAGES = new Set([...])` — "
+        "re-derive PRODUCT_PAGE_NAMES in this module by hand and re-point this guard")
+    served_names = {
+        name[: -len(".html")] if name.endswith(".html") else name
+        for name in re.findall(r'"/([a-z0-9.\-]+)"', declared.group(1))
+    }
+    assert served_names == set(PRODUCT_PAGE_NAMES), (
+        "the middleware serves "
+        f"{sorted(served_names)} under /{PRODUCT_PREFIX} while this module resolves "
+        f"{sorted(PRODUCT_PAGE_NAMES)} — a <loc> for a page in one set and not the "
+        "other resolves to a 404 live while the sitemap walk stays green")
 
 
 def test_the_site_root_is_a_different_page_per_host() -> None:
@@ -2839,8 +2908,9 @@ def test_the_conventional_sitemap_url_serves_a_sitemap_index() -> None:
     """`/sitemap.xml` must be a sitemap INDEX — the 404 in #11615 was this path.
 
     A `<urlset>` here would also "work", so the element is named explicitly: the index is
-    what lets one conventional URL advertise the per-host sitemaps without pretending one
-    host owns the other's URLs.
+    what lets one conventional URL advertise the CHILD sitemaps without pretending one
+    host owns another's URLs — and since #11766 it names children on its OWN host only,
+    which is asserted beside this test.
     """
     assert SITEMAP_INDEX.is_file(), (
         "website/sitemap.xml is missing — https://premiselabs.co/sitemap.xml answers 404, "
@@ -2859,21 +2929,132 @@ def test_the_conventional_sitemap_url_serves_a_sitemap_index() -> None:
             f"({sorted(SITE_HOSTS)})")
 
 
-def test_the_sitemap_index_and_robots_advertise_the_same_set() -> None:
-    """The two advertisements must agree EXACTLY, in both directions.
+def test_every_sitemap_index_loc_is_on_the_indexes_own_host() -> None:
+    """#11766: the index may name sitemaps on ITS OWN host, and nothing else.
 
-    One-way checks rot: the index could keep advertising a sitemap that robots dropped,
-    or robots could name one that no longer exists. Both are the same defect a crawler
-    sees, so both fail here.
+    This is the assertion that would have caught #11623: the index named children on
+    `tortoise.premiselabs.co` and `app.premiselabs.co` while being served from three
+    hosts, which the Sitemaps protocol forbids for index files (sitemaps.org, *Using
+    Sitemap index files*: an index "can only specify Sitemaps that are found on the same
+    site as the Sitemap index file … not on … http://yourhost.yoursite.com" — a SUBDOMAIN
+    is the spec's own counterexample).
+
+    "The index's own host" is the ONE marketing host (#11762): the retired product host
+    is a PERMANENT 301 to it and serves nothing, so a child named there is not a second
+    site — it is the same site spelled at a redirect. That host is READ from the
+    middleware (`COMPANY_ORIGIN`) rather than restated from memory, because the copy that
+    drifts from the host the pages are actually served on is the defect itself.
+
+    ⛔ THE PROPERTY IS ON THE CHILD <loc>s, which is why `SITE_HOSTS` (the membership set
+    used above) cannot express it: three served hosts all pass that check, and that is
+    precisely the index #11623 shipped.
     """
-    index = set(_xml_locs(SITEMAP_INDEX))
-    robots = set(_robots_sitemap_urls())
-    assert robots, "robots.txt advertises no sitemap at all"
-    assert index == robots, (
-        "website/sitemap.xml and website/robots.txt disagree about which sitemaps exist — "
-        f"only in the index: {sorted(index - robots)}; only in robots.txt: "
-        f"{sorted(robots - index)}. Update both: the index is what /sitemap.xml serves, "
-        "robots.txt is what a crawler reads first")
+    middleware = _read(WEBSITE / "functions" / "_middleware.ts")
+    code = "\n".join(
+        line for line in middleware.splitlines() if not line.lstrip().startswith("//")
+    )
+    origin = re.search(r'const COMPANY_ORIGIN = "(https://[^"]+)"', code)
+    assert origin, (
+        "_middleware.ts no longer declares `const COMPANY_ORIGIN = \"https://…\"` — "
+        "re-derive MARKETING_ORIGIN in this module by hand and re-point this guard")
+    assert origin.group(1).rstrip("/") == MARKETING_ORIGIN, (
+        f"the middleware serves the one marketing host at {origin.group(1)!r} while the "
+        f"sitemap advertisements here assume {MARKETING_ORIGIN!r} — every child <loc> "
+        "would be submitted against a host nothing is served from, or a host that 301s")
+    own_host = urlparse(MARKETING_ORIGIN).netloc
+    off_host = sorted({urlparse(loc).netloc for loc in _xml_locs(SITEMAP_INDEX)} - {own_host})
+    assert not off_host, (
+        f"website/sitemap.xml names {off_host} — an index may only specify sitemaps on "
+        f"its own site, and this one is served from {own_host} (#11623/#11766). Repoint "
+        "the child at its URL on the marketing host, or drop it: either it is this "
+        "project's page (so it lives here now, epic #11762) or it belongs to another "
+        "project with its own robots.txt (the app origin) and this index must not "
+        "claim it")
+
+
+def _advertised_sitemaps() -> set[str]:
+    """Every sitemap URL a crawler reaches from robots.txt, transitively.
+
+    robots.txt names the INDEX (`/sitemap.xml`) rather than the three children, which is
+    what Google documents for a sitemap index ("you don't need to include each individual
+    sitemap") — so the index↔robots relation CANNOT be textual set equality (#11766). The
+    drift the equality existed to catch is not "robots names the index" but "a child
+    becomes undiscoverable", and that is what this closure measures: start from the
+    `Sitemap:` lines, and for every advertised document that is a SITEMAP INDEX add its
+    children, until nothing new appears.
+
+    A line that resolves to no file contributes nothing — that is
+    `test_every_advertised_sitemap_is_servable_from_this_tree`'s subject, asserted
+    separately so the two failures are not reported as one.
+    """
+    reached = set(_robots_sitemap_urls())
+    queue = list(reached)
+    while queue:
+        document = _sitemap_file_for(queue.pop())
+        # ⛔ A FUNCTION-SERVED SITEMAP CANNOT BE A STATIC INDEX here: the blog's child is a
+        # `.ts` handler, and handing it to an XML parser raises rather than answering. It
+        # is a `<urlset>` by construction, so it contributes no children and is skipped.
+        if document is None or document.suffix != ".xml":
+            continue
+        if _sitemap_root_tag(document) != f"{SITEMAP_NS}sitemapindex":
+            continue
+        for child in _xml_locs(document):
+            if child not in reached:
+                reached.add(child)
+                queue.append(child)
+    return reached
+
+
+def _function_sitemap_paths() -> set[str]:
+    """URL paths served by a Pages Function whose filename IS `sitemap.xml.ts`.
+
+    DERIVED from the tree, because the walk over `website/*.xml` cannot see these: the blog's
+    sitemap is generated at request time from published posts. Without this population the
+    "is every sitemap discoverable?" question has no subject for the one child that is a
+    Function, which is how a dropped `<loc>` for `/blog/sitemap.xml` could pass every guard
+    in this file (measured — a fresh-context verifier deleted it and the module stayed 75
+    green).
+    """
+    return {
+        "/" + str(path.relative_to(WEBSITE / "functions"))[: -len(".ts")]
+        for path in (WEBSITE / "functions").rglob("sitemap.xml.ts")
+    }
+
+
+def test_the_sitemap_index_and_robots_advertise_the_same_set() -> None:
+    """Every sitemap this tree SERVES must be reachable from robots.txt.
+
+    One-way checks rot: robots could advertise an index whose child has been removed (a
+    crawler follows a dead `<loc>`), or a child could stop being advertised by anything at
+    all. Set EQUALITY used to hold the two files to each other, and it no longer can, for two
+    independent reasons (#11766): robots.txt now names the INDEX (the shape Google documents
+    for an index, "you don't need to include each individual sitemap"), and the same-site
+    children mean the two lists differ by construction.
+
+    ⛔ SO THE POPULATION COMES FROM THE TREE, NOT FROM THE ADVERTISEMENT, and that is the
+    whole point of this test rather than a detail. The reachability closure alone is
+    TAUTOLOGICAL in the direction that matters: with robots.txt naming the index, the closure
+    is seeded FROM the index's own children, so "every child of the index is reachable" is
+    true by construction and deleting a child from the index leaves every guard green — the
+    drift equality existed to catch. Asking instead "is every sitemap the tree SERVES
+    reachable?" is non-vacuous in both shapes, and it is the question a crawler's discovery
+    actually depends on. Measured after the fix: removing the blog child's `<loc>` reds here.
+    """
+    reachable = _advertised_sitemaps()
+    assert reachable, "robots.txt advertises no sitemap at all"
+    own_host = urlparse(MARKETING_ORIGIN).netloc
+    reachable_pairs = {(urlparse(url).netloc, urlparse(url).path or "/") for url in reachable}
+    served_pairs = {(own_host, f"/{path.name}") for path in _published_sitemaps(WEBSITE)}
+    served_pairs |= {(own_host, path) for path in _function_sitemap_paths()}
+    # The index itself is advertisement, not a child (`_published_sitemaps` excludes it) —
+    # but it must be reachable too, or a crawler that reads robots.txt cannot start.
+    served_pairs.add((own_host, f"/{SITEMAP_INDEX.name}"))
+    missing = sorted(served_pairs - reachable_pairs)
+    assert not missing, (
+        f"sitemap(s) this tree serves but no crawler is led to: {missing}. A sitemap that "
+        "exists but is advertised by nothing is invisible — the other half of #11615. "
+        "Advertise it from robots.txt, or name it as a child of the index robots.txt "
+        "advertises (which is one line for all of them), or delete it")
 
 
 def test_every_advertised_sitemap_is_servable_from_this_tree() -> None:
@@ -2882,14 +3063,20 @@ def test_every_advertised_sitemap_is_servable_from_this_tree() -> None:
     This is the half the tree could not see before: robots.txt named four sitemaps and
     nothing checked that the file (or the Function) behind each one exists.
 
+    Since #11766 the walk is the CLOSURE (`_advertised_sitemaps`), not the `Sitemap:`
+    lines: robots.txt names the index, and a walk of the raw lines would grade exactly one
+    document while the three children it points at stayed unmeasured.
+
     Its CONVERSE — a sitemap that exists and is advertised by nothing — is
     `test_every_sitemap_in_the_tree_is_advertised`. Both halves are needed: this one walks
     the advertisement, that one walks the tree.
     """
-    missing = [url for url in _robots_sitemap_urls() if _sitemap_file_for(url) is None]
+    missing = [url for url in sorted(_advertised_sitemaps()) if _sitemap_file_for(url) is None]
     assert not missing, (
-        f"robots.txt advertises sitemap(s) with no file or Function behind them: "
-        f"{missing}. Either add the sitemap or drop the `Sitemap:` line")
+        f"an advertised sitemap has no file or Function behind it: "
+        f"{missing}. Either add the sitemap or drop the reference — a crawler that reads "
+        "robots.txt follows the index and its children, and a dead `<loc>` there is "
+        "discarded with everything else in that file")
 
 
 def test_every_sitemap_in_the_tree_is_advertised() -> None:
@@ -2925,11 +3112,23 @@ def test_every_sitemap_in_the_tree_is_advertised() -> None:
                 "that path, so no crawler is told it exists")
     # The app origin's sitemap is a committed copy for a SEPARATE Pages project, so the
     # glob above cannot reach it; it is still a sitemap this tree publishes.
-    app_sitemap = WEBSITE / "apps" / "dashboard" / "public" / "sitemap.xml"
+    #
+    # ⛔ SINCE #11766 THE MARKETING INDEX MUST NOT ADVERTISE IT — it is not a child on
+    # the index's host, and that cross-host entry was the whole defect in #11623. So the
+    # advertisement that has to exist is the APP PROJECT'S OWN `robots.txt`: dropping the
+    # child here must not become "the app's sitemap is advertised by nothing", and it must
+    # not be "fixed" by deleting the app's sitemap, which still serves its own property.
+    app_public = WEBSITE / "apps" / "dashboard" / "public"
+    app_sitemap = app_public / "sitemap.xml"
+    app_robots = app_public / "robots.txt"
     if app_sitemap.is_file() and ("app.premiselabs.co", "/sitemap.xml") not in advertised:
-        problems.append(
-            "website/apps/dashboard/public/sitemap.xml — advertised by nothing, so "
-            "app.premiselabs.co/sitemap.xml is unreachable by any crawler")
+        app_urls = _robots_sitemap_urls(app_robots) if app_robots.is_file() else []
+        if "https://app.premiselabs.co/sitemap.xml" not in app_urls:
+            problems.append(
+                "website/apps/dashboard/public/sitemap.xml — advertised by nothing. The "
+                "marketing index may not name it (a foreign host is #11623/#11766), so "
+                "the app project's OWN robots.txt has to advertise "
+                "https://app.premiselabs.co/sitemap.xml, and it does not")
     assert not problems, "\n".join(problems) + (
         "\nAdvertise it — in BOTH files, since the index and robots.txt are held equal to "
         "each other — or delete it. A sitemap that exists but is advertised by nothing is "
@@ -3041,9 +3240,10 @@ def test_no_sitemap_advertises_a_page_that_is_deleted_or_noindex() -> None:
     deliberately carries no app entry: the mapping describes THIS project's middleware, and
     the app is not served by it. Covering the app sitemap's `<loc>`s is therefore a one-line
     mapping plus a walk entry (no impossibility), and it is owned by #11624 together with
-    the per-host index. What IS asserted about that file today: it is advertised and
-    servable (`test_every_advertised_sitemap_is_servable_from_this_tree`), and a change to
-    it selects this file (tests/test_ci_selection.py).
+    the per-host index. What IS asserted about that file today: it is advertised by its own
+    project's `robots.txt` (`test_every_sitemap_in_the_tree_is_advertised` — the marketing
+    index deliberately no longer names it, #11766), and a change to it selects this file
+    (tests/test_ci_selection.py).
 
     HOST is checked here for every `<loc>` in the walk, because `_document_for_loc` resolves a
     non-root `<loc>` by PATH only: a `<urlset>` `<loc>` on a host this project does not serve

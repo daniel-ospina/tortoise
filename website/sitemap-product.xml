@@ -1,53 +1,64 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- tortoise.premiselabs.co — product + docs + legal sitemap.
-     Same-host URLs only (Google requirement); discovered via robots.txt
-     cross-submission. welcome.html and invite-accept.html are auth-gated
-     (noindex) and intentionally omitted. /auth moved to the app origin
-     (app.premiselabs.co) with the BFF in #4054, so it is no longer a
-     same-host URL and is omitted here too. -->
+<!-- premiselabs.co — product + docs + legal sitemap (#11766).
+     The product surface is served under `/tortoise[/<page>]` on the ONE marketing host
+     (epic #11762); `tortoise.premiselabs.co` is a permanent 301 onto those paths, so a
+     <loc> naming it would submit a redirect and teach a crawler that the canonical URLs
+     moved. Every <loc> below is the URL that answers 200.
+
+     ⛔ THE LEGAL SPLIT IS NOT ONE SHAPE, and the file it sits in is a trap: `/license`
+     governs the PRODUCT and moved under the prefix, while `/privacy`, `/tos` and `/dpa`
+     govern the BUSINESS and stay at the company ROOT (`LEGAL_AT_ROOT` in
+     `functions/_middleware.ts`; #11762 settled that fork explicitly). `/tortoise/privacy`
+     is a 404 — measured live 2026-11-12 — so naming it here would submit a dead URL, not
+     merely a redirect.
+     Same-host URLs only (protocol requirement, and asserted for the INDEX by
+     `test_every_sitemap_index_loc_is_on_the_indexes_own_host`); discovered via robots.txt.
+     welcome.html and invite-accept.html are auth-gated (noindex) and intentionally
+     omitted. /auth lives on the app origin (app.premiselabs.co) since #4054, so it is
+     not a URL of this sitemap either. -->
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
-    <loc>https://tortoise.premiselabs.co/</loc>
+    <loc>https://premiselabs.co/tortoise</loc>
     <changefreq>weekly</changefreq>
     <priority>1.0</priority>
   </url>
   <url>
-    <loc>https://tortoise.premiselabs.co/docs</loc>
+    <loc>https://premiselabs.co/tortoise/docs</loc>
     <changefreq>weekly</changefreq>
     <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://tortoise.premiselabs.co/faq</loc>
+    <loc>https://premiselabs.co/tortoise/faq</loc>
     <changefreq>monthly</changefreq>
     <priority>0.7</priority>
   </url>
   <url>
-    <loc>https://tortoise.premiselabs.co/self-hosted</loc>
+    <loc>https://premiselabs.co/tortoise/self-hosted</loc>
     <changefreq>monthly</changefreq>
     <priority>0.6</priority>
   </url>
   <url>
-    <loc>https://tortoise.premiselabs.co/security</loc>
+    <loc>https://premiselabs.co/tortoise/security</loc>
     <changefreq>monthly</changefreq>
     <priority>0.6</priority>
   </url>
   <url>
-    <loc>https://tortoise.premiselabs.co/privacy</loc>
+    <loc>https://premiselabs.co/privacy</loc>
     <changefreq>yearly</changefreq>
     <priority>0.3</priority>
   </url>
   <url>
-    <loc>https://tortoise.premiselabs.co/tos</loc>
+    <loc>https://premiselabs.co/tos</loc>
     <changefreq>yearly</changefreq>
     <priority>0.3</priority>
   </url>
   <url>
-    <loc>https://tortoise.premiselabs.co/license</loc>
+    <loc>https://premiselabs.co/tortoise/license</loc>
     <changefreq>yearly</changefreq>
     <priority>0.3</priority>
   </url>
   <url>
-    <loc>https://tortoise.premiselabs.co/dpa</loc>
+    <loc>https://premiselabs.co/dpa</loc>
     <changefreq>yearly</changefreq>
     <priority>0.3</priority>
   </url>
