@@ -1016,7 +1016,9 @@ def _run_commands(step: dict) -> str:
     became `b=/usr/lib/postgresql; echo "` — the rsync never reached any rule, and
     the step was GREEN. `_strip_trailing_comment` walks the line and cuts at a `#`
     that BEGINS A WORD — column 0, or after unquoted, unescaped whitespace or one
-    of the list operators `; & | (` — plus, deliberately, NOT `<`/`>`: bash DOES
+    of the list operators `; & | (` — where a word really begins, so NOT after an
+    extglob `(` or the second `(` of a glued `((`, which are word parts — plus,
+    deliberately, NOT `<`/`>`: bash DOES
     begin a comment word after a redirection operator (`echo hi >#f` is a syntax
     error because `#f` was eaten as a comment), but a FLAT class cannot tell that
     context from the ones where the `#` is DATA — inside `(( ))` / `$(( ))` a `<`/`>`
@@ -2950,6 +2952,10 @@ def _compared_variables(lines: list[str]) -> list[tuple[str, str]]:
 #: B), never a bypass.
 #: `test_an_arithmetic_or_parameter_redirect_is_not_a_comment_boundary` pins the
 #: fail-OPEN direction of that trade: re-adding `<`/`>` to this class reds it.
+#: ⚠️ AND `(` IS ONLY THE DEFAULT, NOT A SHELL FACT (#12279 REVIEW 4, P0): a word
+#: begins after a plain `(` but NOT after an extglob opener (`@(#X)`) or the second
+#: `(` of a glued `((` — those are word parts, so `_strip_trailing_comment` derives
+#: `boundary` from the FRAME it pushed instead of from this class.
 COMMENT_START_CHARS = " \t;&|("
 
 
@@ -6069,6 +6075,11 @@ def test_a_substitution_closer_is_not_a_comment_boundary() -> None:
         "echo ${x:+(a)#}",
         "echo @(b)#x",
         "echo ${x:-plain}#note",
+        # ⛔ A `#` AFTER AN OPENER THAT BEGINS NO WORD IS DATA TOO (#12279 REVIEW 4,
+        # P0, measured RED→GREEN twice). The opener itself used to set the boundary,
+        # so the line was truncated AT THE `(` and every rule arm went blind.
+        "true || ((#X))",
+        "echo hi @(#X)",
     ):
         step = {"run": f"b=/usr/lib/postgresql; {opener}; {replacement}"}
         assert replacement in _run_commands(step), (
@@ -6086,6 +6097,39 @@ def test_a_substitution_closer_is_not_a_comment_boundary() -> None:
     assert replacement not in _run_commands(step), (
         "a group-closing `)` did not end the word, so a REAL comment survived: "
         f"{_run_commands(step)!r}"
+    )
+
+    # CONTROL: and a `#` right after a PLAIN `(` IS a comment (the round-4 fix must
+    # not turn every opener into data — `( #c )` really is a comment to bash).
+    step = {"run": f"( #c ); {replacement}"}
+    assert replacement not in _run_commands(step), (
+        "a comment after a plain `(` survived, so the whole line still ran: "
+        f"{_run_commands(step)!r}"
+    )
+
+
+def test_without_comment_is_the_same_rule_as_the_stripper() -> None:
+    r"""`_without_comment` must DELEGATE, not re-implement (#12279 REVIEW 4, P3).
+
+    It used to be a second implementation (`_mask_quotes` + a flat-class regex),
+    which is how the narrow rule came back once already. It now calls
+    `_strip_trailing_comment`, but nothing pinned that: reverting the delegation to
+    the deleted flat class left the suite fully green while the two answers
+    diverged on every word-part `#` (`echo $(date)#note; …` lost its tail). These
+    two assertions are the pin — the first fails on any re-implementation that
+    keeps the flat class, the second fails if the rule stops stripping real
+    comments.
+    """
+
+    assert _without_comment("echo $(date)#note; cp -a x y") == "echo $(date)#note; cp -a x y", (
+        "a substitution's `#` was treated as a comment — `_without_comment` is no "
+        "longer the stripper's rule"
+    )
+    assert _without_comment("echo ${x:-(a)#}; cp -a x y") == "echo ${x:-(a)#}; cp -a x y", (
+        "a `#` inside `${…}` was treated as a comment"
+    )
+    assert _without_comment("echo hi # note") == "echo hi ", (
+        "a real trailing comment was not stripped"
     )
 
 
@@ -7016,17 +7060,28 @@ def _strip_trailing_comment(line: str) -> str:
             # ⛔ `index and` IS LOAD-BEARING: `"" in "$<>"` is True in Python, so a
             # `(` at column 0 was classified as a SUBSTITUTION and `(true)#x`
             # stopped stripping a real comment (caught by the suite, 2 failed).
-            # A `(` inside `${…}`, or the `(` of an extglob pattern (`@(b)#x`
-            # prints `@(b)#x`), is also a WORD part — same measured class.
+            # ⛔ AND `boundary` COMES FROM THE FRAME, NOT THE CHARACTER (#12279
+            # REVIEW 4, P0, measured RED→GREEN twice). Setting it True for every
+            # `(` made a `#` after an extglob opener (`echo hi @(#X)`) or a glued
+            # arithmetic opener (`true || ((#X))`) a comment, which truncated the
+            # line at the `(` and blinded every rule arm while bash ran the
+            # replacement. A `(` inside `${…}`, the `(` of an extglob pattern, and
+            # the second `(` of `((` are word parts: no word begins there.
             if braces or (index and previous in "?*+@!"):
                 stack.append("word")
+                boundary = False
+            elif previous == "(":
+                stack.append("arith")
+                boundary = False
             elif index and previous in "$<>":
                 stack.append("sub")
+                boundary = True
             elif previous == "=":
                 stack.append("word")
+                boundary = True
             else:
                 stack.append("group")
-            boundary = True
+                boundary = True
             index += 1
             continue
         if char == ")":
