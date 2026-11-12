@@ -14218,7 +14218,17 @@ class FalkorProjection(
                         inputs: list[str] = []
                         try:
                             op_type_val = props.get("op_type", "IMPL")
-                            edge_rel = "hasPart" if op_type_val not in ("IMPL", "NAND") else op_type_val
+                            # #12067: the FIFTH op_type→rel map, and the same
+                            # defect the two replay maps had — a `coherence`
+                            # operator is stored on `:IMPL`, so scanning
+                            # `hasPart` returned `inputs = []` and the synthetic
+                            # `OperatorAdded` then carried an operator with NO
+                            # inputs (the block below is written to fail closed on
+                            # exactly that outcome, but an empty result is not an
+                            # exception, so nothing fired). Read the map from its
+                            # one home.
+                            from tortoise.ep import MECHANISM_REL_TYPES as _MECH_REL
+                            edge_rel = _MECH_REL.get(op_type_val, "hasPart")
                             edge_rows = self.g.query(
                                 f"MATCH (n:Point {{id:$id}})-[r:{edge_rel}]->(m:Point) "
                                 f"RETURN m.id ORDER BY r.idx",

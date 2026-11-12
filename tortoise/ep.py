@@ -63,7 +63,13 @@ MECHANISM_VALUES = frozenset(_MECHANISM_POTENTIALS)
 #: `op_type` and rel type happened to be equal — matches nothing for the third
 #: mechanism: the message read back as (0, 0), the flush wrote 0 rows, and the
 #: mechanism priced a belief while never persisting the evidence for it (#12067
-#: review, P0). Keep this map and the two write/replay maps in step.
+#: review, P0). ⛔ THIS is the declaration; the write/replay sites must READ it
+#: rather than restate it — `projection/edges.py`, `record_projection`,
+#: `projection/__init__`'s graph-only snapshot, `sdk.create_operator`'s edge
+#: writer, `commit_ops`' idempotency probe, `ingest`'s dedupe probe and its
+#: partial-absorb leg all spell the mapping, and THREE of them were wrong for the
+#: third mechanism when they spelled it themselves (two P0s and a P1 that made an
+#: absorbed leg inert).
 MECHANISM_REL_TYPES: dict[str, str] = {
     "IMPL": "IMPL",
     "NAND": "NAND",

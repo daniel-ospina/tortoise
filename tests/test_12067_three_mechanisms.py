@@ -603,6 +603,57 @@ def test_an_ingest_retry_dedups_a_coherence_operator(sdk):
     assert len(ops) == 1, ops
 
 
+def test_ingest_reports_the_conflict_as_a_VIOLATION_not_a_mid_bundle_abort(sdk):
+    """⛔ Phase 1 must know the invariant, or the conflict aborts the bundle
+    MID-WRITE (#12067 review round 3, P1).
+
+    `create_operator`'s refusal is a `raise` — right for a direct caller, wrong
+    for `ingest`, whose Phase 1 is documented as pure and aggregated. Measured
+    before the fix: a payload with a new point, one valid connection and one
+    conflicting `coherence` connection COMMITTED the point and the valid
+    connection, then raised — no `violations` entry, nothing to skip, and the same
+    error on every retry (the partial-mutation class Phase 1 exists to prevent).
+    """
+    from tortoise.exceptions import BundleValidationError
+
+    a, b = _points(sdk)
+    sdk.create_operator("IMPL", a, [b])
+    payload = {
+        "points": [{"content": "a brand new claim, queued behind the conflict"}],
+        "connections": [{"operator": "coherence", "from": a, "to": b}],
+    }
+    with pytest.raises(BundleValidationError) as exc:
+        sdk.ingest(payload)
+    violations = getattr(exc.value, "violations", []) or []
+    assert any("SECOND mechanism" in (v.get("message") or "") for v in violations), (
+        violations)
+    # NOTHING from the bundle committed — that is the whole point.
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.content = $c RETURN n.id",
+        params={"c": "a brand new claim, queued behind the conflict"}).result_set
+    assert rows == [], rows
+
+
+def test_an_absorbed_coherence_leg_lands_on_the_STORAGE_edge(sdk):
+    """⛔ The ingest partial-absorb leg mapped every non-IMPL/NAND op_type to
+    `hasPart`, so an absorbed coherence input landed as a structural edge the
+    factor builder never reads: ingest answered SUCCESS with a warning and the leg
+    was INERT (#12067 review round 3, P1 — the same class as the two replay maps).
+    """
+    a, b = _points(sdk)
+    c = sdk.create_point("statement", "third input")["id"]
+    sdk.create_operator("coherence", a, [b])
+    # The absorb arm: same operator, widened input set.
+    sdk.ingest({"connections": [
+        {"operator": "coherence", "from": a, "to": [b, c]}]})
+    rels = sdk._get_proj().g.query(
+        "MATCH (o:Point {is_operator:true})-[r]->(t:Point) "
+        "RETURN o.id, type(r), t.id").result_set
+    typed = {(rel, tgt) for _oid, rel, tgt in rels if rel in ("IMPL", "NAND")}
+    assert ("IMPL", c) in typed, rels
+    assert not any(rel == "hasPart" for _oid, rel, _t in rels), rels
+
+
 # ── END TO END: the mechanism must move a belief through the RUN, not just
 #          through `_update_factor`. A mechanism that is priced correctly and
 #          never reached is INERT — the failure #8169 records (a relation that
