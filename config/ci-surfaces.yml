@@ -5838,7 +5838,7 @@ surfaces:
   # job reds on it — which is why no landing on a tree carrying that commit can
   # be graded green until it is named. Hermetic: the SDK-door cases take a
   # per-test EMBEDDED engine and the rest are pure unit — no docker, no network,
-  # no model call (neither half is graph-free, so "no DB" would be wrong here).
+  # no model call.
   - test_percent_value_11915.py
   # #2814: authoritative-config durability across rebuild_all — the config
   # registry + sidecar section live in tortoise/projection/ (core fallback),
