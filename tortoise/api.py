@@ -625,12 +625,21 @@ class EventAPI:
         landed in the ``except`` below — the belief record was DROPPED with a
         log line while the identical ``point=`` refusal raised. One class of
         malformed payload, two answers; the caller of a best-effort seam is the
-        only one who can react, so every payload-shape refusal is raised here,
-        BEFORE the arm that swallows I/O: the record-shaped, envelope, marker,
-        money and kind families — i.e. every gate `_emit` runs before its commit
-        point. That enumeration is not decorative: a family added to `_emit`
-        must be added here in the same commit, or the sentence goes back to
-        being a claim the code does not honour (it has twice).
+        only one who can react, so a payload-shape refusal is reported here,
+        BEFORE the arm that swallows I/O, wherever the gate is PURE enough to
+        run here: the record-shaped, envelope, marker and money families, and
+        the invisible-character half of the kind gate.
+
+        ⛔ THE APPROVAL half of the kind gate is the ONE exception, and it is
+        not a hole: it needs a whole-graph READ, and that read RAISES on a
+        bound-but-unreadable handle (an outage is not a caller's bug). Run
+        before the arm, it would be an I/O failure escaping ``ep.run()`` — the
+        thing this door's best-effort posture exists to prevent (measured at
+        `3f5c61601`). So it runs inside ``_emit``, and the ``except`` below
+        RE-RAISES its named refusal instead of logging it away: an outage stays
+        swallowed, a refused pack is reported. Stated as the split it is,
+        because the flat claim "every payload-shape refusal is raised here"
+        stopped being true the moment the pure-only call landed.
         """
         _refuse_caller_named_funnel_keys(payload, "`emit_belief`")
         # …and the MONEY family, which is the other gate `_emit` runs and this
@@ -663,6 +672,23 @@ class EventAPI:
         try:
             self._emit(type_, **payload)
         except Exception as exc:  # noqa: BLE001, RUF100
+            # ⛔ A DETERMINISTIC PAYLOAD REFUSAL IS NOT THE I/O FAILURE THIS ARM
+            # EXISTS TO SWALLOW. The approval half of the kind gate is the one
+            # payload-shape gate that still runs inside the arm (the eager call
+            # above is pure by contract), so logging-and-dropping it would
+            # restore exactly the F2 divergence one family over: the same
+            # payload raises at `add_object` and vanishes here. Measured at
+            # `8ee861cbaa`: `emit_belief("ConfidenceChanged", id=…,
+            # eventKind="marketing:campaign")` returned normally with the
+            # journal empty. `UnapprovedKindNamespace` is the type the SDK
+            # publishes for this distinction — its own docstring: a transport
+            # "can tell this DETERMINISTIC payload refusal from a transient
+            # graph failure WITHOUT parsing the message". An UNREADABLE handle
+            # raises OSError, not this, so an outage keeps its best-effort
+            # posture and the graph is still read once, inside `_emit`.
+            from .sdk import UnapprovedKindNamespace
+            if isinstance(exc, UnapprovedKindNamespace):
+                raise
             logger.warning(
                 "failed to append %s event to ingest log: %s", type_, exc)
 
