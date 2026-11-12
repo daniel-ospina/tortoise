@@ -292,10 +292,13 @@ def _refusal_arm(env: dict[str, str], name: str, pid: int) -> str:
             "OF THAT ARM'S THREE CAUSES FIRED — `kill -0` failing gives ESRCH (gone) or "
             "EPERM (unsignalable), and a `Z` state letter is the third — so this names "
             "the candidates and not a culprit: the decoy exited or never exec'd (the "
-            "fixture's), a peer job's machine-global reap killed it (#10283's actual "
-            "defect, i.e. a REAL finding), or `/proc` lost it (the SUT's). Read the "
-            "decoy's own exit status and the job log before closing a red here as flake"
-            " (`stderr` says 'is not running' for all three)"
+            "fixture's), or a peer job's machine-global reap killed it (#10283's "
+            "actual defect, i.e. a REAL finding). ⚠️ A `/proc` that loses a LIVE pid is "
+            "NOT one of them and lands on the start-time arm instead: `pid_state` "
+            "returns empty, and `[[ \"\" != \"Z\" ]]` is true, so `pid_running` passes "
+            "and `pid_starttime` is what refuses. Read the decoy's own exit status and "
+            "the job log before closing a red here as flake (`stderr` says 'is not "
+            "running' for every cause named above)"
         )
     if arm == "no-start-time":
         return ("the START-TIME leg refused (`pid_starttime`): `/proc` lost the pid "
@@ -630,9 +633,21 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
     # interpreter under that argv[0] + `prctl`, so the pin moves from "the symlink exists"
     # to "the process is named workerd"). `ps -o comm=` is what `pkill` reads; guarded to
     # Linux because `prctl` does not exist elsewhere and comm then stays the interpreter's.
+    #
+    # ⛔ A BOUNDED POLL, because `prctl` is NOT part of the `execve` `_await_exec` waits
+    # for: it runs later, inside the child's `-c` code, ~13-22 ms after exec on this box
+    # (measured), while `ps -o comm=` costs ~42 ms — so a one-shot sample passes here by
+    # luck of relative latency. It fails deterministically on a faster process table
+    # (measured: 4/4 reds in a PID namespace where `ps` takes ~4 ms). The poll still reds
+    # if `prctl` never runs at all.
     if Path("/proc").is_dir():
-        comm = subprocess.run(["ps", "-o", "comm=", "-p", str(peer.pid)],
-                              capture_output=True, text=True).stdout.strip()
+        deadline, comm = time.time() + 5.0, ""
+        while time.time() < deadline:
+            comm = subprocess.run(["ps", "-o", "comm=", "-p", str(peer.pid)],
+                                  capture_output=True, text=True).stdout.strip()
+            if comm == "workerd":
+                break
+            time.sleep(0.02)
         assert comm == "workerd", (
             f"the peer decoy is named {comm!r}, not `workerd` — the shape #10283's "
             "pre-fix machine-global `pkill workerd` matched is not reproduced"
