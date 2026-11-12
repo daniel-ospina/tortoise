@@ -329,8 +329,8 @@ def _refuse_non_str_keys(fields, channel: str) -> None:
 
     ⛔ THE KEYS ARE WRITTEN BY VALUE, THE GUARDS READ THEM BY HASH (#11996 review
     round 8, measured). A `str` SUBCLASS whose `__hash__` differs from `str`'s
-    passes every `k in frozenset(...)` / `set(keys) & forbidden` test in this
-    module and is then journalled under the name it claims:
+    passes every hash-membership test (`k in frozenset(...)`,
+    `set(keys) & forbidden`) and is then journalled under the name it claims:
 
         class K(str):
             def __hash__(self): return 0x5f3a1
@@ -352,8 +352,9 @@ def _refuse_non_str_keys(fields, channel: str) -> None:
             raise ValueError(
                 f"{channel} carries a key that is not an exact `str` "
                 f"({type(key).__name__}): the journal writes a key by its STRING "
-                f"VALUE while every guard here tests membership, which is a HASH "
-                f"lookup, so such a key can pass a refusal and land under the "
+                f"VALUE while the HASH-membership arms here (`_forged_envelope`, "
+                f"`_forged_markers`, `add_point`'s `_forged_keys`) test it by hash, "
+                f"so such a key can pass one of those refusals and land under the "
                 f"name it claims (#11948). Pass plain `str` keys.")
 
 
