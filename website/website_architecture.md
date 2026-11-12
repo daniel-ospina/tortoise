@@ -20,7 +20,7 @@ auth pages, dashboard, and billing. Written 2026-08-14 from the current
 | Host | Serves | Deployment |
 | --- | --- | --- |
 | `premiselabs.co` | Company page (`website/index.html`) | Cloudflare Pages project `premise-labs` |
-| `tortoise.premiselabs.co` | Product page (`website/product.html` at `/`), docs, FAQ (`/faq`), blog, legal — **no session is minted here**; the admin-gated blog Functions (`/blog/api/purge`, `generate-seo`, `generate-cover`, `notify-publish`) authenticate via `Authorization: Bearer` (reached through the app-origin `/blog/api/*` Token Handler); the legacy parent-domain `sb-tortoise-auth-token` cookie is no longer accepted by them (see the auth bullet below). The auth surfaces redirect to the app origin (302, except the `/auth` exact path — see the redirect notes below) | Cloudflare Pages project `premise-labs` (same project, host-routed) |
+| `tortoise.premiselabs.co` | **Serves NO page — a PERMANENT 301 (epic #11762)** onto the row above (product set → `/tortoise/…`, legal → the root, blog → `/blog`); **no session is minted here**; the admin-gated blog Functions (`/blog/api/purge`, `generate-seo`, `generate-cover`, `notify-publish`) authenticate via `Authorization: Bearer` (reached through the app-origin `/blog/api/*` Token Handler); the legacy parent-domain `sb-tortoise-auth-token` cookie is no longer accepted by them (see the auth bullet below). The auth surfaces redirect to the app origin (302, except the `/auth` exact path — see the redirect notes below) | Cloudflare Pages project `premise-labs` (same project, host-routed) |
 | `app.premiselabs.co` | **The one session-bearing origin (#4054):** the BFF, the dashboard SPA, `/auth*`, `/welcome`, `/invite-accept`, `/admin`, `/api/v1`, `/blog/api` | Cloudflare Pages project `tortoise-dashboard` (separate) |
 | `api.premiselabs.co` | Hosted API (FastAPI, `tortoise/hosted_api.py`) | Fly.io app `tortoise-y4mjjq` |
 
@@ -175,9 +175,10 @@ Host routing lives in `website/functions/_middleware.ts`:
   `tortoise.*` and previews/dev); `/signup`, `/welcome` and `/invite-accept` are 301'd by the
   middleware's `APP_ONLY` branch **only on the exact `premiselabs.co` host**, and on the tortoise host
   by the static `website/_redirects`. The visitor lands where the session cookie lives.
-- `/signin`, `/signin/`, `/signin.html` → 301 `/auth` on the **tortoise** host. The company host takes
-  one extra hop first (`premiselabs.co/signin` → `tortoise.premiselabs.co/signin`), and the app origin
-  has no `/signin` route at all (it 404s) — `/signin` is a marketing-host alias, not a session route.
+- `/signin`, `/signin/`, `/signin.html` → **301 `https://app.premiselabs.co/auth` in ONE hop on BOTH
+  marketing hosts** (measured 2026-11-12: the middleware `SIGNIN_ALIAS` branch is host-independent and
+  names the app origin directly). The app origin has no `/signin` route at all (it 404s) — `/signin` is
+  a marketing-host alias, not a session route.
 - `/signup` variants serve the same page as a legacy alias (canonical `/auth`).
 - **`/welcome` is not a provisioning page and not a rendered page by default** —
   `functions/welcome.ts` decides: signed in → 302 to the app (with `?claim=1` when the claim marker
@@ -255,6 +256,12 @@ not per seat (#310/#432).
 ---
 
 ## 5. Target architecture (approved direction, 2026-08-14)
+
+> ⚠️ **Host topology superseded (epic #11762):** the item below still says the product lands on
+> `tortoise.premiselabs.co`. That host is now a **permanent 301** and the product is served at
+> `premiselabs.co/tortoise` — read the URL in the ending state, not in the 2026-08-14 wording.
+> What survives here unchanged is the *journey* (one Login control → `/auth`), which is why the
+> list is kept rather than rewritten.
 
 The user-approved end state for the auth/marketing surfaces:
 
@@ -357,7 +364,12 @@ Rules:
   direction and the owner of each URL changed. The 2026-08-17 decision and its locks (the G-gate
   ③/⑨ contract in `docs/plans/2026-08-08-657-legal-pages-plan.md`) are superseded by this, not
   silently dropped.
-- **Canonical tags:** all indexable pages carry `<link rel="canonical">` — `index.html` → `https://premiselabs.co/`, `product.html` → `https://tortoise.premiselabs.co/` (served at `/`), plus docs/faq/self-hosted/auth. Legal pages already had them.
+- **Canonical tags:** all indexable pages carry `<link rel="canonical">` naming the URL that
+  SERVES them (pinned per page by `tests/test_website_static.py::TestProductSetIsServedUnderTheOneHost`):
+  `index.html` → `https://premiselabs.co/`, the product set → `https://premiselabs.co/tortoise[/<page>]`
+  (`product.html` is the bare `/tortoise`), the legal pages the business owns → `https://premiselabs.co/<page>`
+  at the ROOT. No page names `tortoise.premiselabs.co` — that host is a permanent 301, so a canonical
+  naming it would point at a redirect back to the document serving it.
 - **Auth-gated pages** (`welcome.html`, `invite-accept.html`) are `noindex,nofollow` and excluded from sitemaps. Signup stays indexable (a redirect-free alias of `/auth`); the legacy `/signin` URLs 301 → `/auth`. Keep `.html` auth URLs as-is — OAuth `redirectTo` and invite emails reference them directly.
 - **Middleware** (runs before `_redirects`) consolidates the raw product assets onto the ONE
   canonical product URL: `/product`, `/product.html` and (on the product host) `/index.html` 301 →

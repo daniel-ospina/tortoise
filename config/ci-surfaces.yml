@@ -1087,6 +1087,20 @@ surfaces:
   - test_egress_bytes.py
   - test_email_integration_resend.py
   - test_email_notify.py
+  # #11767: the runtime URL surface (#11762 child 5). The email link is emitted
+  # from `tortoise/email_notify.py` and `tortoise/hosted_api.py` — both EXACT
+  # `api` SOURCE_PATTERNS — so a change to either selects this surface, and this
+  # guard must be selected with it. Dual-registered `core` + `onboarding`
+  # because `abuse.py` selects `core` (it matches no SOURCE_PATTERNS entry) and
+  # `tortoise/onboarding/SKILL.md` selects `onboarding` — both are in its reach.
+  # ⚠️ COVERAGE GAP — NOT created here, filed as #11982, not closed here: the guard
+  # also pins the two Supabase edge-function allowlists, and a diff touching ONLY
+  # `supabase/functions/{waitlist-subscribe,deck-view}/handle.ts` selects NO surface
+  # at all (measured: `select([...handle.ts])` -> surfaces [], this suite absent),
+  # because `supabase/` is a `NON_PYTHON_PREFIX`. So a sweep deleting an allowlist
+  # entry there runs no leg that reads it; do not read these three registrations as
+  # covering those files.
+  - test_runtime_urls_are_canonical.py
   - test_email_signup.py
   - test_enforcement.py
   - test_env_truthy.py  # #4097: env-truthiness contract + guard (registered in api/core/sdk/eval/ep/onboarding; the ledger pins hosted_api.py / mcp_auth.py / __main__.py reads)
@@ -1569,12 +1583,26 @@ surfaces:
   # `tools/ci_selection.py --integrity` refuses every tree that carries it with
   # `manifest drift:` — a case no shard is told to run, and a red on the required
   # check for every PR whose diff touches `tests/` or this manifest, this one
-  # included. DUAL-REGISTERED with `core`: its subjects (`tortoise/pricing.py`'s
-  # two storage dimensions, the loader and the overage arithmetic) match no
+  # included. DUAL-REGISTERED with `core`: THREE of its four subjects
+  # (`tortoise/pricing.py`'s two storage dimensions and the loader) match no
   # SOURCE_PATTERNS row and fall through to `core`, so this `api` row alone would
   # never select it on a `tortoise/pricing.py`-only PR — the same reason
   # `test_write_op_reachability.py` sits in both (#4495). A main-red repaired
   # here, not a new suite: the file is main's, only the registration is added.
+  # #12003: the two purchasable STORAGE dimensions (#11758) — the decision record
+  # pinned against `product/pricing.json` and its e2e served copy, the loader
+  # (`tortoise/pricing.py::tier_limits`), the overage arithmetic
+  # (`tortoise/metering.py::storage_overage_cost_usd`) and the allowance-gate keys.
+  # Registered on `api` because `tortoise/metering.py` is the ONE subject of the
+  # four that is an exact `api` SOURCE_PATTERN; the other three fall to `core`, and
+  # a named-surface match REPLACES the `core` fallback (#2938), so this row alone
+  # would never run the suite on a `tortoise/pricing.py`-only diff — the
+  # dual-registration trap stated just above (#4495). The `core` block's
+  # entry carries that arm, the per-commit row history and the #12006
+  # artifact-coverage gap; read it there rather than restating it here.
+  # Hermetic — the committed artifact plus `tmp_path` mutations and
+  # `pricing.reload()`, no DB/graph/network/model — so it is deliberately NOT
+  # carve_out-registered.
   - test_pricing_storage_dimensions.py
   - test_probe_reset_inflight_4608.py  # #4608: a probe reset/rebuild must not close a handle an in-flight probe still queries (hosted_api + selfhost)
   - test_provisioning_edge_function.py
@@ -2205,6 +2233,12 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  # #11767: the runtime URL surface (#11762 child 5). `tortoise/abuse.py` matches
+  # NO `SOURCE_PATTERNS` entry, so an abuse.py-only diff falls through to this
+  # `core` fallback (measured: `select(['tortoise/abuse.py'])` → ['core']) — and
+  # that file's appeal URL is one of the things this guard pins. Dual-registered
+  # `api` + `onboarding`; see the note beside the `api` row.
+  - test_runtime_urls_are_canonical.py
   # #11739: the `quote` POPULATION RATE evidence bundle
   # (`docs/evidence/11739-quote-population/`) — the issue's own "Do this FIRST",
   # and the measurement a later gate decision is taken on, so its READING of the
@@ -2219,6 +2253,13 @@ surfaces:
   # `test_9664_premise_census.py` precedent). ⛔ NOT in `battery`: a docs census
   # has no business running on a battery-only diff.
   - test_11739_quote_population_probe.py
+  # #12051: the record drill's PostgreSQL CLIENT major must equal the servers'
+  # major. A newer client writes a preamble the RESTORE target cannot execute
+  # (`SET transaction_timeout`, PG17 client into the pg16 scratch server), and
+  # the job reds with "the artifact did NOT restore" — a message that blames the
+  # record path for a runner-image property. Hermetic: reads
+  # `.github/workflows/python-ci.yml` only — no DB, no client binary, no network.
+  - test_12051_ci_pg_client_matches_server.py
 
   # #11855: pins the BLAST RADIUS of an unreadable belief operand — a batch
   # containing a legacy `List`-valued α still returns every requested row, and
@@ -2256,29 +2297,96 @@ surfaces:
   # Same class as the `test_percent_value_11915.py` row directly above — which is
   # what #11978 was filed for 42 minutes before this drift landed (issue
   # 2026-11-12T00:47:22Z, `a3d20763ab` 01:29:58Z), not hours.
+  #
+  # ⛔ THIS `core` ROW IS THE SURVIVOR OF THREE COMPETING `core` ROWS, and the
+  # history above is why. #11837
+  # (`3557a476e1`) registered the file with the `api` row beside
+  # `test_pricing_tiers.py` and NO `core` row; #12023 (`51a5dc2bf4`) added the
+  # first `core` row (its "DUAL-REGISTRATION" one-liner), #11965 (`379de48fdd`)
+  # added a second plus the first `durations:` row, and #12005 (`d088425a7c`) a
+  # third plus a second `durations:` row. Measured per commit — `api`/`core`
+  # surface rows, then `durations:` keys, for this one file:
+  #   `3557a476e1` 1/0, 0 · `51a5dc2bf4` 1/1, 0 · `379de48fdd` 1/2, 1 ·
+  #   `d088425a7c` 1/3, 2 (= `origin/main` before #12003's own commit)
+  # and an EARLIER iteration of #12003's branch (`e2b762904e`) carried one more
+  # `core` row and one more `durations:` key — a FOURTH `core` row and a THIRD
+  # `durations:` row when replayed onto that `1/3, 2` state. That variant was
+  # dropped in the PR's own rebase: every head it ended at (`0514ec3d`,
+  # `67e61605`, `e10c1f9e`) measures `1/1, 1`, i.e. a DEDUP, which is why the
+  # `#12035` paragraph below calls it an empty sibling.
+  # Measured on `origin/main` at `7f7ac34a6b` — on `main`,
+  # NOT on this branch — `--integrity` exits 1 with
+  #   x duplicate mapping key 'test_pricing_storage_dimensions.py': line 11176
+  #     repeats line 9984 — a YAML loader keeps only the LAST value
+  # and, with that mapping-key copy removed, the surfaces walk adds
+  #   duplicate entry 'test_pricing_storage_dimensions.py' at .surfaces.core[]
+  #   (lines 2282, 2322) … (lines 2282, 7320)
+  # so the REQUIRED `manifest-integrity` leg went RED on `main` again — minutes
+  # after the commits meant to repair it. Every row-adding commit is in the table
+  # above, and its THIRD row is already red: `379de48fdd` (04:45:40Z) adds the
+  # second `core` row while carrying ONE `durations:` key, so it fails on the
+  # `duplicate entry` ALONE; `d088425a7c` (04:46:16Z) adds a third row and the
+  # duplicate key. `7f7ac34a6b` (04:54Z) is the head both messages above were
+  # measured on, NOT the first red one. The lanes that repaired the drift are the
+  # ones that re-created it — three `core` rows from three lanes (#12023, #11965,
+  # #12005) — the #11210/#11211/#11222 recurrence this file records
+  # beside `test_pack_hierarchy_11001.py` (three lanes, three rows) and again
+  # beside `test_percent_value_11915.py`.
+  #
+  # ⛔ #12035 (`a7139b663d`) landed the DEDUP FIRST — it deleted the extra `core`
+  # rows and the second `durations:` key, and `--integrity` is green from there —
+  # but it did NOT fix the record, so it left the prose behind a now-ABSENT row:
+  # the `#11758/#11981` block that used to sit beside `test_allowance_gate.py`
+  # survives with no row under it, still asserting "THIS ROW REPAIRS `main`, NOT
+  # THIS PR" and "The surviving `core` row is the one above, beside
+  # `test_8447_c3_ingest_door.py`" — a pointer that still RESOLVES: the surviving
+  # `core` row (`- test_pricing_storage_dimensions.py`) does sit above
+  # `test_stdlib_shadow_guard.py` and `test_8447_c3_ingest_door.py`. What is stale
+  # is the "THIS ROW REPAIRS `main`" claim and the block's POSITION — it now
+  # annotates `- test_10000_narrative_record_home.py`, the row directly under it.
+  # #12003's remaining work is therefore the RECORD, not the
+  # dedup: delete that orphan, fold its still-true measurements in HERE, and
+  # correct the counts. ⚠️ Do not read this note as #12003 having repaired `main`;
+  # #12035 did, and #12035 landed FIRST (05:27:10Z, after #12003's own 05:25 dedup
+  # head), so #12003's dedup would have been the empty sibling.
+  # The three `core` rows were SEMANTICALLY identical registrations (one carried a
+  # trailing `# #11837: …` note rather than being byte-identical, and its content
+  # is restated here, so nothing is lost), so WHICH one survives is not meaningful
+  # and ONE row is. `--integrity` is green at that state, measured.
+  #
+  # The `api` block's row (not a second one here) is what covers `metering.py`.
+  # Two rows, one per surface: a second `api` row is a `duplicate entry` and reds
+  # the gate it was added to green.
   # `core` because THREE of this file's FOUR subjects select no named surface:
   # measured `--changed tortoise/pricing.py` -> ['core'],
   # `--changed tortoise/allowance_gate.py` -> ['core'] and
   # `--changed tortoise/cost_dimensions.py` -> ['core'] (that one is imported
   # DIRECTLY by the suite, not only through `pricing.storage_dimensions`). The
   # FOURTH (`tortoise/metering.py`) DOES select `api`, where #11837 already
-  # registered it — which is why the `core` arm keeps THIS row only (NOT the
+  # registered it — which is why THIS row covers the `core` half only (NOT the
   # six-surface census `test_cost_dimensions.py` carries: this file pins two
   # dimensions, not a sweep over every tracked `.py`).
   # Hermetic: 31 cases, no DB, no graph, no network, no model call, no `gh`.
   # ⚠️ COVERAGE GAP — NOT created here, NOT closed here (#12006): this suite also
   # reads `product/pricing.json`, and a diff touching ONLY that artifact selects
   # no surface at all (measured `--changed-files product/pricing.json` ->
-  # the tier-1 smoke set, this suite absent) because `product/` is a
+  # surfaces [], 89 tier-1 files, this suite absent — ⛔ 89 is a DATED anchor, not
+  # a constant: it read 88 at `a3d20763ab` and moved to 89 at #11839
+  # (`31b29c3ce`), which added `tests/test_pack_selection_durability_doc_pin_9752.py`
+  # and its `tier1:` row — the printed count is |`tier1`| minus any
+  # `slow_files`/`uri_requiring`/`on_demand` overlap, so re-derive it in one
+  # `select()` call) because `product/` is a
   # `NON_PYTHON_PREFIXES` entry. Those four modules are what THIS row buys;
   # the artifact leg needs the #12006 decision, so do not read this row as
   # covering the rates.
   # ⛔ ONE ROW PER SURFACE, and re-measure before adding one (`grep -n
   # '^  - test_pricing_storage_dimensions.py' config/ci-surfaces.yml` must print
-  # exactly TWO lines, one under `api` and one under `core`). It ALREADY HAD
-  # three `core` copies — three lanes repaired this drift and a conflict-free
-  # union splice kept all three (#10032/#10057), so `--integrity` refused
-  # `origin/main` itself until the extras were collapsed (#12035).
+  # exactly TWO lines, one under `api` and one under `core`): the note ABOVE
+  # records the lanes that each repaired this same drift and left FOUR
+  # registrations of one row (one `api` + three `core`); #12035 removed the two
+  # extra `core` copies, leaving one row per surface. A second row on ONE surface
+  # reds `--integrity` on a `duplicate entry` in `.surfaces.api[]` for exactly
+  # that reason.
   - test_pricing_storage_dimensions.py
   # ⛔ `test_pack_hierarchy_11001.py` is registered ONCE, further down this list
   # beside the pack suites — three PRs (#11210, #11211, #11222) each independently
@@ -2297,33 +2405,6 @@ surfaces:
   # guards is an exact `api` match, the other is a `core` fallback, and both
   # diffs must select the evidence.
   - test_allowance_gate.py
-  # #11758/#11981: the two purchasable storage dimensions (stored data, hot
-  # capacity) pinned against the cost-dimension registry, the pricing artifact,
-  # `tier_limits()` and the overage arithmetic. THREE of its four subjects —
-  # `tortoise/pricing.py`, `tortoise/allowance_gate.py` and
-  # `tortoise/cost_dimensions.py` — match NO `SOURCE_PATTERNS` entry and are not
-  # SHARED_MODULEs, so each falls through to the `core` fallback (measured:
-  # `select(['tortoise/pricing.py'])` -> surfaces ['core']). The fourth,
-  # `tortoise/metering.py`, IS an exact `api` match, so this row alone would miss
-  # every `metering.py`-only diff — the `api` arm beside `test_allowance_gate.py`
-  # covers that half, and BOTH arms are required.
-  #
-  # ⛔ THIS ROW REPAIRS `main`, NOT THIS PR. #11981 squash-merged at `a3d20763ab`
-  # WITHOUT registering the file it added, so the REQUIRED `manifest-integrity`
-  # leg went red on `main` itself — and, because that job runs on the PR MERGE
-  # ref, red on every PR's merge ref too (measured on `origin/main @ e4703a286a`:
-  # `ci_selection.py --integrity` -> `manifest drift:
-  # ['test_pricing_storage_dimensions.py']`). An unlisted file is the #1262
-  # drift class: the suite runs in NO leg while the required leg is red.
-  # ⚠️ If a PEER PR lands this same repair first, these rows become the duplicate
-  # the #11210/#11211/#11222 recurrence is about — `--integrity` reds on
-  # `duplicate entry … .surfaces.core[]`. Then DELETE the extra row; do not add
-  # a third.
-  # ⛔ DEDUPED 2026-11-12: three lanes repaired this same `#11981` drift concurrently
-  # (`#12005`, `#12023`) and left THREE `core` rows plus a SECOND `durations:` key —
-  # `--integrity` reds on a duplicate row and on a duplicate key, so the tree was
-  # redder than the drift it repaired. The surviving `core` row is the one above,
-  # beside `test_8447_c3_ingest_door.py`; the extra `durations:` copy is gone too.
   - test_10000_narrative_record_home.py
   - test_10017_cache_tier.py
   - test_10017_purge_guard.py
@@ -5999,11 +6080,19 @@ surfaces:
   # SHARED_MODULE), which is why its `money`/`value_normalizer` siblings sit
   # above. ⛔ NO `surfaces:` ENTRY HERE — `main` registered the file itself in
   # `26592c2600` (#11966) while this branch's base (`927c24e233`) predated it, so
-  # keeping this branch's `core` row would leave TWO on the merged tree and
-  # `--integrity` reds on a duplicate (measured on the merge result: "duplicate
-  # entry 'test_percent_value_11915.py' at .surfaces.core[] (lines 2201, 5872)" —
-  # the #11210/#11211/#11222 recurrence this file already records). Only the
-  # WEIGHT row below is still this PR's to add: `main` carries none for the file.
+  # this branch's `core` row was DROPPED when the branch was rebased onto `main`;
+  # keeping it would leave TWO and `--integrity` reds on a duplicate — the
+  # #11210/#11211/#11222 recurrence this file already records. `main`'s row is the
+  # single one; re-measure it (`grep -n '^  - test_percent_value_11915.py'
+  # config/ci-surfaces.yml`) rather than trusting a line number, which rots on any
+  # insertion above it. `main` ALSO carries
+  # this file's `durations` weight (`test_percent_value_11915.py: 2.0`, landed in
+  # #11938's repair of #11915's drift, commit `e9a52e832a`), so NEITHER row is this
+  # PR's to add: it contributes only the
+  # runtime-URL guard rows above and that guard's own weight row. An earlier
+  # revision of this note claimed `main` "carries none for the file" — a reader
+  # acting on that would add a SECOND weight row, which reds `--integrity` on a
+  # duplicate MAPPING key (a different check from the duplicate-ENTRY one above).
   # #2814: authoritative-config durability across rebuild_all — the config
   # registry + sidecar section live in tortoise/projection/ (core fallback),
   # and pack_state/pack_manifest_store are the writer modules whose labels
@@ -7990,6 +8079,13 @@ surfaces:
   - test_waitlist_form.py
   - test_w7_publish.py
   - test_welcome_url_consolidation.py
+  # #11767: the runtime URL surface — the email link is emitted from
+  # `tortoise/email_notify.py` and `tortoise/hosted_api.py` (both EXACT `api`
+  # SOURCE_PATTERNS, and a named-surface match REPLACES the `core` fallback), so
+  # a change to either selects this surface and must select this guard with it.
+  # The sibling pin it supersedes in spirit, `test_welcome_url_consolidation.py`,
+  # is right above.
+  - test_runtime_urls_are_canonical.py  # #11767: dual-registered api + core + onboarding — measured: abuse.py-only → ['core'], SKILL.md-only → ['onboarding'], email_notify.py-only → ['api']
   - test_website_static.py
   - test_website_docs_consistency.py  # #3332: checks each public page against its canonical source (status vocab, EP mechanism, ontology link)
   # #3329: the public capacity page. Registered HERE because `website/self-hosted.html`
@@ -10821,6 +10917,21 @@ durations:
   test_supabase_control.py: 4.9  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 4.0
   test_supabase_cli_pin_10593.py: 5.6  # #10593: PR-added file, flat DEFAULT_FAST_WEIGHT; two file reads + a YAML parse, no DB — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.0
   test_welcome_url_consolidation.py: 0.1
+  # #11767: PR-added file, so the weight is the flat `DEFAULT_FAST_WEIGHT` (2.0) and
+  # NOT a reading from this box — a weight is a SHARD-LAYOUT input, which a local
+  # timing may not decide (#2818/#3419/#4348; header rule above, and the sibling
+  # `test_pricing_storage_dimensions.py` row above is the same shape). This row
+  # shipped `5.0` first, under a note that claimed the flat default while carrying
+  # the local number — the exact contradiction that row warns about, caught in
+  # fresh-context review of the rebased head and corrected here. The SHAPE is
+  # quoted instead of the seconds, for the reason the sibling row gives: a seconds
+  # figure copied beside a weight re-stales against the recording it came from and
+  # is not a shard-layout input anyway. 16 cases, one `TestClient` spin-up, no DB,
+  # no network, no model call — hermetic, so the flat `DEFAULT_FAST_WEIGHT` is a
+  # declared ceiling rather than a lower bound. `tools/ci_timing.py
+  # --refresh-durations` replaces it from the first push-to-main junit sweep that
+  # includes the file.
+  test_runtime_urls_are_canonical.py: 2.0
   test_battery_retrieval_preflight.py: 5.5  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.2
   test_claim_endpoints.py: 4.8  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 3.8
   test_de2e3_content_dedup.py: 5.8  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 4.2
