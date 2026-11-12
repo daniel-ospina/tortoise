@@ -812,7 +812,7 @@ def _command_haystacks(line: str) -> list[str]:
     so the tail is read as executable text rather than prose.
 
     ⛔ AND A MESSAGE IN COMMAND POSITION BEHIND AN UN-SKIPPED PREFIX IS STILL A FALSE
-    POSITIVE (#12088, re-measured on `origin/main` `1f28d107cf`): `_SEGMENT_CMD` skips the
+    POSITIVE (#12088, measured through this reader's own `_gh_hazards`): `_SEGMENT_CMD` skips the
     statement keywords (`then|else|do|elif|if`) and a leading `{`, which is what the loop/branch/
     `if …; then` shapes need. A message behind any OTHER command-position prefix still
     reads as a command named by that prefix, so the helper name inside it becomes a

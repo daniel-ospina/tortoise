@@ -161,9 +161,8 @@ uv run python tools/test_lane.py run -- tests/test_cache_projection_live.py \
 → 338 passed, 3 skipped
 ```
 
-⛔ Both figures are readings of a TREE, not properties of this change, so each is bound to the
-base it was taken on: block 1's `317 / 1` and block 2's `338 / 3` were re-measured on `origin/main`
-`1f28d107cf`, and both are UNCHANGED from the previous reading on `edcac493a5` (block 2 read
-`324 / 3` before THAT base). `main` gains tests under these files over time, so re-derive at the
-head you are reading rather than carrying any number forward. `uv run ruff check` is green at the
-same head.
+⛔ Both figures are readings of a TREE, so they are true only of the head they were taken at: THIS
+branch's head, which INCLUDES the 11 tests this change adds — 9 in block 1 (`6 + 2 + 1` across its
+three files) and 2 in block 2. Compare them with your own run of the same two commands at the same
+head, never with `main`, and re-derive rather than carrying any number forward: `main` also gains
+tests under these files over time. `uv run ruff check` is green at the same head.
