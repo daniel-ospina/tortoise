@@ -1252,6 +1252,21 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "chain — the same direction, and for the same reason, as "
         "`_journal_event_raw_write`: its record IS what the rebuild reads the "
         "vector back from (`#8488`), not a store reached around the gate"),
+    "tortoise.sdk::create_source": (
+        CENSUS_EXEMPT,
+        "`tortoise/sdk.py::create_source` — the instrument's ONLY match is the "
+        "ValueError MESSAGE STRING at the `#11858` guard, which INSTRUCTS the "
+        "caller to `pass embedding= and it declares the truth`. `_EMBED_WRITE` "
+        "reads raw source, so an instruction to the caller enrols the function; "
+        "the body writes no vector of any kind. The guard `#11858`/`#12113` "
+        "added REFUSES the `_SERVER_MANAGED_EMBEDDING_MARKERS` family over `ev` "
+        "BEFORE the node write, so this door is the opposite of a leak — it is "
+        "the one props write that never reaches `_sanitize_props`, which is why "
+        "the refusal had to be placed here. The node store is `_upsert_source`'s "
+        "fold, and that function holds no `_EMBED_WRITE` match (measured at this "
+        "head), nor does `create_source` itself reach the gated embed seam. "
+        "Exempt as a REFUSAL's PROSE — the same class as `tortoise.api::_emit` "
+        "and `tortoise.projection::_apply_one`"),
     "tortoise.sdk::ingest_corpus": (
         CENSUS_RECOGNISED,
         "`tortoise/sdk.py::ingest_corpus` — `self._session_embedding(...)` + "
@@ -1325,6 +1340,9 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     "tortoise.record_read::turn_prior_vectors": (
         ("tortoise/record_read.py", "turn_prior_vectors",
          "embedding=row[2]"),),
+    "tortoise.sdk::create_source": (
+        ("tortoise/sdk.py", "create_source",
+         "pass `embedding=` and it declares the truth"),),
     "tortoise.sdk::_embedding_repair_attempt": (
         ("tortoise/sdk.py", "_embedding_repair_attempt",
          "self._session_embedding("),

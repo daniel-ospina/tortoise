@@ -977,6 +977,21 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
         ),
     ),
     (
+        "tortoise.sdk::create_source",
+        WriterClass(
+            EXEMPT,
+            "`tortoise/sdk.py::create_source` — the match is the ValueError MESSAGE STRING of the "
+            "`#11858` guard, which INSTRUCTS the caller to `pass embedding= and it declares the "
+            "truth`. That guard REFUSES the `_SERVER_MANAGED_EMBEDDING_MARKERS` family over `ev` "
+            "before the node write, so the door is a REFUSAL, not a producer — it is the one props "
+            "write that never reaches `_sanitize_props` (`_skip_sanitize=True`), which is why the "
+            "refusal had to be placed here. The node store is `_upsert_source`'s fold, which names "
+            "no `embedding` at all",
+            "#11858",
+            stores=NO_LIVE_VECTOR,  # the only `_EMBED_WRITE` match is the refusal's own message
+        ),
+    ),
+    (
         "tortoise.projection::_prewipe_synthetic_write_scope",
         WriterClass(
             EXEMPT,
