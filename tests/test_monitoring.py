@@ -734,6 +734,61 @@ class TestProbeDbBoundedAcquisition:
             f"be observed=False (#3683) — got {result!r}"
         )
 
+    def test_a_landed_acquisition_is_read_from_the_future_not_the_wait(
+            self, monkeypatch):
+        """#11962 review — the message and the ``observed`` bit come from the FUTURE.
+
+        Same ``done()`` window as ``_bounded_graph_size``'s: the budget expires
+        first and the worker completes before the arm reads ``done()``, so an
+        arm that reports the CAUGHT ``exc`` reports the BOUND. Then a store's own
+        ``TimeoutError`` is presented as the synthesized phase timeout the
+        comment three lines above it forbids — and a REFUSED submission
+        (``_WorkerBacklogFull``, whose exception the caught one is not) reads as
+        ``observed=True``: an answer the pool never produced (#3683).
+
+        RED on the pre-fix code: both messages are the synthesized
+        ``probe sdk acquisition timeout after …`` and both ``observed`` bits are
+        ``True``.
+        """
+        class _LandedAfterTheWaitExpired:
+            def __init__(self, exc):
+                self._exc = exc
+
+            def result(self, timeout=None):
+                raise concurrent.futures.TimeoutError()  # the BUDGET's expiry
+
+            def done(self):
+                return True
+
+            def cancelled(self):
+                return False
+
+            def exception(self):
+                return self._exc
+
+        def _landed(exc):
+            monkeypatch.setattr(
+                monitoring, "_probe_worker",
+                lambda: SimpleNamespace(
+                    submit=lambda fn: _LandedAfterTheWaitExpired(exc)))
+            return monitoring.probe_db(acquire=lambda: FakeSDK())
+
+        raised = _landed(TimeoutError("socket connect timed out"))
+        assert raised["ok"] is False, raised
+        assert raised["error"] == "socket connect timed out", (
+            f"the acquisition's OWN message was replaced by {raised['error']!r} "
+            "— the arm reported the expired WAIT instead of the future's outcome")
+        assert raised["observed"] is True, raised
+
+        refused = _landed(monitoring._WorkerBacklogFull(
+            "tortoise-probe-worker backlog full (32) — worker wedged"))
+        assert refused["ok"] is False, refused
+        assert "backlog full" in refused["error"], refused
+        assert refused["observed"] is False, (
+            "a REFUSED submission that landed after the wait expired produced "
+            f"NO answer and must be observed=False (#3683) — got {refused!r}"
+        )
+
     def test_ambiguous_phase_ownership_is_rejected(self):
         """Passing BOTH an sdk and an acquire callable is a CALL error.
 
@@ -1573,6 +1628,49 @@ class TestGraphSizeMeasurementIsBoundedAndReported:
         assert result["status"] == "unknown"
         assert result["graph_size"] == 0
         assert result["graph_size_error"] is not None
+
+    def test_own_timeout_that_lands_after_the_budget_expired_is_kept(
+            self, monkeypatch):
+        """#11962 review — the THIRD site of the defect the seams fixed.
+
+        ``future.result(timeout=…)`` and ``future.done()`` are two reads with a
+        window between them, and a bare ``raise`` inside that window re-raises
+        the CAUGHT exception — the budget's own empty-message ``TimeoutError`` —
+        so a count that failed on its own (a redis socket read timeout) is
+        reported as a slow count. That is the same shape ``run_control_plane_call``
+        and ``reawait_control_plane_call`` fixed in #11961, three lines under the
+        comment asserting the invariant it violated.
+
+        The window is reproduced with a settled future whose WAIT still raises
+        the budget's expiry: a timing race made into a FACT, because no
+        ``time.sleep`` can land inside a microsecond-wide window deterministically.
+
+        RED on the pre-fix code: the propagated exception is the budget's
+        empty-message ``TimeoutError``, which does not name the store at all.
+        """
+        class _LandedAfterTheWaitExpired:
+            """The ``done()`` window: the wait raised, the worker has landed."""
+
+            def result(self, timeout=None):
+                raise concurrent.futures.TimeoutError()  # the BUDGET's expiry
+
+            def done(self):
+                return True
+
+            def cancelled(self):
+                return False
+
+            def exception(self):
+                return TimeoutError("redis socket read timeout")
+
+        monkeypatch.setattr(
+            monitoring, "daemon_worker",
+            lambda name, **kw: SimpleNamespace(
+                submit=lambda fn: _LandedAfterTheWaitExpired()))
+
+        with pytest.raises(TimeoutError, match="redis socket read timeout"):
+            monitoring._bounded_graph_size(
+                SimpleNamespace(taxonomy=lambda: {"Point": 1}), 0.05)
 
 
 class TestProbeNeverAskedStatus:

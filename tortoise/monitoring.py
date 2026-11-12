@@ -3396,9 +3396,16 @@ async def run_control_plane_call(fn, *, op: str,
                 # own arms (measured: ``/v1/search``'s ``_ProjectionOpenError``
                 # became an unhandled ``TimeoutError``). The future is the only
                 # witness that the work RAN, so it must supply what propagates.
-                # ``from None``: the bound's expiry did not CAUSE this failure,
-                # it merely coincided with it (B904, and the honest chain).
-                raise future_exc from None
+                #
+                # ⛔ ...and NOT ``from None`` either (#11962 review): ``from
+                # None`` writes ``__cause__ = None`` on THIS exception object,
+                # so a domain ``ValueError`` raised ``from KeyError`` loses its
+                # KeyError. That chain is the domain error's own provenance, not
+                # the bound's misleading context — suppressing it with B904 is
+                # discarding evidence we do not own. A plain ``raise`` keeps
+                # ``__cause__`` intact and costs only the "during handling of
+                # the above" note.
+                raise future_exc  # noqa: B904
             reason = ("pool backlog full" if isinstance(future_exc, _WorkerBacklogFull)
                       else f"exceeded its {bound}s bound")
             if not future.done():
@@ -3493,8 +3500,11 @@ async def reawait_control_plane_call(future, *, op: str, timeout: float,
                 # as the sibling seam's (#11961). The arm above proves the
                 # FUTURE is the witness that the work RAN and failed on its own;
                 # a bare ``raise`` propagates the bound's TimeoutError instead,
-                # which is a claim about OUR wait, not about the work.
-                raise future_exc from None
+                # which is a claim about OUR wait, not about the work. And not
+                # ``from None`` either: that rewrites the domain exception's
+                # ``__cause__`` to None, discarding a chain it owns (#11962
+                # review — see the sibling seam).
+                raise future_exc  # noqa: B904
             if not future.done():
                 future.add_done_callback(_log_abandoned_outcome(op))
             outcome = "bound_miss_running"
@@ -3742,8 +3752,11 @@ def _acquire_on_probe_worker(acquire, budget):
     future = _probe_worker().submit(_run_acquisition)
     try:
         return future.result(timeout=budget), None, True
-    except concurrent.futures.TimeoutError as exc:
-        if future.done():
+    except concurrent.futures.TimeoutError:
+        # ⛔ No ``as exc``: the caught exception is NOT evidence here — the
+        # budget's expiry and the callable's own TimeoutError are the same class,
+        # and only the FUTURE can say which one happened (#11962 review).
+        if future.done() and not future.cancelled():
             # ``done()`` is True for two different causes and so cannot be read
             # as "the deadline expired": (a) the worker refused the submission
             # (saturated backlog, ``_WorkerBacklogFull``); (b) the callable
@@ -3753,10 +3766,23 @@ def _acquire_on_probe_worker(acquire, budget):
             # The two differ on ``observed`` (#3683): (b) produced an ANSWER,
             # (a) did not. ``_probe_once`` resolves the same ambiguity with the
             # same ``isinstance`` test.
+            #
+            # ⛔ Read the FUTURE's outcome, never the caught exception (#11962
+            # review). The budget can expire FIRST and the worker can land
+            # inside the window before this read; the caught exception is then
+            # the BOUND's — an empty-message TimeoutError — so the message
+            # becomes the synthesized phase timeout the paragraph above forbids,
+            # and a REFUSED submission reads as ``observed=True``: an answer it
+            # never produced, from a pool that never ran the callable.
+            acquire_exc = future.exception()
+            if acquire_exc is None:
+                # It SUCCEEDED inside that window, so an answer exists: hand it
+                # back rather than report an overrun that did not happen.
+                return future.result(), None, True
             return (None,
-                    (str(exc)[:200]
+                    (str(acquire_exc)[:200]
                      or f"{_PROBE_ACQUISITION_TIMEOUT_MSG}{budget}s"),
-                    not isinstance(exc, _WorkerBacklogFull))
+                    not isinstance(acquire_exc, _WorkerBacklogFull))
         if not started.is_set():
             # The submission was QUEUED and never RAN: the shared worker was
             # busy for the whole budget. The phase at fault is the WAIT for the
@@ -5784,8 +5810,18 @@ def _bounded_graph_size(target, timeout: float) -> int:
         # redis socket read timeout) is caught here too. ``future.done()``
         # separates the two: a callable that already finished raised its OWN
         # error and must keep it, not be relabelled as a budget overrun.
-        if future.done():
-            raise
+        #
+        # ⛔ ...but ``done()`` alone is NOT enough (#11962 review): the WAIT can
+        # expire FIRST and the worker can land its own error in the window
+        # before this read. A bare ``raise`` there propagates the CAUGHT
+        # exception — the budget's own empty-message ``TimeoutError`` — so a
+        # store failure is reported as a slow count. That is the same defect the
+        # two control-plane seams fixed in #11961, at a third site; the FUTURE is
+        # the only witness that the count RAN, so it supplies what propagates.
+        if future.done() and not future.cancelled():
+            graph_size_exc = future.exception()
+            if graph_size_exc is not None:
+                raise graph_size_exc  # noqa: B904
         raise TimeoutError(
             f"graph_size count exceeded its {timeout}s budget") from exc
     return sum(counts.values())

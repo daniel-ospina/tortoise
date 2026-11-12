@@ -782,9 +782,10 @@ def test_graph_pool_capacity_is_fail_closed_not_a_silent_empty(
     # runner the loop can be descheduled past both the bound and the sleep, and
     # the row then observes the construction's RESULT instead of the capacity
     # refusal it pins: measured on `test (h)` at PR #11936, red first as an
-    # unhandled ``TimeoutError`` and, once the seam stopped mislabelling that
-    # domain error as a bound miss (#11961), as a 500 "Search failed" — the
-    # store arm, from a pool that was never saturated. Holding the submission
+    # unhandled ``TimeoutError`` and, once the seam stopped REPLACING that
+    # domain error with the bound's own empty-message ``TimeoutError`` (#11961),
+    # as a 500 "Search failed" — the store arm, from a pool that was never
+    # saturated. Holding the submission
     # open until this test releases it makes the ordering a guarantee: the bound
     # fires against a submission that is provably in flight, and the worker
     # finishes only after the response is in hand.
