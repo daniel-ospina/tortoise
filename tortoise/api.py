@@ -855,9 +855,24 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
         # ⛔ AN EXACT `list` / `tuple` first, for the same reason as the dict rule
         # above (#11996 review round 8, measured): a `list` SUBCLASS can answer
         # `__iter__` differently on each call, so the guard reads one vector and
-        # the encoder writes another — measured, a staged subclass landed `[NaN]`
-        # under a declared `f32` after seven "good" iterations.
-        if type(values) not in (list, tuple):
+        # the encoder writes another. ⛔ IDENTITY, NOT MEMBERSHIP (#11996 review
+        # round 17, measured): `type(values) not in (list, tuple)` is
+        # `not (list == type(values) or tuple == type(values))`, which runs the
+        # reflected `type(values).__eq__(list)` — the METACLASS's `__eq__` — so a
+        # carrier that answers `True` defeated the arm:
+        #
+        #     class M(type):
+        #         def __eq__(cls, other): return True
+        #         def __hash__(cls): return id(cls)
+        #     class StagedList(list, metaclass=M):   # real contents [nan]
+        #         ... __iter__ yields [0.5] for the first six reads
+        #     _emit(… {"embedding": StagedList([nan]), KEY: "f32"})
+        #       -> LANDED, journalled `f32` over [NaN]
+        #
+        # Every neighbouring arm in this module already compares by identity for
+        # exactly this reason (`type(declared) is not str`, `type(record[0]) is
+        # not dict`, `type(_pair) is list`); these two were the exceptions.
+        if type(values) is not list and type(values) is not tuple:
             raise ValueError(
                 f"{_KEY}={declared!r} is declared over a {type(values).__name__} "
                 f"vector: only an exact `list` / `tuple` can be read the same way "
@@ -868,7 +883,20 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
         # refused rather than verified. The MAGNITUDE arm — an `int` the float
         # conversion cannot reproduce, and the totality of that comparison — is
         # directly below, because it has its own reason and its own message.
-        bad = [x for x in values if type(x) not in (int, float)]
+        # ⛔ AND THE ELEMENT TEST IS IDENTITY TOO (#11996 review round 17,
+        # measured): `type(x) not in (int, float)` runs `int.__eq__(type(x))` and
+        # then the METACLASS's `__eq__`, so a numeric subclass whose metaclass
+        # answers `True` passed the arm while the seam read it through
+        # `float(x)` and the C encoder wrote it raw:
+        #
+        #     class Sneaky(float, metaclass=M):   # M.__eq__ -> True
+        #         def __float__(self): return 0.5
+        #     _emit(… {"embedding": [Sneaky(nan)], KEY: "f32"})
+        #       -> LANDED, journalled `f32` over [NaN]
+        #
+        # Same rule as the container above, and as `_int_is_float_exact`.
+        bad = [x for x in values
+               if type(x) is not int and type(x) is not float]
         if bad:
             raise ValueError(
                 f"{_KEY}={declared!r} is declared over a vector carrying an "
@@ -1840,8 +1868,13 @@ class EventAPI:
         uncallerable-record-fact families, and the invisible-character half of
         the kind gate. Every one of those arrived the same way — a gate `_emit`
         got and this door did not — EXCEPT the uncallerable record facts, which
-        are a different shape: #11948 wired them into this very call, so there
-        was never a state in which `_emit` was armed and this door was not. (This
+        are a different shape: #11948 arms them in this very call AS WELL AS in
+        `_emit`, so no released state has one armed without the other. (An
+        intermediate revision of this fix armed only `_emit`, and that is the
+        `emit_belief` drop the paragraph above records as measured — so "from the
+        start" describes the SHIPPED pairing, not a history in which nothing was
+        ever half-armed. #11996 review round 17 found these two sentences
+        contradicting each other.) This
         paragraph used to count "FIVE" over its own list of seven; it is written
         without a count now, because both earlier counts disagreed with the list
         they sat under.)

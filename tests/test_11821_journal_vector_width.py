@@ -1406,14 +1406,6 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
     assert "sourceVersionTransit" not in _UNCALLERABLE_RECORD_KEYS
     assert {"extractedFromAll", "sourceVersion", "sourceVersions"} <= (
         _UNCALLERABLE_RECORD_KEYS)
-    # The fold key is the READER's constant, not a second spelling of it.
-    # ⛔ This assert alone does NOT prove it: api.py IMPORTS the symbol, so a
-    # rename at the consumer moves both sides together and the assert stays
-    # green. What actually pins the identity is the loop below, whose literal
-    # "evidence_fold" — the name the projection READS — would red on a consumer
-    # rename. This row is a cheap spelling check; the loop is the pin. (Review
-    # note at #11996: the comment here used to attribute that guarantee to
-    # this line.)
     # ⛔ …AND THE EXEMPTION IS SCOPED TO THE CHANNEL THAT MINTS IT (#11996 review
     # round 6, measured). `sourceVersionTransit` is exempt from the SET because
     # `add_point` mints it INTO ITS RECORD; no seam call mints it on a keyword
@@ -1552,6 +1544,15 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
                                          "evidence_fold": True},
                                         {"id", "content"}))
     assert EVIDENCE_FOLD_KEY in _UNCALLERABLE_RECORD_KEYS
+    # The fold key is the READER's constant, not a second spelling of it.
+    # ⛔ This assert alone does NOT prove it: api.py IMPORTS the symbol, so a
+    # rename at the consumer moves both sides together and the assert stays
+    # green. What actually pins the identity is the loop below, whose literal
+    # "evidence_fold" — the name the projection READS — would red on a consumer
+    # rename. This row is a cheap spelling check; the loop is the pin. (Review
+    # note at #11996: this comment used to sit ~140 lines above the assert it
+    # describes, so "this assert" / "this line" had no referent — round 17 moved
+    # it here and kept the note.)
     # …and `emit_belief` must RAISE these rather than drop them: its refusal is
     # armed before the best-effort arm, which is the whole point of #11948 F2.
     for marker in ("evidence_fold", "embeddingText", "extractedFromAll",
@@ -2185,9 +2186,10 @@ def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
     #           -> LANDED, journalled `f32` over STRINGS, which the FOLD then stored
     #              as the Point's embedding ← the same lie, one reader over
     #
-    #     Falsifier: widen the arm back to `isinstance(x, (int, float)) and
-    #     type(x) not in (int, float)` — which is what an earlier revision of
-    #     this arm refused — and the `str` row reads `DID NOT RAISE` while the
+    #     Falsifier: WEAKEN the arm to `isinstance(x, (int, float)) and
+    #     type(x) not in (int, float)` (a hypothetical loosening, NOT an earlier
+    #     revision — every revision on this branch has used exact `type(...)`,
+    #     #11996 review round 17) and the `str` row reads `DID NOT RAISE` while the
     #     subclass rows stay refused (measured). ⛔ NOT every row: `bool` is an
     #     `int` subclass, so the widened arm catches it itself, and a nested
     #     sequence is refused by the grid / DROP arm instead — those rows red on
@@ -2265,6 +2267,50 @@ def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
                   {"id": "p-staged", "content": "c",
                    "embedding": _Staged([0.5], [float("nan")], 6),
                    JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32})
+    # 11c. ⛔ AND THE TYPE TESTS ARE IDENTITY, NOT MEMBERSHIP (#11996 review
+    #      round 17, measured). `type(x) not in (list, tuple)` is
+    #      `not (list == type(x) or tuple == type(x))`, so it runs the REFLECTED
+    #      `type(x).__eq__(list)` — the METACLASS's `__eq__` — and a carrier whose
+    #      metaclass answers `True` passed BOTH arms while the encoder wrote what
+    #      the guard never read:
+    #
+    #        class _M(type):
+    #            def __eq__(cls, other): return True
+    #            def __hash__(cls): return id(cls)
+    #
+    #      Measured before this row existed: a `_Staged` under such a metaclass
+    #      landed `f32` over `[NaN]`, and a `_Sneaky`-shaped `float` subclass
+    #      landed it with no staging at all. Falsifier: restore either
+    #      `not in (...)` membership test and the matching row below lands
+    #      (measured). ⛔ Every neighbouring arm already compared by identity for
+    #      this reason, which is why the two membership forms were the exception
+    #      rather than the rule.
+    class _LyingMeta(type):
+        def __eq__(cls, other):
+            return True
+
+        def __hash__(cls):
+            return id(cls)
+
+    class _MetaStaged(list, metaclass=_LyingMeta):
+        def __iter__(self):
+            return iter([0.5])
+
+    class _MetaSneaky(float, metaclass=_LyingMeta):
+        def __float__(self):
+            return 0.5
+
+    for _width in (JOURNAL_VECTOR_WIDTH_F32, JOURNAL_VECTOR_WIDTH_F64):
+        with pytest.raises(ValueError, match="only an exact `list`"):
+            api._emit("PointAdded",
+                      {"id": f"p-meta-list-{_width}", "content": "c",
+                       "embedding": _MetaStaged([float("nan"), 0.5]),
+                       JOURNAL_VECTOR_WIDTH_KEY: _width})
+        with pytest.raises(ValueError, match="not an exact"):
+            api._emit("PointAdded",
+                      {"id": f"p-meta-float-{_width}", "content": "c",
+                       "embedding": [_MetaSneaky(float("nan"))],
+                       JOURNAL_VECTOR_WIDTH_KEY: _width})
     with pytest.raises(ValueError, match="no float reproduces exactly"):
         api._emit("PointAdded", {"id": "p-bigint", "content": "c",
                                  "embedding": [2 ** 53 + 1],
@@ -2507,9 +2553,10 @@ def test_a_declared_width_reads_a_one_shot_iterable_exactly_once(tmp_path):
 
     ⛔ It is the KEYWORD channel's vector, deliberately. A RECORD-carried
     generator is not pinned here: it cannot land on any tree (`main` raised
-    `TypeError` at the encoder; this head refuses it in the post-stamp belt with
-    "the seam can only DROP", measured — the pre-stamp call materialises the
-    record's iterator and does not write it back, so the belt re-reads it empty),
+    `TypeError` at the encoder; this head refuses it in the post-stamp belt —
+    "the seam can only DROP" under a declared `f64`, "an EMPTY vector" under
+    `f32`, both measured — because the pre-stamp call materialises the record's
+    iterator and does not write it back, so the belt re-reads it empty),
     so there is no behaviour to pin. The residual — a non-`list`/`tuple` iterable
     of a type this arm cannot enumerate still rides the seam arms — is unchanged
     and is NOT what this row pins.
