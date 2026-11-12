@@ -631,8 +631,15 @@ def test_4365_served_document_sends_chatgpt_to_a_path_that_exists():
         "chooser — the #9660 owner ruling added it")
     assert "dashboard's connect step (the ChatGPT" in skill, (
         "the served document must tell a ChatGPT user it has a dashboard surface")
-    # #11767: the canonical company origin — the retired host is a permanent 301
-    # (#11762), so the reference copy is reached in one hop instead of two.
+    # #11767: re-aimed off the retiring host, ONCE, so the copy does not have to
+    # be pasted again. ⚠️ MEASURED TWICE, because #12031's deploy landed between:
+    # before it (2026-11-12 05:49Z) the replaced value
+    # `tortoise.premiselabs.co/docs#chatgpt` answered 200 — 0 hops — and the
+    # installed one answered 301 → 200. AFTER it (05:52Z, three cache-busted
+    # reads) BOTH spellings are ONE hop, 301 onto `premiselabs.co/tortoise/docs`
+    # (200, 0 hops): so the move is 1-hop → 1-hop and cost nothing, and the
+    # retired host is NOT the 0-hop shortcut a future lane might re-adopt on the
+    # old reading. The 0-hop value is the one #12049 installs.
     # ⛔ SCHEME-QUALIFIED on purpose: the bare host needle
     # `"premiselabs.co/docs#chatgpt"` is ALSO a substring of the retired
     # `"tortoise.premiselabs.co/docs#chatgpt"` (measured:

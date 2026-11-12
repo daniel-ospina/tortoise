@@ -355,9 +355,11 @@ def appeal_url() -> str:
     ``/docs`` is a permanent SAME-HOST 301 onto the docs page's terminal address
     ``/tortoise/docs`` (#11763; measured live 2026-11-12 — 301, then 200, one
     redirect, both on the company origin). Emitting the terminal path here would
-    make it 0 hops; that flip belongs to #11764's canonical sweep, which is also
-    what re-points the onboarding document, so the two move together instead of
-    one drifting.
+    make it 0 hops; that flip belongs to #12049, which also re-points the pasted
+    onboarding document, so the two move together instead of one drifting.
+    ⛔ #12049 and not #11764: #11764's scoping assigns `onboarding/SKILL.md` to
+    #11767 and lists it under "deliberately NOT do", and #11767 closes with the
+    alias still in place — without #12049 the re-point would have no owner.
 
     ⚠️ The fragment is DEAD and this function does not claim otherwise: the
     docs page has no ``id="appeal"`` (and no occurrence of the word), so this

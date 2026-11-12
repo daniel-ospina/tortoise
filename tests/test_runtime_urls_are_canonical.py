@@ -224,9 +224,11 @@ def test_onboarding_skill_points_at_the_reference_copy_on_the_canonical_origin()
     301 onto `/tortoise/docs` (#11763's map — one hop, both on the canonical
     origin), and `/tortoise/docs` is the 200 they end on; measured live
     2026-11-12 the chain is `301` then `200`, one redirect. Pinning either
-    spelling alone REDS the other, and the flip between them is #11764's
-    canonical sweep rather than a defect — a pin that forbids the better URL is
-    how a guard blocks the follow-up it exists to make safe. What must not come
+    spelling alone REDS the other, and the flip between them is #12049's sweep
+    rather than a defect — a pin that forbids the better URL is how a guard
+    blocks the follow-up it exists to make safe. (#12049, not #11764: #11764's
+    scoping assigns this file to #11767 and lists it under "deliberately NOT
+    do", so it needed an owner of its own.) What must not come
     back is the `.html` file form (itself a 301) or the retired host, which
     `test_documents_humans_copy_do_not_name_the_retired_host` refuses.
     """
