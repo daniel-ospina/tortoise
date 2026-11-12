@@ -2220,7 +2220,12 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
     else:
         deployment_reading = (
             f"UNARMED deployment file(s) {deployment['silent']} — a Tortoise "
-            "deployment built from them runs with the gate OFF. This condition is "
+            "deployment built from that file ALONE runs with the gate OFF. It is not "
+            "the OFF on every build: a compose file that builds from an image build "
+            "file INHERITS that image's `ENV`, so a silent compose file does not "
+            "unset what an armed `Dockerfile*` sets (fresh review of PR #12016, P3 — "
+            "a per-file fact stated as a deployment consequence claimed more than "
+            "the walk measured). This condition is "
             "SCOPED to the surface(s) that arm it "
             f"({', '.join(shipped['armed']) or 'none'}) and is NOT a claim about a "
             "deployment built from the silent path(s)"

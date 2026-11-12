@@ -2330,6 +2330,13 @@ def test_the_gate_is_not_read_True_off_ONE_armed_surface(tmp_path, monkeypatch):
     assert ".env.example=ON" in note, note
     assert "docker-compose.yml=OFF" in note, note
     assert "UNARMED deployment file(s) ['docker-compose.yml']" in note, note
+    # The OFF branch states a PER-FILE fact, not a deployment consequence (fresh
+    # review of PR #12016, P3): a silent compose file that builds from an armed
+    # `Dockerfile*` inherits the image's `ENV`, so the deployment IS armed and the
+    # unqualified "a deployment built from them runs with the gate OFF" published the
+    # opposite of what the walk measured. Pin the qualification, not just the claim.
+    assert "deployment built from that file ALONE runs with the gate OFF" in note, note
+    assert "INHERITS that image's `ENV`" in note, note
     assert "SCOPED to the surface(s) that arm it (.env.example)" in note, note
 
 
