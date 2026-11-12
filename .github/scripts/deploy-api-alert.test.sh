@@ -452,6 +452,45 @@ else
   bad "the body is NOT valid UTF-8 — a split multibyte character reached the issue"
 fi
 
+# ── case 17c: a non-zero iconv status must NOT abort the alert ──────────────
+# `iconv -c` guarantees valid UTF-8 OUTPUT; its EXIT STATUS is not part of that
+# contract (GNU libiconv, and newer glibc builds, return 1 having dropped an
+# invalid sequence). Under `set -e` + `pipefail` that status killed the notifier
+# before the body was built, so NOTHING was filed — observed on CI as
+# "the alert succeeds on a report cut mid-character (got '1', want '0')". A
+# fail-closed notifier is precisely the silence this script exists to remove, so
+# both shapes are pinned here: status 1 WITH valid output, and status 1 with no
+# output at all (where the ASCII fallback must still carry the remediation).
+# The stub shadows the real iconv through the harness PATH, so this case does
+# not depend on the host's iconv build.
+cat > "$BIN/iconv" <<'ICONV_EOF'
+#!/usr/bin/env bash
+# STUB_ICONV_MODE=status → pass the bytes through, then report GNU libiconv's
+# "some sequence was dropped" status.  =silent → report it and emit nothing.
+[ "${STUB_ICONV_MODE:-status}" = "silent" ] && exit 1
+cat
+exit 1
+ICONV_EOF
+chmod +x "$BIN/iconv"
+reset_case
+export STUB_ICONV_MODE=status
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+assert_eq "$RC" "0" "an iconv status of 1 with valid output does not abort the alert (the notifier is the safety net)"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "gh workflow run supabase-deploy.yml --ref main" "and the excerpt still reaches the body"
+reset_case
+export STUB_ICONV_MODE=silent
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+assert_eq "$RC" "0" "an iconv status of 1 with NO output does not abort the alert"
+UTF8_FALLBACK_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")"
+assert_contains "$UTF8_FALLBACK_BODY" "gh workflow run supabase-deploy.yml --ref main" "the ASCII fallback still carries the report (not an empty fenced block)"
+if printf '%s' "$UTF8_FALLBACK_BODY" | python3 -c "import sys; sys.stdin.buffer.read().decode('utf-8')" 2>/dev/null; then
+  ok "the fallback body is valid UTF-8 (non-ASCII bytes are dropped, never split)"
+else
+  bad "the fallback body is NOT valid UTF-8"
+fi
+unset STUB_ICONV_MODE
+rm -f "$BIN/iconv"   # every later case must see the real converter again
+
 # A job with no declared note still alerts, with an honest generic sentence
 # rather than a wrong one (the workflow's site set is pinned by pytest).
 reset_case

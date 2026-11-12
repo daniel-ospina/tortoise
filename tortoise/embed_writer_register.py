@@ -279,6 +279,9 @@ claim and a slogan:
   nonlocal … found` — so no runnable writer can be in that shape.) ⛔ The
   RESOLUTION IS OF CALLS, not of imports: an alias imported and never called is credited nothing —
   crediting the import would fill the population with writers that store nothing, the cry-wolf
+  direction. Pinned, DRIVEN (a temp module per shape, through the real discovery filter), by
+  `tests/test_embed_writer_register.py::test_an_IMPORT_ALIAS_is_the_reach_it_names` — the same test
+  whose `ALIASED_IMPORT_SHAPES` table carries the `gated`/`{}` arms that bound this in the other
   direction. ⛔ The MIRROR of that is NOT closed: a CALL the writer never RUNS — a never-called
   nested `def`, a never-called `lambda` body, a method of a class the writer never instantiates,
   or a call behind an `if False` / after `return` in the writer's own scope — IS credited, so the
@@ -287,10 +290,14 @@ claim and a slogan:
   `NEEDS_A_DECLARATION` — measured `ungated` → `gated` once a never-run seam call is added — so
   for that composition the wanted verdict is `ungated`, NOT `unresolved_write`
   (measured; the dangerous direction). That is a named residual in `UNDECIDABLE_WRITE_SHAPES`
-  ("never-run call") and pinned in the suite, not a resolved case, and this bullet must not
-  be read as "every credited call executes". Pinned, DRIVEN (a temp module per shape, through the
-  real discovery filter), by
-  `tests/test_embed_writer_register.py::test_an_IMPORT_ALIAS_is_the_reach_it_names`.
+  ("never-run call"), not a resolved case, and this bullet must not be read as "every credited
+  call executes". Pinned, DRIVEN, by
+  `tests/test_embed_writer_register.py::test_the_alias_forms_discovery_still_cannot_see_are_named`
+  — that table owns the never-run rows (`never_run_nested_def`, `…_LAMBDA`,
+  `…_container_CLASS_METHOD`), and the pin reds both when a row stops being blind and when its
+  naming entry is deleted. ⛔ The citation above is NOT this one: `ALIASED_IMPORT_SHAPES` does not
+  drive the never-run shapes, so a reader holding this sentence to that test would find it
+  unfalsifiable.
 
 **Leaf, and it must stay one.** `04-plan.md` §5: a leaf must not live under `tortoise/projection/`,
 whose `__init__` is the head of the `projection → pack_state → sdk → projection` cycle where a
