@@ -3414,8 +3414,26 @@ def _sdk_methods_on_vector_leg(
                              else f"UNKNOWN({ast.unparse(kw.value)[:40]})")
         return found or [default_entity_type]
 
+    def _in_module_receiver(expr: ast.AST, receivers: frozenset[str]) -> bool:
+        """Whether `expr` stands for the enclosing CLASS — i.e. an in-module method reference.
+
+        ⛔ `self` is not the only one (#11397, the UNDER-report half). A `classmethod` reaches its
+        own method as `cls.<name>` (and as `<ClassName>.<name>` from anywhere in the class body), and
+        `self.__class__.<name>` is the same receiver written the long way; `super()` and `type(self)`
+        are the same family and were already accepted. Every one of them was a real reach DROPPED
+        with no entry — the silent-short-list direction this channel exists to narrow.
+        """
+        if isinstance(expr, ast.Name):
+            return expr.id in receivers
+        if (isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name)
+                and expr.func.id in ("super", "type")):
+            return True
+        # `self.__class__` / `<receiver>.__class__` — the same receiver, spelled through the type.
+        return isinstance(expr, ast.Attribute) and expr.attr == "__class__"
+
     def _reachable_by_name(node: ast.AST, entrant: dict[str, set[str]],
-                           shadowed: set[str] | None = None) -> str | None:
+                           shadowed: set[str] | None = None,
+                           receivers: frozenset[str] = frozenset({"self"})) -> str | None:
         """The leg-reaching function this expression names, if any.
 
         Used ONLY to declare a reach this scan cannot resolve — never to add an
@@ -3451,16 +3469,11 @@ def _sdk_methods_on_vector_leg(
             # above matches `func.attr` with no receiver check, so it still names
             # such a caller (pre-existing behaviour, unchanged by #11337). This
             # channel's job is to add the caveat, not to correct the closure.
-            if isinstance(receiver, ast.Name) and receiver.id == "self":
-                return node.attr
-            if (isinstance(receiver, ast.Call)
-                    and isinstance(receiver.func, ast.Name)
-                    and receiver.func.id in ("super", "type")):
+            if _in_module_receiver(receiver, receivers):
                 return node.attr
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                 and node.func.id == "getattr" and len(node.args) in (2, 3)
-                and isinstance(node.args[0], ast.Name)
-                and node.args[0].id == "self"):
+                and _in_module_receiver(node.args[0], receivers)):
             name = node.args[1]
             if (isinstance(name, ast.Constant) and isinstance(name.value, str)
                     and name.value in entrant):
@@ -3569,10 +3582,16 @@ def _sdk_methods_on_vector_leg(
     # IS walked and IS reported — EXCEPT a `Load` that reuses THAT comprehension's
     # own target name: the target binds in the comprehension's own scope, so such
     # a `Load` is the comprehension's binding, not the enclosing method's
-    # (#11389 review, P3).) Also NOT
-    # modelled in `shadowed`: `*args`/`**kwargs` names, lambda parameters, `match`
-    # patterns and `global`/`nonlocal` — those produce a spurious entry rather
-    # than a missed one, and are owned by `#11397`. Under-
+    # (#11389 review, P3).)
+    # ⛔ `#11397` CLOSED the scope model in `_shadowed_names`: `*args`/`**kwargs`,
+    # lambda parameters, a nested `def`/`class` NAME, `match` patterns and `del`
+    # all bind a name in this scope, so a later mention of it is not a reach. What
+    # is STILL not modelled, and named rather than implied: `global`/`nonlocal`
+    # (they rebind a name whose scope this walk does not track) — those produce a
+    # spurious entry rather than a missed one. The UNDER-report half was closed in
+    # `_in_module_receiver`: `cls.<name>`, `<Class>.<name>`, `self.__class__.<name>`
+    # and `getattr(self.__class__, '<name>')` are in-module receivers, alongside the
+    # `self` / `super()` / `type(self)` forms. Under-
     # reporting is the dangerous direction for a surface an owner approves, so
     # the shape is REPORTED through the same `UNMEASURED` channel the handler
     # scan uses for its own bound (see `by_reference` below) instead of being
@@ -3646,6 +3665,98 @@ def _sdk_methods_on_vector_leg(
     #: was neither traversed (not a `Call.func`) NOR declared, and three artifacts
     #: asserted no such shape existed. A name-resolved CALL of the leg is still
     #: excluded, by `call_funcs` above — that is the closure's.
+    def _pattern_names(pattern: ast.AST) -> set[str]:
+        """The names a `match` PATTERN binds (`case _pool:` / `case [_pool, *rest]:`).
+
+        ⛔ A pattern is a BINDING, not a mention (#11397, the OVER-report half): reading
+        `case _pool: return _safe(_pool)` as a reference to the method published a spurious
+        `declared bound` entry on a COMPLETE caller table — the cry-wolf failure that makes a real
+        declaration ignorable. Collected off `MatchAs.name` / `MatchStar.name` / `MatchMapping.rest`,
+        which is where Python binds; a dotted `MatchValue` binds nothing.
+        """
+        names: set[str] = set()
+        for sub in ast.walk(pattern):
+            for attr in ("name", "rest"):
+                value = getattr(sub, attr, None)
+                if isinstance(value, str):
+                    names.add(value)
+        return names
+
+    def _shadowed_names(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+        """Every name `fn`'s OWN scope binds — and therefore every mention that is not a reach.
+
+        ⛔ The scope model `#11397` found incomplete, closed here in the OVER-report direction: each
+        of these shapes bound a name the walk did not know about, so a LATER mention of the same
+        name inside the method was published as a by-reference reach on a caller table that was
+        already complete:
+
+        * `*args` / `**kwargs` (the node carries them in `fn.args.vararg` / `kwarg`, never as a
+          `Name(Store)`);
+        * a nested `def`'s / `class`'s NAME (it binds here; its BODY is its own scope, so it is not
+          descended into — the reason `mentions_past_a_NESTED_shadow` must stay declared);
+        * a `lambda`'s parameters (their own scope; the lambda's body is still walked);
+        * a `match` pattern;
+        * `del <name>` — `Name(ctx=Del)` binds the name as a local exactly as a `Store` does.
+
+        Not modelled, and named rather than implied: `global` / `nonlocal` (they rebind a name whose
+        scope this walk does not track). Both are OVER-reports at worst, and a foreign receiver that
+        happens to be named exactly like the enclosing class is the same direction.
+        """
+        shadowed: set[str] = set()
+        for sub in fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs:
+            shadowed.add(sub.arg)
+        for star in (fn.args.vararg, fn.args.kwarg):
+            if star is not None:
+                shadowed.add(star.arg)
+        for sub in list(fn.body):
+            stack_s = [sub]
+            while stack_s:
+                n = stack_s.pop()
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.ClassDef)):
+                    # The NAME binds here (#11397); the body does not.
+                    shadowed.add(n.name)
+                    continue
+                # ⛔ NOT a comprehension target: `[x for _pool in …]` binds in the
+                # comprehension's OWN scope, so treating it as a function local
+                # suppresses a genuine mention elsewhere in the body — the
+                # under-report direction this guard exists to narrow, not create
+                # (#11389 review). Comprehension scopes are skipped entirely.
+                if isinstance(n, _COMPREHENSION_NODES):
+                    continue
+                if isinstance(n, ast.Lambda):
+                    for a in n.args.posonlyargs + n.args.args + n.args.kwonlyargs:
+                        shadowed.add(a.arg)
+                    for star in (n.args.vararg, n.args.kwarg):
+                        if star is not None:
+                            shadowed.add(star.arg)
+                if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+                    shadowed.add(n.id)
+                # ⛔ These bind a name on the NODE, not as `Name(Store)`
+                # (#11389 review, P3): `except X as _pool` keeps the name in
+                # `ExceptHandler.name`, and `import _pool` in the alias. A local
+                # that reuses an entrant's name is not a reach either way.
+                elif isinstance(n, ast.ExceptHandler) and n.name:
+                    shadowed.add(n.name)
+                elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                    for alias in n.names:
+                        bound = alias.asname or alias.name.split(".")[0]
+                        shadowed.add(bound)
+                elif getattr(ast, "match_case", None) and isinstance(
+                        n, ast.match_case) and n.pattern is not None:
+                    shadowed |= _pattern_names(n.pattern)
+                stack_s.extend(ast.iter_child_nodes(n))
+        return shadowed
+
+    #: Which class a method is defined in — the receiver the `cls.` / `<Class>.` shapes name
+    #: (#11397). Direct methods only: a nested `def` is its own scope, and no shape here reaches it.
+    enclosing_class: dict[int, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for sub in node.body:
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    enclosing_class[id(sub)] = node.name
+
     mentionable: dict[str, set[str]] = {**direct, VECTOR_LEG_SDK_METHOD: set()}
     by_reference: dict[str, set[str]] = {}
     for fn in functions:
@@ -3671,38 +3782,24 @@ def _sdk_methods_on_vector_leg(
         # namespace is not FUNCTION scope, so a class-body binding must not
         # suppress an enclosing mention — while the mention walk descends into a
         # class body, because a mention there IS a real reach. The two disagree
-        # about `class` on purpose; the residual that follows (a class-body
-        # binding reusing an entrant's name is an OVER-report) is on `#11397`.
-        shadowed: set[str] = set()
-        for sub in fn.args.args + fn.args.kwonlyargs + fn.args.posonlyargs:
-            shadowed.add(sub.arg)
-        for sub in list(fn.body):
-            stack_s = [sub]
-            while stack_s:
-                n = stack_s.pop()
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                  ast.ClassDef)):
-                    continue
-                # ⛔ NOT a comprehension target: `[x for _pool in …]` binds in the
-                # comprehension's OWN scope, so treating it as a function local
-                # suppresses a genuine mention elsewhere in the body — the
-                # under-report direction this guard exists to narrow, not create
-                # (#11389 review). Comprehension scopes are skipped entirely.
-                if isinstance(n, _COMPREHENSION_NODES):
-                    continue
-                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
-                    shadowed.add(n.id)
-                # ⛔ These two bind a name on the NODE, not as `Name(Store)`
-                # (#11389 review, P3): `except X as _pool` keeps the name in
-                # `ExceptHandler.name`, and `import _pool` in the alias. A local
-                # that reuses an entrant's name is not a reach either way.
-                elif isinstance(n, ast.ExceptHandler) and n.name:
-                    shadowed.add(n.name)
-                elif isinstance(n, (ast.Import, ast.ImportFrom)):
-                    for alias in n.names:
-                        bound = alias.asname or alias.name.split(".")[0]
-                        shadowed.add(bound)
-                stack_s.extend(ast.iter_child_nodes(n))
+        # about `class` on purpose, and that disagreement is now the DECLARED
+        # residual rather than a `#11397` placeholder: a class-body binding
+        # reusing an entrant's name is still an OVER-report (`#11397` closed the
+        # function-scope names, not this one), as is a `global`/`nonlocal`
+        # rebinding. Both are over-reports, the safe direction. `#11397` DID
+        # close `*args`/`**kwargs`, lambda parameters, nested `def`/`class`
+        # NAMES, `match` patterns and `del` (`_shadowed_names`), and the
+        # receiver set (`_in_module_receiver`).
+        shadowed: set[str] = _shadowed_names(fn)
+        # The in-module receivers for THIS method (#11397): `self`, `cls` (a classmethod's own
+        # first parameter), `super()`, `type(self)` and `<EnclosingClass>`.
+        receivers = {"self"}
+        positional = fn.args.posonlyargs + fn.args.args
+        if positional and positional[0].arg == "cls":
+            receivers.add("cls")
+        if id(fn) in enclosing_class:
+            receivers.add(enclosing_class[id(fn)])
+        receivers_frozen = frozenset(receivers)
         # ⛔ A COMPREHENSION'S OWN BINDINGS SHADOW WITHIN IT (#11389 review,
         # P2). `shadowed` above skips comprehension subtrees ON PURPOSE — a
         # comprehension target binds in its own scope, so it must not suppress a
@@ -3723,7 +3820,7 @@ def _sdk_methods_on_vector_leg(
                 continue
             if id(node) not in call_funcs:
                 reached = _reachable_by_name(node, mentionable,
-                                             shadowed | comp_bound)
+                                             shadowed | comp_bound, receivers_frozen)
                 if reached:
                     by_reference.setdefault(fn.name, set()).add(reached)
             if isinstance(node, _COMPREHENSION_NODES):
