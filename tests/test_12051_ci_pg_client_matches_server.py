@@ -5437,10 +5437,21 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
 
     Seven arms over the step's FIVE named pre-install branches: the os-release
     SOURCE, the key fetch, the codename, `apt-get update`, and the ORIGIN check
-    (THREE arms — an `apt-cache` that fails, an index that loads but does not name
-    apt.postgresql.org, and the control that reaches past). Two branches remain
-    unexecuted and are pinned in text instead: the install guard (unreachable by
-    construction, this arm stops AT the install line) and the version branch.
+    (THREE arms: an `apt-cache` that fails, an index that loaded but does not name
+    apt.postgresql.org, and the control that reaches past) — and EVERY failing arm
+    asserts its OWN branch's named text PLUS the absence of the next branch's,
+    because the step carries SEVEN `::error::` pairs and a whole-output search is
+    satisfied by any of them (MEASURED, review cycle 9: two gutted `exit 1`s left
+    the suite GREEN). Plus TWO branches no arm executes: the install guard
+    (unreachable by construction — this arm stops AT the install line; it is pinned
+    in text by `test_the_client_comes_from_pgdg_not_the_distro_archive`) and the
+    version branch (pinned in text by this file's `FAIL_CLOSED_BRANCH_RE` reader).
+    A branch nothing executes is the unguarded-claim class this file exists to
+    refuse, so this sentence is the AUDIT of that: it names every branch and says
+    which ones are executed, and it is re-cut whenever the branch or arm count moves
+    rather than left to drift. (It was already stale once — review cycle 6 of
+    `5ed3b1950b` — which is why the install guard is named here explicitly rather
+    than folded into "the version branch is the only unexecuted one".)
     """
     _, pin = _pin_step(_steps(job))
     lines = _run_text(pin).splitlines()
@@ -5482,11 +5493,21 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         "than letting the arm write the HOST's temp dir"
     )
     prefix = prefix.replace('key_file="$(mktemp)"', f'key_file="{key_file}"')
-    for use in ('-o "$key_file"', 'install -m 0644 "$key_file"'):
-        assert use in code_only(prefix), (
-            f"expected `{use}` in the committed step — the key file must be the one "
-            "`curl` wrote and the one `install` copies"
-        )
+    assert '-o "$key_file"' in code_only(prefix), (
+        "the committed step does not fetch the key into `$key_file` — the file `install` "
+        "copies must be the one the fetch wrote"
+    )
+    # ⛔ THE FACT, NOT THE VERB: `install -m 0644`, `install -D -m 0644` and
+    # `install -m 0644 -D` are the SAME behaviour, and this file's own keyring-directory
+    # rule accepts all three. Pinning the spelling FALSE-REDDED the `-D` rewrite
+    # (MEASURED, review cycle 9), which teaches the next lane to widen the guard
+    # instead of trusting it.
+    assert re.search(
+        r"install\b[^\n]*\"\$key_file\"[^\n]*apt\.postgresql\.org\.asc", code_only(prefix)
+    ), (
+        "the key file is not the one installed to the keyring path, so `signed-by` could "
+        "point at a different (or absent) key than the fetch wrote"
+    )
 
     def run_with(
         stub: str,
@@ -5592,9 +5613,20 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         "a failed `apt-get update` did not stop the script, so the repo-setup failure "
         f"is neither named nor fatal: {update_combined!r}"
     )
-    assert "::error::" in update_combined, (
-        "`apt-get update` stopped the step but nothing NAMED it — a PGDG "
-        f"key/suite/egress failure must read as THIS defect: {update_combined!r}"
+    # ⛔ ATTRIBUTED, AND NOT TO THE BRANCH ONE LINE LATER. The step carries SEVEN
+    # `::error::`/`exit 1` pairs, so a whole-output search is satisfied by ANY of them:
+    # MEASURED, review cycle 9 — gutting this guard's `exit 1` leaves the suite GREEN,
+    # because the ORIGIN guard then names its own failure. The named text IS the fact
+    # here, and the downstream message must be ABSENT.
+    assert "apt-get update FAILED after the PGDG source was added" in update_combined, (
+        "`apt-get update` stopped the step but not on ITS OWN named cause — the whole "
+        "point of the update guard is that a PGDG key/suite/egress failure reads as "
+        f"THIS defect rather than as apt's opaque exit 100: {update_combined!r}"
+    )
+    assert "apt.postgresql.org did not SUPPLY" not in update_combined, (
+        "the run stopped at the ORIGIN guard instead of the update guard, so the update "
+        "guard's own `exit 1` is unpinned — gutting it would leave this arm GREEN: "
+        f"{update_combined!r}"
     )
 
     # ⛔ AND THE KEY FETCH — the most likely PGDG failure of all (egress, DNS, a 503
@@ -5612,9 +5644,17 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         "a failed key fetch did not stop the script, so the step proceeds without "
         f"the signing key it just claimed to install: {curl_combined!r}"
     )
-    assert "::error::" in curl_combined, (
+    # ⛔ ATTRIBUTED, AND NOT TO THE ORIGIN GUARD. Same hole as the update arm: with the
+    # key guard's `exit 1` gutted, the run continues and the ORIGIN guard names a failure,
+    # which satisfied a whole-output search (MEASURED, review cycle 9: 8 passed).
+    assert "could not FETCH the PGDG signing key" in curl_combined, (
         "the key fetch stopped the step but named nothing — `set -e` would surface "
         f"curl's exit 22 as an opaque failure: {curl_combined!r}"
+    )
+    assert "apt.postgresql.org did not SUPPLY" not in curl_combined, (
+        "the run stopped at the ORIGIN guard instead of the key-fetch guard, so the key "
+        "guard's own `exit 1` is unpinned — gutting it would leave this arm GREEN: "
+        f"{curl_combined!r}"
     )
 
     # ⛔ AND AN os-release THAT CANNOT BE READ — the SOURCE, not its content. Without
@@ -5626,10 +5666,19 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         "with NO readable /etc/os-release the step carried on, so the sources line "
         f"would be built from an empty suite name: {os_release_combined!r}"
     )
-    assert "::error::" in os_release_combined and "os-release" in os_release_combined, (
-        "an unreadable /etc/os-release stopped the step but named nothing (or named it "
-        "as the codename rather than the missing FILE) — guarding the SOURCE exists so "
-        f"it reads as THIS defect, not bash's own `No such file`: {os_release_combined!r}"
+    # ⛔ ATTRIBUTED, like the key and update arms: the CODENAME guard's message also
+    # contains "os-release", so a bare substring test was satisfied by the branch one
+    # line later and gutting this guard's `exit 1` left the arm GREEN (MEASURED, review
+    # cycle 10). The SOURCE guard's own text is the fact, and the codename branch's
+    # must be ABSENT.
+    assert "cannot be READ" in os_release_combined, (
+        "the failure was named, but not as the unreadable FILE — a reader is sent after "
+        f"the codename when the box has no os-release at all: {os_release_combined!r}"
+    )
+    assert "carries no VERSION_CODENAME" not in os_release_combined, (
+        "the run stopped at the CODENAME guard instead of the SOURCE guard, so the "
+        "source guard's own `exit 1` is unpinned — gutting it would leave this arm GREEN: "
+        f"{os_release_combined!r}"
     )
 
     # ⛔ AND AN os-release WITHOUT A CODENAME — the `set -u` abort the explicit
