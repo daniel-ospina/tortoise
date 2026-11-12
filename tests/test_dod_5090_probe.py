@@ -4721,7 +4721,21 @@ def _byref_sdk_source() -> str:
         "    def dunder_class_getattr(self):\n"
         "        return _safe(getattr(self.__class__, '_review_pool'))\n"
         "    def cls_is_not_a_receiver_here(self, cls):\n"
-        "        return _safe(cls._review_pool)\n")
+        "        return _safe(cls._review_pool)\n"
+        # ── `#11397` review: a LAMBDA parameter binds in the LAMBDA's scope, so it must not shade
+        # the enclosing body (that suppression is the under-report direction, and it was LIVE: see
+        # `lambda_param_does_not_shade_the_body`), while its DEFAULTS are evaluated in the enclosing
+        # scope and are real mentions (`lambda_default_is_the_enclosing_scope`).
+        "    def lambda_param_does_not_shade_the_body(self):\n"
+        "        f = lambda _review_pool: 1\n"
+        "        return _safe(_review_pool)\n"
+        "    def lambda_default_is_the_enclosing_scope(self):\n"
+        "        f = lambda v=_review_pool: v\n"
+        "        return f()\n"
+        # ── `#11397` review: `*. __class__` is only the ENCLOSING class when the base is an
+        # in-module receiver; a foreign object's class is not this module's method.
+        "    def foreign_dunder_class_receiver(self, other):\n"
+        "        return _safe(other.__class__._review_pool)\n")
 
 
 def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
@@ -4791,6 +4805,12 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
               # set of only `self` made BOTH invisible).
               "classmethod_cls_receiver", "class_name_receiver",
               "dunder_class_receiver", "dunder_class_getattr",
+              # ⛔ `#11397` review: a LAMBDA parameter binds in the LAMBDA's own scope, so a mention
+              # of the same name in the ENCLOSING body is still a reach — function-wide shadowing
+              # suppressed it (the silent-short-list direction). And a lambda DEFAULT is evaluated
+              # in the enclosing scope, so it is a reach too.
+              "lambda_param_does_not_shade_the_body",
+              "lambda_default_is_the_enclosing_scope",
               # the CONTROL for the star-arg half: `*args`/`**kwargs` bind THEIR names, and a
               # mention of a different name is still a reach — without this row, "add every
               # vararg name to `shadowed`" could shade the whole body and stay green.
@@ -4908,7 +4928,12 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
                       # …and the boundary of the `cls` receiver: a plain parameter named `cls`
                       # on a method whose FIRST argument is `self` is a foreign object, not the
                       # class — only the classmethod's own first parameter is the class receiver.
-                      "cls_is_not_a_receiver_here"):
+                      "cls_is_not_a_receiver_here",
+                      # …and the `__class__` receiver only names the ENCLOSING class when its BASE
+                      # is an in-module receiver: `other.__class__._review_pool` is a foreign
+                      # object's class, and accepting any `*.__class__` put a spurious caveat on a
+                      # complete table (`#11397` review).
+                      "foreign_dunder_class_receiver"):
         assert shadowing not in declared, (
             f"a local shadowing an entrant's name was declared as a reach: "
             f"{shadowing} in {declared}")
@@ -5344,8 +5369,8 @@ _NEGATION_GOVERNS = re.compile(
     r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 # ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
 # is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
-# one of the same four verbs AFTER the negation, so on all 132 candidate sentences
-# (the 100 rows across the four sets — 49 / 13 / 22 / 16 — plus the 32 sentences of
+# one of the same four verbs AFTER the negation, so on all 133 candidate sentences
+# (the 100 rows across the four sets — 49 / 13 / 22 / 16 — plus the 33 sentences of
 # the real §3 under
 # this predicate's own `split(". ")` segmentation) there is no case where the
 # governance test hits and this one does not — dropping the term from

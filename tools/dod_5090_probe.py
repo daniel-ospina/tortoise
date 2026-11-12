@@ -3432,8 +3432,12 @@ def _sdk_methods_on_vector_leg(
         if (isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name)
                 and expr.func.id in ("super", "type")):
             return True
-        # `self.__class__` / `<receiver>.__class__` — the same receiver, spelled through the type.
-        return isinstance(expr, ast.Attribute) and expr.attr == "__class__"
+        # `self.__class__` — the same receiver, spelled through the type. ⛔ The BASE must itself be
+        # an in-module receiver (`#11397` review): `other.__class__._pool` is a FOREIGN object's
+        # class, and accepting any `*. __class__` published a spurious `declared bound` entry on a
+        # complete caller table — the cry-wolf direction, the same failure `_pattern_names` closes.
+        return (isinstance(expr, ast.Attribute) and expr.attr == "__class__"
+                and _in_module_receiver(expr.value, receivers))
 
     def _reachable_by_name(node: ast.AST, entrant: dict[str, set[str]],
                            shadowed: set[str] | None = None,
@@ -3686,6 +3690,18 @@ def _sdk_methods_on_vector_leg(
                     names.add(value)
         return names
 
+    def _parameter_names(args: ast.arguments) -> set[str]:
+        """Every name a parameter list binds — including `*args` / `**kwargs`.
+
+        ⛔ The star names are carried on the NODE (`args.vararg` / `args.kwarg`), never as a
+        `Name(Store)`, which is why a syntactic `Store` walk alone missed them (`#11397`).
+        """
+        names = {a.arg for a in args.posonlyargs + args.args + args.kwonlyargs}
+        for star in (args.vararg, args.kwarg):
+            if star is not None:
+                names.add(star.arg)
+        return names
+
     def _shadowed_names(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
         """Every name `fn`'s OWN scope binds — and therefore every mention that is not a reach.
 
@@ -3698,20 +3714,21 @@ def _sdk_methods_on_vector_leg(
           `Name(Store)`);
         * a nested `def`'s / `class`'s NAME (it binds here; its BODY is its own scope, so it is not
           descended into — the reason `mentions_past_a_NESTED_shadow` must stay declared);
-        * a `lambda`'s parameters (their own scope; the lambda's body is still walked);
-        * a `match` pattern;
+        * a `match` pattern — a capture name binds in the FUNCTION's scope, so it belongs here;
         * `del <name>` — `Name(ctx=Del)` binds the name as a local exactly as a `Store` does.
+
+        ⛔ A `lambda`'s parameters are NOT here, and the exclusion is the same rule the comprehension
+        scopes above already follow: a lambda parameter binds in the LAMBDA's scope only, so adding it
+        to this set suppressed a genuine mention of the same name ELSEWHERE in the method — the
+        silent-short-list direction, reproduced by an anti-cry-wolf fix. It is tracked as a SCOPE in
+        the mention walk below (`#11397` review), which kills the spurious reach inside the lambda
+        without shading the enclosing body.
 
         Not modelled, and named rather than implied: `global` / `nonlocal` (they rebind a name whose
         scope this walk does not track). Both are OVER-reports at worst, and a foreign receiver that
         happens to be named exactly like the enclosing class is the same direction.
         """
-        shadowed: set[str] = set()
-        for sub in fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs:
-            shadowed.add(sub.arg)
-        for star in (fn.args.vararg, fn.args.kwarg):
-            if star is not None:
-                shadowed.add(star.arg)
+        shadowed: set[str] = set(_parameter_names(fn.args))
         for sub in list(fn.body):
             stack_s = [sub]
             while stack_s:
@@ -3728,12 +3745,6 @@ def _sdk_methods_on_vector_leg(
                 # (#11389 review). Comprehension scopes are skipped entirely.
                 if isinstance(n, _COMPREHENSION_NODES):
                     continue
-                if isinstance(n, ast.Lambda):
-                    for a in n.args.posonlyargs + n.args.args + n.args.kwonlyargs:
-                        shadowed.add(a.arg)
-                    for star in (n.args.vararg, n.args.kwarg):
-                        if star is not None:
-                            shadowed.add(star.arg)
                 if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
                     shadowed.add(n.id)
                 # ⛔ These bind a name on the NODE, not as `Name(Store)`
@@ -3791,8 +3802,10 @@ def _sdk_methods_on_vector_leg(
         # reusing an entrant's name is still an OVER-report (`#11397` closed the
         # function-scope names, not this one), as is a `global`/`nonlocal`
         # rebinding. Both are over-reports, the safe direction. `#11397` DID
-        # close `*args`/`**kwargs`, lambda parameters, nested `def`/`class`
-        # NAMES, `match` patterns and `del` (`_shadowed_names`), and the
+        # close `*args`/`**kwargs`, nested `def`/`class` NAMES, `match` patterns
+        # and `del` (`_shadowed_names`), the lambda's OWN parameter scope (as a
+        # scope here in the mention walk, not as a function-wide name — a lambda
+        # parameter must not shade the enclosing body), and the
         # receiver set (`_in_module_receiver`).
         shadowed: set[str] = _shadowed_names(fn)
         # The in-module receivers for THIS method (#11397): `self`, `cls` (a classmethod's own
@@ -3844,6 +3857,21 @@ def _sdk_methods_on_vector_leg(
                     stack.append((gen.target, here))
                     for cond in getattr(gen, "ifs", ()):
                         stack.append((cond, here))
+                continue
+            # ⛔ A LAMBDA's PARAMETERS SHADOW WITHIN THE LAMBDA ONLY (#11397 review). The same
+            # rule the comprehension above follows, for the same reason: a parameter binds in the
+            # LAMBDA's scope, so treating it as a function-wide local suppressed a genuine mention
+            # of the same name elsewhere in the method — the silent-short-list direction. Its
+            # DEFAULTS are evaluated in the ENCLOSING scope (like the outer `for` iterable), so
+            # they are walked unwidened.
+            if isinstance(node, ast.Lambda):
+                lam_bound = comp_bound | _parameter_names(node.args)
+                for default in node.args.defaults:
+                    stack.append((default, comp_bound))
+                for default in node.args.kw_defaults:
+                    if default is not None:
+                        stack.append((default, comp_bound))
+                stack.append((node.body, lam_bound))
                 continue
             for child in ast.iter_child_nodes(node):
                 stack.append((child, comp_bound))
