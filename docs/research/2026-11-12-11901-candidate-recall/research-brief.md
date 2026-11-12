@@ -100,13 +100,18 @@ never class-share weighted** — it is not an estimate of the production mix, an
 to quote for any one class.
 
 ⚠️ **The corpus is LIVE, and the two runs therefore did NOT sample the identical population.** `~/.tortoise/session-events`
-is written by the fleet's own capture hook, so each run harvests whatever landed since: the two committed
-artifacts harvested **102,898** (hybrid) and **103,087** (control) distinct definite descriptions, a 0.18 % drift
-between two runs ~60 s apart. The artifacts carry their own `corpus.harvested_distinct`, so the drift is visible
-rather than silent — and it is why **§3.1's class deltas are BETWEEN-RUN, not paired**: they are two samples of
-the same live corpus, not one population measured twice. A paired version needs the population written out
-(`--population-file`), which this harness does not yet do; treat §3.1's deltas as directional evidence, not a
-controlled effect size.
+is written by the fleet's own capture hook; the two committed artifacts harvested **102,898** (hybrid) and
+**103,087** (control) distinct definite descriptions, a 0.18 % drift between two runs ~60 s apart. ⛔ **That
+0.18 % is a floor from a 61-second gap, NOT a bound on between-run variation**, and this corpus is not monotone
+under this harvest: re-running the committed `harvest()` over the same nine files ~2 h later (16:37Z) returned
+**91,725** distinct definite descriptions — **−10.9 %** — *fewer* than the earlier artifact, which appends alone
+cannot produce. The mechanism is unidentified and this document makes no claim about it (the capture hook appends;
+what else may touch the directory was not traced). What IS established is the consequence: a between-run gap on
+this corpus varies by far more than 0.18 %, so that number is not the yardstick. The artifacts carry their own
+`corpus.harvested_distinct`, so the drift is visible rather than silent — and it is why **§3.1's class deltas are
+BETWEEN-RUN, not paired**: they are two samples of the same live corpus, not one population measured twice. A
+paired version needs the population written out (`--population-file`), which this harness does not yet do; treat
+§3.1's deltas as directional evidence, not a controlled effect size.
 
 ⛔ **Declared gap, stated where it cannot be skimmed away:** this is a sample of the strings real captures
 contain, **not a census of production `:Object` rows**. No lane can reach that population (no live `:Object` graph
@@ -157,8 +162,8 @@ the two states with different fixes.
 ### 3.1 The finding that matters most: the dense leg moves the classes in OPPOSITE directions
 
 ⚠️ **Between-run, not paired** (§2): the two artifacts sampled the same live corpus ~60 s apart, not the identical
-population. The direction of every delta below is large relative to that drift, but the magnitudes are not a
-controlled effect size.
+population. The direction of every delta below is large relative to the 0.18 % those two runs differ by — although
+§2 measures that number as a **floor, not a bound** — but the magnitudes are not a controlled effect size.
 
 | class | n | keyword-only @3 | **hybrid @3** | change | hybrid @15 |
 |---|---|---|---|---|---|
@@ -299,6 +304,9 @@ pgvector's post-filter trap all point the same way: resolution step first, index
 - **Not a production census.** The population is a declared sample of real capture strings (§2).
 - **Not a class-share estimate.** The quotas oversample identifiers and paths on purpose (§2).
 - **Not a production duplicate rate.** §5 is phase-1 only; §4's "0.0 %" is not "this capture mints a duplicate".
+- **Not observed variants.** §4's 419 pairs are **GENERATED** from harvested names by the harness's rewrite rules
+  (`variants()`: article-drop, separator swap both ways, basename-only, hash-dropped). The base names are real;
+  the variants are constructed, so "0.0 % attached" is a property of the construction as well as of the matcher.
 - **Not a measurement of phase 2.** It is live in production and unmeasured here (§1, §7-2a).
 - **No mechanism for the identifier class's keyword-only failure.** The keyword-only control returns **zero rows
   for 11/300 names**, 8 of them identifiers; the dense leg removes that entirely (`rows_zero` 0 in hybrid). That
@@ -334,10 +342,11 @@ harness has a prior-off arm — and is pinned as text); §3's prose derivatives 
 identifier share, the crowding mean and median); §6's and §7's restatements (the recall pair, the pooled mean, the
 fold's two denominators, the width residual, the class deltas, the wall clock); §2's between-run drift (the
 `corpus.harvested_distinct` pair and the percentage between them) and §3's keyword-only miss split and k=5 mean
-rank; and §8's `rows_zero` claim. **Not pinned:** the file count is carried as `corpus.files`, but the corpus is
-live, so nothing about its growth is pinned — and the record and character totals this section used to quote are
-gone: they were not in the artifact and did not reproduce against the corpus they named. One unpinned sentence is
-the honest state; an unpinned TABLE is not.
+rank; and §8's `rows_zero` claim. **Not pinned, and cannot be:** everything §2 says about the corpus ITSELF — the
+file count is carried as `corpus.files`, but the corpus is live, so nothing about its growth is; and §2's re-run
+figure (**91,725**) is a dated measurement of a directory that changes under it. The record and character totals
+this section used to quote are gone for the opposite reason: they were never in the artifact and did not
+reproduce against the corpus they named. One unpinned sentence is the honest state; an unpinned TABLE is not.
 
 ## 10. Write-back
 
