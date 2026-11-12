@@ -569,7 +569,7 @@ exactly the same gates** - not "CI". W2a's "the lane is `workflow_dispatch` only
   payload below is empty for an unresolved lookup, this reds, and `config/v4-mechanisms.yml`'s row must flip to
   `implemented`"* - plus the flip condition. ⚠️ The *"if a create gate landed, flip `failure_policy` …"* wording is
   that test's **assert message**, not its docstring, and *"the day a create gate lands"* appears in no test at all
-  (it is `docs/00_index.md:174`'s prose) — an earlier revision quoted the two as one docstring. **Do not**
+  (it is `docs/00_index.md:175`'s prose) — an earlier revision quoted the two as one docstring. **Do not**
   use `preconditions:` for composition: the file defines it as **ordering**, not "part of".
   The two planning docs disagreed (C3 vs C4); **C4 is the owner**, because `symbols:` can only be satisfied by the
   producer.
@@ -636,7 +636,7 @@ core**. So:
 
 | path | derivation | where |
 |---|---|---|
-| **operator / label path** | ✅ **already derived** from the packs: `declared \|= {r.get("predicate") for r in reg.list_relations()}` | `tortoise/sdk.py:23951` (`declared = declared_relation_predicates()`) → `pack_registry.py:609`/`:635` (`declared_relation_predicates()` — the `def` and the union it builds) |
+| **operator / label path** | ✅ **already derived** from the packs: `declared \|= {r.get("predicate") for r in reg.list_relations()}` | `tortoise/sdk.py:24003` (`declared = declared_relation_predicates()`) → `pack_registry.py:609`/`:635` (`declared_relation_predicates()` — the `def` and the union it builds) |
 | **structural path** | ⛔ **a static literal** — and it is **1 of FIVE declarations in one file**, and **not the one the verdict reads**: `relation_write_paths` reads **`STRUCTURAL_WRITE_PREDICATES`** (the union), while `create_edge` gates on `_VALID_EDGE_PREDICATES` | `projection/edges.py:621` (`_VALID_EDGE_PREDICATES`) · `:639` (`_VALID_ABOUT_EDGE_PREDICATES`) · `:655` (`STRUCTURAL_WRITE_PREDICATES`) · `:54` (`DERIVABLE_STRUCTURAL_RELS`) · `:1129` (`structural_edge_carrier`) · the reader `from .projection.edges import STRUCTURAL_WRITE_PREDICATES` at `pack_registry.py:723` (used `:729`) |
 | **per-graph gating** | ✅ **the resolver exists and is THREE-VALUED** — `pack_state.graph_installed_namespaces(sdk, *, graph_name=None)`: `None` ⇒ no `:PackInstall` records ⇒ **catalog union**; a `frozenset` ⇒ recorded ∪ already-in-data; an **empty** frozenset ⇒ a configured graph whose set is deliberately empty (`#2728`), where the union fallback **must not** apply. The SDK v2 master's write gate stays ungated (`#5202`) | `tortoise/pack_state.py:1170`; caveat in `docs/EXPANSION_PACKS.md` (`#2714`/`#2728`) |
 
