@@ -939,130 +939,92 @@ def _jobs(path: Path) -> list[tuple[str, list[str]]]:
         if m:
             starts.append((i, next(g for g in m.groups() if g is not None)))
     out = []
+    resolved = _yaml_run_scalars(path.read_text())
     for n, (at, name) in enumerate(starts):
         end = starts[n + 1][0] if n + 1 < len(starts) else len(lines)
         body = lines[at:end]
-        out.append((name, body + _folded_scalars(body)))
+        # Each `run:` value AS YAML RESOLVED IT, added to the body and never in place of it:
+        # the scan is allowed to see more, never less. A value already present is skipped, so
+        # a literal block (`run: |`), whose resolved lines ARE its physical lines, adds
+        # nothing — and neither does the ordinary single-line `run: <cmd>`, whose resolved
+        # value is the command WITHOUT the `run: ` prefix. Comparing the raw line alone would
+        # add every one of those a second time and report each hazard twice (#12167 review).
+        present = {line.strip() for line in body}
+        present |= {re.sub(r"^-\s+run:\s*|^run:\s*", "", line.strip()) for line in body}
+        out.append(
+            (
+                name,
+                body
+                + [
+                    "      " + folded
+                    for value in resolved.get(name, [])
+                    for folded in value.splitlines()
+                    if folded.strip() and folded.strip() not in present
+                ],
+            )
+        )
     return out
 
 
-#: The KEY of a `run` step, quoted or bare — YAML allows `"run":`, `'run':`, `run :` and all
-#: are the same key, so all fold the body into one executing command.
-_FOLDED_KEY = re.compile(r"^(?P<indent>\s*)(?:-\s+)?(?:\"run\"|'run'|run)\s*:\s*(?P<value>.*)$")
-
-#: A DECORATION on the value: an anchor (`&a`), a tag in any of its three spellings
-#: (`!!str`, `!foo`, `!<tag:yaml.org,2002:str>`). ⛔ STRIPPED REPEATEDLY, never matched as
-#: `(?:&\S+|!!\S+)?` — an enumeration of "an anchor OR a tag" is beaten by `&a !!str` (both),
-#: by `!!str &a` (the other order) and by the verbatim `!<...>` form, and ALL of those fold
-#: the body into one command exactly like the bare spelling (#12167 review).
-_FOLDED_DECORATION = re.compile(r"^(?:&[^\s]+|!![^\s]+|!<[^>]*>|![^\s]+)\s*")
-
-#: The indicator itself, with YAML's optional CHOMING and/or INDENTATION indicator, in
-#: EITHER order (`>2-` and `>-2` are both valid), then an optional comment.
-_FOLDED_INDICATOR = re.compile(r"^>(?:[1-9][-+]?|[-+][1-9]?)?\s*(?:#.*)?$")
-
-
-def _undecorated(text: str) -> str:
-    """`text` with every leading decoration (anchor / tag) removed, stripped."""
-    while True:
-        stripped = _FOLDED_DECORATION.sub("", text)
-        if stripped == text:
-            return text.strip()
-        text = stripped
-
-
-def _is_folded_indicator(text: str) -> bool:
-    """Whether `text` is a folded block-scalar indicator, however it is decorated.
-
-    `run: |` is literal and is NOT folded — the pipe preserves the newline, so the lines
-    really are separate commands and the per-line scan is the right reading of them.
-    """
-    return bool(_FOLDED_INDICATOR.match(_undecorated(text)))
-
-
-def _folded_header(line: str) -> int | None:
-    """The indent of a `run: >` header, or None. `run: |` is literal and is NOT matched.
-
-    ⛔ THE `>` MAY ALSO BE ON THE NEXT LINE, which is the UNDECORATED base case:
-
-        - run:
-            >
-            echo 'bash tools/h.sh'
-            | bash
-
-    folds to the same one command as `- run: >`, and a header pattern that required the `>`
-    on the key's own line answered NO HAZARD for it (measured through `_jobs` with
-    `yaml.safe_load` as the oracle, #12167 review).
-    """
-    m = _FOLDED_KEY.match(line)
-    if m is None:
+def _mapping_entry(node: object, name: str) -> object | None:
+    """The value node for key `name` in a YAML mapping node, or None."""
+    if not isinstance(node, yaml.MappingNode):
         return None
-    return len(m.group("indent")) if _is_folded_indicator(m.group("value")) else None
+    for key, value in node.value:
+        if isinstance(key, yaml.ScalarNode) and key.value == name:
+            return value
+    return None
 
 
-def _folded_scalars(lines: list[str]) -> list[str]:
-    """Each `run: >` body in `lines`, FOLDED the way YAML folds it (#12167 review).
+def _yaml_run_scalars(text: str) -> dict[str, list[str]]:
+    """Each job's `run:` values exactly as YAML RESOLVES them (#12167 review).
 
-    ⛔ A FOLDED BLOCK SCALAR JOINS ITS LINES, so scanning a `run: >` body LINE BY LINE
-    splits one command into commands that never existed:
+    ⛔ WHY A LOADER AND NOT A PATTERN — this function exists because a pattern cannot do
+    this job. Four review passes closed a fold hole by naming MORE spellings YAML accepts
+    (`>` with a chomping or indentation indicator; a quoted or space-separated key; an
+    anchor; a tag in each of its spellings; the indicator on the next line), and every
+    pass was beaten by the next spelling — the fourth found that the "stop enumerating"
+    fix had reintroduced two enumerations of its own (a bare `!` tag, the explicit-key
+    `? run` form). A pattern is a re-implementation of the grammar, so it loses to the
+    grammar, and the losing is silent: each miss is a fail-open in a fail-open gate.
+
+    PyYAML already knows the answer. `compose` returns the node tree WITH POSITIONS, so
+    the textual scan can still attribute a hit to a job, and a folded block scalar arrives
+    ALREADY JOINED into the single string the runner will execute:
 
         - run: >
             echo 'bash tools/h.sh'
             | bash
 
-    is `echo 'bash tools/h.sh' | bash` — ONE command that pipes the message into bash and
-    RUNS the helper. Line by line the first line is an inert message about a file and the
-    second names no helper, so the scan was silent (measured: the helper ran and
-    `_gh_hazards` answered `[]`). DIRECTION: an INHERITED MISS on `origin/main` and a
-    REGRESSION against pre-`#12106`, which caught it because it read every line raw.
+    is `echo 'bash tools/h.sh' | bash`, which is the hazard — and so is every other
+    spelling of it, including a PLAIN multi-line scalar, which `origin/main` misses too.
+    Nothing here enumerates a spelling; the composer folds, and this just reads it.
 
-    YAML folds a newline to a space and a BLANK line to a newline, which is modelled here.
-    A single-line body folds to itself and adds nothing; the two live instances today each
-    span several physical lines for ONE command, so folding them adds one scanned line
-    each (measured: 17 053 → 17 055 scanned lines across the 41 workflows, with the hazard
-    verdicts unchanged — 0 added, 0 removed).
-
-    The rendering is ADDED to the job's body, never substituted for the physical lines:
-    this scan is allowed to see more, never less, and a hit still attributes to the job.
+    A file YAML cannot parse returns `{}`: the textual scan is unaffected, exactly as a
+    scanner that never heard of this function would be.
     """
-    folded: list[str] = []
-    i, n = 0, len(lines)
-    while i < n:
-        indent = _folded_header(lines[i])
-        if indent is None:
-            # An undecorated `run:` whose `>` sits on the NEXT line: the value-less key is
-            # the header and the first following indented line carries the indicator.
-            key = _FOLDED_KEY.match(lines[i])
-            if key is not None and not _undecorated(key.group("value")):
-                base = len(key.group("indent"))
-                k = i + 1
-                while k < n and not lines[k].strip():
-                    k += 1
-                if (
-                    k < n
-                    and len(lines[k]) - len(lines[k].lstrip()) > base
-                    and _is_folded_indicator(lines[k])
-                ):
-                    indent, i = base, k
-            if indent is None:
-                i += 1
-                continue
-        parts = [""]
-        j = i + 1
-        while j < n:
-            line = lines[j]
-            if not line.strip():
-                parts.append("")  # a blank line folds to a NEWLINE, not a space
-            elif len(line) - len(line.lstrip()) > indent:
-                parts[-1] = f"{parts[-1]} {line.strip()}".strip()
-            else:
-                break  # dedented: the scalar ended
-            j += 1
-        nonblank = [k for k in range(i + 1, j) if lines[k].strip()]
-        if len(nonblank) > 1:
-            folded.extend(" " * indent + part for part in parts if part)
-        i = j
-    return folded
+    try:
+        root = yaml.compose(text)
+    except yaml.YAMLError:
+        return {}
+    jobs = _mapping_entry(root, "jobs")
+    if not isinstance(jobs, yaml.MappingNode):
+        return {}
+    out: dict[str, list[str]] = {}
+    for key, job in jobs.value:
+        if not isinstance(key, yaml.ScalarNode):
+            continue
+        steps = _mapping_entry(job, "steps")
+        if not isinstance(steps, yaml.SequenceNode):
+            continue
+        runs = []
+        for step in steps.value:
+            run = _mapping_entry(step, "run")
+            if isinstance(run, yaml.ScalarNode) and run.value.strip():
+                runs.append(run.value)
+        if runs:
+            out[key.value] = runs
+    return out
 
 
 def _code_only(line: str) -> str:
@@ -2340,8 +2302,8 @@ def test_a_folded_block_scalar_is_one_command_not_two(tmp_path):
     no helper, so the scan answered `[]` with the helper running (measured, marker file).
     It is an INHERITED MISS on `origin/main` and a REGRESSION against pre-`#12106`.
 
-    It reds if `_folded_scalars` stops folding, and it asserts the FOLDED RENDERING is
-    present in the job body — so it cannot pass by the physical lines happening to hit.
+    It reds if `_yaml_run_scalars` stops being consulted, and it asserts the FOLDED RENDERING
+    is present in the job body — so it cannot pass by the physical lines happening to hit.
     """
     scripts = _gh_executing_scripts()
     helper = "install-ci-runner-x64.sh"
@@ -2378,17 +2340,14 @@ def test_a_folded_block_scalar_is_one_command_not_two(tmp_path):
         "`run: |` must not be folded — its newlines are real"
     )
 
-    # ⛔ EVERY HEADER SPELLING, not just the bare `>`. YAML allows a CHOMING indicator and an
-    # INDENTATION indicator, in either order (`>2-` and `>-2` are both valid), plus a trailing
-    # comment. A chomp-only pattern left `run: >2` unfolded, which is this exact fail-open
-    # under one spelling and with no escape or contrivance needed (#12167 review, cycle 2).
-    #
-    # ⛔ AND EVERY KEY AND DECORATION SPELLING. `"run":`, `'run':`, `run :` are the SAME key
-    # to YAML; `&a`, `!!str`, `!<tag:…>` are decorations that may appear in ANY combination and
-    # order before the indicator. Both rounds of review landed on the same lesson: a pattern
-    # that ENUMERATES the legal spellings is beaten by the next one, so `_folded_header`
-    # strips decorations REPEATEDLY and this row loops over the spellings as the oracle's
-    # evidence rather than as the pattern's shape (#12167 review, acceptance pass).
+    # ⛔ THE SPELLINGS YAML ACCEPTS — NOT a table the CODE enumerates, which is the lesson
+    # four review passes taught. Each pass closed a hole by naming more spellings and the next
+    # spelling beat it: `>2`/`>-2` (indicator), `"run":`/`run :` (key), `&a`/`!!str` (one
+    # decoration), `&a !!str` (two), `!<tag:…>` (verbatim form), `>` on the next line (the
+    # plainest spelling of all), `>` after a COMMENT line, a bare `!` tag, and the explicit-key
+    # `? run` / `: >` form. So `_yaml_run_scalars` asks PyYAML: the composer folds, and this row
+    # asserts the ANSWER rather than the pattern. Every spelling below is one the runner
+    # really folds into a single executing command — verified against `yaml.safe_load`.
     for header in (
         "run: >",
         "run: >-",
@@ -2403,6 +2362,7 @@ def test_a_folded_block_scalar_is_one_command_not_two(tmp_path):
         "run : >",
         "run: &a >",
         "run: !!str >",
+        "run: ! >",
         "run: &a !!str >",
         "run: !!str &a >",
         "run: !<tag:yaml.org,2002:str> >",
@@ -2420,24 +2380,45 @@ def test_a_folded_block_scalar_is_one_command_not_two(tmp_path):
         spelled_body = dict(_jobs(spelling))["folded"]
         assert _gh_hazards(spelled_body, scripts), f"`{header}` was not folded: {spelled_body}"
 
-    # ⛔ AND THE INDICATOR ON ITS OWN LINE — the UNDECORATED base case, where the `>` is not on
-    # the key's line at all. This is not an exotic spelling: it is the plainest way to write a
-    # folded scalar, and a header pattern anchored to `run: >` on one line answered NO HAZARD
-    # for it while `yaml.safe_load` folded the body into one executing command (#12167 review).
-    next_line = tmp_path / "next-line.yml"
-    next_line.write_text(
+    # ⛔ AND THE SHAPES THAT ARE NOT A HEADER AT ALL — the indicator on its own line, behind a
+    # COMMENT line, on a decorated value, and the explicit-key form. Each is the SAME ONE
+    # COMMAND to the runner and answered NO HAZARD under the pattern that preceded the
+    # composer (#12167 review, cycles 4 and 5).
+    for shape in (
+        "      - run:\n          >\n",
+        "      - run:\n          &a >\n",
+        "      - run:\n          !!str >\n",
+        "      - run:\n          # how the body folds\n          >\n",
+        "      - ? run\n        : >\n",
+    ):
+        spelled = tmp_path / "shape.yml"
+        spelled.write_text(
+            "jobs:\n"
+            "  folded:\n"
+            "    runs-on: ubuntu-24.04\n"
+            "    steps:\n"
+            f"{shape}"
+            f"          echo 'bash tools/{helper}'\n"
+            "          | bash\n"
+        )
+        shaped_body = dict(_jobs(spelled))["folded"]
+        assert _gh_hazards(shaped_body, scripts), f"{shape!r} was not folded: {shaped_body}"
+
+    # …and a PLAIN multi-line scalar, which is not a block scalar at all: YAML joins its lines
+    # exactly like a `>`, so it is the same hazard with no indicator in sight. `origin/main`
+    # misses it, which makes it inherited — and the composer closes it for free.
+    plain = tmp_path / "plain.yml"
+    plain.write_text(
         "jobs:\n"
         "  folded:\n"
         "    runs-on: ubuntu-24.04\n"
         "    steps:\n"
-        "      - run:\n"
-        "          >\n"
-        f"          echo 'bash tools/{helper}'\n"
+        f"      - run: echo 'bash tools/{helper}'\n"
         "          | bash\n"
     )
-    next_line_body = dict(_jobs(next_line))["folded"]
-    assert _gh_hazards(next_line_body, scripts), (
-        f"an indicator on the next line was not folded: {next_line_body}"
+    plain_body = dict(_jobs(plain))["folded"]
+    assert _gh_hazards(plain_body, scripts), (
+        f"a plain multi-line scalar was not joined: {plain_body}"
     )
 
 
