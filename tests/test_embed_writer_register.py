@@ -1377,6 +1377,20 @@ def test_a_RETARGETED_loop_and_a_moved_store_both_FAIL_the_row():
     assert "no STATEMENT" in problem, (
         f"the red is not the statement arm's, so this arm does not pin the prose rule: {problem}")
 
+    # (4b) A RE-BINDING of the loop variable is not an iteration over the constant (#12020 round
+    # 3). The loop still iterates `_CANONICAL_ENTITY_ID_PROPS` and every store still interpolates
+    # `{label}`, so the TEXT is indistinguishable — but `label` is pinned to one literal, so the
+    # declaration's five labels are no longer derived from the constant. Measured at the reviewed
+    # head: the whole guard stayed green and row 2 still reported `0 undeclared`.
+    rebinding = source.replace(loop, loop + '                label = "Point"\n', 1,)
+    assert rebinding != source
+    problem_rebinding = violation(rebinding)
+    assert problem_rebinding is not None, (
+        "re-binding the loop variable to a literal satisfied the iterated-store claim: the row "
+        "declares five labels while the code writes one")
+    assert "RE-BOUND" in problem_rebinding, (
+        f"the red is not the re-binding arm's, so this arm does not pin it: {problem_rebinding}")
+
     # (5) NO VACUOUS PASS: a source that does not define the symbol cannot be checked, and must RED
     # rather than answer by an empty `any(...)`.
     assert violation("def _other() -> None:\n    pass\n") is not None
@@ -1987,14 +2001,33 @@ def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str]) -> s
     for sub in ast.walk(node):
         if isinstance(sub, ast.For):
             iterable, body = sub.iter, [sub]
+            target = sub.target
+            body_nodes = [*sub.body, *sub.orelse]
         elif isinstance(sub, _COMPREHENSION_LIKE) and len(sub.generators) == 1:
             iterable, body = sub.generators[0].iter, [sub]
+            target = sub.generators[0].target
+            elements = ([sub.key, sub.value] if isinstance(sub, ast.DictComp) else [sub.elt])
+            body_nodes = [*elements, *sub.generators[0].ifs]
         else:
             continue
         if not (isinstance(iterable, ast.Name) and iterable.id == constant):
             continue
-        targets = [n.id for n in ast.walk(sub) if isinstance(n, ast.Name)
-                   and isinstance(n.ctx, ast.Store)]
+        # ⛔ The loop's OWN binding, never every `Store` name in its subtree (#12020 round 3). The
+        # looser form passed a source that re-binds the loop variable — `label = "Point"` as the
+        # body's first statement — while every store still interpolates `{label}`, so the row
+        # declared five labels and the code wrote one (`_Point`) with the whole guard green.
+        bound = {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
+        # …and a RE-BINDING of that name inside the loop body means the store is no longer built
+        # from the ITERATED value. This is the half that sees the mutation above: the binding stops
+        # holding what the loop produced, so the claim `the labels come from <constant>` is false.
+        rebound = {n.id for b in body_nodes for n in ast.walk(b)
+                   if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+                   and n.id in bound}
+        if rebound:
+            return (
+                f"`{'`, `'.join(sorted(rebound))}` is RE-BOUND inside the loop over {constant}, so "
+                "the store is no longer built from the iterated value — the labels are no longer "
+                "derived from that constant")
         hits = [n for outer in body for n in ast.walk(outer)
                 if isinstance(n, ast.stmt) and _STORE_CARRIER.search(_slice(lines, n))]
         # ⛔ The MINIMAL store statements: without this, the enclosing `for` itself matches (its text
@@ -2008,7 +2041,7 @@ def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str]) -> s
             continue
         # …and the TARGET drives it: the store statement must name the loop's binding, otherwise the
         # loop is beside the store rather than the thing that produces it.
-        if any(any(f"{{{t}" in _slice(lines, s) for t in targets) for s in stores):
+        if any(any(f"{{{t}" in _slice(lines, s) for t in bound) for s in stores):
             return None
     return (
         f"no `for … in {constant}` drives a store — the iterable is not that constant, or its "
@@ -2721,6 +2754,43 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
         {},
         "an aliased import that the writer never CALLS is not a write — crediting the import "
         "rather than the call would fill the population with writers that assert nothing",
+    ),
+    # ⛔ `#12020` round 3 — the three ways an alias is NOT the reach it names. Each was measured
+    # to class the writer `gated`, which is OUTSIDE `NEEDS_A_DECLARATION`: the writer stopped owing
+    # a declaration while never reaching the gate. That is a false PASS, so every arm below is the
+    # `unresolved_write` direction.
+    "alias_shadowed_by_a_local_binding": (
+        "from tortoise.embeddings import encode_for_row as _enc\n"
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    _enc = lambda p: p\n"
+        '    return proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")}, _enc(text))\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "a writer-local rebinding of the alias: `_enc` no longer names the gate seam, so the gate "
+        "is NOT reached and a declaration is owed — crediting the import instead of the call hid it",
+    ),
+    "alias_from_a_foreign_module": (
+        "from thirdparty.lib import encode_for_row as _enc\n"
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def w(proj):\n"
+        '    return proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")}) or _enc(1)\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "a DIFFERENT function that merely shares the name: only the real home module makes an "
+        "alias the seam, or any library could silence the row by naming a function encode_for_row",
+    ),
+    "alias_on_a_foreign_receiver": (
+        "from tortoise.embeddings import encode_for_row as _enc\n"
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def w(proj, client):\n"
+        '    proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")})\n'
+        "    return client._enc(1)\n",
+        {"tortoise.m::w": "unresolved_write"},
+        "an ATTRIBUTE call: only a bare `Name` call can bind an import alias, and `client._enc` is "
+        "that object's method — resolving it through the module's import map credited a reach the "
+        "writer does not have",
     ),
 }
 

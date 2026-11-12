@@ -332,6 +332,20 @@ WRITE_CLAUSE_BUILDERS: tuple[str, ...] = ("set_embedding_clause", "clear_then_se
 _ALIASABLE_CALL_NAMES: frozenset[str] = (
     frozenset(WRITE_CLAUSE_BUILDERS) | {SEAM_CALL} | frozenset(UNGATED_CALLS))
 
+#: The module each aliasable name actually LIVES in. ⛔ An `ImportFrom` from anywhere else binds a
+#: different function that merely shares the name, and crediting it as the seam flips a writer that
+#: never reaches the gate from `unresolved_write` (a declaration is owed) to `gated` (none is) — a
+#: false PASS in the population rows 1-2 are scored on, i.e. `#11274`'s failure class re-created in
+#: the opposite direction (#12020 review round 3). Both the package-absolute and the bare spelling
+#: are accepted so a RELATIVE import (`from .embeddings import …`, `level > 0`) still resolves.
+_ALIAS_HOMES: dict[str, frozenset[str]] = {
+    "set_embedding_clause": frozenset({"tortoise.vector_write", "vector_write"}),
+    "clear_then_set_prefix": frozenset({"tortoise.vector_write", "vector_write"}),
+    SEAM_CALL: frozenset({"tortoise.embeddings", "embeddings"}),
+    "encode_for_store": frozenset({"tortoise.embeddings", "embeddings"}),
+    "compute_session_embedding": frozenset({"tortoise.session_indexer", "session_indexer"}),
+}
+
 #: Write shapes discovery CANNOT decide, with the reason — named so the
 #: register's claim can be scoped to the mechanism rather than wider than it
 #: (`tests/test_embed_writer_register.py::test_the_register_names_the_shapes_its_discovery_cannot_see`).
@@ -353,23 +367,73 @@ def _import_aliases(*roots: ast.AST) -> dict[str, str]:
     """Local name -> the name it was IMPORTED AS, for the seams and clause builders (`#11274`).
 
     Both scopes a writer can import in: the MODULE (`from … import X as Y` at module level) and the
-    WRITER'S OWN SUBTREE (a function-level import). ⛔ Deliberately over-inclusive in one direction:
-    an import inside a NESTED function contributes to its enclosing writer's map. That can only
-    credit a reach, which is the fail-closed direction here (the writer is discovered and owes a
-    declaration) — never hide one.
+    WRITER'S OWN SUBTREE (a function-level import). An import inside a NESTED function contributes
+    to its enclosing writer's map — that can only credit a reach the writer's subtree really holds.
 
-    Only names in `WRITE_CLAUSE_BUILDERS`, `SEAM_CALL` and `UNGATED_CALLS` are resolved: an alias of
-    anything else says nothing about a vector write, and resolving it would be a guess.
+    Only names in `WRITE_CLAUSE_BUILDERS`, `SEAM_CALL` and `UNGATED_CALLS` are resolved, and ONLY
+    when the import's module is that name's real home (`_ALIAS_HOMES`): an alias of anything else
+    says nothing about a vector write, and `from thirdparty.lib import encode_for_row as _enc`
+    binds a different function that happens to share the name. ⛔ The first version of this docstring
+    argued the widening could "only credit a reach, which is the fail-closed direction". That was
+    wrong, and `#12020` round 3 measured it: crediting `SEAM_CALL` sets `kind="gated"`, and `gated`
+    is OUTSIDE `NEEDS_A_DECLARATION` — so an over-credit HIDES the writer instead of exposing it.
+    Under-crediting is the safe direction here (it leaves the writer `unresolved_write`, which owes
+    a declaration) and over-crediting is the dangerous one.
     """
     found: dict[str, str] = {}
     for root in roots:
         for sub in ast.walk(root):
             if not isinstance(sub, ast.ImportFrom):
                 continue
+            module = sub.module or ""
             for alias in sub.names:
-                if alias.name in _ALIASABLE_CALL_NAMES:
-                    found[alias.asname or alias.name] = alias.name
+                if alias.name not in _ALIASABLE_CALL_NAMES:
+                    continue
+                if module not in _ALIAS_HOMES.get(alias.name, frozenset()):
+                    continue  # a same-named function from somewhere else is not this seam
+                found[alias.asname or alias.name] = alias.name
     return found
+
+
+def _locally_bound(node) -> set[str]:
+    """Names ``node`` (a writer definition) binds ITSELF, so a same-named import alias is shadowed.
+
+    Any binding counts — assignment, annotated/augmented assignment, `for`/`with`/`except` target,
+    a nested `def`/`class` name, a parameter, a walrus. The question is only "does this name, inside
+    this writer, still mean the imported object?", and the conservative answer is the safe one:
+    dropping an alias leaves the writer `unresolved_write`, which OWES a declaration, while keeping
+    a shadowed one can class it `gated` and make it owe nothing (#12020 round 3).
+    """
+    import ast
+
+    bound: set[str] = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)):
+            bound.add(sub.id)
+        elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(sub.name)  # a nested def/class name, and the writer's own (harmless)
+        elif isinstance(sub, ast.arg):
+            bound.add(sub.arg)
+        elif isinstance(sub, ast.ExceptHandler) and sub.name:
+            bound.add(sub.name)
+    # ⛔ `ast.alias` is deliberately NOT counted: the import is what CREATES the alias, so counting
+    # it would drop every function-level alias — including the honest `function_level_alias` shape
+    # whose whole point is that the writer's own subtree binds it.
+    return bound
+
+
+def _named_callees(node) -> set[str]:
+    """Calls whose func is a BARE `Name` — the only shape an import alias can bind.
+
+    ⛔ `_callees` also answers a `func.attr`, which is right for matching a literal spelling but
+    wrong for resolving an alias: `client._enc(x)` is a different function on a foreign object, and
+    resolving it through the import map credited it as the gate seam (#12020 round 3, measured:
+    `unresolved_write` -> `gated`, i.e. the writer stopped owing a declaration).
+    """
+    import ast
+
+    return {c.func.id for c in ast.walk(node)
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
 
 
 def _writes_an_embedding(node, source: str, aliases: dict[str, str] | None = None) -> bool:
@@ -952,7 +1016,17 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
             # declaration owed) and an aliased clause builder is a SILENT MISS (a false `bypass`
             # answer, the direction that matters).
             aliases = {**module_aliases, **_import_aliases(node)}
-            called = _callees(node) | {aliases[name] for name in _callees(node) if name in aliases}
+            # ⛔ `#12020` round 3: an alias the writer REBINDS is not that reach. Measured —
+            # `from … import encode_for_row as _enc` followed by a writer-local `_enc = lambda p: p`
+            # still credited `encode_for_row`, classing a writer that never reaches the gate as
+            # `gated` (a declaration owed by nobody) where it had been `unresolved_write`. Dropping
+            # a shadowed alias is the under-credit direction, which is the safe one here.
+            shadowed = _locally_bound(node)
+            if shadowed:
+                aliases = {k: v for k, v in aliases.items() if k not in shadowed}
+            # …and only a BARE-`Name` call can bind an import alias (`client._enc(x)` cannot).
+            called = _callees(node) | {aliases[name] for name in _named_callees(node)
+                                       if name in aliases}
             # The function's own text by LINE RANGE — `ast.get_source_segment`
             # re-splits the whole file per call, which cost 90 s on this tree.
             source = "\n".join(lines[node.lineno - 1:node.end_lineno])
