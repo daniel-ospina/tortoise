@@ -1263,10 +1263,15 @@ attack *is* mutual exclusivity; for coherence it selects which input is the nece
 support inflates a well-evidenced pair (two reports of ONE fact are not two pieces of evidence),
 coherence does not. Both on one pair silently over-states confidence, and the over-statement is
 invisible because it looks like strong support. The set is closed so that state is unwritable:
-`create_operator` and `create_direct_edge` both refuse a pair carrying two mechanisms
-(operator-mediated and operator-less shapes are judged by the same reader). The two writers outside
-that pair of doors — `EventAPI.add_operator` and the projection's own edge fold — are not covered
-yet (`#10306`).
+`create_operator` and `create_direct_edge` each refuse a MIXED pair — an operator beside a bare edge of
+the other mechanism, in either write order — through one shared reader, over live AND draft operators
+(a draft is promoted, and the promotion re-checks nothing).
+
+⛔ **The residual, stated rather than implied:** two BARE edges of different types on one pair
+(`:IMPL` beside `:NAND`) are still writable. They occupy separate message slots, so the last-writer
+hazard this closure is about does not arise, and refusing them would change a shape the engine has
+always allowed — so this table does not claim they are refused. Not covered here at all:
+`EventAPI.add_operator` and the projection's own edge fold (`#10306`).
 
 ### Reification rule — when an edge gets an operator
 
@@ -1351,10 +1356,10 @@ and the answer is the direction the relation records.
 | `refutes` | NAND | `->` | Negative evidence, one way — the directed attack: the attacker's truth penalizes the target, with no back-pressure (#753) |
 | `mutuallySupportive` | IMPL | `<->` | Each end reinforces the other |
 | `mutuallyExclusive` | NAND | `<->` | They rule each other out — a mutual restatement |
-| `hasPart` | IMPL (bare edge) / coherence (operator) | `<->` | Composition — the whole REQUIRES its parts, so the meaning is `coherence`: a part failing should lower the whole and a part being present must not inflate it. ⛔ What a BARE edge writes today is `IMPL`, because a bare edge carries its mechanism as its edge TYPE and only `IMPL`/`NAND` exist; write the relation as an operator (`op_type="coherence"`) to get the necessity pricing, and see #12067 for the bare-edge follow-up (#12067) |
+| `hasPart` | IMPL | `<->` | Composition — the whole REQUIRES its parts, so a part failing should lower the whole and a part being present must not inflate it. ⛔ The mechanism column says `IMPL` because that is the mechanism this table's map DECLARES and the bare-edge leg WRITES, and a bare edge carries its mechanism as its edge TYPE (`IMPL`/`NAND` only). The mechanism that prices necessity is `coherence` and it exists as an OPERATOR (`op_type="coherence"`); carrying it on a bare edge is the #12067 follow-up. ⚠️ Do not pair `semantics="hasPart"` with a `coherence` operator and expect silence: the #9963 disclosure compares the write against THIS map and will (correctly, about the map) report the mismatch |
 | `causes` | IMPL | `->` | *A brought B about* — **untyped, any kind to any kind, no restriction.** ⛔ Not the same assertion as `produces` (next row) and not its replacement: W3C PROV states that generation does **not** assert a general causal relation. `causes` is the Layer-3-preferred spelling for a happening → the artifact it created, aligned to `schema:result` / `prov:wasGeneratedBy` (§3.8's structural Event→Object `produces` is a separate layer and does not conflict) |
 | `produces` | IMPL | `<-` | **Production, entity → entity** — *the TARGET brought the source into existence.* Direction `<-` because the declared edge is `asset → program` while production runs producer → product, so `->` would assert the asset caused the program. Restored as a Layer-2 meaning by #11083 (owner 2026-11-05, cites `#7848`'s `OVERRIDES:`); the pre-#11083 mapping onto `causes` changed the meaning **and** inverted the direction. ⛔ Not a rename of `causes`: a produced thing may be unrelated to the producer causally, and a cause need not produce anything. |
-| `dependsOn` | IMPL (bare edge) / coherence (operator) | `->` | A precondition — the condition bears on the dependent, one way; the dependent should fall when the precondition is absent and **not** be raised by its presence, which is `coherence`. ⛔ A bare edge writes `IMPL` today (see the `hasPart` row); the operator path carries the necessity mechanism (#12067) |
+| `dependsOn` | IMPL | `->` | A precondition — the condition bears on the dependent, one way; the dependent falls when the precondition is absent and is **not** raised by its presence, which is what `coherence` prices. ⛔ This map declares `IMPL` for the same reason the `hasPart` row does (bare-edge carriage), and the same caveat about pairing the meaning with a `coherence` operator applies (#12067) |
 | `transacts` | — | `-` | A trade or exchange — association only; no confidence either way |
 | `related` | — | `-` | The deliberately ambiguous generic association, kept rare. **OVERRIDES:** the common practice of typing every association — a deliberate owner ruling, not an accident; no belief path reads it |
 | `ownedBy` / `managedBy` | — | `->` | The core structural rows (§3.6) a pack may name as a relation's meaning. ⚠️ `ownedBy`'s `->` is only the DEFAULT: with its target left open (Subject **or** Object) a declaration carries the sense per edge — see §3.6 |

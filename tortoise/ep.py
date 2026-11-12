@@ -1018,8 +1018,8 @@ class TortoiseEP:
         # a factor (its rel type is `hasPart` and no factor is built from it), so
         # the fallback is only ever reached by a legacy/unknown spelling, where
         # support is the safe reading.
-        # ⛔ TWO of the three potentials are ASYMMETRIC in their slots, and this
-        # is where the direction flag is read for them. ``phi_impl`` and
+        # ⛔ ONE of the three potentials is ASYMMETRIC in its slots, and this
+        # is where the direction flag is read for it. ``phi_impl`` and
         # ``phi_nand`` are symmetric (swapping the endpoints changes nothing but
         # which message each one receives, which `direction` already decides).
         # ``phi_coherence(ca, cb) = exp(-w*(1-ca)*cb)`` is NOT: slot 0 is the

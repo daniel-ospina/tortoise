@@ -10837,6 +10837,34 @@ def _property_filter_clause(key: str) -> str:
     return f"n.`{key}` = ${key}"
 
 
+#: Every mechanism op_type `create_operator` accepts (#12067). ONE tuple, so a
+#: fourth write path cannot forget the third mechanism — three separate
+#: `("IMPL", "NAND")` literals in this file were each wrong for exactly that
+#: reason (the #2351 guard at the operator door, its ingest twin, and the
+#: operator dedupe probe).
+_MECHANISM_OP_TYPES = ("IMPL", "NAND", "coherence")
+
+
+def _mechanism_population(alias: str) -> str:
+    """Cypher predicate: an operator that CARRIES a mechanism — live OR draft.
+
+    ⛔ WHY DRAFT IS INCLUDED (#12067 review round 2, P1). The first cut used
+    ``_live_only``, on the reasoning that a DRAFT operator prices no belief and so
+    carries no mechanism to conflict with. That reasoning is wrong about the
+    lifecycle this repo ships: a draft operator is PROMOTED
+    (``_promote_incident_operators`` flips every draft whose endpoints go live)
+    and the promotion re-checks nothing, so two drafts over one pair become two
+    LIVE mechanisms on one pair — and ``create_operator(promote_source=False)`` is
+    the ordinary posture of ``commit_ops.apply_payload_operators`` and of
+    ``ingest`` under its DEFAULT ``promotion_policy="gated"``. The invariant is
+    about the STATE a pair can reach, not about what prices today, so the
+    population is "not TERMINAL": terminal statuses are excluded because nothing
+    promotes them back (``retract_point`` refuses operators, and a terminal
+    operator is never resurrected).
+    """
+    return _terminal_excluded(alias)
+
+
 def _live_operator_mechanism_pairs(proj, ids):
     """The mechanisms live operators already carry over ``ids`` (#12067).
 
@@ -10860,7 +10888,7 @@ def _live_operator_mechanism_pairs(proj, ids):
         "MATCH (o:Point)-[:IMPL|NAND]->(p:{label}), "
         "(o)-[:IMPL|NAND]->(q) "
         "WHERE (o.is_operator = true OR o.op_type IS NOT NULL) "
-        f"AND {_live_only('o.status')} "
+        f"AND {_mechanism_population('o.status')} "
         "AND p.id IN $ids "
         "RETURN DISTINCT o.id, o.op_type, q.id"
     ):
@@ -23951,8 +23979,11 @@ class TortoiseSDK:
             connection exists and NO confidence transfers), plus the two
             legacy aliases ``unidirectional`` (≡ ``->``) and ``bidirectional``
             (≡ ``<->``), which stay accepted and readable. The value is stored
-            VERBATIM. Signature default ``bidirectional`` (mutual) for all op
-            types; pass ``unidirectional`` (or ``->``) for a directed attack
+            VERBATIM. An ABSENT direction defaults per mechanism: ``bidirectional``
+            (mutual) for ``IMPL`` and ``NAND`` (an explicit ``None`` still
+            canonicalizes to NAND's ``unidirectional``), ``->`` for ``coherence``
+            (the first input is the necessary condition, #12067); pass
+            ``unidirectional`` (or ``->``) for a directed attack
             (no back-pressure). A NON-default explicit value outranks
             ``semantics``; the signature default does not (it is the default,
             not a declaration).
@@ -24102,7 +24133,8 @@ class TortoiseSDK:
                                detail=f"semantics={semantics} (out of vocabulary)")
             else:
                 derived = self._direction_from_semantics(semantics)
-                if derived is not None and is_default_direction(direction):
+                if derived is not None and (
+                        direction is None or is_default_direction(direction)):
                     # Chain step 2 — basis `semantics`: the direction was resolved
                     # from the Layer-2 meaning the caller declared, which is the
                     # input actually read here. `is_default_direction` is what
@@ -24114,6 +24146,24 @@ class TortoiseSDK:
                     # the Layer-3 `label` predicate — a different input.)
                     direction = derived
                     direction_basis = "semantics"
+        # ── chain step 4: the per-op_type default, resolved LAST so a declared
+        # semantics (step 2) still outranks it ──────────────────────────────
+        # ⛔ #12067: `coherence` states its OWN absent-direction default. The
+        # signature default is IMPL's mutual `bidirectional` (#7813, kept as-is
+        # for IMPL and NAND — `direction=None` still canonicalizes to NAND's
+        # `unidirectional`), and letting the third mechanism INHERIT it priced
+        # MUTUAL necessity for every direction-omitting write — neither what the
+        # caller said nor what the necessity tables read ("A is necessary for B"
+        # is one-way: FIRST input = condition, SECOND = dependent, which is
+        # `phi_coherence`'s slot order).
+        #
+        # The DEFAULT spelling is what is re-resolved, never the whole set: an
+        # explicit `<->` (the model token) still records mutual necessity, while
+        # the legacy default spelling and an absent `None` both mean "the caller
+        # stated nothing", which for this mechanism reads `->`.
+        if op_type == "coherence" and (
+                direction is None or direction == "bidirectional"):
+            direction = "->"
         # ── mechanism: the THIRD leg of the #7852 triple (#9963) ────────────
         # The door checked the triple's other two legs and never this one: the
         # `label` block above tests MEMBERSHIP (is the word declared?) and the
@@ -24424,7 +24474,7 @@ class TortoiseSDK:
                 "WHERE a.id IN $ids AND b.id IN $ids "
                 "AND a.op_type IS NULL "
                 "AND (a.is_operator IS NULL OR a.is_operator = false) "
-                "RETURN a.id, b.id, type(r) LIMIT 10"
+                "RETURN a.id, b.id, type(r)"
             ):
                 _direct.extend(
                     (_a, _b, _t) for _a, _b, _t in proj.g.query(
@@ -24457,7 +24507,7 @@ class TortoiseSDK:
         _operator_targets = set().union(
             *(endpoint_classes.get(t, set()) for t in target_ids if t in point_ids)
         ) if target_ids else set()
-        if (op_type in ("IMPL", "NAND") and source_id in point_ids
+        if (op_type in _MECHANISM_OP_TYPES and source_id in point_ids
                 and _operator_targets
                 and _claim_class.direction_blocks_create(
                     direction,
@@ -26040,7 +26090,17 @@ class TortoiseSDK:
         ``sorted`` carries a type-aware key rather than comparing raw values."""
         if direction is not None:
             return direction
-        return "unidirectional" if op_type == "NAND" else "bidirectional"
+        # ⛔ `coherence` states its OWN default (#12067 review round 2, P2):
+        # inheriting IMPL's `bidirectional` priced every direction-omitting
+        # coherence write as MUTUAL necessity, which is neither what the caller
+        # said nor what the necessity tables read (`A is necessary for B` is
+        # one-way). `->` is the necessity reading: the FIRST input is the
+        # condition, the second the dependent.
+        if op_type == "NAND":
+            return "unidirectional"
+        if op_type == "coherence":
+            return "->"
+        return "bidirectional"
 
     def _check_connection(self, index: int, conn: Any,
                           violations: list[dict],
@@ -26149,7 +26209,8 @@ class TortoiseSDK:
                 })
             frm = conn.get("from")
             to_list = tos if isinstance(tos, list) else [tos]
-            if op_type in ("IMPL", "NAND") and (frm == tos or frm in to_list):
+            if op_type in _MECHANISM_OP_TYPES and (
+                    frm == tos or frm in to_list):
                 violations.append({
                     "section": "connections", "index": index,
                     "message": f"ingest: connections[{index}] self-edges are "
@@ -29489,7 +29550,7 @@ class TortoiseSDK:
                     _absorb_targets = set().union(
                         *(_absorb_classes.get(t, set()) for t in dsts)
                     ) if dsts else set()
-                    if (op_type in ("IMPL", "NAND")
+                    if (op_type in _MECHANISM_OP_TYPES
                             and src in _absorb_classes
                             and _absorb_targets
                             and _claim_class.direction_blocks_create(
@@ -30267,7 +30328,15 @@ class TortoiseSDK:
         (bare-MERGE + SET per input — IDEMPOTENT) for a partial-absorb.
         """
         proj = self._get_proj()
-        edge_rel = "hasPart" if op_type not in ("IMPL", "NAND") else op_type
+        # ⛔ The probe reads the edge `create_operator` WROTE, so it must map the
+        # mechanism exactly as that writer does (#12067 review round 2, P1): a
+        # `coherence` operator is stored on `:IMPL`, and treating every
+        # non-IMPL/NAND spelling as `hasPart` made the probe miss, so every
+        # retried ingest minted ANOTHER operator over the same pair — the
+        # double-count the closure exists to prevent (the same class as the
+        # `commit_ops` #4971 probe, fixed in the same diff).
+        from tortoise.ep import MECHANISM_REL_TYPES as _MECHANISM_REL_TYPES
+        edge_rel = _MECHANISM_REL_TYPES.get(op_type, "hasPart")
         canonical_dir = self._canonical_direction(op_type, direction)
         # ── #9750: BOTH SIDES OF THE KEY ARE SETS ──────────────────────────
         # (#10305: …and the request's ARITY is the third leg of the key — see

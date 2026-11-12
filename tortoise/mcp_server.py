@@ -4520,6 +4520,8 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
     """Create an operator connecting Points.
     
     op_type: 'IMPL' (A supports B), 'NAND' (A contradicts B),
+             'coherence' (A is a NECESSARY CONDITION for B: an unmet condition
+             drags B down, a met one never lifts it — #12067),
              'composedOf'/'decomposesInto'/'contains'/'wraps' → stored as hasPart edge.
     source_id: source/parent Point ID.
     target_ids: target/child Point IDs (1 for IMPL/NAND, N for part/whole).

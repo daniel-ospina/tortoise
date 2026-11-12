@@ -530,6 +530,79 @@ def test_a_non_point_endpoint_is_still_checked(sdk):
         sdk.create_operator("IMPL", a, [subj])
 
 
+def test_a_DRAFT_operator_is_part_of_the_population(sdk):
+    """⛔ DRAFT is not a free pass (#12067 review round 2, P1).
+
+    The first cut excluded drafts on the reasoning that "a draft prices no
+    belief". That is wrong about the lifecycle this repo ships: a draft operator
+    is PROMOTED when its endpoints go live, the promotion re-checks nothing, and
+    `promote_source=False` is the ordinary posture of the commit/ingest paths —
+    so two drafts over one pair become two LIVE mechanisms on one pair. Measured
+    before the fix: both writes were accepted.
+    """
+    a, b = _points(sdk)
+    sdk.create_operator("IMPL", a, [b], promote_source=False)
+    with pytest.raises(ValueError):
+        sdk.create_operator("coherence", a, [b], promote_source=False)
+    # ... and the promotion really does keep both live, which is why the refusal
+    # has to happen at the WRITE, not at the promotion.
+    sdk._promote_incident_operators(sdk._get_proj(), a, "2026-01-01T00:00:00Z")
+    ops = sdk._get_proj().g.query(
+        "MATCH (o:Point) WHERE o.is_operator = true "
+        "RETURN o.id, o.op_type").result_set
+    assert len(ops) == 1, ops
+
+
+def test_coherence_has_its_OWN_direction_default(sdk):
+    """⛔ `coherence` must not inherit IMPL's `bidirectional` (#12067 review round
+    2, P2): a direction-omitting necessity write would be priced as MUTUAL
+    necessity. `->` is the reading the mechanism means — the FIRST input is the
+    condition, the second the dependent."""
+    a, b = _points(sdk)
+    op = sdk.create_operator("coherence", a, [b])
+    stored = sdk._get_proj().g.query(
+        "MATCH (o:Point {id:$id}) RETURN o.direction",
+        params={"id": op["id"]}).result_set
+    assert stored and stored[0][0] == "->", stored
+    # IMPL keeps the mutual default it has always had.
+    c, d = _points(sdk)
+    op2 = sdk.create_operator("IMPL", c, [d])
+    stored2 = sdk._get_proj().g.query(
+        "MATCH (o:Point {id:$id}) RETURN o.direction",
+        params={"id": op2["id"]}).result_set
+    assert stored2 and stored2[0][0] == "bidirectional", stored2
+
+
+def test_the_derived_over_asserted_guard_covers_the_third_mechanism(sdk):
+    """⛔ The #2351 guard enumerated IMPL/NAND only, so the SAME derived-over-
+    asserted write was refused for support and accepted for coherence (#12067
+    review round 2, P1) — and with the asymmetric potential's slot swap, the
+    downgraded direction then pushed the DERIVED claim into the ASSERTED one."""
+    src = sdk.create_point("statement", "src", claim_class="derived")["id"]
+    tgt = sdk.create_point("statement", "tgt", claim_class="asserted")["id"]
+    for mechanism in ("IMPL", "NAND", "coherence"):
+        with pytest.raises(ValueError, match="DERIVED"):
+            sdk.create_operator(mechanism, src, [tgt])
+
+
+def test_an_ingest_retry_dedups_a_coherence_operator(sdk):
+    """⛔ The ingest dedupe probe read `hasPart` for every non-IMPL/NAND spelling,
+    while `create_operator` stores coherence on `:IMPL` — so a retried ingest
+    minted a SECOND operator over the same pair, double-pricing the factor
+    (#12067 review round 2, P1; the same class as the `commit_ops` probe)."""
+    a = sdk.create_point("statement", "a")["id"]
+    b = sdk.create_point("statement", "b")["id"]
+    payload = {"connections": [{"operator": "coherence", "from": a, "to": b}]}
+    first = sdk.ingest(payload)
+    second = sdk.ingest(payload)
+    assert first["created"]["connections"] == 1, first
+    assert second["created"]["connections"] == 0, second
+    ops = sdk._get_proj().g.query(
+        "MATCH (o:Point) WHERE o.is_operator = true "
+        "RETURN o.id").result_set
+    assert len(ops) == 1, ops
+
+
 # ── END TO END: the mechanism must move a belief through the RUN, not just
 #          through `_update_factor`. A mechanism that is priced correctly and
 #          never reached is INERT — the failure #8169 records (a relation that
