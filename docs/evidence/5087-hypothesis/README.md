@@ -342,12 +342,13 @@ git status --porcelain -- tortoise tests/eval/write_path \
 
 Then, at an admitted head, with a private FalkorDB lane. `tools/test_lane.py run` is the entry point
 into **pytest** — it strips a leading `--` and invokes `python -m pytest <argv>` — so it cannot carry
-the probe, which is not a test module. The tool's documented two-step form is what puts the three
+the probe, which is not a test module. The tool's documented two-step form is what puts the four
 seam variables into THIS shell:
 
 ```bash
 uri="$(uv run python tools/test_lane.py uri)" || exit 1   # a private FalkorDB lane
-eval "$uri"   # exports TORTOISE_DB_URI, TORTOISE_TEST_DOCKER_PORT, TORTOISE_TEST_DOCKER_PASSWORD
+eval "$uri"   # exports TORTOISE_DB_URI, TORTOISE_TEST_DOCKER_PORT,
+              # TORTOISE_TEST_DOCKER_PASSWORD and TORTOISE_TEST_LEGACY_PORT
 # A NEW filename: the committed log is NEVER overwritten (the probe refuses an existing --out).
 uv run python tools/s3_prior_ablation.py \
     --prereg a1075dfc2a964a6e9e1a49ec990ebadf8c9a180a \

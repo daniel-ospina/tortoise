@@ -2732,34 +2732,50 @@ def test_the_site_root_is_a_different_page_per_host() -> None:
     exists to catch it. So the comments are dropped first (only lines that BEGIN with
     `//`, so a `//` inside a string is never truncated) and the branch that actually
     fetches the root document is required to name the document `HOST_ROOT_PAGE` claims
-    for that host. The duplicate-301 block (`:446-470`) is not this block: it only
-    redirects the raw `/product`, `/product.html` and `/index.html` duplicates.
+    for that host. Since epic #11762 the product host no longer fetches its root at all —
+    it 301s onto the one marketing host, where the product document is served under
+    `PRODUCT_PREFIX` — so the guard tracks BOTH halves (the hop, and the rewrite's root
+    row) and still resolves the mapping to the same document, now after one hop.
     """
     middleware = _read(WEBSITE / "functions" / "_middleware.ts")
     code = "\n".join(
         line for line in middleware.splitlines() if not line.lstrip().startswith("//")
     )
-    rewrite = re.search(
-        r'if \(host\.startsWith\("tortoise\."\)\) \{\s*'
-        r'const res = await context\.env\.ASSETS\.fetch\(\s*'
-        r'url\.origin \+ "([^"]+)"\s*\);',
+    hop = re.search(
+        r"const toCompany = \(target: string\) =>\s*"
+        r"new Response\(null, \{\s*"
+        r"status: 301,\s*"
+        r"headers: \{ Location: COMPANY_ORIGIN \+ target \+ url\.search",
         code,
     )
-    assert rewrite, (
-        "the tortoise host's ROOT rewrite is no longer the shape this guard reads — "
+    assert hop, (
+        "the product host's 301 helper is no longer the shape this guard reads — "
         "either it was restructured (re-derive HOST_ROOT_PAGE by hand and re-point this "
         "guard) or it is gone")
-    assert rewrite.group(1) == "/" + HOST_ROOT_PAGE["tortoise.premiselabs.co"], (
-        f"the tortoise host root now serves {rewrite.group(1)!r} while HOST_ROOT_PAGE "
+    assert re.search(
+        r'if \(path === "/" \|\| path === "/index\.html" \|\| PRODUCT_ROOT\.has\(path\)\) \{\s*'
+        r"return toCompany\(PRODUCT_PREFIX\);",
+        code,
+    ), (
+        "the product host's ROOT is no longer redirected onto PRODUCT_PREFIX — the "
+        "product document would then be reachable at a second URL, which is the "
+        "duplicate-canonical condition #11762 exists to remove")
+    served = re.search(r'const asset = rest === "" \? "([^"]+)"', code)
+    assert served, (
+        "the PRODUCT_PREFIX rewrite's root row is no longer the shape this guard reads — "
+        "re-derive HOST_ROOT_PAGE by hand and re-point this guard")
+    assert served.group(1) == "/" + HOST_ROOT_PAGE["tortoise.premiselabs.co"], (
+        f"the product root now serves {served.group(1)!r} while HOST_ROOT_PAGE "
         f"claims {HOST_ROOT_PAGE['tortoise.premiselabs.co']!r} — every root <loc> would "
         "resolve to the wrong document")
-    # The COMPANY host is the fallback: it is named nowhere, because once no rewrite
-    # claims `/` the raw asset is served (`/` -> `index.html`). So its half of the split
-    # is the ABSENCE of a second root rewrite, not the presence of a string.
-    after = code[rewrite.end():]
-    assert not re.search(r'host\.startsWith\("premise', after), (
-        "a premiselabs.co root rewrite now follows the tortoise one — the host split has "
-        "moved, and HOST_ROOT_PAGE no longer describes it")
+    # Exactly ONE asset fetch: the prefix rewrite. A second one would be a root rewrite
+    # for another host, i.e. the host split has moved and HOST_ROOT_PAGE no longer
+    # describes it. The company host is the FALLBACK (it is named nowhere: once no
+    # rewrite claims `/`, the raw asset is served), so its half is the ABSENCE of one.
+    assert code.count("ASSETS.fetch(") == 1, (
+        f"_middleware.ts performs {code.count('ASSETS.fetch(')} asset fetches; exactly one "
+        "(the PRODUCT_PREFIX rewrite) is expected — a second one re-opens a per-host root "
+        "rewrite and HOST_ROOT_PAGE must be re-derived")
     for host, page in HOST_ROOT_PAGE.items():
         assert (WEBSITE / page).is_file(), f"{host}'s root document {page} is missing"
 
