@@ -279,7 +279,16 @@ BINARY_MUTATION_RE = re.compile(
 #: `pg_dump --version | tee -a "$RUNNER_TEMP/v.txt"` (the guard's OWN recommended
 #: compensating control) from reading as replacements — both measured RED, round
 #: 10. The call site also reads the name only AFTER the verb.
-BINARY_NAME_RE = re.compile(r"\b(?:pg_dump|pg_restore|pg_ctl|pg_wrapper)(?![\w.])")
+#: ⛔ THE ENUMERATION IS THE CLIENT SUITE, NOT JUST THE TWO TOOLS (#12069 review
+#: round 4, measured). With the pinned dir arriving in a VARIABLE, `CLIENT_DIR_RE`
+#: cannot see `$d`, so the NAME is the only evidence left — and `"$d/pg_dumpall"`
+#: stayed green while the literal `…/16/bin/pg_dumpall` was refused. `pg_dumpall`,
+#: `psql`, `pg_isready`, `pg_basebackup` and `pg_recvlogical` ship in the same
+#: `postgresql-client` package, so writing any of them is the same act.
+BINARY_NAME_RE = re.compile(
+    r"\b(?:pg_dump|pg_dumpall|pg_restore|pg_ctl|pg_wrapper|pg_isready|"
+    r"pg_basebackup|pg_recvlogical|psql)(?![\w.])"
+)
 
 #: A REDIRECT whose TARGET is a client binary or the pinned bin directory
 #: (#12069 review P1, measured at `5de9f4b5d7`). The mutating-verb rule above
@@ -370,6 +379,32 @@ def _redirects_into_a_client_binary(line: str) -> bool:
     """
     for match in REDIRECT_TARGET_RE.finditer(line):
         target = match.group("target")
+        # ⛔ THE TARGET WORD CAN CONTINUE PAST WHAT WAS CAPTURED (#12069 review
+        # round 4, measured). The charclass excludes quotes, so `"$d/"/pg_dump`
+        # captures `$d/` and `"$d/pg_dum"p` captures `$d/pg_dum` — the LEFTOVER is
+        # what the shell concatenates into the real filename, and it was never
+        # read. Both wrote `/usr/lib/postgresql/16/bin/pg_dump` with `205 passed`.
+        # A closing quote belongs to the captured word; anything word-like after
+        # it (or after an unquoted target) means the basename we graded is not the
+        # name being written, so the target is unclassifiable and refused.
+        tail = line[match.end():]
+        closing = match.group("quote")
+        if closing and tail.startswith(closing):
+            tail = tail[1:]
+        elif (
+            not closing
+            and tail.startswith(("'", '"'))
+            # A `>` that sits INSIDE a quoted message: the captured word ends at
+            # the string's closing quote and the real redirect (if any) is later
+            # on the same line, graded on its own iteration. Only a quote followed
+            # by word-like characters continues the target here.
+            and not re.match(r"['\"][\w.$`/]", tail)
+        ):
+            continue
+        if tail and tail[0] not in " \t;&|)":
+            return True
+        if target.endswith("/"):
+            return True
         basename = target.rsplit("/", 1)[-1]
         if BINARY_NAME_RE.fullmatch(basename):
             return True
@@ -4373,6 +4408,15 @@ REDIRECT_POLARITY = [
     ('f=/usr/lib/postgresql/16/bin/pg_dump; : > `printf %s "$f"`', True, "backticks over a variable"),
     ('echo x >> "$GITHUB_OUTPUT"', False, "a runner command file this job does not use"),
     ('echo x >> "$GITHUB_STEP_SUMMARY"', False, "…and the summary file the repo does use"),
+    # ⛔ A TARGET WORD CAN CONTINUE PAST THE CAPTURE (#12069 review round 4,
+    # measured): the charclass excludes quotes, so the leftover is what the shell
+    # concatenates into the real filename and it was never read — these two wrote
+    # `/usr/lib/postgresql/16/bin/pg_dump` with the whole suite green.
+    (': > "$d/"/pg_dump', True, "a spliced target continues past the quote"),
+    (': > "$d/pg_dum"p', True, "the basename is reassembled after the quote"),
+    ('d=/usr/lib/postgresql/16/bin; : > "$d/psql"', True, "an opaque dir plus a client suite name"),
+    ('d=/usr/lib/postgresql/16/bin; : > "$d/pg_dumpall"', True, "…and the suite's other names"),
+    (': > "pg"', False, "an opaque target that is NOT a client name"),
 ]
 
 
