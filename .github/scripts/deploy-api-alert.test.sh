@@ -754,6 +754,16 @@ assert_no_match "$BODY_17I" 'follows verbatim' "case 17i: and the section intro 
 # this net would otherwise false-red.
 BODY_17I_PRESENCE='(reproduced|quoted|shown|included|printed|carried) below([[:space:]]*[;.,:]|$)'
 assert_no_match "$BODY_17I_LC" "$BODY_17I_PRESENCE" "case 17i: and the intro's presence claim is CONDITIONED — an unconditional '<verb> below;' would claim a report this state does not carry (#12200)"
+# …and the SAME claim with a word between `below` and its punctuation walks past the row above
+# (measured in review round 4: `reproduced below in full;` left 190/190 green while the body
+# claimed a report in a state that carries none). So the condition is pinned POSITIVELY as
+# well — the presence claim must be followed by a conditional keyword, whatever its wording.
+# Residual, stated rather than implied: a restructure that moves the condition BEFORE the verb
+# ('when it can be carried, the report is reproduced below') reds this row although the
+# sentence is true. That is the right failure mode (a red asks for the alternation to be
+# extended) as against a green that certifies a claim the body does not carry.
+BODY_17I_CONDITION='(reproduced|quoted|shown|included|printed|carried) below[[:space:]]+(when|whenever|if|provided|unless)'
+assert_match "$BODY_17I_LC" "$BODY_17I_CONDITION" "case 17i: and the condition is PRESENT in the claim — 'below in full;' is unconditional, so it would read as a carried report (review round 4)"
 assert_not_contains "$BODY_17I" '```' "case 17i: and it pastes NO fenced block, in any form"
 if python3 -c "import sys,pathlib; pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')" "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null; then
   ok "case 17i: and the body is still valid UTF-8"
@@ -763,11 +773,16 @@ fi
 
 # ── case 17j: a converter's own diagnostic must not reach the job log (#12200) ────────
 # The fallback also fires when `iconv` is ABSENT, and a missing or refusing converter
-# prints its own diagnostic. Main suppressed it with `2>/dev/null`; the merge that brought
-# this branch up to main dropped the suppression (#12200, "Also in the same block"). One
-# spurious stderr line is not a correctness bug — but it is noise on the one channel an
-# operator reads during an incident, and an unsuppressed diagnostic reads like a second
-# failure. Pinned, or a later merge drops it again and nothing says so.
+# prints its own diagnostic. This branch ADDS the suppression relative to main (#12200,
+# "Also in the same block"). The history, checked against the commits rather than assumed:
+# the pre-#12110 form of this statement DID suppress it (`… -c 2>/dev/null || true`,
+# 49cf519354), and #12110's rewrite of the squeeze (6e5ff01625) did not carry it over — no
+# merge dropped it, and `git log 6e5ff01625..origin/main -- …deploy-api-alert.sh` is empty,
+# so the branch does not inherit it from anywhere. (An earlier draft of this comment said a
+# merge dropped it, which is the same class this PR removes: a sentence stating a mechanism
+# the artifact does not show.) One spurious stderr line is not a correctness bug — but it is
+# noise on the one channel an operator reads during an incident, and an unsuppressed
+# diagnostic reads like a second failure. Pinned, or a later edit drops it and nothing says so.
 ICONV_NOISY_DIR="$FIX/bin-iconv-noisy"
 mkdir -p "$ICONV_NOISY_DIR"
 cat > "$ICONV_NOISY_DIR/iconv" <<'ICONV_NOISY_EOF'
@@ -822,6 +837,7 @@ assert_no_match "$BLANK_BODY" 'follows verbatim' "and the intro claims no VERBAT
 # reddening in the other. Same net, flattened+lowercased for the same reasons as 17i's.
 BLANK_BODY_LC="$(printf '%s' "$BLANK_BODY" | tr '\n' ' ' | tr '[:upper:]' '[:lower:]')"
 assert_no_match "$BLANK_BODY_LC" "$BODY_17I_PRESENCE" "and the intro's presence claim is CONDITIONED here too — 'reproduced below;' would claim a report a blank state does not carry (#12200)"
+assert_match "$BLANK_BODY_LC" "$BODY_17I_CONDITION" "and that claim CARRIES its condition here too — the positive half, so an adverb after 'below' cannot smuggle the unconditional claim back in"
 
 # ── case 17d: the READ GUARD — an existing but unreadable report must not abort ─────
 # NOTE THE MECHANISM (corrected, pass-5 review): a DIRECTORY is `-s`-TRUE on this fs, so
