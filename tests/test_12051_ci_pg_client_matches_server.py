@@ -104,6 +104,23 @@ not a tenth spelling — it is the one a text guard cannot reach:
   job because it applies here too). A `shell:` reached through a
   reusable workflow (`uses: ./.github/workflows/x.yml`) is outside this
   file and outside this guard.
+- **`env:` and `$GITHUB_ENV` are read at file scope only (#12069 review P1).**
+  `env:` was previously not read AT ALL — a job- (or workflow-) level
+  `env: PATH: /usr/bin:/bin` left the whole file green while the leg resolved
+  `pg_wrapper` → the newest client, i.e. #12051 restored in three lines
+  (measured, `67 passed`). It is read now, at workflow, job and step scope, and
+  `$GITHUB_ENV` — the second command file, which sets a variable for later steps
+  the same way — is refused by NAME, because nothing in this job uses it (the
+  same polarity as `_runner_file_commands`). What remains outside: an `env:` set
+  by an INVOKED script (`run: bash x.sh`), by a composite action this job calls,
+  or by a reusable workflow this job calls — the invoked-script blind spot
+  above, in one more mechanism.
+- **A PATH entry's PRECEDENCE is read from the value, not from the shell.**
+  `_keeps_the_pin_first` requires the pinned dir (or `$PATH`) to be the FIRST
+  entry, so a prepend is an offender — but a value built at runtime
+  (`PATH="$(dirname "$(command -v pg_dump)"):$PATH"`) is read only as its first
+  literal entry, and one that expands to another client's directory is invisible.
+  The in-job `pg_dump --version` assertion is what makes that visible in the log.
 - **The mutating-verb rule costs some precision.** The client name is
   read only AFTER the verb, so `rm -f "$RUNNER_TEMP/pg_dump.log"` and
   `pg_dump --version | tee -a x` are not replacements — but a genuinely
@@ -173,9 +190,13 @@ RUNNER_FILE_COMMAND_RE = re.compile(r"_runner_file_commands")
 #: `export PATH="/usr/local/bin:/usr/bin:/bin"` looked innocent — it names no
 #: client dir — while `/usr/bin/pg_dump` is `pg_wrapper`, which this file's own
 #: docstring says resolves to the image's NEWEST client (17). All five rows stayed
-#: GREEN with the leg on pg17 (measured). An assignment KEEPS the pin if its value
-#: names the pinned dir or still references `$PATH` (an append or a re-order cannot
-#: drop what is already on it); anything else REPLACES it.
+#: GREEN with the leg on pg17 (measured).
+#: ⛔ THE INVARIANT IS PRECEDENCE, NOT CONTAINMENT (#12069 review P1): an
+#: assignment keeps the pin only when the pinned dir (or the inherited `$PATH`)
+#: is its FIRST entry. The earlier reading accepted any value that MENTIONED
+#: either, so `export PATH="/usr/bin:$PATH"` — the pin on SECOND place, where a
+#: `PATH` lookup never reaches it — stayed GREEN and restored #12051 (measured).
+#: See `_keeps_the_pin_first`.
 PATH_ASSIGN_RE = re.compile(r"\bPATH\s*=\s*(?P<quote>[\"']?)(?P<value>[^\s;\"']*)")
 
 #: A command that REPLACES a binary rather than naming one (#12051 review round
@@ -372,6 +393,15 @@ def job() -> dict:
     job_defaults["run"] = job_run
     for key, value in ((workflow.get("defaults") or {}).get("run") or {}).items():
         job_run.setdefault(key, value)
+
+    # `env:` is folded the same way and for the same reason (#12069 review P1):
+    # workflow-scope `env` applies to every step of every job, so a `PATH` set
+    # there moves the leg exactly as the job's own does — and reading only the
+    # job's left the workflow-level form invisible. Per KEY, job wins, which is
+    # GitHub's documented precedence ("the most specific default setting").
+    resolved["env"] = dict(resolved.get("env") or {})
+    for key, value in (workflow.get("env") or {}).items():
+        resolved["env"].setdefault(key, value)
     return resolved
 
 
@@ -608,10 +638,30 @@ NON_SKIPPING_IF = frozenset(
 
 
 def _normalise_if(value: object) -> str:
-    """`${{ X }}` / `X` / extra whitespace collapse to one comparable spelling."""
+    """`${{ X }}`, spacing and digraph spelling collapse to ONE comparable form.
+
+    ⛔ SPACING IS NOT MEANING IN A GITHUB EXPRESSION (#12069 review P2). Whitespace
+    was collapsed but never REMOVED where it does not matter, so the two
+    spellings GitHub's own docs use were read as conditions that cannot skip:
+    `${{ ! cancelled() }}` normalised to `! cancelled()` and `success()||failure()`
+    to itself, neither matched `NON_SKIPPING_IF`, and the row red the CORRECT
+    `if:` with a message saying the condition could not skip the step (measured:
+    both false REDs). `! cancelled()` and `!cancelled()`, `a()||b()` and
+    `a() || b()` are the same expression, so they now normalise the same way.
+    """
 
     text = re.sub(r"\s+", " ", str(value)).strip()
-    return re.sub(r"^\$\{\{\s*|\s*\}\}$", "", text).strip()
+    text = re.sub(r"^\$\{\{\s*|\s*\}\}$", "", text).strip()
+    # PARENTHESES FIRST: tightening them afterwards would re-close the space the
+    # `||` rule opens (`success() || failure()` -> `success()|| failure()`), which
+    # is how the first cut of this fix still missed the set (measured).
+    text = re.sub(r"\s*\(\s*", "(", text)
+    text = re.sub(r"\s*\)\s*", ")", text)
+    text = re.sub(r"\s*(\|\||&&)\s*", r" \1 ", text)
+    # Only a LEADING negation: `!` is meaningful there and nowhere else here, and
+    # rewriting every `!` would touch `!=` and string literals.
+    text = re.sub(r"^\s*!\s*", "!", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _conditional_skip(step: dict) -> str | None:
@@ -661,6 +711,45 @@ def _command_word(before: str) -> str:
     return words[-1].strip("\"'") if words else ""
 
 
+#: A comparison OPERATOR — the thing that makes a line a CONDITION rather than a
+#: mention. `!=` is matched before `=`, and `-eq`/`-ne`/`-gt`/`-lt` are the
+#: `test` spellings of the same.
+COMPARISON_RE = re.compile(r"==|!=|=~|(?<![-\w])=|-eq|-ne|-gt|-lt")
+
+
+def _selects_on_var(body: list[str], var: str) -> bool:
+    """Does this loop BODY select a subset of the loop's names on `$var`?
+
+    ⛔ A LOOP DOES NOT COVER ITS HEADER'S NAMES IF ITS BODY CHOOSES BETWEEN THEM
+    (#12069 review P2). `scan()` credited EVERY name in `for tool in pg_dump
+    pg_restore; do` the moment the body invoked `$tool --version` — so a body
+    that only checked one of them
+
+        for tool in pg_dump pg_restore; do
+          if [ "$tool" = pg_dump ]; then
+            version="$("$tool" --version)"
+          fi
+        done
+
+    still reported BOTH, with `pg_restore` never checked (measured), which is the
+    same defect the loop body was introduced to fix (round 11), one level down.
+
+    Only a SELECTION on the LOOP VARIABLE counts: a condition on anything else
+    (`if [ "$major" != "16" ]`, which is what this job actually writes) does not
+    narrow the coverage, and reading it as one would red the correct tree.
+    """
+
+    ref = re.compile(r"\$\{" + re.escape(var) + r"\}|\$" + re.escape(var) + r"(?!\w)")
+    for line in body:
+        if not ref.search(line):
+            continue
+        if re.match(r"^[ \t]*case\b", line):
+            return True
+        if COMPARISON_RE.search(line) and re.search(r"\[\[?|\btest\b", line):
+            return True
+    return False
+
+
 def _version_checked_tools(code: str) -> set[str]:
     """Which client tools this code actually VERSION-CHECKS (#12051 rounds 11-12).
 
@@ -671,6 +760,14 @@ def _version_checked_tools(code: str) -> set[str]:
     green), and neither does a QUOTED mention (round 12: `$(echo "$tool
     --version")` runs nothing). Both are the token-in-text defect rounds 4 and 7
     fixed for `::error::` / `exit 1`.
+
+    ACCEPTED SPELLING: a loop body that runs unconditionally. A body that
+    SELECTS between the names on the loop variable (`if [ "$tool" = pg_dump ]`,
+    `case "$tool" in`, `[ "$tool" = pg_restore ] && continue`) credits NOTHING,
+    because how many of the names such a body reaches is not decidable from text
+    (`_selects_on_var`, #12069 review P2). Check every tool unconditionally, or
+    check each one on its own `<tool> --version` line — the two shapes this
+    guard can read, and the second needs no loop at all.
     """
 
     checked: set[str] = set()
@@ -697,23 +794,65 @@ def _version_checked_tools(code: str) -> set[str]:
             if name in TOOLS
         }
         var = head.group("var")
+        body: list[str] = []
         for body_line in lines[index + 1 :]:
             if LOOP_END_RE.match(body_line):
                 break
-            scan(body_line, var, names)
+            body.append(body_line)
+        # ⛔ A SELECTING BODY COVERS NONE OF THE HEADER'S NAMES (#12069 review P2).
+        credited = set() if _selects_on_var(body, var) else names
+        for body_line in body:
+            scan(body_line, var, credited)
     return checked
+
+
+def _keeps_the_pin_first(value: str, pinned: str) -> bool:
+    """Is the pinned dir — or the whole inherited `$PATH` — the FIRST entry?
+
+    ⛔ CONTAINMENT IS NOT PRECEDENCE (#12069 review P1). The rule used to accept
+    any value that merely MENTIONED the pinned dir or `$PATH`, so
+
+        export PATH="/usr/bin:$PATH"
+
+    was GREEN: the pin is still ON the value, but it is on SECOND. A `PATH`
+    lookup takes the FIRST match, and `/usr/bin/pg_dump` is `pg_wrapper` — which
+    this module's own docstring says resolves to the image's NEWEST client — so
+    that one line restored #12051 with every row green (measured, and again at
+    `${PATH}` and at `$PATHX`). The pin is therefore kept only when nothing
+    outranks it: the first `:`-separated entry must BE the pinned dir, or a
+    reference to the inherited `$PATH` (the runner has already prepended the pin
+    to it, so `$PATH` first still puts the pin first).
+    """
+
+    if value.startswith("${"):
+        # A PARAMETER EXPANSION CONTAINS ITS OWN COLON (`${PATH:-/usr/bin}`), so
+        # splitting on `:` first would read the head as `${PATH`. Cut the whole
+        # brace group instead, and accept only the forms that still EXPAND TO
+        # `$PATH`: `${PATH}` and the default-if-unset spellings `${PATH:-…}` /
+        # `${PATH-…}` (PATH is always set, so they are `$PATH`). `${PATH+…}` and
+        # `${PATH:+…}` are NOT — they expand to the alternate value.
+        end = value.find("}")
+        head = value[: end + 1] if end != -1 else value.split(":", 1)[0]
+        return head in (pinned, "${PATH}") or head.startswith(
+            ("${PATH:-", "${PATH-")
+        )
+    head = value.split(":", 1)[0]
+    return head == pinned or head == "$PATH"
 
 
 def _path_assignments_that_drop_the_pin(
     steps: list[dict], start: int, server_major: int, job: dict | None = None
 ) -> list[str]:
-    """PATH assignments at or after the pin that can no longer see the pinned dir.
+    """PATH assignments at or after the pin that no longer keep it FIRST.
 
-    Only a value that neither names `/usr/lib/postgresql/<major>/bin` nor keeps
-    `$PATH` can DROP it, which is what keeps the rule precise: the pin's own
-    `export PATH="/usr/lib/postgresql/16/bin:$PATH"` and every append
-    (`PATH="$PATH:/x"`, `PATH=/x:$PATH`) stay green, and a diagnostic
-    `echo "PATH=$PATH"` is not an assignment at all.
+    A value keeps the pin only when its FIRST entry is the pinned dir or
+    `$PATH`/`${PATH}` — see `_keeps_the_pin_first` for why mere containment was
+    not enough. So the pin's own
+    `export PATH="/usr/lib/postgresql/16/bin:$PATH"` and every APPEND
+    (`PATH="$PATH:/x"`, `PATH=${PATH}:/x`) stay green, while a PREPEND of any
+    other directory (`PATH="/usr/bin:$PATH"`, `PATH="/usr/local/bin:$PATH"`)
+    is an offender, and a diagnostic `echo "PATH=$PATH"` is not an assignment at
+    all.
     """
 
     pinned = f"/usr/lib/postgresql/{server_major}/bin"
@@ -723,13 +862,71 @@ def _path_assignments_that_drop_the_pin(
             _effective_shell(job, steps[index]) + "\n" + _run_commands(steps[index])
         ).splitlines():
             for match in PATH_ASSIGN_RE.finditer(line):
-                value = match.group("value")
-                if pinned in value or "$PATH" in value or "${PATH}" in value:
+                if _keeps_the_pin_first(match.group("value"), pinned):
                     continue
                 if _command_word(line[: match.start()]) in PRINTING_COMMANDS:
                     continue
-                offenders.add(f"step {index} REPLACES the client PATH: {line.strip()!r}")
+                offenders.add(
+                    f"step {index} puts a directory ahead of the client PATH (or "
+                    f"replaces it): {line.strip()!r}"
+                )
     return sorted(offenders)
+
+
+#: `$GITHUB_ENV` is the SECOND command file (#12069 review P1). `$GITHUB_PATH` is
+#: not the only way to move a variable for later steps: a step that writes
+#: `PATH=/usr/bin` to `$GITHUB_ENV` moves the leg's PATH exactly as `env:` does,
+#: and nothing here read it. Nothing in this job names `$GITHUB_ENV`, so the name
+#: itself is refused outright — the same polarity as `_runner_file_commands`, and
+#: for the same reason: a write this guard cannot classify is an offender.
+GITHUB_ENV_MENTION_RE = re.compile(r"\bGITHUB_ENV\b")
+
+
+def _env_path_replacements(
+    steps: list[dict], server_major: int, job: dict | None = None
+) -> list[str]:
+    """`env: PATH` entries that move the leg's PATH off the pinned dir.
+
+    ⛔ `env:` WAS NEVER READ (#12069 review P1). Every PATH rule here read
+    `run:` / `shell:` ASSIGNMENTS, and `env:` is a different mechanism entirely:
+    GitHub applies it to the step's environment, so
+
+        env:
+          PATH: /usr/bin:/bin:/usr/local/bin
+
+    replaces the runner's composed PATH — pin included — for that step, and for
+    every later step at job scope. `/usr/bin/pg_dump` is `pg_wrapper` (the
+    image's newest client), so this is #12051 restored with every row green
+    (measured: the job-level form left the whole file `67 passed`). Workflow
+    scope is folded into the job by the `job()` fixture, so job scope here
+    covers both.
+
+    ⛔ AND `$PATH` DOES NOT RESCUE AN `env:` VALUE: GitHub does not expand shell
+    variables inside `env:` (`${{ }}` expressions are the only substitution), so
+    `PATH: $PATH:/x` sets PATH to the LITERAL string `$PATH:/x` — the pin is
+    gone, not kept. The pin is therefore kept only when the value literally
+    BEGINS with the pinned dir, which is stricter than the shell-assignment rule
+    above on purpose: there the shell does the expansion.
+    """
+
+    pinned = f"/usr/lib/postgresql/{server_major}/bin"
+    found: set[str] = set()
+    scopes: list[tuple[str, object]] = [("job", (job or {}).get("env"))]
+    scopes += [(f"step {index}", step.get("env")) for index, step in enumerate(steps)]
+    for where, env in scopes:
+        if not isinstance(env, dict):
+            continue
+        for key, value in env.items():
+            if str(key).upper() != "PATH":
+                continue
+            if str(value).split(":", 1)[0] == pinned:
+                continue
+            found.add(
+                f"{where} sets `env: PATH` to {value!r}, which does not start "
+                "with the pinned dir (`env:` is not shell-expanded, so `$PATH` "
+                "there is the literal string)"
+            )
+    return sorted(found)
 
 
 def _pin_step(steps: list[dict]) -> tuple[int, dict]:
@@ -1020,6 +1217,15 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
     # at workflow-level `defaults.run.shell`.
     replacements = sorted(
         set(_path_assignments_that_drop_the_pin(steps, pin_index, server_major, job))
+        # ⛔ `env:` AND `$GITHUB_ENV` MOVE THE SAME PATH (#12069 review P1). Both
+        # were unread, so both restored #12051 with every row green.
+        | set(_env_path_replacements(steps, server_major, job))
+        | {
+            f"step {index} mentions `$GITHUB_ENV`: {line!r}"
+            for index, step in enumerate(steps)
+            for line in _executed_lines(job, step)
+            if GITHUB_ENV_MENTION_RE.search(line)
+        }
         | {
             f"step {index} REPLACES a client binary: {line!r}"
             for index, step in enumerate(steps)
@@ -1036,8 +1242,9 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
     )
     assert not (offenders or other_majors or replacements), (
         "a `$GITHUB_PATH` write, a step's own PATH entry, a PATH ASSIGNMENT that "
-        "drops the pinned dir, or a REPLACEMENT of a client binary changes which "
-        "client the leg runs: "
+        "drops the pinned dir or puts something AHEAD of it, an `env: PATH` that "
+        "does not begin with the pinned dir, a `$GITHUB_ENV` write, or a "
+        "REPLACEMENT of a client binary changes which client the leg runs: "
         + "; ".join(offenders + other_majors + replacements)
         + ". Later writes and in-step assignments both WIN over the pin, and a "
         "replaced binary is what the pinned dir resolves, so the leg would run "
@@ -1370,6 +1577,39 @@ VERSION_CHECK_POLARITY = [
         {"pg_dump"},
         "printf mentions both, the only real check is pg_dump",
     ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  if [ "$tool" = pg_dump ]; then\n'
+        '    version="$("$tool" --version)"\n'
+        '  fi\ndone',
+        set(),
+        "#12069: a body that SELECTS on the loop variable covers no name",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  [ "$tool" = pg_restore ] && continue\n'
+        '  version="$("$tool" --version)"\n'
+        'done',
+        set(),
+        "#12069: a `continue` guard selects just as surely as an `if`",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  case "$tool" in\n'
+        '    pg_dump) version="$("$tool" --version)" ;;\n'
+        '  esac\n'
+        'done',
+        set(),
+        "#12069: `case` on the loop variable is a selection too",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  if [ "$major" != "16" ]; then exit 1; fi\n'
+        'done',
+        {"pg_dump", "pg_restore"},
+        "#12069: a condition on ANOTHER variable does NOT narrow the coverage",
+    ),
 ]
 
 
@@ -1377,13 +1617,53 @@ VERSION_CHECK_POLARITY = [
 #: `_path_assignments_that_drop_the_pin`. A PATH assignment that names no client
 #: dir was invisible, and `/usr/bin/pg_dump` is `pg_wrapper`, i.e. the image's
 #: newest client (#12051 review round 12, measured GREEN on all five rows).
+#: ⛔ AND PRECEDENCE IS THE INVARIANT, NOT CONTAINMENT (#12069 review P1): the
+#: pin being somewhere on the value does not help if something else is FIRST, so
+#: `PATH="/usr/bin:$PATH"` is an offender even though `$PATH` is still there.
 PATH_ASSIGNMENT_POLARITY = [
     ('export PATH="/usr/local/bin:/usr/bin:/bin"', True, "a bare replacement drops the pin"),
     ('PATH="/usr/bin:/bin" timeout -s INT bash x.sh', True, "a command-prefix assignment drops it"),
     ("env -i PATH=/usr/bin:/bin bash x.sh", True, "`env -i` drops it just as well"),
-    ('export PATH="/usr/lib/postgresql/16/bin:$PATH"', False, "the pin's own assignment"),
-    ('export PATH="$PATH:/usr/local/bin"', False, "an append cannot drop what is already there"),
-    ('PATH="/usr/local/bin:$PATH" bash x.sh', False, "a re-order keeps `$PATH` intact"),
+    (
+        'export PATH="/usr/lib/postgresql/16/bin:$PATH"',
+        False,
+        "the pin's own assignment: the pin is FIRST",
+    ),
+    (
+        'export PATH="$PATH:/usr/local/bin"',
+        False,
+        "an append cannot outrank what is already first",
+    ),
+    (
+        'export PATH="${PATH}:/usr/local/bin"',
+        False,
+        "the braced append is the same append",
+    ),
+    (
+        'PATH="/usr/local/bin:$PATH" bash x.sh',
+        True,
+        "a PREPEND outranks the pin, however harmless the directory looks",
+    ),
+    (
+        'export PATH="/usr/bin:${PATH}"',
+        True,
+        "the same prepend, braced: /usr/bin/pg_dump is pg_wrapper, the NEWEST client",
+    ),
+    (
+        'export PATH="${PATH:-/usr/bin}"',
+        False,
+        "a default-if-unset is still `$PATH`: PATH is always set",
+    ),
+    (
+        'export PATH="${PATH:+x}"',
+        True,
+        "the ALTERNATE value expands to `x`, not to `$PATH`",
+    ),
+    (
+        'export PATH="$PATHX:/bin"',
+        True,
+        "`$PATHX` is a DIFFERENT variable — the pin is dropped, not kept",
+    ),
     ('echo "PATH=/usr/bin"', False, "a diagnostic PRINTS a value, it does not assign one"),
 ]
 
@@ -1392,10 +1672,51 @@ PATH_ASSIGNMENT_POLARITY = [
     ("line", "drops", "why"), PATH_ASSIGNMENT_POLARITY, ids=[c.replace(" ", "-")[:28] for c, _, _ in PATH_ASSIGNMENT_POLARITY]
 )
 def test_a_path_assignment_must_keep_the_pinned_dir(line: str, drops: bool, why: str) -> None:
-    """Only a value that neither names the pin nor keeps `$PATH` can DROP it."""
+    """Only a value that puts the pin FIRST keeps it — containment is not precedence."""
 
     offenders = _path_assignments_that_drop_the_pin([{"run": line}], 0, 16)
-    assert bool(offenders) is drops, f"{why} (measured, round 12): {line!r}"
+    assert bool(offenders) is drops, f"{why} (measured, round 12 / #12069): {line!r}"
+
+
+#: (`if:` value, may it SKIP the step, why) — the pin for `_normalise_if`.
+#: ⛔ SPACING IS NOT MEANING IN A GITHUB EXPRESSION (#12069 review P2): the two
+#: spellings GitHub's own documentation uses were normalised into forms that
+#: matched no entry in `NON_SKIPPING_IF`, so the row red the CORRECT `if:` —
+#: `${{ ! cancelled() }}` and `success()||failure()` (both measured false RED).
+NON_SKIPPING_IF_POLARITY = [
+    ("success()", False, "the default condition"),
+    ("${{ success() }}", False, "the templated default"),
+    ("always()", False, "runs whenever the job is running at all"),
+    ("${{ always() }}", False, "templated `always()`"),
+    ("!cancelled()", False, "the docs' spelling of `always()`"),
+    (
+        "${{ ! cancelled() }}",
+        False,
+        "the SAME expression with the spacing the docs print",
+    ),
+    ("success() || failure()", False, "runs unless cancelled"),
+    (
+        "${{ success()||failure() }}",
+        False,
+        "the same `||` with no spaces around it",
+    ),
+    ("failure()", True, "a REAL condition: it skips the step on success"),
+    ("${{ github.event_name == 'push' }}", True, "a real condition, and it stays one"),
+]
+
+
+@pytest.mark.parametrize(
+    ("value", "skips", "why"),
+    NON_SKIPPING_IF_POLARITY,
+    ids=[c.replace(" ", "-").replace("$", "")[:30] for c, _, _ in NON_SKIPPING_IF_POLARITY],
+)
+def test_an_if_condition_is_read_however_it_is_spaced(
+    value: str, skips: bool, why: str
+) -> None:
+    """`! cancelled()` and `!cancelled()` are one condition, not two."""
+
+    found = _conditional_skip({"if": value})
+    assert bool(found) is skips, f"{why} (#12069 review): {value!r} -> {found!r}"
 
 
 #: (command, the major it installs, why) — the pin for `CLIENT_PKG_RE`.
