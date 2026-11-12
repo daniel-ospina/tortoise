@@ -27430,8 +27430,33 @@ class TortoiseSDK:
                 item, _item_flatten_depth(item, "entities"))
             if not _declares_status:
                 continue
-            if not (isinstance(own_status, str)
-                    and is_terminal_status(own_status)):
+            # ⛔ The TYPE dimension is part of this arm (review cycle 6, P1).
+            # `refuse_terminal_event_state` refuses a PERSISTABLE non-string
+            # status (an int glided through the membership test and stored a
+            # status no vocabulary can name) while a NON-persistable one is
+            # accepted-and-dropped, because the projection's persistable-value
+            # filter drops it before the `SET` (#7925's over-rejection class).
+            # Without this mirror a bundle carrying `status: 42` passed Phase 1
+            # and raised in step 3 with the point already committed — the same
+            # partial-mutation class, in the dimension this arm had not swept
+            # (measured: `phase1: []` then `ValueError`, point count 0 → 1).
+            if not isinstance(own_status, str):
+                from .live import _status_is_discarded_by_every_writer
+                if _status_is_discarded_by_every_writer(own_status):
+                    continue
+                violations.append({
+                    "section": "entities", "index": i,
+                    "message": f"ingest: entities[{i}] declares status "
+                               f"{own_status!r} for an :Event — `status` on "
+                               f"the node is a STRING drawn from the "
+                               f"vocabulary, or `None` to clear it, so the "
+                               f"bundle is rejected at validation rather "
+                               f"than mid-write. WHAT TO DO: pass a string "
+                               f"(the door accepts `scheduled`/`draft`/"
+                               f"`live`), or drop `status`.",
+                })
+                continue
+            if not is_terminal_status(own_status):
                 continue
             violations.append({
                 "section": "entities", "index": i,
