@@ -1459,10 +1459,29 @@ def test_a_mitigation_targets_a_COHERENCE_bridge_too(sdk):
     from tortoise.commit_ops import apply_payload_operators
     from tortoise.extractor_v2 import _target_emitted
 
-    # the producer's own decision, as a unit:
+    # the producer's own decision, as a unit. ⛔ THE DETECTION SET IS THE CLOSED
+    # SET'S THREE, not the schema's two (#12067 review round 13, P2): a plain
+    # operator entry may be NAND (`commit_schema.Operator.op_type` admits it), so
+    # a pair can already carry NAND, and a set without it makes this function
+    # answer "no" — the #2552 arm then mints an IMPL twin the closed set refuses,
+    # which is the same two-warnings-blaming-the-wrong-cause shape as round 4.
     assert _target_emitted("A", "B", {("A", "B", "coherence")}) is True
     assert _target_emitted("A", "B", {("A", "B", "IMPL")}) is True
+    assert _target_emitted("A", "B", {("A", "B", "NAND")}) is True, (
+        "a NAND pair must look emitted — `Operator.op_type` admits NAND, so "
+        "`emitted_edges` can carry it")
     assert _target_emitted("A", "B", set()) is False
+
+    # ⛔ ... and the DECLARATION set is the SCHEMA's two, which is a different
+    # question. Pinned together so the two cannot drift: the day the schema
+    # admits a NAND target, this raises and the producer's set is widened.
+    from pydantic import ValidationError
+
+    from tortoise.commit_schema import OperatorTarget
+    assert list(OperatorTarget.model_fields["op_type"].annotation.__args__) == [
+        "IMPL", "coherence"], "the schema's admitted target mechanisms moved"
+    with pytest.raises(ValidationError):
+        OperatorTarget(src="a", dst="b", op_type="NAND")
 
     # ... and end-to-end through the commit layer, which is where it was lost.
     a = sdk.create_point("statement", "mit condition")["id"]
@@ -1481,3 +1500,25 @@ def test_a_mitigation_targets_a_COHERENCE_bridge_too(sdk):
         "MATCH (o:Point) WHERE o.is_operator = true "
         "RETURN o.op_type").result_set
     assert mechanisms == [["coherence"]], mechanisms
+
+    # ⛔ AND THE DECLARATION IS LOAD-BEARING (#12067 review round 13, P1). The
+    # probe used to filter `op_type IN ['IMPL','coherence']`, so a payload
+    # declaring a DIFFERENT mechanism attached to this bridge anyway — silently,
+    # on exactly the pair the declaration was about: a mitigation that says
+    # "support" damping a necessity. Written as an EARLIER call's bridge, because
+    # a same-call operator is in `target_op_ids` and never reaches the probe.
+    c = sdk.create_point("statement", "impostor mitigation")["id"]
+    d = sdk.create_point("statement", "impostor target")["id"]
+    apply_payload_operators(sdk._get_proj(), sdk, [
+        {"src": c, "dst": d, "op_type": "coherence", "direction": "->"},
+    ])
+    apply_payload_operators(sdk._get_proj(), sdk, [
+        {"src": c, "dst": d, "op_type": "MITIGATES",
+         "target": {"src": c, "dst": d, "op_type": "IMPL"},
+         "strength": 0.3},
+    ])
+    impostor = sdk._get_proj().g.query(
+        "MATCH (:Point)-[:mitigated_by]->(m:Point) RETURN m.id").result_set
+    assert len(impostor) == 1, (
+        "a MITIGATES declaring IMPL attached to a coherence bridge — the probe "
+        f"is not reading the declared target mechanism: {impostor}")

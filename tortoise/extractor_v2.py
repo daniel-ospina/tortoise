@@ -9934,11 +9934,20 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
     return kept, dropped
 
 
-#: The mechanisms a MITIGATES bridge may sit on (#12067). Both are stored on
-#: the `:IMPL` edge type — `ep.MECHANISM_REL_TYPES` is what says so — so the
-#: target's src/dst pair is the same key either way; only the operator NODE's
-#: `op_type` differs.
-_MITIGATABLE_MECHANISMS = ("coherence", "IMPL")
+#: The mechanisms that can already be on a MITIGATES target's pair — the CLOSED
+#: SET's three, which is a DIFFERENT question from what a payload may DECLARE.
+#: `_target_emitted` asks "has this pair already got a mechanism?", so every
+#: mechanism `emitted_edges` can carry belongs here: `Operator.op_type` admits
+#: NAND, so a plain operator entry can put `(src, dst, "NAND")` on the pair, and
+#: a set without NAND makes the #2552 arm mint an IMPL twin over it — the twin
+#: the closed set refuses, i.e. the two-warnings-blaming-the-wrong-cause shape
+#: round 4 fixed for `coherence` (#12067 review round 13, P2).
+#: The DECLARATION leg is narrower and is the SCHEMA's call, not this tuple's:
+#: `commit_schema.OperatorTarget.op_type` is `Literal["IMPL", "coherence"]` (a
+#: NAND target raises `ValidationError`) and the producer computes
+#: `_target_mech` as coherence-else-IMPL. Storage spelling: `coherence` shares
+#: `:IMPL` with IMPL; NAND lives on `:NAND` (`ep.MECHANISM_REL_TYPES`).
+_MITIGATABLE_MECHANISMS = ("coherence", "IMPL", "NAND")
 
 
 def _target_emitted(t_src, t_dst, emitted_edges) -> bool:
