@@ -1364,8 +1364,15 @@ def _assert_no_stale_citation_claim(text: str, blocks: list[str], citing: list[s
        other units is not read at all, and is asserted to pass.
     2. ``the N blocks that cite nothing`` — the complement, restated in prose.
     3. an ordinal sentence naming ``D2 — A``, recognised by ``_D2_ORDINAL_PATTERN``
-       (the same pattern the pin parses the SCOPE paragraph with), anchored so a true
-       remark about the OTHER v3.33 entry is not read as a misidentification.
+       (the same pattern the pin parses the SCOPE paragraph with). ⛔ WHAT THIS COSTS,
+       as the code performs it: the sentence is the unit, so a text that names
+       ``D2 — A`` AND an ordinal in one sentence is read as calling the lander that
+       ordinal — a true remark about the OTHER v3.33 entry that also names the lander
+       in the same sentence is REFUSED (measured: a true sentence naming the lander
+       and that other entry's ordinal reds here). Write such a remark as its own
+       sentence, without ``D2 — A``. The anchoring buys the case that
+       actually happens — a sentence about the other entry ALONE — and the message
+       says which of the two it saw, so the next lane is not told what its text said.
 
     Returns the ordinals it saw, so the caller can require that the module says which
     of the two entries lands the block at all (a prose requirement, not a verdict).
@@ -1392,8 +1399,11 @@ def _assert_no_stale_citation_claim(text: str, blocks: list[str], citing: list[s
                 for word in re.findall(_D2_ORDINAL_PATTERN, sentence, re.I)]
     for word in ordinals:
         assert (word.lower() == "first") == lands_first, (
-            f"this text calls the `D2 — A` block the {word.lower()} of the two v3.33 "
-            f"entries; measured, it is the {'first' if lands_first else 'second'}")
+            "a sentence here names both `D2 — A` and the "
+            f"{word.lower()} of the two v3.33 entries, so the sweep reads it as "
+            f"calling the D2 block the {word.lower()}; measured, it is the "
+            f"{'first' if lands_first else 'second'}. If the sentence is making a "
+            "different point, move the ordinal out of the `D2 — A` sentence.")
     return ordinals
 
 
@@ -1626,8 +1636,13 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     and the comment beside the sweep are swept too, which is why neither may quote a
     stale number in bold), every ``the N blocks that cite nothing``, every
     ``the first/second of the two v3.33 entries`` in a sentence that also names
-    ``D2 — A``, and every ``#issuecomment-<id>`` in a DOCSTRING (which must be a
-    permalink the landing block carries).
+    ``D2 — A``, and every ``#issuecomment-<id>`` in a DOCSTRING — one that SOME block
+    must carry in an accepted citation form, and, in the sibling docstring ALONE, one
+    the landing block itself must carry (the ``carrier`` arm). The earlier sentence
+    said "the landing block" for both, which no code performs: it read as a refusal
+    for another block's permalink that does not happen (measured — a docstring citing
+    the v3.32 block's id stays green), i.e. a scope sentence claiming more enforcement
+    than the code performs, which is finding 2's class.
 
     A count restated OUTSIDE those shapes is prose this pin does not read —
     measured, and green: *"Only 3 of 39 blocks cite a comment id."*, *"measured 3
@@ -1899,9 +1914,22 @@ def test_every_declared_sweep_arm_refuses_a_stale_restatement() -> None:
     if (stale_numerator, len(blocks)) in {(len(citing), len(blocks)),
                                           (len(blocks) - len(citing), len(blocks))}:
         stale_numerator += 1
+    # ⛔ BOTH SIDES OF THE ACCEPTED SET ARE PROBED. Only the HIGH side was, and a
+    # one-line widening of the acceptance set re-admitted the very number #12089 was
+    # filed about with the file still green (measured: admitting the count one BELOW
+    # the measurement left all 56 passing, so the historical stale figure could come
+    # back invisibly). The low side is skipped only where it collides with the
+    # complement, which is a true value the arm must accept.
+    low_numerator = len(citing) - 1
+    low_side = () if (low_numerator, len(blocks)) in {
+        (len(citing), len(blocks)),
+        (len(blocks) - len(citing), len(blocks))} else (
+        ("the bold-pair arm (low side)",
+         f"this text states **{low_numerator} of {len(blocks)}** somewhere"),)
     stale_restatements = (
         ("the bold-pair arm",
          f"this text states **{stale_numerator} of {len(blocks)}** somewhere"),
+        *low_side,
         ("the complement arm",
          f"it restates the {len(blocks) - len(citing) + 1} blocks that cite nothing"),
         ("the ordinal arm",
@@ -1999,8 +2027,12 @@ def test_the_citation_pin_calls_every_arm_it_declares() -> None:
     call, so an unwiring reds here with the arm's name.
 
     ⛔ A WIRING check, not a behaviour check: it does not prove the arm refuses the
-    right input (the previous test does), only that it is reached. Both are needed,
-    and neither substitutes for the other.
+    right input (the previous test does), only that it is reached — and it names the
+    ARGUMENTS too, because reverting the module-wide arm to the lander alone is
+    invisible to a helper-level test: measured, `_refuse_unresolvable_evidence(
+    prose, [lands_d2[0]])` left the file at 56 passed while the sweep's paragraph
+    above still said "SOME block". Both checks are needed, and neither substitutes
+    for the other.
     """
     source = inspect.getsource(
         test_the_citation_scope_docstring_states_the_measured_count)
@@ -2008,9 +2040,9 @@ def test_the_citation_pin_calls_every_arm_it_declares() -> None:
         "the sweep arms (bold, complement, ordinal)":
             "_assert_no_stale_citation_claim(",
         "the uniqueness scan": "_refuse_a_duplicated_statement(",
-        "the module-wide permalink arm":
-            "_refuse_unresolvable_evidence(prose",
-        "the carrier arm": "_refuse_unresolvable_evidence(doc",
+        "the module-wide permalink arm against EVERY block":
+            "_refuse_unresolvable_evidence(prose, blocks)",
+        "the carrier arm": "_refuse_unresolvable_evidence(doc, blocks, carrier=",
     }
     missing = sorted(name for name, marker in required.items()
                      if marker not in source)
