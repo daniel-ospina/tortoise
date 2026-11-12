@@ -1344,7 +1344,12 @@ class LLMExtractor:
         # the phrase's offset inside it. See the census in the return value.
         held_subjects: list[dict] = []
 
-        for title, body, span in sections:  # noqa: B007
+        # ⛔ The ruff B007 silencing directive that used to sit on this loop is
+        # GONE, and that IS the #12094 change: `span` was an unused loop control
+        # variable until the held-surface record started carrying
+        # `"span": list(span)`, so keeping it would red RUF100 (an unused
+        # silencing directive) rather than silence anything.
+        for title, body, span in sections:
             try:
                 entities = stage.run(title, body, context)
             except Exception:

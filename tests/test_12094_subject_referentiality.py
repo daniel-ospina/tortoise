@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from typing import ClassVar
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -65,12 +66,12 @@ class _FixedStage:
     about a model's output.
     """
 
-    payload: dict = {}
+    payload: ClassVar[dict] = {}
 
-    def __init__(self, *args, **kwargs):  # noqa: D107 - mirrors _SemanticStage
+    def __init__(self, *args, **kwargs):
         pass
 
-    def run(self, title, body, context):  # noqa: D102
+    def run(self, title, body, context):
         return self.payload
 
 
