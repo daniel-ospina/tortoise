@@ -1420,6 +1420,23 @@ class EventAPI:
             # caller could just pass (`_emit(…, _seam_mints=True)` LANDED the same
             # forgery). So the test is a PREDICATE instead: re-derive the value the
             # seam would mint and compare. A caller can only pass the TRUTH.
+            #
+            # ⛔ AND THE COST IS THE POINT: this runs `resolve_source_versions` a
+            # SECOND time on the live write path, because `add_point` resolved it
+            # to mint the value it hands this funnel. Measured at #11996 review
+            # round 13 (5 `add_point` calls, one `contentHash`-bearing source
+            # each): `resolve_source_versions` 10 calls vs 5 with the arm disabled,
+            # `resolve_source_key` 15 vs 10, 47.8 ms vs 37.4 ms — ~2 ms per
+            # sourced point, on the extraction hot path.
+            #
+            # It is NOT removable by reusing the caller's value, which is the
+            # whole class this PR closes: every channel that would carry it
+            # (`seam_mints`, the channel name, a module-private token a caller can
+            # import) is caller-suppliable or caller-reachable, and a re-used value
+            # is a TRUSTED one. A memoised resolution would have to be keyed by
+            # `(graph, extractedFrom)` on the instance, i.e. a cache whose staleness
+            # is a new correctness surface for a ~2 ms saving. Stated here instead
+            # of left for the next reader to measure.
             if _named_from_caller(record[0], _DERIVE_ON_RECORD):
                 _declared_sv = record[0]["sourceVersionTransit"]
                 _g = getattr(self.projection, "g", None)

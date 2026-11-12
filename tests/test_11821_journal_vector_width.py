@@ -1489,15 +1489,15 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
     #
     # The exemption is a DERIVED PREDICATE, not a declared signal: `_emit`
     # re-derives `_source_version_transit(resolve_source_versions(g,
-    # extractedFrom))` and refuses a mismatch or an underivable value
-    # (`tortoise/api.py:1355-1391`, `_DERIVE_ON_RECORD`), and it checks the SHAPE
+    # extractedFrom))` and refuses a mismatch or an underivable value (the
+    # `_DERIVE_ON_RECORD` arm of `_emit`), and it checks the SHAPE
     # (`type(...) is list` of exact `[str, str]` pairs) BEFORE comparing, because
     # `!=` would delegate to a caller's `__eq__`. Both earlier designs are recorded
-    # as MEASURED caller-suppliable at `tortoise/api.py:1348-1352` — a channel-name
-    # scope AND a caller-passable `seam_mints` keyword (`_emit(…, _seam_mints=True)`
-    # LANDED the same forgery) — so neither is a mechanism and this comment must not
-    # name one. Falsifier: replace the derive arm with either of those signals and
-    # this row lands.
+    # in that same comment as MEASURED caller-suppliable — a channel-name scope AND
+    # a caller-passable `seam_mints` keyword (`_emit(…, _seam_mints=True)` LANDED
+    # the same forgery) — so neither is a mechanism and this comment must not name
+    # one. Falsifier: replace the derive arm with either of those signals and this
+    # row lands.
     # ⛔ AND `projection_version` IS REFUSED AT THE DOORS TOO, not only inside the
     # record (#11996 review round 10, measured): putting the key ONE LEVEL OUT
     # defeated the #49 v2 stop-write on a public door —
