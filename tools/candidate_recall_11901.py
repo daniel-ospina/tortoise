@@ -136,7 +136,7 @@ these those it its they them their we our you your he she his her
 """.split())
 
 
-def harvest(sessions_dir: Path) -> dict[str, collections.Counter]:
+def harvest(sessions_dir: Path, stats: dict | None = None) -> dict[str, collections.Counter]:
     """Real capture text -> candidate entity names, by the three declared rules.
 
     Returns ``{class: Counter(name -> record-frequency)}``. Frequency counts the
@@ -146,7 +146,16 @@ def harvest(sessions_dir: Path) -> dict[str, collections.Counter]:
     times in one turn is one mention. (Stated this narrowly because the first
     draft called it "turn-frequency" while the ``seen`` set was created per
     record, which is a different population — review round 2, F5.)
+
+    ``stats``, when given, is filled with this call's OWN input accounting
+    (``lines``, ``parse_errors``, ``records_without_text``). Both ``continue``s
+    below drop a record SILENTLY, and without a counter an artifact cannot
+    distinguish "the corpus lost names" from "the harness stopped parsing
+    records" — which is exactly the distinction a re-run has to make, so the
+    instrument now reports how much of its own input it discarded.
     """
+    if stats is not None:
+        stats.update(lines=0, parse_errors=0, records_without_text=0)
     out: dict[str, collections.Counter] = {c: collections.Counter()
                                            for c in ("definite", "ident", "path")}
     files = sorted(sessions_dir.glob("*.jsonl"))
@@ -154,9 +163,13 @@ def harvest(sessions_dir: Path) -> dict[str, collections.Counter]:
         raise SystemExit(f"no session events under {sessions_dir}")
     for f in files:
         for line in f.open(errors="replace"):
+            if stats is not None:
+                stats["lines"] += 1
             try:
                 rec = json.loads(line)
             except Exception:
+                if stats is not None:
+                    stats["parse_errors"] += 1
                 continue
             parts = []
             for turn in rec.get("conversation") or []:
@@ -164,6 +177,8 @@ def harvest(sessions_dir: Path) -> dict[str, collections.Counter]:
                 if isinstance(c, str):
                     parts.append(c)
             if not parts:
+                if stats is not None:
+                    stats["records_without_text"] += 1
                 continue
             blob = "\n".join(parts)
             seen: set[tuple[str, str]] = set()
@@ -289,7 +304,8 @@ def run(args: argparse.Namespace) -> int:
 
     sessions = Path(os.path.expanduser(args.sessions_dir))
     t0 = time.time()
-    harvested = harvest(sessions)
+    _input_stats: dict = {}
+    harvested = harvest(sessions, stats=_input_stats)
     pop = build_population(harvested, args.population)
     if not pop:
         print("REFUSED: the harvest produced no names", file=sys.stderr)
@@ -491,6 +507,7 @@ def run(args: argparse.Namespace) -> int:
             "issue": 11901,
             "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "corpus": {"dir": str(sessions), "files": len(list(sessions.glob("*.jsonl"))),
+                       "input": dict(_input_stats),
                        "harvested_distinct": counts, "population": len(pop),
                        "sample": len(sample), "elapsed_s": round(time.time() - t0, 1)},
             "ks": list(KS),

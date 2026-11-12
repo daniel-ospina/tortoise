@@ -107,7 +107,11 @@ under this harvest: re-running the committed `harvest()` over the same nine file
 **91,725** distinct definite descriptions — **−10.9 %** — *fewer* than the earlier artifact, which appends alone
 cannot produce. The mechanism is unidentified and this document makes no claim about it (the capture hook appends;
 what else may touch the directory was not traced). What IS established is the consequence: a between-run gap on
-this corpus varies by far more than 0.18 %, so that number is not the yardstick. The artifacts carry their own
+this corpus varies by far more than 0.18 %, so that number is not the yardstick. ⚠️ **The instrument now reports its
+own input accounting** — `corpus.input`, holding `lines`, `parse_errors` and `records_without_text`, added after
+this measurement — so a re-run can separate *the corpus lost names* from *the harness stopped parsing records*.
+The two committed artifacts predate that field and carry none, which is why the drop above is stated as measured
+and not diagnosed. The artifacts carry their own
 `corpus.harvested_distinct`, so the drift is visible rather than silent — and it is why **§3.1's class deltas are
 BETWEEN-RUN, not paired**: they are two samples of the same live corpus, not one population measured twice. A
 paired version needs the population written out (`--population-file`), which this harness does not yet do; treat
@@ -162,8 +166,8 @@ the two states with different fixes.
 ### 3.1 The finding that matters most: the dense leg moves the classes in OPPOSITE directions
 
 ⚠️ **Between-run, not paired** (§2): the two artifacts sampled the same live corpus ~60 s apart, not the identical
-population. The direction of every delta below is large relative to the 0.18 % those two runs differ by — although
-§2 measures that number as a **floor, not a bound** — but the magnitudes are not a controlled effect size.
+population, and §2 measures that this corpus is not even monotone under this harvest — so the direction of every
+delta below is not established as stable between runs, and the magnitudes are not a controlled effect size.
 
 | class | n | keyword-only @3 | **hybrid @3** | change | hybrid @15 |
 |---|---|---|---|---|---|
@@ -342,11 +346,12 @@ harness has a prior-off arm — and is pinned as text); §3's prose derivatives 
 identifier share, the crowding mean and median); §6's and §7's restatements (the recall pair, the pooled mean, the
 fold's two denominators, the width residual, the class deltas, the wall clock); §2's between-run drift (the
 `corpus.harvested_distinct` pair and the percentage between them) and §3's keyword-only miss split and k=5 mean
-rank; and §8's `rows_zero` claim. **Not pinned, and cannot be:** everything §2 says about the corpus ITSELF — the
-file count is carried as `corpus.files`, but the corpus is live, so nothing about its growth is; and §2's re-run
-figure (**91,725**) is a dated measurement of a directory that changes under it. The record and character totals
-this section used to quote are gone for the opposite reason: they were never in the artifact and did not
-reproduce against the corpus they named. One unpinned sentence is the honest state; an unpinned TABLE is not.
+rank; §2's corpus shape as the artifacts record it (`corpus.files` and `corpus.population` — the file count and the
+population size); and §8's `rows_zero` claim. **Not pinned, and cannot be:** everything §2 says about the corpus
+CHANGING — §2's re-run figure (**91,725**) is a dated measurement of a directory that moves under it, and the
+record and character totals this section used to quote are gone for the opposite reason: they were never in the
+artifact and did not reproduce against the corpus they named. One unpinned sentence is the honest state; an
+unpinned TABLE is not.
 
 ## 10. Write-back
 

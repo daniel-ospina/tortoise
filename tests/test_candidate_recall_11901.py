@@ -620,6 +620,17 @@ def test_the_briefs_restatements_all_recompute(report, control):
     assert f"a {drift:.2f} % drift" in text, (
         f"§2 does not state the recomputed between-run drift ({drift:.2f} %)")
 
+    # ── §2: the corpus SHAPE the artifacts record. Both are committed
+    # integers — the file count and the population size — so they are pinnable
+    # in one line each, and §9 has to be right about which corpus facts are
+    # pinned and which are the live-collapse material it cannot pin.
+    assert f"{report['corpus']['files']} daily files" in text, (
+        f"§2 does not state the artifact's file count ({report['corpus']['files']})")
+    assert (f"Population {report['corpus']['population']:,}, "
+            f"stratified sample {report['corpus']['sample']}.") in text, (
+        "§2 does not state the artifact's population and sample sizes "
+        f"({report['corpus']['population']:,} / {report['corpus']['sample']})")
+
     # ── §6: the headline restated in the external-findings section.
     exact = report["arms"]["exact"]
     n = report["corpus"]["sample"]
@@ -704,3 +715,54 @@ def test_the_brief_keeps_its_two_standing_negatives():
     # The KEEP ruling is quoted, never re-opened.
     assert "No pass may remove those embeddings" in text
     assert "reopen" in text
+
+
+def test_the_harness_reports_how_much_of_its_own_input_it_discarded(tmp_path):
+    """`harvest()` drops two kinds of record SILENTLY; it must now count them.
+
+    Both `continue`s (an unparseable line, a record with no text) used to leave
+    no trace, so an artifact could not distinguish *"the corpus lost 11k names"*
+    from *"the harness stopped parsing records"* — the one distinction a re-run
+    has to make. The committed artifacts predate `corpus.input` and carry none;
+    this asserts the INSTRUMENT reports it, which is the part the harness owns.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("candidate_recall_11901", TOOL)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(mod)
+
+    day = tmp_path / "2026-01-01.jsonl"
+    day.write_text(
+        '{"conversation": [{"content": "the widget is broken"}]}\n'  # 1 good record
+        'not json at all\n'                                          # 1 parse error
+        '{"conversation": []}\n'                                     # 1 without text
+        '{"conversation": [{"content": 42}]}\n',                     # content not a str
+        encoding="utf-8")
+
+    stats: dict = {}
+    counts = mod.harvest(tmp_path, stats=stats)
+
+    assert stats["lines"] == 4, "every line must be counted, including the bad ones"
+    assert stats["parse_errors"] == 1
+    assert stats["records_without_text"] == 2, (
+        "an empty conversation AND a non-string content are both 'no text' — and "
+        "both used to vanish without a trace")
+    # The accounting did not change what the harvest produces.
+    assert counts["definite"], "the one good record must still contribute a name"
+
+
+def test_the_input_counters_are_wired_into_the_artifact_it_writes():
+    """The counters exist in `harvest()` AND in the report it feeds.
+
+    A counter nobody writes to the artifact would be the same blind spot in a
+    new place: the re-run reads the JSON, not the function's return value.
+    """
+    src = TOOL.read_text()
+    assert "harvest(sessions, stats=_input_stats)" in src, (
+        "main() must pass its stats dict into harvest(), or the counters are dead")
+    assert '"input": dict(_input_stats)' in src, (
+        "the report's corpus block must carry the input accounting, or a re-run "
+        "cannot see it")
+    assert "records_without_text=0" in src, "the counters must be initialised"
