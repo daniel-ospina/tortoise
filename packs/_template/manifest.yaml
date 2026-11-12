@@ -177,10 +177,13 @@ ontology:
   #   - mechanism: IMPL (A supports B) or NAND (A contradicts B).
   #     ⛔ `coherence` (A is a NECESSARY CONDITION for B) is a valid mechanism
   #     since #12067, but a relation declared HERE writes an operator-LESS bare
-  #     edge, whose mechanism IS its edge type — and there are two. Declaring
-  #     `coherence` here validates, then DROPS at capture with a reason naming
-  #     this limit (#12067's open follow-up): reach necessity as an OPERATOR
-  #     (`create_operator(op_type="coherence")`) instead.
+  #     edge, whose mechanism IS its edge type — and there are two. So declaring
+  #     `coherence` here is REFUSED when the pack loads (the manifest does not
+  #     validate), and a catalog that reaches the write leg anyway DROPS the
+  #     relation with a reason naming this limit rather than re-spelling it IMPL
+  #     (#12067's open follow-up — carriage on the bare-edge leg). Reach
+  #     necessity as an OPERATOR (`create_operator(op_type="coherence")`)
+  #     instead.
   #     ⤷ a declared `mechanism` is what BINDS this verb to the operator write
   #       path (#2766): it is the op_type a caller passes
   #       (`create_operator(op_type=mechanism, label=predicate)`, the path
@@ -322,7 +325,7 @@ extraction:
 #                        predicate:        the domain verb
 #                        mechanism:        IMPL | NAND — the same pair
 #                                          `ontology.relations` accepts.
-#                                          (`coherence` is valid but not
+#                                          (`coherence` is refused here: not
 #                                          carriable on a bare edge — #12067.)
 #                                          ⛔ NOT MITIGATES: it was RETIRED from
 #                                          the operator menu by the F1 ruling

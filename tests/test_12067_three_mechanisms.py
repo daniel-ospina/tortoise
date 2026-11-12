@@ -1049,9 +1049,12 @@ class _OneRelationRegistry:
 def test_a_pack_relation_declaring_coherence_is_NOT_silently_written_as_IMPL():
     """⛔ THE PACK/CAPTURE ARM OF THE SAME SILENCE (#12067 review round 4, P1).
 
-    This PR widened pack validation to accept ``mechanism: coherence`` on a
-    relation. The operator-less direct-edge leg that CONSUMES a pack relation
-    carries only ``IMPL``/``NAND`` — and ``relation_write._mechanism_for`` used to
+    A pack relation may declare ``mechanism: coherence`` only if the catalog
+    reaches the write leg WITHOUT the manifest validator (which refuses it — see
+    ``test_the_pack_leg_refuses_coherence_until_the_carriage_exists``); this arm
+    is the defence in depth. The operator-less direct-edge leg that CONSUMES a
+    pack relation carries only ``IMPL``/``NAND`` — and
+    ``relation_write._mechanism_for`` used to
     scan the declaration list for the first *carriable* mechanism, so a row
     declaring ``coherence`` was replaced by whatever its ``semantics`` mapped to:
 
