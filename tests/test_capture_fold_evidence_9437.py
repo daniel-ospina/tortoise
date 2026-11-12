@@ -409,7 +409,8 @@ class _FakeGraph:
     def __init__(self, *, dup_row=_DUP_ROW, edges=(), carried=(0, None),
                  canon_row=_CANON_ROW, raise_on=frozenset(),
                  dup_props=None, inbound=(), canon_rows=None,
-                 dup_status=None, dup_is_operator=None, dup_labels=("Point",)):
+                 dup_status=None, dup_is_operator=None, dup_labels=("Point",),
+                 dup_prov_source=None):
         self.dup_row = dup_row
         self.edges = list(edges)
         self.carried = carried
@@ -426,6 +427,9 @@ class _FakeGraph:
         self.dup_is_operator = dup_is_operator
         #: The duplicate's own LABELS — the one class `properties(d)` cannot see.
         self.dup_labels = tuple(dup_labels)
+        #: The duplicate's own `provenanceSource` — the OTHER provenance pointer,
+        #: read as a REF, so a differing one must refuse.
+        self.dup_prov_source = dup_prov_source
         #: The canonical's own `extractedFrom` targets — a provenance edge on the
         #: duplicate may only die when the canonical holds the same one.
         self.canon_prov_targets = []
@@ -437,7 +441,7 @@ class _FakeGraph:
         self.dup_props = dup_props
 
     @staticmethod
-    def _to_query_row(row, status, is_operator):
+    def _to_query_row(row, status, is_operator, prov_source=None):
         """The fixture's 12-tuple → the QUERY's column order.
 
         `_COLUMNS` is the fixture order (evidence×10, confidence, pointKind);
@@ -452,7 +456,7 @@ class _FakeGraph:
         assert len(base) == 12, f"fixture row is {len(base)} wide, expected 12"
         # query order: evidence×10, status, is_operator, provenanceSource,
         # confidence, pointKind
-        return (*base[:10], status, is_operator, None, *base[10:])
+        return (*base[:10], status, is_operator, prov_source, *base[10:])
 
     def apply_slot(self, props: dict) -> None:
         """Simulate `update_point` landing: the read-back must SEE it."""
@@ -490,7 +494,8 @@ class _FakeGraph:
             # not select it, so the two branches differ by exactly that.
             return SimpleNamespace(
                 result_set=[(*self._to_query_row(
-                    self.dup_row, self.dup_status, self.dup_is_operator),
+                    self.dup_row, self.dup_status, self.dup_is_operator,
+                    self.dup_prov_source),
                     self.dup_props, list(self.dup_labels))])
         if "c.extractedFrom" in q:
             # `canon_row=None` is the "canonical cannot be read" arm;
@@ -537,9 +542,10 @@ class _FakeSDK:
 
 
 def test_an_unaddressable_attachment_refuses():
-    """An `about*` link whose target has no id cannot be re-pointed
-    (`link_entity` MERGEs on `{id:$id}` and would mint a DIFFERENT node), so
-    the fold must keep the duplicate. Token: `unaddressable`."""
+    """An `about*` link whose target has NEITHER an id nor a url cannot be
+    re-pointed — nothing can NAME it: the writer addresses its target by
+    `{id:$id}`, and `link_entity` MINTS nothing — so the fold keeps the
+    duplicate. Token: `unaddressable`."""
     proj = _FakeProj(_FakeGraph(edges=[("aboutObject", "Object", "", None)]))
     out = capture_fold.carry_fold_evidence(proj, "pt_dup", "pt_canon")
     assert out["ok"] is False and out["reason"] == "unaddressable", out
@@ -1293,10 +1299,17 @@ def test_the_canonical_read_normalises_a_string_ref_list_too():
 
 
 def test_a_source_link_refuses_as_unaddressable_and_a_point_link_is_carried():
-    """The two §3.2 triples no test constructed end to end: `aboutSource` targets
-    a `:Source`, which is `url`-keyed and carries NO id, so it must refuse as
-    `unaddressable` rather than claim a carry; `aboutAction` (Point→Point) is
-    carriable and counts as present."""
+    """The two §3.2 triples no test constructed end to end: `aboutSource` refuses
+    rather than claim a carry, and `aboutAction` (Point→Point) is carriable and
+    counts as present.
+
+    ⚠️ The FIXTURE's condition is a target with NEITHER an id NOR a url (the
+    address column here is `""`), which is genuinely `unaddressable`. A REAL
+    url-keyed `:Source` is a different shape: the outbound read coalesces
+    `t.id, t.url`, so it IS addressable and refuses as `link_not_carried` — that
+    is `test_a_real_source_link_refuses_as_link_not_carried`, and an earlier
+    version of THIS docstring claimed the url-keyed case was unaddressable.
+    """
     src = _FakeGraph(edges=[("aboutSource", "Source", "", None)])
     out = capture_fold.carry_fold_evidence(
         _FakeProj(src), "pt_dup", "pt_canon")
@@ -1797,3 +1810,53 @@ def test_a_BLANK_source_ref_is_reported_not_silently_dropped():
     # …and it does NOT become a refusal: a blank ref is not a MISSING ref, so the
     # duplicate's other evidence still folds.
     assert out["reason"] is None, out
+
+
+# ── 20) round 17: the two disclosures that were mutation-deletable ──
+
+
+def test_a_RETRACTED_duplicates_status_is_reported_not_swallowed():
+    """`status` and `is_operator` were crossed in SILENCE while declared
+    structural; the comment says `_REPORTED_FIELDS` now reports a difference —
+    and nothing tested it. Measured by mutation: adding
+    `and k not in ("status", "is_operator")` to the `support` comprehension left
+    all 79 tests green, so re-silencing exactly these two fields was undetected.
+    """
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(_FakeGraph(dup_status="retracted")), "pt_dup", "pt_canon")
+    assert any("status (duplicate 'retracted', canonical None)" in r
+               for r in out["residual"]), out
+
+
+def test_an_OPERATOR_flag_is_reported_only_when_TRUTHY():
+    """The second guard: `is_operator` False is the default, so reporting it would
+    put a residual on every fold whose canonical lacks the flag. Only a truthy
+    flag is a fact worth comparing."""
+    op = capture_fold.carry_fold_evidence(
+        _FakeProj(_FakeGraph(dup_is_operator=True)), "pt_dup", "pt_canon")
+    assert any("is_operator (duplicate True, canonical None)" in r
+               for r in op["residual"]), op
+    plain = capture_fold.carry_fold_evidence(
+        _FakeProj(_FakeGraph(dup_is_operator=False)), "pt_dup", "pt_canon")
+    assert not any("is_operator" in r for r in plain["residual"]), plain
+
+
+def test_a_DIFFERING_provenanceSource_refuses_the_fold():
+    """`provenanceSource` is read as a REF, so a differing one must refuse like
+    any other source reference. Only the "equal ⇒ silent" half was pinned:
+    measured by mutation, passing `None` instead of `prov_source` into
+    `_refs_from` left every test green — and with it a duplicate whose
+    provenanceSource differs is DELETED with the value destroyed and no clause
+    at all (it is declared, so not `undeclared`; it is not a reported field, so
+    not a residual; and the ref set it should have joined is empty)."""
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(_FakeGraph(dup_prov_source="session:other")),
+        "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "uncarried_source_ref", out
+    assert "session:other" in out["blocked"], out
+    # The equal case stays silent — that half is pinned by
+    # `test_a_provenance_source_on_the_duplicate_is_declared_not_undeclared`.
+    same = capture_fold.carry_fold_evidence(
+        _FakeProj(_FakeGraph(dup_prov_source="session:s")),
+        "pt_dup", "pt_canon")
+    assert same["ok"] is True and not same["residual"], same

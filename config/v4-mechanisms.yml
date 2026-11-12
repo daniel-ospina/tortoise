@@ -339,8 +339,14 @@ mechanisms:
       # set of files that happen to hold a resolvable symbol.
       - tortoise/extractor_v2.py
       - tortoise/sdk.py
+      # The EVIDENCE-PRESERVING half of a fold (move the duplicate's attachments,
+      # slots and refs onto the canonical before the delete, and refuse where it
+      # cannot) is implemented here — see this row's note. Without it the row's
+      # `code:` points a lane at modules with no such write in them.
+      - tortoise/capture_fold.py
     tests:
       - tests/test_capture_phase_d_dedup.py
+      - tests/test_capture_fold_evidence_9437.py
     symbols:
       - exact_hit_id
     note: >-
