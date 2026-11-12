@@ -1338,9 +1338,9 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
     # sibling door raised on the identical payload. Pinned at BOTH doors for
     # the reason the money and kind rows are: the enumeration rots, the pin
     # does not.
-    with pytest.raises(Exception, match="percent|basisPoints|ratio"):
+    with pytest.raises(Exception, match=r"percent|basisPoints|ratio"):
         api.emit_belief("ConfidenceChanged", id="node-1", basisPoints=20000)
-    with pytest.raises(Exception, match="percent|basisPoints|ratio"):
+    with pytest.raises(Exception, match=r"percent|basisPoints|ratio"):
         api.add_object("an object", "skill", id="obj-pct", basisPoints=20000)
     assert not journal.exists() or not journal.read_text().strip(), (
         "the refusal must not leave a half-record behind")
