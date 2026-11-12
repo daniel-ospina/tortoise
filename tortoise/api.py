@@ -293,8 +293,13 @@ def _refuse_invisible_point_kinds_in_payload(payload: dict) -> None:
     from .sdk import _refuse_invisible_kind
     for kind_prop, value in kind_spellings_in_payload(payload):
         if kind_prop == "pointKind":
-            _refuse_invisible_kind("pointKind", value,
-                                   door="EventAPI.add_point")
+            # ⛔ NOT one door's name: this gate runs at the FUNNEL (`_emit`) for
+            # every write door, and eagerly at the doors that carry a payload
+            # (`add_point`, `emit_belief`), so naming one of them told a caller
+            # who came in through another to fix the wrong call — and on the
+            # `emit_belief` path this message is the caller's ONLY signal
+            # (nothing journalled, nothing logged).
+            _refuse_invisible_kind("pointKind", value, door="EventAPI")
 
 
 class EventAPI:
@@ -1299,9 +1304,14 @@ class EventAPI:
         record reaches the replay's fold chain untested by that rule — so it is
         refused here for a message that names THIS door, and again at `_emit`
         (`_NESTED_RECORD_KEYS`), which is where the refusal is total. Nor may
-        it name an ENVELOPE field (`type=`, `event_id=`, `corrects=`, …): those
-        are the funnel's, and the collision re-types / re-identifies the record
-        (#11948).
+        it name an ENVELOPE field in ``**extra`` (`type=`, `ts=`,
+        `initiated_by=`, `corrects=`, `agent_id=`): those are the funnel's, and
+        the collision re-types / re-attributes the record (#11948). ⚠️
+        ``event_id=`` is NOT in that list HERE: it is this door's own first
+        parameter, re-emitted as the payload's ``id``, so it never travels
+        ``**extra`` and cannot collide — the passthrough set names it for the
+        doors whose ``id=`` means something ELSE (``add_object``'s
+        ``add_object(id=…, event_id=…)``).
         """
         _refuse_caller_named_funnel_keys(extra, "`add_event`")
         self._emit("EventRecorded",
