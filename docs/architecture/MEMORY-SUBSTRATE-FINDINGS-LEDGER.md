@@ -282,17 +282,17 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   form (path, `#`, `L`, line number), because
   every wider delimiter set refused correct prose when tried
   against this repository's own `docs/`: `_` parses an identifier (`tests/test_findings_ledger_2852.py`),
-  `-` parses a dated slug, `/` parses plain paths and dates (600+ spans across 799 files), `#`
+  `-` parses a dated slug, `/` parses plain paths and dates (600+ spans across 801 files), `#`
   parses the `owner/repo#N` issue refs this repo writes everywhere, `@` parses commit refs, and `,`
   parses SQL and call prose. The pipe is refused because it was refused before the narrowing and
-  dropping it silently was a red-to-green the carve-out list did not admit: no code span in the 1144
+  dropping it silently was a red-to-green the carve-out list did not admit: no code span in the 1146
   tracked files under `docs/` (nor the 144 other tracked `*.md`) carries a `path|LINE` form, so
   refusing it cannot red this repository's prose. The permalink form survives that objection and the
   rest do not: an
   issue ref carries no `L`, so `#` + `L` + digits is unambiguous, and it is what a human writes when
   copying a GitHub link — the spelling most likely to arrive looking verified while going unchecked
   (it did: both an out-of-range permalink and an in-range one left this page CLEAN before the arm
-  existed). It is measured, not assumed: every code span in all 1144 tracked files under `docs/`,
+  existed). It is measured, not assumed: every code span in all 1146 tracked files under `docs/`,
   plus the 144 other tracked `*.md`, was swept with the shipped pattern — zero matches, so refusing
   it cannot red this repository's own prose. Rewriting a citation's delimiter is therefore **not**
   universally refused: `path#LINE` (the bare-number form, which IS what collides with issue refs),
