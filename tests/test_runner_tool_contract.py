@@ -772,9 +772,10 @@ def _command_haystacks(line: str) -> list[str]:
         echo hi & bash "tools/install-ci-runner-x64.sh"        # the SECOND cut (no `&`)
 
     The rule is therefore POSITIONAL, never textual: a quoted span is prose only when it
-    sits OUTSIDE a `$( … )`/backtick substitution; inside one, everything (quotes
-    included) is kept. `_code_only` is deliberately NOT used for this arm — it blanks
-    every quoted span, including the second shape's.
+    sits OUTSIDE a substitution — `$( … )`, a backtick, or `<( … )`/`>( … )` (the fourth
+    class below); inside one, everything (quotes included) is kept. `_code_only` is
+    deliberately NOT used for this arm — it blanks every quoted span, including the
+    second shape's.
 
     ⛔ THE FOURTH FALSE NEGATIVE — a PROCESS SUBSTITUTION is a substitution too. `<( … )`
     and `>( … )` run their body as a command, so its contents are executable text
@@ -936,7 +937,7 @@ def _segment_executes_a_helper(line: str, script_ref: re.Pattern[str]) -> bool:
     defect, not the workflow's prose.
 
     ⛔ ONLY A MESSAGE'S OWN LITERAL ARGUMENTS ARE INERT. See `_command_haystacks` for the
-    three false negatives the earlier cuts produced and the positional rule that replaced
+    false negatives the earlier cuts produced and the positional rule that replaced
     them; the threat surface is pinned by
     `test_the_message_exclusion_cannot_hide_a_real_invocation`.
     """
@@ -1142,6 +1143,8 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     assert _gh_hazards([f"            printf 'run tools/{helper} by hand\\n'"], scripts) == []
     assert _gh_hazards([f'            echo "a & b: run tools/{helper} by hand"'], scripts) == []
     assert _gh_hazards([f'            echo "a; b: run tools/{helper} by hand"'], scripts) == []
+    assert _gh_hazards([f'            echo "a | b: run tools/{helper} by hand"'], scripts) == []
+    assert _gh_hazards([f'            echo "a || b: run tools/{helper} by hand"'], scripts) == []
 
 
 def test_every_printer_prefixed_shape_that_still_runs_a_command_is_a_hazard():
