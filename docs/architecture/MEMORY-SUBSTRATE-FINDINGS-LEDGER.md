@@ -478,7 +478,8 @@ arm reads that is not the page's CONTENT is outside it. Of the arms `check_docum
 two are blind this way — `check_section_presence`, the FIRST one called, and `check_registration`,
 which reads `docs/00_index.md` rather than the page — and so are the §3 letter-list rules above, which
 decide which letters a sentence names and are internal to the tally arms rather than one of them.
-Measured: making either arm a no-op, or removing either letter rule, leaves `--self-test`
+Measured: making either arm a no-op, or removing a letter-membership rule (the run requirement,
+or the `a`/`i` ending test), leaves `--self-test`
 reporting `PASS` with exit 0, while EVERY OTHER arm reds when no-op'd. Their mechanism is
 the pytest arms instead: `test_every_section_is_required_not_just_the_bounded_ones` for the structural
 arm, `test_unregistered_document_is_rejected` for the registration arm, and
