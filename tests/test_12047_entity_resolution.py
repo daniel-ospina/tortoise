@@ -51,6 +51,7 @@ from tortoise.entity_resolver import (
     similarity,
 )
 from tortoise.exceptions import NameAlreadyHeld
+from tortoise.sdk import _existing_entity_ids
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -774,6 +775,81 @@ class TestSecondReviewRoundBounded:
         ).result_set[0][0]
         assert folded == "sub-b", (
             f"the merge folded into {folded!r}, not the survivor the queue showed")
+
+    def test_the_ingest_guard_asks_the_writers_question(self, sdk_factory):
+        """P1: the Phase-1 probe matched raw ``name``; the writer matches the union
+        (#12047 review round 9).
+
+        A fold-only holder was invisible to the guard, so a bundle passed Phase 1
+        and the write died in step 4 with the earlier items already committed —
+        the partial-mutation class that guard exists to prevent. It also refused
+        legitimate bundles after an exact-twin merge.
+        """
+        sdk = sdk_factory()
+        _create_raw(sdk, "Subject", "sub-a", "Acme", "subjectKind", "other",
+                    ts="2026-01-01", canonical_name="acme")
+        _create_raw(sdk, "Subject", "sub-b", "The Acme Holdings", "subjectKind",
+                    "other", ts="2026-01-02", canonical_name="acme")
+        with pytest.raises(AmbiguousEntityName):
+            sdk.create_subject("Acme")
+        exists, _t, _op, _st, count, merges, _tid = sdk._entity_name_holders(
+            "Subject", "Acme")
+        assert exists and count == 2 and not merges, (
+            f"the Phase-1 guard disagrees with the write: count={count} "
+            f"merges={merges}")
+
+    def test_a_fold_only_match_is_not_reported_as_created(self, sdk_factory):
+        """P2: `_existing_entity_ids` probed raw `name` only (#12047 round 9).
+
+        A fold-only match reported no holder, so `created.entities` counted 1 on
+        every re-ingest forever — the #9964 review P2 defect its own docstring
+        says it fixes.
+        """
+        sdk = sdk_factory()
+        _create_raw(sdk, "Subject", "sub-a", "The Acme", "subjectKind",
+                    "other", ts="2026-01-01", canonical_name="acme")
+        got = _existing_entity_ids(sdk._get_proj().g, "subject", {}, "acme")
+        assert [str(x) for x in got if x] == ["sub-a"], got
+
+    def test_a_string_aliases_row_does_not_disable_entity_writes(self, sdk_factory):
+        """P2: the new `aliases` arm required a List, and `aliases` is writable as
+        a bare string (#12047 review round 9).
+
+        One such row made EVERY entity write raise a driver type error — a public
+        write that disables the whole write path. The arm is type-guarded now, so
+        the string simply does not participate.
+        """
+        sdk = sdk_factory()
+        sdk.create_subject("Foo", "other", aliases="a bare string")
+        made = sdk.create_subject("Bar", "other")
+        assert made["id"]
+        g = sdk._get_proj().g
+        assert find_live_holder(g, "Subject", normalize_entity_name("Foo"))
+
+    def test_a_merge_does_not_resolve_onto_a_retired_survivor(self, sdk_factory):
+        """P2: the collapse could hand back a TERMINAL survivor (#12047 round 9).
+
+        A merged-away carrier stays live, so once the SURVIVOR is retired the name
+        resolved onto the buried incarnation — `resolve_entity_id` returned a
+        `superseded` id against its own D2 rule, and a create MERGEd onto it
+        instead of minting the new incarnation R5 requires.
+        """
+        sdk = sdk_factory()
+        _create_raw(sdk, "Subject", "sub-a", "Bob Smyth", "subjectKind",
+                    "naturalPerson", ts="2026-01-01")
+        _create_raw(sdk, "Subject", "sub-b", "Bob Smith", "subjectKind",
+                    "naturalPerson", ts="2026-01-02")
+        sdk.approve_merge("sub-b", action="merge")
+        sdk.update_entity("sub-a", status="superseded")
+        g = sdk._get_proj().g
+        assert resolve_entity_id(
+            g, "Subject", "Bob Smith",
+            name_props=("name", "canonical_name")) is None, (
+            "a retired survivor was handed back as a live holder")
+        minted = sdk.create_subject("Bob Smith")
+        assert minted["id"] != "sub-a", (
+            "the create MERGEd onto the retired incarnation instead of minting")
+        assert minted.get("status") != "superseded"
 
     def test_rejecting_the_re_offered_pair_records_that_pair(self, sdk_factory):
         """P2: the reject early return was CANDIDATE-scoped (#12047 review F1).

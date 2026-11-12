@@ -607,7 +607,8 @@ def find_live_holder(graph, label: str, folded: str) -> list[tuple[str, str]]:
             "WHERE n.id IS NOT NULL "
             "AND (n.status IS NULL OR NOT n.status IN ['superseded','deprecated',"
             "     'archived','retracted']) "
-            "AND (n.canonical_name = $k OR $k IN coalesce(n.aliases, [])) "
+            "AND (n.canonical_name = $k OR "
+            "     (typeof(n.aliases) = 'List' AND $k IN n.aliases)) "
             "RETURN n.id, (n.canonical_name = $k)",
             params={"k": folded},
         ).result_set

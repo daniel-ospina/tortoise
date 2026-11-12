@@ -367,20 +367,48 @@ def _collapse_resolved_holders(g, label: str, holder_ids) -> list:
     carries no ``resolved_from`` evidence and stays a holder in its own right,
     per-row (F-B's node-exactness).
     """
+    # ⛔ #12047 review round 9: the hop DROPS a terminal survivor. The holders
+    # were live-only BEFORE the hop, but a merged-away carrier stays live while
+    # carrying `resolved_from`, so once the SURVIVOR is retired the name
+    # resolved onto the buried incarnation — `resolve_entity_id` handed back a
+    # `superseded` id (contradicting its own D2 rule a few lines below) and a
+    # create MERGEd onto it instead of minting the new incarnation R5 requires.
+    # The write path must therefore put a survivor through the same terminal
+    # test every other read uses.
+    from .live import _terminal_excluded
     from .entity_resolver import follow_resolved_from
     collapsed: list = []
     seen: set = set()
+    hopped = False
     for holder in holder_ids:
         resolved = follow_resolved_from(g, label, holder) if holder else None
+        if resolved and holder and str(resolved) != str(holder):
+            hopped = True
         key = resolved if resolved else f"id-less:{len(collapsed)}"
         if key in seen:
             continue
         seen.add(key)
         collapsed.append(resolved)
+    if hopped:
+        ids = [str(c) for c in collapsed if c]
+        if ids:
+            # Entity labels use the entity vocabulary (no `outdated` flag).
+            live_pred = _terminal_excluded(
+                "n.status",
+                ("superseded", "deprecated", "archived", "retracted"),
+                include_outdated_flag=False)
+            rows = g.query(
+                f"MATCH (n:{label}) WHERE n.id IN $ids AND {live_pred} "
+                "RETURN n.id",
+                params={"ids": ids}).result_set
+            live = {str(r[0]) for r in rows}
+            collapsed = [c for c in collapsed
+                         if not (c and str(c) not in live)]
     return collapsed
 
 
-def _live_holders_same_entity(g, label: str, name: str) -> tuple[list, tuple]:
+def _live_holders_same_entity(g, label: str, name: str, *,
+                              any_status: bool = False) -> tuple[list, tuple]:
     """The holders of ``name`` including the FOLDED spelling — and which props found them.
 
     #12047 review F1: the +hosted+ pre-flight probe
@@ -397,8 +425,9 @@ def _live_holders_same_entity(g, label: str, name: str) -> tuple[list, tuple]:
     adopted and the create mints a twin beside it.
     """
     folded = normalize_entity_name(name)
+    _read = all_name_holder_ids if any_status else live_name_holder_ids
     if not folded:
-        return live_name_holder_ids(g, label, name), ("name",)
+        return _read(g, label, name), ("name",)
     # ⛔ ONE query over the UNION predicate — never two queries deduped in Python
     # (review F-B). The two-query form could not dedupe an ID-LESS row: the
     # primitive returns ``n.id``, which is ``None`` for every legacy row, so a
@@ -426,7 +455,8 @@ def _live_holders_same_entity(g, label: str, name: str) -> tuple[list, tuple]:
     # One query, through the audited name-keyed primitive (`also=`), so a probe
     # for the lock/probe agreement (#3590) still sees every holder read and an
     # id-less row is counted per NODE (review F-B).
-    rows = live_name_holder_ids(
+    _read = all_name_holder_ids if any_status else live_name_holder_ids
+    rows = _read(
         g, label, name,
         name_props=("name", "canonical_name"),
         also=(folded,),
@@ -752,7 +782,7 @@ def _name_holder_ids(g, label: str, name: str, *,
     for i, spelling in enumerate([s for s in dict.fromkeys(alias_of) if s]):
         key = f"an{i}"
         params[key] = spelling
-        arms.append(f"${key} IN coalesce(n.aliases, [])")
+        arms.append(f"(typeof(n.aliases) = 'List' AND ${key} IN n.aliases)")
     for i, spelling in enumerate(spellings):
         key = f"n{i}"
         # `case_insensitive` lowercases BOTH sides (mirroring `_name_predicate`):
@@ -782,7 +812,9 @@ def _name_holder_ids(g, label: str, name: str, *,
 
 def all_name_holder_ids(g, label: str, name: str, *,
                         case_insensitive: bool = False,
-                        name_props: tuple = ("name",)) -> list:
+                        name_props: tuple = ("name",),
+                        also: tuple = (),
+                        alias_of: tuple = ()) -> list:
     """Every holder of ``name`` for ``label`` — ANY status (raw ids).
 
     The complement of :func:`live_name_holder_ids`: used ONLY to tell a
@@ -790,10 +822,16 @@ def all_name_holder_ids(g, label: str, name: str, *,
     absent name, so the former can be recorded as a non-folded
     ``no-live-holder`` refusal instead of silently returning ``None``
     (#3633 §B.1 "refuse + record").
+
+    ``also``/``alias_of`` mirror ``live_name_holder_ids`` so an ANY-status probe
+    asks the SAME union question as the write (#12047 review round 9): a
+    fold-only match reported no holder at all, so the ingest re-reported
+    ``created`` on every re-ingest forever.
     """
     return _name_holder_ids(g, label, name,
                             case_insensitive=case_insensitive, live_only=False,
-                            name_props=name_props)
+                            name_props=name_props, also=also,
+                            alias_of=alias_of)
 
 
 def _endpoint_idents(g, value: str, *, include_url: bool) -> set:

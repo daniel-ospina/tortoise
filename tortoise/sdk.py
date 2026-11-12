@@ -5627,7 +5627,14 @@ def _existing_entity_ids(g, etype: str, props: dict, name: Any) -> list:
     if not isinstance(name, str) or not name:
         return []
     label = _landing_entity_label(etype, props)
-    return all_name_holder_ids(g, label, name) if label else []
+    if not label:
+        return []
+    # ⛔ #12047 review round 9: ANY-status over the WRITER'S union. A raw-name
+    # probe reported "no holder" for a fold-only match, so `created.entities`
+    # counted 1 on every re-ingest forever — the exact #9964 review P2 defect
+    # this function's docstring says it fixes.
+    from tortoise.entity_identity import _live_holders_same_entity
+    return list(_live_holders_same_entity(g, label, name, any_status=True)[0])
 
 
 def _kind_layer_note(t: str, props: dict) -> tuple[str, dict | None]:
@@ -23830,13 +23837,15 @@ class TortoiseSDK:
           ``resolved_from``/``dedup_reviewed='merge'``. **No node is deleted and
           no edge is moved.** Returns ``{candidate_id, action, candidate_type:
           'entity', survived_id, aliases, method, similarity}``.
-        * ``reject`` → ``dedup_reviewed='reject'``, ``reviewed=true``,
-          ``DedupeRejected``; nothing is written onto the survivor. The verdict
-          is SET-VALUED: every survivor this candidate was rejected against is
-          kept in ``dedup_rejected_targets`` (the scalar ``dedup_target_id`` is
-          the legacy single-verdict fallback), so rejecting a second pair does
-          not un-suppress the first. Returns the ``target_id`` it decided
-          against.
+        * ``reject`` → ``dedup_reviewed='reject'``, ``reviewed=true``, and the
+          rejected pair recorded in ``dedup_rejected_targets``; the verdict is
+          journaled as an ``EntityMutated`` record (the property form #783's
+          plan sanctions) — the entity branch emits NO ``DedupeRejected`` event,
+          unlike the content branch above. Nothing is written onto the survivor.
+          The verdict is SET-VALUED: every survivor this candidate was rejected
+          against is kept (the scalar ``dedup_target_id`` is the legacy
+          single-verdict fallback), so rejecting a second pair does not
+          un-suppress the first. Returns the ``target_id`` it decided against.
 
         ⛔ The pair is RECOMPUTED (the queue is a read surface and stores no
         pair), so a merge applies to the resolver's *current* best unambiguous
@@ -23850,8 +23859,9 @@ class TortoiseSDK:
         is a NEW decision against that next pair — by design, since ``reject``
         means "this candidate is not a duplicate of the pair I am shown" — so a
         caller retrying a timed-out reject can consume the next queued pair.
-        The result names the pair it decided (``target_id``) so the record is
-        never ambiguous about what was answered.
+        The result always names the pair that stands as this candidate's
+        rejection (``target_id``, falling back to the stored verdict) so the
+        record is never ambiguous about what was answered.
         """
         if action not in ("merge", "reject"):
             raise ValueError(f"action must be 'merge' or 'reject', got {action!r}")
@@ -24036,7 +24046,8 @@ class TortoiseSDK:
                 # pair is the one already rejected. Both are idempotent no-ops.
                 return {"candidate_id": candidate_id, "action": "reject",
                         "candidate_type": "entity", "already_reviewed": True,
-                        "survived_id": target_id, "target_id": target_id}
+                        "survived_id": target_id or props.get("dedup_target_id"),
+                        "target_id": target_id or props.get("dedup_target_id")}
             new_targets = prior_targets + ([str(target_id)]
                                            if target_id is not None else [])
             write: dict = {}
@@ -26979,14 +26990,36 @@ class TortoiseSDK:
         about what "terminal" means.
         """
         proj = self._get_proj()
-        rows = proj.g.query(
-            f"MATCH (n:{label} {{name:$name}}) "
-            f"RETURN n.id, {_terminal_expression('n')} AS term, "
-            f"coalesce(n.is_operator, false) AS op, n.status AS status",
-            params={"name": name},
-        ).result_set
-        if not rows:
-            return False, None, None, None, 0, False, None
+        # ⛔ #12047 review round 9 (P1): the probe must ask the WRITER's
+        # question. `resolve_or_mint` matches the folded UNION (name ·
+        # canonical_name · aliases, raw and folded spellings) and collapses
+        # merged-away carriers; this probe matched `{name:$name}` only. A
+        # fold-only holder was therefore invisible here, the guard passed the
+        # bundle item, and the write then died in step 4 with the earlier items
+        # already committed — the partial-mutation class this guard exists to
+        # prevent. It also refused legitimate bundles after an EXACT-TWIN merge,
+        # whose two carriers both keep the raw name. `_live_holders_same_entity`
+        # IS that predicate, so the guard and the writer cannot disagree.
+        from .entity_identity import _live_holders_same_entity
+        holders, _ = _live_holders_same_entity(proj.g, label, name)
+        if not holders:
+            # No LIVE carrier. `exists_by_name` still gates the #7925 terminal
+            # refusal, so a TERMINAL-only reference keeps answering True — but
+            # through the SAME union, not a raw-name probe.
+            any_holders, _ = _live_holders_same_entity(
+                proj.g, label, name, any_status=True)
+            if not any_holders:
+                return False, None, None, None, 0, False, None
+            return True, None, None, None, 0, False, None
+        holder_ids = [str(h) for h in holders if h]
+        rows = []
+        if holder_ids:
+            rows = proj.g.query(
+                f"MATCH (n:{label}) WHERE n.id IN $ids "
+                f"RETURN n.id, {_terminal_expression('n')} AS term, "
+                f"coalesce(n.is_operator, false) AS op, n.status AS status",
+                params={"ids": holder_ids},
+            ).result_set
         # ⛔ #3590 (round-5 review F1): THE TARGET IS THE NODE THE WRITE LANDS
         # ON, and the write now resolves over **LIVE** carriers only
         # (`entity_identity.resolve_or_mint`): a TERMINAL sole carrier does not
@@ -27001,7 +27034,7 @@ class TortoiseSDK:
         # computed from the LIVE holder set, the same predicate the create uses,
         # so the guard and `resolve_or_mint` cannot disagree.
         _live = [r for r in rows if not r[1]]
-        if len(_live) != 1 or not _live[0][0]:
+        if len(holders) != 1 or not _live or not _live[0][0]:
             # 0 (terminal-only) and 2+ (same-name coexistence, which the create
             #     REFUSES rather than picking a carrier — #8864 / D2): the write
             #     lands on no single existing carrier, so it MINTS its own node
@@ -27016,7 +27049,7 @@ class TortoiseSDK:
             #     is what keeps the name create-able.
             # The cases are told apart by the live COUNT — and by the target's
             # own id, which is what separates a MINT from an ADOPT.
-            return True, None, None, None, len(_live), len(_live) == 1, None
+            return True, None, None, None, len(holders), len(holders) == 1, None
         target = _live[0]
         # All three axes in ONE pass (#7925 review round 4 — an early return per
         # axis made a holder that matched two of them report only the first, so
