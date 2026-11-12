@@ -59,8 +59,8 @@ import logging
 import threading
 from typing import NamedTuple
 
-from tortoise.live import _terminal_excluded
 from tortoise.entity_resolver import normalize_entity_name
+from tortoise.live import _terminal_excluded
 
 logger = logging.getLogger(__name__)
 

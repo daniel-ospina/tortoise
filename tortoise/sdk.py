@@ -23929,7 +23929,7 @@ class TortoiseSDK:
         """
         from .entity_resolver import apply_entity_merge, entity_pair_for
 
-        labels, props = row
+        _labels, props = row
         reviewed = str(props.get("dedup_reviewed") or "")
         if reviewed == action:
             return {"candidate_id": candidate_id, "action": action,

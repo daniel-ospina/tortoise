@@ -208,7 +208,7 @@ def _read_entities(graph, label: str) -> list[dict]:
         rows = graph.query(
             _ENTITY_READ.format(label=label, kind=_KIND_PROP[label])
         ).result_set
-    except Exception as exc:  # noqa: BLE001 — re-raised as the honest failure
+    except Exception as exc:
         raise EntityScanUnavailable(
             f"entity scan could not read :{label} — refusing to report an "
             f"empty queue ({type(exc).__name__}: {exc})") from exc
@@ -261,7 +261,7 @@ def _semantic_matrix(entities: list[dict], encode_fn) -> dict:
         return {}
     try:
         import numpy as np
-    except Exception as exc:  # noqa: BLE001 — degrade, and say so
+    except Exception as exc:
         _logger.warning("entity semantic rung skipped — numpy unavailable: %s", exc)
         return {}
     ids = [e["id"] for e in entities]
@@ -270,7 +270,7 @@ def _semantic_matrix(entities: list[dict], encode_fn) -> dict:
         from .embeddings import _encode as encode_fn  # local: heavy import
     try:
         vectors, _degraded = encode_fn(texts)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         _logger.warning("entity semantic rung skipped — encoder failed: %s", exc)
         return {}
     if vectors is None or len(vectors) != len(texts):
@@ -416,7 +416,7 @@ def entity_candidates(graph, *, limit: int = 50,
         return rows[:limit]
     except EntityScanUnavailable:
         raise
-    except Exception as exc:  # noqa: BLE001 — the fail-open this module exists to end
+    except Exception as exc:
         raise EntityScanUnavailable(
             f"entity scan failed — refusing to report an empty queue "
             f"({type(exc).__name__}: {exc})") from exc
@@ -448,7 +448,7 @@ def follow_resolved_from(graph, label: str, node_id: str) -> str:
                 f"MATCH (n:{label} {{id:$id}}) RETURN n.resolved_from",
                 params={"id": current},
             ).result_set
-        except Exception:  # noqa: BLE001 — a write must not fail on the hop probe
+        except Exception:
             return current
         target = row[0][0] if row else None
         if not target or str(target) in seen:
@@ -469,7 +469,7 @@ def find_live_holder(graph, label: str, folded: str) -> list[str]:
             "RETURN n.id",
             params={"k": folded},
         ).result_set
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise EntityScanUnavailable(
             f"entity resolution could not read :{label} — refusing to guess "
             f"({type(exc).__name__}: {exc})") from exc
@@ -617,10 +617,8 @@ def entity_pair_for(graph, candidate_id: str, *,
     for eid, ent in by_id.items():
         if eid == candidate_id or ent["label"] != me["label"]:
             continue
-        if ent["folded"] == me["folded"]:
-            sim = 1.0
-        else:
-            sim = similarity(me["folded"], ent["folded"])
+        sim = (1.0 if ent["folded"] == me["folded"]
+               else similarity(me["folded"], ent["folded"]))
         if sim >= review_threshold:
             scored.append((sim, ent))
     if not scored:

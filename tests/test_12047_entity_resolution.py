@@ -138,7 +138,6 @@ class TestEntityQueueIsNoLongerAStub:
 
     def test_a_scan_that_cannot_run_raises_instead_of_going_empty(self, monkeypatch):
         """The honest empty: 'could not compare' must never read as 'clean'."""
-        import tortoise.entity_resolver as er
 
         class _Broken:
             def query(self, *_a, **_kw):
@@ -350,8 +349,8 @@ class TestApproveMergeOnEntities:
         # sub-3's two rivals are equidistant — the resolver must refuse.
         with pytest.raises(ValueError, match="refusing"):
             entity_pair_for(g, "sub-3")
-        row = [r for r in sdk.list_dedup_candidates(candidate_type="entity")
-               if r["candidate_id"] == "sub-3"][0]
+        row = next(r for r in sdk.list_dedup_candidates(candidate_type="entity")
+                   if r["candidate_id"] == "sub-3")
         assert row["ambiguous"] is True and row["tied_with"]
 
     def test_a_repeat_merge_is_idempotent_and_a_verdict_cannot_be_flipped(
@@ -376,6 +375,48 @@ class TestApproveMergeOnEntities:
                                method="exact", similarity=1.0)
 
 
+class TestMergeIsDurable:
+    def test_a_merge_survives_a_full_wipe_and_replay(self, tmp_path):
+        """`derived == replay(journal)` — the claim the ledger rests on.
+
+        A merge that lived only on the node would be the #7951 class: correct
+        until the next rebuild, then silently gone (the alias lost, the
+        resolution pointer lost, the variant free to mint a twin again). Both
+        writes therefore go through ``update_entity``, whose ``EntityMutated``
+        record carries the applied map as ``state``.
+
+        The pair is created through the JOURNALED door (``create_subject``), not
+        the raw helper: a raw ``CREATE`` writes no record, so replay would have
+        no node to fold the mutation onto and the rebuild would (correctly) fail
+        the non-folded assertion — that is the test fixture's limitation, not
+        this change's.
+        """
+        from tortoise.sdk import TortoiseSDK
+
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t.db"),
+                          event_log_path=str(events / "events.jsonl"),
+                          namespace=f"test_suite_{os.urandom(4).hex()}")
+        try:
+            sdk.create_subject("fresh-context code reviewer", "role")
+            sdk.create_subject("the fresh-context reviewer role", "role")
+            row = sdk.list_dedup_candidates(candidate_type="entity")[0]
+            sdk.approve_merge(row["candidate_id"], action="merge")
+            g = sdk._get_proj().g
+            q = ("MATCH (s:Subject) RETURN s.id, s.aliases, s.resolved_from, "
+                 "s.canonical_name ORDER BY s.id")
+            before = [list(r) for r in g.query(q).result_set]
+            assert any(r[1] for r in before), "the merge wrote no alias — nothing to replay"
+
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+            after = [list(r) for r in g.query(q).result_set]
+            assert after == before, (
+                "the merge did not replay: aliases/resolved_from are live-only state")
+        finally:
+            sdk.close()
+
+
 # ── holdsRole production (person → role) ──────────────────────────────────
 
 
@@ -393,7 +434,7 @@ class TestHoldsRoleProduction:
     def test_the_holder_may_be_addressed_by_id(self, sdk_factory):
         sdk = sdk_factory()
         person = sdk.create_subject("Operator", "naturalPerson")
-        role = sdk.create_subject("the operator", "role", roleHolder=person["id"])
+        sdk.create_subject("the operator", "role", roleHolder=person["id"])
         assert sdk._get_proj().g.query(
             "MATCH (:Subject)-[r:holdsRole]->(:Subject) RETURN count(r)"
         ).result_set[0][0] == 1
