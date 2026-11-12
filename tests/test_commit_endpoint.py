@@ -5738,40 +5738,84 @@ class TestThe12120HostedAboutObjectAnchor:
             "the claim's fold-equivalent about name dropped its `aboutObject` "
             "edge — the hosted anchor resolved on the raw name")
 
-    def test_a_padded_reference_keeps_its_exact_name_edge(self, client):
-        """Round 17: the Event channel strips before it decides AND resolves.
+    def test_a_padded_subject_kind_reference_takes_the_drop_on_both_channels(
+            self, client):
+        """Round 18: ONE spelling per decision, on BOTH hosted channels.
 
-        F6's rule (an Object whose name IS the reference keeps its edge, while a
-        fold-only carrier does not) is reached through the exact-narrowing arm,
-        which asks `o.name = $exact`. Both sibling sites strip before that compare
-        (`sdk.py`, `near_dup_merge.py`) and the arm this channel replaced folded —
-        which strips. Passing the RAW payload spelling through made `" the team "`
-        match nothing, so the edge `main` wrote disappeared on this channel alone.
+        A payload may legally declare a subject-kind entity `"The Team"`
+        (`organization`) beside a padded twin `" The Team "` (Layer-1 checks
+        `about_entities ⊆ entities` by exact string, so `" The Team "` needs its own
+        entry), and then reference `" The Team "`. The reference fold-equals the
+        subject-kind name, so `#1370`/`#4934` say the gated binder owns the
+        attribution and neither channel may write the un-gated `aboutObject` edge —
+        which is what `main`, the local capture path and `near_dup_merge` all do.
+
+        Round 17 stripped the reference but left the DECLARATION raw and left the
+        POINT channel raw, so the two hosted channels disagreed with each other and
+        with `main`: the reference missed the drop and the exact-narrowing arm
+        attached it. Both channels are asserted here, and each half is RED without
+        its own fix.
         """
-        # The Object's name IS "the team" — F6's carrier, reached by an EXACT
-        # match, which is exactly what a padded reference loses without the strip.
-        _seed_objects(client, "s12120-padsk-1", ["the team"])
+        # The exact-name carrier exists, so a missing edge means the DROP fired —
+        # not that the anchor had nothing to match.
+        _seed_objects(client, "s12120-padsk-1", ["The Team"])
         raw = _raw_payload(
             1, session_id="s12120-padsk-2",
             entities=[{"name": "The Team", "kind": "organization",
                        "passes_frequency_gate": True},
-                      {"name": " the team ", "kind": "Project",
+                      {"name": " The Team ", "kind": "Project",
                        "passes_frequency_gate": True}],
-            points=[_point(0, about_entities=[])],
+            points=[_point(0, about_entities=[" The Team "])],
             events=[{"id": "ev_" + "8" * 62, "eventKind": "decision",
                      "content": "e0", "confidence": 0.8,
                      "source_ref": "session.md",
-                     "about_entities": [" the team "]}])
+                     "about_entities": [" The Team "]}])
         resp = _commit(client, raw)
         assert resp.status_code == 200, resp.text[:800]
 
         g = _team_sdk()._get_proj().g
-        rows = g.query(
-            "MATCH (:Event)-[:aboutObject]->(o:Object {name:'the team'}) "
-            "RETURN count(o)").result_set
-        assert rows and rows[0][0] >= 1, (
-            "a PADDED reference lost the exact-name edge F6 keeps — the channel "
-            "compared the raw string while both sibling sites strip")
+        for label in ("Event", "Point"):
+            rows = g.query(
+                f"MATCH (n:{label})-[:aboutObject]->(o:Object {{name:'The Team'}}) "
+                "RETURN count(o)").result_set
+            assert rows and rows[0][0] == 0, (
+                f"a PADDED subject-kind reference wrote the un-gated aboutObject "
+                f"edge on the {label} channel — the #1370/#4934 drop exists "
+                f"precisely to keep the gated binder the only writer here")
+
+    def test_a_padded_SUBJECT_declaration_still_owns_the_attribution(
+            self, client):
+        """Round 18: the DECLARATION side is stripped, not only the reference.
+
+        Both sibling sites strip the subject-name set they build (`sdk.py`,
+        `near_dup_merge.py`). Leaving it raw while the reference is stripped made
+        a declared subject `" The Team "` unreachable — the reference `" The Team "`
+        stripped to `"The Team"`, missed the set, and took the fold-equal arm that
+        attaches to an exact-name carrier, an edge `main` and the local path both
+        refuse. RED without the set strip.
+        """
+        _seed_objects(client, "s12120-padsubj-1", ["The Team"])
+        raw = _raw_payload(
+            1, session_id="s12120-padsubj-2",
+            entities=[{"name": " The Team ", "kind": "organization",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=[" The Team "])],
+            events=[{"id": "ev_" + "7" * 62, "eventKind": "decision",
+                     "content": "e0", "confidence": 0.8,
+                     "source_ref": "session.md",
+                     "about_entities": [" The Team "]}])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        g = _team_sdk()._get_proj().g
+        for label in ("Event", "Point"):
+            rows = g.query(
+                f"MATCH (n:{label})-[:aboutObject]->(o:Object {{name:'The Team'}}) "
+                "RETURN count(o)").result_set
+            assert rows and rows[0][0] == 0, (
+                f"a PADDED subject DECLARATION did not own the attribution on the "
+                f"{label} channel — the subject-name set must be built from the "
+                f"stripped spelling, as both sibling sites build it")
 
     def test_an_event_keeps_the_edge_for_an_exact_name_carrier(self, client):
         """Round 6: F6 holds on the EVENT channel too — narrow, don't drop.

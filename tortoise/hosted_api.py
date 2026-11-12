@@ -21072,8 +21072,15 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     from tortoise.entity_resolver import normalize_entity_name as _fold
     from tortoise.subject_binding import bind_point_subjects, is_subject_kind
 
+    # ⛔ The DECLARATION side is stripped, exactly as both sibling sites strip it
+    # (`sdk.py`'s subject-name set, `near_dup_merge.py`'s) and as every reference
+    # below now is. Comparing a stripped reference against a raw-padded set made a
+    # declared subject `" The Team "` unreachable: the reference missed the
+    # `#1370`/`#4934` drop and wrote the un-gated edge that `main` and the local
+    # path refuse (review round 18). `kind` is compared RAW — that is
+    # `is_subject_kind`'s contract.
     subject_entity_names = {
-        er.entity.name for er in reconcile.entities
+        str(er.entity.name).strip() for er in reconcile.entities
         if is_subject_kind(er.entity.kind)
     }
     subject_entity_names_folded = {_fold(n) for n in subject_entity_names}
@@ -22028,7 +22035,14 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # keeps the pre-fix id when §5's write gate found no confirmed id.
         pid = point_resolved_ids.get(pr.point.id, pid)
         for name in pr.point.about_entities:
-            if str(name) in subject_entity_names:
+            # One spelling for the whole decision — the same treatment the Event
+            # loop gives its reference (`review round 18`): deciding on the raw
+            # padding made `" The Team "` miss the `#1370` drop here and take the
+            # fold-equal narrowing below, writing the un-gated `aboutObject` edge
+            # to the exact-name carrier, while both the local path and the Event
+            # channel dropped it.
+            name = str(name).strip()
+            if name in subject_entity_names:
                 continue  # #1370: the gated binder owns aboutSubject (EXACT, per F6)
             # #12120 about-anchor site: the anchor attached on the RAW `name` only, while
             # every writer resolves the FOLDED union (`name` · `canonical_name` ·
