@@ -238,7 +238,10 @@ not a tenth spelling — it is the one a text guard cannot reach:
   half, and it fails closed on every spelling whose destination it can PLACE as
   the last positional token of the owning verb's segment — residual 1 is the one
   class where the reading lands on the wrong token, and it is fail-OPEN, not
-  fail-closed.
+  fail-closed. One further class belongs to the install exemption rather than to
+  these six: a `$( … )` command substitution carrying the INSTALL PACKAGE text
+  into the offending segment still reads as command position, so it can launder
+  that segment (`cp -a "$(apt-get install -y postgresql-client-16)" …/16/bin/pg_dump`).
 
 So: a green run means "no plausible spelling of the regression is in this
 text", not "the job provably installs and uses pg16". The job's own assertion is
@@ -1170,18 +1173,31 @@ def _replaces_a_client_binary(line: str) -> bool:
     The pin's own install line is excluded.
     """
 
-    # ⛔ THE PIN'S OWN INSTALL LINE IS EXEMPT — ITS OWN COMMAND SEGMENT ONLY
-    # (#12069 review round 25, measured GREEN). A LINE-wide bail spared every other
-    # command chained onto the install, and the pin step is exactly where a reader
-    # would chain one:
+    # ⛔ THE PIN'S OWN INSTALL LINE IS EXEMPT — AND ONLY A MENTION THAT IS ITSELF
+    # A COMMAND (#12069 review round 25, then round 26 measured the hole in the
+    # round-25 narrowing). Scoping the exemption to the mention's SEGMENT was not
+    # enough, because the mention could be TEXT inside a quoted operand in the
+    # SAME segment as the offender, and then the whole line was "the install
+    # segment":
     #
-    #     sudo apt-get install -y postgresql-client-16 && sudo rsync -a "$b/17/bin/" "$b/16/bin/"
+    #     echo "apt-get install -y postgresql-client-16" > /usr/lib/postgresql/16/bin/pg_dump
     #
-    # was GREEN — the full #12051 regression, after the step's own
-    # `pg_dump --version` assertion, i.e. statically invisible to the job. The same
-    # line without the package text was RED, and the redirect and binary-name arms
-    # were spared the same way (`… && : > …/16/bin/pg_dump`).
-    pkg = CLIENT_PKG_RE.search(line)
+    # was GREEN — the #12051 wrapper regression, written by a payload that merely
+    # NAMES the pin. The exemption now requires the package mention to be in
+    # COMMAND position (this file's own run-vs-name helper), so a quoted or
+    # substituted mention is graded. Measured: the offenders flip RED and every
+    # legitimate install spelling (plain, `sudo -E`, `DEBIAN_FRONTEND=…`,
+    # `timeout 300 sudo`, `apt-get -y install`, continued lines) stays green.
+    # STATED RESIDUAL: a package mention inside a `$( … )` in the OFFENDING
+    # segment still reads as command position and spares that segment.
+    pkg = next(
+        (
+            match
+            for match in CLIENT_PKG_RE.finditer(line)
+            if _is_command_position(line, match.start())
+        ),
+        None,
+    )
     exempt = _segment_bounds(line, pkg.start()) if pkg is not None else None
 
     def _spared(position: int) -> bool:
@@ -1248,7 +1264,12 @@ def _replaces_a_client_binary(line: str) -> bool:
         if _is_command_position(line, dir_match.start()) or _spared(dir_match.start()):
             continue
         seg_start, seg_end = _segment_bounds(line, dir_match.start())
-        if COMMAND_FILE_MENTION_RE.search(line, seg_start, seg_end):
+        # ⛔ AND THE COMMAND FILE MUST BE WRITTEN HERE, NOT MERELY NAMED (#12069
+        # review round 26, measured GREEN): a rewrite was spared whenever the
+        # segment mentioned `GITHUB_PATH` anywhere, including inside a quoted
+        # operand — `sudo rsync -a "$b/17/bin/" "$b/16/bin/" --note="GITHUB_PATH"`.
+        # A real append names it as a REDIRECT TARGET, which is what this asks.
+        if _segment_appends_to_a_command_file(line, seg_start, seg_end):
             continue
         owner = _owning_verb(line, dir_match.start())
         if owner is None:
@@ -1333,6 +1354,16 @@ _REDIRECT_RE = re.compile(r"\d*>>?\s*\S+")
 
 #: A `$GITHUB_PATH`/`$GITHUB_ENV` mention, as a property of ITS OWN segment.
 COMMAND_FILE_MENTION_RE = re.compile(r"\b(?:GITHUB_PATH|GITHUB_ENV)\b")
+
+
+def _segment_appends_to_a_command_file(line: str, seg_start: int, seg_end: int) -> bool:
+    """Does THIS segment write to a runner command file (not merely name one)?"""
+
+    segment = line[seg_start:seg_end]
+    return any(
+        COMMAND_FILE_TARGET_RE.match(match.group("target"))
+        for match in REDIRECT_TARGET_RE.finditer(segment)
+    )
 
 #: `cp -t DIR` / `--target-directory=DIR` NAMES the destination (#12069 review
 #: round 22, measured GREEN): with the operand order inverted, the trailing source
@@ -1429,7 +1460,14 @@ def _is_last_path_token(line: str, start: int, end: int, verb: re.Match[str]) ->
     # the verbs where that flag MEANS it. `rsync -t` is `--times`, and a value
     # that is itself a flag (`-t -v`) names no directory either; both are skipped
     # into the positional scan below. See `_TARGET_OPTION_VERBS`.
-    target = _TARGET_OPTION_RE.search(segment)
+    # ⛔ THE **LAST** TARGET OPTION, NOT THE FIRST (#12069 review round 26,
+    # measured): the attached alternative added in round 25 made `.search` return
+    # the LEFTMOST match, so `cp -t/tmp/a --target-directory="$b/16/bin" src`
+    # flipped RED → GREEN — GNU `cp`/`mv`/`ln`/`install` use the LAST target
+    # option, which is the one that decides where the copy lands.
+    target = None
+    for candidate in _TARGET_OPTION_RE.finditer(segment):
+        target = candidate
     target_value = None
     if target is not None:
         target_value = target.group("value") or target.group("attached")
@@ -4901,11 +4939,31 @@ BINARY_MUTATION_POLARITY = [
         "glob became the last path (measured GREEN)",
     ),
     (
+        'echo "apt-get install -y postgresql-client-16" > /usr/lib/postgresql/16/bin/pg_dump',
+        True,
+        "#12069 round-26 P1: a payload that merely NAMES the pin was exempted with the "
+        "install line — the exemption now requires the mention in COMMAND position "
+        "(measured GREEN before)",
+    ),
+    (
+        'sudo rsync -a "$b/17/bin/" "$b/16/bin/" --note="GITHUB_PATH"',
+        True,
+        "#12069 round-26 P1: naming a command file in an option spared the rewrite — "
+        "the exemption now needs it as a REDIRECT TARGET of that segment (measured GREEN)",
+    ),
+    (
+        'cp -t/tmp/a --target-directory="$b/16/bin" src',
+        True,
+        "#12069 round-26 P2: the LAST target option decides where the copy lands; "
+        "reading the first flipped this RED→GREEN in round 25 (measured)",
+    ),
+    (
         'sudo cpio -idmv -D "$b/16/bin"',
         False,
-        "STATED RESIDUAL: `cpio` is not in `BINARY_MUTATION_RE`, so `_owning_verb` "
-        "answers None; the destination is a POSITIONAL, so recognising the verb is "
-        "all that is missing — no flag grammar (#12069 round 24, corrected r25)",
+        "STATED RESIDUAL: `_is_command_position` answers COMMAND because the verb is "
+        "in NEITHER `_OPERAND_TAKING_WORDS` nor `BINARY_MUTATION_RE`; adding it to "
+        "`BINARY_MUTATION_RE` fixes the classification and `_owning_verb` together "
+        "(#12069 r24, corrected r26)",
     ),
     (
         'sudo unzip -o pg17.zip -d "$b/16/bin"',
@@ -4916,9 +4974,10 @@ BINARY_MUTATION_POLARITY = [
     (
         'sudo dpkg-deb -x x.deb "$b/16/bin"',
         False,
-        "STATED RESIDUAL: `dpkg-deb -x` is not in `BINARY_MUTATION_RE` (so "
-        "`_owning_verb` answers None); its destination IS positional, so adding the "
-        "verb would grade it with no flag grammar at all (#12069 round 24, corrected r25)",
+        "STATED RESIDUAL: `dpkg-deb -x` is in neither table, so "
+        "`_is_command_position` calls it a COMMAND and the mention is skipped; its "
+        "destination is positional, so adding the verb grades it with no flag "
+        "grammar at all (#12069 r24, corrected r26)",
     ),
     (
         'tar -czf "$RUNNER_TEMP/pg_dump-output.tgz" "$b/16/bin"',
