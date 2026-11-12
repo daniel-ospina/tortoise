@@ -1511,7 +1511,15 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
                              for r in _members]
             _matched_subj += [rep for rep, _key, _members in _subj_raw
                               if rep is not None]
-            if any(_same_successor(str(r[4] or ""), supersedes_by)
+            # ⛔ Same requirement as the Object twin below (review round 19): the
+            # successor's CARRIER spellings, flattened from the probe's groups —
+            # never the representatives, whose spelling this record may never have
+            # resolved.
+            if any(_same_successor(
+                    str(r[4] or ""), supersedes_by,
+                    candidate_names=[mname
+                                     for _rep, _key, members in sb_entities
+                                     for _mid, mname, _mst in members])
                    for r in _matched_subj if len(r) > 4):
                 return False
             if _matched_subj:
@@ -2040,7 +2048,17 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # forbids ("only the same-successor arm stays silent … an idempotent
             # dedup, not a refusal"). Measured on `main`: `applied=0, skips=[],
             # warns=[]` for that shape.
-            if any(_same_successor(str(r[4] or ""), supersedes_by)
+            # ⛔ `candidate_names` is REQUIRED here (review round 19): the fold
+            # stores the successor NODE's spelling (`_one_successor_spelling`), so
+            # the ordinary success path — a successor resolved by its folded key —
+            # stores a value that is NOT this record's, and the fold arm cannot see
+            # that it is the same successor. Without the candidate set, a re-ingest
+            # of an ALREADY-FOLDED record was reported as a fresh refusal and wrote
+            # a durable `unaddressable-name` entry (the round-18 class, for the
+            # shape where the stored spelling happens to equal the record's, was
+            # fixed the same way).
+            if any(_same_successor(str(r[4] or ""), supersedes_by,
+                                   candidate_names=_sb_carrier_spellings)
                    for r in _name_rows):
                 continue
             # The entry is the record (review round 18): both twin refusals

@@ -4801,6 +4801,91 @@ class TestThe12120ReviewRound18:
         finally:
             sdk.close()
 
+    def test_a_fold_only_successor_still_dedups_through_a_gone_survivor(
+            self, sdk_factory):
+        """Round 19: the dedup must use the SUCCESSOR's resolved spellings.
+
+        `_one_successor_spelling` stores the successor NODE's spelling, so the
+        ordinary success path — a successor resolved by its folded key — stores a
+        value that is NOT the record's. Re-ingesting that record after the REF
+        carrier's survivor is deleted lands in the gone-survivor guard, and
+        `_same_successor` was called there WITHOUT `candidate_names`, which its own
+        docstring calls "required, not decoration": the stored spelling folds
+        differently from the record's, so the comparison returns False and an
+        already-folded record is reported as a fresh refusal plus a durable
+        `unaddressable-name` entry — the exact class round 18 fixed for the shape
+        where the stored spelling happens to equal the record's.
+
+        Measured pre-fix: `skips=[{"reason": "ref carrier's survivor is gone"}]`,
+        two warnings, one `unaddressable-name` entry. `main` is silent here.
+        """
+        from tortoise.entity_identity import (
+            clear_non_folded_entries,
+            non_folded_entries,
+        )
+
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            # The successor is reachable from the record's spelling `Acme` only
+            # through its folded key — the PR's own success path.
+            g.query(
+                "CREATE (s:Object {id:'r19-succ', name:'Acme Corporation', "
+                "canonical_name:'acme', objectKind:'organization', "
+                "status:'live'})")
+            g.query(
+                "CREATE (o:Object {id:'r19-old', name:'Old Co', "
+                "objectKind:'document', status:'superseded', "
+                "supersededBy:'Acme Corporation', resolved_from:'r19-gone'})")
+            clear_non_folded_entries()
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Old Co", "supersedes_by": "Acme",
+                 "evidence": "test"}])
+            assert applied == 0, (applied, skips, msgs)
+            assert skips == [], (
+                "a re-ingest whose successor was resolved by its folded key was "
+                "reported as a fresh refusal — the guard compared spellings "
+                f"without this record's candidate set: {skips!r}")
+            assert msgs == [], f"the dedup emitted warnings: {msgs!r}"
+            assert [e.shape for e in non_folded_entries()
+                    if e.name == "Old Co"] == [], (
+                "the dedup wrote a durable repair record for a record that is "
+                "already folded")
+        finally:
+            sdk.close()
+
+    def test_the_subject_lane_dedups_a_fold_only_successor_too(
+            self, sdk_factory):
+        """The Subject twin of the round-19 finding.
+
+        The same guard exists on the Subject lane, and it omitted the same
+        required `candidate_names`. Pinned separately because the two call sites
+        are separate code and a fix to one has twice not reached the other
+        (rounds 15–19): the Object pin cannot see this site at all.
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (s:Subject {id:'r19-succ-s', name:'Acme Corporation', "
+                "canonical_name:'acme', subjectKind:'organization', "
+                "status:'live'})")
+            g.query(
+                "CREATE (o:Subject {id:'r19-old-s', name:'Old Co', "
+                "subjectKind:'organization', status:'superseded', "
+                "supersededBy:'Acme Corporation', resolved_from:'r19-gone-s'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Old Co", "supersedes_by": "Acme",
+                 "evidence": "test"}])
+            assert applied == 0, (applied, skips, msgs)
+            assert skips == [], (
+                "the Subject lane reported a re-ingest as a fresh refusal — its "
+                "guard compared spellings without this record's candidate set: "
+                f"{skips!r}")
+            assert msgs == [], f"the Subject dedup emitted warnings: {msgs!r}"
+        finally:
+            sdk.close()
+
     def test_the_gone_survivor_refusal_is_recorded_durably(self, sdk_factory):
         from tortoise.entity_identity import (
             clear_non_folded_entries,
