@@ -34,7 +34,11 @@ That makes four things load-bearing in a way that is invisible to a reader:
    select rows by shape, so a row shaped other than expected is simply not seen —
    which made a thirteenth correction row (or a fifth §6 bucket) free: measured,
    appending one returned CLEAN with the pin still reading `abcdefghijkl`. So §3
-   and §6 now refuse any table row whose label cell they cannot classify, and every
+   and §6 now refuse any table row whose label cell they cannot classify, and so
+   does §1 — the table this page names as the vocabulary's authority — where a row
+   that is not a `**VERDICT**` row is a claim class with no handling rule (and was
+   invisible to the vocabulary comparison, which only collects the rows that
+   MATCH: measured, one inserted row left the guard at rc 0). Every
    backticked `token:LINE` the citation pattern declines is refused too — apart from
    the spellings §8 names as carve-outs, which are skipped BY DECLARATION and listed
    there rather than left to be discovered. The
@@ -274,17 +278,19 @@ INNER_CITATION_RE = re.compile(
 
 #: `## N.` headings actually present, so a `§N` evidence reference can be checked
 #: for existence rather than accepted as a token.
+#:
+#: ⛔ THE NUMBER IS `\d+`, NOT `\d`. A single-digit read parsed `§10` as `§1` and
+#: discarded the `0`, and since §1 exists every two-digit reference to a section the
+#: page does not have was accepted as evidence (measured: an evidence cell rewritten
+#: to `§10` left `check_document()` at `[]`). Existence is only a check if the whole
+#: number is read, and the pattern is the only thing that decides where it ends.
 HEADING_NUMBER_RE = re.compile(r"(?m)^##\s+(\d+)\.")
-SECTION_REF_TOKEN_RE = re.compile(r"§\s?(\d)")
+SECTION_REF_TOKEN_RE = re.compile(r"§\s?(\d+)")
 
 
 def _has_path_marker(token: str) -> bool:
     """Is this token shaped like a path at all (`/`, `.`, or the `:LINE` shorthand)?"""
     return "/" in token or "." in token or token.startswith(":")
-
-#: An in-page section reference (`§6`) — §1 accepts it in place of a citation for
-#: a row whose evidence IS the section below it (row (l)).
-SECTION_REF_RE = re.compile(r"§\s?\d")
 
 #: A backticked command — the third evidence form §1 allows
 #: (`gh issue view N`, `ls tortoise/semantic_extractor.py`).
@@ -314,7 +320,7 @@ VOCAB_ROW_RE = re.compile(r"^\|\s*\*\*(?P<token>[A-Z][A-Z-]*)\*\*\s*\|")
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-MIN_SELF_TEST_MUTATIONS = 31
+MIN_SELF_TEST_MUTATIONS = 35
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -652,9 +658,25 @@ def check_verdict_tally(text: str) -> list[str]:
     # sits BEFORE the words it introduces, so the head swallowed the complement and
     # the arm named all twelve (measured).
     sentences = re.split(r"(?<=\.)\s+", paragraph)
-    non_still_sentence = " ".join(
-        s for s in sentences if "no longer read as written" in s
-    )
+    # ⛔ EXACTLY ONE SENTENCE, not "every sentence that matches". Joining them let a
+    # second compliant sentence anywhere in the paragraph supply the letter set, the
+    # per-letter verdict attribution and the overtaken count while the sentence a lane
+    # actually quotes stayed stale: measured, appending
+    # `Note: seven of the twelve rows no longer read as written — **(a)**, … **(j)**.`
+    # and falsifying the real sentence's letter list in the same edit left `--check` at
+    # rc 0. This is the §6 survivor arm's rule ("keep exactly one") one level down from
+    # the paragraph-level decoy check above, and for the same reason: the arm locates
+    # its subject BY PATTERN, so more than one candidate means it can report OK over a
+    # sentence nobody reads.
+    tally_sentences = [s for s in sentences if "no longer read as written" in s]
+    if len(tally_sentences) > 1:
+        return [
+            f"§3 carries {len(tally_sentences)} sentences saying 'no longer read as "
+            "written' — the guard cannot tell which one a lane quotes, and a second "
+            "one can supply the letters while the real sentence goes stale; keep "
+            "exactly one"
+        ]
+    non_still_sentence = tally_sentences[0] if tally_sentences else ""
     still_sentence = " ".join(
         s for s in sentences if "still read as written" in s and "no longer" not in s
     )
@@ -976,7 +998,17 @@ def check_vocabulary(text: str) -> list[str]:
     `check_document()` empty while §3 still used it and §8 still claimed §1 was the
     authority (measured). The page would then define a vocabulary narrower than its
     own table uses — the "claim class with no handling rule" §1 exists to prevent.
+
+    ⛔ AND THE ROWS THAT DO NOT MATCH ARE REFUSED TOO. The comparison above only
+    collects rows that MATCH, so a row shaped any other way is invisible to it:
+    measured, inserting `| SUPERSEDED-BY-DRIFT | … |` left `check_vocabulary()`
+    empty and `--check` at rc 0, so §1 could carry a sixth claim class with no
+    handling rule — exactly the state §1 exists to prevent — while §8 went on naming
+    §1 as the authority. This is §3's and §6's rule ("an unrecognised row shape is
+    refused, not skipped") applied to the one table that DEFINES the vocabulary the
+    others are checked against.
     """
+    problems: list[str] = []
     section = _region(text, "## 1. What a row means", "## 2. The four defect classes")
     defined = tuple(
         m.group("token")
@@ -984,12 +1016,23 @@ def check_vocabulary(text: str) -> list[str]:
         if m
     )
     if defined != VERDICTS:
-        return [
+        problems.append(
             f"§1 vocabulary drift: the page defines {defined or '(none)'}, the guard "
             f"enforces {VERDICTS} — in either direction a verdict has no handling "
             "rule, and §8 names §1 as the authority"
-        ]
-    return []
+        )
+    for line in section.splitlines():
+        row = line.strip()
+        if not row.startswith("|") or TABLE_SEPARATOR_RE.match(row):
+            continue
+        if VOCAB_ROW_RE.match(row) or row.startswith("| Verdict"):
+            continue
+        problems.append(
+            f"§1 carries a table row that is not a `**VERDICT**` row: {row[:80]} — "
+            "the closed vocabulary is the rows of this one table, so a row shaped any "
+            "other way is a claim class with no handling rule"
+        )
+    return problems
 
 
 def _line_count(path: Path) -> int | None:
@@ -1829,6 +1872,54 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
             1,
         ),
         "carries 2 tables",
+    ),
+    (
+        # The `~` carve-out's WIDTH. It exempted every `~`-rooted path, so the whole
+        # resolver could be skipped with one keystroke: measured, `~tortoise/nope.py:16`
+        # and `~tortoise/pipeline.py:999999` both returned `[]`. §8's exemption names
+        # ONE dated tree (`~/.swarm/`), and this arm fails if it widens again.
+        "a `~`-rooted citation outside the exempt tree",
+        lambda t: t.replace(
+            "`tortoise/pipeline.py:16`", "`~tortoise/pipeline.py:999999`", 1
+        ),
+        "`~`-rooted outside",
+    ),
+    (
+        # The two-digit §N. `SECTION_REF_TOKEN_RE` matched ONE digit and discarded the
+        # rest, so `§10` parsed as `§1` — a section the page has — and every two-digit
+        # reference to a section that does not exist passed as evidence (measured).
+        # This arm is the pin for `\d+`: narrowing it back to `\d` reds the self-test.
+        "a §N evidence reference two digits wide that names no heading",
+        lambda t: t.replace("| §6 below, measured per issue |",
+                            "| §10 below, measured per issue |", 1),
+        "names no `path:line`, issue, command or §N",
+    ),
+    (
+        # §1's unrecognised row. `check_vocabulary()` compared only the rows that
+        # MATCH, so a sixth claim class shaped any other way was invisible while §8
+        # went on naming §1 as the authority (measured: rc 0). §3 and §6 already
+        # refuse an unrecognised row shape; this is the same rule on the table that
+        # DEFINES the vocabulary they are checked against.
+        "a row in §1 that is not a `**VERDICT**` row",
+        lambda t: t.replace(
+            "| **ADOPTED** |",
+            "| SUPERSEDED-BY-DRIFT | whatever |\n| **ADOPTED** |",
+            1,
+        ),
+        "is not a `**VERDICT**` row",
+    ),
+    (
+        # The tally arm joined EVERY sentence matching its phrase, so a second one
+        # inside the same paragraph could carry the letters while the sentence a lane
+        # quotes went stale (measured on the pre-fix tool: `[]`). This is the §6
+        # survivor arm's "keep exactly one" rule, one level down.
+        "a second tally sentence inside the same paragraph",
+        lambda t: t.replace(
+            "stated both ways.)",
+            "stated both ways.) Seven of the twelve rows no longer read as written.",
+            1,
+        ),
+        "sentences saying 'no longer read as written'",
     ),
 )
 

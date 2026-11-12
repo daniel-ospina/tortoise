@@ -191,6 +191,15 @@ def test_mutation_population_is_pinned():
     permalink left the page CLEAN — the likeliest real-world citation form was also
     the one shape that looked verified and was not. The population and the floor move
     together.
+
+    The #11902 re-verification added the 32nd–35th (the population was 31 at the head
+    it re-measured), one per fail-open it found still
+    open on the merged head: a `~`-rooted citation outside `~/.swarm/` (one keystroke
+    defused the resolver), a two-digit `§N` that named no heading (read as its first
+    digit), a §1 row that is not a `**VERDICT**` row (a claim class with no handling
+    rule, invisible to the vocabulary comparison), and a second tally sentence in the
+    same paragraph (a decoy supplying the letters while the real one went stale).
+    35 is the population at this head.
     """
     # ⛔ EQUALITY, not `>=` (#11902 review P2). A floor cannot see a one-arm shrink:
     # at this head two merges of two 25-arm populations produced 26 arms while the
@@ -201,8 +210,8 @@ def test_mutation_population_is_pinned():
         "the registered population must EQUAL the floor it declares — a `>=` floor "
         "cannot see a one-arm shrink"
     )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 31, (
-        "this line RECORDS the population (31 arms); removing one means editing the "
+    assert flc.MIN_SELF_TEST_MUTATIONS == 35, (
+        "this line RECORDS the population (35 arms); removing one means editing the "
         "floor here too, which is the second place a shrink has to touch"
     )
 
@@ -614,7 +623,9 @@ def test_a_page_of_nothing_but_tilde_citations_is_drift(tmp_path, monkeypatch):
         tmp_path,
         monkeypatch,
         lambda t: re.sub(
-            r"`((?:tortoise|tests|docs|\.github|config|tools)/[^`]*:\d[^`]*)`", r"`~\1`", t
+            r"`((?:tortoise|tests|docs|\.github|config|tools)/[^`]*:\d[^`]*)`",
+            r"`~/.swarm/\1`",
+            t,
         ),
     )
     problems = _doc_problems()
@@ -2131,3 +2142,139 @@ def test_tool_is_stdlib_only():
         [sys.executable, str(REPO / "tools" / "findings_ledger_check.py"), "--self-test"],
         cwd=REPO, capture_output=True, check=False,
     ).returncode == 0
+
+
+def test_a_tilde_citation_outside_the_swarm_tree_is_refused(tmp_path, monkeypatch):
+    """FAILS if a `~`-rooted citation anywhere is exempted from the resolver.
+
+    §8's carve-out is ONE dated tree — §5's `~/.swarm` inventory — but the arm
+    exempted every `~` path, so prefixing any citation with one character defused
+    every red this resolver can raise: measured, `~tortoise/nope.py:16` (a path
+    that does not exist) and `~tortoise/pipeline.py:999999` (a line past the end of
+    its file) both returned `[]`. A citation the guard cannot open must not be
+    counted as checked.
+    """
+    for spelling in ("~tortoise/nope_module.py:16", "~tortoise/pipeline.py:999999"):
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, _s=spelling: t.replace(
+                    "`tortoise/pipeline.py:16`", f"`{_s}`", 1
+                ),
+            )
+            problems = _doc_problems()
+            assert any("`~`-rooted outside" in p for p in problems), (
+                f"{spelling!r} is `~`-rooted outside `~/.swarm/` and must be refused, "
+                f"not exempted: {problems}"
+            )
+
+
+def test_a_tilde_citation_inside_the_swarm_tree_stays_exempt(tmp_path, monkeypatch):
+    """FAILS if narrowing the carve-out also reds the citation §8 declares exempt.
+
+    The other direction of the test above: §5 is a dated reading of a tree outside
+    this repository, so its citation cannot be resolved and must stay counted-but-
+    exempt rather than becoming a red the required `docs` job cannot fix.
+    """
+    with monkeypatch.context() as patch:
+        _mutated(
+            tmp_path,
+            patch,
+            lambda t: t.replace(
+                "`tortoise/pipeline.py:16`",
+                "`~/.swarm/issue-triage-2026-09-09.md:3`",
+                1,
+            ),
+        )
+        problems = _doc_problems()
+        assert not any("`~`-rooted outside" in p for p in problems), problems
+        assert not any("does not exist in the tree" in p for p in problems), problems
+
+
+def test_a_two_digit_section_reference_must_name_a_real_heading(tmp_path, monkeypatch):
+    """FAILS if `§N` is read as a single digit.
+
+    `SECTION_REF_TOKEN_RE` matched one digit and DISCARDED the rest, so `§10`
+    parsed as `§1` — a section the page has — and every two-digit reference to a
+    section that does not exist was accepted as evidence (measured: an evidence
+    cell rewritten to `§10` left `check_document()` at `[]`). Existence is only a
+    check if the whole number is read.
+    """
+    with monkeypatch.context() as patch:
+        _mutated(
+            tmp_path,
+            patch,
+            lambda t: t.replace(
+                "| §6 below, measured per issue |",
+                "| §10 below, measured per issue |",
+                1,
+            ),
+        )
+        problems = _doc_problems()
+        assert any("names no `path:line`, issue, command or §N" in p for p in problems), (
+            f"a `§10` evidence cell names no heading this page has: {problems}"
+        )
+
+
+def test_a_non_verdict_row_in_s1_is_refused(tmp_path, monkeypatch):
+    """FAILS if §1's table can carry a row that is not a `**VERDICT**` row.
+
+    `check_vocabulary()` compared only the rows that MATCH its pattern, so a row
+    shaped any other way was invisible: measured, inserting
+    `| SUPERSEDED-BY-DRIFT | … |` left the arm empty and `--check` at rc 0 — a
+    sixth claim class with no handling rule, in the one table §8 names as the
+    authority for the vocabulary §3 is checked against.
+    """
+    with monkeypatch.context() as patch:
+        _mutated(
+            tmp_path,
+            patch,
+            lambda t: t.replace(
+                "| **ADOPTED** |",
+                "| SUPERSEDED-BY-DRIFT | whatever |\n| **ADOPTED** |",
+                1,
+            ),
+        )
+        problems = _doc_problems()
+        assert any("is not a `**VERDICT**` row" in p for p in problems), (
+            f"an unhandled claim class in §1 must red: {problems}"
+        )
+
+
+def test_a_second_tally_sentence_is_refused(tmp_path, monkeypatch):
+    """FAILS if a decoy sentence can supply the §3 tally's letter list.
+
+    The arm joined EVERY sentence containing "no longer read as written", so a
+    second one anywhere in the paragraph could carry the correct letters, the
+    per-letter verdict attributions and the overtaken count while the sentence a
+    lane actually quotes went stale: measured on the pre-fix tool, falsifying the
+    real sentence's letter list while appending a compliant decoy in the same
+    paragraph returned `[]`. The §6 survivor arm already refuses a second match for
+    the same reason — the subject is located BY PATTERN, so more than one candidate
+    means the arm can report OK over a sentence nobody reads.
+    """
+    real = (
+        "written** — **(c)**, **(d)** and **(g)** are **SUPERSEDED-BY-FIX**, **(e)** is\n"
+        "**ADOPTED**, and **(b)**, **(k)** and **(l)** are **DRIFTED**."
+    )
+    decoy = (
+        " stated both ways.) Note: seven of the twelve rows no longer read as written — "
+        "**(c)**, **(d)** and **(g)** are **SUPERSEDED-BY-FIX**, **(e)** is **ADOPTED**, "
+        "and **(b)**, **(k)** and **(l)** are **DRIFTED**. "
+    )
+
+    def _falsify_and_deceive(text: str) -> str:
+        falsified = text.replace(real, "written** — nothing else moved this round.", 1)
+        assert falsified != text, "the tally sentence did not change"
+        deceived = falsified.replace(" stated both ways.) ", decoy, 1)
+        assert deceived != falsified, "the decoy anchor did not change"
+        return deceived
+
+    with monkeypatch.context() as patch:
+        _mutated(tmp_path, patch, _falsify_and_deceive)
+        problems = _doc_problems()
+        assert any("sentences saying 'no longer read as written'" in p for p in problems), (
+            f"a decoy must not be able to take the tally match: {problems}"
+        )
+
