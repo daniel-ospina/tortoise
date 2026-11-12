@@ -30,6 +30,7 @@ What is pinned here
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -2245,3 +2246,249 @@ class TestThe12120FourthRoundReaders:
         assert exists is True, (
             "a held name read as UNHELD through the collapsed ANY-status arm")
         assert live == 0, f"fixture drift: a live carrier appeared ({live})"
+
+class TestThe12120AboutEdgeStubIsFoldAware:
+    """#12120 finding 1 (P1): the about-edge Subject stub read a NARROWER key space
+    than the writer, and the write it guarded was the poisoning one.
+
+    ``projection/edges.py::_mint_subject_stub`` minted a ``:Subject`` stub
+    unconditionally on the RAW spelling of a mention. The create door resolves on
+    the FOLDED union (``name`` · ``canonical_name`` · ``aliases``, raw and
+    folded), so a mention of an already-registered Subject under a VARIANT
+    spelling (``"the owner"`` beside ``"The Owner"``) opened a SECOND live
+    carrier with the same folded key. From then on ``resolve_or_mint`` refused
+    EVERY spelling of that name — non-exempt ``ambiguous-name``, no by-name repair
+    path — so ONE mention create-poisoned the entity, while ``origin/main`` still
+    succeeded.
+
+    The fix: the stub is RESOLVE-OR-MINT over the writer's key space, and it
+    returns the node it ADDRESSED — so the callers (`wire_about_link` live,
+    `resolve_structural_target` replay) wire the node the writer's key names
+    instead of re-deriving a target from the mention's spelling.
+    """
+
+    def test_a_variant_mention_does_not_mint_a_twin(self, sdk_factory):
+        """The measured failure: 2 live carriers, then every create of the name
+        raised. Discriminating assertion: `create_subject("owner")` succeeds."""
+        sdk = sdk_factory()
+        try:
+            owner = sdk.create_subject("The Owner")["id"]
+            sdk.create_event("ev-12055-1", "github.issue.open",
+                             aboutSubject="the owner")
+
+            g = sdk._get_proj().g
+            carriers = g.query(
+                "MATCH (s:Subject) RETURN s.id, s.name, s.canonical_name"
+            ).result_set
+            assert len(carriers) == 1, (
+                "the mention minted a SECOND live carrier for the folded name — "
+                f"one mention create-poisons it: {carriers}")
+
+            wired = g.query(
+                "MATCH (e:Event)-[:aboutSubject]->(s:Subject) "
+                "WHERE e.name = $e RETURN s.id",
+                params={"e": "ev-12055-1"}).result_set
+            assert wired == [[owner]], (
+                "the mention did not wire onto the registered Subject "
+                f"(wired {wired!r}, registered {owner!r})")
+
+            # THE POISONING. Before the fix this raised `AmbiguousEntityName`
+            # (`candidate_ids=['<ulid>', 'the owner']`, measured).
+            again = sdk.create_subject("owner")
+            assert again["id"] == owner, (
+                "the folded spelling resolved to a different entity than the one "
+                f"the mention wired: {again!r}")
+        finally:
+            sdk.close()
+
+    def test_the_variant_mention_link_survives_a_rebuild(self, tmp_path):
+        """Live and replay must agree (#9836): the journaled link carries the
+        RESOLVED endpoint's id, so replay wires the same Subject instead of
+        re-deriving a stub from the mention's spelling."""
+        from tortoise.sdk import TortoiseSDK
+
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t.db"),
+                          event_log_path=str(events / "events.jsonl"),
+                          namespace=f"test_suite_{os.urandom(4).hex()}")
+        try:
+            owner = sdk.create_subject("The Owner")["id"]
+            sdk.create_event("ev-12055-2", "github.issue.open",
+                             aboutSubject="the owner")
+            g = sdk._get_proj().g
+            q = ("MATCH (e:Event)-[:aboutSubject]->(s:Subject) "
+                 "WHERE e.name = $e RETURN s.id")
+            before = [list(r) for r in g.query(
+                q, params={"e": "ev-12055-2"}).result_set]
+            assert before == [[owner]], f"fixture drift: {before!r}"
+
+            # Raises `NonFoldedEventsError` if the fold records a non-exempt miss
+            # for the mention — the shipped failure mode of this class.
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+            after = [list(r) for r in g.query(
+                q, params={"e": "ev-12055-2"}).result_set]
+            assert after == before, (
+                "the aboutSubject link did not replay onto the same Subject "
+                f"(live {before!r} vs replay {after!r})")
+
+            # ⛔ THE RECORD ITSELF, not just the graph: deleting the fold retry
+            # leaves the graph identical (the replay-side mint adopts the live
+            # holder), so a graph-only assertion is GREEN under that mutant —
+            # measured by review at this head. What the retry actually changes is
+            # the journal shape, so that is what this pin must read.
+            record = None
+            for line in (events / "events.jsonl").read_text().splitlines():
+                rec = json.loads(line)
+                if rec.get("name") == "ev-12055-2" and rec.get("aboutLinks"):
+                    record = rec
+            assert record is not None, "fixture drift: no journaled about link"
+            assert record["aboutLinks"][0] == {
+                "rel": "aboutSubject",
+                "how": "id",
+                "targets": [owner],
+                "target_label": "Subject",
+                "resolve_key": "The Owner",
+                "mint_if_absent": False,
+            }, (
+                "the journal pinned the mention's SPELLING instead of the resolved "
+                f"endpoint — replay would have to re-derive it: {record['aboutLinks'][0]!r}")
+            carriers = g.query("MATCH (s:Subject) RETURN s.id").result_set
+            assert len(carriers) == 1, (
+                f"the rebuild minted a stub beside the registered Subject: {carriers}")
+        finally:
+            sdk.close()
+
+    def test_a_deleted_fold_target_is_not_fabricated_at_replay(self, tmp_path):
+        """The record must name the RESOLVED endpoint, not the mention's spelling.
+
+        This is the fabrication direction, and it is what the stub-fallback link
+        shape costs: a record that journals `targets=[<spelling>]` with
+        `mint_if_absent` cannot be told apart at replay from a mention nobody ever
+        registered. Once the Subject it actually wired is hard-deleted, the
+        replay's staleness test (keyed on the journaled value, here a SPELLING)
+        does not fire, the value does not resolve, and the `mint_if_absent` repair
+        MINTS a Subject stub the live graph never had — `derived == replay(journal)`
+        broken by fabrication, in a rebuild. With the resolved id journaled, the
+        hard delete is recognised and the link is simply skipped.
+        """
+        from tortoise.sdk import TortoiseSDK
+
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t.db"),
+                          event_log_path=str(events / "events.jsonl"),
+                          namespace=f"test_suite_{os.urandom(4).hex()}")
+        try:
+            owner = sdk.create_subject("The Owner")["id"]
+            sdk.create_event("ev-12055-3", "github.issue.open",
+                             aboutSubject="the owner")
+            g = sdk._get_proj().g
+            assert g.query(
+                "MATCH (:Event)-[:aboutSubject]->(s:Subject) RETURN s.id"
+            ).result_set == [[owner]], "fixture drift: the link was not wired"
+
+            assert sdk.delete_entity(owner) is True, (
+                "fixture drift: the Subject was not hard-deleted")
+
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+            carriers = g.query("MATCH (s:Subject) RETURN s.id, s.name").result_set
+            assert carriers == [], (
+                "the rebuild FABRICATED a Subject for a mention whose target was "
+                f"hard-deleted — the journal pinned the spelling, not the node: {carriers}")
+            edges = g.query(
+                "MATCH (:Event)-[:aboutSubject]->(s:Subject) RETURN s.id"
+            ).result_set
+            assert edges == [], (
+                f"the rebuild wired an edge to a fabricated target: {edges!r}")
+        finally:
+            sdk.close()
+
+    def test_a_variant_mention_skips_a_superseded_holder(self, sdk_factory):
+        """The writer's question includes its LIVE filter; the spelling union does not.
+
+        `apply_subject_supersession` leaves the buried incarnation carrying the same
+        folded key with `status='superseded'`. An unfiltered fold retry attributed a
+        variant mention to that dead incarnation — while the SAME record's `subject`
+        fold records the name as having no live holder (`resolve_fold_name`) and
+        `resolve_or_mint` would mint a new incarnation. One record, two answers.
+        """
+        sdk = sdk_factory()
+        try:
+            buried = sdk.create_subject("The Owner")["id"]
+            assert sdk.update_entity(buried, status="superseded") is not False
+            sdk.create_event("ev-12055-4", "github.issue.open",
+                             aboutSubject="the owner")
+            g = sdk._get_proj().g
+            wired = g.query(
+                "MATCH (e:Event)-[:aboutSubject]->(s:Subject) "
+                "WHERE e.name = $e RETURN s.id",
+                params={"e": "ev-12055-4"}).result_set
+            assert [buried] not in wired, (
+                "the mention was attributed to the SUPERSEDED incarnation: "
+                f"{wired!r} (buried {buried!r})")
+        finally:
+            sdk.close()
+
+    def test_a_variant_mention_collapses_a_merged_away_carrier(self, sdk_factory):
+        """`apply_entity_merge` is non-destructive: BOTH nodes keep a matching key.
+
+        The survivor gains the candidate's folded name in `aliases`, and the
+        candidate keeps its own `canonical_name`, so the SPELLING union matches two
+        rows. Collapsing onto the survivor is the writer's own rule
+        (`_collapse_resolved_holders`); without it live wires and journals a second
+        about edge onto the very duplicate the merge retired.
+        """
+        sdk = sdk_factory()
+        try:
+            survivor = sdk.create_subject("Acme Corp")["id"]
+            candidate = sdk.create_subject("Acme Corporaton")["id"]
+            assert candidate != survivor, "fixture drift: no pair to merge"
+            sdk.approve_merge(candidate, action="merge")
+            sdk.create_event("ev-12055-5", "github.issue.open",
+                             aboutSubject="the acme corporaton")
+            g = sdk._get_proj().g
+            wired = g.query(
+                "MATCH (e:Event)-[:aboutSubject]->(s:Subject) "
+                "WHERE e.name = $e RETURN s.id",
+                params={"e": "ev-12055-5"}).result_set
+            assert wired == [[survivor]], (
+                "the merge was not collapsed: expected one edge onto the survivor "
+                f"{survivor!r}, got {wired!r} (candidate {candidate!r})")
+        finally:
+            sdk.close()
+
+    def test_an_ambiguous_folded_name_mints_no_third_carrier(self, sdk_factory):
+        """Route-then-refuse: two live carriers is not a choice the stub may make.
+
+        An old-shape journal (``targets=[<mention spelling>]``, ``mint_if_absent``)
+        replays through ``resolve_structural_target(mint=True)``. With the folded
+        name already held twice, the stub must report "cannot address" and write
+        NOTHING — minting there opens a THIRD carrier under the same folded key.
+        """
+        from tortoise.projection.edges import resolve_structural_target
+
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (:Subject {id:'dup-a', name:'Owner', "
+                "                  canonical_name:'owner'}) "
+                "CREATE (:Subject {id:'dup-b', name:'The Owner', "
+                "                  canonical_name:'owner'})")
+            # "OWNER" FOLDS to "owner" — the key both carriers store. (A
+            # spelling that folds elsewhere is simply unheld, and the stub mints
+            # for it by design; that is what made the first version of this pin
+            # non-discriminating.)
+            target = resolve_structural_target(
+                g, "Subject", "OWNER", "aboutSubject", mint=True)
+            assert target is None, (
+                "the stub PICKED a carrier of an ambiguous folded name: "
+                f"{target!r}")
+            carriers = g.query("MATCH (s:Subject) RETURN s.id").result_set
+            assert len(carriers) == 2, (
+                f"the stub minted a THIRD carrier under a poisoned folded key: {carriers}")
+        finally:
+            sdk.close()

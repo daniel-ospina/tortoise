@@ -942,17 +942,35 @@ _ALLOWED_KEYED = {
         # NO status filter.
     },
     'tortoise/projection/edges.py': {
-        # #5509 A: `resolve_structural_target`'s name-keyed targets now read
-        # with `LIMIT 2` and refuse on >1 (`_refuse_ambiguous_target`), so the
+        # #5509 A: `resolve_structural_target`'s name-keyed targets read with
+        # `LIMIT 2` and refuse on >1 (`_refuse_ambiguous_target`), so the
         # remaining read is the holder probe itself, not a silent pick.
+        # #12120 finding 1: this is now the RESOLVE-ONLY arm and the refusal arm —
+        # when `mint` is requested, `_mint_subject_stub` answers with the node it
+        # ADDRESSED (over the folded union) and this read is not reached. It still
+        # refuses a spelling that its own key holds twice.
         'rows = g.query( "MATCH (s:Subject {name:$name}) RETURN ID(s), s.id LIMIT 2", params={"name": key}).result_set': 1,
+        # #12120 finding 1: the READ-BACK of the stub `_mint_subject_stub` has just
+        # MERGE'd — it cannot name two carriers, because the mint is guarded by a
+        # folded-union holder probe that returns BEFORE this write when any live
+        # holder exists. It returns the identity of the node the call wrote (the
+        # caller wires by that internal id), and a 2-row answer here is REFUSED
+        # rather than picked. The minted stub is the last name-keyed WRITE in the
+        # tree, migration-gated (owner: S3 identity/resolver).
+        'rows = g.query( "MATCH (s:Subject {name:$name}) RETURN ID(s), s.id LIMIT 2", params={"name": name}).result_set': 1,
         # E: the cascade's Subject-stub FALLBACK anchor (#8398 P1-2). Reached
-        # only when no label matched by name — including no `:Subject` — so the
-        # mint above it creates the node this read then addresses. A write key,
+        # only when no label matched by name — including no `:Subject`, raw OR
+        # folded (`_resolve_subject_fold_target` runs first) — so the mint above
+        # it creates the node this read then addresses. A write key,
         # migration-gated (owner: S3 identity/resolver). Its predecessor, the
         # rel-ignoring `MERGE (n)-[:aboutSubject]->(s)` by name, is REMOVED with
         # `_try_about_edge`'s inline write, not left stale below.
-        'rows = self.g.query( "MATCH (s:Subject {name:$name}) RETURN ID(s) LIMIT 1", params={"name": link["resolve_key"]}).result_set': 1,
+        #
+        # ⛔ The `LIMIT 1` read that used to follow the mint at BOTH call sites is
+        # GONE (#12120 finding 1): `_mint_subject_stub` now returns the node it
+        # addressed, so no caller re-derives the target from the MENTION'S spelling
+        # (which a fold-only holder does not carry) and live no longer picks one of
+        # N carriers.
     },
     'tortoise/projection/entities.py': {
         # §B "Route" — lifecycle folds / participants fallback / edge anchors;
