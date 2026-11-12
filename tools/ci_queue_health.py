@@ -689,10 +689,14 @@ class QueueHealth:
     #: These are the runs that produced that.
     pr_running_excluded: tuple[int, ...] = ()
     #: PR-event runs that are still COUNTED as executing because their execution was not
-    #: disproved. FOUR causes, ONE bucket — and the causes span three layers, so the
-    #: ATTRIBUTION is stated once, on `pr_running_unmeasured_unprobed` below, and the set is
-    #: deliberately not re-enumerated here (a second copy is what drifted before; the
-    #: `has_live_job` field doc above carries the callee's half of it).
+    #: disproved. The causes span THREE LAYERS (the callee's read routes, the caller's
+    #: settle gate, and the caller's probe budget), so the ATTRIBUTION is stated once, on
+    #: `pr_running_unmeasured_unprobed` below, and the set is deliberately not re-enumerated
+    #: here. ⛔ NO NUMERAL IS GIVEN, deliberately: this comment has carried a count three
+    #: times and every one was a route short — most recently "FOUR, ONE bucket" after the
+    #: callee gained a third completeness route (an int `total_count` above the page, a
+    #: present-but-not-an-int count, and no count on a full page). The `has_live_job` field
+    #: doc above carries the callee's half; re-derive the total from it, never from here.
     #: Abstaining toward executing is what keeps an unread jobs surface from manufacturing
     #: `PR-STARVED` — a `STARVING_VERDICT` that authorises a destructive cancel-then-rerun.
     #: Reported so the abstention is visible.
