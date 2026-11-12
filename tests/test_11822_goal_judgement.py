@@ -36,6 +36,8 @@ from tortoise.goal_judgement import (
     Target,
     _ensure_judgement_edge,
     _extra_operators,
+    _point_status,
+    _supersession_evidence,
     compare,
     compare_values,
     judge,
@@ -830,6 +832,372 @@ def test_a_refused_baseline_leaves_no_judgement_point(sdk, monkeypatch):
         judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                          target=target)
     assert _judgement_points(sdk, goal["id"]) == []
+
+
+def test_a_supersede_that_fails_after_mutating_keeps_the_migrated_mirror(
+        sdk, monkeypatch):
+    """⛔ #11953 P2-1: the compensation is only safe BEFORE any mutation lands.
+
+    `supersede_point` emits `PointSuperseded` FIRST and then runs ~15 mutating
+    statements, so a driver/infra failure inside that window arrives at the
+    success arm's `except Exception` looking exactly like a guard refusal —
+    while demanding the OPPOSITE response. Measured before this pin: the handler
+    deleted the successor, which by then already owned the migrated `INPUT`
+    mirror (the 2a-INPUT leg MERGEs `(new)-[:INPUT]->(op)` and DELETEs
+    `(old)-[:INPUT]->(op)`), leaving the operator holding `-[:IMPL]->(goal)` and
+    NO input — an operator nothing prunes, because the next pass finds no
+    `(p)-[:INPUT]->(op)-[:IMPL]->(g)` match and mints a SECOND one (the
+    double-count this module exists to remove).
+
+    So the survivor is asserted, not the exception: the successor must still be
+    the live claim AND must still reach the goal through an INPUT→operator.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                     target=target)
+
+    _reading(sdk, indicator, 12.0, at="2026-11-11T11:00:00Z")
+    real = sdk.supersede_point
+
+    def dies_after_the_mutation(old_id, new_id, **kw):
+        real(old_id, new_id, **kw)  # the supersession LANDED (mirror migrated)
+        raise RuntimeError("driver died after the journal append")
+
+    monkeypatch.setattr(sdk, "supersede_point", dies_after_the_mutation)
+    with pytest.raises(RuntimeError) as excinfo:
+        judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                         target=target)
+    monkeypatch.setattr(sdk, "supersede_point", real)
+
+    live = [r for r in _judgement_points(sdk, goal["id"])
+            if r[1] not in {"superseded", "retracted"}]
+    assert len(live) == 1, (
+        f"a post-mutation supersede failure left {len(live)} live judgements"
+    )
+    wired = sdk._get_proj().g.query(
+        "MATCH (p:Point {id:$i})-[:INPUT]->(op:Point)-[:IMPL]->(g) "
+        "WHERE g.id = $goal RETURN op.id",
+        params={"i": live[0][0], "goal": goal["id"]}).result_set
+    assert wired, (
+        "the survivor lost the INPUT mirror the supersession had migrated onto "
+        "it — its operator now holds an IMPL arrow with no source"
+    )
+    assert any("#11953" in note for note in getattr(excinfo.value, "__notes__", [])), (
+        "a survivor left standing must SAY so on the raised exception"
+    )
+
+
+def test_a_supersede_that_dies_mid_transfer_keeps_the_successor(sdk, monkeypatch):
+    """⛔ #11953, the window the STATUS witness misses.
+
+    `supersede_point` re-points the operator's `IMPL` in the 2a leg (~`sdk.py`
+    22136), migrates the `INPUT` mirror in 2a-INPUT (~22218), and writes the
+    predecessor's `status` LAST (~22712). So a failure between 2a and 2a-INPUT
+    leaves the predecessor reading `live` while the successor already carries
+    the operator — the case a status-only test deletes, orphaning the operator.
+
+    The witness is therefore the successor's own edges, and this case pins it:
+    the predecessor is asserted to STILL BE LIVE, which is exactly why the
+    delete must not happen.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    met = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                           target=target)
+
+    _reading(sdk, indicator, 12.0, at="2026-11-11T11:00:00Z")
+    real = sdk.supersede_point
+
+    def dies_mid_transfer(old_id, new_id, **kw):
+        # 2a landed: the operator's IMPL now points at the successor …
+        sdk._get_proj().g.query(
+            "MATCH (op:Point)-[:IMPL]->(old:Point {id:$old}), "
+            "(new:Point {id:$new}) MERGE (op)-[:IMPL]->(new)",
+            params={"old": old_id, "new": new_id})
+        # … and 2a-INPUT + the status write never happen.
+        raise RuntimeError("driver died between the 2a and 2a-INPUT legs")
+
+    monkeypatch.setattr(sdk, "supersede_point", dies_mid_transfer)
+    with pytest.raises(RuntimeError):
+        judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                         target=target)
+    monkeypatch.setattr(sdk, "supersede_point", real)
+
+    assert sdk.get_entity(met["point_id"])["status"] == "live", (
+        "this pin is about the window where the predecessor is STILL live"
+    )
+    live = [r for r in _judgement_points(sdk, goal["id"])
+            if r[1] not in {"superseded", "retracted"}]
+    assert len(live) == 2, (
+        "the successor took part in the transfer, so it must not be deleted "
+        f"(live judgements: {[r[0] for r in live]})"
+    )
+
+
+def test_a_refused_supersede_over_a_non_live_predecessor_still_removes_the_successor(
+        sdk):
+    """⛔ #11953 — a predecessor that was ALREADY non-live is not evidence of a landing.
+
+    `draft` is a CURRENT status (``live.CURRENT_POINT_STATUS_VALUES``), so
+    ``latest_judgement`` selects it — reachable through the public writer, no
+    seam needed. The #2351 claim-class guard then refuses a DERIVED successor to
+    an ASSERTED claim BEFORE any mutation. Witnessing "the predecessor is not
+    `live` now" as "the supersession landed" skipped the compensation and left
+    the goal with TWO current claims; because ``latest_judgement`` takes the
+    newest, the derived ``unmet`` out-ranked the authored ``met`` and the raised
+    judgement became the recorded state — the exact outcome #2351 exists to
+    prevent.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 12.0, at="2026-11-11T11:00:00Z")
+    authored = sdk.create_point(
+        "statement", "CI is fast — an authored judgement",
+        claim_class="asserted", status="draft", judgementState="met",
+        goalId=goal["id"], indicatorId=indicator["id"],
+        targetId=target.target_id, evaluatedAt="2026-11-11T10:00:00Z",
+    )
+
+    # unmatched by the reading, so the pass does not take the unchanged arm and
+    # actually reaches `supersede_point` — where #2351 refuses it.
+    with pytest.raises(ValueError):
+        judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                         target=target)
+
+    current = [r[0] for r in _judgement_points(sdk, goal["id"])
+               if r[1] not in {"superseded", "retracted"}]
+    assert current == [authored["id"]], (
+        "a refused supersession over a non-live predecessor left a second "
+        f"current claim: {current}"
+    )
+
+
+def test_a_status_only_supersession_landing_keeps_the_successor(sdk, monkeypatch):
+    """⛔ #11953 — witness 2's ONLY job: a landing that leaves the successor edge-less.
+
+    The predecessor's status is written LAST (~`sdk.py`:22712), and a predecessor
+    with nothing to transfer leaves the successor with NO incident edge, so
+    witness 1 is silent and the status change is the only evidence. Without
+    witness 2 this shape deletes a successor the supersession had already
+    accepted, leaving ZERO live judgements.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    met = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                           target=target)
+
+    _reading(sdk, indicator, 12.0, at="2026-11-11T11:00:00Z")
+    real = sdk.supersede_point
+
+    def stamps_then_dies(old_id, new_id, **kw):
+        # the status write landed; no edge leg ran for this shape
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) SET n.status = 'superseded'",
+            params={"id": old_id})
+        raise RuntimeError("driver died after the status write")
+
+    monkeypatch.setattr(sdk, "supersede_point", stamps_then_dies)
+    with pytest.raises(RuntimeError):
+        judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                         target=target)
+    monkeypatch.setattr(sdk, "supersede_point", real)
+
+    assert sdk.get_entity(met["point_id"])["status"] == "superseded"
+    live = [r[0] for r in _judgement_points(sdk, goal["id"])
+            if r[1] not in {"superseded", "retracted"}]
+    assert len(live) == 1, (
+        "the status write had landed, so the successor is the claim now — "
+        f"deleting it leaves {len(live)} live judgements"
+    )
+    assert live[0] != met["point_id"]
+
+
+def test_the_witness_treats_an_unreadable_read_as_landed(sdk, monkeypatch):
+    """⛔ #11953 — both read-failure arms: when the witness cannot see, keep.
+
+    The two outcomes are not symmetric: deleting is irreversible, while a
+    successor left standing over an un-retired predecessor is recoverable and
+    visible (`extraOperators`). An unreadable probe must therefore never authorise
+    the delete.
+    """
+    monkeypatch.setattr(sdk, "_get_proj",
+                        lambda: (_ for _ in ()).throw(RuntimeError("proj gone")))
+    reason = _supersession_evidence(sdk, "prev", "succ", "live", guard_class=False)
+    assert reason is not None
+    # ⛔ the note is the only operator-facing report of this arm, so it must name
+    # the READ failure rather than assert a mutation that was never observed.
+    assert "could not be read" in reason, reason
+    assert "moved" not in reason, reason
+
+    monkeypatch.undo()
+    monkeypatch.setattr(sdk, "get_entity",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            RuntimeError("entity read gone")))
+    reason = _supersession_evidence(sdk, "prev", "succ", "live", guard_class=False)
+    assert reason is not None
+    assert "could not be read" in reason, reason
+
+
+def test_the_witness_keeps_the_successor_when_the_baseline_read_failed(
+        sdk, monkeypatch):
+    """⛔ #11953 — a baseline that could not be READ is not a baseline of "absent".
+
+    "Absent before the call" means the call cannot have retired anything (delete is
+    safe); "unreadable" means we know nothing (delete is not safe). Only this pin
+    separates the two, so a refactor that collapses them back together flips the
+    one branch that chooses between keeping and irreversibly deleting.
+    """
+    monkeypatch.setattr(sdk, "get_entity",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            RuntimeError("entity read gone")))
+    baseline = _point_status(sdk, "a-predecessor")
+    monkeypatch.undo()
+
+    reason = _supersession_evidence(sdk, "a-predecessor", "a-successor", baseline,
+                                  guard_class=False)
+    assert reason is not None, "an unreadable baseline must keep the successor"
+    assert "before the call" in reason, reason
+
+
+def test_a_guard_refusal_over_an_unreadable_graph_still_removes_the_successor(
+        sdk, monkeypatch):
+    """⛔ #11953 review P1 — the inconclusive arm must not keep a CURRENT claim.
+
+    A lifecycle / claim-class guard raises BEFORE any mutation, so an unreadable
+    graph on top of a `ValueError` still means nothing landed. Keeping the
+    successor there would leave a CURRENT `derived` claim, and the module's own
+    next pass takes the unchanged arm on the newest current claim — so a
+    transition #2351 refused becomes the goal's recorded state, durably, and the
+    guard never fires again. Pre-fix the guard kept firing; that must stay true.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 12.0, at="2026-11-11T11:00:00Z")
+    authored = sdk.create_point(
+        "statement", "CI is fast — an authored judgement",
+        claim_class="asserted", status="draft", judgementState="met",
+        goalId=goal["id"], indicatorId=indicator["id"],
+        targetId=target.target_id, evaluatedAt="2026-11-11T10:00:00Z",
+    )
+
+    # the projection is available everywhere EXCEPT the witness's edge probe, so
+    # the graph read in `_supersession_evidence` fails while the pass still runs.
+    real_proj = sdk._get_proj
+
+    class _Graph:
+        def __init__(self, g):
+            self._g = g
+
+        def __getattr__(self, name):  # everything else is the real graph
+            return getattr(self._g, name)
+
+        def query(self, q, params=None, **kw):
+            if "RETURN type(r) LIMIT 1" in q:
+                raise RuntimeError("projection unavailable")
+            return self._g.query(q, params=params or {}, **kw)
+
+    class _Proj:
+        def __init__(self, p):
+            self._p = p
+            self.g = _Graph(p.g)
+
+        def __getattr__(self, name):  # everything else is the real projection
+            return getattr(self._p, name)
+
+    monkeypatch.setattr(sdk, "_get_proj", lambda: _Proj(real_proj()))
+
+    judge_kwargs = dict(goal_id=goal["id"], indicator_id=indicator["id"],
+                        target=target)
+    with pytest.raises(ValueError):
+        judge_and_record(sdk, **judge_kwargs)
+    current = [r[0] for r in _judgement_points(sdk, goal["id"])
+               if r[1] not in {"superseded", "retracted"}]
+    assert current == [authored["id"]], (
+        "the successor survived a pre-mutation refusal, so the refused state is "
+        f"now the goal's newest current claim: {current}"
+    )
+
+    # and the guard still holds on the next pass (it is not silently adopted)
+    with pytest.raises(ValueError):
+        judge_and_record(sdk, **judge_kwargs)
+
+
+def test_a_missing_predecessor_is_not_an_unreadable_one(sdk):
+    """⛔ #11953 review P1: ABSENT is not UNREADABLE.
+
+    A caller-supplied `previous_point_id` (the public seam kwarg) may name a point
+    that does not exist. `supersede_point` then refuses in its lifecycle guard
+    (`No point …`), which raises BEFORE any mutation — so nothing was retired and
+    the successor must be deleted, exactly as before this change. Treating the
+    missing point as an unreadable read keeps the successor, and because the
+    goal's OLDER claim is still live and still wired, the next normal pass takes
+    the unchanged arm on the leftover: the over-count becomes durable (the defect
+    this module exists to remove) rather than one write's worth of noise.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                     target=target)
+
+    _reading(sdk, indicator, 12.0, at="2026-11-11T11:00:00Z")
+    # the lifecycle guard refuses a missing point with ValueError (pre-mutation)
+    with pytest.raises(ValueError):
+        record_judgement(
+            sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+            target=target, judgement=Judgement(state="unmet", reason="flipped"),
+            previous_point_id="a-point-that-does-not-exist",
+        )
+
+    live = [r[0] for r in _judgement_points(sdk, goal["id"])
+            if r[1] not in {"superseded", "retracted"}]
+    assert len(live) == 1, (
+        "a missing predecessor is a pre-mutation refusal, so the successor must "
+        f"be removed; live judgements: {live}"
+    )
+
+
+def test_a_failed_compensation_does_not_mask_the_supersede_refusal(
+        sdk, monkeypatch):
+    """⛔ #11953 P2-2: `delete_point` can itself fail, and must not replace the why.
+
+    `delete_point` declares `WriteNotLandedError` / `destroy_verified=True`, so
+    the cleanup can raise on its own. The arm is `raise exc from cleanup_exc` so
+    BOTH are visible; without this pin a later refactor back to `raise
+    cleanup_exc` would silently report the cleanup failure as the reason the
+    judgement was refused.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                     target=target)
+
+    _reading(sdk, indicator, 12.0, at="2026-11-11T11:00:00Z")
+    refusal = ValueError("refused by the lifecycle guard")
+
+    def refuse(*a, **kw):
+        raise refusal
+
+    def cleanup_cannot_confirm(*a, **kw):
+        raise RuntimeError("journal append for the delete did not confirm")
+
+    monkeypatch.setattr(sdk, "supersede_point", refuse)
+    monkeypatch.setattr(sdk, "delete_point", cleanup_cannot_confirm)
+    with pytest.raises(ValueError) as excinfo:
+        judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                         target=target)
+
+    assert excinfo.value is refusal, (
+        "the cleanup failure replaced the reason the supersession was refused"
+    )
+    assert isinstance(excinfo.value.__cause__, RuntimeError), (
+        "the cleanup failure must be CHAINED (both visible), not dropped"
+    )
 
 
 def test_strength_actually_reaches_the_prior(sdk):
