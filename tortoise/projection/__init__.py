@@ -22718,13 +22718,38 @@ class FalkorProjection(
 
         factors = []
         degenerate_count = 0
+        unpriceable_count = 0
         for op_id, op_type in op_types.items():
             input_ids = op_inputs.get(op_id, [])
+            if op_type not in _SVBP_PRICED_MECHANISMS:
+                # ⛔ THE TILT HAS TWO POTENTIALS, SO A THIRD MECHANISM IS PRICED
+                # AS SUPPORT (#12067 review round 14, P2). `_tilt_log_prob`
+                # selects `nand_term` on `is_nand` and takes the `else` branch
+                # otherwise — and that else IS the IMPL potential
+                # (`-(c_a - c_b) ** 2`). A `coherence` factor therefore lands on
+                # the IMPL term: the exact substitution the closed set exists to
+                # forbid, on `EventAPI.get_confidence`. SVBP is DEPRECATED with no
+                # production caller (#7927), so the honest move is to DECLINE the
+                # mechanism loudly rather than mis-price it silently; EP prices
+                # all three.
+                unpriceable_count += 1
+                continue
             if len(input_ids) >= 2:
                 weight = 3.0 if op_type == "NAND" else 1.0
                 factors.append((op_id, op_type, input_ids, weight))
             else:
                 degenerate_count += 1
+
+        if unpriceable_count > 0:
+            logger.warning(
+                "extract_svbp_factors: %d operators carry a mechanism this "
+                "engine cannot price (%s) and were EXCLUDED — SVBP has IMPL and "
+                "NAND potentials only and would otherwise price them as IMPL. "
+                "Their beliefs are computed by EP (tortoise/ep.py), which prices "
+                "all three mechanisms.",
+                unpriceable_count,
+                ", ".join(sorted(_SVBP_PRICED_MECHANISMS)),
+            )
 
         if degenerate_count > 0:
             logger.warning(
@@ -22790,3 +22815,11 @@ def is_missing_graph_error(e: Exception) -> bool:
     return any(k in s for k in ("graph not found", "no such graph",
                                 "does not exist", "unknown graph",
                                 "invalid graph operation", "empty key"))
+
+
+#: The mechanisms SVBP's tilt actually has a potential for (#12067 review round
+#: 14, P2). `tortoise/svbp.py::_tilt_log_prob` selects `nand_term` on `is_nand`
+#: and falls through to the IMPL term otherwise, so every other op_type would be
+#: priced as SUPPORT. Kept beside the extractor that consumes it so a fourth
+#: mechanism cannot silently inherit the IMPL term.
+_SVBP_PRICED_MECHANISMS = frozenset({"IMPL", "NAND"})

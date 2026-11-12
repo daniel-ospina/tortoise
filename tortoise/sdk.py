@@ -10909,6 +10909,15 @@ def _property_filter_clause(key: str) -> str:
     return f"n.`{key}` = ${key}"
 
 
+# #11823 — the propagation census rides a POLLED endpoint
+# (`GET /v1/dream/health`) and costs O(live points + IMPL|NAND edges), so it is
+# BOUNDED: above this many live non-operator `:Point`s the census refuses with
+# a named reason instead of holding the dream executor. Measured ~65 ms per
+# 1,000 live claims (embedded), so 25_000 is ~1.6 s worst case per poll.
+# Raise it if you accept that cost.
+PROPAGATION_CENSUS_MAX_POINTS_ENV = "TORTOISE_PROPAGATION_CENSUS_MAX_POINTS"
+DEFAULT_PROPAGATION_CENSUS_MAX_POINTS = 25_000
+
 #: Every mechanism op_type `create_operator` accepts (#12067), as the ORDERED
 #: spelling the in-file call sites iterate. ONE tuple in THIS module so a
 #: fourth write path cannot forget the third mechanism — three separate
@@ -11173,15 +11182,6 @@ def _live_operator_mechanism_pairs(proj, ids):
                       for p in _priced_pairs(_otype or "", ordered, _odir)}
         priced_out[_oid] = (_otype, priced)
     return priced_out
-
-# #11823 — the propagation census rides a POLLED endpoint
-# (`GET /v1/dream/health`) and costs O(live points + IMPL|NAND edges), so it is
-# BOUNDED: above this many live non-operator `:Point`s the census refuses with
-# a named reason instead of holding the dream executor. Measured ~65 ms per
-# 1,000 live claims (embedded), so 25_000 is ~1.6 s worst case per poll.
-# Raise it if you accept that cost.
-PROPAGATION_CENSUS_MAX_POINTS_ENV = "TORTOISE_PROPAGATION_CENSUS_MAX_POINTS"
-DEFAULT_PROPAGATION_CENSUS_MAX_POINTS = 25_000
 
 
 class TortoiseSDK:
@@ -23538,6 +23538,10 @@ class TortoiseSDK:
         # #5365: unapplied supersessions during this promotion — see the
         # temporal_replacement loop below.
         supersede_skipped: list[dict] = []
+        # #12067: temporal NANDs the CLOSED MECHANISM SET refused — the pair
+        # already carried another mechanism, so the wire was dropped. Named in
+        # the result below rather than left in a log line (see the `except`).
+        temporal_nand_refused: list[dict] = []
         temporal_targets = point.get("temporal_target_ids") or []
         if point.get("temporal_target_id") and point.get("temporal_target_id") not in temporal_targets:
             temporal_targets.append(point["temporal_target_id"])
@@ -23623,6 +23627,17 @@ class TortoiseSDK:
                     _logger.warning(
                         "promote_point: NAND wiring to %s failed for %s: %s",
                         tgt, point_id, exc)
+                    # ⛔ EXCEPT THE CLOSED-SET REFUSAL, WHICH IS NOT A LOST
+                    # RACE. The point is live and the temporal NAND was
+                    # DROPPED, so a caller reading only `temporal_wired` cannot
+                    # tell it from a race — the same fail-open SKIP the
+                    # `supersede_skipped` arm eight lines above exists for
+                    # (#5365: "the caller must be able to SEE that, not just
+                    # find a log line"). Reported as a counted, listed field;
+                    # the promotion still succeeds.
+                    if "mechanism set is CLOSED" in str(exc):
+                        temporal_nand_refused.append({"candidate": point_id,
+                                                      "target": tgt})
 
         # R16 zombie-operator prevention: promote incident draft operators
         # once ALL their endpoint Points are live.
@@ -23646,6 +23661,14 @@ class TortoiseSDK:
             # hidden).
             result["supersede_skipped"] = supersede_skipped
             result["supersede_skipped_count"] = len(supersede_skipped)
+        if temporal_nand_refused:
+            # #12067: the temporal NAND the CLOSED MECHANISM SET refused (the
+            # pair already carries another mechanism). Same contract as
+            # `supersede_skipped` above and the same key name the mining report
+            # uses, so a caller reading `temporal_wired` absent can tell a drop
+            # from a race; the promotion itself stands (#1080).
+            result["temporal_nand_refused"] = temporal_nand_refused
+            result["temporal_nand_refused_count"] = len(temporal_nand_refused)
         if race_detected:
             result["race_detected"] = True
             result["race_warning"] = (
@@ -24783,6 +24806,17 @@ class TortoiseSDK:
                 # half alone. That covers the pre-#7852 spelling too, where the
                 # meaning arrived as `label` — a caller who DID declare the
                 # meaning keeps its worked example.
+                # ⛔ WHICH SIDE MOVES, AND WHY NOTHING MAY BE NAMED "THE SECOND
+                # INPUT" (#12067 review round 14, P2). `phi_coherence(ca, cb)`
+                # prices the DEPENDENT (slot 1) off the necessary CONDITION
+                # (slot 0) at the DEFAULT `->`, but the door stores `<-` too, and
+                # there the DEPENDENT is the FIRST input — measured at this head,
+                # the sentence was byte-identical for all three stored
+                # directions, so an agent that wired `<-` was told input 2 moves
+                # while EP lowered input 1. The claim below is therefore stated
+                # in ROLE terms (condition vs dependent), which is true for
+                # every direction `_canonical_direction` can store, rather than
+                # in slot terms, which is true for one.
                 _meaning_mechanisms = {
                     mechanism
                     for meaning in (semantics, label)
@@ -24791,6 +24825,13 @@ class TortoiseSDK:
                 _from_meaning = any(
                     mechanism in _meaning_mechanisms
                     for mechanism, _ in contradictions)
+                # ⛔ AND THE PREAMBLE IS PER-CONTRADICTION, NOT PER-WRITE (#12067
+                # review round 14, P2). `_other` is the FIRST contradiction
+                # (authority order: the pack leg), while `_from_meaning` is a
+                # flag over ALL of them — so a write whose pack declares NAND
+                # AND whose `semantics` declares IMPL was told the wire carried
+                # "a NAND meaning", a mechanism no input named. Provenance is
+                # read for `_other` ITSELF here.
                 if op_type == "IMPL" and _from_meaning:
                     _inversion = (
                         "An IMPL wire carrying a NAND meaning (e.g. 'refutes') "
@@ -24840,16 +24881,42 @@ class TortoiseSDK:
                     # sibling arms do: a meaning leg is "carrying a {m} meaning",
                     # a pack leg is "fed a relation declared {m}".
                     _other = contradictions[0][0]
+                    _other_from_meaning = any(
+                        mechanism == _other and mechanism in _meaning_mechanisms
+                        for mechanism, _ in contradictions)
+                    _other_from_pack = any(
+                        mechanism == _other and mechanism not in _meaning_mechanisms
+                        for mechanism, _ in contradictions)
                     _preamble = (f"carrying a {_other} meaning"
-                                 if _from_meaning
+                                 if (_other_from_meaning
+                                     and not _other_from_pack)
                                  else f"fed a relation declared {_other}")
-                    _expected = ("RAISE" if _other == "IMPL" else "LOWER")
+                    # ⛔ THE CONTRAST NAMES A DIFFERENT TRIGGER, NOT A POLARITY
+                    # (#12067 review round 14, P2). The polarity form read
+                    # "where the declared NAND mechanism would have it LOWER the
+                    # TARGET" — the SAME direction the coherence sentence just
+                    # gave, so the reader learned nothing about what to change.
+                    # `phi_nand` lowers the attacked side unconditionally, on the
+                    # strength of the attack alone; `phi_impl` is a DIFFERENCE
+                    # coupling (it moves the target toward the source's own
+                    # level, measured Δ = -0.009249 for Beta(3,7)=0.30 against a
+                    # held Beta(10,1)=0.909 — a source the target outranks pulls
+                    # it DOWN). Neither is "coherence with the sign flipped".
+                    _contrast = (
+                        "an IMPL mechanism instead moves the target TOWARD the "
+                        "source's own level, so a source the target already "
+                        "outranks pulls it down"
+                        if _other == "IMPL" else
+                        "a NAND mechanism instead lowers the attacked side on "
+                        "the strength of the attack alone, with no necessary "
+                        "condition involved")
                     _inversion = (
                         f"A coherence wire {_preamble} prices a NECESSARY "
-                        f"CONDITION — an unmet condition LOWERS the DEPENDENT "
-                        f"(the second input) and never raises it, where the "
-                        f"declared {_other} mechanism would have it {_expected} "
-                        f"the TARGET")
+                        f"CONDITION: it cannot lift the condition's own belief "
+                        f"— only leave it where it is or lower it — and "
+                        f"the DEPENDENT loses confidence when the condition is "
+                        f"absent, whereas {_contrast}. Those are different "
+                        f"relations, not one relation with the sign flipped")
                 elif _from_meaning:
                     _inversion = (
                         "A NAND wire carrying an IMPL meaning (e.g. 'supports') "
@@ -26647,7 +26714,18 @@ class TortoiseSDK:
         token made an absent coherence connection look mutual, so Phase 1 judged a
         clique where the door prices a star). Both steps are the writer's own:
         `_direction_from_semantics` reads the ONE table (`SEMANTICS_DIRECTIONS`),
-        and `_canonical_direction` is the writer's chain step 4.
+        and `_canonical_direction` is the writer's canonicalization step.
+
+        ⛔ `_canonical_direction` IS NOT STEP 4 IN FULL (#12067 review round 14,
+        P2). Step 4 also rewrites the DEFAULT SPELLING: `coherence` + (`None` or
+        `"bidirectional"`) stores `->`, while `_canonical_direction` returns a
+        PRESENT token VERBATIM (pinned at `test_2351_claim_class.py:1076`, which
+        is why the widening belongs HERE and not there). Reading only
+        `_canonical_direction` predicted a CLIQUE for an explicit
+        `"bidirectional"` while the door stored `->` and priced a STAR — measured:
+        phase 1 judged the `(b, c)` subpair of a three-input bundle the factor
+        never prices, and reported a closed-set violation for a write that
+        succeeds.
 
         ⚠️ STATED RESIDUAL: a RETIRED semantics word (`SEMANTICS_TRANSITION`) is
         not canonicalized here, so the shape may be predicted from the retired
@@ -26658,7 +26736,13 @@ class TortoiseSDK:
             derived = TortoiseSDK._direction_from_semantics(semantics)
             if derived is not None:
                 direction = derived
-        return TortoiseSDK._canonical_direction(op_type, direction)
+        direction = TortoiseSDK._canonical_direction(op_type, direction)
+        # Step 4's last half, verbatim from the writer's own block: the legacy
+        # DEFAULT spelling means "the caller stated nothing", which for this
+        # mechanism reads `->`. An explicit `<->` still records mutual necessity.
+        if op_type == "coherence" and direction == "bidirectional":
+            direction = "->"
+        return direction
 
     @staticmethod
     def _canonical_direction(op_type: str, direction: str | None) -> str:

@@ -400,15 +400,17 @@ def apply_payload_operators(proj, sdk, operators: list, *,
     target idempotent and the rest duplicated. Widen the probe to read the
     whole target set before routing such a caller here.
 
-    ⚠️ The MITIGATES fallback below is IMPL-only (it hardcodes
-    ``op_type:'IMPL'``), so ``continue``-ing a skipped NAND leaves a
-    NAND-targeted mitigation with nothing to attach to and it is dropped with
-    a warning. Not reachable today — ``OperatorTarget.op_type`` is
-    ``Literal["IMPL"]`` (``commit_schema.py:464``) and the extractor emits
-    ``op_type: "IMPL"`` (``extractor_v2.py:5868``) — but this guard is the
-    first thing that makes that fallback load-bearing for a skipped same-call
-    operator, so extend the fallback (``t_op_type`` + the mapped edge) in the
-    same change that widens the schema.
+    ⚠️ SCOPE — the MITIGATES fallback reads the DECLARED target mechanism
+    (``OperatorTarget.op_type``, ``Literal["IMPL", "coherence"]``) and takes
+    the storage edge type from ``ep.MECHANISM_REL_TYPES``, so the declaration is
+    load-bearing: a ``MITIGATES`` declaring ``IMPL`` cannot attach to a
+    ``coherence`` bridge (pinned in
+    ``tests/test_12067_three_mechanisms.py::test_a_mitigation_targets_a_COHERENCE_bridge_too``,
+    which reds if the probe widens back to a SET — #12067 review round 14, P1).
+    The residual is the DECLARATION set, not this probe: a pair emitted as NAND
+    cannot be named by a target at all (the schema has no NAND arm), so the
+    extractor declines it with its own warning rather than letting it land here
+    as a missing-IMPL-edge drop.
     """
     target_op_ids: dict[tuple, str] = {}
     created_ids: list[str] = []
