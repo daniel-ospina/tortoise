@@ -323,13 +323,30 @@ def _assert_supersession_scope(
         # of the same goal+target — the supersession transfers its arrow, #6180 —
         # is exactly the collapse this module exists to produce.
         #
-        # `goalId` and `targetId` stay STRICT: this module has ALWAYS written
-        # them, so their absence means the Point is not a judgement of this chain
-        # at all. The tolerance is one named dimension, never a blanket rule —
-        # tolerating `goalId` would re-open the cross-goal transfer (#6180) this
-        # guard exists to stop.
+        # `goalId` stays STRICT: this module has ALWAYS written it (with
+        # `goal_id` a required argument, unconditionally), so its absence means
+        # the Point is not a judgement of this chain at all — and tolerating it
+        # would re-open the cross-goal transfer (#6180) this guard exists to
+        # stop.
+        #
+        # ⛔ `targetId` may ALSO be absent on a legacy claim, for the SAME reason
+        # as `indicatorId` and by the same mechanism: the pre-#11965 writer's
+        # DOOR checked `if target.target_id is None` while its WRITER checked
+        # `if target.target_id:` — so `Target(..., target_id="")` passed the door
+        # and the prop was dropped, minting a judgement with `judgementState` +
+        # `goalId` and NO `targetId`. MEASURED on this head with such a claim:
+        # invisible to the derived lookup (the `p.targetId = $targetId` clause is
+        # always present now), the explicit seam REFUSED it, and the goal kept two
+        # live claims and two IMPL arrows with belief 0.6920 against the
+        # single-chain 0.6502 — the same duplicate-support defect, one dimension
+        # over. The falsy spelling is closed on the WRITE side now; claims
+        # already written are this seam's to retire.
+        #
+        # So the tolerance is TWO named dimensions, never a blanket rule, and
+        # both are the ones whose pre-#11965 door was `is None` while its writer
+        # was truthiness. `goalId` is the one that was never optional.
         have = node.get(key)
-        if have is None and key == "indicatorId":
+        if have is None and key in ("indicatorId", "targetId"):
             continue
         if have != want:
             raise ValueError(
