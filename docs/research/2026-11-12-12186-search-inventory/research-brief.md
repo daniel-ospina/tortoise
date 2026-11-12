@@ -36,7 +36,7 @@ as the record of what the authoring pass could not establish — **not as a limi
 
 ---
 
-## 1. The finding that changes the epic: three levers the epic lists are already built, and the one it omits is the one that matters
+## 1. The finding that changes the epic: levers the epic lists are already built, and the one it omits is the one that matters
 
 Verified against the tree at `1f28d107cf`, not against the epic's status column.
 
@@ -54,6 +54,13 @@ mechanism we already own: *"we are two steps from the field"* is **one** step on
 M3 question is narrower than "do we have BM25" — we do; the open question is whether the **text index** moves
 to Postgres. That is exactly what `SEARCH-ARCHITECTURE.md` §6.2 already says (`:268`), so M3 needs no
 re-scoping — **but the epic's framing of C2 as "nothing exists" would send a lane to build a second BM25.**
+
+**⚠️ These three are not the whole class — §2 adds two more, with the same consequence.** **A1** (fold the
+stored side) is **BUILT since `#12047`**: `canonical_name` already carries the fold at the funnel every entity
+door meets, and adding a second stored key is what `#12047`'s review N8/P0 forbids. **A2** (alias / multi-key
+blocking) is **PARTLY BUILT**: an `aliases[]` store, an alias rung and a character-prefix `block_key` already
+exist. So **five** inventory items, not three, would send a lane to rebuild what is there — read §2 A1/A2
+before dispatching on either.
 
 ### 1.1 The lever the inventory omits entirely: the referentiality gate
 
@@ -102,7 +109,7 @@ Status legend (verified, not inherited): **NEW** · **BUILT-OFF** · **BUILT-MIS
 
 | # | what the top performers do | gain | contradicts? | cost | our status |
 |---|---|---|---|---|---|
-| **C1** cross-encoder rerank | MemPalace's held-out hybrid v4 adds a **Haiku reranker** (in-repo `comparison-systems.md` §3.3, vendor claim); Mastra's counter-case reaches the top **without** an entity graph — ⛔ **but also without a reranker** (§5.1: *"No per-turn dynamic retrieval"*), so it does **not** show that a strong reranker substitutes for graph structure; it is evidence for a **third** route (observation-log context construction). MMR + cross-encoder is the standard pair *where a reranker is used at all* | MemPalace: 96.6 % raw → 98.4 % held-out with the reranker (⚠️ vendor, not re-run by us) | no decision | one model forward pass per candidate; latency, not money | **BUILT-OFF in the noun path / BUILT-ON-OFF in the ask path** — `ask_lane.py:630` wired, `TORTOISE_ASK_RERANK` default OFF. **Do not re-implement** (epic is right about this). |
+| **C1** cross-encoder rerank | MemPalace's held-out hybrid v4 adds a **Haiku reranker** (in-repo `comparison-systems.md` §3.3, vendor claim); Mastra's counter-case reaches the top **without** an entity graph — ⛔ **but also without a reranker** (§5.1: *"No per-turn dynamic retrieval"*), so it does **not** show that a strong reranker substitutes for graph structure; it is evidence for a **third** route (observation-log context construction). MMR + cross-encoder is the standard pair *where a reranker is used at all* | MemPalace: 96.6 % raw → 98.4 % held-out with the reranker (⚠️ vendor, not re-run by us) | no decision | one model forward pass per candidate; latency, not money | **BUILT in the ASK path only, default OFF — and there is NO noun-path rerank.** The only call site is `ask_lane.py:631` (`ask_lane_rerank`); `TORTOISE_ASK_RERANK` is default OFF and degrades to the unreranked pool — so the noun path has no switch to arm, and "built-off in the noun path" is the epic's framing, not the code's. **Do not re-implement** (epic is right about this). |
 | **C2** BM25 instead of TF-IDF | every comparable runs a real BM25 or better; **gbrain's own numbers: keyword/BM25 19.8 % vs hybrid+expansion 97.6 %** on LongMemEval `_s` (in-repo §3.3, ⚠️ vendor, any-hit variant) — the single most dramatic lexical-vs-hybrid gap in the repo's record | see left | **V1 §6.2**: the text index **stays** in the graph until **M3** measures a BM25-capable Postgres option — so the index move is gated, and only that | in-process BM25 ≈ 0 marginal; the index move is a migration | **BUILT-ON (embedded lane) / open (hosted)**: `BM25_DEFAULT_ENABLED = True`, `bm25.py:166`. **The epic's status is wrong**; M3 remains open and correctly scoped. |
 | **C3** SPLADE / learned sparse | SPLADE (arXiv:2107.05720) is a **trained** sparse-expansion model: *"trained end-to-end in a single stage"*, competitive with dense. **No top LongMemEval performer surveyed uses it** — Zep, Mem0, Agent Zero, Human-Inspired and the counter-case are all hybrid-dense + graph/lexical, none learned-sparse | SPLADE's own paper reports parity-with-dense on MS MARCO-class benchmarks, **not** LongMemEval | **V1 §6.2** gates it behind M3 — and the owner has **pre-authorised** it (epic's SPLADE decision) | a model to host + train/serve, on top of two lexical stacks we already run | **NEW, BLOCKED-ON-MEASUREMENT (M3), correctly in-epic.** ⚠️ **`rg -i 'splade' docs/ tortoise/ tools/` → 2 hits, both in this file**: the leg has **no pre-registration anywhere**, so a lane dispatched to it would be inventing its own falsifier. |
 
@@ -140,7 +147,7 @@ Zep: 3-gram shingles → 32 MinHash permutations → band size 4 → LSH buckets
 (`dedup_helpers.py:31-37, 89-144, 293-314`). Sublinear, and it catches **transposition and typo** classes that
 our FTS token blocker cannot (`"release-notes"` vs `"notes releas"`).
 
-**Why it matters:** the tokenisation class is real, but two claims here need correcting. (a) **`search_graph`/FTS is not our only blocker** — a character-prefix blocker already exists (`entity_resolver.block_key`, `:185-187`), so the gap is shingle/LSH blocking, not blocking as such. (b) ⚠️ **21.1 % and 30.0 % are the SUPERSEDED keyword-only figures**, not the product's read — `#11901` comment `6826507139` supersedes them, and on the hybrid read the same classes move **+25.6** (identifiers) and **+63.4** (paths) points, i.e. ≈46.7 % and ≈93.4 % at k=3. That comment also states the identifier class's **mechanism is not established** (*"a 5-node probe with `keep_numeric` toggled reproduces none of it, so nothing is diagnosed here"*). So this lever rests on a weaker premise than the row implies: paths are largely fixed on the product's read, and identifiers are half-fixed with an undiagnosed cause.
+**Why it matters:** the tokenisation class is real, but two claims here need correcting. (a) **`search_graph`/FTS is not our only blocker** — a character-prefix blocker already exists (`entity_resolver.block_key`, `:185-187`), so the gap is shingle/LSH blocking, not blocking as such. (b) ⚠️ **21.1 % and 30.0 % are the SUPERSEDED keyword-only figures**, not the product's read — `#11901` comment `6826507139` supersedes them, and on the hybrid read the same classes move **+25.6** (identifiers) and **+63.4** (paths) points. ⛔ **Do not add those deltas to the keyword-only bases to compose a hybrid percentage** — the same comment is explicit that *"the class deltas are between-run, not paired"*, so `21.1 + 25.6` and `30.0 + 63.4` are numbers **no artifact holds**. The identifier class's **mechanism is not established** — stated in `6825791142`'s DoD item (b) (*"a 5-node probe with `keep_numeric` toggled reproduces none of it, so nothing is diagnosed here"*), a caveat about mechanism rather than one of that comment's superseded figures. So this lever rests on a weaker premise than the row implies: paths are largely fixed on the product's read, and identifiers are half-fixed with an undiagnosed cause.
 
 ### M-3 **Identity-property blocking** — a second, cheaper key
 
@@ -213,7 +220,8 @@ correctly.** This is already recorded twice in-repo and the epic contains neithe
    verified the 94.87 % figure against it.
 2. **Cognee and Honcho remain unread — and this is now the largest hole.** §5.1 read **Mastra** and
    **Letta/MemGPT** to primary sources, and added **Supermemory**'s numbers from Mastra's cross-system
-   leaderboard (a third-party *measurement* of it, not Supermemory's own write-up). **Cognee** (an
+   leaderboard (per-row provenance is not stated there, and **Mastra is a competitor on that same board** — so
+   *not re-run by us*, not an independent measurement). **Cognee** (an
 extract → "cognify" → load graph pipeline) and **Honcho** (implicit user representation) were still not read
    to a primary source. **Do not treat their absence from §2/§3 as evidence they have nothing to teach** — it
    is an unread surface.
@@ -280,8 +288,10 @@ adds a sleep-time agent** that runs during idle time, rewriting the memory state
 into *"learned context"* before the user asks. The same shape from the other side: the lever is
 **consolidation during downtime** — again, not a ranker.
 
-**Supermemory — numbers from Mastra's cross-system leaderboard** (a third-party measurement of it, not its own
-write-up): **85.20 %** (gemini-3-pro), **84.60 %** (gpt-5), **81.60 %** (gpt-4o) on the same `longmemeval_s`
+**Supermemory — numbers as compiled on Mastra's cross-system leaderboard** (⚠️ **not an independent
+measurement**: that page states no per-row provenance for the competitor rows, and Mastra itself occupies five of
+the top six — treat these as *not re-run by us*): **85.20 %** (gemini-3-pro), **84.60 %** (gpt-5), **81.60 %**
+(gpt-4o) on the same `longmemeval_s`
 basis. For scale on that same board: Hindsight 91.40 % (gemini-3-pro), EmergenceMem Internal 86.00 % (gpt-4o) — ⚠️ **which Mastra footnotes as an *"Internal"* configuration that is *"not publicly reproducible"***, a closed implementation that also uses *"multi-step reranking (slower, more expensive)"*; its public Simple configuration is 82.40 %. **The highest *openly reproducible* score on the official benchmark model is OM's own 84.23 %.**
 
 ---
