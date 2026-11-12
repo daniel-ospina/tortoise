@@ -376,6 +376,7 @@ class _FakeGraph:
         self.carried = carried
         self.canon_row = canon_row
         self.raise_on = set(raise_on)
+        self.inbound: list[tuple[str, str]] = []
 
     def apply_slot(self, props: dict) -> None:
         """Simulate `update_point` landing: the read-back must SEE it."""
@@ -390,6 +391,24 @@ class _FakeGraph:
             raise RuntimeError("graph refused the read")
         # ⚠️ Order matters: the EDGES read also starts `MATCH (d:Point`, so it
         # is keyed on its own shape and checked before the property read.
+        if "->(d:Point" in q:            # the INBOUND probe
+            return SimpleNamespace(result_set=self.inbound)
+        if "MERGE (s)-[r:" in q or "MERGE (s)-[:" in q:
+            # `link_entity`'s WRITE: its own `RETURN count(s)` is what proves the
+            # edge exists. A MERGE over an absent endpoint lands nothing, which
+            # the `carried` map models (`(0, …)` = the edge is not there).
+            tid = (kw.get("params") or {}).get("tid")
+            if isinstance(self.carried, dict) and \
+                    self.carried.get(tid, (1, None))[0] == 0:
+                return SimpleNamespace(result_set=[])
+            return SimpleNamespace(result_set=[[1]])
+        if "-[:" in q and "RETURN count(s)" in q and "MERGE" not in q:
+            # `link_entity`'s pre-existence probe: a hit makes it return 0 and
+            # write NOTHING (the #1370 short-circuit this file pins).
+            tid = (kw.get("params") or {}).get("tid")
+            pre = (isinstance(self.carried, dict)
+                   and self.carried.get(tid, (0, None))[0])
+            return SimpleNamespace(result_set=[[1 if pre else 0]])
         if "-[r]->" in q:
             # Honour the query's rel FILTER: a fake that returns every edge
             # regardless makes `test_an_aboutEvent_link_is_carried` and the
@@ -706,3 +725,63 @@ def test_an_undeclared_provenance_field_that_differs_is_reported(sdk, monkeypatc
         sdk, monkeypatch, evidence={"eventId": "ev_dup_turn2"})
     assert [e["dedup"] for e in extracted] == ["new", "rephrase_linked"], extracted
     assert any("eventId" in w for w in meta["warnings"]), meta["warnings"]
+
+
+def test_an_inbound_about_edge_refuses_the_fold():
+    """`link_entity` writes FROM the canonical, so a link the duplicate is the
+    TARGET of cannot be carried: deleting the duplicate would orphan it.
+
+    ⚠️ This is also the ONLY guard that catches a self-loop on the duplicate
+    (`Point -[:aboutAction]-> Point` with `s == t` matches the inbound probe), so
+    deleting the branch re-opens that class. Token: `inbound_attachment`.
+    """
+    graph = _FakeGraph()
+    graph.inbound = [("aboutPoint", "Event")]
+    out = capture_fold.carry_fold_evidence(_FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "inbound_attachment", out
+    assert "aboutPoint" in out["blocked"], out
+
+
+def test_an_attachment_targeting_the_canonical_refuses():
+    """`dup -[aboutAction]-> canonical` is a permitted Point→Point triple, so it
+    would be carried — and after the fold it is a SELF-LOOP no occurrence
+    asserted. Refused before any write."""
+    proj = _FakeProj(_FakeGraph(
+        edges=[("aboutAction", "Point", "pt_canon", None)]))
+    out = capture_fold.carry_fold_evidence(proj, "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "unaddressable", out
+    assert "self-loop" in out["blocked"], out
+
+
+def test_a_multi_labelled_target_is_carried_under_the_rels_own_label():
+    """A promoted node carries several labels (`:Point:Object` is minted by
+    promotion, `docs/capacity.md`, `ep.py`), and FalkorDB's label ORDER is not
+    the label the relation names — reading `head(labels(t))` handed
+    `link_entity` the wrong one, so a legally carriable link was refused as
+    "not carried" (measured). The REL owns the label (§3.2's third member)."""
+    dup_row = ("session:s", [], None, None, None, None, None, None, None,
+               None, None, None)
+    graph = _FakeGraph(dup_row=dup_row,
+                       edges=[("aboutObject", ["Point", "Object"], "obj_1", None)],
+                       carried=(1, None))
+    # the fake's edge tuples carry a LABEL LIST here; `read_fold_evidence`
+    # selects `_CARRIABLE_ATTACHMENT_LABELS['aboutObject']` == "Object" from it.
+    out = capture_fold.carry_fold_evidence(_FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is True and out["carried"] == 1, out
+
+
+def test_the_disclosure_counts_a_link_created_before_the_read_back_raised():
+    """`link_entity`'s own `RETURN count(s)` proves the edge exists; gating the
+    `created` count on `_carried` (which can raise) made a late refusal report
+    ZERO added links over a canonical that had gained one.
+
+    Pins the round-4 fix by mutation: reverting it leaves `created == 0`.
+    """
+    graph = _FakeGraph(
+        dup_row=_DUP_ROW,
+        edges=[("aboutObject", "Object", "obj_1", None)],
+        carried=(1, None),
+        raise_on={"head(collect(r.confidence))"})
+    out = capture_fold.carry_fold_evidence(_FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "link_not_carried", out
+    assert out["created"] == 1, out

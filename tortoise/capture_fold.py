@@ -133,7 +133,7 @@ ONE `link_entity` per attachment (2 graph statements, journaled as
 `EntityLinked` when the SDK has a journal), plus — only when a free slot is
 actually filled — ONE `update_point`. So a fold writes N+1 times where N is the
 duplicate's attachment count, and a duplicate with no evidence issues ZERO
-writes (`test_a_plain_duplicate_with_no_evidence_still_folds` pins that).
+writes (no door is called: `to_write` and `attachments` are both empty).
 
 Reads per fold: three unconditional (the duplicate's props, its outbound edges,
 its inbound edges) plus one per canonical view and one read-back per
@@ -145,9 +145,9 @@ query covers them all.
 Event, and this door appends `PointRevised`. Two consequences a later reader
 must know rather than discover:
 
-* on a journal-armed SDK TWO records are appended per fold — a `PointRevised`
-  (from `update_point`, and only when a free slot was filled) and one
-  `EntityLinked` per link this fold CREATED — and the capture's own Points live
+* on a journal-armed SDK up to `1 + N` records are appended per fold — a
+  `PointRevised` (from `update_point`, only when a free slot was filled) plus
+  one `EntityLinked` per link this fold CREATED — and the capture's own Points live
   in `_InMemoryEventLog` (`durable = False`, `sdk.py`), so the journal holds
   records for ids whose `PointAdded` it never had. They are inert
   on the graph fold (the revision matches no row, the link descriptor's
@@ -355,20 +355,34 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         edges = proj.g.query(
             "MATCH (d:Point {id:$dup})-[r]->(t) "
             f"WHERE type(r) IN {list(_FOLD_ATTACHMENT_RELS)!r} "
-            "RETURN type(r), head(labels(t)), coalesce(t.id, ''), r.confidence",
+            # ⚠️ ALL labels, not `head(labels(t))`: a node can carry several
+            # (`:Point:Object` is minted by promotion), and FalkorDB's label
+            # ORDER is not the label the relation names — `head()` returned
+            # `Point` for a promoted Object, so `link_entity` rejected the
+            # triple and a legally carriable link was refused as "not carried"
+            # (measured). The REL owns the label (§3.2's third member).
+            "RETURN type(r), labels(t), coalesce(t.id, ''), r.confidence",
             params={"dup": dup_id}).result_set
     except Exception:
         return None
     attachments: list[tuple[str, str, str, float | None]] = []
     unaddressable: list[tuple[str, str]] = []
-    for rel, label, target_id, confidence in edges:
-        if not isinstance(rel, str) or not isinstance(label, str):
+    for rel, labels, target_id, confidence in edges:
+        if not isinstance(rel, str):
             return None
-        if isinstance(target_id, str) and target_id.strip():
+        held = [lab for lab in (labels or ()) if isinstance(lab, str)]
+        # The rel names the label its triple requires; when the target carries
+        # it, that is the label the writer must spell. When it does not, the
+        # link is not carriable through the permitted triples — refused with a
+        # named token, never an exception dump.
+        label = _CARRIABLE_ATTACHMENT_LABELS.get(rel, held[0] if held else "")
+        addressable = (label in held) if label in _CARRIABLE_ATTACHMENT_LABELS \
+            else bool(held)
+        if isinstance(target_id, str) and target_id.strip() and addressable:
             conf = confidence if isinstance(confidence, (int, float)) else None
             attachments.append((rel, label, target_id.strip(), conf))
         else:
-            unaddressable.append((rel, label))
+            unaddressable.append((rel, ",".join(held) or "?"))
     try:
         inbound_rows = proj.g.query(
             "MATCH (s)-[r:aboutObject|aboutSubject|aboutEvent|aboutSource|"
@@ -602,6 +616,20 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
                           "inbound link(s))")
         return out
 
+    # 4c) A link whose target IS the canonical would become a SELF-LOOP once the
+    #     rows are one — a relation no occurrence asserted, the mirror of the
+    #     address-composition rule above. (The duplicate's own self-loop is
+    #     caught by the inbound probe.)
+    self_targeted = sorted({rel for rel, _label, target, _conf
+                            in evidence.attachments
+                            if target == canonical_id})
+    if self_targeted:
+        out["reason"] = "unaddressable"
+        out["blocked"] = (f"its {', '.join(self_targeted)} link(s) point at the "
+                          "canonical itself, and folding would mint a self-loop "
+                          "no occurrence asserted")
+        return out
+
     # 5) Evidence of SUPPORT the fold must not write but must not cross in
     #    silence: the canonical's own value stands (first-writer; `confidence`
     #    is EP's field, not a capture writer's) and the difference is reported.
@@ -696,6 +724,13 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
             created = link_entity(proj, "Point", canonical_id, target_id,
                                   edge_type=rel, target_label=label, sdk=sdk,
                                   confidence=confidence)
+            # ⚠️ Count it HERE, not after the read-back: `link_entity`'s own
+            # `RETURN count(s)` already proved the edge exists, and gating this
+            # on `_carried` (which can raise) made a late refusal understate what
+            # the canonical gained — the same lie the disclosure exists to
+            # prevent (measured: canonical held the link, report said 0 added).
+            if created:
+                out["created"] += 1
             present, grading = _carried(proj, canonical_id, rel, label,
                                         target_id)
         except Exception as e:
@@ -709,8 +744,6 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
             failures.append(f"{rel}→{target_id} (did not land)")
             continue
         out["carried"] += 1
-        if created:
-            out["created"] += 1
         # ⚠️ The LINK is carried; its GRADING may not be. `link_entity`
         # short-circuits a pre-existing edge without re-grading it (#1370),
         # so when the canonical already held this link the duplicate's

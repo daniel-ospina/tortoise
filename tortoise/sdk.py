@@ -16959,8 +16959,9 @@ class TortoiseSDK:
                             "operator-wired duplicate not deduped")
                     else:
                         # #9437: the fold may not destroy the duplicate's OWN
-                        # evidence. `DETACH DELETE` takes the node's
-                        # `aboutObject`/`aboutSubject` edges with it, so the
+                        # evidence. `DETACH DELETE` takes the node's `about*`
+                        # edges with it (seven predicates the capture cascade
+                        # and the shared writer can mint), so the
                         # SURVIVING claim would carry less support than the
                         # two together held — the loss the sibling guard
                         # (PR #9424) refuses at the against-store classifier.
