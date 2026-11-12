@@ -92,11 +92,18 @@ from tortoise.search_engine import (  # noqa: E402, RUF100
     get_relationships_bounded,
 )
 
-#: The healthy row's persisted belief: α/(α+β) with the `n.confidence` mirror
-#: preferred (#2206). 0.75 is deliberately NOT 0.5 — the neutral Beta(1,1) mean
-#: a blanked or absent row falls back to on a pre-#11702 tree, and the number a
-#: batch-scope conflation would answer.
-HEALTHY_ALPHA, HEALTHY_BETA, HEALTHY_MIRROR = 3.0, 1.0, 0.75
+#: The healthy row's persisted belief. The MIRROR is 0.6 while the PAIR MEAN is
+#: α/(α+β) = 3.0/4.0 = 0.75 — DELIBERATELY DIFFERENT numbers, because the read
+#: contract is that the `n.confidence` mirror LEADS and the pair is only its
+#: fallback (#2206 precedence, kept by #11702), and a seed where the two agree
+#: cannot tell that precedence from a pair-mean read: every value assertion
+#: below stays green with the mirror preference deleted (measured — a mutation
+#: dropping it in `annotate_ep_batch`, and another dropping it in BOTH rankers,
+#: each left all 15 rows passing at a 0.75/0.75 seed). An inconsistent mirror
+#: beside a real pair is not a contrived shape: it IS the mirror/pair split
+#: #11702 closed, and 0.6 is still not the neutral Beta(1,1) 0.5 that a blanked
+#: or absent row falls back to.
+HEALTHY_ALPHA, HEALTHY_BETA, HEALTHY_MIRROR = 3.0, 1.0, 0.6
 HEALTHY_MEAN = HEALTHY_MIRROR
 
 #: Values a pre-guard write could store that the store cannot INSPECT. `[1, 2]`
@@ -147,7 +154,7 @@ def _seed(sdk, operand, *, symmetric: bool = False,
         params={"id": poison, "a": operand},
     )
     if symmetric:
-        # No mirror: a stale 0.75 beside a new pair is the mirror/pair split
+        # No mirror: a stale mirror beside a new pair is the mirror/pair split
         # #11702 closed, and it would mask what this row is here to do.
         g.query(
             "MATCH (n:Point {id: $id}) SET n.posterior_alpha = 1.5, "
