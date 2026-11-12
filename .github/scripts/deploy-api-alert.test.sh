@@ -668,6 +668,9 @@ assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "co
 # not guessed; a cause-specific sentence reds this row.
 assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "ASCII fallback produced no excerpt either" "case 17h: and a FAILING fallback is described as itself, not as a non-ASCII report"
 assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "is non-ASCII" "case 17h: and it does NOT diagnose the report's bytes — a failing tr and an all-non-ASCII tail are indistinguishable from here"
+# …and this report is 11,923 bytes, so THIS arm must declare the 6000-byte cut as well
+# (review round 6, P3): the intro promises it beside the excerpt in every state.
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "only its last 6000 were read" "case 17h: and the 6000-byte cut is DECLARED in this arm too, not only in the empty-capture arm"
 
 # ── case 17i: the ASCII fallback's OWN empty state claims no excerpt (#12200) ─────────
 # The fallback branch has TWO outcomes and the sentence that described them was
@@ -712,6 +715,7 @@ assert_contains "$BODY_17I" "could not be byte-squeezed" "case 17i: and the sque
 assert_contains "$BODY_17I" "produced no excerpt either" "case 17i: and it names the state it is actually in"
 assert_contains "$BODY_17I" "run link above" "case 17i: and sends the reader to where the report actually is"
 assert_not_contains "$BODY_17I" "it is pasted with its non-ASCII bytes dropped" "case 17i: and it does NOT claim a pasted excerpt it does not carry (#12200 — this row reds if the sentence's condition is removed)"
+assert_not_contains "$BODY_17I" "only its last 6000 were read" "case 17i: and it does NOT declare a cut for a report under the cap — the clause is CONDITIONAL (this report is a few bytes)"
 # The claim is pinned by SHAPE, not only by one phrasing, and the shape row alone is NOT the
 # net: round-1 review measured a mutant that keeps every other row green — the correct state
 # sentence SURVIVES and a second clause is added ("… yet the report **was** pasted with its
@@ -876,6 +880,8 @@ assert_contains "$UNDEC_BODY" "produced no excerpt either" "case 17l: and it nam
 assert_not_contains "$UNDEC_BODY" "is unavailable or refused to emit" "case 17l: and does NOT blame the converter — a healthy converter that emits nothing is not a missing one"
 assert_contains "$UNDEC_BODY" "emitted nothing it could convert" "case 17l: and the third cause is named, so the enumeration matches what the host can do"
 assert_not_contains "$UNDEC_BODY" '```' "case 17l: and it pastes no fenced block"
+assert_contains "$UNDEC_BODY" "only its last 6000 were read" "case 17l: and the 6000-byte cut is DECLARED in this arm too (review round 6 — the intro promises it beside the excerpt)"
+assert_contains "$UNDEC_BODY" "15400 bytes" "case 17l: and it names the report's real size"
 
 # ── case 17d: the READ GUARD — an existing but unreadable report must not abort ─────
 # NOTE THE MECHANISM (corrected, pass-5 review): a DIRECTORY is `-s`-TRUE on this fs, so

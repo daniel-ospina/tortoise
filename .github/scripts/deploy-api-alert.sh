@@ -230,7 +230,7 @@ USAGE
 
 build_body() { # <out-file> <job> <step-id> <failed-step-raw>
   local out="$1" job="$2" sid="$3" raw="$4" label excerpt
-  local raw_tail squeeze_incomplete
+  local raw_tail squeeze_incomplete report_bytes cut_note
   local failed_names="" pair id outcome pretty
   if [ -n "$raw" ]; then
     for pair in $raw; do
@@ -347,6 +347,17 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         raw_tail="$(tail -c 6000 "$DRIFT_REPORT_FILE" 2>/dev/null)" || raw_tail=""
         excerpt=""
         squeeze_incomplete=0
+        # How big the report ACTUALLY is, measured once here for BOTH empty arms: they each
+        # have to declare the 6000-byte cut the section intro promises (review rounds 5-6).
+        # ⛔ NO EXTERNAL TOOL IN THE MEASUREMENT beyond `wc` itself, and no `tr`: the states
+        # these arms describe are exactly the ones where a converter or the ASCII fallback is
+        # broken, and a `| tr -d ' '` here FAILED under `pipefail` in case 17h's state (broken
+        # `tr`), silently setting the size to 0 and reverting to the cut-undeclared sentence —
+        # measured. Parameter expansion strips a right-padded `wc` count without a subprocess;
+        # the guard maps "cannot read it" (a directory: `wc` fails) to 0.
+        report_bytes="$(wc -c < "$DRIFT_REPORT_FILE" 2>/dev/null)" || report_bytes=""
+        report_bytes="${report_bytes//[[:space:]]/}"
+        case "${report_bytes:-}" in '' | *[!0-9]*) report_bytes=0 ;; esac
         # `2>/dev/null`: a converter that is absent prints its own "command not found" or
         # refusal on stderr, which lands in the job log beside an alert that went out
         # perfectly well. ⛔ THE HISTORY, CHECKED RATHER THAN ASSUMED (#12200): the
@@ -367,15 +378,14 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
           # a heading that promises the report) would be two false statements; say only
           # what is true.
           #
-          # ⛔ AND SAY WHICH BYTES WERE READ (review round 5, P3): the tail is only the
+          # ⛔ AND SAY WHICH BYTES WERE READ (review rounds 5-6, P3): the tail is only the
           # report's LAST 6000 bytes, so a 15,400-byte report whose final bytes are blank
           # holds plenty of text the alert never looked at. Calling that "the report file
           # held no excerpt-able text" is false about the file — and it left the 6000-byte
           # cut UNDECLARED, which made the section intro's "any of the 6000-byte cut … is
-          # declared beside it" false in this ONE state. Measure the size and name both
-          # facts without diagnosing which of them caused the empty capture.
-          report_bytes="$(wc -c < "$DRIFT_REPORT_FILE" 2>/dev/null)" || report_bytes=""
-          case "${report_bytes:-}" in '' | *[!0-9]*) report_bytes=0 ;; esac
+          # declared beside it" false in this state. MEASURED ONCE, ABOVE (see the read), for
+          # BOTH empty arms: the excerpt-empty arm has the same obligation, and round 5's fix
+          # covered only this one.
           if [ "$report_bytes" -gt 6000 ]; then
             echo "⚠️ **The report's last 6000 bytes held no excerpt-able text** (nothing but line endings or NUL bytes, or it could not be re-read); the report itself is ${report_bytes} bytes, and only that tail is read — the gate's own output is in the run link above."
             echo
@@ -436,7 +446,15 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
             # tr, an ASCII report), the body claimed every byte of an ASCII report was non-ASCII
             # — the exact class this whole change exists to remove, reintroduced one branch down.
             # The reader's action is the same in both states, so name the state, not the cause.
-            echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable, refused to emit, or emitted nothing it could convert), and the ASCII fallback produced no excerpt either — so NOTHING is pasted below; the full report is at the run link above."
+            # ⛔ AND DECLARE THE CUT HERE TOO (review round 6, P3): this arm fires on reports
+            # over the cap as readily as the arm above (case 17l's fixture is 15,400 bytes), so
+            # the intro's promise that a cut is declared beside the excerpt is false unless
+            # this sentence carries it as well.
+            cut_note=""
+            if [ "$report_bytes" -gt 6000 ]; then
+              cut_note=" (the report itself is ${report_bytes} bytes, and only its last 6000 were read)"
+            fi
+            echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable, refused to emit, or emitted nothing it could convert), and the ASCII fallback produced no excerpt either — so NOTHING is pasted below${cut_note}; the full report is at the run link above."
           fi
           echo
         elif [ "$(printf '%s' "$excerpt" | wc -c)" -lt "$(printf '%s' "$raw_tail" | wc -c)" ]; then
