@@ -882,21 +882,21 @@ def check_citation_shapes(text: str) -> list[str]:
         # The GitHub permalink spelling FIRST: it is the likeliest real-world form and
         # the one shape nothing else in this module could see (measured, #11952 P1).
         #
-        # ⛔ EVERY match in the span, not just the first. The `~` carve-out below is
-        # per-CITATION, and testing only `search()`'s first match made one exempt
-        # `~`-rooted permalink certify a whole span: measured, the span below went
-        # REFUSED → CLEAN, an out-of-range permalink riding behind an exempt one —
-        # a red→green in exactly the class this arm exists for (found by review).
-        permalinks = [
-            p
-            for p in CITATION_HASH_LINE_RE.finditer(body)
-            # A `~`-rooted path is §8's remaining carve-out: a dated reading of
-            # something outside this repository. Refusing its permalink spelling red
-            # the required `docs` job over a citation §8 declares exempt (found by
-            # review, measured) — so the carve-out covers both spellings, and the
-            # deferral is per-citation, never for whatever else shares the span.
-            if not p.group("path").startswith("~")
-        ]
+        # ⛔ EVERY match in the span, not just the first: testing only `search()`'s
+        # first match let a second permalink in the same span ride behind the first
+        # one, a red→green in exactly the class this arm exists for (found by review).
+        #
+        # ⛔ This arm had a `~`-rooted carve-out until #11902's review measured it
+        # open: the exemption skipped `~/…` in BOTH spellings, so
+        # `~/.swarm/x.md#L999999` was refused nowhere and an out-of-range `~/`
+        # permalink read CLEAN, while §8 justified the carve-out as protecting *"a §5
+        # reading that §8 declares exempt"* — a citation form no revision of this page
+        # has ever carried (measured over all 37 commits that touch it, both
+        # spellings, zero matches). §5's own first consequence already says a
+        # `~/.swarm` citation is a BROKEN citation: the page's doctrine and the
+        # guard's exemption contradicted each other, and the exemption was the side
+        # that was wrong. A `~`-rooted path is now refused here like any other.
+        permalinks = list(CITATION_HASH_LINE_RE.finditer(body))
         if permalinks and not COMMAND_RE.match(match.group(0)):
             problems.append(
                 f"`{match.group(0)[1:-1]}` is not a recognised citation — it carries "
@@ -1013,7 +1013,6 @@ def check_citations(text: str, root: Path = REPO) -> list[str]:
     problems: list[str] = []
     seen: set[str] = set()
     n_resolved = 0
-    exempted = 0
     anchor: str | None = None
     for match in CITATION_RE.finditer(text):
         if _is_host_port(match.group(0)):
@@ -1063,13 +1062,17 @@ def check_citations(text: str, root: Path = REPO) -> list[str]:
             # unreachable for shorthands and remains for a full path that lost its
             # marker. Kept rather than deleted so the two orders cannot drift back.
             continue
-        if rel.startswith("~"):
-            # A dated reading of something OUTSIDE this repository — §5's `~/.swarm`
-            # tree. §8 names this as a carve-out, and `exempted` is counted
-            # separately so a page made ENTIRELY of exempt citations falls through
-            # to the "measured nothing" floor below instead of reporting clean.
-            exempted += 1
-            continue
+        # ⛔ A `~`-rooted path is REFUSED, not exempt. This inherited a carve-out that
+        # skipped such paths as "a dated reading of something outside this
+        # repository", justified by §8 as protecting a §5 reading — but no revision of
+        # the page carries a `~`-rooted `path:line` in either spelling (measured over
+        # all 37 commits that touch it: zero), so the exemption protected nothing and
+        # DEFUSED a red: an out-of-range `~/tortoise/pipeline.py:999999` read CLEAN
+        # (measured). §5's own first consequence already says a `~/.swarm` citation is
+        # now a BROKEN citation, so a `~`-rooted `path:line` is a dangling citation —
+        # the class this arm exists to catch. No branch is needed to say so: falling
+        # through to the resolve/exists path below resolves `root / "~/…"` to a literal
+        # `~` directory this tree does not have, and reports it.
         if rel.startswith("/"):
             # An absolute path is NOT auto-exempt: rewriting every citation to
             # `/tortoise/…` used to leave the page CLEAN with zero citations
@@ -1086,7 +1089,7 @@ def check_citations(text: str, root: Path = REPO) -> list[str]:
         else:
             target = root / rel
         # ⛔ A `../..` path walks OUT of the tree, and pathlib would let an absolute
-        # one through by DISCARDING `root` (absolute paths are exempted above by
+        # one through by DISCARDING `root` (absolute paths are handled above by
         # design, so this arm is about relative escapes). An existence check alone
         # then certifies a file the repository does not contain — the "looks exactly
         # like evidence" class this page is about (measured: `../../..` was clean).
@@ -1121,7 +1124,7 @@ def check_citations(text: str, root: Path = REPO) -> list[str]:
     if n_resolved == 0 and not problems:
         raise Unverifiable(
             "no `path:line` citation resolved to a file in this tree — the guard "
-            f"measured nothing ({len(seen)} citation(s) seen, {exempted} exempt)"
+            f"measured nothing ({len(seen)} citation(s) seen)"
         )
     return problems
 
@@ -1366,10 +1369,25 @@ def check_measured_commit(text: str, root: Path = REPO) -> list[str]:
         return [f"`measured_at_commit: {sha}` is not a hex commit id"]
 
     def git(*args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            ["git", "-C", str(root), *args],
-            capture_output=True, text=True, timeout=60, check=False,
-        )
+        try:
+            return subprocess.run(
+                ["git", "-C", str(root), *args],
+                capture_output=True, text=True, timeout=60, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            # `FileNotFoundError` (no `git` on PATH), `PermissionError`, and
+            # `TimeoutExpired` are NOT a verdict about this document. Letting them
+            # escape `main()` returns Python's traceback exit **1**, which this
+            # module defines as DRIFT — "a named claim is false, and the message
+            # names the claim" — over a document nothing ever faulted (measured:
+            # `env PATH=/tmp/nogit python3 tools/findings_ledger_check.py --check`
+            # exited 1 with a traceback and no claim). The ancestry question is
+            # exactly the one `tools/problem_map_check.py`'s `_git` exists to
+            # answer with a refusal, so this maps to the UNVERIFIED code.
+            raise Unverifiable(
+                f"`git {' '.join(args)}` could not be run ({type(exc).__name__}: "
+                f"{exc}) — this clone cannot answer the ancestry question"
+            ) from exc
 
     resolved = git("rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}")
     if resolved.returncode != 0:
@@ -1406,6 +1424,62 @@ def check_measured_commit(text: str, root: Path = REPO) -> list[str]:
     return []
 
 
+#: The page's sections, in the order they must appear. A section is one of the
+#: things this guard reads, so an ABSENT one must never check nothing quietly.
+#: §1–§4 and §6–§7 were already bounded by a `_region()` pair and raised UNVERIFIED
+#: when renumbered away; §5 and §8 were bounded by nothing at all, so deleting
+#: either whole returned CLEAN (measured: `§5 deleted -> check_document() == []`,
+#: `§8 deleted -> []`, while the same deletions of §2/§4/§7 raised Unverifiable).
+#: §5 is one of the two halves the review's own conclusion rests on and prose
+#: outside it cites it; §8 is the page's statement of what IS checked, so its
+#: absence silently widens every other claim. Same verdict as a missing §3: an
+#: absent section is the strongest form of drift and must not certify anything.
+SECTION_HEADINGS = (
+    "## 1. What a row means",
+    "## 2. The four defect classes",
+    "## 3. The corrections log",
+    "## 4. The artefact index",
+    "## 5. The at-risk inventory",
+    "## 6. The issue index",
+    "## 7. What this changes",
+    "## 8. What is machine-checked",
+)
+
+
+def check_section_presence(text: str) -> list[str]:
+    """Every section in `SECTION_HEADINGS` must exist, in order, with a body.
+
+    Raises `Unverifiable` (exit 2) rather than reporting drift, matching the
+    verdict `_region()` already returns for a section it cannot locate — the two
+    mechanisms must not disagree about the same condition.
+    """
+    positions: list[int] = []
+    for heading in SECTION_HEADINGS:
+        at = text.find(heading)
+        if at < 0:
+            raise Unverifiable(
+                f"section {heading!r} is absent — an absent section is the strongest "
+                "form of drift, and checking nothing over it would report clean"
+            )
+        positions.append(at)
+    if positions != sorted(positions):
+        raise Unverifiable(
+            "the sections are out of order: "
+            + ", ".join(
+                f"{h.split('.')[0]}.@{p}"
+                for h, p in zip(SECTION_HEADINGS, positions, strict=True)
+            )
+        )
+    for index, heading in enumerate(SECTION_HEADINGS):
+        body_end = positions[index + 1] if index + 1 < len(positions) else len(text)
+        if not text[positions[index] + len(heading) : body_end].strip():
+            raise Unverifiable(
+                f"section {heading!r} has an empty body — a heading with nothing "
+                "under it asserts a section the reader cannot read"
+            )
+    return []
+
+
 def check_document(text: str, root: Path = REPO) -> list[str]:
     """Every arm that reads this checkout's TREE — no `git` history required.
 
@@ -1416,6 +1490,9 @@ def check_document(text: str, root: Path = REPO) -> list[str]:
     lives in `check_all()`, because answering it needs the whole clone.
     """
     problems: list[str] = []
+    # FIRST: a section that is not there must not be quietly unmeasured by every
+    # arm below that would have read it.
+    problems.extend(check_section_presence(text))
     problems.extend(check_vocabulary(text))
     problems.extend(check_verdicts(text))
     problems.extend(check_verdict_tally(text))
