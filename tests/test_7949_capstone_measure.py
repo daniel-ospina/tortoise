@@ -5162,7 +5162,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # re-derivation onto it does not get told `sdk:` and conclude the guard is
         # broken.
         ("03-test-design.md", "`carve_out:` holds **one**", (
-            ("9917", "- test_pack_logic_writeprobe_11083.py"),
+            ("9933", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
