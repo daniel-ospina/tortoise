@@ -98,7 +98,10 @@ CLIENT_INSTALL_RE = re.compile(
 #: "exactly ONE install" fact was false over a step that installs twice
 #: (MEASURED, review of `aec7c83e15`).
 _ANY_INSTALL_RE = re.compile(
-    r"(?:^|[;&|])[ \t]*" + _APT_INSTALL
+    # `{ cmd; }`, `if …; then cmd; fi` and `( cmd )` are shell too: without the
+    # grouping keywords a second installer led by one was invisible to the count
+    # AND unmatched by the line-anchored pin (MEASURED, review of `fb4f52a4d2`).
+    r"(?:^|[;&|{}()]|\bthen\b|\bdo\b|\belse\b)[ \t]*" + _APT_INSTALL
     + r"(?:(?!&&|[;|&])[^\n])*?\bpostgresql-client-(?P<major>\d+)\b",
     re.MULTILINE,
 )
@@ -257,7 +260,8 @@ _GITHUB_PATH_REF = r"['\"]?\$\{?GITHUB_PATH\}?['\"]?"
 
 GITHUB_PATH_PREPEND_RE = re.compile(
     r"echo\s+(?P<quote>['\"]?)/usr/lib/postgresql/(?P<major>\d+)/bin(?P=quote)"
-    r"\s*(?:>>?|\|[ \t]*(?:sudo[ \t]+)?tee[ \t]+(?:-{1,2}[A-Za-z]+[ \t]+)*)\s*"
+    r"\s*(?:>>?|\|[ \t]*(?:sudo[ \t]+(?:-{1,2}[A-Za-z][A-Za-z-]*[ \t]+)*)?tee[ \t]+"
+    r"(?:-{1,2}[A-Za-z][A-Za-z-]*[ \t]+)*)\s*"
     + _GITHUB_PATH_REF
 )
 
@@ -272,8 +276,8 @@ _GITHUB_PATH_WRITE_RE = re.compile(
     # MEASURED, review of `48370b8261`: `> "$GITHUB_PATH"` was not counted at all,
     # and previously `| tee -a` was not either.
     r">>{0,2}[ \t]*" + _GITHUB_PATH_REF
-    + r"|\|[ \t]*(?:sudo[ \t]+(?:-{1,2}[A-Za-z]+[ \t]+)*)?tee[ \t]+"
-    r"(?:-{1,2}[A-Za-z]+[ \t]+)*" + _GITHUB_PATH_REF
+    + r"|\|[ \t]*(?:sudo[ \t]+(?:-{1,2}[A-Za-z][A-Za-z-]*[ \t]+)*)?tee[ \t]+"
+    r"(?:-{1,2}[A-Za-z][A-Za-z-]*[ \t]+)*" + _GITHUB_PATH_REF
 )
 
 
@@ -314,7 +318,12 @@ def _pin_step(steps: list[dict]) -> tuple[int, dict]:
     # review of `f34c4fb741`: an appended `… postgresql-client-18` line in the pin
     # step passed all six).
     install_lines = sum(
-        len(_ANY_INSTALL_RE.findall(_code_only(_run_text(step)))) for step in steps
+        len(
+            _ANY_INSTALL_RE.findall(
+                _strip_comments(_without_heredocs(_code_only(_run_text(step))))
+            )
+        )
+        for step in steps
     )
     assert install_lines == 1, (
         f"expected exactly ONE `apt-get install postgresql-client-*` in `{JOB}`; "
@@ -460,6 +469,11 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     # ONE write to `$GITHUB_PATH`, then read it: each write is PREPENDED, so a
     # second one decides PATH. Counted over code with comments and heredoc bodies
     # removed (a trailing comment naming a write is inert shell).
+    # ⚠️ STATED LIMIT: a write through an ALIAS (`gp="$GITHUB_PATH"; echo /usr/bin
+    # >> "$gp"`) is invisible — this reads text, and tracking variable aliasing
+    # needs a shell interpreter. The spelling it does catch is the one this step's
+    # contract is written in; the alias form is named here rather than half-guarded
+    # (MEASURED, review of `fb4f52a4d2`).
     writes = _GITHUB_PATH_WRITE_RE.findall(
         _strip_comments(_without_heredocs(_code_only(text)))
     )
@@ -547,14 +561,12 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
         # CODE, not `text`: both names appear in this step's own prose comment, so a
         # raw search stays green after the tool is dropped from the `for` loop —
         # MEASURED (review of `7b02823f41`): `for tool in pg_restore; do` plus a
-        # comment naming `pg_dump` passed all six tests. STATED LIMIT:
-        # `_code_only` drops comment-ONLY lines, so a trailing `# …pg_dump…` on the
-        # loop's own line still satisfies this. Stripping inline comments needs
-        # shell-quote awareness (every `#` here would have to be classified), which
-        # is a new false-red surface on the assertions that share `_code_only`; the
-        # shape is a deliberate note, not a removal, so it is named rather than
-        # half-guarded.
-        assert tool in _code_only(text), (
+        # comment naming `pg_dump` passed all six tests. Read through the same
+        # quote-aware preparation the rest of the file uses, so a TRAILING comment
+        # naming the tool is inert here too (`_strip_comments` already classifies
+        # every `#` by quote state — the old note claiming this needed new machinery
+        # was wrong, MEASURED, review of `fb4f52a4d2`).
+        assert tool in _strip_comments(_without_heredocs(_code_only(text))), (
             f"the pin must assert `{tool} --version`: the drill resolves BOTH "
             "from PATH, and pinning only one leaves the other on the image's "
             "client"
