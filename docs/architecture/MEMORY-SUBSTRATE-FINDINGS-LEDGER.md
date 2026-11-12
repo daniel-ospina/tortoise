@@ -348,17 +348,28 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   `docs/00_index.md`, this module's docstring and the test module's, so a wrong one propagates well
   past this page. It must also be the ONLY such paragraph: a decoy carrying a correct-looking tally,
   inserted anywhere above §3, took the match while the real sentence was falsified (measured, rc 0),
-  so more than one is a page defect;
+  so more than one is a page defect — and the paragraph must likewise contain **exactly one sentence**
+  carrying that phrase, because the arm locates its subject *by pattern*: it joined every matching
+  sentence, so a second one in the same paragraph could supply the letters, the per-letter verdict
+  attributions and the overtaken count while the sentence a lane quotes went stale (measured on the
+  pre-fix tool: falsifying the real sentence beside a compliant decoy returned `[]`). This is the §6
+  survivor arm's "keep exactly one" rule, one level down;
 - every **§3 evidence cell** names a `path:line`, an issue, a command or a §N (§1's own rule), and
   the §N must name a heading that EXISTS — accepting any `§<digit>` let all twelve cells be replaced
   with a reference to a section the page does not have (measured, rc 0). Without this, the whole
   evidence column can be **emptied** while every verdict still passes — a red defused by deleting
-  what it pointed at, which is the one move this page exists to make impossible;
+  what it pointed at, which is the one move this page exists to make impossible. The number is read
+  **whole**: a single-digit read parsed `§10` as `§1`, so every two-digit reference to a section the
+  page does not have was accepted as evidence (measured, rc 0);
 - the **§3 population is pinned** to twelve rows, and the **§6 arithmetic** (open + closed + merged =
   the indexed population) is re-derived from the table rather than trusted — deleting a row and every
   mention of it otherwise passes every referential check. Because a pin selects rows *by shape*, an
-  **unrecognised row shape is refused** on both tables: a thirteenth correction row, or a fifth §6
-  state bucket, used to be silently invisible (measured — appending one left the guard CLEAN). That
+  **unrecognised row shape is refused** on all three tables: a thirteenth correction row, a fifth §6
+  state bucket, or a §1 row that is not a `**VERDICT**` row, used to be silently invisible (measured —
+  appending one left the guard CLEAN). The §1 case is the one that matters most, because §1 is what
+  this section names as the authority for the vocabulary §3 is checked against: a sixth claim class
+  shaped any other way there is a verdict with **no handling rule**, which is the state §1 exists to
+  prevent. That
   refusal counts the first table's ROWS and every other `|` line in the section, not only table
   separators, because a lone `|` row appended under a blank line brings no separator: measured, it
   carried the invented verdict `FIXED-IT` and left `--check` at rc 0;
