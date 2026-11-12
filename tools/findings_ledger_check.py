@@ -1876,13 +1876,17 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
     (
         # The `~` carve-out's WIDTH. It exempted every `~`-rooted path, so the whole
         # resolver could be skipped with one keystroke: measured, `~tortoise/nope.py:16`
-        # and `~tortoise/pipeline.py:999999` both returned `[]`. §8's exemption names
-        # ONE dated tree (`~/.swarm/`), and this arm fails if it widens again.
-        "a `~`-rooted citation outside the exempt tree",
+        # and `~tortoise/pipeline.py:999999` both returned `[]`. Narrowing the
+        # exemption to `~/.swarm/` was tried and measured to still exempt a citation of
+        # a file §5 records as GONE, so §8's carve-out is now empty and EVERY
+        # `~`-rooted citation is refused — this page carries none in either spelling
+        # (measured over all 37 commits that touch it), which is why refusal reds
+        # nothing real. This arm fails if `~` starts defusing the resolver again.
+        "a `~`-rooted citation",
         lambda t: t.replace(
             "`tortoise/pipeline.py:16`", "`~tortoise/pipeline.py:999999`", 1
         ),
-        "`~`-rooted outside",
+        "does not exist in the tree",
     ),
     (
         # The two-digit §N. `SECTION_REF_TOKEN_RE` matched ONE digit and discarded the
