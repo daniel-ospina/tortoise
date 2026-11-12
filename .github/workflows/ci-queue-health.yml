@@ -81,8 +81,11 @@ name: ci-queue-health
 # ⛔ And NOT "repair the frozen runs": exclusion from `pr_running` requires TWO halves —
 # every job `completed` AND the run's own `updated_at` still for JOB_SETTLE_SECONDS — so
 # an all-`completed` run whose last update just moved is COUNTED (unmeasured), not
-# excluded. `repair` is not a lever either way: neither /cancel nor /force-cancel accepts
-# a run in either state (409), so naming it would send an operator to a closed avenue.
+# excluded. `repair` is not a lever either way, but ⛔ FOR TWO DIFFERENT REASONS and they
+# must not be merged: the 409 evidence ("not in progress" / "has not been queued yet") is
+# scoped to the FROZEN population, while a settle-downgraded run is one that "is about to
+# execute its whole matrix" — /cancel on THAT would be ACCEPTED and destructive, so it is
+# the one thing here an operator must not be told is a closed avenue.
 # Neither can block a merge, because a
 # `schedule`-event run is a NON-CODE event: the merge rail's own `NON_CODE_EVENTS`
 # set excludes `schedule|issues|issue_comment` from the merge decision, so a red
@@ -358,9 +361,10 @@ jobs:
               # for JOB_SETTLE_SECONDS, so an all-completed run is unmeasured whenever its
               # stillness is unproven — and the bucket it lands in is this one, whose lever
               # (RETRY once it settles) is exactly right. Such a run is identified BY being
-              # probed, which is the budget lever; neither /cancel nor /force-cancel accepts
-              # a repair in either state, so naming one would point an operator at a closed
-              # avenue.
+              # probed, which is the budget lever. Do NOT offer /cancel or /force-cancel as
+              # the lever: for a FROZEN run they answer 409, and for a settle-downgraded one
+              # they would be ACCEPTED and destructive — the run is about to execute its
+              # matrix — so an "API-side repair" is either closed or harmful, never right.
               unprobed_n="$(python3 -c "import json; print(json.load(open('/tmp/ci-queue-health.json')).get('pr_running_unmeasured_unprobed') or 0)" 2>/dev/null || echo 0)"
               unread_n="$(python3 -c "import json; print(json.load(open('/tmp/ci-queue-health.json')).get('pr_running_unmeasured_unread') or 0)" 2>/dev/null || echo 0)"
               if [ "${unread_n:-0}" -gt 0 ] && [ "${unprobed_n:-0}" -eq 0 ]; then

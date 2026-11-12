@@ -687,9 +687,12 @@ class QueueHealth:
     #: These are the runs that produced that.
     pr_running_excluded: tuple[int, ...] = ()
     #: PR-event runs that are still COUNTED as executing because their execution was not
-    #: disproved — three causes, one bucket: the jobs could NOT be read; or every job
-    #: `completed` but the run had not been still for `JOB_SETTLE_SECONDS`; or the read
-    #: returned nothing usable (empty/partial/malformed/other-attempt). Abstaining toward
+    #: disproved — FOUR causes, one bucket: the probe BUDGET never reached the run; the jobs
+    #: could NOT be read; every job `completed` but the run had not been still for
+    #: `JOB_SETTLE_SECONDS`; or the read returned nothing usable
+    #: (empty/partial/malformed/other-attempt). The budget cause is counted here too — the
+    #: split is in `pr_running_unmeasured_unprobed` / `_unread`, and the emitted sentence
+    #: names both — so "three" would contradict this module's own output. Abstaining toward
     #: executing is what keeps an unread jobs surface from manufacturing `PR-STARVED` — a
     #: `STARVING_VERDICT` that authorises a destructive cancel-then-rerun. Reported so the
     #: abstention is visible.
