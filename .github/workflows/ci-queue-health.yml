@@ -78,9 +78,11 @@ name: ci-queue-health
 # dimension and can be set in the SAME reading, in which case the cut feed still
 # needs --max-pages and the annotation must not forbid it. The arm therefore reads
 # `truncated` from the payload rather than hardcoding the refutation.
-# ⛔ And NOT "repair the frozen runs": a run whose every job is `completed` is the
-# PROOF that excludes it from `pr_running`, so it can never make the census
-# unmeasured, and neither /cancel nor /force-cancel accepts such a repair (409).
+# ⛔ And NOT "repair the frozen runs": exclusion from `pr_running` requires TWO halves —
+# every job `completed` AND the run's own `updated_at` still for JOB_SETTLE_SECONDS — so
+# an all-`completed` run whose last update just moved is COUNTED (unmeasured), not
+# excluded. `repair` is not a lever either way: neither /cancel nor /force-cancel accepts
+# a run in either state (409), so naming it would send an operator to a closed avenue.
 # Neither can block a merge, because a
 # `schedule`-event run is a NON-CODE event: the merge rail's own `NON_CODE_EVENTS`
 # set excludes `schedule|issues|issue_comment` from the merge decision, so a red
@@ -351,13 +353,14 @@ jobs:
               # (`pr_running_unmeasured_unprobed` / `_unread`) and this arm names only the
               # remedy that applies.
               #
-              # ⛔ AND THERE IS NO THIRD CAUSE NAMED HERE ANY MORE: "a run GitHub has stopped
-              # driving (frozen, every job completed)" is the OPPOSITE of unmeasured — all-jobs
-              # -completed is the PROOF that EXCLUDES a run from `pr_running` (see the
-              # `excluded` sentence), so it can never contribute to an unmeasured census. Such
-              # a run is identified BY being probed, which is the budget lever, and neither
-              # /cancel nor /force-cancel accepts a repair — so pointing an operator at an
-              # "API-side repair" sent them to an avenue the tool's own record calls closed.
+              # ⛔ AND "a run GitHub has stopped driving (frozen, every job completed)" is NOT
+              # a third cause: exclusion needs every job `completed` AND `updated_at` still
+              # for JOB_SETTLE_SECONDS, so an all-completed run is unmeasured whenever its
+              # stillness is unproven — and the bucket it lands in is this one, whose lever
+              # (RETRY once it settles) is exactly right. Such a run is identified BY being
+              # probed, which is the budget lever; neither /cancel nor /force-cancel accepts
+              # a repair in either state, so naming one would point an operator at a closed
+              # avenue.
               unprobed_n="$(python3 -c "import json; print(json.load(open('/tmp/ci-queue-health.json')).get('pr_running_unmeasured_unprobed') or 0)" 2>/dev/null || echo 0)"
               unread_n="$(python3 -c "import json; print(json.load(open('/tmp/ci-queue-health.json')).get('pr_running_unmeasured_unread') or 0)" 2>/dev/null || echo 0)"
               if [ "${unread_n:-0}" -gt 0 ] && [ "${unprobed_n:-0}" -eq 0 ]; then

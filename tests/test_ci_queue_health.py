@@ -2284,7 +2284,13 @@ def test_the_reason_line_names_the_runs_it_read_out_of_pr_running():
     health = classify([run(999001, "python-ci", event="pull_request", age_seconds=300)],
                       in_progress=ghost_runs())
     joined = " ".join(health.reasons)
-    assert "pr_running excluded 3 run(s) whose every job is completed" in joined
+    # ⛔ BOTH HALVES OF THE PROOF ARE NAMED (review P2). Exclusion requires every job
+    # `completed` AND the run's own `updated_at` still for `JOB_SETTLE_SECONDS`; a
+    # one-half sentence taught that the settle-downgraded population cannot exist, while
+    # this very reading can produce it (an all-completed run whose list was not
+    # corroborated stays counted, in `pr_running_unmeasured`).
+    assert "pr_running excluded 3 run(s) whose every job is completed AND" in joined
+    assert f"still for {Q.JOB_SETTLE_SECONDS:.0f}s" in joined, joined
     for rid in GHOSTS:
         assert str(rid) in joined
 
@@ -3319,6 +3325,16 @@ def test_the_unwitnessed_annotation_selects_the_CAUSE_and_its_own_lever():
                             "pr_running_unmeasured_unread": 3})
         assert "RETRY the reading" in read_only, read_only
         assert "--max-job-probes" not in read_only, read_only
+        # ⛔ AND IT ENUMERATES ALL THREE CAUSES THE BUCKET STANDS FOR (review P2-2).
+        # `5f6f08902c`'s subject was this emitted list, and the REASON LINE's copy is
+        # pinned — but this ANNOTATION's copy was not, so the exact two-cause regression
+        # that commit removed could return with the whole suite green (measured: the
+        # retracted form passes every other assertion in this file). The three causes are
+        # (i) the read FAILED, (ii) it returned nothing USABLE (empty/partial/malformed/
+        # other-attempt), (iii) the run was not still long enough for the list to count.
+        assert "read FAILED" in read_only, read_only
+        assert "other-attempt" in read_only, read_only
+        assert "still long enough" in read_only, read_only
 
         # both present: name both, and say which to try first
         both = census({"pr_running_unmeasured_unprobed": 2,
@@ -3726,12 +3742,24 @@ def test_the_UNMEASURED_token_is_rendered_by_EVERY_arm_that_can_carry_it():
             run(7003, "python-ci", event="pull_request", has_live_job=None)]
     base = classify(queued, in_progress=runs, probe_attempted=True)
     assert base.pr_running == 3 and base.pr_running_unmeasured == 2
-    for verdict in (Q.FLOOD, Q.PR_BACKLOGGED, Q.OK):
+    # ⛔ ONLY THE ARMS A PARTIAL CENSUS CAN ACTUALLY REACH (review NIT). `FLOOD` and
+    # `PR-STARVED` are unreachable while any counted run is unmeasured — both require
+    # `pr_running == 0`, and `pr_running_unmeasured ⊆ pr_running` — so rendering them here
+    # via `dataclasses.replace` would be a state `classify_queue` cannot produce, i.e. a
+    # mutation "covered" by an impossible input. Their splices stay in the arms as
+    # defence against a future condition change, and are counted as DEAD TEXT, not as
+    # coverage. The two reachable arms are the ones this asserts.
+    for verdict in (Q.PR_BACKLOGGED, Q.OK):
         line = dataclasses.replace(base, verdict=verdict,
                                    dominant_workflow="welcome-e2e").state_line
         assert "unmeasured=2" in line, (verdict, line)
         # EXACTLY ONCE: two occurrences would mean two arms rendered into one line.
         assert line.count("unmeasured=2") == 1, (verdict, line)
+    # ... and the unreachability above is ASSERTED, not assumed, so it cannot rot.
+    for dead in (Q.FLOOD, Q.PR_STARVED):
+        impossible = dataclasses.replace(base, verdict=dead, pr_running=0,
+                                         pr_running_unmeasured=0)
+        assert ", unmeasured=" not in impossible.state_line, impossible.state_line
 
     # The ALL-UNMEASURED shape takes `census=unmeasured` instead of the count token, and
     # must never print both. With the degradation flag set, the `PR-UNWITNESSED` arm is

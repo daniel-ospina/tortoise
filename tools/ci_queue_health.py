@@ -1330,8 +1330,12 @@ def classify_queue(
     #     (180 s, 90 min) was certified healthy. That is the #10237 shape ("a clean bill
     #     of health for a required check answering in hours") driven by DEAD runs rather
     #     than an idle pool.
-    # The exclusion is a PROOF, never a heuristic (`is_executing`): a run counts out
-    # only when its jobs were read and every one had completed. An unmeasured run keeps
+    # The exclusion is a PROOF, never a heuristic (`is_executing`), and it has TWO
+    # halves: a run counts out only when its jobs were read, every one had completed,
+    # AND its own `updated_at` has been still for `JOB_SETTLE_SECONDS` (`_settled_still`,
+    # applied by `read_health`). The second half is not decoration — a DYNAMIC matrix
+    # answers with only its finished parent for a few seconds while the run is about to
+    # execute, so a one-half rule would subtract a live run. An unmeasured run keeps
     # counting, so this can never manufacture a starvation verdict.
     pr_in_progress = [run for run in in_progress if run.is_pr]
     pr_running = sum(1 for run in pr_in_progress if run.is_executing)
@@ -1479,7 +1483,8 @@ def classify_queue(
         if pr_running_excluded:
             notes.append(
                 f"pr_running excluded {len(pr_running_excluded)} run(s) whose every job "
-                f"is completed {list(pr_running_excluded)}"
+                f"is completed AND whose own `updated_at` has been still for "
+                f"{JOB_SETTLE_SECONDS:.0f}s {list(pr_running_excluded)}"
             )
         if pr_running_unmeasured:
             notes.append(
@@ -1566,10 +1571,14 @@ def classify_queue(
             # ⛔ THE TWO FACTS BEHIND `pr_running` (#12037), emitted so a consumer can
             # tell a census of EXECUTING runs from one that merely trusted the `status`
             # string. `pr_running_excluded` names the runs whose every job was READ as
-            # `completed` — a run GitHub has stopped driving — and they are subtracted
-            # from `pr_running`. `pr_running_unmeasured` counts runs whose jobs could not
-            # be read; they remain IN `pr_running` (abstaining toward executing, so an
-            # unread jobs surface can never manufacture a starvation verdict).
+            # `completed` AND whose `updated_at` had been still for `JOB_SETTLE_SECONDS`
+            # — a run GitHub has stopped driving — and they are subtracted from
+            # `pr_running`. BOTH halves are required: an all-completed list alone is also
+            # what a DYNAMIC matrix's pre-expansion window looks like.
+            # `pr_running_unmeasured` counts runs whose jobs could not be read OR whose
+            # all-completed list was not corroborated by stillness; they remain IN
+            # `pr_running` (abstaining toward executing, so an unread jobs surface can
+            # never manufacture a starvation verdict).
             "pr_running_excluded": pr_running_excluded,
             "pr_running_unmeasured": pr_running_unmeasured,
             # ⛔ THE DEGRADATION ITSELF, EMITTED AS A NAMED FACT (#12037 review round 5).
