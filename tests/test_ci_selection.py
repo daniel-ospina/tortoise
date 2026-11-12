@@ -3374,6 +3374,54 @@ def test_a_consent_token_only_diff_runs_the_bridge_guard():
     )
 
 
+def test_a_metering_only_diff_runs_the_storage_dimension_pins():
+    """#11968 review (P2): the arithmetic's own diff must select the guard that pins it.
+
+    `tests/test_pricing_storage_dimensions.py` pins
+    `metering.storage_overage_cost_usd` (12 invocations, all in that file — the
+    function has no production caller yet), and `tortoise/metering.py`
+    is an exact `SOURCE_PATTERNS["api"]` entry. A named-surface match REPLACES the
+    `core` fallback (#2938), so a `metering.py`-only diff resolves `['api']` and a
+    `core`-only registration leaves the overage arithmetic asleep on the very
+    change that moves it — the silent-drop class #1349/#2938 warn about. Asserts
+    the SELECTION, not the registration, so it reds if the `api` arm of the entry
+    is dropped or the `api` SOURCE_PATTERN stops claiming `metering.py`.
+    """
+    r = _sel(["tortoise/metering.py"])
+    assert r["full"] is False
+    assert "api" in r["surfaces"], (
+        f"a metering.py-only diff selects {r['surfaces']} — expected `api`, which "
+        "is where the storage-dimension pins are registered"
+    )
+    assert "test_pricing_storage_dimensions.py" in r["test_files"], (
+        "a metering.py-only diff does not run "
+        "tests/test_pricing_storage_dimensions.py, so its storage-overage pins "
+        "cannot fire on the change they pin (#11968)"
+    )
+
+
+def test_a_pricing_only_diff_runs_the_storage_dimension_pins():
+    """#11968 review round 2 (P2): the OTHER arm of the dual registration, measured.
+
+    `tortoise/pricing.py` matches NO `SOURCE_PATTERNS` row, so a `pricing.py`-only
+    diff resolves `['core']` — that fallback is what the `core` arm of
+    `test_pricing_storage_dimensions.py` exists for, and nothing else reds if it is
+    deleted: the sibling `..._metering_only_...` test pins the `api` leg only.
+    """
+    r = _sel(["tortoise/pricing.py"])
+    assert r["full"] is False
+    assert r["surfaces"] == ["core"], (
+        f"a pricing.py-only diff selects {r['surfaces']} — expected ['core']. If "
+        "pricing.py ever GAINS a named surface, this arm stops running on its own "
+        "diff and the registration needs the new surface added too"
+    )
+    assert "test_pricing_storage_dimensions.py" in r["test_files"], (
+        "a pricing.py-only diff does not run "
+        "tests/test_pricing_storage_dimensions.py, so the `core` arm of the dual "
+        "registration is gone (#11968)"
+    )
+
+
 def test_a_client_identity_only_diff_runs_the_consent_identity_guards():
     """#8218 review (finding 3): the identity RULE's own diff must select the
     guards that pin it.

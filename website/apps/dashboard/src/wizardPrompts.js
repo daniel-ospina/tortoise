@@ -34,7 +34,7 @@ export const ONBOARDING_INSTRUCTIONS = `Onboarding is instructions, not a skill 
 // leaves, and appended to the workflows prompt. Without it a connector user
 // never calls tortoise_health / tortoise_create_point, so onboarding never
 // auto-completes.
-export const WIZARD_STEP2_TEXT = `Call tortoise_health to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://tortoise.premiselabs.co/docs`
+export const WIZARD_STEP2_TEXT = `Call tortoise_health to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://premiselabs.co/tortoise/docs`
 
 // #9660 review: ChatGPT is the ONE harness whose tools arrive as a GRANT built
 // from `tools/list`, so it cannot call `tortoise_health` at all — that name is
@@ -52,7 +52,7 @@ export const WIZARD_STEP2_TEXT = `Call tortoise_health to verify the connection,
 // below gets the call every client can actually make, and the JS guard reds
 // until someone classifies it. The other polarity (default = legacy) would hand
 // a future grant-based harness a retired name silently, which is this very bug.
-export const ADVERTISED_VERIFY_FILE_STEP_TEXT = `Call tortoise_graph_overview(section="health") to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://tortoise.premiselabs.co/docs`
+export const ADVERTISED_VERIFY_FILE_STEP_TEXT = `Call tortoise_graph_overview(section="health") to verify the connection, then tortoise_create_point to file my first memory.\nDocs: https://premiselabs.co/tortoise/docs`
 
 //: The leaves that write a config file (or run the installer) and therefore see
 //: the RETIRED name answered on `get_tool`. #2827's shared body is correct for
@@ -70,7 +70,7 @@ export function wizardPromptText(harness, step, key, mode) {
   // here would re-create exactly the drift the MCP_URL/CANONICAL_MCP_URL
   // split exists to prevent.
   const url = MCP_URL
-  const docs = 'Docs: https://tortoise.premiselabs.co/docs'
+  const docs = 'Docs: https://premiselabs.co/tortoise/docs'
   const keyLine = mode === 'included' ? `Key: ${key}` : 'I\'ll give you the API key when you need it.'
   const twoStepNote = 'Tell me when to restart'
   // #3232: the M1 restart cue. ONE authored sentence for every config-writing

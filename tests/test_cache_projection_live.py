@@ -340,14 +340,36 @@ def test_a_PRODUCTION_graph_refusal_does_not_log_a_drop_it_never_made(caplog):
     `dropped N vector(s)` over a cache that was never touched.
 
     ⛔ The name is PRODUCTION-SHAPED on purpose: that is the input the L2 guard exists for. The
-    refusal happens before any wipe, so the graph this fixture opens is never written to.
+    refusal happens before any wipe — `_assert_test_graph` sits ABOVE `_wipe_all_nodes` **and**
+    above the post-guard `_ensure_indexes()` — so the guard this test is named for is reached
+    either way.
+
+    ⛔ …and the fixture must not create the graph it refuses to write to, or the docstring below
+    is the #11389 "a claim that does not match the code" defect in the file that tests for it.
+    `from_uri`'s DEFAULTS MINT IT: `ensure_indexes=True` runs `_ensure_indexes()`'s DDL and the
+    open-time health probe is itself a `GRAPH.QUERY` that creates a graph the store does not
+    hold. Measured on a private lane at `origin/main@0dca7fcad`, `GRAPH.LIST` filtered to the
+    probe names — default flags → the graph APPEARS; the write-freedom PAIR → it does not:
+
+        BEFORE any arm:                    []
+        AFTER default-flags construction:  ['org_12043_default']
+        AFTER pair construction:           (unchanged — nothing minted)
+
+    So the construction uses the PAIR `skip_health_check=True, ensure_indexes=False` — the
+    module's own rule (*"Write-freedom is the PAIR"*, `tortoise/projection/__init__.py:11841`),
+    pinned by *"⛔ `ensure_indexes=False` ALONE still WRITES — the pair is the guarantee"* in
+    `test_write_freedom_needs_the_flag_PAIR_not_ensure_indexes_alone`
+    (`tests/test_10017_turn_parity_census.py:1362`). It is safe on THIS path precisely because
+    the L2 refusal precedes the post-guard `_ensure_indexes()`: the arm still raises for the
+    guard it exists to pin.
     """
     import logging
     import os
 
     _skip_unless_live_uri()
     prod = FalkorProjection.from_uri(os.environ["TORTOISE_DB_URI"],
-                                     graph_name="org_11747_l2_pin")
+                                     graph_name="org_11747_l2_pin",
+                                     skip_health_check=True, ensure_indexes=False)
     view = _view_with_an_unserved_vector()
 
     with caplog.at_level(logging.WARNING), pytest.raises(

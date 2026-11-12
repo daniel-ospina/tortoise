@@ -6,17 +6,17 @@
   <title>FAQ — Tortoise</title>
   <meta name="description" content="Why Tortoise stores relationships instead of re-deriving them, how a confidence score is computed, what happens when the graph is wrong, and how this differs from plain retrieval over a large context window.">
   <meta name="theme-color" content="#060b14">
-  <link rel="canonical" href="https://tortoise.premiselabs.co/faq">
+  <link rel="canonical" href="https://premiselabs.co/tortoise/faq">
   <link rel="icon" href="/favicon.ico?v=62885cadb6d1" sizes="32x32 48x48">
   <link rel="icon" type="image/png" href="/favicon.png?v=49f77b817262" sizes="256x256">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=d528e4e4021a">
   <meta name="twitter:card" content="summary_large_image">
-  <meta property="og:image" content="https://tortoise.premiselabs.co/assets/og-tortoise.jpg">
+  <meta property="og:image" content="https://premiselabs.co/assets/og-tortoise.jpg">
   <meta property="og:image:type" content="image/jpeg">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="Tortoise — context and reasoning infrastructure for agents. A gradient triangle mark beside the Premise Labs wordmark.">
-  <meta name="twitter:image" content="https://tortoise.premiselabs.co/assets/og-tortoise.jpg">
+  <meta name="twitter:image" content="https://premiselabs.co/assets/og-tortoise.jpg">
   <meta name="twitter:image:alt" content="Tortoise — context and reasoning infrastructure for agents. A gradient triangle mark beside the Premise Labs wordmark.">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -140,10 +140,10 @@
 <body>
   <div class="wrap">
     <nav class="topbar" aria-label="Site navigation">
-      <a href="/">← Back to product</a>
-      <a href="/docs">Docs</a>
-      <a href="/security">Security</a>
-      <span class="host">tortoise.premiselabs.co</span>
+      <a href="/tortoise">← Back to product</a>
+      <a href="/tortoise/docs">Docs</a>
+      <a href="/tortoise/security">Security</a>
+      <span class="host">premiselabs.co/tortoise</span>
     </nav>
 
     <header>
@@ -157,7 +157,7 @@
         </div>
         <div>
           <span class="label">Source of truth</span>
-          <span class="value"><a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/ONTOLOGY.md">docs/ONTOLOGY.md</a> · <a href="/docs">technical docs</a></span>
+          <span class="value"><a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/ONTOLOGY.md">docs/ONTOLOGY.md</a> · <a href="/tortoise/docs">technical docs</a></span>
         </div>
       </div>
     </header>
@@ -201,7 +201,7 @@
       <h3 id="not-just-rag">Isn't this just RAG with extra steps?</h3>
       <p>Not quite, and the difference is specific.</p>
       <p>Similarity search returns text that <em>resembles</em> your question. A correction rarely resembles the thing it corrects — it's shorter, worded differently, often a footnote on a later document. So the agreeing text outranks the disagreeing text, and a model reading only the top results never learns there was a disagreement. It doesn't fail at reasoning; the counter-evidence never arrived.</p>
-      <p>Tortoise keeps the source text and additionally records the one thing the text cannot contain: the relationships <em>between</em> pieces, as typed constraints. &ldquo;These two conflict.&rdquo; &ldquo;This replaced that.&rdquo; Belief is then computed over those constraints &mdash; conflicts and support carry a weight and propagate, replacement is tracked structurally &mdash; rather than over text similarity, which is what makes Tortoise a cognitive layer for agents: <strong>reasoning, memory and learning</strong>, rather than a better index. The mechanism itself — what each relation does to a score — is on <a href="/docs">the docs page</a>.</p>
+      <p>Tortoise keeps the source text and additionally records the one thing the text cannot contain: the relationships <em>between</em> pieces, as typed constraints. &ldquo;These two conflict.&rdquo; &ldquo;This replaced that.&rdquo; Belief is then computed over those constraints &mdash; conflicts and support carry a weight and propagate, replacement is tracked structurally &mdash; rather than over text similarity, which is what makes Tortoise a cognitive layer for agents: <strong>reasoning, memory and learning</strong>, rather than a better index. The mechanism itself — what each relation does to a score — is on <a href="/tortoise/docs">the docs page</a>.</p>
 
       <h3 id="query-time">Why not let the model work out contradictions at query time?</h3>
       <p>It can only judge what is in front of it. Deciding whether A contradicts B requires having both, and contradictions are the least likely pair to be retrieved together.</p>
@@ -252,12 +252,12 @@
       <h3 id="variance">What does the variance on a confidence score mean?</h3>
       <p>A confidence score is a distribution, not a single number — so it carries a spread as well as a centre.</p>
       <p>A tight spread means the evidence has settled. A wide spread means it has not: either there is very little evidence, or the evidence points both ways. That distinction is why a claim can be flagged as <strong>contested</strong> rather than handing you a middling score and leaving you to guess which situation you are in.</p>
-      <p>Contested claims are often the interesting ones. A 0.5 that nobody disputes and a 0.5 that two strong sources are fighting over are different situations, and only one of them deserves your attention. The full treatment is on <a href="/docs">the docs page</a>.</p>
+      <p>Contested claims are often the interesting ones. A 0.5 that nobody disputes and a 0.5 that two strong sources are fighting over are different situations, and only one of them deserves your attention. The full treatment is on <a href="/tortoise/docs">the docs page</a>.</p>
 
       <h3 id="ep">What is expectation propagation?</h3>
       <p>It is how the belief score is actually computed, and the reason a score can change after the claim was written. Support and contradiction propagate along the relationships connecting a claim, and its score settles at whatever the surrounding evidence supports.</p>
       <p>Unlike a system that assigns each claim a number once, the score here is a distribution that is updated as evidence accumulates around it.</p>
-      <p>It also means a contradiction is a first-class force rather than a missing record. Silently replacing a contradicted claim looks identical to never having recorded the contradiction — until you need to know why the belief changed. For the mechanism itself, <a href="/docs">the docs page</a> has the full account.</p>
+      <p>It also means a contradiction is a first-class force rather than a missing record. Silently replacing a contradicted claim looks identical to never having recorded the contradiction — until you need to know why the belief changed. For the mechanism itself, <a href="/tortoise/docs">the docs page</a> has the full account.</p>
 
       <h3 id="missed">What happens if extraction misses something?</h3>
       <p>If a relationship is missed when it is observable, no later search recovers it, because the relationship was never inside either document — which is why extraction quality is what the write path spends its effort on, and why the captured source text is kept as the authoritative record.</p>
@@ -271,7 +271,7 @@
       <h2>Using Tortoise</h2>
 
       <h3 id="pricing">What does it cost?</h3>
-      <p>Pricing is stated on the <a href="https://tortoise.premiselabs.co/#pricing-section">product page</a> — metered write operations, with reads free at every tier. Self-hosting is also a real option if you would rather run it yourself than pay per write (see <a href="/self-hosted">self-hosted</a>): the source is public and the licence is <a href="/license">source-available rather than open source</a>, with production use free for organisations at or below the $5M revenue threshold.</p>
+      <p>Pricing is stated on the <a href="https://premiselabs.co/tortoise#pricing-section">product page</a> — metered write operations, with reads free at every tier. Self-hosting is also a real option if you would rather run it yourself than pay per write (see <a href="/tortoise/self-hosted">self-hosted</a>): the source is public and the licence is <a href="/tortoise/license">source-available rather than open source</a>, with production use free for organisations at or below the $5M revenue threshold.</p>
       <p>We are not going to restate a price here, because a copy of a price is exactly the kind of thing that goes stale without anyone noticing. The product page is the single place it is stated.</p>
 
       <h3 id="export">Can I export my graph, and what if I stop using it?</h3>
@@ -280,21 +280,21 @@
 
       <h3 id="data-access">Who can read my data?</h3>
       <p>Only authorised personnel operating the service can reach production systems, and access to personal data is limited to what is necessary to operate and support the service — stated in full in the <a href="/privacy">privacy policy</a>, with the contractual terms in the <a href="/dpa">DPA</a>.</p>
-      <p>The technical controls behind that — encryption in transit and at rest, how API key credentials are stored, what control-plane activity is logged — are on the <a href="/security">security page</a>.</p>
+      <p>The technical controls behind that — encryption in transit and at rest, how API key credentials are stored, what control-plane activity is logged — are on the <a href="/tortoise/security">security page</a>.</p>
       <p>We do not restate those documents here, because a summary is precisely the artefact that drifts out of sync with what it summarises.</p>
     </main>
 
     <footer>
       <p>
-        <a href="/">Product</a> ·
-        <a href="/docs">Docs</a> ·
+        <a href="/tortoise">Product</a> ·
+        <a href="/tortoise/docs">Docs</a> ·
         <a href="/blog">Blog</a> ·
-        <a href="/self-hosted">Self-hosted</a> ·
+        <a href="/tortoise/self-hosted">Self-hosted</a> ·
         <a href="/privacy">Privacy</a> ·
         <a href="/tos">Terms of Service</a> ·
-        <a href="/license">License</a> ·
+        <a href="/tortoise/license">License</a> ·
         <a href="/dpa">DPA</a> ·
-        <a href="/security">Security</a> ·
+        <a href="/tortoise/security">Security</a> ·
         <a href="/contact">Contact</a>
       </p>
       <p>Premise Labs · Tortoise</p>
