@@ -323,35 +323,51 @@ def test_a_failed_read_of_the_DEFINITION_BOUNDARY_is_undecidable_not_healthy(sdk
     assert sdk.get_entity(made["point_id"])["status"] == "live"
 
 
-def test_the_boundary_is_read_from_the_NODE_not_from_definition_boundary(sdk):
-    """⛔ REVIEW cycle 2, P2, reproduced: the failing-read test above passes for
-    the WRONG REASON — failing `get_entity` for the indicator also fails the
-    `indicator-retired` arm, which produces a `could not be read` message of its
-    own, so it never exercises the boundary comparison at all.
+def test_the_boundary_is_read_from_the_NODE_already_fetched(sdk):
+    """⛔ REVIEW cycles 2–3, P2. TWO earlier versions of this pin were wrong, and
+    both wrongnesses are worth recording because the fix is a BEHAVIOURAL
+    invariant rather than a spy on a name:
 
-    This is the discriminating pin: `goal_judgement.definition_boundary` is forced
-    to answer `None` (exactly the fold it performs on a failed read) while the
-    indicator node DOES carry a boundary. A refactor that "simplifies"
-    `invalidation_for` back onto that helper — the natural move, since the helper
-    exists and looks right — passes the whole suite except this test, and re-opens
-    the silent-healthy defect."""
-    from tortoise import goal_judgement as gj
+    * cycle 1's test failed the whole `get_entity` read for the indicator, which
+      also fails the `indicator-retired` arm — whose message is verbatim "the
+      indicator … could not be read" — so its assertion held with no boundary
+      declared at all (reproduced by review);
+    * cycle 2's test patched the `goal_judgement.definition_boundary` MODULE
+      ATTRIBUTE. That only bites a refactor that calls the helper by attribute
+      lookup; the spelling a maintainer actually writes
+      (`from .goal_judgement import definition_boundary`, which is how this file's
+      own import block reads) binds at import, and the whole suite stayed GREEN
+      under that mutation (measured by review: 59 passed).
 
+    So the invariant pinned here is the FACT both refactors would break: the
+    boundary comes from the node this function has ALREADY fetched, i.e. the
+    indicator is read ONCE per verdict. A second read through the helper is the
+    silent-healthy hole of cycle 1 — the helper folds "the read failed" into "no
+    boundary declared" — and it is counted here regardless of how it is spelled.
+    """
     i, t, g = _world(sdk, tag="boundary-source")
-    made = _judge(sdk, i, t, g, at="2026-11-11T10:00:00Z")
+    _judge(sdk, i, t, g, at="2026-11-11T10:00:00Z")
     mark_definition_change(sdk, i["id"], at="2026-11-12T00:00:00+00:00")
 
-    real = gj.definition_boundary
-    gj.definition_boundary = lambda *a, **kw: None
+    reads: list[str] = []
+    real_get = sdk.get_entity
+
+    def counting(node_id, *a, **kw):
+        reads.append(node_id)
+        return real_get(node_id, *a, **kw)
+
+    sdk.get_entity = counting
     try:
         v = _only(verdicts(sdk, goal_id=g["id"]))
     finally:
-        gj.definition_boundary = real
-    assert v.invalidation is not None, (
-        "the boundary was read through `definition_boundary` — a transient read "
-        "failure would now make a stale claim read healthy")
+        sdk.get_entity = real_get
+    assert v.invalidation is not None, v.undecidable
     assert v.invalidation.reason == "definition-changed"
-    assert sdk.get_entity(made["point_id"])["status"] == "live"
+    assert reads.count(i["id"]) == 1, (
+        f"the indicator was read {reads.count(i['id'])} times for one verdict — "
+        "the boundary must come from the node the retirement check already "
+        "fetched: a second read through `definition_boundary()` folds a read "
+        "failure into 'no boundary declared' and makes a stale claim read healthy")
 
 
 # ── 5. the GOAL is retired (capability 12's derived half) ─────────────────
