@@ -860,10 +860,14 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
     #
     # So the seam's own reading is materialised ONCE here and handed to every
     # arm, and written back onto whichever CHANNEL carried the vector: the stamp
-    # and the post-stamp belt each read the merged view, so a channel left holding
-    # the object this arm consumed is read a SECOND time and refuses a value the
-    # arm had just ACCEPTED. (The envelope's write-back was added in round 14; the
-    # record's was missing until round 23 — see the arm below.)
+    # re-reads the ENVELOPE's top-level `embedding`, and the post-stamp belt (the
+    # second call to this function inside `_emit`) re-reads the MERGED view — so a
+    # channel left holding the object this arm consumed is read a SECOND time and
+    # refuses a value the arm had just ACCEPTED. (The envelope's write-back was
+    # added in round 14; the record's was missing until round 23 — see the arm
+    # below. ⛔ An earlier revision said the stamp too read the merged view; it
+    # does not, measured — a record-carried generator is still unconsumed after it
+    # returns, and a record-carried `"abc"` is returned untouched, #11996 round 25.)
     # ⛔ THE ELEMENT ARM KEEPS THE RAW OBJECT ON PURPOSE: materialising would put
     # a numpy array's `np.float64` elements in front of a check that refuses
     # everything but an exact `int`/`float`, turning the stated residual (a
@@ -890,7 +894,9 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
             # ⛔ WHAT THE GATE DOES NOT CATCH, stated so it is not read as an
             # equivalence (review round 24, measured): a CONTAINER whose
             # `__iter__` hands out a CACHED iterator is also one-shot
-            # (`iter(Shared([0.1, 0.2])) is not shared`) and keeps the residual
+            # (`iter(shared) is not shared` — the SAME object; the free-floating
+            # form `iter(Shared([0.1, 0.2])) is not shared` compares two unrelated
+            # objects and therefore proves nothing) and keeps the residual
             # disposition below — the record channel still refuses it with the
             # fabricated "the seam can only DROP" / "an EMPTY vector" message
             # while the SAME object lands on the envelope channel. And a
@@ -899,8 +905,21 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
             # (that arm's container test skips it) and fails later at the JSON
             # encoder with `TypeError: not JSON serializable`, while the envelope
             # channel lands it. Both are the stated residual
-            # `#11948-non-list-iterable`; materialising them here would turn that
-            # residual into an over-block of a vector the envelope accepts.
+            # `#11948-non-list-iterable`.
+            #
+            # ⛔ AND WHAT WIDENING WOULD ACTUALLY DO — measured (#11996 review
+            # round 25), and NOT the over-block an earlier revision of this
+            # paragraph claimed. Widening the gate to its identity half alone
+            # (`if record.get("embedding") is values:`, i.e. dropping only
+            # `iter(x) is x`) makes the cached-iterator container LAND on this
+            # channel ([0.1, 0.2], at both widths) and moves the numpy array's
+            # refusal from the JSON encoder to the re-run element arm ("not an
+            # exact `int` / `float` (float64)"). So widening would CLOSE one
+            # refusal and RELOCATE the other — it changes this channel's
+            # accept-set for two shapes no door produces, which is exactly why it
+            # is a DECISION recorded as `#11948-non-list-iterable` in the PR
+            # body's `residuals=` line, not a consequence of safety to be assumed
+            # here.
             #
             # Measured before this arm — the round-14 write-back covered the
             # ENVELOPE only, so the record channel kept the exhausted iterator
@@ -910,10 +929,12 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
             #                          KEY: "f64", "embedding": (x for x in [0.1, 0.2])})
             #       -> ValueError "declared over a value the seam can only DROP"
             #          (and under `f32`: "declared over an EMPTY vector")
-            # while `stamp_journal_embedding({"embedding": (x for x in [0.1, 0.2])})`
-            # returns `[0.1, 0.2]`, and the SAME generator on the ENVELOPE
-            # channel landed. Both messages named a cause that is not the cause,
-            # which is the class this guard exists to close.
+            # while `stamp_journal_embedding(..., creating=False)` returns
+            # `[0.1, 0.2]` for that same generator, and the SAME generator on the
+            # ENVELOPE channel landed. Both messages named a cause that is not the
+            # cause, which is the class this guard exists to close. (The `creating=`
+            # kwarg is REQUIRED on that call — quoting it without the kwarg raises
+            # `TypeError`, an unrunnable citation, #11996 review round 25.)
             if record.get("embedding") is values and iter(values) is values:
                 record["embedding"] = seam_values
     # ⛔ EVERY ELEMENT IS READ BY TWO DIFFERENT PATHS, so neither arm below can
@@ -952,7 +973,10 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
     #
     # ⛔ SCOPED TO `list` / `tuple` ON PURPOSE: an iterable of another type (a numpy
     # array, a generator) keeps the older path through the seam arms below, where
-    # the seam's own reading still decides DROP — a stated residual, because this
+    # the SEAM'S OWN reading decides — and for a numpy array of valid floats that
+    # reading ACCEPTS it, so the refusal lands somewhere else entirely (an element
+    # arm the array never reaches, then the JSON encoder on the record channel;
+    # measured, #11996 review round 25). A stated residual either way, because this
     # arm cannot see those elements without materialising a caller's iterator.
     if isinstance(values, (list, tuple)):
         # ⛔ AN EXACT `list` / `tuple` first, for the same reason as the dict rule

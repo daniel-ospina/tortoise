@@ -2655,8 +2655,9 @@ def test_a_declared_width_reads_a_one_shot_iterable_exactly_once(tmp_path):
     generator kept the exhausted iterator and the post-stamp belt refused a value
     the seam ACCEPTS — under `f64` as "declared over a value the seam can only
     DROP", under `f32` as "declared over an EMPTY vector", while
-    `stamp_journal_embedding({"embedding": (x for x in [0.1, 0.2])})` returns
-    `[0.1, 0.2]`. Both messages named a cause that is not the cause. Falsifier for
+    `stamp_journal_embedding({"embedding": (x for x in [0.1, 0.2])}, creating=False)`
+    returns `[0.1, 0.2]`. Both messages named a cause that is not the cause.
+    Falsifier for
     the record rows: drop the record write-back and this row reds at the FIRST
     record emit — `p-rec-gen-f64`, "declared over a value the seam can only DROP"
     (measured). ⛔ The `f32` "declared over an EMPTY vector" refusal is real but is
@@ -2671,16 +2672,22 @@ def test_a_declared_width_reads_a_one_shot_iterable_exactly_once(tmp_path):
     iterator, not the boundary of one:
 
     * a CONTAINER whose `__iter__` hands out a CACHED iterator is also one-shot
-      (`iter(Shared([0.1, 0.2])) is not shared`) and is NOT caught, so the record
-      channel still raises the fabricated "the seam can only DROP" / "an EMPTY
-      vector" message for it while the same object lands on the envelope channel;
+      (`iter(shared) is not shared` — the same object) and is NOT caught, so the
+      record channel still raises the fabricated "the seam can only DROP" / "an
+      EMPTY vector" message for it while the same object lands on the envelope
+      channel;
     * a RE-ITERABLE non-container (a numpy array) is left as it is on purpose —
       on the record channel it never reaches the element arm (that arm's container
       test skips it) and fails later at the JSON encoder with `TypeError: not JSON
       serializable`, while the envelope channel lands it.
 
-    Both are the stated residual `#11948-non-list-iterable`; materialising them
-    here would turn it into an over-block of a vector the envelope accepts.
+    Both are the stated residual `#11948-non-list-iterable`. ⛔ Widening the gate
+    would NOT turn it into an over-block — an earlier revision of this paragraph
+    said so, and measurement says the opposite (#11996 review round 25): the
+    cached-iterator container would LAND on the record channel and the numpy
+    array's refusal would move from the JSON encoder to the element arm. Widening
+    is therefore a DECISION recorded in the PR body's `residuals=` line, and this
+    docstring does not assume it in either direction.
     """
     from tortoise.api import EventAPI
     from tortoise.log import EventLog
@@ -2745,7 +2752,7 @@ def test_the_two_one_shot_shapes_outside_the_write_back_keep_their_residual(tmp_
     the way "it reaches the element check" did:
 
     1. a CONTAINER whose `__iter__` hands out a CACHED iterator — also one-shot,
-       `iter(Shared([0.1, 0.2])) is not shared`, so the gate does not catch it and
+       `iter(shared) is not shared`, so the gate does not catch it and
        the record channel refuses a vector the seam ACCEPTS (the message it raises
        names the wrong cause: the seam does not DROP it — that is the residual's
        cost, not a guarantee of the arm);
@@ -2754,11 +2761,14 @@ def test_the_two_one_shot_shapes_outside_the_write_back_keep_their_residual(tmp_
        encoder instead.
 
     BOTH land on the ENVELOPE channel, which is what makes this a CHANNEL
-    asymmetry rather than a rule about the value. Widening the write-back to cover
-    them is a deliberate decision, not a tidy-up: it would turn the residual into
-    an over-block of a vector the envelope channel journals today, so this row
-    reds on purpose if someone widens it — come here, re-measure, and update both
-    the arm's comment and this docstring.
+    asymmetry rather than a rule about the value. ⛔ WIDENING THE GATE IS A
+    DECISION and this row is its tripwire — but NOT because widening would
+    over-block (an earlier revision of this docstring said that; measured, review
+    round 25, it is the opposite): widening to the identity half would LAND the
+    cached-iterator container on the record channel and MOVE the numpy array's
+    refusal from the JSON encoder to the element arm. It is recorded as deferred
+    in the PR body's `residuals=` line — if someone widens it, come here,
+    re-measure, and update both the arm's comment and this docstring.
 
     FAILS IF: either shape starts LANDING on the record channel (the residual was
     widened without the decision), the envelope control stops landing (the
@@ -2840,11 +2850,17 @@ def test_an_envelope_carried_one_shot_iterable_is_not_written_onto_the_record(
         tmp_path):
     """The write-back is scoped by IDENTITY, not by "the value is one-shot".
 
-    The round-23 write-back exists because the STAMP and the post-stamp BELT both
-    read the MERGED view (`{**payload, **record}`, the record winning per key), so
-    a channel left holding the object the guard consumed is read a SECOND time and
-    refuses a value the guard had just ACCEPTED. It is therefore scoped to the
-    channel that actually CARRIED the vector: `record.get("embedding") is values`.
+    The round-23 write-back exists because the vector is read a SECOND time after
+    this guard returns, on whichever channel carried it, and the second reader is
+    CHANNEL-specific: the stamp re-reads the ENVELOPE's top-level `embedding`, and
+    the post-stamp belt — the second `_verify_record_vector_width` call inside
+    `_emit` — re-reads the MERGED view (`{**payload, **record}`, the record winning
+    per key), so only the BELT can re-read a RECORD-carried vector (measured,
+    #11996 review round 25: a record-carried generator is still unconsumed after
+    the stamp returns). A channel left holding the object the guard consumed is
+    therefore read a second time and refuses a value the guard had just ACCEPTED.
+    Hence the scope is the channel that actually CARRIED the vector:
+    `record.get("embedding") is values`.
 
     ⛔ THE IDENTITY HALF WAS UNPINNED until this row (#11996 review round 24,
     measured): the neighbouring rows exercise the arm's OTHER half — `iter(x) is
