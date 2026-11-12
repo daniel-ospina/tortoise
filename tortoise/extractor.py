@@ -1113,8 +1113,9 @@ def _referentiality_hold(surface: str) -> tuple[str, str] | None:
       returns ``None``, while ``"#4118"`` and a path correctly resolve to
       ``reference``/``path``. So the 453 ``issue:<repo>#<n>`` Subjects #12060
       measured still mint on this path — tracked as ``#12118``, NOT discharged
-      by this cue. The same holds for the Object loop ~20 lines below (also
-      unclaimed, ``#12119``); this PR is the S7 **Subject** mint only — not "the
+      by this cue. The same holds for the object loop in the same section walk
+      (``for o in entities.get("objects", [])``, also unclaimed, ``#12119``);
+      this PR is the S7 **Subject** mint only — not "the
       one Subject mint on this path", which the ``aboutEntities`` door above
       falsifies.
 
@@ -1574,7 +1575,11 @@ class LLMExtractor:
                     # NOT the original document. So it is not "document
                     # coordinates" either: measured, a document carrying a 4-line
                     # frontmatter puts its body at index 8 there and 35 in the
-                    # original, and an opening fence is rewritten 3 chars → 5.
+                    # original, and a fenced block redistributes its own text —
+                    # the OPENING fence is rewritten 3 chars → 6
+                    # (`\n\n` + fence + `\n`) and the CLOSING 3 → 5
+                    # (fence + `\n\n`), so later text shifts by +5 per complete
+                    # block (+3 on an unterminated one).
                     # The two fields of this one record therefore cannot be
                     # combined: do NOT compute
                     # the document index as `span[0] + phrase_offset`. The gap is
