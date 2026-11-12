@@ -448,14 +448,13 @@ same step with the same tail is the investigation.
     there is no lever here; a stamp GitHub never wrote cannot be recovered, so retry the reading;
   - the RUNNING CENSUS is unwitnessed — every run counted in `pr_running` was unmeasured. This
     shows on the state line as `census=unmeasured` **whenever the counted census is entirely
-    unmeasured, on ANY verdict that can carry that shape** (`PR-BACKLOGED`, `PR-UNWITNESSED`, and
-    an `OK` from a non-probing caller — `PR-STARVED`/`FLOOD` cannot: they require
-    `pr_running == 0`, and an unmeasured run is always counted). ⛔ The TWO-sub-cause split
-    below is reported — and its annotation arm runs — only on the `PR-UNWITNESSED`
-    degradation; on the other verdicts the token says the census was unmeasured, but no
-    sub-cause lever is named. It has exactly TWO sub-causes with
-    OPPOSITE remedies, which the tool reports separately (`pr_running_unmeasured_unprobed` /
-    `..._unread` in `--json`, and the annotation names the one that applies):
+    unmeasured, on ANY verdict that can carry that shape** (`PR-BACKLOGGED`, `PR-UNWITNESSED`
+    via an unreadable stamp or a cut `pending`/`requested` leg, and an `OK` from a non-probing
+    caller — `PR-STARVED`/`FLOOD` cannot: they require `pr_running == 0`, and an unmeasured run
+    is always counted). ⛔ Only its DIAGNOSIS is scoped: the two-sub-cause remedy sentence and
+    its annotation arm run only on the `PR-UNWITNESSED` degradation. The two counts themselves
+    are in `--json` on EVERY verdict (`pr_running_unmeasured_unprobed` / `..._unread`), so open
+    the payload on any verdict — the annotation names the one that applies only where it runs:
     - **the probe budget never REACHED the run** — raise `--max-job-probes`. The budget is spent
       oldest-first, so the surplus is the *newest* runs;
     - **the jobs read did not PROVE them idle** — RETRY the reading. This bucket now has

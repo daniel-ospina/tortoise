@@ -3690,8 +3690,11 @@ def test_a_partial_unmeasured_census_is_named_on_the_state_line():
 
 def test_a_fully_unmeasured_census_is_named_on_a_verdict_that_is_not_PR_UNWITNESSED():
     # `pr_running_census_unwitnessed` is set only for an `OK` the degradation fired on, so
-    # on PR-BACKLOGGED / PR-STARVED / FLOOD nothing else prints `census=unmeasured`. Without
-    # this the all-unmeasured census read EXACTLY like a fully measured EXECUTING one.
+    # on the OTHER verdicts that can carry a fully-unmeasured census — PR-BACKLOGGED, and an
+    # `OK` from a non-probing caller — nothing else printed `census=unmeasured`. (PR-STARVED
+    # and FLOOD cannot carry it at all: they require `pr_running == 0`, and an unmeasured run
+    # is always counted, so `pr_running_unmeasured` is 0 there.) Without this the
+    # all-unmeasured census read EXACTLY like a fully measured EXECUTING one.
     queued = [run(1, "python-ci", event="pull_request", age_seconds=9000)]
     runs = [run(7001, "python-ci", event="pull_request", has_live_job=None),
             run(7002, "python-ci", event="pull_request", has_live_job=None)]

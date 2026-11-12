@@ -757,7 +757,10 @@ class QueueHealth:
             # `pr_running == 0`, so a fully-unmeasured census is UNREACHABLE there and
             # their `census=` splice is dead text — it is not coverage. The verdicts that
             # CAN carry the shape are `PR-BACKLOGGED`, `PR-UNWITNESSED` reached by an
-            # unreadable stamp, and `OK` from a non-probing caller.
+            # UNREADABLE STAMP or by a CUT `pending`/`requested` leg (both are flag-`False`
+            # routes — see the note beside the `PR-UNWITNESSED` arm's local `census`, which
+            # already says the same token arrives there from this property), and `OK` from a
+            # non-probing caller.
             return "" if self.pr_running_census_unwitnessed else ", census=unmeasured"
         return f", unmeasured={self.pr_running_unmeasured}"
 
