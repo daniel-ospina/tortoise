@@ -5946,8 +5946,11 @@ _MIRROR_SOURCE = re.compile(
 #: The clause breaks for the MIRROR scan. A LOCAL copy of `_CLAUSE_BREAK`
 #: plus the same abbreviation lookbehinds `_SENTENCE_END` carries, and for the
 #: same reason: `_CLAUSE_BREAK`'s `(?<=[.!?])\s` fires on `i.e. ` and `e.g. `,
-#: which the corpus writes on 178 lines (77 `e.g.`, 101 `i.e.`, measured — `cf. `
-#: is carried DEFENSIVELY and occurs ZERO times in these five modules).
+#: which the corpus writes on 177 DISTINCT LINES (77 `e.g.` + 101 `i.e.`
+#: occurrences, and one `sdk.py` line carries both, so the line total is 177 and
+#: not 178 — the unit is stated because that off-by-one is what produced the
+#: disagreement the count had; measured). `cf. ` is carried DEFENSIVELY and
+#: occurs ZERO times in these five modules.
 #: Measured (review): with the
 #: bare `_CLAUSE_BREAK`, `…the readable mirror's value i.e. not the value the
 #: field serves` CERTIFIED — the denial sits in the same clause, across an
@@ -5983,12 +5986,18 @@ _MIRROR_NEGATED = re.compile(
     # NEGATIVE PREPOSITIONS — a denial that sits inside the mention's own clause
     # with no negator WORD. Without these, `…the pair mean instead of the
     # mirror's value` and `…without the mirror's value` CERTIFIED (measured).
-    # `instead of` closes at zero corpus cost; `without` costs one deliberate
-    # false block (residual 1), which is the trade this guard is built on.
+    # `instead of` and `without` both close a REAL inversion that carries no
+    # negator word, and both cost a deliberate false block (residual 1) — the
+    # asymmetry an earlier revision of this comment asserted does not exist:
+    # `…the field reads the mirror's value instead of the pair's` is CORRECT
+    # prose and is REFUSED, exactly as `…which applies without qualification`
+    # is (measured). Neither changes a corpus verdict (no corpus claim sentence
+    # carries either phrase beside a mirror), and both false blocks are pinned
+    # in `refused_by_design` so the trade is visible rather than argued.
     # `rather than` is NOT closable here: `_MIRROR_CLAUSE_BREAK` treats
     # `\brather\b` as a break, so the mention is severed from the denial before
     # this list is consulted (measured: adding `rather` changes nothing) — it is
-    # NAMED as residual 3d rather than left as a silent hole.
+    # NAMED as residual 4 rather than left as a silent hole.
     r"|\binstead\s+of\b|\bwithout\b",
     re.IGNORECASE,
 )
@@ -6161,7 +6170,10 @@ def _mirror_sources_the_value(sentence: str) -> bool:
       is load-bearing today.
 
     ⛔ NAMED RESIDUALS — this is a tripwire on the WORDING the tree uses, not a
-    grammar proof. Three are known and deliberate:
+    grammar proof. FOUR are known and deliberate — and the count is a
+    correctness detail, not bookkeeping: residual 4 is the one whose positive
+    leg MATCHES, so a reader who trusts "three" and stops would miss the most
+    dangerous of them:
 
       1. FALSE BLOCK (accepted — the remedy is to reword, and the red test says
          so). A correct sentence phrasing the relation outside the two source
@@ -6172,7 +6184,8 @@ def _mirror_sources_the_value(sentence: str) -> bool:
          DIFFERENT word sitting in the mirror's clause), and `…the mirror's
          value, which applies without qualification` (same class — carrying
          `without` to close a real inversion also refuses this correct
-         sentence). All are pinned as
+         sentence) and `…the field reads the mirror's value instead of the
+         pair's` (the same trade for `instead of`). Both are pinned as
          control rows so the behaviour is intentional rather than a surprise.
       2. FALSE PASS, unclosable by clause scope (pinned as a disclosure): a
          denial in a `_MIRROR_CLAUSE_BREAK`-separated clause that carries NO
@@ -6675,7 +6688,8 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
             "Its confidence_mean IS the declared PRIOR mean — the mirror "
             "cannot supply the value.",
             # a denial in the SAME clause across an abbreviation the corpus
-            # writes on 150+ lines (`i.e.` / `e.g.` / `cf.`). The shared
+            # writes (`i.e.` / `e.g.` — 77 and 101 occurrences, measured; `cf.`
+            # occurs ZERO times there and is carried defensively). The shared
             # `_CLAUSE_BREAK` breaks there and certified both of these (review,
             # measured); `_MIRROR_CLAUSE_BREAK` carries `_SENTENCE_END`'s
             # abbreviation lookbehinds for exactly this.
@@ -6701,7 +6715,7 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
             # inside the mention's own clause. Both CERTIFIED before
             # `_MIRROR_NEGATED` carried them (measured). `rather than` is the
             # same class but is NOT closable this way — the clause-breaker
-            # severs it — and is residual 3d.
+            # severs it — and is residual 4.
             "Its confidence_mean IS the declared PRIOR mean — the field reads "
             "the pair mean instead of the mirror's value.",
             "Its confidence_mean IS the declared PRIOR mean — the field reads "
@@ -6835,7 +6849,17 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
             # the guard cannot tell them apart without a parser — err toward
             # the red a human reads.
             "its confidence_mean IS the declared PRIOR mean — or the mirror's "
-            "value, which applies without qualification."):
+            "value, which applies without qualification.",
+            # the SAME price for `instead of` — the half of the trade an earlier
+            # revision charged to `without` alone (review, measured). This
+            # sentence names the mirror as the SOURCE, and `instead of` negates
+            # the COMPETITOR, so it is correct prose and is refused anyway;
+            # `the pair mean instead of the mirror's value` is a real inversion
+            # in the identical position and the guard cannot separate them
+            # without a parser. Pinned so the cost is visible on both entries,
+            # not argued on one.
+            "its confidence_mean IS the declared PRIOR mean — the field reads "
+            "the mirror's value instead of the pair's."):
         assert _unqualified_claims_on(
             refused_by_design, _PRIOR_MEAN_CLAIM_PATTERNS), (
             "a source phrase outside `_MIRROR_SOURCE` is expected to be "
