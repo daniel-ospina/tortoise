@@ -171,7 +171,12 @@ def test_an_object_whose_belief_was_moved_is_not_reported(sdk):
     p = sdk.create_point("statement", "the gateway enforces the policy")
     v1 = _obj(sdk, "PolicyV1")
     v2 = _obj(sdk, "PolicyV2")
-    op = sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    other = sdk.create_point("statement", "the policy is published")
+    op = sdk.create_operator("IMPL", p["id"], [v1["id"], other["id"]])
+    live = sdk.compute_confidence(factors=[op["id"]], require_calibration=False)
+    assert len(live["confidences"]) >= 2 and not live.get("skipped_factors"), (
+        "fixture drifted: a two-input operator over live inputs must run: "
+        + repr(live))
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
 
     # The repair the emitted `fix` prescribes, performed literally: move the
@@ -2007,3 +2012,88 @@ def test_the_zero_live_input_rung_is_stated(sdk):
     for row in rows:
         assert "NO participating input left" in row.detail, row.detail
         assert "writes NO skipped-factor record" in row.detail, row.detail
+
+
+def test_a_refused_carry_is_not_offered_on_a_direct_edge(sdk):
+    """The §3.1 clause may not offer a CARRY through the endpoint it just refused.
+
+    Measured: with a direct edge onto an OPERATOR-SHAPED successor, the fix said
+    "an IMPL may CARRY to the successor" two clauses after "which EP excludes from a
+    factor's inputs … the belief is NOT moved". One of the two is false, and §3.1's
+    per-edge rule already answers it — a carry needs a successor EP reads, so this
+    row's disposition is DROP (or `pend`).
+    """
+    o = _obj(sdk, "PolicyV1")
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    sdk.create_direct_edge("IMPL", p["id"], o["id"])
+    _obj(sdk, "PolicyV2", is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+               if i.node_id == o["id"]).fix
+    assert "OPERATOR-SHAPED" in fix, fix
+    assert "may CARRY" not in fix, fix
+    assert "the disposition for this edge is DROP" in fix, fix
+
+
+def test_an_op_type_only_successor_is_READ_by_the_operator_input_arm(sdk):
+    """The refusal test is per MECHANISM, and an operator input ADMITS this node.
+
+    EP's DIRECT-edge arm demands ``op_type IS NULL`` on both endpoints, but its
+    OPERATOR-INPUT arm admits ``create_entity(obj, op_type='IMPL')`` (measured:
+    ``skipped: []`` and the factor runs). A shape test applied to both mechanisms
+    therefore told an operator-input row that its successor "is excluded from a
+    factor's inputs" — a false block: the prescribed re-point keeps the factor.
+    """
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2", op_type="IMPL")
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    op = sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    text = issues[0].detail + issues[0].fix
+    assert "OPERATOR-SHAPED" not in text, (
+        "EP reads an op_type-only OPERATOR INPUT, so calling it operator-shaped "
+        "refuses a repair that works: " + text)
+
+    # ...and the engine agrees: the prescribed re-point keeps the factor.
+
+    _q(sdk, "MATCH (op:Point {id:$op})-[r:IMPL]->(sup:Object {id:$old}), "
+            "(succ:Object {id:$new}) "
+            "MERGE (op)-[nr:IMPL]->(succ) SET nr.idx = r.idx DELETE r",
+       {"op": op["id"], "old": v1["id"], "new": v2["id"]})
+    after = sdk.compute_confidence(factors=[op["id"]], require_calibration=False)
+    assert len(after["confidences"]) >= 2 and not after.get("skipped_factors"), (
+        "fixture drifted: EP must read an op_type-only OPERATOR INPUT — the factor "
+        "has to keep running with no skip record: " + repr(after))
+    assert [i for i in _issues(sdk, "superseded_object_active_edges")] == []
+
+
+def test_the_source_stripped_claim_names_its_idx_precondition(sdk):
+    """EP's ``source_stripped`` skip is gated on ``op_idx_known``.
+
+    An operator with ONE legacy idx-less input edge stands that guard down and the
+    factor RUNS with a survivor renumbered into the source slot (measured: three
+    confidences, no skip record) — the opposite of "EP drops the whole factor", which
+    the directional arms asserted unconditionally.
+    """
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    p = sdk.create_point("statement", "alpha")
+    t2 = sdk.create_point("statement", "beta")
+    t3 = sdk.create_point("statement", "gamma")
+    op = sdk.create_operator("IMPL", v1["id"], [p["id"], t2["id"]], direction="->")
+    _q(sdk, "MATCH (o:Point {id:$o}), (t {id:$t}) CREATE (o)-[:IMPL]->(t)",
+       {"o": op["id"], "t": t3["id"]})  # a legacy idx-less input edge
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    run = sdk.compute_confidence(factors=[op["id"]], require_calibration=False)
+    assert len(run["confidences"]) == 3 and not (run.get("skipped_factors") or []), (
+        "fixture drifted: the idx-less edge must stand EP's guard down and the "
+        f"factor must RUN: {run.get('skipped_factors')}")
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    for text in (issues[0].detail, issues[0].fix):
+        assert "EVERY input edge carries an ``idx``" in text, (
+            "the skip is conditional on EP's ``op_idx_known``: " + text)

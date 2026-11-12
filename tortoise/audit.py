@@ -1225,7 +1225,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "is has no factor to begin with, so nothing is lost; "
                     + _NO_INPUT_LADDER + ". A "
                     "DIRECTIONAL operator is skipped outright "
-                    "when the stripped input is its idx-0 source (source_stripped). "
+                    "when the stripped input is its idx-0 source (source_stripped) "
+                    "— but only WHERE EVERY input edge carries an ``idx``: one "
+                    "legacy idx-less input edge stands that guard down and the "
+                    "factor runs, renumbering a survivor into the source slot "
+                    "(measured: 3 confidences, no skip record). "
                     "The successor inherits no belief from this edge unless it was "
                     "separately rewired into a slot EP reads (#11826)")
         else:
@@ -1333,7 +1337,23 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         fwd, bwd = direction_flows(s["direction"])
         neither_arm = s["shape"] and not s["is_operator"]
         neutral = not (fwd or bwd)
-        if neither_arm or neutral:
+        if _succ_refused(s):
+            # ⛔ A CARRY needs a successor EP actually reads. Where the successor is
+            # one EP REFUSES, "an IMPL may CARRY to the successor" sat in the SAME
+            # string as "the belief is NOT moved … target a CLAIM successor" — one
+            # of the two is false, and the reader cannot tell which (#12111 review
+            # round 16). §3.1's per-edge rule decides it: DROP (or `pend`).
+            disposal = (
+                "a carry needs a successor EP actually reads, and this successor is "
+                "one EP REFUSES (operator-shaped on the operator lane, or "
+                "operator-shaped OR carrying an ``op_type`` on a direct edge) — so "
+                "the disposition for this edge is DROP, or `pend` (the non-voting "
+                "placeholder) if the claim may still be revisited, and no door "
+                "implements `pend` today. ⛔ A refutation that STILL APPLIES is "
+                "kept, not dropped: carry it where EP can read it (a :Point "
+                "operator the engine evaluates), never by re-attaching it to a "
+                "successor that cannot carry it")
+        elif neither_arm or neutral:
             why = ("EP assembles no factor for this endpoint in either arm, so the "
                    "support never counted"
                    if neither_arm else
@@ -1448,7 +1468,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             successor (a flowing direction carried belief; a neutral one carried
             none).
           * The operator's idx-0 SOURCE of a non-bidirectional operator — EP drops
-            the whole factor while that slot is terminal, and DELETING the edge
+            the whole factor while that slot is terminal WHERE EVERY input edge
+            carries an ``idx`` (one idx-less edge stands that guard down), and
+            DELETING the edge
             alone renumbers a live target into idx 0 and inverts the factor's
             direction (``ep.py``'s ``source_stripped`` note).
           * Any other operator input — re-point, preserving ``idx`` where the edge
@@ -1617,7 +1639,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 f"Write the successor ({successor}) into the SOURCE slot: this "
                 f"{s['edge_type']} edge is the operator's idx-0 source and the "
                 f"operator is {_quoted(s['direction'])}-directional, so EP drops "
-                f"the whole factor while that slot is terminal — and DELETING the "
+                f"the whole factor while that slot is terminal (WHERE EVERY input "
+                f"edge carries an ``idx``; one legacy idx-less input edge stands "
+                f"that guard down and the factor runs, renumbering a survivor "
+                f"into the source slot) — and DELETING the "
                 f"edge alone is not the repair: with TWO OR MORE inputs surviving, "
                 f"the one that takes the source slot is renumbered into it and the "
                 f"factor's direction inverts; with exactly ONE left the factor stops "
