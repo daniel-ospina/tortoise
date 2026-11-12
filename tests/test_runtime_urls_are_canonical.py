@@ -27,13 +27,16 @@ whose host moved while its dead `#appeal` fragment did not (#11939).
 
 ⛔ #11767's items 4 and 5 are IN THIS FILE'S SURFACE: the dashboard landing
 pages, the blog origin, and the dashboard's docs links used to spell the retired
-origin. Each is in `RETIRED_HOST_ALLOWLIST` with an EXACT occurrence count, its
-TERMINATOR — a 301 onto a canonical origin (the DEFAULT `/blog*` 301 for five of
-them, so those five name no status: it is stated once, in the census below), or
-NOT REDIRECTED AT ALL, where the retired host answers in place — and the issue
-that owns the re-aim, so this guard cannot report GREEN over a file it never
-opened, and a sweep that removes one of those literals must remove its recorded
-reason too.
+origin. Every file that STILL spells it is in `RETIRED_HOST_ALLOWLIST` with an
+EXACT occurrence count, its TERMINATOR — a 301 onto a canonical origin (the
+DEFAULT `/blog*` 301 for five of them, so those five name no status: it is stated
+once, in the census below), or NOT REDIRECTED AT ALL, where the retired host
+answers in place — and, for the DEFERRALS, the issue that owns the re-aim. The
+four files that now read 0 have NO row and stay in `RUNTIME_FILES`, so a literal
+coming back REDS the guard instead of leaving the surface; the four KEEP rows name
+no follow-up issue on purpose; and neither group is a leftover, which is why this
+guard cannot report GREEN over a file it never opened, and why a sweep that
+removes one of those literals must remove its recorded reason too.
 
 ⛔ THE COUNTS MOVED UNDER THIS PR, AND THAT IS THE POINT OF AN EXACT COUNT. main's
 #12058 ("serve the product at premiselabs.co/tortoise", which is what CLOSED
@@ -350,9 +353,12 @@ RETIRED_HOST_ALLOWLIST = {
 #:
 #: ⛔ NOT "every runtime file #11767 owns" — an earlier revision of this comment
 #: said exactly that and it was false. The issue also enumerates five app pages
-#: and API modules that still emit the retired origin and are DEFERRED here, not
-#: swept. Counts measured at this head, so the deferral cannot be read as a clean
-#: sweep. BASIS: EMITTING occurrences (an `href`/const a browser or server would
+#: and API modules in this surface. At this head THREE of them still emit and are
+#: DEFERRED here, not swept, while `invite-accept.html` and `welcome.html` were
+#: re-aimed to 0 by #12058 (both rows removed — see the table below). Counts
+#: measured at this head, so NEITHER the deferral nor the sweep can be read as
+#: complete from this list alone.
+#: BASIS: EMITTING occurrences (an `href`/const a browser or server would
 #: follow) — a PROSE comment that merely names the host is not counted, which is
 #: why `[[path]].ts` is 1 and not 2 (line 12 is a comment, line 49 emits):
 #:   website/apps/dashboard/functions/blog/api/[[path]].ts   1  DEFAULT_BLOG_ORIGIN
@@ -379,10 +385,13 @@ RETIRED_HOST_ALLOWLIST = {
 #:       `ONBOARDING_FUNNEL_HREF`'s `/welcome` (`website/_redirects` :36 — the
 #:       middleware's `/welcome` entry sits in `APP_ONLY` INSIDE the company-host
 #:       block at :342/:350, so the retired host never reaches it);
-#:   (b) SERVED ON THE RETIRED HOST, no redirect at all — `harnesses.js`'s
-#:       `/skills/<name>.skill` download and `DEFAULT_BLOG_ORIGIN`'s `/blog/api/*`
-#:       calls, which `_middleware.ts` :331-335 EXCLUDES from the blog 301 because
-#:       a redirect would turn a POST into a GET. Re-aiming either changes WHICH
+#:   (b) NOT REDIRECTED AT ALL — the retired host answers the request in place,
+#:       and the two members of this class do NOT share a status: `harnesses.js`'s
+#:       `/skills/<name>.skill` download answers 200 (both hosts, identical bytes),
+#:       while `DEFAULT_BLOG_ORIGIN`'s `/blog/api/*` calls are EXCLUDED from the
+#:       blog 301 by `_middleware.ts` :334-336 (a redirect would turn a POST into a
+#:       GET), so no branch rewrites them and they answer the ROUTE's own status —
+#:       404, no `Location`, for the paths probed. Re-aiming either changes WHICH
 #:       host answers; it saves no hop, so it is not the same sweep as (a).
 #: Either way they are a SCOPE deferral, and all ten files they name ARE
 #: in `RETIRED_HOST_ALLOWLIST` with the same kind of reason — recording a count is
