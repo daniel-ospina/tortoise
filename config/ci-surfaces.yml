@@ -1344,6 +1344,12 @@ surfaces:
   # `undeclared_metric_findings()` nor `foreign_metric_findings()` (#5045 review
   # P1 — the same six-surface reasoning `test_7951_write_doors.py` carries).
   - test_cost_dimensions.py
+  # #11978 (instance 2): the `api` arm of the row the `core` block carries — that
+  # block's note states the measurement. `tortoise/metering.py` SELECTS `api`,
+  # and a named-surface match REPLACES the `core` fallback (#2938), so a
+  # `metering.py`-only diff runs `api` — and without this line that diff would
+  # never select the suite that pins `storage_overage_cost_usd`'s arithmetic.
+  - test_pricing_storage_dimensions.py
   # #4241: the metering period-anchor repair's periodic caller. Registered with
   # `api` because the step (`_reconcile_metering_periods`) and both call sites
   # live in `tortoise/hosted_api.py`, which SELECTS `api` — a named-surface match
@@ -2199,6 +2205,44 @@ surfaces:
   - test_11855_poison_sibling.py
   - test_curation_11469.py
   - test_percent_value_11915.py
+  # #11978 (instance 2, 2026-11-12): `tests/test_pricing_storage_dimensions.py`
+  # landed in #11981 (`a3d20763ab`) with NO manifest row, so
+  # `tools/ci_selection.py --integrity` has reported
+  # `manifest drift: ['test_pricing_storage_dimensions.py']` from that merge on.
+  # The REQUIRED `manifest-integrity` leg (a `python-ci-gate.needs` entry) runs on
+  # `refs/pull/N/merge`, and there it is red — measured on #12002,
+  # `COMPLETED FAILURE` with the merge blocked. ⚠️ Precisely, because the deferred
+  # class fix (#11978) turns on the distinction: `main`'s OWN copy of the leg has
+  # no completed conclusion for this drift — the push run for `a3d20763ab` was
+  # CANCELLED and its successor on `e4703a286a` carried zero jobs — so "red on
+  # `main`" would be stating a CI state nobody observed. The merge ref is the
+  # observed red; `--integrity` on `main`'s manifest is the observed drift.
+  # Same class, and the same repair, as the `test_percent_value_11915.py` row
+  # directly above — which is what #11978 was filed for 42 minutes before this
+  # drift landed (issue 2026-11-12T00:47:22Z, `a3d20763ab` 01:29:58Z), not hours.
+  # `core` because THREE of this file's FOUR subjects select no named surface:
+  # measured `--changed tortoise/pricing.py` -> ['core'],
+  # `--changed tortoise/allowance_gate.py` -> ['core'] and
+  # `--changed tortoise/cost_dimensions.py` -> ['core'] (that one is imported
+  # DIRECTLY by the suite, not only through `pricing.storage_dimensions`). The
+  # FOURTH (`tortoise/metering.py`) DOES select `api`, so the `api` block carries its
+  # own row for that arm — the #10668/#9583 dual-registration idiom, the same
+  # `core`+`api` pair `test_allowance_gate.py` carries (NOT the six-surface
+  # census `test_cost_dimensions.py` carries: this file pins two dimensions, not
+  # a sweep over every tracked `.py`).
+  # Hermetic: 31 cases, no DB, no graph, no network, no model call, no `gh`.
+  # ⚠️ COVERAGE GAP — NOT created here, NOT closed here (#12006): this suite also
+  # reads `product/pricing.json`, and a diff touching ONLY that artifact selects
+  # no surface at all (measured `--changed-files product/pricing.json` ->
+  # surfaces [], 88 tier-1 files, this suite absent) because `product/` is a
+  # `NON_PYTHON_PREFIXES` entry. Those four modules are what THIS row buys;
+  # the artifact leg needs the #12006 decision, so do not read this row as
+  # covering the rates.
+  # ⛔ ONE ROW PER SURFACE, and re-measure before adding one (`grep -c
+  # '^  - test_pricing_storage_dimensions.py' config/ci-surfaces.yml` unless you
+  # mean the two surfaces above): the note below records three lanes that each
+  # repaired this same drift and left three copies of one row.
+  - test_pricing_storage_dimensions.py
   # ⛔ `test_pack_hierarchy_11001.py` is registered ONCE, further down this list
   # beside the pack suites — three PRs (#11210, #11211, #11222) each independently
   # registered it while repairing the same `main` drift, so `origin/main` at
@@ -9838,6 +9882,7 @@ durations_floors:
   eval/write_path/test_write_path_operator_lane.py: {value: 355.0, pinned: true}
 durations:
   test_percent_value_11915.py: 2.0  # new in #11915, registered in the repair that followed it — the #3400/#4348 trap: a file a PR ADDS cannot carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"), and the `core` registration above is what puts it in `fast_pool()`. ⛔ No case count and no local timing are quoted here on purpose: the count is the file's own business (`tools/ci_selection.py --integrity` is the authority on it) and a measured-on-this-box timing is not a shard-layout input; `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. What the weight covers: the `percent` shape end to end — `percent_props` / `read_percent_value`'s bounds, the evidence field and the refusal arms, plus the arms that write through the SDK's own door (a `create_point` carrying `percent_props`, the read back, and the declared-property arms). ⛔ The file is NOT uniformly DB-free, and this row says which half is which: the SDK-door cases take a per-test EMBEDDED engine (`TortoiseSDK(str(tmp_path / "percent_11915.db"), event_log_path=…)`) and do real graph writes, while the remaining cases are pure unit — no docker, no network, no model call. That distinction is what a reader uses to decide whether a `core`-registered file needs a `uri_requiring` declaration, so it is stated rather than glossed. ⚠️ An earlier revision of this row said "each case" opens an engine; that was false (most cases construct none), and it is recorded here rather than silently dropped because the same overstatement is the easy one to re-introduce.
+  test_pricing_storage_dimensions.py: 2.0  # new in #11758/#11981, registered in the repair that followed it (#11978, instance 2) — the #3400/#4348 trap: a file a PR ADDS cannot carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"), and the `core`/`api` registrations above are what put it in `fast_pool()`. ⛔ **No local timing is quoted beside this weight, on purpose** — the rule the `test_percent_value_11915.py` row directly above states. The weight is a SHARD-LAYOUT input, so only a CI junit reading may move it, and a local seconds figure copied next to it re-stales against the recording it came from: this row's own first draft quoted one, taken from a run that included the `uv` build, and the runs recorded in `WORKTREE-REPORT.md` disagree with it. The SHAPE is quoted instead of the seconds: 31 test functions (4 module-level, the rest class-based; no parametrisation), hermetic — no DB, no graph, no network, no model call. What the weight covers: the two purchasable storage dimensions as the DECLARED registry names (`tortoise.cost_dimensions` via `pricing.storage_dimensions`) and as `allowance_gate.ALLOWANCE_KEYS`' own values; the $0.30/GB-month and $85/GB-month overage arithmetic (`metering.storage_overage_cost_usd`); the tier rows' overage eligibility; and the invariant that the storage allowance keys stay ABSENT from `tier_limits()`, which is what keeps the presence-armed gate from arming on keys every caller treats as limits. ⛔ The CASE COUNT is deliberately not quoted as a weight input (`tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it).
   test_11855_poison_sibling.py: 2.0  # new in #11855 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core`/`ep` registrations above put it in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight. The recorded readings live in `WORKTREE-REPORT.md` (suite runs with their verbatim commands and counts), and this row records the WEIGHT only — no hand-quoted timing figure is repeated here, because a figure copied beside a weight row re-stales against the report it came from. What the weight covers: five properties x three poison operands (`[1,2]` / `"abc"` / `True`), each on a two-point batch — the batch row set from `annotate_ep_batch`, the unreadable row's `None`/absent answer, both rankers' signal fetches keeping the healthy row, `get_relationships_bounded`'s fail-open marker with an operator-anchored peer, and `TortoiseEP.get_contested_claims` still listing a genuinely contested healthy row. Each test a fresh EMBEDDED engine (`TortoiseSDK(db_path=str(tmp_path / "t.db"))`) with real graph writes plus a raw-Cypher seed of the legacy shape; no docker, no network, no model call. ⛔ The CASE COUNT is deliberately not quoted as a weight input (`tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it).
   test_11822_goal_judgement.py: 2.0  # new in #11822 — the #3400/#4348 trap: a file a PR ADDS cannot carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts it in `fast_pool()`. ⚠️ MEASURED LOCALLY as context for a human, NOT as the weight: **64 collected / 64 passed in ~32 s** whole-file through this worktree's interpreter with `TORTOISE_TEST_CARVE_OUT=1` (embedded `redislite`, one throwaway DB per case via the shared `sdk_factory`), so the flat 2.0 UNDERSTATES it on the fast pool until a sweep re-bases it — the same understatement every embedded-fixture row here records. What the weight covers: the decision table's completeness (every cell of the input product matched by exactly one row), the comparator/dwell unit arms, the supersession-on-flip arms (including the flip-count invariance of BOTH the operator count and the goal's belief), `latest_readings`/`latest_judgement`, and the EP arms that read real posterior numbers out of `compute_confidence()` (plus the two negative controls). ⛔ That count is CONTEXT, never a weight input and never a pin: it has already moved twice inside this PR (three review rounds added twenty-five finding pins), which is exactly why the weight comes from `tools/ci_timing.py --refresh-durations` over junit and `tools/ci_selection.py --integrity` is the authority on the denominator.
   test_11702_absent_belief_state.py: 2.0  # new in #11702 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `ep`/`core` registrations above put it in `fast_pool()`, and `--integrity` stays green either way (a 0.90 ratio floor with headroom), so only this row records the weight. ⚠️ MEASURED LOCALLY as context, NOT as the weight: **87 cases in ~37 s whole-file** on a private lane box (`tools/test_lane.py`) at this PR's head — re-measured when the file grew from 13 cases (the earlier reading here said "13 cases in ~138 s"; that is the SAME arithmetic against a file that no longer exists, and a stale reading beside a weight row is exactly what the "a default is not a reading" doctrine forbids). The live arms build per-test graphs, so the flat 2.0 UNDERSTATES it on the fast pool until a sweep re-bases it, exactly as every other embedded-fixture row here records. What the weight covers: the ranking/why/sdk read surfaces — `ep_state` vocabulary + presence predicate, the null-not-0.5 answers on annotate_ep_batch / the `ep` block / GraphRanker / StateRanker / GapsRanker / SubgraphExpander, the sort-TIER that keeps an absent row behind every row with a belief, `min_confidence` refusing an absent belief at any floor above 0.0, and the `n.confidence` mirror agreeing with the prior it was rewritten from. ⛔ The CASE COUNT is deliberately not quoted as a weight input (`tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it).
