@@ -181,8 +181,12 @@ def test_a_plain_duplicate_with_no_evidence_still_folds(sdk, monkeypatch):
     assert len(_claim_rows(sdk._get_proj())) == 1, _claim_rows(sdk._get_proj())
     assert any("folded into canonical" in w for w in meta["warnings"]), meta["warnings"]
     assert any("no attachments" in w for w in meta["warnings"]), meta["warnings"]
-    assert any("no per-occurrence evidence of its own" in w
-               for w in meta["warnings"]), meta["warnings"]
+    said = [w for w in meta["warnings"] if "no per-occurrence evidence" in w]
+    assert said, meta["warnings"]
+    # …and the clause says what DID go with the node: the row's write history.
+    # Unqualified, it asserted an absence over a node whose `createdAt` died.
+    assert "beyond its write history" in said[0], said[0]
+    assert "createdAt" in said[0], said[0]
 
 
 def test_a_pre_existing_link_is_reported_present_but_not_written(sdk, monkeypatch):
@@ -1890,9 +1894,75 @@ def test_an_OCCUPIED_date_slot_says_NEITHER_spelling_travelled():
     assert sdk.calls == [], sdk.calls
     # The other half — a FREE slot — still names the traveller (that pin already
     # existed; this asserts the two arms DISAGREE only where reality does).
+    free_graph = _FakeGraph(
+        dup_row=("session:s", [], "q", 10, 40, "turn-1", None,
+                 "2026-08-01", "2026-08-02", None, None, None))
     free = capture_fold.carry_fold_evidence(
-        _FakeProj(_FakeGraph(
-            dup_row=("session:s", [], "q", 10, 40, "turn-1", None,
-                     "2026-08-01", "2026-08-02", None, None, None))),
-        "pt_dup", "pt_canon", sdk=_FakeSDK(on_update=_FakeGraph().apply_slot))
+        _FakeProj(free_graph), "pt_dup", "pt_canon",
+        sdk=_FakeSDK(on_update=free_graph.apply_slot))
+    assert free["ok"] is True, free
     assert any("only '2026-08-01' travelled" in r for r in free["residual"]), free
+
+
+# ── 22) round 19: the date verdict on the arms where NOTHING landed ──
+
+
+def _dual_date_graph(**kw):
+    return _FakeGraph(
+        dup_row=("session:s", [], "q", 10, 40, "turn-1", None,
+                 "2026-08-01", "2026-08-02", None, None, None), **kw)
+
+
+def test_a_date_conflict_on_a_RAISED_write_claims_NO_travel():
+    """The travel clause was completed as soon as the slot was FREE — before the
+    write was issued — so the two write-failure arms printed "only '2026-08-01'
+    travelled" one clause after "could not be written onto the canonical".
+    Nothing travelled: the canonical gained neither value."""
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(_dual_date_graph()), "pt_dup", "pt_canon",
+        sdk=_FakeSDK(raises=RuntimeError("no door")))
+    assert out["ok"] is False and out["reason"] == "slot_write_failed", out
+    item = next(r for r in out["residual"]
+                if r.startswith("the duplicate's second validFrom"))
+    assert "neither spelling travelled — the write did not land" in item, item
+    assert "so only '2026-08-01' travelled" not in item, item
+
+
+def test_a_date_conflict_on_an_UNREADABLE_read_back_claims_no_travel():
+    """The "unproven" arm must not assert a landing either: the same verdict, but
+    named for what it is (no travel CLAIMED, because nothing verified it)."""
+    graph = _dual_date_graph()
+
+    def _vanish(props):
+        graph.canon_rows = [list(graph.canon_row), list(graph.canon_row)]
+
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon", sdk=_FakeSDK(on_update=_vanish))
+    assert out["ok"] is False and out["reason"] == "slot_write_failed", out
+    item = next(r for r in out["residual"]
+                if r.startswith("the duplicate's second validFrom"))
+    assert "no travel is claimed" in item, item
+    assert "so only " not in item, item
+
+
+def test_an_OUTBOUND_malformed_row_fails_closed_like_its_inbound_twin():
+    """The outbound arm's `return None` on a null rel/label is the mirror of the
+    inbound guard added in round 12 — and only the inbound side was pinned:
+    replacing it with `continue` left all 83 tests green."""
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(_FakeGraph(edges=[(None, None, "x_1", None)])),
+        "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "unreadable", out
+
+
+def test_the_label_allowlist_backstop_still_fails_closed():
+    """`_carried`'s allowlist check is INERT from the module's only call site
+    (`read_fold_evidence` passes the dict's own value), so nothing exercised it:
+    `if ... != label:` → `if False:` left all 83 tests green. It protects a
+    future caller, so it is pinned directly rather than through the carry."""
+    proj = _FakeProj(_FakeGraph(edges=[("aboutObject", "Object", "obj_1", 0.9)],
+                                carried=(1, 0.9)))
+    assert capture_fold._carried(proj, "pt_canon", "aboutObject", "Source",
+                                 "obj_1") == (0, None)
+    assert capture_fold._carried(proj, "pt_canon", "aboutObject", "Object",
+                                 "obj_1") == (1, 0.9)

@@ -17055,8 +17055,18 @@ class TortoiseSDK:
                                 # to destroy it — so the clause that would
                                 # deny any evidence must not be printed over
                                 # it (#2795's open set).
+                                # ⚠️ QUALIFIED, not a bare "nothing to carry":
+                                # the clause is measured against this module's
+                                # private vocabulary, while the duplicate DOES
+                                # hold `createdAt`/`updatedAt` — the row's write
+                                # history, which the delete takes and which no
+                                # residual claims (a DECLARED exemption in
+                                # `capture_fold._STRUCTURAL_PROPS`). Unqualified,
+                                # the receipt asserted an absence over a node
+                                # that lost its own write time.
                                 + (", no per-occurrence evidence of its own "
-                                   "to carry"
+                                   "to carry beyond its write history — the "
+                                   "row's `createdAt`/`updatedAt` went with it"
                                    if (not carried and not copied and not residual
                                        and not undeclared)
                                    else ""))

@@ -881,16 +881,46 @@ def _canonical_view(proj: Any, canonical_id: str) -> dict | None:
     }
 
 
-#: The prefix of the duplicate's dual-date residual, so the travel clause can be
+#: The prefix of the duplicate's dual-date residual, so the OUTCOME clause can be
 #: appended to THAT item rather than emitted as a second residual (which the sinks
 #: would prefix with another "did not carry").
 _SLOT_CONFLICT_PREFIX = "the duplicate's second validFrom (as when) spelling"
 
 
+def _finish_date_conflict(out: dict, evidence: Any, outcome: str) -> None:
+    """Say what happened to the duplicate's two dates, given what the WRITE did.
+
+    ``outcome`` is one of:
+      * ``"landed"``   — the read-back saw the canonical's date slot filled;
+      * ``"unlanded"`` — the read-back did not;  * ``"unproven"`` — the canonical
+        could not be read back at all;
+      * ``"raised"``   — `update_point` raised, so nothing landed.
+
+    ⚠️ Only ``"landed"`` may claim a travel. Every other arm says so explicitly,
+    because the residual is printed by `_already_written` on those arms too.
+    """
+    if evidence.slot_conflict_values is None:
+        return
+    won, lost = evidence.slot_conflict_values
+    _complete_slot_conflict(
+        out,
+        (f"so only {won!r} travelled; {lost!r} went with the node")
+        if outcome == "landed" else
+        ("so neither spelling travelled — the write did not land"
+         if outcome in ("raised", "unlanded") else
+         "so no travel is claimed — the landing could not be verified"))
+
+
 def _complete_slot_conflict(out: dict, sentence: str) -> None:
-    """Append the travel clause to the dual-date residual, if this fold has one."""
+    """Append the OUTCOME clause to the dual-date residual, once.
+
+    ⚠️ Idempotent by the presence of "travelled": every verdict sentence contains
+    it (including "neither spelling travelled"), so a second call cannot stack a
+    second verdict — which is what pinned this clause to the OCCUPANCY only and
+    left it claiming a travel on the arms where the write did not land.
+    """
     for i, item in enumerate(out.get("residual") or ()):
-        if item.startswith(_SLOT_CONFLICT_PREFIX):
+        if item.startswith(_SLOT_CONFLICT_PREFIX) and "travelled" not in item:
             out["residual"][i] = f"{item}, {sentence}"
             return
 
@@ -953,6 +983,11 @@ def _carried(proj: Any, canonical_id: str, rel: str, label: str,
         # Both halves are read from the graph itself; the allowlist is a
         # fail-closed backstop against interpolating an unvetted label into a
         # pattern (the same posture `session_link.link_entity` takes).
+        # ⚠️ It is INERT from the module's only call site — `read_fold_evidence`
+        # passes `_CARRIABLE_ATTACHMENT_LABELS.get(rel) or label`, i.e. the
+        # dict's own value — so it protects a FUTURE caller rather than today's.
+        # It is pinned directly (`test_the_label_allowlist_backstop_still_fails_closed`)
+        # because an unpinned inert guard is the shape this module criticises.
         return 0, None
     # ⚠️ Membership, not `head(labels(t))`: a target carrying more than one
     # label would not have the expected label FIRST, and the caller reads a 0 as
@@ -1227,14 +1262,18 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
         held = canonical.get(write_key)
         if held is None:
             held = canonical.get(key)
-        if key == "when" and evidence.slot_conflict_values is not None:
-            won, lost = evidence.slot_conflict_values
-            _complete_slot_conflict(out,
-                                    (f"so only {won!r} travelled; {lost!r} "
-                                     "went with the node") if held is None else
-                                    ("so neither spelling travelled — the "
-                                     f"canonical's own value ({held!r}) "
-                                     "stands"))
+        if key == "when" and held is not None \
+                and evidence.slot_conflict_values is not None:
+            # An OCCUPIED slot is decided HERE, and the verdict is true in every
+            # state: nothing is written, so nothing travelled.
+            _complete_slot_conflict(
+                out, "so neither spelling travelled — the canonical's own "
+                     f"value ({held!r}) stands")
+        # A FREE slot is NOT decided here: the write has not been issued yet, so
+        # a travel claim would be false on both write-failure arms — the shape
+        # that survived one round by moving the claim to where the OCCUPANCY is
+        # known instead of where the OUTCOME is. It is completed at each arm
+        # below (`_finish_date_conflict`).
         if held is not None:
             if held != value:
                 # Named as the SLOT, not the read spelling: `when` and `validFrom`
@@ -1267,6 +1306,7 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
             # computed — disclose them here too, or a raise after a differing
             # `pointKind` crosses that difference in silence, the class round 5
             # fixed on the other two arms.
+            _finish_date_conflict(out, evidence, "raised")
             out["blocked"] += _already_written(out)
             return out
         # COUNT what landed, do not report the attempt: `update_point` on an
@@ -1287,6 +1327,10 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
             out["copied"] = sorted(
                 k for k, v in to_write.items()
                 if after is not None and after.get(k) == v)
+            _finish_date_conflict(
+                out, evidence,
+                "unproven" if after is None else
+                ("unlanded" if "validFrom" in unlanded else "landed"))
             out["blocked"] = (
                 "the canonical could not be read back after the evidence "
                 "write, so the carry is unproven" if after is None else
@@ -1295,6 +1339,7 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
             out["blocked"] += _already_written(out)
             return out
         out["copied"] = sorted(to_write)
+        _finish_date_conflict(out, evidence, "landed")
 
     # 7) Carry the attachment links (additive, journaled when the SDK has a
     #    journal), then COUNT what landed. Last, because a link write is the
