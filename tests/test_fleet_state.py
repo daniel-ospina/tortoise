@@ -3733,12 +3733,13 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
 
     The pin itself was re-measured on that same image before this change: at `COLUMNS=80`
     `ps -ww -axo pid=,ppid=,uid=,command=` shows the whole long path (basename `pi`
-    matches), and the identical call WITHOUT `-ww` truncates it to
-    `/tmp/pi-census-…5in` (basename `5in`, no match). So `-ww` is still load-bearing on
-    ubuntu-26.04; only the fixture's way of putting an arbitrary argv[0] in front of a
-    live process changed. `executable=` runs this interpreter under the long path —
-    exactly the argv[0] the matcher reads — with no dependence on a copied binary
-    accepting its new name.
+    matches), and the identical call WITHOUT `-ww` is cut at exactly 80 characters —
+    measured on this fixture's shape, the row ends inside the PATH, so what a matcher
+    reads as `basename(argv[0])` is the truncated directory name
+    (`pi-census-xxxx…sx8`), never `pi`. So `-ww` is still load-bearing; only the
+    fixture's way of putting an arbitrary argv[0] in front of a live process changed.
+    `executable=` runs this interpreter under the long path — exactly the argv[0] the
+    matcher reads — with no dependence on a copied binary accepting its new name.
 
     ⛔ BOUNDED POLL, because `Popen` returns at FORK time (#12039). The census can run
     in the window before the child has exec'd — its row still carries the PARENT's

@@ -1091,8 +1091,14 @@ def test_the_refusal_message_names_the_arm_the_SUT_recorded(tmp_path: Path, stat
     assert "arm is unrecorded" in unrecorded, unrecorded
 
     # The current-state observation is a separate sentence and must not raise on a pid
-    # that never existed, nor claim an arm from it.
-    assert "kill -0 says" in _pid_now(99999999), _pid_now(99999999)
+    # that never existed, nor claim an arm from it. ⛔ Pinned on BOTH halves: every branch
+    # of `_pid_now` starts with "kill -0 says", so a bare substring check on that prefix
+    # is satisfied by ANY output — including one that wrongly reported it alive.
+    now = _pid_now(99999999)
+    assert "ESRCH" in now, now
+    assert "LIVENESS" not in now and "START-TIME" not in now, (
+        f"the observation asserted an arm — that is what `_refusal_arm` is for: {now}"
+    )
 
 
 def test_the_record_poll_does_not_call_a_dead_pid_running(tmp_path: Path, state) -> None:
