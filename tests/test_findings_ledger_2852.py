@@ -2370,7 +2370,10 @@ def test_a_sentence_quoting_the_tally_phrases_is_not_counted(tmp_path, monkeypat
     that contains one red an edit that only talked ABOUT the phrase: measured,
     appending `(The phrase "still read as written" names the complement.)` produced
     `§3 carries 2 sentences saying 'still read as written'` while a single sentence
-    asserted anything. A candidate must also carry a LETTER LIST, in any spelling (`**(x)**`, `(b), (c)`, `b, c, d` or `b and c`, every one of them bounded to the page's single-letter alphabet `a`–`l`) — requiring MARKUP rather than a list was itself fail-open, measured — and a sentence with
+    asserted anything. A candidate must also carry a LETTER LIST — two or more single letters, comma-joined
+    or in a pair, each written bold, code, italic or bare, every form bounded to the
+    page's alphabet `a`–`l`; requiring MARKUP rather than a list was itself fail-open
+    (measured). A sentence with
     no letter list in it cannot disagree with the table.
     """
     for quote in (
@@ -2391,37 +2394,70 @@ def test_a_sentence_quoting_the_tally_phrases_is_not_counted(tmp_path, monkeypat
             ), f"a sentence quoting the phrase must not be counted: {problems}"
 
 
-def test_a_de_bolded_second_tally_sentence_is_still_refused(tmp_path, monkeypatch):
-    """FAILS if a tally candidate must be written with markdown emphasis.
+def test_a_quoted_letter_list_is_still_a_candidate(tmp_path, monkeypatch):
+    """FAILS if the quote strip is applied to the LETTERS as well as the phrase.
 
-    The candidate filter required a BOLDED `**(x)**` token, so a second genuine tally
-    written in plain text was no candidate at all and the "keep exactly one" invariant
-    could be beaten by removing emphasis: measured, appending
-    `Six of the twelve rows no longer read as written: b, c, d, e, g and k.` left
-    `--check` at rc 0, and a de-bolded stale real list beside a compliant bolded decoy
-    — the historical exploit, re-shaped — also read CLEAN, while the parent refused
-    both. The page's own §3 spells its overtaken group in plain text, so all spellings
-    of a letter list have to count.
+    Removing quoted spans before the phrase test is what stops a sentence that merely
+    QUOTES the phrase from being counted. Feeding the same stripped text to the letter
+    test went one step too far: a quoted letter LIST then became invisible, so a stale
+    takeaway spelled `… no longer read as written: "**(b)**, **(k)** and **(l)**".`
+    read CLEAN beside one compliant decoy while the parent refused it (measured). A
+    quote around the PHRASE names the words; a quote around a LETTER still names that
+    letter.
+    """
+    anchor = "is the exact defect #2795 D2 fixed. "
+    decoy = 'Six of the twelve rows no longer read as written: "**(b)**, **(k)** and **(l)**". '
+    with monkeypatch.context() as patch:
+        _mutated(tmp_path, patch, lambda t: t.replace(anchor, f"{anchor}{decoy}", 1))
+        problems = _doc_problems()
+        assert any(
+            "sentences saying 'no longer read as written'" in p for p in problems
+        ), f"a QUOTED letter list is still a letter list: {problems}"
+
+
+def test_every_spelling_of_a_second_tally_sentence_is_refused(tmp_path, monkeypatch):
+    """FAILS if any ONE spelling of a letter list is not a tally candidate.
+
+    The candidate filter once required a BOLDED `**(x)**` token, so a second genuine
+    tally written plainly was no candidate at all and the "keep exactly one" invariant
+    could be beaten by removing emphasis: measured, a de-bolded stale list beside one
+    compliant bolded decoy read CLEAN while the parent refused it. The first fix that
+    widened it was itself half-pinned — each further spelling was added and left with
+    no case, so any one alternative could be deleted with the suite still green
+    (measured: four separate neuterings, four green runs).
+
+    So every spelling the page or this repo can plausibly use gets its own case, and
+    each decoy is anchored at a REAL sentence boundary: appending after
+    `stated both ways.)` merges the decoy into the preceding sentence, which already
+    carries a list, and then the case passes for the wrong reason (measured).
     """
     decoys = (
+        # a comma run, in each markup
         "Six of the twelve rows no longer read as written: b, c, d, e, g and k.",
+        "Six of the twelve rows no longer read as written: **(b)**, **(c)** and **(g)**.",
+        "Six of the twelve rows no longer read as written: `b`, `c` and `g`.",
+        "Six of the twelve rows no longer read as written: *(b)*, *(c)* and *(g)*.",
+        # a parenthesised run
         "Six of the twelve rows no longer read as written (b), (c), (d), (e), (g) and (k).",
-        "Six of the twelve rows no longer read as written: b, c, d and g.",
+        # a two-item list
+        "Two of the twelve rows no longer read as written: c and d.",
+        # a comma run with NO "and" — the only case that exercises the run
+        # alternative on its own (the decoy above also matches the pair form, so
+        # without this one the run could be deleted green)
+        "Three of the twelve rows no longer read as written: b, c, d.",
     )
+    anchor = "is the exact defect #2795 D2 fixed. "
     for decoy in decoys:
         with monkeypatch.context() as patch:
             _mutated(
                 tmp_path,
                 patch,
-                lambda t, _d=decoy: t.replace(
-                    "stated both ways.)", f"stated both ways.) {_d}", 1
-                ),
+                lambda t, _d=decoy: t.replace(anchor, f"{anchor}{_d} ", 1),
             )
             problems = _doc_problems()
             assert any(
                 "sentences saying 'no longer read as written'" in p for p in problems
-            ), f"a second genuine tally in plain text must red: {decoy!r} -> {problems}"
-
+            ), f"a second genuine tally must red in every spelling: {decoy!r} -> {problems}"
 
 def test_a_possessive_apostrophe_cannot_hide_a_second_tally(tmp_path, monkeypatch):
     """FAILS if an apostrophe is treated as a quote delimiter, hiding a second tally.
