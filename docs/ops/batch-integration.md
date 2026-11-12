@@ -92,7 +92,7 @@ it, because an export does not cross a shell boundary (see *The lane is shell-lo
 Pick the lane that **isolates this batch's ledger**, and name it in the record:
 
 1. `tools/test_lane.py uri` → a **private** container for this batch. This is the **default**, and
-   export **all three** vars it prints (the URI alone is not the lane — see below).
+   export **all four** vars it prints (the URI alone is not the lane — see below).
 2. Only when you can state that **no other lane is live on this box** → the shared docker FalkorDB
    instance, `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'`.
 3. No docker → `TORTOISE_TEST_CARVE_OUT=1`. Then the verdict is `UNPROVEN-FULL-SUITE` and **no phase
@@ -100,9 +100,10 @@ Pick the lane that **isolates this batch's ledger**, and name it in the record:
 
 ```bash
 # DEFAULT: a PRIVATE container, so no peer lane's graphs land in this batch's ledger (#5084).
-# It prints all THREE seam vars — export every one: tests that resolve their target through
-# `tests/_live_utils.py` key on TORTOISE_TEST_DOCKER_PORT, so a URI-only export leaves them
-# silently addressing the SHARED instance (`tools/test_lane.py`'s own SCOPE section).
+# It prints all FOUR seam vars — export every one: tests that resolve their target through
+# `tests/_live_utils.py` key on TORTOISE_TEST_DOCKER_PORT and (for the passwordless legacy
+# family) TORTOISE_TEST_LEGACY_PORT, so a URI-only export leaves them silently addressing
+# the SHARED instance or the dead literal 16379 (`tools/test_lane.py`'s own SCOPE section).
 lane="$(uv run python tools/test_lane.py uri)" || exit 1
 eval "$lane"
 
