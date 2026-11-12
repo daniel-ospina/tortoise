@@ -66,8 +66,10 @@ name: ci-queue-health
 # instead of inferring health. Its THREE causes are different dimensions, and the
 # annotation must not prescribe one cause's lever for another's: (a) the feed was
 # cut at its page cap, so the oldest queued runs — the end the age clause needs —
-# were never read (lever: --max-pages); (b) the queued PR runs carry no readable
-# `created_at`, so the wait cannot be measured at all; (c) the RUNNING CENSUS is
+# were never read (lever: --max-pages); (b) a WAITING PR-event run has no measurable
+# current-attempt age, so the wait cannot be measured at all — it is NOT only an
+# unreadable `created_at`: `QueuedRun.wait_age_seconds` abstains on THREE routes, and a
+# readable stamp does not rule this cause out; (c) the RUNNING CENSUS is
 # unwitnessed — every run counted in `pr_running` was unmeasured, which is #12037's
 # own defect returned by the probe budget. That sub-cause has TWO forms with
 # opposite levers (round 13), and the payload reports which applies:

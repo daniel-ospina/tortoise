@@ -2400,8 +2400,27 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     #: the 300 s during which stillness is NOT yet established (`_settled_still`) — so "inside
     #: the settle window" is the NEGATION of the proof, and a gate noun rather than a stillness
     #: predicate. Measured: a one-half claim qualified with it passed the guard.
-    SECOND_HALF = ("updated_at", "job_settle_seconds", "still for", "motionless",
+    SECOND_HALF = ("still for", "motionless",
                    "quiet for", "stopped moving", "has been still")
+
+    #: ⛔ AND NO TOKEN MAY NAME A GATE, A FIELD OR A CONSTANT (review P1, round 12). This is
+    #: the general form of the `settle window` defect, stated as code so it cannot come back
+    #: as prose: a token here can only ever SUPPRESS a hit, so any noun the module itself
+    #: uses to name a GATE ("settle window" is the 300 s in which stillness is not yet
+    #: established) or a raw FIELD/CONSTANT (`updated_at`, `JOB_SETTLE_SECONDS`,
+    #: `created_at`) is a false PASS waiting for the first sentence that names it. Measured
+    #: on the pre-fix tuple: a one-half claim qualified ", for the `JOB_SETTLE_SECONDS`
+    #: window" and again ", once its `updated_at` was last read" each PASSED the guard —
+    #: both are the NEGATION of stillness, or a bare field name, and neither states it.
+    #: Stillness must be a PREDICATE ("has been still", "stopped moving"), never the clock
+    #: it is measured against.
+    for _gate in ("settle", "window", "updated_at", "job_settle_seconds", "created_at",
+                  "budget", "probe", "completed", "status", "conclusion", "attempt"):
+        assert not any(_gate in token for token in SECOND_HALF), (
+            f"{_gate!r} names a gate, field or constant, not stillness — as a "
+            f"SECOND_HALF token it can only suppress a hit, which turns this guard into a "
+            f"false PASS: {SECOND_HALF!r}"
+        )
 
     def hits(hay: str, needle: str) -> bool:
         """Does ``needle`` occur where the second half is NOT also stated nearby?
@@ -2599,7 +2618,8 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         "from `pr_running` only once its own `updated_at` has been still for "
         "`JOB_SETTLE_SECONDS`.",
         "this fixture's `False` is a PROOF (every job of the run is `completed`, so it is "
-        "executing nothing) precisely because its `updated_at` is 7 days old",
+        "executing nothing) precisely because its stamp has been still for far longer than "
+        "`JOB_SETTLE_SECONDS`",
         "PR-event runs read as `in_progress` whose jobs could NOT be read, and which are "
         "still counted as executing — along with the settle-downgraded and "
         "budget-unreached runs.",
@@ -2615,11 +2635,21 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         "now READ and SETTLED (their `updated_at` is 7 days old, so both halves of the "
         "exclusion proof hold), so none of them is executing anything",
         # ⛔ THESE FOUR PIN THE WIDENED VOCABULARY ITSELF. Each embeds a needle that exists
-        # in `retracted` AND is disarmed ONLY by one of the tokens added for it, so deleting
-        # that token reds here instead of passing silently. ⛔ THE RISK DIRECTION IS THE
-        # OTHER WAY FROM WHAT IT LOOKS: this tuple only ever SUPPRESSES a hit, so DELETING a
-        # token makes the guard STRICTER and reds loudly (noise, not silence); the dangerous
-        # edit is ADDING vocabulary, which weakens detection and which NO assertion can see.
+        # in `retracted` AND is disarmed by EXACTLY ONE of the tokens — asserted
+        # immediately below, because a pin whose qualifier two tokens match pins neither
+        # (review P2, round 12: the third one, written to replace the removed `settle
+        # window` prose, said "has been still for 300 s" and so was disarmed by BOTH
+        # `has been still` and `still for`, i.e. by nothing in particular). ⛔ THE RISK
+        # DIRECTION IS THE OTHER WAY FROM WHAT IT LOOKS, with TWO exceptions this comment
+        # shipped without
+        # (review P2, round 12; both measured). DELETING a token a pin actually relies on
+        # reds — but only for `motionless`, `quiet for` and `stopped moving`: deleting
+        # `still for` or `has been still` reds NOTHING, because the pins they carry are also
+        # carried by the other. And ADDING a STILLNESS token is visible (it disarms a
+        # `pre_fix` entry, tripping the exercise leg below); what no assertion can see is
+        # adding a token that is NOT a stillness predicate at all — a gate noun or a bare
+        # field name — which is why the tuple-length pin above is a closed blocklist rather
+        # than a proof of sufficiency.
         # This leg keeps a pin from being dropped silently — it does not, and cannot, prove
         # the vocabulary is not over-wide. That is why the `settle window` token was a P1, and
         # why every future addition must be argued from `_settled_still`, never from the prose
@@ -2629,11 +2659,21 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         "now READ: every job is completed, so none of them is executing anything, and the run "
         "has been quiet for 300 s",
         "the runs read out because EVERY job of them was completed (a proof of "
-        "non-execution), and how many, now that its stamp has been still for 300 s",
+        "non-execution), and how many, now that its stamp has been still long enough",
         "all-jobs-completed is the PROOF that EXCLUDES a run from pr_running (see the "
         "excluded sentence), so it can never contribute to an unmeasured census once its "
         "stamp has stopped moving",
     ]
+    # ⛔ EACH VOCABULARY PIN MUST NAME EXACTLY ONE TOKEN (review P2, round 12). A token's
+    # PRESENCE in the passage is what disarms it, so "exactly one token occurs" IS the
+    # exclusivity claim the comment above makes — a pin carrying two is carried by neither.
+    for _pin in correct[-4:]:
+        _tokens = [token for token in SECOND_HALF if token in flat(_pin)]
+        assert len(_tokens) == 1, (
+            f"this vocabulary pin is disarmed by {len(_tokens)} tokens {_tokens!r}, so "
+            f"deleting any single one leaves the path green — it pins nothing: {_pin!r}"
+        )
+
     disarming = []
     for phrase in correct:
         want = flat(phrase)
@@ -2660,14 +2700,19 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     # vacuously (every correct sentence carries the stillness half, so any hit on one is
     # disarmed). This is the leg with teeth: it catches the real risk of narrowing — a needle
     # taken so far down that the sentence it exists to catch walks past it. These are the
-    # phrasings that actually SHIPPED — pre-fix on `origin/main` for 13 of them (ONE of those a
-    # truncation of a shipped sentence to its shortest true instance), plus TWO sentences that
-    # shipped only mid-branch at `6c05aeb903` (the merged closed-avenue claim, later
-    # retracted), and ONE declared RE-TYPED variant — SEVENTEEN entries. ⛔ THE COUNT CLAIMS ARE NOT HERE: they
-    # live in `unconditional` below, checked WITHOUT the discriminator, because a count sentence
-    # is wrong whatever stillness it also names (every shipped form names `JOB_SETTLE_SECONDS`,
-    # which would otherwise read as a correction). Several guarded sites carry more than one
-    # entry, so this is not one-per-site.
+    # phrasings that actually SHIPPED: most pre-fix on `origin/main` (one of those a
+    # truncation of a shipped sentence to its shortest true instance), two that shipped only
+    # mid-branch at `6c05aeb903` (the merged closed-avenue claim, later retracted), and one
+    # declared RE-TYPED variant. ⛔ NO NUMERAL IS GIVEN (review P2, round 12): this sentence
+    # carried one ("SEVENTEEN entries") whose own parts summed to 16, and the split it named
+    # did not match the list — every count in this file has been a route short. What
+    # matters is that each entry shipped; the composition is not a fact about the guard.
+    # ⛔ THE COUNT CLAIMS ARE NOT HERE: they live in `unconditional` below, checked WITHOUT
+    # the discriminator, because a count sentence
+    # is wrong whatever stillness it also names (the FIRST TWO shipped forms name
+    # `JOB_SETTLE_SECONDS`, which would otherwise read as a correction; the third names no
+    # settle constant at all — see the `unconditional` leg below, which reaches all
+    # three). Several guarded sites carry more than one entry, so this is not one-per-site.
     pre_fix = [
         # to_dict + the two field docs + classify_queue's comment + its returned-dict twin
         "the runs read out because EVERY job of them was `completed` (a proof of "
@@ -2752,7 +2797,7 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         ("disproved — three causes, one bucket",
          "disproved — three causes, one bucket: the jobs could NOT be read"),
         ("disproved — FOUR causes, one bucket",
-         "disproved — FOUR causes, one bucket"),
+         "disproved — FOUR causes, one bucket: the probe BUDGET never reached the run"),
         ("disproved. FOUR causes, ONE bucket",
          "disproved. FOUR causes, ONE bucket — and the causes span three layers"),
     ):
