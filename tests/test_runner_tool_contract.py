@@ -640,8 +640,35 @@ def _code_only(line: str) -> str:
     hazard this pin guards (a bare `gh` step that dies 127) is written unquoted —
     and the pin is a backstop, not the only defence: the contract step itself is
     what makes the job work.
+
+    ⛔ ONLY the `gh` arm uses THIS function. The SCRIPT-NAME arm uses
+    `_prose_stripped` below, because a script path is legitimately quoted
+    (`bash "$GITHUB_WORKSPACE/tools/x.sh"`) — stripping every quoted span there
+    loses a real invocation.
     """
     return re.sub(r"'[^']*'|\"[^\"]*\"", "''", line)
+
+
+def _prose_stripped(line: str) -> str:
+    """Drop quoted spans that carry WHITESPACE — operator-facing MESSAGES only.
+
+    WHY (the second false positive, #12133): `test-record-postgres` runs no `gh`
+    anywhere, but its fail-closed `::error::` text names
+    `tools/install-ci-runner-x64.sh` to tell an operator how to repair a runner's
+    labels. The script arm matched the RAW line, so the message read as an
+    invocation and the job was demanded to declare a `gh` gap it does not have —
+    while the `gh` arm had already been taught to strip quoted prose for exactly
+    this shape. The demanded remedy (`ensure gh`) FAILS CLOSED, so the false
+    positive would red a healthy job on a no-egress runner.
+
+    The strip is scoped to quoted spans containing whitespace, i.e. sentences: a
+    quoted span with no whitespace is an argv WORD (`"$GITHUB_WORKSPACE/tools/
+    ci_timing.py"`) and stays visible. Cost, stated and the same direction as
+    `_code_only`'s: a real invocation written inside a quoted sentence
+    (`sh -c 'cd repo && tools/x.sh'`) is not seen — a hazard the pin guards against
+    is written as a plain step command, not smuggled through a message.
+    """
+    return re.sub(r"'[^']*\s[^']*'|\"[^\"]*\s[^\"]*\"", "''", line)
 
 
 def _looks_poolable(value: str) -> bool:
@@ -756,7 +783,8 @@ def _gh_hazards(body: list[str], scripts: frozenset[str]) -> list[str]:
         if stripped.startswith("#") or stripped.startswith("- name:"):
             continue
         code = _code_only(line)
-        if _GH_CMD.search(code) or (script_ref is not None and script_ref.search(line)):
+        prose = _prose_stripped(line)
+        if _GH_CMD.search(code) or (script_ref is not None and script_ref.search(prose)):
             hits.append(stripped)
     return hits
 
@@ -844,6 +872,44 @@ def test_a_test_module_named_like_a_helper_is_not_a_gh_hazard():
     # …while a REAL invocation of the helper is still a hazard, in both shapes.
     assert _gh_hazards(["        run: python3 tools/ci_timing.py --refresh-durations"], scripts)
     assert _gh_hazards(['        run: python3 "$GITHUB_WORKSPACE/tools/ci_timing.py"'], scripts)
+
+
+def test_an_error_message_naming_a_gh_script_is_not_a_hazard():
+    """A MESSAGE telling an operator to run a script is not the job running it.
+
+    The second false positive of the same class as the test above, and this one went
+    live: `python-ci.yml`'s `test-record-postgres` runs no `gh` anywhere, but its
+    fail-closed `::error::` text names `tools/install-ci-runner-x64.sh` to tell an
+    operator how to repair a runner's labels. The script arm matched the RAW line,
+    so that sentence read as an invocation and the job was reported as a `gh` user
+    — measured on main's `4b1d6cd0d4`, where the REQUIRED `test-carve-out` shard
+    reds on every open PR (#12133, filed from PR #12046's head `f090e070db`).
+
+    ⛔ The remedy the old message demanded makes it worse rather than better:
+    `ensure gh` FAILS CLOSED, so adding it to a job that never calls `gh` would red
+    a healthy job on a no-egress pool runner. A scan that reds on prose is not
+    conservative, it is wrong, and it costs every lane in the repo.
+
+    REDS ON THE PRE-FIX SCAN: the first assert returned a hazard line there.
+    """
+    scripts = _gh_executing_scripts()
+    message = (
+        '            echo "::error::no client in this archive — on this box run '
+        'CI_RUNNER_OS_LABEL=off tools/install-ci-runner-x64.sh --repair-labels --count 4"'
+    )
+    assert _gh_hazards([message], scripts) == [], (
+        "an operator-facing MESSAGE that names a `gh`-executing script was read as "
+        "the job invoking it (#12133)")
+    # …and the strip is scoped to SPANS CARRYING WHITESPACE (messages), not to
+    # quoting at all: a quoted argv WORD is a real invocation and must stay a
+    # hazard, or this fix would trade one false positive for a false NEGATIVE.
+    assert _gh_hazards(
+        ['        run: bash "$GITHUB_WORKSPACE/tools/install-ci-runner-x64.sh"'],
+        scripts,
+    ), "a quoted script PATH is an invocation — the message strip must not hide it"
+    assert _gh_hazards(
+        ["        run: bash tools/install-ci-runner-x64.sh --repair-labels"], scripts
+    ), "an unquoted script invocation must stay a hazard"
 
 
 def test_the_poolable_label_reader_sees_every_yaml_shape():
