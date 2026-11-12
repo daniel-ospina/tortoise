@@ -199,9 +199,7 @@ def test_mutation_population_is_pinned():
     that named no heading (read as its first digit), a §1 row that is not a
     `**VERDICT**` row (a claim class with no handling rule, invisible to the vocabulary
     comparison), and a second tally sentence in the same paragraph (a decoy supplying the
-    letters while the real one went stale). A fifth was added later in the same pass: a
-    §1 header slot exempted by POSITION rather than by shape, so a substituted first row
-    stayed clean.
+    letters while the real one went stale).
 
     This lane's is the *uncoloned* arm's carve-outs, which were tested against
     `CITATION_UNCOLONED_SHAPE_RE.search()`'s FIRST match only, so one exempt token
@@ -226,6 +224,13 @@ def test_mutation_population_is_pinned():
     against a table of twelve). The same review also proposed a `~/.swarm/../…` escape
     guard: it is absent here because the reconciliation commit removed the `~` carve-out
     outright, which refuses that spelling by construction and carries its own arm.
+
+    One further arm closes the header slot itself, and it was a RED→GREEN on the way in:
+    exempting row 0 by POSITION rather than by the header's SHAPE made the slot
+    content-blind — measured on the parent tool, REPLACING the header with an unbolded
+    invented claim class left `check_document()` at `[]` where the parent returned a
+    problem — so the exemption is the shape `| Verdict | … |`, and a reworded header is a
+    deliberate two-place edit rather than a silent one.
     39 is the population at this head.
     """
     # ⛔ EQUALITY, not `>=` (#11902 review P2). A floor cannot see a one-arm shrink:
@@ -2311,7 +2316,9 @@ def test_a_s1_row_starting_with_the_word_verdict_is_still_refused(tmp_path, monk
             ),
         )
         problems = _doc_problems()
-        assert any("has no header row" in p for p in problems), (
+        assert any(
+            "has no header row" in p or "is not the table header" in p for p in problems
+        ), (
             f"a header-less §1 table must red: {problems}"
         )
 
@@ -2329,6 +2336,10 @@ def test_a_s1_first_row_that_is_not_the_header_is_refused(tmp_path, monkeypatch)
     for row in (
         "| SUPERSEDED-BY-DRIFT | Means | What a lane should do |",
         "| not-a-header | Means | What a lane should do |",
+        "| FIXED-IT | a | b |",
+        # The PLURAL is the case a substring test would wave through: the shape
+        # test refuses it because `Verdict` must be followed by the cell edge.
+        "| Verdicts | Means | What a lane should do |",
     ):
         with monkeypatch.context() as patch:
             _mutated(
@@ -2346,6 +2357,34 @@ def test_a_s1_first_row_that_is_not_the_header_is_refused(tmp_path, monkeypatch)
     assert not [p for p in _doc_problems() if "table header" in p], (
         "the shipped header must not be refused"
     )
+
+
+def test_a_sentence_quoting_the_tally_phrases_is_not_counted(tmp_path, monkeypatch):
+    """FAILS if a sentence that merely QUOTES a tally phrase is counted as a second one.
+
+    The exactly-one arms locate their subject by phrase, so counting every sentence
+    that contains one red an edit that only talked ABOUT the phrase: measured,
+    appending `(The phrase "still read as written" names the complement.)` produced
+    `§3 carries 2 sentences saying 'still read as written'` while a single sentence
+    asserted anything. A candidate must also carry a `**(x)**` token — a sentence with
+    no letter list in it cannot disagree with the table.
+    """
+    for quote in (
+        ' stated both ways.) (The phrase "still read as written" names the complement.) ',
+        ' stated both ways.) The words "no longer read as written" are the arm\'s subject. ',
+    ):
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, _q=quote: t.replace(" stated both ways.) ", _q, 1),
+            )
+            problems = _doc_problems()
+            assert not any(
+                "sentences saying 'still read as written'" in p
+                or "sentences saying 'no longer read as written'" in p
+                for p in problems
+            ), f"a sentence quoting the phrase must not be counted: {problems}"
 
 
 def test_a_second_still_read_as_written_sentence_is_refused(tmp_path, monkeypatch):
@@ -2396,7 +2435,12 @@ def test_a_second_tally_sentence_is_refused(tmp_path, monkeypatch):
     )
 
     def _falsify_and_deceive(text: str) -> str:
-        falsified = text.replace(real, "written** — nothing else moved this round.", 1)
+        # The falsified sentence KEEPS a letter token on purpose: a candidate must name
+        # a letter to be compared at all, so falsifying it down to bare prose would
+        # drop it out of the population and leave this arm testing nothing (measured).
+        falsified = text.replace(
+            real, "written** — only **(a)** moved this round.", 1
+        )
         assert falsified != text, "the tally sentence did not change"
         deceived = falsified.replace(" stated both ways.) ", decoy, 1)
         assert deceived != falsified, "the decoy anchor did not change"
