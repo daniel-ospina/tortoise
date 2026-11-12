@@ -499,7 +499,6 @@ def _job_block(path: Path, job: str) -> str:
     return "\n".join(lines[start:end])
 
 
-@pytest.mark.parametrize(("workflow", "job"), [(w, j) for w, js in GH_JOBS.items() for j in js])
 def _contract_violations(block: str, scripts: frozenset[str]) -> list[str]:
     """Why `block` breaks the ordering contract — `[]` when it complies.
 
@@ -947,9 +946,14 @@ def _jobs(path: Path) -> list[tuple[str, list[str]]]:
     return out
 
 
-#: A `run:` whose value is a FOLDED block scalar (`>`), with YAML's optional chomping
-#: indicator. `run: |` is literal and is deliberately not matched.
-_FOLDED_RUN = re.compile(r"^(?P<indent>\s*)(?:-\s+)?run:\s*>(?P<chomp>[-+]?)\s*(?:#.*)?$")
+#: A `run:` whose value is a FOLDED block scalar (`>`), with YAML's optional CHOMING indicator
+#: and/or INDENTATION indicator. `run: |` is literal and is deliberately not matched.
+#:
+#: ⛔ BOTH INDICATOR ORDERS ARE VALID YAML (`>2-` and `>-2`), and the indentation indicator is
+#: not cosmetic here: `run: >2` was NOT matched by a chomp-only pattern, so the exact class
+#: this function exists to close — a folded `echo 'bash h.sh'` + `| bash` pair — stayed silent
+#: under one spelling, with no escape or contrivance needed (#12167 review).
+_FOLDED_RUN = re.compile(r"^(?P<indent>\s*)(?:-\s+)?run:\s*>(?:[1-9][-+]?|[-+][1-9]?)?\s*(?:#.*)?$")
 
 
 def _folded_scalars(lines: list[str]) -> list[str]:
@@ -1138,18 +1142,27 @@ _MESSAGE_CMDS = ("echo", "printf")
 #: (`> /dev/null`) stayed inert. A bare `>` with no target left is a bash SYNTAX ERROR, so
 #: treating it as a redirect that consumed nothing is the safe reading, not a hole.
 #:
-#: ⛔ AND A TARGET MAY CONTAIN ONLY **COMPLETE** ESCAPES. `\X` replaces the pair, so a LONE
-#: trailing `\` cannot appear in a target — if the class accepted one it would read
-#: `echo '…' 2>&1\` as "a redirect whose target is a file named `\`", the anchored match
-#: would succeed, and the line would answer INERT. bash reads `\`+newline as a
+#: ⛔ AND A TARGET MAY CONTAIN ONLY **COMPLETE** ESCAPES, AND NO PARENTHESES. `\X` replaces
+#: the pair, so a LONE trailing `\` cannot appear in a target — if the class accepted one it
+#: would read `echo '…' 2>&1\` as "a redirect whose target is a file named `\`", the anchored
+#: match would succeed, and the line would answer INERT. bash reads `\`+newline as a
 #: CONTINUATION, so that line and a following `| bash` are ONE command that pipes the
 #: message into bash and RUNS the helper — measured, with the `\` accepted. DIRECTION: an
 #: INHERITED MISS on `origin/main` (it misses too) and a REGRESSION against pre-`#12106`
 #: (which HIT it), so it is closed rather than declared (#12167 review).
+#:
+#: NOR A PARENTHESIS, because `>( … )` / `<( … )` IS a process substitution and bash RUNS its
+#: body — which falsifies this block's own premise one paragraph up ("a redirect consumes its
+#: argument without executing it"). A target class that admitted `(`/`)` swallowed the whole
+#: substitution as a consumed argument, so `echo > >(bash${IFS}tools/ci_tim\ing.py)` answered
+#: INERT, and an inert line is searched ONLY by `_code_only`, never by the spliced views — so
+#: the escaped name was contiguous nowhere and 45 spellings ran the helper with no hit
+#: (measured). DIRECTION: inherited on all three readers, but it sat INSIDE a rule this
+#: change introduces, so it is closed here rather than declared.
 _INERT_MESSAGE = re.compile(
     r"^\s*(?:-\s+)?(?:run:\s*)?(?:" + "|".join(_MESSAGE_CMDS) + r")"
     r"(?:\s+-[A-Za-z]+)*"  # the message command's own flags (`-e`, `-n`)
-    r"(?:\s*(?:\d?>>?|\d?>&|&>>?)\s*(?:[^\s;|&<>\\]|\\.)*)*"  # redirects, complete escapes
+    r"(?:\s*(?:\d?>>?|\d?>&|&>>?)\s*(?:[^\s;|&<>()\\]|\\.)*)*"  # no pipe, no `(`, no lone `\`
     r"\s*$"
 )
 
@@ -1695,6 +1708,25 @@ def test_the_job_splitter_returns_exactly_the_jobs_yaml_declares(tmp_path):
         "single-quoted",
     ], "the tolerant job header stopped tolerating a spelling it is documented to tolerate"
 
+    # ⛔ AND THE `jobs:` BOUND'S END IS PINNED TOO, because it is the same fail-open shape as
+    # the start: a top-level key AFTER `jobs:` must end the block, or every later key's
+    # children are scanned as jobs. Measured, deleting that `break` left the whole suite green
+    # — no live workflow has a top-level key after `jobs:` today, which is exactly why the
+    # bound needs a synthetic file rather than a tree-wide claim (#12167 review).
+    trailing = tmp_path / "trailing.yml"
+    trailing.write_text(
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-24.04\n"
+        "env:\n"
+        "  DEPLOY_ENV:\n"
+        "    descends from a top-level key, not a job\n"
+    )
+    assert [name for name, _ in _jobs(trailing)] == ["build"], (
+        "a top-level key after `jobs:` leaked into the job list — its children are being "
+        "scanned as jobs"
+    )
+
 
 def test_the_gh_script_derivation_has_no_visible_blind_spot():
     """Re-measure the idiom claim against the tree — do not trust its docstring."""
@@ -1910,8 +1942,13 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     #      the span to end of line, blanked the invocation and answered INERT — measured,
     #      the helper really runs (marker file created) while the scan reported nothing.
     #      Found by `#12167` review on the rebased head. `#12149`'s walker misses it too,
-    #      so it is inherited rather than a regression — pinned here rather than declared,
-    #      because the fix is a reorder of two branches.
+    #      so it is inherited rather than a regression.
+    #      ⛔ WHAT THIS ROW IS AND IS NOT: it is a HAZARD row, NOT a pin for the branch.
+    #      Measured, deleting the single-quote branch leaves the whole suite green, because
+    #      the mis-walk then ends INSIDE the span and the unterminated guard falls back to
+    #      the raw line, which still names the helper — fail-closed by a different route.
+    #      The branch's own discriminating row is the OVER-REPORT one below (class 11b), and
+    #      it is what reds when the branch goes.
     #      The probe is BUILT BY CONCATENATION on purpose: as one literal it is a wall of
     #      backslashes where a reader cannot tell a bash escape from a Python one, which is
     #      the very confusion that produced the hole.
@@ -1921,6 +1958,18 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
         f'            echo {sq}a{bs}{sq} {bs}" ; bash tools/{helper} ; true {bs}" # {sq}'
     )
     assert _gh_hazards([single_quote_escape], scripts), single_quote_escape
+    # 11b — THE BRANCH'S OWN PIN, in the OVER-REPORT direction. With the branch the span
+    #       closes at the `'` after the backslash and the rest is quoted prose → INERT. With
+    #       the branch deleted the walk stays "inside" until end of line, the unterminated
+    #       guard hands back the RAW line, and this message about a helper REDS a healthy
+    #       job — measured: inert here, hazard under the mutation.
+    assert _gh_hazards([f'            echo {sq}a{bs}{sq} "bash tools/{helper}"'], scripts) == []
+    # 11c — THE UNTERMINATED GUARD'S OWN PIN, in the FAIL-OPEN direction. `_blank_quoted`
+    #       returns the line UNCHANGED when a span never closes, so the raw arm still sees
+    #       the name. Deleting that `return line` blanks the span to a space, the line
+    #       answers INERT, `_code_only` hides the quoted name too, and this hazard vanishes
+    #       (measured: hazard here, `[]` under the mutation).
+    assert _gh_hazards([f'            echo {sq}bash tools/{helper}{sq} "unterminated'], scripts)
 
     # 12 — TWO SHAPES THAT DEFEATED THE *BLANKED* TEXT RATHER THAN THE WALK, both found by
     #      `#12167` review with a marker file. Their baseline directions DIFFER, so both are
@@ -1943,6 +1992,32 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     #         against pre-`#12106`, which HIT it — so it must be closed, not declared.
     assert _gh_hazards([f"            echo 'bash tools/{helper}' 2>&1" + bs], scripts)
     assert _gh_hazards([f"            echo 'bash tools/{helper}' >/tmp/x" + bs], scripts)
+
+    # 13 — A PROCESS SUBSTITUTION IS NOT A "CONSUMED" REDIRECT TARGET. `>( … )` / `<( … )`
+    #      RUNS its body, which falsifies the premise the redirect allowance rests on ("a
+    #      redirect consumes its argument without executing it"). A target class that
+    #      admitted `(`/`)` swallowed the whole substitution, so the line answered INERT —
+    #      and an INERT line is searched ONLY by `_code_only`, never by the spliced views, so
+    #      a name made non-contiguous there was contiguous nowhere. Measured: 45 spellings ran
+    #      the helper with no hit before the parens were excluded (#12167 review, cycle 2).
+    assert _gh_hazards([f"            echo > >(bash tools/{helper})"], scripts)
+    assert _gh_hazards(
+        [f"            printf x &> >(bash tools/install-ci-runner-x64{bs}.sh)"], scripts
+    )
+    # ⛔ THE ROW THAT ACTUALLY DISCRIMINATES: NO SPACE in the substitution and a name that is
+    # contiguous ONLY after unescaping. With the parens excluded the line is searched by the
+    # raw + spliced views and the `\.` resolves; with them allowed it is INERT and only
+    # `_code_only` is searched, where the name is split by the backslash — measured, this is
+    # the difference between a hit and `[]`, and the plain-name rows above do NOT discriminate
+    # (the name is contiguous in `_code_only` either way).
+    assert _gh_hazards(
+        [f"            echo > >(bash${{IFS}}tools/install-ci-runner-x64{bs}.sh)"], scripts
+    )
+    assert _gh_hazards([f"            echo > >(bash${{IFS}}tools/{helper})"], scripts)
+    assert _gh_hazards([f"            echo <(bash tools/{helper})"], scripts)
+    # …and the trailing half: the `<(`/`>(` rows that stay INERT are prose ABOUT a
+    # substitution, and erasing them would re-open #12133's false block.
+    assert _gh_hazards([f'            echo "a <(b: run tools/{helper}) c"'], scripts) == []
 
     # …and the INERT shapes that motivated the fix stay inert, so it cannot be satisfied
     # by reverting it.
@@ -2245,6 +2320,24 @@ def test_a_folded_block_scalar_is_one_command_not_two(tmp_path):
         "`run: |` must not be folded — its newlines are real"
     )
 
+    # ⛔ EVERY HEADER SPELLING, not just the bare `>`. YAML allows a CHOMING indicator and an
+    # INDENTATION indicator, in either order (`>2-` and `>-2` are both valid), plus a trailing
+    # comment. A chomp-only pattern left `run: >2` unfolded, which is this exact fail-open
+    # under one spelling and with no escape or contrivance needed (#12167 review, cycle 2).
+    for header in (">", ">-", ">+", ">2", ">-2", ">2-", ">+2", ">  # keep the newline"):
+        spelling = tmp_path / "spelling.yml"
+        spelling.write_text(
+            "jobs:\n"
+            "  folded:\n"
+            "    runs-on: ubuntu-24.04\n"
+            "    steps:\n"
+            f"      - run: {header}\n"
+            f"          echo 'bash tools/{helper}'\n"
+            "          | bash\n"
+        )
+        spelled_body = dict(_jobs(spelling))["folded"]
+        assert _gh_hazards(spelled_body, scripts), f"`run: {header}` was not folded: {spelled_body}"
+
 
 def test_the_cross_line_redirect_residual_is_a_declared_miss():
     """The one FAIL-OPEN shape this arm declares instead of closing (#12167 review).
@@ -2378,13 +2471,37 @@ def test_the_contract_step_reader_cannot_be_defused_by_prose():
         "      - name: contract",
         f"        run: bash .github/scripts/{CONTRACT_STEP}",
     ]
-    at = next(i for i, line in enumerate(lines) if _CONTRACT_RUN_RE.match(line))
-    assert at == 5, f"the step-reader bound the wrong line: {at} -> {lines[at]!r}"
-    # …and the derived hazard arm sees the real `gh` call that the decoy was hiding.
-    assert _gh_hazards(lines[:at], _gh_executing_scripts()), (
-        "the pre-contract arm no longer sees a plain `gh pr view` — the ordering check is "
-        "vacuous even when the step-reader is right"
+    scripts = _gh_executing_scripts()
+    # ⛔ DRIVEN THROUGH `_contract_violations` — THE FUNCTION THE LIVE JOBS USE — not the
+    # regex in isolation. Pinning the regex alone was measurably vacuous: the pre-contract
+    # arm replaced by `early = []`, and the loose `CONTRACT_STEP in line` reader, each left
+    # the whole suite green (#12167 review). `_contract_step_index`/`_contract_step_problems`
+    # were this lane's first attempt at that pin; round 6 extracted the same arm as
+    # `_contract_violations`, which is the better factoring, so the pin rides THAT.
+    problems = _contract_violations("\n".join(lines), scripts)
+    assert problems and "BEFORE the contract step" in problems[0], (
+        "the ordering arm reports nothing for a job with a real `gh pr view` ahead of the "
+        f"contract step — it is vacuous: {problems}"
     )
+    # …and a compliant block reports nothing, so the arm cannot pass by reporting everything.
+    assert (
+        _contract_violations(
+            "\n".join(
+                [
+                    "      - name: contract",
+                    f"        run: bash .github/scripts/{CONTRACT_STEP}",
+                    "      - name: peek",
+                    "        run: gh pr view 1 --json number",
+                ]
+            ),
+            scripts,
+        )
+        == []
+    )
+    # …and a job that runs NO contract step is a problem rather than an empty answer:
+    # silently answering `[]` there is how a missing step reads as a clean job.
+    missing = _contract_violations("        run: gh pr view 1", scripts)
+    assert missing and CONTRACT_STEP in missing[0], missing
     # ⛔ AND IT IS DERIVED, not a text list. The old list named 5 of the 49 derived helpers and
     # 8 of `_GH_CMD`'s subcommands, so a job could put `check-required-set.py` or `gh secret`
     # ahead of the contract step and this pin stayed green. Both are pre-contract hazards now.
