@@ -487,9 +487,14 @@ same step with the same tail is the investigation.
     shards being created the jobs endpoint answers with ONE `completed` row while the run is
     about to execute — an all-`completed` list alone would subtract a run that is working.
     A run whose stillness cannot be proven abstains instead (counted, and reported in
-    `pr_running_unmeasured`). Such a run is identified *by being probed*, i.e. by the budget
-    lever above, and neither `/cancel` nor `/force-cancel` accepts a repair. It is **NOT
-    `--max-pages`**.
+    `pr_running_unmeasured`), and its lever is the RETRY described in the bullet above — a
+    larger budget only probes more runs the same way. ⛔ Its two sub-cases must not be merged
+    with the frozen one, because the repair endpoints differ between them: for a **frozen**
+    run `/cancel` and `/force-cancel` both answer 409 ("not in progress" / "has not been
+    queued yet"), while a run that merely has not been still yet is one that is *about to
+    execute* — `/cancel` on THAT is accepted, and destructive. So neither endpoint is the
+    lever here, but for two different reasons: closed for the frozen run, harmful for the
+    settling one. It is **NOT `--max-pages`**.
 
   In every case an unmeasured dimension is not a measured-healthy one.
 - **It does not reduce jobs per run.** A `python-ci` run is 22 jobs (max 30) by construction; with

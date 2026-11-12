@@ -2276,72 +2276,92 @@ def test_the_default_projection_is_the_pre_fix_census():
 
 
 def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
-    """The prose that documents the exclusion proof must never state it with one half.
+    r"""The prose that documents the exclusion proof must never state it with one half.
 
-    ⛔ WHY A TEXT GUARD EXISTS IN A SUITE OTHERWISE BUILT ON EXECUTED ASSERTIONS. The
+    WHY A TEXT GUARD EXISTS IN A SUITE OTHERWISE BUILT ON EXECUTED ASSERTIONS. The
     settle gate made exclusion require every job `completed` AND `updated_at` still for
-    `JOB_SETTLE_SECONDS`. That rule is stated in prose in six places (three module
-    comments, two `#:` field docs, two workflow comment blocks) and prose cannot be
-    executed — so a revert to the one-half wording is invisible to every behavioural
-    test. It has ALREADY happened three times: round 17 corrected one twin and left the
-    other contradicting it in the same file; the workflow block that says an all-completed
-    run "can never make the census unmeasured" is FALSE for the population the gate
-    creates; and the review that asked for this guard measured a fourth site
-    (`classify_queue`'s comment) that the first version of the guard did NOT catch.
+    `JOB_SETTLE_SECONDS`. That rule is stated in prose in SEVEN places — three module
+    comments, two `#:` field docs, two workflow comment blocks — plus the ops doc and two
+    test headers, and prose cannot be executed, so a revert to the one-half wording is
+    invisible to every behavioural test. It has ALREADY happened four times: round 17
+    corrected one twin and left the other contradicting it in the same file; the workflow
+    block claiming an all-completed run "can never make the census unmeasured" is FALSE for
+    the population the gate creates; the first version of this guard missed
+    `classify_queue`'s comment; and the second missed the two test headers that shipped the
+    same inference in this very file.
 
-    ⛔ THEREFORE THE MATCH IS WHITESPACE-INSENSITIVE. The first version compared literal
-    lines, so re-wrapping a reverted paragraph at ~72 columns — routine in this file —
-    passed. Both the haystack and every needle are normalised, so a revert is caught
-    however it wraps.
+    SO THE MATCH IS CLAIM-LEVEL AND WHITESPACE-INSENSITIVE. Line-literal matching let a
+    re-wrap at a comment boundary through (routine at ~72 columns here), so leading
+    comment markers are stripped and all whitespace flattened on both sides. The needles
+    are the retracted CLAIM, never a fragment: "can never make the census" alone is TRUE
+    when stated over both halves — the ops doc states exactly that — so a fragment needle
+    both over-triggers on correct prose and cannot be pointed at the doc at all. Half
+    needles are likewise avoided where the fragment is legitimate: "therefore NOT counted
+    in" is correct prose in the corrected field doc, so the retracted PAIR is one needle.
 
     RESIDUAL, stated plainly: this catches the phrasings that have actually shipped, not a
-    novel paraphrase. It is a regression guard, not a proof of the prose.
+    novel paraphrase, and a revert that ALSO mangles a backticked token or drops the
+    backticks altogether is not caught either. It is a regression guard, not a proof of
+    the prose.
     """
     root = Path(__file__).resolve().parents[1]
-    module = (root / "tools/ci_queue_health.py").read_text()
-    workflow = (root / ".github/workflows/ci-queue-health.yml").read_text()
+    scanned = {
+        "module": (root / "tools/ci_queue_health.py").read_text(),
+        "workflow": (root / ".github/workflows/ci-queue-health.yml").read_text(),
+        "doc": (root / "docs/ops/ci-wall-clock.md").read_text(),
+        "tests": (root / "tests/test_ci_queue_health.py").read_text(),
+    }
 
     def flat(text: str) -> str:
         r"""Comment markers and line wrapping are NOT content, so neither may hide a revert.
 
-        Dropping only `\s+` was not enough: a reverted paragraph re-wrapped at a comment
-        boundary flattens to `can never # make the census` and slips past the needle. The
-        leading `#`/`#:` of every line is stripped first, so the comparison is on the prose
-        an operator reads, however it is wrapped or indented.
+        Dropping only whitespace was not enough: a reverted paragraph re-wrapped at a
+        comment boundary flattens to a token split across the marker and slips past the
+        needle. The leading comment marker of every line is stripped first, so the
+        comparison is on the prose an operator reads, however it is wrapped or indented.
         """
         lines = [re.sub(r"^\s*(?:#:|#)\s?", "", ln) for ln in text.splitlines()]
         return re.sub(r"\s+", " ", " ".join(lines))
 
     retracted = [
-        # the three module sites that shipped uncorrected through round 18. ⛔ THE PAIR IS
-        # ONE NEEDLE, because "therefore NOT counted in" is CORRECT prose on its own — the
-        # corrected field doc says "... AND whose own `updated_at` had been still ..., and
-        # which are therefore NOT counted" — so two half-needles false-positive on the fix
-        # (measured: it did), while the retracted PAIR cannot appear in correct prose.
+        # the module sites that shipped uncorrected
         "whose EVERY job had completed, and which are therefore NOT counted in",
         "EVERY job of them was `completed` (a proof of",
         "whose jobs could NOT be read, and which are",
         "only when its jobs were read and every one had completed",
-        # both workflow blocks' sufficiency claim — false for a settle-downgraded run
-        "can never make the census",
-        "can never contribute to an unmeasured census",
-        # and the merged claim that either state is a CLOSED avenue: for a
-        # settle-downgraded run /cancel is ACCEPTED and destructive
+        # the settled-ness INFERENCE the two test headers shipped: all-completed,
+        # therefore executing nothing. True only of a fixture that is also still, so it
+        # must be stated as the premise, never as the inference.
+        "`False` is a PROOF (every job of the run is `completed`, so it is executing nothing)",
+        "every job is `completed`, so none of them is executing anything",
+        # the sufficiency CLAIM (not the fragment): an all-completed run "can never make
+        # the census" is TRUE over both halves — the ops doc states it correctly — so the
+        # needle is the claim that ONE half suffices.
+        "every job is `completed` is the PROOF that excludes it from `pr_running`",
+        "every job `completed` is the PROOF that EXCLUDES a run from `pr_running`",
+        "PROOF that excludes it from `pr_running`, so it can never make the census",
+        "all-jobs -completed is the PROOF that EXCLUDES a run from `pr_running`",
+        # the merged claim that either state is a CLOSED avenue: for a settle-downgraded
+        # run /cancel is ACCEPTED and destructive
         "accepts a run in either state",
+        "accepts a repair in either state",
         # a COUNT claim that contradicts this module's own emitted sentence: the field
         # counts the budget-unreached runs too (the split is emitted separately)
         "three causes, one bucket",
-        "accepts a repair in either state",
     ]
-    flat_module, flat_workflow = flat(module), flat(workflow)
+    flats = {name: flat(text) for name, text in scanned.items()}
+    # The guard's own docstring quotes several of these to describe them, so the test file
+    # is scanned with this function's body CUT OUT — otherwise the guard self-triggers.
+    head, _, tail = scanned["tests"].partition("def test_NO_site_states_the_retracted")
+    _, _, tail_after = tail.partition("def test_the_reason_line_names_the_runs")
+    flats["tests"] = flat(head + tail_after)
     for phrase in retracted:
         needle = flat(phrase)
-        assert needle not in flat_module, (
-            f"retracted one-half claim is back in the module (wrapping-insensitive): {phrase!r}"
-        )
-        assert needle not in flat_workflow, (
-            f"retracted one-half claim is back in the workflow (wrapping-insensitive): {phrase!r}"
-        )
+        for name, hay in flats.items():
+            assert needle not in hay, (
+                f"retracted one-half claim is back in the {name} (claim-level, "
+                f"wrapping-insensitive): {phrase!r}"
+            )
 
 
 def test_the_reason_line_names_the_runs_it_read_out_of_pr_running():
