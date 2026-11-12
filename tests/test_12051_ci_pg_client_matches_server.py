@@ -67,13 +67,18 @@ IMAGE_RE = re.compile(r":(?:pg)?(\d+)(?:@sha256:[0-9a-fA-F]{64})?$")
 #: install (MEASURED, review of `bfb7af441a`: that shape selected a second step
 #: and failed all six assertions with "a second installer" over a step that
 #: installs nothing).
+#: `apt-get`'s own option tokens may sit BEFORE the verb (`apt-get -y install`,
+#: `apt-get -o Dpkg::Use-Pty=0 install`) and an env assignment may prefix the whole
+#: command — all behaviourally identical to the shipped line. Requiring `install`
+#: to follow the binary immediately red the wrapped spelling AND hid a second
+#: install spelled that way (MEASURED, review of `2547274eaa`: five of six red on
+#: the re-spelled single install, six green on an appended `-y install … -18`).
+_APT_INSTALL = (
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*[ \t]+)*(?:sudo[ \t]+(?:-[A-Za-z]+[ \t]+)*)?"
+    r"apt(?:-get)?[ \t]+(?:\S+[ \t]+)*?install\b"
+)
 CLIENT_INSTALL_RE = re.compile(
-    # `sudo` may carry its OWN flags (`sudo -E apt-get install …`), and a line
-    # continued with `\` is the same command — `_code_only` joins continuations,
-    # so only the flag cluster needs spelling here (MEASURED, review of
-    # `3726d2f400`: both spellings reported "found 0 installers" and red 5 of 6).
-    r"^[ \t]*(?:sudo[ \t]+(?:-[A-Za-z]+[ \t]+)*)?apt(?:-get)?[ \t]+install[^\n]*?"
-    r"\bpostgresql-client-(?P<major>\d+)\b",
+    r"^[ \t]*" + _APT_INSTALL + r"[^\n]*?\bpostgresql-client-(?P<major>\d+)\b",
     re.MULTILINE,
 )
 
@@ -81,10 +86,7 @@ CLIENT_INSTALL_RE = re.compile(
 #: from `CLIENT_INSTALL_RE` because a continued command puts the package on its
 #: SECOND line — the prefix must stop at the command, and the raw lines here are
 #: never joined (they are executed verbatim).
-_INSTALL_CMD_RE = re.compile(
-    r"^[ \t]*(?:sudo[ \t]+(?:-[A-Za-z]+[ \t]+)*)?apt(?:-get)?[ \t]+install\b",
-    re.MULTILINE,
-)
+_INSTALL_CMD_RE = re.compile(r"^[ \t]*" + _APT_INSTALL, re.MULTILINE)
 
 #: An `exit 1` is only a fail action when it is a STATEMENT — never inside a
 #: quoted message, and never inside a heredoc body (that is data). `_statements`
@@ -109,9 +111,72 @@ _EXIT_1_RE = re.compile(r"(?:^|;|&&|\|\||\{|\()[ \t]*exit[ \t]+1\b", re.MULTILIN
 
 
 def _statements(line: str) -> str:
-    """One shell line with its quoted spans blanked. Single quotes first: inside
-    double quotes a `'` is a literal, so the spans must be removed outer-first."""
+    """One shell line with its quoted spans blanked.
+
+    DOUBLE-quoted spans are blanked first: inside `"…"` a `'` is a literal, so
+    removing single-quoted spans first would eat the tail of a double-quoted one.
+    """
     return _SQUOTED_RE.sub("''", _DQUOTED_RE.sub('""', line))
+
+
+def _heredoc_tag(line: str) -> str | None:
+    """The tag of the first UNQUOTED `<<` heredoc opener on this line, if any.
+
+    A `<<` inside a quoted string is message text, not an opener: `search`ing the
+    raw line made `echo "see <<EOF in the docs"` swallow the rest of the step, and
+    the `exit 1` after it was reported missing (MEASURED, review of
+    `2547274eaa`).
+    """
+    quote: str | None = None
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if quote:
+            if char == "\\" and quote == '"':
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+        elif line.startswith("<<", index):
+            opener = _HEREDOC_RE.match(line, index)
+            if opener:
+                return opener.group("tag")
+        index += 1
+    return None
+
+
+def _strip_comments(text: str) -> str:
+    """Drop `#`-introduced comments that are OUTSIDE quotes — trailing ones too.
+
+    `_code_only` only drops comment-ONLY lines, and a count taken over it let a
+    trailing comment naming a write over-count (MEASURED, review of
+    `2547274eaa`: one stray `# … echo /usr/bin >> $GITHUB_PATH` red the step as a
+    double write). Quoted spans are PRESERVED here — the write under test is
+    spelled `>> "$GITHUB_PATH"`.
+    """
+    kept: list[str] = []
+    for line in text.splitlines():
+        quote: str | None = None
+        cut = len(line)
+        index = 0
+        while index < len(line):
+            char = line[index]
+            if quote:
+                if char == "\\" and quote == '"':
+                    index += 2
+                    continue
+                if char == quote:
+                    quote = None
+            elif char in "\"'":
+                quote = char
+            elif char == "#" and (index == 0 or line[index - 1] in " \t"):
+                cut = index
+                break
+            index += 1
+        kept.append(line[:cut])
+    return "\n".join(kept)
 
 
 def _without_heredocs(text: str) -> str:
@@ -129,9 +194,9 @@ def _without_heredocs(text: str) -> str:
                 terminator = None
             continue
         kept.append(line)
-        opener = _HEREDOC_RE.search(line)
-        if opener:
-            terminator = opener.group("tag")
+        tag = _heredoc_tag(line)
+        if tag:
+            terminator = tag
     return "\n".join(kept)
 
 
@@ -164,7 +229,15 @@ GITHUB_PATH_PREPEND_RE = re.compile(
 #: read was written to close, and a `search` for the first one cannot see it
 #: (MEASURED, review of `f34c4fb741`: `echo …/16/bin >> $GITHUB_PATH` followed by
 #: `echo /usr/bin >> $GITHUB_PATH` passed all six).
-_GITHUB_PATH_WRITE_RE = re.compile(r">>[ \t]*['\"]?\$\{?GITHUB_PATH\}?")
+_GITHUB_PATH_WRITE_RE = re.compile(
+    # A redirect AND the canonical append spellings (`| tee -a`), so a second write
+    # cannot slip past the count in the spelling a shell script actually uses —
+    # MEASURED, review of `2547274eaa`: `echo "/usr/bin" | tee -a "$GITHUB_PATH"`
+    # left all six green.
+    r">>[ \t]*['\"]?\$\{?GITHUB_PATH\}?"
+    r"|\|[ \t]*(?:sudo[ \t]+(?:-[A-Za-z]+[ \t]+)*)?tee[ \t]+-a[ \t]+"
+    r"['\"]?\$\{?GITHUB_PATH\}?"
+)
 
 
 @pytest.fixture(scope="module")
@@ -347,9 +420,12 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     # ONE regex over the WHOLE command: the versioned dir must be the value
     # WRITTEN TO `$GITHUB_PATH`. A bare `CLIENT_PATH_RE`/`"GITHUB_PATH" in text`
     # pair is satisfiable by two different lines and by an inert `export`.
-    # ONE write to `$GITHUB_PATH`, then read it: a second write decides PATH and
-    # no assertion counts it (see `_GITHUB_PATH_WRITE_RE`).
-    writes = _GITHUB_PATH_WRITE_RE.findall(_code_only(text))
+    # ONE write to `$GITHUB_PATH`, then read it: each write is PREPENDED, so a
+    # second one decides PATH. Counted over code with comments and heredoc bodies
+    # removed (a trailing comment naming a write is inert shell).
+    writes = _GITHUB_PATH_WRITE_RE.findall(
+        _strip_comments(_without_heredocs(_code_only(text)))
+    )
     assert len(writes) == 1, (
         f"the pin writes `$GITHUB_PATH` {len(writes)} times — each write is "
         "PREPENDED, so the LAST one decides `PATH` and only this assertion's "
