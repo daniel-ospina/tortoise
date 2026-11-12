@@ -5135,7 +5135,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # re-derivation onto either stays green while the document's `carve_out:`
         # claim goes false (measured: 5854 and 8173 both drove this row GREEN).
         ("03-test-design.md", "`carve_out:` holds **one**", (
-            ("9842", "- test_pack_logic_writeprobe_11083.py"),
+            ("9714", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
