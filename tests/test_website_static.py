@@ -432,8 +432,11 @@ class TestDashboardPlanPricesAreThePriceOfRecord:
             "`planOptions()` entry (the accessible name the e2e asserts)")
 
     def test_no_spec_restates_a_plan_price_that_disagrees_with_the_record(self):
-        """A spec may pin a plan price only at the price of record. Fails on
-        the pre-#11981 tree (`Solo · $9/mo` vs pricing.json's 19)."""
+        """A spec may pin a plan price only at the price of record. Fails on the
+        tree BETWEEN #11981 and this PR: #11981 raised `solo` 9 -> 19 while the e2e
+        spec still asserted `Solo · $9/mo`, so they agreed BEFORE #11981 (verified:
+        `git show a3d20763ab09^:product/pricing.json` -> solo 9) and disagreed after
+        it — which is why the fix is to read the record, not to bump the literal."""
         prices = self._prices()
         labels = self._label_to_tier()
         offenders: list[str] = []

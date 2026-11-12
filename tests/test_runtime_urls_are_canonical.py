@@ -34,17 +34,20 @@ sweep that removes one of those literals must remove its recorded reason too.
 
 ⛔ THE COUNTS MOVED UNDER THIS PR, AND THAT IS THE POINT OF AN EXACT COUNT. main's
 #12058 ("serve the product at premiselabs.co/tortoise", which is what CLOSED
-#11764) re-aimed most of the dashboard set while this PR was open, so four rows
+#11764) re-aimed most of the dashboard set while this PR was open, so THREE rows
 went to ZERO and were removed (`invite-accept.html` 3 -> 0, `welcome.html` 1 -> 0,
-`wizardPrompts.js` 3 -> 0) or shrank (`signup.html` 2 -> 1, `overviewEmptyAction.js`
-2 -> 1). Their files STAY in `RUNTIME_FILES`, so a literal coming back REDS the
-guard rather than leaving the surface. The two survivors are app-ORIGIN hrefs
-(`/auth`, `/welcome`) on the retired host, which #12058's scope (the marketing and
-product pages) did not cover; they defer to **#12057**, which is open and lists
-them. ⛔ Every reason here names #12057 and NOT #11764: #11764 is CLOSED, and this
-file's OWNERSHIP note states the rule this row broke — "a note deferring to it
-defers nowhere". A row left pointing at a closed issue is the same defect as a
-deleted row: the sweep it asks for cannot be opened.
+`wizardPrompts.js` 3 -> 0) and two SHRANK (`signup.html` 2 -> 1,
+`overviewEmptyAction.js` 2 -> 1). Their files STAY in `RUNTIME_FILES`, so a literal
+coming back REDS the guard rather than leaving the surface. The two survivors are
+app-ORIGIN hrefs (`/auth`, `/welcome`) on the retired host, which #12058's scope
+(the marketing and product pages) did not cover; they defer to **#12057**, which
+is open and lists them. ⛔ Those TWO rows name #12057 and NOT #11764: #11764 is
+CLOSED, and this file's OWNERSHIP note states the rule they would break — "a note
+deferring to it defers nowhere". A row left pointing at a closed issue is the same
+defect as a deleted row: the sweep it asks for cannot be opened. (The four
+non-deferral KEEP rows — `hosted_api.py`, the two Supabase edge functions and
+`supabase/config.toml` — name no follow-up issue on purpose: nothing is deferred
+there, so naming one would invent work that does not exist.)
 
 ⛔ ONE ROW CHANGED UNDER THIS PR, AND THE CHANGE IS THE POINT OF THE EXACT COUNT.
 `website/functions/blog/_lib.ts` was 4 when this file was written; main's #11765
@@ -189,9 +192,14 @@ def test_email_link_base_follows_an_explicit_override(monkeypatch):
 #
 # Each entry: path -> (occurrence count, why the retired origin is deliberately
 # still spelled there). Exact counts on purpose: an ADDED literal fails, and so
-# does a sweep that DELETES one of these without deleting its reason — which is
-# the point, because (b) below is a live allowlist and (c) is dashboard-adjacent
-# local-dev state, not leftovers.
+# does a sweep that DELETES one of these without deleting its reason. The map holds
+# two KINDS of row and they must not be read as one: the DEFERRALS (a follow-up
+# issue owns the re-aim) and the four KEEP rows — `hosted_api.py`'s live CORS
+# allowlist, the two Supabase edge-function public allowlists, and
+# `supabase/config.toml`'s local-dev redirect — which are not leftovers and are not
+# deferred to anything. ⛔ An earlier revision of this note referred to "(b)" and
+# "(c)", letters from a list that no longer exists anywhere in this file; name the
+# rows instead, so there is nothing to dereference.
 RETIRED_HOST_ALLOWLIST = {
     "tortoise/hosted_api.py": (
         1,
@@ -297,17 +305,18 @@ RETIRED_HOST_ALLOWLIST = {
     "website/apps/dashboard/src/harnesses.js": (
         1,
         "DOCS_ORIGIN constant (301 -> premiselabs.co/tortoise/docs). Deferred to "
-        "#12057 with the rest of the dashboard copy. ⚠️ This file ALSO carries a "
-        "BARE-host mention of the same docs page in the ChatGPT step's copy "
-        "(`:277`) that this counter does not see, because the guard counts the "
-        "full origin — a bare-host sweep is a different guard. ⛔ That copy is "
-        "DEFERRED, not overlooked, and the reason is the same one that separates "
-        "the two: this line is rendered IN the dashboard a user acts on, so the "
-        "301 carries them; the copy re-aimed in this PR (`onboarding/SKILL.md` \u00a72) "
-        "is pasted into an agent's own config, which no redirect can reach. "
-        "Re-aiming `:277` here would be #12057's change, and it would leave this "
-        "file's DOCS_ORIGIN constant and its prose disagreeing — a partial move "
-        "is worse than one recorded deferral."),
+        "#12057 with the rest of the dashboard copy. ⚠️ This row counts the FULL "
+        "origin (`RETIRED_ORIGIN` carries the scheme), so it sees only this "
+        "constant. The markdown-ish `:277` step used to carry a bare-host copy of "
+        "the same docs URL and DOES NOT ANY MORE: main's #12058 re-aimed it to "
+        "`premiselabs.co/tortoise/docs#chatgpt` while this PR was open (verified: "
+        "`git log -S'premiselabs.co/tortoise/docs#chatgpt' -- ` that file returns "
+        "only `1cd4ac816826`). ⛔ An earlier revision of this row described `:277` "
+        "as a deferred retired-host mention and argued a partial move would be "
+        "worse; that was true when written and #12058 falsified it — the prose IS "
+        "moved, only the constant is not. Stating it as still-deferred is exactly "
+        "the defect this file exists to catch, so the deferral is now scoped to "
+        "what is actually left: `DOCS_ORIGIN`."),
     "website/apps/dashboard/src/overviewEmptyAction.js": (
         1,
         "ONBOARDING_FUNNEL_HREF `…/welcome` (301 -> app.premiselabs.co/welcome). "
@@ -342,18 +351,25 @@ RETIRED_HOST_ALLOWLIST = {
 #:   website/apps/dashboard/src/harnesses.js                 1  DOCS_ORIGIN
 #:   website/apps/dashboard/src/overviewEmptyAction.js       1  ONBOARDING_FUNNEL_HREF (app origin)
 #:   website/apps/dashboard/src/billingCta.js                1  COMPARE_PLANS_URL
-#: None of the THIRTEEN deferrals is a broken link (every one still 301s onto the
-#: canonical host); they are a SCOPE deferral, and all thirteen files they name ARE
+#: None of the TEN deferrals is a broken link (every one still 301s onto the
+#: canonical host); they are a SCOPE deferral, and all ten files they name ARE
 #: in `RETIRED_HOST_ALLOWLIST` with the same kind of reason — recording a count is
 #: not blessing the literal, it is what makes the deferral visible and what forces
 #: a sweep to update the record in the same commit.
-#: ⛔ The FOURTEENTH file in the list above is NOT a deferral and is NOT in the map:
-#: `website/functions/blog/_lib.ts` sits at 0 because #11767 repointed its three
-#: `navHtml` hrefs to the terminal forms and DELETED the row (#11764 closed without
-#: doing it). It stays in `RUNTIME_FILES` on purpose — with no row its expected count
-#: is 0, so a literal coming back REDS this guard instead of leaving the surface.
-#: An earlier revision of this paragraph said "ALL FOURTEEN … ARE in
-#: `RETIRED_HOST_ALLOWLIST`", which stopped being true when that row was removed.
+#: ⛔ The other FOUR files in the list above sit at 0 and are NOT in the map, for two
+#: different reasons, and the difference matters: `website/functions/blog/_lib.ts`
+#: is not a deferral at all — #11767 repointed its three `navHtml` hrefs to the
+#: terminal forms and DELETED the row (#11764 closed without doing it) — while
+#: `invite-accept.html`, `welcome.html` and `wizardPrompts.js` were re-aimed to 0 by
+#: main's #12058 and their rows deleted. All four stay in `RUNTIME_FILES` on purpose:
+#: with no row the expected count is 0, so a literal coming back REDS this guard
+#: instead of leaving the surface.
+#: ⛔ COUNT THE TABLE, DO NOT TRUST A NUMBER HERE. An earlier revision of this
+#: paragraph said "all THIRTEEN deferrals ... ARE in `RETIRED_HOST_ALLOWLIST`", then
+#: "the FOURTEENTH is not", then left "fourteen" implying FOURTEEN files were in the
+#: map. Ten are. Appending the three #12058 rows would red `assert count` in
+#: `test_every_allowlisted_occurrence_has_a_reason` — the fix is to read the table,
+#: which is the artifact, rather than the sentence that once summarised it.
 #:
 #: ⛔ An earlier revision of this paragraph said the OPPOSITE — that they were
 #: "deliberately NOT added", because blessing them "would turn a deferral into a
