@@ -1069,6 +1069,20 @@ def _entity_rows(g, label: str, rows, *, id_idx: int = 1,
     return out
 
 
+def _id_claimant_count(g, label: str, node_id: str) -> int:
+    """How many NODES claim one logical id — the single-id form of
+    :func:`_id_claimant_counts`.
+
+    #12120 (review round 14): :func:`_entity_key_of` asks the same question
+    ``_entity_rows`` asks, so it must use the same primitive — a second, narrower
+    count is how the target's entity became backend-order dependent.
+    """
+    if not node_id:
+        return 0
+    return _id_claimant_counts(g, label, [(None, str(node_id))], 1).get(
+        str(node_id), 0)
+
+
 def _entity_key_of(g, label: str, node_id) -> str | None:
     """The ENTITY a node belongs to: its survivor's id, or its own.
 
@@ -1077,6 +1091,15 @@ def _entity_key_of(g, label: str, node_id) -> str | None:
     probe and compared against successor candidates at entity level.
     """
     if not node_id:
+        return None
+    # ⛔ The claimant guard `_entity_rows` applies (review round 14):
+    # `follow_resolved_from` reads ONE node for an id, so a second claimant makes
+    # the target's ENTITY — and every question compared against it
+    # (`all_candidates_are_target`, the `key != _target_key` exclusion) — depend
+    # on which of them the backend happened to bind (#2164 P2-2). The ref probes
+    # refuse a duplicated id before this point; this keeps the rule true even if
+    # one of them is ever reordered.
+    if _id_claimant_count(g, label, str(node_id)) > 1:
         return None
     return str(follow_resolved_from(g, label, str(node_id)) or node_id)
 
@@ -1220,6 +1243,25 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
                 "RETURN ID(s), s.id, s.name, s.status, s.supersededBy",
                 params=_ref_params,
             ).result_set if _ref_space else [])
+        if len(by_name) > 1:
+            # ⛔ A DUPLICATE-ID pair is CORRUPTION, not two incarnations, and the
+            # live narrowing below cannot tell them apart: with one claimant
+            # terminal it collapses the pair to ONE row, the never-guess refusal
+            # never fires, and the fold is applied to a corrupt graph — measured
+            # (review round 14) `applied=1, skipped=[]` with two nodes sharing an
+            # id, one live and one superseded, where `main` refused. Two rows
+            # claiming one id therefore refuse here, BEFORE any narrowing, which is
+            # the apart-ness `_entity_rows` documents it preserves.
+            _claimed_ids = [str(r[1]) for r in by_name if r[1]]
+            if len(_claimed_ids) != len(set(_claimed_ids)):
+                record_non_folded("Subject", ref,
+                                  display_holder_ids(_claimed_ids),
+                                  shape="duplicate-id")
+                warn(f"subject supersession {ref!r} matches "
+                     f"{len(by_name)} Subjects claiming duplicate ids — "
+                     f"skipped (never-guess)")
+                _skip(ref, supersedes_by, "ambiguous subject id")
+                return False
         if len(by_name) > 1:
             # #12120 review round 6: count the writer's question — LIVE carriers
             # only (`entity_identity._live_holders_same_entity` is live-only, so a
@@ -1825,6 +1867,27 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # issue removes, in the other direction. Narrow to the LIVE rows when
             # one entity is live; keep the full set when every row is terminal
             # (the keep-first arms below own that case).
+            if len(by_name) > 1:
+                # ⛔ A DUPLICATE-ID pair is CORRUPTION, not two incarnations, and
+                # the live narrowing below cannot tell them apart: with one
+                # claimant terminal it collapses the pair to ONE row, the
+                # never-guess refusal never fires, and a corrupt fold is APPLIED —
+                # measured (review round 14) `applied=1, skipped=[]` with two
+                # nodes sharing an id, one live and one superseded, and the
+                # live/journal/replay paths then disagreed (`main` refused this
+                # shape outright). Two rows claiming one id therefore refuse
+                # here, BEFORE any narrowing — the apart-ness `_entity_rows`
+                # documents it preserves.
+                _claimed_ids = [str(r[0]) for r in by_name if r[0]]
+                if len(_claimed_ids) != len(set(_claimed_ids)):
+                    record_non_folded("Object", ref,
+                                      display_holder_ids(_claimed_ids),
+                                      shape="duplicate-id")
+                    warn(f"supersession ref {ref!r} matches "
+                         f"{len(by_name)} Objects claiming duplicate ids — "
+                         f"skipped (never-guess)")
+                    _skip(ref, supersedes_by, "ambiguous object id")
+                    continue
             if len(by_name) > 1:
                 _live_rows = [r for r in by_name
                               if (r[2] or "") not in _RECALL_OBJECT_EXCLUDED_STATUS]

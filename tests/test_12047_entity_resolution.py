@@ -3985,3 +3985,92 @@ class TestThe12120ReviewRound13:
                 f"skipped list: {skips!r} (warnings: {msgs!r})")
         finally:
             sdk.close()
+
+
+class TestThe12120ReviewRound14:
+    """The two defects review round 14 found at the merged head.
+
+    Both are holes in a guard that was written for the shape it was thinking of:
+    the round-6 live narrowing assumed two rows under one name are two
+    INCARNATIONS (they are corruption when they share an id), and the blank-fold
+    zero-row answer was justified by a premise that measurement falsifies.
+    """
+
+    @staticmethod
+    def _apply(sdk, records):
+        from tortoise.commit_ops import apply_supersessions
+
+        msgs: list[str] = []
+        skips: list[dict] = []
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk, records, session_id="s-12120-r14",
+            skipped=skips,
+            warn=lambda m, *a, **k: msgs.append(m % a if a else m))
+        return applied, skips, msgs
+
+    def test_a_duplicate_id_pair_refuses_before_the_live_narrowing(
+            self, sdk_factory):
+        """One terminal claimant must not hide the duplicate-id corruption.
+
+        The round-6 live narrowing asks "is a terminal ex-incarnation competing
+        with a live carrier?" — but when two rows share an `id` they are
+        CORRUPTION, not two incarnations, and the narrowing collapsed them to one
+        row, so the never-guess refusal never fired. Measured pre-fix: `applied=1,
+        skipped=[]` for two nodes sharing an id (one live, one superseded), with
+        the live/journal/replay paths then disagreeing; `main` refused the shape.
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("New Widget", "document")
+            g.query(
+                "CREATE (a:Object {id:'dup-r14', name:'Twinned', "
+                "objectKind:'document', status:'live'}) "
+                "CREATE (b:Object {id:'dup-r14', name:'Twinned', "
+                "objectKind:'document', status:'superseded', "
+                "supersededBy:'Older'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Twinned", "supersedes_by": "New Widget",
+                 "evidence": "test"}])
+            assert applied == 0, (
+                f"a duplicate-id pair was folded instead of refused: {msgs}")
+            assert any("ambiguous object id" in str(s.get("reason") or "")
+                       for s in skips), skips
+            row = g.query(
+                "MATCH (o:Object {id:'dup-r14'}) "
+                "WHERE o.supersededBy = 'Older' RETURN count(o)").result_set
+            assert row and row[0][0] == 1, (
+                "the terminal claimant's recorded successor was overwritten "
+                f"by the fold: {row}")
+        finally:
+            sdk.close()
+
+    def test_a_duplicate_id_pair_of_subjects_refuses(self, sdk_factory):
+        """The Subject twin: the narrowing collapsed the pair, so both claimants
+        were stamped (the Subject write is not CAS-gated) and the terminal
+        claimant's recorded successor was silently overwritten."""
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_subject("New Team", "organization")
+            g.query(
+                "CREATE (a:Subject {id:'dup-subj-r14', name:'Old Team', "
+                "subjectKind:'organization', status:'live'}) "
+                "CREATE (b:Subject {id:'dup-subj-r14', name:'Old Team', "
+                "subjectKind:'organization', status:'superseded', "
+                "supersededBy:'Older Team'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Old Team", "supersedes_by": "New Team",
+                 "evidence": "test"}])
+            assert applied == 0, (
+                f"a duplicate-id Subject pair was folded instead of refused: "
+                f"{msgs}")
+            assert any("ambiguous subject id" in str(s.get("reason") or "")
+                       for s in skips), skips
+            row = g.query(
+                "MATCH (s:Subject {id:'dup-subj-r14'}) "
+                "WHERE s.supersededBy = 'Older Team' RETURN count(s)").result_set
+            assert row and row[0][0] == 1, (
+                f"the terminal claimant's successor was overwritten: {row}")
+        finally:
+            sdk.close()

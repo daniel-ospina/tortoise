@@ -885,22 +885,32 @@ def name_key_space_same_entity(var: str, name: str) -> tuple[str, dict]:
     must honour (skip the query), never a degenerate ``WHERE ()``.
     ⛔ That is DELIBERATELY not the shape its twins over the same union use:
     :func:`_name_holder_ids_same_entity` and
-    :func:`_live_holders_same_entity` fall back to a raw ``name`` read here
-    (``if not folded: return _read(g, label, name)``). The two answers cannot
-    disagree on a real graph — whitespace is the ONLY input
-    ``normalize_entity_name`` maps to ``""`` (``"the_"`` folds to ``"_"``, not to
-    empty), and a blank name is not a name any write door mints — so the
-    difference is cost, not semantics: an id-returning twin pays one query to
-    learn "no holder", while this props-returning helper hands the caller the
-    skip it would have taken anyway. A caller that ever needs the literal
-    whitespace match must ask for it explicitly, not rely on a silent fallback.
+    :func:`_live_holders_same_entity` fall back to a raw ``name`` read for a blank
+    fold (``if not folded: return _read(g, label, name)``). ⚠️ **The two answers
+    DO differ, and the difference is a stated BLIND SPOT, not a cost.** Measured
+    (review round 14): ``create_object("   ")`` / ``create_subject("   ")`` DO
+    mint a node whose ``name`` is the whitespace string — the earlier claim here
+    that "a blank name is not a name any write door mints" was FALSE — and the
+    twins' raw fallback matches it while this helper answers zero rows. The
+    behaviour is kept anyway, because the resolver the WRITER uses
+    (:func:`resolve_fold_name`) returns nothing for that node too (measured), so a
+    by-name reader that named it would disagree with the write it describes — the
+    very defect this module exists to remove. What that costs is one dropped
+    attachment edge (``hosted_api``'s Point anchor wrote it on ``main``, with its
+    raw ``{name:$name}`` match), and it is recorded rather than silent. The node
+    itself is unaddressable by every fold reader; whether a blank-named entity
+    should be mintable at all is a write-door question, filed separately
+    (#12242). A caller that genuinely needs the literal whitespace match must ask
+    for it explicitly, not rely on a silent fallback.
     """
     folded = normalize_entity_name(name) or ""
     if not folded:
         # Blank (or all-whitespace) name: the ZERO-ROW answer documented above,
         # NOT a props-only clause. Answering `n.name = ''` here would match a
         # placeholder label nothing writes, and a caller that skipped the check
-        # would run a query whose result means nothing.
+        # would run a query whose result means nothing. A blank-NAMED holder (a
+        # real, mintable node) is the documented blind spot above — skipped on
+        # purpose, because the writer's resolver skips it too.
         return "", {}
     return _name_key_predicate(
         var, name, name_props=("name", "canonical_name"),

@@ -1353,3 +1353,43 @@ def test_sweep_catches_evasive_query_forms():
             "a docstring that quotes a retired pattern must not fabricate a hit"
     finally:
         os.remove(path)
+
+
+class TestThe12120BlankNameBlindSpot:
+    """A whitespace-only name IS mintable — the zero-row answer is a STATED gap.
+
+    #12120 review round 14: `name_key_space_same_entity`'s docstring justified its
+    `("", {})` answer with "a blank name is not a name any write door mints", and
+    measurement falsifies that: `create_object("   ")` mints a node whose `name` is
+    the whitespace string. The behaviour is kept because the WRITER's resolver
+    reports that node as unheld too — a reader that named it would disagree with
+    the write it describes — but the agreement is what makes it defensible, so both
+    halves are pinned here. Whether the door should mint such a name at all is
+    #12242.
+    """
+
+    def test_a_blank_named_holder_is_unheld_for_every_fold_reader(
+            self, sdk_factory):
+        from tortoise.entity_identity import (
+            _live_holders_same_entity,
+            name_key_space_same_entity,
+            resolve_fold_name,
+        )
+
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            made = sdk.create_object("   ", "document")
+            assert made and made.get("name") == "   ", made
+            # read back BY ID: an indexed equality filter on a whitespace value is
+            # not a probe this test can rely on (#9599).
+            row = g.query("MATCH (o:Object {id:$id}) RETURN o.name",
+                          params={"id": made["id"]}).result_set
+            assert row and row[0][0] == "   ", row
+
+            assert name_key_space_same_entity("o", "   ") == ("", {})
+            holders, _props = _live_holders_same_entity(g, "Object", "   ")
+            assert holders == [], holders
+            assert resolve_fold_name(g, "Object", "   ", mention=True) is None
+        finally:
+            sdk.close()
