@@ -713,7 +713,20 @@ def check_verdict_tally(text: str) -> list[str]:
     # the paragraph-level decoy check above, and for the same reason: the arm locates
     # its subject BY PATTERN, so more than one candidate means it can report OK over a
     # sentence nobody reads.
-    tally_sentences = [s for s in sentences if "no longer read as written" in s]
+    # ⛔ THE CANDIDATES ARE THE SENTENCES THAT NAME A LETTER (#11902 review P3).
+    # Counting every sentence that merely CONTAINS the phrase red an edit that quoted it
+    # — measured: appending `(The phrase "still read as written" names the
+    # complement.)` produced `§3 carries 2 sentences saying 'still read as written'`
+    # while only one sentence asserted anything, i.e. the same false-accusation class
+    # the neighbouring arms were written to avoid. A sentence that carries no
+    # `**(x)**` token cannot be the arm's subject: there is no letter list in it to
+    # disagree with the table. When NO sentence names a letter the list is empty and
+    # the letter arm below reports it, which is the correct outcome.
+    letter_sentence = re.compile(r"\*\*\([a-z]\)\*\*")
+    tally_sentences = [
+        s for s in sentences
+        if "no longer read as written" in s and letter_sentence.search(s)
+    ]
     if len(tally_sentences) > 1:
         return [
             f"§3 carries {len(tally_sentences)} sentences saying 'no longer read as "
@@ -730,7 +743,10 @@ def check_verdict_tally(text: str) -> list[str]:
     # Falsifying the real still-list beside a compliant decoy did the same. One
     # sentence, or a red.
     still_sentences = [
-        s for s in sentences if "still read as written" in s and "no longer" not in s
+        s for s in sentences
+        if "still read as written" in s
+        and "no longer" not in s
+        and letter_sentence.search(s)
     ]
     if len(still_sentences) > 1:
         problems.append(
@@ -1081,13 +1097,22 @@ def check_vocabulary(text: str) -> list[str]:
             f"enforces {VERDICTS} — in either direction a verdict has no handling "
             "rule, and §8 names §1 as the authority"
         )
-    # ⛔ THE HEADER IS THE FIRST `|` ROW AND NOTHING ELSE (#11902 review P2). The skip
-    # used to be `row.startswith("| Verdict")`, which exempted EVERY row whose first
-    # cell merely begins with that word — so the arm below was defeated by a plural:
-    # measured, `| Verdicts | a | b |`, `| Verdict-ish | a | b |` and
-    # `| Verdict-and-more | … |` each left `check_document()` at `[]` while the plain
-    # non-verdict row reded. A table whose first `|` row is already a verdict row has
-    # no header at all, which is a page defect rather than an exemption.
+    # ⛔ THE HEADER IS THE FIRST `|` ROW *AND ITS FIRST CELL IS `Verdict`*
+    # (#11902 review P2, then P1). The skip used to be
+    # `row.startswith("| Verdict")`, which exempted EVERY row whose first cell merely
+    # begins with that word — so the arm below was defeated by a plural: measured,
+    # `| Verdicts | a | b |`, `| Verdict-ish | a | b |` and `| Verdict-and-more | … |`
+    # each left `check_document()` at `[]` while the plain non-verdict row reded.
+    #
+    # ⛔ AND POSITION ALONE IS NOT ENOUGH EITHER — that was a RED→GREEN regression, and
+    # the review measured it: exempting `vocab_rows[0]` unconditionally made the FIRST
+    # row content-blind, so REPLACING the header with an unbolded invented class
+    # (`| FIXED-IT | a | b |`, `| SUPERSEDED-BY-DRIFT | Means | …`) went from refused
+    # (1 problem on the parent) to CLEAN, in the one table §8 calls the authority. So
+    # row 0 must BE the header: its first cell, with `**`/backticks/space stripped, has
+    # to read exactly `Verdict`. A reworded header therefore reds — deliberately, and
+    # in the same two-places spirit as `MIN_SELF_TEST_MUTATIONS`: update the page and
+    # this test together, rather than letting the first row drift out of the arm.
     vocab_rows = [
         row for row in (ln.strip() for ln in section.splitlines())
         if row.startswith("|") and not TABLE_SEPARATOR_RE.match(row)
@@ -2031,11 +2056,14 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         # The tally arm joined EVERY sentence matching its phrase, so a second one
         # inside the same paragraph could carry the letters while the sentence a lane
         # quotes went stale (measured on the pre-fix tool: `[]`). This is the §6
-        # survivor arm's "keep exactly one" rule, one level down.
+        # survivor arm's "keep exactly one" rule, one level down. ⛔ The decoy carries a
+        # `**(x)**` token on purpose: a sentence that only QUOTES the phrase is not a
+        # candidate at all now (it names no letter to disagree with), so a decoy
+        # without one would leave this arm dead — measured.
         "a second tally sentence inside the same paragraph",
         lambda t: t.replace(
             "stated both ways.)",
-            "stated both ways.) Seven of the twelve rows no longer read as written.",
+            "stated both ways.) Only **(a)** no longer read as written.",
             1,
         ),
         "sentences saying 'no longer read as written'",

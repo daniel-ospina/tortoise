@@ -370,7 +370,10 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   **complement** list ("still read as written"), which was joined across sentences and compared as a
   set-union: a second complement sentence could assert a STILL-TRUE letter the real sentence does not,
   so the page could say *seven of the twelve no longer read as written* beside *only `**(a)**` still
-  read as written* — 7 + 1 against a table of twelve — at rc 0 (measured);
+  read as written* — 7 + 1 against a table of twelve — at rc 0 (measured). Both arms count only a
+  sentence that also carries a `**(x)**` token: one that merely QUOTES the phrase has no letter list
+  to disagree with the table, and counting it reded a clarifying edit (measured), which is the
+  false-accusation class the neighbouring citation arms exist to avoid;
 - every **§3 evidence cell** names a `path:line`, an issue, a command or a §N (§1's own rule), and
   the §N must name a heading that EXISTS — accepting any `§<digit>` let all twelve cells be replaced
   with a reference to a section the page does not have (measured, rc 0). Without this, the whole
@@ -386,17 +389,18 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   appending one left the guard CLEAN). The §1 case is the one that matters most, because §1 is what
   this section names as the authority for the vocabulary §3 is checked against: a sixth claim class
   shaped any other way there is a verdict with **no handling rule**, which is the state §1 exists to
-  prevent. §1's header is the **FIRST `|` row and nothing else**: the skip used to be a prefix test on
-  the word `Verdict`, so any row whose first cell merely began with it (`| Verdicts | … |`) escaped the
-  very arm beside it (measured, rc 0), a table with no header at all is refused too, and the
-  header slot is exempted by SHAPE rather than by position — skipping the first `|` row
-  unconditionally exempted whatever stood there, so substituting a claim class for the header
-  (`| SUPERSEDED-BY-DRIFT | Means | … |`) left `--check` at rc 0 while the same row one line
-  lower reded (measured).
-  That
-  refusal counts the first table's ROWS and every other `|` line in the section, not only table
-  separators, because a lone `|` row appended under a blank line brings no separator: measured, it
-  carried the invented verdict `FIXED-IT` and left `--check` at rc 0;
+  prevent. §1's header is the **FIRST `|` row, exempted by SHAPE — its first cell reads
+  `Verdict` — and nothing else**: the skip used to be a prefix test on the word `Verdict`, so any
+  row whose first cell merely began with it (`| Verdicts | … |`) escaped the very arm beside it
+  (measured, rc 0); exempting row 0 by *position* instead was a red→green of its own, because
+  replacing the header with an unbolded invented class (`| FIXED-IT | … |`) then matched nothing at
+  all (measured: 1 problem on the pre-fix tool, `[]` on the positional one); and a table with no
+  header at all is refused too. A reworded header is therefore a **two-place edit** — the page and
+  `check_vocabulary()` — rather than a silent exemption, which is the same discipline
+  `MIN_SELF_TEST_MUTATIONS` imposes on the arm population. The **row-shape** refusal also counts the
+  first table's ROWS and every other `|` line in the section, not only table separators, because a
+  lone `|` row appended under a blank line brings no separator: measured, it carried the invented
+  verdict `FIXED-IT` and left `--check` at rc 0;
 - the **§6 survivor sentence's two numbers** are derived as well: its survivor TOTAL must equal the
   OPEN row's own count, and its "already re-measured" count must equal the number of **bullets naming
   an OPEN issue** — the `#2730` bullet is CLOSED and is printed because *issue closure is not evidence
