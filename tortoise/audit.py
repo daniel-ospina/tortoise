@@ -1245,10 +1245,15 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     + _dropped_input(s) + ", and a re-audit reads CLEAN over it: "
                     "target a CLAIM successor")
         if (s["next_status"] or "") == DRAFT_STATUS:
+            # ⛔ Mechanism split, as at hop 1: a DIRECT edge is excluded in Cypher
+            # before evaluation, so nothing is stripped and no record exists.
             return (f"names the next link ({_quoted(s['carrier_sb'])}), which is "
-                    f"'{DRAFT_STATUS}' — EP strips a draft input like a terminal one "
-                    "(#780), so " + _dropped_input(s) + ": it needs promoting to "
-                    "live as well")
+                    f"'{DRAFT_STATUS}' — EP "
+                    + ("strips a draft input like a terminal one (#780), so "
+                       if s["is_operator"] else
+                       "EXCLUDES from a direct edge before evaluation (measured: no "
+                       "factor and no skipped-factor record), so ")
+                    + _dropped_input(s) + ": it needs promoting to live as well")
         return (f"names the next link ({_quoted(s['carrier_sb'])}), which is LIVE — "
                 "target THAT, not the immediate successor")
 
@@ -1387,8 +1392,21 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     ", which EP excludes from a factor's inputs (#9269): "
                     f"{_dropped_input(s)} — target a CLAIM successor")
         if (status or "") == DRAFT_STATUS:
-            return (f" ⛔ {succ} is '{DRAFT_STATUS}', which EP strips the same way "
-                    "(#780): promote it to live as well — " + _dropped_input(s))
+            # ⛔ SPLIT BY MECHANISM — the same split ``_successor_note`` already
+            # carries: EP STRIPS a draft on the OPERATOR lane (``ep.py`` Batch 2, in
+            # Python, with a record) and EXCLUDES the row on the DIRECT lane before
+            # evaluation (Batch 3's ``live_a``/``live_b``, in Cypher, recording
+            # nothing — ``skipped.append`` is on the operator path only). Measured on
+            # a direct row: 2 confidences live, 0 after the supersession, ``skipped:
+            # None``; so "EP strips the same way (#780)" was false there (round 19,
+            # #12111).
+            return (f" ⛔ {succ} is '{DRAFT_STATUS}', which EP "
+                    + ("strips the same way (#780): promote it to live as well — "
+                       if s["is_operator"] else
+                       "EXCLUDES from a direct edge before evaluation — no factor, "
+                       "no skipped-factor record (measured), so promoting it to live "
+                       "is the repair: ")
+                    + _dropped_input(s))
         if not s["carrier_terminal"]:
             return ""
         return (f" ⛔ {succ} is ITSELF "
@@ -1443,8 +1461,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         fwd, bwd = direction_flows(s["direction"])
         neither_arm = s["shape"] and not s["is_operator"]
         neutral = not (fwd or bwd)
-        if _succ_refused(s):
-            # ⛔ A CARRY needs a successor EP actually reads. Where the successor is
+        if s["carrier_count"] == 1 and _succ_refused(s):
+            # ⛔ A CARRY needs a successor EP actually reads — and the check may only
+            # say so when the name resolves to ONE carrier (an ambiguous name is the
+            # repair's first problem, not a refusal). Where the successor is
             # one EP REFUSES, "an IMPL may CARRY to the successor" sat in the SAME
             # string as "the belief is NOT moved … target a CLAIM successor" — one
             # of the two is false, and the reader cannot tell which (#12111 review
@@ -1712,7 +1732,13 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # successor leaves ``confidences {}`` and the row quiet; review round 17,
         # #12111). So the destination is a CLAIM successor and the named one is
         # explicitly withdrawn.
-        refused = _succ_refused(s)
+        # ⛔ SINGLE CARRIER ONLY: with N≥2 Objects carrying the name the row cannot
+        # say WHICH one EP refuses (``carrier_is_operator`` is ``head(collect(...))``
+        # — one arbitrary row), so asserting a refusal there can be false of the
+        # intended successor and withdraws a carry the check itself declines to
+        # arbitrate. Measured: an ambiguous name with one plain and one shaped
+        # carrier flipped its verdict with the MINT ORDER (round 19, #12111).
+        refused = s["carrier_count"] == 1 and _succ_refused(s)
         dest = (f"a CLAIM successor — NOT the one it names ({successor}), which EP "
                 f"refuses as a factor input" if refused
                 else f"the successor ({successor})")

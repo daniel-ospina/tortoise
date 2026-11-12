@@ -2320,3 +2320,80 @@ def test_an_op_type_only_SUPERSEDED_input_IS_stripped_by_the_operator_lane(sdk):
         "EP admitted it and then stripped it — the direct lane's predicate does not "
         "answer this lane: " + detail)
     assert "strips that terminal input" in detail, detail
+
+
+def test_a_draft_successor_on_a_direct_edge_is_EXCLUDED_not_stripped(sdk):
+    """The two lanes differ on a draft too: excluded in Cypher vs stripped in Python.
+
+    ``ep.py`` Batch 3 filters a non-live direct endpoint out of the query
+    (``live_a``/``live_b``) and appends a skipped-factor record only on the OPERATOR
+    path, so "EP strips it the same way (#780)" is false on a direct row. Measured:
+    2 confidences while live, 0 after the supersession, ``skipped: None`` — and 0
+    again after the emitted repair, still with no record (#12111 review round 19).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyDraft", status="draft")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    assert len(sdk.compute_confidence(anchors=[p["id"]],
+                                      require_calibration=False)["confidences"]) == 2
+    _supersede_object(sdk, "PolicyV1", "PolicyDraft")
+    run = sdk.compute_confidence(anchors=[p["id"]], require_calibration=False)
+    assert not (run.get("confidences") or {}) and not (run.get("skipped_factors") or []), (
+        "fixture drifted: a direct edge onto a draft is excluded, not stripped: "
+        + repr(run))
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    for text in (issue.detail, issue.fix):
+        assert "strips the same way" not in text and \
+            "strips a draft input" not in text, (
+            "EP records no strip on this lane: " + text)
+        assert "EXCLUDES from a direct edge before evaluation" in text or \
+            "excludes from a direct edge before evaluation" in text, text
+
+
+def test_a_draft_at_the_second_hop_on_a_direct_edge_is_EXCLUDED_too(sdk):
+    """Hop 2 carries the same mechanism as hop 1 — and it feeds BOTH strings."""
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    _obj(sdk, "PolicyDraft", status="draft")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _supersede_object(sdk, "PolicyV2", "PolicyDraft")
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    assert "names the next link" in issue.detail, issue.detail
+    for text in (issue.detail, issue.fix):
+        assert "strips a draft input like a terminal one" not in text, (
+            "no strip happens on a direct edge: " + text)
+
+
+def test_an_ambiguous_successor_name_is_not_called_refused(sdk):
+    """With N≥2 carriers the row must not name a refusal it cannot attribute.
+
+    ``carrier_is_operator`` is ``head(collect(...))`` — ONE arbitrary row — so
+    asserting "the one it names … EP refuses" and disposing DROP on it withdrew a
+    carry the check itself declines to arbitrate, and the verdict flipped with the
+    MINT ORDER on identical semantics (measured, #12111 review round 19).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2", is_operator=True)     # the shaped carrier, minted FIRST
+    # A genuine SECOND node carrying the same name (name-upsert bypassed), and
+    # minted AFTER the shaped one — the order that used to flip the verdict.
+    _q(sdk, "CREATE (:Object {id:'twin-PolicyV2', name:'PolicyV2', "
+            "objectKind:'other', status:'live'})", {})
+    assert _q(sdk, "MATCH (o:Object {name:'PolicyV2'}) RETURN count(o)", {}) == [[2]], \
+        "fixture drifted: the twin was upserted into one node"
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    assert "carried by 2 Objects" in issue.fix, (
+        "fixture drifted: the name must be ambiguous: " + issue.fix)
+    assert "NOT the one it names" not in issue.fix, (
+        "the row cannot say WHICH of the two EP refuses: " + issue.fix)
+    assert "the disposition for this edge is DROP" not in issue.fix, (
+        "an ambiguous name keeps the carry/drop triage: " + issue.fix)
