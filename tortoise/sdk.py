@@ -24469,6 +24469,17 @@ class TortoiseSDK:
                 # half alone. That covers the pre-#7852 spelling too, where the
                 # meaning arrived as `label` — a caller who DID declare the
                 # meaning keeps its worked example.
+                # ⛔ WHICH SIDE MOVES, AND WHY NOTHING MAY BE NAMED "THE SECOND
+                # INPUT" (#12067 review round 14, P2). `phi_coherence(ca, cb)`
+                # prices the DEPENDENT (slot 1) off the necessary CONDITION
+                # (slot 0) at the DEFAULT `->`, but the door stores `<-` too, and
+                # there the DEPENDENT is the FIRST input — measured at this head,
+                # the sentence was byte-identical for all three stored
+                # directions, so an agent that wired `<-` was told input 2 moves
+                # while EP lowered input 1. The claim below is therefore stated
+                # in ROLE terms (condition vs dependent), which is true for
+                # every direction `_canonical_direction` can store, rather than
+                # in slot terms, which is true for one.
                 _meaning_mechanisms = {
                     mechanism
                     for meaning in (semantics, label)
@@ -24477,6 +24488,13 @@ class TortoiseSDK:
                 _from_meaning = any(
                     mechanism in _meaning_mechanisms
                     for mechanism, _ in contradictions)
+                # ⛔ AND THE PREAMBLE IS PER-CONTRADICTION, NOT PER-WRITE (#12067
+                # review round 14, P2). `_other` is the FIRST contradiction
+                # (authority order: the pack leg), while `_from_meaning` is a
+                # flag over ALL of them — so a write whose pack declares NAND
+                # AND whose `semantics` declares IMPL was told the wire carried
+                # "a NAND meaning", a mechanism no input named. Provenance is
+                # read for `_other` ITSELF here.
                 if op_type == "IMPL" and _from_meaning:
                     _inversion = (
                         "An IMPL wire carrying a NAND meaning (e.g. 'refutes') "
@@ -24526,16 +24544,42 @@ class TortoiseSDK:
                     # sibling arms do: a meaning leg is "carrying a {m} meaning",
                     # a pack leg is "fed a relation declared {m}".
                     _other = contradictions[0][0]
+                    _other_from_meaning = any(
+                        mechanism == _other and mechanism in _meaning_mechanisms
+                        for mechanism, _ in contradictions)
+                    _other_from_pack = any(
+                        mechanism == _other and mechanism not in _meaning_mechanisms
+                        for mechanism, _ in contradictions)
                     _preamble = (f"carrying a {_other} meaning"
-                                 if _from_meaning
+                                 if (_other_from_meaning
+                                     and not _other_from_pack)
                                  else f"fed a relation declared {_other}")
-                    _expected = ("RAISE" if _other == "IMPL" else "LOWER")
+                    # ⛔ THE CONTRAST NAMES A DIFFERENT TRIGGER, NOT A POLARITY
+                    # (#12067 review round 14, P2). The polarity form read
+                    # "where the declared NAND mechanism would have it LOWER the
+                    # TARGET" — the SAME direction the coherence sentence just
+                    # gave, so the reader learned nothing about what to change.
+                    # `phi_nand` lowers the attacked side unconditionally, on the
+                    # strength of the attack alone; `phi_impl` is a DIFFERENCE
+                    # coupling (it moves the target toward the source's own
+                    # level, measured Δ = -0.009249 for Beta(3,7)=0.30 against a
+                    # held Beta(10,1)=0.909 — a source the target outranks pulls
+                    # it DOWN). Neither is "coherence with the sign flipped".
+                    _contrast = (
+                        "an IMPL mechanism instead moves the target TOWARD the "
+                        "source's own level, so a source the target already "
+                        "outranks pulls it down"
+                        if _other == "IMPL" else
+                        "a NAND mechanism instead lowers the attacked side on "
+                        "the strength of the attack alone, with no necessary "
+                        "condition involved")
                     _inversion = (
                         f"A coherence wire {_preamble} prices a NECESSARY "
-                        f"CONDITION — an unmet condition LOWERS the DEPENDENT "
-                        f"(the second input) and never raises it, where the "
-                        f"declared {_other} mechanism would have it {_expected} "
-                        f"the TARGET")
+                        f"CONDITION: it cannot lift the condition's own belief "
+                        f"— only leave it where it is or lower it — and "
+                        f"the DEPENDENT loses confidence when the condition is "
+                        f"absent, whereas {_contrast}. Those are different "
+                        f"relations, not one relation with the sign flipped")
                 elif _from_meaning:
                     _inversion = (
                         "A NAND wire carrying an IMPL meaning (e.g. 'supports') "
@@ -26333,7 +26377,18 @@ class TortoiseSDK:
         token made an absent coherence connection look mutual, so Phase 1 judged a
         clique where the door prices a star). Both steps are the writer's own:
         `_direction_from_semantics` reads the ONE table (`SEMANTICS_DIRECTIONS`),
-        and `_canonical_direction` is the writer's chain step 4.
+        and `_canonical_direction` is the writer's canonicalization step.
+
+        ⛔ `_canonical_direction` IS NOT STEP 4 IN FULL (#12067 review round 14,
+        P2). Step 4 also rewrites the DEFAULT SPELLING: `coherence` + (`None` or
+        `"bidirectional"`) stores `->`, while `_canonical_direction` returns a
+        PRESENT token VERBATIM (pinned at `test_2351_claim_class.py:1076`, which
+        is why the widening belongs HERE and not there). Reading only
+        `_canonical_direction` predicted a CLIQUE for an explicit
+        `"bidirectional"` while the door stored `->` and priced a STAR — measured:
+        phase 1 judged the `(b, c)` subpair of a three-input bundle the factor
+        never prices, and reported a closed-set violation for a write that
+        succeeds.
 
         ⚠️ STATED RESIDUAL: a RETIRED semantics word (`SEMANTICS_TRANSITION`) is
         not canonicalized here, so the shape may be predicted from the retired
@@ -26344,7 +26399,13 @@ class TortoiseSDK:
             derived = TortoiseSDK._direction_from_semantics(semantics)
             if derived is not None:
                 direction = derived
-        return TortoiseSDK._canonical_direction(op_type, direction)
+        direction = TortoiseSDK._canonical_direction(op_type, direction)
+        # Step 4's last half, verbatim from the writer's own block: the legacy
+        # DEFAULT spelling means "the caller stated nothing", which for this
+        # mechanism reads `->`. An explicit `<->` still records mutual necessity.
+        if op_type == "coherence" and direction == "bidirectional":
+            direction = "->"
+        return direction
 
     @staticmethod
     def _canonical_direction(op_type: str, direction: str | None) -> str:

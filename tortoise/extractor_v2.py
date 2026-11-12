@@ -9935,18 +9935,9 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
 
 
 #: The mechanisms that can already be on a MITIGATES target's pair — the CLOSED
-#: SET's three, which is a DIFFERENT question from what a payload may DECLARE.
-#: `_target_emitted` asks "has this pair already got a mechanism?", so every
-#: mechanism `emitted_edges` can carry belongs here: `Operator.op_type` admits
-#: NAND, so a plain operator entry can put `(src, dst, "NAND")` on the pair, and
-#: a set without NAND makes the #2552 arm mint an IMPL twin over it — the twin
-#: the closed set refuses, i.e. the two-warnings-blaming-the-wrong-cause shape
-#: round 4 fixed for `coherence` (#12067 review round 13, P2).
-#: The DECLARATION leg is narrower and is the SCHEMA's call, not this tuple's:
-#: `commit_schema.OperatorTarget.op_type` is `Literal["IMPL", "coherence"]` (a
-#: NAND target raises `ValidationError`) and the producer computes
-#: `_target_mech` as coherence-else-IMPL. Storage spelling: `coherence` shares
-#: `:IMPL` with IMPL; NAND lives on `:NAND` (`ep.MECHANISM_REL_TYPES`).
+#: SET's three (`Operator.op_type` admits NAND, so `emitted_edges` can carry it).
+#: The DECLARATION leg is narrower and is the SCHEMA's: `OperatorTarget.op_type`
+#: is `Literal["IMPL", "coherence"]`, and `coherence` shares `:IMPL` with IMPL.
 _MITIGATABLE_MECHANISMS = ("coherence", "IMPL", "NAND")
 
 
@@ -11483,9 +11474,9 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 f"wire): the declared target IMPL ({t_src[:40]!r} → "
                 f"{t_dst[:40]!r}) was not emitted as its own operator "
                 "— added so the dampener has its target")
-        if not (t_src and t_dst and _target_emitted(t_src, t_dst, emitted_edges)):
-            warnings.append(f"MITIGATES target edge not emitted ({t_src!r}→{t_dst!r} "
-                            "IMPL|coherence) — dropped")
+        # a pair carrying a mechanism a target cannot DECLARE is dropped here too
+        if _w := _mitigation_target_warning(t_src, t_dst, _target_mech, emitted_edges):
+            warnings.append(_w)
             continue
         payload_operators.append({
             "src": src, "dst": dst, "op_type": "MITIGATES",
@@ -18233,3 +18224,36 @@ def _gap_fill_sees_candidates(embed_list: object) -> bool:
         return bool(_vet_gate.check_batch(embed_list, "").get("candidates"))
     except Exception:  # noqa: BLE001, RUF100 — a detector that raises must not arm a call
         return False
+
+
+def _mitigation_target_warning(t_src, t_dst, target_mech,
+                              emitted_edges) -> str | None:
+    """The warning when the pair carries a mechanism a target cannot DECLARE.
+
+    ⛔ `_target_mech` can only be `coherence` or `IMPL`
+    (`commit_schema.OperatorTarget.op_type` is `Literal["IMPL", "coherence"]`,
+    so a NAND target cannot even be STATED), while :func:`_target_emitted` reads
+    the WIDER closed set. A pair emitted as NAND therefore passes the emitted
+    check and ships a payload whose target declares `IMPL` over a `:NAND`
+    operator: the commit-side bridge probe finds no IMPL edge and reports
+    "target edge (…,IMPL) not found — mitigation dropped", blaming a missing
+    IMPL edge for a pair that EXISTS and carries NAND (#12067 review round 14,
+    P1; measured at the commit layer as `created: []`, no `mitigated_by`). The
+    producer drops it here instead, with the real cause. Returns ``None`` when
+    the declared mechanism is on the pair (the normal case).
+    """
+    if not (t_src and t_dst):
+        return (f"MITIGATES target edge not emitted ({t_src!r}→{t_dst!r} "
+                "IMPL|coherence) — dropped")
+    if (t_src, t_dst, target_mech) in emitted_edges:
+        return None
+    carried = next((m for m in _MITIGATABLE_MECHANISMS
+                    if (t_src, t_dst, m) in emitted_edges), None)
+    if carried is None:
+        return (f"MITIGATES target edge not emitted ({t_src!r}→{t_dst!r} "
+                "IMPL|coherence) — dropped")
+    return (
+        f"MITIGATES dropped: the target pair ({t_src!r}→{t_dst!r}) carries "
+        f"{carried!r}, which a mitigation target cannot DECLARE "
+        f"(OperatorTarget.op_type is IMPL|coherence) — no bridge of the "
+        f"declared mechanism ({target_mech!r}) exists to attach to")

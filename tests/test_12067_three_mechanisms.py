@@ -42,6 +42,7 @@ Runnable embedded:
 from __future__ import annotations
 
 import types
+from typing import ClassVar
 
 import pytest
 
@@ -1230,10 +1231,19 @@ def test_the_mechanism_mismatch_message_names_the_THIRD_mechanism(sdk):
     # `->` reading and contradicts ONTOLOGY.
     assert "DEPENDENT" in text, text
     assert "LOWERS the condition" not in text, text
-    # …and the contrast's polarity follows the DECLARED mechanism: a NAND
-    # declaration expects the target to LOWER, so "would have it RAISE" is
-    # backwards for it — and this call declared NAND.
-    assert "would have it LOWER the TARGET" in text, text
+    # ⛔ …and NOTHING MAY BE NAMED BY SLOT (#12067 review round 14, P2).
+    # "(the second input)" is true only of the default `->`: the door also stores
+    # `<-`, where the DEPENDENT is the FIRST input (measured: `<-` lowers input 1
+    # 0.909091 → 0.901401 and leaves input 2 unmoved), so an agent that wired
+    # `<-` was told the wrong input. The sentence is stated in ROLE terms now, and
+    # this pin holds for every direction `create_operator` can store.
+    assert "the second input" not in text, text
+    assert "second input" not in text.lower(), text
+    # The contrast must name a DIFFERENT TRIGGER, not the same polarity as the
+    # coherence sentence — the old form read "…would have it LOWER the TARGET",
+    # the same direction just given, so it taught the reader nothing.
+    assert "would have it" not in text, text
+    assert "attack" in text or "TOWARD" in text, text
 
 
 def test_the_disclosure_does_not_invent_a_meaning_the_PACK_leg_never_supplied(sdk):
@@ -1565,3 +1575,161 @@ def test_the_PROMOTION_door_reports_a_refused_temporal_NAND(sdk):
         params={"c": cid, "p": prior}).result_set[0][0]
     assert nand == 0, nand
 
+def test_a_NAND_target_pair_is_DECLINED_with_the_real_cause():
+    """⛔ THE DECLARATION HALF OF THE MITIGATES TARGET (#12067 round 14, P1).
+
+    The detection set is the closed set's three (a pair can carry NAND), but the
+    DECLARATION set is the schema's two — a mitigation target cannot name NAND.
+    So a NAND pair passes `_target_emitted` and used to ship a payload declaring
+    `IMPL` over a `:NAND` operator, which the commit-side probe then dropped with
+    "target edge (…,IMPL) not found — mitigation dropped": a pair that EXISTS,
+    described as a missing IMPL edge, naming a mechanism the emission never
+    carried. Measured at the commit layer as `created: []` and no `mitigated_by`.
+
+    The pin is the PRODUCER's verdict, which is where the lie was told.
+    """
+    from tortoise.extractor_v2 import _mitigation_target_warning
+
+    assert _mitigation_target_warning(
+        "A", "B", "IMPL", {("A", "B", "IMPL")}) is None
+    assert _mitigation_target_warning(
+        "A", "B", "coherence", {("A", "B", "coherence")}) is None
+
+    text = _mitigation_target_warning(
+        "A", "B", "IMPL", {("A", "B", "NAND")})
+    assert text is not None, (
+        "a NAND pair must be declined by the producer — a target cannot "
+        "declare NAND, so nothing can attach and the commit-side warning would "
+        "describe an edge that EXISTS")
+    # …and the reason must be the real one: the mechanism the pair carries, not
+    # a missing-IMPL-edge claim.
+    assert "NAND" in text, text
+    assert "not found" not in text, text
+    assert "IMPL|coherence" in text, text
+
+    # A pair carrying NOTHING is the OTHER verb of the same helper — the #2552
+    # mint arm owns it, so the warning must say "not emitted", never "carries
+    # NAND": the two causes must stay distinguishable, which is the whole point.
+    none_emitted = _mitigation_target_warning("A", "B", "IMPL", set())
+    assert none_emitted and "not emitted" in none_emitted, none_emitted
+    assert "carries" not in none_emitted, none_emitted
+    # …and a degenerate endpoint pair still reports the missing edge verb.
+    degenerate = _mitigation_target_warning(
+        "", "B", "IMPL", {("", "B", "NAND")})
+    assert degenerate and "not emitted" in degenerate, degenerate
+
+
+def test_phase1_predicts_the_direction_the_DOOR_stores():
+    """⛔ A PREDICTION THAT DISAGREES WITH THE WRITE (round 14, P2).
+
+    `_effective_direction` claims to resolve "the direction the WRITE will
+    store", but `_canonical_direction` returns a PRESENT token VERBATIM, while
+    the writer's step 4 rewrites the DEFAULT SPELLING for `coherence`
+    (`None`/`"bidirectional"` → `->`). Phase 1 therefore predicted a CLIQUE and
+    judged the `(b, c)` subpair of a three-input bundle, while the door stored
+    `->` and priced a STAR — a closed-set violation reported for a write that
+    succeeds.
+
+    Pinned as an IDENTITY over every admitted token, so a fourth mechanism or a
+    new token cannot re-open the gap quietly.
+    """
+    from tortoise.sdk import ACCEPTED_DIRECTION_VALUES, TortoiseSDK
+
+    def door_stores(op_type, direction):
+        """The writer's own chain, steps 3-4, as `create_operator` applies it."""
+        if direction is None:
+            direction = TortoiseSDK._canonical_direction(op_type, None)
+        if op_type == "coherence" and (
+                direction is None or direction == "bidirectional"):
+            direction = "->"
+        return direction
+
+    for op_type in ("IMPL", "NAND", "coherence"):
+        for token in [None, *sorted(ACCEPTED_DIRECTION_VALUES)]:
+            got = TortoiseSDK._effective_direction(op_type, token, None)
+            want = door_stores(op_type, token)
+            assert got == want, (
+                f"{op_type}/{token!r}: Phase 1 predicts {got!r} but the door "
+                f"stores {want!r} — the pair shape judged is not the one priced")
+
+    # …and the case that was wrong: an explicit legacy default on coherence.
+    assert TortoiseSDK._effective_direction(
+        "coherence", "bidirectional", None) == "->"
+    # An explicit model token still records mutual necessity.
+    assert TortoiseSDK._effective_direction(
+        "coherence", "<->", None) == "<->"
+
+
+def test_a_MIXED_contradiction_does_not_invent_a_meaning(sdk):
+    """⛔ THE PREAMBLE IS PER-CONTRADICTION, NOT PER-WRITE (#12067 round 14, P2).
+
+    Round 8 fixed the single-leg case, but `_from_meaning` is a flag over ALL
+    contradictions while the named mechanism is `contradictions[0][0]` (the pack
+    leg, authority order). With a pack declaring NAND AND a `semantics`
+    declaring IMPL, the message said the wire carried "a NAND meaning" — a
+    mechanism the call never gave as a meaning: the round-8 defect surviving in
+    the mixed case.
+    """
+    a, b = _points(sdk)
+    out = sdk.create_operator(
+        "coherence", a, [b], label="competesWith", semantics="supports")
+    msgs = [w for w in (out.get("warnings") or [])
+            if w.get("code") == "mechanism_mismatch"]
+    assert msgs, out.get("warnings")
+    text = msgs[0]["message"]
+    # The only MEANING declared is `supports` (IMPL); NAND came from the pack.
+    assert "carrying a NAND meaning" not in text, text
+    assert "declared NAND" in text or "declares 'NAND'" in text, text
+
+
+def test_a_STRUCTURAL_verb_declaring_coherence_is_DROPPED_with_a_reason():
+    """⛔ THE STRUCTURAL ARM SKIPPED THE UNCARIABLE CHECK (#12067 round 14, P2).
+
+    `_uncarriable_reason` only ran when `paths` was empty, so `dependsOn` /
+    `hasPart` — the two verbs ONTOLOGY §8 itself names as necessity — wrote a
+    MECHANISM-LESS bare edge for a relation declaring `coherence`: not carried,
+    not dropped, not warned. `gatedBy` dropped with a reason and `dependsOn` was
+    silent, which is why a `gatedBy`-only pin could not see this branch.
+    """
+    from tortoise.relation_write import plan_relation_edges
+
+    class _OneRelationRegistry:
+        """The registry seam `declared_mechanisms` reads: `list_relations()`."""
+
+        #: `declared_hierarchy` walks this before any predicate is resolved.
+        packs: ClassVar[dict] = {}
+
+        _PREDICATES = ("gatedBy", "dependsOn", "hasPart")
+
+        def list_relations(self):
+            return [{"predicate": p, "mechanism": "coherence"}
+                    for p in self._PREDICATES]
+
+        def pack_of(self, predicate):
+            return "probe"
+
+    index = {"A": [("id-a", "subject")], "B": [("id-b", "subject")]}
+    for predicate in ("gatedBy", "dependsOn", "hasPart"):
+        edges, drops = plan_relation_edges(
+            [{"src": "A", "dst": "B", "predicate": predicate}],
+            index, registry=_OneRelationRegistry())
+        assert not edges, (
+            f"{predicate} declaring coherence wrote a mechanism-less edge — "
+            f"neither carried nor dropped: {edges}")
+        assert drops, f"{predicate}: the drop is SILENT — edges={edges}"
+        assert "coherence" in drops[0].reason, drops[0].reason
+
+
+def test_SVBP_declines_a_mechanism_it_cannot_price():
+    """⛔ THE THIRD MECHANISM PRICED AS SUPPORT (#12067 review round 14, P2).
+
+    `svbp._tilt_log_prob` selects `nand_term` on `is_nand` and takes the `else`
+    branch otherwise — and that else IS the IMPL potential. A `coherence` factor
+    was therefore priced as SUPPORT by `extract_svbp_factors`, on
+    `EventAPI.get_confidence`: the exact substitution the closed set forbids.
+    SVBP is deprecated (#7927), so it must DECLINE loudly, not mis-price.
+    """
+    from tortoise.projection import _SVBP_PRICED_MECHANISMS
+
+    assert {"IMPL", "NAND"} == _SVBP_PRICED_MECHANISMS
+    assert "coherence" not in _SVBP_PRICED_MECHANISMS

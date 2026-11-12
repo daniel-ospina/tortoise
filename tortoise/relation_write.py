@@ -762,6 +762,25 @@ def plan_relation_edges(
                         f"inferred in its place")))
             continue
         if RELATION_STRUCTURAL in paths and predicate in _VALID_EDGE_PREDICATES:
+            # ⛔ A DECLARED MECHANISM THIS LEG CANNOT CARRY DROPS THE RELATION,
+            # EVEN WHEN THE STRUCTURAL PATH EXISTS (#12067 review round 14, P2).
+            # The check below only ran on the `not paths` branch, so
+            # `dependsOn` / `hasPart` — the two verbs ONTOLOGY §8 itself names as
+            # necessity — took the structural arm and wrote a MECHANISM-LESS bare
+            # edge for a relation that DECLARES `coherence`: not carried, not
+            # dropped, not warned, which is the exact silence
+            # `_uncarriable_reason` exists to end (measured: `predicate='gatedBy'
+            # mech='coherence'` → dropped with a reason; `dependsOn` → an edge and
+            # an EMPTY drops list). The docstring and the pack template both
+            # promise the relation is NOT written, so the code moves to the
+            # promise, not the other way round.
+            _uncarriable = _uncarriable_reason(
+                predicate, semantics, registry)
+            if _uncarriable:
+                _drop_once(drops, seen_drops, src=src, dst=dst,
+                           predicate=predicate, semantics=semantics,
+                           reason=_uncarriable)
+                continue
             key = (predicate, src_id, dst_id)
             kept_at = structural_at.get(key)
             if kept_at is not None:
