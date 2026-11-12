@@ -401,12 +401,18 @@ class _FakeGraph:
                 "validFrom", "eventId", "confidence", "pointKind")
 
     def __init__(self, *, dup_row=_DUP_ROW, edges=(), carried=(0, None),
-                 canon_row=_CANON_ROW, raise_on=frozenset()):
+                 canon_row=_CANON_ROW, raise_on=frozenset(),
+                 dup_props=None):
         self.dup_row = dup_row
         self.edges = list(edges)
         self.carried = carried
         self.canon_row = canon_row
         self.raise_on = set(raise_on)
+        #: The DUPLICATE's whole property map — the `properties(d)` column the
+        #: open-set report reads. Kept OUT of the shared row tuples so every
+        #: fixed-width fixture above stays fixed-width; `None` means "no map
+        #: came back", which must read as an empty open set, not as a loss.
+        self.dup_props = dup_props
 
     def apply_slot(self, props: dict) -> None:
         """Simulate `update_point` landing: the read-back must SEE it."""
@@ -431,9 +437,14 @@ class _FakeGraph:
             return SimpleNamespace(
                 result_set=[e for e in self.edges if e[0] in wanted])
         if "d.extractedFrom" in q:
-            return SimpleNamespace(result_set=[self.dup_row])
+            # `properties(d)` is the row's LAST column; the canonical read does
+            # not select it, so the two branches differ by exactly that.
+            return SimpleNamespace(
+                result_set=[(*self.dup_row, self.dup_props)])
         if "c.extractedFrom" in q:
-            return SimpleNamespace(result_set=[self.canon_row])
+            # `canon_row=None` is the "canonical cannot be read" arm.
+            return SimpleNamespace(
+                result_set=[] if self.canon_row is None else [self.canon_row])
         if "head(collect(r.confidence))" in q:
             target = (kw.get("params") or {}).get("target")
             if isinstance(self.carried, dict):
@@ -879,11 +890,138 @@ def test_an_undeclared_provenance_field_that_differs_is_reported(sdk, monkeypatc
     A duplicate holding a different one must be REPORTED, never crossed in
     silence while the receipt says it had no evidence.
 
-    (The open-set bound is stated in the module docstring: a field outside
-    `_REPORTED_FIELDS` is neither carried nor reported — no list can cover a
-    payload's open set — and a reader must not read this guard as total.)
+    (The open-set bound is stated at `_STRUCTURAL_PROPS`: a field outside the
+    declared vocabulary is never CARRIED — no list can cover a payload's open
+    set — but since round 7 it is REPORTED by name as `undeclared`, so the
+    bound is on the carry, not on the disclosure.)
     """
     extracted, meta = _extract(
         sdk, monkeypatch, evidence={"eventId": "ev_dup_turn2"})
     assert [e["dedup"] for e in extracted] == ["new", "rephrase_linked"], extracted
     assert any("eventId" in w for w in meta["warnings"]), meta["warnings"]
+
+
+# ── 9) the OPEN SET: a prop the fold does not know is REPORTED (#2795) ─────
+
+
+def test_a_prop_outside_the_declared_vocabulary_is_reported_by_name():
+    """`api.add_point(**fields)` persists undeclared props (#2795), so a
+    duplicate can carry evidence this module has no slot for. The fold cannot
+    carry it — and the delete takes it — so it must be NAMED.
+
+    RED before round 7 — the receipt read "no per-occurrence evidence of its
+    own to carry" over a node whose `author` was about to be destroyed.
+    """
+    graph = _FakeGraph(dup_props={"id": "pt_dup", "content": "c",
+                                  "author": "second-producer"})
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["undeclared"] == ["author"], out
+    # …and the STRUCTURAL props are not noise: an id/content pair is the row's
+    # own identity, not a loss.
+    assert "id" not in out["undeclared"] and "content" not in out["undeclared"], out
+
+
+def test_the_undeclared_report_does_not_depend_on_the_fold_succeeding():
+    """A REFUSED fold also discloses the open set: the operator deciding whether
+    to force the fold needs to know what the delete would take."""
+    graph = _FakeGraph(dup_props={"author": "second-producer"},
+                       edges=[("aboutObject", "Object", "obj_1", None)],
+                       carried=(0, None))
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is False, out
+    assert out["undeclared"] == ["author"], out
+
+
+def test_a_clean_capture_point_reports_no_undeclared_props(sdk, monkeypatch):
+    """NOISE CONTROL, and the drift guard for `_STRUCTURAL_PROPS`.
+
+    A real capture Point must report an EMPTY open set: if the projection starts
+    writing a prop this module does not declare, every fold's receipt grows a
+    "dropped field(s)" clause — which is the loud direction — and this arm is
+    what makes that drift visible instead of merely loud.
+    """
+    sdk.create_object("Acme")
+    extracted, meta = _extract(
+        sdk, monkeypatch, evidence={"aboutEntities": ["Acme"]})
+    assert [e["dedup"] for e in extracted] == ["new", "rephrase_linked"], extracted
+    assert not any("could not carry" in w for w in meta["warnings"]), meta["warnings"]
+    props = sdk._get_proj().g.query(
+        "MATCH (p:Point {id:$pid}) RETURN properties(p)",
+        params={"pid": extracted[0]["id"]}).result_set[0][0]
+    assert not (set(props) - capture_fold._DECLARED_PROPS), (
+        "the projection writes props this fold does not declare (so every fold "
+        f"would report them as dropped): {sorted(set(props) - capture_fold._DECLARED_PROPS)}"
+    )
+
+
+def test_a_real_undeclared_prop_is_named_on_the_captures_receipt(sdk, monkeypatch):
+    """End to end through the capture seam: the warning NAMES the prop."""
+    extracted, meta = _extract(sdk, monkeypatch,
+                               evidence={"author": "second-producer"})
+    assert [e["dedup"] for e in extracted] == ["new", "rephrase_linked"], extracted
+    assert any("could not carry: author" in w for w in meta["warnings"]), \
+        meta["warnings"]
+
+
+# ── 10) arms a reader could delete without any test going red ──────────────
+
+
+def test_an_unreadable_canonical_refuses_naming_the_canonical():
+    """`_canonical_view` answering None (absent id, failed read) must refuse —
+    the occupancy checks compare against a view, and "no view" is not "empty".
+
+    Unpinned before round 7: deleting the arm made the carry raise inside the
+    never-raise wrapper, which reports `internal_error` — a token that blames
+    the code for a graph state.
+    """
+    graph = _FakeGraph(edges=[("aboutObject", "Object", "obj_1", None)],
+                       canon_row=None)
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "unreadable", out
+    assert "canonical" in out["blocked"], out
+
+
+def test_a_late_link_failure_discloses_the_link_it_already_wrote(monkeypatch):
+    """The positive arm of `_already_written` on the LINK side: one of two links
+    lands, the second does not, and the refusal says the canonical GAINED one.
+
+    Unpinned before round 7 (only the slot-copy arm was pinned), so a reader
+    could delete the `created` disclosure and the refusal would read "kept
+    distinct" over a canonical that gained a link.
+    """
+    # `link_entity` reports CREATION; the fake graph cannot (it answers reads
+    # only), so the writer is stubbed and the READ-BACK stays real — which is
+    # what the disclosure keys on.
+    from tortoise import session_link
+    monkeypatch.setattr(session_link, "link_entity",
+                        lambda *a, **kw: True)
+    graph = _FakeGraph(
+        edges=[("aboutObject", "Object", "obj_ok", None),
+               ("aboutObject", "Object", "obj_bad", None)],
+        carried={"obj_ok": (1, None), "obj_bad": (0, None)})
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "link_not_carried", out
+    assert out["created"] == 1 and out["carried"] == 1, out
+    assert "ALREADY added 1 attachment link(s)" in out["blocked"], out["blocked"]
+
+
+def test_an_empty_string_slot_is_a_VALUE_and_is_carried():
+    """#5004's presence rule: presence is ownership, so `""` is a value the
+    producer wrote, not an absence to fill.
+
+    Unpinned before round 7 — swapping `if value is not None:` for a truthiness
+    test left every arm green, and the duplicate's empty-string slot would be
+    dropped with the node.
+    """
+    graph = _FakeGraph(dup_row=("session:s", [], "", None, None, None, None,
+                               None, None, None, None, None))
+    sdk = _FakeSDK(on_update=graph.apply_slot)
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon", sdk=sdk)
+    assert out["ok"] is True, out
+    assert sdk.calls and sdk.calls[0].get("quote") == "", (sdk.calls, out)
+    assert out["copied"] == ["quote"], out

@@ -16988,6 +16988,7 @@ class TortoiseSDK:
                             created = fold_report["created"]
                             copied = fold_report["copied"]
                             residual = fold_report["residual"]
+                            undeclared = fold_report["undeclared"]
                             # ⚠️ "present" and "moved" are different facts:
                             # `link_entity` short-circuits a link the canonical
                             # already held, so `carried` counts links PRESENT
@@ -17008,9 +17009,16 @@ class TortoiseSDK:
                                 # per-occurrence evidence, so the
                                 # "nothing to carry" clause would contradict
                                 # the clause that immediately follows it.
+                                # `undeclared` matters for the same reason and
+                                # one more: the node carried something this
+                                # fold does not know, and the delete is about
+                                # to destroy it — so the clause that would
+                                # deny any evidence must not be printed over
+                                # it (#2795's open set).
                                 + (", no per-occurrence evidence of its own "
                                    "to carry"
-                                   if not carried and not copied and not residual
+                                   if (not carried and not copied and not residual
+                                       and not undeclared)
                                    else ""))
                             if residual:
                                 said += (
@@ -17018,6 +17026,16 @@ class TortoiseSDK:
                                     f"{', '.join(residual)} "
                                     "(one value per field — the duplicate's "
                                     "differ)")
+                            if undeclared:
+                                # The fold cannot carry a prop it does not
+                                # declare, and the duplicate is gone — so the
+                                # receipt NAMES what went with it (a silent
+                                # drop of a producer's own field was the
+                                # measured shape this clause closes).
+                                said += (
+                                    "; dropped field(s) this fold does not "
+                                    f"declare, and so could not carry: "
+                                    f"{', '.join(undeclared)}")
                             warnings.append(said)
                 if dedup == DEDUP_NEW:
                     canonical_by_hash[_content_hash(content)] = pid

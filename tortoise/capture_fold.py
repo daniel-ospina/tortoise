@@ -255,11 +255,45 @@ _SINGLE_SLOTS = (
 #: claimed it had "no evidence of its own to carry" (measured).
 #:
 #: ⚠️ This set covers the DECLARED contract plus the capture's own provenance
-#: field; a Point's payload is OPEN-SET (`api.add_point(**fields)` persists
-#: undeclared props too, #2795), so no list can cover every field a producer
-#: might attach. A field outside this list is neither carried nor reported —
-#: the honest bound of this guard, stated so a reader does not read it as total.
+#: field, and a Point's payload is OPEN-SET (`api.add_point(**fields)` persists
+#: undeclared props too, #2795) — so no list can cover every field a producer
+#: might attach. That bound is on what the fold can CARRY, not on what it
+#: discloses: a prop outside the declared vocabulary is never carried, and it
+#: is now REPORTED by name (`FoldEvidence.undeclared`, `out["undeclared"]`, and
+#: the caller's receipt) rather than silently deleted with the node. Before that
+#: report existed the receipt said "no per-occurrence evidence of its own to
+#: carry" over a duplicate whose `author`/`source` prop was about to be
+#: destroyed (measured), which is the same silence this module exists to close.
 _REPORTED_FIELDS = ("confidence", "pointKind", "eventId")
+
+#: The props the fold neither carries nor reports because they are the ROW's
+#: identity or the projection's own bookkeeping rather than the occurrence's
+#: evidence: `id` addresses the row, `content`/`content_hash` are the dedup key
+#: the FOLD ITSELF is about (the canonical holds its own, and they are equal by
+#: construction, or the two nodes would not be duplicates), `createdAt` is
+#: first-writer history and `updatedAt` moves on any later write, `is_operator`
+#: is structural (`sdk` refuses an operator-wired duplicate before this module is
+#: reached), and `status` is the lifecycle slot §4.3 owns.
+#:
+#: ⚠️ This list is the OPEN SET's boundary, so it is the one place where an
+#: unknown prop becomes visible instead of lost: a prop NOT named here is
+#: reported as undeclared. A system prop added upstream therefore shows up as
+#: noise on the receipt (loud, harmless) rather than as a silent omission, and
+#: `test_a_clean_capture_point_reports_no_undeclared_props` is what reds when
+#: this list has drifted behind the projection's own writes.
+_STRUCTURAL_PROPS = ("id", "content", "content_hash", "createdAt",
+                     "updatedAt", "is_operator", "status")
+
+#: Everything the duplicate read DECLARES it knows: the occurrence address, the
+#: single slots, the reported support fields, the source refs, and the
+#: structural identity above. A prop outside this union is the open set.
+_DECLARED_PROPS = frozenset(
+    set(_OCCURRENCE_ADDRESS)
+    | {key for key, _ in _SINGLE_SLOTS}
+    | set(_REPORTED_FIELDS)
+    | set(_STRUCTURAL_PROPS)
+    | {"extractedFrom", "extractedFromAll"}
+)
 
 
 @dataclass(frozen=True)
@@ -292,6 +326,13 @@ class FoldEvidence:
     #: receipt came to say "no evidence of its own" over a duplicate whose
     #: `confidence`/`pointKind` disagreed (measured).
     support: dict[str, Any] = field(default_factory=dict)
+    #: Props the duplicate carries that this module DECLARES no knowledge of
+    #: (`_DECLARED_PROPS`'s complement — a producer's `author`, a future field).
+    #: They are not carried (there is no declared slot to carry them into) and
+    #: they are about to be destroyed with the node, so they are REPORTED by
+    #: name: the open set #2795 permits is exactly the set a fold cannot see,
+    #: and naming it is the difference between a loss and a silent loss.
+    undeclared: tuple[str, ...] = ()
     #: More than one node carries the duplicate's id. The reads below answer for
     #: `rows[0]`, while the caller's `DETACH DELETE` removes EVERY row with that
     #: id — so a second copy's evidence would be destroyed without being read.
@@ -321,8 +362,15 @@ def assert_evidence_vocabulary() -> None:
     would destroy it — precisely the failure this module exists to stop. The
     sibling read-back (`sdk._capture_passthrough_read_fields`) generates its
     field list from that tuple for the same reason; this asserts coverage
-    instead of importing it, because importing `sdk` here would be a cycle
-    (`sdk` imports this module at its fold site).
+    instead, so the read SELECT can stay a literal Cypher string (a generated
+    one would also have to be a generated `_EVIDENCE_SELECT`, and the canonical
+    read must select the SAME list in the SAME order).
+
+    ⚠️ The import is FUNCTION-LOCAL on purpose: `sdk` imports this module at its
+    fold site, so a module-level `from .sdk import …` here would be the cycle.
+    Deferring it to call time costs one dict lookup and keeps the direction one-
+    way. (The earlier wording claimed the import was avoided altogether "because
+    importing `sdk` here would be a cycle" — two lines above the import.)
     """
     from .sdk import _CAPTURE_PASSTHROUGH_ORDER
 
@@ -346,7 +394,8 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
     """
     try:
         rows = proj.g.query(
-            _EVIDENCE_SELECT.format(alias="d") + ", d.confidence, d.pointKind",
+            _EVIDENCE_SELECT.format(alias="d")
+            + ", d.confidence, d.pointKind, properties(d)",
             params={"id": dup_id}).result_set
     except Exception:
         return None
@@ -358,11 +407,18 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         return FoldEvidence(ambiguous=True)
     (scalar_ref, all_refs, quote, span_start, span_end, source_turn_id,
      search_keys, when, validfrom, _event_id, _confidence,
-     _point_kind) = rows[0]
+     _point_kind, _props) = rows[0]
     refs: set[str] = set()
     for ref in (scalar_ref, *(all_refs or ())):
         if isinstance(ref, str) and ref.strip():
             refs.add(ref.strip())
+    # The open set: what the node carries that this module does not read. Read
+    # from the node itself (`properties(d)`), never derived from the producer's
+    # payload — the payload is the superset the projection SELECTS from. A read
+    # that returns no map at all is `()`: an absent map is not an undeclared
+    # field, and inventing one would put a phantom loss on every receipt.
+    undeclared_props = tuple(sorted(
+        str(key) for key in (_props or ()) if str(key) not in _DECLARED_PROPS))
     scalar: dict[str, Any] = {}
     for key, value in (("quote", quote), ("span_start", span_start),
                        ("span_end", span_end), ("source_turn_id", source_turn_id),
@@ -438,6 +494,7 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         malformed_address=malformed_address,
         inbound=tuple(inbound),
         support={k: v for k, v in support.items() if v is not None},
+        undeclared=undeclared_props,
     )
 
 
@@ -567,7 +624,10 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
          "carried": int,         # attachment links PRESENT after the write
          "created": int,         # …of which THIS fold wrote (rest pre-existed)
          "copied": [keys],       # free scalar slots filled from the duplicate
-         "residual": [keys]}     # slots/fields the canonical already filled
+         "residual": [keys],     # slots/fields the canonical already filled
+         "undeclared": [keys]}   # props the duplicate held and this fold does
+                                 # not know (open set, #2795) — REPORTED, never
+                                 # carried, so the caller says what it dropped
 
     ⚠️ BOTH the success and the never-raise refusal return this EXACT key set:
     the capture seam indexes `blocked` on every refusal and `carried`/`created`/
@@ -581,13 +641,19 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
     field. ``reason`` is the narrow set the module docstring enumerates.
     """
     out: dict = {"ok": False, "reason": None, "blocked": None,
-                 "carried": 0, "created": 0, "copied": [], "residual": []}
+                 "carried": 0, "created": 0, "copied": [], "residual": [],
+                 "undeclared": []}
     evidence = read_fold_evidence(proj, dup_id)
     if evidence is None:
         out["reason"] = "unreadable"
         out["blocked"] = ("the duplicate's evidence could not be read, so a "
                           "fold cannot be shown to lose nothing")
         return out
+    # Set on EVERY arm, refusals included: a refused fold also tells the caller
+    # what the node holds that this module cannot carry, and a receipt that
+    # reported it only on success would go quiet in exactly the case where the
+    # operator is deciding whether to force the fold.
+    out["undeclared"] = list(evidence.undeclared)
     if evidence.ambiguous:
         out["reason"] = "ambiguous_duplicate"
         out["blocked"] = ("more than one node carries its id, and the fold's "
