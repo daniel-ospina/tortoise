@@ -2061,3 +2061,57 @@ class TestThe12120ReadersOutsideTheEntityModule:
             approver_id="the acme corp", artifact_id=artifact, point_ids=[claim])
         assert out["event_id"] and out["decision_point_id"], (
             f"the approval was not recorded: {out}")
+
+
+class TestThe12120AnchorReaderCollapsesToo:
+    """`find_subject_by_name` took the union but not the writer's COLLAPSE.
+
+    `apply_entity_merge` leaves the candidate live with a folded key
+    (`entity_resolver.apply_entity_merge`), so the union legitimately returns two
+    rows for one entity and `create_subject` collapses them
+    (`_live_holders_same_entity`). Counting rows made this guard raise
+    `AmbiguousEntityName`, which `_classify_anchor` turns into `SubjectCollision`
+    — so a re-seed of an org whose anchor was ever merged failed at a door that
+    worked before the widening. The union without the collapse is the same
+    reader/writer disagreement as #12120 itself, in the other direction.
+    """
+
+    def test_a_merged_pair_reads_as_one_anchor(self, sdk_factory):
+        from tortoise.onboarding.seed import find_subject_by_name
+
+        sdk = sdk_factory()
+        proj = sdk._get_proj()
+        anchor = sdk.create_subject("Acme Corp", "org")["id"]
+        # the pre-#12047 damage shape the queue exists to merge: a second node
+        # carrying the SAME folded key under a different surface form
+        proj.g.query(
+            "CREATE (:Subject {id:'sub-legacy', name:'The Acme Corp', "
+            "subjectKind:'org', status:'live', canonical_name:'acme corp'})")
+        apply_entity_merge(sdk, candidate_id="sub-legacy", survivor_id=anchor,
+                           method="exact", similarity=1.0)
+
+        props = find_subject_by_name(proj, "Acme Corp")
+        assert props is not None and props["id"] == anchor, (
+            f"the guard refused a merged pair the writer collapses: {props!r}")
+        # …and the write path agrees on the same single node.
+        assert sdk.create_subject("The Acme Corp", "org")["id"] == anchor
+        assert _count(sdk, "Subject") == 2, "the merge must not delete either node"
+
+    def test_a_second_distinct_holder_still_refuses(self, sdk_factory):
+        """The collapse must not swallow a genuinely separate identity."""
+        from tortoise.onboarding.seed import find_subject_by_name
+
+        sdk = sdk_factory()
+        proj = sdk._get_proj()
+        anchor = sdk.create_subject("Acme Corp", "org")["id"]
+        proj.g.query(
+            "CREATE (:Subject {id:'sub-legacy', name:'The Acme Corp', "
+            "subjectKind:'org', status:'live', canonical_name:'acme corp'})")
+        apply_entity_merge(sdk, candidate_id="sub-legacy", survivor_id=anchor,
+                           method="exact", similarity=1.0)
+        # a THIRD node holding the same folded key but NOT merged away
+        proj.g.query(
+            "CREATE (:Subject {id:'sub-other', name:'ACME CORP', "
+            "subjectKind:'org', status:'live', canonical_name:'acme corp'})")
+        with pytest.raises(AmbiguousEntityName):
+            find_subject_by_name(proj, "Acme Corp")
