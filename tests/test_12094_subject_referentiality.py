@@ -50,6 +50,12 @@ from tortoise.log import EventLog  # noqa: E402, RUF100
 from tortoise.projection import FalkorProjection  # noqa: E402, RUF100
 
 FLAG = "TORTOISE_REFERENTIALITY"
+#: The ``#12060`` class (453 Subjects measured in the ``default`` graph) that ``#12118``
+#: tracks and this change deliberately does NOT gate — ``value_gate.identifier_only``
+#: does not claim it either (measured: it returns ``None`` here while claiming
+#: ``#4118``/a path), so it is the surface that pins the DECLINE rather than the
+#: ``value_gate`` boundary alone.
+ISSUE_SURFACE = "issue:daniel-ospina/tortoise#1234"
 
 
 def _tmp(name: str) -> str:
@@ -286,25 +292,38 @@ def test_an_identifier_subject_is_left_to_the_value_gate(monkeypatch):
     ``value_gate.identifier_only`` claims (``#4118``, a path) left this suite
     **24/24 green**, while that widening is exactly the *"unmeasured discard on a
     live document ingest"* ``_referentiality_hold``'s docstring says it declines
-    to ship. The second half below drives ``extract_entities`` for real, so the
-    claim the docstring makes as *measured* — the ``issue:<repo>#<n>`` class still
-    mints on this path (``#12118``) — has an assertion behind it.
+    to ship. The second half below drives ``extract_entities`` for real, over all
+    THREE surfaces the docstring's decline covers — ``#4118`` and a path (the two
+    ``value_gate.identifier_only`` actually claims) and ``issue:<repo>#<n>``,
+    which it does NOT — so the claim the docstring makes as *measured* — that the
+    453 ``issue:<repo>#<n>`` Subjects ``#12060`` counted still mint on this path
+    (``#12118``) — has an assertion behind it.
+
+    ⛔ THE ``issue:`` SURFACE IS THE LOAD-BEARING ONE (#12102 re-review, measured):
+    a mutant that widens the gate to hold anything ``identifier_only`` claims reds
+    this test, but a mutant that holds ``issue:``-prefixed surfaces left the suite
+    **24/24 green** while this payload was ``#4118`` alone — the very class the
+    docstring cites as the open, tracked one (``#12118``) had no pin at all.
     """
     monkeypatch.setenv(FLAG, "1")
     assert referentiality.judge("#4118") is None
     assert referentiality.judge("config/ci-surfaces.yml") is None
+    assert referentiality.judge(ISSUE_SURFACE) is None
 
     api, proj, _log = _proj_api()
     payload = {"subjects": [
         {"name": "#4118", "subjectKind": "other"},
+        {"name": "config/ci-surfaces.yml", "subjectKind": "other"},
+        {"name": ISSUE_SURFACE, "subjectKind": "other"},
     ], "objects": [], "aboutEntities": []}
 
     result = _extract(monkeypatch, payload, api)
 
-    assert result["subjects"] == 1 and result["subjects_minted"] == 1
+    assert result["subjects"] == 3 and result["subjects_minted"] == 3
     assert result["subjects_held"] == 0
     rows = proj.g.query("MATCH (s:Subject) RETURN s.name").result_set
-    assert [r[0] for r in rows] == ["#4118"], (
+    assert sorted(r[0] for r in rows) == sorted(["#4118", "config/ci-surfaces.yml",
+                                                ISSUE_SURFACE]), (
         "the identifier class must still mint on the S7 path — widening"
         " _referentiality_hold to value_gate's class is a DIFFERENT decision"
         " and would ship an unmeasured discard")
