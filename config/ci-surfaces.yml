@@ -4452,6 +4452,35 @@ surfaces:
   # `test_a_verbatim_vector_is_never_narrowed` (the #5004 round-7 promise that a
   # caller-owned vector keeps its raw form).
   - test_11821_journal_vector_width.py
+  # #11858: registered under BOTH `core` (here) and `sdk` (below). Two DIFFERENT
+  # changed paths, two different selectors, and each row is the one that carries its
+  # own half — neither substitutes for the other. Measured at `2b5ae847d4` (review
+  # cycle 8, P3; surface membership re-read from this file by `yaml.safe_load`, which
+  # reports exactly `core` and `sdk`) with the real selector, one row deleted at a
+  # time:
+  #
+  #   both rows        api.py -> ['api','core']  file RUNS | ids.py -> ['sdk']  file RUNS
+  #   this row only    api.py -> ['api','core']  file RUNS | ids.py -> ['sdk']  file NOT run
+  #   the sdk row only api.py -> ['api','core']  file NOT run
+  #
+  # So: THIS row is what makes an `api.py`-only diff run the file — via the `core`
+  # fallback (`api` and `core` are selected together) — and the `sdk` row is what
+  # does it for `tortoise/ids.py` and the other `sdk`-mapped paths, where a named
+  # surface match means no `core` fallback. `sdk.py` itself needs neither: it is a
+  # SHARED_MODULE, so any diff touching it selects the full matrix.
+  # ⛔ Do NOT "simplify" to one row. Deleting this one means an `api.py` diff — where
+  # the `api ⊆ sdk` spelling pin (`_SERVER_MANAGED_EMBEDDING_KEYS` vs the SDK family)
+  # and the `tortoise/api.py` residual note can actually break — runs NONE of this
+  # file's rows, and `--integrity` stays green through it because the file IS still
+  # classified: that gate answers a different question, which is the silent-drop
+  # class its own row above documents.
+  # History, because it was mis-stated three times and VGATE falsified each version
+  # against git: the commit that ADDED this test file (`c0634bcf6`) carried NO
+  # manifest row at all — that is what redded `--integrity` — and the first commit
+  # to carry any row is `32bed5ad2`, which added BOTH at once. No commit in
+  # `origin/main..HEAD` carries exactly one. (Bare `--register` defaults to `core`;
+  # the `sdk` placement came from `--register --surface sdk`.)
+  - test_11858_source_door_markers.py
   - test_test_lane_tool.py
   # #11385 (review P1): the S4 re-emit tax's instrument (`tools/s4_reeemit_tax.py`)
   # and its evidence bundle. Same class as `test_journal_growth.py` above — a
@@ -8126,6 +8155,7 @@ surfaces:
   # policy module moves.
   - test_csp_plan_doc_consistency.py
   sdk:
+  - test_11858_source_door_markers.py
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #8290: the RESERVED-namespace half lives in `tortoise/ids.py`, which
   # `SOURCE_PATTERNS` maps to the NAMED surface `sdk` — and a named-surface match

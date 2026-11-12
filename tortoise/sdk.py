@@ -5069,6 +5069,55 @@ _RESERVED_ENVELOPE_PROPS = (
     "initiated_by", "projection_version",
 )
 
+#: The SERVER-MANAGED embedding journal fields — the names a caller may never
+#: supply, for TWO different reasons that must not be collapsed into one (#11858
+#: review cycle 3, P3 — measured):
+#:
+#: * `embedding_width` / `embedding_model` / `embedding_revision` /
+#:   `embedding_text_hash` are DERIVED by the writer beside the vector;
+#: * `embedding_verbatim` / `embedding_preserved` / `embeddingText` are INPUTS
+#:   the writer READS (`tortoise/embeddings.py:539`, `:550`, `:692`) — a caller
+#:   value for those does not duplicate a derivation, it FORGES the reading.
+#:
+#: ONE spelling, TWO placements, and the second placement is the fix for #11858:
+#:
+#: * `_sanitize_props` refuses them at prop INTAKE, which covers every SDK door
+#:   that passes through it;
+#: * `create_source` refuses them over its ASSEMBLED `ev`, because that door
+#:   builds its payload itself and passes `_skip_sanitize=True` — the intake
+#:   strip cannot cover it, and the write happens before `_emit_event` runs.
+#:
+#: ⛔ WHAT THE WRITER ACTUALLY DOES, per key — the enumeration above is a
+#: REFUSAL set, not a claim that one function mints all seven (#11858 review
+#: cycle 2, P2 — measured). `stamp_journal_embedding` WRITES `embedding_width`
+#: for every vector it stamps, and writes `embedding_model` /
+#: `embedding_revision` / `embedding_text_hash` only on `creating=True` records
+#: (`tortoise/embeddings.py:539-562`) — which a `SourceCreated` never is. It only
+#: READS `embedding_verbatim` / `embedding_preserved` / `embeddingText`
+#: (`:539`, `:550`, `:692`): those three are INPUTS the writer consults, so a
+#: caller value does not "duplicate a derivation" — it FORGES the reading (a
+#: truthy `embedding_preserved` silences the R1 model-change attestation; a
+#: supplied `embeddingText` rewrites the text the #4194 comparison trusts).
+#:
+#: The measured route the refusal names is therefore the WIDTH one: hand over the
+#: vector with `embedding=` and the writer declares `f32`/`f64` from the values
+#: it just stored. The other six have no route on this door by design — they are
+#: not the caller's to set, and the message says so instead of promising a mint
+#: that does not happen.
+#:
+#: ⚠️ What this set is NOT: a claim about every caller-visible journal field.
+#: `update_point` legitimately rides `embedding_verbatim` INTO a `PointRevised`
+#: record (it sets it from the vector it was given, #5004 round-8) — so the set
+#: is refused at INTAKE and at the ONE door that bypasses intake, never as a
+#: blanket rule over `_emit_event`'s props, where it would false-block that
+#: sanctioned writer.
+_SERVER_MANAGED_EMBEDDING_MARKERS = frozenset({
+    "embedding_model", "embedding_revision", "embedding_text_hash",
+    "embeddingText",
+    "embedding_verbatim", "embedding_preserved",
+    "embedding_width",
+})
+
 #: `_emit_event`-owned names that are NOT journal-envelope keys, yet still
 #: collide with a caller prop AT THE CALL — the same fail-open the set above
 #: closes, but invisible to `_journal_record_payload` (neither name is in
@@ -6840,31 +6889,11 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # persist LIVE and vanish on a rebuild — a live/replay parity break. They
     # are brand-new names, so rejecting them cannot break an existing caller;
     # this closes the only route by which they could become node properties.
-    _embed_identity_keys = set(props) & {
-        "embedding_model", "embedding_revision", "embedding_text_hash",
-        # #8488 scope 1: the enriched text a turn's vector describes is
-        # WRITER-minted (only the capture path stores it, beside the vector it
-        # was encoded from). A caller-supplied value would persist live through
-        # `update_point`'s bare `SET n += $props`, and no `PointRevised` arm
-        # replays it — a live-only write a rebuild drops. It is also the input
-        # to the #4194 comparison, so a caller-set value would let a node claim
-        # a vector describes text it was never computed from.
-        "embeddingText",
-        # #5004 round-3/4: the verbatim marker is server-owned too. It is a
-        # declared node property (so a re-emit carries it), which means a
-        # tenant-supplied value WOULD persist live — and it both flips the
-        # replay's storage form and silences the R1 model-change attestation.
-        # `embedding_preserved` is the same argument: truthy makes
-        # `stamp_journal_embedding` skip the identity on a CREATING record, so
-        # a caller could silence the model-change record R1 exists to keep
-        # (and, living only on the live side, it is a parity break too).
-        "embedding_verbatim", "embedding_preserved",
-        # #11821 P0: the journal payload's vector WIDTH marker. Server-minted
-        # beside the vector (`stamp_journal_embedding`), and it must stay out of
-        # caller props for the same reason as the identity stamps: it is a
-        # recorded fact about the journal's text, and a caller could otherwise
-        # forge it.
-        "embedding_width"}
+    # The family and its reasons live in ONE constant
+    # (`_SERVER_MANAGED_EMBEDDING_MARKERS`); the notes it carries are the ones
+    # this strip was introduced with (#8488 scope 1 for `embeddingText`, #5004
+    # round-3/4 for the verbatim/preserved pair, #11821 P0 for the width).
+    _embed_identity_keys = set(props) & _SERVER_MANAGED_EMBEDDING_MARKERS
     if _embed_identity_keys:
         raise ValueError(
             f"{sorted(_embed_identity_keys)} are server-managed embedding "
@@ -49042,11 +49071,71 @@ class TortoiseSDK:
         # store unguarded, so `create_source(url, "web", sourceDate=2**70)` was
         # still silently clamped — the exact defect #4647 exists to fix, still
         # live on a public tenant write surface (and reachable through `ingest`,
-        # which splats `**item` into this method). Running it here, after every
-        # `ev` assignment, makes the cover structural: a field added to `ev`
-        # later cannot bypass a guard that runs after all of them.
+        # which splats `**item` into this method). Running it here, after the
+        # CALLER-facing assignments, covers every field a caller can reach: a
+        # caller field added to `ev` above this point cannot bypass the guard.
+        # (Two assignments do follow it — `updatedAt` and `validFrom`, minted
+        # from this door's one clock — so the cover is over caller ingress, not
+        # over literally every later line. Stated because the earlier wording
+        # "after every `ev` assignment … cannot bypass a guard that runs after
+        # all of them" was false as written, and #11858's guard below says why
+        # that distinction matters.)
         for _key, _value in ev.items():
             _reject_unrepresentable_number(_key, _value)
+        # #11858: the embedding MARKER family is not caller-writable on this
+        # door either — and the placement follows the two gates above for the
+        # same reason: this writer bypasses `_sanitize_props` entirely
+        # (`_skip_sanitize=True`), it is the ONE door measured to accept them,
+        # and it writes the node BEFORE it emits, so a refusal at `_emit_event`
+        # would land too late and leave a live-only `:Source` (the #2296
+        # divergence). Over the ASSEMBLED `ev`, so the guard follows every
+        # CALLER ingress of this door (the `**props` splat and the explicit
+        # keyword arguments) rather than a caller-argument list. It is NOT a
+        # claim that no `ev` assignment follows — two server-minted ones do, and
+        # the note below the guard names them.
+        #
+        # Measured at `7e6baffc5d`, one `create_source` call per key, none of
+        # them carrying any vector — i.e. every marker describing NOTHING:
+        #
+        #     create_source(url, "web", embedding_width="f16")
+        #       -> OK, journalled SourceCreated with `embedding_width: "f16"`
+        #          and no `embedding` key anywhere (#11996 measured the same
+        #          through this door); `embedding_verbatim` / `_preserved` /
+        #          `_model` / `_revision` / `_text_hash` / `embeddingText`
+        #          land identically.
+        #
+        # The other public props doors were driven the same way in the same
+        # measurement — all TEN of them (the eleven `**props` write doors minus
+        # this one), not just the four this note first listed (#11858 review
+        # cycle 3, P3): `create_point`, `create_entity`,
+        # `create_document`, `create_object`, `create_subject`, `create_event`,
+        # `update_point` and `update_entity` refuse the name at intake; `update`
+        # and `update_knowledge` refuse on an EXISTING node and silently no-op
+        # on an unknown id (so a census row for those two must create its target
+        # first — a row without one asserts nothing). This door was the only
+        # leak, which is why the guard is here and why the test drives every
+        # door rather than this row alone.
+        #
+        # ⚠️ Scope of "covered": this guard sits above every CALLER ingress
+        # (`**props` is splatted into `ev` at the top of this method), so a
+        # caller key cannot arrive below it. It is NOT a claim that no `ev`
+        # assignment follows — two server-minted ones do (`updatedAt` /
+        # `validFrom` from the one clock), and they are this door's own values,
+        # not caller input. That distinction is pinned by the control test rather
+        # than by this comment (a marker injected after the guard is caught
+        # there; the guard itself never sees it).
+        _caller_markers = sorted(set(ev) & _SERVER_MANAGED_EMBEDDING_MARKERS)
+        if _caller_markers:
+            raise ValueError(
+                f"{_caller_markers} are server-managed embedding journal "
+                "fields and cannot be set by hand. On this door the writer "
+                "declares only the WIDTH, derived from the vector it stores — "
+                "pass `embedding=` and it declares the truth; the rest are "
+                "either inputs the writer READS (a supplied value forges that "
+                "reading) or identity stamps it never mints on a `:Source`. A "
+                "marker written here describes no values at all, which is "
+                "exactly what a later width/base64 migration trusts (#11858)."
+            )
         # #2782 (review Finding 3): the same reason, one field family over — and
         # the same placement discipline, over the ASSEMBLED ``ev`` so a later
         # keyword cannot bypass it. This door is the one props write that never
