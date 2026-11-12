@@ -5067,12 +5067,15 @@ _EPIC_CITE_SOURCES = {
     "ci_surfaces": _REPO / "config/ci-surfaces.yml",
     # ⛔ `relation_write.py`'s `plan_hierarchy_edges` call is cited by two documents
     # (and by an artifact row that talks about the same seam) and by NOTHING else in
-    # this file. Measured commit-by-commit across #12112's own 36 commits (2 of them
-    # predate the call's existence): the call sat at `:631` on `origin/main` (8
-    # commits), then `:687` (22), then `:695` (3), then
-    # `:700` at the squash (1) — **four** numbers, not three, with the documents
-    # trailing one behind at each step. (`:687` is the move an earlier draft of this
-    # comment dropped, and dropping it is the same error the comment is about.)
+    # this file. Measured commit-by-commit across ALL 36 of #12112's commits — every
+    # object fetched FIRST, because `git show` on a missing object prints nothing and
+    # exits 0, which is how the first draft of this comment "counted" two commits as
+    # pre-dating the call: they were simply unreadable. Correct distribution: `:631`
+    # (8 commits), `:687` (22), `:695` (4), `:700` (2) = 36 — **four** VALUES and
+    # **three** moves, with the documents trailing one behind at each step. (`:687`
+    # is the move the first draft dropped, and dropping it was the same error the
+    # comment is about. `:631` is where `main` already had it, so it is the
+    # starting value, not a move.)
     # ⛔ ONE TREE, ONE NUMBER: `:631` is the call at `aebf91352bfd` and is
     # `declared=None,` at the branch's forward merge `5b17de24de42` (that merge is what
     # made the number wrong). Quoting either tree's reading as if it described both is
@@ -5185,9 +5188,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # re-derivation onto it does not get told `sdk:` and conclude the guard is
         # broken.
         # The `plan_hierarchy_edges` CALL, in the two documents that name it, keyed
-        # by the sentence rather than by the number: #12112 moved this line four
-        # times (`631` on main, `687`, `695`, `700`) and each move left a document
-        # behind.
+        # by the sentence rather than by the number: `:631` is where `main` had it,
+        # then #12112 moved it three times (`687`, `695`, `700`) and each move left a
+        # document behind — four VALUES, three moves.
         # ⛔ Three rows, not one, because a row scopes to ONE document + ONE source
         # and the 11083 record is a different file that no sweep reads at all.
         ("RECONCILE-A1-A2-A5.md", "one of them the **call**", (
@@ -5198,6 +5201,22 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ), "relation_write"),
         ("11083/README.md", "calls `pack_hierarchy.plan_hierarchy_edges`", (
             ("700", "planned = plan_hierarchy_edges("),
+        ), "relation_write"),
+        # ⛔ The BLOCK at `:687`/`:705` is why this whole pin exists: it is the line
+        # that read `` (`:53 :653 :695 :700`), `:695` being the CALL `` while `:695`
+        # was `continue` — printably self-contradictory. The first version of this
+        # table pinned only the two PROSE sentences and left the block unpinned, so
+        # mutating it back to its previous numbers ran 282 green (measured at
+        # `2931c9c59c`, review cycle 2). A repaired cite that nothing pins is a
+        # repair the next move of the symbol undoes silently.
+        ("RECONCILE-A1-A2-A5.md", "is the same module's own internal", (
+            ("700", "planned = plan_hierarchy_edges("),
+        ), "relation_write"),
+        ("RECONCILE-A1-A2-A5.md", "being the CALL", (
+            ("53", "``pack_hierarchy.plan_hierarchy_edges`` is the oracle"),
+            ("658", "plan_hierarchy_edges,"),
+            ("700", "planned = plan_hierarchy_edges("),
+            ("705", "`plan_hierarchy_edges` returns one"),
         ), "relation_write"),
         ("03-test-design.md", "`carve_out:` holds **one**", (
             ("9933", "- test_pack_logic_writeprobe_11083.py"),
