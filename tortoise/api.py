@@ -335,10 +335,15 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
         # declared width that is neither of the seam's two (`"f16"`, say) is
         # ALSO returned here, and that is a named RESIDUAL, not a truthfulness
         # claim: measured at this head, `embedding_width="f16"` beside a vector
-        # is ACCEPTED and journalled. No door mints a third width and the seam
-        # mints only `f32`/`f64`, so it is unobservable to a live caller — the
-        # sentence above would become false only if someone widened it to
-        # "any other declared width is truthful", which this line does not say.
+        # is ACCEPTED and journalled. No PRODUCER writes a third width (the seam
+        # mints only `f32`/`f64`), but that is not the same as unobservable — a
+        # caller can SUPPLY one, and `TortoiseSDK.create_source(**props)` takes
+        # `embedding_width` through its `_skip_sanitize` carve-out with no
+        # width verifier behind it, so a live caller can still journal a
+        # declared width over NO vector through the SDK funnel (#11948 records
+        # that unguarded-door class; this channel closes the EventAPI funnel
+        # only). The sentence above would become false only if someone widened
+        # it to "any other declared width is truthful".
         return
     try:
         truthful = _is_shortest_f32_text(values)
