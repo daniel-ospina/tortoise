@@ -1143,18 +1143,6 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "are prose — the DOCSTRING reproducing the measured `_emit(...)` calls and the body "
         "comments recording later measured cases — because `_EMBED_WRITE` reads raw source, as "
         "it does for `tortoise.projection::_prewipe_synthetic_write_scope`'s"),
-    "tortoise.sdk::create_source": (
-        CENSUS_EXEMPT,
-        "`tortoise/sdk.py::create_source` — the `#11858` guard's OWN message is the only "
-        "match: its `ValueError` text says \"pass `embedding=` and it declares the truth\", "
-        "and `_EMBED_WRITE` reads raw source, so prose quoting the key enrols the function. "
-        "This door writes no vector of its own — it refuses a caller-supplied MARKER before "
-        "the props write, and the vector it stores is the caller's `embedding`, carried by "
-        "the same `_emit_event` / `_create_entity` path every other `:Source` writer uses; "
-        "it names no label of its own (`NO_LIVE_VECTOR` in `tortoise/embed_writer_register`). "
-        "⛔ Arrived at `origin/main` in `18d43e0462` (`#12113`) WITHOUT a census entry, so the "
-        "probe was red on `main` before this branch touched it (measured: 5 failures whose "
-        "only unclassified name is this one)"),
     "tortoise.api::_int_is_float_exact": (
         CENSUS_EXEMPT,
         "`tortoise/api.py::_int_is_float_exact` — a pure PREDICATE (`float(value) == value`, "
@@ -1301,7 +1289,10 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "disposition `tortoise.api::add_point` carries, and the reason "
         "`tortoise/projection/entities.py::_upsert_source`'s passthrough legitimately stores "
         "`s.embedding` for the vector retrieval leg to read. Exempt as a CARRIER — NOT "
-        "because no store is reachable through it"),
+        "because no store is reachable through it. ⛔ The match arrived at `origin/main` in "
+        "`18d43e0462` (`#12113`) WITHOUT a census entry, so the probe was red on `main` from "
+        "that merge until this entry landed in `a7b2d51bf1` (`#12016`); measured then, 5 "
+        "failures whose only unclassified name was this one"),
     "tortoise.sdk::ingest_corpus": (
         CENSUS_RECOGNISED,
         "`tortoise/sdk.py::ingest_corpus` — `self._session_embedding(...)` + "
@@ -1328,12 +1319,6 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     "tortoise.api::add_point": (
         ("tortoise/api.py", "add_point",
          'p["embedding"] = fields["embedding"]'),),
-    "tortoise.sdk::create_source": (
-        # The quoted refusal sentence itself — the whole reason this name enrols.
-        ("tortoise/sdk.py", "create_source",
-         "pass `embedding=` and it declares the truth"),
-        # …and the guard that makes the class true (it refuses MARKERS; it writes none).
-        ("tortoise/sdk.py", "create_source", "_SERVER_MANAGED_EMBEDDING_MARKERS"),),
     "tortoise.api::_int_is_float_exact": (
         # ⛔ The DOCSTRING's quoted REFUSAL is the entire reason this name is in
         # the population: `_EMBED_WRITE` reads raw SOURCE, so the measured example

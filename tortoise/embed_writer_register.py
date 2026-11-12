@@ -983,25 +983,6 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
         ),
     ),
     (
-        "tortoise.sdk::create_source",
-        WriterClass(
-            EXEMPT,
-            "`tortoise/sdk.py::create_source` — this door REFUSES a caller-supplied "
-            "embedding MARKER (`_SERVER_MANAGED_EMBEDDING_MARKERS`, `#11858`) and writes "
-            "no vector of its own; the vector it stores is the caller's `embedding`, "
-            "carried through the same `_emit_event` / `_create_entity` path as every "
-            "other `:Source` writer. The instrument's only match is the guard's own "
-            "MESSAGE (\"pass `embedding=` and it declares the truth\"), and "
-            "`_EMBED_WRITE` reads raw SOURCE, so prose quoting the key enrols the "
-            "function — the same false-positive class as "
-            "`tortoise.api::_int_is_float_exact` below. ⛔ It arrived at `origin/main` in "
-            "`18d43e0462` (`#12113`) without an entry, so the probe was red on `main` "
-            "before this branch touched it (measured)",
-            "#11858",
-            stores=NO_LIVE_VECTOR,  # the match is the guard's own MESSAGE, all prose
-        ),
-    ),
-    (
         "tortoise.api::_int_is_float_exact",
         WriterClass(
             EXEMPT,
