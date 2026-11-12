@@ -432,6 +432,53 @@ def test_every_embedded_label_has_a_query_path():
         assert row.verdict in ("PARTIAL", "NOT MET"), row.verdict
 
 
+#: ── `#11747`: the write path the DISCOVERY cannot see ─────────────────────────────────
+#: `cache_projection.node_statement` stores its vector through an INTERPOLATED property name
+#: (`f", n.{prop} = {form}"`), which is one of the shapes `_EMBED_WRITE` and the AST pass cannot
+#: decide — so the writer was ABSENT from `embedding_writers()` and a `:Session` vector reached the
+#: graph while this row printed `MET` / `stored-without-a-query-path: none`. The two tests below
+#: are that hole's closure: the first pins that the row MEASURES the projection at all (and that
+#: the measurement is non-vacuous), the second that removing the guard turns the row RED.
+
+
+def test_row_two_MEASURES_the_cache_projection_by_running_it():
+    """`#11747` — measured by EXECUTING the writer, because reading it is the blind spot.
+
+    ⚠️ Non-vacuity is the load-bearing half. A derivation that simply returned nothing (or that
+    the import broke) would satisfy `labels <= served` on the live tree while seeing no store at
+    all — the fail-open shape every row in this file refuses. So the assertion is that the
+    projection DOES store vectors, that every label it stores on is served, and that `Session`
+    is not among them.
+    """
+    measured = probe.cache_projection_store_labels()
+    assert measured["error"] is None, measured["error"]
+    assert measured["unmeasured"] == {}, measured["unmeasured"]
+    assert measured["labels"], (
+        "the projection reports NO vector store at all — the probe is measuring nothing, so a "
+        "`labels <= served` assertion below would pass vacuously")
+    assert measured["labels"] <= probe.served_labels(), (
+        sorted(measured["labels"] - probe.served_labels()))
+    assert "Session" not in measured["labels"]
+    assert probe.score_path_bullet().verdict == "MET"
+
+
+def test_re_introducing_the_session_vector_flips_row_two_to_NOT_MET(monkeypatch):
+    """The falsifier: delete the guard and this row must go RED by itself.
+
+    ⛔ Mutating the GATE (not the probe's inputs) is the point: it exercises the real derivation
+    path end to end — `node_from_row` → `node_statement` → `stmt.params` → served-set comparison
+    — so the test reds on the failure a future lane would actually introduce, rather than on a
+    mock the probe was told to believe.
+    """
+    import tortoise.cache_projection as cp
+
+    monkeypatch.setattr(cp, "UNSERVED_VECTOR_LABELS", frozenset())
+    assert "Session" in probe.cache_projection_store_labels()["labels"]
+    row = probe.score_path_bullet()
+    assert row.verdict == "NOT MET", row.observed
+    assert "stored-without-a-query-path: ['Session']" in row.observed
+
+
 #: ── `#11492`: row 2 resolves labels from the SAME product register row 1 reads ──────────────
 #: The issue required the reading to be DECIDED, not assumed: the register classified writers but
 #: carried NO label (Case B), and the label is not derivable per writer either (15 of the 20
@@ -7069,7 +7116,7 @@ def test_the_census_doc_collects_what_the_file_collects():
     (the skip is the `<3.12` re-derive) and the carve-out lane reads
     `164 passed, 2 skipped` (that skip plus `tests/_live_utils.py`'s live-graph
     fixture, which only a lane with a `TORTOISE_DB_URI` satisfies). Both splits add
-    to the `166` re-derived below, which is why the doc states its split as
+    to the `168` re-derived below, which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
     """
     root = Path(probe.__file__).resolve().parent.parent

@@ -227,7 +227,7 @@ from .residency import (
     ResidencyDeclaration,
     declare_residency,
 )
-from .security import validate_rel_type
+from .security import VALID_ENTITY_TYPES, entity_label, validate_rel_type
 from .session_source_display import SESSION_SOURCE_SUMMARY_PREFIX
 from .stored_form import STORED_VECTOR_PROPS, VERBATIM_MARKER, is_verbatim
 
@@ -292,8 +292,10 @@ __all__ = [
     "read_lifecycle_events",
     "read_record_view",
     "record_plan",
+    "UNSERVED_VECTOR_LABELS",
     "relation_from_row",
     "relation_statement",
+    "served_vector_labels",
     "stored_vector_props",
 ]
 
@@ -306,6 +308,53 @@ NODE_TABLES: dict[str, str] = {
     "Source": "source",
     "Session": "session",
 }
+
+def served_vector_labels() -> frozenset[str]:
+    """The labels the VECTOR query leg can reach — the runner's own vocabulary.
+
+    ⛔ Read from :mod:`tortoise.security`, never restated here. That module is
+    the single home of both halves `run_vector_query` applies: it validates the
+    caller's ``entity_type`` against ``VALID_ENTITY_TYPES`` and then translates
+    it with :func:`~tortoise.security.entity_label`. A second copy of the set in
+    this module is exactly how a writer and the query leg start disagreeing
+    about which labels exist — the disagreement `#5090` DoD row 2 scores.
+
+    Ordinary ``frozenset`` rather than a cached constant because the vocabulary
+    is a module-level declaration, not a file read: the cost is six dict lookups
+    and the alternative (a module-scope constant computed from an import) is the
+    same thing with an import-order dependency attached.
+    """
+    return frozenset(entity_label(t) for t in VALID_ENTITY_TYPES)
+
+
+#: ⛔ `#11747` — the labels this projection can be handed a vector for and MUST
+#: NOT store one on: the record tables it materialises, minus the labels the
+#: vector leg serves. **`Session` is the only member today**, and the reason is
+#: structural rather than incidental: `public.session` has NO `embedding` column
+#: (see its `CREATE TABLE`), so a `:Session` vector has no PRIMARY claim in the
+#: record at all — it can only arrive through the row's open-set `props` tail
+#: (whose CHECK is `NOT (props ?| ARRAY[]::text[])`, i.e. it constrains nothing),
+#: and it can then never be read: `run_vector_query` refuses `entity_type='session'`
+#: before it builds a query. A vector paid for and unreadable is precisely what
+#: `#5090` row 2 forbids, and storing one also made the cache richer than the
+#: record `#7968` declares.
+#:
+#: ⛔ DERIVED, not written down: a label added to :data:`NODE_TABLES` without a
+#: served query path lands here automatically, and a label that BECOMES served
+#: (a `#11901`/V3 index) leaves here automatically. This is deliberately NOT an
+#: index decision — which labels get a vector index is `#11901`'s, not this
+#: module's; this only states what may be WRITTEN.
+#:
+#: ⚠️ WHY THE DROP IS HERE AND NOT A REFUSAL. `record_plan` materialises a whole
+#: record view; raising on one row's stray `props` key would make a rebuild
+#: unable to complete over a single malformed tail — the same trade
+#: `tortoise.hosted_backup._require_served_restore_labels` makes in its
+#: `allow_unserved_vectors` repair-on-read path, and where it iterates the same
+#: decision from the other direction: keep the node, drop the vector, REPORT it.
+#: :func:`node_statement` carries the report on
+#: :attr:`Statement.dropped_vectors`, so the drop is nameable at runtime and
+#: never silent (this module's own rule for every column it declines).
+UNSERVED_VECTOR_LABELS: frozenset[str] = frozenset(NODE_TABLES) - served_vector_labels()
 
 #: The relations table — every edge is a row (ONTOLOGY §8 reification).
 RELATION_TABLE = "relation"
@@ -1686,10 +1735,18 @@ class RecordView:
 
 @dataclass(frozen=True)
 class Statement:
-    """One parameterized Cypher statement."""
+    """One parameterized Cypher statement.
+
+    ``dropped_vectors`` is the DROP LOG (`#11747`): the vector properties this
+    statement REFUSED to store, mapped to the reason. It is empty on every
+    statement that stored what it was given, so a caller can assert the drop
+    happened without re-deriving why it should have — and an empty map is the
+    signal that nothing was withheld, never a claim that nothing could be.
+    """
 
     cypher: str
     params: Mapping[str, Any]
+    dropped_vectors: Mapping[str, str] = field(default_factory=dict)
 
 
 def _scalar(value: Any) -> Any:
@@ -3296,9 +3353,20 @@ def node_statement(node: RecordNode) -> Statement:
     props.pop(VERBATIM_MARKER, None)
     cypher = f"MERGE (n:{node.label} {{{key_prop}:$key}}) SET n += $props"
     params: dict[str, Any] = {"key": node.key, "props": props}
+    dropped: dict[str, str] = {}
     for prop in sorted(STORED_VECTOR_PROPS):
         vector = props.pop(prop, None)
         if vector is None:
+            continue
+        if node.label in UNSERVED_VECTOR_LABELS:
+            # ⛔ #11747 — the label is one no query leg reaches, so the vector
+            # could never be read. Dropped, and REPORTED on the statement, never
+            # written silently (see :data:`UNSERVED_VECTOR_LABELS`).
+            dropped[prop] = (
+                f"{node.label} is not a label run_vector_query serves "
+                f"(served: {sorted(served_vector_labels())}) — a vector stored "
+                f"there has no query path"
+            )
             continue
         form = f"${prop}" if verbatim else f"vecf32(${prop})"
         cypher += f", n.{prop} = {form}"
@@ -3311,7 +3379,7 @@ def node_statement(node: RecordNode) -> Statement:
         # storage FORM: a caller-owned float64 vector would lose its flag and
         # the next journaled re-emit would narrow it through `vecf32` (#5004).
         props[VERBATIM_MARKER] = True
-    return Statement(cypher=cypher, params=params)
+    return Statement(cypher=cypher, params=params, dropped_vectors=dropped)
 
 
 def relation_statement(rel: RecordRelation) -> Statement:

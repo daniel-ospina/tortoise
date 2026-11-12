@@ -2060,6 +2060,80 @@ def unparsed_modules(writers: dict[str, dict] | None = None) -> list[str]:
     return sorted(d["at"] for d in writers.values() if d["kind"] == "unparsed")
 
 
+#: `#11747` — a width is irrelevant here: the statement is BUILT, never executed,
+#: so the probe plants a two-element vector rather than importing the encoder.
+_CACHE_PROJECTION_PROBE_VECTOR: tuple[float, ...] = (0.5, 0.25)
+
+
+def cache_projection_store_labels() -> dict:
+    """The labels `cache_projection` can still put a vector on — MEASURED, not read.
+
+    ⛔ `#11747`: `cache_projection.node_statement` was storing a vector on
+    `:Session` while this row read `MET` with `stored-without-a-query-path: none`.
+    The reason is the DISCOVERY's blind spot, not a gap in the served set: the
+    writer emits `f", n.{prop} = {form}"` (a property name INTERPOLATED into the
+    clause), which is one of the shapes `_EMBED_WRITE` and the AST pass cannot
+    decide — so the writer was absent from `embedding_writers()` entirely and its
+    label never reached the served-set comparison. (`tortoise/embed_writer_register`
+    says the same in its own words; `INVISIBLE_SHAPES["interpolated_property"]`
+    pins it.)
+
+    So this derivation does not read the writer's SOURCE — it RUNS the writer's
+    own pipeline (`node_from_row` → `node_statement`) for every label in
+    :data:`tortoise.cache_projection.NODE_TABLES` and asks the resulting
+    statement what it would actually store. That is immune to the spelling of
+    the clause by construction: the answer is read off ``stmt.params``, where a
+    vector appears only when a store clause was emitted for it.
+
+    ⛔ BOTH DOORS ARE PROBED, and neither is assumed: a vector reaches this
+    writer through the record's ``embedding`` COLUMN (point/event/source/… carry
+    one) or through the row's open-set ``props`` TAIL — which is the ONLY door on
+    `public.session`, whose `chk_session_props_no_derived` refuses nothing at all
+    (`NOT (props ?| ARRAY[]::text[])`). A shape that REFUSES the name is a
+    measurement of that door, not a hole; a label where NEITHER shape could be
+    built is reported as unmeasured, which holds the row rather than answering
+    for it.
+
+    Returns ``{"labels": frozenset[str], "unmeasured": {label: why}, "error": str|None}``
+    — ``error`` means the projection could not be imported at all, so nothing
+    was measured and the row must not read as if something had been.
+    """
+    try:
+        from tortoise import cache_projection as cp
+        from tortoise import record_projection as rp
+    except Exception as e:  # noqa: BLE001 — an unimportable projection is UNMEASURED
+        return {"labels": frozenset(), "unmeasured": {},
+                "error": f"{type(e).__name__}: {e}"}
+    stored: set[str] = set()
+    unmeasured: dict[str, str] = {}
+    vector = list(_CACHE_PROJECTION_PROBE_VECTOR)
+    for label in sorted(cp.NODE_TABLES):
+        # The record's own key column for this label (the schema's contract key).
+        key_column = rp.snake(cp.KEY_PROPERTY[label])
+        key = f"dod-5090-probe-{rp.snake(label)}"
+        shapes = (
+            # (1) the `props` TAIL — the open set every table carries.
+            {key_column: key, "props": {"embedding": vector}},
+            # (2) the record's `embedding` COLUMN, where the table has one.
+            {key_column: key, "embedding": vector},
+        )
+        measured = False
+        errors: list[str] = []
+        for row in shapes:
+            try:
+                stmt = cp.node_statement(cp.node_from_row(label, row))
+            except Exception as e:  # noqa: BLE001 — a refusal is one door's answer
+                errors.append(f"{type(e).__name__}: {e}")
+                continue
+            measured = True
+            if any(prop in stmt.params for prop in cp.stored_vector_props()):
+                stored.add(label)
+                break
+        if not measured:
+            unmeasured[label] = "; ".join(errors)
+    return {"labels": frozenset(stored), "unmeasured": unmeasured, "error": None}
+
+
 def served_labels() -> set[str]:
     """The labels `run_vector_query` can query — its declared vocabulary.
 
@@ -2149,6 +2223,15 @@ def score_path_bullet() -> Row:
     scored = scored_labels(writers=writers)
     written, labels, unknown, resolved = (
         scored["by_writer"], scored["labels"], scored["unresolved"], scored["resolution"])
+    # ⛔ `#11747`: the cache projection is a WRITE PATH this row could not see. Its store
+    # clause interpolates the property name (`f", n.{prop} = {form}"`), which is one of the
+    # shapes `_EMBED_WRITE`/`_writes_an_embedding` cannot decide — so it was ABSENT from
+    # `embedding_writers()` and a `:Session` vector reached the graph with this row reading
+    # `MET`. `cache_projection_store_labels()` measures it by running the writer instead of
+    # reading it, and its labels join the SAME served-set comparison as the derived ones:
+    # `Session` is not in `served`, so its presence in `labels` makes `orphans` non-empty
+    # and this row `NOT MET` — the falsifier for a re-introduced write.
+    projection = cache_projection_store_labels()
     served = served_labels()
     # ⛔ `unknown` is row 2's OWN hold set, and it is computed AFTER resolution: a writer the
     # register resolved is no longer unknown (that is the whole fix), while a writer declared
@@ -2190,12 +2273,38 @@ def score_path_bullet() -> Row:
         - {fn for fn in unknown
            if writers[fn]["kind"] in ("unresolved_write", "ungated")}
     )
-    orphans = labels - served
+    # ⛔ `#11747`: the PROJECTION's labels are compared against the served set in the same
+    # comparison, but they are deliberately NOT folded into `labels` — that map is this row's
+    # writer DERIVATION, and its note is pinned as such (a fixture-built writer tree asserts its
+    # own exact content). Keeping the two populations separate in the notes and united only in
+    # the comparison is what lets the row catch an unserved projection label WITHOUT the
+    # instrument's writer tree appearing to gain a writer it does not have.
+    orphans = (labels | set(projection["labels"])) - served
     notes = [
         f"written labels: {sorted(labels)}",
+        # The evidence for the comparison below: HOW the cache projection's labels were obtained.
+        # Named on every run — `#11492` learned that a `MET` resting on a declaration is
+        # invisible unless the row prints where each label came from, and this one rests on a
+        # MEASUREMENT the discovery cannot make at all (`#11747`).
+        "cache projection vector targets (MEASURED by running "
+        "cache_projection.node_from_row → node_statement over every record label, both the "
+        f"`embedding` column and the `props` tail — #11747): {sorted(projection['labels'])}",
         f"served labels (run_vector_query vocabulary): {sorted(served)}",
         f"stored-without-a-query-path: {sorted(orphans) or 'none'}",
     ]
+    if projection["error"]:
+        notes.append(
+            "cache projection vector targets: UNMEASURED "
+            f"({projection['error']}) — the projection could not be imported, so NOTHING is "
+            "claimed about where it stores (hold this row at PARTIAL)"
+        )
+    if projection["unmeasured"]:
+        notes.append(
+            "cache projection labels whose store could not be MEASURED (hold this row at "
+            "PARTIAL — neither the column door nor the props tail could be built): "
+            + "; ".join(f"{label}: {why}" for label, why in
+                        sorted(projection["unmeasured"].items()))
+        )
     if resolved["error"]:
         notes.append(
             "#11492 — labels resolved from the product register "
@@ -2426,7 +2535,8 @@ def score_path_bullet() -> Row:
         "PARTIAL" if (unknown or unparsed or duplicates or real_bypasses or register_bypasses
                       or resolved["partial"] or resolved["contradictions"]
                       or resolved["at_runtime"] or resolved["violations"]
-                      or resolved["error"])
+                      or resolved["error"]
+                      or projection["error"] or projection["unmeasured"])
         else "MET")
     return Row(
         bullet=2,
