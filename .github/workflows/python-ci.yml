@@ -4280,8 +4280,9 @@ jobs:
       # ancestor by construction, so the anchor arm says nothing and proves nothing. That is the #9075/#11057 shape exactly: a gate that runs only where it
       # cannot answer is a no-op gate, and before this step NO workflow invoked the strict
       # form at all (measured: `rg -- '--anchors'` outside the tool → no match).
-      # This job already pays for `fetch-depth: 0`, which is what the proof NEEDS; the verb
-      # imports no `tortoise`, so the install is not required for it either.
+      # This job already pays for `fetch-depth: 0`, which is what the proof NEEDS.
+      # `verify-anchors` imports no `tortoise`; the `check` beside it does, which is why this
+      # job's `pip install -e .` stays.
       # ⚠️ ACCEPTED RESIDUAL — THE SAME ONE THE STEP ABOVE NAMES, NOT A PINNED COUNTERPART.
       # Like the cut-commit step, this runs the CHECKOUT'S OWN `tools/archive_surface.py`, so a
       # PR that rewrites the verifier in the same commit that rewrites `archive/MANIFEST.json`

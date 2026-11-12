@@ -44,10 +44,13 @@ An archived symbol is:
 
 ⚠️ **What is and is not enforced about importability.** The enforced property is "not importable
 **from the product package**": nothing under `tortoise/`, nothing in the wheel. From a repo
-checkout, `import archive.<batch>.<file>` *does* resolve as a PEP 420 namespace package — that is a
-fact about Python, not a hole in the gate, and asserting otherwise would be a false claim.
-**Reading** a frozen file is the supported path; **importing** one is not supported (the files are
-frozen source, not maintained modules) and nothing in the product ever does it.
+checkout, `import archive` and `import archive.modules` **do** resolve as PEP 420 namespace
+packages (verified: `find_spec("archive").submodule_search_locations` is the tree). The chain stops
+one level down: every batch directory is hyphen- or dot-named (`mcp-tools`, `sdk-methods`,
+`pre-mechanism-legacy-search`) and a hyphen is not a valid module segment, so
+`import archive.<batch>.<file>` does not resolve. **Reading** a frozen file is the supported path;
+**importing** one is not supported (the files are frozen source, not maintained modules) and
+nothing in the product ever does it.
 
 `tools/archive_surface.py check` enforces every one of those, and
 `tests/test_archive.py` proves the detectors **fire** (a gate nobody has seen fire is

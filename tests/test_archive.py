@@ -166,7 +166,23 @@ def test_the_committed_rows_cite_the_commit_the_writer_would_record() -> None:
     ):
         pytest.skip("this clone cannot resolve the anchored commits (shallow) — see verify-anchors")
     for entry in entries:
-        expected, _ref = arch.anchor_sha(arch.ROOT, entry["sources"])
+        # The predicate is the GATE's block comparison, threaded the same way the writer threads
+        # it: "the anchor holds the code", not merely the path. Without it this row-equality test
+        # tells a maintainer to re-anchor onto a commit that does not hold the block — which the
+        # gate then rejects (measured, round 8: the source FILE survives an `mcp-tool`/`sdk-method`
+        # removal, so the merge commit is a candidate).
+        body = (arch.ROOT / entry["file"]).read_text(encoding="utf-8")
+        blocks = [
+            (path, segment, row.get("node"))
+            for (path, segment), row in zip(
+                arch.frozen_blocks(body), entry["blocks"], strict=True
+            )
+        ]
+        expected, _ref = arch.anchor_sha(
+            arch.ROOT,
+            entry["sources"],
+            arch.block_holds(arch.ROOT, entry["kind"], entry["symbol"], blocks),
+        )
         assert entry["archived_at"] == expected, (
             f"{entry['symbol']} cites {entry['archived_at']}, but the writer now records "
             f"{expected} — re-anchor it (see archive/README.md), or the citation drifts from "
@@ -967,6 +983,38 @@ def test_a_body_that_exists_in_the_file_but_is_not_the_symbol_is_reported(tree: 
     assert any("does not exist in" in problem or "not what" in problem for problem in problems), (
         "a body that is merely PRESENT in the anchored file is not the symbol"
     )
+
+
+def test_check_reports_every_arm_it_aggregates(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One forced violation per call site, or three of the four arms are deletable green.
+
+    Round 8 measured exactly that: deleting the `file_violations`, `package_violations` or
+    `index_violations` line from `check` left all 66 tests passing, because each helper has its
+    own test and a clean archive makes every arm silent.
+    """
+    arch.archive_symbol(arch.MCP_TOOL, "tortoise_search", "batch-a", "r", root=tree)
+    (tree / "archive" / "mcp-tools" / "batch-a" / "orphan.py").write_text("x = 1\n", encoding="utf-8")
+    (tree / "tortoise" / "archive").mkdir()
+    (tree / "archive" / "INDEX.md").write_text("stale\n", encoding="utf-8")
+    monkeypatch.setattr(arch, "live_surface", lambda root=None: _surface())
+    problems = arch.check(tree)
+    assert any("orphan" in problem for problem in problems), problems          # file arm
+    assert any("tortoise/archive exists" in problem for problem in problems), problems  # package arm
+    assert any("STALE" in problem for problem in problems), problems           # index arm
+
+
+def test_the_writer_refuses_a_still_served_retired_forward_name(tree: Path) -> None:
+    """A `RETIRED_USE_INSTEAD` name is STILL SERVED — archiving it writes a row its gate rejects."""
+    (tree / "tortoise" / "tool_registry.py").write_text(
+        (tree / "tortoise" / "tool_registry.py").read_text(encoding="utf-8")
+        + "\nRETIRED_USE_INSTEAD = {'tortoise_search': 'tortoise_new'}\n",
+        encoding="utf-8",
+    )
+    _commit(tree, "tortoise/tool_registry.py")
+    with pytest.raises(arch.ArchiveRefused, match="still SERVED"):
+        arch.archive_symbol(arch.MCP_TOOL, "tortoise_search", "batch-a", "r", root=tree)
 
 
 def test_two_module_symbols_cannot_share_one_archived_file(tree: Path) -> None:

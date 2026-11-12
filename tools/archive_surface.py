@@ -245,6 +245,34 @@ def live_surface(root: Path | None = None) -> dict:
     }
 
 
+def _forward_names(root: Path) -> set[str]:
+    """The `RETIRED_USE_INSTEAD` keys, read from the tree rather than imported.
+
+    Parsed, not executed: the writer must be able to reason about ANY tree (`check(root)` already
+    grades one it does not import), and an import would tie the answer to whichever `tortoise`
+    the interpreter resolves.
+    """
+    path = root / "tortoise" / "tool_registry.py"
+    if not path.exists():
+        return set()
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except SyntaxError:  # pragma: no cover - a registry that does not parse is reported elsewhere
+        return set()
+    for node in tree.body:
+        targets = (
+            node.targets if isinstance(node, ast.Assign) else
+            [node.target] if isinstance(node, ast.AnnAssign) else []
+        )
+        if any(isinstance(t, ast.Name) and t.id == "RETIRED_USE_INSTEAD" for t in targets):
+            try:
+                value = ast.literal_eval(node.value)
+            except (ValueError, TypeError):  # pragma: no cover - non-literal map
+                return set()
+            return set(value) if isinstance(value, dict) else set()
+    return set()
+
+
 def _package_modules(root: Path) -> set[str]:
     """Every module file the shipped package tree carries, repo-relative.
 
@@ -897,7 +925,29 @@ def default_branch_ref(root: Path) -> str | None:
     return None
 
 
-def anchor_sha(root: Path, paths: list[str]) -> tuple[str, str]:
+def block_holds(
+    root: Path, kind: str, symbol: str, blocks: list[tuple[str, str, str | None]]
+):
+    """A candidate predicate: does this commit hold EVERY block, byte for byte?
+
+    The block comparison the GATE uses (`expected_block`), so "the anchor holds the code" means
+    the same thing on the way in and on the way out.
+    """
+
+    def holds(candidate: str) -> bool:
+        for path, segment, node_key in blocks:
+            blob = _git_blob(root, candidate, path)
+            if blob is None:
+                return False
+            expected = expected_block(kind, symbol, path, blob, node_key)
+            if expected is None or expected.rstrip() != segment.strip("\n"):
+                return False
+        return True
+
+    return holds
+
+
+def anchor_sha(root: Path, paths: list[str], holds=None) -> tuple[str, str]:
     """(commit on the default branch that last HELD *paths*, the ref it came from).
 
     ⛔ NOT `git rev-parse HEAD`. This repo lands by squash, so a batch PR's own commit never
@@ -921,11 +971,23 @@ def anchor_sha(root: Path, paths: list[str]) -> tuple[str, str]:
             "default branch that held the code, so it must be able to name one"
         )
     code, out = _git(root, "rev-list", ref, "--", *paths)
-    for candidate in (out.split() if code == 0 else []):
-        if _SHA_RE.match(candidate) and all(
-            _git_blob(root, candidate, path) is not None for path in paths
-        ):
+    candidates = [c for c in (out.split() if code == 0 else []) if _SHA_RE.match(c)]
+    held_a_path = False
+    for candidate in candidates:
+        if not all(_git_blob(root, candidate, path) is not None for path in paths):
+            continue
+        held_a_path = True
+        if holds is None or holds(candidate):
             return candidate, ref
+    if held_a_path:
+        # The paths exist on the default branch but no commit holds THIS code: the working tree
+        # carries an edit (or a newer body) that never landed there. ⛔ Not a "never landed"
+        # refusal — that message would describe a state the caller is not in.
+        raise ArchiveRefused(
+            f"no commit on {ref} holds this code at {', '.join(paths)} — the working tree "
+            "differs from every commit there, so the archived body would not be what the "
+            "citation says. Commit the source (or rebase onto the default branch) first"
+        )
     raise ArchiveRefused(
         f"{', '.join(paths)} is not on {ref} — this code never landed on the default branch, "
         "so there is no released state to restore. Delete it; do not archive it"
@@ -1140,38 +1202,6 @@ def render_archive_file(
     return "\n".join(header + body), frozen
 
 
-def _require_sources_match_anchor(
-    root: Path, kind: str, symbol: str, sha: str, blocks: list[tuple[str, str, str | None]]
-) -> None:
-    """Refuse to freeze a BLOCK the anchor commit does not hold, byte for byte.
-
-    The anchor is a commit; the body is read from the WORKING TREE. What must match is the block
-    being archived — which is exactly the property `_anchor_violations` enforces on the way back
-    out, so the writer and the gate answer the same question.
-
-    ⛔ NOT the whole file. A lane branches from `main`; another lane lands a commit that touches
-    `tortoise/sdk.py` without touching this method; the anchor moves to that commit and the whole
-    file legitimately differs by an unrelated hunk. Refusing that blocked every archive from a
-    lane that had not rebased, with a message describing an edit it had not made (measured in
-    review cycle 6). A *block* difference is the real fault: the archived body would not be what
-    the citation says.
-    """
-    for path, segment, node_key in blocks:
-        blob = _git_blob(root, sha, path)
-        if blob is None:
-            raise ArchiveRefused(
-                f"refusing to freeze {symbol}: {sha}:{path} does not exist — the recorded "
-                "commit does not hold this code"
-            )
-        expected = expected_block(kind, symbol, path, blob, node_key)
-        if expected is None or expected.rstrip() != segment.strip("\n"):
-            raise ArchiveRefused(
-                f"refusing to freeze {symbol}: the block from {path} differs from {sha} — commit "
-                "the source, or rebase onto the default branch, so the archived body is exactly "
-                "what the citation says"
-            )
-
-
 def archive_rel(kind: str, batch: str, symbol: str) -> str:
     """`archive/<subdir>/<batch>/<mirrored symbol>.py` — one symbol, one path, always.
 
@@ -1232,6 +1262,17 @@ def archive_symbol(
     if any(e.get("kind") == kind and e.get("symbol") == symbol for e in manifest["entries"]):
         raise ArchiveRefused(f"{symbol} is already archived ({kind})")
 
+    if kind == MCP_TOOL and symbol in _forward_names(root):
+        # ⛔ A `RETIRED_USE_INSTEAD` name leaves the ADVERTISED surface but is STILL SERVED — it
+        # is inside the product, and the gate refuses the row. Writing it and printing "now
+        # delete it" told an operator to delete a live, served handler, and the archive went red
+        # only after the source was gone (measured, round 8). The writer must not write a row its
+        # own gate rejects.
+        raise ArchiveRefused(
+            f"{symbol} is a RETIRED_USE_INSTEAD forward entry — still SERVED, so it is inside "
+            "the product and is NOT archived. Removing the forward entry is a separate decision "
+            "(`docs/product/canonical-mcp-tools.md`)"
+        )
     if kind == MCP_TOOL:
         blocks = _mcp_source(root, symbol) + _mcp_handlers(root, symbol)
     elif kind == SDK_METHOD:
@@ -1242,8 +1283,14 @@ def archive_symbol(
     archived_from = blocks[0][0] if kind == MODULE else SOURCE_OF[kind]
     # ⛔ THE ANCHOR IS A COMMIT ON THE DEFAULT BRANCH, not this branch's HEAD (see
     # `anchor_sha`): a squash merge would otherwise orphan the citation the archive rests on.
-    sha, _ref = anchor_sha(root, sorted({p for p, _s, _n in blocks}))
-    _require_sources_match_anchor(root, kind, symbol, sha, blocks)
+    # ⛔ The anchor must hold the CODE, not merely the path: for `mcp-tool` / `sdk-method` the
+    # source FILE survives the removal, so the merge commit is a candidate and would become the
+    # anchor — the row would then cite a commit that does not hold the block (measured, round 8).
+    sha, _ref = anchor_sha(
+        root,
+        sorted({p for p, _s, _n in blocks}),
+        block_holds(root, kind, symbol, blocks),
+    )
     rel = archive_rel(kind, batch, symbol)
     path = root / rel
     # Containment, belt-and-braces after the slug/symbol validation: resolve and refuse
