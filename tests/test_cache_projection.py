@@ -1242,6 +1242,18 @@ def test_the_PLAN_reports_an_edge_drop_as_a_relationship_type():
     ).dropped_vectors()
     assert asymmetric == {"<relationship:IMPL>": 1}, (
         "a clean node must never be credited with an edge's drop: " f"{asymmetric}")
+    # ⛔ …and the MIRROR case (`#12015` round 4, finding 3 — MEASURED: deleting the
+    # relation arm's `self.statements[len(self.nodes):]` slice left all 99 tests green).
+    # A dropping NODE beside clean edges must report the node only: with the slice gone,
+    # the node's statement is credited to the first edge type, the plan invents a
+    # `<relationship:TYPE>` drop, and `record_restore.render()` then prints "The nodes and
+    # edges are restored" over a drop that kept a node and lost no edge.
+    mirror = cp.record_plan(
+        [node], [cp.relation_from_row(_relation_row())]
+    ).dropped_vectors()
+    assert mirror == {"Session": 1}, (
+        "a node's drop must not be credited to an edge type — the relation arm is reading "
+        f"the NODE statements: {mirror}")
     # Two edges of the SAME type aggregate under one key.
     same = cp.record_plan([], [edge, cp.relation_from_row(_relation_row(
         src_key="op-2", props={"embedding": [0.5, 0.25]}))]).dropped_vectors()

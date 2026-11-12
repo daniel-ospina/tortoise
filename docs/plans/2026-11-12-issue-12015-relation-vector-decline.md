@@ -67,9 +67,23 @@ the vector, and `RecordRelation` had no way to say so.
 
 `relation_statement` is additive (`SET r += $props`), and `SET r += map` merges keys
 without REMOVIng one it no longer carries — so a legacy cache that already holds
-`r.embedding` keeps it across any number of incremental re-projections. The ONE remedy is
-a full `record-restore`, whose whole-graph wipe takes the edges with it. Nothing on the
-read side reports it — `record_serve` has no relation read (`NOT_SERVED`),
+`r.embedding` keeps it across any number of incremental re-projections.
+
+⛔ **Do not state a single remedy without these three facts** (this section said "the ONE
+remedy is a full `record-restore`" until round 4, and that is REFUSED on every production
+cache — §0.5c of `06-cache-projection.md` is the owner of the wording, this is a summary):
+
+1. an edge property-clear CLAUSE exists in this tree (`ep.py`'s
+   `MATCH ()-[r:IMPL|NAND]->() REMOVE r.msg_*`), but no verb clears a DECLINED VECTOR
+   property on an edge — measured on FalkorDB, `SET r += {embedding: null}` does clear one,
+   so a future in-place route is buildable and is not built;
+2. a full `record-restore` DOES clear it, but `_assert_test_graph` (L2) refuses a server
+   graph not named `test_*`/`tortoise_test`, which is every production cache — it is a
+   remedy for a disposable TEST graph and for embedded mode (per-call token);
+3. so on a production cache the operator clears the property explicitly
+   (`MATCH ()-[r:TYPE]->() REMOVE r.embedding`) or re-reads the cache from the record.
+
+Nothing on the read side reports it — `record_serve` has no relation read (`NOT_SERVED`),
 `parity_difference` is label-scoped, `record_reconcile` compares nodes. Same residue as
 the `#11747` node rule.
 

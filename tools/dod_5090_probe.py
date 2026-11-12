@@ -2221,8 +2221,9 @@ def cache_projection_store_labels() -> dict:
 
     Returns ``{"labels": frozenset[str], "relationships": frozenset[str],
     "relationships_probed": frozenset[str], "unmeasured": {target: why},
-    "error": str|None}`` — ``relationships_probed`` is the edge population the arm was
-    BUILT on, so an empty ``relationships`` cannot be confused with an unrun arm — ``error`` means the
+    "error": str|None}`` — ``relationships_probed`` is the edge population the arm
+    PLANTED ON and saw a door refuse, so an empty ``relationships`` cannot be confused
+    with an unrun arm — ``error`` means the
     projection could not be imported at all, so nothing was measured and the row
     must not read as if something had been.
     """
@@ -2235,8 +2236,10 @@ def cache_projection_store_labels() -> dict:
                 "unmeasured": {}, "error": f"{type(e).__name__}: {e}"}
     stored: set[str] = set()
     edge_stored: set[str] = set()
-    #: The predicates this arm BUILT a statement for — appended where the build
-    #: succeeds, never derived from the input list (`#12015` review, finding C).
+    #: The predicates this arm PLANTED ON and saw a door REFUSE — appended where the door
+    #: RECORDED A DROP of the planted vector, never derived from the input list NOR from
+    #: "a statement was built" (both were measured wrong: a door over an empty bag builds
+    #: a statement too — `#12015` review, finding C).
     edge_probed: set[str] = set()
     unmeasured: dict[str, str] = {}
     for label in sorted(cp.NODE_TABLES):
