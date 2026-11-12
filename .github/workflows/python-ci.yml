@@ -4722,12 +4722,32 @@ jobs:
         # a `$GITHUB_PATH` prepend after the leg would not be consulted at all.
         run: |
           set -euo pipefail
+          # ⛔ THE PACKAGE COMES FROM PGDG, NOT THE DISTRO ARCHIVE (#12051).
+          # `ubuntu-latest` is a MOVING label. Measured 2026-11-12 (job
+          # `131100353978`, run `43180078623`, main `7e6baffc5d`): it resolved to
+          # `ubuntu-26.04`, whose archive carries the CURRENT distro major (18 in
+          # that release) and NOT the 16 this job needs, so the first cut of this
+          # step died before the leg ran —
+          # `E: Unable to locate package postgresql-client-16`, exit 100. The
+          # distro archive can never be relied on for an OLD major; the job would
+          # red on a runner-image roll rather than on a diff, which is the class
+          # #12051 exists to remove. apt.postgresql.org publishes EVERY supported
+          # major for every supported release (`16.15-1.pgdg26.04+2` on resolute,
+          # `16.15-1.pgdg24.04+2` on noble — both verified in a container running
+          # THIS script), so the pin resolves the same way wherever the label goes.
+          sudo install -d /usr/share/postgresql-common/pgdg
+          curl -fsSL -o /tmp/pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          sudo install -m 0644 /tmp/pgdg.asc /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
           sudo apt-get update -qq
-          # ⛔ FAIL CLOSED WITH A NAME. Without this, `set -e` surfaces the
-          # archive's own message — `E: Unable to locate package …` (exit 100) —
-          # which reads as a typo in THIS step rather than as the image drifting
-          # under a drill whose artifact depends on the client's major. That is
-          # exactly what happened on 2026-11-12 when the label moved to 26.04.
+          # ⛔ FAIL CLOSED WITH A NAME. Without this, `set -e` surfaces apt's own
+          # message — `E: Unable to locate package …` (exit 100) — which reads as a
+          # typo in THIS step rather than as the client's SOURCE failing under a
+          # drill whose artifact depends on the client's major. That is exactly what
+          # happened on 2026-11-12 when the label moved to 26.04 and the distro
+          # archive carried no 16 (#12051 round 2); the install now comes from PGDG,
+          # so this branch fires when PGDG itself did not resolve.
           if ! apt-cache show postgresql-client-16 >/dev/null 2>&1; then
             # Identity must survive BOTH runner classes: `ImageOS`/`ImageVersion` are set ONLY
             # on GitHub-hosted runners, so naming them alone reports `unknown` on a self-hosted
@@ -4738,7 +4758,7 @@ jobs:
             if [ -n "${ImageOS:-}" ]; then
               identity="$identity hosted-image=${ImageOS}/${ImageVersion:-unknown}"
             fi
-            echo "::error::no postgresql-client-16 in this image's archive [$identity] — BOTH provisioned servers are pg16 and the drill's client major is part of the artifact's contract (#12051), so it cannot run here. HOSTED runner: this release no longer carries the servers' major — pin the job to one that does. SELF-HOSTED runner: this box is not the pinned release yet claims the label, i.e. the routing drift #10289 — on it run CI_RUNNER_OS_LABEL=off tools/install-ci-runner-x64.sh --repair-labels --count <N> (an on/auto install KEEPS the pin, so a BARE --repair-labels changes nothing)."
+            echo "::error::postgresql-client-16 does not resolve from PGDG on this runner [$identity] — BOTH provisioned servers are pg16 and the drill's client major is part of the artifact's contract (#12051), so it cannot run here. The pin installs from apt.postgresql.org `/etc/os-release`'s ${VERSION_CODENAME}-pgdg suite, so the usual cause is that repo not resolving: check the key at /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc, the suite name, and network egress. SELF-HOSTED runner: this box may not be the release that claims the label, i.e. the routing drift #10289 — on it run CI_RUNNER_OS_LABEL=off tools/install-ci-runner-x64.sh --repair-labels --count <N> (an on/auto install KEEPS the pin, so a BARE --repair-labels changes nothing)."
             exit 1
           fi
           sudo apt-get install -y --no-install-recommends postgresql-client-16

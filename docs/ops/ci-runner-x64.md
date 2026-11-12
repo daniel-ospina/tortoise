@@ -278,12 +278,12 @@ only leg whose pin is about speed, and the mitigation buys it nothing (above):
 - `.github/workflows/python-ci.yml` (`test-record-postgres`) — pinned on a **fifth** reason:
   **artifact determinism — not egress, quota, topology or the runner tool contract.** The job's
   PostgreSQL **client major** is part of the drill's artifact contract: the D8 archive is dumped by
-  whatever `pg_dump` the image's archive provides, and that major must equal the
+  whatever `pg_dump` PATH resolves, and that major must equal the
   `pgvector/pgvector:pg16` servers' (#12051). MEASURED 2026-11-12: `ubuntu-latest` had moved to
   `ubuntu-26.04`, whose archive ships only `postgresql-client-18`, so the pin's install died with an
-  opaque `E: Unable to locate package` (exit 100) before a single test ran. The job now names 24.04
-  (archive candidate `16.15-0ubuntu0.24.04.1`) and its step fails closed with a NAMED `::error::` if a
-  non-noble box answers this label — the `=on` routing drift is #10289.
+  opaque `E: Unable to locate package` (exit 100) before a single test ran. The job now names 24.04,
+  installs the client from PGDG (`apt.postgresql.org`; `16.15-1.pgdg24.04+2` measured on noble) so the
+  pin no longer rides the image's archive — and it still fails closed with a NAMED `::error::` (#10289).
 
 These are **accepted costs of the temporary mitigation, stated as costs**, and all nine revert with
 it. If the mitigation becomes permanent, the scoping fix is to put the starved required legs on a
@@ -958,7 +958,7 @@ job itself:
   self-hosted runner lost communication with the server"*. The zero-step count is the
   discriminator: none of the job's own steps ran, so none of them caused it. Re-run before
   investigating a harness — a red here READS as a harness defect, which is #9018's misdiagnosis one
-  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:5133`) buys no landing:
+  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:5151`) buys no landing:
   the rail blocks on any red on the PR's tree, so this one costs a re-run.
 
 ⛔ **Do not copy this pin onto a required leg.** The override is scoped to ONE job whose red costs a
