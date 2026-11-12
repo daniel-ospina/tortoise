@@ -174,8 +174,8 @@ def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
 
     Reachable, and measured at the head that added this arm: no comparison in
     this file read a row's status BY ISSUE — the arms that read the page compare
-    COUNTS (§2's tally, the abstract headline, the index headline, the WS-C cell)
-    or check a row's presence, vocabulary and anchors, and none tied a status to a
+    COUNTS (§2's tally, the abstract, the WS-C cell) or check a row's presence,
+    its pin, its status vocabulary and its anchors, and none tied a status to a
     specific issue — so an edit that holds the tally and moves the claim was
     invisible to all of them. Reverting §2's `#2782` to `OPEN`
     **and** promoting `#2684` to `VERIFIED-FIXED` (one row each way, so §2 stays
@@ -190,13 +190,14 @@ def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
     most of this file checks; a status is a per-row fact.
 
     ⛔ These expectations are LITERALS — the four statuses above and the `22`/`4`
-    counts the other arms assert. They are a second copy of the same hand
+    counts the count arm asserts. They are a second copy of the same hand
     measurement, not an independent source: a re-cut that moves the page and
-    these literals together is caught by nothing here, and the tracker is the
-    only independent witness for a status while `tools/problem_map_check.py`
-    deliberately refuses to read GitHub. Re-derive them from the tree on every
-    re-cut; a re-cut that only makes this file green has proven nothing about the
-    statuses.
+    these literals together is caught by nothing here. The tracker is an
+    independent witness for whether an issue is still OPEN, never for whether a
+    defect is fixed (the page's §1 records four rows where the two disagree), and
+    `tools/problem_map_check.py` deliberately refuses to read GitHub, so
+    re-derive these from the tree on every re-cut; a re-cut that only makes this
+    file green has proven nothing about the statuses.
     """
     rows, _ = pmc.parse_rows(DOC.read_text(encoding="utf-8"))
     status = {r.issue: r.status for r in rows}
