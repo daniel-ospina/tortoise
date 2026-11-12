@@ -5460,125 +5460,6 @@ def _shell_function_body(code: str, name: str) -> str | None:
     return None
 
 
-def _flag_comes_from_a_positive_probe(code: str, path: str, flag: str) -> bool:
-    """`code` sets `flag=1` under a POSITIVE `-e <path>` test that GATES it.
-
-    Reads the construct, not a spelling. Accepted: `[ -e P ]`, `[[ -e P ]]` and
-    `test -e P`, gated by `then` or `&&`, with the assignment on the same line or in
-    the construct's body. Refused, because each INVERTS the fact and makes the trap
-    delete a path it does not own:
-
-      · `[ -e P ] || F=1` — P present ⇒ test succeeds ⇒ `F` stays 0 ⇒ the trap
-        removes the operator's file; P absent ⇒ `F=1` ⇒ the step's own source is left
-        on the pool box. Both documented defects, and MEASURED GREEN under the plain
-        `[^\n]*?` window this replaces (review cycle 16).
-      · `[ -e P ]; F=1` — no gate at all, so the flag is 1 unconditionally.
-      · `[ ! -e P ] && F=1` — the negated test does not match here at all.
-      · `if [ -e P ]; then :; else F=1; fi` — the assignment is in the ELSE arm, so
-        the flag is 1 exactly when the path was ABSENT: the inversion by another
-        spelling. MEASURED GREEN under the first cut of this reader (review cycle 17).
-      · `if [ -e P ]; then :; fi` followed by `F=1` on the next line — the same
-        gutted gate as `[ -e P ]; F=1`, reached by letting the window cross the `fi`.
-
-    ⛔ WHY NOT A WINDOW. A `[^\n]*?` between the test and the assignment is satisfied
-    by the CONSTRUCT UNLESS the construct is the thing read: MEASURED (review cycle 16),
-    the trap is ONE line carrying both flags, so a window after `"${had_sources…}"`
-    reached `"${had_keyring:-0}" = 0` and accepted `= 1`, `!= 0` and `-n` — a
-    fail-open in the very row that exists to stop the trap deleting an operator's file.
-    The bound is the construct: the credited text is the **then**-arm (or the `&&`
-    operand) ONLY, terminated at `fi`/`else`/`elif`, so neither an `else`-arm
-    assignment nor one after the construct can be credited.
-    """
-    p, f = re.escape(path), re.escape(flag)
-    for test in re.finditer(
-        rf"(?:\[\[\s*-e\s+{p}\s*\]\]|\[\s*-e\s+{p}\s*\]|test\s+-e\s+{p})",
-        code,
-    ):
-        # ⛔ A NEGATION OUTSIDE THE BRACKETS IS NOT A POSITIVE PROBE. `if ! [ -e P ];
-        # then F=1; fi` and `! [ -e P ] && F=1` set the flag exactly when the path was
-        # ABSENT, so the trap deletes the operator's file — MEASURED GREEN (review cycle
-        # 19), and REFUSED by the pre-diff substring check. The `!` is tested on the
-        # text BEFORE the probe; `[ ! -e P ]` and `[[ ! -e P ]]` already miss the
-        # alternation above, so this covers the form they cannot.
-        if re.search(r"!\s*$", code[: test.start()]):
-            continue
-        window = code[test.end():]
-        # ⛔ THE ARM, NOT A LINE COUNT. The earlier cut bounded the body with a
-        # newline-`fi` search plus a two-line fallback, which (a) let an assignment in
-        # the construct's `else` arm be credited and (b) walked past a `fi` that shares
-        # the construct's line — and the REAL probe is exactly that one-line shape
-        # (`if [ -e P ]; then F=1; fi`), so both escapes were reachable (review cycle 17).
-        then_gate = re.match(r"\s*;?\s*then\b", window)
-        if then_gate is not None:
-            arm = window[then_gate.end():]
-            stop = re.search(r";\s*fi\b|\n\s*fi\b|;\s*else\b|\n\s*else\b|\belif\b", arm)
-            if stop is not None:
-                arm = arm[: stop.start()]
-            else:
-                arm = arm.splitlines()[0] if arm.splitlines() else ""
-        else:
-            # ⛔ A LINE CONTINUATION IS NOT A DIFFERENT PROBE. `[ -e P ] \` newline
-            # `&& F=1` is the same gate, refused before this bound (review cycle 19).
-            and_gate = re.match(r"\s*(?:\\\s*\n\s*)?&&", window)
-            if and_gate is None:
-                continue
-            arm = window[and_gate.end():]
-            stop = re.search(r"[;\n]", arm)
-            arm = arm[: stop.start()] if stop else arm
-        assignment = re.search(rf"(?<![\w.]){f}=1\b", arm)
-        if assignment is None:
-            continue
-        # ⛔ A CONDITIONED ASSIGNMENT IS NOT THE FLAG. `false && F=1` (or `|| F=1`)
-        # inside the then-arm leaves the flag 0 when the path EXISTS, so the trap still
-        # deletes the operator's file — MEASURED GREEN before this guard (review cycle 18),
-        # and REFUSED by the pre-diff substring check it replaced.
-        if "||" in arm[: assignment.start()] or "&&" in arm[: assignment.start()]:
-            continue
-        return True
-    return False
-
-
-def _guard_owns_path(trap: str, flag: str, path: str) -> bool:
-    """The `rm -f <path>` sits inside the clause guarded by THIS flag's own `= 0` test.
-
-    ⛔ ONE CLAUSE, NOT TWO SEPARATE FACTS. Checking the guard per flag and the removal
-    per path independently is satisfied by a trap whose two guards are SWAPPED: with
-    an operator's sources file present, the sources `rm` gated on `had_keyring` deletes
-    a path it does not own — the exact harm this row names — and the suite stayed GREEN
-    (MEASURED, review cycle 17). The association is the assertion.
-    Returns: the clause bound stops at `fi`/`else`/`elif`, and the removal must name
-    the SAME path — so neither an `else`-arm removal nor a swapped guard passes.
-    """
-    f, p = re.escape(flag), re.escape(path)
-    for opener in re.finditer(r"\bif\b", trap):
-        clause = trap[opener.end():]
-        stop = re.search(
-            r";\s*fi\b|\n\s*fi\b|\bfi\b|;\s*else\b|\n\s*else\b|\belif\b", clause
-        )
-        if stop is None:
-            continue
-        clause = clause[: stop.start()]
-        test = re.search(
-            rf"(?:\[|\[\[)\s*\"?\$\{{?{f}\b(?:[:-][^}}\n]*)?\}}?\"?\s*"
-            rf"(?:==|=|-eq)\s*[\"']?0[\"']?\s*(?:\]|\]\])",
-            clause,
-        )
-        if test is None:
-            continue
-        # ⛔ THE WHOLE `rm` SPELLING, NOT ONE FLAG CLUSTER. `-rf`, `-f --` and a
-        # `sudo` prefix are the same removal; pinning `-f ` alone refused them with a
-        # message false about what the file said (MEASURED, review cycle 18).
-        # ⛔ AND A REMOVAL THAT CANNOT RUN IS NOT A REMOVAL: `false && rm -f P` inside
-        # the right clause leaves the step's own file on a pool box once its keyring is
-        # gone (MEASURED, review cycle 19). The real shape's `|| true` sits AFTER the
-        # `rm`, so only the PREFIX is tested.
-        tail = clause[test.end():]
-        removal = re.search(rf"rm\s+(?:-[a-zA-Z]+\s+)*(?:--\s+)?\S*{p}", tail)
-        if removal is not None and not re.search(r"&&|\|\|", tail[: removal.start()]):
-            return True
-    return False
-
-
 def _cleanup_trap(code: str) -> str:
     """The registered `EXIT`/`0` trap, resolved through a named function.
 
@@ -5602,69 +5483,82 @@ def _cleanup_trap(code: str) -> str:
 
 
 def test_the_cleanup_trap_owns_only_what_this_step_created(job: dict) -> None:
-    """⛔ AN UNCONDITIONAL `rm` DELETES STATE THIS JOB NEVER WROTE, ON ANY LATER FAILURE.
+    """⛔ THE TRAP MAY REMOVE ONLY FILES THIS STEP CREATED — AND MUST REMOVE ALL OF THEM.
 
-    The trap's paths are shared with an operator (or `postgresql-common`'s own keyring), and
-    this job is POOL-ELIGIBLE. MEASURED, review cycle 12: with PGDG configuration planted and
-    the key fetch forced to fail, an unconditional trap still removed both files — the step
-    then damages the box it was supposed to leave alone. The fix records pre-existence BEFORE
-    writing and the trap skips what it did not create, so the assertion is that the trap reads
-    those flags (the executed arm cannot: `rm` is stubbed, which is stated in its docstring).
+    The job is POOL-ELIGIBLE, so both halves fail: a trap that deletes an operator's apt state
+    damages the box, and one that leaves part of this step's own state turns the next job's
+    `apt-get update` into the soft failure the ORIGIN check exists to catch. MEASURED, review
+    cycle 12: an unconditional trap over the SHARED paths removed an operator's keyring.
+    MEASURED, review cycle 14: the pre-existence-flag fix for that produced the OPPOSITE
+    half-state — a box with an operator `sources.list.d/pgdg.list` and no keyring at the shared
+    path had its file REWRITTEN to point at a keyring the trap then deleted, leaving exactly
+    the unverifiable source this step says is worse than no source at all.
+
+    So the property is STEP-PRIVATE PATHS: the two files the trap removes are names this step
+    alone writes, which is what makes the removal unconditional and safe. A `had_*` flag is
+    REFUSED rather than required, because with private paths it can only recreate the
+    half-removed state.
     """
     _, pin = _pin_step(_steps(job))
     code = _run_code(pin)
     trap = [_cleanup_trap(code)]
-    # ⛔ THE FLAG'S VALUE MUST COME FROM THE REAL PATH, AND BE READ BEFORE THE WRITE.
-    # Asserting only that the NAME appears leaves both halves of the property unpinned:
-    # MEASURED, review cycle 13 — (i) turning each detection into a probe of a path that
-    # never exists keeps the suite GREEN while the trap goes back to deleting the
-    # operator's file, and (ii) moving the flag blocks BELOW the write makes them read 1 on
-    # the step's own file, so the trap removes nothing and a pool box keeps this step's
-    # source. The ordering is the fact, exactly as it is for the keyring directory above.
-    for flag, path in (
-        ("had_sources", "/etc/apt/sources.list.d/pgdg.list"),
-        ("had_keyring", "/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc"),
+    # ⛔ STEP-PRIVATE, NOT THE SHARED PGDG PATHS. `pgdg.list` / `apt.postgresql.org.asc` are
+    # where an operator's own configuration lives; this step's files must be its own names.
+    for ours in (
+        "/etc/apt/sources.list.d/tortoise-12051-pgdg.list",
+        "/etc/apt/keyrings/tortoise-12051-pgdg.asc",
     ):
-        # ⛔ THE FACT, NOT ONE SPELLING OF IT. `if [ -e P ]; then F=1; fi`,
-        # `[ -e P ] && F=1` and `if test -e P; then F=1; fi` are the SAME probe, and an
-        # explicit `else F=0` is the same fact made redundant. Pinning the first spelling
-        # refused the other three with a message false about what was written (MEASURED,
-        # review cycle 15) — the false-block class this file has now paid for five times.
-        assert _flag_comes_from_a_positive_probe(code, path, flag), (
-            f"`{flag}` is not set to 1 by a POSITIVE `-e {path}` test, so the trap may "
-            f"delete a file this step did not create (or skip one it did): {code[:400]!r}"
+        assert ours in trap[0], (
+            f"the trap does not remove this step's own `{ours}`, so a pool box keeps apt "
+            f"state this job added: {trap[0]!r}"
         )
-        # ⛔ THE WHOLE BRACKETED TEST, LEFT OPERAND ANCHORED TO THIS FLAG. A window
-        # ("flag … then somewhere a zero comparison") is satisfied by the SIBLING flag
-        # on the same line: MEASURED (review cycle 16), `= 1`, `!= 0` and `-n` in the
-        # `had_sources` test all left the suite GREEN because the trap is one line and
-        # the walk reached `"${had_keyring:-0}" = 0`. That is a fail-open in the one row
-        # that stops the trap deleting an operator's pre-existing PGDG config.
-        # ⛔ AND TO THIS FLAG'S OWN PATH: reading guard and removal SEPARATELY is
-        # satisfied by SWAPPED guards — the sources `rm` gated on `had_keyring` deletes
-        # a path it does not own while the suite stays GREEN (MEASURED, review cycle 17).
-        assert _guard_owns_path(trap[0], flag, path), (
-            f"the trap does not GUARD `{path}` on `{flag}`, so it removes a path it may "
-            f"not own: {trap[0]!r}"
-        )
-    assert code.index("had_sources=1") < code.index("tee /etc/apt/sources.list.d/pgdg.list"), (
-        "the sources flag is recorded AFTER the sources line already truncated the file, so "
-        "it reads 1 on this step's own write and the trap never removes it"
+    assert "/etc/apt/sources.list.d/pgdg.list" not in trap[0], (
+        "the trap removes the SHARED `/etc/apt/sources.list.d/pgdg.list` — an operator file "
+        f"this step does not own: {trap[0]!r}"
     )
-    assert code.index("had_keyring=1") < code.index('install -m 0644 "$key_file"'), (
-        "the keyring flag is recorded AFTER this step wrote the key, so it reads 1 on its "
-        "own file and the trap never removes it"
+    assert "postgresql-common/pgdg" not in code, (
+        "the step still uses the SHARED `/usr/share/postgresql-common/pgdg` path for its "
+        "keyring, so its `tee` can point an operator sources file at a keyring the trap "
+        "removes — the half-removed state that leaves an unverifiable source behind"
+    )
+    assert "had_sources" not in code and "had_keyring" not in code, (
+        "the trap is keyed on pre-existence again: with STEP-PRIVATE paths that flag can only "
+        "produce the half-removed state it was meant to avoid. Remove the flag, not the removal."
+    )
+    # ⛔ `errexit` IS IN FORCE INSIDE AN EXIT TRAP, so one failing removal reds a step that
+    # SUCCEEDED and skips the rest of the cleanup (MEASURED, review cycle 13: body `exit 0`
+    # + a failing `rm` -> rc 1). Every removal must be protected.
+    # ⛔ THE TRAP BODY MUST HAVE NO CONDITION AT ALL — naming two flags is not the property
+    # (a renamed one reproduces the same half-removed state, MEASURED at `330dd8b962`).
+    assert "if " not in trap[0] and "[" not in trap[0], (
+        "the trap is CONDITIONAL, so some path is removed only sometimes — with step-private "
+        "names that can only leave half of this step's apt state behind (a sources file whose "
+        f"keyring is gone): {trap[0]!r}"
     )
     for rm_line in trap[0].split(";"):
         if "rm -f" in rm_line:
-            assert "|| true" in rm_line or rm_line.rstrip().endswith("true"), (
+            assert "|| true" in rm_line, (
                 "a cleanup `rm` is not protected by `|| true`: `errexit` IS in force inside "
-                "an EXIT trap, so one failing removal reds a step that SUCCEEDED and skips "
-                f"the rest of the cleanup: {rm_line!r}"
+                f"an EXIT trap, so one failing removal reds a step that SUCCEEDED: {rm_line!r}"
             )
     assert "${key_file:-}" in trap[0], (
         "the trap does not clean up the temp key file (or does it unguarded, which aborts "
         f"under `set -u` before the mktemp call): {trap[0]!r}"
+    )
+    # ⛔ BEFORE THE FIRST WRITE, not merely before the sources line: a trap moved below the key
+    # fetch leaks the `mktemp`'d key, and one moved below the keyring install leaves a partial
+    # keyring. MEASURED: both mutants stayed GREEN under the sources-line-only pin.
+    assert code.index("trap ") < code.index('key_file="$(mktemp)"'), (
+        "the EXIT trap is registered AFTER the key file is created, so a failing fetch leaks "
+        "the `mktemp`'d key on the box"
+    )
+    assert code.index("trap ") < code.index("curl -fsSL"), (
+        "the EXIT trap is registered AFTER the key fetch, so a failed fetch leaves the temp "
+        "key file behind"
+    )
+    assert code.index("trap ") < code.index("install -m 0644"), (
+        "the EXIT trap is registered AFTER the keyring install, so an interrupted install "
+        "leaves a partial keyring at this step's own path on the box"
     )
 
 
@@ -5703,34 +5597,43 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     sources. `rm` is in the set for the same reason once the step grew its EXIT
     trap: an unstubbed trap cleans up HOST paths as the arm exits.
 
-    ⛔ AND THE TWO HOST READS ARE REPLACED, each with the count asserted. The
+    ⛔ AND EVERY HOST READ IS REPLACED, each with the count asserted (three now: the two
+    below, plus the apt-sources probe the presence gate reads). The
     prefix sources `. /etc/os-release` (the suite is derived from the box's
     codename) and fetches the key into `key_file="$(mktemp)"`; run verbatim they
     read the host's file and write the host's temp dir — the one thing a suite
     claiming hermeticity must not need. MEASURED: on a box without that file the
     absent arm dies at the source line and reports the guard as silent.
 
-    EIGHT arms over the step's FIVE named pre-install branches: the os-release
-    SOURCE, the key fetch, the codename, `apt-get update`, and the ORIGIN check
-    (FOUR arms: an `apt-cache` that fails, an index that loaded but does not name
-    apt.postgresql.org, the control that reaches past, and `match_then_noise` — the
-    SIGPIPE discriminator, whose producer emits the match and then KEEPS WRITING).
-    That multiplicity is the reason every arm is attributed: the step carries SEVEN
-    `::error::` pairs and a whole-output search is satisfied by any of them
-    (MEASURED, review cycle 9: two gutted `exit 1`s left the suite GREEN).
+    TWELVE arm call sites (FIFTEEN runs — the `configured` loop drives THREE ignored
+    shapes and the `reused` loop TWO readable ones) over the step's FIVE named
+    pre-install branches: the os-release SOURCE, the key fetch, the codename,
+    `apt-get update`, and the ORIGIN check (THREE arms: an `apt-cache` that fails, an
+    index that loaded but does not name apt.postgresql.org, and the control that
+    reaches past) — plus the STREAM-DRAIN arm (`match_then_noise`: a producer that
+    keeps writing after the match, the only shape that can show the `grep -q` +
+    `pipefail` SIGPIPE red), the REUSE arm (`already`: an operator PGDG stanza is
+    present and the key host is unreachable, so the step must neither add a second
+    stanza nor fetch a key it will not use) and its UNVERIFIABLE sibling
+    (`dangling_key`: the same reuse branch with `apt-get update` failing, so the red
+    lands on THAT guard and nothing self-heals — `main`'s merged trap can leave a
+    reused stanza pointing at a keyring it deleted).
+    The step carries SEVEN `::error::` pairs, so a whole-output search is satisfied
+    by any of them (MEASURED, review cycle 9: two gutted `exit 1`s left the suite
+    GREEN).
     ⚠️ Which arms assert WHAT, stated rather than generalised — and re-cut when the
-    arm count moves, because this paragraph has now been stale TWICE: every arm
-    that must stop on a NAMED branch — key fetch, `apt-get update`, os-release
-    SOURCE, ORIGIN-fires, no-codename — asserts its OWN branch's text AND that the
-    neighbouring branch's is ABSENT. THREE arms also carry a bare `::error::`
-    check — `not_pgdg`, `codename`, and the `apt-cache`-fails arm — but only on
-    top of their own attributed assertion; the `apt-cache`-fails arm is the one
-    whose discrimination RESTS on the bare check, because in it no earlier branch
-    can fire (its `apt_get` stub returns 0, os-release is present, the codename is
-    bound), so the marker's absence is what separates "this guard armed" from
-    "silent";
-    `present` and `match_then_noise` are CONTROLS and assert the marker's PRESENCE.
-    Plus TWO branches no arm executes: the install guard
+    arm count moves, because this paragraph has been stale before: the key-fetch,
+    `apt-get update`, os-release SOURCE and ORIGIN-fires arms name their own
+    branch's text AND assert the next branch's is ABSENT. THREE arms also carry a
+    bare `::error::` check — `not_pgdg`, `no_codename` and the `apt-cache`-fails arm
+    — but the first two sit on top of their own attributed assertion, so the
+    `apt-cache`-fails arm is the one whose discrimination RESTS on the bare check
+    (no earlier branch can fire in it: its `apt_get` stub returns 0, os-release is
+    present and the codename is bound), and `no_codename` is additionally
+    discriminated by the absence of the shell's `set -u` backstop (`unbound
+    variable`) rather than by a neighbour's message; `present` and `match_then_noise`
+    are CONTROLS and assert the marker's PRESENCE. Plus TWO branches no arm executes:
+    the install guard
     (unreachable by construction — this arm stops AT the install line; it is pinned
     in text by `test_the_client_comes_from_pgdg_not_the_distro_archive`) and the
     version branch (pinned in text by this file's `FAIL_CLOSED_BRANCH_RE` reader).
@@ -5806,11 +5709,63 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     # (MEASURED, review cycle 9), which teaches the next lane to widen the guard
     # instead of trusting it.
     assert re.search(
-        r"install\b[^\n]*\"\$key_file\"[^\n]*apt\.postgresql\.org\.asc", code_only(prefix)
+        r"install\b[^\n]*\"\$key_file\"[^\n]*tortoise-12051-pgdg\.asc", code_only(prefix)
     ), (
         "the key file is not the one installed to the keyring path, so `signed-by` could "
         "point at a different (or absent) key than the fetch wrote"
     )
+
+    # ⛔ AND THE "IS PGDG ALREADY CONFIGURED" PROBE IS THE SAME CLASS ONE STEP FURTHER. The
+    # step now greps the box's apt sources before adding its own stanza; run verbatim that
+    # reads the HOST's apt configuration — the one thing a suite claiming hermeticity must
+    # not need, and on a host that DOES configure PGDG the arms would silently take the
+    # reuse branch and never exercise the guards at all. The probe is substituted with
+    # fixtures under `tmp_path` and the substitution is count-asserted, so a rewrite reds
+    # here instead of restoring the host dependency.
+    # ⛔ THE FACT, NOT THE SPELLING (this file's own rule — `curl -o`/`--output`, `install -D`
+    # and `.`/`source` are tolerated for the same reason): the probe is located by what it
+    # DOES — a `grep` line naming apt.postgresql.org and an apt source path — and only its
+    # OPERAND PATHS are replaced. Pinning one verbatim text
+    # (`grep -qE -e '<pattern>' … 2>/dev/null`) false-redded a single `-e`, a `-F`, and a
+    # trailing-slash path as "Re-derive the substitution" — the guard telling the maintainer to
+    # do work already done. ⚠️ AND THIS PROBE IS NOT RECURSIVE: it names the apt-READABLE files
+    # explicitly (`/etc/apt/sources.list`, `sources.list.d/*.list`, `sources.list.d/*.sources`),
+    # which is how it excludes the BACKUP names apt ignores (`pgdg.list.save`,
+    # `pgdg.list.distUpgrade` — created by ordinary apt/dpkg operations, and the shapes the
+    # ignored-shape rows below plant). Reading the DIRECTORY recursively is what would count a
+    # backup. ⚠️ THE FLAG ALONE IS NOT THE FACT EITHER — MEASURED: adding `-r` to these same
+    # operand globs left the file at `285 passed`, because the operands are still files. (For the
+    # record, swapping the globs for the directory operand reds too, but for an UNRELATED reason:
+    # `fixed_probe` below rewrites the glob operands, so an unrewritten probe reads the HOST's
+    # apt config and the REUSE arm reds on its own stub — not the ignored-shape rows. That is why
+    # this comment states the operands as a FACT rather than citing that mutation as its
+    # evidence.) So the stale claim was calling the probe "recursive" at all.
+    probe_lines = [
+        line
+        for line in code_only(prefix).splitlines()
+        if re.search(r"\bgrep\b", line)
+        and "apt" in line
+        and "postgresql" in line
+        and "sources.list" in line
+    ]
+    assert len(probe_lines) == 1, (
+        "the PGDG-presence probe is expected exactly once in the prefix's CODE so this test "
+        f"can point it at fixtures; found {len(probe_lines)}. Re-derive the substitution "
+        "rather than letting the arm read the HOST's apt sources"
+    )
+    apt_sources = tmp_path / "host-sources.list"
+    apt_sources_dir = tmp_path / "host-sources.list.d"
+    tee_log = tmp_path / "tee.log"
+    install_log = tmp_path / "install.log"
+    fixed_probe = re.sub(r"/etc/apt/sources\.list\.d/\*\.(list|sources)", f"{apt_sources_dir}/*.\\1", probe_lines[0])
+    fixed_probe = re.sub(
+        r"/etc/apt/sources\.list(?!\.d)", f"{apt_sources}", fixed_probe
+    )
+    assert fixed_probe != probe_lines[0], (
+        "the probe's apt-source operands were not found on its line, so the arm would read "
+        f"the HOST's apt configuration: {probe_lines[0]!r}"
+    )
+    prefix = prefix.replace(probe_lines[0], fixed_probe, 1)
 
     def run_with(
         stub: str,
@@ -5818,8 +5773,35 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         curl_stub: str = "curl() { return 0; }",
         codename: str = "noble",
         os_release_present: bool = True,
+        existing_pgdg: bool = False,
+        plant: dict[str, str] | None = None,
+        plant_sources_file: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         script = tmp_path / "precondition.sh"
+        # The host-sources fixtures the probe substitution points at. Empty by default (no
+        # PGDG on the box -> the step adds its own stanza); `existing_pgdg` plants an
+        # operator stanza so the REUSE branch is exercised.
+        tee_log.write_text("", encoding="utf-8")
+        install_log.write_text("", encoding="utf-8")
+        apt_sources.write_text("", encoding="utf-8")
+        apt_sources_dir.mkdir(parents=True, exist_ok=True)
+        # ⛔ EVERY ENTRY, not the two suffixes this file happens to write today: the
+        # `pgdg.list.save` fixture below is a THIRD spelling (`*.list` does not match
+        # `pgdg.list.save`), and a leftover from one arm would let a later arm's probe see a
+        # peer's file — the vacuous pass the `*.sources` clear was added to prevent. Measured:
+        # `glob("*.list")` -> [] and `glob("*.sources")` -> [] with `['pgdg.list.save']` on
+        # disk.
+        for stale in apt_sources_dir.iterdir():
+            stale.unlink()
+        if plant_sources_file is not None:
+            apt_sources.write_text(plant_sources_file, encoding="utf-8")
+        if existing_pgdg:
+            (apt_sources_dir / "pgdg.list").write_text(
+                "deb https://apt.postgresql.org/pub/repos/apt noble-pgdg main\n",
+                encoding="utf-8",
+            )
+        for name, content in (plant or {}).items():
+            (apt_sources_dir / name).write_text(content, encoding="utf-8")
         if os_release_present:
             os_release.write_text(
                 "ID=ubuntu\n" + (f"VERSION_CODENAME={codename}\n" if codename else ""),
@@ -5836,10 +5818,12 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         script.write_text(
             'sudo() { "$@"; }\n'
             f"{apt_get}\n{curl_stub}\n"
-            "install() { return 0; }\n"
+            f"install() {{ printf '%s\\n' \"$*\" >> \"{install_log}\" ; }}\n"
             "mkdir() { return 0; }\n"
             "rm() { return 0; }\n"
-            "tee() { cat >/dev/null; }\n"
+            # `tee` RECORDS what this step asked it to write, so an arm can assert that the
+            # step wrote NO stanza (the reuse branch) rather than only that it did not fetch.
+            f"tee() {{ cat >/dev/null; printf '%s\\n' \"$*\" >> \"{tee_log}\" ; }}\n"
             f"{stub}\n{prefix}\n"
             "echo REACHED_PAST_PRECONDITION\n",
             encoding="utf-8",
@@ -5882,6 +5866,204 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         "the script never reached the line after the precondition even when the "
         "package resolved — the block is unconditional"
     )
+    assert "tortoise-12051-pgdg.list" in tee_log.read_text(encoding="utf-8"), (
+        "the control arm did not write the PGDG stanza, so the reuse arm's 'no write' "
+        "assertion would be satisfied by a step that never writes at all"
+    )
+    assert "tortoise-12051-pgdg.asc" in install_log.read_text(encoding="utf-8"), (
+        "the control arm did not install the keyring, so the reuse arm's 'nothing written' "
+        "assertion would be vacuous"
+    )
+
+    # ⛔ AND A BOX THAT ALREADY CONFIGURES PGDG IS LEFT ALONE — THE REGRESSION THIS ROW
+    # EXISTS FOR. Adding a SECOND stanza for the same URI+suite with a different
+    # `Signed-By` makes apt refuse the WHOLE source list ("E: Conflicting values set for
+    # option Signed-By regarding source … <codename>-pgdg"), so `apt-get update` exits 100
+    # and the guard below reds a CORRECT box — MEASURED on ubuntu-24.04 (apt 2.8.4) against an
+    # operator stanza whose `Signed-By` differs from this step's (the shared
+    # `postgresql-common/pgdg` keyring, as a `pgdg.list` AND as a deb822 `pgdg.sources`). ⚠️ The
+    # shape planted BELOW is the BENIGN one — a stanza with no `signed-by` at all — which is
+    # MEASURED rc 0 with only `W: … configured multiple times`; it is reused all the same,
+    # because reusing needs no judgement about which operator shape is on the box.
+    # The arm plants an operator stanza AND makes the key host unreachable: the step must
+    # not fetch a key it is not going to use, and must not stop.
+    already = run_with(
+        'apt-cache() { echo "Candidate: 16.15-1.pgdg24.04+2"; '
+        'echo "     500 https://apt.postgresql.org/pub/repos/apt noble-pgdg/main amd64 Packages"; }',
+        curl_stub='curl() { echo "curl: (22) unreachable" >&2; return 22; }',
+        existing_pgdg=True,
+    )
+    already_combined = already.stdout + already.stderr
+    assert already.returncode == 0, (
+        "the step RED on a box that already configures apt.postgresql.org — it either added a "
+        "stanza the box does not need (benign on THIS fixture, which carries no `signed-by`: "
+        "apt only warns `configured multiple times`; on an operator stanza whose `Signed-By` "
+        "DIFFERS it makes apt refuse the whole source list), fetched a key it does not need, "
+        "or ABORTED under `set -u` on a line hoisted out of the gate that reads "
+        "`${VERSION_CODENAME}` or `$key_file` — both are defined only in the else-branch, so "
+        "a hoisted write dies there before any recorder is read: "
+        + repr(already_combined)
+    )
+    assert "REACHED_PAST_PRECONDITION" in already.stdout, (
+        "the step did not get past the repo setup on a box that already has a PGDG stanza: "
+        + repr(already_combined)
+    )
+    assert "already configured on this box" in already_combined, (
+        "the step did not report that it is REUSING the box's own PGDG stanza, so a reader "
+        "cannot tell whether it added one: " + repr(already_combined)
+    )
+    assert "could not FETCH" not in already_combined, (
+        "the step still fetched the signing key on a box it was not going to configure: "
+        + repr(already_combined)
+    )
+    # ⛔ AND IT MUST NOT HAVE WRITTEN A STANZA AT ALL. `already` prints the reuse message and
+    # skips the fetch, and BOTH of those stay true if the `tee` is hoisted OUT of the gate —
+    # the exact regression this arm exists for. MEASURED, review of `330dd8b962`: that hoist
+    # left the whole suite GREEN until this assertion existed. ⚠️ THE CONSEQUENCE IS STATED PER
+    # SHAPE (the same rule as the positive arms below): this fixture carries NO `signed-by`,
+    # so a second stanza would NOT conflict — it is still wrong, because the operator's own
+    # stanza is the one apt should keep using and this job would be adding state it never
+    # needs. The conflicting shapes are covered by the positive arms, not by this one.
+    assert install_log.read_text(encoding="utf-8").strip() == "", (
+        "the step still ran `install` on a box that already has a PGDG source — it created "
+        "the keyring DIRECTORY/file it will never reference: "
+        + repr(install_log.read_text(encoding="utf-8"))
+    )
+    assert tee_log.read_text(encoding="utf-8").strip() == "", (
+        "the step still WROTE an apt source stanza on a box that already has one — the box "
+        "needs it not, and on an operator stanza whose `Signed-By` differs a second one makes "
+        "apt refuse the whole list (benign on THIS no-`signed-by` fixture, wrong either way): "
+        + repr(tee_log.read_text(encoding="utf-8"))
+    )
+
+    # ⛔ A REUSED STANZA IS TRUSTED, NOT REPAIRED — and that COST is PINNED here, not merely
+    # stated in the workflow comment and the runbook. When the operator's stanza names a
+    # `Signed-By` key that no longer exists, this step neither repairs it nor deletes it: it
+    # owns only its own private pair, so `apt-get update` is the first thing that can notice,
+    # and the red lands THERE — not on the ORIGIN check, which the workflow comment names for
+    # the ignored-shape case. The state is REAL, not hypothetical: `main`'s merged trap
+    # produced it on a pool box (an operator `pgdg.list` rewritten onto the shared keyring the
+    # trap then deleted — #12051's own post-close table), so after this PR such a box reds on
+    # every later run until its own stanza is repaired. MEASURED in review on `ubuntu:24.04`
+    # (apt 2.8.3) with a dangling `signed-by`: `apt-get update` rc 100, `E: The repository … is
+    # not signed`, i.e. the update guard, never the ORIGIN one. The harness stubs `apt-get`, so
+    # what this arm pins is the STEP's behaviour on that pre-state: reuse, write nothing, red
+    # on the update guard.
+    dangling_key = run_with(
+        "apt-cache() { return 0; }",
+        apt_get="apt-get() { return 100; }",
+        existing_pgdg=True,
+    )
+    dangling_combined = dangling_key.stdout + dangling_key.stderr
+    assert dangling_key.returncode != 0 and "REACHED_PAST_PRECONDITION" not in dangling_key.stdout, (
+        "a box whose REUSED PGDG stanza cannot be verified did not stop the step, so an "
+        f"unverifiable source is trusted all the way to the install: {dangling_combined!r}"
+    )
+    assert "already configured on this box" in dangling_combined, (
+        "the step did not take the REUSE branch on a box naming apt.postgresql.org, so this "
+        "arm is not measuring the reused-stanza path at all: " + repr(dangling_combined)
+    )
+    assert "apt-get update FAILED" in dangling_combined, (
+        "an unreadable `Signed-By` on a REUSED stanza must red on the `apt-get update` guard — "
+        "that is the branch whose message tells the operator this step added neither file"
+        + repr(dangling_combined)
+    )
+    assert tee_log.read_text(encoding="utf-8").strip() == "", (
+        "the step WROTE a stanza on a box whose own stanza it was reusing, so it repaired "
+        "state it does not own: " + repr(tee_log.read_text(encoding="utf-8"))
+    )
+
+    # ⛔ AND THE PROBE MUST READ ONLY WHAT apt READS. A recursive grep over the whole
+    # `sources.list.d` directory also matches the names apt IGNORES — `pgdg.list.save` and
+    # `pgdg.list.distUpgrade` are created by ordinary apt/dpkg operations — and a
+    # commented-out line is not a stanza either. On a box whose only pgdg line is one of
+    # those, a too-wide probe takes the reuse branch, adds NOTHING, and the ORIGIN check
+    # reds with a message about a stanza that is not in effect. Both shapes are exercised
+    # on the WRITE side: the step must configure the box.
+    for shape, filename, content in (
+        ("commented-out stanza", "pgdg.list", "# deb https://apt.postgresql.org/pub/repos/apt noble-pgdg main\n"),
+        ("apt-ignored backup", "pgdg.list.save", "deb https://apt.postgresql.org/pub/repos/apt noble-pgdg main\n"),
+        # ⛔ THE DEB822 SPELLING NEEDS ITS OWN ROW: the `URIs:` alternative in the probe is a
+        # SEPARATE expression, so a maintainer widening only it stayed GREEN (MEASURED, review
+        # of `ee48814138`: loosening it to `URIs:.*apt\.postgresql\.org` left `285 passed`
+        # while a fully commented-out `.sources` paragraph is NOT something apt reads —
+        # measured rc 0, no error, and `apt-cache policy` names no postgresql package).
+        (
+            "commented-out deb822 stanza",
+            "pgdg.sources",
+            "#Types: deb\n#URIs: https://apt.postgresql.org/pub/repos/apt\n"
+            "#Suites: noble-pgdg\n#Components: main\n",
+        ),
+    ):
+        configured = run_with(
+            'apt-cache() { echo "Candidate: 16.15-1.pgdg24.04+2"; '
+            'echo "     500 https://apt.postgresql.org/pub/repos/apt noble-pgdg/main amd64 Packages"; }',
+            plant={filename: content},
+        )
+        assert configured.returncode == 0, (
+            f"the step red on a box whose only pgdg line is a {shape}: "
+            + repr(configured.stdout + configured.stderr)
+        )
+        assert "tortoise-12051-pgdg.list" in tee_log.read_text(encoding="utf-8"), (
+            f"the step did NOT configure the box whose only pgdg line is a {shape} — the "
+            "presence probe counted something apt does not read, so this box is left with no "
+            "PGDG source and reds at the ORIGIN check"
+        )
+        assert "already configured" not in (configured.stdout + configured.stderr), (
+            f"the step reported REUSING a stanza on a box whose only pgdg line is a {shape}"
+        )
+
+    # ⛔ AND THE POSITIVE HALF IS PINNED TOO — the probe must COUNT every shape apt reads.
+    # The loop above only plants shapes apt IGNORES, so deleting an operand from the probe
+    # stayed GREEN: MEASURED, review of `6b891dba2e`, dropping `sources.list.d/*.sources`,
+    # dropping the `URIs:` alternative, and dropping the legacy `/etc/apt/sources.list`
+    # operand each left `358 passed`. That is the gap that matters, because a deb822
+    # `pgdg.sources` is PGDG's OWN current procedure (postgresql.org/download/linux/ubuntu/)
+    # and a miss there does not degrade quietly: the step writes a second stanza for the same
+    # URI+suite with a DIFFERENT `Signed-By` and apt refuses the WHOLE source list
+    # (`E: Conflicting values set for option Signed-By`, rc 100 — measured on ubuntu-24.04).
+    # So each readable shape gets a POSITIVE arm asserting REUSE, not merely an ignored-shape
+    # arm asserting the write.
+    deb822 = (
+        "Types: deb\n"
+        "URIs: https://apt.postgresql.org/pub/repos/apt\n"
+        "Suites: noble-pgdg\n"
+        "Components: main\n"
+        "Signed-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc\n"
+    )
+    for shape, kwargs, consequence in (
+        (
+            "a deb822 `sources.list.d/pgdg.sources`",
+            {"plant": {"pgdg.sources": deb822}},
+            "the second stanza would carry a different Signed-By from the one that file "
+            "lists, and apt then refuses the WHOLE source list",
+        ),
+        (
+            "the legacy `/etc/apt/sources.list`",
+            {"plant_sources_file": "deb https://apt.postgresql.org/pub/repos/apt noble-pgdg main\n"},
+            "the step adds a stanza the box does not need — benign HERE, because the fixture "
+            "carries no `signed-by` (apt only warns `configured multiple times`), but writing "
+            "it is still wrong: the operator's own stanza is the one apt should keep using",
+        ),
+    ):
+        reused = run_with(
+            'apt-cache() { echo "Candidate: 16.15-1.pgdg24.04+2"; '
+            'echo "     500 https://apt.postgresql.org/pub/repos/apt noble-pgdg/main amd64 Packages"; }',
+            **kwargs,
+        )
+        reused_combined = reused.stdout + reused.stderr
+        assert reused.returncode == 0, (
+            f"the step red on a box already configured for PGDG through {shape}: "
+            + repr(reused_combined)
+        )
+        assert "already configured on this box" in reused_combined, (
+            f"the presence probe MISSED {shape} — apt reads it, so {consequence}: "
+            + repr(reused_combined)
+        )
+        assert tee_log.read_text(encoding="utf-8").strip() == "", (
+            f"the step WROTE its own stanza on a box already configured through {shape}: "
+            + repr(tee_log.read_text(encoding="utf-8"))
+        )
 
     # ⛔ AND THE PRODUCER'S OWN EXIT IS NOT PART OF THIS GUARD (#12051 review, P1).
     # The origin check reads `apt-cache policy … | grep …`, and under `pipefail` a
@@ -5968,7 +6150,7 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     # MEASURED, review cycle 9 — gutting this guard's `exit 1` leaves the suite GREEN,
     # because the ORIGIN guard then names its own failure. The named text IS the fact
     # here, and the downstream message must be ABSENT.
-    assert "apt-get update FAILED after the PGDG source was added" in update_combined, (
+    assert "apt-get update FAILED" in update_combined, (
         "`apt-get update` stopped the step but not on ITS OWN named cause — the whole "
         "point of the update guard is that a PGDG key/suite/egress failure reads as "
         f"THIS defect rather than as apt's opaque exit 100: {update_combined!r}"
@@ -6117,12 +6299,35 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
     Read from `_run_code` (comment lines stripped, `${…}` INTACT — the suite name
     IS an expansion, so `_normalised_code` would erase the fact under test).
 
-    Mutations re-measured at this head (backed-up workflow, sha256-identical after
-    each restore): delete the sources line -> 1 failed (THIS row); delete the EXIT
-    trap -> 1 failed (THIS row); unguard the os-release source -> 2 failed (THIS row
-    and the executed arm); `-16` -> `-18` on the install -> 3 failed (the pin rows,
-    where the install major is asserted). Each mutant's own message was read, not
-    just the count — a red for the wrong reason is not evidence.
+    Mutations re-measured at this head (workflow copied aside, sha256-identical after
+    each restore): delete the sources line -> 2 failed (THIS row and the executed arm's
+    control arm, which asserts the stanza was written); delete the EXIT trap
+    -> 2 failed (THIS row and `test_the_cleanup_trap_owns_only_what_this_step_created`);
+    move the EXIT trap below the key fetch, or below the keyring install -> 2 failed (the
+    same pair); point the step back at the SHARED `sources.list.d/pgdg.list` /
+    `postgresql-common/pgdg` paths -> 3 failed (THIS row, the cleanup-trap row, and the
+    executed arm); delete the PGDG-PRESENCE GATE so the step always adds its own stanza ->
+    2 failed (THIS row and the executed arm's reuse arm); HOIST the stanza write out of the
+    gate (both branches write) -> 1 failed (the executed arm's reuse arm — but MEASURED, the
+    red is an ABORT under `set -u` on `${VERSION_CODENAME}`, which only the else-branch
+    defines, NOT the `tee` recorder: that recorder is never reached, so the hoist mutants
+    prove the `set -u` guard and NOT the recorders' discriminating power); reintroduce a
+    pre-existence flag under ANY name
+    -> 2 failed (both trap rows, because the trap body must have no condition at all);
+    unguard the os-release source -> 2 failed (THIS row and the executed arm); `-16` -> `-18`
+    on the install -> 3 failed (the pin rows, where the install major is asserted); hoist
+    `install -d`/`install -m 0644` out of the gate -> 1 failed (the reuse arm, again ABORTING
+    under `set -u` — the `install -d` line DOES run and IS recorded (`-d /etc/apt/keyrings` in
+    the stub's log), then the `-m 0644` line aborts on `$key_file`, which only the else-branch's
+    `mktemp` defines, so the `install_log == ''` assertion is never REACHED: like the `tee`
+    hoist, this proves the `set -u` guard and not the recorders); drop `*.sources`, the `URIs:`
+    alternative, or the legacy `sources.list` operand from the presence probe -> 1 failed EACH
+    (the positive-shape arms above; MEASURED GREEN before they existed — that was the gap);
+    widen the presence probe so it accepts a COMMENTED-OUT stanza -> 1 failed (the ignored-shape
+    loop, which now covers BOTH spellings — `deb`/`.list` and `URIs:`/`.sources`); make it
+    RECURSIVE over `sources.list.d` so an apt-ignored `pgdg.list.save` counts -> 1 failed
+    (both are the ignored-shape arm). Each mutant's own message was read, not just the
+    count — a red for the wrong reason is not evidence.
     """
     _, pin = _pin_step(_steps(job))
     code = _run_code(pin)
@@ -6144,10 +6349,23 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
         "#12051 round 3's whole mechanism is that one line."
     )
     sources_line = sources[0]
-    assert "signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc" in sources_line, (
-        "the PGDG sources line does not bind the keyring it just installed, so apt "
-        f"would have to accept the repo unsigned (or refuse it): {sources_line!r}"
+    assert "signed-by=/etc/apt/keyrings/tortoise-12051-pgdg.asc" in sources_line, (
+        "the PGDG sources line does not bind the step-private keyring it installed, so "
+        f"apt would have to accept the repo unsigned (or refuse it): {sources_line!r}"
     )
+    # ⛔ THE WRITE IS GATED ON THE BOX NOT ALREADY CONFIGURING PGDG. Adding a second
+    # stanza for the same URI+suite with a different `Signed-By` makes apt refuse the whole
+    # source list and `apt-get update` exit 100 — a CORRECT box red (MEASURED, apt 2.8.4).
+    assert re.search(r"grep\b[^\n]*sources\.list[^\n]*sources\.list\.d", code), (
+        "the step does not check whether apt.postgresql.org is ALREADY configured, so on a "
+        "pool box that carries an operator `pgdg.list` it adds a second stanza for the same "
+        "suite — apt then refuses the whole source list and this step reds a correct box"
+    )
+    assert code.index("grep ") < code.index("apt.postgresql.org/pub/repos/apt"), (
+        "the presence check runs AFTER the sources line, so the second stanza is already "
+        "written — the check would always pass"
+    )
+
     assert "${VERSION_CODENAME}-pgdg" in sources_line, (
         "the PGDG suite is not derived from the box's own codename, so the step would "
         f"pin one release's suite and die on every other one: {sources_line!r}"
@@ -6165,15 +6383,15 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
     # so every equivalent spelling is accepted (`install -d`, `install -d -m 0755`,
     # `mkdir -p`, and `install -D` which creates the leading components itself) —
     # pinning the spelling false-redded the `install -D` rewrite (measured, cycle 4).
-    key_install = re.search(r"install\s+[^\n]*apt\.postgresql\.org\.asc", code)
+    key_install = re.search(r"install\s+[^\n]*tortoise-12051-pgdg\.asc", code)
     assert key_install, (
-        "the PGDG keyring is never installed with `install … apt.postgresql.org.asc` — "
+        "the PGDG keyring is never installed with `install … tortoise-12051-pgdg.asc` — "
         "the `signed-by` on the sources line would point at nothing"
     )
     if not re.search(r"(?:^|\s)-[A-Za-z]*D", key_install.group(0)):
         mkdir = re.search(
             r"(?:install\b[^\n]*?-d\b[^\n]*|mkdir\b[^\n]*)"
-            r"/usr/share/postgresql-common/pgdg",
+            r"/etc/apt/keyrings",
             code,
         )
         assert mkdir, (
@@ -6289,13 +6507,27 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
     # paid for once (#12069's continued-install P1).
     cleanup = _cleanup_trap(code)
     for artifact, why in (
-        ("/etc/apt/sources.list.d/pgdg.list", "the PGDG source it added"),
-        ("apt.postgresql.org.asc", "the keyring it installed"),
+        ("/etc/apt/sources.list.d/tortoise-12051-pgdg.list", "the PGDG source it added"),
+        ("/etc/apt/keyrings/tortoise-12051-pgdg.asc", "the keyring it installed"),
     ):
         assert artifact in cleanup, (
             f"the EXIT trap does not remove {artifact} ({why}), so a pool box keeps state "
             f"this step added: {cleanup!r}"
         )
+    assert "had_sources" not in code and "had_keyring" not in code, (
+        "the trap is keyed on pre-existence again: with STEP-PRIVATE paths that flag can only "
+        "produce the half-removed state (a rewritten file whose keyring is gone). Remove the "
+        "flag, not the removal."
+    )
+    # ⛔ AND THE TRAP BODY MUST HAVE NO CONDITION AT ALL. Naming the two flags is not the
+    # property — a renamed one (`pre_existing_list`, `k=0`) reproduces the same half-removed
+    # state and kept the suite GREEN at `330dd8b962` (MEASURED). The property is the SHAPE:
+    # straight-line removals, so the ONLY thing that may vary is the path.
+    assert "if " not in cleanup and "[" not in cleanup, (
+        "the trap is CONDITIONAL, so some path is removed only sometimes — with step-private "
+        "names that can only leave half of this step's apt state behind (a sources file whose "
+        f"keyring is gone): {cleanup!r}"
+    )
     key_target = re.search(r"curl\s[^\n]*?(?:-o|--output)\s+\"?\$\{?(\w+)", code)
     assert key_target, (
         "the key fetch does not write to a variable (`curl -o \"$…\"`), so the EXIT trap "
@@ -6305,17 +6537,26 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
         "the EXIT trap does not remove the downloaded key file, so every run leaves a temp "
         f"file on the box: {cleanup!r}"
     )
-    assert cleanup.index("/etc/apt/sources.list.d/pgdg.list") < cleanup.index(
-        "apt.postgresql.org.asc"
+    assert cleanup.index("/etc/apt/sources.list.d/tortoise-12051-pgdg.list") < cleanup.index(
+        "/etc/apt/keyrings/tortoise-12051-pgdg.asc"
     ), (
         "the trap removes the keyring BEFORE the sources file that is signed by it, so "
         "there is a window in which the box advertises a source it cannot verify — a soft "
         f"`apt-get update` failure for the next job on the box: {cleanup!r}"
     )
-    assert code.index("trap ") < code.index("apt.postgresql.org/pub/repos/apt"), (
-        "the EXIT trap is registered AFTER the sources line, so any failure from there on "
-        "leaves the PGDG source on the box"
-    )
+    # ⛔ BEFORE THE FIRST WRITE, not merely before the sources line: a trap moved below the
+    # key fetch leaks the `mktemp`'d key, one moved below the keyring install leaves a
+    # partial keyring. MEASURED: both mutants stayed GREEN under the sources-only pin.
+    for first_write in (
+        'key_file="$(mktemp)"',
+        "curl -fsSL",
+        "install -m 0644",
+        "apt.postgresql.org/pub/repos/apt",
+    ):
+        assert code.index("trap ") < code.index(first_write), (
+            f"the EXIT trap is registered AFTER `{first_write}`, so any failure from there on "
+            "leaves part of what this step wrote on the box"
+        )
 
 
 def _precondition_line_re() -> re.Pattern[str]:
