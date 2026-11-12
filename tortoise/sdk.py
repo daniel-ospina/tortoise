@@ -24352,21 +24352,35 @@ class TortoiseSDK:
                         "LOWER it")
                 elif op_type == "coherence":
                     # ⛔ THE THIRD MECHANISM HAS ITS OWN ARM (#12067 review round
-                    # 5, P2). The two branches below name NAND, so a coherence
-                    # wire fell into the NAND examples — an agent-facing warning
-                    # that said "A NAND wire carrying an IMPL meaning" about a
-                    # COHERENCE wire, wrong twice (the wire is not NAND, and this
-                    # one was declared NAND). An agent acting on it would rewrite
-                    # a correct coherence wire into a NAND one. A coherence wire
-                    # prices a NECESSARY CONDITION: it lowers the condition's
-                    # confidence, which is the opposite direction from a support
-                    # meaning and a different quantity from an attack meaning.
+                    # 5, P2), and the ARM'S OWN SENTENCE has to be true of the
+                    # potential (#12067 review round 7, P2). The two branches
+                    # below name NAND, so a coherence wire fell into the NAND
+                    # examples — an agent-facing warning that said "A NAND wire
+                    # carrying an IMPL meaning" about a COHERENCE wire, wrong
+                    # twice (the wire is not NAND, and this one was declared
+                    # NAND). An agent acting on it would rewrite a correct
+                    # coherence wire into a NAND one.
+                    #
+                    # ⛔ WHICH SIDE MOVES: `phi_coherence(ca, cb)` prices the
+                    # DEPENDENT (slot 1) off the necessary CONDITION (slot 0), so
+                    # an unmet condition DRAGS THE DEPENDENT DOWN — measured on
+                    # the factor path: `->` leaves the condition at 0.050000 and
+                    # lowers the dependent 0.9091 → 0.8264, and `<-` lowers the
+                    # dependent again (0.0500 → 0.0472). The first cut of this
+                    # message said it "LOWERS the condition's confidence", which
+                    # is false of the default reading and contradicts ONTOLOGY
+                    # ("an unmet condition propagates loss to the dependent").
+                    # The polarity of the CONTRAST depends on the declared
+                    # meaning too: an IMPL meaning expects a RAISE, a NAND
+                    # meaning expects a LOWER, so one clause cannot serve both.
                     _other = "NAND" if "NAND" in _meaning_mechanisms else "IMPL"
+                    _expected = ("RAISE" if _other == "IMPL" else "LOWER")
                     _inversion = (
                         f"A coherence wire carrying a {_other} meaning prices a "
-                        "NECESSARY CONDITION — it LOWERS the condition's "
-                        "confidence where the meaning would have it RAISE the "
-                        "target's")
+                        f"NECESSARY CONDITION — an unmet condition LOWERS the "
+                        f"DEPENDENT (the second input) and never raises it, "
+                        f"where the {_other} meaning would have it {_expected} "
+                        f"the target's")
                 elif _from_meaning:
                     _inversion = (
                         "A NAND wire carrying an IMPL meaning (e.g. 'supports') "

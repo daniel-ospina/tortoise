@@ -1184,6 +1184,17 @@ def test_the_mechanism_mismatch_message_names_the_THIRD_mechanism(sdk):
     # The declared mechanism it names must be the one that actually contradicted.
     assert "NAND declaration" in text or "declared NAND" in text.replace(
         "declares 'NAND'", "declared NAND"), text
+    # ⛔ …and WHICH SIDE MOVES must be right (#12067 review round 7, P2).
+    # `phi_coherence(ca, cb)` prices the DEPENDENT off the CONDITION, so an unmet
+    # condition drags the DEPENDENT down; the first wording said it lowers the
+    # CONDITION, which is false of the default `->` reading and contradicts
+    # ONTOLOGY. Measured on the factor path: `->` leaves the condition at
+    # 0.050000 and lowers the dependent 0.9091 → 0.8264.
+    assert "DEPENDENT" in text, text
+    assert "LOWERS the condition" not in text, text
+    # …and the contrast's polarity follows the DECLARED meaning: a NAND meaning
+    # expects the target to LOWER, so "would have it RAISE" is backwards for it.
+    assert "would have it LOWER the target's" in text, text
 
 
 # ── ROUND 4 continued: the two P1s the third round's fix left behind ──────
