@@ -230,9 +230,12 @@ not a tenth spelling — it is the one a text guard cannot reach:
   mechanism — they are not one: an option whose value is a SEPARATE token written
   AFTER the target (`rsync … "$b/17/bin/" "$b/16/bin/" -e "ssh -o X=/a"`) moves
   the last-path reading past the real target, while the `=`-joined form
-  (`--log-file=…`) starts with `-` and is skipped, so it stays REFUSED; a base
-  quoted separately from its token
-  (`"$b"/16/bin/`, `"${b}"/17/bin/`) is never MATCHED, so the last-path
+  (`--log-file=…`) starts with `-` and is skipped, so it stays REFUSED; a QUOTE
+  anywhere between the base and `/bin` defeats the match — not only one closing
+  right after the base (`"$b"/16/bin/`, `"${b}"/17/bin/`) but also one inside or
+  after the TOKEN (`"$b/16"/bin/`, `"$b/1"6/bin/`, `"$b/1""6/bin/`), all of which
+  shell-resolve to the real `/usr/lib/postgresql/16/bin/` and all of which are
+  MEASURED GREEN (#12173 round 31) — so the last-path
   machinery is not reached at all; a quoted command word (`sh -c 'rsync …'`) puts
   both mentions in COMMAND position, so the arm is skipped; a destination that
   names NO token at all (`rsync -a "$b/17/bin/" "$d/"`) is not reached —
@@ -266,7 +269,10 @@ not a tenth spelling — it is the one a text guard cannot reach:
   SEVEN. That last one is deliberate: the extractor verbs
   are absent from the mutation list by design (round 9 — `tar -czf …`,
   `unzip -l …` are reads), `dpkg-deb -x` takes no flag value, one shared flag set
-  lets `unzip -x` shadow `-d`, `cpio` reads as command position, and `tar -C` is a
+  lets `unzip -x` shadow `-d`, `cpio` would have to be ADDED to the mutation
+  table first (it is absent from it, which is the only reason it reads as command
+  position — circular, and #12173 round 31 measured that adding the verb flips
+  the row to REFUSED; nothing in this job needs `cpio`), and `tar -C` is a
   SOURCE chdir outside extract mode — a half-built arm that reds correct trees is
   the defect the whitelist's own note names. The admitted spellings are pinned in
   `BINARY_MUTATION_POLARITY`. The task's own `pg_dump --version` assertion is the
@@ -4898,6 +4904,30 @@ BINARY_MUTATION_POLARITY = [
         "accident.",
     ),
     (
+        'b=/usr/lib/postgresql; sudo rsync -a "$b/17/bin/" "$b/16"/bin/',
+        False,
+        "STATED RESIDUAL (#12173 review round 31, measured): a QUOTE anywhere "
+        "between the base and `/bin` defeats the match — not only the "
+        "base-quoted-apart form. Shell-resolves to /usr/lib/postgresql/16/bin/, "
+        "so this is the COMPLETE #12051 directory replacement and it is GREEN. "
+        "Fail-OPEN and declared rather than closed, because admitting quotes as "
+        "glue is how a text guard starts accepting more than it can reason "
+        "about; pinned so closing it is a deliberate edit.",
+    ),
+    (
+        'b=/usr/lib/postgresql; sudo rsync -a "$b/17/bin/" "$b/1"6/bin/',
+        False,
+        "STATED RESIDUAL (#12173 review round 31, measured): the same quoting "
+        "hole inside the TOKEN — shell-resolves to /usr/lib/postgresql/16/bin/. "
+        "Fail-OPEN, declared, pinned.",
+    ),
+    (
+        'b=/usr/lib/postgresql; sudo rsync -a "$b/17/bin/" "$b/1""6/bin/',
+        False,
+        "STATED RESIDUAL (#12173 review round 31, measured): token split across "
+        "two quoted halves — same act, same GREEN. Fail-OPEN, declared, pinned.",
+    ),
+    (
         'b=/usr/lib/postgresql/; sudo rsync -a "${b%x}17/bin/" "${b%x}16/bin/"',
         False,
         "STATED RESIDUAL (#12069 review round-30, measured): a braced base "
@@ -5195,10 +5225,12 @@ BINARY_MUTATION_POLARITY = [
         "EXTRACTOR residual — named, not ordinalised, because the list is "
         "append-only and an ordinal drifts every time an entry is inserted; this "
         "one said `sixth` and was correct when written at round 24, but the "
-        "variable-base and `cd`-relative rows inserted since moved the extractor "
-        "to eighth, which pointed a future round at a REFUSED direction instead "
-        "(#12069 r24, ordinal corrected r30); pinned so closing it is a deliberate "
-        "edit",
+        "variable-base row inserted since moved the extractor from sixth to "
+        "SEVENTH (the `cd`-relative statement is a separate bullet, not an entry "
+        "in this list), which pointed a future round at a REFUSED direction "
+        "instead "
+        "(#12069 r24, ordinal corrected r30 and again r31); pinned so closing it "
+        "is a deliberate edit",
     ),
     (
         'sudo dpkg-deb -x x.deb "$b/16/bin"',
