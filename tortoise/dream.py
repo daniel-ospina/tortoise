@@ -165,8 +165,14 @@ EMBEDDED_LATENCY_BUDGET_S = 0.5
 # operator Point is edged (so the `is_operator` conjunct is indistinguishable
 # from `NOT (n)-[:IMPL|NAND]-()`). An EDGE-LESS operator
 # (`create_point(..., is_operator=True)` builds one where `create_operator`
-# always wires an edge) is pinned only in the drop-claims direction, by the
-# passes that must trivially stamp an isolated claim.
+# always wires an edge) has **NO pin**: nothing that OBSERVES the trivial-stamp
+# population carries one, so WIDENING the conjunct stays green — measured: adding
+# such a node to this fixture leaves its count at 2. (What IS pinned is the
+# OPPOSITE edge of the same conjunct: NARROWING `= false` to `IS NULL` drops
+# every `is_operator: false` claim, and the passes that must trivially stamp an
+# isolated claim redden — `tests/test_epic903_freshness.py`. That mutation says
+# nothing about an edge-less operator, which is why it is not a pin for this
+# drift.)
 # ⛔ And the additive-widening class is pinned only for a status this fixture
 # CARRIES — measured: widening the clause to exclude `'live'` as well reddens it
 # (2→0), while excluding `'archived'`, which no node here carries, leaves it

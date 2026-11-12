@@ -312,7 +312,8 @@ unreadable test goes red; drop the closure term from `_reachable_claim_count` wh
   is WIDER, the ratio FALLS and `no_belief` RISES, both in range, and the ranges are blind to it. That
   second direction is the one that matters here (measured on the §2 fixture, `belief_present=1`:
   denominator 4→5 gives `pct` 0.25→0.2 and `no_belief` 3→4 — absolute values, not a delta; the earlier
-  `/ +4` shorthand read as one and is not). So the ranges are a lower bound, not the control: `test_counts_match_an_independent_query` pins `ep_reachable_claims`, `belief_present`
+  `denominator +4 ⇒ pct 0.2, no_belief +4` shorthand read as one and is not). So the ranges are a lower
+  bound, not the control: `test_counts_match_an_independent_query` pins `ep_reachable_claims`, `belief_present`
   and `points_edged` against independently written queries, which is what reddens on an inflated
   denominator.
 - R7 the new reads make a polled endpoint expensive (`GET /v1/dream/health` is per-request; the

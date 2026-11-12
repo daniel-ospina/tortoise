@@ -751,12 +751,14 @@ def test_untested_operator_less_population_matches_trivial_stamp(sdk):
     so the `is_operator` conjunct is indistinguishable from the negated pattern
     (measured: dropping the conjunct stays GREEN). The edge-less `is_operator`
     shape exists and is one public call away (`create_point(...,
-    is_operator=True)`; `create_operator` always wires an edge), but no test
-    that OBSERVES the trivial-stamp population carries one — so that drift is
-    pinned only in the DROP-CLAIMS direction, where narrowing `= false` to
-    `IS NULL` drops every `is_operator: false` claim and the passes that must
-    trivially stamp an isolated claim redden
-    (`tests/test_epic903_freshness.py`).
+    is_operator=True)`; `create_operator` always wires an edge), and it has
+    **NO pin**: no test that OBSERVES the trivial-stamp population carries one
+    (measured: adding such a node here leaves the count at 2), so WIDENING the
+    conjunct is silent. What IS pinned is the opposite edge — NARROWING
+    `= false` to `IS NULL` drops every `is_operator: false` claim, and the
+    passes that must trivially stamp an isolated claim redden
+    (`tests/test_epic903_freshness.py`); that mutation says nothing about an
+    edge-less operator, so it is not a pin for this drift.
 
     The census keeps DERIVING its number (`graph_live - points_edged`, a
     positive traversal): the negated pattern is a production cost, and a
