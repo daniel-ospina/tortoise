@@ -851,23 +851,64 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # NEITHER arm — no factor, no skipped-factor record — and the direct-edge
             # sentence ("write the equivalent edge") would prescribe a repair that
             # changes nothing (measured: confidences empty after it).
-            "shape": bool(is_op_flag) or op_type is not None,
+            # ⛔ IDENTITY, never truthiness — every column here is a raw property
+            # or a ``coalesce(prop, false)``, and the engine compares with STRICT
+            # type semantics: measured on this engine, ``RETURN 'false' = true,
+            # 'false' = false, 0 = false, 1 = true`` → ``[False, False, False,
+            # False]``. ``update_entity(x, is_operator='false')`` is a DOOR
+            # (measured: accepted on a ``:Object`` AND a ``:Point``, and the
+            # property then holds the STRING ``'false'``), so ``bool('false')`` is
+            # True and put the row on EP's OPERATOR arm while EP matches NEITHER
+            # arm — measured: the prescribed idx re-point left the new edge's
+            # ``msg_alpha``/``msg_beta`` None and a re-audit read CLEAN over a
+            # factor EP never built (#12111 round-13 P2).
+            "shape": (is_op_flag is not False) or op_type is not None,
             "is_operator": ("Point" in (active_labels or [])
-                            and (bool(is_op_flag) or op_type is not None)),
+                            and (is_op_flag is True or op_type is not None)),
             "direction": direction, "active_id": active_id,
             "carrier_count": carrier_count, "carrier_status": carrier_status,
             "carrier_sb": carrier_sb,
-            "carrier_is_operator": bool(carrier_is_operator),
+            # ``coalesce(..., false)``: operator-SHAPED means anything EP's
+            # ``_non_operator`` refuses, i.e. NOT the boolean ``false``.
+            "carrier_is_operator": carrier_is_operator is not False,
             # ⛔ DERIVED through the shared predicate, not read off ``status``: EP's
-            # terminal test is the status vocabulary OR the legacy ``outdated`` flag.
-            "carrier_outdated": bool(carrier_outdated),
+            # terminal test is the status vocabulary OR the legacy ``outdated`` flag
+            # — and that comparison is strict too, so the mirror is handed a real
+            # bool rather than a value whose truthiness may not be its comparison.
+            "carrier_outdated": carrier_outdated is True,
             "carrier_terminal": is_terminal_status(carrier_status,
-                                                   bool(carrier_outdated)),
+                                                   carrier_outdated is True),
             "next_count": next_count, "next_status": next_status,
-            "next_outdated": bool(next_outdated),
-            "next_terminal": is_terminal_status(next_status, bool(next_outdated)),
-            "next_is_operator": bool(next_is_operator),
+            "next_outdated": next_outdated is True,
+            "next_terminal": is_terminal_status(next_status,
+                                                next_outdated is True),
+            "next_is_operator": next_is_operator is not False,
         }
+
+    def _dropped_input(s: dict) -> str:
+        """What EP does when the re-point sends this input where EP will not read it.
+
+        ⛔ ONE SOURCE, because this consequence was restated per arm and the
+        restatements asserted an ARITY: "the operator is left with NO factor
+        (measured: confidences empty, successor absent)" and "the re-point leaves
+        the factor degenerate" are true only of a factor left with fewer than two
+        inputs. Measured on a THREE-input operator re-pointed onto an
+        operator-shaped successor: EP drops the input, re-scores over the two that
+        remain, and returns **two** confidences with ``skipped: None`` — so a
+        reader holding that factor is told to abandon a repair that would have
+        worked, while the string claims a measurement it does not have.
+
+        The check does not project the arity (a fourth ``OPTIONAL MATCH`` would
+        multiply rows and move ``SAMPLE_LIMIT``), so the consequence is stated as
+        the ladder ``ep.py`` actually runs rather than as one rung of it.
+        """
+        if not s["is_operator"]:
+            return ("EP assembles no factor for this row in the first place, so the "
+                    "re-point moves no belief either way")
+        return ("EP drops that input from the factor and re-scores it over the "
+                "REMAINING inputs — ONE left is skipped as degenerate "
+                "(``len(input_ids) < 2``), two or more run without it (measured "
+                "on a three-input operator: two confidences, ``skipped: None``)")
 
     def _successor_note(s: dict) -> str:
         """The pointer's state, as the trailing clause of a ``detail``.
@@ -891,27 +932,30 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         if s["carrier_is_operator"]:
             # ⛔ EP does not admit an OPERATOR-SHAPED node as a factor input (#9269,
             # ``_non_operator``) — the same strip a draft gets — so re-pointing onto
-            # one leaves the factor degenerate while a re-audit reads CLEAN. Measured:
-            # ``create_entity("object", n, is_operator=True)`` is door-permitted, the
-            # prescribed re-point leaves ``skipped_factors: [degenerate]`` and 4b
-            # reports 0 issues afterwards.
+            # one leaves the input unread while a re-audit reads CLEAN.
+            # ``create_entity("object", n, is_operator=True)`` is door-permitted and
+            # the prescribed re-point leaves 4b reporting 0 issues afterwards.
+            # ⛔ The CONSEQUENCE is ``_dropped_input``'s: "NO factor / confidences
+            # empty" is an arity claim (true at two inputs only — measured false at
+            # three, where the factor runs over the remaining two).
             return ("; the successor it names is itself OPERATOR-SHAPED "
                     "(is_operator=true), which EP excludes from a factor's inputs "
-                    "(#9269) — so re-pointing onto it drops that input entirely and "
-                    "the operator is left with NO factor (measured: confidences "
-                    "empty, successor absent), the claim's support silently gone "
-                    "while a re-audit reads CLEAN. Target a CLAIM successor")
+                    "(#9269) — " + _dropped_input(s) + ", and a re-audit reads "
+                    "CLEAN over it. Target a CLAIM successor")
         if (s["carrier_status"] or "") == DRAFT_STATUS:
             # ⛔ A DRAFT successor is not terminal, so without this arm it takes the
             # ordinary one — but EP strips a draft input exactly as it strips a
             # terminal input (#780). The re-point would then read CLEAN on a
-            # re-audit with the factor still degenerate: the same self-inflicted
-            # false NEGATIVE the successorless arm refuses for ``archived``, and
+            # re-audit while the input is unread: the same self-inflicted false
+            # NEGATIVE the successorless arm refuses for ``archived``, and
             # reachable through the sanctioned fold lane (measured:
             # ``apply_supersessions`` folds a draft successor with NO warning).
+            # ⛔ ``_dropped_input`` again: "leaves the factor degenerate" is true at
+            # two inputs, false at three (measured: two confidences, ``skipped:
+            # None``).
             return (f"; the successor it names is '{DRAFT_STATUS}', which EP "
                     "strips like a terminal input (#780) — it needs promoting to "
-                    "live as well, or the re-point leaves the factor degenerate")
+                    "live as well, or " + _dropped_input(s))
         if s["carrier_terminal"]:
             return ("; the successor it names is ITSELF "
                     f"{_quoted(_status_or_flag(s['carrier_status'], s['carrier_outdated']))}"
@@ -1056,14 +1100,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         succ = f"'{s['sup_sb']}'" if bool(s["sup_sb"]) else "the successor"
         if s["carrier_is_operator"]:
             return (f" ⛔ {succ} is OPERATOR-SHAPED (is_operator=true), which EP "
-                    "excludes from a factor's inputs (#9269): re-pointing onto it "
-                    "drops the input entirely and leaves the operator with NO factor "
-                    "(measured: confidences empty, successor absent) — target a CLAIM "
-                    "successor")
+                    "excludes from a factor's inputs (#9269): "
+                    f"{_dropped_input(s)} — target a CLAIM successor")
         if (status or "") == DRAFT_STATUS:
             return (f" ⛔ {succ} is '{DRAFT_STATUS}', which EP strips the same way "
-                    "(#780): promote it to live as well, or the re-point leaves "
-                    "the factor degenerate")
+                    "(#780): promote it to live as well — " + _dropped_input(s))
         if not s["carrier_terminal"]:
             return ""
         return (f" ⛔ {succ} is ITSELF "
@@ -1166,8 +1207,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING: EP builds no "
                     "factor for that endpoint in EITHER arm, so " + anchor + " "
                     "over a claim whose support was never there — and the claim's "
-                    "support has to be wired through a :Point operator (or the "
-                    "shape cleared) regardless")
+                    "support has to be wired through a :Point operator regardless: "
+                    "clearing the shape alone restores nothing while this edge still "
+                    "ends at the superseded Object")
             return lead + (
                 "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING: this is a DIRECT "
                 "edge, so EP assembles no factor for it either way (the row is "
@@ -1277,9 +1319,14 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 # support was never there.
                 fix += ("; and no edge rewrite repairs this — EP builds NO factor "
                         "in EITHER arm (the operator arm needs the :Point label, the "
-                        "direct-edge arm refuses an operator-shaped endpoint): "
-                        f"{_shape_repair} or wiring this claim through a "
-                        ":Point operator is what restores the support")
+                        "direct-edge arm refuses an operator-shaped endpoint). "
+                        "Clearing the shape is NOT sufficient on its own — this edge "
+                        "still ends at the superseded Object, so what restores the "
+                        f"support is the wiring, not the flag: {_shape_repair} AND "
+                        "wire the claim through a :Point operator, or delete this "
+                        "edge (measured: clearing the flag alone leaves "
+                        "``msg_alpha`` None and this finding returns as a "
+                        "direct-edge row)")
             elif not s["is_operator"]:
                 fix += ("; and this is a DIRECT edge, so there is no factor to "
                         "re-point — write the equivalent edge onto that successor "
@@ -1295,18 +1342,25 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         tail = _chain_tail(s)
         if s["shape"] and not s["is_operator"]:
             # ⛔ NEITHER arm: "write the equivalent edge" would change nothing, so the
-            # repair is to clear the SHAPE or route the claim through a :Point
-            # operator — measured: re-pointing leaves EP building no factor at all.
+            # repair is to clear the SHAPE **and** move the edge — measured: clearing
+            # the flag alone leaves ``confidences {}`` and this finding returns as a
+            # direct-edge row (the edge still ends at the superseded Object), while
+            # clearing AND re-pointing onto the live successor builds the factor and
+            # the check goes CLEAN.
             # ⛔ The shape belongs to the ACTIVE ENDPOINT, never to the superseded
             # anchor ``q`` (``active_id`` differs by construction: the anchor is
             # ``status='superseded'`` while ``active`` must be live), so a call on
             # ``q`` would set the flag on a node that never carried it.
             return prefix + (
-                "No edge rewrite repairs this: EP builds NO factor in either arm "
-                "(the operator arm needs the :Point label, the direct-edge arm "
-                "refuses an operator-shaped endpoint), so "
-                f"{_shape_repair} or wiring this claim through a :Point operator "
-                "is what restores the support" + tail)
+                "No edge rewrite ALONE repairs this: EP builds NO factor in either "
+                "arm (the operator arm needs the :Point label, the direct-edge arm "
+                "refuses an operator-shaped endpoint). The flag is only HALF the "
+                f"repair — {_shape_repair} AND move this "
+                f"{s['edge_type']} edge off {q} onto the successor ({successor}) — "
+                "or wire the claim through a :Point operator: clearing the flag "
+                "alone restores nothing while the edge still ends at the "
+                "superseded Object (measured: ``confidences {}`` and this finding "
+                "returns as a direct-edge row)" + tail)
         if not s["is_operator"]:
             return prefix + (
                 f"Re-point this {s['edge_type']} edge off {q} onto the successor "

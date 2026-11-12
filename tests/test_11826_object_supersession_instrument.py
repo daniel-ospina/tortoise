@@ -1554,3 +1554,218 @@ def test_historical_knowledge_renders_an_absent_status_as_live(sdk):
     out = sdk.get_historical_knowledge(live["id"], "2026-03-01")
     assert out["current"]["status"] == "live"
     assert out["current"]["terminal"] is False
+
+
+# ── 4. the classification is IDENTITY, not truthiness (#12111 round 13) ──
+
+
+def test_a_string_flag_on_a_point_is_not_an_operator_input(sdk):
+    """``is_operator='false'`` is a DOOR, and ``bool()`` is not EP's comparison.
+
+    ``update_entity(p, is_operator='false')`` is accepted and the property then holds
+    the STRING ``'false'`` (measured, on a ``:Point`` and on a ``:Object``). The
+    engine compares with STRICT type semantics — ``RETURN 'false' = true, 'false' =
+    false, 0 = false, 1 = true`` → ``[False, False, False, False]`` — so EP's
+    ``is_operator = true`` arm does NOT match it, while ``_non_operator`` (absence-or-
+    the-boolean-``false``) does not admit it either: NEITHER arm. ``bool('false')``
+    is True, so the check emitted the OPERATOR arm — "stamp one, idx 0 is the source
+    slot" — and performing that repair left the new edge's ``msg_alpha``/``msg_beta``
+    None with a re-audit reading CLEAN over a factor EP never built.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    sdk.update_entity(p["id"], is_operator="false")
+    assert _q(sdk, "MATCH (a:Point {id:$i}) RETURN a.is_operator", {"i": p["id"]}) \
+        == [["false"]], "fixture drifted: the flag is not the string 'false'"
+    assert _q(sdk, "RETURN 'false' = true, 'false' = false, 0 = false, 1 = true", {}) \
+        == [[False, False, False, False]], "fixture drifted: the engine coerces"
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues, "fixture broken: the row must still be reported"
+    detail, fix = issues[0].detail, issues[0].fix
+    assert "in EITHER arm" in detail, detail
+    assert "idx 0 is the source slot" not in fix, (
+        "no factor will read an idx here — EP matches neither arm: " + fix)
+
+    # The measurement the arm rests on: the repair an operator-arm reader would
+    # perform restores nothing, and the finding goes quiet anyway.
+    _q(sdk, "MATCH (a {id:$p}), (t {id:$t}) CREATE (a)-[:IMPL {idx: 0}]->(t)",
+       {"p": p["id"], "t": v2["id"]})
+    _q(sdk, "MATCH (a {id:$p})-[r:IMPL]->(o {id:$v}) DELETE r",
+       {"p": p["id"], "v": v1["id"]})
+    assert _q(sdk, "MATCH (a {id:$p})-[r:IMPL]->(t {id:$t}) "
+                   "RETURN r.msg_alpha, r.msg_beta",
+              {"p": p["id"], "t": v2["id"]}) == [[None, None]], \
+        "fixture drifted: EP propagated through this edge after all"
+    assert [i for i in _issues(sdk, "superseded_object_active_edges")] == [], (
+        "fixture drifted: the finding must go quiet after the re-point — that is "
+        "what makes the wrong arm dangerous")
+
+
+def test_a_zero_flag_successor_is_operator_shaped(sdk):
+    """``is_operator=0`` (an INT) is excluded by EP and was read as a plain claim.
+
+    The door accepts it (measured: the property holds the integer ``0``), and the
+    engine's ``0 = false`` is False — so ``_non_operator`` refuses the node and the
+    re-point leaves the factor short, while ``bool(0)`` is False and put the row on
+    the ordinary arm ("the successor inherits no belief unless it was separately
+    rewired") instead of naming the shape.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyA")
+    v2 = _obj(sdk, "PolicyB")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    sdk.update_entity(v2["id"], is_operator=0)
+    assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.is_operator", {"i": v2["id"]}) \
+        == [[0]], "fixture drifted: the flag is not the integer 0"
+    _supersede_object(sdk, "PolicyA", "PolicyB")
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    assert "OPERATOR-SHAPED" in issues[0].detail, (
+        "EP refuses this endpoint as a factor input (0 = false is False), so the "
+        "ordinary arm's 'it inherits no belief unless rewired' understates it: "
+        + issues[0].detail)
+
+
+# ── 5. a consequence is the LADDER, never an arity (#12111 round 13) ──
+
+
+def test_a_three_input_operator_loses_only_the_dropped_input(sdk):
+    """EP skips a factor only when FEWER THAN TWO inputs remain (``ep.py``).
+
+    The operator-shaped-successor arms asserted "the operator is left with NO factor
+    (measured: confidences empty, successor absent)". Measured on a THREE-input
+    operator: the shaped input is dropped, the factor runs over the two that remain,
+    and ``compute_confidence`` returns **two** confidences with ``skipped: None`` —
+    so the string claims a measurement of a two-input factor that this row does not
+    have, and tells the reader to abandon a repair that would have worked.
+    """
+    a = sdk.create_point("statement", "alpha claim")
+    b = sdk.create_point("statement", "beta claim")
+    v1 = _obj(sdk, "PolicyA")
+    _obj(sdk, "PolicyB", is_operator=True)
+    op = sdk.create_operator("IMPL", a["id"], [b["id"], v1["id"]])
+    _supersede_object(sdk, "PolicyA", "PolicyB")
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    for text in (issues[0].detail, issues[0].fix):
+        assert "OPERATOR-SHAPED" in text, text
+        assert "NO factor" not in text and "confidences empty" not in text, (
+            "this row has three inputs, and two survive the drop: " + text)
+        assert "two or more run without it" in text or "re-scores" in text, text
+
+    # The consequence the ladder names, measured by performing the re-point.
+    _q(sdk, "MATCH (o:Point {id:$o})-[r:IMPL]->(t:Object {id:$v}) "
+            "MATCH (s:Object {name:'PolicyB'}) MERGE (o)-[nr:IMPL]->(s) "
+            "SET nr.idx = r.idx DELETE r", {"o": op["id"], "v": v1["id"]})
+    run = sdk.compute_confidence(factors=[a["id"]], require_calibration=False)
+    assert len(run["confidences"]) == 2, (
+        "fixture drifted: the remaining two inputs must still run: "
+        f"{run['confidences']}")
+    assert run.get("skipped_factors") is None, run.get("skipped_factors")
+
+
+def test_a_three_input_operator_with_a_draft_successor_is_not_degenerate(sdk):
+    """The draft arm made the same arity claim as the operator-shaped one.
+
+    "the re-point leaves the factor degenerate" holds at two inputs; with three, one
+    dropped input leaves two and the factor runs (measured: two confidences,
+    ``skipped: None``).
+    """
+    a = sdk.create_point("statement", "alpha claim")
+    b = sdk.create_point("statement", "beta claim")
+    v1 = _obj(sdk, "PolicyA")
+    _obj(sdk, "PolicyB", status="draft")
+    sdk.create_operator("IMPL", a["id"], [b["id"], v1["id"]])
+    _supersede_object(sdk, "PolicyA", "PolicyB")
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    for text in (issues[0].detail, issues[0].fix):
+        assert "'draft'" in text, text
+        assert "leaves the factor degenerate" not in text and \
+            "the factor degenerate" not in text, (
+            "this row has three inputs, so one drop cannot make it degenerate: "
+            + text)
+
+
+def test_clearing_the_shape_without_moving_the_edge_restores_nothing(sdk):
+    """The shaped-endpoint repair dropped the re-point step.
+
+    It ended at "clearing the shape … is what restores the support". Measured: the
+    edge still ends at the superseded Object, so clearing the flag alone leaves
+    ``confidences {}`` and the finding returns as a direct-edge row; clearing AND
+    re-pointing onto the live successor builds the factor and the check goes CLEAN.
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    fix = issues[0].fix
+    assert "clearing the flag alone restores nothing" in fix, fix
+    assert "onto the successor" in fix, (
+        "the repair must still move the edge: " + fix)
+
+    # Measured, in the order the fix now spells it: flag first, edge second.
+    sdk.update_entity(actor["id"], is_operator=False)
+    assert sdk.compute_confidence(factors=[actor["id"]],
+                                 require_calibration=False)["confidences"] == {}, (
+        "fixture drifted: clearing the flag restored the support by itself")
+    assert [i for i in _issues(sdk, "superseded_object_active_edges")
+            if i.node_id == v1["id"]], (
+        "fixture drifted: the finding must survive the flag-clearing step")
+    _q(sdk, "MATCH (a {id:$a}), (t {id:$t}) CREATE (a)-[:IMPL]->(t)",
+       {"a": actor["id"], "t": _q(sdk, "MATCH (o:Object {name:'PolicyV2'}) "
+                                      "RETURN o.id", {})[0][0]})
+    _q(sdk, "MATCH (a {id:$a})-[r:IMPL]->(o {id:$v}) DELETE r",
+       {"a": actor["id"], "v": v1["id"]})
+    assert len(sdk.compute_confidence(factors=[actor["id"]],
+                                      require_calibration=False)["confidences"]) == 2
+    assert [i for i in _issues(sdk, "superseded_object_active_edges")] == []
+
+
+def test_the_successorless_shaped_arm_does_not_promise_the_flag_restores(sdk):
+    """With no successor the flag is not even half a repair: the edge must go.
+
+    The successorless shaped arm ended at "clearing the shape … is what restores the
+    support", which is unreachable here — there is no successor to move the edge to,
+    so clearing the flag leaves ``msg_alpha`` None and the finding re-reports as a
+    direct-edge row.
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_entity(v1["id"], status="superseded")  # NO successor
+    assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.supersededBy",
+              {"i": v1["id"]}) == [[None]], "fixture drifted"
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    fix = issues[0].fix
+    assert "Clearing the shape is NOT sufficient" in fix, fix
+    assert "delete this edge" in fix, (
+        "with no successor the only complete repair is the delete: " + fix)
+    sdk.update_entity(actor["id"], is_operator=False)
+    assert sdk.compute_confidence(factors=[actor["id"]],
+                                 require_calibration=False)["confidences"] == {}, (
+        "fixture drifted: clearing the flag restored the support by itself")
+    assert [i for i in _issues(sdk, "superseded_object_active_edges")
+            if i.node_id == v1["id"]], (
+        "fixture drifted: the flag-clearing step must not clear the finding")
