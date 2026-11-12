@@ -187,7 +187,7 @@ cost of the wrong assumption compounds per lane.
 | A-a | the `live-v4` baseline in §Feature is accurate | **high** | owner-measured 2026-11-04, per-kind breakdowns | C1's extended census re-derives it |
 | A-b | the packs *do* declare part-whole object relations; schema + writers admit them | **high** | tree: `packs/dev/manifest.yaml:142,148,193`; `projection/edges.py:621-630`; ONTOLOGY §3.7 | C3 |
 | A-c | the gap is the **declaration → consumer** seam, not a missing writer | **high** | tree: zero `create_edge` in `extractor_v2.py`; `hierarchies` validated-only (`pack_registry.py:2341-2355`) | C3 |
-| A-d | a corpus reachable **through the door the fleet writes through** exists or is capturable | **medium** | ⚠️ **Transports, not lanes.** The committed arm *is* the **v2 lane** — `llm:deepseek-direct` is what `sdk.py:15158` states as *"the v2 path reports `extraction_mode: llm:<route>`"* (keyed by symbol: `extraction_mode`), and `probes/capstone_measure.py` drives `TortoiseSDK.capture_session`. What **no committed capstone arm** exercises is the **hosted transport** the fleet's sessions actually use — `POST /v1/sessions` (`tortoise/pi-hooks/tortoise-capture.ts:948`, the plain `postCapture`; `:938` is the `install-probe` sibling, `hosted_api.py:17761`), with its quota/auth gates, and the registered corpus is a **fixture** (`tests/eval/write_path`, `pinned_by: fixtures_hash`). Also: **E1b's deterministic `m2` control has no committed artifact**. | C1 + C2 (the open decision is *which transport*, not *which lane*) |
+| A-d | a corpus reachable **through the door the fleet writes through** exists or is capturable | **medium** | ⚠️ **Transports, not lanes.** The committed arm *is* the **v2 lane** — `llm:deepseek-direct` is what `sdk.py:15650` states as *"the v2 path reports `extraction_mode: llm:<route>`"* (keyed by symbol: `extraction_mode`), and `probes/capstone_measure.py` drives `TortoiseSDK.capture_session`. What **no committed capstone arm** exercises is the **hosted transport** the fleet's sessions actually use — `POST /v1/sessions` (`tortoise/pi-hooks/tortoise-capture.ts:948`, the plain `postCapture`; `:938` is the `install-probe` sibling, `hosted_api.py:20319`), with its quota/auth gates, and the registered corpus is a **fixture** (`tests/eval/write_path`, `pinned_by: fixtures_hash`). Also: **E1b's deterministic `m2` control has no committed artifact**. | C1 + C2 (the open decision is *which transport*, not *which lane*) |
 | A-e | `TAGGED edges: 0` is a gap | **rejected** | no extraction path writes `tags`; `_sync_tags` is the only writer | no child; recorded so it never becomes a target |
 | A-f | E1–E5 need a fresh instrument | **rejected** | `#9075` registration + `probes/capstone_measure.py` + verdict gate, all committed | C1 extends it |
 
@@ -200,7 +200,7 @@ Written here because a decision that cites only its conclusion is unauditable; t
 
 - **R1/R2 — the packs already declare it** (`decomposesInto`, `hasPart`, `hierarchies`), the schema admits
   it (`hasPart` on the structural allowlist; Object→Object per ONTOLOGY §3.7) and the writer exists
-  (`edges.py:2899`). ⚠️ `decomposesInto` is **not itself writable** — its route is `semantics: hasPart`,
+  (`edges.py:2900`). ⚠️ `decomposesInto` is **not itself writable** — its route is `semantics: hasPart`,
   and **nothing derives the writable predicate from the declaration**.
 - **R3 — the extraction lane writes no structural edge at all.**
 - **R6 — the door is the v2 lane** (`_capture_lane()` → `"v2"` unless `TORTOISE_SESSION_EXTRACTOR=m2`).
@@ -220,7 +220,7 @@ shipped table says RED.
 Two recorded decisions and one closed-but-unsettled metric sit under the owner's assertions. This epic
 **routes** them; it does not decide them.
 
-1. **REOPEN — D3 `statement`-only** (`docs/ONTOLOGY.md:969-978`, option B 2026-08-12, `#1022` MERGED) vs A4
+1. **REOPEN — D3 `statement`-only** (`docs/ONTOLOGY.md:975-984`, option B 2026-08-12, `#1022` MERGED) vs A4
    ("0.6 % typed is the ceiling the capstone must beat"). Fork: (a) A4 overrides D3 → `OVERRIDES:` on
    `#1022` + `ONTOLOGY.md` §5 and C7 gains a target; (b) A4 was aimed at `#4432`'s docs-vs-code drift → C7
    attributes the 109 and follows whichever of `#4432`'s options the owner picks.
