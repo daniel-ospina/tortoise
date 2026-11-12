@@ -4825,12 +4825,18 @@ jobs:
           # suite carry DIFFERENT `Signed-By` values:
           #   E: Conflicting values set for option Signed-By regarding source … <codename>-pgdg: … != …
           #   E: The list of sources could not be read.
-          # MEASURED on ubuntu-24.04 (apt 2.8.4) with an operator `pgdg.list` carrying NO
-          # `signed-by` (PGDG's legacy `trusted.gpg.d` install) or the shared keyring:
+          # MEASURED on ubuntu-24.04 (apt 2.8.4) with an operator stanza whose `Signed-By`
+          # DIFFERS from this step's — the shared `postgresql-common/pgdg` keyring (PGDG's own
+          # documented procedure) as a one-line `pgdg.list`, and as a deb822 `pgdg.sources`:
           # `apt-get update` exits 100, so the guard below would red a CORRECT box — a
-          # regression, on exactly the pool-box class this cleanup exists for. On such a box
-          # the operator's stanza already provides the index, so this step adds nothing; the
-          # ORIGIN check below still proves apt.postgresql.org lists this major.
+          # regression, on exactly the pool-box class this cleanup exists for. ⚠️ What is NOT
+          # a conflict, and must not be reported as one: a stanza with NO `signed-by` at all
+          # (PGDG's legacy `trusted.gpg.d` install) — MEASURED rc 0 with only
+          # `W: Target Packages … is configured multiple times`, on apt 2.8.4 (24.04), 3.1.6
+          # (25.10) and 3.2.1 (26.04). It is reused anyway: its index is the same one this step
+          # would add, and REUSING needs no judgement about which operator shape is on the box.
+          # On such a box the operator's stanza already provides the index, so this step adds
+          # nothing; the ORIGIN check below still proves apt.postgresql.org lists this major.
           # ⚠️ THE PROBE READS ONLY WHAT apt ACTUALLY READS: the legacy single file, and
           # `sources.list.d/*.list` / `*.sources`. A recursive grep over the whole directory
           # also matches the BACKUP names apt ignores (`pgdg.list.save`,

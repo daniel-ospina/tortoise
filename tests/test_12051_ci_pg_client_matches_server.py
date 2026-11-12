@@ -5873,6 +5873,7 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         os_release_present: bool = True,
         existing_pgdg: bool = False,
         plant: dict[str, str] | None = None,
+        plant_sources_file: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         script = tmp_path / "precondition.sh"
         # The host-sources fixtures the probe substitution points at. Empty by default (no
@@ -5884,6 +5885,13 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         apt_sources_dir.mkdir(parents=True, exist_ok=True)
         for stale in apt_sources_dir.glob("*.list"):
             stale.unlink()
+        # ⛔ `*.sources` TOO: a deb822 fixture left behind by one arm would satisfy the
+        # presence probe in every arm after it, so the "the step must CONFIGURE the box"
+        # rows would silently take the reuse branch instead.
+        for stale in apt_sources_dir.glob("*.sources"):
+            stale.unlink()
+        if plant_sources_file is not None:
+            apt_sources.write_text(plant_sources_file, encoding="utf-8")
         if existing_pgdg:
             (apt_sources_dir / "pgdg.list").write_text(
                 "deb https://apt.postgresql.org/pub/repos/apt noble-pgdg main\n",
@@ -5968,8 +5976,12 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     # EXISTS FOR. Adding a SECOND stanza for the same URI+suite with a different
     # `Signed-By` makes apt refuse the WHOLE source list ("E: Conflicting values set for
     # option Signed-By regarding source … <codename>-pgdg"), so `apt-get update` exits 100
-    # and the guard below reds a CORRECT box — MEASURED on ubuntu-24.04 (apt 2.8.4) against
-    # an operator `pgdg.list` with no `signed-by` (PGDG's legacy `trusted.gpg.d` install).
+    # and the guard below reds a CORRECT box — MEASURED on ubuntu-24.04 (apt 2.8.4) against an
+    # operator stanza whose `Signed-By` differs from this step's (the shared
+    # `postgresql-common/pgdg` keyring, as a `pgdg.list` AND as a deb822 `pgdg.sources`). ⚠️ The
+    # shape planted BELOW is the BENIGN one — a stanza with no `signed-by` at all — which is
+    # MEASURED rc 0 with only `W: … configured multiple times`; it is reused all the same,
+    # because reusing needs no judgement about which operator shape is on the box.
     # The arm plants an operator stanza AND makes the key host unreachable: the step must
     # not fetch a key it is not going to use, and must not stop.
     already = run_with(
@@ -5981,8 +5993,11 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     already_combined = already.stdout + already.stderr
     assert already.returncode == 0, (
         "the step RED on a box that already configures apt.postgresql.org — it either added a "
-        "second stanza for the same suite (apt then refuses the whole source list) or fetched "
-        "a key it does not need: " + repr(already_combined)
+        "second stanza for the same suite (apt then refuses the whole source list), fetched "
+        "a key it does not need, or ABORTED under `set -u` on a line hoisted out of the gate "
+        "that reads `${VERSION_CODENAME}` or `$key_file` — both are defined only in the "
+        "else-branch, so a hoisted write dies there before any recorder is read: "
+        + repr(already_combined)
     )
     assert "REACHED_PAST_PRECONDITION" in already.stdout, (
         "the step did not get past the repo setup on a box that already has a PGDG stanza: "
@@ -6040,6 +6055,51 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         )
         assert "already configured" not in (configured.stdout + configured.stderr), (
             f"the step reported REUSING a stanza on a box whose only pgdg line is a {shape}"
+        )
+
+    # ⛔ AND THE POSITIVE HALF IS PINNED TOO — the probe must COUNT every shape apt reads.
+    # The loop above only plants shapes apt IGNORES, so deleting an operand from the probe
+    # stayed GREEN: MEASURED, review of `6b891dba2e`, dropping `sources.list.d/*.sources`,
+    # dropping the `URIs:` alternative, and dropping the legacy `/etc/apt/sources.list`
+    # operand each left `358 passed`. That is the gap that matters, because a deb822
+    # `pgdg.sources` is PGDG's OWN current procedure (postgresql.org/download/linux/ubuntu/)
+    # and a miss there does not degrade quietly: the step writes a second stanza for the same
+    # URI+suite with a DIFFERENT `Signed-By` and apt refuses the WHOLE source list
+    # (`E: Conflicting values set for option Signed-By`, rc 100 — measured on ubuntu-24.04).
+    # So each readable shape gets a POSITIVE arm asserting REUSE, not merely an ignored-shape
+    # arm asserting the write.
+    deb822 = (
+        "Types: deb\n"
+        "URIs: https://apt.postgresql.org/pub/repos/apt\n"
+        "Suites: noble-pgdg\n"
+        "Components: main\n"
+        "Signed-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc\n"
+    )
+    for shape, kwargs in (
+        ("a deb822 `sources.list.d/pgdg.sources`", {"plant": {"pgdg.sources": deb822}}),
+        (
+            "the legacy `/etc/apt/sources.list`",
+            {"plant_sources_file": "deb https://apt.postgresql.org/pub/repos/apt noble-pgdg main\n"},
+        ),
+    ):
+        reused = run_with(
+            'apt-cache() { echo "Candidate: 16.15-1.pgdg24.04+2"; '
+            'echo "     500 https://apt.postgresql.org/pub/repos/apt noble-pgdg/main amd64 Packages"; }',
+            **kwargs,
+        )
+        reused_combined = reused.stdout + reused.stderr
+        assert reused.returncode == 0, (
+            f"the step red on a box already configured for PGDG through {shape}: "
+            + repr(reused_combined)
+        )
+        assert "already configured on this box" in reused_combined, (
+            f"the presence probe MISSED {shape} — apt reads it, so the step then writes a "
+            "second stanza for the same URI+suite with a different Signed-By and apt "
+            "refuses the whole source list: " + repr(reused_combined)
+        )
+        assert tee_log.read_text(encoding="utf-8").strip() == "", (
+            f"the step WROTE its own stanza on a box already configured through {shape}: "
+            + repr(tee_log.read_text(encoding="utf-8"))
         )
 
     # ⛔ AND THE PRODUCER'S OWN EXIT IS NOT PART OF THIS GUARD (#12051 review, P1).
@@ -6285,12 +6345,19 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
     `postgresql-common/pgdg` paths -> 3 failed (THIS row, the cleanup-trap row, and the
     executed arm); delete the PGDG-PRESENCE GATE so the step always adds its own stanza ->
     2 failed (THIS row and the executed arm's reuse arm); HOIST the stanza write out of the
-    gate (both branches write) -> 1 failed (the executed arm's reuse arm — the one that reads
-    what `tee` was actually asked to write); reintroduce a pre-existence flag under ANY name
+    gate (both branches write) -> 1 failed (the executed arm's reuse arm — but MEASURED, the
+    red is an ABORT under `set -u` on `${VERSION_CODENAME}`, which only the else-branch
+    defines, NOT the `tee` recorder: that recorder is never reached, so the hoist mutants
+    prove the `set -u` guard and NOT the recorders' discriminating power); reintroduce a
+    pre-existence flag under ANY name
     -> 2 failed (both trap rows, because the trap body must have no condition at all);
     unguard the os-release source -> 2 failed (THIS row and the executed arm); `-16` -> `-18`
     on the install -> 3 failed (the pin rows, where the install major is asserted); hoist
-    `install -d`/`install -m 0644` out of the gate -> 1 failed (the reuse arm's recorder);
+    `install -d`/`install -m 0644` out of the gate -> 1 failed (the reuse arm, again ABORTING
+    under `set -u` — on `$key_file`, which only the else-branch's `mktemp` defines — so this
+    mutant also does not reach the `install` recorder); drop `*.sources`, the `URIs:`
+    alternative, or the legacy `sources.list` operand from the presence probe -> 1 failed EACH
+    (the positive-shape arms above; MEASURED GREEN before they existed — that was the gap);
     widen the presence probe so it accepts a COMMENTED-OUT stanza -> 1 failed; make it
     RECURSIVE over `sources.list.d` so an apt-ignored `pgdg.list.save` counts -> 1 failed
     (both are the ignored-shape arm). Each mutant's own message was read, not just the
