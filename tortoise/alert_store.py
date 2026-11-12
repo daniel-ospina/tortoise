@@ -88,8 +88,29 @@ PLATFORM_ALIASES = ("_", "global")
 _PENDING_PREFIX = "ops/pending-push/"
 _SUPPRESSION_KEY = "ops/suppression.json"
 
+#: The marker this store stamps on the recurrence record it posts when a DEDUPed
+#: incident is observed STILL UNHEALTHY (#12243).
+#:
+#: ⛔ Deliberately NOT the bash driver's exact marker (`OCCURRENCE_MARKER`,
+#: `.github/scripts/registry-cron.sh` → `<!-- dr-occurrence -->`). The driver
+#: publishes a recurrence NUMBER that it derives by COUNTING its own marked
+#: comments, so a second writer posting under the identical marker would inflate
+#: a number the driver states as fact. The two markers share the `dr-occurrence`
+#: prefix, so one `contains("dr-occurrence")` filter finds every recurrence
+#: record whichever writer posted it, while the driver's exact-match count still
+#: sees only its own.
+OCCURRENCE_MARKER = "<!-- dr-occurrence store -->"
+#: The sentinel field holding the UTC date of this store's LAST recurrence
+#: record — a RATE BOUND, never a published count. The sentinel is shared with
+#: the bash driver, which rewrites it, so any number kept there would be reset by
+#: the other writer (the reason the driver counts from the issue: see
+#: `registry-cron.sh`, "The count is read from the ISSUE … never from the R2 dedup
+#: object"). Nothing in this module derives a recurrence number from this field.
+_OCCURRENCE_DAY_FIELD = "last_occurrence_record"
+
 FileIssue = Callable[[str, str], int]      # (title, body) -> issue number
 CloseIssue = Callable[[int, str | None], None]
+CommentIssue = Callable[[int, str], None]  # (issue number, body) -> None
 SearchOpen = Callable[[str, str], list[int]]  # (kind, org_id) -> open issue numbers
 PushTelegram = Callable[[str], None]
 IssueOpen = Callable[[int], bool]           # (issue number) -> still open?
@@ -301,6 +322,7 @@ class AlertStore:
         search_open: SearchOpen,
         push_telegram: PushTelegram,
         issue_open: IssueOpen | None = None,
+        comment_issue: CommentIssue | None = None,
         default_writer: str = WRITER_UNSPECIFIED,
         repo: str,
         assignee: str | None = None,
@@ -310,6 +332,11 @@ class AlertStore:
         self._storage = storage
         self._file = file_issue
         self._close = close_issue
+        # #12243: the recurrence record's ONE egress. Optional: absent means "no
+        # comment channel configured", which is exactly the pre-#12243 behaviour
+        # (DEDUP posts nothing), so every existing construction site — tests
+        # included — keeps working unchanged.
+        self._comment = comment_issue
         self._search = search_open
         self._push = push_telegram
         # #3127: authoritative per-issue state reader. Preferred over the
@@ -522,6 +549,7 @@ class AlertStore:
                     kind, sibling, number,
                 )
                 self._note_still_unhealthy(sibling, state)
+                self._record_occurrence(sibling, state, kind, org_id)
                 return OpenOutcome.DEDUP
         if adopted:
             self._forget(adopted, kind)
@@ -553,6 +581,7 @@ class AlertStore:
                     except Exception as e:
                         logger.warning("dedup: could not drop our own sentinel %s: %s", key, e)
                     self._note_still_unhealthy(sibling, state)
+                    self._record_occurrence(sibling, state, kind, org_id)
                     return OpenOutcome.DEDUP
             self._become_filer(kind, org_id, detail, key, placeholder, writer)
             return OpenOutcome.FILED
@@ -563,6 +592,7 @@ class AlertStore:
             # already filed and still live — nothing to do beyond the #3146
             # unhealthy-observation reset.
             self._note_still_unhealthy(key, existing)
+            self._record_occurrence(key, existing, kind, org_id)
             return OpenOutcome.DEDUP
         # Placeholder (winner died mid-filing): become the filer via GH-search
         # fallback to avoid duplicates.
@@ -591,6 +621,92 @@ class AlertStore:
         """
         if _streak_of(state) > 0:
             self._set_healthy_streak(key, state, 0)
+
+    def _record_occurrence(self, key: str, state: dict[str, Any],
+                           kind: str, org_id: str) -> None:
+        """Record that a DEDUPed incident was observed STILL UNHEALTHY (#12243).
+
+        Every DEDUP return above resets the recovery window and posts NOTHING, so
+        an incident re-observed on every sweep was indistinguishable on GitHub
+        from one that fired once and went quiet — #3907's *"a dedupe that hides
+        the escalation converts noisy into blind"*, fixed on the bash driver
+        (``registry-cron.sh`` → ``gh_record_occurrence``) and never on this side
+        of the same lifecycle. Measured cost (#12136 triage): 21 open
+        ``[DR] DATA_LOSS_CANDIDATE`` issues, ages 23-29 days, **zero comments
+        each** — the fleet's only visibility into "21 of 92 graphs have had no
+        archive for 3+ weeks".
+
+        ADDITIVE ONLY, like its bash twin: it comments and logs, and it NEVER
+        changes the incident lifecycle — no close, no delete, no re-file, and no
+        change to the outcome the caller returns. A failed comment is logged and
+        swallowed: the incident is already LOUD without it, and letting it
+        propagate would turn a failed COMMENT into a failed POLL.
+
+        BOUNDED to one record per incident per UTC day
+        (:data:`_OCCURRENCE_DAY_FIELD`), because this runs inside the sweep loop
+        for every open incident. The bound is the store's own write, in the only
+        place it may trust one; the record itself carries no running number — see
+        :data:`OCCURRENCE_MARKER` for why.
+        """
+        if self._comment is None:
+            return
+        number = state.get("issue_number")
+        if not number:
+            return
+        # ONE reading of the clock for both the bound and the stamp it records: a
+        # second reading could straddle UTC midnight and stamp tomorrow's time
+        # under today's day, which is a wasted record rather than a bound.
+        now = self._clock()
+        day = now.date().isoformat()
+        if state.get(_OCCURRENCE_DAY_FIELD) == day:
+            return
+        subject = org_id or "_"
+        body = (
+            f"🔁 **Observed again** — `[DR] {kind} — {subject}` was still "
+            f"unhealthy at `{now.isoformat()}`. This incident is "
+            "already tracked by this issue, so no duplicate was filed.\n\n"
+            f"{OCCURRENCE_MARKER}"
+        )
+        try:
+            self._comment(int(number), body)
+        except Exception as e:
+            logger.warning(
+                "dedup: recurrence record on issue #%s FAILED (%s) — the incident "
+                "is still on record and still LOUD; the next observation "
+                "re-records", number, e,
+            )
+            return
+        self._set_occurrence_day(key, state, day)
+
+    def _set_occurrence_day(self, key: str, state: dict[str, Any], day: str) -> None:
+        """Compare-and-set the recurrence-record day on a sentinel (#12243).
+
+        Same discipline as :meth:`_set_healthy_streak`, for the same reason: the
+        caller's ``state`` is a snapshot taken earlier in the call, so a BLIND
+        write would clobber a sentinel another writer re-filed in between (a NEW
+        ``issue_number``) and orphan that open issue. Written only when the
+        object still matches the snapshot, and not at all when it disappeared
+        (resolved under us).
+
+        Never raises: the caller has ALREADY posted its record, so a failed bound
+        write costs at most a second record later the same day — far cheaper than
+        aborting a poll over bookkeeping.
+        """
+        try:
+            current = _read_json(self._storage, key)
+            if not current:
+                return
+            if (current.get("issue_number") != state.get("issue_number")
+                    or current.get("filed_at") != state.get("filed_at")):
+                logger.warning(
+                    "recurrence record: %s changed while we were recording it — "
+                    "leaving it alone (the other writer re-filed)", key,
+                )
+                return
+            current[_OCCURRENCE_DAY_FIELD] = day
+            _write_json(self._storage, key, current)
+        except Exception as e:
+            logger.warning("recurrence record: could not bound %s for %s: %s", key, day, e)
 
     def _set_healthy_streak(self, key: str, state: dict[str, Any], value: int) -> None:
         """Compare-and-set ``healthy_streak`` on a sentinel (#3146).

@@ -148,6 +148,12 @@ def alert_store_from(cfg, *, storage_factory, writer: str | None = None):
     def close_issue(number: int, comment: str | None = None) -> None:
         gi.close_issue(cfg.gh_repo, cfg.github_issues_pat, number, comment)
 
+    def comment_issue(number: int, body: str) -> None:
+        # #12243: the DEDUP recurrence record's egress. Same credentials as the
+        # close comment above — a token that can close an incident's issue can
+        # record an observation on it.
+        gi.comment_issue(cfg.gh_repo, cfg.github_issues_pat, number, body)
+
     def search_open(kind: str, org_id: str = "") -> list[int]:
         return gi.search_open_incident(
             cfg.gh_repo, cfg.github_issues_pat, kind, org_id)
@@ -161,7 +167,8 @@ def alert_store_from(cfg, *, storage_factory, writer: str | None = None):
     return AlertStore(
         storage, file_issue=file_issue, close_issue=close_issue,
         search_open=search_open, push_telegram=push_telegram,
-        issue_open=issue_open, default_writer=writer,
+        issue_open=issue_open, comment_issue=comment_issue,
+        default_writer=writer,
         repo=cfg.gh_repo, assignee=cfg.alert_assignee,
     )
 
