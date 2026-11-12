@@ -1356,18 +1356,17 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     residual is tracked in #12068 rather than grown here.
 
     ⛔ SCOPED TO A RELEASE THAT RECORDS §4.3, because the unconditional form was
-    measured to false-block. Demanding a comment id in EVERY newest block reds
-    the next release that touches §4.5 (verified with a synthetic `v3.35`), and
-    the file's practice does not support the demand: v3.33 — the block that
-    landed `D2 — A` for this very question — records the approval and cites no
-    ``comment <id>`` for it, only a `#2725` permalink for a different attribute.
-    (A count over the pin's OWN enumerated forms is not the measure of practice
-    that argument rests on: ``_CITATION_RE`` accepts the permalink too, so under
-    it that block does cite one. State the form, not a number — a count over a
-    growing file re-stales on the next release that cites a comment.) What the
-    approval rule actually needs is that no
-    release RECORDS owner-approved §4.3 text without naming where that approval
-    lives. The requirement is scoped to §4.3, like the sibling pin, but it is NOT
+    measured to false-block: demanding a comment id in EVERY newest block reds
+    the next release that touches §4.5 (verified with a synthetic `v3.35`, whose
+    block quotes no §4.3 clause and cites no comment). That measurement is the
+    whole argument, deliberately — a claim about the file's PRACTICE here would
+    have to work inside the pin's own ``_CITATION_RE``, which accepts the
+    ``#issuecomment-<n>`` permalink as well as ``comment <id>``, and any COUNT
+    over a growing file re-stales on the next release that cites a comment (this
+    paragraph carried one once, and it was wrong when written). What the
+    approval rule actually needs is that no release RECORDS owner-approved §4.3
+    text without naming where that approval lives. The requirement is scoped to
+    §4.3, like the sibling pin, but it is NOT
     the sibling pin's gate: it is armed only when the newest block quotes the
     clause, which makes it strictly narrower — the sibling pin also speaks when
     an OLDER block quotes it, and reds in the state where an older block still
