@@ -34,7 +34,7 @@
 import { onRequest } from "../website/functions/_middleware.ts";
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WEBSITE = join(HERE, "..", "website");
@@ -84,6 +84,19 @@ const ROOT_ASSETS = new Set(
   readdirSync(WEBSITE)
     .filter((f) => f === "robots.txt" || f.endsWith(".xml"))
     .map((f) => `/${f}`),
+);
+
+// …and a sitemap can be a PAGES FUNCTION rather than a file (`/blog/sitemap.xml` is
+// `functions/blog/sitemap.xml.ts`). Derived from the tree so a NEW one is held to the
+// crawler-surface rule the moment it lands: a Function sitemap has no root file, so a
+// hand-kept row would miss it and the retired host would answer it with a 200 whose
+// `<loc>`s are on the marketing host (#11766 round 3 — measured: adding
+// `functions/events/sitemap.xml.ts` left every suite green).
+const FUNCTION_SITEMAPS = new Set(
+  readdirSync(join(WEBSITE, "functions"), { recursive: true })
+    .map((p) => String(p).split(sep).join("/"))
+    .filter((p) => p.endsWith("sitemap.xml.ts"))
+    .map((p) => `/${p.slice(0, -".ts".length)}`),
 );
 
 // The two layers BELOW the middleware that a bare asset mock would get wrong,
@@ -155,6 +168,9 @@ function ctx(urlStr) {
       }
       if (isBlogFunction(u.pathname)) {
         return new Response(`<html data-function="blog"></html>`, { status: 200 });
+      }
+      if (FUNCTION_SITEMAPS.has(u.pathname)) {
+        return new Response(`<urlset data-function="sitemap"></urlset>`, { status: 200 });
       }
       if (u.pathname === "/") {
         return new Response(`<html data-asset="/index.html"></html>`, { status: 200 });
@@ -255,23 +271,21 @@ async function assertOneHop(src, { expectStatus = 301, expectLocation = null, ex
   // branch existed: `tortoise.premiselabs.co/sitemap.xml` → 200. The alias maps straight
   // to the index in ONE hop rather than chaining through the company host's `_redirects`.
   //
-  // These rows are a SAMPLE of the behaviour, not the coverage: the exhaustive comparison
-  // (`CRAWLER_SURFACE` == `robots.txt` + every sitemap document the tree serves, both
-  // directions) lives in `tests/test_website_docs_consistency.py`
-  // (`test_the_retired_hosts_crawler_surface_covers_every_sitemap_in_the_tree`), because a
-  // hand-kept list HERE would go stale the moment a sitemap is added — which is the defect
-  // this branch fixes.
-  for (const [from, to] of [
-    ["/sitemap.xml", "/sitemap.xml"],
-    ["/sitemap-company.xml", "/sitemap-company.xml"],
-    ["/sitemap-product.xml", "/sitemap-product.xml"],
-    ["/robots.txt", "/robots.txt"],
-    ["/sitemap_index.xml", "/sitemap.xml"],
-  ]) {
+  // ⛔ DERIVED FROM THE TREE, not a hand-kept list (round 3). Every root crawler asset and
+  // every Function-served sitemap must leave the retired host in ONE hop; a page branch
+  // does not catch them, because they are not pages. The population is the same one
+  // `tests/test_website_docs_consistency.py` compares `CRAWLER_SURFACE` against for the
+  // static half, and it is the half that list CANNOT express.
+  for (const from of [...ROOT_ASSETS, ...FUNCTION_SITEMAPS].sort()) {
     await assertOneHop(`https://${PRODUCT}${from}`, {
-      expectLocation: `https://${COMPANY}${to}`,
+      expectLocation: `https://${COMPANY}${from}`,
     });
   }
+  // `/sitemap_index.xml` is a CONVENTION, not a file: it maps straight onto the index in
+  // one hop rather than chaining through the company host's own `_redirects` row.
+  await assertOneHop(`https://${PRODUCT}/sitemap_index.xml`, {
+    expectLocation: `https://${COMPANY}/sitemap.xml`,
+  });
 
   // ⛔ The product host must hand off the CANONICAL form in ONE hop. Forwarding
   // the raw path chains (`/tortoise/docs.html` -> `.../tortoise/docs.html` ->

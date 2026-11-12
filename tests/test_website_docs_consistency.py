@@ -2914,6 +2914,15 @@ def test_the_retired_hosts_crawler_surface_covers_every_sitemap_in_the_tree() ->
     every sitemap document `_published_sitemaps` derives from the tree. Both directions are
     asserted — a missing entry reds (the decay above), and an entry for a file that does not
     exist reds too (a 301 onto a 404).
+
+    ⛔ THIS HALF IS THE STATIC POPULATION ONLY — every root file. A sitemap can also be a Pages
+    FUNCTION (`/blog/sitemap.xml` is `functions/blog/sitemap.xml.ts`), which no literal in the
+    middleware enumerates and this list cannot see; measured: adding
+    `functions/events/sitemap.xml.ts` left this suite green while the retired host answered it
+    with a 200. That half is covered BEHAVIOURALLY in
+    `tests/test_middleware_host_consolidation.mjs`, whose crawler rows are derived from the tree
+    (`ROOT_ASSETS` + `FUNCTION_SITEMAPS`) and assert a one-hop 301 per served path — so a new
+    Function sitemap reds there the moment it lands, branch or no branch.
     """
     code = _middleware_code()
     literal = re.search(r"const CRAWLER_SURFACE = new Set\(\[(.*?)\]\)", code, re.S)
@@ -3063,6 +3072,16 @@ def test_every_sitemap_index_loc_is_on_the_indexes_own_host() -> None:
         f"sitemap advertisements here assume {MARKETING_ORIGIN!r} — every child <loc> "
         "would be submitted against a host nothing is served from, or a host that 301s")
     own_host = urlparse(MARKETING_ORIGIN).netloc
+    # ⛔ THE ADVERTISEMENT SIDE IS HELD TO THE SAME HOST, not only the index's children. A
+    # `Sitemap:` line naming `app.premiselabs.co` or the retired host is the cross-submission
+    # this child removes, and without this assertion it could be re-added with every guard
+    # green — measured: appending the app line, or the retired host's, left 77 passed.
+    advertised_hosts = {urlparse(url).netloc for url in _robots_sitemap_urls()}
+    assert advertised_hosts == {own_host}, (
+        f"website/robots.txt advertises sitemaps on {sorted(advertised_hosts)} — this file names "
+        f"the sitemaps of the host it is served from ({own_host}), and nothing else (#11766). "
+        "A foreign host here is the cross-submission the same-host index replaced; the app "
+        "project's own robots.txt advertises its own sitemap")
     off_host = sorted({urlparse(loc).netloc for loc in _xml_locs(SITEMAP_INDEX)} - {own_host})
     assert not off_host, (
         f"website/sitemap.xml names {off_host} — an index may only specify sitemaps on "
