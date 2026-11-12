@@ -1228,9 +1228,8 @@ def test_signup_acceptance_same_viewport(page: Page, viewport: tuple[int, int]) 
 def test_signup_acceptance_dom_structure(page: Page) -> None:
     """DOM parentage (P1-2): .legal-accept is a SIBLING of .providers,
     PRECEDES <form id="email-form"> in document order, and is NOT a
-    descendant of the form. Links resolve to the /tos and /privacy DOCUMENTS on
-    the one marketing origin — absolute since #11762, because the app origin that
-    serves this page hosts no legal page of its own (see the pin below)."""
+    descendant of the form. Links resolve to /tos and /privacy — asserted as
+    the DESTINATION (host + path), see the pin below."""
     _goto(page, _app_url("/signup"))
 
     struct = page.evaluate(
@@ -1251,40 +1250,66 @@ def test_signup_acceptance_dom_structure(page: Page) -> None:
     assert struct["notInForm"], ".legal-accept must not be a descendant of the form"
 
     # ⛔ THE DESTINATION IS PINNED, NOT THE SPELLING (#12058). This page belongs
-    # to the APP origin (`_app_url`), which is its own Pages project and hosts no
-    # legal page of its own, so a root-relative `/tos` here answers 404 (measured)
-    # — the reason the markup carries the company host ABSOLUTELY. Reading
-    # `a.getAttribute('href')` pinned the SPELLING instead: `/tos` and
-    # `https://premiselabs.co/tos` read as different documents even though the
-    # first one is the 404. `a.href` is the browser-resolved URL, so the pin is
-    # the destination: a root-relative link fails (it resolves to the app host),
-    # and an absolute one must name the company origin WHOLE (scheme AND netloc,
-    # so a `http://` downgrade or an odd port cannot pass either).
+    # to the APP origin (`_app_url`), which is its own Pages project, so a
+    # root-relative `/tos` here answers 404 — measured, and the reason the
+    # markup carries the company host ABSOLUTELY. Reading
+    # `a.getAttribute('href')` pinned the spelling instead: once the markup was
+    # corrected to `https://premiselabs.co/tos`, `"/tos" in hrefs` reddened a
+    # tree that had just been fixed, and it stayed green on the defect it exists
+    # for (a relative link that 404s). `a.href` is the browser-resolved URL, so
+    # the pin is the destination — while a root-relative `/tos` on this origin
+    # still FAILS, because it resolves to the app host, which serves no legal
+    # page.
     #
     # The required pair is a SUBSET, not the whole set: the statement may gain a
-    # further legal link (a DPA, say) without this guard — a REQUIRED check —
-    # calling two correct links wrong, and a set cannot see a duplicate. What
-    # must NOT appear is a link OFF the company origin: the app origin (a
-    # root-relative path there 404s) or the retired host (301-only, the property
-    # #11762's move exists for). The PATH of an extra link is deliberately not
-    # pinned — and ⛔ NOT because something else checks it: the enumerated crawl
-    # (`CRAWL_PAGES`) is marketing-origin paths only, and the external crawl
-    # SKIPS `_PROJECT_OWNED_HOSTS`, so a company-host link to a path outside that
-    # list is not resolved by this suite either.
+    # further legal link (a DPA, say) without this guard calling it wrong, and a
+    # set cannot see a duplicate. What must NOT appear is a link off the company
+    # ORIGIN — the app origin (a root-relative path there 404s) or the retired host
+    # (301-only, the property #11762's move exists for). The ORIGIN is pinned
+    # whole: `urlsplit(...).hostname` alone accepted `http://premiselabs.co/tos`
+    # and `https://premiselabs.co:8443/tos` (measured), so a scheme downgrade or a
+    # stray port would pass a legal-accept link the markup never carries. The
+    # PATH of an extra link is deliberately not pinned — and ⛔ NOT because
+    # something else checks it: the enumerated crawl (`CRAWL_PAGES`) is
+    # marketing-origin paths only, and the external crawl SKIPS
+    # `_PROJECT_OWNED_HOSTS`, so a company-host link to a path outside that list is
+    # not resolved by this suite either.
+    #
+    # The LABEL is pinned to its destination in the same pass: anchors are collected
+    # with their text, so `Terms of Service` pointing at `/privacy` (and the mirror)
+    # fails. A destination SET cannot see a swap — both documents are still present.
     links = page.evaluate(
-        """() => [...document.querySelectorAll('.legal-accept a')].map(a => a.href)"""
+        """() => [...document.querySelectorAll('.legal-accept a')].map(a => ({
+            href: a.href, text: (a.textContent || '').trim() }))"""
     )
-    company_origin = "https://premiselabs.co"
-    destinations = {(f"{urlsplit(h).scheme}://{urlsplit(h).netloc}", urlsplit(h).path)
-                    for h in links}
-    assert {(company_origin, "/tos"), (company_origin, "/privacy")} <= destinations, (
-        f"legal-accept links wrong: {links}; the acceptance statement must link the "
-        "company host's Terms of Service (https://premiselabs.co/tos) and Privacy "
-        "Policy (https://premiselabs.co/privacy)")
-    off_host = sorted(d for d in destinations if d[0] != company_origin)
-    assert not off_host, (
-        f"legal-accept links leave the company origin: {off_host} (all: {links}); "
-        "on the app origin a root-relative path 404s, and the retired host only 301s")
+
+    def _destination(link: dict) -> tuple[str, str, str]:
+        parsed = urlsplit(link["href"])
+        return parsed.scheme, parsed.netloc, parsed.path
+
+    destinations = {_destination(link) for link in links}
+    assert {("https", "premiselabs.co", "/tos"),
+            ("https", "premiselabs.co", "/privacy")} <= destinations, (
+        f"legal-accept links wrong: {[link['href'] for link in links]}; the acceptance "
+        "statement must link the company host's Terms of Service (/tos) and Privacy "
+        "Policy (/privacy) over https")
+    off_origin = [link["href"] for link in links
+                  if _destination(link)[:2] != ("https", "premiselabs.co")]
+    assert not off_origin, (
+        f"legal-accept links leave https://premiselabs.co: {off_origin} "
+        f"(all: {[link['href'] for link in links]}); on the app origin a root-relative "
+        "path 404s, the retired host only 301s, and a scheme downgrade or an odd port "
+        "is not the one marketing origin")
+    for link in links:
+        label = link["text"].lower()
+        path = _destination(link)[2]
+        if "terms" in label or "tos" in label:
+            assert path == "/tos", (
+                f"the {link['text']!r} link points at {path!r}, not /tos (all: {links})")
+        if "privacy" in label:
+            assert path == "/privacy", (
+                f"the {link['text']!r} link points at {path!r}, not /privacy "
+                f"(all: {links})")
 
 
 def test_mock_email_signup_created_signs_in_and_redirects(page: Page) -> None:
