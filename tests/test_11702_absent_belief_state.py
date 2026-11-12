@@ -6156,6 +6156,12 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             # with (`_NEGATED`'s determiner rule): before this alternative
             # existed, this correct sentence was a false block (cycle 2, P2).
             "``credibility=`` is no 0.75 — it is 0.5238 alone",
+            # …and the PERCENT half of the same number-bound alternative: the
+            # `75\s*%` sub-branch had no row, so it was deletable with a green
+            # suite — half a disclosed false-block exemption, unsupported
+            # (review cycle 12, P2). Measured: quiet today, REDS when the
+            # sub-branch is dropped.
+            "the credibility word is no 75% — it is 0.5238 alone",
             # …the reach-back: the negator precedes the `credibility` token, so
             # this is quiet ONLY because the span starts at the clause
             # beginning. It is the pin for that boundary — the sentence a
