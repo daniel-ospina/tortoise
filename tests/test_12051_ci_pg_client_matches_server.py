@@ -1037,10 +1037,15 @@ PRINTING_COMMANDS = frozenset({"echo", "printf", "cat", "tee", "logger", "true",
 
 #: The COMMAND WORD that governs a position: the first word after the nearest
 #: command separator (`$(`, a backtick, `;`, `&&`, `||`, `|`, a bracket, or the
-#: start of the line), skipping `sudo` and `env` prefixes.
+#: start of the line), skipping the wrappers that RUN another command.
+#: ⛔ `sudo` TAKES FLAGS AND A WRAPPER TAKES AN OPERAND (review 4). The skip was
+#: `sudo\s+` alone, so `version="$(sudo -E "$tool" --version)"` read its command
+#: word as `-E` and `timeout 30 "$tool" --version` as `30`; the check was not
+#: credited and the row red a body that checks every tool (measured false RED).
 COMMAND_WORD_RE = re.compile(
     r"(?:^|\$\(|`|;|&&|\|\||\||[(){}])\s*"
-    r"(?:sudo\s+|env\s+(?:-\S+\s+)*)*"
+    r"(?:(?:sudo|env)\s+(?:-\S+\s+)*|command\s+|timeout\s+\S+\s+|"
+    r"exec\s+)*"
     r"([^\s;|&(){}]+)"
 )
 
@@ -1080,10 +1085,13 @@ PATTERN_MATCHER_RE = re.compile(r"\bcase\b|\b(?:(?:e|f)?grep|awk|expr)\b")
 #: resolved by substitution, one level (`_selects_on_var`), not refused.
 #: Only an assignment whose WHOLE VALUE is the variable records a copy — the pin's
 #: own `version="$("$tool" --version)"` assigns a command's OUTPUT, not the name.
-def _copied_to(line: str, var: str) -> str | None:
-    """The alias this line copies the loop variable into, or None."""
+def _copied_to(line: str, sources: list[str]) -> str | None:
+    """The alias this line copies one of `sources` into, or None."""
 
-    ref = r"(?:\$\{" + re.escape(var) + r"\}|\$" + re.escape(var) + r"(?!\w))"
+    alternative = "|".join(re.escape(source) for source in sources)
+    ref = (
+        r"(?:\$\{(?:" + alternative + r")\}|\$(?:" + alternative + r")(?!\w))"
+    )
     match = re.search(
         r"(?:^|[;&|]|\b(?:local|export|declare|readonly|typeset)\b)\s*"
         r"(?P<alias>[A-Za-z_]\w*)=\s*[\"']?" + ref + r"[\"']?\s*(?:$|[;&|])",
@@ -1105,10 +1113,30 @@ def _with_aliases(line: str, aliases: list[str], var: str) -> str:
 
 
 def _with_aliases_each(body: list[str], var: str) -> list[str]:
-    """The body with every loop-variable alias rewritten back to the variable."""
+    """The body with every loop-variable alias rewritten back to the variable.
 
-    aliases = [alias for alias in (_copied_to(line, var) for line in body) if alias]
-    return [_with_aliases(line, aliases, var) for line in body]
+    ⛔ ALIASES CHAIN, SO THE RESOLUTION RUNS TO A FIXED POINT (#12069 review 4).
+    Rewriting one level left a SECOND hop unresolved — `t=$tool` then `u=$t` then
+    `[ "$u" = pg_dump ]` — and an unresolved alias fails OPEN: the selection is
+    invisible, both tools are credited, and the row passes a body that only checks
+    one (measured, and a regression from the `_copies_loop_var` form it replaced,
+    which refused the whole body). Known names are grown until no new alias
+    appears, so a chain of any length resolves.
+    """
+
+    known = [var]
+    seen = {var}
+    changed = True
+    while changed:
+        changed = False
+        for line in body:
+            alias = _copied_to(line, known)
+            if alias and alias not in seen:
+                seen.add(alias)
+                known.append(alias)
+                changed = True
+    extra = [alias for alias in known if alias != var]
+    return [_with_aliases(line, extra, var) for line in body]
 
 
 #: The CONDITION itself: the `[ … ]` / `[[ … ]]` groups on a line. A line that
@@ -1126,18 +1154,46 @@ def _with_aliases_each(body: list[str], var: str) -> list[str]:
 BRACKET_SPAN_RE = re.compile(r"\[\[?[^\]]*\]\]?")
 
 
-def _condition_spans(line: str) -> list[str]:
-    """Every `[ … ]` / `[[ … ]]` group on this line, or the whole line for `test`.
+def _splits_cleanly(line: str, spans: list[str]) -> bool:
+    """Did removing these spans leave a line with no stray bracket behind?"""
 
-    `") ]"`, an unbalanced bracket and a `]` inside a quoted string are read as
-    span boundaries this guard cannot see through — the safe direction, because a
-    span it mis-splits is one it will not credit.
+    remainder = line
+    for span in spans:
+        remainder = remainder.replace(span, "", 1)
+    return "]" not in remainder and line.count("[") == line.count("]")
+
+
+def _condition_spans(line: str) -> list[str]:
+    """Every `[ … ]` / `[[ … ]]` group on this line, or the whole line otherwise.
+
+    ⛔ A MIS-SPLIT FAILS **OPEN**, SO THE FALLBACK IS THE WHOLE LINE (#12069
+    review 4). The previous cut claimed that not crediting a mis-split span was
+    "the safe direction" — it is the OPPOSITE: the span is where the selection is
+    DETECTED, so dropping it credits BOTH tools while one is never checked. A `]`
+    inside a quoted word split one line into two halves that each held half of the
+    test:
+
+        if [ "${TARGETS[0]}" = "$tool" ]; then … fi
+
+    so neither half carried both the operator and the variable, the body read as
+    unconditional, and the row PASSED a pin body that only checks `pg_dump`
+    (measured, via the real row). Whenever the brackets do not pair cleanly the
+    WHOLE LINE is the span: it contains the operator and the variable by
+    construction, so the selection is FOUND rather than lost.
+
+    ⛔ AND `test` IS NOT SUPPRESSED BY A BRACKET (#12069 review 4).
+    `[ -n "$CI" ] && test "$tool" = pg_dump` has an unrelated group on the line;
+    the early `if spans: return spans` dropped the `test` fallback entirely and the
+    selection was invisible (measured). `test` is added to the span list, not used
+    only when no group is present.
     """
 
     spans = [match.group(0) for match in BRACKET_SPAN_RE.finditer(line)]
-    if spans:
+    if re.search(r"\btest\b", line):
+        spans.append(line)
+    if spans and _splits_cleanly(line, spans):
         return spans
-    return [line] if re.search(r"\btest\b", line) else []
+    return [line] if re.search(r"\[|\btest\b", line) else []
 
 
 def _matches_on(text: str, matcher: re.Match[str], ref: re.Pattern[str]) -> bool:
