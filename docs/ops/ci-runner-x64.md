@@ -297,8 +297,11 @@ only leg whose pin is about speed, and the mitigation buys it nothing (above):
   check catches it), and a suite that resolves without this major — the `=on` routing drift that can
   put an unexpected box here is #10289.
 
-  The step also leaves the box as it found it: an `EXIT` trap removes
-  `/etc/apt/sources.list.d/pgdg.list`, its keyring and the `mktemp`'d key file. That is not hygiene —
+  The step also undoes its own apt configuration: an `EXIT` trap removes the
+  `/etc/apt/sources.list.d/pgdg.list` entry, its keyring and the `mktemp`'d key file — but ONLY the
+  ones this step created (a release that already carried PGDG is left alone). ⚠️ That is not "the box
+  is as it was": the installed `postgresql-client-16` and its dependency closure STAY on the box, and
+  a later job on it keeps a pg16 client available. The trap exists because
   the job is POOL-ELIGIBLE, and a leftover sources file changes apt resolution for every later job on
   the same box; outliving its keyring, it would turn the next job's `apt-get update` into the very
   soft failure the ORIGIN check exists to catch.
@@ -976,7 +979,7 @@ job itself:
   self-hosted runner lost communication with the server"*. The zero-step count is the
   discriminator: none of the job's own steps ran, so none of them caused it. Re-run before
   investigating a harness — a red here READS as a harness defect, which is #9018's misdiagnosis one
-  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:5272`) buys no landing:
+  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:5285`) buys no landing:
   the rail blocks on any red on the PR's tree, so this one costs a re-run.
 
 ⛔ **Do not copy this pin onto a required leg.** The override is scoped to ONE job whose red costs a

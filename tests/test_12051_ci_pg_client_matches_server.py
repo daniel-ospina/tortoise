@@ -5241,8 +5241,12 @@ def test_no_reserved_error_message_asks_the_shell_to_do_something(job: dict) -> 
         to ANY text scan (MEASURED, review cycle 8: that shape passed `8 passed`). The
         variable half is unreachable without executing the step, so it is recorded here
         rather than half-guarded; the concrete half (a literal `$(` or a backtick in a
-        printed message) is what this test refuses. A future lane that needs one should move
-        the message to a single-quoted string instead of widening this guard.
+        printed message) is what this test refuses. ⚠️ AND THE REMEDY IS NOT "SINGLE-QUOTE IT":
+        the scan is a TEXT scan, so it does not parse quoting and would refuse a backtick inside
+        a single-quoted string just the same (MEASURED — `echo 'run `apt-cache policy`'` is
+        refused, and it is harmless in bash). A future lane that needs a sigil in a message must
+        spell it in plain words (`the apt.postgresql.org index`, not a quoted command) rather
+        than widen this guard — widening it is how the guard stops seeing the real defect.
 
     ⛔ A LINE-INITIAL `echo` SCAN IS NOT ENOUGH, and that is a correction this test needed: an
     earlier version checked only lines whose stripped form BEGAN with `echo `, so a backticked
@@ -5270,7 +5274,9 @@ def test_no_reserved_error_message_asks_the_shell_to_do_something(job: dict) -> 
         "a message this step PRINTS asks the shell to substitute something — a backtick "
         "(anywhere in the step) or `$(` on a printing line runs as a command and its "
         "output replaces the text, so the diagnostic silently loses (or executes) that "
-        "span. Name the thing in plain words or single quotes: " + repr(offenders)
+        "span. Name the thing in plain words — no backtick and no `$(` ANYWHERE in "
+        "the message, not even inside single quotes (this guard does not parse "
+        "quoting, so a quoted specimen is refused too): " + repr(offenders)
     )
 
 
@@ -5293,16 +5299,22 @@ def test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(job: dict)
 
     assert "ubuntu-latest" not in labels, (
         "`ubuntu-latest` is a MOVING label and it moved: on 2026-11-12 it became "
-        "ubuntu-26.04, whose archive has no `postgresql-client-16`, so this job "
-        "reds before a single test runs (#12051). Name the release."
+        "ubuntu-26.04, i.e. a release nobody had MEASURED for this drill, so the "
+        "pin reds until someone does (#12051). Since round 3 the client comes from "
+        "PGDG, so the failure is no longer 'no client in the archive' — it is that "
+        "the suite this step derives (`<codename>-pgdg`) is not in "
+        "KNOWN_GOOD_IMAGE_MAJOR and its codename can change under the job with no "
+        "diff. Name the release."
     )
     assert len(labels) == 1 and labels[0].startswith("ubuntu-"), (
-        f"`{JOB}` asks for {labels!r}. This pin needs ONE named hosted image: the "
-        "drill's PostgreSQL client major comes from that image's archive, so any "
-        "second label (e.g. `self-hosted`) makes the client an inherited fact of "
-        "whichever box answers — the exact inheritance #12051 removed. The "
-        "in-step precondition fails closed on such a box; this assertion is the "
-        "contract."
+        f"`{JOB}` asks for {labels!r}. This job needs ONE named hosted image: the "
+        "suite the client is installed from is derived from THAT box's "
+        "`VERSION_CODENAME`, so any second label (e.g. `self-hosted`) makes the "
+        "suite an inherited fact of whichever machine answers — the exact "
+        "inheritance #12051 removed. ⚠️ It does NOT follow that the in-step guard "
+        "reds on such a box: a PGDG-supported release simply RUNS there (MEASURED, "
+        "`ubuntu-26.04` exits 0), which is why this assertion, not the guard, is "
+        "what keeps the artifact's provenance measured."
     )
     label = labels[0]
     assert label in KNOWN_GOOD_IMAGE_MAJOR, (
@@ -5403,6 +5415,35 @@ def test_a_continued_install_line_still_reads_as_the_install(job: dict) -> None:
     test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(continued)
 
 
+def test_the_cleanup_trap_owns_only_what_this_step_created(job: dict) -> None:
+    """⛔ AN UNCONDITIONAL `rm` DELETES STATE THIS JOB NEVER WROTE, ON ANY LATER FAILURE.
+
+    The trap's paths are shared with an operator (or `postgresql-common`'s own keyring), and
+    this job is POOL-ELIGIBLE. MEASURED, review cycle 12: with PGDG configuration planted and
+    the key fetch forced to fail, an unconditional trap still removed both files — the step
+    then damages the box it was supposed to leave alone. The fix records pre-existence BEFORE
+    writing and the trap skips what it did not create, so the assertion is that the trap reads
+    those flags (the executed arm cannot: `rm` is stubbed, which is stated in its docstring).
+    """
+    _, pin = _pin_step(_steps(job))
+    code = _run_code(pin)
+    trap = [line for line in code.splitlines() if line.lstrip().startswith("trap '")]
+    assert trap, "the step registers no EXIT cleanup trap — a pool box keeps its PGDG config"
+    assert len(trap) == 1, f"expected ONE cleanup trap, found {trap!r}"
+    for flag in ("had_sources", "had_keyring"):
+        assert flag in code, (
+            f"the trap does not record whether `{flag}` already existed, so it deletes state "
+            "this step never created"
+        )
+        assert f'"${{{flag}:-0}}" = 0' in trap[0], (
+            f"the trap does not GUARD on `{flag}`, so it removes a path it may not own: {trap[0]!r}"
+        )
+    assert "${key_file:-}" in trap[0], (
+        "the trap does not clean up the temp key file (or does it unguarded, which aborts "
+        f"under `set -u` before the mktemp call): {trap[0]!r}"
+    )
+
+
 def test_the_precondition_actually_fires_when_the_package_is_absent(
     job: dict, tmp_path: Path
 ) -> None:
@@ -5448,11 +5489,17 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     Seven arms over the step's FIVE named pre-install branches: the os-release
     SOURCE, the key fetch, the codename, `apt-get update`, and the ORIGIN check
     (THREE arms: an `apt-cache` that fails, an index that loaded but does not name
-    apt.postgresql.org, and the control that reaches past) — and EVERY failing arm
-    asserts its OWN branch's named text PLUS the absence of the next branch's,
-    because the step carries SEVEN `::error::` pairs and a whole-output search is
-    satisfied by any of them (MEASURED, review cycle 9: two gutted `exit 1`s left
-    the suite GREEN). Plus TWO branches no arm executes: the install guard
+    apt.postgresql.org, and the control that reaches past), because the step
+    carries SEVEN `::error::` pairs and a whole-output search is satisfied by any
+    of them (MEASURED, review cycle 9: two gutted `exit 1`s left the suite GREEN).
+    ⚠️ Which arms assert WHAT, stated rather than generalised: the key-fetch,
+    `apt-get update`, os-release SOURCE and ORIGIN-fires arms name their own
+    branch's text AND assert the next branch's is ABSENT; the `apt-cache`-fails
+    arm and the ORIGIN arm assert a generic `::error::` (no earlier branch can
+    fire in them, so their discrimination is the absence of the
+    `REACHED_PAST_PRECONDITION` marker), and the no-codename arm is discriminated
+    by the absence of the shell's `set -u` backstop (`unbound variable`) rather
+    than by a neighbour's message. Plus TWO branches no arm executes: the install guard
     (unreachable by construction — this arm stops AT the install line; it is pinned
     in text by `test_the_client_comes_from_pgdg_not_the_distro_archive`) and the
     version branch (pinned in text by this file's `FAIL_CLOSED_BRANCH_RE` reader).
@@ -5633,6 +5680,28 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     # and exits 0, so on a release whose own archive carries the major a plain
     # `apt-cache show` passes with PGDG never applied: the mechanism silently absent
     # and green. MEASURED, review cycle 7 of `fc9d4204aa`.
+    # ⛔ THE SIGPIPE CLASS — the failure mode a bash-function stub CANNOT show. `grep -q`
+    # exits on the first match, the producer takes SIGPIPE, and `set -o pipefail` makes the
+    # pipeline 141, which `if !` reads as SUCCESS: the guard then fires on a HEALTHY repo.
+    # MEASURED, review cycle 12: rc 141 in 10/10 real runs on `ubuntu:24.04` (the required
+    # leg red on every run) while this suite stayed green, because the stub finished writing
+    # before the pipe closed. This stub keeps writing AFTER the match, like a real producer.
+    slow_producer = run_with(
+        'apt-cache() { echo "Candidate: 16.15-1.pgdg24.04+2"; '
+        'echo "     500 https://apt.postgresql.org/pub/repos/apt noble-pgdg/main amd64 Packages"; '
+        'sleep 0.2; '
+        'echo "     500 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 Packages"; }'
+    )
+    assert slow_producer.returncode == 0, (
+        "the origin check fired on a repo that DOES list the package — the grep is not "
+        "DRAINING `apt-cache`'s output, so `grep -q` + `pipefail` turned SIGPIPE (141) into a "
+        f"false failure on a healthy repo: {(slow_producer.stdout + slow_producer.stderr)!r}"
+    )
+    assert "REACHED_PAST_PRECONDITION" in slow_producer.stdout, (
+        "the origin check did not let a PGDG-listed candidate through when the producer kept "
+        "writing after the match"
+    )
+
     not_pgdg = run_with(
         'apt-cache() { echo "Candidate: 16.15-0ubuntu0.24.04.1"; '
         'echo "     500 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 Packages"; }'

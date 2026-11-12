@@ -4751,9 +4751,13 @@ jobs:
           # that release) and NOT the 16 this job needs, so the first cut of this
           # step died before the leg ran —
           # `E: Unable to locate package postgresql-client-<the major>`, exit 100. The
-          # distro archive can never be relied on for an OLD major; the job would
-          # red on a runner-image roll rather than on a diff, which is the class
-          # #12051 exists to remove. apt.postgresql.org publishes EVERY supported
+          # distro archive can never be relied on for an OLD major. ⚠️ NOT because a
+          # pinned `ubuntu-24.04` would red on an image roll — noble's archive always
+          # carries the current 16.x, and this job names that release. The exposure the
+          # PGDG source actually removes is the box CLAIMING this label from another
+          # release (the `=on` routing drift, #10289): on that box the archive resolves
+          # the WRONG major with no diff to blame, which is the class #12051 exists to
+          # remove. apt.postgresql.org publishes EVERY supported
           # major for every supported release (`16.15-1.pgdg26.04+2` on resolute,
           # `16.15-1.pgdg24.04+2` on noble — both verified in a container running
           # THIS script), so the pin resolves the same way wherever the label goes.
@@ -4804,7 +4808,16 @@ jobs:
           # failure anywhere later still cleans up, and the SOURCE is removed FIRST so there is no
           # window in which it outlives the key that signs it. `${key_file:-}` because the trap can
           # fire before that mktemp call, where `set -u` in the trap would itself abort.
-          trap 'sudo rm -f /etc/apt/sources.list.d/pgdg.list /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc "${key_file:-}" || true' EXIT
+          # ⛔ OWN ONLY WHAT THIS STEP WROTE. A pool box may ALREADY carry PGDG configuration
+          # (an operator's, or `postgresql-common`'s own keyring at exactly that path); an
+          # unconditional `rm` would delete state this job never created — on any later
+          # failure, not just the success path (MEASURED: with an operator file planted and
+          # the key fetch forced to fail, an unconditional trap still deleted it).
+          had_sources=0
+          if [ -e /etc/apt/sources.list.d/pgdg.list ]; then had_sources=1; fi
+          had_keyring=0
+          if [ -e /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc ]; then had_keyring=1; fi
+          trap 'if [ "${had_sources:-0}" = 0 ]; then sudo rm -f /etc/apt/sources.list.d/pgdg.list; fi; if [ "${had_keyring:-0}" = 0 ]; then sudo rm -f /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc; fi; sudo rm -f "${key_file:-}"; true' EXIT
           # ⚠️ `mktemp`, not a fixed `/tmp/pgdg.asc`: this job is pool-eligible and `curl -o`
           # FOLLOWS symlinks, so a co-tenant could pre-create that path and redirect this write.
           key_file="$(mktemp)"
