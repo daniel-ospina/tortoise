@@ -1251,6 +1251,7 @@ def test_signup_acceptance_dom_structure(page: Page) -> None:
     assert struct["notInForm"], ".legal-accept must not be a descendant of the form"
 
     # ⛔ THE DESTINATION IS PINNED, NOT THE SPELLING (#12058). This page belongs
+    # ⛔ THE DESTINATION IS PINNED, NOT THE SPELLING (#12058). This page belongs
     # to the APP origin (`_app_url`), which is its own Pages project and hosts no
     # legal page of its own, so a root-relative `/tos` here answers 404 (measured)
     # — the reason the markup carries the company host ABSOLUTELY. Reading
@@ -1258,19 +1259,30 @@ def test_signup_acceptance_dom_structure(page: Page) -> None:
     # `https://premiselabs.co/tos` read as different documents even though the
     # first one is the 404. `a.href` is the browser-resolved URL, so the pin is
     # the destination: a root-relative link fails (it resolves to the app host),
-    # an absolute one must name the marketing origin in full (scheme AND netloc,
-    # so a `http://` downgrade or an odd port cannot pass), and the path must be
-    # the document (`/tos-archive` is not `/tos`).
+    # and an absolute one must name the company origin WHOLE (scheme AND netloc,
+    # so a `http://` downgrade or an odd port cannot pass either).
+    #
+    # The required pair is a SUBSET, not the whole set: the statement may gain a
+    # further legal link (a DPA, say) without this guard — a REQUIRED check —
+    # calling two correct links wrong, and a set cannot see a duplicate. What
+    # must NOT appear is a link OFF the company origin: the app origin (a
+    # root-relative path there 404s) or the retired host (301-only, the property
+    # #11762's move exists for). The PATH of an extra link is deliberately not
+    # pinned: the suite's own link crawl resolves them.
     links = page.evaluate(
         """() => [...document.querySelectorAll('.legal-accept a')].map(a => a.href)"""
     )
+    company_origin = "https://premiselabs.co"
     destinations = {(f"{urlsplit(h).scheme}://{urlsplit(h).netloc}", urlsplit(h).path)
                     for h in links}
-    assert destinations == {("https://premiselabs.co", "/tos"),
-                            ("https://premiselabs.co", "/privacy")}, (
-        f"legal-accept links wrong: {links} -> {sorted(destinations)}; the acceptance "
-        "statement must resolve to the company host's two legal pages "
-        "(https://premiselabs.co/tos and /privacy), not to a spelling of them")
+    assert {(company_origin, "/tos"), (company_origin, "/privacy")} <= destinations, (
+        f"legal-accept links wrong: {links}; the acceptance statement must link the "
+        "company host's Terms of Service (https://premiselabs.co/tos) and Privacy "
+        "Policy (https://premiselabs.co/privacy)")
+    off_host = sorted(d for d in destinations if d[0] != company_origin)
+    assert not off_host, (
+        f"legal-accept links leave the company origin: {off_host} (all: {links}); "
+        "on the app origin a root-relative path 404s, and the retired host only 301s")
 
 
 def test_mock_email_signup_created_signs_in_and_redirects(page: Page) -> None:
