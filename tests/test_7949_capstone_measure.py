@@ -5046,6 +5046,18 @@ _EPIC_CITE_DOCS = {
         _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md",
     "03-test-design.md":
         _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+    # ⛔ Registered because this forward merge re-pointed THREE cites in these two
+    # documents and could not have noticed either way: they were in NO table, so
+    # `00-align.md`'s `hierarchies` range kept the +15 arithmetic the branch guessed
+    # (real offset +42) and its `extraction_mode` pair and `04-plan.md`'s
+    # `declared_relation_predicates` cite both went stale under the merge's own
+    # +38 / +157 shifts in `sdk.py`. A document this bundle EDITS is a document this
+    # bundle reads — registering them is what makes the next insertion red instead of
+    # silent (#12138's convention: the row exists so the rot has a reader).
+    "00-align.md":
+        _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-align.md",
+    "04-plan.md":
+        _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md",
     # `docs/evidence/11083/README.md` cites the SAME `relation_write.py` call the
     # RECONCILE row below pins, and was read by nothing at all until #12112. The
     # cite was CORRECT on main (`:631` WAS the call at `aebf91352bfd`, the parent of
@@ -5065,6 +5077,9 @@ _EPIC_CITE_SOURCES = {
     # while the document went on naming 9548, which is the row above — a cite a
     # change moves is exactly the cite no hand-recheck keeps.
     "ci_surfaces": _REPO / "config/ci-surfaces.yml",
+    # `00-align.md` pins the `hierarchies` VALIDATOR by range and nothing read it,
+    # which is how a guessed +15 survived where the tree's real offset is +42.
+    "pack_registry": _REPO / "tortoise/pack_registry.py",
     # ⛔ `relation_write.py`'s `plan_hierarchy_edges` call is cited by two documents
     # (and by an artifact row that talks about the same seam) and by NOTHING else in
     # this file. Measured commit-by-commit across ALL 36 of #12112's commits — every
@@ -5170,6 +5185,20 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # names the call), keyed by the quoted form the sentence prints.
         ("00-plan.md", "point-creation path at", (
             ("18375", "bind_point_subjects(proj, self, point_id=pid,"),
+        ), "sdk"),
+        # The two cites this forward merge re-pointed in the documents no row read —
+        # each is a RANGE, pinned at BOTH endpoints, because a range that moves by a
+        # few lines still "contains" the number the document names.
+        ("00-align.md", "the gap is the **declaration → consumer** seam", (
+            ("2415", "# Validate hierarchies"),
+            ("2429", 'errors.append("hierarchies: entry missing \'type\' field")'),
+        ), "pack_registry"),
+        ("00-align.md", "`llm:deepseek-direct` is what", (
+            ("16251", "The v2 path reports"),
+            ("16252", '"extraction_mode": "llm:<route>"'),
+        ), "sdk"),
+        ("04-plan.md", "operator / label path", (
+            ("25041", "declared = declared_relation_predicates()"),
         ), "sdk"),
         # The manifest's own `carve_out:` entry, cited from the artifact table.
         # ⛔ The 5th element is the SECTION the cite must fall inside: this exact
