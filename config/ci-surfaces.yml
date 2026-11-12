@@ -11031,12 +11031,19 @@ durations:
   # preserves the label set and never reaches it, and with the branch deleted this
   # control fails with `KeyError: 'WS-F'` while the other 57 pass).
   # -> 57 once #11904's re-cut control landed
-  # (`test_the_recut_row_and_survivors_hold_their_status_by_ISSUE`): every other
-  # comparison in the file is a COUNT, so an edit that holds every tally while
-  # swapping two rows' statuses is invisible to all of them — measured at
-  # #11904's head, reverting §2's `#2782` to `OPEN` and promoting `#2684` to
-  # `VERIFIED-FIXED` left `tools/problem_map_check.py --check` CLEAN. The arm
-  # pins the two sets the page asserts BY NAME. This is the move that made the
+  # (`test_the_recut_row_and_survivors_hold_their_status_by_ISSUE`): no other
+  # comparison in the file ASSERTS a row's status by issue — of the arms that READ
+  # THE PAGE the rest compare COUNTS, or check a row's presence, its pin, its
+  # status vocabulary and its anchors (the state/machinery arms compare the tool's
+  # answer, not the page) — so an edit that held every tally while swapping two
+  # rows' statuses was invisible to all of them as a CLAIM. (A per-issue status
+  # literal does appear elsewhere, but as a MUTATION FIXTURE's premise —
+  # `_rewrite_row(..., 2813, "| VERIFIED-FIXED |", …)` — where it reds as
+  # "row #2813 does not contain '| VERIFIED-FIXED |'", i.e. as a broken fixture,
+  # not as a status finding.) Measured at #11904's head, reverting §2's `#2782`
+  # to `OPEN` and promoting `#2684` to `VERIFIED-FIXED` left
+  # `tools/problem_map_check.py --check` CLEAN. The arm pins the two sets the
+  # page asserts BY NAME. This is the move that made the
   # leading count above stale: #11904 (#2820) added the function but did not
   # re-derive this row, so `test_no_durations_row_states_a_stale_case_count`
   # red on `main` at 43db5c0f — fixed here because a stale citation in the map
