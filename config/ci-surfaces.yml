@@ -2260,6 +2260,22 @@ surfaces:
   # record path for a runner-image property. Hermetic: reads
   # `.github/workflows/python-ci.yml` only — no DB, no client binary, no network.
   - test_12051_ci_pg_client_matches_server.py
+  # #11826: the superseded-`:Object` audit instrument. `tortoise/audit.py` matches
+  # NO `SOURCE_PATTERNS` entry, so an audit.py-only diff resolves `['core']`
+  # (measured: `tools/ci_selection.py --changed-files tortoise/audit.py` →
+  # `surfaces: ['core']`, `full: false`), and this row is what selects the suite
+  # on exactly the diff class it guards. The PR's other halves need no row here:
+  # `tortoise/sdk.py`, `tortoise/mcp_server.py` and `tortoise/tool_registry.py`
+  # each resolve `full: true` (`test_files: ALL`), so the suite is already in
+  # their selection. Not dual-registered: unlike the `hosted_api.py`/`ranking.py`
+  # class above, no second surface can own the audit lane.
+  # ⛔ This row is why the REQUIRED `manifest-integrity` leg (`python-ci-gate`
+  # needs entry) exists: without it `tools/ci_selection.py --integrity` refuses
+  # the whole tree with `manifest drift:
+  # ['test_11826_object_supersession_instrument.py']` — an unregistered test file
+  # is a case no shard is told to run — and the PR sits BLOCKED. Measured on
+  # #12111 at `68f2932463`, `manifest-integrity` COMPLETED FAILURE.
+  - test_11826_object_supersession_instrument.py
 
   # #11855: pins the BLAST RADIUS of an unreadable belief operand — a batch
   # containing a legacy `List`-valued α still returns every requested row, and
