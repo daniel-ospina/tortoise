@@ -1941,8 +1941,23 @@ def test_the_RUN_level_refusal_names_a_NULL_mechanism_without_raising(monkeypatc
     reproduces on the pre-delta commit). With nothing priced, `run()` exercises
     the sort/format/logger line and returns without touching the jax path — so
     the gate reddens on the defect it is about, not on the environment.
+
+    ⛔ WHAT MAKES EACH ASSERTION DISCRIMINATE (#12221 review, both reviewers,
+    measured). Two details are load-bearing and must not be "tidied":
+
+      * `coherence` is passed FIRST and `None` second, because `"None" <
+        "coherence"` — with the natural order the sorted string would EQUAL the
+        dict's insertion order, and the whole sort could be deleted
+        (`list(refused.items())`) while this still passed.
+      * `coherence` is refused TWICE and `None` once (`_n == 3`), not once each,
+        because with equal counts `sum(refused.values())` and `len(refused)` are
+        indistinguishable and a `_n` collapse would go unnoticed.
+      * every factor carries TWO `input_ids`, because `_update_factor` early-
+        returns below two (`svbp.py:269`) — with one id, deleting `factors =
+        priced` reaches no message passing and the "must not be priced"
+        assertion is inert.
     """
-    from tortoise import svbp as svbp_module
+    svbp_module = pytest.importorskip("tortoise.svbp")
 
     seen: dict = {}
 
@@ -1952,23 +1967,27 @@ def test_the_RUN_level_refusal_names_a_NULL_mechanism_without_raising(monkeypatc
     monkeypatch.setattr(svbp_module.logger, "warning", _warn)
 
     eng = svbp_module.TortoiseSVBP()
-    iters, converged = eng.run([
-        ("op-null", None, ["c1"], 0.5),
-        ("op-coh", "coherence", ["c2"], 0.5),
+    _iters, converged = eng.run([
+        ("op-coh-a", "coherence", ["c1", "c2"], 0.5),
+        ("op-null", None, ["c3", "c4"], 0.5),
+        ("op-coh-b", "coherence", ["c5", "c6"], 0.5),
     ])
 
     assert seen, (
         "the refusal never warned — either the factors were not refused or the "
         "warning path was lost entirely"
     )
-    # The count and the ORDER are both pinned: the order is what the `key=`
-    # provides, and it is what a bare `sorted(refused.items())` cannot produce.
-    assert seen["args"] == (2, "None×1, coherence×1"), (
-        "the refused-mechanism list must sort by str(op_type), so a NULL and a "
-        "named mechanism can share one warning: " + repr(seen["args"])
+    # `_n` is a SUM of the counts (3, not 2 distinct mechanisms), and the list is
+    # sorted by `str(op_type)` — NOT insertion order, which is the reverse here.
+    assert seen["args"] == (3, "None×1, coherence×2"), (
+        "the refused-mechanism list must count every factor and sort by "
+        "str(op_type), so a NULL and a named mechanism can share one warning: "
+        + repr(seen["args"])
     )
-    assert converged is True and iters == 1, (
-        "with every factor refused there is nothing to iterate, so the reduced "
-        "problem converges immediately: " + repr((iters, converged))
-    )
+    # `converged` is the property worth pinning. `iters` is deliberately NOT
+    # asserted: it is an emergent property of the convergence loop (empty
+    # `posteriors` ⇒ `max_change == 0`), so a loop refactor would redden a test
+    # that is about sorting.
+    assert converged is True, "nothing was priced, so the reduced problem converges"
     assert eng.messages == {}, "a refused factor must not reach message passing"
+    assert eng.posteriors == {}, "a refused factor must not create a posterior"
