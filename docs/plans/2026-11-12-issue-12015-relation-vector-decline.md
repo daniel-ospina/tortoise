@@ -82,7 +82,7 @@ cache — §0.5c of `06-cache-projection.md` is the owner of the wording, this i
 
 1. an edge property-clear CLAUSE exists in this tree (`ep.py`'s
    `MATCH ()-[r:IMPL|NAND]->() REMOVE r.msg_*`), but no verb clears a DECLINED VECTOR
-   property on an edge — measured on FalkorDB, `SET r += {embedding: null}` does clear one,
+   property on an edge IN PLACE — measured on FalkorDB, `SET r += {embedding: null}` does clear one,
    so a future in-place route is buildable and is not built;
 2. a full `record-restore` DOES clear it, but `_assert_test_graph` (L2) refuses a server
    graph not named `test_*`/`tortoise_test`, which is every production cache — it is a

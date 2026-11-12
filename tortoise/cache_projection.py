@@ -479,16 +479,17 @@ def _unserved_vector_reason(label: str) -> str:
 #: (`MERGE … SET r += $props`): `SET r += map` merges the map's keys and never
 #: REMOVEs one it does not carry, so a legacy cache that already holds
 #: `r.embedding` keeps it however many times the edge is re-MERGEd from a view that
-#: no longer carries the vector. No SHIPPED route clears an ARBITRARY edge property
-#: (`#11070`'s explicit clear is the NODE door's; the EP path's `REMOVE r.msg_*` in
-#: `tortoise/ep.py` clears only its own derived seeds, which is why an edge clause can
-#: exist at all — see below).
+#: no longer carries the vector. No SHIPPED route clears an ARBITRARY edge property IN
+#: PLACE — nothing targets one property of your choosing (`#11070`'s explicit clear is the
+#: NODE door's; the EP path's `REMOVE r.msg_*` in `tortoise/ep.py` clears only its own
+#: derived seeds, which is why an edge clause can exist at all — see below, and (2) below
+#: for the one wholesale route that does remove it by taking the whole graph).
 #: ⚠️ READ THE NEXT THREE POINTS BEFORE QUOTING A REMEDY (`#12015` review — an earlier
 #: draft of this note was wrong twice here):
 #: (1) An edge property-clear CLAUSE does exist in this tree — `ep.py`'s message drop
 #:     emits `MATCH ()-[r:IMPL|NAND]->() REMOVE r.msg_alpha, …` — so this is not "the
 #:     engine cannot". What does not exist is a verb that clears a DECLINED VECTOR
-#:     property on an edge. Measured on FalkorDB, `SET r += {embedding: null}` DOES
+#:     property on an edge IN PLACE — a targeted removal of that one property. Measured on FalkorDB, `SET r += {embedding: null}` DOES
 #:     clear the property, so either shape could be built; neither is built today.
 #: (2) A FULL `record-restore` DOES clear it — its wipe takes the edges with it — but it
 #:     is NOT an operator remedy on a production cache: L2's `_assert_test_graph` refuses

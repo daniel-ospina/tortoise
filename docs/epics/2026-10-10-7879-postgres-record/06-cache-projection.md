@@ -271,7 +271,9 @@ wrong twice here, `#12015` review):
 1. **An edge property-clear route does exist in this tree** — `ep.py`'s message drop
    emits `MATCH ()-[r:IMPL|NAND]->() REMOVE r.msg_alpha, …`, a named clause on an edge.
    What does not exist is a verb that clears a *declined vector property* on an edge
-   (`#11070`'s explicit clear is the NODE pair's). Measured on FalkorDB,
+   **in place** — a targeted removal of that one property (`#11070`'s explicit clear is
+   the NODE pair's; the wholesale route is (2), and it removes the edge with it). Measured
+   on FalkorDB,
    `SET r += {embedding: null}` does clear the property, so either shape could be
    built; neither is built today.
 2. **A full `record-restore` clears it, but is not an operator remedy on production**:

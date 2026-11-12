@@ -7482,10 +7482,14 @@ def test_the_census_doc_collects_what_the_file_collects():
     actual = int(match.group(1))
 
     # ⛔ EVERY statement of the count, not just the transcript line (`#12015` review):
-    # §6 states the figure THREE times (the run line, the bold prose total, and the
-    # `122 + … = N` arithmetic). Pinning one left the other two free to be re-cut to a
-    # different number with this gate green — a doc contradicting itself, which is the
-    # defect this pin exists to prevent.
+    # §6 states the figure FOUR times (the run line, the bold prose total, the
+    # `122 + … = N` arithmetic, and the `to the same `N` the pin re-derives` clause).
+    # Pinning one left the rest free to be re-cut to a different number with this gate
+    # green — a doc contradicting itself, which is the defect this pin exists to
+    # prevent. ⚠️ The fourth arm was added by a `#12015` review that MEASURED the gap:
+    # §6 named `999` at that line and this pin still passed with `3` statements found,
+    # so the comment's claim to cover every statement was itself false — the exact
+    # "a guard that cannot see the shape it exists for" class this file keeps citing.
     statements = [int(n) for n in re.findall(r"this tree: (\d+) collected", text)]
     statements += [int(n) for n in
                    re.findall(r"collects \*\*(\d+) in the tree", text)]
@@ -7494,9 +7498,14 @@ def test_the_census_doc_collects_what_the_file_collects():
     # nothing, and a dead arm shrinks to the arms that still match, so `= 999` stayed
     # green while the comment claimed all three were pinned).
     statements += [int(n) for n in re.findall(r"= (\d+)`", text)]
-    assert len(statements) == 3, (
-        f"§6 states the collected count of THIS tree three times — the run line, the "
-        f"bold prose total, and the `122 + … = N` arithmetic — and this pin found "
+    # The splits paragraph's `to the same `173` the pin re-derives` clause — the fourth
+    # statement of the same figure, and the one an earlier revision of this pin missed.
+    statements += [int(n) for n in
+                   re.findall(r"to the same `(\d+)` the pin re-derives", text)]
+    assert len(statements) == 4, (
+        f"§6 states the collected count of THIS tree four times — the run line, the "
+        f"bold prose total, the `122 + … = N` arithmetic, and the `to the same `N` the "
+        f"pin re-derives` clause — and this pin found "
         f"{len(statements)}: {statements}. A pattern that matches nothing is a DEAD ARM "
         f"(it shrinks to the arms that still match), and a count stated against a branch "
         f"head ('at #11337's head') describes a measurement the row no longer matches as "
