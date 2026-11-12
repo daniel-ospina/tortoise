@@ -66,10 +66,16 @@ name: ci-queue-health
 # cut at its page cap, so the oldest queued runs — the end the age clause needs —
 # were never read (lever: --max-pages); (b) the queued PR runs carry no readable
 # `created_at`, so the wait cannot be measured at all; (c) the RUNNING CENSUS is
-# unwitnessed — every run counted in `pr_running` was unmeasured (the jobs probe
-# could not read it, or the budget did not reach it), which is #12037's own defect
-# returned by the budget and is cleared by the frozen runs being repaired or the
-# budget being raised, NOT by --max-pages. Neither can block a merge, because a
+# unwitnessed — every run counted in `pr_running` was unmeasured, which is #12037's
+# own defect returned by the probe budget. That sub-cause has TWO forms with
+# opposite levers (round 13), and the payload reports which applies:
+# `pr_running_unmeasured_unprobed` is cleared by RAISING the budget, and
+# `pr_running_unmeasured_unread` by RETRYING the reading (a bigger budget only
+# probes more runs that fail the same way). NOT --max-pages either way.
+# ⛔ And NOT "repair the frozen runs": a run whose every job is `completed` is the
+# PROOF that excludes it from `pr_running`, so it can never make the census
+# unmeasured, and neither /cancel nor /force-cancel accepts such a repair (409).
+# Neither can block a merge, because a
 # `schedule`-event run is a NON-CODE event: the merge rail's own `NON_CODE_EVENTS`
 # set excludes `schedule|issues|issue_comment` from the merge decision, so a red
 # scheduled run never gates a PR.
