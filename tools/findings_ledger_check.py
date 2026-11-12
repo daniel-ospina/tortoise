@@ -1621,7 +1621,12 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
     ),
     (
         "a shorthand citation pointing past the end of its anchor's file",
-        lambda t: t.replace("`:3115`", "`:999999`", 1),
+        # ⛔ The literal tracks the DOCUMENT: `main`'s `43db5c0f55` shifted
+        # `_persist_extra_props`'s call site by 16 lines, so row (c)'s shorthand
+        # moved to `:3131` and this fixture stopped matching — the arm reported
+        # "did not change the document" rather than going quiet, which is how it was
+        # caught. Retarget, never delete.
+        lambda t: t.replace("`:3131`", "`:999999`", 1),
         "out of range",
     ),
     (
