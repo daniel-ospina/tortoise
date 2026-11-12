@@ -1045,11 +1045,22 @@ def _referentiality_hold(surface: str) -> tuple[str, str] | None:
       *unmeasured ⇒ fail open*), so an unarmed run here is byte-identical to
       the pre-#12094 behaviour, exactly as ``route_mentions`` promises;
     * the identifier-only class (``#4118``, a path) is deliberately NOT asked
-      here. ``value_gate`` owns it and is ON by default, so wiring it on this
-      path would ship an unmeasured discard to a live document ingest and can
-      drop a must-keep surface (``config/ci-surfaces.yml`` is the row
-      ``#11021``'s 12-row arm exists to protect). That is a different
-      decision, on a different path, and it is not this issue's.
+      here: wiring it on this path would ship an unmeasured discard to a live
+      document ingest and can drop a must-keep surface
+      (``config/ci-surfaces.yml`` is the row ``#11021``'s 12-row arm exists to
+      protect). That is a different decision, on a different path, and it is
+      not this issue's.
+
+      ⛔ **Nothing claims this class on THIS path yet — stated as measured, not
+      inferred.** ``value_gate`` is NOT consulted by ``extractor.py`` (it holds
+      no import of it) nor by ``api.add_subject``, so no gate runs here at all;
+      and it would not claim the surface this issue actually measures either:
+      ``value_gate.identifier_only("issue:daniel-ospina/tortoise#1234")``
+      returns ``None``, while ``"#4118"`` and a path correctly resolve to
+      ``reference``/``path``. So the 453 ``issue:<repo>#<n>`` Subjects #12060
+      measured still mint on this path — tracked as ``#12118``, NOT discharged
+      by this cue. The same holds for the Object loop ~20 lines below (also
+      unclaimed, ``#12119``); this PR is the Subject mint only.
 
     ``the owner`` / ``the founder`` / ``the user`` are NOT held by this
     predicate and must not become so: ``#2453``/``#4899`` measured them as real
@@ -1308,8 +1319,17 @@ class LLMExtractor:
         """
         is_doc, sections = _document_sections(text)
         if not is_doc:
+            # ⛔ The FULL shape, not the pre-#12094 five keys: the docstring
+            # above documents this return as always carrying the disposition
+            # keys, so a non-document input returning a short dict hands the
+            # next caller a KeyError on a contract that reads as complete.
+            # ``mentions`` is ``None`` for the same reason as the main return
+            # (no claim Point at this stage), never ``[]``.
             return {"subjects": 0, "objects": 0, "subject_names": [],
-                    "entities": [], "failed_sections": []}
+                    "entities": [], "failed_sections": [],
+                    "subjects_minted": 0, "subjects_held": 0,
+                    "held_subjects": [], "subjects_held_by_rule": {},
+                    "mentions": None}
 
         # Build kind vocabularies from the domain_loader adapter (#951):
         # domain_kinds()/known_kinds(bucket) previously did not exist — the
