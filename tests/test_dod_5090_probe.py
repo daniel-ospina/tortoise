@@ -2439,6 +2439,29 @@ def test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool(
     assert "UNMEASURED here, not a measurement" in hold, hold
     assert "no shipped surface arms it at all" not in hold, hold
 
+    # ⛔ And a HIT in the same surface root as an unreadable file must still read
+    # ARMED (fresh review of PR #12016, P3). `UNMEASURED` used to SUPERSEDE `ON`, so
+    # such a root was dropped from `armed` entirely and the note then published "no
+    # surface the walk could READ arms it" over a file it had just READ arming it — an
+    # absence asserted over a positive measurement. A hit is a positive measurement; an
+    # unreadable sibling adds uncertainty about the files not read, it cannot
+    # un-measure one the walk did read. The unreadable file must nonetheless stay
+    # REPORTED, which is the arm that keeps this from becoming a quiet OFF.
+    (tmp_path / ".env.example").write_text("SOME_OTHER_VAR=1\n", encoding="utf-8")
+    cfg = tmp_path / "config"
+    cfg.mkdir(exist_ok=True)
+    (cfg / "armed.yml").write_text(
+        "value_gate:\n  TORTOISE_EMBED_GATE: 1\n", encoding="utf-8")
+    (cfg / "big.yml").write_text("#" + "x" * 2_100_000, encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["armed"] == ["config"], shipped
+    assert shipped["unmeasured"] == [], shipped
+    assert shipped["unreadable"] == ["config/big.yml"], shipped
+    row = probe.score_rule_bullet()
+    hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
+    assert "the surface(s) that do arm it (config)" in hold, hold
+    assert "could not be read" not in hold, hold
+
     # …and the `ambient` HALF of the same clause: a lane's exported flag is not a
     # DEFAULT. With the switch armed in the ENVIRONMENT and the deployment still
     # silent, an `ambient or deployment["on"]` reading turns this row `MET` — the

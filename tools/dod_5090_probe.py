@@ -2117,13 +2117,24 @@ def flag_in_shipped_configs(flag: str) -> dict:
                     surface_file_hits.setdefault(posix, []).append(hit)
         if not present:
             state = "ABSENT"
+        elif surface_hits:
+            # ⛔ A HIT is a POSITIVE measurement: this surface demonstrably arms the
+            # flag, because a file the walk READ assigned it a truthy value. An
+            # unreadable SIBLING file adds uncertainty about the files it could not
+            # read; it cannot un-measure an assignment the walk did read. Letting
+            # UNMEASURED supersede ON dropped a measured hit out of `armed` entirely,
+            # which then let the hold note publish "no surface the walk could READ arms
+            # it" over a root it had just read arming it (fresh review of PR #12016,
+            # P3). The unreadable file is still reported — in `unreadable:` and in this
+            # surface's own `UNMEASURED` accounting below — so nothing is hidden.
+            state = "ON"
         elif surface_unreadable:
             # A file this walk could not read could arm the flag, so "present and
             # silent" would be a claim about a surface half of which was never
             # read. UNMEASURED is the only honest state — never a quiet OFF.
             state = "UNMEASURED"
         else:
-            state = "ON" if surface_hits else "OFF"
+            state = "OFF"
         # Per FILE, so one armed build file cannot hide a silent sibling: the
         # deployment reading below is computed at this granularity, not at the
         # surface root's.
@@ -2814,19 +2825,26 @@ def score_rule_bullet() -> Row:
         # #12016, P3). The `#11455` reading moved into the arm where a template really
         # does arm it, which is the only shape it describes.
         if armed_deployment_files:
+            # ⛔ The noun is scoped to the population it interpolates. This arm names
+            # `deployment["armed"]` — the per-FILE DEPLOYMENT subset — so calling them
+            # "the surface(s) that do arm it" claimed the WHOLE armed population was
+            # deployment files. It is not: arm 2 below is reached by exactly the case
+            # where a non-deployment surface arms it too, and on the real tree
+            # `.env.example` does (fresh review of PR #12016, P3).
             armed_clause = (
-                f"the surface(s) that do arm it ({', '.join(armed_deployment_files)}) "
-                "are themselves deployment files, so a build that uses one of them "
+                f"armed deployment file(s) ({', '.join(armed_deployment_files)}) are "
+                "themselves deployment files, so a build that uses one of them "
                 "carries the flag — this reading is per FILE and does not model that "
                 "merge"
             )
         elif shipped["armed"]:
             # ⛔ NOT "a TEMPLATE": this arm is reached by ANY armed non-deployment
-            # surface, and `config/` and `.github/workflows` arm it too (both scored
-            # HITs by this walk), so a template-only noun named a population the walk
-            # did not measure. The consequence is stated for the population actually
-            # armed, and `#11455` stays named for traceability (fresh review of PR
-            # #12016, P3).
+            # surface, and `config/` and `.github/workflows` are IN that population —
+            # a template-only noun would name a population narrower than the arm's, so
+            # the consequence is stated for whatever actually armed. (Stated as a shape
+            # on purpose: on this tree BOTH of those read OFF, so asserting they arm it
+            # would be a measurement the walk did not make — the very defect class this
+            # PR removes; fresh review of PR #12016, P3.)
             armed_clause = (
                 f"the surface(s) that do arm it ({', '.join(shipped['armed'])}) do "
                 "not deploy the container's environment on their own, so no armed "
