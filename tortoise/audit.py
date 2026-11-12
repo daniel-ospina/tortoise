@@ -1677,12 +1677,23 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # Object), but the string must not hand out a call that cannot work —
             # 4c already answers this state in prose, and the two checks must not
             # disagree about it.
+            # ⛔ …and the SAME neutral guard as the successorless arm below: on a
+            # neutral row "re-point this input onto that successor" orders the repair
+            # this arm's own archive clause and appended §3.1 triage forbid. Only a
+            # raw ``REMOVE o.id`` reaches this state, but the string is still read by
+            # whoever runs the audit against a repaired graph (#12210 review, P3).
             return (
                 f"No id-keyed repair is possible for the superseded Object named "
                 f"{_named(s['sup_name'])} (it carries no id, so "
                 "tortoise_update_entity cannot address it): give it one, then name "
-                f"the successor on it and re-point this {s['edge_type']} input onto "
-                "that successor, deleting the edge into the old endpoint. "
+                "the successor on it and "
+                + ("delete this edge: §3.1's disposition here is DROP, and a "
+                   "re-point would keep the same inert connection, because a "
+                   "neutral edge transfers no confidence in either direction"
+                   if s["neutral_row"] else
+                   f"re-point this {s['edge_type']} input onto that successor, "
+                   "deleting the edge into the old endpoint")
+                + ". "
                 + _archive_clause(s))
         if not s["carrier_count"]:
             # ⛔ "Nothing to re-point onto" would be FALSE whenever a :Subject or

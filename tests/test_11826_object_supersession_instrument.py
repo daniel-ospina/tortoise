@@ -2502,3 +2502,28 @@ def test_a_successorless_neutral_direct_edge_is_not_told_to_rewire(sdk):
     assert "equivalent edge onto that successor transfers nothing" in fix or \
         "delete it: it is neutral" in fix, fix
     assert "may CARRY to the successor" not in fix, fix
+
+
+def test_an_id_less_neutral_row_is_told_to_delete(sdk):
+    """The `sup_id is None` arm needs the same neutral guard as its sibling.
+
+    Only a raw ``REMOVE o.id`` reaches this state, but the string is read by whoever
+    audits a repaired graph: on a neutral row it ordered "re-point this IMPL input
+    onto that successor" while its own archive clause and §3.1 triage said
+    re-pointing restores nothing and the disposition is DROP (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    op = sdk.create_operator("IMPL", p["id"], [v1["id"]], semantics="related")
+    assert _q(sdk, "MATCH (o {id:$i}) RETURN o.direction", {"i": op["id"]}) == [["-"]]
+    _obj(sdk, "PolicyV2")
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == "PolicyV1")
+    fix = issue.fix
+    assert "No id-keyed repair is possible" in fix, fix
+    assert "re-point this IMPL input onto that successor" not in fix, (
+        "a neutral edge transfers nothing, so the instruction is DELETE: " + fix)
+    assert "delete this edge: §3.1's disposition here is DROP" in fix, fix
