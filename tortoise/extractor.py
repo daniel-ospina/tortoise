@@ -1331,11 +1331,14 @@ class LLMExtractor:
                   "mentions": None}
 
         UNITS, because a census whose buckets count different things invites a
-        caller to add them: ``subjects_minted`` and ``subjects_held`` are both
-        SURFACE-level (distinct names), while ``held_subjects`` and
-        ``hold_failures`` are OCCURRENCE-level — one record per (surface,
-        section), so a surface the model returns in two sections appears twice
-        there and once in the counters.
+        caller to add them: ``subjects_minted``, ``subjects_held`` and
+        ``subjects_hold_failed`` are all SURFACE-level (distinct names), while
+        ``held_subjects`` is OCCURRENCE-level — one record per (surface, section),
+        so a surface the model returns in two sections appears twice there and
+        once in the counters. ⛔ ``hold_failures`` is NOT that second list despite
+        being a list of records: a FAILED surface is minted (fail-open), so it is
+        in ``seen_subjects`` and a later section never reaches the cue again — one
+        record per surface, in step with ``subjects_hold_failed``.
 
         ``mentions`` is ``None`` on purpose, not an empty list: this stage has
         no claim Point to carry a mention record (DM1 / ``#11021``), so the
@@ -1403,6 +1406,9 @@ class LLMExtractor:
         held_surfaces: dict[str, str] = {}  # surface → its rule_id (first hold)
         # #12094: a cue that RAISES is fail-open — the surface is minted, as it
         # would have been before this gate existed — and the failure is reported.
+        # ⛔ ONE record per surface, not per occurrence: a failed surface mints, so
+        # it lands in ``seen_subjects`` and a later section never asks the cue
+        # again. That is why this list is stated as surface-level above.
         hold_failures: list[dict] = []
 
         # ⛔ The ruff B007 silencing directive that used to sit on this loop is
@@ -1451,14 +1457,22 @@ class LLMExtractor:
                         "#12094: referentiality cue raised on %r in %r — minted "
                         "(fail-open): %s", name, title, exc, exc_info=True)
                 if _verdict is not None:
-                    _offset = body.find(name)
+                    # ⛔ A WORD-BOUNDARY match, not `body.find(name)`. A substring
+                    # index is wrong for exactly the class this gate holds: the
+                    # pronoun `it` is found INSIDE "with"/"within"/"itself", so the
+                    # recorded offset pointed at a different word than the surface
+                    # — measured at the #12102 review (`body[34:36] == 'it'` inside
+                    # "with"). `None` when the phrase is genuinely absent is the
+                    # honest answer, never a nearby match.
+                    _match = re.search(rf"(?<!\w){re.escape(name)}(?!\w)", body)
+                    _offset = _match.start() if _match is not None else None
                     held_subjects.append({
                         "surface": name,
                         "rule_id": _verdict[0],
                         "reason": _verdict[1],
                         "section": title,
                         "span": list(span),
-                        "phrase_offset": _offset if _offset >= 0 else None,
+                        "phrase_offset": _offset,
                     })
                     held_surfaces.setdefault(name, _verdict[0])
                     continue
