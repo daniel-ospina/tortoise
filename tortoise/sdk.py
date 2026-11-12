@@ -32814,9 +32814,12 @@ class TortoiseSDK:
         # label-blind numerator) can push `no_belief` negative or the ratio above
         # 1.0, which the ranges CATCH; a WIDER denominator with `belief_present`
         # fixed LOWERS the ratio and RAISES `no_belief`, both in range, so the
-        # ranges CANNOT see it — that direction is pinned only by
+        # ranges CANNOT see it — that direction is pinned by
         # `test_counts_match_an_independent_query`, which counts the denominator
-        # with its own queries.
+        # with its own queries, and, from a different angle, by
+        # `test_an_edged_but_unreachable_claim_is_not_invisible` (measured: a reach
+        # query missing the far-endpoint live filter reddens BOTH, so naming one
+        # alone overstated the coverage).
         no_belief = reachable - belief_present
         unclassified = points_edged - reachable
         return {
