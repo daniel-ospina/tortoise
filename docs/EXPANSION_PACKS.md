@@ -197,6 +197,13 @@ $ tortoise pack validate packs/mypack
       add the dependency or redirect to a core kind (R1/R3)
 ```
 
+**A guard must be about a kind a door can WRITE.** Two kind axes name no layer,
+so a `layer` claimed for a kind they alone own could not be verified against
+anything: `documentKinds` (a `:Source` genre, D10) and `actionKinds` (ONTOLOGY
+v3.0 dissolved Action — it names a declared kind, never a node label).
+`tortoise pack validate` refuses a guard on a kind declared only on either axis;
+declare the kind on the axis whose layer it really has.
+
 **A missing target makes the guard abstain at write time — never reject.** If
 `depends_on`'s pack is not installed in the graph being written to (uninstalled
 after install, drift, a catalog/installed mismatch), the guard degrades to its
