@@ -33,6 +33,118 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
+> **Changelog v3.34 (2026-11-12 — issue #11824 — the successor clause becomes a definition of the word):**
+>
+> **Owner approval of the exact changes** is on record on #11824 (comment `6815950417`, the decision relay:
+> it quotes the owner's verbatim answers and states each one's provenance). This entry records the change;
+> **v3.33 → v3.34** because one sentence cannot carry two meanings under one version, and a citation to
+> `v3.33` must not be ambiguous between the sentence that landed on 2026-11-11 and this one. The build of
+> the guard is still not part of this change — this is the model.
+>
+> **v3.34 lands this sentence, and this is the sentence the file carries:**
+>
+> > **Core Object types accept `draft`, `live`, `superseded`, `deprecated`, `archived`, `in_progress`,
+> > `completed`; an Object created without a status stores none and reads as `live` (#9974 R1 — never a
+> > fabricated `live` write). `superseded` means replaced: it names the successor; a retirement
+> > with no successor is `archived`; `deprecated` is an independent terminal state and needs no successor.
+> > A journal rebuild is unchanged and still restores a supersession recorded without a successor.
+> > `outdated` and `retracted` are not Object lifecycle words (read-only, retained for legacy data).
+> > Pack-declared kinds validate against their own declared words.**
+>
+> **What each scope fixes, and why the previous wording could not stand.** (1) **`draft` stays** — the
+> owner's ruling is that an Object may be a draft; what changes is that the sentence no longer implies the
+> write defaults to a stored `live`. The code stores nothing and an absent status READS as live, because
+> `coalesce($st,'live')` was removed as a fabricated birth in #9974 R1. (2) *"a removal with no successor
+> is `archived`"* redirected **every** `deprecated` write to `archived`, because a deprecated Object is
+> terminal and by definition has no successor — erasing the difference between *something replaced this*
+> and *this was wrong*. The clause is now stated through the replacement reading ("`superseded` means
+> replaced: it names the successor"), and `deprecated` is stated as an independent terminal state. ⚠️ The
+> landed wording still says *"a **retirement** with no successor is `archived`"*, and `deprecated` is a
+> retirement — so the two clauses sit in tension even with the `deprecated` carve-out beside them. That is
+> **owner-approved text**, so it is a follow-up on #11824, not a defect fixed here. (3) **The successor clause is stated as a DEFINITION OF THE WORD, not as a description of a door.** The
+> previous wording — *"at the write door `superseded` requires the successor"* — was MEASURED FALSE of the
+> generic doors (`create_object(..., status='superseded')` and `update_entity(<object>, status='superseded')`
+> both store `status='superseded'` with `supersededBy` absent), so a guard builder reading it concluded the
+> door was already covered or built a refusal `sdk.py` calls an **over-block**. The clause now says what the
+> word MEANS — *`superseded` means replaced: it names the successor; a retirement with no
+> successor is `archived`* — which is true of the vocabulary and enforceable by the unbuilt guard, because
+> `archived` is a legal successorless route for a **retirement**. ⚠️ **That does NOT retire `sdk.py`'s
+> over-block objection**, and an earlier draft of this entry wrongly said it did. The shape `sdk.py` protects
+> is not a retirement: it is *no longer current, replacement not yet known* — the state the extractor's
+> owner-ruled policy needs, and one `archived` cannot express (see THE GAP IS REAL, BELOW). So that objection **still
+> stands for that shape**, and the guard must not refuse it on the strength of this clause alone. The **journal rebuild**
+> carve-out is kept and must be: `_fold_object_superseded` folds `supersededBy` from
+> `ev.get("supersedes_by") or ""`, and `sdk.py` records the id-only legacy `ObjectSuperseded` as a
+> legitimate record row, so a refusal at the rebuild would break §11's reconstruction guarantee.
+>
+> ⚠️ **The SAME cell carries a sentence this entry does not fix, and it is the one read first.** The row opens with
+> *"Write-through cache of lifecycle events (ObjectRegistered→live; …)"*, while the clause this entry lands says an Object created
+> without a status stores none and reads as `live`. That opening is **pre-change build record and already recorded as WRONG about the
+> code** — see the #9974 entry below, which parks the exact replacement wording on **#9974** because editing it needs the owner's
+> approval of the exact text. It is called out here rather than left implicit because the two sentences now sit in one cell: read
+> together, they invite a guard that stamps `status='live'` on a statusless record — the *fabricated birth* #9974 R1 removed. Until
+> that parked wording lands, this entry's clause governs and the parenthetical describes the fold as it was.
+>
+> **Why the clause became a definition rather than a narrower door rule (research, 2026-11-12).** These systems agree on the point this
+> clause is about, and do NOT agree on how history is kept — so only the narrow claim is made here. **None of them requires the CALLER
+> to name a successor** to mark something no-longer-current: Graphiti/Zep sets an edge's `invalid_at` to the invalidating edge's
+> `valid_at` and lets the SYSTEM link them; Cognee's conflict review labels a contradicted fact `superseded` and its counterpart
+> `current` (`cognee/modules/conflicts/methods.py`), with no successor argument from the caller; mem0's
+> **Supersede** action ("marks an older fact as outdated when a newer one contradicts it", always on, all plans) infers both the
+> supersession and its replacement link in the background — `replaced_by`/`lifecycle_state` are written by the system, not
+> passed by a caller. ⚠️ **Three corrections to an earlier version of this paragraph, each falsified by review.** (a) It said *"Every
+> agent-memory system surveyed uses **soft revocation** rather than deletion"*; arXiv 2609.08258v1 (*"Revoked but Still
+> Authoritative: An Empirical Study of Revocation Enforcement in Agent-Memory Systems"*) says **"Many** agent-memory systems
+> preserve history through soft revocation", and its §3.3 names two of the five it measures (cognee, langmem) as deleting the superseded
+> record outright under direct insertion — a universal claim is exactly wrong, and cognee is named three lines above. The paper is
+> **v1 of 2026-09-08** (its submission date — it states no measurement window and names no cognee version), which is BEFORE the
+> 1.6.5 conflict review cited above, so it records cognee without a fact-level
+> contradiction step while the same paragraph credits it with one — both are true of their own version (the review's is 1.6.5, released
+> 2026-10-16), and the version is named
+> here so the two do not read as a source refuting its own example. (b) It said
+> *"mem0 and Letta have no successor concept"*, which is false of mem0 (its Supersede feature carries a system-inferred replacement
+> pointer) and was never verified for Letta from a primary source. (c) It named Cognee's `close_node()`, which cognee removed in 1.6.5
+> (2026-10-16) — an API that no longer exists. What survives all three is the narrower, load-bearing claim:
+> **the successor pointer is system-inferred, so no caller is required to supply it.** The tension runs the other way too — and this
+> next sentence is the entry's OWN REASONING, not a sourced finding: an earlier version put it in quotation marks with no
+> attribution, and it appears in neither the cited study nor any comment on #11824, so it could not be checked from the artifact.
+> Stated plainly: when the WORD means "replaced", the pointer is not optional, so a tombstone that says `superseded` without
+> recording what superseded it records a timestamp and no replacement. Both hold at once only if the word carries the
+> pointer and the successorless case is a different word — which is what this sentence now says. The same survey's measured
+> failure mode is the one already tracked here: that study of five stores found *"no system enforces revocation by
+> default"* — the mark exists and retrieval ignores it, our #11825/#11826 exactly.
+>
+> ⚠️ **THE GAP IS REAL AND NO WORD IS WARRANTED YET — `stale` was considered and WITHDRAWN.** The vocabulary has no word for
+> *no longer current, replacement not yet known*, the state the extractor's owner-ruled policy needs (*"mark stale now, supersede on
+> re-inference"*, `stale ≠ wrong`). That gap is why the `status='superseded'`-without-carrier shape came into use, and why refusing
+> it read as an over-block. What was measured about the writer is narrower than "nothing can produce it": `invalidate_point(id,
+> corrected_by_id)` requires the corrector, so **the invalidation path** cannot mark something no-longer-current without naming a
+> successor — but the shape IS reachable and already in use through `update_entity(<Subject>, status='superseded')` and
+> `create_object(name, status='superseded')`, which store it with `supersededBy` absent (`sdk.py:5267-5273` says of the mirror
+> shape "*it is a shape in use*"; `:63-67` above records the measurement). What withdraws `stale` is not that the state is
+> unreachable: it is that `archived` does not cover it either (`:71-75`), the vocabulary's own `outdated` flag does not carry the
+> distinction (§4.1: the flag and the `CORRECTS` edge *"do not distinguish the two"*), so a word would also need a consumer, and
+> there is none —
+> `archived` **and** `superseded` both leave retrieval and belief (`TERMINAL_STATUS_VALUES` → `TERMINAL_EXCLUDED_STATUSES`), so a
+> third terminal word changes nothing a reader or a retriever would act on. ⚠️ That argument does not rest on terminal being
+> frozen: it is not — `update_entity`'s Point arms carry no lifecycle guard, so a `retracted` Point can be flipped to `live`
+> (`docs/ONTOLOGY.md:1177`, tracked as #9649), and the `:Object` write path carries no status vocabulary guard at all, so an
+> `archived` Object can be given `status='live'` (`docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md:1076`, tracked as #10371 — a
+> Point-arm fix cannot close it). Policy B therefore stays
+> **unimplemented**, and when it is built it needs a word *then*, with a producer and a revival path that respects both — its own
+> change, not this one. **`archived` does not close policy B**: it is the retirement route, not the replacement-not-yet-known one,
+> which is why the clause above is buildable without an expansion **and** why `sdk.py`'s over-block note still stands for that
+> shape (`:71-75`, and the owner's relay, `#11824` comment `6815950417`: *"`archived` does not close policy B"*).
+>
+> **Still unbuilt, deliberately:** the guard that enforces this vocabulary, including the AX three-part
+> refusals (`status='outdated'` naming both `archived` and `superseded`; one refusal shape across
+> Point/Subject/Object — measured: `:Subject` **already** raises the correct shape,
+> `ValueError: Invalid status 'outdated' for a :Subject. Must be one of: archived, deprecated, draft, live,
+> superseded`, for `None` and every undeclared word alike, so the Object arm should match it rather than
+> invent one). Tracked on **#8166** (same root as **#10371**), where the buildable contract is recorded.
+
+---
+
 > **Changelog v3.33 (2026-11-11 — issue #11824 — a core Object kind gets a declared lifecycle vocabulary, and one stale tracker flag is recorded):**
 >
 > **Approval** is the owner's decision `D2 — A` on #11824 (2026-11-11): core Object types get their own

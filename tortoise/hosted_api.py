@@ -1515,6 +1515,31 @@ _ALLOWED_ORIGINS = [
     "https://premiselabs.co",
     "https://app.premiselabs.co",
     "https://api.premiselabs.co",
+    # #11767: KEEP, do not sweep. `tortoise.premiselabs.co` outlives the pages this
+    # entry was added for: a tab opened against it before the cutover still
+    # preflights against it, and the host still ANSWERS for some paths — re-measured
+    # 2026-11-12 after #11763's map and #12031's host inversion shipped:
+    #   `/`          -> 301 to https://premiselabs.co/tortoise
+    #   `/contact`   -> 200, serving `website/contact.html`, which carries a <script>
+    #   `/404`       -> 200 (no script); `/404.html` -> 308 to `/404`
+    # so the host is NOT "a scriptless 404 and nothing else". ⛔ An earlier revision
+    # of this comment claimed `website/404.html` was ALL this host still served, and
+    # made THAT the safety argument. It was false: `_middleware.ts`'s product-host
+    # block does not intercept `/contact`, and `website/_redirects` maps
+    # `/contact.html` host-agnostically, so `/contact` falls through and is served.
+    # A sweep reading the false version could satisfy its own condition (c) from a
+    # premise that was never true. The entry is safe to keep for a DIFFERENT and
+    # durable reason: this host serves only THIS repository's own static pages (no
+    # third-party content is hosted there), so the entry grants nothing to anyone
+    # else — it exists so a legacy tab's preflight is not refused.
+    # Removal trigger (all four MEASURED, not judgement): (a) #11763's redirect map
+    # covers every path that still answers 200 here (`/contact` is NOT covered
+    # today — reported on #11762); (b) >=30 days after children 1-3 are live;
+    # (c) a probe shows the host answers 200 `text/html` for NO path — not merely
+    # that `website/404.html` is scriptless, which is why the old wording had to go;
+    # (d) a production probe shows no request FROM that origin. Also note
+    # _ALLOWED_HOSTS below derives from this list, so dropping the entry ALSO
+    # tightens the MCP Host guard — a second behaviour change riding on a CORS line.
     "https://tortoise.premiselabs.co",
     "https://tortoise-y4mjjq.fly.dev",
 ]
@@ -40984,11 +41009,14 @@ async def github_callback(code: str | None = None, state: str | None = None,
     /v1/connectors/github/auth`` adds ``connector_source_type`` so this
     completion ALSO leaves the connector row that flow promises (#4685).
     """
-    # #1135: welcome page lives on the static-Pages host — derive from the
-    # same env-driven base as the email links (EMAIL_LINK_BASE_URL), never a
-    # second hardcoded host literal.
+    # #1135: derive from the same env-driven base as the email links
+    # (EMAIL_LINK_BASE_URL), never a second hardcoded host literal. #11767: that
+    # base is the APP origin now — /welcome.html has lived there since #4054,
+    # so the emitted URL is terminal (0 hops) rather than a 301 into it.
     from tortoise.email_notify import email_link_base
-    welcome_url = f"{email_link_base()}/welcome.html"
+    # #11767: extensionless, matching the app origin's terminal form
+    # (`/welcome.html` answers 308 to `/welcome` there, measured 2026-11-11).
+    welcome_url = f"{email_link_base()}/welcome"
 
     if error:
         await _emit_analytics_off_loop(

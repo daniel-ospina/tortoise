@@ -304,13 +304,24 @@ TOS_DRAFT = DRAFTS_DIR / "2026-08-08-657-tos-draft.md"
 PRIVACY_DRAFT = DRAFTS_DIR / "2026-08-08-657-privacy-draft.md"
 
 LEGAL_PAGES = ("/privacy", "/tos", "/license", "/dpa", "/security")
+# The five legal/security surfaces every footer must offer. Matched by PATH SUFFIX,
+# not equality, and the reason is the #11762 split: the product pages live under
+# `/tortoise`, so their footer links `/tortoise/license` and `/tortoise/security` —
+# the same documents, one prefix deeper — while the app-origin pages name them
+# ABSOLUTELY (`https://premiselabs.co/tortoise/license`) because a root-relative href
+# on app.premiselabs.co is a 404 there (measured: `/license` answered 404 on the app
+# origin before #11764). An equality match would have to encode all three shapes and
+# would still red the next legitimate one.
 FOOTER_LINK_HREFS = ("/privacy", "/tos", "/license", "/dpa", "/security")
 FOOTER_SELECTOR = "footer, .legal-footer, .footer"
 # The ABSOLUTE canonical Pricing Page URL (reviewer P2): the relative
 # '/#pricing-section' form breaks on premiselabs.co, where '/' serves index.html
 # with NO pricing content — the id="pricing-section" anchor exists only in
-# product.html (served at '/' on the tortoise host via the middleware rewrite).
-PRICING_PAGE_URL = "https://tortoise.premiselabs.co/#pricing-section"
+# product.html (served at '/tortoise' on the ONE marketing host via the
+# middleware rewrite).
+# Since epic #11762 the product page is SERVED at `premiselabs.co/tortoise` (the
+# retired host 301s there), so the absolute canonical Pricing Page URL is this one.
+PRICING_PAGE_URL = "https://premiselabs.co/tortoise#pricing-section"
 FOOTER_PAGES = ("/self-hosted.html", "/faq")
 APP_FOOTER_PAGES = ("/auth", "/signup")
 # The crawl only walks pages the MARKETING origin serves with a final 200. The
@@ -587,11 +598,26 @@ def _body_text_clean(page: Page) -> str:
     return _clean(page.evaluate("document.body.innerText"))
 
 
+def _footer_href_matches(hrefs, wanted: str) -> bool:
+    """Does any footer href point at `wanted`, in any of the shapes #11762 creates?
+
+    `/license`, `/tortoise/license` and `https://premiselabs.co/tortoise/license`
+    are the SAME document; which spelling is correct depends on the origin serving
+    the page. Path suffix accepts all three without accepting a different page.
+    """
+    for href in hrefs:
+        path = urlsplit(href).path if "//" in href else href
+        if path == wanted or path.endswith(wanted):
+            return True
+    return False
+
+
 def _footer_links_present(content: str) -> None:
     """Raw-HTML half (tortoise-host / crawl tests, no live page): the five
     legal/security hrefs appear in the served document."""
+    hrefs = re.findall(r'href="([^"]+)"', content)
     for href in FOOTER_LINK_HREFS:
-        assert href in content, f"footer link {href} missing"
+        assert _footer_href_matches(hrefs, href), f"footer link {href} missing"
 
 
 def _has_blog_entry(content: str) -> bool:
@@ -697,7 +723,7 @@ def test_tos_200_and_negation_safe_block(page: Page) -> None:
 
 def test_tos_pricing_page_hyperlink_resolves(page: Page) -> None:
     """The 'Pricing Page' phrase must be HYPERLINKED (never bare text) with the
-    ABSOLUTE canonical URL https://tortoise.premiselabs.co/#pricing-section
+    ABSOLUTE canonical URL https://premiselabs.co/tortoise#pricing-section
     (reviewer P2: the relative '/#pricing-section' form breaks on premiselabs.co,
     where '/' serves index.html with NO pricing content — the anchor exists
     only in product.html). The fragment target must EXIST in the served
@@ -787,7 +813,8 @@ def test_footer_legal_links_on_all_site_pages(page: Page) -> None:
             "el => [...el.querySelectorAll('a[href]')].map(a => a.getAttribute('href'))"
         )
         for href in FOOTER_LINK_HREFS:
-            assert href in hrefs, f"footer link {href} missing on {url} (footer hrefs: {hrefs})"
+            assert _footer_href_matches(hrefs, href), (
+                f"footer link {href} missing on {url} (footer hrefs: {hrefs})")
 
 
 @TORTOISE_HOST_SKIP
@@ -833,7 +860,7 @@ def test_company_root_links_to_the_blog(page: Page) -> None:
     assert _has_blog_entry(body), (
         "premiselabs.co/ carries no /blog entry point (#3950): the blog is live but "
         "unreachable when nothing links it. Add the absolute "
-        "https://tortoise.premiselabs.co/blog to index.html's footer bar."
+        "https://premiselabs.co/blog to index.html's footer bar."
     )
 
 

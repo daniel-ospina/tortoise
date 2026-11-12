@@ -103,7 +103,7 @@ test('#3890: the deep-link hash resolves to the Settings tab AND the section', (
   // '…/welcome' -> '…/welcome2' left the whole suite green).
   assert.equal(ONBOARDING_FUNNEL_HREF, 'https://tortoise.premiselabs.co/welcome',
     'the self-fork route is the onboarding funnel')
-  assert.equal(SDK_DOCS_HREF, 'https://tortoise.premiselabs.co/docs',
+  assert.equal(SDK_DOCS_HREF, 'https://premiselabs.co/tortoise/docs',
     'the build-fork route is the SDK documentation')
   assert.equal(MEMORY_SOURCES_HREF, '#settings-memory-heading',
     'the rendered href and the resolver must name the same section')
