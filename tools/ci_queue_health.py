@@ -674,16 +674,25 @@ class QueueHealth:
     #: can tell "the queue is busy with other work" from "the run I am about to repair
     #: is itself the congestion" (#10641 review P1).
     wait_witness_ids: tuple[int, ...] = ()
-    #: Ids of the PR-event runs read as `in_progress` whose EVERY job had completed, and
-    #: which are therefore NOT counted in `pr_running` (#12037). A run GitHub has stopped
-    #: driving used to be counted as executing work, which made `PR-STARVED` unreachable
-    #: (`pr_running == 0` could never hold) and moved the wait sensitivity from 180 s to
-    #: 5400 s, so a starved queue printed `OK`. These are the runs that produced that.
+    #: Ids of the PR-event runs read as `in_progress` whose EVERY job had completed AND
+    #: whose own `updated_at` had been still for `JOB_SETTLE_SECONDS`, and which are
+    #: therefore NOT counted in `pr_running` (#12037). ⛔ BOTH HALVES ARE REQUIRED, and the
+    #: second is not decoration: `python-ci.yml` instantiates its test matrix from
+    #: `fromJSON(needs.changes.outputs.*_matrix)`, so between the parent job's completion
+    #: and the shards being created the jobs endpoint answers with one complete-looking row
+    #: while the run is about to execute — an all-completed list ALONE is not proof of
+    #: non-execution. A run GitHub has stopped driving used to be counted as executing
+    #: work, which made `PR-STARVED` unreachable (`pr_running == 0` could never hold) and
+    #: moved the wait sensitivity from 180 s to 5400 s, so a starved queue printed `OK`.
+    #: These are the runs that produced that.
     pr_running_excluded: tuple[int, ...] = ()
-    #: PR-event runs read as `in_progress` whose jobs could NOT be read, and which are
-    #: still counted as executing. Abstaining toward executing is what keeps an unread
-    #: jobs surface from manufacturing `PR-STARVED` — a `STARVING_VERDICT` that authorises
-    #: a destructive cancel-then-rerun. Reported so the abstention is visible.
+    #: PR-event runs that are still COUNTED as executing because their execution was not
+    #: disproved — three causes, one bucket: the jobs could NOT be read; or every job
+    #: `completed` but the run had not been still for `JOB_SETTLE_SECONDS`; or the read
+    #: returned nothing usable (empty/partial/malformed/other-attempt). Abstaining toward
+    #: executing is what keeps an unread jobs surface from manufacturing `PR-STARVED` — a
+    #: `STARVING_VERDICT` that authorises a destructive cancel-then-rerun. Reported so the
+    #: abstention is visible.
     pr_running_unmeasured: int = 0
     #: DID `pr_running` DEGRADE TO `PR-UNWITNESSED` FOR LACK OF MEASUREMENT? (#12037
     #: review round 5) `PR-UNWITNESSED` has three causes on three different dimensions —
@@ -1090,10 +1099,12 @@ class QueueHealth:
             "pr_running": self.pr_running,
             # ⛔ THE TWO FACTS BEHIND `pr_running` (#12037), emitted so a consumer can
             # tell a census of EXECUTING runs from one that trusted the `status` string:
-            # the runs read out because EVERY job of them was `completed` (a proof of
-            # non-execution), and how many could not be read and are still counted as
-            # executing (the abstention that keeps an unread jobs surface from
-            # manufacturing a `STARVING_VERDICT`).
+            # the runs read out because EVERY job of them was `completed` AND the run had
+            # been still for `JOB_SETTLE_SECONDS` (both halves, or it is no proof — a
+            # DYNAMIC matrix answers with only its finished parent for a few seconds), and
+            # how many are still counted because their execution was not disproved (the
+            # abstention that keeps an unread jobs surface from manufacturing a
+            # `STARVING_VERDICT`).
             "pr_running_excluded": list(self.pr_running_excluded),
             "pr_running_unmeasured": self.pr_running_unmeasured,
             # Whether that abstention is what DEGRADED the verdict, so a consumer reads

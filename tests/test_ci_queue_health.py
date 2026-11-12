@@ -2274,6 +2274,42 @@ def test_the_default_projection_is_the_pre_fix_census():
                        created_at="2026-10-19T03:00:00Z").is_executing is True
 
 
+def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
+    """The prose that documents the exclusion proof must never state it with one half.
+
+    ⛔ WHY A TEXT GUARD EXISTS IN A SUITE OTHERWISE BUILT ON EXECUTED ASSERTIONS. The
+    settle gate made exclusion require every job `completed` AND `updated_at` still for
+    `JOB_SETTLE_SECONDS`. That rule is stated in prose in four places (two module
+    comments, one `#:` field doc pair, two workflow comment blocks) and prose cannot be
+    executed — so a revert to the one-half wording is invisible to every behavioural
+    test. It has ALREADY happened twice: round 17 corrected one twin and left the other
+    verbatim contradicting it in the same file, and the workflow block that says an
+    all-completed run "can never make the census unmeasured" is FALSE for the population
+    the gate creates (an all-completed run whose last update just moved is counted, in
+    `pr_running_unmeasured`). Measured: both comment mutations shipped green before this
+    guard.
+
+    RESIDUAL, stated plainly: this catches the phrasings that actually shipped, not a
+    novel paraphrase. It is a regression guard, not a proof of the prose.
+    """
+    root = Path(__file__).resolve().parents[1]
+    module = (root / "tools/ci_queue_health.py").read_text()
+    workflow = (root / ".github/workflows/ci-queue-health.yml").read_text()
+    retracted = [
+        # the two module sites that shipped uncorrected through round 17
+        "whose EVERY job had completed, and\n",
+        "which are therefore NOT counted in",
+        "EVERY job of them was `completed` (a proof of",
+        "whose jobs could NOT be read, and which are\n",
+        # both workflow blocks' sufficiency claim — false for a settle-downgraded run
+        "can never make the census",
+        "can never contribute to an unmeasured census",
+    ]
+    for phrase in retracted:
+        assert phrase not in module, f"retracted one-half claim back in the module: {phrase!r}"
+        assert phrase not in workflow, f"retracted one-half claim back in the workflow: {phrase!r}"
+
+
 def test_the_reason_line_names_the_runs_it_read_out_of_pr_running():
     """The exclusion is declared, not silent — with the ids.
 
@@ -3755,11 +3791,22 @@ def test_the_UNMEASURED_token_is_rendered_by_EVERY_arm_that_can_carry_it():
         assert "unmeasured=2" in line, (verdict, line)
         # EXACTLY ONCE: two occurrences would mean two arms rendered into one line.
         assert line.count("unmeasured=2") == 1, (verdict, line)
-    # ... and the unreachability above is ASSERTED, not assumed, so it cannot rot.
-    for dead in (Q.FLOOD, Q.PR_STARVED):
-        impossible = dataclasses.replace(base, verdict=dead, pr_running=0,
-                                         pr_running_unmeasured=0)
-        assert ", unmeasured=" not in impossible.state_line, impossible.state_line
+    # ⛔ THE PREMISE IS PINNED BY REACHABILITY, NOT BY A ZEROED FIELD (review NIT). The
+    # arms DO splice the token — hand them `pr_running=3, pr_running_unmeasured=2` and both
+    # render it — so asserting on a zeroed object passes by construction and proves nothing.
+    # What is actually true is that `classify_queue` can never hand them such a census:
+    # `FLOOD` is only returned once `pr_running == 0` (its flood clause returns early), and
+    # `starved_wait` is only built when `pr_running == 0` — and
+    # `pr_running_unmeasured ⊆ pr_running`. So the assertion is on the PRODUCER: a partial
+    # census of this shape must never classify as either dead arm.
+    assert base.pr_running_unmeasured > 0
+    assert base.verdict not in (Q.FLOOD, Q.PR_STARVED), base.verdict
+    # ... and the splice is real, so "the arm is dead" is a statement about reachability
+    # rather than about a missing token: force the unreachable census and see it render.
+    assert ", unmeasured=2" in dataclasses.replace(
+        base, verdict=Q.FLOOD, dominant_workflow="w").state_line
+    assert ", unmeasured=2" in dataclasses.replace(
+        base, verdict=Q.PR_STARVED).state_line
 
     # The ALL-UNMEASURED shape takes `census=unmeasured` instead of the count token, and
     # must never print both. With the degradation flag set, the `PR-UNWITNESSED` arm is
