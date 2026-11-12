@@ -1066,9 +1066,27 @@ def test_product_route_blocked_on_company_host(page: Page) -> None:
     rather than render a second copy at a second URL — the property the old 404
     protected, expressed as a 301 now that the page is served here.
 
-    UNCONDITIONAL: the target is a constant, so this is safe on stale-DNS runs."""
+    UNCONDITIONAL: the target is a constant, so this is safe on stale-DNS runs.
+
+    ⛔ THE SCHEME IS ASSERTED ONLY WHERE THE DEPLOYMENT ANSWERS IT (#12004).
+    This is the ONE redirect in the map whose target is on the SAME host as the
+    request, and `wrangler pages dev` NORMALIZES a same-origin absolute
+    `Location` to the request's own scheme — measured on this job's own preview
+    at `origin/main` (`500242fac6`), Host-spoofed `premiselabs.co`:
+
+        GET /product     → Location: http://premiselabs.co/tortoise    (rewritten)
+        GET /signin      → Location: https://app.premiselabs.co/auth   (untouched)
+
+    The second row is why the cross-host assertions elsewhere in this file need
+    no such carve-out: only a SAME-origin absolute is rewritten, and only the
+    local preview's scheme (`http`) differs from production's. So the preview
+    pins the CONSOLIDATION TARGET (host + path, which is the property this test
+    exists for) and a real company-host run additionally pins the exact https
+    string. Asserting `== "https://…"` unconditionally reds `legal-e2e` on every
+    PR from a local preview while production answers correctly."""
     b_host = urlsplit(BASE_URL).hostname or "premiselabs.co"
     b_spoof = b_host if b_host.endswith("premiselabs.co") else "premiselabs.co"
+    prod_company = urlsplit(BASE_URL).hostname == "premiselabs.co"
     for path in ("/product", "/product.html"):
         r = page.request.get(BASE_URL + path, headers={"Host": b_spoof},
                              timeout=15_000, max_redirects=0)
@@ -1076,8 +1094,23 @@ def test_product_route_blocked_on_company_host(page: Page) -> None:
             f"{path} on premiselabs.co → {r.status} (expected a 301 to /tortoise — a "
             "200 here means the product page is reachable at two URLs again)"
         )
-        assert r.headers.get("location") == "https://premiselabs.co/tortoise", (
-            f"{path} redirects to {r.headers.get('location')!r}"
+        location = r.headers.get("location") or ""
+        if prod_company:
+            assert location == "https://premiselabs.co/tortoise", (
+                f"{path} redirects to {location!r}"
+            )
+            continue
+        # Local preview: accept the dev-normalized absolute OR `_redirects`'
+        # same-origin relative form, and pin host+path either way — a bare
+        # `endswith("/tortoise")` would also accept any other host.
+        parsed = urlsplit(location)
+        target_path = parsed.path if parsed.netloc else location
+        assert (parsed.hostname in (None, "premiselabs.co")
+                and target_path == "/tortoise"
+                and not parsed.query), (
+            f"{path} redirects to {location!r} — expected one unit of "
+            "consolidation onto premiselabs.co/tortoise (a query string, a "
+            "second host, or an extra hop is a second URL)"
         )
 
 
