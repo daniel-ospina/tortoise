@@ -128,6 +128,7 @@ from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verd
 from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
 from .live import status_as_reported  # #9974 R1 absent-status rendering (shared with live.py)
+from .live import refuse_terminal_event_state  # #11825 an :Event carries no lifecycle state
 from .raw_state import (  # #3998: the absent-raw state
     WRITABLE_RAW_STATES,
     raw_entry,
@@ -44874,6 +44875,37 @@ class TortoiseSDK:
                         f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}"
                     )
 
+        # ── #11825: an :Event carries no lifecycle, so it is not a status door ──
+        # The two arms above are LABEL-SCOPED and this generic surface's non-Point
+        # branch then writes caller props with a live ``SET n += $p`` — so a
+        # terminal status on an :Event was ACCEPTED and stored (measured at
+        # #11825's head: `update_entity(<event>, status='superseded')` ->
+        # ``event.status == 'superseded'``), while `ep.py`'s terminal strip is
+        # label-blind and NO retrieval leg filters an Event
+        # (``search_engine._STATUS_FILTERED_LABELS`` omits it). That is a node the
+        # belief layer treats as dead and every read serves as live — #11825.
+        #
+        # Target-aware by the SAME key enumeration the write loop below uses
+        # (``_label_reachable_by``: an :Event resolves on ``eventId``, and a
+        # guard that matched only ``id`` would be inert on it — the failure
+        # `tests/test_commit_endpoint.py` caught for the #10000 guard and
+        # #11836's Finding 1 records). ⛔ ``_entity_identity_probes()`` (what the
+        # write's own probe derivation uses) and this helper answer the same
+        # question TODAY; the equivalence is stated rather than assumed, because
+        # a secondary identity key added to :Event would separate them (#11836
+        # review round 5). The key PRESENCE test comes first so an ordinary
+        # ``update_entity(<event>, name=…)`` pays no extra round trip.
+        #
+        # The ``outdated`` half of the predicate is NOT re-tested here: the
+        # ``_sanitize_props`` call at the top of this method already refuses the
+        # flag on EVERY label (sdk.py, 'server-managed lifecycle flag'), so it
+        # cannot be in ``props`` by now — the shared helper tests it for the
+        # doors that never pass through `_sanitize_props` (`EventAPI.add_event`,
+        # and `create_entity`, whose Event branch runs before `_create_entity`).
+        if ("status" in props
+                and self._label_reachable_by(proj.g, "Event", id_val)):
+            refuse_terminal_event_state(props, door="update_entity")
+
         # #4649: a write can MOVE the node it addressed. The only identity key a
         # caller may rewrite is `url` (a :Source's identity): `id` is refused by
         # `_sanitize_props` above, and `eventId` is refused for every EVENT
@@ -45395,6 +45427,16 @@ class TortoiseSDK:
             if not eventKind:
                 raise ValueError(
                     "create_entity(type='event') requires eventKind")
+            # #11825: the CREATE door is the other half of the same hole. A
+            # terminal status supplied HERE lands on the new node directly (the
+            # fold's extras lane is an open prop passer-by design, #2788), and
+            # `create_event` relays through this branch, so guarding only the
+            # update door would leave the half-state one call away — measured at
+            # #11825's head: `create_entity('event', …, status='superseded')`
+            # stored it. Refused BEFORE any write or journal emission, so a
+            # refused create leaves nothing behind (the Point/Subject doors'
+            # shape, #9287/#1423).
+            refuse_terminal_event_state(props, door="create_entity(type='event')")
             # Legacy create_event about* wiring — preserved verbatim (#888 W2).
             # W5 Phase F (#2104, TOCTOU): an explicit deterministic id
             # (server-ONLY channel via the ``_server_id`` keyword — the

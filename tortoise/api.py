@@ -19,6 +19,12 @@ from .ids import now_iso, ulid
 # shared with the SDK doors and the hosted surfaces — see the leaf module.
 from .kind_fallbacks import named_kind
 
+# #11825: an :Event carries no lifecycle, so this door — the THIRD one onto an
+# Event node, after `create_entity` and `_update_entity` — refuses the terminal
+# half of the status vocabulary too. `live` is the leaf status module (it
+# imports nothing from here), so this adds no cycle.
+from .live import refuse_terminal_event_state
+
 # #2782: the money value's WRITE gate, at the one seam that bypasses
 # `_sanitize_props`. `money` imports only `numeric_domain` (no cycle).
 from .money import refuse_malformed_money_in_payload
@@ -689,6 +695,30 @@ class EventAPI:
         # undecidable input keeps the pre-guard posture (a WRITE never fails on
         # an import).
         _refuse_caller_named_record_keys(payload, f"the `{type_}` envelope")
+        # ── #11825: the `EventRecorded` CHOKEPOINT ──
+        # A record-gated guard on the ONE seam every record must pass. The three
+        # tenant doors each call `refuse_terminal_event_state` as well, for a
+        # refusal that NAMES the door the caller used — but a door list is not a
+        # boundary, and this seam is what makes the answer independent of it:
+        # measured at the previous head (review cycle 2, P0), a fourth caller
+        # (``emit_belief("EventRecorded", …, status='superseded')``) reached the
+        # fold with no guard at all, on the same public class this change declares
+        # in scope.
+        #
+        # It unwraps the ``event`` key because the fold does: `_upsert_event`
+        # reads ``inner = event.get("event", event)``, so a caller map named
+        # ``event`` is the map that lands on the node. A top-level-only check was
+        # bypassable through exactly that key (measured, same cycle, P0). Both
+        # channels are swept: the kwargs payload and a positional record, since
+        # `_emit` accepts either.
+        if type_ == "EventRecorded":
+            for _map in (payload, *record):
+                if not isinstance(_map, dict):
+                    continue
+                _inner = _map.get("event")
+                refuse_terminal_event_state(
+                    _inner if isinstance(_inner, dict) else _map,
+                    door=f"the `{type_}` envelope")
         if record:
             if len(record) > 1:
                 raise TypeError(
@@ -966,6 +996,21 @@ class EventAPI:
         # journal delta 0). `_emit` re-runs the full gate inside the arm, at its
         # commit point, so the graph is read once per record and not twice.
         self._refuse_unapproved_kinds(payload, graph_reads=False)
+        # ── #11825: the belief seam is a FOURTH door onto an `:Event` ──
+        # `type_` is a free string and `**payload` is splatted onto the record, so
+        # `emit_belief("EventRecorded", id=…, status='superseded')` wrote a
+        # terminal Event with no guard (measured, review cycle 2 P0). The
+        # check runs HERE, before the arm below, for the reason the money/percent/
+        # kind gates above do: `_emit`'s chokepoint raises inside the `try`, and
+        # this door's `except` exists to swallow I/O — a deterministic payload
+        # refusal swallowed there is the same record silently DROPPED (the F2
+        # divergence this docstring already records three times). Same unwrap as
+        # `_emit`, so the two cannot disagree about which map is the record.
+        if type_ == "EventRecorded":
+            _inner = payload.get("event")
+            refuse_terminal_event_state(
+                _inner if isinstance(_inner, dict) else payload,
+                door="EventAPI.emit_belief")
         try:
             self._emit(type_, **payload)
         except Exception as exc:  # noqa: BLE001, RUF100
@@ -1608,8 +1653,30 @@ class EventAPI:
         ``**extra`` and cannot collide — the passthrough set names it for the
         doors whose ``id=`` means something ELSE (``add_object``'s
         ``add_object(id=…, event_id=…)``).
+
+        ⛔ ``**extra`` is also a straight line onto the EVENT NODE's property
+        map, so it can carry lifecycle STATE, which an :Event does not have
+        (ONTOLOGY §4.5). Measured at #11825's head: ``add_event(id, kind,
+        status='superseded')`` stored the status, and ``add_event(id, kind,
+        outdated=True)`` stored the flag — the two markers `ep.py` reads
+        label-blindly to strip a node from every factor, while every retrieval
+        leg keeps serving it. Both are refused here, through the ONE shared
+        predicate the SDK doors use (`live.refuse_terminal_event_state`), so a
+        fourth door cannot be wired with half of it. The rule is the terminal
+        half only: a non-terminal ``status`` rides the prop lane exactly as it
+        did (and as #2788 pins).
+
+        ⛔ This door is not "internal": `EventAPI` is a shipped public class,
+        the MCP server constructs it for `mine_conversation`, and
+        ``add_event`` itself has one in-tree caller (``ingest.py``). It is also
+        the only `:Event` writer that bypasses ``_sanitize_props``, which is why
+        the non-boolean half of the `outdated` contract is enforced by the
+        shared helper rather than by intake.
         """
         _refuse_caller_named_funnel_keys(extra, "`add_event`")
+        # #11825: refused BEFORE the emit, so a refused call appends nothing to
+        # the journal and writes nothing to the graph.
+        refuse_terminal_event_state(extra, door="EventAPI.add_event")
         self._emit("EventRecorded",
                    id=event_id,
                    eventKind=event_kind,

@@ -546,6 +546,128 @@ def status_as_reported(value: str | None, *, label: str | None = None) -> str:
         return ""
     return "live"
 
+
+#: The ONE refusal predicate behind #11825, as a sentence so every door that
+#: imports it cannot drift in what it claims to enforce.
+_EVENT_TERMINAL_STATE_REFUSAL = (
+    "an :Event is a dated fact and carries no lifecycle (ONTOLOGY §4.5: the "
+    "Event-carries-state question was answered `no` in #2725). The belief "
+    "layer strips a terminal Event from every factor while every retrieval leg "
+    "keeps serving it, so the write is the half-state #11825 records. "
+    "WHAT TO DO: to record a correction, write a NEW :Event (a dated fact is "
+    "corrected by a later fact, never by a status flip on an earlier one); for "
+    "ingest state use `eventStatus` (`scheduled` -> `completed`), which is a "
+    "plain prop and not a lifecycle; to un-mark a legacy terminal status on an "
+    "existing Event, pass `status='live'` or `status=None`."
+)
+
+
+def refuse_terminal_event_state(props, *, door: str) -> None:
+    """Refuse the TERMINAL half of the status vocabulary on an `:Event`.
+
+    Write-side ONLY, and deliberately NOT an Event status family: `:Event`
+    stays outside `STATUS_CARRYING_EPISTEMIC_LABELS`, and
+    ``status_as_reported`` still reports ``''`` for an Event — this function
+    says which stored values are FORBIDDEN, not which ones the layer owns. A
+    non-terminal `status` (`draft`, `live`, and whatever else a caller passes)
+    keeps riding the prop lane exactly as #2788 pins it, because
+    ``_promote_incident_operators`` reads it as the live/draft gate (#7853,
+    #10828).
+
+    ⛔ The predicate is NOT a hand-written list OR a second composition. The
+    DECISION is delegated to :func:`is_terminal_status` — this module's declared
+    Python mirror of the Cypher terminal predicate, which is what ``ep.py``'s
+    factor selection applies — so a status added to the vocabulary, or a change
+    to the flag half, moves ONE function and both the reader and this writer
+    follow it. That is the #2901/#3301 lesson (a per-surface re-declaration
+    drifts silently) applied to a WRITE gate rather than a read one.
+
+    Why this is the right boundary and an allowlist is not: `#8166` is the
+    mirror defect (an undeclared status on `:Object` reads as CURRENT because
+    the read vocabulary is a denylist) and its remedy is to validate against a
+    DECLARED lifecycle — which `:Object` has (§4.2) and `:Event` does not (§4.5).
+    Inventing an Event vocabulary here would be the lifecycle this ruling says
+    must not exist, and would refuse `status='scheduled'`, which main pins
+    (`tests/test_operator_dedup_parity.py::test_create_entity_event_journals_single_line`).
+
+    ⛔ RECIPROCAL INVARIANT (do not relax this guard alone): the retrieval legs
+    omit `:Event` from `search_engine._STATUS_FILTERED_LABELS` BECAUSE this guard
+    makes a terminal Event unwritable. Relaxing the guard requires adding
+    `Event` to `_STATUS_FILTERED_LABELS` AND giving
+    `search_engine._status_vocab_for` an `Event` arm in the SAME change (it
+    currently falls through to the Object arm, which would exclude the wrong
+    vocabulary).
+
+    ⛔ ``outdated`` must be a REAL boolean here, and this is the one door where
+    that is not already guaranteed. It is contractually a boolean
+    (server-managed since #2491; :func:`is_terminal_status` says so), and the
+    SDK doors enforce it by refusing the key outright (``_sanitize_props``).
+    ``EventAPI.add_event`` writes ``**extra`` straight onto the node with no
+    such intake, so before this check it could STORE a non-boolean — and the two
+    predicates already disagree about that value: the Cypher one
+    (``coalesce(outdated,false) <> false``) reads ``''``/``0``/``0.0`` as
+    TERMINAL while :func:`is_terminal_status` reads them as live. The
+    documented "out of contract; no in-repo writer can produce such a value"
+    was measurably false once this door existed, so the value is refused rather
+    than half-read (review cycle 1, P1).
+
+    ``props`` is the caller's property map. The SDK doors flatten it first
+    (``_coerce_props``), so a nested ``props={"status": …}`` reaches here as a
+    top-level key. At ``add_event`` the flatten never runs and a nested map is
+    inert for the FOLD's persistable-value filter — but that is NOT the whole
+    story, and the first revision of this docstring claimed it was: ``add_event``
+    splats ``**extra`` onto the record, and the ``EventRecorded`` fold UNWRAPS a
+    caller key literally named ``event`` (``inner = event.get("event", event)``),
+    so ``add_event(id, kind, event={"status": "superseded"})`` rode that lane
+    straight past a top-level check (measured, review cycle 2 P0). The chokepoint
+    in ``api._emit`` therefore unwraps the same key before asking this function,
+    which is what makes the answer independent of which kwargs shape arrives.
+    ``door`` names the surface in the refusal, per `docs/ax/ax-principles.md`
+    (#10183): refused, exactly what failed, exactly what to do.
+    """
+    status = props.get("status")
+    outdated = props.get("outdated")
+    # Both keys are typed here, because this is the ONE `:Event` writer with no
+    # ``_sanitize_props`` intake to do it. A non-STRING status is not merely
+    # undeclared: an unhashable one (a list, a dict) reached the membership test
+    # below and raised a bare ``TypeError: unhashable type`` — a 500-class with
+    # no door name and no remedy, measured at this door (review cycle 2, P2) —
+    # while a hashable non-string (an int) glided through and stored a status no
+    # vocabulary can name. Refused symmetrically with ``outdated`` below.
+    if status is not None and not isinstance(status, str):
+        raise ValueError(
+            f"Refused: `status={status!r}` is not a legal value on an :Event "
+            f"({door}). `status` is a STRING drawn from the vocabulary, or "
+            f"`None` to clear it. WHAT TO DO: pass a string (to record a "
+            f"correction, write a NEW :Event; for ingest state use "
+            f"`eventStatus`)."
+        )
+    if outdated is not None and not isinstance(outdated, bool):
+        raise ValueError(
+            f"Refused: `outdated={outdated!r}` is not a legal value on an "
+            f":Event ({door}). `outdated` is contractually a BOOLEAN and it is "
+            f"server-managed; a non-boolean is read as TERMINAL by the Cypher "
+            f"predicate and as LIVE by the Python mirror, which is the "
+            f"half-state #11825 records, reached through the one door that "
+            f"writes props without `_sanitize_props`. WHAT TO DO: pass `True`, "
+            f"`False`, or omit the key."
+        )
+    if not is_terminal_status(status, outdated):
+        return
+    # Terminal — name the key that made it so. `is_terminal_status` is
+    # ``(status or '') in TERMINAL_EXCLUDED_STATUSES or bool(outdated)``, so a
+    # true flag can only be the flag's message; otherwise it is the status's.
+    if outdated:
+        raise ValueError(
+            f"Refused: `outdated={outdated!r}` is not writable on an "
+            f":Event ({door}). {_EVENT_TERMINAL_STATE_REFUSAL}"
+        )
+    raise ValueError(
+        f"Refused: `status={status!r}` is not writable on an :Event "
+        f"({door}). {_EVENT_TERMINAL_STATE_REFUSAL}"
+    )
+
+
 #: The keys an epistemic node's identity may live under, in resolution order
 #: (#7927). ONE declaration for a question three widened surfaces ask —
 #: ``audit``'s legacy-edge repair, ``ep.get_contested_claims`` and
