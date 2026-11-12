@@ -104,7 +104,22 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Self-locating with BUILTINS ONLY (no `dirname`). `dirname` is not guaranteed to
+# be on PATH, and this checker is deliberately run with one stripped: harness
+# case 13 empties PATH to prove the `jq` refusal, and there the external
+# `dirname` failed, `cd` received an empty operand, and the whole script aborted
+# at the line BELOW the dependency checks — so the operator saw
+# `dirname: command not found` instead of `jq is required`. That is also
+# bash-version-dependent (`cd ""` is a silent no-op up to bash 5.2 and an error
+# from 5.3), so the same tree redded on the runner and passed locally. Parameter
+# expansion + the `cd`/`pwd` builtins make the resolution independent of both the
+# PATH and the shell version.
+_self="${BASH_SOURCE[0]}"
+case "$_self" in
+  */*) SCRIPT_DIR="$(cd -- "${_self%/*}" && pwd)" ;;
+  *)   SCRIPT_DIR="$(pwd)" ;;   # invoked by bare name (resolved from PATH) — already here
+esac
+unset _self
 
 REPO="${GITHUB_REPOSITORY:-daniel-ospina/tortoise}"
 API_URL="${DEPLOY_STALENESS_API_URL:-https://api.premiselabs.co}"
