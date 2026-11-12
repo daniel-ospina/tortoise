@@ -479,8 +479,10 @@ def _unserved_vector_reason(label: str) -> str:
 #: (`MERGE … SET r += $props`): `SET r += map` merges the map's keys and never
 #: REMOVEs one it does not carry, so a legacy cache that already holds
 #: `r.embedding` keeps it however many times the edge is re-MERGEd from a view that
-#: no longer carries the vector. There is no edge property-clear route (`#11070`'s
-#: explicit clear is the NODE door's). So the ONE remedy is a FULL `record-restore`,
+#: no longer carries the vector. No SHIPPED edge route clears an ARBITRARY property
+#: (`#11070`'s explicit clear is the NODE door's; the EP path's `REMOVE r.msg_*` in
+#: `tortoise/ep.py` clears only its own derived seeds). So the ONE remedy is a FULL
+#: `record-restore`,
 #: whose `MATCH (n) DETACH DELETE n` wipe takes the edges with it — which is exactly
 #: what the `#11747` node rule says about its own residue one screen up, and an
 #: earlier draft of THIS note offered the root cause of the problem as the cure.

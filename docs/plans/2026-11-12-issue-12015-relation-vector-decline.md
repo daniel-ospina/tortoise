@@ -130,13 +130,13 @@ both; two edges aggregate; empty plan reports nothing.
 ```text
 uv run python tools/test_lane.py run -- tests/test_cache_projection.py \
     tests/test_dod_5090_probe.py tests/test_9556_record_restore_verb.py -q
-→ 315 passed, 1 skipped
+→ 317 passed, 1 skipped
 
 uv run python tools/test_lane.py run -- tests/test_cache_projection_live.py \
     tests/test_record_serve.py tests/test_reconciliation.py \
     tests/test_record_reconcile_trigger.py tests/test_11641_runtime_vector_label.py \
     tests/test_embed_writer_register.py -q
-→ 322 passed, 3 skipped
+→ 323 passed, 3 skipped
 
 uv run ruff check tortoise/ tools/ tests/   → clean
 ```
