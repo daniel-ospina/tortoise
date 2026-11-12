@@ -38,8 +38,10 @@ allowlists, not links) have none to carry; and files OUTSIDE `RUNTIME_FILES` sti
 spell the host with no row at all — the `blog/api/notify-publish` POST in
 `.github/workflows/deploy-pages.yml`, and the `author_image_url` literals in
 `supabase/migrations/*` — because this guard counts what the RUNTIME emits in its
-own surface, not every occurrence in the tree. The four files that now read 0 have
-NO row and stay in `RUNTIME_FILES`, so a literal coming back REDS the guard instead
+own surface, not every occurrence in the tree. Every file that reads 0 has
+NO row and stays in `RUNTIME_FILES` — the four that LOST a row under this PR
+(`invite-accept.html`, `welcome.html`, `wizardPrompts.js`, `website/functions/blog/_lib.ts`)
+and the five that never carried one — so a literal coming back REDS the guard instead
 of leaving the surface, and neither group is a leftover — which is why this guard
 cannot report GREEN over a file it never opened, and why a sweep that removes one of
 those literals must remove its recorded reason too.
@@ -398,7 +400,12 @@ RETIRED_HOST_ALLOWLIST = {
 #:       blog 301 by `_middleware.ts` :334-336 (a redirect would turn a POST into a
 #:       GET), so no branch rewrites them and they answer the ROUTE's own status —
 #:       404 for a GET/HEAD probe, and 401 `{"error":"unauthorized"}` with no
-#:       `Location` for the POST the console actually sends. Re-aiming either
+#:       `Location` for an ANONYMOUS POST — the probe `.github/workflows/deploy-pages.yml`
+#:       :873 runs. ⛔ NOT the POST the console sends: that one goes same-origin to the
+#:       app-origin Token Handler, which sets a `Bearer`, and `notify-publish.ts:45-51`
+#:       returns 401 only when the admin gate REFUSES — so the console's own POST is
+#:       authorized and answers its own result (200 on success, 409 when the post is
+#:       held from the live blog). Re-aiming either
 #:       changes WHICH host answers; it saves no hop, so it is not the same sweep
 #:       as (a).
 #: Either way they are a SCOPE deferral, and all ten files they name ARE
@@ -452,7 +459,9 @@ RUNTIME_FILES = (
     # `/skills/<name>.skill` answers 200 on both hosts (identical bytes), while
     # `/blog/api/*` is excluded from the 301 (`:334-336`) and answers the route's
     # OWN status (404 for a GET/HEAD probe; 401 `{"error":"unauthorized"}`, no
-    # `Location`, for the POST the console sends) — so "a 200" is the
+    # `Location`, for an ANONYMOUS POST — the `deploy-pages.yml:873` gate posts one;
+    # the console's own POST arrives through the app-origin Token Handler carrying a
+    # `Bearer`, so it is authorized) — so "a 200" is the
     # `/skills` row's measurement, not a property of the class.
     # The four non-website KEEP rows — `hosted_api.py`'s live CORS allowlist, the
     # two Supabase edge-function public allowlists, and `supabase/config.toml`'s
