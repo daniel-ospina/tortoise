@@ -1607,19 +1607,14 @@ surfaces:
   # diff, so the suite would have stayed green if the gate were deleted. That is
   # the #10513 / #1349 silent-drop class. Keep BOTH arms.
   - test_allowance_gate.py
-  # #11758/#11981 review: the `api` arm of the storage-dimensions evidence.
-  # `tortoise/metering.py` IS an exact `api` SOURCE_PATTERNS entry (measured:
-  # `--changed-files tortoise/metering.py` -> surfaces ['api']), and five cases in
-  # the file drive `metering.storage_overage_cost_usd` through it — the hot
-  # capacity overage priced per MB, the per-GB-of-data basis and the
-  # overage-eligibility arms. A `core`-only row leaves those asleep on a
-  # `metering.py`-only diff, because a named-surface match REPLACES the `core`
-  # fallback in `select()` (measured on the `core`-only tree: `select([
-  # 'tortoise/metering.py'])` -> ['api'] with this file ABSENT) — the same
-  # #10513/#1349/#2938/#3154 silent-drop class as the #9567 D11/D12 rows above.
-  # DUAL-REGISTERED with `core` (pricing/cost_dimensions/allowance_gate all fall
-  # through there); keep BOTH arms.
-  - test_pricing_storage_dimensions.py
+  # ⛔ #11837 landed the `api` arm of the storage-dimensions evidence FIRST (this
+  # PR had registered the same file for the same surface), so a row here is a
+  # SAME-SURFACE DUPLICATE and `tools/ci_selection.py --integrity` refuses the
+  # tree with `duplicate entry ... at .surfaces.api[]` — the exact
+  # #11210/#11211/#11222 recurrence this PR's review predicted. The `api` row
+  # above (main's, carrying the metering-overage rationale) holds that arm; this
+  # PR's remaining contribution is the `core` arm further down, which main does
+  # not have.
   # #4010: the session-cap removal — drives the hosted capture path + the
   # registry resolver, so it belongs with the quota/api surface.
   - test_issue_4010_sessions_unlimited.py
