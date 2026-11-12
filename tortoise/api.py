@@ -1791,16 +1791,32 @@ class EventAPI:
         # could pick the identity of its own record — the same harm the record
         # channel refuses it for
         # (`_ENVELOPE_KEYS_AT_PASSTHROUGH`, which the three splatting doors use).
-        # ⛔ Scoped to the ONE producer that legitimately passes it: reversing
-        # `add_document`'s pin would be a reopen of #125/#167, not a fix, and
+        # ⛔ SCOPED BY TYPE, NOT BY PRODUCER — and that is a STATED RESIDUAL, not a
+        # guarantee (#11996 review round 22, measured). `_emit` cannot identify its
+        # caller: every call-side signal this file has tried (a `channel` string, a
+        # `seam_mints` keyword) turned out to be caller-suppliable, which is why
+        # `_RECORD_ENVELOPE_EXTRA` above refuses a RECORD rather than guessing who
+        # wrote it. So the exemption is the ONE TYPE `add_document` produces:
+        #
+        #     api._emit("DocumentCreated", id="doc-x", title="t", event_id="forged")
+        #       -> still LANDS with the caller's id (measured)
+        #
+        # i.e. a direct `_emit` caller naming `DocumentCreated` chooses the envelope
+        # id and can DUPLICATE one. Closing that needs `add_document`'s pin to stop
+        # travelling through a caller-reachable payload channel — a record-contract
+        # decision, not this lane's — so it is named here rather than papered over
+        # with a claim of producer scoping. What the arm BUYS is every other type,
+        # which is the whole `PointAdded`/document/object surface a caller reaches.
+        # Reversing `#125`/`#167` to close it would be a reopen, not a fix, and
         # `tests/test_11821_journal_vector_width.py::test_the_envelope_collision_
-        # guard_keeps_add_documents_event_id_pin` pins that it still lands.
+        # guard_keeps_add_documents_event_id_pin` pins that half.
         if "event_id" in payload and type_ != "DocumentCreated":
             raise ValueError(
                 f"['event_id'] are journal ENVELOPE fields and cannot be set via "
                 f"{type_}'s payload: the envelope id is minted here, and a "
-                f"caller-chosen one re-identifies the record (#11996). Only "
-                f"`add_document`'s own `#125` pin may pass it")
+                f"caller-chosen one re-identifies the record (#11996). "
+                f"`DocumentCreated` is exempt because `add_document` pins it "
+                f"(`#125`/`#167`) — a residual stated at that arm, not a licence")
         _forged_markers = sorted(set(payload) & _SERVER_MANAGED_EMBEDDING_KEYS)
         if _forged_markers:
             raise ValueError(

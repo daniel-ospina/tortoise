@@ -1787,8 +1787,12 @@ def test_the_envelope_collision_guard_keeps_add_documents_event_id_pin(tmp_path)
     assert [r["event_id"] for r in records] == ["evt-1", None], (
         "`add_document`'s event_id pin and its None default are #125/#167 "
         f"decisions, got {[r['event_id'] for r in records]!r}")
-    # ⛔ …AND THE EXCEPTION IS SCOPED TO THAT ONE PRODUCER (#11996 review round 21,
-    # measured). Excluding `event_id` from `_ENVELOPE_KEYS` applied to EVERY type
+    # ⛔ …AND THE EXCEPTION IS SCOPED TO THAT ONE TYPE, NOT THAT ONE PRODUCER
+    # (corrected in review round 22: "producer" was a claim the code cannot make —
+    # `_emit` has no caller identity to check, so a direct `_emit("DocumentCreated",
+    # …, event_id=…)` still lands and may duplicate an id. That is the residual the
+    # arm states; what this row pins is the `#125`/`#167` half). Excluding
+    # `event_id` from `_ENVELOPE_KEYS` had applied to EVERY type
     # on the funnel's keyword channel, so a caller could choose the identity of its
     # own record:
     #
@@ -1797,10 +1801,11 @@ def test_the_envelope_collision_guard_keeps_add_documents_event_id_pin(tmp_path)
     #
     # `projection._warn_entity_mutation_fold_miss`'s docstring calls `event_id`
     # "the only handle that locates the diverging journal line", and the record
-    # channel and all three splatting
-    # doors already refused it — this was the last open channel. Falsifier: drop
-    # the `type_ != "DocumentCreated"` clause and the two rows below land while the
-    # `add_document` assertions above still pass (measured).
+    # channel and all three splatting doors already refused it — this was the
+    # last open channel for those types.
+    # Falsifier: replace the `type_ != "DocumentCreated"` scope with an impossible
+    # one (e.g. `type_ is None`) and the two rows below land while the
+    # `add_document` assertions above still pass (measured, round 22).
     before = len(journal.read_text(encoding="utf-8").splitlines())
     for _type in ("PointAdded", "ConfidenceChanged"):
         with pytest.raises(ValueError, match="ENVELOPE"):
