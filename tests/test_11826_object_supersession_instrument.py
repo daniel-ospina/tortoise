@@ -999,6 +999,58 @@ def test_the_remaining_input_threshold_is_eps_one_not_two(sdk):
         "degenerate record that does not exist: " + detail)
 
 
+def test_a_shaped_non_point_endpoint_is_in_neither_arm(sdk):
+    """EP's two arms exclude it twice over, so the repair must not be an edge rewrite.
+
+    The operator arm needs the ``:Point`` label; the direct-edge arm refuses an
+    operator-shaped endpoint on either side. So EP builds NO factor — before the
+    supersession as well — and "write the equivalent edge from the same source onto
+    the successor" (the direct-edge sentence) changes nothing: measured, confidences
+    stay empty and a re-audit reads CLEAN.
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    assert sdk.compute_confidence(factors=[v1["id"]],
+                                 require_calibration=False)["confidences"] == {}
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    detail, fix = issues[0].detail, issues[0].fix
+    assert "in EITHER arm" in detail, detail
+    assert "EP builds NO factor" in fix, fix
+    assert "write the equivalent edge" not in fix, (
+        "an edge rewrite cannot create a factor EP refuses to build: " + fix)
+    assert "tortoise_update_entity(" in fix and "'is_operator': False" in fix, fix
+
+
+def test_a_flag_dead_successor_names_the_flag_not_none(sdk):
+    """``outdated=true`` with no status is terminal and renders no status at all.
+
+    ``_quoted(None)`` emitted the literal ``'None'`` — a status no node carries —
+    and the one fact the repair must act on (the flag) was never stated.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _q(sdk, "MATCH (o:Object {name:'PolicyV2'}) SET o.outdated = true", {})
+    assert _q(sdk, "MATCH (o:Object {name:'PolicyV2'}) RETURN o.status, o.outdated",
+              {}) == [[None, True]], "fixture drifted"
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    for text in (issues[0].detail, issues[0].fix):
+        assert "'None'" not in text and "None" not in text, text
+        assert "live(outdated)" in text, text
+
+
 def test_a_non_point_operator_is_not_an_operator_input(sdk):
     """EP's operator arm requires the LABEL, so a flagged non-:Point builds nothing.
 

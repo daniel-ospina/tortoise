@@ -263,6 +263,19 @@ def _node_pattern(alias: str, keys: dict[str, object]) -> str | None:
     return f"({alias} {{{rendered}}})"
 
 
+def _status_or_flag(status, outdated: bool) -> str:
+    """A node's EP-lifecycle state, spelling the ``outdated`` flag when it is the cause.
+
+    ``is_terminal_status(None, True)`` is True, so a legacy-flagged node reaches the
+    terminal arms with NO status at all and ``_quoted(None)`` rendered the literal
+    ``'None'`` — a status no node carries, and the one fact the repair must act on
+    (the flag) was never stated.
+    """
+    if outdated:
+        return f"{status or 'live'}(outdated)"
+    return status or "live"
+
+
 def _named(value: object) -> str:
     """A node NAME for display — a missing one is ``<unnamed>``, never ``None``.
 
@@ -830,6 +843,15 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # ⛔ EP's predicate is the flag OR ``op_type`` AND the ``:Point`` label
             # (its arms are ``(o:Point)-[:IMPL|NAND]->(c)`` and a non-operator check
             # on both endpoints of a direct edge), so the label belongs here.
+            # ⛔ SHAPE and PREDICATE are different questions and the third mechanism
+            # lives between them: EP's operator arm requires the ``:Point`` label AND
+            # the flag-or-``op_type``, while its direct-edge arm refuses an
+            # operator-SHAPED endpoint on either side (``is_operator IS NULL|false
+            # AND op_type IS NULL``). So a shaped non-``:Point`` endpoint is in
+            # NEITHER arm — no factor, no skipped-factor record — and the direct-edge
+            # sentence ("write the equivalent edge") would prescribe a repair that
+            # changes nothing (measured: confidences empty after it).
+            "shape": bool(is_op_flag) or op_type is not None,
             "is_operator": ("Point" in (active_labels or [])
                             and (bool(is_op_flag) or op_type is not None)),
             "direction": direction, "active_id": active_id,
@@ -838,9 +860,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             "carrier_is_operator": bool(carrier_is_operator),
             # ⛔ DERIVED through the shared predicate, not read off ``status``: EP's
             # terminal test is the status vocabulary OR the legacy ``outdated`` flag.
+            "carrier_outdated": bool(carrier_outdated),
             "carrier_terminal": is_terminal_status(carrier_status,
                                                    bool(carrier_outdated)),
             "next_count": next_count, "next_status": next_status,
+            "next_outdated": bool(next_outdated),
             "next_terminal": is_terminal_status(next_status, bool(next_outdated)),
             "next_is_operator": bool(next_is_operator),
         }
@@ -890,7 +914,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "live as well, or the re-point leaves the factor degenerate")
         if s["carrier_terminal"]:
             return ("; the successor it names is ITSELF "
-                    f"{_quoted(s['carrier_status'])}, and it {_head_fact(s)}")
+                    f"{_quoted(_status_or_flag(s['carrier_status'], s['carrier_outdated']))}"
+                    f", and it {_head_fact(s)}")
         return ""
 
     def _head_fact(s: dict) -> str:
@@ -925,7 +950,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "resolve, so name the LIVE head by ID")
         if s["next_terminal"]:
             return (f"names the next link ({_quoted(s['carrier_sb'])}), which is "
-                    f"{_quoted(s['next_status'])} too, so it is not a head either — "
+                    f"{_quoted(_status_or_flag(s['next_status'], s['next_outdated']))}"
+                    " too, so it is not a head either — "
                     "resolve that chain to a live Object before writing, and if it "
                     "ends with none, re-point onto whatever now carries the claim or "
                     "delete the edge")
@@ -963,7 +989,15 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                   else "<no id or eventId>")
         detail = (f"Superseded Object {_named(s['sup_name'])} still carries an "
                   f"active {s['edge_type']} edge from {source}")
-        if s["is_operator"]:
+        if s["shape"] and not s["is_operator"]:
+            # NEITHER arm — see the ``shape`` note in ``_4b_state``.
+            detail += (
+                " — the Object lane moved no edges on supersession, and EP builds NO "
+                "factor for this endpoint in EITHER arm: the operator arm requires "
+                "the :Point label, and the direct-edge arm refuses an "
+                "operator-shaped endpoint. So the claim never counted this support "
+                "and no skipped-factor record exists (#9269/#11826)")
+        elif s["is_operator"]:
             fwd, bwd = direction_flows(s["direction"])
             if not (fwd or bwd):
                 # ⛔ A NEUTRAL operator (``direction='-'``, e.g.
@@ -1032,7 +1066,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "the factor degenerate")
         if not s["carrier_terminal"]:
             return ""
-        return (f" ⛔ {succ} is ITSELF {_quoted(status)} and it {_head_fact(s)}")
+        return (f" ⛔ {succ} is ITSELF "
+                f"{_quoted(_status_or_flag(status, s['carrier_outdated']))} "
+                f"and it {_head_fact(s)}")
 
     def _active_edge_fix(s: dict) -> str:
         """The repair for this row, chosen by the state the row carries.
@@ -1103,6 +1139,17 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                       "by ID. ")
         successor = f"'{s['sup_sb']}'" if bool(s["sup_sb"]) else "its successor"
         tail = _chain_tail(s)
+        if s["shape"] and not s["is_operator"]:
+            # ⛔ NEITHER arm: "write the equivalent edge" would change nothing, so the
+            # repair is to clear the SHAPE or route the claim through a :Point
+            # operator — measured: re-pointing leaves EP building no factor at all.
+            return prefix + (
+                f"No edge rewrite repairs this: EP builds NO factor for {q} in "
+                "either arm (the operator arm needs the :Point label, the "
+                "direct-edge arm refuses an operator-shaped endpoint), so clearing "
+                f"the shape — tortoise_update_entity({q}, {{'is_operator': False}}) "
+                "— or wiring this claim through a :Point operator is what restores "
+                "the support" + tail)
         if not s["is_operator"]:
             return prefix + (
                 f"Re-point this {s['edge_type']} edge off {q} onto the successor "
