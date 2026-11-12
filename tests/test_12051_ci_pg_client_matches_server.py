@@ -232,9 +232,10 @@ not a tenth spelling — it is the one a text guard cannot reach:
   the last-path reading past the real target, while the `=`-joined form
   (`--log-file=…`) starts with `-` and is skipped, so it stays REFUSED; a QUOTE
   anywhere between the base and `/bin` defeats the match — not only one closing
-  right after the base (`"$b"/16/bin/`, `"${b}"/17/bin/`) but also one inside or
-  after the TOKEN (`"$b/16"/bin/`, `"$b/1"6/bin/`, `"$b/1""6/bin/`), all of which
-  shell-resolve to the real `/usr/lib/postgresql/16/bin/` and all of which are
+  right after the base (`"$b"/16/bin/`, `"${b}"/16/bin/`) but also one inside or
+  after the TOKEN (`"$b/16"/bin/`, `"$b/1"6/bin/`, `"$b/1""6/bin/`), and those
+  three shell-resolve to the real `/usr/lib/postgresql/16/bin/` while all five —
+  the two base-quoted spellings and the three token-spliced ones — are
   MEASURED GREEN (#12173 round 31) — so the last-path
   machinery is not reached at all; a quoted command word (`sh -c 'rsync …'`) puts
   both mentions in COMMAND position, so the arm is skipped; a destination that
@@ -1428,7 +1429,10 @@ _TARGET_OPTION_RE = re.compile(
 #: `unzip -l …` are READS), and a half-built flag grammar cannot be made correct:
 #: `dpkg-deb -x` takes NO flag value (the destination is positional), `unzip -x`
 #: takes a PATTERN that shadows a later `-d` under one shared alternation, `cpio`
-#: reads as command position to `_is_command_position`, and `tar -C` is a SOURCE
+#: is ABSENT from `BINARY_MUTATION_RE` — which is the ONLY reason
+#: `_is_command_position` reads its mention as command position; adding the verb
+#: flips the row to REFUSED (measured, #12173 round 32), and nothing in this job
+#: uses `cpio` — and `tar -C` is a SOURCE
 #: chdir in create/list mode (`tar -czf /tmp/o.tgz -C "$b/16/bin" .` — measured,
 #: 192 such lines would have been refused by the withdrawn arm). The limit is in
 #: the docstring's residual list, and the admitted spellings are pinned as rows in
@@ -5225,9 +5229,11 @@ BINARY_MUTATION_POLARITY = [
         "EXTRACTOR residual — named, not ordinalised, because the list is "
         "append-only and an ordinal drifts every time an entry is inserted; this "
         "one said `sixth` and was correct when written at round 24, but the "
-        "variable-base row inserted since moved the extractor from sixth to "
-        "SEVENTH (the `cd`-relative statement is a separate bullet, not an entry "
-        "in this list), which pointed a future round at a REFUSED direction "
+        "PARAMETER-MODIFIER row inserted since moved the extractor from sixth to "
+        "SEVENTH (the variable-base row PREDATES that ordinal — it was already in "
+        "the list when `sixth` was written and correct — and the `cd`-relative "
+        "statement is a separate bullet, not an entry in this list), which pointed "
+        "a future round at a REFUSED direction "
         "instead "
         "(#12069 r24, ordinal corrected r30 and again r31); pinned so closing it "
         "is a deliberate edit",
