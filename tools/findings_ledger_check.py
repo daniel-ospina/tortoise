@@ -1673,12 +1673,14 @@ def check_verdict_tally(text: str) -> list[str]:
     # "names ['a','f','h','i','j'] as NOT still reading as written" — the page saying exactly
     # what its table says. So the text AFTER the verb must be the ellipsis (`do not.`), or a
     # form of `read` — `do not read`, `no longer read as written`, `read as written any more` —
-    # or `do` again (`no longer do.`), optionally followed by punctuation and more prose
-    # (`do not, unlike the rest.`). ⚠️ A NEGATION OF ANY OTHER VERB IS NOT READ, and that is a
-    # stated residual, not an oversight: `no longer hold.` and `do not overlap the fix.` name
-    # rows too, but `did not move.` and `do not need re-reading.` are TRUE sentences with the
-    # same shape, so accepting arbitrary verbs re-creates the false accusation above. Only the
-    # verbs this page actually pairs with the tally are read.
+    # or `do` again (`no longer do.`). ⚠️ NOTHING ELSE IS READ, AND THAT IS A STATED RESIDUAL,
+    # not an oversight: `no longer hold.` and `do not overlap the fix.` name rows too, and so
+    # does `do not, unlike the rest.` — but `did not move.`, `did not, however, move.` and
+    # `do not, in fact, need re-reading.` are TRUE sentences of the IDENTICAL shape (and the
+    # punctuation does not separate them: an independent continuation made the verb requirement
+    # moot and re-red the very sentence #11902's round 12 removed). A miss on this page is
+    # visible on the page it reds nowhere; a false accusation reds a REQUIRED job. So the verb
+    # span after the negation must be nothing but a form of `read` / `do` and punctuation.
     # ⛔ AND `Only` IS THIS PAGE'S OWN LIST LABEL (`Only **(a)** … still read as written`), so
     # it may open the governed span: without that, the natural counterpart spelling
     # `Only **(i)** and **(j)** do not.` still read CLEAN (measured).
@@ -1689,9 +1691,9 @@ def check_verdict_tally(text: str) -> list[str]:
         tail = candidate[verb.end() :].strip()
         if not re.fullmatch(
             r"(?:(?:do|read|reads)(?:\s+as\s+written)?"
-            r"(?:\s+any\s+(?:more|longer))?)?(?:\W.*)?",
+            r"(?:\s+any\s+(?:more|longer))?)?[\W_]*",
             tail,
-            re.IGNORECASE | re.DOTALL,
+            re.IGNORECASE,
         ):
             continue
         head = re.sub(

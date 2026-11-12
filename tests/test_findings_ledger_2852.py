@@ -3881,7 +3881,6 @@ def test_a_governed_group_in_its_own_sentence_is_validated(tmp_path, monkeypatch
         "are **DRIFTED**. Only **(i)** and **(j)** do not. Only",
         # The idiomatic trailing adverbs and continuations, which the tail check must accept.
         "are **DRIFTED**. — **(i)** and **(j)** do not read as written any more. Only",
-        "are **DRIFTED**. — **(i)** and **(j)** do not, unlike the rest. Only",
     )
     for spelled in contradicting:
         src = tail if spelled.startswith("are ") else complement
@@ -3912,6 +3911,14 @@ def test_a_governed_group_in_its_own_sentence_is_validated(tmp_path, monkeypatch
         # shape-identical to the TRUE `did not move.`, so reading arbitrary verbs
         # re-creates the false accusation. CLEAN here is the declared trade, not a pass.
         "are **DRIFTED**. — **(i)** and **(j)** no longer hold. Only",
+        # …and a PUNCTUATED continuation is no better: it does not separate the true from the
+        # false either. Allowing one made the verb requirement moot and re-red the very
+        # sentence round 12 removed (#11902 review, round 14).
+        "are **DRIFTED**. — **(a)**, **(f)**, **(h)**, **(i)** and **(j)** "
+        "do not, in fact, need re-reading. Only",
+        "are **DRIFTED**. — **(a)**, **(f)**, **(h)**, **(i)** and **(j)** "
+        "did not, however, move. Only",
+        "are **DRIFTED**. — **(i)** and **(j)** do not, unlike the rest. Only",
     ):
         with monkeypatch.context() as patch:
             _mutated(tmp_path, patch, lambda t, b=spelled: t.replace(tail, b, 1))
