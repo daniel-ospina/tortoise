@@ -2220,7 +2220,9 @@ def cache_projection_store_labels() -> dict:
     query path) rather than a comparison that is true by construction.
 
     Returns ``{"labels": frozenset[str], "relationships": frozenset[str],
-    "unmeasured": {target: why}, "error": str|None}`` — ``error`` means the
+    "relationships_probed": frozenset[str], "unmeasured": {target: why},
+    "error": str|None}`` — ``relationships_probed`` is the edge population the arm was
+    BUILT on, so an empty ``relationships`` cannot be confused with an unrun arm — ``error`` means the
     projection could not be imported at all, so nothing was measured and the row
     must not read as if something had been.
     """
@@ -2229,6 +2231,7 @@ def cache_projection_store_labels() -> dict:
         from tortoise import record_projection as rp
     except Exception as e:  # an unimportable projection is UNMEASURED
         return {"labels": frozenset(), "relationships": frozenset(),
+                "relationships_probed": frozenset(),
                 "unmeasured": {}, "error": f"{type(e).__name__}: {e}"}
     stored: set[str] = set()
     edge_stored: set[str] = set()
@@ -2285,8 +2288,7 @@ def cache_projection_store_labels() -> dict:
         edge_types = sorted(KNOWN_REL_TYPES)
         vector_props = sorted(cp.stored_vector_props())
     except Exception as e:
-        unmeasured[cp.RELATIONSHIP_TARGET_PREFIX + "ANY>"] = (
-            f"{type(e).__name__}: {e}")
+        unmeasured[_relationship_target("ANY")] = f"{type(e).__name__}: {e}"
         edge_types = []
     for rel_type in edge_types:
         vector = list(_CACHE_PROJECTION_PROBE_VECTOR)
@@ -2320,6 +2322,11 @@ def cache_projection_store_labels() -> dict:
                 break
     return {"labels": frozenset(stored),
             "relationships": frozenset(edge_stored),
+            # ⛔ The POPULATION the edge arm actually planted on (`#12015` review). Without
+            # it, "no relationship stores a vector" and "no relationship was ever probed"
+            # are the same answer — the empty set — and deleting the whole edge block
+            # leaves the door's own test green. A caller can now assert the arm RAN.
+            "relationships_probed": frozenset(edge_types),
             "unmeasured": unmeasured, "error": None}
 
 

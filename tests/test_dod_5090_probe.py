@@ -599,6 +599,14 @@ def test_the_row_two_MEASURES_the_EDGE_vector_door():
     assert edge_unmeasured == {}, (
         "an edge door could not be built, so the empty set above is not a measurement: "
         f"{edge_unmeasured}")
+    # ⛔ The POSITIVE signal (`#12015` review): an empty `relationships` is the SAME value
+    # an arm that planted on nothing would return, so the population itself is asserted —
+    # deleting the edge block now reds here instead of leaving this pin green.
+    from tortoise.security import KNOWN_REL_TYPES
+
+    assert measured["relationships_probed"] == frozenset(KNOWN_REL_TYPES), (
+        "the edge arm did not run over every allowlisted predicate: "
+        f"{sorted(measured['relationships_probed'])}")
     row = probe.score_path_bullet()
     assert row.verdict == "MET", row.observed
     assert "cache projection RELATIONSHIP vector targets" in row.observed, row.observed
@@ -7299,11 +7307,11 @@ def test_the_census_doc_collects_what_the_file_collects():
     `--collect-only`, so adding a test reds this row until the figure is re-cut.
     The passed/skipped **split** is deliberately NOT pinned — it moves with the
     interpreter and the LANE, so pinning it would red on a box rather than on a
-    defect. Measured at this tree: the docker lane reads `170 passed, 1 skipped`
+    defect. Measured at this tree: the docker lane reads `172 passed, 1 skipped`
     (the skip is the `<3.12` re-derive) and the carve-out lane reads
-    `169 passed, 2 skipped` (that skip plus `tests/_live_utils.py`'s live-graph
+    `171 passed, 2 skipped` (that skip plus `tests/_live_utils.py`'s live-graph
     fixture, which only a lane with a `TORTOISE_DB_URI` satisfies). Both splits add
-    to the `171` re-derived below, which is why the doc states its split as
+    to the `173` re-derived below, which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
     """
     root = Path(probe.__file__).resolve().parent.parent
@@ -7326,15 +7334,24 @@ def test_the_census_doc_collects_what_the_file_collects():
         f"nothing: {run.stdout[-2000:]}")
     actual = int(match.group(1))
 
-    stated = re.search(r"this tree: (\d+) collected", text)
-    assert stated, (
+    # ⛔ EVERY statement of the count, not just the transcript line (`#12015` review):
+    # §6 states the figure THREE times (the run line, the bold prose total, and the
+    # `122 + … = N` arithmetic). Pinning one left the other two free to be re-cut to a
+    # different number with this gate green — a doc contradicting itself, which is the
+    # defect this pin exists to prevent.
+    statements = [int(n) for n in re.findall(r"this tree: (\d+) collected", text)]
+    statements += [int(n) for n in
+                   re.findall(r"collects \*\*(\d+) in the tree", text)]
+    statements += [int(n) for n in re.findall(r"= (\d+)\)", text)]
+    assert statements, (
         "§6's run record no longer states the collected count of THIS tree. A "
         "count stated against a branch head ('at #11337's head') describes a "
         "measurement the row no longer matches as soon as a test is added")
-    assert int(stated.group(1)) == actual, (
-        f"§6 states this tree collects {stated.group(1)} and the file collects "
-        f"{actual}: the row describes a measurement it no longer matches — re-cut "
-        f"the figure, or delete it and let this pin stand alone")
+    wrong = [n for n in statements if n != actual]
+    assert not wrong, (
+        f"§6 states {wrong} where the file collects {actual} (every statement must "
+        f"agree: {statements}): the row describes a measurement it no longer matches "
+        f"— re-cut EVERY figure, or delete them and let this pin stand alone")
 
 
 def test_a_pass_through_tool_changes_NOTHING_when_the_affected_set_is_EMPTY():

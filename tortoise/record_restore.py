@@ -220,8 +220,8 @@ class RestoreOutcome:
     #: :attr:`nodes_selected` can be below ``record_nodes`` without anything
     #: being lost, and they are reported so the difference is auditable.
     refused_keys: tuple[tuple[str, str], ...] = ()
-    #: `#11747` — vectors the projection REFUSED to store, and the targets they
-    #: were on. The projection drops a vector on a label no query leg serves
+    #: `#11747` — vectors the projection REFUSED to store (a record LABEL, or since
+    #: `#12015` a ``<relationship:TYPE>`` entry for an EDGE). The projection drops a vector on a label no query leg serves
     #: (``cache_projection.UNSERVED_VECTOR_LABELS``), so a restore over a record
     #: whose rows carry one DELETES it from the cache. ⛔ Reported, never silent:
     #: without this the run prints the same clean line as a restore that lost

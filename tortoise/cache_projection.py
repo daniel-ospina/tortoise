@@ -450,7 +450,8 @@ def _unserved_vector_reason(label: str) -> str:
 #: :func:`stored_vector_props` returns this module's own `STORED_VECTOR_PROPS`, which
 #: `from .stored_form import …` binds ONCE at import, so rebinding the owner
 #: (`tortoise.stored_form.STORED_VECTOR_PROPS`) does NOT move this rule — only a
-#: rebind of THIS module's copy does, i.e. the set is fixed at the next import. The
+#: rebind of THIS module's copy does, and takes effect IMMEDIATELY (which is what the
+#: falsifier below relies on). The
 #: function earns its place for three other reasons, and no more: there is no
 #: arithmetic to compute (so a constant would be a plain copy with nowhere to say
 #: why); both edge doors read ONE spelling of the rule; and the falsifier needs a
@@ -483,6 +484,11 @@ def _unserved_vector_reason(label: str) -> str:
 #: whose `MATCH (n) DETACH DELETE n` wipe takes the edges with it — which is exactly
 #: what the `#11747` node rule says about its own residue one screen up, and an
 #: earlier draft of THIS note offered the root cause of the problem as the cure.
+#: ⚠️ That is a fact about SHIPPED ROUTES, not an engine limit: measured on FalkorDB,
+#: `SET r += {embedding: null}` DOES clear the property, so a projection that emitted
+#: the null for a declined key could clear a legacy edge in place — the in-place route
+#: `#11070` uses for the node pair. No route does that today, which is why the operator
+#: remedy is the full restore; a future one may add it.
 #: Nothing on the read side reports the residue either — `record_serve` has no
 #: relation read at all (`NOT_SERVED`), `parity_difference` is label-scoped and
 #: `record_reconcile` compares nodes — so it is stated here rather than left to be
@@ -3777,8 +3783,9 @@ class ProjectionReport:
     coverage: str = COVERAGE_COMPLETE
     declaration_keys: int = 0
     scope: str = ""
-    #: `#11747` — vectors the plan REFUSED to store, and the labels they were on.
-    #: On the REPORT beside the write counts (the shape
+    #: `#11747` — vectors the plan REFUSED to store, and the TARGETS they were on:
+    #: a record LABEL, or (since `#12015`) a ``<relationship:TYPE>`` entry for an EDGE,
+    #: which is not a label at all. On the REPORT beside the write counts (the shape
     #: :func:`tortoise.hosted_backup.restore_graph` already uses for the identical
     #: drop), because the drop happens on a path an operator asked for: a rebuild
     #: that deletes vectors a previous cache held would otherwise print the same
