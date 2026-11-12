@@ -759,7 +759,24 @@ def _import_aliases(*roots: ast.AST) -> dict[str, str]:
                 accepted = _accepted_homes(alias.name, sub.level)
                 if module not in accepted:
                     continue  # a same-named function from somewhere else is not this seam
-                found[alias.asname or alias.name] = alias.name
+                local = alias.asname or alias.name
+                previous = found.get(local)
+                # ⛔ ONE local name bound by TWO aliasable imports (`#12020` round 8 review P3). The
+                # walk yields siblings LIFO, so a plain assignment kept the LEXICALLY FIRST binding
+                # — and if that one was a GATE spelling that never runs (`if TYPE_CHECKING:`), the
+                # live CLAUSE BUILDER it shares a name with was replaced by a gate reach and the
+                # writer measured `gated` (outside `NEEDS_A_DECLARATION`, i.e. it stopped owing a
+                # declaration; measured). Neither binding is a "rebinding" (`_imports_that_REBIND`
+                # skips every import that RESOLVES), so no other rule sees the collision.
+                # ⛔ Prefer the BUILDER in every collision, which is fail-closed in BOTH orders:
+                # the builder outcome is `unresolved_write`/`ungated`, both inside
+                # `NEEDS_A_DECLARATION`, while a source-order-dependent answer is right in one order
+                # and a silent hide in the other.
+                if previous is None or (
+                    previous not in WRITE_CLAUSE_BUILDERS
+                    and alias.name in WRITE_CLAUSE_BUILDERS
+                ):
+                    found[local] = alias.name
     return found
 
 
@@ -813,13 +830,22 @@ def _locally_bound(node) -> set[str]:
     Any binding in the writer's own scope counts — assignment, annotated/augmented assignment,
     `for`/`with`/`except` target, a nested `def`/`class` NAME (the name binds here; its body is a
     different scope), a parameter, a walrus. The question is only "does this name, inside this
-    writer, still mean the imported object?", and there is no single safe answer: it is
-    `_keep_shadowed_aliases`' split, i.e. `_accepted_homes`'. For a `SEAM_CALL`/`UNGATED_CALLS`
-    alias, dropping it leaves the writer `unresolved_write`, which OWES a declaration, while keeping
-    a shadowed one can class it `gated` and make it owe nothing (`#12020` round 3). For a CLAUSE
-    BUILDER, dropping it is the DANGEROUS direction — the alias is the only discovery signal, so the
-    writer vanishes instead of owning anything. This function only answers "which names does this
-    scope bind"; the builder arm skips the DELETION, never the question.
+    writer, still mean the imported object?", and there is NO single safe answer. `_keep_shadowed_aliases`
+    holds it, and that split is NOT `_accepted_homes`' (round 7 review P3 retracted exactly that
+    equation; round 8 P3 found it still here — `_accepted_homes` groups the builders WITH
+    `UNGATED_CALLS`, while this groups them apart):
+
+    * `SEAM_CALL` — dropping is right: keeping a shadowed one can class the writer `gated`, which is
+      outside `NEEDS_A_DECLARATION` (`#12020` round 3, measured: a writer-local `_enc = lambda p: p`
+      still credited `encode_for_row`).
+    * `UNGATED_CALLS` — dropping is right, and the outcome is NOT always `unresolved_write`: with an
+      own write clause the writer lands there and owes a declaration; WITHOUT one it is absent (`{}`),
+      where keeping the alias yields `producer` — an entry that owes nothing (round 7 P3, measured).
+    * `WRITE_CLAUSE_BUILDERS` — KEEPING is right: the alias is the only discovery signal, so dropping
+      it does not demote the writer, it deletes it.
+
+    This function only answers "which names does this scope bind"; the builder arm skips the DELETION,
+    never the question.
 
     ⛔ OWN SCOPE ONLY, and that is not symmetry with the module pass — it is a measured fail-open
     (`#12020` round 5). `ast.walk(node)` descends into a NESTED `def`, so a nested function's

@@ -4108,6 +4108,44 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
         "the shadow set is control-flow-blind by design, which is right for a GATE spelling and "
         "wrong for a builder: `if False:` cannot unbind anything at run time",
     ),
+    # ⛔ `#12020` round 8 review P3 — ONE local name, TWO aliasable imports. The alias map kept the
+    # LEXICALLY FIRST binding (the walk yields siblings LIFO), so a GATE spelling that never runs
+    # replaced the live BUILDER it shares a name with and the writer measured `gated` — outside
+    # `NEEDS_A_DECLARATION`, i.e. it stopped owing a declaration. Neither binding is a "rebinding",
+    # so no other rule saw the collision. Resolution now prefers the BUILDER in every collision,
+    # which is fail-closed in both source orders; each arm below is the shape that was `gated`.
+    "one_local_name_bound_by_a_GATE_then_a_BUILDER_import": (
+        "from tortoise.embeddings import encode_for_row as _a\n"
+        "from tortoise.vector_write import set_embedding_clause as _a\n"
+        "\n"
+        "def w(proj):\n"
+        '    return proj.g.query("MATCH (y) SET y += $p", {"p": _a("y")})\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "the BUILDER import is the live binding, and the source-order-dependent map replaced it with "
+        "the gate spelling — a real vector writer credited `gated` and hidden",
+    ),
+    "one_local_name_bound_by_a_BUILDER_then_a_GATE_import": (
+        "from tortoise.vector_write import set_embedding_clause as _a\n"
+        "from tortoise.embeddings import encode_for_row as _a\n"
+        "\n"
+        "def w(proj):\n"
+        '    return proj.g.query("MATCH (y) SET y += $p", {"p": _a("y")})\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "the reversed order — pinned so the fix cannot be a source-order flip that is right in one "
+        "order and a silent hide in the other",
+    ),
+    "one_local_name_bound_by_a_GATE_import_under_TYPE_CHECKING_then_a_builder": (
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from tortoise.embeddings import encode_for_row as _a\n"
+        "from tortoise.vector_write import set_embedding_clause as _a\n"
+        "\n"
+        "def w(proj):\n"
+        '    return proj.g.query("MATCH (y) SET y += $p", {"p": _a("y")})\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "the idiomatic spelling of the same collision: an `if TYPE_CHECKING:` gate import above the "
+        "runtime builder import — it cannot shadow anything at run time",
+    ),
     "builder_alias_rebound_in_the_WRITER_scope": (
         "from tortoise.vector_write import set_embedding_clause as _set\n"
         "\n"
