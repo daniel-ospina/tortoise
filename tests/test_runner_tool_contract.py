@@ -1189,9 +1189,10 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     # again — a remediation message is exactly what a loop or a branch tends to emit, and the
     # remedy the assertion then demands (`ensure gh`) FAILS CLOSED on a no-egress pool box.
     # Measured on this implementation before `_SEGMENT_CMD` skipped the keyword: every row
-    # below answered `hazard`. The sibling lane that rewrote this reader (#12167, branch
-    # `fix/9018-scan-name-arm-fail-open`) still answers `hazard` for all five — its whole-line
-    # predicate is `_MESSAGE_WORD`, not a keyword skip — and it adds no loop/keyword row at all.
+    # below answered `hazard`, and the sibling lane that rewrote this reader (#12167, branch
+    # `fix/9018-scan-name-arm-fail-open`) still answers `hazard` for every one of them — its
+    # whole-line predicate is `_MESSAGE_WORD`, not a keyword skip — and it adds no loop/keyword
+    # row at all.
     keyword_inert = [
         f'            then echo "run tools/{helper} by hand"',
         f'            else echo "please run tools/{helper} --repair-labels by hand"',
