@@ -188,9 +188,10 @@ def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
     WS-B/C/D, so a tally-holding swap touching it has to promote one of the four
     the pin names — which reds this arm — and move WS-A's "5 of 5" cell, which
     reds the count arms. What the premises add is the case this arm cannot see: a
-    UNILATERAL move whose counts are all corrected, where `problem_map_check
-    --check` reads CLEAN and the only reds are these premises, reading as
-    breakage rather than as a status finding.
+    UNILATERAL move on a row the pin does NOT name, whose counts are all
+    corrected, where `problem_map_check --check` reads CLEAN and the reds are
+    breakage — these premises, and the arms whose fixtures encode the shipped
+    counts.
     Reverting §2's `#2782` to `OPEN`
     **and** promoting `#2684` to `VERIFIED-FIXED` (one row each way, so §2 stays
     22/4/0, the total 26, WS-C 4 of 6, and both headlines intact) left
@@ -216,13 +217,12 @@ def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
     tracker-OPEN issue is fixed), while `tools/problem_map_check.py` deliberately
     refuses to read GitHub and re-derives none of this from the tree, so re-derive
     these on every re-cut; a re-cut that only makes this file green has proven
-    nothing about the statuses. Inside that re-cut — page and pin moved together —
-    a compensating **swap** IS caught by the pin as a status finding (§2's `OPEN`
-    count plus the pin's four by-issue assertions), while a **unilateral** move
-    whose counts are all corrected is invisible to the guard — `--check` reads
-    CLEAN — and reds only as breakage: the fixture premises that name that row's
-    cells, and the arms whose fixtures encode the shipped counts. Detected as
-    breakage, never confirmed.
+    nothing about the statuses. The pin asserts statuses by issue for five rows —
+    the re-cut row and §8's four survivors — so ANY status move touching one of
+    them reds it as a status finding, whatever the counts say. Outside those
+    five, a unilateral move with every count corrected reads CLEAN under
+    `--check` and reds only as breakage: a fixture premise that happens to name
+    that row's cells, or an arm whose fixture encodes the shipped counts.
     """
     rows, _ = pmc.parse_rows(DOC.read_text(encoding="utf-8"))
     status = {r.issue: r.status for r in rows}
