@@ -3396,7 +3396,13 @@ class PackRegistry:
                 # is not free: `_layer_of_kind` builds its own registry to read
                 # the kind-index spec (measured +0.40 s per process on the 7-pack
                 # catalog, and two extra `load_all` calls — a fallback-chain test
-                # counts them). Nothing declared ⇒ nothing to report.
+                # counts them). Nothing declared ⇒ nothing PACK-side to report.
+                # ⛔ AND THAT INCLUDES THE CORE TABLE, deliberately: the core
+                # confusions are a CONSTANT validated by this repo's own test
+                # suite, not something a user's catalog load can answer for, so a
+                # load does not pay the compile to re-check a static table. A
+                # BROKEN core entry is still reported — by the leftover arm below —
+                # as soon as any pack declares a guard.
                 return self.guard_warnings
             kinds = {
                 ns: list(getattr(self.packs[ns], "object_kinds", None) or [])
@@ -3417,10 +3423,19 @@ class PackRegistry:
             # problems too — they were appended to EVERY pack's bucket and logged
             # as `pack <ns>: guard — …`, blaming `acme` and `beta` for a defect in
             # neither manifest, and making the leftover arm below unreachable
-            # (every core problem counted as "attributed"). Asked once, kept once.
+            # (every core problem counted as "attributed"). Asked once, logged
+            # once by the leftover arm; never bucketed to a pack.
             core_only = {p for p in guard_table_problems(
                 [], include_catalog=False, pack_kinds=kinds)}
-            attributed = set(core_only)
+            # ⛔ `attributed` MUST START EMPTY. Seeding it with `core_only` was
+            # the round-12 shape's own defect (round-12 review P2, measured): the
+            # full-list call returns exactly `core_only ∪ ⋃_ns own(ns)`, so every
+            # core problem counted as "already attributed" and the leftover arm —
+            # the ONLY reporter a core problem has — became unreachable. The fix
+            # moved core problems from *mis-blamed on every pack* to *silent*,
+            # which is worse. They are excluded from every pack bucket above and
+            # logged exactly once by the leftover arm below.
+            attributed: set[str] = set()
             for ns in sorted(self.packs):
                 own = [c for c in confusions if c.declaring_pack == ns]
                 if not own:

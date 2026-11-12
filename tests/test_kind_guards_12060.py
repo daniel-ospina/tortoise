@@ -2170,6 +2170,102 @@ depends_on: []
         qualified = registry("acme:my-rule")
         assert "acme" in qualified, qualified
 
+    def test_a_CORE_table_problem_is_logged_ONCE_and_bucketed_to_NO_pack(
+            self, tmp_path, monkeypatch, caplog):
+        """It is the CORE table's defect — mis-blaming a pack is not a fix.
+
+        Round-11 review P3 measured the core problems being appended to EVERY
+        pack's bucket (`pack acme: guard — …` / `pack beta: guard — …` for a
+        defect in neither manifest); the first fix then seeded the "already
+        attributed" set with them, which made the leftover arm unreachable and
+        moved core defects from mis-blamed to SILENT (round-12 review P2). This
+        pins the third shape: excluded from every pack bucket, logged exactly once
+        by the leftover arm.
+        """
+        from tortoise import kind_guards
+        from tortoise.pack_registry import PackRegistry
+
+        broken = kind_guards.Confusion(
+            rule="core-broken-probe", when="nameMatches", pattern=r"^zz-[0-9]+$",
+            redirect="core:NoSuchKindXyz", fallback="core:WorkItem", reason="x")
+        monkeypatch.setattr(kind_guards, "CORE_CONFUSIONS",
+                            (*kind_guards.CORE_CONFUSIONS, broken))
+
+        pack = tmp_path / "beta"
+        pack.mkdir()
+        (pack / "manifest.yaml").write_text("""namespace: beta
+name: Beta
+version: "0.1.0"
+tier: free
+ontology:
+  extends: core
+  objectKinds: [widget]
+  guards:
+  - kind: widget
+    layer: object
+    onConfusion:
+      - when: nameMatches
+        pattern: '^thing-[0-9]+$'
+        rule: my-bare-rule
+        redirect: core:WrokItem
+        fallback: core:WorkItem
+        reason: x
+depends_on: []
+""")
+        reg = PackRegistry(tmp_path)
+        reg.load_all()
+        with caplog.at_level("WARNING", logger="tortoise.pack_registry"):
+            reg.check_guard_table()
+
+        # the pack's OWN problem stays attributed to it …
+        assert list(reg.guard_warnings) == ["beta"], reg.guard_warnings
+        assert any("my-bare-rule" in m for m in reg.guard_warnings["beta"])
+        # … the CORE one is in NO bucket, and is reported exactly once
+        assert not any("core-broken-probe" in m
+                       for msgs in reg.guard_warnings.values() for m in msgs)
+        core_lines = [r.getMessage() for r in caplog.records
+                      if "core-broken-probe" in r.getMessage()]
+        assert len(core_lines) == 1, core_lines
+        assert core_lines[0].startswith("pack catalog: guard")
+
+    def test_a_malformed_ontology_MEMBER_names_the_field(self):
+        """Round-11 review P3: `objectKinds:` null gave `'NoneType' object is not
+        iterable`, `relations: nope` gave `'str' object has no attribute 'get'` —
+        `ok=False` both times, but the message named no field.
+
+        ⛔ AND `extraction` IS NOT ONE OF THESE (round-12 review P2): it is a
+        TOP-LEVEL key the registry reads from `raw`, so checking
+        `ontology.extraction` made the hosted route refuse a manifest that
+        `pack validate` loads `✓` Clean — a NEW divergence in the code that exists
+        to keep the two surfaces honest. The control below is that divergence.
+        """
+        from tortoise.pack_manifest_store import validate_manifest
+
+        base = """namespace: acme
+name: Acme
+version: "0.1.0"
+tier: free
+ontology:
+{body}
+depends_on: []
+"""
+        cases = (
+            ("  objectKinds:", "ontology.objectKinds must be a list", "NoneType"),
+            ("  extends: core\n  relations: nope",
+             "ontology.relations must be a list", "str"),
+            ("  extends: core\n  kindDefs: [1]",
+             "ontology.kindDefs must be a mapping", "list"),
+        )
+        for body, wording, type_name in cases:
+            errors = validate_manifest(base.format(body=body)).errors
+            joined = " ".join(errors)
+            assert wording in joined, (body, errors)
+            assert type_name in joined, (body, errors)
+        # a valid ontology is still accepted, and `ontology.extraction` is not a
+        # thing this route refuses (it is the top level's key, not this block's)
+        assert validate_manifest(base.format(
+            body="  extends: core\n  objectKinds: [concept]")).ok is True
+
     def test_a_fromKinds_scope_naming_no_CORE_kind_is_refused(self):
         """`core:WrokItem` is a typo the own-namespace arm cannot see.
 

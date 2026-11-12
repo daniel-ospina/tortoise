@@ -351,7 +351,13 @@ def validate_manifest(
         _LIST_MEMBERS = ("objectKinds", "documentKinds", "eventKinds",
                          "pointKinds", "actionKinds", "relations", "chains",
                          "hierarchies")
-        _MAP_MEMBERS = ("kindDefs", "subclassOf", "equivalentTo", "extraction")
+        # ⛔ `extraction` IS NOT AN `ontology.` MEMBER (round-12 review P2): the
+        # registry reads `raw["extraction"]` (a TOP-LEVEL key), so listing it here
+        # made the hosted route refuse `ontology: {extraction: [a]}` while
+        # `pack validate` loaded the same manifest `✓` Clean — a NEW divergence
+        # between the two surfaces, in the very code that exists to keep them
+        # honest. Only members the registry reads from `ontology` are listed.
+        _MAP_MEMBERS = ("kindDefs", "subclassOf", "equivalentTo")
         for _k in _LIST_MEMBERS:
             if _k in _ont and not isinstance(_ont[_k], list):
                 return ManifestValidation(
