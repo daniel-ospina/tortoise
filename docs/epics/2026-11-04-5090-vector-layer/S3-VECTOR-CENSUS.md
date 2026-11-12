@@ -338,8 +338,8 @@ no label at all, so the projection's edge writer can store a vector nothing can 
 the row could not see it, because the node measurement only ever asked about labels. One pin
 measures the edge doors on the fixed tree, the other is the falsifier that empties the decline
 and watches row 2 go `NOT MET`)
-(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 2 = 173`). ⚠️ No figure here names what `main` collects TODAY: four of
-those five additions are already merged and the fifth lands with this document, so any "`main` at N"
+(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 2 = 173`). ⚠️ No figure here names what `main` collects TODAY: every
+addition but the last is already merged, and the last lands with this document, so any "`main` at N"
 would be a moving reference this paragraph forbids — the total is bound to THIS TREE alone): seven
 row-2 resolution pins (register resolves every writer; the unserved-label falsifier; the
 derived-label-wins arm; the runtime-label hold; the unreadable register holding as `UNMEASURED`; the
