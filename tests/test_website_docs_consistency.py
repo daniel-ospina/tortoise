@@ -2885,6 +2885,53 @@ def test_every_page_loc_is_the_canonical_url_for_its_document() -> None:
         "that ANSWERS 200")
 
 
+def _middleware_code() -> str:
+    """`functions/_middleware.ts` with its line comments dropped.
+
+    ⛔ COMMENTS ARE DROPPED BEFORE ANY MATCH, so a commented-out declaration cannot satisfy a pin
+    and a documented example cannot be read as the live one — the discipline
+    `test_the_site_root_is_a_different_page_per_host` already applies to the same file (a
+    substring probe over the raw source stayed green when two host branches were SWAPPED, because
+    both document names appear in the comments).
+    """
+    middleware = _read(WEBSITE / "functions" / "_middleware.ts")
+    return "\n".join(
+        line for line in middleware.splitlines() if not line.lstrip().startswith("//")
+    )
+
+
+def test_the_retired_hosts_crawler_surface_covers_every_sitemap_in_the_tree() -> None:
+    """#11766: `CRAWLER_SURFACE` must name EVERY sitemap this tree serves, or the fix decays.
+
+    The middleware 301s the retired host's `robots.txt` and sitemaps so there is exactly ONE host
+    a crawler can read an index from. That set is HAND-KEPT, and a hand-kept list is how the
+    defect it fixes comes back: add `website/sitemap-events.xml` and name it in the index (which
+    the tree-side guards REQUIRE — they red otherwise), and the new file is still SERVED as a 200
+    on the retired host, listing URLs on `premiselabs.co` — #11623 verbatim, one added file away.
+    Measured before this pin: that addition left 76 passed and the node suite green.
+
+    So the set is compared with the POPULATION rather than trusted: `robots.txt`, the index, and
+    every sitemap document `_published_sitemaps` derives from the tree. Both directions are
+    asserted — a missing entry reds (the decay above), and an entry for a file that does not
+    exist reds too (a 301 onto a 404).
+    """
+    code = _middleware_code()
+    literal = re.search(r"const CRAWLER_SURFACE = new Set\(\[(.*?)\]\)", code, re.S)
+    assert literal, (
+        "_middleware.ts no longer declares `const CRAWLER_SURFACE = new Set([...])` — re-derive "
+        "this guard's subject by hand; without it the retired host serves its own copy of the "
+        "sitemap index again (#11766)")
+    declared = set(re.findall(r'"(/[^"]+)"', literal.group(1)))
+    served = {"/robots.txt", f"/{SITEMAP_INDEX.name}"}
+    served |= {f"/{path.name}" for path in _published_sitemaps(WEBSITE)}
+    assert declared == served, (
+        "CRAWLER_SURFACE and the sitemaps this tree serves disagree — "
+        f"served but not 301'd off the retired host: {sorted(served - declared)}; "
+        f"301'd but not served (a 301 onto a 404): {sorted(declared - served)}. "
+        "A sitemap reachable as a 200 on the retired host names URLs on the marketing host, "
+        "which the Sitemaps protocol forbids for an index (#11623/#11766)")
+
+
 def test_the_site_root_is_a_different_page_per_host() -> None:
     """Guard the guard: the host→root mapping above must match the middleware.
 
@@ -3319,11 +3366,14 @@ def test_no_sitemap_advertises_a_page_that_is_deleted_or_noindex() -> None:
     existed: `premiselabs.co`'s `/contact` rewritten to `https://not-our-host.example.net/contact`
     passed 71/71.
 
-    WHAT THIS DOES NOT CLOSE, named rather than implied: a `<loc>` on a host we DO serve but the
-    wrong one for that sitemap (e.g. `https://premiselabs.co/docs` in `sitemap-product.xml`, which
-    `_middleware.ts` 301s to the tortoise host) still passes, because `SITE_HOSTS` is the set of
-    served hosts and not a per-file canonical map. That needs the per-file host table (§6.5's
-    `Host` column), which is #11624's scope together with the per-host index.
+    WHAT THIS DOES NOT CLOSE, named rather than implied: the page `<loc>`s of THIS project are now
+    held to their canonical URL — `test_every_page_loc_is_the_canonical_url_for_its_document` reds
+    on `https://premiselabs.co/docs` in `sitemap-product.xml` and on
+    `https://tortoise.premiselabs.co/docs`, host AND path together, with no per-file host table.
+    What remains outside these walks is the population the walks cannot reach: the app project's
+    `apps/dashboard/public/sitemap.xml` `<loc>`s (a separate Pages project; #11624) and the blog's
+    Function-generated `<loc>`s (asserted in `tests/test_blog_seo_meta.mjs` against `SITE_URL`, not
+    here). Do not re-derive a host table for the page case — the canonical test is that answer.
     """
     problems: list[str] = []
     for sitemap in _published_sitemaps(WEBSITE):

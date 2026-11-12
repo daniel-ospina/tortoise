@@ -254,6 +254,13 @@ async function assertOneHop(src, { expectStatus = 301, expectLocation = null, ex
   // (a subdomain is the spec's own counterexample). Measured on the live site before this
   // branch existed: `tortoise.premiselabs.co/sitemap.xml` → 200. The alias maps straight
   // to the index in ONE hop rather than chaining through the company host's `_redirects`.
+  //
+  // These rows are a SAMPLE of the behaviour, not the coverage: the exhaustive comparison
+  // (`CRAWLER_SURFACE` == `robots.txt` + every sitemap document the tree serves, both
+  // directions) lives in `tests/test_website_docs_consistency.py`
+  // (`test_the_retired_hosts_crawler_surface_covers_every_sitemap_in_the_tree`), because a
+  // hand-kept list HERE would go stale the moment a sitemap is added — which is the defect
+  // this branch fixes.
   for (const [from, to] of [
     ["/sitemap.xml", "/sitemap.xml"],
     ["/sitemap-company.xml", "/sitemap-company.xml"],
