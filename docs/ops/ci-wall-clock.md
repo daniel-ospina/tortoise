@@ -491,10 +491,12 @@ same step with the same tail is the investigation.
     larger budget only probes more runs the same way. ⛔ THE TWO POPULATIONS — the frozen
     one and the settling one — must not be merged, because the repair endpoints differ
     between them: for a **frozen** run `/cancel` and `/force-cancel` both answer 409
-    ("not in progress" / "has not been queued yet"), while a run that merely has not been
-    still yet is one that is *about to execute* — `/cancel` on THAT is accepted, and
-    destructive. So neither endpoint is the lever here, but for two different reasons:
-    closed for the frozen run, harmful for the settling one. It is **NOT `--max-pages`**.
+    ("not in progress" / "has not been queued yet"), while a run whose stillness is merely
+    UNPROVEN may have `/cancel` accepted — and that population is not only the
+    pre-expansion window: `_settled_still` also answers "not proven" for a run that has
+    just finished every job, and for an unreadable or future-dated stamp. So neither
+    endpoint is the lever here, for two different reasons: closed for the frozen run,
+    neither closed nor reliably harmless for the unproven one. It is **NOT `--max-pages`**.
 
   In every case an unmeasured dimension is not a measured-healthy one.
 - **It does not reduce jobs per run.** A `python-ci` run is 22 jobs (max 30) by construction; with

@@ -364,9 +364,12 @@ jobs:
               # lever — it only probes more runs the same way. A FROZEN run is reachable only
               # BY being probed; that bounds how many are ever FOUND, it does not fix one.
               # Do NOT offer /cancel or /force-cancel as the lever: for a FROZEN run they
-              # answer 409, and for a settle-downgraded one
-              # they would be ACCEPTED and destructive — the run is about to execute its
-              # matrix — so an "API-side repair" is either closed or harmful, never right.
+              # answer 409, while for a settle-downgraded one they may be ACCEPTED — and that
+              # population is NOT proven to be "about to execute" either (`_settled_still`
+              # also answers False for a run that has just finished every job, and for an
+              # UNREADABLE or future-dated stamp), so cancelling one is unsafe for a reason
+              # the 409 evidence does not cover. An "API-side repair" is therefore either
+              # closed or unreliable, never right.
               unprobed_n="$(python3 -c "import json; print(json.load(open('/tmp/ci-queue-health.json')).get('pr_running_unmeasured_unprobed') or 0)" 2>/dev/null || echo 0)"
               unread_n="$(python3 -c "import json; print(json.load(open('/tmp/ci-queue-health.json')).get('pr_running_unmeasured_unread') or 0)" 2>/dev/null || echo 0)"
               if [ "${unread_n:-0}" -gt 0 ] && [ "${unprobed_n:-0}" -eq 0 ]; then
