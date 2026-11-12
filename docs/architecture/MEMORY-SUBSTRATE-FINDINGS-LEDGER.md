@@ -267,7 +267,13 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   (c) and (g) cited `_upsert_point_props` at line 2632 and its `_persist_extra_props` call at line
   3115 — correct at `f70d884b7`. `main` then added 16 lines to that file (`43db5c0f55`) and 13 more
   (`927c24e233`); at 2648 and 3131 the citations had slid onto a `#2958` comment and a `#2795`
-  comment while `--check` stayed at exit 0. Re-measured by hand to lines 2661 and 3144 — and it will
+  comment while `--check` stayed at exit 0. Re-measured by hand to lines 2661 and 3144 at that
+  ask — and `main` moved the file a THIRD time before this page's merge head, carrying them to
+  **2679** and **3162**, and `sdk.py` with it: row (a)'s docstring quote to `tortoise/sdk.py:17109`
+  and its call to `tortoise/sdk.py:17530`, row (d)'s range to `tortoise/sdk.py:36215-36218`. Every one
+  of those moves stayed IN RANGE with `--check` at exit 0: 2661 landed on a bare `continue`, 17045 on
+  a `_rollup_llm(...)` call, 17478 on a `# deliberately EXCLUDES validFrom` comment. That is the arm's
+  limit, measured three times on one page — and it will
   rot again the moment the file moves, which is why the symbol arm is the missing half. The same
   commit moved `sdk.py` by 168 lines, taking `_extract_session_v2`, `create_point` and row (d)'s
   quoted range with it; `tests/test_substrate_map.py::test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names`
@@ -285,14 +291,15 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   `-` parses a dated slug, `/` parses plain paths and dates (600+ spans across 801 files), `#`
   parses the `owner/repo#N` issue refs this repo writes everywhere, `@` parses commit refs, and `,`
   parses SQL and call prose. The pipe is refused because it was refused before the narrowing and
-  dropping it silently was a red-to-green the carve-out list did not admit: no code span in the 1146
+  dropping it silently was a red-to-green the carve-out list did not admit: no code span in the 1149
   tracked files under `docs/` (nor the 144 other tracked `*.md`) carries a `path|LINE` form, so
-  refusing it cannot red this repository's prose. The permalink form survives that objection and the
+  refusing it cannot red this repository's prose (the `docs/` population is what moves — re-derive it
+  with `git ls-files docs | wc -l`, never carry this number forward). The permalink form survives that objection and the
   rest do not: an
   issue ref carries no `L`, so `#` + `L` + digits is unambiguous, and it is what a human writes when
   copying a GitHub link — the spelling most likely to arrive looking verified while going unchecked
   (it did: both an out-of-range permalink and an in-range one left this page CLEAN before the arm
-  existed). It is measured, not assumed: every code span in all 1146 tracked files under `docs/`,
+  existed). It is measured, not assumed: every code span in all 1149 tracked files under `docs/`,
   plus the 144 other tracked `*.md`, was swept with the shipped pattern — zero matches, so refusing
   it cannot red this repository's own prose. Rewriting a citation's delimiter is therefore **not**
   universally refused: `path#LINE` (the bare-number form, which IS what collides with issue refs),
@@ -479,8 +486,14 @@ the population source, not the derivation.
 ---
 
 *Re-cut 2026-11-12 from `f70d884b7`, which was `origin/main` at the time of the cut — it is **behind
-`origin/main` at this page's merge head** (`bf7401e4` brought later main in; the guard requires
-*ancestry*, not equality). Cut against the original ledger posted on #2852 and re-measured claim by
-claim. Every code citation on this page was opened at that commit; every issue state was read
-individually. Where a 2026-09-10 claim could no longer be re-measured, it says so rather than
-repeating it.*
+`origin/main` at this page's merge head** (the guard requires *ancestry*, not equality). Cut against
+the original ledger posted on #2852 and re-measured claim by claim. Where a 2026-09-10 claim could no
+longer be re-measured, it says so rather than repeating it.*
+
+⛔ **The line numbers are NOT at `f70d884b7`, and this page used to say they were.** Every ISSUE state
+here was read individually at that commit; every CODE citation was re-derived by hand at the merge
+head, because `main` moved `entities.py` and `sdk.py` three times between the cut and it (the last,
+before `e4703a286a`, slid all four §3 citations off their symbols while `--check` stayed at exit 0 —
+§8 records that measurement). The commit in the frontmatter is therefore the basis of the STATUS half,
+not of the line numbers, and a reader who needs a number re-derived should ask the symbol, not this
+page.
