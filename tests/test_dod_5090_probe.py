@@ -2387,8 +2387,10 @@ def test_an_unreadable_deployment_surface_is_UNMEASURED_not_silent(
     assert shipped["deployment"]["on"] is False, shipped
     assert shipped["deployment"]["unmeasured"] == ["docker-compose.yml"], shipped
     note = _gate_note(shipped)
-    assert "gate enabled by default: False" in note, note
-    assert "UNMEASURED" in note, note
+    # ⛔ The leading value is UNMEASURED, never `False`: `False` is an answer about a
+    # population this run could not read (fresh review of PR #12016, P3).
+    assert "gate enabled by default: UNMEASURED" in note, note
+    assert "gate enabled by default: False" not in note, note
     assert "docker-compose.yml=UNMEASURED" in note, note
 
 
@@ -2407,7 +2409,7 @@ def test_a_tree_with_NO_deployment_surface_is_UNMEASURED(tmp_path, monkeypatch):
     assert shipped["deployment"]["measured"] is False, shipped
     assert shipped["deployment"]["on"] is False, shipped
     note = _gate_note(shipped)
-    assert "UNMEASURED" in note, note
+    assert "gate enabled by default: UNMEASURED" in note, note
     assert "no deployment surface exists" in note, note
     # …and the ROW holds on it, naming UNMEASURED rather than "the config sets
     # nothing" — the misattribution `#11455`'s third requirement forbids.
