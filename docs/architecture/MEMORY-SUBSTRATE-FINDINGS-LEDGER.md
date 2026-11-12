@@ -391,8 +391,8 @@ follows `SUBSTRATE-REBUILD-MAP.md`'s ruling: *the tracker half is deliberately n
 dated and its command is recorded.* The command for §6 is `gh issue view <N> --json state`, and it
 was run per issue, not sampled.
 
-⚠️ **Five more are unguarded, and none is out-of-repo — they are simply not armed yet (#11902,
-#11957).** Every one is derivable from **this page alone**, so the ruling above does not reach them and
+⚠️ **Five more are unguarded, and none is out-of-repo — they are simply not armed yet (#11902, #11957).**
+Every one is derivable from **this page alone**, so the ruling above does not reach them and
 a guard for them could not pass by not looking:
 §4's row population (count its rows: 14) and its `**No copy of its content in-repo**` cells among the
 `research/` rows (3); §6's own heading count (`4 of 40 open`); and §7's `36 of 40 have moved` and
