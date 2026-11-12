@@ -4441,25 +4441,34 @@ surfaces:
   # `test_a_verbatim_vector_is_never_narrowed` (the #5004 round-7 promise that a
   # caller-owned vector keeps its raw form).
   - test_11821_journal_vector_width.py
-  # #11858: registered under BOTH `api` (here) and `sdk` (below), and the reason is
-  # narrower than the row above's. The sdk half is easy: this file's guard lives on
-  # `create_source`, so `tortoise/sdk.py` is the module it protects. The api half
-  # exists because `--register` put the file under `sdk` FIRST, and a NAMED-surface
-  # match does not get the `core` fallback — so a file registered ONLY under `sdk`
-  # loses every `core` selection it would otherwise have had. Measured at
-  # `32bed5ad2d` (review cycle 7, P3) by deleting one row at a time and running the
-  # real selector: with the `api` row alone, `tortoise/api.py` selects
-  # `['api','core']` and DOES run this file (so `api` is not strictly required on
-  # its own); with the `sdk` row alone, the same `api.py` diff runs it NOT AT ALL -
-  # which is the state `--register --surface sdk` produces by default, and it is
-  # exactly when the `api ⊆ sdk` spelling pin (`_SERVER_MANAGED_EMBEDDING_KEYS` vs
-  # the SDK family) and the `tortoise/api.py` residual note can break.
-  # ⛔ So do NOT "simplify" by deleting this row and relying on `sdk`: that is the
-  # silent-drop class, and `--integrity` stays green through it because the file IS
-  # classified — that gate answers a different question.
-  # The `sdk` row's own value is NOT `sdk.py` (a SHARED_MODULE selects `full`
-  # regardless); it is the other `sdk`-mapped paths, e.g. `tortoise/ids.py`, which
-  # select `['sdk']` with a named-surface match replacing `core`.
+  # #11858: registered under BOTH `core` (here) and `sdk` (below). Two DIFFERENT
+  # changed paths, two different selectors, and each row is the one that carries its
+  # own half — neither substitutes for the other. Measured at `2b5ae847d4` (review
+  # cycle 8, P3; surface membership re-read from this file by `yaml.safe_load`, which
+  # reports exactly `core` and `sdk`) with the real selector, one row deleted at a
+  # time:
+  #
+  #   both rows        api.py -> ['api','core']  file RUNS | ids.py -> ['sdk']  file RUNS
+  #   this row only    api.py -> ['api','core']  file RUNS | ids.py -> ['sdk']  file NOT run
+  #   the sdk row only api.py -> ['api','core']  file NOT run
+  #
+  # So: THIS row is what makes an `api.py`-only diff run the file — via the `core`
+  # fallback (`api` and `core` are selected together) — and the `sdk` row is what
+  # does it for `tortoise/ids.py` and the other `sdk`-mapped paths, where a named
+  # surface match means no `core` fallback. `sdk.py` itself needs neither: it is a
+  # SHARED_MODULE, so any diff touching it selects the full matrix.
+  # ⛔ Do NOT "simplify" to one row. Deleting this one means an `api.py` diff — where
+  # the `api ⊆ sdk` spelling pin (`_SERVER_MANAGED_EMBEDDING_KEYS` vs the SDK family)
+  # and the `tortoise/api.py` residual note can actually break — runs NONE of this
+  # file's rows, and `--integrity` stays green through it because the file IS still
+  # classified: that gate answers a different question, which is the silent-drop
+  # class its own row above documents.
+  # History, because it was mis-stated three times and VGATE falsified each version
+  # against git: the commit that ADDED this test file (`c0634bcf6`) carried NO
+  # manifest row at all — that is what redded `--integrity` — and the first commit
+  # to carry any row is `32bed5ad2`, which added BOTH at once. No commit in
+  # `origin/main..HEAD` carries exactly one. (Bare `--register` defaults to `core`;
+  # the `sdk` placement came from `--register --surface sdk`.)
   - test_11858_source_door_markers.py
   - test_test_lane_tool.py
   # #11385 (review P1): the S4 re-emit tax's instrument (`tools/s4_reeemit_tax.py`)
