@@ -385,19 +385,85 @@ def _inside_quotes(text: str, position: int) -> bool:
     """
 
     quote: str | None = None
+    ansi = False
     index = 0
     while index < position:
         char = text[index]
-        if char == "\\" and quote != "'":
+        # ⛔ A BACKSLASH **IS** AN ESCAPE INSIDE `$'…'` (#12069 review 14, measured
+        # FAIL-OPEN). The plain single-quoted string has no escapes, but the ANSI-C
+        # form does, and treating them alike let `'` close the span early and the
+        # closing `'` reopen it — an odd count, so the write was SPARED:
+        #     printf 'x' $'it\'s' > /usr/lib/postgresql/16/bin/pg_dump
+        # (bash really writes the file). The opening `'` is therefore checked for a
+        # preceding `$`, and escaping stays active for that span.
+        if char == "\\" and (quote != "'" or ansi):
             index += 2
             continue
         if quote is None:
             if char in "\"'":
                 quote = char
+                ansi = char == "'" and index > 0 and text[index - 1] == "$"
         elif char == quote:
             quote = None
+            ansi = False
         index += 1
     return quote is not None
+
+
+#: A shell word that makes its quoted argument CODE: `sh -c` in any option spelling
+#: (`-c`, `-ec`, `-euc` …) or `eval`.
+#: ⛔ `\s+-c\b` MISSED THE COMBINED SPELLINGS (#12069 review 14, measured): the
+#: `c` is followed by another letter, so the boundary never fired and
+#: `sudo bash -ec "cat … > …/pg_dump"` was GREEN. `-[A-Za-z]*c[A-Za-z]*` covers
+#: every ordering.
+_SHELL_CODE_RE = re.compile(
+    r"\b(?:sh|bash|zsh|dash|ksh)\s+-[A-Za-z]*c[A-Za-z]*\b|\beval\b"
+)
+
+
+def _code_quoted(line: str, position: int) -> bool:
+    """Is `position` inside the quoted span a shell `-c`/`eval` word opened?
+
+    ⛔ PER SPAN, NOT PER LINE (#12069 review 14, measured false RED). `eval`
+    anywhere on the line used to switch the message exemption off for the WHOLE
+    line, so a message that merely PRINTS the word eval red a correct step:
+
+        echo "remember to eval > /usr/lib/postgresql/16/bin/pg_dump" >> "$log"
+
+    — bash writes only the log. A span counts as CODE only when the shell word sits
+    immediately before the quote that opened it (nothing but spaces in between), and
+    `eval` must itself be in COMMAND position, so `eval "$(x)" && echo "a > …"`
+    keeps its printed `>` exempt.
+    """
+
+    openers = [
+        match.end()
+        for match in _SHELL_CODE_RE.finditer(line)
+        if match.group(0) != "eval" or _is_command_position(line, match.start())
+    ]
+    if not openers:
+        return False
+    quote: str | None = None
+    ansi = False
+    opened_at = -1
+    index = 0
+    while index < position:
+        char = line[index]
+        if char == "\\" and (quote != "'" or ansi):
+            index += 2
+            continue
+        if quote is None:
+            if char in "\"'":
+                quote = char
+                ansi = char == "'" and index > 0 and line[index - 1] == "$"
+                opened_at = index
+        elif char == quote:
+            quote = None
+            ansi = False
+        index += 1
+    if quote is None:
+        return False
+    return any(re.fullmatch(r"\s*['\"]?", line[opener : opened_at + 1]) for opener in openers)
 
 
 def _redirects_into_a_client_binary(line: str) -> bool:
@@ -432,9 +498,6 @@ def _redirects_into_a_client_binary(line: str) -> bool:
     # COMMAND, and that `>` still writes the binary. The row pinning it is this
     # file's own (`BINARY_MUTATION_POLARITY`): `sudo sh -c "cat $b/17/bin/pg_dump >
     # $b/16/bin/pg_dump"`, verbatim the shape the guard exists for.
-    quoted_is_code = bool(
-        re.search(r"\b(?:sh|bash|zsh|dash|ksh)\s+-c\b|\beval\b", line)
-    )
     for match in REDIRECT_TARGET_RE.finditer(line):
         # ⛔ IS THE `>` ITSELF INSIDE A QUOTED MESSAGE? (#12069 review 12, measured
         # FAIL-OPEN). The previous cut inferred that from the SHAPE of what followed
@@ -446,7 +509,9 @@ def _redirects_into_a_client_binary(line: str) -> bool:
         # message" branch and was never graded, while the same line without the `""`
         # was refused. Quoting is a property of the LINE BEFORE the operator, which
         # is cheap to read exactly, so it is read exactly.
-        if not quoted_is_code and _inside_quotes(line, match.start()):
+        if not _code_quoted(line, match.start()) and _inside_quotes(
+            line, match.start()
+        ):
             continue
         target = match.group("target")
         # ⛔ THE TARGET WORD CAN CONTINUE PAST WHAT WAS CAPTURED (#12069 review
@@ -466,6 +531,21 @@ def _redirects_into_a_client_binary(line: str) -> bool:
             if continuation:
                 target += continuation.group(0)
                 tail = tail[continuation.end():]
+        elif not closing and tail[:1] in ("'", '"'):
+            # ⛔ AN UNQUOTED TARGET JOINS A QUOTED RUN TOO (#12069 review 14,
+            # measured FAIL-OPEN). `pg_` + `"dump"` is `pg_dump` to the shell, and the
+            # quote was read as a word END here, so the write was SPARED (the plain
+            # spelling is refused):
+            #     echo x > /usr/local/bin/pg_"dump"       EVERY ROW GREEN
+            # The quoted run is joined onto the word and the JOINED basename graded.
+            # A lone terminator (no closer) stays a terminator, which is what keeps
+            # `sudo sh -c "cat x > /tmp/f"` spared.
+            closer = tail.find(tail[0], 1)
+            if closer == -1:
+                tail = tail[1:]
+            else:
+                target += tail[1:closer]
+                tail = tail[closer + 1 :]
         # A QUOTE ends the word; it is not an unclassifiable continuation
         # (#12069 review 13). With `quoted_is_code` in play the captured target is
         # the LAST word of the quoted command, so its closing `"` follows it — and
@@ -946,7 +1026,7 @@ def _is_command_position(line: str, start: int) -> bool:
 
     ⛔ TOKEN WALK, NOT ONE REGEX (#12069 review 13, measured). The previous cut
     required exactly `wrapper` + ONE token, and it matched a `rstrip()`ed prefix —
-    deleting the very whitespace its `\s+` needed — so it answered "operand" for
+    deleting the very whitespace its `\\s+` needed — so it answered "operand" for
     `sudo psql`, `nice -n 5 psql`, `env FOO=1 psql`, `xargs psql` and `exec psql`:
     every one a step being REFUSED with the untrue message `REPLACES a client
     binary`, while the same shape let `sudo tee psql` through.
@@ -960,7 +1040,19 @@ def _is_command_position(line: str, start: int) -> bool:
             return True
         if token in _WRAPPER_WORDS:
             return True
-        if token in _OPERAND_TAKING_WORDS:
+        # ⛔ ONE VERB TABLE, NOT TWO (#12069 review 14, measured FAIL-OPEN).
+        # A second hand-kept list here went stale the moment it was written: it did
+        # not carry `update-alternatives`, `perl -i` or `dpkg -i`, all of which
+        # `BINARY_MUTATION_RE` already knows, so the walk skipped their operands and
+        # reached `sudo` — answering "command position" and SPARING a rewrite of the
+        # pinned client that the previous head refused:
+        #     sudo update-alternatives --install /usr/bin/psql psql "$b/17/bin/psql" 1700
+        #     sudo perl -i -pe 's/16/17/' psql
+        # A mutating verb's following words are its OPERANDS, whatever the verb, so
+        # the test is the rule's own population.
+        if token in _OPERAND_TAKING_WORDS or BINARY_MUTATION_RE.match(
+            " ".join(tokens[index:])
+        ):
             return False
         index -= 1
     return True
@@ -3714,6 +3806,36 @@ BINARY_MUTATION_POLARITY = [
         'sudo sh -c "cat x > /tmp/f"',
         False,
         "CONTROL: the same `sh -c` shape aimed anywhere else is spared",
+    ),
+    (
+        'sudo update-alternatives --install /usr/bin/psql psql "$b/17/bin/psql" 1700',
+        True,
+        "#12069 round-14: the walk stops on the RULE's own verbs, not a second list",
+    ),
+    (
+        "sudo perl -i -pe 's/16/17/' psql",
+        True,
+        "#12069 round-14: `perl -i` takes an operand, and the join is what matches",
+    ),
+    (
+        "printf 'x' $'it\\'s' > /usr/lib/postgresql/16/bin/pg_dump",
+        True,
+        "#12069 round-14: inside `$'\u2026'` a backslash IS an escape",
+    ),
+    (
+        'echo x > /usr/local/bin/pg_"dump"',
+        True,
+        "#12069 round-14: an unquoted target JOINS a quoted run \u2014 this is `pg_dump`",
+    ),
+    (
+        'echo "remember to eval > /usr/lib/postgresql/16/bin/pg_dump" >> "$SCRATCH/log"',
+        False,
+        "#12069 round-14: the WORD eval in a message makes nothing code",
+    ),
+    (
+        'sudo bash -ec "cat $b/17/bin/pg_dump > $b/16/bin/pg_dump"',
+        True,
+        "#12069 round-14: combined shell options (`-ec`) still quote CODE",
     ),
 ]
 
