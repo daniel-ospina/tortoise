@@ -2556,10 +2556,11 @@ def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
     assert "one of them ALONE runs with the rule off" in hold, hold
     assert "INHERITS that image's `ENV`" in hold, hold
 
-    # The latent shape, executed: the compose file is silent AND builds from an armed
-    # dockerfile, so the MERGED deployment is armed while the per-file reading still
-    # holds the row. The verdict stays the conservative `PARTIAL`; what must not
-    # happen is the note telling a reader the deployment runs with the gate off.
+    # The latent shape, executed: the compose file is silent while a DEPLOYMENT file
+    # (`Dockerfile.selfhost`) arms the flag — the two facts the qualification exists
+    # for. ⛔ This walk globs `Dockerfile*` only; it does NOT parse the compose file's
+    # `build:` stanza, so what this fixture pins is the PER-FILE reading and the note's
+    # scoping of it, not a measured compose→image inheritance (that merge is `#12022`).
     (tmp_path / "Dockerfile.selfhost").write_text(
         'FROM python:3.12-slim\nENV TORTOISE_EMBED_GATE="1"\n', encoding="utf-8")
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
@@ -2569,6 +2570,12 @@ def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
     assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
     hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
     assert "one of them ALONE runs with the rule off" in hold, hold
+    # ⛔ And the OTHER half of the same conflation (round-11 review, P2): with an armed
+    # surface that IS a deployment file, the note must NOT claim that surface "does
+    # not deploy the container's environment on their own" — a build using it carries
+    # the flag. The clause is scoped to templates; here it states the opposite fact.
+    assert "do not deploy the container's environment on their own" not in hold, hold
+    assert "themselves deployment files" in hold, hold
 
 
 @pytest.mark.parametrize("text", [

@@ -2040,16 +2040,33 @@ def score_rule_bullet() -> Row:
             "UNMEASURED, never True and never 'the config sets nothing')"
         )
     elif not deployment["on"]:
+        # ⛔ The trailing clause is about a TEMPLATE, and only a template (fresh review
+        # of PR #12016, P2): when a surface that ARMS the flag is itself a deployment
+        # file (an armed `Dockerfile*` today; `docker-compose.yml` the moment `#11086`
+        # lands), "the surfaces that do arm it do not deploy the container's
+        # environment on their own" is the `#11455` false claim in its OTHER half —
+        # that build DOES carry the flag, and the row is held because this walk reads
+        # each file independently and does not model the merge.
+        # ⛔ `shipped["armed"]` holds SURFACE ROOTS (`Dockerfile`), not the per-file
+        # paths in `deployment["files"]` (`Dockerfile.selfhost`) — so the split is
+        # against `deployment["surfaces"]`, which is the same vocabulary.
+        armed_deployment_files = sorted(set(shipped["armed"]) & set(deployment["surfaces"]))
+        armed_clause = (
+            f"the surface(s) that do arm it ({', '.join(armed_deployment_files)}) are "
+            "themselves deployment files, so a build that uses one of them carries the "
+            "flag — this reading is per FILE and does not model that merge"
+            if armed_deployment_files else
+            f"the surfaces that do arm it ({shipped['armed'] or 'none'}) do not deploy "
+            "the container's environment on their own"
+        )
         notes.append(
             "shipped default NOT armed for every deployment file (hold this row "
             "at PARTIAL — silent deployment file(s): "
             f"{deployment['silent']} declare no gate, so a deployment built from "
             "one of them ALONE runs with the rule off (a compose file that builds "
             "from an ARMED image build file INHERITS that image's `ENV`, so this "
-            "is a per-FILE fact, not the merged view's); the surfaces that do arm it "
-            f"({shipped['armed'] or 'none'}) do not deploy the container's "
-            "environment on their own. This is the `#11455` reading: one armed "
-            "TEMPLATE is not a shipped default)"
+            f"is a per-FILE fact, not the merged view's); {armed_clause}. This is "
+            "the `#11455` reading: one armed TEMPLATE is not a shipped default)"
         )
     if not stated or not shared or not gated:
         verdict = "NOT MET"
