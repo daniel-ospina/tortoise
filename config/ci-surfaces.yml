@@ -9013,9 +9013,11 @@ tier1:
   # ⚠️ RE-MEASURED once the sibling `CORE_ALSO` entry landed (an earlier revision
   # of this comment still claimed the `tools/` half was pin-ABSENT, which stopped
   # being true at that point): with it, `select(["tools/findings_ledger_check.py"])`
-  # -> `surfaces: ['core']`, 813 files; the docs arm -> 88 files, pin PRESENT. So a
-  # `tools/` diff is WIDTH (`core`, not tier-1 smoke) while `docs/` and the 88-file
-  # tier-1 path are what keep the pin ALIVE. Pinned by
+  # -> `surfaces: ['core']`, 819 files; the docs arm -> 89 files, pin PRESENT. So a
+  # `tools/` diff is WIDTH (`core`, not tier-1 smoke) while `docs/` and the 89-file
+  # tier-1 path are what keep the pin ALIVE. Both counts move with `main` — they are
+  # re-derived here (`select()` in-process) rather than carried, and the ARM each
+  # sentence names is what the pin asserts, never the count. Pinned by
   # `tests/test_findings_ledger_2852.py::test_test_file_is_selected_on_the_diffs_it_guards`
   # (the `tools/` arm's `surfaces == ['core']` comes from the sibling `CORE_ALSO`
   # entry in `tools/ci_selection.py`, the `docs/` arm from THIS row).
@@ -11128,13 +11130,6 @@ durations:
   # red on `main` at 43db5c0f — fixed here because a stale citation in the map
   # this PR edits blocks every landing, not only this one — and #11904 landed it
   # without re-deriving this row, which is the staleness `#11959` records.
-  # control fails with `KeyError: 'WS-F'` while the other 58 pass).
-  # -> 57 once `#11904`'s recut control landed
-  # (`test_the_recut_row_and_survivors_hold_their_status_by_ISSUE`: the row it
-  # re-cut to VERIFIED-FIXED and the survivors' status-by-ISSUE rule get their own
-  # pin, so that recut cannot rot back unseen — one function, no new parametrised
-  # arm, which is why the collected count moves 58 -> 59 with it; #11904 landed it
-  # without re-deriving this row, which is the staleness `#11959` records).
   # Round 14's own guard exists because `Path.exists()` re-raises
   # `PermissionError` (only the ENOENT family is swallowed) — each of these
   # controls is mutation-verified: it FAILS with its guard reverted.
