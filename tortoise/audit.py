@@ -1214,14 +1214,13 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                        "record exists (measured: no factor, no record): promote it "
                        "to live **and then re-point onto it** — promotion alone "
                        "repairs nothing, because the stale edge still ends at the "
-                       "superseded Object (measured: ``confidences {}`` with the "
-                       "promotion alone, ``effective_n 2.9296`` once the edge moves "
-                       "too)"
+                       "superseded Object (measured: ``effective_n 2.9296`` once the "
+                       "edge moves too)"
                        if not s["is_operator"] else
                        "strips like a terminal input (#780) — promote it to live "
                        "**and then re-point onto it**: promotion alone leaves the "
-                       "stale edge where it is (measured: ``confidences {}``)") + \
-                    "; " + _dropped_input(s))
+                       "stale edge where it is, and the unread input is one EP "
+                       "drops") + "; " + _dropped_input(s))
         if s["carrier_terminal"]:
             return ("; the successor it names is ITSELF "
                     f"{_quoted(_status_or_flag(s['carrier_status'], s['carrier_outdated']))}"
@@ -1428,8 +1427,14 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "input (``is_operator`` absent or ``false``"
                 + (" and no ``op_type`` set), because an edge written to a dead "
                    "or shaped node builds no factor. " if not s["is_operator"]
-                   else "), because an edge written to a dead node builds no "
-                        "factor (an ``op_type`` only is ADMITTED here). "))
+                   # ⛔ The operator lane's consequence is the ARITY LADDER, not an
+                   # absolute: measured on a three-input operator, writing the edge
+                   # onto a dead carrier leaves the factor running over the two
+                   # survivors (``effective_n 2.52``, ``skipped: None``)
+                   # (#12210 review, P2).
+                   else "), because an edge written to a dead node is an input EP "
+                        "drops: " + _dropped_input(s) + " (an ``op_type`` only is "
+                        "ADMITTED here). "))
 
     def _chain_tail(s: dict) -> str:
         """What to do when the named successor is not a live target.
@@ -1577,8 +1582,12 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # reader pick a live one, so it is not a DROP either.
         live_head = (s["next_count"] == 1 and not s["next_terminal"]
                      and not _next_refused(s))
-        neither_drops = (neither_arm and not live_head
-                         and (s["carrier_count"] == 0 or unread))
+        # ⛔ …and NOT a row with no successor name at all: naming a live successor,
+        # clearing the shape and re-pointing measurably restores the belief
+        # (`effective_n 2.5236`, re-audit 0 rows) — measured on the successorless
+        # neither-arm row, whose own leading instruction orders exactly that
+        # (#12210 review, P3).
+        neither_drops = (neither_arm and unread and not live_head)
         if s["carrier_count"] == 1 and _succ_refused(s):
             # ⛔ A CARRY needs a successor EP actually reads — and the check may only
             # say so when the name resolves to ONE carrier (an ambiguous name is the
@@ -1642,9 +1651,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "a DRAFT successor is the destination ONCE PROMOTED: set it "
                 "``status='live'`` first, then CARRY the IMPL (and any NAND that "
                 "STILL APPLIES) onto it — measured, the same edge write builds the "
-                "factor after the promotion (``effective_n 2.263``) and builds none "
-                "before it" + _shape_too + ". Drop only a refutation that MOTIVATED "
-                "the correction")
+                "factor after the promotion (``effective_n 2.263``) and, before it, "
+                "EP instead drops that input and re-scores over whatever remains "
+                "(the arity ladder stated above)" + _shape_too
+                + ". Drop only a refutation that MOTIVATED the correction")
         elif unread and not neutral:
             # ⛔ …and NOT on a NEUTRAL row, which transfers nothing: a CARRY there is
             # false (measured: carrying a neutral input onto a live node leaves both

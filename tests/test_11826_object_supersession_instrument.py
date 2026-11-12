@@ -1418,11 +1418,16 @@ def test_a_shaped_endpoint_with_no_successor_gets_no_edge_rewrite(sdk):
         "the shape is cleared, so this row is a DIRECT row now: " + after[0].fix)
     # The archive sentence must not claim a strip that never happens either.
     assert "EP strips a terminal input either way" not in fix, fix
-    # ⛔ §3.1's disposition on a neither-arm row is DROP: this fix says no edge
-    # rewrite repairs it, so offering a CARRY in the appended triage would
-    # contradict the repair it rides on (#12111 review).
-    assert "may CARRY to the successor" not in fix, fix
-    assert "the disposition here is DROP" in fix, fix
+    # ⛔ §3.1's disposition here is CARRY, and that is a MEASURED correction to what
+    # this test pinned at #12111: on this row the string orders "name the successor,
+    # then re-point the input onto it", and performing exactly that restores the belief
+    # (measured: clear the shape, name a live successor, re-point → ``effective_n
+    # 2.5236`` on both endpoints, re-audit 0 rows), so a DROP beside it denied the
+    # repair the same string prescribes (#12210 review, P3).
+    assert "may CARRY to the successor" in fix, fix
+    assert "the disposition here is DROP" not in fix, (
+        "the string's own repair measurably works, so the disposition cannot be DROP: "
+        + fix)
 
 
 def test_a_flag_dead_successor_names_the_flag_not_none(sdk):
@@ -3115,3 +3120,63 @@ def test_a_dead_input_on_a_three_input_operator_is_not_told_it_builds_no_factor(
     assert "builds no factor" not in fix, (
         "with two inputs left the factor still runs, so the absolute claim is false: "
         + fix)
+
+
+def test_the_ambiguous_operator_clause_states_the_arity_ladder(sdk):
+    """ "an edge written to a dead node builds no factor" is false at operator arity ≥ 3.
+
+    Measured on a three-input operator (`create_operator("IMPL", p, [v1, p2])`) with
+    the successor name carried by two Objects, one dead: writing the edge onto the dead
+    carrier leaves the factor running over the two survivors (`effective_n 2.52`,
+    `skipped: None`), so the absolute claim is false where the ladder holds
+    (#12210 review, P2).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    p2 = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"], p2["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="archived")
+    _q(sdk, "CREATE (:Object {id:'dead-twin', name:'PolicyV2', "
+            "objectKind:'other', status:'retracted'})", {})
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "carried by 2 Objects" in fix, fix
+    assert "builds no factor" not in fix, (
+        "with two inputs left the factor still runs, so the absolute is false: " + fix)
+    assert "TWO OR MORE run without it" in fix, (
+        "the operator lane states the arity ladder: " + fix)
+
+
+def test_the_draft_strings_state_the_arity_ladder(sdk):
+    """The draft consequence is the ladder too, on a three-input operator.
+
+    Measured: with three inputs, writing the edge onto a draft BEFORE promoting it
+    leaves the factor running (`effective_n 2.5246` on both survivors), and promoting
+    first leaves the same two running — so neither "builds none before it" nor
+    "``confidences {}``" holds once two inputs survive the strip
+    (#12210 review, P2).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    p2 = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"], p2["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="draft")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "ONCE PROMOTED" in fix, fix
+    assert "builds none before it" not in fix, (
+        "two survivors keep the factor running, so 'builds none' is false: " + fix)
+    assert "the arity ladder stated above" in fix, (
+        "the draft consequence must defer to the ladder, not restate an absolute: "
+        + fix)
+    assert "promotion alone leaves the stale edge where it is (measured: ``confidences {}``)" \
+        not in fix, (
+        "the measured outcome at this arity is not an empty confidence set: " + fix)
