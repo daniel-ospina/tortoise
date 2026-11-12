@@ -114,8 +114,9 @@ _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
 #: bought. A positional argument cannot be reached by a kwargs splat at all, so
 #: the gate below is total: whatever a caller names,
 #: `point` in the keyword payload is refused, and `point` inside the positional
-#: one is refused. `add_event` / `emit_belief` still refuse it at their own
-#: doors, for a message that names the door the caller actually called.
+#: one is refused. `add_event` / `emit_belief` / `add_object` still refuse it
+#: at their own doors, for a message that names the door the caller actually
+#: called.
 #:
 #: ⛔ AND THE SAME HOLE, ONE NAME OVER (#11948): `**props` splats onto the
 #: ENVELOPE as well, where `type=` RE-TYPES the record and `event_id=` /
@@ -294,11 +295,11 @@ def _refuse_invisible_point_kinds_in_payload(payload: dict) -> None:
     for kind_prop, value in kind_spellings_in_payload(payload):
         if kind_prop == "pointKind":
             # ⛔ NOT one door's name: this gate runs at the FUNNEL (`_emit`) for
-            # every write door, and eagerly at the doors that carry a payload
-            # (`add_point`, `emit_belief`), so naming one of them told a caller
-            # who came in through another to fix the wrong call — and on the
-            # `emit_belief` path this message is the caller's ONLY signal
-            # (nothing journalled, nothing logged).
+            # every write door, and `emit_belief` ALSO runs its PURE half eagerly
+            # (outside the arm that swallows I/O). Naming `add_point` — which
+            # runs no eager gate at all — told a caller who came in anywhere else
+            # to fix the wrong call, and on the belief path this message is the
+            # caller's ONLY signal (nothing journalled, nothing logged).
             _refuse_invisible_kind("pointKind", value, door="EventAPI")
 
 
@@ -431,9 +432,17 @@ class EventAPI:
         # empty. ⚠️ THE CONTENTS ARE CALLER-REACHABLE ALL THE SAME — `add_point`
         # does `p.update(fields)` and hands `p` positionally, which is how the
         # envelope family got in one nesting level down (#11948 review at
-        # `95b98e6cf1`). So the record is checked against BOTH families, and
-        # ALL THREE refusals run before the append below (the commit point),
-        # which therefore leaves nothing to replay.
+        # `95b98e6cf1`). So the record is checked against TWO of the three
+        # families — `point` and the envelope names — and ALL THREE refusals run
+        # before the append below (the commit point), which therefore leaves
+        # nothing to replay.
+        #
+        # ⛔ THE MARKER FAMILY IS DELIBERATELY NOT CHECKED HERE, and that is not
+        # a gap to tidy away: `_point`'s own `stamp_journal_embedding` writes
+        # `embedding_width` into this very record, so a funnel-wide marker
+        # refusal would refuse every `add_point`. The caller-marker refusal
+        # lives at that door (`_forged_keys`) instead, and `add_operator` takes
+        # no `**kwargs` — so no public door can reach this channel with one.
         _refuse_caller_named_record_keys(payload, f"the `{type_}` envelope")
         if record:
             if len(record) > 1:
@@ -1297,10 +1306,14 @@ class EventAPI:
         inner.get("eventId")``).
 
         ``**extra`` is a passthrough straight onto the ENVELOPE, so a caller can
-        put a top-level ``embedding`` on the record here. It does not have to
-        police that itself: ``_emit`` refuses a caller-set marker and stamps
-        every vector that reaches it, so the rule lives in one place. It must
-        NOT accept a record-shaped payload (`point=`) either — a caller-built
+        put a top-level ``embedding`` on the record here. That is allowed — a
+        vector is not an origin attestation — and ``_emit`` stamps every vector
+        that reaches it. A caller-set MARKER is a different matter: it is refused
+        here AS WELL AS at the funnel, the same set in two placements
+        (`_refuse_caller_named_markers`), so the message names the door the
+        caller actually used and a newly added family cannot be wired at one
+        placement and silently missing at the other. It must NOT accept a
+        record-shaped payload (`point=`) either — a caller-built
         record reaches the replay's fold chain untested by that rule — so it is
         refused here for a message that names THIS door, and again at `_emit`
         (`_NESTED_RECORD_KEYS`), which is where the refusal is total. Nor may
