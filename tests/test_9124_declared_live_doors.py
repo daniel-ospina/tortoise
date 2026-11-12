@@ -505,7 +505,7 @@ _UNRESOLVED = {
     # `probe.format(label=…, match_prop=…)`, so the resolver reports
     # '<unresolved>' for the `g.query` call. Checked by hand: the rendered
     # statement is `MATCH (n:<label> {<match_prop>:$id}) RETURN
-    # n.amountMinor, n.currency, n.minorUnitExponent, n.verbatim, n.asOf` — a
+    # n.amountMinor, n.currency, n.minorUnitExponent, n.verbatim` — a
     # read, with no SET/CREATE/MERGE/DELETE/REMOVE and no write procedure. It
     # is this function's ONLY handle reach; the view it returns is assembled by
     # `money_view_after_update`, a pure mapping operation that never sees `g`.
@@ -514,6 +514,18 @@ _UNRESOLVED = {
     # censused door — performs inside that door's own declared lane. This row
     # therefore declares a read and blesses no undeclared write.
     "_money_views_for_update",
+    # #11827: the SAME shape as the row above, for the percent/evidence probe.
+    # `_STORED_VALUE_SHAPES_PROBE` is a template with `{}` placeholders filled by
+    # `.format(...)`, so the resolver reports '<unresolved>'. Checked by hand: the
+    # rendered statement is `MATCH (n:<label> {<match_prop>:$id}) RETURN
+    # n.amountMinor, n.currency, n.minorUnitExponent, n.basisPoints` — a read,
+    # with no SET/CREATE/MERGE/DELETE/REMOVE and no write procedure, and it is
+    # this function's ONLY handle reach (it returns a frozenset of shape names).
+    # It appends no record: it runs BEFORE the write its caller — a censused door
+    # — performs inside that door's own declared lane, and it exists to grade the
+    # state that write leaves. This row therefore declares a read and blesses no
+    # undeclared write.
+    "_stored_value_shapes",
     # #9962: the state view's mitigation read interpolates
     # `live._live_only('m.status')` — the DAMPENER's own predicate
     # (`weights.py`'s `compute_operator_weight`), which is the point of the row:

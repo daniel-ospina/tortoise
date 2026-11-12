@@ -311,7 +311,8 @@ ruled out when there was no pid to observe); the board's OPEN-ISSUE read hit its
 cap, so an issue outside that window cannot be attributed and its absence from
 the index is NOT a measured "nobody" (the board stamps
 `reconciliation.open_issues_truncated`, and an unstamped board is rebuilt — the
-writer this replaces capped that read at 800 against 989 open issues today); or
+writer this replaces capped that read at 800 against the 989 open issues
+it then held); or
 the board
 could not be obtained. ⚠️ A TERMINAL workspace is NOT a way to demote: its cmux
 workspace is GONE, which says nothing about whether a pi process outlived it
@@ -345,9 +346,11 @@ records `reconciliation.open_issues_truncated`; when it is true, an issue with n
 attribution entry is INCOMPLETE rather than a measured "nobody", because the
 window cannot prove the negative. A board that does not stamp the flag AT ALL is
 refused and REBUILT rather than read as complete — the writer this replaces
-capped the same read at 800 while this repo has 989 open issues, so a missing
-stamp means coverage is UNKNOWN, not complete. While the read IS wide enough
-(989 open issues against a limit of 2000 on 2026-10-14 — the normal case),
+capped the same read at 800 while this repo then held 989 open issues, so a
+missing stamp means coverage is UNKNOWN, not complete. While the read IS wide
+enough (`OPEN_ISSUES_LIMIT` above this repo's live count — 989 against a limit of
+2000 was the normal case on 2026-10-14, and the count has since passed 2000, which
+is what `fleet_state.OPEN_ISSUES_WINDOW_RECORDED_CROSSING` records),
 absence in `index.issues` IS measured: the issue was in the window and no lane's
 branch slug, worktree path or session text named it. The branch and worktree
 surfaces block independently on the issue number either way.
@@ -5924,8 +5927,9 @@ def _board_can_answer(state: dict) -> str:
     # ⛔ AND WAS THAT OPEN-ISSUE READ WIDE ENOUGH TO PROVE A NEGATIVE? The flag
     # must be PRESENT and a BOOL, because it is the one field whose absence is
     # NOT the safe reading (#8175): the writer this change replaces capped the
-    # same read at 800 against 989 open issues today, so an unstamped board's
-    # coverage is UNKNOWN, not complete — such a board is rebuilt, never served.
+    # same read at 800 against the 989 open issues it then held, so an
+    # unstamped board's coverage is UNKNOWN, not complete — such a board is
+    # rebuilt, never served.
     if not isinstance(rec.get("open_issues_truncated"), bool):
         return (
             "the board does not record whether its OPEN-ISSUE read was truncated "
