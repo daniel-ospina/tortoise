@@ -755,15 +755,23 @@ _INERT_MESSAGE = re.compile(
 )
 
 #: Quoted spans removed WHOLE (not replaced), so a bare-message line reads as
-#: `echo   ` and nothing else. This is a shape test, NOT a shell parser — it is only
-#: ever allowed to say "this line cannot execute anything", and every case it gets
-#: wrong lands on the strict side (see `_message_line_is_inert`).
+#: `echo   ` and nothing else. This is a SHAPE TEST, NOT A PARSER: a span it removes is
+#: text that is believed to be inert, so a removal is only ever as safe as this regex —
+#: and it can be wrong in the LENIENT direction, which is why the two guards below exist
+#: rather than a claim that it cannot be.
 #:
-#: ⛔ REMOVING SPANS IS WHY THE ANCHOR MUST ALSO HOLD ON THE RAW LINE. On
-#: `"bash" "tools/h.sh" echo` this deletes both quoted words and leaves ` echo`, which
-#: would satisfy the anchored question while bash runs `bash tools/h.sh` — a fail-open
-#: that review found. `_MESSAGE_WORD` is the guard that makes it impossible.
-_STRIP_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+#: ⛔ TWO FAIL-OPENS THIS REGEX CAUSED, both found by review and both pinned by tests.
+#:
+#:   1. DELETING A LEADING WORD MOVES COMMAND POSITION. On `"bash" "tools/h.sh" echo`
+#:      it deletes both quoted words and leaves ` echo`, satisfying the anchored
+#:      question while bash runs `bash tools/h.sh`. `_MESSAGE_WORD` — the message command
+#:      must be the first word of the RAW line — is the guard.
+#:   2. AN ESCAPED QUOTE IS NOT AN OPENER. Bash treats `\"` as a LITERAL quote, so
+#:      `echo>\" ; bash tools/h.sh ; \"` is an `echo` with a redirect, then a REAL `;`
+#:      separator, then a real `bash`. A naive `"[^"]*"` started a span at that escaped
+#:      quote and swallowed the separator, leaving `echo>\` — which reads as a bare
+#:      message with one redirect. The lookbehind is the guard.
+_STRIP_QUOTED = re.compile(r"(?<!\\)'[^']*'|(?<!\\)\"[^\"]*\"")
 
 #: The message command must be the FIRST WORD OF THE RAW LINE — i.e. in command
 #: position, not brought into command position by `_STRIP_QUOTED` deleting a quoted word
@@ -799,14 +807,19 @@ def _message_line_is_inert(line: str) -> bool:
         stripped text looks bare. `"bash" "tools/h.sh" echo` strips to ` echo` and would
         otherwise answer `True` for a line that RUNS `bash tools/h.sh`.
 
-    The consequence, stated narrowly because an earlier version of this docstring
-    overstated it: **a line this returns `False` for is searched by the RAW-line rule the
-    PRE-#12106 scan applied to every line.** Relative to that scan the exclusion can only
-    REMOVE detections, never hide one it would have made. Relative to #12106's own cut 3
-    (which blanked prose inside message segments) it is strictly WIDER on every message
-    line, because it does not blank anything it has not proved inert — measured: 0
-    differing job verdicts across the tree. Do NOT "restore" cut 3's prose blanking to
-    reconcile the two: that blanking is the modelling this cut deliberately drops.
+    WHAT THE CODE ACTUALLY GUARANTEES, stated without the monotone claim two earlier
+    versions of this docstring made and could not support: **a line this returns `False`
+    for is searched by the RAW-line rule the PRE-#12106 scan applied to every line.** So
+    relative to that scan the exclusion REMOVES detections and adds none — measured: 0
+    gained over a 60 000-line fuzz corpus, and exactly 4 lines / 0 added across the tree.
+    **A removal is only as safe as the shape test behind it**: this is a regex, not a
+    parser, so a wrong answer in the lenient direction is possible and two have already
+    happened (see `_STRIP_QUOTED`). The mitigation is not a promise but the guards —
+    `$(`-anywhere, `_STRIP_QUOTED`'s lookbehind, `_MESSAGE_WORD` — each pinned by a
+    fail-open test. Relative to #12106's cut 3 (which blanked prose inside message
+    segments) this is wider on every message line: measured, 0 differing verdicts across
+    the tree. Do NOT "restore" cut 3's prose blanking to reconcile the two — that
+    blanking is the modelling this cut deliberately drops.
 
     A pipeline whose consumer runs the message (`echo 'bash h.sh' | bash`) is inert to the
     MESSAGE and executable to `bash` — the pipe is not a redirect, and a message's text
@@ -984,10 +997,11 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     Classes 4 and 5 are pinned below rather than just remembered, because they are the
     shapes that made "model the shell" the wrong approach: the rule is now CONSERVATIVE —
     `_message_line_is_inert` answers for the WHOLE line and every other line is searched by
-    the RAW-line rule the PRE-#12106 scan applied to every line. Relative to that scan the
-    exclusion can only REMOVE detections. The pinned INERT tail proves the false positive is
-    still gone, and the pinned HAZARD rows prove the exclusion cannot be widened by
-    accident.
+    the RAW-line rule the PRE-#12106 scan applied to every line, so the exclusion removes
+    detections and adds none (measured: 0 gained on a 60 000-line fuzz corpus). Each
+    removal is only as safe as the shape test behind it, so every guard the shape test
+    relies on has a HAZARD row here, and the pinned INERT tail proves the false positive
+    is still gone.
     """
     scripts = _gh_executing_scripts()
     helper = "install-ci-runner-x64.sh"
@@ -1030,6 +1044,21 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     assert _gh_hazards(['            "bash" "tools/' + helper + '" echo'], scripts)
     assert _gh_hazards(['            "/bin/bash" "tools/' + helper + '" echo'], scripts)
     assert _gh_hazards(["            " + "'" + "tools/" + helper + "'" + " echo"], scripts)
+
+    # 9 — an ESCAPED quote is not a quote OPENER. Bash treats `\"` as a LITERAL quote, so
+    #     the `;` after it is a REAL separator; a naive `"[^"]*"` starts a span there and
+    #     swallows the separator, leaving a shape that reads as a bare message. Found by
+    #     review on this cut — 256 spellings executed the helper while the scan was silent,
+    #     and BOTH baselines flagged them, so this was the strongest form of regression.
+    #     `_STRIP_QUOTED`'s `(?<!\\)` lookbehind is the guard.
+    assert _gh_hazards([f'            echo>\\" ; bash tools/{helper} ; \\"'], scripts)
+    assert _gh_hazards([f'            echo>2\\" ; bash tools/{helper} ; \\"'], scripts)
+    assert _gh_hazards([f"            echo>\\' ; bash tools/{helper} ; \\'"], scripts)
+    assert _gh_hazards([f'            printf>\\" ; bash tools/{helper} ; \\"'], scripts)
+    assert _gh_hazards(
+        [f'            echo "run it by hand" > /tmp/log\\" ; bash tools/{helper} ; \\"'], scripts
+    )
+    assert _gh_hazards([f'            echo -e "note" >&2\\" ; bash tools/{helper} ; \\"'], scripts)
 
     # 7 — the helper as the ARGUMENT-EXECUTING end of a pipeline
     assert _gh_hazards([f"            printf x | bash tools/{helper}"], scripts)
