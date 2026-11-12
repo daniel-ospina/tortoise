@@ -119,7 +119,7 @@ from typing import Any
 
 #: The bound on the pre-wipe count read. Imported from the sibling verb that
 #: bounds the SAME full-graph shape, so the two cannot drift apart.
-from tortoise.cache_projection import NODE_TABLES
+from tortoise.cache_projection import NODE_TABLES, is_relationship_target
 from tortoise.record_reconcile import CACHE_READ_TIMEOUT_MS
 from tortoise.residency import COVERAGE_COMPLETE
 
@@ -220,7 +220,7 @@ class RestoreOutcome:
     #: :attr:`nodes_selected` can be below ``record_nodes`` without anything
     #: being lost, and they are reported so the difference is auditable.
     refused_keys: tuple[tuple[str, str], ...] = ()
-    #: `#11747` — vectors the projection REFUSED to store, and the labels they
+    #: `#11747` — vectors the projection REFUSED to store, and the targets they
     #: were on. The projection drops a vector on a label no query leg serves
     #: (``cache_projection.UNSERVED_VECTOR_LABELS``), so a restore over a record
     #: whose rows carry one DELETES it from the cache. ⛔ Reported, never silent:
@@ -228,6 +228,12 @@ class RestoreOutcome:
     #: nothing, and no re-run can bring the vector back — the record row is the
     #: only carrier and it is what the drop was applied to.
     dropped_vectors: int = 0
+    #: The targets behind :attr:`dropped_vectors` — RECORD LABELS, and since
+    #: `#12015` a ``<relationship:TYPE>`` entry for an EDGE vector
+    #: (``cache_projection.relation_vector_declined_properties``). ⛔ A relationship
+    #: has NO LABEL, so a consumer that prints or classifies these must go through
+    #: ``cache_projection.is_relationship_target`` rather than assume every entry is
+    #: a label: calling an edge a node names the wrong object as the survivor.
     dropped_vector_labels: tuple[str, ...] = ()
     #: ``complete`` / ``partial`` from the projection's own declaration.
     coverage: str | None = None
@@ -375,9 +381,9 @@ class RestoreOutcome:
             # its vector dropped. Calling it a "node" would tell an operator the
             # wrong object survived.
             targets = ", ".join(self.dropped_vector_labels) or "unrecorded"
-            has_node = any(not t.startswith("<relationship:")
+            has_node = any(not is_relationship_target(t)
                            for t in self.dropped_vector_labels)
-            has_edge = any(t.startswith("<relationship:")
+            has_edge = any(is_relationship_target(t)
                            for t in self.dropped_vector_labels)
             kept = ("The nodes and edges are restored" if has_node and has_edge
                     else "The edges are restored" if has_edge

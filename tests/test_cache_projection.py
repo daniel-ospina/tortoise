@@ -1244,15 +1244,74 @@ def test_the_PLAN_reports_an_edge_drop_as_a_relationship_type():
     assert "<relationship:IMPL>" in report.render(), report.render()
 
 
-def test_the_declined_edge_property_set_is_DERIVED_not_a_second_list():
+def test_the_declined_edge_property_set_is_DERIVED_not_a_second_list(monkeypatch):
     """`#12015` — one owner for WHICH properties are vectors, on the edge door too.
 
     A literal `{"embedding"}` here would be the second declaration `#11747` spent a
     review round removing on the served-label side: widen the store seam and the edge
     writer would keep storing the new property with nothing going red.
+
+    ⛔ THE PIN MOVES THE INPUT, or it pins nothing (`#12015` review, finding R3): the
+    body is `return stored_vector_props()`, so asserting equality with
+    `stored_vector_props()` compares the function with its own implementation — a
+    tautology that stays GREEN when the body is replaced by the literal it exists to
+    catch (measured: `frozenset({"embedding"})` passed). WIDENING the set is the
+    falsifier, exactly as the node rule's pin recomputes its derivation independently.
     """
-    assert cp.relation_vector_declined_properties() == cp.stored_vector_props()
     assert "embedding" in cp.relation_vector_declined_properties()
+    monkeypatch.setattr(cp, "STORED_VECTOR_PROPS",
+                        frozenset({"embedding", "embedding_widened"}))
+    assert "embedding_widened" in cp.stored_vector_props()
+    assert "embedding_widened" in cp.relation_vector_declined_properties(), (
+        "the edge rule is a SECOND list: it did not follow the store seam when the "
+        f"seam widened — {sorted(cp.relation_vector_declined_properties())}")
+    # …and the doors actually use it, not just the seam.
+    rel = cp.relation_from_row(_relation_row(
+        props={"embedding_widened": [0.5, 0.25]}))
+    assert "embedding_widened" in rel.dropped_vectors, rel.dropped_vectors
+
+
+def test_a_dropped_edge_vector_does_not_leave_the_verbatim_marker_behind():
+    """`#12015` review — the marker must not outlive the value it describes.
+
+    A relation row's tail is an OPEN set, so `embedding` and `embedding_verbatim` can
+    arrive together. The node door has carried this exact rule since `#11747`
+    (`node_statement`'s `and not dropped`): a statement that withholds the vector must
+    not also assert a storage FORM for it. Both edge doors, because either can be the
+    one that builds the statement.
+    """
+    rel = cp.relation_from_row(_relation_row(
+        props={"embedding": [0.5, 0.25], "embedding_verbatim": True, "label": "x"}))
+    assert "embedding" in rel.dropped_vectors
+    assert cp.VERBATIM_MARKER not in rel.props, rel.props
+    assert rel.props["label"] == "x"
+    stmt = cp.relation_statement(rel)
+    assert cp.VERBATIM_MARKER not in stmt.params["props"], stmt.params
+    # The direct door too: the marker is dropped when a vector was withheld.
+    direct = cp.relation_statement(cp.RecordRelation(
+        rel_type="IMPL", src_label="Point", src_key="a", tgt_label="Point",
+        tgt_key="b", idx=0,
+        props={"embedding": [0.5, 0.25], "embedding_verbatim": True}))
+    assert cp.VERBATIM_MARKER not in direct.params["props"], direct.params
+    # Control: no vector, no drop — the marker rides the edge exactly as before.
+    clean = cp.relation_from_row(_relation_row(props={"embedding_verbatim": True}))
+    assert clean.dropped_vectors == {}
+    assert cp.VERBATIM_MARKER in clean.props, clean.props
+
+
+def test_the_relationship_target_format_has_ONE_owner():
+    """`#12015` review — the report key's format is decided in one place.
+
+    `record_restore` discriminates an edge entry from a record label with
+    `is_relationship_target`, and a record label can never shadow it (the only node
+    entries are `UNSERVED_VECTOR_LABELS` ⊆ `NODE_TABLES`). Spelling the format out at
+    each site is how one of them drifts and silently classifies every entry as a node.
+    """
+    assert cp.relationship_target("IMPL") == "<relationship:IMPL>"
+    assert cp.is_relationship_target(cp.relationship_target("IMPL")) is True
+    assert cp.is_relationship_target("Session") is False
+    for label in cp.NODE_TABLES:
+        assert not cp.is_relationship_target(label), label
 
 
 def test_is_verbatim_is_an_or_across_the_sides_it_is_given():
