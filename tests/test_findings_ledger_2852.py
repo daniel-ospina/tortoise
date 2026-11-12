@@ -541,6 +541,9 @@ def test_a_blank_prose_cell_is_rejected(tmp_path, monkeypatch, cell, column, abs
         "<script><!--<script></script>-->lorem</script>",  # DOUBLE-escaped: the inner close is not one
         "<template><template>x</template>VISIBLE",  # `<template>` NESTS: the inner close is not ours
         "<template><template/>VISIBLE</template>VISIBLE</template>",  # HTML ignores a self-closing `/`
+        "<template><script></template></script>VISIBLE",  # a nested RAW-TEXT body swallows the close
+        "<template><style></template></style>VISIBLE",
+        "<template><textarea></template></textarea>VISIBLE",  # RCDATA body, likewise
         "<script>[b](</script>)VISIBLE</script>",  # a RECOGNISED link re-emits its destination
         "<template><!-- </template>VISIBLE -->",  # PARSED but hidden: a comment's close is not one
         "[<br>](https://x)",  # a LINK LABEL renders; the destination does not
@@ -740,6 +743,44 @@ def test_an_unlisted_placeholder_is_the_declared_limit():
 
 
 @pytest.mark.parametrize(
+    "cell",
+    [
+        "<span hidden>lorem ipsum</span>",  # an element the BROWSER hides with CSS
+        "[][ref]",  # a REFERENCE-style link with no definition renders its literal text
+    ],
+)
+def test_a_declared_limit_is_pinned_as_accepted(cell):
+    """FAILS if a declared limit becomes a silent hole — in either direction.
+
+    §8 names three limits; the placeholder one has its own pin above, and these are the other
+    two. A declared limit that is not pinned is a declaration nobody has tested: the guard could
+    begin refusing them (a false accusation on a required job) or the declaration could go stale
+    against a code change, and neither would red anything. Both are measured with a real renderer
+    in §8's own words: a CSS-hidden element renders blank, and `[][ref]` renders its literal text.
+    """
+    original = flc.read_doc(REPO)
+    mutated = flc._rewrite_first_correction_cell(original, 3, f" {cell} ")
+    assert mutated != original, "the §3 row shape moved — re-derive this mutation"
+    assert flc.check_evidence_cells(mutated) == []
+
+
+def test_a_near_copy_is_the_declared_limit():
+    """FAILS if the copy test starts closing the NEAR-copy class it declares open.
+
+    §8's third limit: the copy test is EQUALITY, so a claim with one word added, dropped or
+    swapped — including the word that inverts it — passes. That is deliberate (a heuristic that
+    guessed at near-copies would refuse the derivations rows (b), (k) and (l) rely on), and it is
+    the limit a reader has to know about, which is why it is pinned rather than only declared.
+    """
+    original = flc.read_doc(REPO)
+    claim = flc._first_correction_cell(original, 2).strip()
+    near = f" {claim} — and this is false. "
+    mutated = flc._rewrite_first_correction_cell(original, 3, near)
+    assert mutated != original, "the §3 row shape moved — re-derive this mutation"
+    assert flc.check_evidence_cells(mutated) == []
+
+
+@pytest.mark.parametrize(
     ("column", "cell", "expect"),
     [
         (4, "<!-- **STILL-TRUE** -->", "no bolded verdict"),
@@ -832,6 +873,10 @@ def test_a_correction_that_quotes_its_claim_and_adds_is_accepted():
         "<script><!-- </script>AFTER -->",  # the escaped state ends at the close tag
         "<template></template>VISIBLE",  # the body ends at its OWN close tag
         "<script><!--<script>--></script>VISIBLE",  # `-->` leaves the double-escaped state
+        "<script><!--<script></script>VISIBLE",  # an UNTERMINATED `<!--` is escaped, not a comment
+        "<template>[a</template>b](u)VISIBLE",  # a link's LABEL is markup: the close tag is real
+        "<textarea>VISIBLE</textarea>",  # RCDATA text is SHOWN
+        "<textarea><!-- note </textarea>",  # …and so is a comment's text inside it
         "x Ложно",  # a placeholder beside a non-Latin word is not placeholders alone
     ],
 )

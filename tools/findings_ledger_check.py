@@ -470,6 +470,21 @@ RAWTEXT_ELEMENTS = frozenset(
     {"script", "style", "title", "iframe", "noembed", "noframes", "noscript"}
 ) | PARSED_BUT_HIDDEN_ELEMENTS
 
+#: Elements whose body is LITERAL TEXT — RCDATA (`textarea`, `xmp`) and `<plaintext>`, which
+#: swallows the rest of the input — and which a reader DOES see. Treating them as ordinary
+#: content stripped the tags and comments inside them, which is doubly wrong: the browser shows
+#: that text, so `<textarea><!-- </textarea> -->` was refused as blank although it reads
+#: `<!-- ` (measured, thirteenth review of this change).
+LITERAL_TEXT_ELEMENTS = frozenset({"textarea", "xmp", "plaintext"})
+
+#: Elements whose BODY swallows markup for the tokenizer, whether or not a reader sees it:
+#: RAW-TEXT and RCDATA bodies (`script`, `style`, `title`, `iframe`, `noembed`, `noframes`,
+#: `noscript`), plus the two whose text is shown but whose markup is not parsed (`textarea`,
+#: `xmp`) and `<plaintext>`, which swallows the rest of the input. A `</template` inside one of
+#: these is TEXT, which is why the `<template>` walk skips the body.
+_SWALLOWING_ELEMENTS = RAWTEXT_ELEMENTS | {"textarea", "xmp", "plaintext"}
+
+
 #: The element name of a matched OPEN tag, for the raw-text switch above.
 OPEN_TAG_NAME_RE = re.compile(r"<([A-Za-z][A-Za-z0-9-]*)")
 
@@ -906,6 +921,14 @@ def _rendered_cell_text(cell: str) -> str:
             i = tag.end()
             opened = OPEN_TAG_NAME_RE.match(tag.group(0))
             name = opened.group(1).casefold() if opened else ""
+            if name in LITERAL_TEXT_ELEMENTS:
+                # Shown as WRITTEN: no tag, comment or escape inside it is markup, and the text is
+                # what a reader sees — so it is appended literally (entities decoded, since RCDATA
+                # decodes character references) instead of being stripped away.
+                body_end, element_end = _literal_text_body_end(cell, i, name)
+                out.append(_ENTITY_RE.sub(lambda m: html.unescape(m.group(0)), cell[i:body_end]))
+                i = element_end
+                continue
             if name in RAWTEXT_ELEMENTS:
                 # The BODY is not rendered: skip to the close tag the browser ACTUALLY sees,
                 # or to the end of the cell when there is none.
@@ -989,14 +1012,18 @@ _SCRIPT_START_RE = re.compile(r"<script(?=[\s/>])", re.IGNORECASE)
 
 
 def _mask_escapes_and_spans(cell: str, start: int) -> str:
-    r"""`cell[start:]` with ESCAPES and CODE SPANS blanked in place, so their characters cannot
-    match a tag.
+    r"""`cell[start:]` with the characters a browser never reads as markup blanked in place.
 
-    markdown-it emits both entity-escaped (`\</script>` and `` `</script>` `` become
-    `&lt;/script&gt;`), so a close tag inside either is not one the browser ever sees — measured.
-    Nothing else is masked: a COMMENT and a LINK are emitted with their content, so a `</script`
-    inside them IS seen by the tokenizer (also measured — refusing those cells was this guard's
-    own false accusation until the eleventh review).
+    Markdown-it emits an ESCAPE and a CODE SPAN entity-escaped (`\</script>` and
+    `` `</script>` `` become `&lt;/script&gt;`), and re-emits a recognised link's DESTINATION into the
+    `href`, so a close tag inside any of the three is not one the tokenizer ever sees — measured.
+
+    ⛔ A LINK is masked at its DESTINATION ONLY, never whole: a LABEL is rendered as inline
+    markup, so `<template>[a</template>b](u)VISIBLE` really does close the template inside the
+    label and the browser shows `bVISIBLE` — protecting the whole link refused that cell
+    (thirteenth review of this change). A COMMENT is NOT masked at all: its text is emitted as one
+    comment, so a `</script` inside it IS seen by the tokenizer (measured — treating it as opaque
+    refused `<script><!-- </script>AFTER -->`, which a browser shows).
     """
     chars = list(cell[start:])
     i, n = 0, len(chars)
@@ -1015,8 +1042,28 @@ def _mask_escapes_and_spans(cell: str, start: int) -> str:
             while i < n and chars[i] == "`":
                 i += 1
             continue
+        link = _link_at(cell, start + i)
+        if link is not None and _RECOGNISED_LINK_TAIL.match(cell[link[2]:link[1]]):
+            for k in range(link[2] - start, link[1] - start):
+                chars[k] = " "
+            i = link[1] - start
+            continue
         i += 1
     return "".join(chars)
+
+
+def _literal_text_body_end(cell: str, start: int, name: str) -> tuple[int, int]:
+    """`(body_end, element_end)` for a body of LITERAL TEXT (`textarea`, `xmp`).
+
+    RCDATA has no constructs — a backtick, a comment or a tag inside it is text — so the body
+    ends at the first close tag and everything before it is shown as written. `<plaintext>` has no
+    close tag at all and swallows the rest of the cell.
+    """
+    if name == "plaintext":
+        return len(cell), len(cell)
+    close_re = re.compile(_RAW_TEXT_CLOSE.format(name=re.escape(name)), re.IGNORECASE)
+    match = close_re.search(cell, start)
+    return (match.start(), match.end()) if match is not None else (len(cell), len(cell))
 
 
 def _parsed_hidden_end(
@@ -1031,36 +1078,22 @@ def _parsed_hidden_end(
     count `<template><template>x</template>VISIBLE` read `VISIBLE` as content while a browser renders
     the cell blank — a fail-open in all four §3 columns (twelfth review of this change).
     """
+    body = _mask_escapes_and_spans(cell, start)
     depth = 1
-    i, n = start, len(cell)
+    i, n = 0, len(body)
     while i < n:
-        if cell[i] == "\\" and i + 1 < n and _ESCAPABLE_RE.match(cell[i + 1]):
-            i += 2
-            continue
-        if cell[i] == "`":
-            span_end = _code_span_end(cell, i)
-            if span_end > 0:
-                i = span_end
-                continue
-            while i < n and cell[i] == "`":
-                i += 1
-            continue
-        comment = COMMENT_AT_RE.match(cell, i)
+        comment = COMMENT_AT_RE.match(body, i)
         if comment is not None:
             i = comment.end()
             continue
-        link = _link_at(cell, i)
-        if link is not None and _RECOGNISED_LINK_TAIL.match(cell[link[2]:link[1]]):
-            i = link[1]
-            continue
-        close = close_re.match(cell, i)
+        close = close_re.match(body, i)
         if close is not None:
             depth -= 1
             if depth == 0:
-                return close.end()
+                return start + close.end()
             i = close.end()
             continue
-        tag = TAG_RE.match(cell, i)
+        tag = TAG_RE.match(body, i)
         if tag is not None:
             opened = OPEN_TAG_NAME_RE.match(tag.group(0))
             # ⛔ NO SELF-CLOSING EXEMPTION: HTML ignores a trailing `/` on a non-void element, so
@@ -1069,10 +1102,17 @@ def _parsed_hidden_end(
             # renders the cell blank (measured, twelfth review of this change).
             if opened is not None and opened.group(1).casefold() == name:
                 depth += 1
+            elif opened is not None and opened.group(1).casefold() in _SWALLOWING_ELEMENTS:
+                # ⛔ A nested element whose BODY swallows markup hides its own close tag from the
+                # tokenizer, so a `</template` inside it is text: skipping the body is what stops
+                # `<template><script></template></script>VISIBLE` losing all four §3 columns while
+                # the cell renders blank (measured, thirteenth review of this change).
+                i = _raw_text_end(cell, start + tag.end(), opened.group(1).casefold()) - start
+                continue
             i = tag.end()
             continue
         i += 1
-    return n
+    return len(cell)
 
 
 def _raw_text_end(cell: str, start: int, name: str) -> int:
@@ -1097,15 +1137,16 @@ def _raw_text_end(cell: str, start: int, name: str) -> int:
     state = "data"
     i, n = 0, len(body)
     while i < n:
-        link = _link_at(cell, start + i)
-        if link is not None and _RECOGNISED_LINK_TAIL.match(cell[link[2]:link[1]]):
-            # A recognised link's destination is re-emitted as an href, so a close tag spelled
-            # inside it never reaches the tokenizer — but only when markdown-it parses the link
-            # at all, which is what `_RECOGNISED_LINK_TAIL` decides.
-            i = link[1] - start
-            continue
         if name == "script":
-            if state == "data" and body.startswith("<!--", i):
+            if (
+                state == "data"
+                and body.startswith("<!--", i)
+                and COMMENT_AT_RE.match(body, i) is not None
+            ):
+                # ⛔ TERMINATED only: markdown-it passes a complete comment through raw but
+                # ESCAPES an unterminated one's `<`, so the tokenizer never leaves the data state
+                # for it — entering `escaped` from the source refused
+                # `<script><!--<script></script>VISIBLE`, which a browser shows (measured).
                 state = "escaped"
                 i += 4
                 continue

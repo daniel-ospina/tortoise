@@ -592,9 +592,16 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   escaped state), and `<!--<script>--></script>VISIBLE` SHOWS `VISIBLE`, because `-->` leaves BOTH
   dash-dash states for the data state. `<template>` is the mirror case — its content is PARSED as
   markup but never rendered — so there a `</template` inside a COMMENT, a TAG's quoted attribute, a
-  code span, an escape or a recognised link closes nothing, the element NESTS (an inner
-  `</template>` closes only the inner one), and a trailing `/` does not self-close it (`<template/>`
-  OPENS one), which is why `<template><template>x</template>VISIBLE` renders blank and is refused. A browser SHOWS the text of `<textarea>`, `<xmp>` and
+  code span, an escape or a recognised link's DESTINATION closes nothing (a link's LABEL is markup,
+  so `<template>[a</template>b](u)VISIBLE` really does close it and shows `bVISIBLE`), the element
+  NESTS (an inner `</template>` closes only the inner one), a trailing `/` does not self-close it
+  (`<template/>` OPENS one), and a nested element whose body swallows markup — `<script>`, `<style>`,
+  `<textarea>` and kin — hides its own close tag, all of which is why
+  `<template><script></template></script>VISIBLE` and `<template><template>x</template>VISIBLE`
+  render blank and are refused. A **literal-text element** (`<textarea>`, `<xmp>`, `<plaintext>`)
+  is the third family: its body is text rather than markup and a reader SEES it, so
+  `<textarea>VISIBLE</textarea>` counts and a comment inside one is text too — stripping it refused a
+  cell a reviewer can read. A browser SHOWS the text of `<textarea>`, `<xmp>` and
   `<plaintext>`, so those count — refusing `<plaintext>` was this guard's own false accusation
   until the tenth review measured a real render and found the words on screen.
   A cell whose every word is a **declared placeholder** (`n/a`, `to do`, `tbc`) is
